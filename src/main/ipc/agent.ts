@@ -273,10 +273,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
  * pre-interrupt fresh-state behaviour. `stopContextCollector` is intentionally
  * not pruned — it tracks turn-wide history regardless of skill scope.
  */
-function pruneTurnStateAtInterrupt(
-  state: TurnState,
-  allHooks: readonly HookConfig[]
-): void {
+function pruneTurnStateAtInterrupt(state: TurnState, allHooks: readonly HookConfig[]): void {
   const keepPluginIds = new Set<string>()
   const keepSkillPaths = new Set<string>()
   const keepSkillNames = new Set<string>()
@@ -310,7 +307,9 @@ function pruneTurnStateAtInterrupt(
         skillRoot?: string
       }
       const hookPluginId = normalizePluginId(scoped.pluginId)
-      const hookSkillPath = normalizePathKey(scoped.skillPath ?? scoped.skillRoot ?? hook.hookSourceRoot)
+      const hookSkillPath = normalizePathKey(
+        scoped.skillPath ?? scoped.skillRoot ?? hook.hookSourceRoot
+      )
       const hookSkillName = normalizeSkillName(scoped.skillName)
       return (
         (hookPluginId && state.hookScope.activePluginIds.has(hookPluginId)) ||
@@ -937,7 +936,11 @@ async function judgeSkillWorthiness(
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
     maxTokens: config.maxOutputTokens,
-    temperature: config.temperature
+    temperature: config.temperature,
+    topP: config.topP,
+    modelKwargs: {
+      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+    }
   })
 
   const userPrompt = `## Conversation window since last skill-evolution reset (${context.turnCount} turns)
@@ -1027,6 +1030,10 @@ Based on this conversation, generate a reusable skill. Output JSON only.`
       configuration: { baseURL: config.baseUrl },
       maxTokens: config.maxOutputTokens,
       temperature: config.temperature,
+      topP: config.topP,
+      modelKwargs: {
+        ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+      },
       streaming: true
     })
 
@@ -1375,10 +1382,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         currentRunSkills.length > 0 ? recentCompletedTurns.slice(-1) : recentCompletedTurns
 
       return Array.from(
-        new Set([
-          ...currentRunSkills,
-          ...inheritedTurns.flatMap((turn) => turn.usedSkills)
-        ])
+        new Set([...currentRunSkills, ...inheritedTurns.flatMap((turn) => turn.usedSkills)])
       )
     }
 
@@ -2422,7 +2426,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 apiKey: config.apiKey,
                 configuration: { baseURL: config.baseUrl },
                 maxTokens: config.maxOutputTokens,
-                temperature: config.temperature
+                temperature: config.temperature,
+                topP: config.topP,
+                modelKwargs: {
+                  ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+                }
               }),
               conversation,
               memoryDir: memoryStore.getMemoryDir()

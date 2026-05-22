@@ -292,19 +292,28 @@ interface CustomAPI {
       maxMaxOutputTokens: number
       defaultTemperature: number
       maxTemperature: number
+      defaultTopP: number
+      maxTopP: number
+      defaultTopK: number
+      minTopK: number
+      maxTopK: number
     }>
-    getCustomConfigs: () => Promise<Array<{
-      id: string
-      name: string
-      baseUrl: string
-      model: string
-      hasApiKey: boolean
-      maxTokens: number
-      maxOutputTokens: number
-      temperature: number
-      interleavedThinking?: boolean
-      tier?: "premium" | "economy"
-    }>>
+    getCustomConfigs: () => Promise<
+      Array<{
+        id: string
+        name: string
+        baseUrl: string
+        model: string
+        hasApiKey: boolean
+        maxTokens: number
+        maxOutputTokens: number
+        temperature: number
+        topP: number
+        topK: number
+        interleavedThinking?: boolean
+        tier?: "premium" | "economy"
+      }>
+    >
     getCustomConfig: (id?: string) => Promise<{
       id: string
       name: string
@@ -314,6 +323,8 @@ interface CustomAPI {
       maxTokens: number
       maxOutputTokens: number
       temperature: number
+      topP: number
+      topK: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     } | null>
@@ -326,6 +337,8 @@ interface CustomAPI {
       maxTokens?: number
       maxOutputTokens?: number
       temperature?: number
+      topP?: number
+      topK?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }) => Promise<void>
@@ -339,6 +352,8 @@ interface CustomAPI {
       maxTokens?: number
       maxOutputTokens?: number
       temperature?: number
+      topP?: number
+      topK?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }) => Promise<{ id: string }>
@@ -352,6 +367,8 @@ interface CustomAPI {
       apiKey?: string
       maxOutputTokens?: number
       temperature?: number
+      topP?: number
+      topK?: number
     }) => Promise<{ success: boolean; error?: string; latencyMs?: number }>
   }
   workspace: {
@@ -660,9 +677,7 @@ interface CustomAPI {
   }
   autoCommit: {
     getSettings: () => Promise<AgentAutoCommitSettings>
-    saveSettings: (
-      updates: Partial<AgentAutoCommitSettings>
-    ) => Promise<AgentAutoCommitSettings>
+    saveSettings: (updates: Partial<AgentAutoCommitSettings>) => Promise<AgentAutoCommitSettings>
   }
   lsp: {
     getConfig: () => Promise<LspConfig>
@@ -1147,7 +1162,13 @@ interface CustomAPI {
       options?: DashboardCommitDetailsOptions
     ) => Promise<{
       success: boolean
-      data?: { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }
+      data?: {
+        total: number
+        page: number
+        pageSize: number
+        pushedOnly: boolean
+        items: DashboardCommitDetail[]
+      }
       error?: string
     }>
     exportSkillTraces: (payload: {
