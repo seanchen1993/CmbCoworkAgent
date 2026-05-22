@@ -28,7 +28,6 @@ import type {
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
-import type { GitHookStatus } from "../main/services/git-hook-service"
 import type {
   ManagedSavedCodeExecTool,
   SavedCodeExecPreviewPayload,
@@ -536,9 +535,6 @@ interface CustomAPI {
       success: boolean
       error?: string
     }>
-    getGitHookStatus: (workspacePath: string) => Promise<GitHookStatus>
-    installGitHooks: (workspacePath: string) => Promise<GitHookStatus>
-    uninstallGitHooks: (workspacePath: string) => Promise<GitHookStatus>
     onFilesChanged: (
       callback: (data: { threadId: string; workspacePath: string }) => void
     ) => () => void

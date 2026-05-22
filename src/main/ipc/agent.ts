@@ -100,6 +100,7 @@ import {
   startAgentGitSnapshot,
   type AgentGitSnapshot
 } from "../services/agent-auto-commit"
+import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
 import { makeHookResultCallback } from "../hooks/result-callback"
@@ -571,7 +572,10 @@ async function beginAutoCommitTracking(
   return {
     snapshot,
     onFileMutation: workspacePath
-      ? (filePath: string) => recordAgentTouchedFile(threadId, workspacePath, filePath)
+      ? (filePath: string) => {
+          recordAgentTouchedFile(threadId, workspacePath, filePath)
+          scheduleAutoInstallGitHooksForPath(workspacePath, filePath)
+        }
       : undefined
   }
 }

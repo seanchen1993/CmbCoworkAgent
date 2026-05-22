@@ -79,7 +79,6 @@ import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/ski
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
 import { groupWelcomeSkills } from "./skill-grouping"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
-import { GitHookSettingsButton } from "./GitHookSettingsButton"
 
 type WelcomeSkillCard = {
   skill: SkillMetadata
@@ -3941,7 +3940,6 @@ export function ChatContainer({
                 )}
               </div>
               <div className="flex min-w-0 items-center gap-2">
-                <GitHookSettingsButton workspacePath={workspacePath} />
                 <GitBranchSwitcher workspacePath={workspacePath} />
               </div>
             </div>

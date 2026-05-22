@@ -100,7 +100,28 @@ interface HookPushIntent {
   records?: HookPushRecord[]
 }
 
+interface RegisteredGitHookRepo {
+  gitRoot: string
+  enabled: boolean
+  registeredAt: string
+  updatedAt: string
+  lastSyncedAt?: string
+  lastErrorAt?: string
+  lastError?: string
+}
+
+type GitHookSyncResult = "synced" | "busy" | "unavailable"
+
 const syncTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const syncInFlight = new Set<string>()
+const syncPending = new Set<string>()
+const autoInstallLastCheckedAt = new Map<string, number>()
+const autoInstallInFlight = new Set<string>()
+let registeredSyncTimer: ReturnType<typeof setInterval> | null = null
+let registeredRepoWriteQueue: Promise<void> = Promise.resolve()
+
+const AUTO_INSTALL_HOOK_TTL_MS = 10 * 60 * 1000
+const REGISTERED_REPO_SYNC_INTERVAL_MS = 2 * 60 * 1000
 
 function normalizePathForKey(input: string): string {
   return input.trim().replace(/\\/g, "/").toLowerCase()
@@ -126,6 +147,10 @@ function getRepoEventsDir(gitRoot: string): string {
   return join(getHookEventsDir(), repoKey(gitRoot))
 }
 
+function getRegisteredReposPath(): string {
+  return join(getGitHookBaseDir(), "repos.json")
+}
+
 async function ensureDir(dir: string): Promise<void> {
   await mkdir(dir, { recursive: true })
 }
@@ -137,6 +162,115 @@ async function pathExists(path: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+async function getGitRootForPath(inputPath: string): Promise<string | null> {
+  const trimmed = inputPath.trim()
+  if (!trimmed) return null
+
+  const absolutePath = resolvePath(trimmed)
+  let gitCwd = absolutePath
+  try {
+    const fileStat = await stat(absolutePath)
+    if (!fileStat.isDirectory()) gitCwd = dirname(absolutePath)
+  } catch {
+    gitCwd = dirname(absolutePath)
+  }
+
+  try {
+    const gitRoot = await runGit(gitCwd, ["rev-parse", "--show-toplevel"], {
+      timeoutMs: GIT_EXEC_TIMEOUT_MS
+    })
+    return gitRoot || null
+  } catch {
+    return null
+  }
+}
+
+function resolveTouchedFilePath(workspacePath: string, filePath: string): string | null {
+  const trimmed = filePath.trim()
+  if (!trimmed) return null
+  if (trimmed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(trimmed)) return resolvePath(trimmed)
+  if (!workspacePath.trim()) return null
+  return resolvePath(join(workspacePath, trimmed))
+}
+
+async function readRegisteredRepos(): Promise<RegisteredGitHookRepo[]> {
+  const raw = await readJsonFile<RegisteredGitHookRepo[]>(getRegisteredReposPath())
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((repo): RegisteredGitHookRepo[] => {
+    if (!repo || typeof repo.gitRoot !== "string" || !repo.gitRoot.trim()) return []
+    return [
+      {
+        gitRoot: repo.gitRoot,
+        enabled: repo.enabled !== false,
+        registeredAt: repo.registeredAt || nowIsoLocal(),
+        updatedAt: repo.updatedAt || repo.registeredAt || nowIsoLocal(),
+        ...(repo.lastSyncedAt ? { lastSyncedAt: repo.lastSyncedAt } : {}),
+        ...(repo.lastErrorAt ? { lastErrorAt: repo.lastErrorAt } : {}),
+        ...(repo.lastError ? { lastError: repo.lastError } : {})
+      }
+    ]
+  })
+}
+
+async function saveRegisteredRepos(repos: RegisteredGitHookRepo[]): Promise<void> {
+  await ensureDir(getGitHookBaseDir())
+  await writeFile(getRegisteredReposPath(), JSON.stringify(repos, null, 2), "utf-8")
+}
+
+async function updateRegisteredRepos(
+  updater: (repos: RegisteredGitHookRepo[]) => RegisteredGitHookRepo[] | void
+): Promise<void> {
+  const run = registeredRepoWriteQueue.catch(() => undefined).then(async () => {
+    const repos = await readRegisteredRepos()
+    const nextRepos = updater(repos) ?? repos
+    await saveRegisteredRepos(nextRepos)
+  })
+  registeredRepoWriteQueue = run.catch(() => undefined)
+  await run
+}
+
+async function registerGitHookRepo(gitRoot: string): Promise<void> {
+  const normalizedRoot = resolvePath(gitRoot)
+  const key = normalizePathForKey(normalizedRoot)
+  const now = nowIsoLocal()
+  await updateRegisteredRepos((repos) => {
+    const existingIndex = repos.findIndex((repo) => normalizePathForKey(repo.gitRoot) === key)
+    if (existingIndex >= 0) {
+      repos[existingIndex] = {
+        ...repos[existingIndex],
+        gitRoot: normalizedRoot,
+        enabled: true,
+        updatedAt: now,
+        lastErrorAt: undefined,
+        lastError: undefined
+      }
+    } else {
+      repos.push({
+        gitRoot: normalizedRoot,
+        enabled: true,
+        registeredAt: now,
+        updatedAt: now
+      })
+    }
+  })
+}
+
+async function disableRegisteredGitHookRepo(gitRoot: string): Promise<void> {
+  const normalizedRoot = resolvePath(gitRoot)
+  const key = normalizePathForKey(normalizedRoot)
+  const now = nowIsoLocal()
+  await updateRegisteredRepos((repos) => {
+    const existingIndex = repos.findIndex((repo) => normalizePathForKey(repo.gitRoot) === key)
+    if (existingIndex < 0) return
+    repos[existingIndex] = {
+      ...repos[existingIndex],
+      gitRoot: normalizedRoot,
+      enabled: false,
+      updatedAt: now
+    }
+  })
 }
 
 async function runGit(
@@ -705,7 +839,61 @@ export async function uninstallGitHooks(workspacePath: string): Promise<GitHookS
   for (const hook of HOOK_NAMES) {
     await uninstallOneHook(context.hookPaths[hook])
   }
+  await disableRegisteredGitHookRepo(context.gitRoot)
   return getGitHookStatus(workspacePath)
+}
+
+async function autoInstallGitHooksForRoot(gitRoot: string): Promise<void> {
+  const normalizedRoot = resolvePath(gitRoot)
+  const key = normalizePathForKey(normalizedRoot)
+  const now = Date.now()
+  const lastCheckedAt = autoInstallLastCheckedAt.get(key) ?? 0
+  if (now - lastCheckedAt < AUTO_INSTALL_HOOK_TTL_MS) return
+  if (autoInstallInFlight.has(key)) return
+
+  autoInstallLastCheckedAt.set(key, now)
+  autoInstallInFlight.add(key)
+  try {
+    const status = await getGitHookStatus(normalizedRoot)
+    if (status.installed) {
+      await registerGitHookRepo(normalizedRoot)
+      scheduleGitHookEventSync(normalizedRoot, 100)
+      return
+    }
+    if (
+      !status.canInstall ||
+      status.state === "modified" ||
+      status.state === "error" ||
+      status.state === "not_git"
+    ) {
+      return
+    }
+
+    const nextStatus = await installGitHooks(normalizedRoot)
+    if (nextStatus.installed) {
+      await registerGitHookRepo(normalizedRoot)
+      scheduleGitHookEventSync(normalizedRoot, 100)
+    }
+  } catch (e) {
+    console.warn("[GitHook] auto install skipped:", e)
+  } finally {
+    autoInstallInFlight.delete(key)
+  }
+}
+
+export function scheduleAutoInstallGitHooksForPath(workspacePath: string, filePath: string): void {
+  const resolvedPath = resolveTouchedFilePath(workspacePath, filePath)
+  if (!resolvedPath) return
+
+  setTimeout(() => {
+    void (async () => {
+      const gitRoot = await getGitRootForPath(resolvedPath)
+      if (!gitRoot) return
+      await autoInstallGitHooksForRoot(gitRoot)
+    })().catch((e) => {
+      console.warn("[GitHook] auto install scheduling failed:", e)
+    })
+  }, 0).unref?.()
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | null> {
@@ -1001,30 +1189,122 @@ async function processPushIntent(repoDir: string, fileName: string): Promise<voi
   })
 }
 
-export async function syncGitHookEvents(workspacePath: string): Promise<void> {
+export async function syncGitHookEvents(workspacePath: string): Promise<GitHookSyncResult> {
   const context = await resolveGitContext(workspacePath)
-  if (!context) return
+  if (!context) return "unavailable"
 
   const repoDir = getRepoEventsDir(context.gitRoot)
-  if (!(await pathExists(repoDir))) return
+  const key = normalizePathForKey(context.gitRoot)
+  if (syncInFlight.has(key)) {
+    syncPending.add(key)
+    return "busy"
+  }
+  syncInFlight.add(key)
 
-  const readyNames = await listDirectoryNames(join(repoDir, "ready"))
-  for (const name of readyNames) {
-    try {
-      await processReadyCommitSnapshot(repoDir, name)
-    } catch (e) {
-      console.warn("[GitHook] failed to process commit snapshot:", e)
+  try {
+    if (!(await pathExists(repoDir))) return "synced"
+
+    const readyNames = await listDirectoryNames(join(repoDir, "ready"))
+    for (const name of readyNames) {
+      try {
+        await processReadyCommitSnapshot(repoDir, name)
+      } catch (e) {
+        console.warn("[GitHook] failed to process commit snapshot:", e)
+      }
+    }
+
+    const pushIntentFiles = await listJsonFiles(join(repoDir, "push-intents"))
+    for (const fileName of pushIntentFiles) {
+      try {
+        await processPushIntent(repoDir, fileName)
+      } catch (e) {
+        console.warn("[GitHook] failed to process push intent:", e)
+      }
+    }
+    return "synced"
+  } finally {
+    syncInFlight.delete(key)
+    if (syncPending.delete(key)) {
+      const timer = setTimeout(() => {
+        void syncGitHookEvents(context.gitRoot).catch((e) => {
+          console.warn("[GitHook] pending sync failed:", e)
+        })
+      }, 100)
+      timer.unref?.()
     }
   }
+}
 
-  const pushIntentFiles = await listJsonFiles(join(repoDir, "push-intents"))
-  for (const fileName of pushIntentFiles) {
+async function markRegisteredRepoSynced(gitRoot: string): Promise<void> {
+  const normalizedRoot = resolvePath(gitRoot)
+  const key = normalizePathForKey(normalizedRoot)
+  const now = nowIsoLocal()
+  await updateRegisteredRepos((repos) => {
+    const index = repos.findIndex((repo) => normalizePathForKey(repo.gitRoot) === key)
+    if (index < 0) return
+    repos[index] = {
+      ...repos[index],
+      gitRoot: normalizedRoot,
+      lastSyncedAt: now,
+      lastErrorAt: undefined,
+      lastError: undefined,
+      updatedAt: now
+    }
+  })
+}
+
+async function markRegisteredRepoSyncFailed(gitRoot: string, error: string): Promise<void> {
+  const normalizedRoot = resolvePath(gitRoot)
+  const key = normalizePathForKey(normalizedRoot)
+  const now = nowIsoLocal()
+  await updateRegisteredRepos((repos) => {
+    const index = repos.findIndex((repo) => normalizePathForKey(repo.gitRoot) === key)
+    if (index < 0) return
+    repos[index] = {
+      ...repos[index],
+      gitRoot: normalizedRoot,
+      lastErrorAt: now,
+      lastError: error,
+      updatedAt: now
+    }
+  })
+}
+
+export async function syncRegisteredGitHookEvents(): Promise<void> {
+  const repos = await readRegisteredRepos()
+  for (const repo of repos) {
+    if (!repo.enabled || !repo.gitRoot) continue
     try {
-      await processPushIntent(repoDir, fileName)
+      const result = await syncGitHookEvents(repo.gitRoot)
+      if (result === "synced") {
+        await markRegisteredRepoSynced(repo.gitRoot)
+      } else if (result === "unavailable") {
+        await markRegisteredRepoSyncFailed(repo.gitRoot, "Git 仓库不可用")
+      }
     } catch (e) {
-      console.warn("[GitHook] failed to process push intent:", e)
+      console.warn("[GitHook] failed to sync registered repo:", repo.gitRoot, e)
+      await markRegisteredRepoSyncFailed(repo.gitRoot, e instanceof Error ? e.message : String(e))
     }
   }
+}
+
+export function startRegisteredGitHookEventSync(): void {
+  if (registeredSyncTimer) return
+  void syncRegisteredGitHookEvents().catch((e) => {
+    console.warn("[GitHook] registered repo sync failed:", e)
+  })
+  registeredSyncTimer = setInterval(() => {
+    void syncRegisteredGitHookEvents().catch((e) => {
+      console.warn("[GitHook] registered repo sync failed:", e)
+    })
+  }, REGISTERED_REPO_SYNC_INTERVAL_MS)
+  registeredSyncTimer.unref?.()
+}
+
+export function stopRegisteredGitHookEventSync(): void {
+  if (!registeredSyncTimer) return
+  clearInterval(registeredSyncTimer)
+  registeredSyncTimer = null
 }
 
 export function scheduleGitHookEventSync(workspacePath: string, delayMs = 500): void {

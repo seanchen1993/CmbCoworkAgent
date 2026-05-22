@@ -19,13 +19,7 @@ import { startWatching, stopWatching } from "../services/workspace-watcher"
 import { trackEvent } from "../services/event-reporter"
 import { captureStagedSnapshotsForCommit, measureForCommit } from "../services/adoption-tracker"
 import { scheduleMarkCodeAdoptionCommitsPushed } from "../services/code-adoption-push-updater"
-import {
-  CMBDEVCLAW_INTERNAL_GIT_ENV,
-  getGitHookStatus,
-  installGitHooks,
-  scheduleGitHookEventSync,
-  uninstallGitHooks
-} from "../services/git-hook-service"
+import { CMBDEVCLAW_INTERNAL_GIT_ENV } from "../services/git-hook-service"
 import { getTracesDir } from "../agent/trace/collector"
 import type { AgentTrace } from "../agent/trace/types"
 import { nowIsoLocal } from "../util/local-time"
@@ -2079,33 +2073,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
     return selectedPath
   })
-
-  ipcMain.handle(
-    "workspace:gitHookStatus",
-    async (_event, { workspacePath }: { workspacePath: string }) => {
-      if (!workspacePath) return getGitHookStatus("")
-      scheduleGitHookEventSync(workspacePath, 100)
-      return getGitHookStatus(workspacePath)
-    }
-  )
-
-  ipcMain.handle(
-    "workspace:installGitHooks",
-    async (_event, { workspacePath }: { workspacePath: string }) => {
-      if (!workspacePath) return getGitHookStatus("")
-      const status = await installGitHooks(workspacePath)
-      scheduleGitHookEventSync(workspacePath, 100)
-      return status
-    }
-  )
-
-  ipcMain.handle(
-    "workspace:uninstallGitHooks",
-    async (_event, { workspacePath }: { workspacePath: string }) => {
-      if (!workspacePath) return getGitHookStatus("")
-      return uninstallGitHooks(workspacePath)
-    }
-  )
 
   // Load files from disk into the workspace view
   ipcMain.handle("workspace:loadFromDisk", async (_event, { threadId }: WorkspaceLoadParams) => {
