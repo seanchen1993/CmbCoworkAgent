@@ -211,6 +211,18 @@ interface JsonlGenEntry {
   // Keeping JSONL lean (~200B/record) lets the 100MB cap hold far more history.
 }
 
+export interface AdoptionLineBaseline {
+  generatedLineHashes: Uint32Array
+  supersededLineHashes: Uint32Array
+  rawGeneratedLineCount: number
+}
+
+export interface AdoptionLineMeasureResult {
+  generatedLineCount: number
+  effectiveGeneratedLineCount: number
+  adoptedLineCount: number
+}
+
 // ─────────────────────────────────────────────────────────
 // Module state
 // ─────────────────────────────────────────────────────────
@@ -322,7 +334,7 @@ function computeLineHashes(content: string): Uint32Array {
   return new Uint32Array(hashes)
 }
 
-function getGenerationOccurrenceCount(input: RecordGenInput): number {
+function getGenerationOccurrenceCount(input: Pick<RecordGenInput, "tool" | "occurrences">): number {
   if (input.tool !== "edit_file") return 1
   if (typeof input.occurrences !== "number" || !Number.isFinite(input.occurrences)) return 1
   const occurrences = Math.floor(input.occurrences)
@@ -338,6 +350,52 @@ function repeatLineHashes(hashes: Uint32Array, occurrences: number): Uint32Array
     repeated.set(hashes, i * hashes.length)
   }
   return repeated
+}
+
+function subtractLineHashMultiset(source: Uint32Array, subtract: Uint32Array): Uint32Array {
+  if (source.length === 0) return source
+  if (subtract.length === 0) return source
+
+  const subtractCounts = buildLineHashCounts(subtract)
+  const kept: number[] = []
+  for (let i = 0; i < source.length; i++) {
+    const h = source[i]
+    const count = subtractCounts.get(h)
+    if (count && count > 0) {
+      subtractCounts.set(h, count - 1)
+    } else {
+      kept.push(h)
+    }
+  }
+  return new Uint32Array(kept)
+}
+
+export function buildAdoptionLineBaseline(input: Pick<
+  RecordGenInput,
+  "tool" | "generatedContent" | "oldString" | "occurrences"
+>): AdoptionLineBaseline {
+  const generationOccurrences = getGenerationOccurrenceCount(input)
+  const rawGeneratedLineHashes = repeatLineHashes(
+    computeLineHashes(input.generatedContent),
+    generationOccurrences
+  )
+  if (input.tool !== "edit_file" || typeof input.oldString !== "string") {
+    return {
+      generatedLineHashes: rawGeneratedLineHashes,
+      supersededLineHashes: new Uint32Array(0),
+      rawGeneratedLineCount: rawGeneratedLineHashes.length
+    }
+  }
+
+  const oldLineHashes = repeatLineHashes(
+    computeLineHashes(input.oldString),
+    getDeletionOccurrenceCount(input)
+  )
+  return {
+    generatedLineHashes: subtractLineHashMultiset(rawGeneratedLineHashes, oldLineHashes),
+    supersededLineHashes: subtractLineHashMultiset(oldLineHashes, rawGeneratedLineHashes),
+    rawGeneratedLineCount: rawGeneratedLineHashes.length
+  }
 }
 
 function packLineHashes(hashes: Uint32Array): Uint8Array {
@@ -391,7 +449,7 @@ function generationFingerprint(content: string, occurrences: number): string {
   return contentFingerprint(`${occurrences}\0${content}`)
 }
 
-function getDeletionOccurrenceCount(input: RecordGenInput): number {
+function getDeletionOccurrenceCount(input: Pick<RecordGenInput, "occurrences">): number {
   if (typeof input.occurrences !== "number" || !Number.isFinite(input.occurrences)) return 1
   return Math.max(0, Math.floor(input.occurrences))
 }
@@ -644,51 +702,37 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       return
     }
 
-    const singleHashes = computeLineHashes(input.generatedContent)
-    if (singleHashes.length === 0) {
-      console.log(
-        `[AdoptionTracker] recordGen skip — empty after normalization: ${input.filePath}`
-      )
-      return
-    }
-    const repeatedHashCount = singleHashes.length * generationOccurrences
+    const baseline = buildAdoptionLineBaseline(input)
 
-    // Non-blank line count may still exceed threshold only when rawLineCount is
-    // already close; stay symmetric with the measure-time check.
-    if (repeatedHashCount > MAX_LINES_FOR_MEASURE) {
+    // Keep the measured baseline guard explicit too, so the persisted row never
+    // exceeds the commit-time comparison cap.
+    if (baseline.rawGeneratedLineCount > MAX_LINES_FOR_MEASURE) {
       emitSkippedLargeAtGen({
         eventId,
         input,
         absPath,
         relPath,
-        lineCount: repeatedHashCount,
+        lineCount: baseline.rawGeneratedLineCount,
         createdAt,
         ctx
       })
       return
     }
 
-    const hashes = repeatLineHashes(singleHashes, generationOccurrences)
-    const oldLineHashes =
-      input.tool === "edit_file" && typeof input.oldString === "string"
-        ? repeatLineHashes(computeLineHashes(input.oldString), getDeletionOccurrenceCount(input))
-        : new Uint32Array(0)
+    const hashes = baseline.generatedLineHashes
+    const oldLineHashes = baseline.supersededLineHashes
+    if (hashes.length === 0 && oldLineHashes.length === 0) {
+      console.log(
+        `[AdoptionTracker] recordGen skip — empty after normalization: ${input.filePath}`
+      )
+      return
+    }
     const fingerprint = generationFingerprint(input.generatedContent, generationOccurrences)
 
-    // Pre-compute net-new line count for edit_file by consuming oldString hashes
-    // from newString hashes (same one-to-one hash consumption as commit-time
-    // supersession). write_file has no oldString → keeps raw hashes.length.
-    let reportedLineCount = hashes.length
-    if (oldLineHashes.length > 0) {
-      const oldCounts = buildLineHashCounts(oldLineHashes)
-      for (let i = 0; i < hashes.length; i++) {
-        const c = oldCounts.get(hashes[i])
-        if (c && c > 0) {
-          oldCounts.set(hashes[i], c - 1)
-          reportedLineCount--
-        }
-      }
-    }
+    // `hashes` is the net-new baseline. For edit_file this removes unchanged
+    // oldString context from newString, while `oldLineHashes` keeps only the
+    // old-only lines that should supersede earlier agent generations.
+    const reportedLineCount = hashes.length
 
     // ── JSONL record ────────────────────────────────────
     // Derive net-deletion count here (in the microtask), NOT at the tool
@@ -755,7 +799,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       relativeHint: relPath.split("/").slice(-1)[0] // leaf filename only, not a full path
     })
     console.log(
-      `[AdoptionTracker] recordGen OK: eventId=${eventId} file=${relPath} lineCount=${reportedLineCount} rawHashes=${hashes.length} deletedLineCount=${deletedLineCount} threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
+      `[AdoptionTracker] recordGen OK: eventId=${eventId} file=${relPath} lineCount=${reportedLineCount} rawHashes=${baseline.rawGeneratedLineCount} supersededHashes=${oldLineHashes.length} deletedLineCount=${deletedLineCount} threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
     )
   } catch (e) {
     console.warn("[AdoptionTracker] doRecordGen failed:", e)
@@ -902,8 +946,17 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
 
       const storedHashes = pending.line_hashes ? unpackLineHashes(pending.line_hashes) : null
       if (!storedHashes || storedHashes.length === 0) {
-        // No baseline — clear the dangling row so future commits don't keep
-        // rediscovering the same corrupt / empty pending record.
+        // No net-new baseline. This can be a legitimate supersession-only
+        // edit (for example an agent deleting a previously generated line).
+        // Apply old-only hashes so older rows are not counted again, then
+        // clear the local row without emitting a code_adopt event.
+        if (pending.old_line_hashes) {
+          try {
+            addLineHashesToCounts(supersededHashCounts, unpackLineHashes(pending.old_line_hashes))
+          } catch {
+            // corrupt row — keep measuring older rows without supersession hints
+          }
+        }
         markMeasured(pending.event_id)
         continue
       }
@@ -1043,6 +1096,35 @@ function consumeEffectiveAdoptionLines(
     }
   }
   return { effectiveLineCount, adoptedFromEffective }
+}
+
+export function evaluateAdoptionLineBaselines(
+  baselinesNewestFirst: AdoptionLineBaseline[],
+  committedContent: string | null
+): AdoptionLineMeasureResult[] {
+  const availableCounts =
+    committedContent === null ? null : buildLineHashCounts(computeLineHashes(committedContent))
+  const supersededHashCounts = new Map<number, number>()
+  const results: AdoptionLineMeasureResult[] = []
+
+  for (const baseline of baselinesNewestFirst) {
+    const { effectiveLineCount, adoptedFromEffective } = consumeEffectiveAdoptionLines(
+      baseline.generatedLineHashes,
+      supersededHashCounts,
+      availableCounts
+    )
+    results.push({
+      generatedLineCount: baseline.generatedLineHashes.length,
+      effectiveGeneratedLineCount: effectiveLineCount,
+      adoptedLineCount: committedContent === null ? 0 : adoptedFromEffective
+    })
+
+    if (baseline.supersededLineHashes.length > 0) {
+      addLineHashesToCounts(supersededHashCounts, baseline.supersededLineHashes)
+    }
+  }
+
+  return results
 }
 
 // ─────────────────────────────────────────────────────────
