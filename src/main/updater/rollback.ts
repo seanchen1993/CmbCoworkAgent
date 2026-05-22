@@ -204,6 +204,39 @@ $asarBackup    = ${toPsString(includeAsarBackup ? asarBackup : "")}
 $fullBackupDir = ${toPsString(fullBackupDir)}
 $exeBaseName   = ${toPsString(exeBaseName)}
 
+function Write-Stage {
+  param([string] $Message)
+  $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
+  Write-Host ("[{0}] {1}" -f $ts, $Message)
+}
+
+function Clear-ReadOnly {
+  param([string] $Target)
+  if (-not (Test-Path -LiteralPath $Target)) { return }
+  try {
+    # attrib /S /D on a directory path only touches the directory itself; use * for descendants.
+    & attrib.exe -R -H -S $Target 2>&1 | Out-Null
+    if ((Get-Item -LiteralPath $Target -Force).PSIsContainer) {
+      & attrib.exe -R -H -S (Join-Path $Target '*') /S /D 2>&1 | Out-Null
+    }
+  } catch {
+    Write-Stage ("Clear-ReadOnly failed for {0}: {1}" -f $Target, $_.Exception.Message)
+  }
+}
+
+function Invoke-RmdirFallback {
+  param([string] $Target)
+  if (-not (Test-Path -LiteralPath $Target)) { return $true }
+  try {
+    Write-Stage ("rmdir fallback for {0}" -f $Target)
+    $quoted = '"' + $Target + '"'
+    & cmd.exe /c ("rmdir /s /q " + $quoted) 2>&1 | ForEach-Object { Write-Stage ("rmdir: {0}" -f $_) }
+  } catch {
+    Write-Stage ("rmdir fallback exception: {0}" -f $_.Exception.Message)
+  }
+  return -not (Test-Path -LiteralPath $Target)
+}
+
 function Remove-BackupPath {
   param(
     [string] $Target,
@@ -213,7 +246,12 @@ function Remove-BackupPath {
   )
 
   if ([string]::IsNullOrWhiteSpace($Target)) { return $true }
-  if (-not (Test-Path -LiteralPath $Target)) { return $true }
+  if (-not (Test-Path -LiteralPath $Target)) {
+    Write-Stage ("Target already absent: {0}" -f $Target)
+    return $true
+  }
+
+  if ($Recurse) { Clear-ReadOnly -Target $Target }
 
   for ($i = 1; $i -le $Attempts; $i++) {
     try {
@@ -222,11 +260,18 @@ function Remove-BackupPath {
       } else {
         Remove-Item -LiteralPath $Target -Force -ErrorAction Stop
       }
-      Write-Host ("[UpdaterCleanup] Removed {0}" -f $Target)
+      Write-Stage ("Removed {0} on attempt {1}" -f $Target, $i)
       return $true
     } catch {
-      Write-Host ("[UpdaterCleanup] Attempt {0}/{1} failed for {2}: {3}" -f $i, $Attempts, $Target, $_.Exception.Message)
+      Write-Stage ("Attempt {0}/{1} failed for {2}: {3}" -f $i, $Attempts, $Target, $_.Exception.Message)
       Start-Sleep -Seconds $DelaySeconds
+    }
+  }
+
+  if ($Recurse) {
+    if (Invoke-RmdirFallback -Target $Target) {
+      Write-Stage ("Removed {0} via rmdir fallback" -f $Target)
+      return $true
     }
   }
 
@@ -236,20 +281,31 @@ function Remove-BackupPath {
 $expectedBackupDir = [System.IO.Path]::GetFullPath($appDir + ".bak")
 $actualBackupDir = [System.IO.Path]::GetFullPath($fullBackupDir)
 if ($actualBackupDir -ine $expectedBackupDir) {
-  Write-Host ("[UpdaterCleanup] Refusing unexpected backup path {0}, expected {1}" -f $actualBackupDir, $expectedBackupDir)
+  Write-Stage ("Refusing unexpected backup path {0}, expected {1}" -f $actualBackupDir, $expectedBackupDir)
   exit 1
 }
 
+Write-Stage ("Cleanup start. appDir={0} fullBackupDir={1} asarBackup={2}" -f $appDir, $fullBackupDir, $asarBackup)
+
 Remove-BackupPath -Target $asarBackup -Recurse $false -Attempts 20 -DelaySeconds 2 | Out-Null
 
-$removedFullBackup = Remove-BackupPath -Target $fullBackupDir -Recurse $true -Attempts 30 -DelaySeconds 2
+$removedFullBackup = Remove-BackupPath -Target $fullBackupDir -Recurse $true -Attempts 15 -DelaySeconds 2
 if (-not $removedFullBackup -and (Test-Path -LiteralPath $fullBackupDir)) {
-  Write-Host ("[UpdaterCleanup] Backup is still locked; waiting for {0}.exe to exit" -f $exeBaseName)
+  Write-Stage ("Backup still present after initial pass; waiting for {0}.exe to exit before retrying" -f $exeBaseName)
   while (Get-Process -Name $exeBaseName -ErrorAction SilentlyContinue) {
     Start-Sleep -Seconds 5
   }
-  Remove-BackupPath -Target $fullBackupDir -Recurse $true -Attempts 120 -DelaySeconds 2 | Out-Null
+  Write-Stage ("Process exited; retrying backup removal")
+  Remove-BackupPath -Target $fullBackupDir -Recurse $true -Attempts 60 -DelaySeconds 2 | Out-Null
 }
+
+if (Test-Path -LiteralPath $fullBackupDir) {
+  Write-Stage ("Cleanup finished but backup still exists: {0}" -f $fullBackupDir)
+  exit 2
+}
+
+Write-Stage ("Cleanup finished successfully")
+exit 0
 `
 }
 
