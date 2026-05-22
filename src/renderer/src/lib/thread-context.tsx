@@ -715,6 +715,31 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     []
   )
 
+  const loadWorkspaceFilesInBackground = useCallback(
+    (threadId: string, workspacePath: string) => {
+      // 工作区文件树可能很大，不能阻塞会话历史首屏恢复。
+      // 这里后台加载，避免 “正在加载会话历史” 被完整目录扫描拖住。
+      window.api.workspace
+        .loadFromDisk(threadId)
+        .then((diskResult) => {
+          if (!diskResult.success) return
+
+          // 后台扫描期间用户可能切走/关闭了这个线程，避免把旧结果写回已清理状态。
+          if (!initializedThreadsRef.current.has(threadId)) return
+
+          updateThreadState(threadId, (state) => {
+            // 如果扫描完成前用户切换了工作区，丢弃旧 workspace 的文件树结果。
+            if (state.workspacePath !== workspacePath) return {}
+            return { workspaceFiles: diskResult.files }
+          })
+        })
+        .catch((error) => {
+          console.error("[ThreadContext] Failed to load workspace files:", error)
+        })
+    },
+    [updateThreadState]
+  )
+
   // Parse error messages into user-friendly format
   const parseErrorMessage = useCallback((error: Error | string): string => {
     const raw = typeof error === "string" ? error : error.message
@@ -1169,11 +1194,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const metadata = thread.metadata || {}
           actions.setGitContext(getGitContextFromMetadata(metadata))
           if (metadata.workspacePath) {
-            actions.setWorkspacePath(metadata.workspacePath as string)
-            const diskResult = await window.api.workspace.loadFromDisk(threadId)
-            if (diskResult.success) {
-              actions.setWorkspaceFiles(diskResult.files)
-            }
+            const workspacePath = metadata.workspacePath as string
+            actions.setWorkspacePath(workspacePath)
+            // 文件树仅用于侧边栏/文件面板展示，和聊天历史恢复解耦后可显著缩短首屏等待。
+            loadWorkspaceFilesInBackground(threadId, workspacePath)
           }
           // Restore the effective model: prefer the routing-resolved model (smart routing),
           // fall back to user's pinned model selection.
@@ -1358,7 +1382,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       updateThreadState(threadId, () => ({ historyLoading: false }))
     },
-    [getThreadActions, updateThreadState]
+    [getThreadActions, loadWorkspaceFilesInBackground, updateThreadState]
   )
 
   // Track passive scheduler/heartbeat stream listeners per thread
