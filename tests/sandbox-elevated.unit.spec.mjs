@@ -51,6 +51,35 @@ test("workspace:select validates elevated sandbox before committing selected wor
   assert.ok(awaitIndex < storeIndex, "selected workspace must be validated before recent-workspace persistence")
 })
 
+test("sandbox mode defaults to disabled and first-run elevated NUX stays opt-in", () => {
+  const readSettingsSection = sectionBetween(
+    readFileSync(new URL("../src/main/storage.ts", import.meta.url), "utf8"),
+    "function readSandboxSettings()",
+    "function updateSandboxSettings("
+  )
+  const nuxNeededSection = sectionBetween(
+    sandboxSource,
+    'ipcMain.handle("sandbox:isNuxNeeded"',
+    'ipcMain.handle(\n    "sandbox:completeNux"'
+  )
+
+  assert.match(
+    readSettingsSection,
+    /return \{ mode: "none", yolo: false, nuxCompleted: true \}/,
+    "missing or unreadable sandbox settings should default to disabled"
+  )
+  assert.match(
+    readSettingsSection,
+    /SANDBOX_MODES\.has\(parsed\.mode\) \? parsed\.mode : "none"/,
+    "invalid persisted sandbox modes should fall back to disabled"
+  )
+  assert.match(
+    nuxNeededSection,
+    /ENABLE_SANDBOX_NUX[\s\S]*isSandboxNuxCompleted\(\)/,
+    "first-run elevated sandbox setup should stay behind an explicit feature flag"
+  )
+})
+
 test("workspace switch preparation still supports explicit setup/UAC for hard failures", () => {
   const section = sectionBetween(
     localSandboxSource,
@@ -391,6 +420,11 @@ test("elevated command routing avoids unconditional Python lookup waits", () => 
     barePythonIndex < resolvePythonIndex,
     "Python path lookup should be gated behind a direct python/py command check"
   )
+  assert.doesNotMatch(
+    preferUnelevatedSection,
+    /git\s*(?:\\s\+)?\([^)]*pull|git[\s\S]*pull\|fetch|git[\s\S]*clone/,
+    "Git network commands should not be silently rerouted from elevated to unelevated sandbox"
+  )
 })
 
 test("LocalSandbox exposes a single sandbox-denial detector modelled on Codex", () => {
@@ -398,8 +432,8 @@ test("LocalSandbox exposes a single sandbox-denial detector modelled on Codex", 
   //   one keyword set, one function, one bypass prompt — keep it simple.
   assert.match(
     localSandboxSource,
-    /static isLikelySandboxDenied\(exitCode: number \| null, output: string\): boolean/,
-    "LocalSandbox should expose a single Codex-style sandbox denial detector"
+    /static isLikelySandboxDenied\(exitCode: number \| null, output: string, command\?: string\): boolean/,
+    "LocalSandbox should expose a single command-aware sandbox denial detector"
   )
   assert.match(
     localSandboxSource,
@@ -617,8 +651,8 @@ test("orchestrator wraps every sandbox failure in Codex's single retry-without-s
   )
   assert.match(
     toolOrchestratorSource,
-    /isLikelySandboxDenied\(sandboxResult\.exitCode,\s*output\)/,
-    "the orchestrator should call LocalSandbox.isLikelySandboxDenied (output + exit code) instead of multiple ad-hoc detectors"
+    /isLikelySandboxDenied\(sandboxResult\.exitCode,\s*output,\s*command\)/,
+    "the orchestrator should pass the command so Git auth timeouts can be classified without treating every timeout as sandbox-denied"
   )
   assert.match(
     bypassSection,
@@ -649,6 +683,55 @@ test("orchestrator wraps every sandbox failure in Codex's single retry-without-s
     toolOrchestratorSource,
     /SANDBOX_BYPASS_PROMPT_REASON\s*=\s*"[^"]+沙箱外重试[^"]+"/,
     "the prompt message constant should be a single shared string (mirrors Codex's 'command failed; retry without sandbox?' UX)"
+  )
+})
+
+test("command-specific timeout retry detection shares timeout metadata constants", () => {
+  const detectorSection = sectionBetween(
+    localSandboxSource,
+    "static isLikelySandboxDenied(",
+    "  /**\r\n   * Keywords whose presence"
+  )
+  const timeoutMetadataSection = sectionBetween(
+    localSandboxSource,
+    "private static createTimeoutMetadata(",
+    "  /**\r\n   * Kill a process tree"
+  )
+
+  assert.match(
+    localSandboxSource,
+    /TIMEOUT_METADATA_SENTINEL\s*=\s*"execute tool killed"/,
+    "timeout sentinel should be a named constant"
+  )
+  assert.match(
+    localSandboxSource,
+    /TIMEOUT_METADATA_REASON\s*=\s*"exceeding timeout"/,
+    "timeout reason should be a named constant"
+  )
+  assert.match(
+    localSandboxSource,
+    /SPARSE_TIMEOUT_OUTPUT_MAX_CHARS\s*=\s*40/,
+    "sparse timeout threshold should be named and documented"
+  )
+  assert.match(
+    timeoutMetadataSection,
+    /TIMEOUT_METADATA_SENTINEL[\s\S]*TIMEOUT_METADATA_REASON/,
+    "timeout metadata generation should use the same constants as detection"
+  )
+  assert.match(
+    detectorSection,
+    /includes\(LocalSandbox\.TIMEOUT_METADATA_SENTINEL\)[\s\S]*includes\(LocalSandbox\.TIMEOUT_METADATA_REASON\)/,
+    "sparse timeout detection should not depend on duplicated literal metadata text"
+  )
+  assert.match(
+    detectorSection,
+    /isLikelyInteractiveNetworkCommand\(command\)/,
+    "timeout retry should remain command-aware, not a blanket timeout escalation"
+  )
+  assert.match(
+    detectorSection,
+    /isGitInteractiveAuthCommand\(command\)[\s\S]*shouldFallbackToUnelevatedForNetworkAuth\(lowerOutput\)/,
+    "Git credential and certificate failures should be routed to the no-sandbox prompt path"
   )
 })
 

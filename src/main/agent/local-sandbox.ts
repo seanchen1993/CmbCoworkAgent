@@ -1243,10 +1243,79 @@ export class LocalSandbox
    * (Access is denied, WinError 5/1314, dubious ownership, spawn EPERM, …) because
    * Codex's wall of "permission denied" is mostly POSIX phrasing.
    */
-  static isLikelySandboxDenied(exitCode: number | null, output: string): boolean {
+  static isLikelySandboxDenied(exitCode: number | null, output: string, command?: string): boolean {
     if (exitCode === 0 || !output) return false
     const lower = output.toLowerCase()
-    return LocalSandbox.SANDBOX_DENIED_KEYWORDS.some((needle) => lower.includes(needle))
+    if (LocalSandbox.SANDBOX_DENIED_KEYWORDS.some((needle) => lower.includes(needle))) {
+      return true
+    }
+    return Boolean(command && LocalSandbox.isCommandSpecificSandboxRetryCandidate(exitCode, command, lower))
+  }
+
+  private static isCommandSpecificSandboxRetryCandidate(
+    exitCode: number | null,
+    command: string,
+    lowerOutput: string
+  ): boolean {
+    if (
+      LocalSandbox.isGitInteractiveAuthCommand(command)
+      && (
+        LocalSandbox.isGitAuthPromptFailure(lowerOutput)
+        || LocalSandbox.shouldFallbackToUnelevatedForNetworkAuth(lowerOutput)
+      )
+    ) {
+      return true
+    }
+    return (
+      exitCode === 124
+      && LocalSandbox.isSparseSandboxTimeoutOutput(lowerOutput)
+      && LocalSandbox.isLikelyInteractiveNetworkCommand(command)
+    )
+  }
+
+  private static isGitAuthPromptFailure(lowerOutput: string): boolean {
+    return (
+      lowerOutput.includes("terminal prompts disabled")
+      || lowerOutput.includes("could not read username")
+      || lowerOutput.includes("could not read password")
+    )
+  }
+
+  private static isSparseSandboxTimeoutOutput(lowerOutput: string): boolean {
+    if (
+      !lowerOutput.includes(LocalSandbox.TIMEOUT_METADATA_SENTINEL)
+      || !lowerOutput.includes(LocalSandbox.TIMEOUT_METADATA_REASON)
+    ) {
+      return false
+    }
+    const substantiveOutput = lowerOutput
+      .replace(/<execute_metadata>[\s\S]*?<\/execute_metadata>/g, "")
+      .replace(/\[stderr\]/g, "")
+      .replace(/<no output>/g, "")
+      .trim()
+    return substantiveOutput.length <= LocalSandbox.SPARSE_TIMEOUT_OUTPUT_MAX_CHARS
+  }
+
+  private static isLikelyInteractiveNetworkCommand(command: string): boolean {
+    const cmd = command.trim().toLowerCase()
+    return (
+      LocalSandbox.isGitInteractiveAuthCommand(command)
+      || /\b(?:ssh|scp|sftp|rsync)(?:\.exe)?\b/.test(cmd)
+      || /\b(?:curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)(?:\.exe)?\b/.test(cmd)
+      || /\bpip(?:3(?:\.\d+)?)?(?:\.exe|\.cmd|\.bat)?\s+(?:install|download|wheel)\b/.test(cmd)
+      || /\b(?:python(?:3(?:\.\d+)?)?|py)(?:\.exe)?(?:\s+-\d+(?:\.\d+)?)?\s+-m\s+pip\s+(?:install|download|wheel)\b/.test(cmd)
+      || /\buv(?:\.exe|\.cmd|\.bat)?\s+(?:pip\s+(?:install|sync)|sync|add|remove|lock|tool\s+install)\b/.test(cmd)
+      || /\bpipx(?:\.exe|\.cmd|\.bat)?\s+(?:install|run|runpip|upgrade|upgrade-all)\b/.test(cmd)
+      || /\bpoetry\s+(?:install|add|update)\b/.test(cmd)
+      || /\bconda\s+(?:install|create|update)\b/.test(cmd)
+      || /\bnpm\s+(?:install|i|ci|update)\b/.test(cmd)
+      || /\bnpx\s/.test(cmd)
+      || /\byarn\s+(?:add|install|upgrade)\b/.test(cmd)
+      || /\bpnpm\s+(?:add|install|i|update)\b/.test(cmd)
+      || /\bcargo\s+(?:fetch|install)\b/.test(cmd)
+      || /\bgo\s+(?:get|install|mod\s+download)\b/.test(cmd)
+      || /\bdotnet\s+restore\b/.test(cmd)
+    )
   }
 
   /**
@@ -1409,16 +1478,7 @@ export class LocalSandbox
       /\bgem\s+install\b/.test(cmd) ||
       /\bbundle\s+(install|update|add)\b/.test(cmd) ||
       // C/C++
-      /\bvcpkg\s+install\b/.test(cmd) ||
-      // Git network operations: elevated sandbox user lacks Windows Credential Store access
-      // (SEC_E_NO_CREDENTIALS for HTTPS) and has empty ~/.ssh (SSH key auth fails with
-      // "Permission denied (publickey)"). Proactive unelevated routing avoids the wasted
-      // elevated attempt and the directory-pollution problem git clone/submodule have
-      // (partial .git/ left behind makes the unelevated retry fail).
-      /\bgit\s+clone\b/.test(cmd) ||
-      /\bgit\s+(pull|fetch|push)\b/.test(cmd) ||
-      /\bgit\s+submodule\b/.test(cmd) ||
-      /\bgit\s+lfs\b/.test(cmd)
+      /\bvcpkg\s+install\b/.test(cmd)
     ) {
       return true
     }
@@ -4420,6 +4480,20 @@ export class LocalSandbox
   private static readonly SIGKILL_TIMEOUT_MS = 200
   /** Max time (ms) to wait for stdout/stderr to drain after killing a process (matches Codex IO_DRAIN_TIMEOUT_MS). */
   private static readonly IO_DRAIN_TIMEOUT_MS = 2_000
+  private static readonly TIMEOUT_METADATA_SENTINEL = "execute tool killed"
+  private static readonly TIMEOUT_METADATA_REASON = "exceeding timeout"
+  // 40 chars is roughly one short output line; meaningful command logs should exceed this.
+  private static readonly SPARSE_TIMEOUT_OUTPUT_MAX_CHARS = 40
+
+  private static createTimeoutMetadata(timeoutMs: number): string {
+    return [
+      "<execute_metadata>",
+      `${LocalSandbox.TIMEOUT_METADATA_SENTINEL} the running process and terminated command after ${LocalSandbox.TIMEOUT_METADATA_REASON} ${(timeoutMs / 1000).toFixed(1)}s`,
+      "</execute_metadata>",
+      "",
+      ""
+    ].join("\n")
+  }
 
   /**
    * Kill a process tree in a platform-aware manner.
@@ -4908,7 +4982,7 @@ export class LocalSandbox
     // waits for it only when the command is a direct python/py invocation.
     if (effectiveMode === "elevated" && sandboxModeOverride !== "unelevated") {
       if (await LocalSandbox.shouldPreferUnelevated(command)) {
-        console.log("[LocalSandbox] package-install command detected; routing directly to unelevated")
+        console.log("[LocalSandbox] elevated command prefers unelevated sandbox; routing directly to unelevated")
         return this.executeInWindowsSandbox(command, attempt, "unelevated", timeoutMs, overrideAbortSignal)
       }
     }
@@ -5269,7 +5343,7 @@ export class LocalSandbox
               const metadata = `<execute_metadata>\nUser aborted the command, process has been killed\n</execute_metadata>\n\n`
               resolve({ output: metadata + output, exitCode: 130, truncated })
             } else if (timedOut) {
-              const metadata = `<execute_metadata>\nexecute tool killed the running process and terminated command after exceeding timeout ${(cmdTimeout / 1000).toFixed(1)}s\n</execute_metadata>\n\n`
+              const metadata = LocalSandbox.createTimeoutMetadata(cmdTimeout)
               resolve({ output: metadata + output, exitCode: 124, truncated })
             } else {
               resolve({ output, exitCode: signal ? null : code, truncated })
@@ -5354,6 +5428,7 @@ export class LocalSandbox
       isElevatedSandbox
       && result.exitCode !== 0
       && sandboxModeOverride !== "unelevated"
+      && !LocalSandbox.isGitInteractiveAuthCommand(command)
       && LocalSandbox.shouldFallbackToUnelevatedForNetworkAuth(result.output)
     ) {
       // Auto-fallback to unelevated mode: elevated sandbox user lacks enterprise network
@@ -5580,7 +5655,7 @@ export class LocalSandbox
             const metadata = `<execute_metadata>\nUser aborted the command, process has been killed\n</execute_metadata>\n\n`
             resolve({ output: metadata + output, exitCode: 130, truncated })
           } else if (timedOut) {
-            const metadata = `<execute_metadata>\nexecute tool killed the running process and terminated command after exceeding timeout ${(cmdTimeout / 1000).toFixed(1)}s\n</execute_metadata>\n\n`
+            const metadata = LocalSandbox.createTimeoutMetadata(cmdTimeout)
             resolve({ output: metadata + output, exitCode: 124, truncated })
           } else {
             resolve({ output, exitCode: signal ? null : code, truncated })
