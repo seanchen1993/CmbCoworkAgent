@@ -256,14 +256,19 @@ export function ModelSelector({
   onAdd: () => void
 }) {
   const [open, setOpen] = React.useState(false)
-  const selected = models.find((model) => model.id === selectedId) ?? models[0]
+  const selected = models.find((model) => model.id === selectedId) ?? null
+  const selectedLabel = selected
+    ? selected.name || selected.model
+    : selectedId
+      ? "模型不可用"
+      : "选择模型"
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
           type="button"
-          title={selected ? selected.name || selected.model : "选择模型"}
+          title={selectedLabel}
           style={{
             display: "inline-flex",
             alignItems: "center",
@@ -282,7 +287,7 @@ export function ModelSelector({
           }}
         >
           <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 130 }}>
-            {selected ? selected.name || selected.model : "选择模型"}
+            {selectedLabel}
           </span>
           <ChevronDown size={12} />
         </button>
@@ -291,7 +296,7 @@ export function ModelSelector({
         <div className="max-h-56 space-y-0.5 overflow-y-auto">
           {models.length > 0 ? (
             models.map((model) => {
-              const active = selected?.id === model.id
+              const active = selectedId === model.id
               const available = model.available !== false
               return (
                 <button

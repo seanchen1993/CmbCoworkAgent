@@ -206,6 +206,7 @@ export function LinkModal({
 export function ExportDesignModal({
   open,
   relatedFileCount,
+  includesMetadata,
   exportingPackage,
   onExportHtml,
   onExportPackage,
@@ -213,6 +214,7 @@ export function ExportDesignModal({
 }: {
   open: boolean
   relatedFileCount: number
+  includesMetadata?: boolean
   exportingPackage: boolean
   onExportHtml: () => void
   onExportPackage: () => void
@@ -233,7 +235,7 @@ export function ExportDesignModal({
           <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#8a8a8a", lineHeight: 1 }}>×</button>
         </div>
         <p style={{ margin: 0, fontSize: 13, color: "#6a6a6a", lineHeight: 1.7 }}>
-          当前页面包含 {relatedFileCount} 个关联资源。可以导出单个 HTML，也可以打包原始项目目录。
+          当前页面包含 {relatedFileCount} 个关联资源{includesMetadata ? "，并包含 artifact.json 元数据" : ""}。可以导出单个 HTML，也可以打包原始项目目录。
         </p>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}>
           <button
@@ -251,7 +253,7 @@ export function ExportDesignModal({
           >
             <span style={{ fontSize: 18 }}>{exportingPackage ? "打包中" : "ZIP"}</span>
             <span style={{ fontSize: 13, fontWeight: 700, color: "#1a1a1a" }}>导出项目包</span>
-            <span style={{ fontSize: 12, color: "#8a8a8a", lineHeight: 1.6 }}>下载 index.html 和关联资源目录。</span>
+            <span style={{ fontSize: 12, color: "#8a8a8a", lineHeight: 1.6 }}>下载 index.html、artifact.json、回滚版本和关联资源目录。</span>
           </button>
         </div>
       </div>

@@ -444,36 +444,36 @@ function DesignExecutionPanel({
                 </div>
               </div>
             )
-              })}
-              {isStreaming && !hasRunningWork && (
-                <div style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: "7px 10px",
-                  borderRadius: 8,
-                  border: "1px solid #ded8c8",
-                  background: "#fffaf0",
-                  color: "#7a5a12",
-                  fontSize: 12,
-                  lineHeight: 1.5,
-                }}>
-                  <span style={{
-                    width: 12,
-                    height: 12,
-                    borderRadius: "50%",
-                    border: "2px solid #d99a29",
-                    borderTopColor: "transparent",
-                    flexShrink: 0,
-                    animation: "spin 0.8s linear infinite",
-                  }} />
-                  <span>正在生成文件内容...</span>
-                </div>
-              )}
+          })}
+          {isStreaming && !hasRunningWork && (
+            <div style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "7px 10px",
+              borderRadius: 8,
+              border: "1px solid #ded8c8",
+              background: "#fffaf0",
+              color: "#7a5a12",
+              fontSize: 12,
+              lineHeight: 1.5,
+            }}>
+              <span style={{
+                width: 12,
+                height: 12,
+                borderRadius: "50%",
+                border: "2px solid #d99a29",
+                borderTopColor: "transparent",
+                flexShrink: 0,
+                animation: "spin 0.8s linear infinite",
+              }} />
+              <span>正在生成文件内容...</span>
             </div>
           )}
         </div>
-      )
+      )}
+    </div>
+  )
 }
 
 function DesignModelRetryNotice({ retry }: { retry: DesignModelRetryState }) {

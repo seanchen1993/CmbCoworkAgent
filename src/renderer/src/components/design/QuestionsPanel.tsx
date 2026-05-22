@@ -25,7 +25,10 @@ export function QuestionsPanel({
   }
 
   const answeredCount = questions.filter(isAnswered).length
-  const allAnswered   = questions.length > 0 && answeredCount === questions.length
+  const requiredQuestions = questions.filter((q) => q.required)
+  const allAnswered = requiredQuestions.length > 0
+    ? requiredQuestions.every(isAnswered)
+    : questions.length > 0
 
   function toggleChip(qId: string, opt: string, multi: boolean) {
     if (!multi) {
@@ -34,7 +37,9 @@ export function QuestionsPanel({
     }
     const current = answers[qId]
     const arr: string[] = Array.isArray(current) ? current : (current ? [current as string] : [])
-    const next = arr.includes(opt) ? arr.filter((v) => v !== opt) : [...arr, opt]
+    const q = questions.find((item) => item.id === qId)
+    const nextRaw = arr.includes(opt) ? arr.filter((v) => v !== opt) : [...arr, opt]
+    const next = q?.maxSelections ? nextRaw.slice(-q.maxSelections) : nextRaw
     onAnswer(qId, next)
   }
 
@@ -89,7 +94,51 @@ export function QuestionsPanel({
               </div>
               {q.hint && <p style={S.questionHint}>{q.hint}</p>}
 
-              {q.type === "chips" && q.options ? (
+              {q.type === "direction-cards" && q.options ? (
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 10 }}>
+                  {q.options.map((opt) => {
+                    const selected = isChipSelected(q.id, opt)
+                    const card = q.cards?.find((item) => item.id === opt)
+                    return (
+                      <button
+                        key={opt}
+                        onClick={() => toggleChip(q.id, opt, false)}
+                        style={{
+                          textAlign: "left",
+                          padding: 12,
+                          borderRadius: 10,
+                          border: selected ? "1px solid #1a1a1a" : "1px solid #d4d2cc",
+                          background: selected ? "#fffdf8" : "#ffffff",
+                          boxShadow: selected ? "0 4px 18px rgba(0,0,0,0.10)" : "none",
+                          cursor: "pointer",
+                          fontFamily: "inherit",
+                        }}
+                      >
+                        <div style={{ display: "flex", gap: 4, marginBottom: 9 }}>
+                          {(card?.palette ?? []).slice(0, 6).map((color, index) => (
+                            <span key={`${color}-${index}`} style={{
+                              width: 22,
+                              height: 16,
+                              borderRadius: 4,
+                              background: color,
+                              border: "1px solid rgba(0,0,0,0.12)",
+                            }} />
+                          ))}
+                        </div>
+                        <div style={{ fontFamily: card?.displayFont, fontSize: 15, fontWeight: 700, color: "#1a1a1a", marginBottom: 4 }}>
+                          {card?.label ?? q.optionLabels?.[opt] ?? opt}
+                        </div>
+                        {card?.mood && <div style={{ fontSize: 12, color: "#6a6a6a", lineHeight: 1.45 }}>{card.mood}</div>}
+                        {card?.references && card.references.length > 0 && (
+                          <div style={{ fontSize: 10, color: "#9a9a9a", marginTop: 8 }}>
+                            {card.references.slice(0, 4).join(" · ")}
+                          </div>
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : q.type === "chips" && q.options ? (
                 <div style={S.chipsRow}>
                   {q.options.map((opt) => {
                     const selected = isChipSelected(q.id, opt)
@@ -106,7 +155,7 @@ export function QuestionsPanel({
                         }}
                       >
                         {q.multi && selected && <span style={{ marginRight: 5, fontSize: 11 }}>✓</span>}
-                        {opt}
+                        {q.optionLabels?.[opt] ?? opt}
                       </button>
                     )
                   })}

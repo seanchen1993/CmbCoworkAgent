@@ -802,7 +802,7 @@ interface CustomAPI {
     generate: (
       sessionId: string,
       prompt: string,
-      onEvent: (event: { type: string; token?: string; html?: string; error?: string }) => void,
+      onEvent: (event: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string; metadata?: unknown }) => void,
       modelId?: string,
       history?: Array<{ role: "user" | "assistant"; content: string }>,
       tabId?: string
@@ -811,12 +811,14 @@ interface CustomAPI {
     saveArtifact: (
       tabId: string,
       html: string,
-      workspacePath?: string
+      workspacePath?: string,
+      metadata?: Record<string, unknown>
     ) => Promise<{ success: boolean; filePath?: string; error?: string }>
     saveArtifactFile: (
       filePath: string,
       html: string,
-      workspacePath?: string
+      workspacePath?: string,
+      metadata?: Record<string, unknown>
     ) => Promise<{ success: boolean; filePath?: string; error?: string }>
     importFromUrl: (
       url: string
@@ -838,11 +840,11 @@ interface CustomAPI {
     readArtifact: (
       tabId: string,
       workspacePath?: string
-    ) => Promise<{ success: boolean; filePath?: string; html?: string; error?: string }>
+    ) => Promise<{ success: boolean; filePath?: string; html?: string; metadata?: unknown; error?: string }>
     readArtifactFile: (
       filePath: string,
       workspacePath?: string
-    ) => Promise<{ success: boolean; filePath?: string; html?: string; error?: string }>
+    ) => Promise<{ success: boolean; filePath?: string; html?: string; metadata?: unknown; error?: string }>
     getArtifactPackageInfo: (
       filePath: string,
       workspacePath?: string
@@ -851,10 +853,29 @@ interface CustomAPI {
       filePath: string,
       workspacePath?: string
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; relatedFileCount?: number; error?: string }>
+    listSystems: () => Promise<Array<{
+      id: string
+      name: string
+      description: string
+      category?: string
+      source?: string
+      origin?: string
+      license?: string
+      path: string
+      tokens?: { bg: string; surface: string; fg: string; muted: string; border: string; accent: string }
+    }>>
+    listTemplates: () => Promise<Array<{
+      name: string
+      description: string
+      path: string
+      mode: string
+      platform: string | null
+      scenario: string
+    }>>
     agentGenerate: (
       sessionId: string,
       prompt: string,
-      onEvent: (event: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string }) => void,
+      onEvent: (event: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string; metadata?: unknown }) => void,
       tabId: string,
       modelId?: string,
       imageData?: string,
@@ -864,7 +885,8 @@ interface CustomAPI {
       workspacePath?: string,
       artifactId?: string,
       sourceArtifactPath?: string,
-      designSessionId?: string
+      designSessionId?: string,
+      designSystemId?: string
     ) => () => void
     askQuestions: (
       sessionId: string,

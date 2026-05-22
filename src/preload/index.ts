@@ -1870,13 +1870,13 @@ const api = {
     generate: (
       sessionId: string,
       prompt: string,
-      onEvent: (event: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string }) => void,
+      onEvent: (event: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string; metadata?: unknown }) => void,
       modelId?: string,
       history?: Array<{ role: "user" | "assistant"; content: string }>,
       tabId?: string
     ): (() => void) => {
       const channel = `design:stream:${sessionId}`
-      const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string }): void => {
+      const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string; metadata?: unknown }): void => {
         onEvent(data)
         if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
           if (data.type === "error") {
@@ -1894,9 +1894,10 @@ const api = {
     saveArtifact: (
       tabId: string,
       html: string,
-      workspacePath?: string
+      workspacePath?: string,
+      metadata?: Record<string, unknown>
     ): Promise<{ success: boolean; filePath?: string; error?: string }> =>
-      ipcRenderer.invoke("design:save-artifact", { tabId, html, workspacePath }) as Promise<{
+      ipcRenderer.invoke("design:save-artifact", { tabId, html, workspacePath, metadata }) as Promise<{
         success: boolean
         filePath?: string
         error?: string
@@ -1904,9 +1905,10 @@ const api = {
     saveArtifactFile: (
       filePath: string,
       html: string,
-      workspacePath?: string
+      workspacePath?: string,
+      metadata?: Record<string, unknown>
     ): Promise<{ success: boolean; filePath?: string; error?: string }> =>
-      ipcRenderer.invoke("design:save-artifact-file", { filePath, html, workspacePath }) as Promise<{
+      ipcRenderer.invoke("design:save-artifact-file", { filePath, html, workspacePath, metadata }) as Promise<{
         success: boolean
         filePath?: string
         error?: string
@@ -1991,6 +1993,25 @@ const api = {
         relatedFileCount?: number
         error?: string
       }>,
+    listSystems: (): Promise<Array<{
+      id: string
+      name: string
+      description: string
+      category?: string
+      source?: string
+      origin?: string
+      license?: string
+      path: string
+      tokens?: { bg: string; surface: string; fg: string; muted: string; border: string; accent: string }
+    }>> => ipcRenderer.invoke("design:list-systems"),
+    listTemplates: (): Promise<Array<{
+      name: string
+      description: string
+      path: string
+      mode: string
+      platform: string | null
+      scenario: string
+    }>> => ipcRenderer.invoke("design:list-templates"),
     /**
      * Full Agent Runtime path — gives Design access to Skills, MCP tools,
      * Hooks, Approvals and context summarisation.
@@ -2000,7 +2021,7 @@ const api = {
     agentGenerate: (
       sessionId: string,
       prompt: string,
-      onEvent: (event: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string }) => void,
+      onEvent: (event: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string; metadata?: unknown }) => void,
       tabId: string,
       modelId?: string,
       imageData?: string,
@@ -2011,9 +2032,10 @@ const api = {
       artifactId?: string,
       sourceArtifactPath?: string,
       designSessionId?: string,
+      designSystemId?: string,
     ): (() => void) => {
       const channel = `design:stream:${sessionId}`
-      const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string }): void => {
+      const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string; metadata?: unknown }): void => {
         onEvent(data)
         if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
           if (data.type === "error") {
@@ -2023,7 +2045,7 @@ const api = {
         }
       }
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("design:agent-generate", { sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath, artifactId, sourceArtifactPath, designSessionId })
+      ipcRenderer.send("design:agent-generate", { sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath, artifactId, sourceArtifactPath, designSessionId, designSystemId })
       return () => ipcRenderer.removeListener(channel, handler)
     },
     askQuestions: (

@@ -24,6 +24,10 @@ export function CommentPin({
   const [editText, setEditText] = useState(comment.text)
   const hasEdits = editText.trim() !== comment.text.trim()
 
+  useEffect(() => {
+    setEditText(comment.text)
+  }, [comment.id, comment.text])
+
   const handleClose = () => {
     if (hasEdits && editText.trim()) onEdit(editText.trim())
     onToggle()

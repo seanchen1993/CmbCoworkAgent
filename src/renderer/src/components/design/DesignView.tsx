@@ -36,9 +36,11 @@ import type {
   DesignContextSyncResult,
   DesignElementAnchor,
   DesignExecutionEvent,
+  DesignArtifactMetadata,
   DesignModelRetryState,
   DesignSessionKind,
   DesignSkillReference,
+  DesignSystemInfo,
   DesignSourceInfo,
   DrawElementHint,
   DrawNote,
@@ -67,6 +69,35 @@ import {
 function getPathName(filePath: string | null): string {
   if (!filePath) return ""
   return filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath
+}
+
+function groupByLabel<T>(items: T[], getLabel: (item: T) => string | null | undefined): Array<{ label: string; items: T[] }> {
+  const groups = new Map<string, T[]>()
+  for (const item of items) {
+    const label = getLabel(item)?.trim() || "Other"
+    const next = groups.get(label) ?? []
+    next.push(item)
+    groups.set(label, next)
+  }
+  return Array.from(groups.entries())
+    .map(([label, groupItems]) => ({ label, items: groupItems }))
+    .sort((a, b) => {
+      const order = ["Core", "prototype", "deck", "template", "design-system", "skills", "Other"]
+      const aIndex = order.indexOf(a.label)
+      const bIndex = order.indexOf(b.label)
+      if (aIndex >= 0 || bIndex >= 0) {
+        return (aIndex >= 0 ? aIndex : order.length) - (bIndex >= 0 ? bIndex : order.length)
+      }
+      return a.label.localeCompare(b.label, "zh-CN")
+    })
+}
+
+function getTemplateModeLabel(mode: string | undefined): string {
+  if (mode === "prototype") return "prototype"
+  if (mode === "deck") return "deck"
+  if (mode === "template") return "template"
+  if (mode === "design-system") return "design-system"
+  return mode || "skill"
 }
 
 function getSessionKindLabel(kind: DesignSessionKind | DesignSourceInfo["kind"] | undefined): string {
@@ -208,6 +239,7 @@ function makeTabState(): TabState {
     selectedModelId: getLastModelId(),  // default to last-used model
     reloadKey: 0,
     selectedSkill: null,
+    selectedDesignSystemId: null,
     codeContext: null,
     designLink: null,
     attachedFiles: null,
@@ -216,6 +248,7 @@ function makeTabState(): TabState {
     retryCleanMsg: null,
     retrySkill: null,
     artifactPath: null,
+    artifactMetadata: null,
     variationPanelPosition: null,
     apiHistory: [],
     pendingApproval: null,
@@ -257,6 +290,7 @@ type DesignIterationRollbackSnapshot = {
   drawNotes: DrawNote[]
   draftDrawNote: TabState["draftDrawNote"]
   inputValue: string
+  artifactMetadata: DesignArtifactMetadata | null
   apiHistory: Array<{ role: "user" | "assistant"; content: string }>
 }
 
@@ -275,6 +309,7 @@ function makeIterationRollbackSnapshot(state: TabState | undefined): DesignItera
     drawNotes: state.drawNotes,
     draftDrawNote: state.draftDrawNote,
     inputValue: state.inputValue,
+    artifactMetadata: state.artifactMetadata,
     apiHistory: state.apiHistory ?? [],
   }
 }
@@ -295,6 +330,7 @@ function restoreIterationRollbackSnapshot(
     drawNotes: snapshot.drawNotes,
     draftDrawNote: snapshot.draftDrawNote,
     inputValue: snapshot.inputValue,
+    artifactMetadata: snapshot.artifactMetadata,
     apiHistory: snapshot.apiHistory,
     reloadKey: prev.reloadKey + 1,
   }
@@ -312,6 +348,19 @@ function hydrateTabStateHtml(state: TabState, html: string): TabState {
       : variations[0]?.id ?? null,
     reloadKey: state.reloadKey + 1,
   }
+}
+
+function makeHydrationGuardFingerprint(state: TabState | undefined): string {
+  if (!state) return ""
+  return JSON.stringify({
+    html: state.html,
+    messages: state.messages.map((msg) => [msg.role, msg.content, msg.isStreaming ?? false]),
+    variations: state.variations.map((variation) => [variation.id, variation.label, variation.html]),
+    activeVariationId: state.activeVariationId,
+    artifactPath: state.artifactPath ?? null,
+    artifactMetadata: state.artifactMetadata ?? null,
+    generationState: state.generationState,
+  })
 }
 
 function promptLooksLikeFileOperation(prompt: string): boolean {
@@ -353,41 +402,173 @@ function getWorkspaceRequirementReason(options: {
   return null
 }
 
+function normalizeQuestionDef(raw: unknown): QuestionDef | null {
+  if (!raw || typeof raw !== "object") return null
+  const item = raw as Record<string, unknown>
+  const id = typeof item.id === "string" && item.id.trim() ? item.id.trim() : ""
+  if (!id) return null
+  const rawType = typeof item.type === "string" ? item.type.trim().toLowerCase() : "text"
+  let type: QuestionDef["type"]
+  switch (rawType) {
+    case "radio":
+    case "select":
+    case "checkbox":
+    case "chips":
+      type = "chips"
+      break
+    case "direction-cards":
+      type = "direction-cards"
+      break
+    case "textarea":
+      type = "textarea"
+      break
+    default:
+      type = "text"
+  }
+  const options = Array.isArray(item.options)
+    ? item.options
+        .map((option) => {
+          if (typeof option === "string") return { value: option, label: option }
+          if (option && typeof option === "object") {
+            const obj = option as Record<string, unknown>
+            const label = typeof obj.label === "string" ? obj.label : ""
+            const value = typeof obj.value === "string" ? obj.value : label
+            return value ? { value, label: label || value } : null
+          }
+          return null
+        })
+        .filter((option): option is { value: string; label: string } => Boolean(option))
+    : []
+  const optionLabels = Object.fromEntries(options.map((option) => [option.value, option.label]))
+  return {
+    id,
+    type,
+    label: typeof item.label === "string" ? item.label : id,
+    hint: typeof item.hint === "string" ? item.hint : typeof item.help === "string" ? item.help : undefined,
+    options: options.map((option) => option.value),
+    optionLabels,
+    cards: Array.isArray(item.cards) ? item.cards as QuestionDef["cards"] : undefined,
+    multi: item.multi === true || rawType === "checkbox",
+    required: item.required === true,
+    maxSelections: typeof item.maxSelections === "number" ? item.maxSelections : undefined,
+    placeholder: typeof item.placeholder === "string" ? item.placeholder : undefined,
+  }
+}
+
 function saveDesignArtifactForTab(
   artifactId: string,
   html: string,
   workspacePath: string | null,
   tabId: string,
   updateTs: (tabId: string, patch: Partial<TabState> | ((prev: TabState) => Partial<TabState>)) => void,
-  existingArtifactPath?: string | null
+  existingArtifactPath?: string | null,
+  metadata?: Partial<DesignArtifactMetadata>
 ): void {
   if (!html.trim()) return
   if (!workspacePath) return
   const savePromise = existingArtifactPath
-    ? window.api.design.saveArtifactFile(existingArtifactPath, html, workspacePath ?? undefined)
-    : window.api.design.saveArtifact(artifactId, html, workspacePath ?? undefined)
+    ? window.api.design.saveArtifactFile(existingArtifactPath, html, workspacePath ?? undefined, metadata as Record<string, unknown>)
+    : window.api.design.saveArtifact(artifactId, html, workspacePath ?? undefined, metadata as Record<string, unknown>)
   savePromise
     .then(async (result) => {
       if (!result.success && existingArtifactPath) {
-        result = await window.api.design.saveArtifact(artifactId, html, workspacePath ?? undefined)
+        result = await window.api.design.saveArtifact(artifactId, html, workspacePath ?? undefined, metadata as Record<string, unknown>)
       }
       if (result.success && result.filePath) {
-        window.api.design.storeHtml(artifactId, html).catch(() => {})
+        window.api.design.storeHtml(artifactId, html).catch((err) => {
+          console.warn("[Design] storeHtml failed", err)
+        })
         updateTs(tabId, { artifactPath: result.filePath })
       }
     })
-    .catch(() => {
+    .catch((err) => {
+      console.warn("[Design] saveArtifact failed", err)
       if (existingArtifactPath) {
-        window.api.design.saveArtifact(artifactId, html, workspacePath ?? undefined)
+        window.api.design.saveArtifact(artifactId, html, workspacePath ?? undefined, metadata as Record<string, unknown>)
           .then((result) => {
             if (result.success && result.filePath) {
-              window.api.design.storeHtml(artifactId, html).catch(() => {})
+              window.api.design.storeHtml(artifactId, html).catch((storeErr) => {
+                console.warn("[Design] storeHtml failed", storeErr)
+              })
               updateTs(tabId, { artifactPath: result.filePath })
             }
           })
-          .catch(() => {})
+          .catch((fallbackErr) => {
+            console.warn("[Design] saveArtifact fallback failed", fallbackErr)
+          })
       }
     })
+}
+
+type PendingArtifactSave = {
+  artifactId: string
+  html: string
+  workspacePath: string | null
+  tabId: string
+  existingArtifactPath?: string | null
+  metadata?: Partial<DesignArtifactMetadata>
+}
+
+function flushPendingArtifactSave(
+  pendingSave: PendingArtifactSave | null,
+  updateTs: (tabId: string, patch: Partial<TabState> | ((prev: TabState) => Partial<TabState>)) => void
+): void {
+  if (!pendingSave) return
+  saveDesignArtifactForTab(
+    pendingSave.artifactId,
+    pendingSave.html,
+    pendingSave.workspacePath,
+    pendingSave.tabId,
+    updateTs,
+    pendingSave.existingArtifactPath,
+    pendingSave.metadata
+  )
+}
+
+function buildDesignArtifactMetadata(input: {
+  artifactId: string
+  title?: string
+  prompt?: string
+  modelId?: string | null
+  skill?: DesignSkillReference | null
+  designSystem?: DesignSystemInfo | null
+  sourceInfo?: DesignSourceInfo | null
+  html: string
+  variations: VariationItem[]
+}): DesignArtifactMetadata {
+  const now = new Date().toISOString()
+  return {
+    artifactId: input.artifactId,
+    title: input.title,
+    prompt: input.prompt,
+    modelId: input.modelId ?? null,
+    skillName: input.skill?.name ?? null,
+    skillPath: input.skill?.path ?? null,
+    designSystemId: input.designSystem?.id ?? null,
+    designSystemName: input.designSystem?.name ?? null,
+    designSystemCategory: input.designSystem?.category ?? null,
+    sourceKind: input.sourceInfo?.kind,
+    sourceLabel: input.sourceInfo?.label,
+    createdAt: now,
+    updatedAt: now,
+    variations: input.variations.map((variation) => ({ id: variation.id, label: variation.label })),
+    preview: {
+      thumbnailText: input.html
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<script[\s\S]*?<\/script>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 120),
+    },
+  }
+}
+
+function asDesignArtifactMetadata(raw: unknown): DesignArtifactMetadata | null {
+  if (!raw || typeof raw !== "object") return null
+  const data = raw as DesignArtifactMetadata
+  if (typeof data.artifactId !== "string" || typeof data.updatedAt !== "string") return null
+  return data
 }
 
 function makeDesignArtifactId(sessionId: string | null, tabId: string): string {
@@ -821,9 +1002,11 @@ type PersistedTabState = {
   drawToolMode?: DrawToolMode
   codeContext: Array<{ filename: string; content: string }> | null
   designLink: string | null
+  selectedDesignSystemId?: string | null
   rightTab: RightPanelTab
   apiHistory?: Array<{ role: "user" | "assistant"; content: string }>
   artifactPath?: string | null
+  artifactMetadata?: DesignArtifactMetadata | null
   variationPanelPosition?: FloatingPanelPosition | null
 }
 
@@ -865,9 +1048,11 @@ function serializeTs(ts: TabState): PersistedTabState {
     drawToolMode:      ts.drawToolMode,
     codeContext:       ts.codeContext,
     designLink:        ts.designLink,
+    selectedDesignSystemId: ts.selectedDesignSystemId,
     rightTab:          ts.rightTab,
     apiHistory:        ts.apiHistory,
     artifactPath:      ts.artifactPath,
+    artifactMetadata:  ts.artifactMetadata,
     variationPanelPosition: ts.variationPanelPosition,
   }
 }
@@ -883,8 +1068,10 @@ function deserializeTs(p: PersistedTabState): TabState {
     drawElementHints:p.drawElementHints ?? [],
     drawNotes:       p.drawNotes ?? [],
     drawToolMode:    p.drawToolMode ?? "draw",
+    selectedDesignSystemId: p.selectedDesignSystemId ?? null,
     apiHistory:      p.apiHistory ?? [],
     artifactPath:    p.artifactPath ?? null,
+    artifactMetadata:p.artifactMetadata ?? null,
     variationPanelPosition: p.variationPanelPosition ?? null,
     generationState: "idle",  // always reset — never restore mid-stream
     activeMode: null,
@@ -970,7 +1157,7 @@ async function hydrateSessionArtifacts(
   const entries = await Promise.all(
     Object.entries(session.tabStates).map(async ([tabId, state]) => {
       const artifactId = makeDesignArtifactId(sessionId, tabId)
-      let result: { success: boolean; filePath?: string; html?: string; error?: string }
+      let result: { success: boolean; filePath?: string; html?: string; metadata?: unknown; error?: string }
       if (state.artifactPath) {
         result = await window.api.design.readArtifactFile(state.artifactPath, workspacePath ?? undefined)
       } else {
@@ -979,12 +1166,15 @@ async function hydrateSessionArtifacts(
       if (!result.success || !result.html?.trim()) return [tabId, state] as const
 
       const previewHtml = await prepareHtmlForSrcDoc(result.html, result.filePath ?? state.artifactPath)
-      window.api.design.storeHtml(artifactId, previewHtml).catch(() => {})
+      window.api.design.storeHtml(artifactId, previewHtml).catch((err) => {
+        console.warn("[Design] storeHtml failed", err)
+      })
       return [
         tabId,
         {
           ...hydrateTabStateHtml(state, previewHtml),
           artifactPath: result.filePath ?? state.artifactPath,
+          artifactMetadata: asDesignArtifactMetadata(result.metadata) ?? state.artifactMetadata,
         },
       ] as const
     })
@@ -1441,6 +1631,7 @@ export function DesignView(): React.JSX.Element {
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
   const [modelDialogSelectedId, setModelDialogSelectedId] = useState<string | undefined>(undefined)
   const [allSkills, setAllSkills] = useState<SkillInfo[]>([])
+  const [designSystems, setDesignSystems] = useState<DesignSystemInfo[]>([])
   const [activeSkillIndex, setActiveSkillIndex] = useState(0)
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
@@ -1451,14 +1642,19 @@ export function DesignView(): React.JSX.Element {
   const [linkModalMode, setLinkModalMode] = useState<"reference" | "import">("reference")
   const [linkModalText, setLinkModalText] = useState("")
   const [importingSource, setImportingSource] = useState<null | "url" | "html" | "prototype_zip">(null)
-  const [exportChoice, setExportChoice] = useState<{ html: string; artifactPath: string; relatedFileCount: number } | null>(null)
+  const [exportChoice, setExportChoice] = useState<{ html: string; artifactPath: string; relatedFileCount: number; includesMetadata: boolean } | null>(null)
   const [exportingPackage, setExportingPackage] = useState(false)
   // Toast notifications
   const [toast, setToast] = useState<{ msg: string; id: number } | null>(null)
+  const toastTimeoutsRef = useRef<Array<ReturnType<typeof setTimeout>>>([])
   const showToast = useCallback((msg: string) => {
     const id = Date.now()
     setToast({ msg, id })
-    setTimeout(() => setToast((t) => t?.id === id ? null : t), 3000)
+    const timeout = setTimeout(() => {
+      setToast((t) => t?.id === id ? null : t)
+      toastTimeoutsRef.current = toastTimeoutsRef.current.filter((item) => item !== timeout)
+    }, 3000)
+    toastTimeoutsRef.current.push(timeout)
   }, [])
 
   // Per-tab session tracking: tabId → { cleanup, sessionId }
@@ -1477,6 +1673,8 @@ export function DesignView(): React.JSX.Element {
   const fileInputRef      = useRef<HTMLInputElement>(null)   // images only (screenshot / 📷)
   const messageListRef    = useRef<HTMLDivElement>(null)
   const skillOptionRefs   = useRef<Array<HTMLDivElement | null>>([])
+  const pendingArtifactSaveRef = useRef<PendingArtifactSave | null>(null)
+  const artifactSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const ts = tabStates[activeTabId] ?? makeTabState()
 
@@ -1485,6 +1683,8 @@ export function DesignView(): React.JSX.Element {
   const tweaksOn   = ts.tweaksOn
   const activeMode = ts.activeMode
   const zoom       = ts.zoom
+  const selectedDesignSystem = designSystems.find((system) => system.id === ts.selectedDesignSystemId) ?? null
+  const designSystemGroups = groupByLabel(designSystems, (system) => system.category || system.source)
 
   const setInputValue = (val: string) => updateTs(activeTabId, { inputValue: val })
   const setTweaksOn   = (val: boolean | ((v: boolean) => boolean)) =>
@@ -1507,6 +1707,28 @@ export function DesignView(): React.JSX.Element {
     })
   }, [])
 
+  const scheduleArtifactSave = useCallback((pendingSave: PendingArtifactSave) => {
+    pendingArtifactSaveRef.current = pendingSave
+    if (artifactSaveTimerRef.current) clearTimeout(artifactSaveTimerRef.current)
+    artifactSaveTimerRef.current = setTimeout(() => {
+      const save = pendingArtifactSaveRef.current
+      pendingArtifactSaveRef.current = null
+      artifactSaveTimerRef.current = null
+      flushPendingArtifactSave(save, updateTs)
+    }, 350)
+  }, [updateTs])
+
+  useEffect(() => {
+    return () => {
+      for (const timeout of toastTimeoutsRef.current) clearTimeout(timeout)
+      toastTimeoutsRef.current = []
+      if (artifactSaveTimerRef.current) clearTimeout(artifactSaveTimerRef.current)
+      artifactSaveTimerRef.current = null
+      flushPendingArtifactSave(pendingArtifactSaveRef.current, () => undefined)
+      pendingArtifactSaveRef.current = null
+    }
+  }, [])
+
   const updatePreviewScrollState = useCallback((iframeX?: number, iframeY?: number) => {
     const state = tabStatesRef.current[activeTabIdRef.current]
     const scale = Math.max((state?.zoom ?? 100) / 100, 0.25)
@@ -1525,10 +1747,14 @@ export function DesignView(): React.JSX.Element {
         ? window.api.skills.listPlugins().catch(() => [])
         : Promise.resolve([])
 
-      const [skills, pluginSkills, disabledList] = await Promise.all([
+      const templatesPromise = typeof window.api.design.listTemplates === "function"
+        ? window.api.design.listTemplates().catch(() => [])
+        : Promise.resolve([])
+      const [skills, pluginSkills, disabledList, templates] = await Promise.all([
         window.api.skills.list(),
         pluginSkillsPromise,
         window.api.skills.getDisabled(),
+        templatesPromise,
       ])
       const disabledSet = new Set(disabledList.map((name) => name.trim().toLowerCase()))
       const enabledSkills = skills.filter(
@@ -1542,14 +1768,39 @@ export function DesignView(): React.JSX.Element {
         ...pluginSkills.filter((skill) => !seen.has(skill.name)),
       ]
       setAllSkills(
-        merged
-          .map((skill) => ({ name: skill.name, description: skill.description, path: skill.path }))
+        [
+          ...templates.map((template) => ({
+            name: template.name,
+            description: template.description,
+            path: template.path,
+            source: "template" as const,
+            mode: template.mode,
+            platform: template.platform,
+            scenario: template.scenario,
+          })),
+          ...merged
+            .map((skill) => ({ name: skill.name, description: skill.description, path: skill.path }))
+            .map((skill) => ({ ...skill, source: "skill" as const })),
+        ]
           .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"))
       )
     } catch {
       setAllSkills([])
     }
   }, [])
+
+  const loadDesignSystems = useCallback(async (): Promise<void> => {
+    try {
+      const systems = await window.api.design.listSystems()
+      setDesignSystems(systems)
+      updateTs(SINGLE_DESIGN_TAB_ID, (prev) => {
+        if (prev.selectedDesignSystemId && systems.some((system) => system.id === prev.selectedDesignSystemId)) return {}
+        return { selectedDesignSystemId: systems.find((system) => system.id === "neutral-modern")?.id ?? systems[0]?.id ?? null }
+      })
+    } catch {
+      setDesignSystems([])
+    }
+  }, [updateTs])
 
   const loadDesignModels = useCallback(async (): Promise<ModelOption[]> => {
     const models = await window.api.models.list()
@@ -1574,6 +1825,10 @@ export function DesignView(): React.JSX.Element {
   useEffect(() => {
     void loadAvailableSkills()
   }, [loadAvailableSkills])
+
+  useEffect(() => {
+    void loadDesignSystems()
+  }, [loadDesignSystems])
 
   useEffect(() => {
     let cancelled = false
@@ -1606,9 +1861,10 @@ export function DesignView(): React.JSX.Element {
   useEffect(() => {
     const messageList = messageListRef.current
     if (!messageList) return
-    window.requestAnimationFrame(() => {
+    const frameId = window.requestAnimationFrame(() => {
       messageList.scrollTop = messageList.scrollHeight
     })
+    return () => window.cancelAnimationFrame(frameId)
   }, [ts.messages, ts.generationState])
   // currentSessionId ref — needed inside startGeneration (which is a stable useCallback)
   // to produce a stable artifact ID without capturing a stale closure value.
@@ -1619,7 +1875,9 @@ export function DesignView(): React.JSX.Element {
     const entry = tabSessionsRef.current.get(tabId)
     if (!entry) return
     entry.cleanup()
-    window.api.design.cancel(entry.sessionId).catch(() => {})
+    window.api.design.cancel(entry.sessionId).catch((err) => {
+      console.warn("[Design] cancel failed", err)
+    })
     tabSessionsRef.current.delete(tabId)
   }, [])
 
@@ -1652,11 +1910,15 @@ export function DesignView(): React.JSX.Element {
         const currentState = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
         const snapshotState = session.tabStates[SINGLE_DESIGN_TAB_ID]
         if (!hydratedState || !currentState) return
-        if (snapshotState && currentState.html !== snapshotState.html) return
-        if (hydratedState.html === currentState.html) return
+        const snapshotFingerprint = makeHydrationGuardFingerprint(snapshotState)
+        const currentFingerprint = makeHydrationGuardFingerprint(currentState)
+        if (snapshotFingerprint && currentFingerprint !== snapshotFingerprint) return
+        if (makeHydrationGuardFingerprint(hydratedState) === currentFingerprint) return
         setTabStates(hydrated.tabStates)
       })
-      .catch(() => {})
+      .catch((err) => {
+        console.warn("[Design] hydrateSessionArtifacts failed", err)
+      })
     // Hydrate once per session/workspace; tabStates is only the initial snapshot.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSessionId, workspacePath])
@@ -1771,7 +2033,9 @@ export function DesignView(): React.JSX.Element {
     const importedHtml = ensureEditMode(options.html)
     const variations = parseVariations(importedHtml)
 
-    window.api.design.storeHtml(storeKey, importedHtml).catch(() => {})
+    window.api.design.storeHtml(storeKey, importedHtml).catch((err) => {
+      console.warn("[Design] storeHtml failed", err)
+    })
     saveDesignArtifactForTab(
       storeKey,
       importedHtml,
@@ -1821,6 +2085,7 @@ export function DesignView(): React.JSX.Element {
       retryCleanMsg: null,
       retrySkill: null,
       artifactPath: null,
+      artifactMetadata: null,
       apiHistory: [
         { role: "user" as const, content: options.userMessage },
         { role: "assistant" as const, content: "页面已还原，可继续编辑" },
@@ -2068,6 +2333,11 @@ export function DesignView(): React.JSX.Element {
           title: autoTitle,
           kind: firstState?.sourceInfo?.kind ?? "prompt",
           sourceLabel: firstState?.sourceInfo?.label,
+          thumbnailText: firstState?.artifactMetadata?.preview?.thumbnailText,
+          designSystemId: firstState?.selectedDesignSystemId ?? firstState?.artifactMetadata?.designSystemId ?? null,
+          designSystemName: firstState?.artifactMetadata?.designSystemName ?? undefined,
+          designSystemCategory: firstState?.artifactMetadata?.designSystemCategory ?? undefined,
+          artifactPath: firstState?.artifactPath ?? undefined,
         })
         setSessionIndex(loadIndex())
       } catch {
@@ -2091,10 +2361,15 @@ export function DesignView(): React.JSX.Element {
         if (currentSessionIdRef.current !== id) return
         const currentState = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
         const snapshotState = session.tabStates[SINGLE_DESIGN_TAB_ID]
-        if (snapshotState && currentState?.html !== snapshotState.html) return
+        const snapshotFingerprint = makeHydrationGuardFingerprint(snapshotState)
+        const currentFingerprint = makeHydrationGuardFingerprint(currentState)
+        if (snapshotFingerprint && currentFingerprint !== snapshotFingerprint) return
+        if (makeHydrationGuardFingerprint(hydrated.tabStates[SINGLE_DESIGN_TAB_ID]) === currentFingerprint) return
         setTabStates(hydrated.tabStates)
       })
-      .catch(() => {})
+      .catch((err) => {
+        console.warn("[Design] hydrateSessionArtifacts failed", err)
+      })
   }, [cancelDesignRunForTab, workspacePath])
 
   const backToGallery = useCallback(() => {
@@ -2136,7 +2411,12 @@ export function DesignView(): React.JSX.Element {
     if (activeMode !== "edit") {
       updateTs(activeTabId, { selectedElement: null })
     }
-  }, [activeMode])
+    return () => {
+      injectIntoIframe(iframeRef.current, COMMENT_CLEANUP)
+      injectIntoIframe(iframeRef.current, EDIT_SELECT_CLEANUP)
+      sendToIframe(iframeRef.current, { type: "__deactivate_edit_mode" })
+    }
+  }, [activeMode, activeTabId, updateTs])
 
   // ── Listen for all postMessages from iframe ───────────────
   useEffect(() => {
@@ -2195,14 +2475,13 @@ export function DesignView(): React.JSX.Element {
         const tabId = activeTabIdRef.current
         const state = tabStatesRef.current[tabId]
         const patchedHtml = ensureEditMode(html)
-        saveDesignArtifactForTab(
-          makeDesignArtifactId(currentSessionIdRef.current, tabId),
-          patchedHtml,
+        scheduleArtifactSave({
+          artifactId: makeDesignArtifactId(currentSessionIdRef.current, tabId),
+          html: patchedHtml,
           workspacePath,
           tabId,
-          updateTs,
-          state?.artifactPath ?? null
-        )
+          existingArtifactPath: state?.artifactPath ?? null,
+        })
         setTabStates((prev) => {
           const state = prev[tabId]
           if (!state) return prev
@@ -2232,14 +2511,13 @@ export function DesignView(): React.JSX.Element {
           ? (state.variations.find((v) => v.id === state.activeVariationId)?.html ?? state.html)
           : state.html
         const updated = mergeEditModeKeys(targetHtml, edits)
-        saveDesignArtifactForTab(
-          makeDesignArtifactId(currentSessionIdRef.current, tabId),
-          updated,
+        scheduleArtifactSave({
+          artifactId: makeDesignArtifactId(currentSessionIdRef.current, tabId),
+          html: updated,
           workspacePath,
           tabId,
-          updateTs,
-          state.artifactPath
-        )
+          existingArtifactPath: state.artifactPath,
+        })
         setTabStates((prev) => {
           const latest = prev[tabId]
           if (!latest) return prev
@@ -2263,7 +2541,7 @@ export function DesignView(): React.JSX.Element {
     }
     window.addEventListener("message", handler)
     return () => window.removeEventListener("message", handler)
-  }, [updatePreviewScrollState, updateTs, workspacePath])
+  }, [scheduleArtifactSave, updatePreviewScrollState, updateTs, workspacePath])
 
   // ── Ask Questions ─────────────────────────────────────────
 
@@ -2308,7 +2586,9 @@ export function DesignView(): React.JSX.Element {
       }
 
       if (event.type === "done") {
-        const qs = Array.isArray(event.questions) ? (event.questions as QuestionDef[]) : []
+        const qs = Array.isArray(event.questions)
+          ? event.questions.map(normalizeQuestionDef).filter((question): question is QuestionDef => Boolean(question))
+          : []
         updateTs(tabId, (prev) => ({
           generationState: "questions_ready",
           questions: qs,
@@ -2407,6 +2687,7 @@ export function DesignView(): React.JSX.Element {
     // directory every generation, making the filesystem-based context chain useless.
     const stableArtifactId = makeDesignArtifactId(currentSessionIdRef.current, tabId)
     const normalizeProgressToken = createDesignProgressNormalizer()
+    const runStartState = tabStatesRef.current[tabId]
 
     const onEvent = async (event: {
       type: string
@@ -2419,6 +2700,7 @@ export function DesignView(): React.JSX.Element {
       reason?: string
       delayMs?: number
       artifactPath?: string
+      metadata?: unknown
     }) => {
       if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
 
@@ -2488,13 +2770,28 @@ export function DesignView(): React.JSX.Element {
         // Guarantee every generated design has a working EDITMODE block
         const patchedHtml = await prepareHtmlForSrcDoc(event.html, event.artifactPath ?? null)
         const variations = parseVariations(patchedHtml)
+        const runState = tabStatesRef.current[tabId]
+        const selectedDesignSystemForRun = designSystems.find((system) => system.id === runState?.selectedDesignSystemId) ?? null
+        const artifactMetadata = asDesignArtifactMetadata(event.metadata) ?? buildDesignArtifactMetadata({
+          artifactId: stableArtifactId,
+          title: cleanUserMsg?.slice(0, 32) || runState?.sourceInfo?.label,
+          prompt: cleanUserMsg ?? prompt,
+          modelId: modelId ?? null,
+          skill: skill ?? null,
+          designSystem: selectedDesignSystemForRun,
+          sourceInfo: runState?.sourceInfo ?? null,
+          html: patchedHtml,
+          variations,
+        })
 
         // Keep htmlStore in sync (used as fallback / reference)
-        window.api.design.storeHtml(stableArtifactId, patchedHtml).catch(() => {})
+        window.api.design.storeHtml(stableArtifactId, patchedHtml).catch((err) => {
+          console.warn("[Design] storeHtml failed", err)
+        })
         if (event.artifactPath) {
-          updateTs(tabId, { artifactPath: event.artifactPath })
+          updateTs(tabId, { artifactPath: event.artifactPath, artifactMetadata })
         } else {
-          saveDesignArtifactForTab(stableArtifactId, patchedHtml, workspacePath, tabId, updateTs)
+          saveDesignArtifactForTab(stableArtifactId, patchedHtml, workspacePath, tabId, updateTs, undefined, artifactMetadata)
         }
 
         updateTs(tabId, (prev) => {
@@ -2523,13 +2820,18 @@ export function DesignView(): React.JSX.Element {
             messages: msgs,
             variations,
             activeVariationId: variations[0]?.id ?? null,
+            artifactMetadata,
             apiHistory: newHistory,
             pendingApproval: null,
           }
         })
 
         if (variations.length > 0) {
-          variations.forEach((v) => { window.api.design.saveVariant(v.id, v.html).catch(() => {}) })
+          variations.forEach((v) => {
+            window.api.design.saveVariant(v.id, v.html).catch((err) => {
+              console.warn("[Design] saveVariant failed", err)
+            })
+          })
         }
         cleanup()
         tabSessionsRef.current.delete(tabId)
@@ -2575,15 +2877,16 @@ export function DesignView(): React.JSX.Element {
       modelId,
       image?.base64,
       image?.mimeType,
-      isIteration ? getCurrentDesignHtml(tabStates[tabId]) : undefined,
+      isIteration ? getCurrentDesignHtml(runStartState) : undefined,
       skill ?? undefined,
       workspacePath ?? undefined,
       stableArtifactId,
       sourceArtifactPath ?? undefined,
-      agentRuntimeSessionId ?? undefined
+      agentRuntimeSessionId ?? undefined,
+      runStartState?.selectedDesignSystemId ?? undefined
     )
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
-  }, [cancelDesignRunForTab, isCurrentDesignRun, tabStates, updateTs, workspacePath])
+  }, [cancelDesignRunForTab, designSystems, isCurrentDesignRun, updateTs, workspacePath])
 
   // ── Generate Design from Screenshot ──────────────────────
 
@@ -2631,7 +2934,9 @@ export function DesignView(): React.JSX.Element {
         const patchedHtml = ensureEditMode(event.html)
         // Store full HTML in main process so subsequent text iterations can reference it
         const storeKey = makeDesignArtifactId(currentSessionIdRef.current, tabId)
-        window.api.design.storeHtml(storeKey, patchedHtml).catch(() => {})
+        window.api.design.storeHtml(storeKey, patchedHtml).catch((err) => {
+          console.warn("[Design] storeHtml failed", err)
+        })
         saveDesignArtifactForTab(storeKey, patchedHtml, workspacePath, tabId, updateTs)
         updateTs(tabId, (prev) => {
           const msgs = [...prev.messages]
@@ -2652,7 +2957,9 @@ export function DesignView(): React.JSX.Element {
             ],
           }
         })
-        window.api.design.saveVariant("image", patchedHtml).catch(() => {})
+        window.api.design.saveVariant("image", patchedHtml).catch((err) => {
+          console.warn("[Design] saveVariant failed", err)
+        })
         tabSessionsRef.current.delete(tabId)
       } else if (event.type === "error") {
         updateTs(tabId, (prev) => {
@@ -3431,8 +3738,17 @@ ${noteLines || "无"}${variantNote}`
   const isSlashMode    = !!slashMatch
   const slashQuery     = (slashMatch?.[1] ?? "").toLowerCase()
   const filteredSkills = isSlashMode
-    ? allSkills.filter((s) => !slashQuery || s.name.toLowerCase().includes(slashQuery))
+    ? allSkills.filter((s) =>
+        !slashQuery ||
+        s.name.toLowerCase().includes(slashQuery) ||
+        (s.scenario ?? "").toLowerCase().includes(slashQuery) ||
+        (s.mode ?? "").toLowerCase().includes(slashQuery)
+      )
     : []
+  const filteredSkillGroups = groupByLabel(
+    filteredSkills,
+    (skill) => skill.source === "template" ? getTemplateModeLabel(skill.mode) : "skills"
+  )
 
   useEffect(() => {
     if (isSlashMode) setActiveSkillIndex(0)
@@ -3466,7 +3782,7 @@ ${noteLines || "无"}${variantNote}`
       if (result.success && result.content) {
         updateTs(activeTabId, (prev) => ({
           ...prev,
-          selectedSkill: prev.selectedSkill?.name === skill.name
+          selectedSkill: prev.selectedSkill?.name === skill.name && prev.selectedSkill?.path === skill.path
             ? { ...prev.selectedSkill, content: result.content }
             : prev.selectedSkill,
         }))
@@ -3519,8 +3835,8 @@ ${noteLines || "无"}${variantNote}`
     }
   }, [linkModalMode, updateTs, activeTabId, linkModalText, handleImportUrl, currentSessionId])
 
-  const downloadCurrentDesignHtml = useCallback((html: string) => {
-    downloadHtml(html)
+  const downloadCurrentDesignHtml = useCallback((html: string, metadata?: DesignArtifactMetadata | null) => {
+    downloadHtml(html, metadata)
     setExportChoice(null)
   }, [])
 
@@ -3548,23 +3864,25 @@ ${noteLines || "无"}${variantNote}`
     if (!html.trim()) return
 
     if (!state.artifactPath) {
-      downloadCurrentDesignHtml(html)
+      downloadCurrentDesignHtml(html, state.artifactMetadata)
       return
     }
 
     try {
       const info = await window.api.design.getArtifactPackageInfo(state.artifactPath, workspacePath ?? undefined)
-      if (!info.success || !info.relatedFileCount || info.relatedFileCount <= 0) {
-        downloadCurrentDesignHtml(html)
-        return
-      }
       setExportChoice({
         html,
-        artifactPath: info.filePath ?? state.artifactPath,
-        relatedFileCount: info.relatedFileCount,
+        artifactPath: info.success ? info.filePath ?? state.artifactPath : state.artifactPath,
+        relatedFileCount: info.success ? info.relatedFileCount ?? 0 : 0,
+        includesMetadata: Boolean(state.artifactMetadata),
       })
     } catch {
-      downloadCurrentDesignHtml(html)
+      setExportChoice({
+        html,
+        artifactPath: state.artifactPath,
+        relatedFileCount: 0,
+        includesMetadata: Boolean(state.artifactMetadata),
+      })
     }
   }, [downloadCurrentDesignHtml, workspacePath])
 
@@ -3663,9 +3981,10 @@ ${noteLines || "无"}${variantNote}`
       <ExportDesignModal
         open={Boolean(exportChoice)}
         relatedFileCount={exportChoice?.relatedFileCount ?? 0}
+        includesMetadata={exportChoice?.includesMetadata ?? false}
         exportingPackage={exportingPackage}
         onExportHtml={() => {
-          if (exportChoice) downloadCurrentDesignHtml(exportChoice.html)
+          if (exportChoice) downloadCurrentDesignHtml(exportChoice.html, ts.artifactMetadata)
         }}
         onExportPackage={() => {
           if (exportChoice) void downloadCurrentDesignPackage(exportChoice.artifactPath)
@@ -3748,6 +4067,36 @@ ${noteLines || "无"}${variantNote}`
           )}
         </div>
         <div style={S.titleActions}>
+          {designSystems.length > 0 && (
+            <select
+              value={ts.selectedDesignSystemId ?? ""}
+              onChange={(event) => updateTs(activeTabId, { selectedDesignSystemId: event.target.value || null })}
+              disabled={isGenerating}
+              title={selectedDesignSystem ? `设计系统: ${selectedDesignSystem.path}` : "选择设计系统"}
+              style={{
+                maxWidth: 190,
+                height: 30,
+                padding: "0 8px",
+                border: "1px solid #d4d2cc",
+                borderRadius: 8,
+                background: "#ffffff",
+                color: "#1a1a1a",
+                fontSize: 12,
+                fontWeight: 600,
+                fontFamily: "inherit",
+                outline: "none",
+              }}
+            >
+              <option value="">无 Design System</option>
+              {designSystemGroups.map((group) => (
+                <optgroup key={group.label} label={group.label}>
+                  {group.items.map((system) => (
+                    <option key={system.id} value={system.id}>{system.name}</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          )}
           <button
             onClick={handleSelectWorkspace}
             disabled={workspaceLoading || isGenerating}
@@ -3823,33 +4172,55 @@ ${noteLines || "无"}${variantNote}`
                 maxHeight: 220, overflowY: "auto", zIndex: 200,
               }}>
                 <div style={{ padding: "6px 8px 4px", fontSize: 11, color: "#a0a0a0", fontWeight: 500, borderBottom: "1px solid #f0eee8" }}>
-                  ⚡ 技能 — ↑↓ 选择，↵ 确认，Esc 取消
+                  ▣ 场景模板 / 技能 — ↑↓ 选择，↵ 确认，Esc 取消
                 </div>
-                {filteredSkills.map((skill, i) => {
-                  const isActive = i === activeSkillIndex
-                  return (
-                    <div
-                      key={skill.name}
-                      ref={(node) => { skillOptionRefs.current[i] = node }}
-                      onClick={() => handleSkillSelect(skill)}
-                      onMouseEnter={() => setActiveSkillIndex(i)}
-                      style={{
-                        padding: "8px 12px", cursor: "pointer",
-                        background: isActive ? "#f3f2ee" : "transparent",
-                        borderBottom: i < filteredSkills.length - 1 ? "1px solid #f4f3f0" : "none",
-                        transition: "background 0.1s",
-                      }}
-                    >
-                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ fontSize: 14 }}>⚡</span>
-                        <span style={{ fontSize: 13, fontWeight: 600, color: "#1a1a1a" }}>{skill.name}</span>
-                      </div>
-                      <div style={{ fontSize: 11, color: "#8a8a8a", marginTop: 2, marginLeft: 20, lineHeight: 1.4 }}>
-                        {skill.description.slice(0, 80)}{skill.description.length > 80 ? "…" : ""}
-                      </div>
+                {filteredSkillGroups.map((group) => (
+                  <div key={group.label}>
+                    <div style={{
+                      padding: "7px 12px 4px",
+                      fontSize: 10,
+                      fontWeight: 800,
+                      color: "#8a8a8a",
+                      textTransform: "uppercase",
+                      letterSpacing: 0,
+                      background: "#fafaf8",
+                      borderBottom: "1px solid #f4f3f0",
+                    }}>
+                      {group.label}
                     </div>
-                  )
-                })}
+                    {group.items.map((skill) => {
+                      const i = filteredSkills.indexOf(skill)
+                      const isActive = i === activeSkillIndex
+                      return (
+                        <div
+                          key={`${skill.source ?? "skill"}:${skill.path}`}
+                          ref={(node) => { skillOptionRefs.current[i] = node }}
+                          onClick={() => handleSkillSelect(skill)}
+                          onMouseEnter={() => setActiveSkillIndex(i)}
+                          style={{
+                            padding: "8px 12px", cursor: "pointer",
+                            background: isActive ? "#f3f2ee" : "transparent",
+                            borderBottom: i < filteredSkills.length - 1 ? "1px solid #f4f3f0" : "none",
+                            transition: "background 0.1s",
+                          }}
+                        >
+                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ fontSize: 14 }}>{skill.source === "template" ? "▣" : "⚡"}</span>
+                            <span style={{ fontSize: 13, fontWeight: 600, color: "#1a1a1a" }}>{skill.name}</span>
+                            {skill.source === "template" && (
+                              <span style={{ fontSize: 10, fontWeight: 700, color: "#7a4300", background: "#fff2df", border: "1px solid #f0d3a6", borderRadius: 999, padding: "1px 6px" }}>
+                                {getTemplateModeLabel(skill.mode)}
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ fontSize: 11, color: "#8a8a8a", marginTop: 2, marginLeft: 20, lineHeight: 1.4 }}>
+                            {skill.description.slice(0, 80)}{skill.description.length > 80 ? "…" : ""}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                ))}
               </div>
             )}
             {isSlashMode && filteredSkills.length === 0 && slashQuery && (
@@ -3888,12 +4259,21 @@ ${noteLines || "无"}${variantNote}`
                 </div>
               )}
               {/* Context pills row — skill / code / design-link / attached files */}
-              {(ts.selectedSkill || ts.codeContext || ts.designLink || (ts.attachedFiles && ts.attachedFiles.length > 0)) && (
+              {(selectedDesignSystem || ts.selectedSkill || ts.codeContext || ts.designLink || (ts.attachedFiles && ts.attachedFiles.length > 0)) && (
                 <div style={{ padding: "8px 12px 0", display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {selectedDesignSystem && (
+                    <ContextPill
+                      icon="▦"
+                      label={selectedDesignSystem.name}
+                      badge="DESIGN.md"
+                      color={{ bg: "#eef7f3", border: "#b9d8cc", text: "#1f5f4a", dot: "#4b9b7a" }}
+                      onRemove={() => updateTs(activeTabId, { selectedDesignSystemId: null })}
+                    />
+                  )}
                   {ts.selectedSkill && (
                     <ContextPill
-                      icon="⚡" label={ts.selectedSkill.name}
-                      badge={ts.selectedSkill.content ? "已加载" : undefined}
+                      icon={ts.selectedSkill.source === "template" ? "▣" : "⚡"} label={ts.selectedSkill.name}
+                      badge={ts.selectedSkill.source === "template" ? "模板" : ts.selectedSkill.content ? "已加载" : undefined}
                       color={{ bg: "#eff0fb", border: "#c7c9ef", text: "#3a3a8a", dot: "#9090c0" }}
                       onRemove={() => updateTs(activeTabId, { selectedSkill: null })}
                     />
@@ -4436,15 +4816,19 @@ ${noteLines || "无"}${variantNote}`
 }
 
 // ─────────────────────────────────────────────────────────
-// Sub-components
-// ─────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────
 // Utility
 // ─────────────────────────────────────────────────────────
 
-function downloadHtml(html: string) {
-  const blob = new Blob([html], { type: "text/html" })
+function downloadHtml(html: string, metadata?: DesignArtifactMetadata | null) {
+  const metadataScript = metadata
+    ? `\n<script type="application/design-artifact+json">${JSON.stringify({ ...metadata, exportedAt: new Date().toISOString() }).replace(/<\/script/gi, "<\\/script")}</script>`
+    : ""
+  const output = metadataScript
+    ? /<\/body>/i.test(html)
+      ? html.replace(/<\/body>/i, `${metadataScript}\n</body>`)
+      : `${html}${metadataScript}`
+    : html
+  const blob = new Blob([output], { type: "text/html" })
   downloadBlob(blob, "design.html", "text/html")
 }
 
@@ -4455,9 +4839,3 @@ function downloadBlob(data: BlobPart, filename: string, type: string) {
   a.href = url; a.download = filename; a.click()
   URL.revokeObjectURL(url)
 }
-
-// ─────────────────────────────────────────────────────────
-// Comment Pin — positioned pin with expand-on-click popover
-// ─────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────

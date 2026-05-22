@@ -8,15 +8,15 @@ function PNumInput({
   step = 1,
   min,
   max,
-  readonly,
+  readOnly,
 }: {
   value: number
-  onChange: (v: number) => void
+  onChange?: (v: number) => void
   suffix?: string
   step?: number
   min?: number
   max?: number
-  readonly?: boolean
+  readOnly?: boolean
 }) {
   const [draft, setDraft] = useState<string | null>(null)
   const displayValue = draft ?? String(value)
@@ -26,18 +26,20 @@ function PNumInput({
       <input
         type="number"
         value={displayValue}
-        readOnly={readonly}
+        readOnly={readOnly}
         step={step}
         min={min}
         max={max}
         onChange={(e) => {
+          if (readOnly) return
           setDraft(e.target.value)
           const n = parseFloat(e.target.value)
-          if (!isNaN(n)) onChange(n)
+          if (!isNaN(n)) onChange?.(n)
         }}
         onBlur={(e) => {
+          if (readOnly) return
           const n = parseFloat(e.target.value)
-          if (!isNaN(n)) onChange(n)
+          if (!isNaN(n)) onChange?.(n)
           setDraft(null)
         }}
         style={{
@@ -46,12 +48,12 @@ function PNumInput({
           outline: "none",
           fontSize: 12,
           fontWeight: 500,
-          color: readonly ? "#aaa" : "#1a1a1a",
+          color: readOnly ? "#aaa" : "#1a1a1a",
           textAlign: "right",
           width: "60px",
           padding: 0,
           fontFamily: "inherit",
-          cursor: readonly ? "default" : "text",
+          cursor: readOnly ? "default" : "text",
         }}
       />
       {suffix && <span style={{ fontSize: 11, color: "#aaa", flexShrink: 0 }}>{suffix}</span>}
@@ -288,7 +290,8 @@ export function ElementPropsPanel({
           <PropLineRow label="Font">
             <input
               type="text"
-              defaultValue={s.fontFamily}
+              value={s.fontFamily}
+              onChange={(e) => onStyleChange("fontFamily", e.target.value)}
               onBlur={(e) => onStyleChange("fontFamily", e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
@@ -354,8 +357,8 @@ export function ElementPropsPanel({
 
           <PropSectionHeader label="Size" />
           <PropPairRow
-            left={{ label: "Width", children: <PNumInput value={s.width} suffix="px" readonly onChange={() => {}} /> }}
-            right={{ label: "Height", children: <PNumInput value={s.height} suffix="px" readonly onChange={() => {}} /> }}
+            left={{ label: "Width", children: <PNumInput value={s.width} suffix="px" readOnly /> }}
+            right={{ label: "Height", children: <PNumInput value={s.height} suffix="px" readOnly /> }}
           />
 
           <PropSectionHeader label="Box" />

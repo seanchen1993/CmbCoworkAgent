@@ -33,6 +33,8 @@ const DESIGN_ARTIFACT_CONTINUATION_MAX_ATTEMPTS = 30
 const DESIGN_ARTIFACT_CONTINUATION_STALL_ATTEMPTS = 2
 const DESIGN_ARTIFACT_WRITE_RECOVERY_ATTEMPTS = 2
 const DESIGN_DRAFT_FRESHNESS_SKEW_MS = 5000
+const DESIGN_ARTIFACT_VERSION_MIN_INTERVAL_MS = 2000
+const designArtifactLastBackupAt = new Map<string, number>()
 const DESIGN_CHINESE_RESPONSE_INSTRUCTION = `\n\n## Response language\n\n- 始终使用中文输出所有面向用户可见的文本，包括执行过程说明、技能使用说明、工具前后的简短说明、错误解释和最终摘要。\n- 即使读取到的 Skill、参考文件或系统上下文是英文，也要把面向用户展示的过程和总结翻译成中文。\n- 代码、HTML/CSS/JS 标识符、文件路径、工具名和必须保持原样的业务文案不需要翻译。`
 
 // ─────────────────────────────────────────────────────────
@@ -41,17 +43,20 @@ const DESIGN_CHINESE_RESPONSE_INSTRUCTION = `\n\n## Response language\n\n- 始�
 
 const QUESTIONS_SYSTEM_PROMPT = `You are a design strategist. Analyze the user's design request carefully and generate 4–6 highly targeted clarifying questions that are SPECIFIC to what they asked — not generic design questions.
 
-Return ONLY a valid JSON array. No markdown fences, no explanation, no preamble — just the raw JSON array.
+Return ONLY one valid <question-form id="discovery" title="告诉我更多关于这个设计">...</question-form> block. No markdown fences, no explanation, no preamble.
+
+The body inside <question-form> must be a valid JSON object with a "questions" array. The host is backward-compatible with raw JSON arrays, but you should use the <question-form> protocol.
 
 ## Question object schema
 
 Each question object must have:
 - "id": unique snake_case identifier
-- "type": "text" | "textarea" | "chips"
+- "type": "text" | "textarea" | "chips" | "direction-cards"
 - "label": question label in Chinese (specific to the request)
 - "hint": optional helper text in Chinese — only include when genuinely useful
 - "options": array of Chinese strings — required only for type "chips"
 - "multi": boolean — for chips questions, set true if multiple selections make sense (e.g. features, sections, platforms), set false if only one answer is valid (e.g. product category, tone)
+- For "direction-cards", use stable option ids and include a "cards" array with {id,label,mood,references,palette,displayFont,bodyFont}. Only ask this when no clear brand, design system, screenshot, or reference direction is supplied.
 
 ## Critical rules
 
@@ -59,6 +64,7 @@ Each question object must have:
 2. **No redundant questions** — don't ask for "brand name" if the request already contains one. Don't ask for "product type" if they clearly said it's a SaaS.
 3. **Mix question types thoughtfully** — use "chips" for categorical choices, "multi:true chips" for features/sections (user may want several), "text" for names/short facts, "textarea" for descriptions or content.
 4. **Options must be relevant and non-obvious** — tailor chip options to the domain, not generic catch-all lists.
+5. **Direction cards** — if needed, choose from these ids: neutral-modern, warm-editorial, brand-vercel, brand-claude, brand-linear-app. Include OKLCH palettes so the UI can render swatches.
 
 ## Examples of differentiated questions by request type
 
@@ -523,6 +529,7 @@ interface DesignArtifactSaveParams {
   tabId: string
   html: string
   workspacePath?: string
+  metadata?: Partial<DesignArtifactMetadata>
 }
 
 interface DesignArtifactReadParams {
@@ -534,6 +541,7 @@ interface DesignArtifactFileSaveParams {
   filePath: string
   html: string
   workspacePath?: string
+  metadata?: Partial<DesignArtifactMetadata>
 }
 
 interface DesignArtifactFileReadParams {
@@ -550,6 +558,7 @@ interface DesignArtifactFileReadResult {
   success: boolean
   filePath?: string
   html?: string
+  metadata?: DesignArtifactMetadata | null
   error?: string
 }
 
@@ -583,7 +592,59 @@ interface DesignContextFilesSyncParams {
   files: DesignContextFileSyncItem[]
 }
 
+interface DesignSystemInfo {
+  id: string
+  name: string
+  description: string
+  category?: string
+  source?: string
+  origin?: string
+  license?: string
+  path: string
+  tokens?: {
+    bg: string
+    surface: string
+    fg: string
+    muted: string
+    border: string
+    accent: string
+  }
+}
+
+interface DesignTemplateInfo {
+  name: string
+  description: string
+  path: string
+  mode: string
+  platform: string | null
+  scenario: string
+}
+
+interface DesignArtifactMetadata {
+  artifactId: string
+  title?: string
+  prompt?: string
+  modelId?: string | null
+  skillName?: string | null
+  skillPath?: string | null
+  designSystemId?: string | null
+  designSystemName?: string | null
+  designSystemCategory?: string | null
+  sourceKind?: string
+  sourceLabel?: string
+  htmlPath?: string
+  createdAt: string
+  updatedAt: string
+  variations?: Array<{ id: string; label: string }>
+  preview?: {
+    thumbnailText?: string
+    thumbnailHtml?: string
+  }
+}
+
 const DESIGN_ARTIFACTS_DIR = ".cmb-design"
+const DESIGN_SYSTEMS_DIRNAME = "design-systems"
+const DESIGN_TEMPLATES_DIRNAME = "design-templates"
 const DESIGN_PROTOTYPE_ZIP_MAX_BYTES = 120 * 1024 * 1024
 const DESIGN_PROTOTYPE_ZIP_MAX_IMAGES = 80
 const DESIGN_PROTOTYPE_ZIP_MAX_ENTRY_BYTES = 30 * 1024 * 1024
@@ -597,6 +658,140 @@ function makeSafeDesignId(tabId: string): string {
     .replace(/[^a-zA-Z0-9_-]/g, "_")
     .replace(/^_+|_+$/g, "")
   return (safeId || "tab").slice(0, 120)
+}
+
+function candidateRepoResourceDirs(dirname: string): string[] {
+  return Array.from(new Set([
+    path.join(process.cwd(), dirname),
+    path.join(app.getAppPath(), dirname),
+    path.join(app.getAppPath(), "out", dirname),
+    path.join(process.resourcesPath || "", dirname),
+    path.join(process.resourcesPath || "", "out", dirname),
+    path.join(__dirname, "..", "..", dirname),
+    path.join(__dirname, "..", "..", "..", dirname),
+  ].filter(Boolean)))
+}
+
+function firstExistingDir(candidates: string[]): string | null {
+  for (const candidate of candidates) {
+    try {
+      if (candidate && fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+        return candidate
+      }
+    } catch {
+      // Keep trying fallbacks.
+    }
+  }
+  return null
+}
+
+function parseSimpleYamlScalar(frontmatter: string, key: string): string | null {
+  const match = frontmatter.match(new RegExp(`^${key}:\\s*(.+)$`, "m"))
+  if (!match) return null
+  return match[1]
+    .replace(/^['"]|['"]$/g, "")
+    .trim() || null
+}
+
+function parseFrontmatterBlock(content: string): string {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+  return match?.[1] ?? ""
+}
+
+function readJsonFile<T>(filePath: string): Partial<T> | null {
+  try {
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return null
+    return JSON.parse(fs.readFileSync(filePath, "utf-8")) as Partial<T>
+  } catch {
+    return null
+  }
+}
+
+function extractDesignSystemTokens(markdown: string): DesignSystemInfo["tokens"] | undefined {
+  const cssBlock = markdown.match(/```css\s*([\s\S]*?)```/i)?.[1] ?? markdown
+  const tokens: Record<string, string> = {}
+  for (const key of ["bg", "surface", "fg", "muted", "border", "accent"]) {
+    const match = cssBlock.match(new RegExp(`--${key}\\s*:\\s*([^;\\n]+)`, "i"))
+    if (match?.[1]?.trim()) tokens[key] = match[1].trim()
+  }
+  return tokens.bg && tokens.surface && tokens.fg && tokens.muted && tokens.border && tokens.accent
+    ? tokens as DesignSystemInfo["tokens"]
+    : undefined
+}
+
+function listDesignSystems(): DesignSystemInfo[] {
+  const root = firstExistingDir(candidateRepoResourceDirs(DESIGN_SYSTEMS_DIRNAME))
+  if (!root) return []
+  const systems: DesignSystemInfo[] = []
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const dirPath = path.join(root, entry.name)
+    const designPath = path.join(dirPath, "DESIGN.md")
+    if (!fs.existsSync(designPath)) continue
+    try {
+      const content = fs.readFileSync(designPath, "utf-8")
+      const fm = parseFrontmatterBlock(content)
+      const meta = readJsonFile<DesignSystemInfo>(path.join(dirPath, "meta.json")) ?? {}
+      const title = content.match(/^#\s+(.+)$/m)?.[1]?.trim()
+      const frontmatterName = parseSimpleYamlScalar(fm, "name")
+      const frontmatterDescription = parseSimpleYamlScalar(fm, "description")
+      const description = content
+        .split(/\r?\n/)
+        .find((line) => line.trim() && !line.startsWith("#") && !line.startsWith("---"))
+        ?.trim()
+      systems.push({
+        id: entry.name,
+        name: typeof meta.name === "string" ? meta.name : (frontmatterName || title || entry.name),
+        description: typeof meta.description === "string" ? meta.description : (frontmatterDescription || description || ""),
+        category: typeof meta.category === "string" ? meta.category : undefined,
+        source: typeof meta.source === "string" ? meta.source : undefined,
+        origin: typeof meta.origin === "string" ? meta.origin : undefined,
+        license: typeof meta.license === "string" ? meta.license : undefined,
+        path: designPath,
+        tokens: extractDesignSystemTokens(content),
+      })
+    } catch {
+      // Ignore malformed systems.
+    }
+  }
+  return systems.sort((a, b) => a.name.localeCompare(b.name, "zh-CN"))
+}
+
+function getDesignSystemById(id: string | undefined): { info?: DesignSystemInfo; content?: string; error?: string } {
+  const safeId = typeof id === "string" ? id.trim() : ""
+  if (!safeId) return {}
+  const info = listDesignSystems().find((item) => item.id === safeId)
+  if (!info) return { error: `Design system not found: ${safeId}` }
+  try {
+    return { info, content: fs.readFileSync(info.path, "utf-8") }
+  } catch (err) {
+    return { info, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function listDesignTemplates(): DesignTemplateInfo[] {
+  const root = firstExistingDir(candidateRepoResourceDirs(DESIGN_TEMPLATES_DIRNAME))
+  if (!root) return []
+  const templates: DesignTemplateInfo[] = []
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const dirPath = path.join(root, entry.name)
+    const skillPath = path.join(dirPath, "SKILL.md")
+    if (!fs.existsSync(skillPath)) continue
+    try {
+      const content = fs.readFileSync(skillPath, "utf-8")
+      const fm = parseFrontmatterBlock(content)
+      const name = parseSimpleYamlScalar(fm, "name") || entry.name
+      const description = parseSimpleYamlScalar(fm, "description") || ""
+      const mode = fm.match(/^\s*mode:\s*(.+)$/m)?.[1]?.trim() || "prototype"
+      const platform = fm.match(/^\s*platform:\s*(.+)$/m)?.[1]?.trim() || null
+      const scenario = fm.match(/^\s*scenario:\s*(.+)$/m)?.[1]?.trim() || "design"
+      templates.push({ name, description, path: skillPath, mode, platform, scenario })
+    } catch {
+      // Ignore malformed templates.
+    }
+  }
+  return templates.sort((a, b) => a.name.localeCompare(b.name, "zh-CN"))
 }
 
 function resolveDesignArtifactPath(tabId: string, workspacePath?: string): { filePath?: string; error?: string } {
@@ -630,10 +825,81 @@ function saveDesignArtifact(tabId: string, html: string, workspacePath?: string)
 
   try {
     fs.mkdirSync(path.dirname(resolved.filePath), { recursive: true })
+    backupExistingDesignArtifact(resolved.filePath)
     fs.writeFileSync(resolved.filePath, html, "utf-8")
     return { success: true, filePath: resolved.filePath }
   } catch (err) {
     return { success: false, filePath: resolved.filePath, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function makeDesignArtifactMetadataPath(htmlPath: string): string {
+  return path.join(path.dirname(htmlPath), "artifact.json")
+}
+
+function readDesignArtifactMetadata(htmlPath: string | undefined): DesignArtifactMetadata | null {
+  if (!htmlPath) return null
+  const metadataPath = makeDesignArtifactMetadataPath(htmlPath)
+  try {
+    if (!fs.existsSync(metadataPath) || !fs.statSync(metadataPath).isFile()) return null
+    return JSON.parse(fs.readFileSync(metadataPath, "utf-8")) as DesignArtifactMetadata
+  } catch {
+    return null
+  }
+}
+
+function writeDesignArtifactMetadata(htmlPath: string, patch: Partial<DesignArtifactMetadata>): DesignArtifactMetadata {
+  const now = new Date().toISOString()
+  const previous = readDesignArtifactMetadata(htmlPath)
+  const next: DesignArtifactMetadata = {
+    ...previous,
+    ...patch,
+    artifactId: patch.artifactId || previous?.artifactId || path.basename(path.dirname(htmlPath)),
+    createdAt: previous?.createdAt || patch.createdAt || now,
+    htmlPath,
+    updatedAt: now,
+  }
+  fs.mkdirSync(path.dirname(htmlPath), { recursive: true })
+  fs.writeFileSync(makeDesignArtifactMetadataPath(htmlPath), JSON.stringify(next, null, 2), "utf-8")
+  return next
+}
+
+function extractDesignVariationMetadata(html: string): Array<{ id: string; label: string }> {
+  const out: Array<{ id: string; label: string }> = []
+  for (const id of ["a", "b", "c"]) {
+    const re = new RegExp(`<[^>]+id=["']variation-${id}["'][^>]*>`, "i")
+    const tag = html.match(re)?.[0]
+    if (!tag) continue
+    const label = tag.match(/\bdata-label=["']([^"']+)["']/i)?.[1]?.trim() || `方案 ${id.toUpperCase()}`
+    out.push({ id, label })
+  }
+  return out
+}
+
+function makeDesignThumbnailText(html: string): string {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120)
+}
+
+function backupExistingDesignArtifact(filePath: string): void {
+  try {
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return
+    const normalizedPath = path.resolve(filePath)
+    const now = Date.now()
+    const lastBackupAt = designArtifactLastBackupAt.get(normalizedPath) ?? 0
+    if (now - lastBackupAt < DESIGN_ARTIFACT_VERSION_MIN_INTERVAL_MS) return
+    designArtifactLastBackupAt.set(normalizedPath, now)
+    const versionsDir = path.join(path.dirname(filePath), "versions")
+    fs.mkdirSync(versionsDir, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-")
+    fs.copyFileSync(filePath, path.join(versionsDir, `${stamp}.html`))
+  } catch {
+    // Backups are best-effort; saving the current artifact should still proceed.
   }
 }
 
@@ -666,6 +932,10 @@ function saveDesignArtifactFile(filePath: string, html: string, workspacePath?: 
 
   try {
     fs.mkdirSync(path.dirname(resolved.filePath), { recursive: true })
+    const base = path.basename(resolved.filePath)
+    if (!base.startsWith(".draft-") && !base.startsWith(".source-")) {
+      backupExistingDesignArtifact(resolved.filePath)
+    }
     fs.writeFileSync(resolved.filePath, html, "utf-8")
     return { success: true, filePath: resolved.filePath }
   } catch (err) {
@@ -673,7 +943,7 @@ function saveDesignArtifactFile(filePath: string, html: string, workspacePath?: 
   }
 }
 
-function readDesignArtifact(tabId: string, workspacePath?: string): { success: boolean; filePath?: string; html?: string; error?: string } {
+function readDesignArtifact(tabId: string, workspacePath?: string): DesignArtifactFileReadResult {
   const resolved = resolveDesignArtifactPath(tabId, workspacePath)
   if (!resolved.filePath) return { success: false, error: resolved.error ?? "Failed to resolve design artifact path" }
 
@@ -681,7 +951,12 @@ function readDesignArtifact(tabId: string, workspacePath?: string): { success: b
     if (!fs.existsSync(resolved.filePath)) {
       return { success: false, filePath: resolved.filePath, error: `Design artifact not found: ${resolved.filePath}` }
     }
-    return { success: true, filePath: resolved.filePath, html: fs.readFileSync(resolved.filePath, "utf-8") }
+    return {
+      success: true,
+      filePath: resolved.filePath,
+      html: fs.readFileSync(resolved.filePath, "utf-8"),
+      metadata: readDesignArtifactMetadata(resolved.filePath),
+    }
   } catch (err) {
     return { success: false, filePath: resolved.filePath, error: err instanceof Error ? err.message : String(err) }
   }
@@ -698,7 +973,12 @@ function readSavedDesignArtifactFile(filePath: string | undefined, workspacePath
     if (!fs.existsSync(resolved.filePath) || !fs.statSync(resolved.filePath).isFile()) {
       return { success: false, filePath: resolved.filePath, error: `Design artifact not found: ${resolved.filePath}` }
     }
-    return { success: true, filePath: resolved.filePath, html: fs.readFileSync(resolved.filePath, "utf-8") }
+    return {
+      success: true,
+      filePath: resolved.filePath,
+      html: fs.readFileSync(resolved.filePath, "utf-8"),
+      metadata: readDesignArtifactMetadata(resolved.filePath),
+    }
   } catch (err) {
     return { success: false, filePath: resolved.filePath, error: err instanceof Error ? err.message : String(err) }
   }
@@ -720,7 +1000,12 @@ function readDesignArtifactFile(filePath: string | undefined, workspacePath: str
     if (!fs.existsSync(resolvedFile) || !fs.statSync(resolvedFile).isFile()) {
       return { success: false, filePath: resolvedFile, error: `Design source artifact not found: ${resolvedFile}` }
     }
-    return { success: true, filePath: resolvedFile, html: fs.readFileSync(resolvedFile, "utf-8") }
+    return {
+      success: true,
+      filePath: resolvedFile,
+      html: fs.readFileSync(resolvedFile, "utf-8"),
+      metadata: readDesignArtifactMetadata(resolvedFile),
+    }
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
   }
@@ -886,7 +1171,8 @@ function exportDesignArtifactPackage(
 
     const zip = new AdmZip()
     for (const file of files) {
-      zip.addFile(file.relativePath, fs.readFileSync(file.filePath))
+      const zipDir = path.dirname(file.relativePath)
+      zip.addLocalFile(file.filePath, zipDir === "." ? "" : zipDir, path.basename(file.relativePath))
     }
     const zipBuffer = zip.toBuffer()
     const baseName = path.basename(info.dirPath).replace(/[^a-zA-Z0-9._-]/g, "_") || "design"
@@ -2255,6 +2541,14 @@ function validateDesignSkillFile(skillPath: string): { resolvedPath?: string; si
     const stat = fs.statSync(resolvedPath)
     if (!stat.isFile()) return { error: `Skill path is not a file: ${skillPath}` }
     if (path.basename(resolvedPath) !== "SKILL.md") return { error: `Skill path must point to SKILL.md: ${skillPath}` }
+    const allowedTemplateRoot = firstExistingDir(candidateRepoResourceDirs(DESIGN_TEMPLATES_DIRNAME))
+    if (allowedTemplateRoot) {
+      const normalizedRoot = path.resolve(allowedTemplateRoot).toLowerCase()
+      const normalizedSkill = resolvedPath.toLowerCase()
+      if (normalizedSkill === normalizedRoot || normalizedSkill.startsWith(normalizedRoot + path.sep)) {
+        return { resolvedPath, sizeBytes: stat.size }
+      }
+    }
     return { resolvedPath, sizeBytes: stat.size }
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) }
@@ -2268,6 +2562,18 @@ function buildSelectedDesignSkillContext(skillName: string, skillPath: string): 
     `Selected skill path: ${skillPath}\n` +
     `If the SKILL.md references supporting files, read only the files needed for this request. Still obey the Design artifact rules above.\n` +
     `Any user-visible progress notes or summaries you emit while using this skill must be written in Chinese.`
+}
+
+function buildSelectedDesignSystemContext(designSystemId: string | undefined): string {
+  const selected = getDesignSystemById(designSystemId)
+  if (!selected.info || !selected.content) {
+    return ""
+  }
+  return `\n\n---\n[Active Design System: ${selected.info.name}]\n` +
+    `The user selected this DESIGN.md for the current Design request. Treat it as the authoritative visual system for palette, typography, spacing, layout, components, motion and anti-patterns. Do not ask for another visual direction unless the user explicitly asks to switch.\n` +
+    `Design system path: ${selected.info.path}\n\n` +
+    selected.content +
+    `\n\nWhen generating HTML, bind the design-system tokens to :root CSS variables and keep visible user-facing text in Chinese unless the user's product copy requires another language.`
 }
 
 function buildDesignModelRetryHooks(send: (data: object) => void): ModelRetryHooks {
@@ -2722,12 +3028,18 @@ export function registerDesignHandlers(): void {
 
   ipcMain.handle(
     "design:save-artifact",
-    (_event, { tabId, html, workspacePath }: DesignArtifactSaveParams) => {
+    (_event, { tabId, html, workspacePath, metadata }: DesignArtifactSaveParams) => {
       if (!tabId || !html) {
         return { success: false, error: "tabId and html are required" }
       }
       const result = saveDesignArtifact(tabId, html, workspacePath)
       if (result.success && result.filePath) {
+        writeDesignArtifactMetadata(result.filePath, {
+          ...(metadata ?? {}),
+          artifactId: metadata?.artifactId || tabId,
+          preview: metadata?.preview ?? { thumbnailText: makeDesignThumbnailText(html) },
+          variations: metadata?.variations ?? extractDesignVariationMetadata(html),
+        })
         storeDesignHtml(tabId, html)
         console.log(`[Design] Saved artifact for tabId=${tabId} -> ${result.filePath}`)
       }
@@ -2737,12 +3049,18 @@ export function registerDesignHandlers(): void {
 
   ipcMain.handle(
     "design:save-artifact-file",
-    (_event, { filePath, html, workspacePath }: DesignArtifactFileSaveParams) => {
+    (_event, { filePath, html, workspacePath, metadata }: DesignArtifactFileSaveParams) => {
       if (!filePath || !html) {
         return { success: false, error: "filePath and html are required" }
       }
       const result = saveDesignArtifactFile(filePath, html, workspacePath)
       if (result.success && result.filePath) {
+        writeDesignArtifactMetadata(result.filePath, {
+          ...(metadata ?? {}),
+          artifactId: metadata?.artifactId || path.basename(path.dirname(result.filePath)),
+          preview: metadata?.preview ?? { thumbnailText: makeDesignThumbnailText(html) },
+          variations: metadata?.variations ?? extractDesignVariationMetadata(html),
+        })
         storeDesignHtml(result.filePath, html)
         console.log(`[Design] Saved artifact file -> ${result.filePath}`)
       }
@@ -2774,6 +3092,10 @@ export function registerDesignHandlers(): void {
       exportDesignArtifactPackage(filePath, workspacePath)
   )
 
+  ipcMain.handle("design:list-systems", async (): Promise<DesignSystemInfo[]> => listDesignSystems())
+
+  ipcMain.handle("design:list-templates", async (): Promise<DesignTemplateInfo[]> => listDesignTemplates())
+
   // ─────────────────────────────────────────────────────────
   // design:agent-generate — routes through the full Agent Runtime so Design
   // naturally inherits Skills, MCP tools, Hooks, Approvals and context
@@ -2782,7 +3104,7 @@ export function registerDesignHandlers(): void {
   ipcMain.on(
     "design:agent-generate",
     async (event, {
-      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, sourceArtifactPath, designSessionId,
+      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, sourceArtifactPath, designSessionId, designSystemId,
     }: {
       sessionId: string
       prompt: string
@@ -2796,6 +3118,7 @@ export function registerDesignHandlers(): void {
       artifactId?: string
       sourceArtifactPath?: string
       designSessionId?: string
+      designSystemId?: string
     }) => {
       const channel = `design:stream:${sessionId}`
       const win = BrowserWindow.fromWebContents(event.sender)
@@ -2985,7 +3308,11 @@ export function registerDesignHandlers(): void {
         const promptWithCurrentHtml = htmlForIteration
           ? `${prompt}\n\n---\nCURRENT DESIGN HTML (iterate on this — do NOT ignore it):\n${htmlForIteration}`
           : prompt
-        const promptWithSkill = skillContext ? `${promptWithCurrentHtml}${skillContext}` : promptWithCurrentHtml
+        const designSystemContext = buildSelectedDesignSystemContext(designSystemId)
+        const promptWithDesignSystem = designSystemContext
+          ? `${promptWithCurrentHtml}${designSystemContext}`
+          : promptWithCurrentHtml
+        const promptWithSkill = skillContext ? `${promptWithDesignSystem}${skillContext}` : promptWithDesignSystem
         const promptWithArtifact = `${promptWithSkill}${artifactInstruction}`
         if (htmlForIteration) storeDesignHtml(htmlStoreKey, htmlForIteration)
 
@@ -3473,7 +3800,27 @@ export function registerDesignHandlers(): void {
           sendValidationEvent("success", browserValidationMessage, false)
           storeDesignHtml(htmlStoreKey, artifactHtml)
           const saved = tabId ? saveDesignArtifact(resolvedArtifactId, artifactHtml, workspacePath) : null
-          send({ type: "done", html: artifactHtml, ...(saved?.filePath ? { artifactPath: saved.filePath } : {}) })
+          let metadata: DesignArtifactMetadata | null = null
+          if (saved?.filePath) {
+            metadata = writeDesignArtifactMetadata(saved.filePath, {
+              artifactId: resolvedArtifactId,
+              prompt,
+              modelId: modelId ?? null,
+              skillName: selectedSkill?.name ?? null,
+              skillPath: selectedSkill?.path ?? null,
+              designSystemId: designSystemId ?? null,
+              designSystemName: designSystemId ? getDesignSystemById(designSystemId).info?.name ?? null : null,
+              designSystemCategory: designSystemId ? getDesignSystemById(designSystemId).info?.category ?? null : null,
+              preview: { thumbnailText: makeDesignThumbnailText(artifactHtml) },
+              variations: extractDesignVariationMetadata(artifactHtml),
+            })
+          }
+          send({
+            type: "done",
+            html: artifactHtml,
+            ...(saved?.filePath ? { artifactPath: saved.filePath } : {}),
+            ...(metadata ? { metadata } : {}),
+          })
           return { ok: true }
         }
 
@@ -3750,6 +4097,20 @@ function isCompleteHtmlDocument(html: string): boolean {
 function parseQuestionsJson(text: string): unknown[] {
   // Strip <think> blocks (some models emit reasoning inside these before the answer)
   let cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim()
+  const formMatch = cleaned.match(/<question-form\b[^>]*>([\s\S]*?)<\/question-form>/i)
+  if (formMatch) {
+    let body = formMatch[1].trim()
+    body = body.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim()
+    try {
+      const parsed = JSON.parse(body) as unknown
+      if (parsed && typeof parsed === "object" && Array.isArray((parsed as { questions?: unknown }).questions)) {
+        return (parsed as { questions: unknown[] }).questions
+      }
+    } catch (err) {
+      console.error("[Design] parseQuestionsJson: failed to parse question-form body:", err)
+    }
+    cleaned = body
+  }
   // Strip markdown code fences
   const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/)
   if (fenced) cleaned = fenced[1].trim()

@@ -31,11 +31,16 @@ export interface Message {
 
 export interface QuestionDef {
   id: string
-  type: "text" | "textarea" | "chips"
+  type: "text" | "textarea" | "chips" | "direction-cards"
   label: string
   hint?: string
   options?: string[]
+  optionLabels?: Record<string, string>
+  cards?: DirectionCard[]
   multi?: boolean
+  required?: boolean
+  maxSelections?: number
+  placeholder?: string
 }
 
 export type RightPanelTab = "design" | "questions"
@@ -149,6 +154,10 @@ export interface SkillInfo {
   description: string
   path: string
   content?: string
+  source?: "skill" | "template"
+  mode?: string
+  platform?: string | null
+  scenario?: string
 }
 
 export interface DesignSkillReference {
@@ -172,6 +181,57 @@ export interface DesignContextSyncResult {
   attachmentFiles?: Array<{ sourcePath: string; targetPath: string; filename: string }>
   codeDir?: string
   codeFiles?: Array<{ sourcePath: string; targetPath: string; filename: string }>
+}
+
+export interface DesignSystemInfo {
+  id: string
+  name: string
+  description: string
+  category?: string
+  source?: string
+  origin?: string
+  license?: string
+  path: string
+  tokens?: {
+    bg: string
+    surface: string
+    fg: string
+    muted: string
+    border: string
+    accent: string
+  }
+}
+
+export interface DirectionCard {
+  id: string
+  label: string
+  mood: string
+  references: string[]
+  palette: string[]
+  displayFont: string
+  bodyFont: string
+}
+
+export interface DesignArtifactMetadata {
+  artifactId: string
+  title?: string
+  prompt?: string
+  modelId?: string | null
+  skillName?: string | null
+  skillPath?: string | null
+  designSystemId?: string | null
+  designSystemName?: string | null
+  designSystemCategory?: string | null
+  sourceKind?: DesignSessionKind
+  sourceLabel?: string
+  htmlPath?: string
+  createdAt: string
+  updatedAt: string
+  variations?: Array<{ id: string; label: string }>
+  preview?: {
+    thumbnailText?: string
+    thumbnailHtml?: string
+  }
 }
 
 export type DesignApprovalDecision = "approve" | "approve_session" | "approve_permanent" | "reject"
@@ -245,6 +305,7 @@ export interface TabState {
   attachedImage: { base64: string; mimeType: string; previewUrl: string } | null
   reloadKey: number
   selectedSkill: SkillInfo | null
+  selectedDesignSystemId: string | null
   codeContext: Array<{ filename: string; content: string }> | null
   designLink: string | null
   attachedFiles: FileAttachment[] | null
@@ -253,6 +314,7 @@ export interface TabState {
   retryCleanMsg: string | null
   retrySkill: DesignSkillReference | null
   artifactPath: string | null
+  artifactMetadata: DesignArtifactMetadata | null
   variationPanelPosition: FloatingPanelPosition | null
   apiHistory: Array<{ role: "user" | "assistant"; content: string }>
   pendingApproval: DesignApprovalRequest | null
@@ -265,4 +327,9 @@ export interface SessionMeta {
   updatedAt: number
   kind?: DesignSessionKind
   sourceLabel?: string
+  thumbnailText?: string
+  designSystemId?: string | null
+  designSystemName?: string | null
+  designSystemCategory?: string | null
+  artifactPath?: string | null
 }

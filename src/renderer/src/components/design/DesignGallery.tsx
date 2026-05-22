@@ -9,6 +9,7 @@ function getPathName(filePath: string | null): string {
 function getSessionKindLabel(kind: SessionMeta["kind"] | undefined): string {
   if (kind === "import_url") return "URL 导入"
   if (kind === "import_html") return "HTML 导入"
+  if (kind === "prototype_zip") return "原型导入"
   return "Prompt"
 }
 
@@ -197,8 +198,33 @@ export function DesignGallery({
                   backgroundImage: "radial-gradient(circle, #d4d2cc 1px, transparent 1px)",
                   backgroundSize: "18px 18px",
                   display: "flex", alignItems: "center", justifyContent: "center",
+                  padding: 14,
                 }}>
-                  <span style={{ fontSize: 28, opacity: 0.25 }}>✦</span>
+                  {meta.thumbnailText ? (
+                    <div style={{
+                      width: "100%",
+                      height: "100%",
+                      borderRadius: 10,
+                      background: "rgba(255,255,255,0.78)",
+                      border: "1px solid rgba(224,222,216,0.9)",
+                      padding: 12,
+                      display: "flex",
+                      flexDirection: "column",
+                      justifyContent: "space-between",
+                      overflow: "hidden",
+                    }}>
+                      <div style={{ fontSize: 11, lineHeight: 1.45, color: "#4a4a4a", textAlign: "left" }}>
+                        {meta.thumbnailText}
+                      </div>
+                      {meta.designSystemName && (
+                        <div style={{ fontSize: 10, color: "#8a8a8a", marginTop: 8, textAlign: "left" }}>
+                          {meta.designSystemCategory ? `${meta.designSystemCategory} · ` : ""}{meta.designSystemName}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <span style={{ fontSize: 28, opacity: 0.25 }}>✦</span>
+                  )}
                 </div>
 
                 <div style={{
