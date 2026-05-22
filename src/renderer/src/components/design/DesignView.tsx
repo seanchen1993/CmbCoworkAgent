@@ -74,7 +74,7 @@ function getPathName(filePath: string | null): string {
 function groupByLabel<T>(items: T[], getLabel: (item: T) => string | null | undefined): Array<{ label: string; items: T[] }> {
   const groups = new Map<string, T[]>()
   for (const item of items) {
-    const label = getLabel(item)?.trim() || "Other"
+    const label = getLabel(item)?.trim() || "其他"
     const next = groups.get(label) ?? []
     next.push(item)
     groups.set(label, next)
@@ -82,7 +82,31 @@ function groupByLabel<T>(items: T[], getLabel: (item: T) => string | null | unde
   return Array.from(groups.entries())
     .map(([label, groupItems]) => ({ label, items: groupItems }))
     .sort((a, b) => {
-      const order = ["Core", "prototype", "deck", "template", "design-system", "skills", "Other"]
+      const order = [
+        "核心",
+        "原型",
+        "演示稿",
+        "模板",
+        "设计系统",
+        "技能",
+        "AI 与大模型平台",
+        "效率工具与 SaaS",
+        "设计与创作工具",
+        "开发工具与 IDE",
+        "后端、数据库与 DevOps",
+        "金融科技与加密",
+        "电商与零售",
+        "媒体与消费科技",
+        "汽车",
+        "其他",
+        "Core",
+        "prototype",
+        "deck",
+        "template",
+        "design-system",
+        "skills",
+        "Other",
+      ]
       const aIndex = order.indexOf(a.label)
       const bIndex = order.indexOf(b.label)
       if (aIndex >= 0 || bIndex >= 0) {
@@ -93,11 +117,38 @@ function groupByLabel<T>(items: T[], getLabel: (item: T) => string | null | unde
 }
 
 function getTemplateModeLabel(mode: string | undefined): string {
-  if (mode === "prototype") return "prototype"
-  if (mode === "deck") return "deck"
-  if (mode === "template") return "template"
-  if (mode === "design-system") return "design-system"
-  return mode || "skill"
+  if (mode === "prototype") return "原型"
+  if (mode === "deck") return "演示稿"
+  if (mode === "template") return "模板"
+  if (mode === "design-system") return "设计系统"
+  return mode || "技能"
+}
+
+function getDesignSystemGroupLabel(label: string | null | undefined): string {
+  switch (label) {
+    case "Core":
+      return "核心"
+    case "AI & LLM Platforms":
+      return "AI 与大模型平台"
+    case "Backend, Database & DevOps":
+      return "后端、数据库与 DevOps"
+    case "Design & Creative Tools":
+      return "设计与创作工具"
+    case "Developer Tools & IDEs":
+      return "开发工具与 IDE"
+    case "E-commerce & Retail":
+      return "电商与零售"
+    case "Fintech & Crypto":
+      return "金融科技与加密"
+    case "Media & Consumer Tech":
+      return "媒体与消费科技"
+    case "Productivity & SaaS":
+      return "效率工具与 SaaS"
+    case "Automotive":
+      return "汽车"
+    default:
+      return label?.trim() || "其他"
+  }
 }
 
 function getSessionKindLabel(kind: DesignSessionKind | DesignSourceInfo["kind"] | undefined): string {
@@ -1684,7 +1735,7 @@ export function DesignView(): React.JSX.Element {
   const activeMode = ts.activeMode
   const zoom       = ts.zoom
   const selectedDesignSystem = designSystems.find((system) => system.id === ts.selectedDesignSystemId) ?? null
-  const designSystemGroups = groupByLabel(designSystems, (system) => system.category || system.source)
+  const designSystemGroups = groupByLabel(designSystems, (system) => getDesignSystemGroupLabel(system.category || system.source))
 
   const setInputValue = (val: string) => updateTs(activeTabId, { inputValue: val })
   const setTweaksOn   = (val: boolean | ((v: boolean) => boolean)) =>
@@ -3747,7 +3798,7 @@ ${noteLines || "无"}${variantNote}`
     : []
   const filteredSkillGroups = groupByLabel(
     filteredSkills,
-    (skill) => skill.source === "template" ? getTemplateModeLabel(skill.mode) : "skills"
+    (skill) => skill.source === "template" ? getTemplateModeLabel(skill.mode) : "技能"
   )
 
   useEffect(() => {
@@ -4087,7 +4138,7 @@ ${noteLines || "无"}${variantNote}`
                 outline: "none",
               }}
             >
-              <option value="">无 Design System</option>
+              <option value="">无设计系统</option>
               {designSystemGroups.map((group) => (
                 <optgroup key={group.label} label={group.label}>
                   {group.items.map((system) => (
