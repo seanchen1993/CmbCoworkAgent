@@ -60,6 +60,8 @@ export interface MarketItem {
   target_version?: string
   candidate_id?: string
   published_at?: string
+  installedVersion?: string
+  updateAvailable?: boolean
 }
 
 export interface MarketUpdateResponse {

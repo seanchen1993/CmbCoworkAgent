@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react"
+import { useState, useCallback, useEffect, useMemo, useRef } from "react"
 import {
   ChevronRight,
   ChevronDown,
@@ -19,6 +19,9 @@ import { Badge } from "@/components/ui/badge"
 import { toast } from "sonner"
 import { GitSubmitDialog } from "./GitSubmitDialog"
 import { insertLog } from "../../../js/mmjUtils"
+import type { ThreadGitContext } from "@/lib/thread-context"
+
+const GIT_BRANCH_REFRESH_EVENT = "cmb:git-branch-switched"
 
 type GitPanelMetaState = {
   success: boolean
@@ -48,13 +51,48 @@ type GitPanelDiffState = {
   error?: string
 }
 
+/**
+ * 根据 thread context 中已经恢复出的 Git 信息，构造 GitPanel 的首屏 meta 状态。
+ *
+ * 这里生成的是“轻量初始状态”：只用于让 header 立即显示仓库/worktree/分支信息。
+ * changed files、pending commits、pushability、diff 等实时数据仍由后台的
+ * `getGitPanelMeta` / `getGitPanelDiffs` 请求覆盖。
+ */
+function createInitialMetaState(
+  threadId: string,
+  gitContext?: ThreadGitContext | null
+): GitPanelMetaState | null {
+  if (
+    !gitContext ||
+    (gitContext.isGitRepo === undefined &&
+      gitContext.isWorktree === undefined &&
+      !gitContext.branch)
+  ) {
+    return null
+  }
+
+  return {
+    success: gitContext.isGitRepo !== false,
+    isGitRepo: gitContext.isGitRepo,
+    isWorktree: Boolean(gitContext.isWorktree),
+    taskId: threadId,
+    hasPendingDiff: false,
+    hasPushableCommit: false,
+    pendingCommits: [],
+    trackedFiles: [],
+    worktreeBranch: gitContext.branch ?? null
+  }
+}
+
 export function GitPanelView({
   threadId,
   workspacePath,
+  initialGitContext,
   onOpenFileFolder
 }: {
   threadId: string
   workspacePath: string | null
+  initialGitContext?: ThreadGitContext | null
   onOpenFileFolder?: (filePath: string) => void
 }): React.JSX.Element {
   const metaRequestIdRef = useRef(0)
@@ -72,20 +110,24 @@ export function GitPanelView({
   const [expandedFilePaths, setExpandedFilePaths] = useState<Set<string>>(new Set())
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
   const [pulling, setPulling] = useState(false)
-  const [metaState, setMetaState] = useState<GitPanelMetaState | null>(null)
+  const initialMetaState = useMemo(
+    () => createInitialMetaState(threadId, initialGitContext),
+    [threadId, initialGitContext]
+  )
+  const [metaState, setMetaState] = useState<GitPanelMetaState | null>(initialMetaState)
   const [diffState, setDiffState] = useState<GitPanelDiffState | null>(null)
 
   useEffect(() => {
     metaRequestIdRef.current += 1
     diffRequestIdRef.current += 1
-    setMetaState(null)
+    setMetaState(initialMetaState)
     setDiffState(null)
     setMetaLoading(true)
     setDiffLoading(true)
     setError(null)
     setSubmitAction(null)
     setExpandedFilePaths(new Set())
-  }, [threadId])
+  }, [threadId, initialMetaState])
 
   const showToast = useCallback((text: string, variant: "success" | "error" = "success"): void => {
     if (variant === "success") {
@@ -172,6 +214,19 @@ export function GitPanelView({
   useEffect(() => {
     void refresh({ meta: true, diff: true })
   }, [refresh])
+
+  useEffect(() => {
+    const handleBranchSwitched = (event: Event): void => {
+      const detail = (event as CustomEvent<{ workspacePath?: string | null }>).detail
+      if (detail?.workspacePath && workspacePath && detail.workspacePath !== workspacePath) return
+      void refresh({ meta: true, diff: true })
+    }
+
+    window.addEventListener(GIT_BRANCH_REFRESH_EVENT, handleBranchSwitched)
+    return () => {
+      window.removeEventListener(GIT_BRANCH_REFRESH_EVENT, handleBranchSwitched)
+    }
+  }, [refresh, workspacePath])
 
   useEffect(() => {
     const files = diffState?.files ?? []
@@ -343,7 +398,6 @@ export function GitPanelView({
   const totalChangedFiles = diffState?.changedFilesTotal ?? metaState?.changedFilesTotal ?? 0
   const omittedFileCount = diffState?.omittedFileCount ?? 0
   const visibleFilesCount = diffState?.totals.fileCount ?? 0
-
   return (
     <div className="rounded-xl border border-border/70 overflow-hidden bg-background flex flex-col min-h-0 h-full">
       <div className="sticky top-0 z-10 px-3 py-2 border-b border-border/70 bg-background-elevated/80 backdrop-blur shrink-0">
@@ -365,7 +419,9 @@ export function GitPanelView({
           ) : (
             <>
               <div className="text-[11px] text-muted-foreground truncate flex items-center gap-1 flex-wrap">
-                <span className="font-semibold text-foreground">{workspaceName}</span>
+                <span className="font-semibold text-foreground" title={workspacePath || workspaceName}>
+                  {workspaceName}
+                </span>
                 <span>•</span>
                 {isInitialDiffLoading ? (
                   <>
