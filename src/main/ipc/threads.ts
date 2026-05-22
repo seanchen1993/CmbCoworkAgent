@@ -17,6 +17,8 @@ import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import { disposeAgentThreadState } from "./agent"
 import type { Thread, ThreadUpdateParams } from "../types"
+import { SqlGoalStore } from "../agent/goals/goal-store"
+import type { ThreadGoal } from "../agent/goals/types"
 
 // 复用主进程 settings 存储，用于读取“最近一次选择的工作区”。
 // 这里不存敏感信息，只读写路径类配置。
@@ -24,6 +26,20 @@ const settingsStore = new Store({
   name: "settings",
   cwd: getOpenworkDir()
 })
+
+function serializeGoal(goal: ThreadGoal | null): ThreadGoal | null {
+  return goal
+    ? {
+        ...goal,
+        ledger: {
+          progress: [...goal.ledger.progress],
+          evidence: [...goal.ledger.evidence],
+          blockers: [...goal.ledger.blockers]
+        },
+        context: { ...goal.context }
+      }
+    : null
+}
 
 export function registerThreadHandlers(ipcMain: IpcMain): void {
   // List all threads
@@ -189,6 +205,17 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       ...event,
       created_at: new Date(event.created_at)
     }))
+  })
+
+  ipcMain.handle("threads:goalState", async (_event, threadId: string) => {
+    const goalStore = new SqlGoalStore()
+    return {
+      goal: serializeGoal(goalStore.get(threadId)),
+      events: getThreadGoalEvents(threadId).map((event) => ({
+        ...event,
+        created_at: new Date(event.created_at)
+      }))
+    }
   })
 
   // Generate a title from a message

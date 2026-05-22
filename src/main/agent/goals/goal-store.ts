@@ -104,27 +104,6 @@ function normalizeGoalContext(value: unknown): GoalContext {
     if (name && path) context.explicitSkill = { name, path }
   }
 
-  const legacyMigration = record.legacyTransportSummaryMigration
-  if (
-    legacyMigration &&
-    typeof legacyMigration === "object" &&
-    !Array.isArray(legacyMigration)
-  ) {
-    const migrationRecord = legacyMigration as Record<string, unknown>
-    const objective =
-      typeof migrationRecord.objective === "string" ? migrationRecord.objective : ""
-    const completionCondition =
-      typeof migrationRecord.completionCondition === "string"
-        ? migrationRecord.completionCondition
-        : ""
-    if (objective || completionCondition) {
-      context.legacyTransportSummaryMigration = {
-        ...(objective ? { objective } : {}),
-        ...(completionCondition ? { completionCondition } : {})
-      }
-    }
-  }
-
   return context
 }
 

@@ -36,7 +36,12 @@ import {
   FilePenLine,
   Plus,
   Loader2,
-  CornerDownLeft
+  CornerDownLeft,
+  Flag,
+  CheckCircle2,
+  PauseCircle,
+  PlayCircle,
+  Trash2
 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -56,7 +61,7 @@ import { ModelSwitcher } from "./ModelSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
-import type { Message, SkillMetadata } from "@/types"
+import type { GoalUiState, Message, SkillMetadata } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator, type ChatScrollQuestion } from "./ChatScrollNavigator"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
@@ -86,10 +91,15 @@ import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
+import { isInternalGoalPromptMessage } from "@/lib/goal-notice-messages"
 import {
-  isInternalGoalPromptMessage,
-  orderGoalNoticeMessagesForDisplay
-} from "@/lib/goal-notice-messages"
+  formatGoalEventMessage,
+  isVisibleCheckpointTranscriptMessage
+} from "@/lib/goal-transcript"
+import {
+  buildGoalPanelViewModel,
+  goalVerdictTone
+} from "@/lib/goal-panel-view"
 import { groupWelcomeSkills } from "./skill-grouping"
 
 type WelcomeSkillCard = {
@@ -118,6 +128,451 @@ function getWelcomeSkillTreePath(skill: SkillMetadata): string {
   return String(skill.relativePath || id || skill.name || "")
     .replace(/\\/g, "/")
     .replace(/^\/+|\/+$/g, "")
+}
+
+function formatGoalDuration(createdAt: number, updatedAt: number, active: boolean): string {
+  const end = active ? Date.now() : updatedAt
+  const seconds = Math.max(0, Math.round((end - createdAt) / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  return rest > 0 ? `${minutes}m ${rest}s` : `${minutes}m`
+}
+
+function goalStatusView(status: "active" | "paused" | "complete"): {
+  label: string
+  icon: React.JSX.Element
+  className: string
+} {
+  if (status === "complete") {
+    return {
+      label: "已完成",
+      icon: <CheckCircle2 className="size-4 text-emerald-600" />,
+      className: "text-[#23483c]"
+    }
+  }
+  if (status === "paused") {
+    return {
+      label: "已暂停",
+      icon: <PauseCircle className="size-4 text-amber-600" />,
+      className: "text-[#51453a]"
+    }
+  }
+  return {
+    label: "进行中",
+    icon: <Flag className="size-4 text-sky-600" />,
+    className: "text-[#2f3f4a]"
+  }
+}
+
+function goalEventTimeLabel(value: Date | string | number): string {
+  const date = value instanceof Date ? value : new Date(value)
+  return Number.isFinite(date.getTime()) ? date.toLocaleTimeString() : ""
+}
+
+function GoalStatusPanel({
+  goalUi,
+  open,
+  onOpenChange,
+  onCommand,
+  onEditGoal
+}: {
+  goalUi: GoalUiState
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onCommand: (command: string) => void
+  onEditGoal: () => void
+}): React.JSX.Element | null {
+  const goal = goalUi.goal
+  if (!goal) return null
+
+  const status = goalStatusView(goal.status)
+  const panel = buildGoalPanelViewModel(goalUi)
+  if (!panel) return null
+  const {
+    latestEvents,
+    canPause,
+    canResume,
+    progressPercent,
+    contextText,
+    progressItems: allProgressItems,
+    evidenceItems: allEvidenceItems,
+    blockerItems: allBlockerItems,
+    hasLedgerDetails,
+    verdictLabel,
+    evaluatorReason,
+    recentEventSummary
+  } = panel
+  const duration = formatGoalDuration(goal.createdAt, goal.updatedAt, goal.status === "active")
+
+  return (
+    <TooltipProvider delayDuration={180}>
+      <div className="relative mx-auto mb-2 max-w-3xl">
+        <div
+          className={cn(
+            "flex items-center gap-3 rounded-2xl border border-black/[0.07] bg-white/82 px-3 py-2 shadow-[0_14px_42px_rgba(24,24,27,0.09),0_1px_0_rgba(255,255,255,0.88)_inset] backdrop-blur-2xl",
+            status.className
+          )}
+        >
+          <button
+            type="button"
+            className="flex min-w-0 flex-1 items-center gap-3 text-left"
+            onClick={() => onOpenChange(!open)}
+          >
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-white shadow-[0_6px_18px_rgba(24,24,27,0.10)] ring-1 ring-black/[0.06]">
+              {status.icon}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="flex flex-wrap items-center gap-2">
+                <span className="shrink-0 text-sm font-semibold">Goal {status.label}</span>
+                <span className="shrink-0 rounded-full border border-black/[0.05] bg-[#f7f7f5]/85 px-2 py-0.5 text-[11px] text-muted-foreground">
+                  {duration} · {goal.turnsUsed}/{goal.maxTurns} 轮
+                </span>
+              </span>
+              <span className="mt-0.5 block truncate text-xs opacity-80">{goal.objective}</span>
+            </span>
+          </button>
+
+          <div className="flex shrink-0 items-center gap-1">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                  onClick={onEditGoal}
+                  aria-label="编辑 Goal"
+                >
+                  <FilePenLine className="size-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>编辑目标</TooltipContent>
+            </Tooltip>
+            {canPause && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                    onClick={() => onCommand("/goal pause")}
+                    aria-label="暂停 Goal"
+                  >
+                    <PauseCircle className="size-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>暂停</TooltipContent>
+              </Tooltip>
+            )}
+            {canResume && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                    onClick={() => onCommand("/goal resume")}
+                    aria-label="继续 Goal"
+                  >
+                    <PlayCircle className="size-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>继续</TooltipContent>
+              </Tooltip>
+            )}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                  onClick={() => onOpenChange(!open)}
+                  aria-label="查看 Goal 详情"
+                >
+                  <Info className="size-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>详情</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                  onClick={() => onCommand("/goal clear")}
+                  aria-label="清除 Goal"
+                >
+                  <Trash2 className="size-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>清除</TooltipContent>
+            </Tooltip>
+          </div>
+        </div>
+
+        {open && (
+          <div className="fixed bottom-24 right-5 top-16 z-40 flex w-[min(480px,calc(100vw-40px))] flex-col overflow-hidden rounded-3xl border border-black/[0.08] bg-[#fbfaf8] shadow-[0_24px_80px_rgba(24,24,27,0.18)]">
+            <div className="border-b border-black/[0.06] bg-white px-5 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="flex size-10 items-center justify-center rounded-full bg-[#f7f7f5] shadow-sm ring-1 ring-black/[0.06]">
+                      {status.icon}
+                    </span>
+                    <div className="text-lg font-semibold text-foreground">Goal {status.label}</div>
+                    <div className="rounded-full border border-black/[0.06] bg-[#f6f5f2] px-2 py-0.5 text-xs text-muted-foreground">
+                      {duration} · {goal.turnsUsed}/{goal.maxTurns} 轮
+                    </div>
+                    <div
+                      className={cn(
+                        "rounded-full border px-2 py-0.5 text-xs font-medium",
+                        goalVerdictTone(goal.lastVerdict)
+                      )}
+                    >
+                      最近判断：{verdictLabel}
+                    </div>
+                  </div>
+                  <div className="mt-3 line-clamp-2 text-sm leading-6 text-foreground/80">
+                    {goal.objective}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="flex size-8 shrink-0 items-center justify-center rounded-full bg-[#f6f5f2] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  onClick={() => onOpenChange(false)}
+                  aria-label="关闭 Goal 详情"
+                >
+                  <X className="size-4" />
+                </button>
+              </div>
+              <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-[#eeece8]">
+                <div
+                  className={cn(
+                    "h-full rounded-full",
+                    goal.status === "complete"
+                      ? "bg-emerald-500"
+                      : goal.status === "paused"
+                        ? "bg-amber-500"
+                        : "bg-sky-500"
+                  )}
+                  style={{ width: `${Math.max(4, progressPercent)}%` }}
+                />
+              </div>
+            </div>
+
+            <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4 text-sm">
+              <section
+                className={cn(
+                  "rounded-2xl border p-4 shadow-[0_1px_0_rgba(255,255,255,0.8)_inset]",
+                  goalVerdictTone(goal.lastVerdict)
+                )}
+              >
+                <div className="mb-2 flex items-center gap-2 text-xs font-semibold">
+                  <Sparkles className="size-4" />
+                  Evaluator 最近判断
+                </div>
+                <div className="whitespace-pre-wrap text-base leading-7 text-foreground/90">
+                  {evaluatorReason}
+                </div>
+                <div className="mt-3 rounded-xl bg-white/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                  这里展示的是 evaluator 根据最近一轮 assistant 回复、工具结果和持久化
+                  ledger 做出的判断。它解释为什么 Goal 会继续、暂停或完成。
+                </div>
+              </section>
+
+              <section className="rounded-2xl border border-black/[0.06] bg-white p-4">
+                <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+                  <Flag className="size-4" />
+                  目标与完成标准
+                </div>
+                <div className="space-y-3">
+                  <div>
+                    <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                      当前目标
+                    </div>
+                    <div className="whitespace-pre-wrap leading-6">{goal.objective}</div>
+                  </div>
+                  {goal.completionCondition !== goal.objective && (
+                    <div className="border-t border-black/[0.06] pt-3">
+                      <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                        完成条件
+                      </div>
+                      <div className="whitespace-pre-wrap leading-6">
+                        {goal.completionCondition}
+                      </div>
+                    </div>
+                  )}
+                  {contextText && (
+                    <div className="border-t border-black/[0.06] pt-3">
+                      <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                        <Notebook className="size-3.5" />
+                        启动上下文
+                      </div>
+                      <div className="whitespace-pre-wrap leading-6 text-foreground/80">
+                        {contextText}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              <section className="rounded-2xl border border-black/[0.06] bg-white p-4">
+                <div className="mb-1 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+                  <Layers className="size-4" />
+                  进展与证据
+                </div>
+                <div className="mb-3 text-xs leading-5 text-muted-foreground">
+                  以下条目来自 evaluator 返回的 ledger_patch，是它从对话、工具结果和
+                  assistant 验证摘要里提炼出的判断依据。
+                </div>
+
+                {!hasLedgerDetails ? (
+                  <div className="rounded-xl border border-dashed border-black/[0.10] bg-[#fbfaf8] px-3 py-4 text-center text-xs text-muted-foreground">
+                    暂无 ledger 条目。下一轮评估后会在这里记录进展、证据或阻塞。
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {allProgressItems.length > 0 && (
+                      <div>
+                        <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-foreground/80">
+                          <CheckCircle2 className="size-3.5 text-emerald-600" />
+                          已确认进展
+                        </div>
+                        <ol className="space-y-2">
+                          {allProgressItems.map((item, index) => (
+                            <li key={`progress-${index}`} className="flex gap-2 leading-5">
+                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-[11px] font-semibold text-emerald-700">
+                                {index + 1}
+                              </span>
+                              <span className="whitespace-pre-wrap text-foreground/85">{item}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
+
+                    {allEvidenceItems.length > 0 && (
+                      <div className="border-t border-black/[0.06] pt-4">
+                        <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-foreground/80">
+                          <Database className="size-3.5 text-sky-600" />
+                          证据
+                        </div>
+                        <ol className="space-y-2">
+                          {allEvidenceItems.map((item, index) => (
+                            <li key={`evidence-${index}`} className="flex gap-2 leading-5">
+                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-sky-50 text-[11px] font-semibold text-sky-700">
+                                {index + 1}
+                              </span>
+                              <span className="whitespace-pre-wrap text-foreground/85">{item}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
+
+                    {allBlockerItems.length > 0 && (
+                      <div className="border-t border-black/[0.06] pt-4">
+                        <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-foreground/80">
+                          <CircleAlert className="size-3.5 text-amber-600" />
+                          未解决问题
+                        </div>
+                        <ol className="space-y-2">
+                          {allBlockerItems.map((item, index) => (
+                            <li key={`blocker-${index}`} className="flex gap-2 leading-5">
+                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-amber-50 text-[11px] font-semibold text-amber-700">
+                                {index + 1}
+                              </span>
+                              <span className="whitespace-pre-wrap text-foreground/85">{item}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </section>
+
+              <section className="rounded-2xl border border-black/[0.06] bg-white p-4">
+                <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+                  <Clock className="size-4" />
+                  最近事件
+                </div>
+                <div className="mb-3 rounded-xl bg-[#fbfaf8] px-3 py-2 text-xs leading-5 text-muted-foreground">
+                  最近一条：{recentEventSummary}
+                </div>
+                <details>
+                  <summary className="cursor-pointer list-none rounded-lg border border-black/[0.06] px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/40">
+                    展开事件历史（{latestEvents.length}）
+                  </summary>
+                  {latestEvents.length === 0 ? (
+                    <div className="mt-3 rounded-lg bg-[#fbfaf8] px-3 py-2 text-xs text-muted-foreground">
+                      暂无事件
+                    </div>
+                  ) : (
+                    <div className="mt-3 space-y-3">
+                      {latestEvents.map((event) => (
+                        <div
+                          key={event.event_id}
+                          className="border-l-2 border-black/[0.10] pl-3"
+                        >
+                          <div className="mb-1 text-[11px] text-muted-foreground">
+                            {goalEventTimeLabel(event.created_at)}
+                          </div>
+                          <div className="whitespace-pre-wrap text-xs leading-5 text-foreground/80">
+                            {formatGoalEventMessage(event.message)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </details>
+              </section>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 border-t border-black/[0.06] bg-white px-5 py-3">
+              <button
+                type="button"
+                className="rounded-xl px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted"
+                onClick={() => onCommand("/goal")}
+              >
+                刷新状态
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="rounded-xl border border-black/[0.08] px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
+                  onClick={onEditGoal}
+                >
+                  编辑
+                </button>
+                {canPause && (
+                  <button
+                    type="button"
+                    className="rounded-xl bg-foreground px-3 py-2 text-sm font-medium text-background transition-colors hover:bg-foreground/85"
+                    onClick={() => onCommand("/goal pause")}
+                  >
+                    暂停
+                  </button>
+                )}
+                {canResume && (
+                  <button
+                    type="button"
+                    className="rounded-xl bg-foreground px-3 py-2 text-sm font-medium text-background transition-colors hover:bg-foreground/85"
+                    onClick={() => onCommand("/goal resume")}
+                  >
+                    继续
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="rounded-xl border border-black/[0.08] px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
+                  onClick={() => onCommand("/goal clear")}
+                >
+                  清除
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </TooltipProvider>
+  )
 }
 
 function buildWelcomeSkillTree(cards: WelcomeSkillCard[]): WelcomeSkillTreeNode[] {
@@ -782,6 +1237,7 @@ export function ChatContainer({
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
   const [activeUserQuestionIndex, setActiveUserQuestionIndex] = useState(-1)
+  const [goalDetailsOpen, setGoalDetailsOpen] = useState(false)
   // Skill creation human-confirmation state
   const [skillConfirmRequest, setSkillConfirmRequest] = useState<SkillConfirmRequest | null>(null)
   // Skill intent banner state ("Want to save as a skill?")
@@ -1024,6 +1480,7 @@ export function ChatContainer({
   // Get persisted thread state and actions from context
   const {
     messages: threadMessages,
+    goalUi,
     pendingApproval,
     todos,
     error: threadError,
@@ -1040,6 +1497,7 @@ export function ChatContainer({
     setTodos,
     setPendingApproval,
     appendMessage,
+    refreshGoalUi,
     setError,
     clearError,
     clearHookInterruption,
@@ -1064,6 +1522,12 @@ export function ChatContainer({
   const [savedToolNameInput, setSavedToolNameInput] = useState("")
   const [savedToolDescriptionInput, setSavedToolDescriptionInput] = useState("")
   const [saveToolMetadataLoading, setSaveToolMetadataLoading] = useState(false)
+
+  useEffect(() => {
+    if (!goalUi.goal) {
+      setGoalDetailsOpen(false)
+    }
+  }, [goalUi.goal])
 
   useEffect(() => {
     const approval = pendingApproval as unknown as Record<string, unknown> | null
@@ -1655,7 +2119,7 @@ export function ChatContainer({
 
     // Clean up attachment XML tags in user messages for display
     const allMessages = [...threadMessages, ...streamingMsgs]
-      .filter((msg) => !isInternalGoalPromptMessage(msg))
+      .filter(isVisibleCheckpointTranscriptMessage)
       .map((msg) => {
         const storedTime = messageTimes[msg.id]
         const startAt = toDate(storedTime?.start_at) ?? msg.start_at ?? msg.created_at
@@ -1693,7 +2157,7 @@ export function ChatContainer({
         fileNames.length > 0 ? `${fileNames.join("\n")}\n\n${textOnly}`.trim() : textOnly
       return { ...msg, content: cleaned }
     })
-    return orderGoalNoticeMessagesForDisplay(cleanedMessages)
+    return cleanedMessages
   }, [threadMessages, streamData.messages, messageTimes])
 
   const assistantDurationsByMessageId = useMemo(() => {
@@ -1956,6 +2420,23 @@ export function ChatContainer({
     hasPendingTransportPayload: hasPendingGoalTransportPayload,
     goalControlAllowedWhileLoading: streamData.isLoading && !scheduledTaskLoading
   })
+  const inputPlaceholder = useMemo(() => {
+    const goal = goalUi.goal
+    if (isLoading) {
+      return streamData.isLoading && !scheduledTaskLoading
+        ? "运行中：可输入 /goal、/goal status、/goal pause、/goal clear"
+        : "任务运行中，可使用取消按钮停止当前任务"
+    }
+    if (attachments.length > 0) return "输入消息或直接发送文件..."
+    if (!goal) return "向 CMBDevClaw 提问，/ 输入命令；Shift + Enter 换行"
+    if (goal.status === "active") {
+      return "补充当前 Goal，或输入 /goal status 查看详情"
+    }
+    if (goal.status === "paused") {
+      return "补充说明，或点击继续 Goal"
+    }
+    return "输入新问题，或用 /goal <目标> 开始新的长期任务"
+  }, [attachments.length, goalUi.goal, isLoading, scheduledTaskLoading, streamData.isLoading])
   // Refresh skill list whenever the popover opens so customize-panel
   // enable/disable changes reflect without an app restart.
   useEffect(() => {
@@ -1994,9 +2475,112 @@ export function ChatContainer({
     [setInput, slashResetSelection]
   )
 
+  const submitGoalResumeCommand = useCallback(async (): Promise<void> => {
+    if (!stream || historyLoading || isLoading || scheduledTaskLoading) return
+    if (threadError) {
+      clearError()
+    }
+    if (!currentModel) {
+      setError("请先在下方选择模型后再继续 goal。")
+      return
+    }
+    const selectedModel = models.find((m) => m.id === currentModel)
+    if (!selectedModel) {
+      setError("当前线程模型不存在，请重新选择模型。")
+      return
+    }
+    if (!selectedModel.available) {
+      setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+      return
+    }
+    if (!workspacePath) {
+      setError("请先选择一个工作区文件夹再继续 goal。")
+      return
+    }
+    setInput("")
+    setAttachments([])
+    setSelectedSkill(null)
+    insertLog("send: /goal resume")
+    await stream.submit(
+      {
+        messages: [{ type: "human", content: "/goal resume" }]
+      },
+      {
+        config: {
+          configurable: { thread_id: threadId, model_id: currentModel }
+        }
+      }
+    )
+  }, [
+    clearError,
+    currentModel,
+    historyLoading,
+    isLoading,
+    models,
+    scheduledTaskLoading,
+    setError,
+    setAttachments,
+    setInput,
+    setSelectedSkill,
+    stream,
+    threadError,
+    threadId,
+    workspacePath
+  ])
+
+  const applyGoalPanelCommand = useCallback(
+    (command: string) => {
+      if (command === "/goal resume") {
+        void submitGoalResumeCommand()
+        return
+      }
+      void (async () => {
+        if (threadError) {
+          clearError()
+        }
+        setInput("")
+        insertLog("send: " + command)
+        const result = await window.api.agent.goalControl(threadId, command)
+        if (command === "/goal" || command === "/goal status") {
+          setGoalDetailsOpen(true)
+        }
+        void refreshGoalUi()
+        if (
+          pendingApproval &&
+          isGoalTerminatingControlCommandInput(command) &&
+          result.terminatedCurrentRun
+        ) {
+          const approvalAny = pendingApproval as unknown as Record<string, unknown>
+          if (approvalAny._orchestratorRequestId) {
+            window.api.sandbox.sendApprovalDecision({
+              requestId: approvalAny._orchestratorRequestId as string,
+              type: "reject",
+              tool_call_id: pendingApproval.tool_call?.id || ""
+            })
+          }
+          setSaveToolMetadataLoading(false)
+          setPendingApproval(null)
+        }
+      })()
+    },
+    [
+      clearError,
+      pendingApproval,
+      refreshGoalUi,
+      setSaveToolMetadataLoading,
+      setInput,
+      setPendingApproval,
+      submitGoalResumeCommand,
+      threadError,
+      threadId
+    ]
+  )
+
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault()
     const trimmedInput = input.trim()
+    const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
+    const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
     // popover is open — the send button is disabled, and handleKeyDown's
     // popover branch returns before reaching handleSubmit. Kept here so any
@@ -2027,18 +2611,13 @@ export function ChatContainer({
       if (threadError) {
         clearError()
       }
-      const userStartAt = new Date()
-      appendMessage({
-        id: crypto.randomUUID(),
-        role: "user",
-        content: trimmedInput,
-        created_at: userStartAt,
-        start_at: userStartAt,
-        end_at: userStartAt
-      })
       setInput("")
+      if (shouldOpenGoalDetailsForStatus) {
+        setGoalDetailsOpen(true)
+      }
       insertLog("send: " + trimmedInput)
       const goalControlResult = await window.api.agent.goalControl(threadId, trimmedInput)
+      void refreshGoalUi()
       if (
         pendingApproval &&
         isGoalTerminatingControlCommandInput(trimmedInput) &&
@@ -2125,9 +2704,16 @@ export function ChatContainer({
     setInput("")
     setAttachments([])
     if (skill) setSelectedSkill(null)
+    if (shouldOpenGoalDetailsForStatus) {
+      setGoalDetailsOpen(true)
+    }
     insertLog("send: " + (userText || (skill ? `[skill-only: ${skill.name}]` : "")))
 
     const isFirstMessage = threadMessages.length === 0
+    // Keep real user intent visible in the transcript. Goal status/pause/clear
+    // are side-channel controls, but `/goal <objective>` and `/goal resume`
+    // are user turns and should appear immediately in live UI.
+    const shouldAppendVisibleUserMessage = !bypassGoalControlValidation
 
     // Build the full message with attachments as XML tags (sent to model)
     let fullMessage = userText
@@ -2171,54 +2757,56 @@ export function ChatContainer({
     // 但 user.start_at 是本轮耗时计算的起点：展示 CMBDevClaw 后面的 duration 时，会找到
     // 当前 user 后面的第一条 assistant，再减到下一个 user 之前最后一条消息的 end_at。
     // 所以 user 也必须持久化 start_at/end_at，否则重启后无法还原该轮起点。
-    const userStartAt = new Date()
-    const userMessage: Message = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: displayContent,
-      created_at: new Date(),
-      start_at: userStartAt,
-      end_at: userStartAt
-    }
-    appendMessage(userMessage)
-    // 用户消息也需要持久化起止时间，后续 duration 用 user.start_at 作为起点。
-    //
-    // 这里先立即写入 thread_values，是为了尽量保证即使 assistant 回复还没结束，
-    // 当前 user 的起点也已经保存下来；assistant/tool 的结束时间会在 loading 结束后补齐。
-    const userMessageTime: MessageTimeMap = {
-      [userMessage.id]: {
-        start_at: userStartAt.toISOString(),
-        end_at: userStartAt.toISOString()
+    if (shouldAppendVisibleUserMessage) {
+      const userStartAt = new Date()
+      const userMessage: Message = {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: displayContent,
+        created_at: new Date(),
+        start_at: userStartAt,
+        end_at: userStartAt
       }
-    }
-    setMessageTimes((prev) => ({ ...prev, ...userMessageTime }))
-    try {
-      const thread = await window.api.threads.get(threadId)
-      if (thread) {
-        await window.api.threads.update(threadId, {
-          thread_values: {
-            ...(thread.thread_values ?? {}),
-            // 保留 id map，优先支持按 message id 精确恢复。
-            //
-            // user message 在前端先 append，checkpoint 恢复时 id 可能不一定完全一致；
-            // 因此仍需要下面的顺序数组作为兜底。
-            [MESSAGE_TIMES_THREAD_VALUE_KEY]: {
-              ...getMessageTimeMap(thread.thread_values),
-              ...userMessageTime
-            },
-            // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。
-            //
-            // 这条 user 时间会成为顺序数组中的一个节点，后续 assistant/tool 时间会继续 append，
-            // 最终形成完整的 user -> assistant/tool... 时间线。
-            [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
-              getMessageTimeOrder(thread.thread_values),
-              userMessageTime
-            )
-          }
-        })
+      appendMessage(userMessage)
+      // 用户消息也需要持久化起止时间，后续 duration 用 user.start_at 作为起点。
+      //
+      // 这里先立即写入 thread_values，是为了尽量保证即使 assistant 回复还没结束，
+      // 当前 user 的起点也已经保存下来；assistant/tool 的结束时间会在 loading 结束后补齐。
+      const userMessageTime: MessageTimeMap = {
+        [userMessage.id]: {
+          start_at: userStartAt.toISOString(),
+          end_at: userStartAt.toISOString()
+        }
       }
-    } catch (error) {
-      console.warn("[ChatContainer] Failed to save user message time:", error)
+      setMessageTimes((prev) => ({ ...prev, ...userMessageTime }))
+      try {
+        const thread = await window.api.threads.get(threadId)
+        if (thread) {
+          await window.api.threads.update(threadId, {
+            thread_values: {
+              ...(thread.thread_values ?? {}),
+              // 保留 id map，优先支持按 message id 精确恢复。
+              //
+              // user message 在前端先 append，checkpoint 恢复时 id 可能不一定完全一致；
+              // 因此仍需要下面的顺序数组作为兜底。
+              [MESSAGE_TIMES_THREAD_VALUE_KEY]: {
+                ...getMessageTimeMap(thread.thread_values),
+                ...userMessageTime
+              },
+              // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。
+              //
+              // 这条 user 时间会成为顺序数组中的一个节点，后续 assistant/tool 时间会继续 append，
+              // 最终形成完整的 user -> assistant/tool... 时间线。
+              [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
+                getMessageTimeOrder(thread.thread_values),
+                userMessageTime
+              )
+            }
+          })
+        }
+      } catch (error) {
+        console.warn("[ChatContainer] Failed to save user message time:", error)
+      }
     }
 
     if (isFirstMessage) {
@@ -2227,7 +2815,9 @@ export function ChatContainer({
       if (hasDefaultTitle) {
         // skill-only sends have empty userText. Fall back to the skill name so
         // the sidebar shows something meaningful instead of the raw thread id.
-        const titleSource = userText || (skill ? `使用 ${skill.name}` : "")
+        const titleSource =
+          (isGoalSlashInput ? userText.replace(/^\/goal\b/i, "").trim() : userText) ||
+          (skill ? `使用 ${skill.name}` : "")
         if (titleSource) {
           generateTitleForFirstMessage(threadId, titleSource)
         }
@@ -2992,6 +3582,41 @@ export function ChatContainer({
     },
     [extractMessageText, setInput, skills, setSelectedSkill]
   )
+
+  const handleSetGoalFromMessage = useCallback(
+    (text: string): void => {
+      const body = text.trim()
+      if (!body) {
+        toast.error("这条消息没有可设置为 Goal 的内容")
+        return
+      }
+      const nextInput = /^\/goal(?:\s|$)/i.test(body) ? body : `/goal ${body}`
+      setInput(nextInput)
+      requestAnimationFrame(() => {
+        const textarea = inputRef.current
+        if (!textarea) return
+        textarea.focus()
+        textarea.setSelectionRange(nextInput.length, nextInput.length)
+      })
+      toast.success("已填入 Goal 草稿，确认后发送")
+    },
+    [setInput]
+  )
+
+  const handleEditGoal = useCallback((): void => {
+    const objective = goalUi.goal?.objective?.trim()
+    if (!objective) return
+    const nextInput = `/goal ${objective}`
+    setInput(nextInput)
+    setGoalDetailsOpen(false)
+    requestAnimationFrame(() => {
+      const textarea = inputRef.current
+      if (!textarea) return
+      textarea.focus()
+      textarea.setSelectionRange(nextInput.length, nextInput.length)
+    })
+    toast.success("已填入当前 Goal，可编辑后重新设置")
+  }, [goalUi.goal?.objective, setInput])
   // Inlined as JSX (not components) to avoid React remounting on every parent render —
   // declaring a component inside the parent creates a new function reference each render,
   // which causes children to lose focus/animation state.
@@ -3400,6 +4025,7 @@ export function ChatContainer({
                     pendingApproval={pendingApproval}
                     onApprovalDecision={handleApprovalDecision}
                     onEditUserMessage={handleEditUserMessage}
+                    onSetGoalFromMessage={handleSetGoalFromMessage}
                     threadId={threadId}
                     isLoading={isLoading}
                     assistantDurationMs={assistantDurationsByMessageId.get(message.id)}
@@ -3760,8 +4386,27 @@ export function ChatContainer({
             })()}
           </div>
         )}
+      {goalUi.goal && (
+        <div
+          className={cn("px-4 pb-1", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}
+        >
+          <GoalStatusPanel
+            goalUi={goalUi}
+            open={goalDetailsOpen}
+            onOpenChange={setGoalDetailsOpen}
+            onCommand={applyGoalPanelCommand}
+            onEditGoal={handleEditGoal}
+          />
+        </div>
+      )}
       {/* Input */}
-      <div className={cn("p-4", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
+      <div
+        className={cn(
+          "px-4 pb-4",
+          goalUi.goal ? "pt-1" : "pt-4",
+          userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
+        )}
+      >
         {showGitChangeNotice && (
           <div className="max-w-3xl mx-auto mb-2 flex items-center justify-between gap-3 rounded-xl border border-status-warning/40 bg-status-warning/10 px-3 py-2">
             <div className="min-w-0 flex items-center gap-2 text-[12px] text-foreground">
@@ -3874,15 +4519,7 @@ export function ChatContainer({
                     isComposingRef.current = false
                   }}
                   onKeyDown={handleKeyDown}
-                  placeholder={
-                    isLoading
-                      ? streamData.isLoading && !scheduledTaskLoading
-                        ? "运行中：可输入 /goal、/goal status、/goal pause、/goal clear"
-                        : "任务运行中，可使用取消按钮停止当前任务"
-                      : attachments.length > 0
-                      ? "输入消息或直接发送文件..."
-                      : "向 CMBDevClaw 提问，/ 输入命令；Shift + Enter 换行"
-                  }
+                  placeholder={inputPlaceholder}
                   disabled={inputDisabled}
                   className={cn(
                     "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",

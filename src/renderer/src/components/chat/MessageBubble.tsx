@@ -17,9 +17,11 @@ import {
   Smile,
   Frown,
   Info,
-  Flag
+  Flag,
+  PlayCircle
 } from "lucide-react"
 import { toast } from "sonner"
+import { cn } from "@/lib/utils"
 import { stripLegacyGoalTransportSummary } from "@/lib/goal-transport-summary"
 import {
   MessageFeedbackDialog,
@@ -69,6 +71,63 @@ function parseUserVisibleSkillContent(content: string): {
   }
   const legacy = stripLegacyGoalTransportSummary(content)
   return { visibleText: legacy.text, skillName: legacy.skillName }
+}
+
+function parseGoalUserSetMessage(text: string): {
+  objective: string
+  attachments: string | null
+  skillName: string | null
+} | null {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  if (lines.length === 0) return null
+
+  const firstLine = lines[0]
+  const match = firstLine.match(/^\/goal\b\s*(.*)$/i)
+  if (!match) return null
+
+  const rest = (match[1] ?? "").trim()
+  if (!rest) return null
+
+  const firstToken = rest.split(/\s+/)[0]?.toLowerCase()
+  if (firstToken && ["status", "pause", "resume", "clear"].includes(firstToken)) return null
+
+  let attachments: string | null = null
+  let skillName: string | null = null
+  const objectiveLines: string[] = [rest]
+
+  for (const line of lines.slice(1)) {
+    const attachmentMatch = line.match(/^启动附件[：:]\s*(.+)$/)
+    if (attachmentMatch) {
+      attachments = attachmentMatch[1]?.trim() || null
+      continue
+    }
+    const skillMatch = line.match(/^显式技能[：:]\s*(.+)$/)
+    if (skillMatch) {
+      skillName = skillMatch[1]?.trim() || null
+      continue
+    }
+    objectiveLines.push(line)
+  }
+
+  const objective = objectiveLines.join("\n").trim()
+  return objective ? { objective, attachments, skillName } : null
+}
+
+function parseGoalUserControlMessage(text: string): {
+  label: string
+  description: string
+  tone: "resume"
+} | null {
+  const normalized = text.trim().replace(/\s+/g, " ").toLowerCase()
+  if (normalized !== "/goal resume") return null
+  return {
+    label: "继续 Goal",
+    description: "从上次暂停处继续推进目标",
+    tone: "resume"
+  }
 }
 
 function extractMessagePlainText(
@@ -436,6 +495,7 @@ interface MessageBubbleProps {
   pendingApproval?: HITLRequest | null
   onApprovalDecision?: (decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit") => void
   onEditUserMessage?: (message: Message) => void
+  onSetGoalFromMessage?: (text: string) => void
   threadId: string
   isLoading: boolean
   assistantDurationMs?: number
@@ -450,6 +510,7 @@ export function MessageBubble({
   pendingApproval,
   onApprovalDecision,
   onEditUserMessage,
+  onSetGoalFromMessage,
   threadId,
   isLoading,
   assistantDurationMs
@@ -522,7 +583,62 @@ export function MessageBubble({
     )
   }
 
+  // Only strip the skill-use tail from OUR user messages; assistant text that
+  // happens to quote the tag (e.g. while discussing the protocol) copies verbatim.
+  const plainTextForCopy = extractMessagePlainText(message.content, { stripSkillUse: isUser })
+  const goalUserSetMessage = isUser ? parseGoalUserSetMessage(plainTextForCopy) : null
+  const goalUserControlMessage = isUser ? parseGoalUserControlMessage(plainTextForCopy) : null
+
+  const renderGoalUserSetContent = (goalMessage: NonNullable<typeof goalUserSetMessage>): React.ReactNode => (
+    <div className="space-y-2 text-left">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-[#5f6b66]">
+        <span className="flex size-6 items-center justify-center rounded-full bg-white shadow-sm ring-1 ring-black/[0.05]">
+          <Flag className="size-3.5 text-sky-600" />
+        </span>
+        <span>设为 Goal</span>
+      </div>
+      <div className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95 break-all">
+        {goalMessage.objective}
+      </div>
+      {(goalMessage.attachments || goalMessage.skillName) && (
+        <div className="flex flex-wrap gap-1.5 pt-0.5">
+          {goalMessage.attachments && (
+            <span className="rounded-full border border-black/[0.05] bg-[#f7f7f5]/85 px-2 py-0.5 text-[11px] text-muted-foreground">
+              附件：{goalMessage.attachments}
+            </span>
+          )}
+          {goalMessage.skillName && (
+            <span className="rounded-full border border-black/[0.05] bg-[#f7f7f5]/85 px-2 py-0.5 text-[11px] text-muted-foreground">
+              技能：{goalMessage.skillName}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  )
+
+  const renderGoalUserControlContent = (
+    goalMessage: NonNullable<typeof goalUserControlMessage>
+  ): React.ReactNode => (
+    <div className="flex items-center gap-2 text-left">
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-white text-sky-700 shadow-[0_6px_18px_rgba(24,24,27,0.10)] ring-1 ring-black/[0.05]">
+        <PlayCircle className="size-4" />
+      </span>
+      <span className="min-w-0">
+        <span className="block text-sm font-semibold text-[#35433f]">{goalMessage.label}</span>
+        <span className="block text-xs text-muted-foreground">{goalMessage.description}</span>
+      </span>
+    </div>
+  )
+
   const renderContent = (): React.ReactNode => {
+    if (goalUserSetMessage) {
+      return renderGoalUserSetContent(goalUserSetMessage)
+    }
+    if (goalUserControlMessage) {
+      return renderGoalUserControlContent(goalUserControlMessage)
+    }
+
     if (typeof message.content === "string") {
       // Empty content (after potentially stripping the trailing skill-use block below)
       if (!message.content.trim()) {
@@ -577,9 +693,8 @@ export function MessageBubble({
 
   const content = renderContent()
   const hasToolCalls = message.tool_calls && message.tool_calls.length > 0
-  // Only strip the skill-use tail from OUR user messages; assistant text that
-  // happens to quote the tag (e.g. while discussing the protocol) copies verbatim.
-  const plainTextForCopy = extractMessagePlainText(message.content, { stripSkillUse: isUser })
+  const canSetGoalFromMessage =
+    isUser && Boolean(onSetGoalFromMessage) && !plainTextForCopy.trim().startsWith("/goal")
 
   const handleCopyMessage = async (): Promise<void> => {
     if (!plainTextForCopy.trim()) {
@@ -657,7 +772,14 @@ export function MessageBubble({
     return (
       <div className="group flex justify-end overflow-hidden py-4">
         <div className="flex max-w-[80%] flex-col items-end gap-1">
-          <div className="rounded-lg p-3 overflow-hidden bg-primary/10">
+          <div
+            className={cn(
+              "rounded-lg p-3 overflow-hidden",
+              goalUserSetMessage || goalUserControlMessage
+                ? "border border-black/[0.07] bg-white/86 shadow-[0_14px_42px_rgba(24,24,27,0.10),0_1px_0_rgba(255,255,255,0.88)_inset]"
+                : "bg-primary/10"
+            )}
+          >
             {content}
           </div>
           <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
@@ -680,6 +802,18 @@ export function MessageBubble({
             >
               <PencilLine className="size-3" />
             </button>
+            {canSetGoalFromMessage && (
+              <button
+                type="button"
+                onClick={() => onSetGoalFromMessage?.(plainTextForCopy)}
+                className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                title="设为 Goal"
+                aria-label="设为 Goal"
+              >
+                <Flag className="size-3" />
+                <span className="text-[11px]">设为目标</span>
+              </button>
+            )}
           </div>
         </div>
       </div>

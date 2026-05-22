@@ -18,10 +18,6 @@ export interface GoalExplicitSkillContext {
 export interface GoalContext {
   explicitSkill?: GoalExplicitSkillContext
   transportSummary?: string
-  legacyTransportSummaryMigration?: {
-    objective?: string
-    completionCondition?: string
-  }
 }
 
 export interface ThreadGoal {

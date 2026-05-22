@@ -20,21 +20,24 @@ import type {
   Subagent,
   HITLRequest,
   SkillMetadata,
-  AgentAutoCommitResult
+  AgentAutoCommitResult,
+  GoalUiState
 } from "@/types"
 import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
 import { formatAutoCommitText } from "../../../shared/auto-commit-format"
 import {
-  createGoalNoticeMessage,
-  goalEventToDisplayMessages,
-  mergeGoalNoticeMessagesForRestore,
   isInternalGoalPromptMessage,
-  normalizeRestoredGoalPromptMessage,
   shouldSuppressCheckpointApprovalRestore,
   type GoalNoticeEvent
 } from "./goal-notice-messages"
+import {
+  buildRestoredCheckpointTranscript,
+  formatGoalEventMessage,
+  goalNoticeEventsToGoalUiEvents,
+  isVisibleCheckpointTranscriptMessage,
+} from "./goal-transcript"
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
@@ -284,6 +287,7 @@ export interface HookInterruptionState {
 // Per-thread state (persisted/restored from checkpoints)
 export interface ThreadState {
   messages: Message[]
+  goalUi: GoalUiState
   todos: Todo[]
   workspaceFiles: FileInfo[]
   workspacePath: string | null
@@ -324,6 +328,8 @@ interface StreamData {
 export interface ThreadActions {
   appendMessage: (message: Message) => void
   setMessages: (messages: Message[]) => void
+  setGoalUi: (goalUi: GoalUiState) => void
+  refreshGoalUi: () => Promise<void>
   setTodos: (todos: Todo[]) => void
   setWorkspaceFiles: (files: FileInfo[] | ((prev: FileInfo[]) => FileInfo[])) => void
   setWorkspacePath: (path: string | null) => void
@@ -364,6 +370,7 @@ interface ThreadContextValue {
 // Default thread state
 const createDefaultThreadState = (): ThreadState => ({
   messages: [],
+  goalUi: { goal: null, events: [], lastUpdated: null },
   todos: [],
   workspaceFiles: [],
   workspacePath: null,
@@ -648,6 +655,24 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     []
   )
 
+  const refreshGoalUi = useCallback(
+    async (threadId: string): Promise<void> => {
+      try {
+        const goalUi = await window.api.threads.getGoalState(threadId)
+        updateThreadState(threadId, () => ({
+          goalUi: {
+            goal: goalUi.goal,
+            events: goalUi.events,
+            lastUpdated: new Date()
+          }
+        }))
+      } catch (error) {
+        console.warn("[ThreadContext] Failed to refresh goal UI state:", error)
+      }
+    },
+    [updateThreadState]
+  )
+
   // Parse error messages into user-friendly format
   const parseErrorMessage = useCallback((error: Error | string): string => {
     const raw = typeof error === "string" ? error : error.message
@@ -802,15 +827,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           break
         case "goal_notice":
           if (typeof data.message === "string" && data.message.trim()) {
-            const message = data.message
-            updateThreadState(threadId, (state) => ({
-              messages: [
-                ...state.messages,
-                createGoalNoticeMessage(message, {
-                  goalId: typeof data.goalId === "string" ? data.goalId : null
-                })
-              ]
-            }))
+            const message = formatGoalEventMessage(data.message)
+            if (message.startsWith("✓ Goal 已完成") || message.startsWith("Goal 已完成")) {
+              toast.success(message)
+            } else if (
+              message.startsWith("Goal 已暂停") ||
+              message.startsWith("Ⅱ Goal 已暂停") ||
+              message.startsWith("Goal 等待补充信息")
+            ) {
+              toast.warning(message)
+            } else if (message.startsWith("Goal 已清除")) {
+              toast.info(message)
+            }
+            void refreshGoalUi(threadId)
           }
           break
         case "hook_blocked": {
@@ -911,7 +940,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           break
       }
     },
-    [updateThreadState]
+    [refreshGoalUi, updateThreadState]
   )
 
   const getThreadActions = useCallback(
@@ -944,6 +973,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         setMessages: (messages: Message[]) => {
           updateThreadState(threadId, () => ({ messages }))
         },
+        setGoalUi: (goalUi: GoalUiState) => {
+          updateThreadState(threadId, () => ({ goalUi }))
+        },
+        refreshGoalUi: () => refreshGoalUi(threadId),
         setTodos: (todos: Todo[]) => {
           updateThreadState(threadId, () => ({ todos }))
         },
@@ -1028,7 +1061,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       actionsCache.current[threadId] = actions
       return actions
     },
-    [updateThreadState]
+    [notifyHookLogSubscribers, refreshGoalUi, updateThreadState]
   )
 
   const loadThreadHistory = useCallback(
@@ -1038,6 +1071,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       let persistedInternalGoalMessageTimes: MessageTimeMap = {}
       let persistedInternalGoalMessageTimeOrder: MessageTimeEntry[] = []
       let persistedMessageTimeOrder: MessageTimeEntry[] = []
+      let rawRestoredMessages: Message[] = []
       let restoredMessages: Message[] = []
       let restoredGoalEvents: GoalNoticeEvent[] = []
       let skipCheckpointPendingApproval = false
@@ -1161,7 +1195,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const channelValues = latestCheckpoint.checkpoint?.channel_values
 
           if (channelValues?.messages && Array.isArray(channelValues.messages)) {
-            const rawRestoredMessages = channelValues.messages.map((msg, index) => {
+            rawRestoredMessages = channelValues.messages.map((msg, index) => {
                 let role: "user" | "assistant" | "system" | "tool" = "assistant"
                 if (typeof msg._getType === "function") {
                   const type = msg._getType()
@@ -1221,9 +1255,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 }
               })
 
-            const visibleRestoredMessages = rawRestoredMessages
-              .map(normalizeRestoredGoalPromptMessage)
-              .filter((message): message is Message => Boolean(message))
+            const visibleRestoredMessages = rawRestoredMessages.filter(
+              isVisibleCheckpointTranscriptMessage
+            )
             latestTrustedCheckpointMessageAt = getLatestTrustedCheckpointMessageAt(
               visibleRestoredMessages,
               persistedMessageTimes,
@@ -1299,13 +1333,27 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         console.error("[ThreadContext] Failed to load thread history:", error)
       }
 
-      const goalMessages: Message[] = restoredGoalEvents.flatMap(goalEventToDisplayMessages)
-      if (goalMessages.length > 0) {
-        restoredMessages = mergeGoalNoticeMessagesForRestore(restoredMessages, goalMessages)
-      }
-
-      if (restoredMessages.length > 0) {
-        actions.setMessages(restoredMessages)
+      actions.setMessages(
+        buildRestoredCheckpointTranscript(
+          rawRestoredMessages,
+          restoredMessages,
+          goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
+        )
+      )
+      try {
+        const goalUi = await window.api.threads.getGoalState(threadId)
+        actions.setGoalUi({
+          goal: goalUi.goal,
+          events: goalUi.events,
+          lastUpdated: new Date()
+        })
+      } catch (error) {
+        console.warn("[ThreadContext] Failed to load goal UI state:", error)
+        actions.setGoalUi({
+          goal: null,
+          events: goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents),
+          lastUpdated: new Date()
+        })
       }
 
       updateThreadState(threadId, () => ({ historyLoading: false }))

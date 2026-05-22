@@ -151,6 +151,46 @@ export interface Message {
   goal_id?: string | null
 }
 
+export interface GoalEvent {
+  event_id: number
+  thread_id: string
+  goal_id: string | null
+  message: string
+  created_at: Date | string | number
+}
+
+export interface GoalSnapshot {
+  threadId: string
+  goalId: string
+  activeWindowId: string
+  objective: string
+  completionCondition: string
+  context: {
+    explicitSkill?: { name: string; path: string }
+    transportSummary?: string
+  }
+  status: "active" | "paused" | "complete"
+  turnsUsed: number
+  maxTurns: number
+  lastVerdict: string | null
+  lastReason: string | null
+  pausedReason: string | null
+  consecutiveParseFailures: number
+  ledger: {
+    progress: string[]
+    evidence: string[]
+    blockers: string[]
+  }
+  createdAt: number
+  updatedAt: number
+}
+
+export interface GoalUiState {
+  goal: GoalSnapshot | null
+  events: GoalEvent[]
+  lastUpdated: Date | null
+}
+
 export interface ContentBlock {
   type: "text" | "image" | "tool_use" | "tool_result"
   text?: string

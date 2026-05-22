@@ -206,6 +206,77 @@ const api = {
         }>
       >
     },
+    getGoalState: (
+      threadId: string
+    ): Promise<{
+      goal: {
+        threadId: string
+        goalId: string
+        activeWindowId: string
+        objective: string
+        completionCondition: string
+        context: {
+          explicitSkill?: { name: string; path: string }
+          transportSummary?: string
+        }
+        status: "active" | "paused" | "complete"
+        turnsUsed: number
+        maxTurns: number
+        lastVerdict: string | null
+        lastReason: string | null
+        pausedReason: string | null
+        consecutiveParseFailures: number
+        ledger: {
+          progress: string[]
+          evidence: string[]
+          blockers: string[]
+        }
+        createdAt: number
+        updatedAt: number
+      } | null
+      events: Array<{
+        event_id: number
+        thread_id: string
+        goal_id: string | null
+        message: string
+        created_at: Date | string | number
+      }>
+    }> => {
+      return ipcRenderer.invoke("threads:goalState", threadId) as Promise<{
+        goal: {
+          threadId: string
+          goalId: string
+          activeWindowId: string
+          objective: string
+          completionCondition: string
+          context: {
+            explicitSkill?: { name: string; path: string }
+            transportSummary?: string
+          }
+          status: "active" | "paused" | "complete"
+          turnsUsed: number
+          maxTurns: number
+          lastVerdict: string | null
+          lastReason: string | null
+          pausedReason: string | null
+          consecutiveParseFailures: number
+          ledger: {
+            progress: string[]
+            evidence: string[]
+            blockers: string[]
+          }
+          createdAt: number
+          updatedAt: number
+        } | null
+        events: Array<{
+          event_id: number
+          thread_id: string
+          goal_id: string | null
+          message: string
+          created_at: Date | string | number
+        }>
+      }>
+    },
     generateTitle: (message: string): Promise<string> => {
       return ipcRenderer.invoke("threads:generateTitle", message)
     },
