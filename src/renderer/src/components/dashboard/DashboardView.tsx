@@ -12,11 +12,13 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  Search,
   User,
   Users
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { formatRelativeTime, truncate } from "@/lib/utils"
@@ -1110,6 +1112,8 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
   mineOnly,
   mineSkillCount,
   mineSkillsLoading,
+  skillSearch,
+  onSkillSearchChange,
   onRecentPageChange,
   onSkillPageChange,
   onMineOnlyChange,
@@ -1123,6 +1127,8 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
   mineOnly: boolean
   mineSkillCount: number
   mineSkillsLoading: boolean
+  skillSearch: string
+  onSkillSearchChange: (value: string) => void
   onRecentPageChange: (page: number, key: string | null) => void
   onSkillPageChange: (page: number) => void
   onMineOnlyChange: (mineOnly: boolean) => void
@@ -1191,6 +1197,16 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
   const selectedAverageTotalTokens = selectedSkill?.averageTotalTokens ?? data.averageTotalTokens
   const selectedAverageDurationMs = selectedSkill?.averageDurationMs ?? data.averageDurationMs
   const scopeLabel = mineOnly ? "我的技能" : "全部技能"
+  const statSampleLabel =
+    data.sampledTraceCount > 0
+      ? `统计基于最新 ${formatNumber(data.sampledTraceCount)} 条样本${
+          data.statTraceLimit > 0 && data.sampledTraceCount >= data.statTraceLimit
+            ? `（上限 ${formatNumber(data.statTraceLimit)}）`
+            : ""
+        }`
+      : loading
+        ? "统计样本加载中"
+        : "暂无统计样本"
 
   return (
     <div className="grid min-h-[720px] grid-cols-[minmax(420px,520px)_minmax(0,1fr)] overflow-hidden rounded-xl border border-border bg-card">
@@ -1202,6 +1218,9 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
               {selectedSkill
                 ? `${skillEvalVersionLabel(selectedSkill.skillName, selectedSkill.skillVersion)} · ${scopeLabel} · 范围统计`
                 : `${scopeLabel} · 范围统计`}
+            </div>
+            <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
+              {statSampleLabel}
             </div>
           </div>
           <SkillEvalStatTile label="运行次数" value={selectedRunTotal} />
@@ -1275,6 +1294,15 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
               >
                 我的技能
               </button>
+            </div>
+            <div className="relative mt-2">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={skillSearch}
+                onChange={(event) => onSkillSearchChange(event.target.value)}
+                placeholder="搜索技能名"
+                className="h-7 pl-8 pr-2 text-xs"
+              />
             </div>
             <div className="mt-2 flex items-center justify-between text-[11px] text-muted-foreground">
               <span>
@@ -1478,6 +1506,8 @@ export function DashboardView(): React.JSX.Element {
   const [currentUserUploadCandidatesLoading, setCurrentUserUploadCandidatesLoading] = useState(true)
   const [currentUserUploadCandidates, setCurrentUserUploadCandidates] = useState<string[]>([])
   const [skillEvalMineOnly, setSkillEvalMineOnly] = useState(false)
+  const [skillEvalSearch, setSkillEvalSearch] = useState("")
+  const [debouncedSkillEvalSearch, setDebouncedSkillEvalSearch] = useState("")
   const currentUserUploadCandidateSet = useMemo(
     () => new Set(currentUserUploadCandidates),
     [currentUserUploadCandidates]
@@ -1505,7 +1535,10 @@ export function DashboardView(): React.JSX.Element {
     () => myUploadedSkillNames.join("\u0001"),
     [myUploadedSkillNames]
   )
-  const skillEvalScopeKey = skillEvalMineOnly ? `mine:${myUploadedSkillNamesKey}` : "all"
+  const skillEvalSearchQuery = debouncedSkillEvalSearch.trim()
+  const skillEvalScopeKey = skillEvalMineOnly
+    ? `mine:${myUploadedSkillNamesKey}:${skillEvalSearchQuery}`
+    : `all:${skillEvalSearchQuery}`
   const skillEvalSkillByKey = useMemo(
     () =>
       new Map(
@@ -1521,6 +1554,13 @@ export function DashboardView(): React.JSX.Element {
     skillEvalMineOnly && (marketSkillsLoading || currentUserUploadCandidatesLoading)
   const effectiveSkillEvalSelectedSkillKey =
     skillEvalSelectedSkillKey === undefined ? latestSkillEvalKey : skillEvalSelectedSkillKey
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSkillEvalSearch(skillEvalSearch)
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [skillEvalSearch])
 
   useEffect(() => {
     setSkillEvalSelectedSkillKey(undefined)
@@ -1540,6 +1580,8 @@ export function DashboardView(): React.JSX.Element {
     if (activeMainTab !== "skill-eval" || skillEval || skillEvalLoading || mineSkillsLoading) return
     void fetchSkillEvalPage(1, {
       defaultRecentToLatestSkill: true,
+      listFirst: true,
+      ...(skillEvalSearchQuery ? { skillSearch: skillEvalSearchQuery } : {}),
       ...(skillEvalMineOnly ? { skillNames: myUploadedSkillNames } : {})
     })
   }, [
@@ -1549,7 +1591,8 @@ export function DashboardView(): React.JSX.Element {
     myUploadedSkillNamesKey,
     skillEval,
     skillEvalLoading,
-    skillEvalMineOnly
+    skillEvalMineOnly,
+    skillEvalSearchQuery
   ])
 
   useEffect(() => {
@@ -1765,10 +1808,11 @@ export function DashboardView(): React.JSX.Element {
       const filter = skillEvalFilterForKey(skillEvalSkillByKey, key) ?? {}
       return {
         ...filter,
+        ...(skillEvalSearchQuery ? { skillSearch: skillEvalSearchQuery } : {}),
         ...(skillEvalMineOnly ? { skillNames: myUploadedSkillNames } : {})
       }
     },
-    [myUploadedSkillNamesKey, skillEvalMineOnly, skillEvalSkillByKey]
+    [myUploadedSkillNamesKey, skillEvalMineOnly, skillEvalSearchQuery, skillEvalSkillByKey]
   )
 
   const handleSkillEvalPageChange = useCallback(
@@ -1789,14 +1833,20 @@ export function DashboardView(): React.JSX.Element {
       void fetchSkillEvalPage(1, {
         skillPage: page,
         defaultRecentToLatestSkill: true,
+        listFirst: true,
+        ...(skillEvalSearchQuery ? { skillSearch: skillEvalSearchQuery } : {}),
         ...(skillEvalMineOnly ? { skillNames: myUploadedSkillNames } : {})
       })
     },
-    [fetchSkillEvalPage, myUploadedSkillNames, skillEvalMineOnly]
+    [fetchSkillEvalPage, myUploadedSkillNames, skillEvalMineOnly, skillEvalSearchQuery]
   )
 
   const handleSkillEvalMineOnlyChange = useCallback((mineOnly: boolean) => {
     setSkillEvalMineOnly(mineOnly)
+  }, [])
+
+  const handleSkillEvalSearchChange = useCallback((value: string) => {
+    setSkillEvalSearch(value)
   }, [])
 
   const handleRefresh = useCallback(() => {
@@ -2283,6 +2333,8 @@ export function DashboardView(): React.JSX.Element {
                 mineOnly={skillEvalMineOnly}
                 mineSkillCount={myUploadedSkillCount}
                 mineSkillsLoading={mineSkillsLoading}
+                skillSearch={skillEvalSearch}
+                onSkillSearchChange={handleSkillEvalSearchChange}
                 onRecentPageChange={handleSkillEvalPageChange}
                 onSkillPageChange={handleSkillEvalSkillPageChange}
                 onMineOnlyChange={handleSkillEvalMineOnlyChange}

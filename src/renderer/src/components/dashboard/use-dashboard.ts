@@ -375,6 +375,7 @@ export interface DashboardSkillEvalSummary {
   totalTraceHits: number
   evaluatedTraceCount: number
   sampledTraceCount: number
+  statTraceLimit: number
   recentTotal: number
   recentPage: number
   recentPageSize: number
@@ -409,15 +410,17 @@ export interface DashboardSkillEvalOptions {
   recentPageSize?: number
   skillPage?: number
   skillPageSize?: number
+  skillSearch?: string
   skillName?: string
   skillVersion?: string
   skillNames?: string[]
   defaultRecentToLatestSkill?: boolean
   recentOnly?: boolean
+  listOnly?: boolean
 }
 
 const SKILL_EVAL_RECENT_PAGE_SIZE = 10
-const SKILL_EVAL_SKILL_PAGE_SIZE = 10
+const SKILL_EVAL_SKILL_PAGE_SIZE = 5
 
 function dashboardSkillEvalKey(skillName?: string, skillVersion?: string): string {
   return `${skillName ?? ""}:${skillVersion ?? ""}`
@@ -1228,6 +1231,7 @@ function parseSkillEvalSummary(
     totalTraceHits: numberValue(raw?.totalTraceHits),
     evaluatedTraceCount: numberValue(raw?.evaluatedTraceCount),
     sampledTraceCount: numberValue(raw?.sampledTraceCount),
+    statTraceLimit: numberValue(raw?.statTraceLimit),
     recentTotal,
     recentPage,
     recentPageSize,
@@ -1266,6 +1270,7 @@ function emptySkillEvalSummary(): DashboardSkillEvalSummary {
     totalTraceHits: 0,
     evaluatedTraceCount: 0,
     sampledTraceCount: 0,
+    statTraceLimit: 0,
     recentTotal: 0,
     recentPage: 1,
     recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE,
@@ -1307,6 +1312,9 @@ function mergeSkillEvalRecentOnly(
   return {
     ...current,
     generatedAt: next.generatedAt,
+    evaluatedTraceCount: next.evaluatedTraceCount,
+    sampledTraceCount: next.sampledTraceCount,
+    statTraceLimit: next.statTraceLimit,
     recentTotal: next.recentTotal,
     recentPage: next.recentPage,
     recentPageSize: next.recentPageSize,
@@ -1334,11 +1342,13 @@ async function loadSkillEvalSummarySafely(
       recentPageSize: options.recentPageSize ?? SKILL_EVAL_RECENT_PAGE_SIZE,
       skillPage: options.skillPage ?? 1,
       skillPageSize: options.skillPageSize ?? SKILL_EVAL_SKILL_PAGE_SIZE,
+      ...(options.skillSearch ? { skillSearch: options.skillSearch } : {}),
       ...(options.skillName ? { skillName: options.skillName } : {}),
       ...(options.skillVersion ? { skillVersion: options.skillVersion } : {}),
       ...(options.skillNames ? { skillNames: options.skillNames } : {}),
       ...(options.defaultRecentToLatestSkill ? { defaultRecentToLatestSkill: true } : {}),
-      ...(options.recentOnly ? { recentOnly: true } : {})
+      ...(options.recentOnly ? { recentOnly: true } : {}),
+      ...(options.listOnly ? { listOnly: true } : {})
     })
   } catch (error) {
     console.warn("[Dashboard] skillEvalSummary unavailable, using empty data:", error)
@@ -1440,6 +1450,8 @@ export function useDashboard() {
         defaultRecentToLatestSkill?: boolean
         recentOnly?: boolean
         skillPage?: number
+        skillSearch?: string
+        listFirst?: boolean
       }
     ) => {
       const id = ++skillEvalFetchIdRef.current
@@ -1447,24 +1459,42 @@ export function useDashboard() {
       setError(null)
 
       try {
-        const result = await loadSkillEvalSummarySafely(range, {
+        const requestOptions: DashboardSkillEvalOptions = {
           recentPage: page,
           recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE,
           skillPage: filter?.skillPage ?? 1,
           skillPageSize: SKILL_EVAL_SKILL_PAGE_SIZE,
+          ...(filter?.skillSearch ? { skillSearch: filter.skillSearch } : {}),
           ...(filter?.skillName ? { skillName: filter.skillName } : {}),
           ...(filter?.skillVersion ? { skillVersion: filter.skillVersion } : {}),
           ...(filter?.skillNames ? { skillNames: filter.skillNames } : {}),
           ...(filter?.defaultRecentToLatestSkill ? { defaultRecentToLatestSkill: true } : {}),
           ...(filter?.recentOnly ? { recentOnly: true } : {})
-        })
+        }
+        if (filter?.listFirst && !filter.skillName && !filter.recentOnly) {
+          const listResult = await loadSkillEvalSummarySafely(range, {
+            ...requestOptions,
+            listOnly: true
+          })
+          if (id !== skillEvalFetchIdRef.current) return
+          if (!listResult.success) throw new Error(listResult.error ?? "获取技能评估列表失败")
+          const listSkillEval = parseSkillEvalSummary(listResult.data, {
+            recentPage: page,
+            recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE,
+            skillPage: filter?.skillPage ?? 1,
+            skillPageSize: SKILL_EVAL_SKILL_PAGE_SIZE
+          })
+          setSkillEval(listSkillEval)
+        }
+        const result = await loadSkillEvalSummarySafely(range, requestOptions)
         if (id !== skillEvalFetchIdRef.current) return
         if (!result.success) throw new Error(result.error ?? "获取技能评估数据失败")
         const nextSkillEval = parseSkillEvalSummary(result.data, {
           recentPage: page,
           recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE,
           skillPage: filter?.skillPage ?? 1,
-          skillPageSize: SKILL_EVAL_SKILL_PAGE_SIZE
+          skillPageSize: SKILL_EVAL_SKILL_PAGE_SIZE,
+          ...(filter?.skillSearch ? { skillSearch: filter.skillSearch } : {})
         })
         setSkillEval((current) =>
           filter?.recentOnly && current

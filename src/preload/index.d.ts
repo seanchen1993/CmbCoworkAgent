@@ -165,11 +165,13 @@ interface DashboardSkillEvalOptions {
   recentPageSize?: number
   skillPage?: number
   skillPageSize?: number
+  skillSearch?: string
   skillName?: string
   skillVersion?: string
   skillNames?: string[]
   defaultRecentToLatestSkill?: boolean
   recentOnly?: boolean
+  listOnly?: boolean
 }
 
 interface DashboardCodeStats {
