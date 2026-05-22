@@ -22,6 +22,7 @@ const SETUP_MARKER_PATH = join(CODEX_HOME, ".sandbox", "setup_marker.json")
 const SANDBOX_USERS_PATH = join(CODEX_HOME, ".sandbox-secrets", "sandbox_users.json")
 const ELEVATED_WORKSPACES_PATH = join(CODEX_HOME, ".sandbox", "elevated_workspaces.json")
 const SETUP_VERSION = 5
+const ENABLE_SANDBOX_NUX = false
 const execFileP = promisify(execFile)
 
 async function pathExists(filePath: string): Promise<boolean> {
@@ -665,8 +666,8 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
   // ── NUX (first-run setup) ──
 
   ipcMain.handle("sandbox:isNuxNeeded", async (): Promise<boolean> => {
-    // Only show NUX on Windows, and only if not yet completed (persisted across app restarts)
-    return process.platform === "win32" && !isSandboxNuxCompleted()
+    // Sandbox now defaults to disabled. Keep elevated setup opt-in from Settings unless NUX is re-enabled.
+    return ENABLE_SANDBOX_NUX && process.platform === "win32" && !isSandboxNuxCompleted()
   })
 
   ipcMain.handle(

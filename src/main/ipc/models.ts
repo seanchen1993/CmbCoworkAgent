@@ -538,7 +538,15 @@ type ThreadGitContextCache = {
   gitRoot: string | null
 }
 
+/**
+ * 清理线程 metadata 中的 Git 探测缓存。
+ *
+ * 新版缓存统一放在 `metadata.gitContext` 对象里；旧版曾经把同一组信息拆成
+ * `cachedIsGitRepo` / `cachedIsWorktreePath` / `cachedGitRoot` 等多个顶层字段。
+ * 这里同时删除新旧字段，确保工作区切换、worktree context 清理等场景不会留下过期状态。
+ */
 function clearThreadGitContextCache(metadata: Record<string, unknown>): void {
+  delete metadata.gitContext
   delete metadata.cachedIsGitRepo
   delete metadata.cachedIsWorktreePath
   delete metadata.cachedGitRoot
@@ -546,26 +554,91 @@ function clearThreadGitContextCache(metadata: Record<string, unknown>): void {
   delete metadata.cachedGitContextAt
 }
 
+/**
+ * 写入线程级 Git context 缓存。
+ *
+ * 该缓存记录“某个 workspacePath 最近一次 Git 探测的结果”，包括：
+ * - 当前路径是否是 Git 仓库；
+ * - 当前路径是否是 worktree；
+ * - 对应的 git root。
+ *
+ * GitPanel、WorkspacePicker 等入口会频繁需要这些信息。把它们写入 metadata 后，进入同一
+ * thread 时可以先用缓存渲染 UI，再由后台刷新补齐实时状态。
+ */
 function writeThreadGitContextCache(
   metadata: Record<string, unknown>,
   payload: { workspacePath: string; isGitRepo: boolean; isWorktreePath: boolean; gitRoot: string | null }
 ): void {
-  metadata.cachedGitContextWorkspacePath = payload.workspacePath
-  metadata.cachedGitContextAt = new Date().toISOString()
-  metadata.cachedIsGitRepo = payload.isGitRepo
-  metadata.cachedIsWorktreePath = payload.isWorktreePath
-  if (payload.gitRoot) {
-    metadata.cachedGitRoot = payload.gitRoot
-  } else {
-    delete metadata.cachedGitRoot
+  // 写入前先清掉新旧缓存字段，避免 metadata 同时存在两套 Git context 表达。
+  clearThreadGitContextCache(metadata)
+  metadata.gitContext = {
+    workspacePath: payload.workspacePath,
+    checkedAt: new Date().toISOString(),
+    isGitRepo: payload.isGitRepo,
+    isWorktreePath: payload.isWorktreePath,
+    gitRoot: payload.gitRoot
   }
 }
 
+/**
+ * 读取线程级 Git context 缓存。
+ *
+ * 返回值只代表“可复用的探测结果”，因此会做三层校验：
+ * - 必须和当前 workspacePath 匹配；
+ * - 必须在 TTL 内，避免长期使用陈旧仓库状态；
+ * - 至少包含 isGitRepo / isWorktreePath / gitRoot 中的一项有效信息。
+ *
+ * 读取顺序是新版 `metadata.gitContext` 优先，旧版 `cached*` 顶层字段作为兼容 fallback。
+ */
 function readThreadGitContextCache(
   metadata: Record<string, unknown>,
   workspacePath: string | null
 ): ThreadGitContextCache | null {
   if (!workspacePath) return null
+  // 优先读取新版结构：所有 Git 探测结果都收敛在 metadata.gitContext 中。
+  const gitContext =
+    metadata.gitContext && typeof metadata.gitContext === "object" && !Array.isArray(metadata.gitContext)
+      ? (metadata.gitContext as Record<string, unknown>)
+      : null
+  if (gitContext) {
+    // 缓存必须属于当前 workspacePath。路径不一致说明线程后来切换过工作区，不能复用。
+    const contextWorkspacePath =
+      typeof gitContext.workspacePath === "string" ? gitContext.workspacePath : null
+    if (!contextWorkspacePath || contextWorkspacePath !== workspacePath) {
+      return null
+    }
+
+    // Git context 是探测结果缓存，只用于减少短时间内的重复 rev-parse/worktree 查询。
+    const checkedAtRaw =
+      typeof gitContext.checkedAt === "string" ? Date.parse(gitContext.checkedAt) : Number.NaN
+    if (!Number.isFinite(checkedAtRaw)) {
+      return null
+    }
+    if (Date.now() - checkedAtRaw > THREAD_GIT_CONTEXT_CACHE_TTL_MS) {
+      return null
+    }
+
+    // 字段级别做宽松读取：老数据或手工编辑 metadata 时，缺字段也不会抛错。
+    const isGitRepo = typeof gitContext.isGitRepo === "boolean" ? gitContext.isGitRepo : null
+    const isWorktreePath =
+      typeof gitContext.isWorktreePath === "boolean" ? gitContext.isWorktreePath : null
+    const gitRoot =
+      typeof gitContext.gitRoot === "string" && gitContext.gitRoot.trim()
+        ? gitContext.gitRoot
+        : null
+
+    if (isGitRepo === null && isWorktreePath === null && !gitRoot) {
+      return null
+    }
+
+    return {
+      isGitRepo: isGitRepo ?? Boolean(gitRoot),
+      isWorktreePath: isWorktreePath ?? false,
+      gitRoot
+    }
+  }
+
+  // 兼容旧 metadata：新写入都会使用 metadata.gitContext 对象。
   const cachedWorkspacePath =
     typeof metadata.cachedGitContextWorkspacePath === "string"
       ? metadata.cachedGitContextWorkspacePath
@@ -1964,8 +2037,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
     const result = await dialog.showOpenDialog({
       properties: ["openDirectory", "createDirectory"],
-      title: "Select Workspace Folder",
-      message: "Choose a folder for the agent to work in",
+      title: "选择工作区文件夹",
+      message: "请选择代理要工作的文件夹",
       defaultPath
     })
 

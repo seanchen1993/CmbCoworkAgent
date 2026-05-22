@@ -670,6 +670,62 @@ async function testNewDirtyFilesAllCommitted(): Promise<void> {
   })
 }
 
+async function testSubdirectoryWorkspacePathspecs(): Promise<void> {
+  await withTempDir("ac-subdir-workspace", async (repo) => {
+    await initRepo(repo)
+    await setSettings(enabledSettings("diff"))
+    const workspace = join(repo, "OSA_MicroService", "OSA_GateWay")
+    const fileRel = join("src", "main", "java", "com", "cmbchina", "ue", "filter", "AuthHeaderFilter.java")
+    const modifiedRel = join("src", "main", "java", "com", "cmbchina", "ue", "filter", "TrackedFilter.java")
+    const renameOldRel = join("src", "main", "java", "com", "cmbchina", "ue", "filter", "OldFilter.java")
+    const renameNewRel = join("src", "main", "java", "com", "cmbchina", "ue", "filter", "RenamedFilter.java")
+    await mkdir(join(workspace, "src", "main", "java", "com", "cmbchina", "ue", "filter"), {
+      recursive: true
+    })
+    await writeFile(join(workspace, modifiedRel), "public class TrackedFilter {}\n")
+    await writeFile(join(workspace, renameOldRel), "public class OldFilter {}\n")
+    await git(repo, ["add", "."])
+    await git(repo, ["commit", "-q", "-m", "add gateway tracked files"])
+
+    const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
+      await importAutoCommit()
+    const snap = await startAgentGitSnapshot("t-c19-subdir", workspace)
+    await writeFile(join(workspace, fileRel), "public class AuthHeaderFilter {}\n")
+    await writeFile(join(workspace, modifiedRel), "public class TrackedFilter { int changed; }\n")
+    await git(workspace, ["mv", renameOldRel, renameNewRel])
+    // `git mv` leaves a staged rename; mark the new path as Agent-touched.
+    recordAgentTouchedFile("t-c19-subdir", workspace, renameNewRel)
+
+    const result = await maybeAutoCommitAfterAgentRun({
+      threadId: "t-c19-subdir",
+      workspacePath: workspace,
+      snapshot: snap
+    })
+
+    assert(result.status === "committed", `expected committed, got ${result.status}: ${JSON.stringify(result.reasons)}`)
+    const expectedNew = fileRel.replace(/\\/g, "/")
+    const expectedModified = modifiedRel.replace(/\\/g, "/")
+    const expectedRenamed = renameNewRel.replace(/\\/g, "/")
+    for (const expected of [expectedNew, expectedModified, expectedRenamed]) {
+      assert(
+        result.committedFiles?.includes(expected) ?? false,
+        `expected workspace-relative committed file ${expected}, got ${JSON.stringify(result.committedFiles)}`
+      )
+    }
+    const committed = await git(repo, ["show", "--name-only", "--format=", "HEAD"])
+    for (const expected of [
+      "OSA_MicroService/OSA_GateWay/src/main/java/com/cmbchina/ue/filter/AuthHeaderFilter.java",
+      "OSA_MicroService/OSA_GateWay/src/main/java/com/cmbchina/ue/filter/TrackedFilter.java",
+      "OSA_MicroService/OSA_GateWay/src/main/java/com/cmbchina/ue/filter/RenamedFilter.java"
+    ]) {
+      assert(
+        committed.includes(expected),
+        `expected repo-root path ${expected} in commit, got ${committed}`
+      )
+    }
+  })
+}
+
 async function testPushSuccessAgainstBareRemote(): Promise<void> {
   await withTempDir("ac-push-ok", async (workspace) => {
     const bare = await mkdtemp(join(tmpdir(), "ac-push-ok-bare-"))
@@ -774,6 +830,8 @@ async function run(): Promise<void> {
     console.log("PASS C18 llmModifiedFiles metadata cleared")
     await testNewDirtyFilesAllCommitted()
     console.log("PASS C19 all new dirty files included (incl. unreported)")
+    await testSubdirectoryWorkspacePathspecs()
+    console.log("PASS C19b subdirectory workspace pathspecs")
     await testPushSuccessAgainstBareRemote()
     console.log("PASS C20 push: true with bare remote -> pushed=true")
     await testPushFailureReportedButCommitKept()

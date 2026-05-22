@@ -25,6 +25,7 @@ import type {
   PluginManifest,
   SkillHookMetadata,
   ChatXConfig,
+  HookLoggingConfig,
   AgentAutoCommitSettings
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -121,7 +122,8 @@ const api = {
       threadId: string,
       message: string,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      userMessageId?: string
     ): (() => void) => {
       const channel = `agent:stream:${threadId}`
 
@@ -133,7 +135,7 @@ const api = {
       }
 
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("agent:invoke", { threadId, message, modelId })
+      ipcRenderer.send("agent:invoke", { threadId, message, modelId, userMessageId })
 
       return () => {
         ipcRenderer.removeListener(channel, handler)
@@ -144,7 +146,8 @@ const api = {
       message: string,
       command: unknown,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      userMessageId?: string
     ): (() => void) => {
       const channel = `agent:stream:${threadId}`
 
@@ -160,7 +163,7 @@ const api = {
       if (command) {
         ipcRenderer.send("agent:resume", { threadId, command, modelId })
       } else {
-        ipcRenderer.send("agent:invoke", { threadId, message, modelId })
+        ipcRenderer.send("agent:invoke", { threadId, message, modelId, userMessageId })
       }
 
       return () => {
@@ -208,6 +211,11 @@ const api = {
     },
     delete: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("threads:delete", threadId)
+    },
+    exportSession: (
+      threadId: string
+    ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> => {
+      return ipcRenderer.invoke("threads:exportSession", threadId)
     },
     getHistory: (threadId: string): Promise<unknown[]> => {
       return ipcRenderer.invoke("threads:history", threadId)
@@ -1229,9 +1237,10 @@ const api = {
       ipcRenderer.invoke("plugins:list") as Promise<PluginMetadata[]>,
     install: (
       buffer: ArrayBuffer,
-      fileName: string
+      fileName: string,
+      origin?: "market" | "local"
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:install", { buffer, fileName }) as Promise<{
+      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin }) as Promise<{
         success: boolean
         pluginName?: string
         error?: string
@@ -1255,6 +1264,13 @@ const api = {
       ipcRenderer.invoke("plugins:delete", id) as Promise<{ success: boolean; error?: string }>,
     setEnabled: (id: string, enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("plugins:setEnabled", { id, enabled }) as Promise<void>,
+    setOriginsBatch: (
+      updates: Array<{ id: string; origin: "market" | "local" }>
+    ): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke("plugins:setOriginsBatch", { updates }) as Promise<{
+        success: boolean
+        error?: string
+      }>,
     getDetail: (
       id: string
     ): Promise<{
@@ -1744,6 +1760,26 @@ const api = {
           ipcRenderer.removeListener("hooks:workspace:changed", handler)
         }
       }
+    },
+    logging: {
+      get: (): Promise<HookLoggingConfig> => ipcRenderer.invoke("hooks:logging:get"),
+      save: (updates: Partial<HookLoggingConfig>): Promise<HookLoggingConfig> =>
+        ipcRenderer.invoke("hooks:logging:save", updates),
+      getLogDir: (): Promise<string> => ipcRenderer.invoke("hooks:logging:getLogDir"),
+      openLogDir: (): Promise<{ success: boolean; error?: string }> =>
+        ipcRenderer.invoke("hooks:logging:openLogDir"),
+      onChanged: (callback: (config: HookLoggingConfig) => void): (() => void) => {
+        const handler = (
+          _: unknown,
+          data: { config: HookLoggingConfig; at: string } | HookLoggingConfig
+        ): void => {
+          callback("config" in data ? data.config : data)
+        }
+        ipcRenderer.on("hooks:logging:changed", handler)
+        return () => {
+          ipcRenderer.removeListener("hooks:logging:changed", handler)
+        }
+      }
     }
   },
   codeExecTools: {
@@ -1787,6 +1823,17 @@ const api = {
       opts?: { upperOrgLv1?: string | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userStats", range, granularity, opts),
+    userList: (
+      range: { from: string; to: string },
+      options?: { pageSize?: number; afterKey?: Record<string, string | number> | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:userList", range, options),
+    userDetail: (
+      sapId: string,
+      range: { from: string; to: string },
+      options?: { traceLimit?: number }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:userDetail", sapId, range, options),
     skillUsageSummary: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -1820,6 +1867,12 @@ const api = {
       limit?: number
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit),
+    marketSkillRecentTraces: (
+      skill: string,
+      range: { from: string; to: string },
+      limit?: number
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:marketSkillRecentTraces", skill, range, limit),
     skillDetail: (
       skill: string,
       range: { from: string; to: string },

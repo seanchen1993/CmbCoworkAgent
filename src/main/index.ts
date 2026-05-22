@@ -139,6 +139,7 @@ import { registerSandboxHandlers } from "./ipc/sandbox"
 import { registerOptimizerHandlers } from "./ipc/optimizer"
 import { registerChatXHandlers } from "./ipc/chatx"
 import { registerHooksHandlers } from "./ipc/hooks"
+import { flushHookLogs, pruneOldHookLogs } from "./hooks/persistence"
 import { registerTerminalHandlers, disposeAllTerminals } from "./ipc/terminal"
 import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
@@ -472,6 +473,8 @@ if (!gotTheLock) {
     registerOptimizerHandlers(ipcMain)
     registerChatXHandlers(ipcMain)
     registerHooksHandlers(ipcMain)
+    // Best-effort cleanup of stale hook-log jsonl files. Doesn't block startup.
+    void pruneOldHookLogs().catch((e) => console.warn("[Main] pruneOldHookLogs error:", e))
     registerTerminalHandlers(ipcMain)
     registerCodeExecToolsHandlers(ipcMain)
     registerRoutingHandlers(ipcMain)
@@ -682,7 +685,8 @@ if (!gotTheLock) {
 
     const cleanup = Promise.all([
       stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
-      closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err))
+      closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err)),
+      flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
     ])
 
     // Single-fire exit guard so timeout + finally don't both call app.exit

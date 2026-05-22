@@ -137,6 +137,29 @@ async function throwMarketError(response: Response): Promise<never> {
   throw new Error(message)
 }
 
+async function readOptionalJsonResponse<T>(response: Response): Promise<T | undefined> {
+  try {
+    const text = await response.text()
+    if (!text.trim()) return undefined
+    return JSON.parse(text) as T
+  } catch (error) {
+    console.warn("[marketApi] Successful response was not JSON:", error)
+    return undefined
+  }
+}
+
+function getSuccessfulResponseFailureMessage(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null
+
+  const payload = body as Record<string, unknown>
+  const status = typeof payload.status === "string" ? payload.status.trim().toLowerCase() : ""
+  if (payload.success === false || payload.ok === false || status === "error" || status === "fail") {
+    return getErrorMessageFromBody(body) || "市场接口返回失败"
+  }
+
+  return null
+}
+
 // Utility function to download blob as file
 const downloadBlobAsFile = (blob: Blob, filename: string) => {
   const url = URL.createObjectURL(blob)
@@ -426,7 +449,7 @@ export const marketApi = {
       try {
         const arrayBuffer = await blob.arrayBuffer()
         if (typeof window.api?.plugins?.install === "function") {
-          const installResult = await window.api.plugins.install(arrayBuffer, filename)
+          const installResult = await window.api.plugins.install(arrayBuffer, filename, "market")
           return {
             success: installResult.success,
             error: installResult.error
@@ -587,7 +610,17 @@ export const marketApi = {
       await throwMarketError(response)
     }
 
-    const data: MarketUploadResponse = await response.json()
+    const data = await readOptionalJsonResponse<MarketUploadResponse & Record<string, unknown>>(
+      response
+    )
+    const failureMessage = getSuccessfulResponseFailureMessage(data)
+    if (failureMessage) {
+      return {
+        success: false,
+        error: failureMessage
+      }
+    }
+
     return {
       success: true,
       data
@@ -653,7 +686,17 @@ export const marketApi = {
       await throwMarketError(response)
     }
 
-    const data: MarketUpdateResponse = await response.json()
+    const data = await readOptionalJsonResponse<MarketUpdateResponse & Record<string, unknown>>(
+      response
+    )
+    const failureMessage = getSuccessfulResponseFailureMessage(data)
+    if (failureMessage) {
+      return {
+        success: false,
+        error: failureMessage
+      }
+    }
+
     return {
       success: true,
       data

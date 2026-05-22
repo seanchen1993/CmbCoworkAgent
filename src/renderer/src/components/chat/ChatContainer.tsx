@@ -43,6 +43,13 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
@@ -50,6 +57,7 @@ import {
   useCurrentThread,
   useThreadStream,
   useThreadContext,
+  type HookLogBucket,
   type HookLogEntry
 } from "@/lib/thread-context"
 import { ModelSwitcher } from "./ModelSwitcher"
@@ -78,6 +86,7 @@ import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-comman
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
 import { groupWelcomeSkills } from "./skill-grouping"
+import { GitBranchSwitcher } from "./GitBranchSwitcher"
 
 type WelcomeSkillCard = {
   skill: SkillMetadata
@@ -361,128 +370,274 @@ function WelcomeSkillTreeList(props: {
   )
 }
 
-function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
-  const [expanded, setExpanded] = React.useState(false)
-  const hasIssue = logs.some(
-    (l) =>
-      l.blocked ||
-      l.continue === false ||
-      l.decision === "block" ||
-      l.exitCode === null ||
-      (l.exitCode !== 0 && l.exitCode !== 2)
-  )
+/** Status descriptor for an executed log row. */
+function entryStatus(log: HookLogEntry): { ok: boolean; text: string } {
+  if (log.kind === "skipped") {
+    return { ok: false, text: "skipped" }
+  }
+  const ok =
+    !log.blocked && log.continue !== false && log.decision !== "block" && log.exitCode === 0
+  if (ok) return { ok: true, text: "✓" }
+  if (log.continue === false) return { ok: false, text: "终止" }
+  if (log.decision === "block") return { ok: false, text: "修订" }
+  if (log.blocked) return { ok: false, text: "✗ 拦截" }
+  if (log.exitCode === null) return { ok: false, text: "✗ 超时" }
+  return { ok: false, text: `✗ exit=${log.exitCode}` }
+}
+
+function formatSkipReason(reason: string | undefined): string {
+  switch (reason) {
+    case "plugin-not-active":
+      return "skipped — 插件未激活（scope 未包含 pluginId）"
+    case "skill-name-only-shadowed":
+      return "skipped — 同名 skill 被路径作用域屏蔽"
+    case "skill-not-in-scope":
+      return "skipped — skill 未激活"
+    default:
+      return reason ? `skipped — ${reason}` : "skipped"
+  }
+}
+
+/** Small inline pill rendered right under a user message. */
+function HookLogChip({
+  bucket,
+  onClick
+}: {
+  bucket: HookLogBucket
+  onClick: () => void
+}): React.JSX.Element {
+  // Count categories separately so the chip label can't mislead the user into
+  // thinking "Hook 7" means 7 hooks ran when 5 of them were scope-filtered.
+  let executedCount = 0
+  let skippedCount = 0
+  let issueCount = 0
+  for (const l of bucket.entries) {
+    if (l.kind === "skipped") {
+      skippedCount += 1
+      continue
+    }
+    executedCount += 1
+    if (!entryStatus(l).ok) issueCount += 1
+  }
+  // Diagnostic mode with no plugins active can produce buckets where every
+  // entry is "skipped". Showing "Hook 0 · skip 5" reads as a bug; surface the
+  // skip count as the primary label instead so the chip stays honest.
+  const onlySkipped = executedCount === 0 && skippedCount > 0
   return (
-    <div
-      className={`rounded-md border text-xs font-mono ${hasIssue ? "border-amber-400/60 bg-amber-50/40 dark:bg-amber-900/10" : "border-border/50 bg-muted/30"}`}
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-mono transition-colors",
+        issueCount > 0
+          ? "border-amber-400/60 bg-amber-50/60 text-amber-700 hover:bg-amber-100/70 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-300"
+          : "border-border/60 bg-muted/40 text-muted-foreground hover:bg-muted"
+      )}
+      title="点击查看本轮 Hook 执行详情"
     >
+      <span>⚙</span>
+      {onlySkipped ? (
+        <span>Hook skip {skippedCount}</span>
+      ) : (
+        <>
+          <span>Hook {executedCount}</span>
+          {skippedCount > 0 && (
+            <span className="text-muted-foreground/70">· skip {skippedCount}</span>
+          )}
+        </>
+      )}
+      {issueCount > 0 && (
+        <span className="rounded-full bg-amber-500/20 px-1 text-[10px] text-amber-700 dark:text-amber-300">
+          ⚠{issueCount}
+        </span>
+      )}
+    </button>
+  )
+}
+
+function HookLogEntryRow({ log }: { log: HookLogEntry }): React.JSX.Element {
+  const [expanded, setExpanded] = React.useState(false)
+  const status = entryStatus(log)
+  const showCopy = (): void => {
+    try {
+      void navigator.clipboard.writeText(JSON.stringify(log, null, 2))
+      toast.success("已复制为 JSON")
+    } catch {
+      toast.error("复制失败")
+    }
+  }
+  return (
+    <div className="px-3 py-2 text-xs font-mono">
       <button
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-muted/50 transition-colors"
+        type="button"
+        className="flex w-full items-center gap-2 text-left"
         onClick={() => setExpanded((v) => !v)}
       >
-        <span className="shrink-0">⚙</span>
-        <span className="text-muted-foreground">
-          Hook 执行记录（{logs.length} 次）{hasIssue ? " ⚠" : ""}
+        <span className={status.ok ? "text-green-600 dark:text-green-400" : "text-red-500"}>
+          {status.text}
         </span>
-        <span className="ml-auto text-muted-foreground/60">{expanded ? "▲" : "▼"}</span>
+        <span className="text-foreground/80 font-semibold shrink-0">
+          [{log.event}
+          {log.toolSuffix}]
+        </span>
+        {log.pluginName && (
+          <span className="text-[10px] text-blue-600/70 dark:text-blue-400/70 shrink-0">
+            plugin: {log.pluginName}
+          </span>
+        )}
+        {log.skillName && (
+          <span className="text-[10px] text-purple-600/70 dark:text-purple-400/70 shrink-0">
+            skill: {log.skillName}
+          </span>
+        )}
+        <span className="text-muted-foreground truncate flex-1">
+          {log.hookType}: {log.label}
+        </span>
+        {typeof log.durationMs === "number" && log.kind === "executed" && (
+          <span className="text-[10px] text-muted-foreground/70 shrink-0">{log.durationMs}ms</span>
+        )}
+        <span className="text-[10px] text-muted-foreground/60 shrink-0">
+          {log.timestamp.toLocaleTimeString()}
+        </span>
+        <span className="text-muted-foreground/60 shrink-0">{expanded ? "▲" : "▼"}</span>
       </button>
       {expanded && (
-        <div className="border-t border-border/40 divide-y divide-border/30">
-          <div className="px-3 py-2 text-[11px] text-muted-foreground">
-            调试日志建议写到 <span className="font-mono text-foreground/80">stderr</span>。 如果{" "}
-            <span className="font-mono text-foreground/80">stdout</span> 输出的是 JSON，它会被当成
-            Hook 返回值解析，结构化的 additionalContext 也会在这里显示。
+        <div className="pl-4 mt-1.5 space-y-1.5">
+          {log.kind === "skipped" && (
+            <div className="text-[11px] text-muted-foreground italic">
+              {formatSkipReason(log.skipReason)}
+            </div>
+          )}
+          {(log.reason || log.stopReason) && (
+            <LogBlock
+              label={log.stopReason ? "stopReason" : "reason"}
+              text={log.stopReason || log.reason || ""}
+              tone="amber"
+            />
+          )}
+          {log.stdout && <LogBlock label="stdout" text={log.stdout} tone="neutral" />}
+          {log.stderr && <LogBlock label="stderr" text={log.stderr} tone="red" />}
+          {log.additionalContext && (
+            <LogBlock label="additionalContext" text={log.additionalContext} tone="blue" />
+          )}
+          {log.systemMessage && <LogBlock label="systemMessage" text={log.systemMessage} tone="blue" />}
+          {log.stdinPayload && <LogBlock label="stdin (诊断)" text={log.stdinPayload} tone="neutral" />}
+          {log.command && <LogBlock label="command" text={log.command} tone="neutral" />}
+          {log.cwd && <LogBlock label="cwd" text={log.cwd} tone="neutral" />}
+          {log.hookSourcePath && (
+            <LogBlock label="hookSourcePath" text={log.hookSourcePath} tone="neutral" />
+          )}
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={showCopy}
+              className="text-[11px] text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
+            >
+              复制 JSON
+            </button>
           </div>
-          {logs.map((log) => {
-            const ok =
-              !log.blocked &&
-              log.continue !== false &&
-              log.decision !== "block" &&
-              log.exitCode === 0
-            const statusText = ok
-              ? "✓"
-              : log.continue === false
-                ? "终止"
-                : log.decision === "block"
-                  ? "修订"
-                  : log.blocked
-                    ? "✗ 拦截"
-                    : log.exitCode === null
-                      ? "✗ 超时"
-                      : `✗ exit=${log.exitCode}`
-            return (
-              <div key={log.id} className="px-3 py-2 space-y-0.5">
-                <div className="flex items-center gap-2">
-                  <span className={ok ? "text-green-600 dark:text-green-400" : "text-red-500"}>
-                    {statusText}
-                  </span>
-                  <span className="text-foreground/80 font-semibold">
-                    [{log.event}
-                    {log.toolSuffix}]
-                  </span>
-                  <span className="text-muted-foreground truncate">
-                    {log.hookType}: {log.label}
-                  </span>
-                  {log.decision && (
-                    <span className="text-xs text-amber-600 dark:text-amber-400">
-                      {log.decision}
-                    </span>
-                  )}
-                  {log.continue === false && (
-                    <span className="text-xs text-red-600 dark:text-red-400">continue=false</span>
-                  )}
-                  <span className="ml-auto text-[10px] text-muted-foreground/70">
-                    {log.timestamp.toLocaleTimeString()}
-                  </span>
-                </div>
-                {(log.reason || log.stopReason) && (
-                  <div className="pl-4 space-y-1">
-                    <div className="text-[10px] uppercase tracking-wide text-amber-600/80 dark:text-amber-400/80">
-                      {log.stopReason ? "stopReason" : "reason"}
-                    </div>
-                    <div className="max-h-40 overflow-auto rounded-md border border-amber-300/40 bg-amber-50/40 px-2 py-1 text-amber-700/90 whitespace-pre-wrap break-all dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300/90">
-                      {log.stopReason || log.reason}
-                    </div>
-                  </div>
-                )}
-                {log.stdout && (
-                  <div className="pl-4 space-y-1">
-                    <div className="text-[10px] uppercase tracking-wide text-muted-foreground/70">
-                      stdout
-                    </div>
-                    <div className="max-h-40 overflow-auto rounded-md border border-border/40 bg-background/70 px-2 py-1 text-muted-foreground whitespace-pre-wrap break-all">
-                      {log.stdout}
-                    </div>
-                  </div>
-                )}
-                {log.stderr && (
-                  <div className="pl-4 space-y-1">
-                    <div className="text-[10px] uppercase tracking-wide text-red-500/70">
-                      stderr / 日志
-                    </div>
-                    <div className="max-h-48 overflow-auto rounded-md border border-red-300/40 bg-red-50/40 px-2 py-1 text-red-500/80 whitespace-pre-wrap break-all dark:border-red-500/30 dark:bg-red-500/10">
-                      {log.stderr}
-                    </div>
-                  </div>
-                )}
-                {log.additionalContext && (
-                  <div className="pl-4 space-y-1">
-                    <div className="text-[10px] uppercase tracking-wide text-blue-500/70">
-                      additionalContext
-                    </div>
-                    <div className="max-h-40 overflow-auto rounded-md border border-blue-300/40 bg-blue-50/40 px-2 py-1 text-blue-600/90 whitespace-pre-wrap break-all dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300/90">
-                      {log.additionalContext}
-                    </div>
-                  </div>
-                )}
-                {log.systemMessage && (
-                  <div className="text-blue-500/80 pl-4">{log.systemMessage}</div>
-                )}
-              </div>
-            )
-          })}
         </div>
       )}
     </div>
+  )
+}
+
+function LogBlock({
+  label,
+  text,
+  tone
+}: {
+  label: string
+  text: string
+  tone: "amber" | "red" | "blue" | "neutral"
+}): React.JSX.Element {
+  const toneClass =
+    tone === "amber"
+      ? "border-amber-300/40 bg-amber-50/40 text-amber-700/90 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300/90"
+      : tone === "red"
+        ? "border-red-300/40 bg-red-50/40 text-red-500/80 dark:border-red-500/30 dark:bg-red-500/10"
+        : tone === "blue"
+          ? "border-blue-300/40 bg-blue-50/40 text-blue-600/90 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300/90"
+          : "border-border/40 bg-background/70 text-muted-foreground"
+  return (
+    <div className="space-y-1">
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground/70">{label}</div>
+      <div
+        className={cn(
+          "max-h-48 overflow-auto rounded-md border px-2 py-1 whitespace-pre-wrap break-all",
+          toneClass
+        )}
+      >
+        {text}
+      </div>
+    </div>
+  )
+}
+
+/** Modal that shows a single turn's bucket of hook executions. */
+function HookLogModal({
+  bucket,
+  open,
+  onOpenChange
+}: {
+  bucket: HookLogBucket | null
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}): React.JSX.Element {
+  // Memoized so re-rendering the modal while the bucket grows doesn't reshuffle
+  // collapsed/expanded child state.
+  const entries = bucket?.entries ?? []
+  const exportJsonl = React.useCallback((): void => {
+    if (!bucket) return
+    const text = entries.map((e) => JSON.stringify(e)).join("\n")
+    const blob = new Blob([text], { type: "application/jsonl" })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `hook-logs-${bucket.turnId}.jsonl`
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [bucket, entries])
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-3xl max-h-[80vh] flex flex-col p-0">
+        <DialogHeader className="px-5 pt-5 pb-3 border-b border-border/60">
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <span>Hook 执行记录</span>
+            <span className="text-xs font-normal text-muted-foreground">
+              · 此轮 {entries.length} 次
+            </span>
+          </DialogTitle>
+          {bucket?.turnPreview && (
+            <DialogDescription className="line-clamp-2 text-xs">
+              用户消息：{bucket.turnPreview}
+            </DialogDescription>
+          )}
+        </DialogHeader>
+        <div className="flex items-center gap-2 px-5 py-2 border-b border-border/40 text-xs">
+          <button
+            type="button"
+            onClick={exportJsonl}
+            disabled={entries.length === 0}
+            className="text-muted-foreground hover:text-foreground underline-offset-2 hover:underline disabled:opacity-40 disabled:no-underline"
+          >
+            导出为 .jsonl
+          </button>
+          <span className="ml-auto text-[11px] text-muted-foreground/70">
+            调试日志写到 stderr；stdout 输出 JSON 会被当作 Hook 返回值解析
+          </span>
+        </div>
+        <div className="flex-1 overflow-auto divide-y divide-border/30">
+          {entries.length === 0 ? (
+            <div className="px-5 py-6 text-center text-xs text-muted-foreground">
+              本轮暂无 Hook 执行记录
+            </div>
+          ) : (
+            entries.map((log) => <HookLogEntryRow key={log.id} log={log} />)
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -1058,12 +1213,45 @@ export function ChatContainer({
     threadMessageIdsRef.current = new Set(threadMessages.map((message) => message.id))
   }, [threadMessages])
 
-  // Hook logs live in an external store so updates don't re-render the full provider tree
+  // Hook logs live in an external store so updates don't re-render the full provider tree.
+  // Per-turn buckets are keyed by the user message id that opened the turn,
+  // so the chip rendered under each user message can pull its own bucket.
   const threadContext = useThreadContext()
-  const hookLogs = useSyncExternalStore(
+  const hookLogBuckets = useSyncExternalStore(
     useCallback((cb) => threadContext.subscribeToHookLogs(threadId, cb), [threadContext, threadId]),
-    useCallback(() => threadContext.getHookLogs(threadId), [threadContext, threadId])
+    useCallback(() => threadContext.getHookLogBuckets(threadId), [threadContext, threadId])
   )
+  const hookLogBucketByTurnId = useMemo(() => {
+    const map = new Map<string, HookLogBucket>()
+    for (const bucket of hookLogBuckets) map.set(bucket.turnId, bucket)
+    return map
+  }, [hookLogBuckets])
+  const [hookLogConfig, setHookLogConfig] = useState<{ enabled: boolean; diagnostic: boolean }>({
+    enabled: false,
+    diagnostic: false
+  })
+  useEffect(() => {
+    let cancelled = false
+    const unsubscribe = window.api.hooks.logging.onChanged((cfg) => {
+      if (!cancelled) setHookLogConfig(cfg)
+    })
+    void window.api.hooks.logging
+      .get()
+      .then((cfg) => {
+        if (!cancelled) setHookLogConfig(cfg)
+      })
+      .catch(() => {
+        /* default already off */
+      })
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [])
+  const [openHookLogBucketId, setOpenHookLogBucketId] = useState<string | null>(null)
+  const openHookLogBucket = openHookLogBucketId
+    ? (hookLogBucketByTurnId.get(openHookLogBucketId) ?? null)
+    : null
 
   // Get the stream data via subscription - reactive updates without re-rendering provider
   const streamData = useThreadStream(threadId)
@@ -1071,19 +1259,33 @@ export function ChatContainer({
   const [savedToolNameInput, setSavedToolNameInput] = useState("")
   const [savedToolDescriptionInput, setSavedToolDescriptionInput] = useState("")
   const [saveToolMetadataLoading, setSaveToolMetadataLoading] = useState(false)
+  const [saveToolMetadataLoadingThreadId, setSaveToolMetadataLoadingThreadId] = useState<string | null>(
+    null
+  )
   const queuedApprovalCount = Math.max(0, pendingApprovals.length - 1)
+  const showSaveToolMetadataLoading =
+    saveToolMetadataLoading && saveToolMetadataLoadingThreadId === threadId
 
   useEffect(() => {
     const approval = pendingApproval as unknown as Record<string, unknown> | null
     if (approval?.operation === "save_code_exec_tool") {
       setSaveToolMetadataLoading(false)
-      setSavedToolNameInput(String(approval.savedToolName || ""))
+      setSaveToolMetadataLoadingThreadId(null)
+      setSavedToolNameInput(
+        String(
+          approval.savedToolName ||
+            approval.savedToolId ||
+            pendingApproval?.tool_call?.args?.toolId ||
+            ""
+        )
+      )
       setSavedToolDescriptionInput(String(approval.savedToolDescription || ""))
       return
     }
 
-    if (!pendingApproval || approval?.operation !== "prepare_save_code_exec_tool") {
+    if (pendingApproval && approval?.operation !== "prepare_save_code_exec_tool") {
       setSaveToolMetadataLoading(false)
+      setSaveToolMetadataLoadingThreadId(null)
     }
 
     setSavedToolNameInput("")
@@ -1312,9 +1514,8 @@ export function ChatContainer({
     [threadId]
   )
 
-  // Check if NUX (first-run sandbox setup) is needed, then auto-start elevated setup.
-  // If elevated setup fails (UAC cancelled, setup exe missing, etc.), the main process
-  // automatically falls back to unelevated mode — so the app is always usable.
+  // Check if sandbox NUX is needed. The main process currently defaults sandbox mode to
+  // "none", so this remains dormant unless the setup flow is re-enabled later.
   useEffect(() => {
     window.api.sandbox
       .isNuxNeeded()
@@ -1393,8 +1594,10 @@ export function ChatContainer({
         const operation = approvalAny.operation as string | undefined
         if (operation === "prepare_save_code_exec_tool" && decision === "approve") {
           setSaveToolMetadataLoading(true)
+          setSaveToolMetadataLoadingThreadId(threadId)
         } else {
           setSaveToolMetadataLoading(false)
+          setSaveToolMetadataLoadingThreadId(null)
         }
 
         // Send decision to main process via the orchestrator's IPC channel
@@ -1409,7 +1612,10 @@ export function ChatContainer({
             ? { savedToolDescription: savedToolDescriptionInput }
             : {})
         })
-        setSaveToolMetadataLoading(false)
+        if (!(operation === "prepare_save_code_exec_tool" && decision === "approve")) {
+          setSaveToolMetadataLoading(false)
+          setSaveToolMetadataLoadingThreadId(null)
+        }
         setToolCallState(pendingApproval.tool_call?.id || "", {
           status:
             decision === "approve" ||
@@ -2206,7 +2412,11 @@ export function ChatContainer({
       },
       {
         config: {
-          configurable: { thread_id: threadId, model_id: currentModel }
+          configurable: {
+            thread_id: threadId,
+            model_id: currentModel,
+            hook_turn_id: userMessage.id
+          }
         }
       }
     )
@@ -2995,7 +3205,7 @@ export function ChatContainer({
 
         <div className="flex items-start gap-2.5 rounded-md border border-amber-500/30 bg-amber-500/8 p-3 text-sm text-amber-700 dark:text-amber-400">
           <Info className="size-4 shrink-0 mt-0.5" />
-          <span>公司安全限制，默认选择 elevated 沙箱模式，确有其他需要请联系管理员。</span>
+          <span>当前默认关闭沙箱。需要隔离执行时，可在设置中手动启用沙箱模式。</span>
         </div>
 
         {nuxLoading ? (
@@ -3337,6 +3547,13 @@ export function ChatContainer({
                 !nextNonToolMessage ||
                 nextNonToolMessage.role !== "assistant"
 
+              // Per-turn hook log chip: shown right under the user message
+              // that opened the turn, only when Hook logging is enabled and
+              // the bucket has at least one entry. Click opens the modal.
+              const hookLogBucketForTurn =
+                hookLogConfig.enabled && message.role === "user"
+                  ? hookLogBucketByTurnId.get(message.id)
+                  : undefined
               return (
                 <div
                   key={message.id}
@@ -3357,6 +3574,14 @@ export function ChatContainer({
                     isLoading={isLoading}
                     assistantDurationMs={assistantDurationsByMessageId.get(message.id)}
                   />
+                  {hookLogBucketForTurn && hookLogBucketForTurn.entries.length > 0 && (
+                    <div className="mt-1 ml-12">
+                      <HookLogChip
+                        bucket={hookLogBucketForTurn}
+                        onClick={() => setOpenHookLogBucketId(hookLogBucketForTurn.turnId)}
+                      />
+                    </div>
+                  )}
                 </div>
               )
             })}
@@ -3364,8 +3589,25 @@ export function ChatContainer({
             {/*测试git diff功能*/}
             {/*<DisplayDiffTest/>*/}
 
-            {/* Hook execution logs — shown during/after a turn for debugging */}
-            {hookLogs.length > 0 && <HookLogsPanel logs={hookLogs} />}
+            {/*
+              Hook log chips now live under each user message above. The modal
+              is mounted once at component scope below so it's not bound to a
+              specific message render. The background-events bucket (no turn
+              id) has no user message to attach to, so render its chip here.
+            */}
+            {hookLogConfig.enabled &&
+              (() => {
+                const bg = hookLogBucketByTurnId.get("__background__")
+                if (!bg || bg.entries.length === 0) return null
+                return (
+                  <div className="flex justify-start mt-1">
+                    <HookLogChip
+                      bucket={bg}
+                      onClick={() => setOpenHookLogBucketId("__background__")}
+                    />
+                  </div>
+                )
+              })()}
 
             {/* Orchestrator standalone approval bar moved outside ScrollArea — see below */}
             {/* Model retry indicator — shown when the fetch layer is retrying a transient error */}
@@ -3466,10 +3708,19 @@ export function ChatContainer({
         />
       )}
       {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
-      {pendingApproval &&
-        Boolean((pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId) && (
-          <div className="px-4 pb-2">
-            {(() => {
+      {(showSaveToolMetadataLoading ||
+        (pendingApproval &&
+          Boolean((pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId))) && (
+        <div className={cn("px-4 pb-2", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
+          {showSaveToolMetadataLoading && (
+            <div className="max-w-3xl mx-auto mb-2 flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-700 shadow-sm dark:text-emerald-300">
+              <Loader2 className="size-3.5 animate-spin" />
+              正在改写脚本并生成工具信息...
+            </div>
+          )}
+          {pendingApproval &&
+            Boolean((pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId) &&
+            (() => {
               const approval = pendingApproval as unknown as Record<string, unknown>
               const operation = approval.operation
               const isFileApproval = operation === "write_file" || operation === "edit_file"
@@ -3487,8 +3738,7 @@ export function ChatContainer({
                 Object.keys(approvalParams as Record<string, unknown>).length > 0
               const isSaveToolApprovalInvalid =
                 isSaveCodeExecToolApproval &&
-                (!savedToolDescriptionInput.trim() ||
-                  (isManualSaveCodeExecToolApproval && !savedToolNameInput.trim()))
+                (!savedToolNameInput.trim() || !savedToolDescriptionInput.trim())
               const approvalTypes = Array.isArray(approval._approvalTypes)
                 ? (approval._approvalTypes as Array<
                     "approve" | "approve_session" | "approve_permanent" | "reject"
@@ -3525,11 +3775,11 @@ export function ChatContainer({
                         : operation === "edit_file"
                           ? "编辑文件需要审批"
                           : isCodeExecApproval
-                            ? "执行 MCP 脚本需要审批"
+                            ? "编程式工具调用"
                             : isPrepareSaveCodeExecToolApproval
-                              ? "是否将脚本注册为工具，便于后续复用"
+                              ? "改写脚本以注册为工具，便于复用"
                               : isSaveCodeExecToolApproval
-                                ? "保存脚本工具需要确认"
+                                ? "注册工具需要确认"
                                 : "命令需要审批"}
                     </span>
                     {queuedApprovalCount > 0 && (
@@ -3546,75 +3796,42 @@ export function ChatContainer({
                         <div className="grid gap-2 md:grid-cols-2">
                           <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
                             <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                              {isManualSaveCodeExecToolApproval ? "tool_name" : "tool_id"}
+                              工具名称
                             </div>
-                            {isManualSaveCodeExecToolApproval ? (
-                              <>
-                                <input
-                                  className="w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary"
-                                  value={savedToolNameInput}
-                                  onChange={(event) => setSavedToolNameInput(event.target.value)}
-                                  placeholder="例如：list_github_issues"
-                                />
-                                <div className="mt-1 text-[11px] text-muted-foreground">
-                                  最终 tool_id 会基于 tool_name 规范化生成。
-                                </div>
-                              </>
-                            ) : (
-                              <div className="font-mono break-all">
-                                {String(
-                                  approval.savedToolId ||
-                                    pendingApproval.tool_call?.args?.toolId ||
-                                    ""
-                                )}
-                              </div>
-                            )}
+                            <div className="font-mono break-all">
+                              {savedToolNameInput || "-"}
+                            </div>
                           </div>
                           <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
                             <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                              description
+                              工具描述
                             </div>
                             <textarea
-                              className="min-h-20 w-full resize-y rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary"
+                              className="min-h-12 w-full resize-y rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary"
                               value={savedToolDescriptionInput}
                               onChange={(event) => setSavedToolDescriptionInput(event.target.value)}
                             />
                           </div>
                         </div>
                       )}
-                      {isManualSaveCodeExecToolApproval && (
-                        <div className="text-xs text-amber-600 dark:text-amber-400">
-                          {String(approval.savedToolMetadataError)}
+                      <div className="overflow-hidden rounded-md border border-border bg-background shadow-sm">
+                        <div className="border-b border-border bg-muted/60 px-3 py-1.5 text-[11px] font-medium text-muted-foreground">
+                          脚本内容
+                        </div>
+                        <div className="max-h-36 overflow-auto px-3 py-2 font-mono text-xs whitespace-pre-wrap break-all">
+                          {String(approval.code || pendingApproval.tool_call?.args?.code || "")}
+                        </div>
+                      </div>
+                      {hasApprovalParams && (
+                        <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
+                          <div className="mb-1 text-[11px] font-medium text-muted-foreground">
+                            params
+                          </div>
+                          <pre className="whitespace-pre-wrap break-all font-mono">
+                            {JSON.stringify(approvalParams, null, 2)}
+                          </pre>
                         </div>
                       )}
-                      <div className="rounded-md bg-muted/50 px-3 py-2 font-mono text-sm whitespace-pre-wrap break-all overflow-auto max-h-64">
-                        {String(approval.code || pendingApproval.tool_call?.args?.code || "")}
-                      </div>
-                      <div className="grid gap-2 md:grid-cols-2">
-                        {hasApprovalParams && (
-                          <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
-                            <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                              params
-                            </div>
-                            <pre className="whitespace-pre-wrap break-all font-mono">
-                              {JSON.stringify(approvalParams, null, 2)}
-                            </pre>
-                          </div>
-                        )}
-                        <div className="rounded-md bg-muted/30 px-3 py-2 text-xs">
-                          <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                            timeout
-                          </div>
-                          <div className="font-mono">
-                            {String(
-                              approval.timeoutMs ??
-                                pendingApproval.tool_call?.args?.timeoutMs ??
-                                "default"
-                            )}{" "}
-                            ms
-                          </div>
-                        </div>
-                      </div>
                     </>
                   ) : (
                     <pre className="rounded-md bg-muted/50 px-3 py-2 font-mono text-sm whitespace-pre-wrap break-words overflow-auto max-h-40">
@@ -3632,22 +3849,24 @@ export function ChatContainer({
                       {String(approval._retryReason)}
                     </div>
                   )}
-                  {Boolean(approval.reason) && (
+                  {(Boolean(approval.reason) || isManualSaveCodeExecToolApproval) && (
                     <div className="text-xs text-muted-foreground">
-                      原因：{String(approval.reason)}
+                      {isManualSaveCodeExecToolApproval
+                        ? `原因：工具注册失败（${String(approval.savedToolMetadataError)}）`
+                        : `原因：${String(approval.reason)}`}
                     </div>
                   )}
                   <div className="flex items-center gap-2">
                     {approval._retryReason ? (
                       <>
                         <button
-                          className="px-3 py-1.5 text-xs bg-amber-500 text-white rounded-md hover:bg-amber-600 transition-colors"
+                          className="rounded-md bg-amber-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-amber-700"
                           onClick={() => handleApprovalDecision("approve")}
                         >
                           无沙箱重试
                         </button>
                         <button
-                          className="px-3 py-1.5 text-xs border border-border rounded-md hover:bg-muted transition-colors"
+                          className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/15"
                           onClick={() => handleApprovalDecision("reject")}
                         >
                           拒绝
@@ -3655,7 +3874,7 @@ export function ChatContainer({
                       </>
                     ) : (
                       <>
-                        {isPrepareSaveCodeExecToolApproval && saveToolMetadataLoading ? (
+                        {isPrepareSaveCodeExecToolApproval && showSaveToolMetadataLoading ? (
                           <div className="flex items-center gap-2 text-xs text-muted-foreground">
                             <Loader2 className="size-4 animate-spin" />
                             正在生成工具信息，请稍候...
@@ -3665,7 +3884,7 @@ export function ChatContainer({
                             {approvalTypes.includes("approve") && (
                               <button
                                 className={cn(
-                                  "px-3 py-1.5 text-xs rounded-md transition-colors",
+                                  "rounded-md px-4 py-2 text-sm font-semibold shadow-sm transition-colors",
                                   isSaveToolApprovalInvalid
                                     ? "bg-primary/50 text-primary-foreground/80 cursor-not-allowed"
                                     : "bg-primary text-primary-foreground hover:bg-primary/90"
@@ -3678,15 +3897,15 @@ export function ChatContainer({
                                   : isCodeExecApproval
                                     ? "执行脚本"
                                     : isPrepareSaveCodeExecToolApproval
-                                      ? "允许注册为工具"
+                                      ? "允许"
                                       : isSaveCodeExecToolApproval
-                                        ? "保存为工具"
+                                        ? "保存"
                                         : "运行"}
                               </button>
                             )}
                             {approvalTypes.includes("approve_session") && (
                               <button
-                                className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+                                className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700"
                                 onClick={() => handleApprovalDecision("approve_session")}
                               >
                                 本会话允许
@@ -3694,7 +3913,7 @@ export function ChatContainer({
                             )}
                             {approvalTypes.includes("approve_permanent") && (
                               <button
-                                className="px-3 py-1.5 text-xs bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors"
+                                className="rounded-md bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-green-700"
                                 onClick={() => handleApprovalDecision("approve_permanent")}
                               >
                                 始终允许
@@ -3702,7 +3921,7 @@ export function ChatContainer({
                             )}
                             {approvalTypes.includes("reject") && (
                               <button
-                                className="px-3 py-1.5 text-xs border border-border rounded-md hover:bg-muted transition-colors"
+                                className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/15"
                                 onClick={() => handleApprovalDecision("reject")}
                               >
                                 拒绝
@@ -3716,8 +3935,8 @@ export function ChatContainer({
                 </div>
               )
             })()}
-          </div>
-        )}
+        </div>
+      )}
       {/* Input */}
       <div className={cn("p-4", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
         {showGitChangeNotice && (
@@ -3939,11 +4158,18 @@ export function ChatContainer({
                 )}
               </div>
               {/*  GitBranch */}
-              {/*<GitBranchSwitcher workspacePath={workspacePath} />*/}
+              <GitBranchSwitcher workspacePath={workspacePath} />
             </div>
           </div>
         </form>
       </div>
+      <HookLogModal
+        bucket={openHookLogBucket}
+        open={openHookLogBucketId !== null}
+        onOpenChange={(open) => {
+          if (!open) setOpenHookLogBucketId(null)
+        }}
+      />
     </div>
   )
 }

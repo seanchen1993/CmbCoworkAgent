@@ -188,7 +188,7 @@ export class ToolOrchestrator {
     sandboxResult: ExecuteResponse
   ): Promise<ExecuteResponse> {
     const output = sandboxResult.output ?? ""
-    if (!LocalSandbox.isLikelySandboxDenied(sandboxResult.exitCode, output)) {
+    if (!LocalSandbox.isLikelySandboxDenied(sandboxResult.exitCode, output, command)) {
       return sandboxResult
     }
     // Pick a tailored guidance message for known recovery-by-config-change cases
