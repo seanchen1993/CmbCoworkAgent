@@ -55,6 +55,11 @@ import {
   MarketUpdateBadge,
   UpdateVersionTooltip
 } from "./MarketUpdateBadge"
+import {
+  getOrgSkillUploaderProfile,
+  renderUploaderProfile,
+  type UploaderProfile
+} from "./MarketUploaderProfile"
 import { marketInstalledSourceStorage } from "./market-installed-source-storage"
 import { marketApi, MarketApiResponse, MarketItem, MarketItemType } from "../../api/market"
 import { USE_MARKET_MOCK_ON_ERROR } from "../../api/market-flags"
@@ -132,14 +137,6 @@ interface SkillUsageDetail {
   emptyUserCalls?: number
 }
 
-interface UploaderProfile {
-  sapId: string
-  userName: string
-  orgName: string
-  upperOrgLv0?: string
-  upperOrgLv1?: string
-}
-
 function resolveUploaderProfile(
   profiles: Record<string, UploaderProfile>,
   userId?: string | null
@@ -160,49 +157,6 @@ function resolveUploaderProfile(
     Object.values(profiles).find((profile) =>
       candidates.some((candidate) => profile.sapId.includes(candidate))
     ) ?? null
-  )
-}
-
-function renderUploaderProfile(
-  profile: UploaderProfile | null,
-  fallbackUserId?: string,
-  options: { multiline?: boolean } = {}
-): React.ReactNode {
-  const { multiline = false } = options
-  if (!profile) {
-    return (
-      <span
-        className={
-          multiline
-            ? "min-w-0 whitespace-normal break-all leading-relaxed"
-            : "truncate"
-        }
-      >
-        {fallbackUserId || "—"}
-      </span>
-    )
-  }
-  const target = profile
-  const userName = target.userName || "未知用户"
-  const sapId = target.sapId || "—"
-  const orgName = target.orgName || "—"
-
-  if (multiline) {
-    return (
-      <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-1 gap-y-0.5 whitespace-normal leading-relaxed">
-        <span className="min-w-0 break-words">{userName}</span>
-        <span className="break-all text-[#a09f98]">（{sapId}）</span>
-        <span className="min-w-0 break-words text-[#a09f98]">{orgName}</span>
-      </span>
-    )
-  }
-
-  return (
-    <span className="inline-flex min-w-0 items-center gap-1">
-      <span className="truncate">{userName}</span>
-      <span className="text-[#a09f98] shrink-0">（{sapId}）</span>
-      <span className="text-[#a09f98] shrink-0">{orgName}</span>
-    </span>
   )
 }
 
@@ -1368,10 +1322,16 @@ export function MarketPanel(): React.JSX.Element {
         (selectedSkillUsage?.uniqueUsersCount ?? selectedSkillMetrics?.users ?? 0)
       : null
   const shouldResolveUploader = activeTab !== ORG_SKILL_MARKET_TYPE
-  const selectedUploaderProfile =
-    shouldResolveUploader && selectedItem?.user_id
-      ? resolveUploaderProfile(uploaderProfiles, selectedItem.user_id)
-      : null
+  let selectedUploaderProfile: UploaderProfile | null = null
+  if (selectedItem) {
+    if (activeTab === ORG_SKILL_MARKET_TYPE) {
+      selectedUploaderProfile = getOrgSkillUploaderProfile(selectedItem)
+    } else if (shouldResolveUploader && selectedItem.user_id) {
+      selectedUploaderProfile = resolveUploaderProfile(uploaderProfiles, selectedItem.user_id)
+    }
+  }
+  const selectedUploaderFallback =
+    selectedItem?.user_id || selectedItem?.managerName || selectedItem?.managerDepartment
   const selectedSkillUsageRows = useMemo(() => {
     const users = selectedSkillUsage?.users ?? []
     const emptyUserCalls = selectedSkillUsage?.emptyUserCalls ?? 0
@@ -2044,7 +2004,9 @@ export function MarketPanel(): React.JSX.Element {
       <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.03)_0px_2px_10px]">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <h4 className="text-[13px] font-medium text-[#141413]">最近 10 条 Trace 记录（本月）</h4>
+            <h4 className="text-[13px] font-medium text-[#141413]">
+              最近 10 条 Trace 记录（本月）
+            </h4>
             <p className="mt-1 text-[11px] text-[#87867f]">
               {skillTracesLoading
                 ? "Trace 加载中…"
@@ -2192,9 +2154,7 @@ export function MarketPanel(): React.JSX.Element {
         <ScrollArea className="flex-1">
           <div className="p-5 h-full">
             <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_380px] gap-5 items-start xl:h-full">
-              <div className="space-y-3 xl:order-1 order-2">
-                {renderDetailFilePanel()}
-              </div>
+              <div className="space-y-3 xl:order-1 order-2">{renderDetailFilePanel()}</div>
 
               <div className="xl:order-2 order-1 space-y-3 xl:sticky xl:top-4 w-full h-full overflow-y-auto pr-1">
                 {/* Info card */}
@@ -2259,10 +2219,10 @@ export function MarketPanel(): React.JSX.Element {
                         精品
                       </span>
                     )}
-                    {selectedItem.user_id ? (
+                    {selectedUploaderFallback ? (
                       <span className="flex min-w-0 max-w-full items-start gap-1 rounded-xl bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
                         <User className="mt-1 size-3 shrink-0" />
-                        {renderUploaderProfile(selectedUploaderProfile, selectedItem.user_id, {
+                        {renderUploaderProfile(selectedUploaderProfile, selectedUploaderFallback, {
                           multiline: true
                         })}
                       </span>
@@ -2743,9 +2703,7 @@ export function MarketPanel(): React.JSX.Element {
             <DialogTitle className="text-base">
               Skill Trace 记录 · {selectedItem?.chinese_name || selectedItem?.name || "-"}
             </DialogTitle>
-            <DialogDescription className="text-xs">
-              最近 10 条 Trace 记录（本月）
-            </DialogDescription>
+            <DialogDescription className="text-xs">最近 10 条 Trace 记录（本月）</DialogDescription>
           </DialogHeader>
           <TraceExplorer
             traces={selectedSkillTraces}

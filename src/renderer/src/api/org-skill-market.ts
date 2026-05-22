@@ -87,7 +87,7 @@ const MOCK_ORG_SKILL_ITEMS: OrgSkillApiItem[] = [
       userId: "mock-user-001",
       ystId: "mock001",
       openId: "MOCK_OPEN_ID_001",
-      department: "示例组织/知识运营组"
+      department: "第一/第二/示例组织/知识运营组"
     },
     belongsToSystems: [{ id: "MOCK.SYS.01", name: "示例技能平台" }],
     labels: [{ labelId: "mock-label-policy", labelName: "制度规范" }],
@@ -242,11 +242,6 @@ export function getMockOrgSkillMarketResponse(pageNum = 1, pageSize = 10): Marke
 function mapOrgSkillItem(item: OrgSkillApiItem): MarketItem {
   const latestVersion = getLatestOrgSkillVersion(item)
   const labelName = item.labels?.[0]?.labelName || item.category || "未分类"
-  const managerParts = [
-    item.manager?.ystId || item.manager?.userId || "",
-    item.manager?.name || "",
-    item.manager?.department || ""
-  ].filter(Boolean)
 
   return {
     id: `org-skill-${item.id}`,
@@ -260,12 +255,13 @@ function mapOrgSkillItem(item: OrgSkillApiItem): MarketItem {
     tag: item.sourceOriginName || item.sourceOrigin || undefined,
     featured: "",
     version: normalizeOrgSkillVersionName(latestVersion?.name),
-    user_id: managerParts.join("-"),
+    user_id: item.manager?.ystId || item.manager?.userId || undefined,
     guidance: item.description || "",
     orgSkillId: latestVersion?.skillId ?? item.id,
     orgSkillVersionId: latestVersion?.id,
     sourceOriginName: item.sourceOriginName,
     managerName: item.manager?.name,
+    managerDepartment: item.manager?.department,
     subscriptionCount: item.subscriptionCount
   }
 }

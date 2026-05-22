@@ -18,6 +18,7 @@ import type { MarketApiResponse, MarketItem } from "../../api/market"
 import { Button } from "@/components/ui/button"
 import { buildMarketInstalledFlags } from "./MarketUpdateBadge"
 import { TabsTrigger } from "@/components/ui/tabs"
+import { getOrgSkillUploaderProfile, renderUploaderProfile } from "./MarketUploaderProfile"
 
 export const ORG_SKILL_MARKET_TYPE = "orgSkill" as const
 const ORG_SKILL_PAGE_SIZE = 10
@@ -126,6 +127,8 @@ function OrgSkillCard({
   onDownload: (item: MarketItem, downloadToLocal?: boolean) => void | Promise<void>
   onUninstall: (item: MarketItem) => void | Promise<void>
 }): React.JSX.Element {
+  const uploaderProfile = getOrgSkillUploaderProfile(item)
+
   return (
     <div
       className="group rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 hover:border-[#d9d5c8] hover:bg-white transition-colors shadow-[rgba(0,0,0,0.03)_0px_2px_10px] cursor-pointer"
@@ -174,10 +177,10 @@ function OrgSkillCard({
             <Calendar className="size-3" />
             {new Date(item.created_at).toLocaleDateString("zh-CN")}
           </span>
-          {item.user_id && (
-            <span className="inline-flex items-center gap-1">
-              <User className="size-3" />
-              {item.user_id}
+          {(item.user_id || item.managerName || item.managerDepartment) && (
+            <span className="inline-flex min-w-0 items-center gap-1">
+              <User className="size-3 shrink-0" />
+              {renderUploaderProfile(uploaderProfile, item.user_id || item.managerName)}
             </span>
           )}
         </div>

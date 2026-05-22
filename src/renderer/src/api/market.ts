@@ -68,6 +68,7 @@ export interface MarketItem {
   orgSkillVersionId?: number
   sourceOriginName?: string
   managerName?: string
+  managerDepartment?: string
   subscriptionCount?: number
 }
 
