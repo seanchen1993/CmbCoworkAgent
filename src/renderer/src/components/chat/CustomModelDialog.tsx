@@ -532,20 +532,21 @@ export function CustomModelDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[760px]">
-        <DialogHeader>
+      <DialogContent className="sm:max-w-[760px] gap-3 p-4">
+        <DialogHeader className="space-y-1">
           <DialogTitle>编辑模型配置</DialogTitle>
           <DialogDescription>配置兼容 OpenAI 接口格式的模型服务。</DialogDescription>
         </DialogHeader>
 
-        <div className="grid grid-cols-[220px_1fr] gap-4 py-2">
+        <div className="grid grid-cols-[220px_1fr] gap-4">
           <div className="rounded-md border border-border p-2">
-            <div className="mb-2 flex items-center justify-between">
+            <div className="mb-1.5 flex items-center justify-between">
               <div className="text-xs font-medium text-muted-foreground">模型列表</div>
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
+                className="h-7 px-2"
                 onClick={() => {
                   setConfig({
                     id: undefined,
@@ -572,7 +573,7 @@ export function CustomModelDialog({
                 新增
               </Button>
             </div>
-            <div className="max-h-[360px] space-y-1 overflow-y-auto">
+            <div className="max-h-[330px] space-y-1 overflow-y-auto">
               {allConfigs.map((item) => (
                 <button
                   key={item.id}
@@ -580,7 +581,7 @@ export function CustomModelDialog({
                   onClick={() => {
                     void selectConfigToEdit(item.id)
                   }}
-                  className={`w-full rounded-sm border px-2 py-2 text-left text-xs transition-colors ${
+                  className={`w-full rounded-sm border px-2 py-1.5 text-left text-xs transition-colors ${
                     item.id === selectedConfigId
                       ? "border-primary bg-primary/10 text-foreground"
                       : "border-transparent text-muted-foreground hover:bg-muted"
@@ -597,10 +598,11 @@ export function CustomModelDialog({
             </div>
           </div>
 
-          <div className="space-y-4">
-            <div className="space-y-1.5">
+          <div className="space-y-3">
+            <div className="space-y-1">
               <label className="text-xs font-medium text-muted-foreground">显示名称</label>
               <Input
+                className="h-8"
                 value={config.name}
                 onChange={(e) => setConfig((c) => ({ ...c, name: e.target.value }))}
                 placeholder="例如：DeepSeek Chat（生产）"
@@ -611,11 +613,12 @@ export function CustomModelDialog({
               )}
             </div>
 
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               <label className="text-xs font-medium text-muted-foreground">
                 接口地址（Base URL）
               </label>
               <Input
+                className="h-8"
                 value={config.baseUrl}
                 onChange={(e) => {
                   setConfig((c) => ({ ...c, baseUrl: e.target.value }))
@@ -625,9 +628,10 @@ export function CustomModelDialog({
               />
             </div>
 
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               <label className="text-xs font-medium text-muted-foreground">模型名称（Model）</label>
               <Input
+                className="h-8"
                 value={config.model}
                 onChange={(e) => {
                   const nextModel = e.target.value
@@ -649,11 +653,12 @@ export function CustomModelDialog({
               />
             </div>
 
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               <label className="text-xs font-medium text-muted-foreground">
                 最大 Token（上下文窗口）
               </label>
               <Input
+                className="h-8"
                 type="number"
                 value={config.maxTokensInput}
                 onChange={(e) => {
@@ -671,11 +676,12 @@ export function CustomModelDialog({
             </div>
 
             <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
+              <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">
                   max_tokens（最大 Tokens）
                 </label>
                 <Input
+                  className="h-8"
                   type="number"
                   value={config.maxOutputTokensInput}
                   onChange={(e) => {
@@ -694,9 +700,10 @@ export function CustomModelDialog({
                 )}
               </div>
 
-              <div className="space-y-1.5">
+              <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">Temperature</label>
                 <Input
+                  className="h-8"
                   type="number"
                   value={config.temperatureInput}
                   onChange={(e) => {
@@ -716,9 +723,10 @@ export function CustomModelDialog({
             </div>
 
             <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
+              <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">top_p</label>
                 <Input
+                  className="h-8"
                   type="number"
                   value={config.topPInput}
                   onChange={(e) => {
@@ -736,9 +744,10 @@ export function CustomModelDialog({
                 {topPError && <p className="text-xs text-destructive">{topPError}</p>}
               </div>
 
-              <div className="space-y-1.5">
+              <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">top_k</label>
                 <Input
+                  className="h-8"
                   type="number"
                   value={config.topKInput}
                   onChange={(e) => {
@@ -756,10 +765,10 @@ export function CustomModelDialog({
               </div>
             </div>
 
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               <label className="text-xs font-medium text-muted-foreground">交错思考</label>
-              <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
-                <div className="space-y-1">
+              <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
+                <div>
                   <div className="text-sm text-foreground">
                     {config.interleavedThinking ? "已开启" : "已关闭"}
                   </div>
@@ -786,7 +795,7 @@ export function CustomModelDialog({
               </div>
             </div>
 
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               <label className="text-xs font-medium text-muted-foreground">智能路由档位</label>
               <div className="flex gap-2">
                 {(["premium", "economy"] as const).map((t) => (
@@ -804,15 +813,16 @@ export function CustomModelDialog({
                   </button>
                 ))}
               </div>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-xs leading-tight text-muted-foreground">
                 开启智能路由后，系统会根据任务复杂度自动选择对应档位的模型
               </p>
             </div>
 
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               <label className="text-xs font-medium text-muted-foreground">API 密钥</label>
               <div className="relative">
                 <Input
+                  className="h-8 pr-10"
                   type={showKey ? "text" : "password"}
                   value={config.apiKey}
                   onChange={(e) => {
@@ -820,7 +830,6 @@ export function CustomModelDialog({
                     setTestResult(null)
                   }}
                   placeholder={hasExisting ? "••••••••••••••••" : "sk-..."}
-                  className="pr-10"
                 />
                 <button
                   type="button"
@@ -835,7 +844,7 @@ export function CustomModelDialog({
                 </button>
               </div>
               <div className="flex items-center gap-2">
-                <p className="text-xs text-muted-foreground">
+                <p className="text-xs leading-tight text-muted-foreground">
                   密钥仅作用于当前模型（按模型 ID 独立保存）。
                 </p>
                 <Button
@@ -875,7 +884,7 @@ export function CustomModelDialog({
               </div>
             )}
 
-            <div className="flex justify-between">
+            <div className="flex justify-between pt-1">
               {hasExisting ? (
                 <Button
                   type="button"
