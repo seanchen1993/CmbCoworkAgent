@@ -586,7 +586,13 @@ async function doAppendJsonl(entry: unknown): Promise<{ shardFile: string; offse
  * Never throws; never blocks the caller (returns synchronously).
  */
 export function recordGen(input: RecordGenInput): void {
-  if (!initialized) return
+  if (!initialized) {
+    console.warn("[AdoptionTracker] recordGen skipped — tracker not initialized")
+    return
+  }
+  console.log(
+    `[AdoptionTracker] recordGen: tool=${input.tool} file=${input.filePath} threadId=${input.threadId}`
+  )
   queueMicrotask(() => {
     doRecordGen(input).catch((e) => {
       console.warn("[AdoptionTracker] recordGen unexpected error:", e)
@@ -596,7 +602,10 @@ export function recordGen(input: RecordGenInput): void {
 
 async function doRecordGen(input: RecordGenInput): Promise<void> {
   try {
-    if (!isCodeFile(input.filePath)) return
+    if (!isCodeFile(input.filePath)) {
+      console.log(`[AdoptionTracker] recordGen skip — not a code file: ${input.filePath}`)
+      return
+    }
 
     // Snapshot attribution context *before* any await. Between the await on
     // appendJsonl below and our subsequent use of ctx, TraceCollector.finish()
@@ -636,7 +645,12 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     }
 
     const singleHashes = computeLineHashes(input.generatedContent)
-    if (singleHashes.length === 0) return // empty-after-normalization → nothing worth tracking
+    if (singleHashes.length === 0) {
+      console.log(
+        `[AdoptionTracker] recordGen skip — empty after normalization: ${input.filePath}`
+      )
+      return
+    }
     const repeatedHashCount = singleHashes.length * generationOccurrences
 
     // Non-blank line count may still exceed threshold only when rawLineCount is
@@ -661,6 +675,21 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
         : new Uint32Array(0)
     const fingerprint = generationFingerprint(input.generatedContent, generationOccurrences)
 
+    // Pre-compute net-new line count for edit_file by consuming oldString hashes
+    // from newString hashes (same one-to-one hash consumption as commit-time
+    // supersession). write_file has no oldString → keeps raw hashes.length.
+    let reportedLineCount = hashes.length
+    if (oldLineHashes.length > 0) {
+      const oldCounts = buildLineHashCounts(oldLineHashes)
+      for (let i = 0; i < hashes.length; i++) {
+        const c = oldCounts.get(hashes[i])
+        if (c && c > 0) {
+          oldCounts.set(hashes[i], c - 1)
+          reportedLineCount--
+        }
+      }
+    }
+
     // ── JSONL record ────────────────────────────────────
     // Derive net-deletion count here (in the microtask), NOT at the tool
     // call site — this keeps edit_file's hot path free of any O(N) scan for
@@ -677,7 +706,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       threadId: input.threadId,
       traceId: ctx.traceId,
       filePath: absPath,
-      lineCount: hashes.length,
+      lineCount: reportedLineCount,
       deletedLineCount,
       fingerprint,
       createdAt
@@ -716,7 +745,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       stepIndex: input.stepIndex,
       tool: input.tool,
       language: extname(absPath).slice(1).toLowerCase() || null,
-      lineCount: hashes.length,
+      lineCount: reportedLineCount,
       deletedLineCount,
       usedSkills,
       modelId: ctx.modelId ?? null,
@@ -725,6 +754,9 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       createdAt: new Date(createdAt).toISOString(),
       relativeHint: relPath.split("/").slice(-1)[0] // leaf filename only, not a full path
     })
+    console.log(
+      `[AdoptionTracker] recordGen OK: eventId=${eventId} file=${relPath} lineCount=${reportedLineCount} rawHashes=${hashes.length} deletedLineCount=${deletedLineCount} threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
+    )
   } catch (e) {
     console.warn("[AdoptionTracker] doRecordGen failed:", e)
   }
@@ -812,7 +844,10 @@ interface MeasureOpts {
  * being the dominant I/O spike source with marginal value over L1 + L3.
  */
 function measureFile(filePath: string, opts?: MeasureOpts): void {
-  if (!initialized) return
+  if (!initialized) {
+    console.warn("[AdoptionTracker] measureFile skipped — tracker not initialized")
+    return
+  }
   queueMicrotask(() => {
     doMeasureFile(filePath, opts).catch((e) => {
       console.warn("[AdoptionTracker] measureFile unexpected error:", e)
@@ -826,12 +861,20 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
     absPath = resolvePath(filePath)
     const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
     const pendingRows = findPendingGensForFile(absPath, minCreated)
+    console.log(
+      `[AdoptionTracker] doMeasureFile: absPath=${absPath} pendingGens=${pendingRows.length} commitSha=${opts?.commitSha ?? "none"} stagedDeleted=${opts?.stagedDeleted ?? false}`
+    )
     if (pendingRows.length === 0) return
 
     // Dedup concurrent measurements for the same file. Even without the
     // timer/commit race, a single commit batch can pass the same file twice
     // (rare but cheap to guard against).
-    if (inFlightFileMeasurements.has(absPath)) return
+    if (inFlightFileMeasurements.has(absPath)) {
+      console.log(
+        `[AdoptionTracker] doMeasureFile dedup skip: absPath=${absPath} (already in-flight)`
+      )
+      return
+    }
     inFlightFileMeasurements.add(absPath)
 
     let currentHashCounts: Map<number, number> | null = null
@@ -935,6 +978,10 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         modelName: pending.model_name ?? null
       })
 
+      console.log(
+        `[AdoptionTracker] measure verdict=${verdict} genEventId=${pending.event_id} file=${absPath} generatedLines=${generatedLineCount} effectiveLines=${effectiveLineCount} adoptedLines=${adoptedLineCount} commitSha=${opts?.commitSha ?? "none"} threadId=${pending.thread_id ?? "none"}`
+      )
+
       if (pending.old_line_hashes) {
         try {
           addLineHashesToCounts(supersededHashCounts, unpackLineHashes(pending.old_line_hashes))
@@ -1022,15 +1069,37 @@ export interface StagedSnapshot {
  */
 export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnapshot[] {
   try {
+    // Resolve the git root — git diff --cached returns paths relative to the
+    // top-level working tree, NOT the -C directory. When the -C directory is a
+    // subfolder of the repo (common in worktree setups), resolvePath(workingDir,
+    // relPath) would duplicate path segments and fail to match gen events later.
+    let gitRoot = workingDir
+    try {
+      gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        encoding: "utf-8",
+        cwd: workingDir,
+        timeout: 5000,
+        maxBuffer: 1024 * 1024
+      }).trim()
+    } catch {
+      // Fallback to workingDir — best-effort
+    }
+
     const raw = execFileSync("git", ["diff", "--cached", "--name-status", "-z"], {
       encoding: "utf-8",
       cwd: workingDir,
       timeout: 5000,
       maxBuffer: 1024 * 1024
     })
-    if (!raw) return []
+    if (!raw) {
+      console.log(`[AdoptionTracker] pre-commit capture: no staged files in ${workingDir}`)
+      return []
+    }
 
     const snapshots: StagedSnapshot[] = []
+    let totalStaged = 0
+    let skippedNonCode = 0
+    let capturedCode = 0
     // Output format with -z:
     //   Normal:      <STATUS>\0<path>\0
     //   Rename/copy: <Rnnn|Cnnn>\0<old>\0<new>\0
@@ -1049,12 +1118,17 @@ export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnaps
       i += 1 + pathsNeeded
       if (!relPath) continue
 
-      const absPath = resolvePath(workingDir, relPath)
+      totalStaged++
+      const absPath = resolvePath(gitRoot, relPath)
       if (status === "D") {
         snapshots.push({ absPath, stagedContent: null })
+        capturedCode++
         continue
       }
-      if (!isCodeFile(absPath)) continue
+      if (!isCodeFile(absPath)) {
+        skippedNonCode++
+        continue
+      }
 
       try {
         const stagedContent = execFileSync("git", ["show", `:${relPath}`], {
@@ -1063,10 +1137,14 @@ export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnaps
           maxBuffer: STAGED_BLOB_MAX_BYTES
         })
         snapshots.push({ absPath, stagedContent })
+        capturedCode++
       } catch {
         // Binary / too-large / other failure — skip silently.
       }
     }
+    console.log(
+      `[AdoptionTracker] pre-commit capture: totalStaged=${totalStaged} codeFiles=${capturedCode} skippedNonCode=${skippedNonCode} gitRoot=${gitRoot}`
+    )
     return snapshots
   } catch (e) {
     console.warn("[AdoptionTracker] adoption pre-commit capture skipped:", e)
@@ -1088,7 +1166,13 @@ export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnaps
  * stagedContent (→ `verdict: deleted`).
  */
 export function measureForCommit(snapshots: StagedSnapshot[], commitSha?: string): void {
-  if (!initialized) return
+  if (!initialized) {
+    console.warn("[AdoptionTracker] measureForCommit skipped — tracker not initialized")
+    return
+  }
+  console.log(
+    `[AdoptionTracker] measureForCommit: snapshotCount=${snapshots.length} commitSha=${commitSha ?? "unknown"}`
+  )
   for (const snap of snapshots) {
     if (!isCodeFile(snap.absPath)) continue
     if (snap.stagedContent === null) {

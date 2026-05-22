@@ -888,50 +888,160 @@ async function isWorktree(cwd?: string): Promise<boolean> {
 }
 
 /**
- * 列出本地分支：
- * - 优先使用 `--format`（结构更稳定）；
- * - 失败时回退到经典 `git branch` 文本解析。
+ * 将完整远端分支名转换为对应的本地分支名。
+ *
+ * Git 返回的远端分支通常形如：
+ * - `origin/main`
+ * - `origin/feature/foo`
+ * - `upstream/release/1.0`
+ *
+ * 如果需要基于远端分支创建 tracking 分支，本地分支名通常是不带 remote 前缀的部分：
+ * `origin/feature/foo` -> `feature/foo`。
+ *
+ * `origin/HEAD` 只是远端默认分支的符号引用，不是一个可直接切换的业务分支，需要过滤。
+ */
+function getLocalNameFromRemoteBranch(remoteBranch: string): string | null {
+  const normalized = remoteBranch.trim()
+  if (!normalized || normalized.endsWith("/HEAD")) return null
+  const slashIndex = normalized.indexOf("/")
+  if (slashIndex <= 0 || slashIndex === normalized.length - 1) return null
+  return normalized.slice(slashIndex + 1)
+}
+
+function normalizeBranchLine(branch: string): string {
+  // 兼容经典 `git branch` 输出中可能出现的 `* ` / `+ ` 前缀。
+  return branch.replace(/^[*+]\s+/, "").trim()
+}
+
+/**
+ * 列出本地分支和远端分支：
+ * - 本地分支保持原名，例如 `main`、`feature/foo`；
+ * - 远端分支只展示 `origin/*`，例如 `origin/main`、`origin/feature/foo`；
+ * - 过滤 `origin/HEAD -> origin/main` 这类符号引用说明。
  */
 async function listBranches(cwd?: string): Promise<string[]> {
   const workingDir = cwd || (await getCurrentWorkingDirectory())
   try {
-    // git branch --format is available since git 2.7; use simple `git branch` as fallback
-    let raw: string
+    // `--format` 输出稳定且不带额外标记；旧版 Git 不支持时回退到经典文本格式。
+    let localRaw: string
     try {
-      raw = await runGitArgs(["branch", "--format=%(refname:short)"], {
+      localRaw = await runGitArgs(["branch", "--format=%(refname:short)"], {
         cwd: workingDir,
         timeout: 10000
       })
     } catch {
-      // fallback: classic `git branch` which prefixes current branch with "* "
-      // and branches checked out in other worktrees with "+ "
-      raw = await runGitArgs(["branch"], {
+      localRaw = await runGitArgs(["branch"], {
         cwd: workingDir,
         timeout: 10000
       })
     }
-    return (
-      raw
-        .split("\n")
-        // strip leading "* " (current branch) and "+ " (worktree branch) markers
-        .map((b) => b.replace(/^[*+]\s+/, "").trim())
-        .filter((b) => b.length > 0 && !b.startsWith("(HEAD detached"))
-    )
+
+    let remoteRaw: string
+    try {
+      remoteRaw = await runGitArgs(["branch", "-r", "--format=%(refname:short)"], {
+        cwd: workingDir,
+        timeout: 10000
+      })
+    } catch {
+      remoteRaw = await runGitArgs(["branch", "-r"], {
+        cwd: workingDir,
+        timeout: 10000
+      })
+    }
+
+    const localBranches = new Set<string>()
+    localRaw
+      .split("\n")
+      .map(normalizeBranchLine)
+      .filter((b) => b.length > 0 && !b.startsWith("(HEAD detached"))
+      .forEach((branch) => localBranches.add(branch))
+
+    const remoteBranches = new Set<string>()
+    remoteRaw
+      .split("\n")
+      .map(normalizeBranchLine)
+      // `origin/HEAD -> origin/main` 是符号引用说明，不是实际分支。
+      .filter((b) => b.length > 0 && !b.includes(" -> "))
+      .forEach((b) => {
+        if (b.startsWith("origin/") && getLocalNameFromRemoteBranch(b)) remoteBranches.add(b)
+      })
+
+    return [
+      ...[...localBranches].sort((a, b) => a.localeCompare(b)),
+      ...[...remoteBranches].sort((a, b) => a.localeCompare(b))
+    ]
   } catch {
     return []
   }
 }
 
 /**
+ * 安全切换远端分支。
+ *
+ * 直接 checkout `origin/foo` 会让仓库进入 detached HEAD，因此这里统一走两步：
+ * 1. 先尝试切到对应本地分支 `foo`，适用于本地分支已经存在的情况；
+ * 2. 本地分支不存在时，再通过 `git checkout --track origin/foo` 创建 tracking 分支。
+ *
+ * 如果两条路径都失败，优先抛回调用方传入的原始错误，避免用兜底路径的错误覆盖真正原因。
+ */
+async function checkoutRemoteBranch(
+  remoteBranch: string,
+  workingDir: string,
+  originalError?: unknown
+): Promise<void> {
+  const localBranch = getLocalNameFromRemoteBranch(remoteBranch)
+  if (localBranch) {
+    try {
+      await runGitArgs(["checkout", localBranch], {
+        cwd: workingDir,
+        timeout: 30000
+      })
+      return
+    } catch (localCheckoutError: unknown) {
+      try {
+        await runGitArgs(["checkout", "--track", remoteBranch], {
+          cwd: workingDir,
+          timeout: 30000
+        })
+        return
+      } catch {
+        throw originalError ?? localCheckoutError
+      }
+    }
+  }
+
+  await runGitArgs(["checkout", "--track", remoteBranch], {
+    cwd: workingDir,
+    timeout: 30000
+  })
+}
+
+/**
  * 切换到指定分支。
+ *
+ * 这里的 `branch` 可能来自本地分支，也可能来自远端分支列表：
+ * - `feature/foo`：优先按本地分支直接 checkout；
+ * - `origin/feature/foo`：优先切到本地 `feature/foo`，没有本地分支时创建 tracking 分支；
+ *
+ * 重点是避免对 `origin/*` 直接 checkout 导致 detached HEAD。
  */
 async function switchBranch(
   branch: string,
   cwd?: string
 ): Promise<{ success: boolean; error?: string }> {
   const workingDir = cwd || (await getCurrentWorkingDirectory())
+  const branchName = branch.trim()
+  if (!branchName) {
+    return { success: false, error: "分支名不能为空" }
+  }
+
   try {
-    await runGitArgs(["checkout", branch], {
+    if (branchName.startsWith("origin/")) {
+      await checkoutRemoteBranch(branchName, workingDir)
+      return { success: true }
+    }
+
+    await runGitArgs(["checkout", branchName], {
       cwd: workingDir,
       timeout: 30000
     })
@@ -1017,7 +1127,13 @@ export function registerGitHandlers(): void {
       // without emitting any adoption event.
       let stagedCapture: StagedCapture | null = null
       if (isCommitCommand(command)) {
+        console.log("[Git] commit detected — capturing staged snapshots for adoption")
         stagedCapture = await captureStagedSnapshotsForCommand(command)
+        if (stagedCapture) {
+          console.log(
+            `[Git] staged capture done: snapshots=${stagedCapture.snapshots.length} workingDir=${stagedCapture.workingDir}`
+          )
+        }
       }
 
       // 这里最终会走 executeGitCommand -> runGitArgs -> 队列限流。
@@ -1028,10 +1144,17 @@ export function registerGitHandlers(): void {
       if (stagedCapture && stagedCapture.snapshots.length > 0) {
         try {
           const sha = extractCommitSha(result, stagedCapture.workingDir) ?? undefined
+          console.log(
+            `[Git] triggering post-commit measurement: commitSha=${sha ?? "unknown"} snapshots=${stagedCapture.snapshots.length}`
+          )
           measureForCommit(stagedCapture.snapshots, sha)
         } catch (e) {
           console.warn("[Git] adoption post-commit measurement skipped:", e)
         }
+      } else if (isCommitCommand(command)) {
+        console.log(
+          `[Git] post-commit measurement skipped: stagedCapture=${stagedCapture ? "present" : "null"} snapshots=${stagedCapture?.snapshots.length ?? 0}`
+        )
       }
 
       return result
@@ -1086,7 +1209,7 @@ export function registerGitHandlers(): void {
     }
   )
 
-  // 列出所有本地分支
+  // 列出所有本地分支和远端分支
   ipcMain.handle(
     "git:listBranches",
     async (_, cwd?: string): Promise<{ success: boolean; branches: string[]; error?: string }> => {

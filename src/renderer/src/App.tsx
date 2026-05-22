@@ -25,6 +25,7 @@ const DashboardView = lazy(() =>
   import("@/components/dashboard/DashboardView").then((m) => ({ default: m.DashboardView }))
 )
 import { ResizeHandle } from "@/components/ui/resizable"
+import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { useAppStore } from "@/lib/store"
 import { ThreadProvider } from "@/lib/thread-context"
 import { initMMJ } from "../js/mmjUtils"
@@ -281,6 +282,14 @@ function App(): React.JSX.Element {
     // always fall back to workspace mode.
     setRightModule("work")
     handlePreviewCollapse()
+
+    try {
+      // 主应用已经处于打开/查看状态，清空宠物完成任务提醒队列。
+      window.api.pet.clearCompletedTasks()
+    } catch (error) {
+      console.warn("[App] Failed to clear pet completed tasks:", error)
+    }
+
   }, [currentThreadId, mainView, handlePreviewCollapse])
 
   useEffect(() => {
@@ -355,6 +364,7 @@ function App(): React.JSX.Element {
       try {
         const threads = await window.api.threads.list()
         useAppStore.setState({ threads })
+        window.api.pet.clearCompletedTasks()
       } catch {
         // ignore
       }
@@ -646,6 +656,7 @@ function App(): React.JSX.Element {
           </div>
         )}
       </div>
+      <PetStateBridge />
       <Toaster position="top-center" richColors duration={2200} />
     </ThreadProvider>
   )

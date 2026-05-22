@@ -24,6 +24,36 @@ function repoName(item: DashboardCommitDetail): string {
   return parts[parts.length - 1] || repoPath
 }
 
+function SkillChips({ skills }: { skills: string[] }): React.JSX.Element {
+  if (skills.length === 0) {
+    return <span className="text-xs text-muted-foreground">-</span>
+  }
+
+  const visibleSkills = skills.slice(0, 2)
+  const hiddenCount = skills.length - visibleSkills.length
+  return (
+    <div className="flex max-w-[180px] flex-wrap gap-1">
+      {visibleSkills.map((skill) => (
+        <span
+          key={skill}
+          className="max-w-[86px] truncate rounded-full border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-300"
+          title={skill}
+        >
+          {skill}
+        </span>
+      ))}
+      {hiddenCount > 0 ? (
+        <span
+          className="rounded-full border border-border bg-muted px-2 py-0.5 text-[10px] text-muted-foreground"
+          title={skills.join(", ")}
+        >
+          +{hiddenCount}
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
 function CommitRow({
   item,
   onOpenExternal
@@ -76,6 +106,9 @@ function CommitRow({
         }`}>
           {item.pushed ? "已 Push" : "未 Push"}
         </span>
+      </td>
+      <td className="px-3 py-2">
+        <SkillChips skills={item.usedSkills} />
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-xs">
         <span className="text-muted-foreground">{item.filesChanged} 文件</span>
@@ -262,7 +295,7 @@ export function CommitDetailsDialog({
             />
             <ScrollArea className="min-h-0 flex-1">
               <div className="overflow-x-auto">
-                <table className="min-w-[860px] w-full text-left">
+                <table className="min-w-[980px] w-full text-left">
                   <thead className="sticky top-0 z-10 bg-background">
                     <tr className="border-b border-border text-[11px] text-muted-foreground">
                       <th className="whitespace-nowrap px-3 py-2 font-medium">时间</th>
@@ -271,6 +304,7 @@ export function CommitDetailsDialog({
                       <th className="whitespace-nowrap px-3 py-2 font-medium">仓库</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">分支</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">状态</th>
+                      <th className="whitespace-nowrap px-3 py-2 font-medium">关联 Skill</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">变更</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">Thread</th>
                     </tr>
