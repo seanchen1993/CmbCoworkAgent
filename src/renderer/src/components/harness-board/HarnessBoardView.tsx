@@ -43,6 +43,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { TabbedPanel } from "@/components/tabs"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
+import { useThreadContext } from "@/lib/thread-context"
 import type {
   HarnessArtifact,
   HarnessHookLogView,
@@ -96,6 +97,7 @@ interface SystemGroup {
 interface SelectedFeature {
   projectId: string
   slug: string
+  initialSessionThreadId?: string
 }
 
 interface GitPanelFileChange {
@@ -626,6 +628,71 @@ function ProjectEditDialog({
   )
 }
 
+function FeatureCreateDialog({
+  project,
+  featureName,
+  creating,
+  error,
+  onOpenChange,
+  onChange,
+  onSubmit
+}: {
+  project: HarnessProjectListItem | null
+  featureName: string
+  creating: boolean
+  error: string | null
+  onOpenChange: (open: boolean) => void
+  onChange: (featureName: string) => void
+  onSubmit: () => void
+}): React.JSX.Element {
+  return (
+    <Dialog open={project !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>创建特性</DialogTitle>
+        </DialogHeader>
+        <form
+          className="grid gap-4 py-1"
+          onSubmit={(event) => {
+            event.preventDefault()
+            onSubmit()
+          }}
+        >
+          <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+            特性名称 *
+            <Input
+              value={featureName}
+              onChange={(event) => onChange(event.target.value)}
+              placeholder="请输入特性名称"
+              className="bg-background"
+              autoFocus
+            />
+          </label>
+          {project && (
+            <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+              项目：{project.name} · {project.projectCode}
+            </div>
+          )}
+          {error && (
+            <div className="rounded-md border border-status-critical/30 bg-status-critical/10 px-3 py-2 text-sm text-status-critical">
+              {error}
+            </div>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={creating}>
+              取消
+            </Button>
+            <Button type="submit" disabled={creating || !featureName.trim()} className="gap-2">
+              {creating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+              创建
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function ProjectActionMenu({
   project,
   archiving,
@@ -737,8 +804,10 @@ function ProjectCard({
   loading,
   expanded,
   archiving,
+  creatingFeature,
   onEditProject,
   onArchiveProject,
+  onCreateFeature,
   onToggleFeatures,
   onOpenFeature
 }: {
@@ -747,8 +816,10 @@ function ProjectCard({
   loading: boolean
   expanded: boolean
   archiving: boolean
+  creatingFeature: boolean
   onEditProject: (project: HarnessProjectListItem) => void
   onArchiveProject: (project: HarnessProjectListItem) => void
+  onCreateFeature: (project: HarnessProjectListItem) => void
   onToggleFeatures: () => void
   onOpenFeature: (projectId: string, slug: string) => void
 }): React.JSX.Element {
@@ -835,6 +906,19 @@ function ProjectCard({
           {expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
           {loading && expanded ? "读取中" : featureButtonLabel}
         </Button>
+        {!archived && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="mt-2 w-full justify-center gap-2"
+            onClick={() => onCreateFeature(project)}
+            disabled={creatingFeature}
+          >
+            {creatingFeature ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+            创建特性
+          </Button>
+        )}
       </div>
 
       {expanded && (
@@ -883,8 +967,10 @@ function SystemSection({
   loadingDetailIds,
   expandedProjectIds,
   archivingProjectId,
+  creatingFeatureProjectId,
   onEditProject,
   onArchiveProject,
+  onCreateFeature,
   onToggleProject,
   onOpenFeature
 }: {
@@ -893,8 +979,10 @@ function SystemSection({
   loadingDetailIds: Set<string>
   expandedProjectIds: Set<string>
   archivingProjectId: string | null
+  creatingFeatureProjectId: string | null
   onEditProject: (project: HarnessProjectListItem) => void
   onArchiveProject: (project: HarnessProjectListItem) => void
+  onCreateFeature: (project: HarnessProjectListItem) => void
   onToggleProject: (projectId: string) => void
   onOpenFeature: (projectId: string, slug: string) => void
 }): React.JSX.Element {
@@ -917,8 +1005,10 @@ function SystemSection({
               loading={loadingDetailIds.has(project.projectId)}
               expanded={expandedProjectIds.has(project.projectId)}
               archiving={archivingProjectId === project.projectId}
+              creatingFeature={creatingFeatureProjectId === project.projectId}
               onEditProject={onEditProject}
               onArchiveProject={onArchiveProject}
+              onCreateFeature={onCreateFeature}
               onToggleFeatures={() => onToggleProject(project.projectId)}
               onOpenFeature={onOpenFeature}
             />
@@ -1438,12 +1528,14 @@ function FeatureWorkspaceChangesPanel({
 function FeatureDetailPage({
   detail,
   loading,
+  initialSessionThreadId,
   onBack,
   onSessionLinked,
   onFeatureWorkspaceChange
 }: {
   detail: HarnessRunDetailViewModel | null
   loading: boolean
+  initialSessionThreadId?: string
   onBack: () => void
   onSessionLinked: () => Promise<void>
   onFeatureWorkspaceChange?: (workspace: ReactNode | null) => void
@@ -1502,7 +1594,12 @@ function FeatureDetailPage({
       return
     }
 
-    const firstThreadId = detail.sessions[0]?.threadId ?? null
+    const initialThreadId =
+      initialSessionThreadId &&
+      detail.sessions.some((session) => session.threadId === initialSessionThreadId)
+        ? initialSessionThreadId
+        : null
+    const firstThreadId = initialThreadId ?? detail.sessions[0]?.threadId ?? null
     setSelectedSessionState((current) => {
       if (current.detailKey !== detailKey) {
         return { detailKey, threadId: firstThreadId }
@@ -1515,11 +1612,11 @@ function FeatureDetailPage({
       }
       return { detailKey, threadId: firstThreadId }
     })
-  }, [detail, detailKey])
+  }, [detail, detailKey, initialSessionThreadId])
 
   useEffect(() => {
-    setActiveDetailTab("feature")
-  }, [detailKey])
+    setActiveDetailTab(initialSessionThreadId ? "session" : "feature")
+  }, [detailKey, initialSessionThreadId])
 
   const selectedSessionThreadId =
     selectedSessionState.detailKey === detailKey ? selectedSessionState.threadId : null
@@ -1827,7 +1924,13 @@ export function HarnessBoardView({
   const [savingEdit, setSavingEdit] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
   const [archivingProjectId, setArchivingProjectId] = useState<string | null>(null)
+  const [featureDialogProject, setFeatureDialogProject] = useState<HarnessProjectListItem | null>(null)
+  const [featureName, setFeatureName] = useState("")
+  const [featureError, setFeatureError] = useState<string | null>(null)
+  const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const createThread = useAppStore((state) => state.createThread)
+  const threadContext = useThreadContext()
 
   const loadProjectDetail = useCallback(async (projectId: string) => {
     setLoadingDetailIds((current) => new Set(current).add(projectId))
@@ -2102,11 +2205,85 @@ export function HarnessBoardView({
     [archivingProjectId, loadProjects]
   )
 
+  const openFeatureCreateDialog = useCallback((project: HarnessProjectListItem): void => {
+    setFeatureDialogProject(project)
+    setFeatureName("")
+    setFeatureError(null)
+  }, [])
+
+  const handleFeatureDialogOpenChange = useCallback(
+    (open: boolean): void => {
+      if (!open && !creatingFeatureProjectId) {
+        setFeatureDialogProject(null)
+        setFeatureName("")
+        setFeatureError(null)
+      }
+    },
+    [creatingFeatureProjectId]
+  )
+
+  const handleSubmitFeature = useCallback(async (): Promise<void> => {
+    if (!featureDialogProject || creatingFeatureProjectId) return
+    const feature = featureName.trim()
+    if (!feature) {
+      setFeatureError("特性名称不能为空")
+      return
+    }
+
+    setCreatingFeatureProjectId(featureDialogProject.projectId)
+    setFeatureError(null)
+    try {
+      const result = await window.api.harnessBoard.createFeature({
+        projectId: featureDialogProject.projectId,
+        feature
+      })
+      const thread = await createThread(
+        {
+          title: `特性: ${result.title || result.slug}`,
+          workspacePath: result.workspacePath,
+          harnessFeature: {
+            projectId: result.projectId,
+            slug: result.slug
+          }
+        },
+        { preserveView: true }
+      )
+      threadContext.getThreadActions(thread.thread_id).setDraftInput(result.prompt)
+      await window.api.harnessBoard.linkSession({
+        projectId: result.projectId,
+        slug: result.slug,
+        threadId: thread.thread_id
+      })
+
+      setFeatureDialogProject(null)
+      setFeatureName("")
+      setExpandedProjectIds((current) => new Set(current).add(result.projectId))
+      await loadProjectDetail(result.projectId)
+      setSelectedFeature({
+        projectId: result.projectId,
+        slug: result.slug,
+        initialSessionThreadId: thread.thread_id
+      })
+    } catch (error) {
+      setFeatureError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setCreatingFeatureProjectId(null)
+    }
+  }, [
+    createThread,
+    creatingFeatureProjectId,
+    featureDialogProject,
+    featureName,
+    loadProjectDetail,
+    threadContext
+  ])
+
   if (selectedFeature) {
     return (
       <FeatureDetailPage
         detail={runDetail}
         loading={loadingRun}
+        initialSessionThreadId={selectedFeature.initialSessionThreadId}
         onBack={() => setSelectedFeature(null)}
         onSessionLinked={refreshSelectedRunDetail}
         onFeatureWorkspaceChange={onFeatureWorkspaceChange}
@@ -2201,8 +2378,10 @@ export function HarnessBoardView({
                     loadingDetailIds={loadingDetailIds}
                     expandedProjectIds={expandedProjectIds}
                     archivingProjectId={archivingProjectId}
+                    creatingFeatureProjectId={creatingFeatureProjectId}
                     onEditProject={handleEditProject}
                     onArchiveProject={(project) => void handleArchiveProject(project)}
+                    onCreateFeature={openFeatureCreateDialog}
                     onToggleProject={handleToggleProject}
                     onOpenFeature={(projectId, slug) => setSelectedFeature({ projectId, slug })}
                   />
@@ -2235,8 +2414,10 @@ export function HarnessBoardView({
                         loadingDetailIds={loadingDetailIds}
                         expandedProjectIds={expandedProjectIds}
                         archivingProjectId={archivingProjectId}
+                        creatingFeatureProjectId={creatingFeatureProjectId}
                         onEditProject={handleEditProject}
                         onArchiveProject={(project) => void handleArchiveProject(project)}
+                        onCreateFeature={openFeatureCreateDialog}
                         onToggleProject={handleToggleProject}
                         onOpenFeature={(projectId, slug) => setSelectedFeature({ projectId, slug })}
                       />
@@ -2249,6 +2430,15 @@ export function HarnessBoardView({
         </main>
       </ScrollArea>
 
+      <FeatureCreateDialog
+        project={featureDialogProject}
+        featureName={featureName}
+        creating={creatingFeatureProjectId !== null}
+        error={featureError}
+        onOpenChange={handleFeatureDialogOpenChange}
+        onChange={setFeatureName}
+        onSubmit={() => void handleSubmitFeature()}
+      />
       <ProjectFormDialog
         open={dialogOpen}
         creating={creating}

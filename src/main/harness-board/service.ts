@@ -12,6 +12,8 @@ import type {
   HarnessAdapterType,
   HarnessArtifact,
   HarnessArtifactKind,
+  HarnessFeatureCreateInput,
+  HarnessFeatureCreateResult,
   HarnessProjectCreateInput,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
@@ -38,8 +40,12 @@ interface HarnessSessionBindingStoreFile {
 }
 
 type HarnessHookLogRef = HarnessRunDetailViewModel["run"]["hookLogRefs"][number]
-type HarnessInspectCommandName = "project" | "run" | "createProject"
-type HarnessPlatformConfigKey = HarnessInspectCommandName | "plugin_dir_prompt" | "plugin_dir"
+type HarnessInspectCommandName = "project" | "run" | "createProject" | "createFeature"
+type HarnessPlatformConfigKey =
+  | HarnessInspectCommandName
+  | "plugin_dir_prompt"
+  | "plugin_dir"
+  | "feature_create_prompt"
 
 interface ConfiguredHarnessInvocation {
   cwd: string
@@ -422,7 +428,7 @@ function buildConfiguredHarnessInvocation(
 ): ConfiguredHarnessInvocation {
   const configured = buildOptionalConfiguredHarnessInvocation(project, mode, feature)
   if (!configured) {
-    throw new Error(`Harness adapter command is not configured: inspectCommands.${process.platform}.${mode}`)
+    throw new Error(`插件未配置 inspectCommands.${process.platform}.${mode}，请检查插件设置`)
   }
   return configured
 }
@@ -1038,6 +1044,16 @@ function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput):
   }
 }
 
+function validateFeatureCreateInput(input: HarnessFeatureCreateInput): void {
+  const feature = normalizeText(input.feature).trim()
+  if (!normalizeText(input.projectId).trim() || !feature) {
+    throw new Error("Project and feature name are required")
+  }
+  if (feature.includes("\0")) {
+    throw new Error("Feature name contains invalid characters")
+  }
+}
+
 function okStatus(_id: string, label: string): HarnessStatus {
   return { label, uiKind: "ok" }
 }
@@ -1102,8 +1118,7 @@ function makeProjectDetailViewModel(
 function initializeHarnessProject(project: HarnessProjectMetadata): void {
   try {
     const projectPath = projectDirectoryPath(project)
-    const configured = buildOptionalConfiguredHarnessInvocation(project, "createProject")
-    if (!configured) return
+    const configured = buildConfiguredHarnessInvocation(project, "createProject")
 
     mkdirSync(projectPath, { recursive: true })
     runHarnessInvocation(configured)
@@ -1111,6 +1126,21 @@ function initializeHarnessProject(project: HarnessProjectMetadata): void {
     const message = error instanceof Error ? error.message : String(error)
     throw new Error(`创建项目失败：${message}`)
   }
+}
+
+function buildHarnessFeatureCreatePrompt(
+  project: HarnessProjectMetadata,
+  feature: string
+): string {
+  const cwd = adapterPluginDir(project)
+  const template = readBoardConfigPlatformText(cwd, "feature_create_prompt")
+  if (!template) {
+    throw new Error(
+      `Harness adapter prompt is not configured: inspectCommands.${process.platform}.feature_create_prompt`
+    )
+  }
+
+  return replaceHarnessConfigPlaceholders(template, project, "createFeature", cwd, feature).trim()
 }
 
 function readHarnessFeatureMetadata(metadata: unknown): { projectId: string; slug: string } | null {
@@ -1174,6 +1204,33 @@ export function createHarnessProject(input: HarnessProjectCreateInput): HarnessP
   store.projects.unshift(project)
   writeProjectStore(store)
   return project
+}
+
+export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessFeatureCreateResult {
+  validateFeatureCreateInput(input)
+  const project = requireProject(input.projectId)
+  const feature = input.feature.trim()
+  const workspacePath = projectDirectoryPath(project)
+  const prompt = buildHarnessFeatureCreatePrompt(project, feature)
+
+  if (!existsSync(workspacePath)) {
+    throw new Error(projectDirectoryMissingMessage(project))
+  }
+
+  try {
+    runConfiguredHarnessCommand(project, "createFeature", feature)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`创建特性失败：${message}`)
+  }
+
+  return {
+    projectId: project.projectId,
+    slug: feature,
+    title: feature,
+    prompt,
+    workspacePath
+  }
 }
 
 export function updateHarnessProjectMetadata(

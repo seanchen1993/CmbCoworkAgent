@@ -1,6 +1,7 @@
 import type { IpcMain } from "electron"
 import {
   archiveHarnessProject,
+  createHarnessFeature,
   createHarnessProject,
   getHarnessProjectDetail,
   getHarnessRunDetail,
@@ -22,6 +23,10 @@ import type {
   HarnessSessionBinding,
   HarnessSessionBindingUpsertInput,
   HarnessAdapterRegistryItem
+} from "../../shared/harness-board-types"
+import type {
+  HarnessFeatureCreateInput,
+  HarnessFeatureCreateResult
 } from "../../shared/harness-board-types"
 
 function getThreadWorkspacePath(threadId: string): string | null {
@@ -61,6 +66,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     "harnessBoard:createProject",
     async (_event, input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> => {
       return createHarnessProject(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:createFeature",
+    async (_event, input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> => {
+      return createHarnessFeature(input)
     }
   )
 

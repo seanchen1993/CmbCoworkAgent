@@ -61,6 +61,19 @@ export interface HarnessProjectCreateInput {
   }
 }
 
+export interface HarnessFeatureCreateInput {
+  projectId: string
+  feature: string
+}
+
+export interface HarnessFeatureCreateResult {
+  projectId: string
+  slug: string
+  title: string
+  prompt: string
+  workspacePath: string
+}
+
 export interface HarnessProjectMetadataUpdateInput {
   adapterId: string
   adapterType: HarnessAdapterType

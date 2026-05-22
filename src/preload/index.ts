@@ -37,6 +37,8 @@ import type {
 } from "../main/ipc/code-exec-tools"
 import type {
   HarnessProjectCreateInput,
+  HarnessFeatureCreateInput,
+  HarnessFeatureCreateResult,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
@@ -1877,6 +1879,8 @@ const api = {
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
     createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>
       ipcRenderer.invoke("harnessBoard:createProject", input) as Promise<HarnessProjectMetadata>,
+    createFeature: (input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> =>
+      ipcRenderer.invoke("harnessBoard:createFeature", input) as Promise<HarnessFeatureCreateResult>,
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput

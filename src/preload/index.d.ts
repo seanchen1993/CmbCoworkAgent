@@ -36,6 +36,8 @@ import type {
 } from "../main/ipc/code-exec-tools"
 import type {
   HarnessProjectCreateInput,
+  HarnessFeatureCreateInput,
+  HarnessFeatureCreateResult,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
@@ -1138,6 +1140,7 @@ interface CustomAPI {
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
+    createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput
