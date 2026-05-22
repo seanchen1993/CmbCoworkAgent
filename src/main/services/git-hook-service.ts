@@ -7,7 +7,11 @@ import { promisify } from "util"
 import { getOpenworkDir } from "../storage"
 import { nowIsoLocal } from "../util/local-time"
 import { parseGitRemoteInfo } from "../utils/git-remote"
-import { measureForCommit, type StagedSnapshot } from "./adoption-tracker"
+import {
+  hasPendingGenerationsForCommit,
+  measureForCommit,
+  type StagedSnapshot
+} from "./adoption-tracker"
 import { scheduleMarkCodeAdoptionCommitsPushed } from "./code-adoption-push-updater"
 import { trackEvent } from "./event-reporter"
 
@@ -993,9 +997,17 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
     }
   }
 
-  if (snapshots.length > 0) {
-    measureForCommit(snapshots, meta.commitSha)
+  if (snapshots.length === 0 || !hasPendingGenerationsForCommit(snapshots)) {
+    console.log(
+      `[GitHook] skip commit snapshot without pending code_gen: commitSha=${meta.commitSha} files=${snapshots.length}`
+    )
+    processed.add(meta.commitSha)
+    await saveProcessedCommitSet(repoDir, processed)
+    await moveEventDir(snapshotDir, join(repoDir, "skipped"), name)
+    return
   }
+
+  measureForCommit(snapshots, meta.commitSha)
 
   const gitRoot = meta.gitRoot
   const [stats, branch, remoteUrl] = await Promise.all([

@@ -1268,6 +1268,16 @@ export function measureForCommit(snapshots: StagedSnapshot[], commitSha?: string
   }
 }
 
+export function hasPendingGenerationsForCommit(snapshots: StagedSnapshot[]): boolean {
+  if (!initialized) return false
+  const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
+  for (const snap of snapshots) {
+    if (!isCodeFile(snap.absPath)) continue
+    if (findPendingGensForFile(snap.absPath, minCreated).length > 0) return true
+  }
+  return false
+}
+
 // ─────────────────────────────────────────────────────────
 // Sweep — housekeeping only (no measurement). Handles shard rotation,
 // retention enforcement, periodic sqlite VACUUM, and index flush.
