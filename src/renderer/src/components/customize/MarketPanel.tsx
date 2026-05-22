@@ -140,14 +140,62 @@ interface UploaderProfile {
   upperOrgLv1?: string
 }
 
-function renderUploaderProfile(profile: UploaderProfile | null, fallbackUserId?: string): React.ReactNode {
+function resolveUploaderProfile(
+  profiles: Record<string, UploaderProfile>,
+  userId?: string | null
+): UploaderProfile | null {
+  const normalizedUserId = userId?.trim()
+  if (!normalizedUserId) return null
+
+  const directProfile = profiles[normalizedUserId]
+  if (directProfile) return directProfile
+
+  const candidates = buildUploaderIdCandidates(normalizedUserId)
+  for (const candidate of candidates) {
+    const profile = profiles[candidate]
+    if (profile) return profile
+  }
+
+  return (
+    Object.values(profiles).find((profile) =>
+      candidates.some((candidate) => profile.sapId.includes(candidate))
+    ) ?? null
+  )
+}
+
+function renderUploaderProfile(
+  profile: UploaderProfile | null,
+  fallbackUserId?: string,
+  options: { multiline?: boolean } = {}
+): React.ReactNode {
+  const { multiline = false } = options
   if (!profile) {
-    return <span className="truncate">{fallbackUserId || "—"}</span>
+    return (
+      <span
+        className={
+          multiline
+            ? "min-w-0 whitespace-normal break-all leading-relaxed"
+            : "truncate"
+        }
+      >
+        {fallbackUserId || "—"}
+      </span>
+    )
   }
   const target = profile
   const userName = target.userName || "未知用户"
   const sapId = target.sapId || "—"
   const orgName = target.orgName || "—"
+
+  if (multiline) {
+    return (
+      <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-1 gap-y-0.5 whitespace-normal leading-relaxed">
+        <span className="min-w-0 break-words">{userName}</span>
+        <span className="break-all text-[#a09f98]">（{sapId}）</span>
+        <span className="min-w-0 break-words text-[#a09f98]">{orgName}</span>
+      </span>
+    )
+  }
 
   return (
     <span className="inline-flex min-w-0 items-center gap-1">
@@ -1322,7 +1370,7 @@ export function MarketPanel(): React.JSX.Element {
   const shouldResolveUploader = activeTab !== ORG_SKILL_MARKET_TYPE
   const selectedUploaderProfile =
     shouldResolveUploader && selectedItem?.user_id
-      ? (uploaderProfiles[selectedItem.user_id] ?? null)
+      ? resolveUploaderProfile(uploaderProfiles, selectedItem.user_id)
       : null
   const selectedSkillUsageRows = useMemo(() => {
     const users = selectedSkillUsage?.users ?? []
@@ -2212,9 +2260,11 @@ export function MarketPanel(): React.JSX.Element {
                       </span>
                     )}
                     {selectedItem.user_id ? (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
-                        <User className="size-3" />
-                        {renderUploaderProfile(selectedUploaderProfile, selectedItem.user_id)}
+                      <span className="flex min-w-0 max-w-full items-start gap-1 rounded-xl bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
+                        <User className="mt-1 size-3 shrink-0" />
+                        {renderUploaderProfile(selectedUploaderProfile, selectedItem.user_id, {
+                          multiline: true
+                        })}
                       </span>
                     ) : null}
                     {activeTab === "skill" && selectedSkillCallCount !== null && (
@@ -2640,7 +2690,7 @@ export function MarketPanel(): React.JSX.Element {
                                 }
                                 uploaderProfile={
                                   shouldResolveUploader && item.user_id
-                                    ? (uploaderProfiles[item.user_id] ?? null)
+                                    ? resolveUploaderProfile(uploaderProfiles, item.user_id)
                                     : null
                                 }
                                 showResolvedUploader={shouldResolveUploader}
