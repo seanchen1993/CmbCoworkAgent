@@ -514,6 +514,8 @@ function buildSkillUsageWildcardFilter(skillName: string): Record<string, unknow
 
 const SKILL_EVAL_STATS_PAGE_SIZE = 1000
 const SKILL_EVAL_STATS_TRACE_LIMIT = 2000
+const SKILL_EVAL_PAGE_STATS_TRACE_LIMIT = 5000
+const SKILL_EVAL_MISSING_PAGE_SKILL_TRACE_LIMIT = 300
 const SKILL_EVAL_STATS_CONCURRENCY = 4
 const SKILL_EVAL_STAT_CACHE_TTL_MS = 60_000
 const SKILL_EVAL_STAT_CACHE_LIMIT = 30
@@ -1805,17 +1807,14 @@ async function fetchSkillEvalSummary(
     }
   })
 
-  let sampleRaw: EsSearchResponse
-  let recentRaw: EsSearchResponse
   let recentSkillFilter = explicitRecentFilter ?? skillNamesFilter
 
   if (recentOnly && explicitRecentFilter) {
     const focusedQuery = skillEvalTraceQuery(range, explicitRecentFilter)
-    const [statsResult, nextRecentRaw] = await Promise.all([
+    const [statsResult, recentRaw] = await Promise.all([
       fetchSkillEvalStatTraces(range, explicitRecentFilter, source),
       esQuery(getEsIndex("trace"), buildRecentBody(focusedQuery)) as Promise<EsSearchResponse>
     ])
-    recentRaw = nextRecentRaw
     const recentTraceHits = getTotalHits(recentRaw, recentRaw.hits?.hits?.length ?? 0)
     const recentTraces = parseSkillEvalTraceHits(recentRaw)
     const statsRuns = buildSkillEvalRuns(
@@ -1868,12 +1867,11 @@ async function fetchSkillEvalSummary(
           ]
         ])
       : undefined
-    const [statsResult, nextRecentRaw, pageStatTraces] = await Promise.all([
+    const [statsResult, recentRaw, pageStatTraces] = await Promise.all([
       statsResultPromise,
       esQuery(getEsIndex("trace"), buildRecentBody(focusedQuery)) as Promise<EsSearchResponse>,
       fetchSkillEvalStatTracesForSkillPage(range, skillList.skills, source, prefetchedStatsBySkill)
     ])
-    recentRaw = nextRecentRaw
     const focusedSampleTraces = statsResult.traces
     const focusedSampleRuns = buildSkillEvalRuns(
       focusedSampleTraces,
@@ -1950,7 +1948,7 @@ async function fetchSkillEvalSummary(
         )
       }))
     : undefined
-  ;[sampleRaw, recentRaw] = await Promise.all([
+  const [sampleRaw, recentRaw] = await Promise.all([
     esQuery(getEsIndex("trace"), buildSampleBody(recentQuery)) as Promise<EsSearchResponse>,
     esQuery(getEsIndex("trace"), buildRecentBody(recentQuery)) as Promise<EsSearchResponse>
   ])
@@ -2300,34 +2298,109 @@ async function fetchSkillEvalStatTracesForSkillPage(
   prefetchedResults = new Map<string, Promise<{ traces: AgentTrace[]; totalTraceHits: number }>>()
 ): Promise<AgentTrace[]> {
   const tracesById = new Map<string, AgentTrace>()
-  const results = await mapWithConcurrency(skills, SKILL_EVAL_STATS_CONCURRENCY, async (skill) => {
-    const key = skillVersionKey(skill.skillName, skill.skillVersion)
-    return (
-      prefetchedResults.get(key) ??
-      fetchSkillEvalStatTraces(range, skillSummaryToExactFilter(skill), source)
-    )
-  })
+  if (skills.length === 0) return []
 
-  for (let index = 0; index < results.length; index += 1) {
-    const result = results[index]
-    if (result.status === "rejected") {
-      const skill = skills[index]
-      console.warn(
-        `[Dashboard] skill eval stats failed for ${skillVersionKey(skill.skillName, skill.skillVersion)}:`,
-        result.reason instanceof Error ? result.reason.message : String(result.reason)
-      )
-      continue
+  const addTraces = (traces: AgentTrace[], fallbackKey: string): void => {
+    for (const trace of traces) {
+      tracesById.set(trace.traceId || `${fallbackKey}:${trace.startedAt}`, trace)
     }
-    const skill = skills[index]
-    for (const trace of result.value.traces) {
-      tracesById.set(
-        trace.traceId ||
-          `${skillVersionKey(skill.skillName, skill.skillVersion)}:${trace.startedAt}`,
-        trace
-      )
+  }
+
+  const pageSkillNames = Array.from(
+    new Set(skills.map((skill) => normalizeSkillQueryName(skill.skillName)).filter(Boolean))
+  )
+  const pageTraceLimit = Math.min(
+    SKILL_EVAL_PAGE_STATS_TRACE_LIMIT,
+    SKILL_EVAL_STATS_TRACE_LIMIT * Math.max(1, pageSkillNames.length)
+  )
+  const batchedStatsPromise =
+    pageSkillNames.length > 0
+      ? fetchSkillEvalStatTraces(range, { skillNames: pageSkillNames }, source, pageTraceLimit)
+      : Promise.resolve({ traces: [], totalTraceHits: 0 })
+  const prefetchedStatsPromise = Promise.allSettled(
+    [...prefetchedResults.entries()].map(async ([key, promise]) => ({
+      key,
+      result: await promise
+    }))
+  )
+  const [batchedStats, prefetchedStats] = await Promise.allSettled([
+    batchedStatsPromise,
+    prefetchedStatsPromise
+  ])
+
+  if (batchedStats.status === "fulfilled") {
+    addTraces(batchedStats.value.traces, `page:${pageSkillNames.join("|")}`)
+  } else {
+    console.warn(
+      "[Dashboard] batched skill eval page stats failed:",
+      batchedStats.reason instanceof Error
+        ? batchedStats.reason.message
+        : String(batchedStats.reason)
+    )
+  }
+
+  if (prefetchedStats.status === "fulfilled") {
+    for (const item of prefetchedStats.value) {
+      if (item.status === "fulfilled") {
+        addTraces(item.value.result.traces, item.value.key)
+      } else {
+        console.warn(
+          "[Dashboard] prefetched skill eval stats failed:",
+          item.reason instanceof Error ? item.reason.message : String(item.reason)
+        )
+      }
+    }
+  }
+
+  const missingSkills = skills.filter(
+    (skill) => ![...tracesById.values()].some((trace) => traceMatchesSkillSummary(trace, skill))
+  )
+  if (missingSkills.length > 0) {
+    const fallbackResults = await mapWithConcurrency(
+      missingSkills,
+      Math.min(SKILL_EVAL_STATS_CONCURRENCY, 2),
+      (skill) =>
+        fetchSkillEvalStatTraces(
+          range,
+          skillSummaryToExactFilter(skill),
+          source,
+          SKILL_EVAL_MISSING_PAGE_SKILL_TRACE_LIMIT
+        )
+    )
+    const failedSkills: string[] = []
+    for (let index = 0; index < fallbackResults.length; index += 1) {
+      const result = fallbackResults[index]
+      const skill = missingSkills[index]
+      const key = skillVersionKey(skill.skillName, skill.skillVersion)
+      if (result.status === "fulfilled") {
+        addTraces(result.value.traces, key)
+      } else {
+        failedSkills.push(key)
+        console.warn(
+          `[Dashboard] skill eval stats failed for ${key}:`,
+          result.reason instanceof Error ? result.reason.message : String(result.reason)
+        )
+      }
+    }
+    if (failedSkills.length > 0) {
+      throw new Error(`技能统计查询失败：${failedSkills.join(", ")}`)
     }
   }
   return [...tracesById.values()]
+}
+
+function traceMatchesSkillSummary(
+  trace: AgentTrace,
+  skill: DashboardSkillEvalSkillSummary
+): boolean {
+  if (!Array.isArray(trace.usedSkills)) return false
+  return trace.usedSkills.some((usedSkill) => {
+    const parsed = parseSkillNameVersionIdentifier(usedSkill)
+    return (
+      parsed.skillName === skill.skillName &&
+      (parsed.skillVersion ?? undefined) === (skill.skillVersion ?? undefined)
+    )
+  })
 }
 
 function parseSkillEvalTraceHits(raw: EsSearchResponse): AgentTrace[] {
@@ -4444,7 +4517,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchSkillEvalSummary(range, options) }
       } catch (e) {
         console.error("[Dashboard] skillEvalSummary error:", e)
-        return { success: true, data: makeMockSkillEvalSummary(range, options) }
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
   )

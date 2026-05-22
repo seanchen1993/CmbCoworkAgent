@@ -420,7 +420,7 @@ export interface DashboardSkillEvalOptions {
 }
 
 const SKILL_EVAL_RECENT_PAGE_SIZE = 10
-const SKILL_EVAL_SKILL_PAGE_SIZE = 5
+const SKILL_EVAL_SKILL_PAGE_SIZE = 10
 
 function dashboardSkillEvalKey(skillName?: string, skillVersion?: string): string {
   return `${skillName ?? ""}:${skillVersion ?? ""}`
