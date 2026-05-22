@@ -764,6 +764,10 @@ const SkillEvalSkillRow = memo(function SkillEvalSkillRow({
   const handleClick = useCallback(() => {
     onSelect(skillKey)
   }, [onSelect, skillKey])
+  const statsStateLabel = skill.statsFailed ? "!" : "—"
+  const statsStateTitle = skill.statsFailed ? "统计加载失败" : "统计加载中"
+  const renderStatsValue = (value: string): string =>
+    skill.statsPending || skill.statsFailed ? statsStateLabel : value
 
   return (
     <button
@@ -794,23 +798,27 @@ const SkillEvalSkillRow = memo(function SkillEvalSkillRow({
       </div>
       <div
         className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}
+        title={skill.statsPending || skill.statsFailed ? statsStateTitle : undefined}
       >
-        {formatSkillEvalPercent(skill.passRate)}
+        {renderStatsValue(formatSkillEvalPercent(skill.passRate))}
       </div>
       <div
         className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}
+        title={skill.statsPending || skill.statsFailed ? statsStateTitle : undefined}
       >
-        {formatSkillEvalScore(skill.averageOutcomeScore)}
+        {renderStatsValue(formatSkillEvalScore(skill.averageOutcomeScore))}
       </div>
       <div
         className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}
+        title={skill.statsPending || skill.statsFailed ? statsStateTitle : undefined}
       >
-        {formatSkillEvalScore(skill.averageScore)}
+        {renderStatsValue(formatSkillEvalScore(skill.averageScore))}
       </div>
       <div
         className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}
+        title={skill.statsPending || skill.statsFailed ? statsStateTitle : undefined}
       >
-        {formatSkillEvalTokens(skill.averageTotalTokens)}
+        {renderStatsValue(formatSkillEvalTokens(skill.averageTotalTokens))}
       </div>
     </button>
   )
@@ -1194,8 +1202,8 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
     : data.totalTokens
   const selectedResultRecords = selectedSkill ? selectedSkill.runs : data.totalRuns
   const selectedTotalLabel = selectedSkill
-    ? `范围内 ${formatNumber(selectedRunTotal)} 条`
-    : `实际最近 ${formatNumber(recentTotal)} 条`
+    ? `${formatNumber(selectedRunTotal)} 条`
+    : `${formatNumber(recentTotal)} 条`
   const selectedAverageToolCalls = selectedSkill?.averageToolCalls ?? data.averageToolCalls
   const selectedAverageModelCalls = selectedSkill?.averageModelCalls ?? data.averageModelCalls
   const selectedAverageTotalTokens = selectedSkill?.averageTotalTokens ?? data.averageTotalTokens
@@ -1543,6 +1551,13 @@ export function DashboardView(): React.JSX.Element {
   const skillEvalScopeKey = skillEvalMineOnly
     ? `mine:${myUploadedSkillNamesKey}:${skillEvalSearchQuery}`
     : `all:${skillEvalSearchQuery}`
+  const skillEvalScopeOptions = useMemo(
+    () => ({
+      ...(skillEvalSearchQuery ? { skillSearch: skillEvalSearchQuery } : {}),
+      ...(skillEvalMineOnly ? { skillNames: myUploadedSkillNames } : {})
+    }),
+    [myUploadedSkillNames, skillEvalMineOnly, skillEvalSearchQuery]
+  )
   const skillEvalSkillByKey = useMemo(
     () =>
       new Map(
@@ -1585,18 +1600,16 @@ export function DashboardView(): React.JSX.Element {
     void fetchSkillEvalPage(1, {
       defaultRecentToLatestSkill: true,
       listFirst: true,
-      ...(skillEvalSearchQuery ? { skillSearch: skillEvalSearchQuery } : {}),
-      ...(skillEvalMineOnly ? { skillNames: myUploadedSkillNames } : {})
+      deferPageStats: true,
+      ...skillEvalScopeOptions
     })
   }, [
     activeMainTab,
     fetchSkillEvalPage,
     mineSkillsLoading,
-    myUploadedSkillNamesKey,
     skillEval,
     skillEvalLoading,
-    skillEvalMineOnly,
-    skillEvalSearchQuery
+    skillEvalScopeOptions
   ])
 
   useEffect(() => {
@@ -1816,7 +1829,7 @@ export function DashboardView(): React.JSX.Element {
         ...(skillEvalMineOnly ? { skillNames: myUploadedSkillNames } : {})
       }
     },
-    [myUploadedSkillNamesKey, skillEvalMineOnly, skillEvalSearchQuery, skillEvalSkillByKey]
+    [myUploadedSkillNames, skillEvalMineOnly, skillEvalSearchQuery, skillEvalSkillByKey]
   )
 
   const handleSkillEvalPageChange = useCallback(
@@ -1838,6 +1851,7 @@ export function DashboardView(): React.JSX.Element {
         skillPage: page,
         defaultRecentToLatestSkill: true,
         listFirst: true,
+        deferPageStats: true,
         ...(skillEvalSearchQuery ? { skillSearch: skillEvalSearchQuery } : {}),
         ...(skillEvalMineOnly ? { skillNames: myUploadedSkillNames } : {})
       })

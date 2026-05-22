@@ -172,6 +172,7 @@ interface DashboardSkillEvalOptions {
   defaultRecentToLatestSkill?: boolean
   recentOnly?: boolean
   listOnly?: boolean
+  statsOnly?: boolean
 }
 
 interface DashboardCodeStats {

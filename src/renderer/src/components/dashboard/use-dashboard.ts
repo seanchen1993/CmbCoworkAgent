@@ -348,6 +348,8 @@ export interface DashboardSkillEvalRun {
 export interface DashboardSkillEvalSkillSummary {
   skillName: string
   skillVersion?: string
+  statsPending?: boolean
+  statsFailed?: boolean
   runs: number
   passRate: number
   resultPassRate: number
@@ -406,6 +408,7 @@ export interface DashboardSkillEvalSummary {
 }
 
 export interface DashboardSkillEvalOptions {
+  limit?: number
   recentPage?: number
   recentPageSize?: number
   skillPage?: number
@@ -417,13 +420,111 @@ export interface DashboardSkillEvalOptions {
   defaultRecentToLatestSkill?: boolean
   recentOnly?: boolean
   listOnly?: boolean
+  statsOnly?: boolean
 }
 
 const SKILL_EVAL_RECENT_PAGE_SIZE = 10
 const SKILL_EVAL_SKILL_PAGE_SIZE = 10
+const SKILL_EVAL_BACKGROUND_STATS_CONCURRENCY = 3
+const SKILL_EVAL_BACKGROUND_STATS_LIMIT = 500
 
 function dashboardSkillEvalKey(skillName?: string, skillVersion?: string): string {
   return `${skillName ?? ""}:${skillVersion ?? ""}`
+}
+
+function markSkillEvalStatsPending(summary: DashboardSkillEvalSummary): DashboardSkillEvalSummary {
+  return {
+    ...summary,
+    skills: summary.skills.map((skill) => ({
+      ...skill,
+      statsPending: true,
+      statsFailed: false
+    }))
+  }
+}
+
+function withSkillEvalDerivedTotals(summary: DashboardSkillEvalSummary): DashboardSkillEvalSummary {
+  const loadedSkills = summary.skills.filter((skill) => !skill.statsPending && !skill.statsFailed)
+  const totalRuns = loadedSkills.reduce((sum, skill) => sum + skill.runs, 0)
+  if (totalRuns <= 0) {
+    return {
+      ...summary,
+      totalRuns: 0,
+      passRate: 0,
+      resultPassRate: 0,
+      averageScore: 0,
+      averageProcessScore: 0,
+      averageOutcomeScore: 0,
+      averageResultScore: 0,
+      averageToolCalls: 0,
+      averageModelCalls: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalPromptInputTokens: 0,
+      totalTokens: 0,
+      averageInputTokens: 0,
+      averageOutputTokens: 0,
+      averagePromptInputTokens: 0,
+      averageTotalTokens: 0,
+      averagePeakInputTokens: 0,
+      averageDurationMs: 0
+    }
+  }
+  const weighted = (selector: (skill: DashboardSkillEvalSkillSummary) => number): number =>
+    Number(
+      (
+        loadedSkills.reduce((sum, skill) => sum + selector(skill) * skill.runs, 0) / totalRuns
+      ).toFixed(4)
+    )
+  const totalInputTokens = loadedSkills.reduce(
+    (sum, skill) => sum + skill.averageInputTokens * skill.runs,
+    0
+  )
+  const totalOutputTokens = loadedSkills.reduce(
+    (sum, skill) => sum + skill.averageOutputTokens * skill.runs,
+    0
+  )
+  const totalPromptInputTokens = loadedSkills.reduce(
+    (sum, skill) => sum + skill.averagePromptInputTokens * skill.runs,
+    0
+  )
+  const totalTokens = loadedSkills.reduce(
+    (sum, skill) => sum + skill.averageTotalTokens * skill.runs,
+    0
+  )
+
+  return {
+    ...summary,
+    totalRuns,
+    passRate: weighted((skill) => skill.passRate),
+    resultPassRate: weighted((skill) => skill.resultPassRate),
+    averageScore: weighted((skill) => skill.averageScore),
+    averageProcessScore: weighted((skill) => skill.averageProcessScore),
+    averageOutcomeScore: weighted((skill) => skill.averageOutcomeScore),
+    averageResultScore: weighted((skill) => skill.averageResultScore),
+    averageToolCalls: weighted((skill) => skill.averageToolCalls),
+    averageModelCalls: weighted((skill) => skill.averageModelCalls),
+    totalInputTokens: Math.round(totalInputTokens),
+    totalOutputTokens: Math.round(totalOutputTokens),
+    totalPromptInputTokens: Math.round(totalPromptInputTokens),
+    totalTokens: Math.round(totalTokens),
+    averageInputTokens: Number((totalInputTokens / totalRuns).toFixed(4)),
+    averageOutputTokens: Number((totalOutputTokens / totalRuns).toFixed(4)),
+    averagePromptInputTokens: Number((totalPromptInputTokens / totalRuns).toFixed(4)),
+    averageTotalTokens: Number((totalTokens / totalRuns).toFixed(4)),
+    averagePeakInputTokens: weighted((skill) => skill.averagePeakInputTokens),
+    averageDurationMs: weighted((skill) => skill.averageDurationMs)
+  }
+}
+
+function skillEvalSummaryToFilter(skill: DashboardSkillEvalSkillSummary): {
+  skillName: string
+  skillVersion?: string
+} {
+  return {
+    skillName: skill.skillName,
+    ...(skill.skillVersion ? { skillVersion: skill.skillVersion } : {})
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1106,6 +1207,8 @@ function parseSkillEvalSummary(
     ? raw.skills.map((item: any) => ({
         skillName: String(item.skillName ?? "unknown"),
         ...(item.skillVersion ? { skillVersion: String(item.skillVersion) } : {}),
+        ...(item.statsPending === true ? { statsPending: true } : {}),
+        ...(item.statsFailed === true ? { statsFailed: true } : {}),
         runs: numberValue(item.runs),
         passRate: numberValue(item.passRate),
         resultPassRate: numberValue(item.resultPassRate),
@@ -1309,7 +1412,7 @@ function mergeSkillEvalRecentOnly(
     next.skills.map((skill) => [dashboardSkillEvalKey(skill.skillName, skill.skillVersion), skill])
   )
 
-  return {
+  const merged = {
     ...current,
     generatedAt: next.generatedAt,
     evaluatedTraceCount: next.evaluatedTraceCount,
@@ -1321,11 +1424,70 @@ function mergeSkillEvalRecentOnly(
     skillPage: next.skillPage,
     skillPageSize: next.skillPageSize,
     recent: next.recent,
-    skills: current.skills.map(
-      (skill) =>
-        updatedSkillByKey.get(dashboardSkillEvalKey(skill.skillName, skill.skillVersion)) ?? skill
+    skills: current.skills.map((skill) => {
+      const updated = updatedSkillByKey.get(
+        dashboardSkillEvalKey(skill.skillName, skill.skillVersion)
+      )
+      return updated ? { ...updated, statsPending: false, statsFailed: false } : skill
+    })
+  }
+  return withSkillEvalDerivedTotals(merged)
+}
+
+function mergeSkillEvalSkillStats(
+  current: DashboardSkillEvalSummary,
+  next: DashboardSkillEvalSummary
+): DashboardSkillEvalSummary {
+  const updatedSkillByKey = new Map(
+    next.skills.map((skill) => [dashboardSkillEvalKey(skill.skillName, skill.skillVersion), skill])
+  )
+  if (updatedSkillByKey.size === 0) return current
+
+  const merged = {
+    ...current,
+    generatedAt: next.generatedAt,
+    skills: current.skills.map((skill) => {
+      const updated = updatedSkillByKey.get(
+        dashboardSkillEvalKey(skill.skillName, skill.skillVersion)
+      )
+      return updated ? { ...updated, statsPending: false, statsFailed: false } : skill
+    })
+  }
+  return withSkillEvalDerivedTotals(merged)
+}
+
+function markSkillEvalSkillStatsFailed(
+  current: DashboardSkillEvalSummary,
+  failedSkill: DashboardSkillEvalSkillSummary
+): DashboardSkillEvalSummary {
+  return {
+    ...current,
+    skills: current.skills.map((skill) =>
+      dashboardSkillEvalKey(skill.skillName, skill.skillVersion) ===
+      dashboardSkillEvalKey(failedSkill.skillName, failedSkill.skillVersion)
+        ? { ...skill, statsPending: false, statsFailed: true }
+        : skill
     )
   }
+}
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>
+): Promise<void> {
+  let nextIndex = 0
+  const workerCount = Math.min(Math.max(1, concurrency), items.length)
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex
+        nextIndex += 1
+        await worker(items[currentIndex], currentIndex)
+      }
+    })
+  )
 }
 
 async function loadSkillEvalSummarySafely(
@@ -1337,7 +1499,7 @@ async function loadSkillEvalSummarySafely(
       return { success: true, data: emptySkillEvalSummary() }
     }
     return await window.api.dashboard.skillEvalSummary(range, {
-      limit: 500,
+      limit: options.limit ?? 500,
       recentPage: options.recentPage ?? 1,
       recentPageSize: options.recentPageSize ?? SKILL_EVAL_RECENT_PAGE_SIZE,
       skillPage: options.skillPage ?? 1,
@@ -1348,7 +1510,8 @@ async function loadSkillEvalSummarySafely(
       ...(options.skillNames ? { skillNames: options.skillNames } : {}),
       ...(options.defaultRecentToLatestSkill ? { defaultRecentToLatestSkill: true } : {}),
       ...(options.recentOnly ? { recentOnly: true } : {}),
-      ...(options.listOnly ? { listOnly: true } : {})
+      ...(options.listOnly ? { listOnly: true } : {}),
+      ...(options.statsOnly ? { statsOnly: true } : {})
     })
   } catch (error) {
     console.warn("[Dashboard] skillEvalSummary unavailable, using empty data:", error)
@@ -1452,6 +1615,7 @@ export function useDashboard() {
         skillPage?: number
         skillSearch?: string
         listFirst?: boolean
+        deferPageStats?: boolean
       }
     ) => {
       const id = ++skillEvalFetchIdRef.current
@@ -1471,6 +1635,7 @@ export function useDashboard() {
           ...(filter?.defaultRecentToLatestSkill ? { defaultRecentToLatestSkill: true } : {}),
           ...(filter?.recentOnly ? { recentOnly: true } : {})
         }
+        let listedSkillEval: DashboardSkillEvalSummary | null = null
         if (filter?.listFirst && !filter.skillName && !filter.recentOnly) {
           const listResult = await loadSkillEvalSummarySafely(range, {
             ...requestOptions,
@@ -1484,7 +1649,79 @@ export function useDashboard() {
             skillPage: filter?.skillPage ?? 1,
             skillPageSize: SKILL_EVAL_SKILL_PAGE_SIZE
           })
-          setSkillEval(listSkillEval)
+          listedSkillEval = markSkillEvalStatsPending(listSkillEval)
+          setSkillEval(listedSkillEval)
+        }
+        if (filter?.deferPageStats && listedSkillEval && !filter.skillName && !filter.recentOnly) {
+          const selectedSkill = listedSkillEval.skills[0]
+          if (!selectedSkill) {
+            setSkillEvalLoading(false)
+            return
+          }
+          const selectedFilter = skillEvalSummaryToFilter(selectedSkill)
+          const selectedResult = await loadSkillEvalSummarySafely(range, {
+            ...requestOptions,
+            ...selectedFilter,
+            recentOnly: true
+          })
+          if (id !== skillEvalFetchIdRef.current) return
+          if (!selectedResult.success) {
+            throw new Error(selectedResult.error ?? "获取当前技能评估数据失败")
+          }
+          const selectedSkillEval = parseSkillEvalSummary(selectedResult.data, {
+            recentPage: page,
+            recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE,
+            skillPage: filter?.skillPage ?? 1,
+            skillPageSize: SKILL_EVAL_SKILL_PAGE_SIZE
+          })
+          setSkillEval((current) =>
+            current ? mergeSkillEvalRecentOnly(current, selectedSkillEval) : selectedSkillEval
+          )
+          // Close the blocking loading state once the list and selected skill are usable.
+          // Remaining skills continue filling in through background requests.
+          setSkillEvalLoading(false)
+
+          const backgroundSkills = listedSkillEval.skills.slice(1)
+          void runWithConcurrency(
+            backgroundSkills,
+            SKILL_EVAL_BACKGROUND_STATS_CONCURRENCY,
+            async (skill) => {
+              if (id !== skillEvalFetchIdRef.current) return
+              const statsResult = await loadSkillEvalSummarySafely(range, {
+                ...requestOptions,
+                limit: SKILL_EVAL_BACKGROUND_STATS_LIMIT,
+                ...skillEvalSummaryToFilter(skill),
+                statsOnly: true
+              })
+              if (id !== skillEvalFetchIdRef.current) return
+              if (!statsResult.success) {
+                console.warn(
+                  "[Dashboard] background skill stats failed:",
+                  statsResult.error ?? skill.skillName
+                )
+                setSkillEval((current) =>
+                  current ? markSkillEvalSkillStatsFailed(current, skill) : current
+                )
+                return
+              }
+              const statsSkillEval = parseSkillEvalSummary(statsResult.data, {
+                recentPage: page,
+                recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE,
+                skillPage: filter?.skillPage ?? 1,
+                skillPageSize: SKILL_EVAL_SKILL_PAGE_SIZE
+              })
+              if (statsSkillEval.skills.length === 0) {
+                setSkillEval((current) =>
+                  current ? markSkillEvalSkillStatsFailed(current, skill) : current
+                )
+                return
+              }
+              setSkillEval((current) =>
+                current ? mergeSkillEvalSkillStats(current, statsSkillEval) : current
+              )
+            }
+          )
+          return
         }
         const result = await loadSkillEvalSummarySafely(range, requestOptions)
         if (id !== skillEvalFetchIdRef.current) return

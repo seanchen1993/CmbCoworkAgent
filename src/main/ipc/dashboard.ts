@@ -425,6 +425,7 @@ interface DashboardSkillEvalOptions {
   defaultRecentToLatestSkill?: boolean
   recentOnly?: boolean
   listOnly?: boolean
+  statsOnly?: boolean
 }
 
 const DISLIKE_TYPE_OPTIONS = [
@@ -598,6 +599,7 @@ function normalizeSkillEvalOptions(value?: DashboardSkillEvalOptions): {
   defaultRecentToLatestSkill: boolean
   recentOnly: boolean
   listOnly: boolean
+  statsOnly: boolean
 } {
   const skillName = typeof value?.skillName === "string" ? value.skillName.trim() : ""
   const skillVersion = typeof value?.skillVersion === "string" ? value.skillVersion.trim() : ""
@@ -620,7 +622,8 @@ function normalizeSkillEvalOptions(value?: DashboardSkillEvalOptions): {
     skillNamesProvided: Array.isArray(value?.skillNames),
     defaultRecentToLatestSkill: value?.defaultRecentToLatestSkill === true,
     recentOnly: value?.recentOnly === true,
-    listOnly: value?.listOnly === true
+    listOnly: value?.listOnly === true,
+    statsOnly: value?.statsOnly === true
   }
 }
 
@@ -1765,12 +1768,19 @@ async function fetchSkillEvalSummary(
     skillNamesProvided,
     defaultRecentToLatestSkill,
     recentOnly,
-    listOnly
+    listOnly,
+    statsOnly
   } = normalizeSkillEvalOptions(options)
   const recentFrom = (recentPage - 1) * recentPageSize
   const skillNamesFilter: SkillEvalNamesFilter | undefined =
     skillNames.length > 0 ? { skillNames } : undefined
   const allowedSkillNames = skillNames.length > 0 ? new Set(skillNames) : undefined
+  const explicitRecentFilter: SkillEvalExactFilter | undefined = skillName
+    ? { skillName, skillVersion }
+    : undefined
+  if (statsOnly && !explicitRecentFilter) {
+    throw new Error("statsOnly requires skillName")
+  }
   if (skillNamesProvided && skillNames.length === 0) {
     return buildSkillEvalSummaryFromTraces({
       traces: [],
@@ -1785,9 +1795,6 @@ async function fetchSkillEvalSummary(
     })
   }
   const source = { includes: skillEvalTraceSourceIncludes() }
-  const explicitRecentFilter: SkillEvalExactFilter | undefined = skillName
-    ? { skillName, skillVersion }
-    : undefined
   const buildSampleBody = (sampleQuery: Record<string, unknown>) => ({
     track_total_hits: true,
     size: sampleLimit,
@@ -1808,6 +1815,36 @@ async function fetchSkillEvalSummary(
   })
 
   let recentSkillFilter = explicitRecentFilter ?? skillNamesFilter
+
+  // statsOnly is intentionally handled before recentOnly; if both flags are
+  // present, the lightweight stats-only path wins and does not fetch recent runs.
+  if (statsOnly && explicitRecentFilter) {
+    const statsResult = await fetchSkillEvalStatTraces(
+      range,
+      explicitRecentFilter,
+      source,
+      sampleLimit
+    )
+    const statsRuns = buildSkillEvalRuns(
+      statsResult.traces,
+      explicitRecentFilter,
+      allowedSkillNames
+    )
+    return buildSkillEvalSummaryFromTraces({
+      traces: statsResult.traces,
+      sampleRuns: statsRuns,
+      recentTraces: [],
+      totalTraceHits: statsResult.totalTraceHits,
+      sampledTraceCount: statsResult.traces.length,
+      recentTotal: 0,
+      recentPage,
+      recentPageSize,
+      skillPage,
+      skillPageSize,
+      recentSkillFilter: explicitRecentFilter,
+      allowedSkillNames
+    })
+  }
 
   if (recentOnly && explicitRecentFilter) {
     const focusedQuery = skillEvalTraceQuery(range, explicitRecentFilter)
