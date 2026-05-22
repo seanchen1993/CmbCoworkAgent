@@ -1983,6 +1983,93 @@ export function saveChatXConfig(updates: Partial<import("./types").ChatXConfig>)
   writeFileSync(CHATX_CONFIG_FILE, JSON.stringify(merged, null, 2))
 }
 
+// ── Hook Logging ──────────────────────────────────────────────────────────────
+//
+// Both flags default to false: no chat UI footprint, no IPC overhead, no disk
+// writes unless the user opts in. See HookLoggingConfig in types.ts for the
+// behavioral split.
+
+const HOOK_LOGGING_CONFIG_FILE = join(OPENWORK_DIR, "hook-logging.json")
+
+// Read once and cache — checked on every hook execution, doesn't need to hit
+// the disk each time. The setter invalidates by overwriting.
+let _hookLoggingCache: import("./types").HookLoggingConfig | null = null
+
+function defaultHookLoggingConfig(): import("./types").HookLoggingConfig {
+  return { enabled: false, diagnostic: false }
+}
+
+export function getHookLoggingConfig(): import("./types").HookLoggingConfig {
+  if (_hookLoggingCache) return _hookLoggingCache
+  getOpenworkDir()
+  if (!existsSync(HOOK_LOGGING_CONFIG_FILE)) {
+    _hookLoggingCache = defaultHookLoggingConfig()
+    return _hookLoggingCache
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(HOOK_LOGGING_CONFIG_FILE, "utf-8")) as Record<
+      string,
+      unknown
+    >
+    const defaults = defaultHookLoggingConfig()
+    _hookLoggingCache = {
+      enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : defaults.enabled,
+      diagnostic: typeof parsed.diagnostic === "boolean" ? parsed.diagnostic : defaults.diagnostic
+    }
+    // Diagnostic requires enabled — clamp here so callers don't need to repeat.
+    if (!_hookLoggingCache.enabled) _hookLoggingCache.diagnostic = false
+    return _hookLoggingCache
+  } catch {
+    _hookLoggingCache = defaultHookLoggingConfig()
+    return _hookLoggingCache
+  }
+}
+
+export function saveHookLoggingConfig(
+  updates: Partial<import("./types").HookLoggingConfig>
+): import("./types").HookLoggingConfig {
+  getOpenworkDir()
+  const current = getHookLoggingConfig()
+  const next: import("./types").HookLoggingConfig = {
+    enabled: typeof updates.enabled === "boolean" ? updates.enabled : current.enabled,
+    diagnostic: typeof updates.diagnostic === "boolean" ? updates.diagnostic : current.diagnostic
+  }
+  if (!next.enabled) next.diagnostic = false
+  writeFileSync(HOOK_LOGGING_CONFIG_FILE, JSON.stringify(next, null, 2))
+  _hookLoggingCache = next
+  return next
+}
+
+/**
+ * Path-only resolver for the log directory — never creates anything. Use this
+ * from read-only paths (e.g. startup prune) so disabling Hook logging really
+ * means "no disk footprint".
+ */
+export function resolveHookLogDir(): string {
+  return join(OPENWORK_DIR, "hooks", "log")
+}
+
+/**
+ * Directory holding the rolling jsonl files. Lives at
+ * `<openworkDir>/hooks/log/` so the daily files don't pollute the top-level
+ * config folder and the "open folder" button can drop the user straight into
+ * the right place. Created on demand — only call this when about to write.
+ */
+export function getHookLogDir(): string {
+  getOpenworkDir()
+  const dir = resolveHookLogDir()
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/** Absolute path to the jsonl log file for a given local date. */
+export function getHookLogFilePath(date: Date = new Date()): string {
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, "0")
+  const d = String(date.getDate()).padStart(2, "0")
+  return join(getHookLogDir(), `hooks.${y}-${m}-${d}.jsonl`)
+}
+
 // ── Sandbox Settings ──────────────────────────────────────────────────────────
 
 const SANDBOX_SETTINGS_FILE = join(OPENWORK_DIR, "sandbox-settings.json")

@@ -20,6 +20,7 @@ import type {
   LspCallHierarchyOutgoingCall,
   LspStatus,
   ChatXConfig,
+  HookLoggingConfig,
   PluginHookMetadata,
   PluginMetadata,
   PluginManifest,
@@ -240,14 +241,16 @@ interface CustomAPI {
       threadId: string,
       message: string,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      userMessageId?: string
     ) => () => void
     streamAgent: (
       threadId: string,
       message: string,
       command: unknown,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      userMessageId?: string
     ) => () => void
     interrupt: (
       threadId: string,
@@ -1034,6 +1037,13 @@ interface CustomAPI {
       onChanged: (
         callback: (data: { threadId: string; workspacePath: string }) => void
       ) => () => void
+    }
+    logging: {
+      get: () => Promise<HookLoggingConfig>
+      save: (updates: Partial<HookLoggingConfig>) => Promise<HookLoggingConfig>
+      getLogDir: () => Promise<string>
+      openLogDir: () => Promise<{ success: boolean; error?: string }>
+      onChanged: (callback: (config: HookLoggingConfig) => void) => () => void
     }
   }
   codeExecTools: {

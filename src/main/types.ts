@@ -20,6 +20,8 @@ export interface AgentInvokeParams {
   threadId: string
   message: string
   modelId?: string
+  /** Renderer user message id for the turn, used to group hook log events. */
+  userMessageId?: string
 }
 
 export interface AgentResumeParams {
@@ -574,6 +576,23 @@ export interface ChatXConfig {
   wsUrl: string
   userIp: string
   robots: ChatXRobotConfig[]
+}
+
+/**
+ * Hook execution logging configuration.
+ *
+ * - `enabled = false` (default): no logs collected anywhere — IPC events skipped,
+ *   no in-memory ring buffer, no jsonl writes. Zero overhead.
+ * - `enabled = true`: per-turn log chips appear in the chat. Click opens a modal
+ *   with that turn's hook execution records.
+ * - `diagnostic = true` (requires enabled): adds stdin payload, full command,
+ *   cwd, env subset; emits "skipped" entries for hooks filtered out by scope;
+ *   persists everything to `<openworkDir>/hooks/log/hooks.<YYYY-MM-DD>.jsonl`.
+ *   Off by default because the stdin payload can contain sensitive user input.
+ */
+export interface HookLoggingConfig {
+  enabled: boolean
+  diagnostic: boolean
 }
 
 // Skills types

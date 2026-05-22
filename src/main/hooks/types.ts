@@ -139,6 +139,28 @@ export interface HookResult {
   decision?: "block" | "approve"
   /** Explanation paired with decision="block" — forwarded to the agent. */
   reason?: string
+  /**
+   * Wall-clock duration of the hook execution in milliseconds. Set by the
+   * runner after the underlying command/prompt resolves. Display-only — never
+   * gate behavior on this. Surfaced in the Hook log UI so users can see slow
+   * hooks at a glance.
+   */
+  durationMs?: number
+  /**
+   * The stdin JSON payload that was handed to the hook (command hooks) or
+   * passed to the prompt evaluator. Only populated when Hook diagnostic mode
+   * is on; otherwise omitted to avoid sending sensitive user input through
+   * the IPC stream and to disk.
+   */
+  stdinPayload?: string
+  /**
+   * Effective working directory the hook actually saw — i.e. the same value
+   * the runner passed as `spawn(..., { cwd })`. Populated by the runner so
+   * the log envelope reports the true cwd without re-deriving from an
+   * incomplete `hook.hookSourceRoot` (often undefined for ad-hoc hooks).
+   * Diagnostic-only; never gate behavior on this.
+   */
+  cwd?: string
 }
 
 /** Environment variables passed to the hook command */

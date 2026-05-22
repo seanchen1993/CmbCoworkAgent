@@ -25,6 +25,7 @@ import type {
   PluginManifest,
   SkillHookMetadata,
   ChatXConfig,
+  HookLoggingConfig,
   AgentAutoCommitSettings
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -121,7 +122,8 @@ const api = {
       threadId: string,
       message: string,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      userMessageId?: string
     ): (() => void) => {
       const channel = `agent:stream:${threadId}`
 
@@ -133,7 +135,7 @@ const api = {
       }
 
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("agent:invoke", { threadId, message, modelId })
+      ipcRenderer.send("agent:invoke", { threadId, message, modelId, userMessageId })
 
       return () => {
         ipcRenderer.removeListener(channel, handler)
@@ -144,7 +146,8 @@ const api = {
       message: string,
       command: unknown,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      userMessageId?: string
     ): (() => void) => {
       const channel = `agent:stream:${threadId}`
 
@@ -160,7 +163,7 @@ const api = {
       if (command) {
         ipcRenderer.send("agent:resume", { threadId, command, modelId })
       } else {
-        ipcRenderer.send("agent:invoke", { threadId, message, modelId })
+        ipcRenderer.send("agent:invoke", { threadId, message, modelId, userMessageId })
       }
 
       return () => {
@@ -1755,6 +1758,26 @@ const api = {
         ipcRenderer.on("hooks:workspace:changed", handler)
         return () => {
           ipcRenderer.removeListener("hooks:workspace:changed", handler)
+        }
+      }
+    },
+    logging: {
+      get: (): Promise<HookLoggingConfig> => ipcRenderer.invoke("hooks:logging:get"),
+      save: (updates: Partial<HookLoggingConfig>): Promise<HookLoggingConfig> =>
+        ipcRenderer.invoke("hooks:logging:save", updates),
+      getLogDir: (): Promise<string> => ipcRenderer.invoke("hooks:logging:getLogDir"),
+      openLogDir: (): Promise<{ success: boolean; error?: string }> =>
+        ipcRenderer.invoke("hooks:logging:openLogDir"),
+      onChanged: (callback: (config: HookLoggingConfig) => void): (() => void) => {
+        const handler = (
+          _: unknown,
+          data: { config: HookLoggingConfig; at: string } | HookLoggingConfig
+        ): void => {
+          callback("config" in data ? data.config : data)
+        }
+        ipcRenderer.on("hooks:logging:changed", handler)
+        return () => {
+          ipcRenderer.removeListener("hooks:logging:changed", handler)
         }
       }
     }
