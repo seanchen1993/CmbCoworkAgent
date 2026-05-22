@@ -8,11 +8,16 @@
 import { execFile } from "child_process"
 import { createHash } from "crypto"
 import { existsSync } from "fs"
-import { mkdtemp, readdir, readFile, realpath, rm, writeFile } from "fs/promises"
+import { mkdtemp, readdir, readFile, realpath, rename, rm, writeFile } from "fs/promises"
 import { homedir, tmpdir } from "os"
 import { join } from "path"
 import { promisify } from "util"
-import { captureStagedSnapshotsForCommit } from "../src/main/services/adoption-tracker.ts"
+import {
+  captureStagedSnapshotsForCommit,
+  initializeAdoptionTracker,
+  recordGen,
+  shutdownAdoptionTracker
+} from "../src/main/services/adoption-tracker.ts"
 import {
   CMBDEVCLAW_INTERNAL_GIT_ENV,
   installGitHooks,
@@ -88,6 +93,46 @@ function repoEventsDir(repo: string): string {
   return join(homedir(), ".cmbcoworkagent", "git-hooks", "events", repoKey(repo))
 }
 
+function adoptionStorePath(name: string): string {
+  return join(homedir(), ".cmbcoworkagent", name)
+}
+
+async function moveIfExists(from: string, to: string): Promise<boolean> {
+  if (!existsSync(from)) return false
+  await rm(to, { recursive: true, force: true })
+  await rename(from, to)
+  return true
+}
+
+async function restorePath(path: string, backupPath: string, hadOriginal: boolean): Promise<void> {
+  await rm(path, { recursive: true, force: true })
+  if (hadOriginal) {
+    await rename(backupPath, path)
+  } else {
+    await rm(backupPath, { recursive: true, force: true })
+  }
+}
+
+async function withIsolatedAdoptionStore<T>(fn: () => Promise<T>): Promise<T> {
+  shutdownAdoptionTracker()
+  const backupRoot = await mkdtemp(join(tmpdir(), "git-hook-adoption-backup-"))
+  const adoptionDir = adoptionStorePath("adoption")
+  const adoptionIndex = adoptionStorePath("adoption-index.sqlite")
+  const adoptionDirBackup = join(backupRoot, "adoption")
+  const adoptionIndexBackup = join(backupRoot, "adoption-index.sqlite")
+  const hadAdoptionDir = await moveIfExists(adoptionDir, adoptionDirBackup)
+  const hadAdoptionIndex = await moveIfExists(adoptionIndex, adoptionIndexBackup)
+
+  try {
+    return await fn()
+  } finally {
+    shutdownAdoptionTracker()
+    await restorePath(adoptionDir, adoptionDirBackup, hadAdoptionDir)
+    await restorePath(adoptionIndex, adoptionIndexBackup, hadAdoptionIndex)
+    await rm(backupRoot, { recursive: true, force: true })
+  }
+}
+
 async function cleanupRepoEvents(repo: string): Promise<void> {
   await rm(repoEventsDir(repo), { recursive: true, force: true })
 }
@@ -117,7 +162,7 @@ async function readReadySnapshot(repo: string): Promise<{
   return { name, meta: JSON.parse(raw) }
 }
 
-async function testExternalCommandCommitIsCollectedByHook(): Promise<void> {
+async function testExternalCommandCommitWithoutCodeGenIsSkipped(): Promise<void> {
   await withTempRepo("git-hook-external", async (repo) => {
     const status = await installGitHooks(repo)
     assert(status.state === "installed", `expected installed hook, got ${status.state}`)
@@ -141,8 +186,44 @@ async function testExternalCommandCommitIsCollectedByHook(): Promise<void> {
     await syncGitHookEvents(repo)
     const remainingReady = await listDirs(join(repoEventsDir(repo), "ready"))
     const processed = await listDirs(join(repoEventsDir(repo), "processed"))
+    const skipped = await listDirs(join(repoEventsDir(repo), "skipped"))
     assert(remainingReady.length === 0, "sync should consume ready external command snapshots")
-    assert(processed.length === 1, "sync should move external command snapshot to processed")
+    assert(processed.length === 0, "external command snapshot without code_gen should not be processed")
+    assert(skipped.length === 1, "external command snapshot without code_gen should be skipped")
+  })
+}
+
+async function testExternalCommandCommitWithCodeGenIsCollectedByHook(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    await initializeAdoptionTracker()
+    await withTempRepo("git-hook-external-codegen", async (repo) => {
+      const status = await installGitHooks(repo)
+      assert(status.state === "installed", `expected installed hook, got ${status.state}`)
+
+      const filePath = join(repo, "external.ts")
+      const generatedContent = "export const externalValue = 2\n"
+      recordGen({
+        threadId: "hook-test-thread",
+        workspacePath: repo,
+        filePath,
+        tool: "write_file",
+        generatedContent
+      })
+      await sleep(250)
+
+      await writeFile(filePath, generatedContent)
+      await git(repo, ["add", "external.ts"])
+      await git(repo, ["commit", "-q", "-m", "external command commit with codegen"])
+
+      await syncGitHookEvents(repo)
+      await sleep(250)
+      const remainingReady = await listDirs(join(repoEventsDir(repo), "ready"))
+      const processed = await listDirs(join(repoEventsDir(repo), "processed"))
+      const skipped = await listDirs(join(repoEventsDir(repo), "skipped"))
+      assert(remainingReady.length === 0, "sync should consume ready code_gen snapshots")
+      assert(processed.length === 1, "external command snapshot with code_gen should be processed")
+      assert(skipped.length === 0, "external command snapshot with code_gen should not be skipped")
+    })
   })
 }
 
@@ -174,8 +255,10 @@ async function testGitPanelPathSkipsHookAndUsesDirectStagedCapture(): Promise<vo
 }
 
 async function run(): Promise<void> {
-  await testExternalCommandCommitIsCollectedByHook()
-  console.log("PASS external command commit collection through Git hook")
+  await testExternalCommandCommitWithoutCodeGenIsSkipped()
+  console.log("PASS external command commit without code_gen is skipped")
+  await testExternalCommandCommitWithCodeGenIsCollectedByHook()
+  console.log("PASS external command commit with code_gen is collected through Git hook")
   await testGitPanelPathSkipsHookAndUsesDirectStagedCapture()
   console.log("PASS Git Panel collection path skips hook and uses direct staged capture")
 }
