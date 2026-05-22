@@ -346,6 +346,10 @@ function formatSkillEvalPercent(value: number): string {
   return `${Math.round(value * 100)}%`
 }
 
+function formatSkillEvalScore(value: number): string {
+  return `${Math.round(value * 100)}分`
+}
+
 function formatDateTime(iso?: string): string {
   if (!iso) return "—"
   const date = new Date(iso)
@@ -796,12 +800,12 @@ const SkillEvalSkillRow = memo(function SkillEvalSkillRow({
       <div
         className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}
       >
-        {formatSkillEvalPercent(skill.averageOutcomeScore)}
+        {formatSkillEvalScore(skill.averageOutcomeScore)}
       </div>
       <div
         className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}
       >
-        {formatSkillEvalPercent(skill.averageScore)}
+        {formatSkillEvalScore(skill.averageScore)}
       </div>
       <div
         className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}
@@ -849,7 +853,7 @@ const SkillEvalRunRow = memo(function SkillEvalRunRow({
             <span className="font-medium text-foreground">{run.skillName}</span>
             {run.skillVersion && <Badge variant="outline">{run.skillVersion}</Badge>}
             <Badge variant={run.pass ? "nominal" : "critical"}>
-              {formatSkillEvalPercent(run.score)}
+              {formatSkillEvalScore(run.score)}
             </Badge>
             <span className="text-[11px] text-muted-foreground">
               {formatRelativeTime(run.startedAt)}
@@ -881,19 +885,19 @@ const SkillEvalRunRow = memo(function SkillEvalRunRow({
           </div>
           <div className="mt-2 flex flex-wrap gap-1.5">
             <Badge variant="outline" className="normal-case tracking-normal">
-              过程 {formatSkillEvalPercent(run.processScore)}
+              过程 {formatSkillEvalScore(run.processScore)}
             </Badge>
             <Badge
               variant={run.outcomePass === false ? "warning" : "nominal"}
               className="normal-case tracking-normal"
             >
-              结束 {formatSkillEvalPercent(run.outcomeScore)}
+              结束 {formatSkillEvalScore(run.outcomeScore)}
             </Badge>
             <Badge
               variant={run.resultGenerated ? (run.resultPass ? "nominal" : "warning") : "outline"}
               className="normal-case tracking-normal"
             >
-              结果 {run.resultGenerated ? formatSkillEvalPercent(run.resultScore) : "待生成"}
+              结果 {run.resultGenerated ? formatSkillEvalScore(run.resultScore) : "待生成"}
             </Badge>
             <Badge variant="outline" className="normal-case tracking-normal">
               Token {formatSkillEvalTokens(run.totalTokens)}
@@ -1002,7 +1006,7 @@ const SkillEvalRunSummary = memo(function SkillEvalRunSummary({
             <span className="font-medium text-foreground">{run.skillName}</span>
             {run.skillVersion && <Badge variant="outline">{run.skillVersion}</Badge>}
             <Badge variant={run.pass ? "nominal" : "critical"}>
-              {formatSkillEvalPercent(run.score)}
+              {formatSkillEvalScore(run.score)}
             </Badge>
             <span className="text-[11px] text-muted-foreground">
               {formatRelativeTime(run.startedAt)}
@@ -1034,19 +1038,19 @@ const SkillEvalRunSummary = memo(function SkillEvalRunSummary({
           </div>
           <div className="mt-2 flex flex-wrap gap-1.5">
             <Badge variant="outline" className="normal-case tracking-normal">
-              过程 {formatSkillEvalPercent(run.processScore)}
+              过程 {formatSkillEvalScore(run.processScore)}
             </Badge>
             <Badge
               variant={run.outcomePass === false ? "warning" : "nominal"}
               className="normal-case tracking-normal"
             >
-              结束 {formatSkillEvalPercent(run.outcomeScore)}
+              结束 {formatSkillEvalScore(run.outcomeScore)}
             </Badge>
             <Badge
               variant={run.resultGenerated ? (run.resultPass ? "nominal" : "warning") : "outline"}
               className="normal-case tracking-normal"
             >
-              结果 {run.resultGenerated ? formatSkillEvalPercent(run.resultScore) : "待生成"}
+              结果 {run.resultGenerated ? formatSkillEvalScore(run.resultScore) : "待生成"}
             </Badge>
             <Badge variant="outline" className="normal-case tracking-normal">
               Token {formatSkillEvalTokens(run.totalTokens)}
@@ -1231,23 +1235,23 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
           />
           <SkillEvalStatTile
             label="平均分"
-            value={formatSkillEvalPercent(selectedSkill?.averageScore ?? data.averageScore)}
+            value={formatSkillEvalScore(selectedSkill?.averageScore ?? data.averageScore)}
           />
           <SkillEvalStatTile
             label="过程分"
-            value={formatSkillEvalPercent(
+            value={formatSkillEvalScore(
               selectedSkill?.averageProcessScore ?? data.averageProcessScore ?? data.averageScore
             )}
           />
           <SkillEvalStatTile
             label="结束分"
-            value={formatSkillEvalPercent(
+            value={formatSkillEvalScore(
               selectedSkill?.averageOutcomeScore ?? data.averageOutcomeScore ?? data.averageScore
             )}
           />
           <SkillEvalStatTile
             label="结果分"
-            value={formatSkillEvalPercent(
+            value={formatSkillEvalScore(
               selectedSkill?.averageResultScore ?? data.averageResultScore
             )}
           />
