@@ -646,6 +646,8 @@ export interface CustomModelConfig {
   maxTokens?: number
   maxOutputTokens?: number
   temperature?: number
+  topP?: number
+  topK?: number
   interleavedThinking?: boolean
   tier?: "premium" | "economy"
 }
@@ -673,6 +675,12 @@ export const MAX_MAX_OUTPUT_TOKENS = 100_000
 export const DEFAULT_TEMPERATURE = 0.1
 export const MIN_TEMPERATURE = 0
 export const MAX_TEMPERATURE = 2
+export const DEFAULT_TOP_P = 0.95
+export const MIN_TOP_P = 0
+export const MAX_TOP_P = 1
+export const DEFAULT_TOP_K = 40
+export const MIN_TOP_K = 0
+export const MAX_TOP_K = 1_000
 
 export interface CustomModelPublicConfig {
   id: string
@@ -683,6 +691,8 @@ export interface CustomModelPublicConfig {
   maxTokens: number
   maxOutputTokens: number
   temperature: number
+  topP: number
+  topK: number
   interleavedThinking?: boolean
   tier?: "premium" | "economy"
 }
@@ -695,6 +705,8 @@ interface StoredCustomModelRecord {
   maxTokens?: number
   maxOutputTokens?: number
   temperature?: number
+  topP?: number
+  topK?: number
   interleavedThinking?: boolean
   tier?: "premium" | "economy"
 }
@@ -726,6 +738,23 @@ function normalizeTemperature(value: unknown): number {
 
   if (value <= MIN_TEMPERATURE) return DEFAULT_TEMPERATURE
   return Math.min(MAX_TEMPERATURE, value)
+}
+
+function normalizeTopP(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_TOP_P
+  }
+
+  if (value <= MIN_TOP_P) return DEFAULT_TOP_P
+  return Math.min(MAX_TOP_P, value)
+}
+
+function normalizeTopK(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_TOP_K
+  }
+
+  return Math.min(MAX_TOP_K, Math.max(MIN_TOP_K, Math.floor(value)))
 }
 
 function defaultInterleavedThinkingForModel(model: string): boolean {
@@ -802,12 +831,16 @@ function assertValidMaxOutputTokens(value: unknown): number {
   }
 
   if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`maxOutputTokens 必须是数字，范围为 ${MIN_MAX_OUTPUT_TOKENS} 到 ${MAX_MAX_OUTPUT_TOKENS}`)
+    throw new Error(
+      `maxOutputTokens 必须是数字，范围为 ${MIN_MAX_OUTPUT_TOKENS} 到 ${MAX_MAX_OUTPUT_TOKENS}`
+    )
   }
 
   const parsed = Math.floor(value)
   if (parsed < MIN_MAX_OUTPUT_TOKENS || parsed > MAX_MAX_OUTPUT_TOKENS) {
-    throw new Error(`maxOutputTokens 超出范围，必须在 ${MIN_MAX_OUTPUT_TOKENS} 到 ${MAX_MAX_OUTPUT_TOKENS} 之间`)
+    throw new Error(
+      `maxOutputTokens 超出范围，必须在 ${MIN_MAX_OUTPUT_TOKENS} 到 ${MAX_MAX_OUTPUT_TOKENS} 之间`
+    )
   }
 
   return parsed
@@ -827,6 +860,39 @@ function assertValidTemperature(value: unknown): number {
   }
 
   return value
+}
+
+function assertValidTopP(value: unknown): number {
+  if (value === undefined || value === null) {
+    return DEFAULT_TOP_P
+  }
+
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`top_p 必须是数字，范围为 (${MIN_TOP_P}, ${MAX_TOP_P}]`)
+  }
+
+  if (value <= MIN_TOP_P || value > MAX_TOP_P) {
+    throw new Error(`top_p 超出范围，必须在 (${MIN_TOP_P}, ${MAX_TOP_P}] 之间`)
+  }
+
+  return value
+}
+
+function assertValidTopK(value: unknown): number {
+  if (value === undefined || value === null) {
+    return DEFAULT_TOP_K
+  }
+
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`top_k 必须是整数，范围为 ${MIN_TOP_K} 到 ${MAX_TOP_K}`)
+  }
+
+  const parsed = Math.floor(value)
+  if (parsed < MIN_TOP_K || parsed > MAX_TOP_K) {
+    throw new Error(`top_k 超出范围，必须在 ${MIN_TOP_K} 到 ${MAX_TOP_K} 之间`)
+  }
+
+  return parsed
 }
 
 function assertValidBaseUrl(value: string): string {
@@ -916,7 +982,9 @@ function migrateLegacyCustomModel(): void {
       model: legacy.model,
       maxTokens: normalizeMaxTokens(legacy.maxTokens),
       maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
-      temperature: DEFAULT_TEMPERATURE
+      temperature: DEFAULT_TEMPERATURE,
+      topP: DEFAULT_TOP_P,
+      topK: DEFAULT_TOP_K
     }
     writeCustomModelsRaw([migrated])
   } catch {
@@ -937,6 +1005,8 @@ function toPublicConfig(
     maxTokens: normalizeMaxTokens(config.maxTokens),
     maxOutputTokens: normalizeMaxOutputTokens(config.maxOutputTokens),
     temperature: normalizeTemperature(config.temperature),
+    topP: normalizeTopP(config.topP),
+    topK: normalizeTopK(config.topK),
     interleavedThinking: resolveInterleavedThinkingSetting(
       config.model,
       config.interleavedThinking
@@ -957,6 +1027,8 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
     maxTokens: normalizeMaxTokens(item.maxTokens),
     maxOutputTokens: normalizeMaxOutputTokens(item.maxOutputTokens),
     temperature: normalizeTemperature(item.temperature),
+    topP: normalizeTopP(item.topP),
+    topK: normalizeTopK(item.topK),
     interleavedThinking: resolveInterleavedThinkingSetting(item.model, item.interleavedThinking),
     ...(item.tier !== undefined && { tier: item.tier })
   }))
@@ -975,6 +1047,8 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
     maxTokens: normalizeMaxTokens(record.maxTokens),
     maxOutputTokens: normalizeMaxOutputTokens(record.maxOutputTokens),
     temperature: normalizeTemperature(record.temperature),
+    topP: normalizeTopP(record.topP),
+    topK: normalizeTopK(record.topK),
     interleavedThinking: resolveInterleavedThinkingSetting(
       record.model,
       record.interleavedThinking
@@ -999,6 +1073,8 @@ export function upsertCustomModelConfig(
   const validatedMaxTokens = assertValidMaxTokens(config.maxTokens)
   const validatedMaxOutputTokens = assertValidMaxOutputTokens(config.maxOutputTokens)
   const validatedTemperature = assertValidTemperature(config.temperature)
+  const validatedTopP = assertValidTopP(config.topP)
+  const validatedTopK = assertValidTopK(config.topK)
   const validatedBaseUrl = assertValidBaseUrl(config.baseUrl)
   const normalizedName = config.name.trim()
   const normalizedModel = config.model.trim()
@@ -1036,6 +1112,8 @@ export function upsertCustomModelConfig(
     maxTokens: validatedMaxTokens,
     maxOutputTokens: validatedMaxOutputTokens,
     temperature: validatedTemperature,
+    topP: validatedTopP,
+    topK: validatedTopK,
     interleavedThinking: resolveInterleavedThinkingSetting(
       normalizedModel,
       config.interleavedThinking
@@ -1945,8 +2023,7 @@ const SANDBOX_MODES = new Set<"none" | "unelevated" | "readonly" | "elevated">([
 type SandboxMode = "none" | "unelevated" | "readonly" | "elevated"
 
 function readSandboxSettings(): { mode: SandboxMode; yolo: boolean; nuxCompleted: boolean } {
-  if (!existsSync(SANDBOX_SETTINGS_FILE))
-    return { mode: "none", yolo: false, nuxCompleted: true }
+  if (!existsSync(SANDBOX_SETTINGS_FILE)) return { mode: "none", yolo: false, nuxCompleted: true }
   try {
     const parsed = JSON.parse(readFileSync(SANDBOX_SETTINGS_FILE, "utf-8"))
     return {

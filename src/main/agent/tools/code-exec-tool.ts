@@ -179,7 +179,9 @@ interface SavedToolRewriteResult {
   error?: string
 }
 
-function mapDecisionToReview(type: ApprovalDecision["type"]): "approved" | "approved_session" | "denied" {
+function mapDecisionToReview(
+  type: ApprovalDecision["type"]
+): "approved" | "approved_session" | "denied" {
   switch (type) {
     case "approve":
       return "approved"
@@ -198,14 +200,20 @@ async function requestCodeExecApproval(
   if (!context.approvalStore || !context.requestApproval) return true
 
   const fingerprint = createHash("sha256")
-    .update(JSON.stringify({
-      code: input.code,
-      timeoutMs: DEFAULT_TIMEOUT_MS,
-      workspacePath: context.workspacePath
-    }))
+    .update(
+      JSON.stringify({
+        code: input.code,
+        timeoutMs: DEFAULT_TIMEOUT_MS,
+        workspacePath: context.workspacePath
+      })
+    )
     .digest("hex")
 
-  const key = context.approvalStore.makeKey(`code_exec:${fingerprint}`, context.workspacePath, "code_exec")
+  const key = context.approvalStore.makeKey(
+    `code_exec:${fingerprint}`,
+    context.workspacePath,
+    "code_exec"
+  )
   const patternKey = `code_exec:${fingerprint}`
 
   const decision = await context.approvalStore.withCachedApproval(
@@ -284,17 +292,19 @@ function maybePromoteCodeExecAsTool(
       })
       const rewrite = rewriteResult.rewrite
 
-      const dependencies = Array.from(new Set((result.meta?.mcpCalls ?? []).map((call) => call.toolId).filter(Boolean)))
+      const dependencies = Array.from(
+        new Set((result.meta?.mcpCalls ?? []).map((call) => call.toolId).filter(Boolean))
+      )
       const metadataError = rewrite ? undefined : rewriteResult.error
       const draft = rewrite
         ? buildSavedCodeExecToolDraft({
-          toolName: rewrite.toolName,
-          description: rewrite.description,
-          inputSchema: rewrite.inputSchema,
-          code: rewrite.rewrittenCode,
-          timeoutMs: DEFAULT_TIMEOUT_MS,
-          dependencies
-        })
+            toolName: rewrite.toolName,
+            description: rewrite.description,
+            inputSchema: rewrite.inputSchema,
+            code: rewrite.rewrittenCode,
+            timeoutMs: DEFAULT_TIMEOUT_MS,
+            dependencies
+          })
         : null
 
       const approval = await context.requestApproval?.({
@@ -313,9 +323,7 @@ function maybePromoteCodeExecAsTool(
         savedToolDescription: rewrite?.description ?? "",
         savedToolMetadataError: metadataError,
         cwd: context.workspacePath,
-        reason: metadataError
-          ? ""
-          : "工具已生成，保存后可在自定义-编程式调用页面管理",
+        reason: metadataError ? "" : "工具已生成，保存后可在自定义-编程式调用页面管理",
         allowed_decisions: metadataError ? ["reject"] : ["approve", "reject"],
         allowed_approval_types: metadataError ? ["reject"] : ["approve", "reject"]
       })
@@ -352,9 +360,14 @@ function maybePromoteCodeExecAsTool(
 
 function resolveSidecarModelConfig(selectedModelId?: string): CustomModelConfig | null {
   const configs = getCustomModelConfigs()
-  const requestedId = selectedModelId?.startsWith("custom:") ? selectedModelId.slice("custom:".length) : selectedModelId
+  const requestedId = selectedModelId?.startsWith("custom:")
+    ? selectedModelId.slice("custom:".length)
+    : selectedModelId
   return requestedId
-    ? (configs.find((item) => item.id === requestedId) || configs.find((item) => item.model === requestedId) || configs[0] || null)
+    ? configs.find((item) => item.id === requestedId) ||
+        configs.find((item) => item.model === requestedId) ||
+        configs[0] ||
+        null
     : (configs[0] ?? null)
 }
 
@@ -400,13 +413,13 @@ function extractBalancedJsonObjects(text: string): string[] {
         escaping = true
         continue
       }
-      if (char === "\"") {
+      if (char === '"') {
         inString = false
       }
       continue
     }
 
-    if (char === "\"") {
+    if (char === '"') {
       inString = true
       continue
     }
@@ -452,9 +465,12 @@ function parseSavedToolRewrite(raw: string): SavedToolRewrite | null {
       const parsed = JSON.parse(candidate) as Record<string, unknown>
       const toolName = typeof parsed.tool_name === "string" ? parsed.tool_name.trim() : ""
       const description = typeof parsed.description === "string" ? parsed.description.trim() : ""
-      const rewrittenCode = typeof parsed.rewritten_code === "string" ? parsed.rewritten_code.trim() : ""
+      const rewrittenCode =
+        typeof parsed.rewritten_code === "string" ? parsed.rewritten_code.trim() : ""
       const inputSchema =
-        parsed.input_schema && typeof parsed.input_schema === "object" && !Array.isArray(parsed.input_schema)
+        parsed.input_schema &&
+        typeof parsed.input_schema === "object" &&
+        !Array.isArray(parsed.input_schema)
           ? {
               type: "object",
               ...(parsed.input_schema as Record<string, unknown>)
@@ -504,20 +520,25 @@ async function generateSavedToolRewrite(
     configuration: { baseURL: config.baseUrl },
     maxTokens: config.maxOutputTokens,
     temperature: config.temperature,
+    topP: config.topP,
+    modelKwargs: {
+      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+    },
     streaming: false
   })
 
-  const userPrompt = JSON.stringify({
-    original_code: input.code,
-    mcp_call_input_param: buildExecutedMcpToolCallsPreview(input.mcpCalls)
-  }, null, 2)
+  const userPrompt = JSON.stringify(
+    {
+      original_code: input.code,
+      mcp_call_input_param: buildExecutedMcpToolCallsPreview(input.mcpCalls)
+    },
+    null,
+    2
+  )
 
   try {
     const response = await model.invoke(
-      [
-        new SystemMessage(SAVED_TOOL_REWRITE_SYSTEM_PROMPT),
-        new HumanMessage(userPrompt)
-      ],
+      [new SystemMessage(SAVED_TOOL_REWRITE_SYSTEM_PROMPT), new HumanMessage(userPrompt)],
       { callbacks: [] }
     )
     const raw = extractResponseText(response.content).trim()
@@ -529,7 +550,10 @@ async function generateSavedToolRewrite(
     return { rewrite }
   } catch (error) {
     console.warn("[code_exec] failed to generate saved-tool rewrite:", error)
-    return { rewrite: null, error: truncateSavedToolMetadataError(getErrorMessage(error)) || "LLM API请求失败" }
+    return {
+      rewrite: null,
+      error: truncateSavedToolMetadataError(getErrorMessage(error)) || "LLM API请求失败"
+    }
   }
 }
 

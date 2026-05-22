@@ -27,6 +27,8 @@ interface CustomConfig {
   maxTokensInput: string
   maxOutputTokensInput: string
   temperatureInput: string
+  topPInput: string
+  topKInput: string
   interleavedThinking: boolean
   tier: "premium" | "economy"
 }
@@ -40,6 +42,11 @@ interface TokenLimits {
   maxMaxOutputTokens: number
   defaultTemperature: number
   maxTemperature: number
+  defaultTopP: number
+  maxTopP: number
+  defaultTopK: number
+  minTopK: number
+  maxTopK: number
 }
 
 interface CustomModelItem {
@@ -51,6 +58,8 @@ interface CustomModelItem {
   maxTokens: number
   maxOutputTokens: number
   temperature: number
+  topP: number
+  topK: number
   interleavedThinking?: boolean
   tier?: "premium" | "economy"
 }
@@ -63,7 +72,12 @@ const FALLBACK_LIMITS: TokenLimits = {
   minMaxOutputTokens: 1,
   maxMaxOutputTokens: 100_000,
   defaultTemperature: 0.1,
-  maxTemperature: 2
+  maxTemperature: 2,
+  defaultTopP: 0.95,
+  maxTopP: 1,
+  defaultTopK: 40,
+  minTopK: 0,
+  maxTopK: 1_000
 }
 
 function defaultInterleavedThinkingForModel(model: string): boolean {
@@ -119,6 +133,32 @@ function getTemperatureError(value: string, limits: TokenLimits): string | null 
   return null
 }
 
+function parseTopP(value: string): number | null {
+  return parseTemperature(value)
+}
+
+function getTopPError(value: string, limits: TokenLimits): string | null {
+  const parsed = parseTopP(value)
+  if (parsed === null) return "请输入 top_p"
+  if (parsed <= 0 || parsed > limits.maxTopP) {
+    return `top_p 必须在 (0, ${limits.maxTopP}] 之间`
+  }
+  return null
+}
+
+function parseTopK(value: string): number | null {
+  return parseMaxTokens(value)
+}
+
+function getTopKError(value: string, limits: TokenLimits): string | null {
+  const parsed = parseTopK(value)
+  if (parsed === null) return "请输入 top_k"
+  if (parsed < limits.minTopK || parsed > limits.maxTopK) {
+    return `top_k 必须在 ${limits.minTopK.toLocaleString()} 到 ${limits.maxTopK.toLocaleString()} 之间`
+  }
+  return null
+}
+
 export function CustomModelDialog({
   open,
   selectedModelId,
@@ -134,6 +174,8 @@ export function CustomModelDialog({
     maxTokensInput: String(FALLBACK_LIMITS.defaultMaxTokens),
     maxOutputTokensInput: String(FALLBACK_LIMITS.defaultMaxOutputTokens),
     temperatureInput: String(FALLBACK_LIMITS.defaultTemperature),
+    topPInput: String(FALLBACK_LIMITS.defaultTopP),
+    topKInput: String(FALLBACK_LIMITS.defaultTopK),
     interleavedThinking: false,
     tier: "premium"
   })
@@ -167,8 +209,8 @@ export function CustomModelDialog({
         window.api.models.getTokenLimits(),
         window.api.models.getCustomConfigs(),
         window.api.models.getCustomConfig(normalizedSelectedId)
-      ]).then(
-        ([limits, all, existing]) => {
+      ])
+        .then(([limits, all, existing]) => {
           if (cancelled) return
           setTokenLimits(limits)
           setAllConfigs(all)
@@ -189,8 +231,12 @@ export function CustomModelDialog({
               model: resolvedExisting.model,
               apiKey: "",
               maxTokensInput: String(resolvedExisting.maxTokens ?? limits.defaultMaxTokens),
-              maxOutputTokensInput: String(resolvedExisting.maxOutputTokens ?? limits.defaultMaxOutputTokens),
+              maxOutputTokensInput: String(
+                resolvedExisting.maxOutputTokens ?? limits.defaultMaxOutputTokens
+              ),
               temperatureInput: String(resolvedExisting.temperature ?? limits.defaultTemperature),
+              topPInput: String(resolvedExisting.topP ?? limits.defaultTopP),
+              topKInput: String(resolvedExisting.topK ?? limits.defaultTopK),
               interleavedThinking:
                 resolvedExisting.interleavedThinking ??
                 defaultInterleavedThinkingForModel(resolvedExisting.model),
@@ -208,16 +254,18 @@ export function CustomModelDialog({
               maxTokensInput: String(limits.defaultMaxTokens),
               maxOutputTokensInput: String(limits.defaultMaxOutputTokens),
               temperatureInput: String(limits.defaultTemperature),
+              topPInput: String(limits.defaultTopP),
+              topKInput: String(limits.defaultTopK),
               interleavedThinking: false,
               tier: "premium"
             })
             setHasExisting(false)
             setHasExistingKey(false)
           }
-        }
-      ).catch((error) => {
-        console.error("[CustomModelDialog] Failed to load model settings:", error)
-      })
+        })
+        .catch((error) => {
+          console.error("[CustomModelDialog] Failed to load model settings:", error)
+        })
     }
 
     return () => {
@@ -241,6 +289,8 @@ export function CustomModelDialog({
       maxTokensInput: String(picked.maxTokens ?? tokenLimits.defaultMaxTokens),
       maxOutputTokensInput: String(picked.maxOutputTokens ?? tokenLimits.defaultMaxOutputTokens),
       temperatureInput: String(picked.temperature ?? tokenLimits.defaultTemperature),
+      topPInput: String(picked.topP ?? tokenLimits.defaultTopP),
+      topKInput: String(picked.topK ?? tokenLimits.defaultTopK),
       interleavedThinking:
         picked.interleavedThinking ?? defaultInterleavedThinkingForModel(picked.model),
       tier: picked.tier ?? "premium"
@@ -253,6 +303,8 @@ export function CustomModelDialog({
   const maxTokensError = getMaxTokensError(config.maxTokensInput, tokenLimits)
   const maxOutputTokensError = getMaxOutputTokensError(config.maxOutputTokensInput, tokenLimits)
   const temperatureError = getTemperatureError(config.temperatureInput, tokenLimits)
+  const topPError = getTopPError(config.topPInput, tokenLimits)
+  const topKError = getTopKError(config.topKInput, tokenLimits)
   const canToggleKeyVisibility = config.apiKey.trim().length > 0
   const duplicateNameError =
     config.name.trim() &&
@@ -268,6 +320,8 @@ export function CustomModelDialog({
     !maxTokensError &&
     !maxOutputTokensError &&
     !temperatureError &&
+    !topPError &&
+    !topKError &&
     !duplicateNameError
 
   const canTest =
@@ -275,7 +329,9 @@ export function CustomModelDialog({
     config.model.trim() &&
     (hasExistingKey || config.apiKey.trim()) &&
     !maxOutputTokensError &&
-    !temperatureError
+    !temperatureError &&
+    !topPError &&
+    !topKError
 
   async function handleTest(): Promise<void> {
     if (!canTest || testing || saving || deleting) return
@@ -293,13 +349,25 @@ export function CustomModelDialog({
         setFormError("请输入有效的 Temperature")
         return
       }
+      const parsedTopP = parseTopP(config.topPInput)
+      if (parsedTopP === null) {
+        setFormError("请输入有效的 top_p")
+        return
+      }
+      const parsedTopK = parseTopK(config.topKInput)
+      if (parsedTopK === null) {
+        setFormError("请输入有效的 top_k")
+        return
+      }
       const result = await window.api.models.testConnection({
         id: config.id,
         baseUrl: config.baseUrl.trim(),
         model: config.model.trim(),
         apiKey: config.apiKey.trim() || undefined,
         maxOutputTokens: parsedMaxOutputTokens,
-        temperature: parsedTemperature
+        temperature: parsedTemperature,
+        topP: parsedTopP,
+        topK: parsedTopK
       })
       setTestResult(result)
     } catch (e) {
@@ -317,6 +385,8 @@ export function CustomModelDialog({
       if (maxTokensError) setFormError(maxTokensError)
       else if (maxOutputTokensError) setFormError(maxOutputTokensError)
       else if (temperatureError) setFormError(temperatureError)
+      else if (topPError) setFormError(topPError)
+      else if (topKError) setFormError(topKError)
       else if (duplicateNameError) setFormError(duplicateNameError)
       return
     }
@@ -338,6 +408,16 @@ export function CustomModelDialog({
         setFormError("请输入有效的 Temperature")
         return
       }
+      const parsedTopP = parseTopP(config.topPInput)
+      if (parsedTopP === null) {
+        setFormError("请输入有效的 top_p")
+        return
+      }
+      const parsedTopK = parseTopK(config.topKInput)
+      if (parsedTopK === null) {
+        setFormError("请输入有效的 top_k")
+        return
+      }
 
       const result = await window.api.models.upsertCustomConfig({
         id: config.id,
@@ -348,6 +428,8 @@ export function CustomModelDialog({
         maxTokens: parsedMaxTokens,
         maxOutputTokens: parsedMaxOutputTokens,
         temperature: parsedTemperature,
+        topP: parsedTopP,
+        topK: parsedTopK,
         interleavedThinking: config.interleavedThinking,
         tier: config.tier
       })
@@ -363,8 +445,12 @@ export function CustomModelDialog({
           model: updated.model,
           apiKey: "",
           maxTokensInput: String(updated.maxTokens ?? tokenLimits.defaultMaxTokens),
-          maxOutputTokensInput: String(updated.maxOutputTokens ?? tokenLimits.defaultMaxOutputTokens),
-          temperatureInput: String(updated.temperature ?? tokenLimits.defaultTemperature)
+          maxOutputTokensInput: String(
+            updated.maxOutputTokens ?? tokenLimits.defaultMaxOutputTokens
+          ),
+          temperatureInput: String(updated.temperature ?? tokenLimits.defaultTemperature),
+          topPInput: String(updated.topP ?? tokenLimits.defaultTopP),
+          topKInput: String(updated.topK ?? tokenLimits.defaultTopK)
         }))
         setHasExisting(true)
         setHasExistingKey(updated.hasApiKey)
@@ -405,8 +491,12 @@ export function CustomModelDialog({
           model: fallback.model,
           apiKey: "",
           maxTokensInput: String(fallback.maxTokens ?? tokenLimits.defaultMaxTokens),
-          maxOutputTokensInput: String(fallback.maxOutputTokens ?? tokenLimits.defaultMaxOutputTokens),
+          maxOutputTokensInput: String(
+            fallback.maxOutputTokens ?? tokenLimits.defaultMaxOutputTokens
+          ),
           temperatureInput: String(fallback.temperature ?? tokenLimits.defaultTemperature),
+          topPInput: String(fallback.topP ?? tokenLimits.defaultTopP),
+          topKInput: String(fallback.topK ?? tokenLimits.defaultTopK),
           interleavedThinking:
             fallback.interleavedThinking ?? defaultInterleavedThinkingForModel(fallback.model),
           tier: fallback.tier ?? "premium"
@@ -424,6 +514,8 @@ export function CustomModelDialog({
           maxTokensInput: String(tokenLimits.defaultMaxTokens),
           maxOutputTokensInput: String(tokenLimits.defaultMaxOutputTokens),
           temperatureInput: String(tokenLimits.defaultTemperature),
+          topPInput: String(tokenLimits.defaultTopP),
+          topKInput: String(tokenLimits.defaultTopK),
           interleavedThinking: false,
           tier: "premium"
         })
@@ -464,6 +556,8 @@ export function CustomModelDialog({
                     maxTokensInput: String(tokenLimits.defaultMaxTokens),
                     maxOutputTokensInput: String(tokenLimits.defaultMaxOutputTokens),
                     temperatureInput: String(tokenLimits.defaultTemperature),
+                    topPInput: String(tokenLimits.defaultTopP),
+                    topKInput: String(tokenLimits.defaultTopK),
                     interleavedThinking: false,
                     tier: "premium"
                   })
@@ -496,7 +590,9 @@ export function CustomModelDialog({
                 </button>
               ))}
               {allConfigs.length === 0 && (
-                <div className="px-2 py-6 text-center text-xs text-muted-foreground">暂无模型配置</div>
+                <div className="px-2 py-6 text-center text-xs text-muted-foreground">
+                  暂无模型配置
+                </div>
               )}
             </div>
           </div>
@@ -510,14 +606,21 @@ export function CustomModelDialog({
                 placeholder="例如：DeepSeek Chat（生产）"
                 autoFocus
               />
-              {duplicateNameError && <p className="text-xs text-destructive">{duplicateNameError}</p>}
+              {duplicateNameError && (
+                <p className="text-xs text-destructive">{duplicateNameError}</p>
+              )}
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">接口地址（Base URL）</label>
+              <label className="text-xs font-medium text-muted-foreground">
+                接口地址（Base URL）
+              </label>
               <Input
                 value={config.baseUrl}
-                onChange={(e) => { setConfig((c) => ({ ...c, baseUrl: e.target.value })); setTestResult(null) }}
+                onChange={(e) => {
+                  setConfig((c) => ({ ...c, baseUrl: e.target.value }))
+                  setTestResult(null)
+                }}
                 placeholder="https://api.example.com/v1"
               />
             </div>
@@ -535,7 +638,9 @@ export function CustomModelDialog({
                       ...c,
                       model: nextModel,
                       interleavedThinking:
-                        c.interleavedThinking === currentDefault ? nextDefault : c.interleavedThinking
+                        c.interleavedThinking === currentDefault
+                          ? nextDefault
+                          : c.interleavedThinking
                     }
                   })
                   setTestResult(null)
@@ -584,13 +689,13 @@ export function CustomModelDialog({
                   min={tokenLimits.minMaxOutputTokens}
                   max={tokenLimits.maxMaxOutputTokens}
                 />
-                {maxOutputTokensError && <p className="text-xs text-destructive">{maxOutputTokensError}</p>}
+                {maxOutputTokensError && (
+                  <p className="text-xs text-destructive">{maxOutputTokensError}</p>
+                )}
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-xs font-medium text-muted-foreground">
-                  Temperature
-                </label>
+                <label className="text-xs font-medium text-muted-foreground">Temperature</label>
                 <Input
                   type="number"
                   value={config.temperatureInput}
@@ -607,6 +712,47 @@ export function CustomModelDialog({
                   step="any"
                 />
                 {temperatureError && <p className="text-xs text-destructive">{temperatureError}</p>}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground">top_p</label>
+                <Input
+                  type="number"
+                  value={config.topPInput}
+                  onChange={(e) => {
+                    setConfig((c) => ({
+                      ...c,
+                      topPInput: e.target.value
+                    }))
+                    setTestResult(null)
+                  }}
+                  placeholder={String(tokenLimits.defaultTopP)}
+                  min={0}
+                  max={tokenLimits.maxTopP}
+                  step="any"
+                />
+                {topPError && <p className="text-xs text-destructive">{topPError}</p>}
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground">top_k</label>
+                <Input
+                  type="number"
+                  value={config.topKInput}
+                  onChange={(e) => {
+                    setConfig((c) => ({
+                      ...c,
+                      topKInput: e.target.value
+                    }))
+                    setTestResult(null)
+                  }}
+                  placeholder={String(tokenLimits.defaultTopK)}
+                  min={tokenLimits.minTopK}
+                  max={tokenLimits.maxTopK}
+                />
+                {topKError && <p className="text-xs text-destructive">{topKError}</p>}
               </div>
             </div>
 
@@ -669,7 +815,10 @@ export function CustomModelDialog({
                 <Input
                   type={showKey ? "text" : "password"}
                   value={config.apiKey}
-                  onChange={(e) => { setConfig((c) => ({ ...c, apiKey: e.target.value })); setTestResult(null) }}
+                  onChange={(e) => {
+                    setConfig((c) => ({ ...c, apiKey: e.target.value }))
+                    setTestResult(null)
+                  }}
                   placeholder={hasExisting ? "••••••••••••••••" : "sk-..."}
                   className="pr-10"
                 />
@@ -697,7 +846,11 @@ export function CustomModelDialog({
                   onClick={handleTest}
                   disabled={!canTest || testing || saving || deleting}
                 >
-                  {testing ? <Loader2 className="size-3 animate-spin" /> : <Zap className="size-3" />}
+                  {testing ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : (
+                    <Zap className="size-3" />
+                  )}
                   测试连接
                 </Button>
               </div>
@@ -731,7 +884,11 @@ export function CustomModelDialog({
                   onClick={handleDelete}
                   disabled={deleting || saving || testing}
                 >
-                  {deleting ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                  {deleting ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="size-4" />
+                  )}
                   删除
                 </Button>
               ) : (

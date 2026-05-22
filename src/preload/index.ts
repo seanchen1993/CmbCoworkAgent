@@ -252,6 +252,11 @@ const api = {
       maxMaxOutputTokens: number
       defaultTemperature: number
       maxTemperature: number
+      defaultTopP: number
+      maxTopP: number
+      defaultTopK: number
+      minTopK: number
+      maxTopK: number
     }> => {
       return ipcRenderer.invoke("models:getTokenLimits") as Promise<{
         defaultMaxTokens: number
@@ -262,6 +267,11 @@ const api = {
         maxMaxOutputTokens: number
         defaultTemperature: number
         maxTemperature: number
+        defaultTopP: number
+        maxTopP: number
+        defaultTopK: number
+        minTopK: number
+        maxTopK: number
       }>
     },
     getCustomConfigs: (): Promise<
@@ -274,6 +284,8 @@ const api = {
         maxTokens: number
         maxOutputTokens: number
         temperature: number
+        topP: number
+        topK: number
         interleavedThinking?: boolean
         tier?: "premium" | "economy"
       }>
@@ -288,6 +300,8 @@ const api = {
           maxTokens: number
           maxOutputTokens: number
           temperature: number
+          topP: number
+          topK: number
           interleavedThinking?: boolean
           tier?: "premium" | "economy"
         }>
@@ -304,6 +318,8 @@ const api = {
       maxTokens: number
       maxOutputTokens: number
       temperature: number
+      topP: number
+      topK: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     } | null> => {
@@ -316,6 +332,8 @@ const api = {
         maxTokens: number
         maxOutputTokens: number
         temperature: number
+        topP: number
+        topK: number
         interleavedThinking?: boolean
         tier?: "premium" | "economy"
       } | null>
@@ -329,6 +347,8 @@ const api = {
       maxTokens?: number
       maxOutputTokens?: number
       temperature?: number
+      topP?: number
+      topK?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }): Promise<void> => {
@@ -343,6 +363,8 @@ const api = {
       maxTokens?: number
       maxOutputTokens?: number
       temperature?: number
+      topP?: number
+      topK?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }): Promise<{ id: string }> => {
@@ -364,6 +386,8 @@ const api = {
       apiKey?: string
       maxOutputTokens?: number
       temperature?: number
+      topP?: number
+      topK?: number
     }): Promise<{ success: boolean; error?: string; latencyMs?: number }> => {
       return ipcRenderer.invoke("models:testConnection", params) as Promise<{
         success: boolean
@@ -1086,9 +1110,7 @@ const api = {
   autoCommit: {
     getSettings: (): Promise<AgentAutoCommitSettings> =>
       ipcRenderer.invoke("autoCommit:getSettings") as Promise<AgentAutoCommitSettings>,
-    saveSettings: (
-      updates: Partial<AgentAutoCommitSettings>
-    ): Promise<AgentAutoCommitSettings> =>
+    saveSettings: (updates: Partial<AgentAutoCommitSettings>): Promise<AgentAutoCommitSettings> =>
       ipcRenderer.invoke("autoCommit:saveSettings", updates) as Promise<AgentAutoCommitSettings>
   },
   heartbeat: {
@@ -1709,9 +1731,7 @@ const api = {
     skills: {
       list: (): Promise<SkillHookMetadata[]> => ipcRenderer.invoke("hooks:skills:list")
     },
-    onChanged: (
-      callback: (data: { reason?: string; at: string }) => void
-    ): (() => void) => {
+    onChanged: (callback: (data: { reason?: string; at: string }) => void): (() => void) => {
       const handler = (_: unknown, data: { reason?: string; at: string }): void => {
         callback(data)
       }
@@ -1857,16 +1877,14 @@ const api = {
       options?: { page?: number; pageSize?: number; pushedOnly?: boolean }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:commitDetails", range, options),
-    exportSkillTraces: (
-      payload: {
-        skill: string
-        range: { from: string; to: string }
-        page: number
-        pageSize: number
-        totalTraces: number
-        traces: unknown[]
-      }
-    ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
+    exportSkillTraces: (payload: {
+      skill: string
+      range: { from: string; to: string }
+      page: number
+      pageSize: number
+      totalTraces: number
+      traces: unknown[]
+    }): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportSkillTraces", payload),
     exportExcel: (
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>

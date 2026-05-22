@@ -475,6 +475,10 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
     timeout,
     maxTokens: config.maxOutputTokens,
     temperature: config.temperature,
+    topP: config.topP,
+    modelKwargs: {
+      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+    },
     configuration: { baseURL: config.baseUrl }
   })
 }
