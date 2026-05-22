@@ -1221,7 +1221,7 @@ function CloudEvolutionIntro(): React.JSX.Element {
       <Info className="mt-0.5 size-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
       <p className="leading-relaxed">
         <span className="font-medium text-foreground">云端自进化</span>
-        会从大量真实 traces 中提取高频、稳定、可复用的经验，包括成功路径和失败教训，并沉淀为 Skill 优化版本；适合将团队实践快速同步到本地已安装的同名 Skill。
+        会从大量真实 traces 中提取高频、稳定、可复用的经验，包括成功路径和失败教训，并沉淀为 Skill 优化版本；适合将团队实践快速同步到本地已安装的同名 Skill。若希望自己的 Skill 纳入云端自进化队列，请先将 Skill 上传到应用市场。
       </p>
     </div>
   )
