@@ -66,6 +66,8 @@ const harnessActionOverlayClassName =
   "pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-primary-foreground/10 to-primary-foreground/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
 const harnessActionIconClassName =
   "relative flex size-4 items-center justify-center rounded-full bg-primary-foreground/15 ring-1 ring-primary-foreground/25 transition-transform duration-200 group-hover:scale-105"
+const harnessNamePattern = /^[\u4e00-\u9fffA-Za-z0-9]+$/u
+const harnessNameRuleMessage = "仅支持中文、英文字母和数字，不允许空格或特殊符号"
 
 function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataUpdateInput {
   return {
@@ -158,6 +160,19 @@ function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boole
 
 function createRequiredMissing(form: HarnessProjectCreateInput): boolean {
   return metadataRequiredMissing(form)
+}
+
+function getHarnessNameError(label: string, value: string): string | null {
+  if (!value.trim()) return null
+  return harnessNamePattern.test(value) ? null : `${label}${harnessNameRuleMessage}`
+}
+
+function getProjectMetadataNameError(form: HarnessProjectMetadataUpdateInput): string | null {
+  return getHarnessNameError("项目名称", form.name) ?? getHarnessNameError("项目编号", form.projectCode)
+}
+
+function metadataNameInvalid(form: HarnessProjectMetadataUpdateInput): boolean {
+  return getProjectMetadataNameError(form) !== null
 }
 
 function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectMetadataUpdateInput {
@@ -349,6 +364,9 @@ function ProjectFormDialog({
   onPickWorkspace: () => void
   onSubmit: () => void
 }): React.JSX.Element {
+  const projectNameError = getHarnessNameError("项目名称", form.name)
+  const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-3xl">
@@ -387,7 +405,9 @@ function ProjectFormDialog({
                   onChange={(event) => onChange({ ...form, name: event.target.value })}
                   placeholder="请输入"
                   className="bg-background"
+                  aria-invalid={projectNameError ? true : undefined}
                 />
+                {projectNameError && <span className="text-status-critical">{projectNameError}</span>}
               </label>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目编号 *
@@ -396,7 +416,9 @@ function ProjectFormDialog({
                   onChange={(event) => onChange({ ...form, projectCode: event.target.value })}
                   placeholder="请输入"
                   className="bg-background"
+                  aria-invalid={projectCodeError ? true : undefined}
                 />
+                {projectCodeError && <span className="text-status-critical">{projectCodeError}</span>}
               </label>
               <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目描述 *
@@ -468,7 +490,11 @@ function ProjectFormDialog({
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={creating}>
             取消
           </Button>
-          <Button onClick={onSubmit} disabled={creating || createRequiredMissing(form)} className="gap-2">
+          <Button
+            onClick={onSubmit}
+            disabled={creating || createRequiredMissing(form) || metadataNameInvalid(form)}
+            className="gap-2"
+          >
             {creating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
             创建
           </Button>
@@ -499,6 +525,9 @@ function ProjectEditDialog({
   onPickWorkspace: () => void
   onSubmit: () => void
 }): React.JSX.Element {
+  const projectNameError = getHarnessNameError("项目名称", form.name)
+  const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-3xl">
@@ -537,7 +566,9 @@ function ProjectEditDialog({
                   onChange={(event) => onChange({ ...form, name: event.target.value })}
                   placeholder="请输入"
                   className="bg-background"
+                  aria-invalid={projectNameError ? true : undefined}
                 />
+                {projectNameError && <span className="text-status-critical">{projectNameError}</span>}
               </label>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目编号 *
@@ -546,7 +577,9 @@ function ProjectEditDialog({
                   onChange={(event) => onChange({ ...form, projectCode: event.target.value })}
                   placeholder="请输入"
                   className="bg-background"
+                  aria-invalid={projectCodeError ? true : undefined}
                 />
+                {projectCodeError && <span className="text-status-critical">{projectCodeError}</span>}
               </label>
               <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目描述 *
@@ -618,7 +651,11 @@ function ProjectEditDialog({
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={saving}>
             取消
           </Button>
-          <Button onClick={onSubmit} disabled={saving || metadataRequiredMissing(form)} className="gap-2">
+          <Button
+            onClick={onSubmit}
+            disabled={saving || metadataRequiredMissing(form) || metadataNameInvalid(form)}
+            className="gap-2"
+          >
             {saving ? <Loader2 className="size-4 animate-spin" /> : <Pencil className="size-4" />}
             保存
           </Button>
@@ -645,6 +682,8 @@ function FeatureCreateDialog({
   onChange: (featureName: string) => void
   onSubmit: () => void
 }): React.JSX.Element {
+  const featureNameError = getHarnessNameError("特性名称", featureName)
+
   return (
     <Dialog open={project !== null} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-md">
@@ -666,7 +705,9 @@ function FeatureCreateDialog({
               placeholder="请输入特性名称"
               className="bg-background"
               autoFocus
+              aria-invalid={featureNameError ? true : undefined}
             />
+            {featureNameError && <span className="text-status-critical">{featureNameError}</span>}
           </label>
           {project && (
             <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
@@ -682,7 +723,11 @@ function FeatureCreateDialog({
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={creating}>
               取消
             </Button>
-            <Button type="submit" disabled={creating || !featureName.trim()} className="gap-2">
+            <Button
+              type="submit"
+              disabled={creating || !featureName.trim() || featureNameError !== null}
+              className="gap-2"
+            >
               {creating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
               创建
             </Button>
@@ -2132,6 +2177,11 @@ export function HarnessBoardView({
       setFormError("所有字段均为必填")
       return
     }
+    const nameError = getProjectMetadataNameError(form)
+    if (nameError) {
+      setFormError(nameError)
+      return
+    }
     setCreating(true)
     try {
       await window.api.harnessBoard.createProject(form)
@@ -2156,6 +2206,11 @@ export function HarnessBoardView({
     setEditError(null)
     if (metadataRequiredMissing(editForm)) {
       setEditError("所有字段均为必填")
+      return
+    }
+    const nameError = getProjectMetadataNameError(editForm)
+    if (nameError) {
+      setEditError(nameError)
       return
     }
 
@@ -2227,6 +2282,11 @@ export function HarnessBoardView({
     const feature = featureName.trim()
     if (!feature) {
       setFeatureError("特性名称不能为空")
+      return
+    }
+    const featureNameError = getHarnessNameError("特性名称", featureName)
+    if (featureNameError) {
+      setFeatureError(featureNameError)
       return
     }
 

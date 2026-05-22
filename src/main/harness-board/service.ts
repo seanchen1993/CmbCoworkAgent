@@ -67,6 +67,8 @@ const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
 const HARNESS_ADAPTER_MAX_BUFFER = 10 * 1024 * 1024
 const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
+const HARNESS_NAME_PATTERN = /^[\u4e00-\u9fffA-Za-z0-9]+$/u
+const HARNESS_NAME_RULE_MESSAGE = "仅支持中文、英文字母和数字，不允许空格或特殊符号"
 
 const HARNESS_UI_KINDS = new Set<HarnessStatus["uiKind"]>([
   "pending",
@@ -1026,6 +1028,8 @@ function validateCreateInput(input: HarnessProjectCreateInput): void {
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
     throw new Error("Project name, code, description, product and workspace are required")
   }
+  validateHarnessName(input.name, "项目名称")
+  validateHarnessName(input.projectCode, "项目编号")
 }
 
 function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput): void {
@@ -1042,6 +1046,14 @@ function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput):
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
     throw new Error("Project name, code, description, product and workspace are required")
   }
+  validateHarnessName(input.name, "项目名称")
+  validateHarnessName(input.projectCode, "项目编号")
+}
+
+function validateHarnessName(value: unknown, label: string): void {
+  if (!HARNESS_NAME_PATTERN.test(normalizeText(value))) {
+    throw new Error(`${label}${HARNESS_NAME_RULE_MESSAGE}`)
+  }
 }
 
 function validateFeatureCreateInput(input: HarnessFeatureCreateInput): void {
@@ -1052,6 +1064,7 @@ function validateFeatureCreateInput(input: HarnessFeatureCreateInput): void {
   if (feature.includes("\0")) {
     throw new Error("Feature name contains invalid characters")
   }
+  validateHarnessName(input.feature, "特性名称")
 }
 
 function okStatus(_id: string, label: string): HarnessStatus {
@@ -1118,6 +1131,10 @@ function makeProjectDetailViewModel(
 function initializeHarnessProject(project: HarnessProjectMetadata): void {
   try {
     const projectPath = projectDirectoryPath(project)
+    if (existsSync(projectPath)) {
+      throw new Error(`项目目录已存在：${projectPath}`)
+    }
+
     const configured = buildConfiguredHarnessInvocation(project, "createProject")
 
     mkdirSync(projectPath, { recursive: true })
