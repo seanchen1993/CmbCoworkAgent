@@ -13,6 +13,7 @@ import {
   Zap
 } from "lucide-react"
 import { getMockOrgSkillMarketResponse, orgSkillMarketApi } from "../../api/org-skill-market"
+import { USE_MARKET_MOCK_ON_ERROR } from "../../api/market-flags"
 import type { MarketApiResponse, MarketItem } from "../../api/market"
 import { Button } from "@/components/ui/button"
 import { buildMarketInstalledFlags } from "./MarketUpdateBadge"
@@ -20,10 +21,6 @@ import { TabsTrigger } from "@/components/ui/tabs"
 
 export const ORG_SKILL_MARKET_TYPE = "orgSkill" as const
 const ORG_SKILL_PAGE_SIZE = 10
-const USE_MARKET_MOCK_ON_ERROR =
-  String(import.meta.env.VITE_MARKET_MOCK_ON_ERROR || "false")
-    .trim()
-    .toLowerCase() === "true"
 
 export const orgSkillTabIntro = {
   title: "组织级技能来自技能开放平台",

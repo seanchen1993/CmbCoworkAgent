@@ -1,6 +1,7 @@
 import { MOCK_MARKET_DATA } from "../components/customize/MarketMockData"
 import { toast } from "sonner"
 import { getMockOrgSkillMarketResponse, orgSkillMarketApi } from "./org-skill-market"
+import { USE_MARKET_MOCK_ON_ERROR } from "./market-flags"
 
 export type MarketItemType = "skill" | "orgSkill" | "mcp" | "plugin"
 
@@ -76,11 +77,6 @@ export interface MarketUpdateResponse {
   message: string
   s3_path: string
 }
-
-const USE_MARKET_MOCK_ON_ERROR =
-  String(import.meta.env.VITE_MARKET_MOCK_ON_ERROR ?? "false")
-    .trim()
-    .toLowerCase() === "true"
 
 function getMockMarketResponse(type: MarketItemType, error?: unknown): MarketApiResponse {
   const reason = error instanceof Error ? error.message : String(error ?? "unknown error")

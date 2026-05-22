@@ -57,6 +57,7 @@ import {
 } from "./MarketUpdateBadge"
 import { marketInstalledSourceStorage } from "./market-installed-source-storage"
 import { marketApi, MarketApiResponse, MarketItem, MarketItemType } from "../../api/market"
+import { USE_MARKET_MOCK_ON_ERROR } from "../../api/market-flags"
 import { getMarketMockResponse } from "./MarketMockData"
 import {
   formatTopUserOrgName,
@@ -84,10 +85,6 @@ import {
 
 // Local storage helper functions for tracking user uploads
 const UPLOADED_ITEMS_KEY = "marketplace_uploaded_items"
-const USE_MARKET_MOCK_ON_ERROR =
-  String(import.meta.env.VITE_MARKET_MOCK_ON_ERROR || "false")
-    .trim()
-    .toLowerCase() === "true"
 
 function getSecondaryCategory(category?: string): string {
   if (!category) return ""

@@ -1271,6 +1271,15 @@ async function fetchSkillUserStats(
       top_users: {
         terms: { field: "ystId", size: 100 },
         aggs: {
+          latest_user_info: {
+            top_hits: {
+              size: 1,
+              sort: [{ startedAt: { order: "desc" } }],
+              _source: {
+                includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+              }
+            }
+          },
           user_name: { terms: { field: "userName", size: 1 } },
           org_name: { terms: { field: "orgName", size: 1 } }
         }
