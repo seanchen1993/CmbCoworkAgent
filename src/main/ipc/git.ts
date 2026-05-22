@@ -225,7 +225,7 @@ function isRenameOrCopyStatus(x: string, y: string): boolean {
  * 设计意图：
  * - `getGitStatus` 走“一次 git 子进程 + 本地解析”模式，替代多次 diff/ls-files 调用。
  * - 优先解析 NUL 分隔（`-z`），避免路径中空格/特殊字符导致歧义。
- * - 对 rename/copy 的“额外 source token”做跳过，确保 path 集合只保留目标路径。
+ * - 对 rename/copy 的“额外 source token”做跳过，确保 path 集合只保留当前目标路径。
  */
 function parsePorcelainStatus(output: string): PorcelainStatusEntry[] {
   const entries: PorcelainStatusEntry[] = []
@@ -249,7 +249,8 @@ function parsePorcelainStatus(output: string): PorcelainStatusEntry[] {
       const y = status[1] || " "
       entries.push({ path: rawPath, x, y })
 
-      // In `status -z`, rename/copy records include one extra token for source path.
+      // In `status -z`, rename/copy records are `<new-path>\0<old-path>\0`.
+      // Keep `rawPath` above and skip the extra historical source path.
       if (isRenameOrCopyStatus(x, y) && i + 1 < chunks.length) {
         i += 1
       }
@@ -975,6 +976,14 @@ async function listBranches(cwd?: string): Promise<string[]> {
   }
 }
 
+async function fetchOriginBranches(cwd?: string): Promise<void> {
+  const workingDir = cwd || (await getCurrentWorkingDirectory())
+  await runGitArgs(["fetch", "--prune", "origin"], {
+    cwd: workingDir,
+    timeout: 2 * 60 * 1000
+  })
+}
+
 /**
  * 安全切换远端分支。
  *
@@ -1212,15 +1221,35 @@ export function registerGitHandlers(): void {
   // 列出所有本地分支和远端分支
   ipcMain.handle(
     "git:listBranches",
-    async (_, cwd?: string): Promise<{ success: boolean; branches: string[]; error?: string }> => {
+    async (
+      _,
+      input?: string | { cwd?: string; refreshRemote?: boolean }
+    ): Promise<{ success: boolean; branches: string[]; error?: string }> => {
+      const cwd = typeof input === "string" ? input : input?.cwd
+      const refreshRemote = typeof input === "object" ? Boolean(input.refreshRemote) : false
       try {
         if (!(await isGitRepo(cwd)))
           return { success: false, branches: [], error: "Not a git repository" }
+        if (refreshRemote) {
+          await fetchOriginBranches(cwd)
+        }
         const branches = await listBranches(cwd)
         return { success: true, branches }
       } catch (error) {
         console.error("[IPC] git:listBranches error:", error)
-        return { success: false, branches: [], error: String(error) }
+        let branches: string[] = []
+        try {
+          branches = await listBranches(cwd)
+        } catch {
+          branches = []
+        }
+        const err = error as ExecCommandError
+        const stderr = normalizeExecOutput(err.stderr).trim()
+        return {
+          success: false,
+          branches,
+          error: stderr || err.message || String(error)
+        }
       }
     }
   )

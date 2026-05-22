@@ -495,14 +495,14 @@ interface CustomAPI {
     }>
     commitWorktree: (
       threadId: string,
-      message: string
+      message: string,
+      filePaths?: string[]
     ) => Promise<{
       success: boolean
       error?: string
     }>
     pushWorktree: (
-      threadId: string,
-      message?: string
+      threadId: string
     ) => Promise<{
       success: boolean
       autoCommitted?: boolean
@@ -1219,7 +1219,8 @@ interface CustomAPI {
       cwd?: string
     ) => Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }>
     listBranches: (
-      cwd?: string
+      cwd?: string,
+      options?: { refreshRemote?: boolean }
     ) => Promise<{ success: boolean; branches: string[]; error?: string }>
     switchBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
     createBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
