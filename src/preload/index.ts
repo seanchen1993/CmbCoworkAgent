@@ -1851,6 +1851,8 @@ const api = {
       sapIds: string[]
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userProfiles", sapIds),
+    queryAllUser: (): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:queryAllUser"),
     productivity: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"
