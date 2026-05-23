@@ -181,11 +181,35 @@ function rejectRuntimeRestoredCheckpointResume(
 ): boolean {
   if (allowRuntimeRestoredCheckpointResume) return false
   if (!isRuntimeRestoredPausedGoal(threadId)) return false
-  const goalId = goalManager.get(threadId)?.goalId ?? null
+  const goal = goalManager.get(threadId)
+  const goalId = goal?.goalId ?? null
+  const activeWindowId = goal?.activeWindowId ?? null
+  let eventId: number | null = null
+  let createdAt = Date.now()
+  try {
+    const event = addThreadGoalEvent(
+      threadId,
+      RUNTIME_RESTORED_GOAL_PAUSE_NOTICE,
+      goalId,
+      createdAt,
+      activeWindowId
+    )
+    eventId = event.event_id
+    createdAt = event.created_at
+  } catch (error) {
+    console.warn("[Goal] failed to persist runtime-restored checkpoint rejection notice:", error)
+  }
   if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
     window.webContents.send(channel, {
       type: "custom",
-      data: { type: "goal_notice", message: RUNTIME_RESTORED_GOAL_PAUSE_NOTICE, goalId }
+      data: {
+        type: "goal_notice",
+        message: RUNTIME_RESTORED_GOAL_PAUSE_NOTICE,
+        goalId,
+        activeWindowId,
+        eventId,
+        createdAt
+      }
     })
     window.webContents.send(channel, { type: "done" })
   }
@@ -203,10 +227,17 @@ function abortActiveRun(threadId: string): void {
 function persistGoalUserMessage(
   threadId: string,
   content: string,
-  goalId = goalManager.get(threadId)?.goalId ?? null
+  goalId = goalManager.get(threadId)?.goalId ?? null,
+  activeWindowId = goalManager.get(threadId)?.activeWindowId ?? null
 ): void {
   try {
-    addThreadGoalEvent(threadId, `${GOAL_USER_MESSAGE_EVENT_PREFIX}${content}`, goalId)
+    addThreadGoalEvent(
+      threadId,
+      `${GOAL_USER_MESSAGE_EVENT_PREFIX}${content}`,
+      goalId,
+      Date.now(),
+      activeWindowId
+    )
   } catch (error) {
     console.warn("[Goal] failed to persist goal user message:", error)
   }
@@ -291,17 +322,22 @@ function emitGoalNotice(
   channel: string,
   threadId: string,
   notice: string,
-  goalId = goalManager.get(threadId)?.goalId ?? null
+  goalId = goalManager.get(threadId)?.goalId ?? null,
+  activeWindowId = goalManager.get(threadId)?.activeWindowId ?? null
 ): void {
+  let eventId: number | null = null
+  let createdAt = Date.now()
   try {
-    addThreadGoalEvent(threadId, notice, goalId)
+    const event = addThreadGoalEvent(threadId, notice, goalId, createdAt, activeWindowId)
+    eventId = event.event_id
+    createdAt = event.created_at
   } catch (error) {
     console.warn("[Goal] failed to persist goal notice:", error)
   }
   if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
     window.webContents.send(channel, {
       type: "custom",
-      data: { type: "goal_notice", message: notice, goalId }
+      data: { type: "goal_notice", message: notice, goalId, activeWindowId, eventId, createdAt }
     })
   }
 }
@@ -337,7 +373,10 @@ function handleGoalNonStartingControlCommand(params: {
   }
 
   if (command.type === "status") {
-    persistGoalUserMessage(threadId, "/goal")
+    persistGoalUserMessage(
+      threadId,
+      originalMessage ? sanitizeGoalSlashCommandForPersistence(originalMessage) : "/goal"
+    )
     emitGoalNotice(window, channel, threadId, goalManager.statusLine(threadId))
     done()
     return { handled: true, terminatedCurrentRun: false }
@@ -1726,9 +1765,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         sendDoneForTerminatingControl: true
       })
       if (!result.handled) {
-        if (goalCommand.type !== "none") {
-          persistGoalUserMessage(threadId, sanitizeGoalSlashCommandForPersistence(message))
-        }
         emitGoalNotice(window, channel, threadId, "该 /goal 命令需要在当前运行结束后发送。")
       }
       return result
@@ -1759,16 +1795,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
 
     const sendGoalNotice = (notice: string): void => {
-      const goalId = goalManager.get(threadId)?.goalId ?? null
+      const goal = goalManager.get(threadId)
+      const goalId = goal?.goalId ?? null
+      const activeWindowId = goal?.activeWindowId ?? null
+      let eventId: number | null = null
+      let createdAt = Date.now()
       try {
-        addThreadGoalEvent(threadId, notice, goalId)
+        const event = addThreadGoalEvent(threadId, notice, goalId, createdAt, activeWindowId)
+        eventId = event.event_id
+        createdAt = event.created_at
       } catch (error) {
         console.warn("[Goal] failed to persist goal notice:", error)
       }
       if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
         window.webContents.send(channel, {
           type: "custom",
-          data: { type: "goal_notice", message: notice, goalId }
+          data: { type: "goal_notice", message: notice, goalId, activeWindowId, eventId, createdAt }
         })
       }
     }
@@ -1818,7 +1860,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           return
         }
         if (goalCommand.type === "resume") {
-          persistGoalUserMessage(threadId, "/goal resume")
           const currentGoal = goalManager.get(threadId)
           if (currentGoal?.status === "active" && activeRuns.has(threadId)) {
             sendGoalNotice("Goal 正在进行中，无需 resume。")
@@ -1871,6 +1912,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             window.webContents.send(channel, { type: "done" })
             return
           }
+          persistGoalUserMessage(threadId, "/goal resume", goal.goalId, goal.activeWindowId)
           sendGoalNotice(`Goal 已继续：${displayGoalObjective(goal.objective) || goal.objective}`)
           rootUserPrompt = goal.objective
           routingMessage = buildGoalRoutingMessage(goal)
@@ -1911,7 +1953,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           persistGoalUserMessage(
             threadId,
             buildPersistedGoalSetUserMessage(goalCommand.displayText, transportPayload),
-            goal.goalId
+            goal.goalId,
+            goal.activeWindowId
           )
           sendGoalNotice(
             `Goal 已设置（最多 ${goal.maxTurns} 轮）。完成前会自动继续；查看状态请发送 /goal，暂停请发送 /goal pause，清除请发送 /goal clear。`
@@ -4136,14 +4179,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     if (paused?.status === "paused") {
       const pausedReason = displayGoalPausedReason(paused.pausedReason)
       const notice = pausedReason ? `Goal 已暂停：${pausedReason}` : "Goal 已暂停。"
+      let eventId: number | null = null
+      let createdAt = Date.now()
       try {
-        addThreadGoalEvent(threadId, notice, paused.goalId)
+        const event = addThreadGoalEvent(threadId, notice, paused.goalId, createdAt, paused.activeWindowId)
+        eventId = event.event_id
+        createdAt = event.created_at
       } catch (error) {
         console.warn("[Goal] failed to persist cancel goal notice:", error)
       }
       window?.webContents.send(channel, {
         type: "custom",
-        data: { type: "goal_notice", message: notice, goalId: paused.goalId }
+        data: {
+          type: "goal_notice",
+          message: notice,
+          goalId: paused.goalId,
+          activeWindowId: paused.activeWindowId,
+          eventId,
+          createdAt
+        }
       })
     }
     if (controller) {

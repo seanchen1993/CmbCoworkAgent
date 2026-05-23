@@ -192,22 +192,25 @@ const api = {
         event_id: number
         thread_id: string
         goal_id: string | null
+        active_window_id: string | null
         message: string
         created_at: Date | string | number
       }>
     > => {
       return ipcRenderer.invoke("threads:goalEvents", threadId) as Promise<
         Array<{
-          event_id: number
-          thread_id: string
-          goal_id: string | null
-          message: string
-          created_at: Date | string | number
-        }>
+            event_id: number
+            thread_id: string
+            goal_id: string | null
+            active_window_id: string | null
+            message: string
+            created_at: Date | string | number
+          }>
       >
     },
     getGoalState: (
-      threadId: string
+      threadId: string,
+      options?: { includeEvents?: boolean }
     ): Promise<{
       goal: {
         threadId: string
@@ -238,11 +241,12 @@ const api = {
         event_id: number
         thread_id: string
         goal_id: string | null
+        active_window_id: string | null
         message: string
         created_at: Date | string | number
       }>
     }> => {
-      return ipcRenderer.invoke("threads:goalState", threadId) as Promise<{
+      return ipcRenderer.invoke("threads:goalState", threadId, options) as Promise<{
         goal: {
           threadId: string
           goalId: string
@@ -272,6 +276,7 @@ const api = {
           event_id: number
           thread_id: string
           goal_id: string | null
+          active_window_id: string | null
           message: string
           created_at: Date | string | number
         }>

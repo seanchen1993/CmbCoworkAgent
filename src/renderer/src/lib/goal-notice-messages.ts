@@ -9,6 +9,7 @@ import { stripLegacyGoalTransportSummary } from "./goal-transport-summary"
 export interface GoalNoticeEvent {
   event_id: number
   goal_id?: string | null
+  active_window_id?: string | null
   message: string
   created_at: Date | string | number
 }
@@ -79,7 +80,7 @@ function nextNoticeId(): string {
 
 export function createGoalNoticeMessage(
   message: string,
-  options: { id?: string; createdAt?: Date; goalId?: string | null } = {}
+  options: { id?: string; createdAt?: Date; goalId?: string | null; activeWindowId?: string | null } = {}
 ): Message {
   const createdAt = options.createdAt ?? new Date()
   return {
@@ -89,13 +90,14 @@ export function createGoalNoticeMessage(
     created_at: createdAt,
     start_at: createdAt,
     end_at: createdAt,
-    goal_id: options.goalId ?? null
+    goal_id: options.goalId ?? null,
+    active_window_id: options.activeWindowId ?? null
   }
 }
 
 function createGoalUserMessage(
   content: string,
-  options: { id: string; createdAt: Date; goalId?: string | null }
+  options: { id: string; createdAt: Date; goalId?: string | null; activeWindowId?: string | null }
 ): Message {
   return {
     id: options.id,
@@ -104,7 +106,8 @@ function createGoalUserMessage(
     created_at: options.createdAt,
     start_at: options.createdAt,
     end_at: options.createdAt,
-    goal_id: options.goalId ?? null
+    goal_id: options.goalId ?? null,
+    active_window_id: options.activeWindowId ?? null
   }
 }
 
@@ -113,7 +116,8 @@ export function goalEventToSystemMessage(event: GoalNoticeEvent): Message {
   return createGoalNoticeMessage(event.message, {
     id: `goal-event-${event.event_id}`,
     createdAt,
-    goalId: event.goal_id ?? null
+    goalId: event.goal_id ?? null,
+    activeWindowId: event.active_window_id ?? null
   })
 }
 
@@ -144,7 +148,8 @@ export function goalEventToDisplayMessages(event: GoalNoticeEvent): Message[] {
       createGoalUserMessage(event.message.slice(GOAL_USER_MESSAGE_EVENT_PREFIX.length), {
         id: `goal-user-event-${event.event_id}`,
         createdAt,
-        goalId: event.goal_id ?? null
+        goalId: event.goal_id ?? null,
+        activeWindowId: event.active_window_id ?? null
       })
     ]
   }
@@ -157,7 +162,8 @@ export function goalEventToDisplayMessages(event: GoalNoticeEvent): Message[] {
     createGoalUserMessage(legacyCommand, {
       id: `goal-legacy-command-${event.event_id}`,
       createdAt,
-      goalId: event.goal_id ?? null
+      goalId: event.goal_id ?? null,
+      activeWindowId: event.active_window_id ?? null
     }),
     notice
   ]

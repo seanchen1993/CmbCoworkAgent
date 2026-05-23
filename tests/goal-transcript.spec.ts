@@ -14,8 +14,9 @@ import {
   isVisibleCheckpointTranscriptMessage,
   mergeGoalUserEventsIntoTranscript
 } from "../src/renderer/src/lib/goal-transcript.ts"
+import { buildGoalContinuationPrompt, buildGoalStartPrompt } from "../src/main/agent/goals/goal-manager.ts"
 import { GOAL_USER_MESSAGE_EVENT_PREFIX } from "../src/shared/goal-events.ts"
-import type { Message } from "../src/renderer/src/types.ts"
+import type { Message, GoalSnapshot } from "../src/renderer/src/types.ts"
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message)
@@ -50,6 +51,32 @@ function message(
     start_at: createdAt,
     end_at: createdAt,
     ...extra
+  }
+}
+
+function goalSnapshot(overrides: Partial<GoalSnapshot> = {}): GoalSnapshot {
+  return {
+    threadId: "thread-1",
+    goalId: "goal-1",
+    activeWindowId: "window-1",
+    objective: "讲解项目功能",
+    completionCondition: "讲解项目功能",
+    context: {},
+    status: "active",
+    turnsUsed: 0,
+    maxTurns: 15,
+    lastVerdict: null,
+    lastReason: null,
+    pausedReason: null,
+    consecutiveParseFailures: 0,
+    ledger: {
+      progress: [],
+      evidence: [],
+      blockers: []
+    },
+    createdAt: Date.parse("2026-05-22T10:00:00.000Z"),
+    updatedAt: Date.parse("2026-05-22T10:00:00.000Z"),
+    ...overrides
   }
 }
 
@@ -208,17 +235,17 @@ function testPersistedGoalUserEventsRestoreAsUserMessages(): void {
 }
 
 function testGoalStartUserMessageUsesCheckpointPromptPosition(): void {
+  const promptGoal = goalSnapshot({
+    goalId: "goal-1",
+    activeWindowId: "window-1",
+    objective: "讲解项目功能",
+    completionCondition: "讲解项目功能"
+  })
   const rawCheckpointMessages = [
     message(
       "internal-start",
       "user",
-      [
-        "[Starting active goal]",
-        "<goal_id>goal-1</goal_id>",
-        "<untrusted_objective>",
-        "讲解项目功能",
-        "</untrusted_objective>"
-      ].join("\n"),
+      buildGoalStartPrompt(promptGoal),
       new Date("2026-05-22T10:00:00.000Z")
     ),
     message("assistant-intro", "assistant", "我先查看项目结构。", new Date("2026-05-22T10:00:01.000Z")),
@@ -231,6 +258,7 @@ function testGoalStartUserMessageUsesCheckpointPromptPosition(): void {
     {
       event_id: 1,
       goal_id: "goal-1",
+      active_window_id: "window-1",
       message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal 讲解项目功能`,
       created_at: "2026-05-22T10:00:05.000Z"
     }
@@ -254,18 +282,117 @@ function testGoalStartUserMessageUsesCheckpointPromptPosition(): void {
   )
 }
 
+function testGoalStartUserMessageWithGeneratedMetadataDoesNotDuplicate(): void {
+  const promptGoal = goalSnapshot({
+    goalId: "goal-1",
+    activeWindowId: "window-1",
+    objective: "根据附件检查实现",
+    completionCondition: "根据附件检查实现"
+  })
+  const rawCheckpointMessages = [
+    message(
+      "internal-start",
+      "user",
+      buildGoalStartPrompt(promptGoal),
+      new Date("2026-05-22T10:00:00.000Z")
+    ),
+    message("assistant-intro", "assistant", "我先读取附件和代码。", new Date("2026-05-22T10:00:01.000Z"))
+  ]
+  const visibleCheckpointMessages = buildCheckpointTranscriptForDisplay(rawCheckpointMessages)
+  const events = goalNoticeEventsToGoalUiEvents("thread-1", [
+    {
+      event_id: 11,
+      goal_id: "goal-1",
+      active_window_id: "window-1",
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal 根据附件检查实现\n启动附件：spec.md\n显式技能：docs`,
+      created_at: "2026-05-22T10:00:05.000Z"
+    }
+  ])
+
+  const visible = buildRestoredCheckpointTranscript(
+    rawCheckpointMessages,
+    visibleCheckpointMessages,
+    events
+  )
+
+  assertArrayEqual(
+    visible.map((item) => item.id),
+    ["goal-user-event-11", "assistant-intro"],
+    "generated attachment/skill metadata should not make the same /goal command restore twice"
+  )
+  assertEqual(
+    visible[0]?.content,
+    "/goal 根据附件检查实现\n启动附件：spec.md\n显式技能：docs",
+    "restored command should keep generated metadata for chip rendering"
+  )
+  assertEqual(
+    visible[0]?.created_at.toISOString(),
+    "2026-05-22T10:00:00.000Z",
+    "metadata-rich /goal command should still inherit the checkpoint prompt time"
+  )
+}
+
+function testGoalStartPromptDoesNotMatchWrongPersistedGoalEvent(): void {
+  const rawCheckpointMessages = [
+    message(
+      "internal-start",
+      "user",
+      buildGoalStartPrompt(
+        goalSnapshot({
+          goalId: "goal-A",
+          activeWindowId: "window-A",
+          objective: "分析项目 A",
+          completionCondition: "分析项目 A"
+        })
+      ),
+      new Date("2026-05-22T10:00:00.000Z")
+    ),
+    message("assistant-intro", "assistant", "我先查看项目 A。", new Date("2026-05-22T10:00:01.000Z"))
+  ]
+  const visibleCheckpointMessages = buildCheckpointTranscriptForDisplay(rawCheckpointMessages)
+  const events = goalNoticeEventsToGoalUiEvents("thread-1", [
+    {
+      event_id: 10,
+      goal_id: "goal-B",
+      active_window_id: "window-B",
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal 分析项目 B`,
+      created_at: "2026-05-22T10:00:00.500Z"
+    }
+  ])
+
+  const visible = buildRestoredCheckpointTranscript(
+    rawCheckpointMessages,
+    visibleCheckpointMessages,
+    events
+  )
+
+  assertArrayEqual(
+    visible.map((item) => item.id),
+    ["goal-start-prompt-internal-start", "goal-user-event-10", "assistant-intro"],
+    "internal start prompt must stay distinct from a persisted event from a different goal"
+  )
+  assertEqual(
+    visible[0]?.content,
+    "/goal 分析项目 A",
+    "fallback prompt should preserve the checkpoint objective when persisted event goal_id mismatches"
+  )
+}
+
 function testGoalResumeUserMessageUsesCheckpointPromptPosition(): void {
+  const promptGoal = goalSnapshot({
+    goalId: "goal-1",
+    activeWindowId: "window-resume-1",
+    objective: "讲解项目功能",
+    completionCondition: "讲解项目功能",
+    turnsUsed: 1,
+    lastVerdict: "continue",
+    lastReason: "还需要继续检查。"
+  })
   const rawCheckpointMessages = [
     message(
       "internal-continue",
       "user",
-      [
-        "[Continuing active goal]",
-        "<goal_id>goal-1</goal_id>",
-        "<untrusted_objective>",
-        "讲解项目功能",
-        "</untrusted_objective>"
-      ].join("\n"),
+      buildGoalContinuationPrompt(promptGoal),
       new Date("2026-05-22T10:00:00.000Z")
     ),
     message("assistant-resumed", "assistant", "继续检查。", new Date("2026-05-22T10:00:01.000Z")),
@@ -278,6 +405,7 @@ function testGoalResumeUserMessageUsesCheckpointPromptPosition(): void {
     {
       event_id: 2,
       goal_id: "goal-1",
+      active_window_id: "window-resume-1",
       message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal resume`,
       created_at: "2026-05-22T10:00:05.000Z"
     }
@@ -294,6 +422,99 @@ function testGoalResumeUserMessageUsesCheckpointPromptPosition(): void {
     "persisted /goal resume should replace the internal continuation prompt at checkpoint position"
   )
   assertEqual(visible[0]?.content, "/goal resume", "continuation prompt should show /goal resume")
+}
+
+function testGoalResumePromptDoesNotMatchWrongPersistedGoalEvent(): void {
+  const rawCheckpointMessages = [
+    message(
+      "internal-continue",
+      "user",
+      buildGoalContinuationPrompt(
+        goalSnapshot({
+          goalId: "goal-A",
+          activeWindowId: "window-A2",
+          objective: "继续分析项目 A",
+          completionCondition: "继续分析项目 A",
+          turnsUsed: 1,
+          lastVerdict: "continue",
+          lastReason: "还需要继续。"
+        })
+      ),
+      new Date("2026-05-22T10:00:00.000Z")
+    ),
+    message("assistant-resumed", "assistant", "继续分析 A。", new Date("2026-05-22T10:00:01.000Z"))
+  ]
+  const visibleCheckpointMessages = buildCheckpointTranscriptForDisplay(rawCheckpointMessages)
+  const events = goalNoticeEventsToGoalUiEvents("thread-1", [
+    {
+      event_id: 20,
+      goal_id: "goal-B",
+      active_window_id: "window-B2",
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal resume`,
+      created_at: "2026-05-22T10:00:00.500Z"
+    }
+  ])
+
+  const visible = buildRestoredCheckpointTranscript(
+    rawCheckpointMessages,
+    visibleCheckpointMessages,
+    events
+  )
+
+  assertArrayEqual(
+    visible.map((item) => item.id),
+    ["goal-continue-prompt-internal-continue", "goal-user-event-20", "assistant-resumed"],
+    "internal continuation prompt must stay distinct from a persisted resume event from a different goal"
+  )
+  assertEqual(
+    visible[0]?.content,
+    "/goal resume",
+    "fallback continuation prompt should preserve the checkpoint resume command"
+  )
+}
+
+function testGoalResumePromptDoesNotMatchWrongActiveWindowEvent(): void {
+  const rawCheckpointMessages = [
+    message(
+      "internal-continue",
+      "user",
+      buildGoalContinuationPrompt(
+        goalSnapshot({
+          goalId: "goal-A",
+          activeWindowId: "window-current",
+          objective: "继续分析项目 A",
+          completionCondition: "继续分析项目 A",
+          turnsUsed: 1,
+          lastVerdict: "continue",
+          lastReason: "还需要继续。"
+        })
+      ),
+      new Date("2026-05-22T10:00:10.000Z")
+    ),
+    message("assistant-resumed", "assistant", "继续分析 A。", new Date("2026-05-22T10:00:11.000Z"))
+  ]
+  const visibleCheckpointMessages = buildCheckpointTranscriptForDisplay(rawCheckpointMessages)
+  const events = goalNoticeEventsToGoalUiEvents("thread-1", [
+    {
+      event_id: 21,
+      goal_id: "goal-A",
+      active_window_id: "window-old",
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal resume`,
+      created_at: "2026-05-22T10:00:10.100Z"
+    }
+  ])
+
+  const visible = buildRestoredCheckpointTranscript(
+    rawCheckpointMessages,
+    visibleCheckpointMessages,
+    events
+  )
+
+  assertArrayEqual(
+    visible.map((item) => item.id),
+    ["goal-continue-prompt-internal-continue", "goal-user-event-21", "assistant-resumed"],
+    "same goal_id resume events from a different active window must not replace the checkpoint prompt"
+  )
 }
 
 function testPersistedGoalControlEventsStayOutOfMainTranscript(): void {
@@ -424,7 +645,11 @@ function run(): void {
     testAssistantToolAdjacencyAndPayloadArePreserved,
     testPersistedGoalUserEventsRestoreAsUserMessages,
     testGoalStartUserMessageUsesCheckpointPromptPosition,
+    testGoalStartUserMessageWithGeneratedMetadataDoesNotDuplicate,
+    testGoalStartPromptDoesNotMatchWrongPersistedGoalEvent,
     testGoalResumeUserMessageUsesCheckpointPromptPosition,
+    testGoalResumePromptDoesNotMatchWrongPersistedGoalEvent,
+    testGoalResumePromptDoesNotMatchWrongActiveWindowEvent,
     testPersistedGoalControlEventsStayOutOfMainTranscript,
     testPersistedGoalUserEventsDoNotDuplicateCheckpointUserMessages,
     testGoalEventsStayInGoalUiState,

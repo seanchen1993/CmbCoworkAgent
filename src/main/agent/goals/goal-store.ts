@@ -146,7 +146,7 @@ export class SqlGoalStore implements GoalStore {
   ): number {
     const db = getDb()
     const activeRows =
-      db.exec("SELECT thread_id, goal_id FROM thread_goals WHERE status = 'active'")?.[0]
+      db.exec("SELECT thread_id, goal_id, active_window_id FROM thread_goals WHERE status = 'active'")?.[0]
         ?.values ?? []
     if (activeRows.length <= 0) return 0
     db.run(
@@ -163,9 +163,10 @@ export class SqlGoalStore implements GoalStore {
       const threadId = String(row[0] ?? "").trim()
       if (!threadId) continue
       const goalId = row[1] == null ? null : String(row[1])
+      const activeWindowId = row[2] == null ? null : String(row[2])
       db.run(
-        "INSERT INTO thread_goal_events (thread_id, goal_id, message, created_at) VALUES (?, ?, ?, ?)",
-        [threadId, goalId, RUNTIME_RESTORED_GOAL_PAUSE_NOTICE, now]
+        "INSERT INTO thread_goal_events (thread_id, goal_id, active_window_id, message, created_at) VALUES (?, ?, ?, ?, ?)",
+        [threadId, goalId, activeWindowId, RUNTIME_RESTORED_GOAL_PAUSE_NOTICE, now]
       )
     }
     saveToDisk()

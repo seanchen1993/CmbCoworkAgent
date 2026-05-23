@@ -207,16 +207,22 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }))
   })
 
-  ipcMain.handle("threads:goalState", async (_event, threadId: string) => {
-    const goalStore = new SqlGoalStore()
-    return {
-      goal: serializeGoal(goalStore.get(threadId)),
-      events: getThreadGoalEvents(threadId).map((event) => ({
-        ...event,
-        created_at: new Date(event.created_at)
-      }))
+  ipcMain.handle(
+    "threads:goalState",
+    async (_event, threadId: string, options?: { includeEvents?: boolean }) => {
+      const goalStore = new SqlGoalStore()
+      const includeEvents = options?.includeEvents !== false
+      return {
+        goal: serializeGoal(goalStore.get(threadId)),
+        events: includeEvents
+          ? getThreadGoalEvents(threadId).map((event) => ({
+              ...event,
+              created_at: new Date(event.created_at)
+            }))
+          : []
+      }
     }
-  })
+  )
 
   // Generate a title from a message
   ipcMain.handle("threads:generateTitle", async (_event, message: string) => {

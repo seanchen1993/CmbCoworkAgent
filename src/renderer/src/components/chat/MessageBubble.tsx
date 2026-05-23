@@ -29,6 +29,7 @@ import {
 } from "./MessageFeedbackDialog"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import { isGoalClearAlias } from "../../../../shared/goal-slash"
 
 function formatResponseDuration(ms?: number): string | null {
   if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return null
@@ -91,8 +92,12 @@ function parseGoalUserSetMessage(text: string): {
   const rest = (match[1] ?? "").trim()
   if (!rest) return null
 
-  const firstToken = rest.split(/\s+/)[0]?.toLowerCase()
-  if (firstToken && ["status", "pause", "resume", "clear"].includes(firstToken)) return null
+  const normalizedRest = rest.toLowerCase()
+  if (
+    ["status", "pause", "resume"].includes(normalizedRest) ||
+    isGoalClearAlias(normalizedRest)
+  )
+    return null
 
   let attachments: string | null = null
   let skillName: string | null = null

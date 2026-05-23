@@ -179,10 +179,11 @@ interface CustomAPI {
       event_id: number
       thread_id: string
       goal_id: string | null
+      active_window_id: string | null
       message: string
       created_at: Date | string | number
     }>>
-    getGoalState: (threadId: string) => Promise<{
+    getGoalState: (threadId: string, options?: { includeEvents?: boolean }) => Promise<{
       goal: {
         threadId: string
         goalId: string
@@ -212,6 +213,7 @@ interface CustomAPI {
         event_id: number
         thread_id: string
         goal_id: string | null
+        active_window_id: string | null
         message: string
         created_at: Date | string | number
       }>

@@ -8,6 +8,7 @@
 import {
   buildGoalPanelViewModel,
   cleanGoalEventText,
+  displayGoalPanelPausedReason,
   goalEmptyDetail,
   goalVerdictLabel
 } from "../src/renderer/src/lib/goal-panel-view.ts"
@@ -170,6 +171,108 @@ function testPausedGoalPrefersPausedReasonAndShowsBlockers(): void {
   )
 }
 
+function testPausedGoalLocalizesInternalReasons(): void {
+  const model = buildGoalPanelViewModel(
+    uiState(
+      goal({
+        status: "paused",
+        lastVerdict: "blocked",
+        lastReason: "Evaluator fallback reason should not win.",
+        pausedReason: "user-paused"
+      })
+    )
+  )
+
+  assert(model, "paused goal should produce a panel model")
+  assertEqual(model!.evaluatorReason, "已手动暂停。", "panel should localize internal pause code")
+
+  assertEqual(
+    displayGoalPanelPausedReason("WORKSPACE_REQUIRED"),
+    "需要先选择工作区。",
+    "workspace-required code should be localized"
+  )
+  assertEqual(
+    displayGoalPanelPausedReason("needs_user_input:请确认项目路径。"),
+    "请确认项目路径。",
+    "needs_user_input prefix should be hidden"
+  )
+  assertEqual(
+    displayGoalPanelPausedReason("Evaluator returned invalid JSON 3 turns in a row."),
+    "评估器连续 3 轮输出格式无效。",
+    "invalid JSON backstop should be localized"
+  )
+  assertEqual(
+    displayGoalPanelPausedReason("Turn budget exhausted (2/2)."),
+    "轮次预算已用尽（2/2）。",
+    "budget pause reason should be localized"
+  )
+  assertEqual(
+    displayGoalPanelPausedReason("Agent run failed: model timeout"),
+    "Agent 运行失败：model timeout",
+    "agent failure prefix should be localized"
+  )
+}
+
+function testPausedGoalLocalizesLastReasonFallback(): void {
+  const model = buildGoalPanelViewModel(
+    uiState(
+      goal({
+        status: "paused",
+        lastVerdict: "blocked",
+        lastReason: "Goal evaluator model is not configured.",
+        pausedReason: null
+      })
+    )
+  )
+
+  assert(model, "paused goal should produce a panel model")
+  assertEqual(
+    model!.evaluatorReason,
+    "Goal 评估器模型未配置。",
+    "paused lastReason fallback should also be localized"
+  )
+}
+
+function testContextTextDoesNotDuplicateExplicitSkill(): void {
+  const model = buildGoalPanelViewModel(
+    uiState(
+      goal({
+        context: {
+          transportSummary: "附件：spec.md；显式技能：audit",
+          explicitSkill: { name: "audit", path: "/tmp/audit/SKILL.md" }
+        }
+      })
+    )
+  )
+
+  assert(model, "goal with launch context should produce a panel model")
+  assertEqual(
+    model!.contextText,
+    "附件：spec.md；显式技能：audit",
+    "panel context should not append explicit skill when the transport summary already contains it"
+  )
+}
+
+function testContextTextAddsExplicitSkillWhenMissingFromSummary(): void {
+  const model = buildGoalPanelViewModel(
+    uiState(
+      goal({
+        context: {
+          transportSummary: "附件：spec.md",
+          explicitSkill: { name: "audit", path: "/tmp/audit/SKILL.md" }
+        }
+      })
+    )
+  )
+
+  assert(model, "goal with explicit skill should produce a panel model")
+  assertEqual(
+    model!.contextText,
+    "附件：spec.md · 显式技能：audit",
+    "panel context should still show explicit skill when the summary does not include it"
+  )
+}
+
 function testActiveGoalFallbacksAreExplicit(): void {
   const model = buildGoalPanelViewModel(uiState(goal()))
 
@@ -219,6 +322,10 @@ function run(): void {
   const tests = [
     testCompleteGoalShowsEvaluatorReasonAndLedger,
     testPausedGoalPrefersPausedReasonAndShowsBlockers,
+    testPausedGoalLocalizesInternalReasons,
+    testPausedGoalLocalizesLastReasonFallback,
+    testContextTextDoesNotDuplicateExplicitSkill,
+    testContextTextAddsExplicitSkillWhenMissingFromSummary,
     testActiveGoalFallbacksAreExplicit,
     testGoalPanelReturnsNullWithoutGoal,
     testEventTextCleanupHidesPersistedUserPrefix,

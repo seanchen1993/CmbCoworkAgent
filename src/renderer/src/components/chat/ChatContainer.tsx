@@ -2430,7 +2430,7 @@ export function ChatContainer({
     if (attachments.length > 0) return "输入消息或直接发送文件..."
     if (!goal) return "向 CMBDevClaw 提问，/ 输入命令；Shift + Enter 换行"
     if (goal.status === "active") {
-      return "补充当前 Goal，或输入 /goal status 查看详情"
+      return "输入新消息会暂停当前 Goal；查看详情用 /goal status"
     }
     if (goal.status === "paused") {
       return "补充说明，或点击继续 Goal"
@@ -2477,6 +2477,11 @@ export function ChatContainer({
 
   const submitGoalResumeCommand = useCallback(async (): Promise<void> => {
     if (!stream || historyLoading || isLoading || scheduledTaskLoading) return
+    const pendingApprovalRecord = pendingApproval as unknown as Record<string, unknown> | null
+    if (pendingApproval && !pendingApprovalRecord?._orchestratorRequestId) {
+      setError("当前有待审批操作，请先处理审批卡片，再发送 /goal resume。")
+      return
+    }
     if (threadError) {
       clearError()
     }
@@ -2517,6 +2522,7 @@ export function ChatContainer({
     historyLoading,
     isLoading,
     models,
+    pendingApproval,
     scheduledTaskLoading,
     setError,
     setAttachments,
@@ -2544,7 +2550,7 @@ export function ChatContainer({
         if (command === "/goal" || command === "/goal status") {
           setGoalDetailsOpen(true)
         }
-        void refreshGoalUi()
+        void refreshGoalUi({ includeEvents: false })
         if (
           pendingApproval &&
           isGoalTerminatingControlCommandInput(command) &&
@@ -2617,7 +2623,7 @@ export function ChatContainer({
       }
       insertLog("send: " + trimmedInput)
       const goalControlResult = await window.api.agent.goalControl(threadId, trimmedInput)
-      void refreshGoalUi()
+      void refreshGoalUi({ includeEvents: false })
       if (
         pendingApproval &&
         isGoalTerminatingControlCommandInput(trimmedInput) &&
@@ -2809,7 +2815,7 @@ export function ChatContainer({
       }
     }
 
-    if (isFirstMessage) {
+    if (isFirstMessage && shouldAppendVisibleUserMessage) {
       const currentThread = threads.find((t) => t.thread_id === threadId)
       const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
       if (hasDefaultTitle) {

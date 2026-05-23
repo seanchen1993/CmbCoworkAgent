@@ -116,7 +116,7 @@ async function testGoalEventsPersistAndDeleteWithThread(): Promise<void> {
   await db.initializeDatabase()
   db.createThread("thread-events", { title: "Goal events regression" })
 
-  const first = db.addThreadGoalEvent("thread-events", "Goal 已设置", "goal-1", 1_000)
+  const first = db.addThreadGoalEvent("thread-events", "Goal 已设置", "goal-1", 1_000, "window-1")
   const second = db.addThreadGoalEvent("thread-events", "Goal 已完成", "goal-1", 2_000)
   await db.flush()
   db.closeDatabase()
@@ -126,6 +126,8 @@ async function testGoalEventsPersistAndDeleteWithThread(): Promise<void> {
   assertEqual(events.length, 2, "goal events should reload after database reopen")
   assertEqual(events[0].event_id, first.event_id, "first event id should persist")
   assertEqual(events[1].event_id, second.event_id, "second event id should persist")
+  assertEqual(events[0].active_window_id, "window-1", "first event active window should persist")
+  assertEqual(events[1].active_window_id, null, "missing active window should reload as null")
   assertEqual(events[0].message, "Goal 已设置", "first event message should persist")
   assertEqual(events[1].message, "Goal 已完成", "second event message should persist")
 

@@ -21,7 +21,8 @@ import type {
   HITLRequest,
   SkillMetadata,
   AgentAutoCommitResult,
-  GoalUiState
+  GoalUiState,
+  GoalEvent
 } from "@/types"
 import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
@@ -38,6 +39,8 @@ import {
   goalNoticeEventsToGoalUiEvents,
   isVisibleCheckpointTranscriptMessage,
 } from "./goal-transcript"
+import { mergeGoalUiEvents } from "./goal-ui-events"
+import { restoreRawCheckpointMessageTime } from "./checkpoint-message-times"
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
@@ -329,7 +332,7 @@ export interface ThreadActions {
   appendMessage: (message: Message) => void
   setMessages: (messages: Message[]) => void
   setGoalUi: (goalUi: GoalUiState) => void
-  refreshGoalUi: () => Promise<void>
+  refreshGoalUi: (options?: { includeEvents?: boolean }) => Promise<void>
   setTodos: (todos: Todo[]) => void
   setWorkspaceFiles: (files: FileInfo[] | ((prev: FileInfo[]) => FileInfo[])) => void
   setWorkspacePath: (path: string | null) => void
@@ -434,6 +437,9 @@ interface CustomEventData {
   reason?: string
   message?: string
   goalId?: string | null
+  activeWindowId?: string | null
+  eventId?: number | null
+  createdAt?: Date | string | number
   delayMs?: number
   // hook_executed fields
   event?: string
@@ -656,13 +662,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   )
 
   const refreshGoalUi = useCallback(
-    async (threadId: string): Promise<void> => {
+    async (threadId: string, options: { includeEvents?: boolean } = {}): Promise<void> => {
       try {
-        const goalUi = await window.api.threads.getGoalState(threadId)
-        updateThreadState(threadId, () => ({
+        const includeEvents = options.includeEvents !== false
+        const goalUi = await window.api.threads.getGoalState(threadId, { includeEvents })
+        updateThreadState(threadId, (state) => ({
           goalUi: {
             goal: goalUi.goal,
-            events: goalUi.events,
+            events: includeEvents ? goalUi.events : state.goalUi.events,
             lastUpdated: new Date()
           }
         }))
@@ -839,7 +846,33 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             } else if (message.startsWith("Goal 已清除")) {
               toast.info(message)
             }
-            void refreshGoalUi(threadId)
+            const liveEvent =
+              typeof data.eventId === "number"
+                ? ({
+                    event_id: data.eventId,
+                    thread_id: threadId,
+                    goal_id: typeof data.goalId === "string" ? data.goalId : null,
+                    active_window_id:
+                      typeof data.activeWindowId === "string" ? data.activeWindowId : null,
+                    message: data.message,
+                    created_at:
+                      typeof data.createdAt === "number" ||
+                      typeof data.createdAt === "string" ||
+                      data.createdAt instanceof Date
+                        ? data.createdAt
+                        : new Date()
+                  } satisfies GoalEvent)
+                : null
+            if (liveEvent) {
+              updateThreadState(threadId, (state) => ({
+                goalUi: {
+                  goal: state.goalUi.goal,
+                  events: mergeGoalUiEvents(state.goalUi.events, [liveEvent]),
+                  lastUpdated: new Date()
+                }
+              }))
+            }
+            void refreshGoalUi(threadId, { includeEvents: !liveEvent })
           }
           break
         case "hook_blocked": {
@@ -976,7 +1009,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         setGoalUi: (goalUi: GoalUiState) => {
           updateThreadState(threadId, () => ({ goalUi }))
         },
-        refreshGoalUi: () => refreshGoalUi(threadId),
+        refreshGoalUi: (options = {}) => refreshGoalUi(threadId, options),
         setTodos: (todos: Todo[]) => {
           updateThreadState(threadId, () => ({ todos }))
         },
@@ -1195,6 +1228,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const channelValues = latestCheckpoint.checkpoint?.channel_values
 
           if (channelValues?.messages && Array.isArray(channelValues.messages)) {
+            let internalGoalPromptIndex = 0
             rawRestoredMessages = channelValues.messages.map((msg, index) => {
                 let role: "user" | "assistant" | "system" | "tool" = "assistant"
                 if (typeof msg._getType === "function") {
@@ -1230,13 +1264,34 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 const messageId =
                   typeof msg.id === "string" ? msg.id : msg.kwargs?.id || `msg-${index}`
                 const fallbackTime = new Date()
-                // 这里只按 id 恢复。顺序兜底必须在内部 goal prompt 过滤/归一化之后再套用，
-                // 否则 checkpoint 里不可见的 [Starting/Continuing active goal] 会挤占
-                // messageTimeOrder 的下标，导致重启后可见消息和 goal 状态卡片错位。
-                const persistedTime = persistedMessageTimes[messageId]
-                const trustedStartAt = toDate(persistedTime?.start_at)
-                const startAt = trustedStartAt ?? fallbackTime
-                const endAt = toDate(persistedTime?.end_at) ?? startAt
+                // Visible messages only use id-based restore here. Their order fallback
+                // is applied after hidden internal goal prompts are filtered out, otherwise
+                // [Starting/Continuing active goal] would shift messageTimeOrder indexes.
+                // Internal goal prompts have a separate order list because they are hidden
+                // from the visible transcript but still anchor restored /goal user bubbles.
+                const isInternalGoalPrompt =
+                  role === "user" &&
+                  typeof content === "string" &&
+                  isInternalGoalPromptMessage({
+                    id: messageId,
+                    role,
+                    content,
+                    created_at: fallbackTime,
+                    start_at: fallbackTime,
+                    end_at: fallbackTime
+                  })
+                const currentInternalGoalPromptIndex = isInternalGoalPrompt
+                  ? internalGoalPromptIndex++
+                  : -1
+                const { startAt, endAt } = restoreRawCheckpointMessageTime({
+                  messageId,
+                  fallbackTime,
+                  isInternalGoalPrompt,
+                  internalGoalPromptIndex: currentInternalGoalPromptIndex,
+                  persistedMessageTimes,
+                  persistedInternalGoalMessageTimes,
+                  persistedInternalGoalMessageTimeOrder
+                })
 
                 return {
                   id: messageId,
@@ -1341,19 +1396,25 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         )
       )
       try {
-        const goalUi = await window.api.threads.getGoalState(threadId)
-        actions.setGoalUi({
-          goal: goalUi.goal,
-          events: goalUi.events,
-          lastUpdated: new Date()
-        })
+        const goalUi = await window.api.threads.getGoalState(threadId, { includeEvents: false })
+        const restoredEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
+        updateThreadState(threadId, (state) => ({
+          goalUi: {
+            goal: goalUi.goal,
+            events: mergeGoalUiEvents(restoredEvents, state.goalUi.events),
+            lastUpdated: new Date()
+          }
+        }))
       } catch (error) {
         console.warn("[ThreadContext] Failed to load goal UI state:", error)
-        actions.setGoalUi({
-          goal: null,
-          events: goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents),
-          lastUpdated: new Date()
-        })
+        const restoredEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
+        updateThreadState(threadId, (state) => ({
+          goalUi: {
+            goal: state.goalUi.goal,
+            events: mergeGoalUiEvents(restoredEvents, state.goalUi.events),
+            lastUpdated: new Date()
+          }
+        }))
       }
 
       updateThreadState(threadId, () => ({ historyLoading: false }))

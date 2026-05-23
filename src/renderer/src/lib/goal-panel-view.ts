@@ -1,4 +1,5 @@
 import type { GoalEvent, GoalSnapshot, GoalUiState } from "@/types"
+import { displayGoalPausedReason } from "../../../shared/goal-paused-reason"
 import { formatGoalEventMessage } from "./goal-transcript"
 
 export type GoalPanelViewModel = {
@@ -37,6 +38,8 @@ export function goalEmptyDetail(status: "active" | "paused" | "complete"): strin
   return "没有记录最近判断。"
 }
 
+export const displayGoalPanelPausedReason = displayGoalPausedReason
+
 export function cleanGoalEventText(message: string): string {
   return formatGoalEventMessage(message).replace(/^Goal\s*/, "Goal ").trim()
 }
@@ -50,9 +53,13 @@ export function buildGoalPanelViewModel(goalUi: GoalUiState): GoalPanelViewModel
     .slice(-6)
     .reverse()
   const goalContext = goal.context ?? {}
+  const transportSummary = goalContext.transportSummary?.trim() || ""
+  const explicitSkillText = goalContext.explicitSkill
+    ? `显式技能：${goalContext.explicitSkill.name}`
+    : ""
   const contextText = [
-    goalContext.transportSummary,
-    goalContext.explicitSkill ? `显式技能：${goalContext.explicitSkill.name}` : null
+    transportSummary,
+    explicitSkillText && !transportSummary.includes(explicitSkillText) ? explicitSkillText : null
   ]
     .filter(Boolean)
     .join(" · ")
@@ -61,7 +68,8 @@ export function buildGoalPanelViewModel(goalUi: GoalUiState): GoalPanelViewModel
   const blockerItems = goal.ledger.blockers
   const reason =
     goal.status === "paused"
-      ? goal.pausedReason || goal.lastReason
+      ? displayGoalPanelPausedReason(goal.pausedReason) ||
+        displayGoalPanelPausedReason(goal.lastReason)
       : goal.status === "complete"
         ? goal.lastReason
         : goal.lastReason

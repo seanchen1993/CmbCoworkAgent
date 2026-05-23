@@ -157,10 +157,17 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
       event_id INTEGER PRIMARY KEY AUTOINCREMENT,
       thread_id TEXT NOT NULL,
       goal_id TEXT,
+      active_window_id TEXT,
       message TEXT NOT NULL,
       created_at INTEGER NOT NULL
     )
   `)
+
+  const goalEventColumns = db.exec("PRAGMA table_info(thread_goal_events)")?.[0]?.values ?? []
+  const hasGoalEventActiveWindowId = goalEventColumns.some((row) => row[1] === "active_window_id")
+  if (!hasGoalEventActiveWindowId) {
+    db.run("ALTER TABLE thread_goal_events ADD COLUMN active_window_id TEXT")
+  }
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at)`)
   db.run(`CREATE INDEX IF NOT EXISTS idx_runs_thread_id ON runs(thread_id)`)
@@ -309,6 +316,7 @@ export interface ThreadGoalEventRow {
   event_id: number
   thread_id: string
   goal_id: string | null
+  active_window_id: string | null
   message: string
   created_at: number
 }
@@ -317,14 +325,15 @@ export function addThreadGoalEvent(
   threadId: string,
   message: string,
   goalId?: string | null,
-  createdAt = Date.now()
+  createdAt = Date.now(),
+  activeWindowId?: string | null
 ): ThreadGoalEventRow {
   const trimmed = message.trim()
   if (!trimmed) throw new Error("Goal event message cannot be empty.")
   const database = getDb()
   database.run(
-    "INSERT INTO thread_goal_events (thread_id, goal_id, message, created_at) VALUES (?, ?, ?, ?)",
-    [threadId, goalId ?? null, trimmed, createdAt]
+    "INSERT INTO thread_goal_events (thread_id, goal_id, active_window_id, message, created_at) VALUES (?, ?, ?, ?, ?)",
+    [threadId, goalId ?? null, activeWindowId ?? null, trimmed, createdAt]
   )
   saveToDisk()
 
@@ -336,6 +345,7 @@ export function addThreadGoalEvent(
       event_id: Number(row.event_id),
       thread_id: threadId,
       goal_id: goalId ?? null,
+      active_window_id: activeWindowId ?? null,
       message: trimmed,
       created_at: createdAt
     }
@@ -358,6 +368,7 @@ export function getThreadGoalEvents(threadId: string): ThreadGoalEventRow[] {
         event_id: Number(row.event_id),
         thread_id: row.thread_id,
         goal_id: row.goal_id,
+        active_window_id: row.active_window_id ?? null,
         message: row.message,
         created_at: Number(row.created_at)
       })

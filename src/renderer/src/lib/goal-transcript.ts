@@ -42,6 +42,7 @@ export function goalNoticeEventsToGoalUiEvents(
     event_id: event.event_id,
     thread_id: threadId,
     goal_id: event.goal_id ?? null,
+    active_window_id: event.active_window_id ?? null,
     message: event.message,
     created_at: event.created_at
   }))
@@ -79,6 +80,7 @@ export function goalUserEventToMessage(event: GoalEvent): Message | null {
     role: "user",
     content,
     goal_id: event.goal_id,
+    active_window_id: event.active_window_id ?? null,
     created_at: createdAt,
     start_at: createdAt,
     end_at: createdAt
@@ -108,6 +110,14 @@ function isGoalSetCommandMessage(message: Message): boolean {
   return !isGoalResumeCommandMessage(message)
 }
 
+function normalizedGoalCommandContent(content: string): string {
+  const { commandText } = splitGoalTransportPayload(content)
+  return commandText
+    .replace(/(?:^|\n)\s*启动附件：[^\n]*(?=\n|$)/g, "")
+    .replace(/(?:^|\n)\s*显式技能：[^\n]*(?=\n|$)/g, "")
+    .trim()
+}
+
 function createGoalPromptFallbackMessage(rawMessage: Message): Message | null {
   if (!isInternalGoalPromptMessage(rawMessage) || typeof rawMessage.content !== "string") {
     return null
@@ -117,12 +127,14 @@ function createGoalPromptFallbackMessage(rawMessage: Message): Message | null {
   const isContinuation = content.startsWith("[Continuing active goal]")
   const objective = extractXmlBlock(content, "untrusted_objective")
   const goalId = extractXmlBlock(content, "goal_id")
+  const activeWindowId = extractXmlBlock(content, "active_window_id")
   const createdAt = rawMessage.start_at ?? rawMessage.created_at
   return {
     id: `${isContinuation ? "goal-continue-prompt" : "goal-start-prompt"}-${rawMessage.id}`,
     role: "user",
     content: isContinuation ? "/goal resume" : objective ? `/goal ${objective}` : "/goal",
     goal_id: goalId ?? rawMessage.goal_id,
+    active_window_id: activeWindowId ?? rawMessage.active_window_id,
     created_at: createdAt,
     start_at: createdAt,
     end_at: rawMessage.end_at ?? createdAt
@@ -139,15 +151,22 @@ function findMatchingGoalUserEventMessage(
   const content = rawPrompt.content.trimStart()
   const isContinuation = content.startsWith("[Continuing active goal]")
   const goalId = extractXmlBlock(content, "goal_id") ?? rawPrompt.goal_id
+  const activeWindowId = extractXmlBlock(content, "active_window_id") ?? rawPrompt.active_window_id
   const expectedCommand = isContinuation ? isGoalResumeCommandMessage : isGoalSetCommandMessage
+  const fallback = createGoalPromptFallbackMessage(rawPrompt)
 
   const match = goalUserMessages.find((message) => {
     if (consumedIds.has(message.id)) return false
     if (!expectedCommand(message)) return false
-    if (goalId && message.goal_id && message.goal_id !== goalId) return false
-    if (goalId || message.goal_id) return true
-    const fallback = createGoalPromptFallbackMessage(rawPrompt)
-    return !!fallback && sameGoalCommandMessage(fallback, message)
+    if (!fallback) return false
+    return sameGoalCommandMessage(
+      {
+        ...fallback,
+        goal_id: goalId ?? fallback.goal_id,
+        active_window_id: activeWindowId ?? fallback.active_window_id
+      },
+      message
+    )
   })
 
   if (!match) return null
@@ -156,6 +175,7 @@ function findMatchingGoalUserEventMessage(
   return {
     ...match,
     goal_id: match.goal_id ?? goalId,
+    active_window_id: match.active_window_id ?? activeWindowId,
     created_at: createdAt,
     start_at: createdAt,
     end_at: rawPrompt.end_at ?? createdAt
@@ -165,7 +185,12 @@ function findMatchingGoalUserEventMessage(
 const sameGoalCommandMessage = (left: Message, right: Message): boolean => {
   if (left.role !== "user" || right.role !== "user") return false
   if (typeof left.content !== "string" || typeof right.content !== "string") return false
-  if (left.content.trim() !== right.content.trim()) return false
+  if (normalizedGoalCommandContent(left.content) !== normalizedGoalCommandContent(right.content)) {
+    return false
+  }
+  if (left.active_window_id || right.active_window_id) {
+    return !!left.active_window_id && !!right.active_window_id && left.active_window_id === right.active_window_id
+  }
   if (left.goal_id && right.goal_id) return left.goal_id === right.goal_id
 
   const leftTime = left.created_at?.getTime?.() ?? 0
@@ -252,13 +277,16 @@ export function mergeGoalUserEventsIntoTranscript(
 
   if (syntheticGoalUserMessages.length === 0) return checkpointMessages
 
+  const checkpointIndexById = new Map(
+    checkpointMessages.map((message, index) => [message.id, index])
+  )
   const merged = [...checkpointMessages, ...syntheticGoalUserMessages]
   merged.sort((left, right) => {
     const timeDelta = left.created_at.getTime() - right.created_at.getTime()
     if (timeDelta !== 0) return timeDelta
 
-    const leftCheckpointIndex = checkpointMessages.findIndex((message) => message.id === left.id)
-    const rightCheckpointIndex = checkpointMessages.findIndex((message) => message.id === right.id)
+    const leftCheckpointIndex = checkpointIndexById.get(left.id) ?? -1
+    const rightCheckpointIndex = checkpointIndexById.get(right.id) ?? -1
     if (leftCheckpointIndex >= 0 && rightCheckpointIndex >= 0) {
       return leftCheckpointIndex - rightCheckpointIndex
     }

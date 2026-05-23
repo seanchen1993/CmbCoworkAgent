@@ -149,12 +149,14 @@ export interface Message {
   start_at?: Date
   end_at?: Date
   goal_id?: string | null
+  active_window_id?: string | null
 }
 
 export interface GoalEvent {
   event_id: number
   thread_id: string
   goal_id: string | null
+  active_window_id?: string | null
   message: string
   created_at: Date | string | number
 }
