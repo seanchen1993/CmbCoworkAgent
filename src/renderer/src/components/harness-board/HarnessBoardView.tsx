@@ -67,6 +67,7 @@ import type {
   HarnessStatus,
   Thread
 } from "@/types"
+import { HARNESS_SOURCE } from "../../../../shared/harness-board-types"
 
 const harnessActionButtonClassName =
   "cursor-pointer group relative overflow-hidden rounded-md shadow-sm transition-all duration-200 hover:-translate-y-px hover:shadow-md"
@@ -239,7 +240,7 @@ async function createHarnessSession(params: CreateHarnessSessionParams): Promise
     {
       title: `特性: ${titleSource}`,
       workspacePath,
-      harnessFeature: { projectId, slug, source: "autobizdevops" }
+      harnessFeature: { projectId, slug, source: HARNESS_SOURCE }
     },
     { preserveView: true }
   )
@@ -1598,11 +1599,10 @@ function ProjectDetailPage({
               onBack={onBackToList}
               onProjectList={onBackToList}
             />
-            <div className="flex min-w-0 items-center gap-2">
+            <ProjectBadgeRow project={project}>
               <Workflow className="size-5 shrink-0 text-status-info" />
               <h1 className="truncate text-xl font-semibold">{project.name}</h1>
-              <ProjectBadgeRow project={project} />
-            </div>
+            </ProjectBadgeRow>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Button
@@ -2101,7 +2101,7 @@ function ProjectFeatureSidebar({
   allThreadStates,
   allStreamLoadingStates,
   selectedFeature,
-  currentThreadId,
+  isViewingSession,
   exportingThreadId,
   editingThreadId,
   editingTitle,
@@ -2124,7 +2124,7 @@ function ProjectFeatureSidebar({
   allThreadStates: ThreadWorkspaceStateMap
   allStreamLoadingStates: Record<string, boolean>
   selectedFeature: SelectedFeature | null
-  currentThreadId: string | null
+  isViewingSession: boolean
   exportingThreadId: string | null
   editingThreadId: string | null
   editingTitle: string
@@ -2139,6 +2139,8 @@ function ProjectFeatureSidebar({
   onCancelEditing: () => void
   onEditingTitleChange: (value: string) => void
 }): React.JSX.Element {
+  const { currentThreadId } = useAppStore()
+  const highlightThreadId = isViewingSession ? currentThreadId : null
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
@@ -2234,7 +2236,7 @@ function ProjectFeatureSidebar({
                             hasPendingApproval={hasPendingApproval}
                             scheduledTaskLoading={scheduledTaskLoading}
                             isExporting={exportingThreadId === thread.thread_id}
-                            isSelected={currentThreadId === thread.thread_id}
+                            isSelected={highlightThreadId === thread.thread_id}
                             isEditing={editingThreadId === thread.thread_id}
                             isUnread={false}
                             editingTitle={editingTitle}
@@ -2299,7 +2301,6 @@ export function HarnessBoardView({
   const [loadError, setLoadError] = useState<string | null>(null)
   const {
     threads,
-    currentThreadId,
     createThread,
     selectThread,
     updateThread,
@@ -2308,7 +2309,6 @@ export function HarnessBoardView({
   const { cleanupThread } = useThreadContext()
   const allThreadStates = useAllThreadStates()
   const allStreamLoadingStates = useAllStreamLoadingStates()
-  const sidebarHighlightThreadId = isViewingSession ? currentThreadId : null
   const [collapsedFeatureKeys, setCollapsedFeatureKeys] = useState<Set<string>>(new Set())
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState("")
@@ -2627,7 +2627,7 @@ export function HarnessBoardView({
           harnessFeature: {
             projectId: result.projectId,
             slug: result.slug,
-            source: "autobizdevops"
+            source: HARNESS_SOURCE
           }
         },
         { preserveView: true }
@@ -2890,7 +2890,7 @@ export function HarnessBoardView({
           allThreadStates={allThreadStates}
           allStreamLoadingStates={allStreamLoadingStates}
           selectedFeature={selectedFeature}
-          currentThreadId={sidebarHighlightThreadId}
+          isViewingSession={isViewingSession}
           exportingThreadId={exportingThreadId}
           editingThreadId={editingThreadId}
           editingTitle={editingTitle}
@@ -2931,7 +2931,7 @@ export function HarnessBoardView({
       allThreadStates,
       allStreamLoadingStates,
       selectedFeature,
-      sidebarHighlightThreadId,
+      isViewingSession,
       exportingThreadId,
       editingThreadId,
       editingTitle

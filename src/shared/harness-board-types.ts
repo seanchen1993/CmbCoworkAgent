@@ -106,6 +106,8 @@ export interface HarnessProjectListItem {
   }
 }
 
+export const HARNESS_SOURCE = "autobizdevops" as const
+
 export interface HarnessSessionBinding {
   projectId: string
   threadId: string

@@ -28,6 +28,7 @@ import type {
   HarnessWatchRef,
   HarnessWorkflow
 } from "../../shared/harness-board-types"
+import { HARNESS_SOURCE } from "../../shared/harness-board-types"
 
 interface HarnessProjectStoreFile {
   version: 1
@@ -925,7 +926,8 @@ function normalizeSessionBinding(value: unknown): HarnessSessionBinding | null {
     threadId: value.threadId,
     createdAt: normalizeText(value.createdAt),
     lastActiveAt: normalizeText(value.lastActiveAt),
-    slug: value.slug
+    slug: value.slug,
+    source: normalizeText(value.source) || HARNESS_SOURCE
   }
 }
 
@@ -1352,7 +1354,7 @@ export function upsertHarnessSessionBinding(input: HarnessSessionBindingUpsertIn
     projectId: project.projectId,
     slug,
     threadId,
-    source: "autobizdevops",
+    source: HARNESS_SOURCE,
     createdAt: existing?.createdAt || now,
     lastActiveAt: now
   }
