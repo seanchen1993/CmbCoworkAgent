@@ -161,7 +161,7 @@ import { closeRuntime } from "./agent/runtime"
 import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
-import { runStartupSelfCheck } from "./updater/rollback"
+import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
 import { isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
@@ -588,14 +588,16 @@ if (!gotTheLock) {
       }
     })
 
-    createWindow()
-    createPetWindow()
-
-    // Run post-update self-check before anything else
+    // Run post-update self-check before creating windows or starting services.
+    // This keeps backup cleanup ahead of renderer startup and lazy child process
+    // creation, reducing the chance that fresh app activity races .bak removal.
     const selfCheckResult = await runStartupSelfCheck()
 
     // Expose result to renderer — renderer polls this on mount to show update toast
     ipcMain.handle("update:get-startup-result", () => selfCheckResult)
+
+    createWindow()
+    createPetWindow()
 
     // Start scheduled task scheduler and heartbeat service
     startScheduler()
@@ -603,6 +605,7 @@ if (!gotTheLock) {
     startChatX()
     startHookConfigWatcher()
     startUpdateChecker()
+    markFullBackupCleanupReady(selfCheckResult)
 
     // ── Keep Awake ──
     applyKeepAwake(isKeepAwakeEnabled())
