@@ -60,17 +60,9 @@ const buildUserIdFromUserInfo = (userInfo: UserInfoLite | null): string | undefi
   if (!userInfo) return undefined
   const rawId = (userInfo.sapId || userInfo.ystId || "").trim()
   const rawName = (userInfo.userName || "").trim()
-  const rawPathName = getDisplayPathName(userInfo.pathName)
+  const rawPathName = userInfo.pathName
   const segments = [rawId, rawName, rawPathName].filter(Boolean)
   return segments.length > 0 ? segments.join(" / ") : undefined
-}
-
-const getDisplayPathName = (pathName?: string): string => {
-  const parts = String(pathName || "")
-    .split("/")
-    .map((part) => part.trim())
-    .filter(Boolean)
-  return parts.find((part) => part.includes("室")) || parts[parts.length - 1] || ""
 }
 
 const PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL =

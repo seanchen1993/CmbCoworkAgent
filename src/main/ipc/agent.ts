@@ -103,7 +103,8 @@ import {
 } from "../services/agent-auto-commit"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
-import { makeHookResultCallback } from "../hooks/result-callback"
+import { makeHookResultCallback, makeHookSkippedCallback } from "../hooks/result-callback"
+import type { ScopeSkipCallback } from "../hooks/scope"
 import { notifyHooksChanged } from "../hooks/notifications"
 import type {
   AgentInvokeParams,
@@ -148,35 +149,64 @@ interface TurnState {
   skillHookKeys: Set<string>
   stopContextCollector: StopHookContextCollector
   runToken: string
+  turnId?: string
 }
 
 const turnStates = new Map<string, TurnState>()
 
-function createTurnState(initialUserMessage?: string): TurnState {
+function createTurnState(initialUserMessage?: string, turnId?: string): TurnState {
   return {
     hookScope: createHookScope(),
     skillUseTracker: createSkillUseTracker(),
     skillHookKeys: new Set<string>(),
     stopContextCollector: new StopHookContextCollector(initialUserMessage),
-    runToken: uuid()
+    runToken: uuid(),
+    turnId
   }
 }
 
-function resetTurnStateForNewInvoke(state: TurnState, initialUserMessage?: string): void {
+function resetTurnStateForNewInvoke(
+  state: TurnState,
+  initialUserMessage?: string,
+  turnId?: string
+): void {
   const snapshot = state.hookScope.snapshot()
   state.hookScope = createHookScope()
   state.hookScope.activatePersistentHookKeys(snapshot.persistentHookKeys ?? [])
   state.skillUseTracker = createSkillUseTracker()
   state.skillHookKeys = new Set<string>()
   state.stopContextCollector = new StopHookContextCollector(initialUserMessage)
+  state.turnId = turnId
 }
 
-function getOrCreateTurnState(threadId: string, initialUserMessage?: string): TurnState {
+function getOrCreateTurnState(
+  threadId: string,
+  initialUserMessage?: string,
+  turnId?: string
+): TurnState {
   const existing = turnStates.get(threadId)
   if (existing) return existing
-  const fresh = createTurnState(initialUserMessage)
+  const fresh = createTurnState(initialUserMessage, turnId)
   turnStates.set(threadId, fresh)
   return fresh
+}
+
+/**
+ * Ensure `turnState.turnId` is non-empty so hook events emitted during this
+ * run can be grouped on the renderer side. The `agent:invoke` path always
+ * supplies the renderer-side user message id, but `agent:resume` /
+ * `agent:interrupt` do not — and when the original turnState was disposed
+ * (process restart, thread idle eviction), all hook events would otherwise
+ * fall into the `__background__` bucket and look orphaned.
+ *
+ * Returns the (possibly newly-assigned) turnId so callers can pass it into
+ * any non-turnState-scoped helpers without re-reading.
+ */
+function ensureTurnId(turnState: TurnState, threadId: string, label: string): string {
+  if (!turnState.turnId) {
+    turnState.turnId = `${label}:${threadId}:${Date.now()}`
+  }
+  return turnState.turnId
 }
 
 function disposeTurnState(threadId: string): void {
@@ -223,9 +253,12 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   payload: unknown
   workspacePath?: string
   threadId: string
+  turnId?: string
   hookScope: HookScopeController
   firedToolCallIds: Set<string>
   onHookResult?: HookResultCallback
+  /** Diagnostic-only callback for "matched event but filtered out by scope". */
+  onHookSkipped?: ScopeSkipCallback
 }): Promise<void> {
   const [msgChunk] = params.payload as [
     { id?: unknown; kwargs?: Record<string, unknown>; content?: unknown } | undefined
@@ -247,6 +280,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   const subagentStopContext: HookContext = {
     workspacePath: params.workspacePath,
     sessionId: params.threadId,
+    turnId: params.turnId,
     subagent: {
       id: toolCallId,
       status: isErr ? "failed" : "completed"
@@ -257,7 +291,8 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
       params.workspacePath,
       "SubagentStop",
       subagentStopContext,
-      params.hookScope
+      params.hookScope,
+      params.onHookSkipped
     ),
     "SubagentStop",
     subagentStopContext,
@@ -372,18 +407,27 @@ async function activateExplicitSkillFromMessage({
   message,
   workspacePath,
   sessionId,
+  turnId,
   hookScope,
   firedSkillKeys,
   skillUseTracker,
-  onHookResult
+  onHookResult,
+  onHookSkippedFactory
 }: {
   message: string
   workspacePath: string
   sessionId: string
+  turnId?: string
   hookScope: HookScopeController
   firedSkillKeys: Set<string>
   skillUseTracker: SkillUseTracker
   onHookResult?: HookResultCallback
+  /**
+   * Factory that builds a per-event scope-skip callback. `resolveHooks` is
+   * called with the actual event, so we construct the callback there with
+   * the matching event bound in its closure. Optional — diagnostic-only.
+   */
+  onHookSkippedFactory?: (event: HookEvent) => ScopeSkipCallback | undefined
 }): Promise<ExplicitSkillActivation | null> {
   const parsed = parseSkillUseBlock(message)
   if (!parsed) return null
@@ -418,11 +462,18 @@ async function activateExplicitSkillFromMessage({
     }),
     workspacePath,
     sessionId,
+    turnId,
     hookScope,
     firedSkillKeys,
     skillUseTracker,
     resolveHooks: (event: HookEvent, context: HookContext): HookConfig[] =>
-      resolveEnabledHooksForRun(workspacePath, event, context, hookScope),
+      resolveEnabledHooksForRun(
+        workspacePath,
+        event,
+        context,
+        hookScope,
+        onHookSkippedFactory?.(event)
+      ),
     onHookResult
   })
 
@@ -1321,7 +1372,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   )
 
   // Handle agent invocation with streaming
-  ipcMain.on("agent:invoke", async (event, { threadId, message, modelId }: AgentInvokeParams) => {
+  ipcMain.on(
+    "agent:invoke",
+    async (event, { threadId, message, modelId, userMessageId }: AgentInvokeParams) => {
     const channel = `agent:stream:${threadId}`
     const window = BrowserWindow.fromWebContents(event.sender)
 
@@ -1347,8 +1400,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
-    const turnState = getOrCreateTurnState(threadId, message)
-    resetTurnStateForNewInvoke(turnState, message)
+    const turnState = getOrCreateTurnState(threadId, message, userMessageId)
+    resetTurnStateForNewInvoke(turnState, message, userMessageId)
     const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
     const runToken = startTurnStateRun(turnState)
     let turnStateShouldDispose = false
@@ -1428,7 +1481,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       window.webContents.send(channel, { type: "done" })
     }
 
-    const onHookResult = makeHookResultCallback(window, channel)
+    const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+    // Per-event scope-skip factory: diagnostic mode only. The gate lives in
+    // `buildHookSkippedRecord`, so constructing this factory is always cheap; the
+    // hot path bails out when Hook diagnostic mode is off.
+    const onHookSkippedFactory = (event: HookEvent): ScopeSkipCallback =>
+      makeHookSkippedCallback(window, channel, event, turnState.turnId)
 
     const appendTurnToProposalWindow = (
       status: "success" | "error",
@@ -1498,10 +1556,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         message,
         workspacePath,
         sessionId: threadId,
+        turnId: turnState.turnId,
         hookScope,
         firedSkillKeys: skillHookKeys,
         skillUseTracker,
-        onHookResult
+        onHookResult,
+        onHookSkippedFactory
       })
       if (explicitSkillActivation?.blocked) {
         const reason = explicitSkillActivation.reason || "显式选择的技能被 Hook 拦截"
@@ -1526,7 +1586,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
       // thread is deleted (threads:delete) or the app is quitting.
-      fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult, hookScope)
+      fireSessionStartOnce(
+        threadId,
+        sessionWorkspacePath,
+        onHookResult,
+        hookScope,
+        onHookSkippedFactory("SessionStart"),
+        turnState.turnId
+      )
       sendActiveHookNotice(window, channel, workspacePath)
 
       // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
@@ -1535,14 +1602,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         toolArgs: { message },
         userPrompt: message,
         workspacePath: workspacePath ?? undefined,
-        sessionId: threadId
+        sessionId: threadId,
+        turnId: turnState.turnId
       }
       const promptSubmitResult = await runHooksEnriched(
         resolveEnabledHooksForRun(
           workspacePath ?? undefined,
           "UserPromptSubmit",
           promptSubmitContext,
-          hookScope
+          hookScope,
+          onHookSkippedFactory("UserPromptSubmit")
         ),
         "UserPromptSubmit",
         promptSubmitContext,
@@ -1660,6 +1729,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
+            hookTurnId: turnState.turnId,
+            onHookSkippedFactory,
             hookScope,
             skillHookKeys,
             skillUseTracker,
@@ -1884,9 +1955,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             payload,
             workspacePath: sessionWorkspacePath,
             threadId,
+            turnId: turnState.turnId,
             hookScope,
             firedToolCallIds: _subagentStopFired,
-            onHookResult
+            onHookResult,
+            onHookSkipped: onHookSkippedFactory("SubagentStop")
           })
 
           if (!isAI) return
@@ -2142,9 +2215,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 payload: [msg],
                 workspacePath: sessionWorkspacePath,
                 threadId,
+                turnId: turnState.turnId,
                 hookScope,
                 firedToolCallIds: _subagentStopFired,
-                onHookResult
+                onHookResult,
+                onHookSkipped: onHookSkippedFactory("SubagentStop")
               })
               const toolMsgId =
                 typeof kwargs.id === "string"
@@ -2273,6 +2348,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
+            hookTurnId: turnState.turnId,
+            onHookSkippedFactory,
             hookScope,
             skillHookKeys,
             skillUseTracker,
@@ -2288,6 +2365,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const completionOutcome = await runCompletionHooksWithRevision({
           threadId,
           workspacePath: workspacePath ?? undefined,
+          turnId: turnState.turnId,
           abortSignal: abortController.signal,
           getStopContext: () =>
             stopContextCollector.snapshot({
@@ -2311,7 +2389,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           skillUseTracker,
           maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
           revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
-          onHookResult
+          onHookResult,
+          onHookSkippedFactory
         })
 
         if (completionOutcome === "failed") {
@@ -2608,6 +2687,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const turnState = getOrCreateTurnState(threadId)
     const runToken = startTurnStateRun(turnState)
     pruneTurnStateAtInterrupt(turnState, getAllEnabledHooksForInterrupt(workspacePath))
+    // Resume IPC payload has no userMessageId; without a fallback, all hook
+    // events from this run would land in the renderer's "__background__"
+    // bucket. Synthesize a deterministic id so the chip can still group them.
+    ensureTurnId(turnState, threadId, "resume")
     const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
     let turnStateShouldDispose = false
     const sendHookNotice = (notice: string): void => {
@@ -2622,7 +2705,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         error
       })
     }
-    const onHookResult = makeHookResultCallback(window, channel)
+    const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+    const onHookSkippedFactory = (event: HookEvent): ScopeSkipCallback =>
+      makeHookSkippedCallback(window, channel, event, turnState.turnId)
 
     const onWindowClosed = (): void => {
       console.log("[Agent] Window closed, aborting resume stream for thread:", threadId)
@@ -2682,6 +2767,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
+            hookTurnId: turnState.turnId,
+            onHookSkippedFactory,
             hookScope,
             skillHookKeys,
             skillUseTracker,
@@ -2782,9 +2869,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               payload: serialized,
               workspacePath,
               threadId,
+              turnId: turnState.turnId,
               hookScope,
               firedToolCallIds: resumeSubagentStopFired,
-              onHookResult
+              onHookResult,
+              onHookSkipped: onHookSkippedFactory("SubagentStop")
             })
           }
           stopContextCollector.processStreamChunk(mode, serialized)
@@ -2820,6 +2909,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
+            hookTurnId: turnState.turnId,
+            onHookSkippedFactory,
             hookScope,
             skillHookKeys,
             skillUseTracker,
@@ -2839,6 +2930,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const completionOutcome = await runCompletionHooksWithRevision({
           threadId,
           workspacePath: workspacePath ?? undefined,
+          turnId: turnState.turnId,
           abortSignal: abortController.signal,
           getStopContext: () => stopContextCollector.snapshot(),
           runRevision: async (revisionPrompt) => {
@@ -2856,7 +2948,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           skillUseTracker,
           maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
           revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
-          onHookResult
+          onHookResult,
+          onHookSkippedFactory
         })
 
         if (completionOutcome === "failed") {
@@ -2950,6 +3043,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const turnState = getOrCreateTurnState(threadId)
     const runToken = startTurnStateRun(turnState)
     pruneTurnStateAtInterrupt(turnState, getAllEnabledHooksForInterrupt(workspacePath))
+    // Interrupt IPC payload also lacks userMessageId; same rationale as the
+    // resume path above. Synthesize a fallback so hook events from this run
+    // don't all collapse into the "__background__" bucket.
+    ensureTurnId(turnState, threadId, "interrupt")
     const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
     let turnStateShouldDispose = false
     const sendHookNotice = (notice: string): void => {
@@ -2964,7 +3061,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         error
       })
     }
-    const onHookResult = makeHookResultCallback(window, channel)
+    const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+    const onHookSkippedFactory = (event: HookEvent): ScopeSkipCallback =>
+      makeHookSkippedCallback(window, channel, event, turnState.turnId)
 
     const onWindowClosed = (): void => {
       console.log("[Agent] Window closed, aborting interrupt stream for thread:", threadId)
@@ -3018,6 +3117,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              hookTurnId: turnState.turnId,
+              onHookSkippedFactory,
               hookScope,
               skillHookKeys,
               skillUseTracker,
@@ -3115,9 +3216,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 payload: serialized,
                 workspacePath,
                 threadId,
+                turnId: turnState.turnId,
                 hookScope,
                 firedToolCallIds: interruptSubagentStopFired,
-                onHookResult
+                onHookResult,
+                onHookSkipped: onHookSkippedFactory("SubagentStop")
               })
             }
             stopContextCollector.processStreamChunk(mode, serialized)
@@ -3153,6 +3256,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              hookTurnId: turnState.turnId,
+              onHookSkippedFactory,
               hookScope,
               skillHookKeys,
               skillUseTracker,
@@ -3169,6 +3274,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const completionOutcome = await runCompletionHooksWithRevision({
             threadId,
             workspacePath: workspacePath ?? undefined,
+            turnId: turnState.turnId,
             abortSignal: abortController.signal,
             getStopContext: () => stopContextCollector.snapshot(),
             runRevision: async (revisionPrompt) => {
@@ -3186,7 +3292,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             skillUseTracker,
             maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
             revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
-            onHookResult
+            onHookResult,
+            onHookSkippedFactory
           })
 
           if (completionOutcome === "failed") {

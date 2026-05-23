@@ -26,7 +26,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { OverviewData } from "../use-dashboard"
-import { hasMarketSkill } from "../skill-market"
+import { hasMarketSkill, normalizeMarketSkillKey } from "../skill-market"
 import {
   DEFAULT_SKILL_ADOPTION_SORT,
   SKILL_ADOPTION_SORT_LABELS,
@@ -539,13 +539,15 @@ function SkillAdoptionRankingPanel({
   activeTab,
   onTabChange,
   onSkillClick,
-  marketSkillKeys
+  marketSkillKeys,
+  pluginSkillKeys
 }: {
   data: OverviewData
   activeTab: SkillRankingTab
   onTabChange: (tab: SkillRankingTab) => void
   onSkillClick?: (skill: string) => void
   marketSkillKeys: Set<string>
+  pluginSkillKeys: Set<string>
 }) {
   const [query, setQuery] = useState("")
   const [sortKey, setSortKey] = useState<SkillAdoptionSortKey>(DEFAULT_SKILL_ADOPTION_SORT)
@@ -657,6 +659,7 @@ function SkillAdoptionRankingPanel({
                           {highlightRankingName(item.skill, trimmedQuery)}
                         </span>
                         {hasMarketSkill(marketSkillKeys, item.skill) ? <MarketSkillTag /> : null}
+                        {hasPluginSkill(pluginSkillKeys, item.skill) ? <PluginSkillTag /> : null}
                       </div>
                       <span className="shrink-0 text-[11px] font-medium text-foreground">
                         {formatSkillAdoptionSortValue(item, sortKey)}
@@ -714,11 +717,13 @@ function SkillAdoptionRankingPanel({
 function SkillRankingPanel({
   data,
   onSkillClick,
-  marketSkillKeys
+  marketSkillKeys,
+  pluginSkillKeys
 }: {
   data: OverviewData
   onSkillClick?: (skill: string) => void
   marketSkillKeys: Set<string>
+  pluginSkillKeys: Set<string>
 }) {
   const [activeTab, setActiveTab] = useState<SkillRankingTab>("usage")
   if (activeTab === "adoption") {
@@ -729,6 +734,7 @@ function SkillRankingPanel({
         onTabChange={setActiveTab}
         onSkillClick={onSkillClick}
         marketSkillKeys={marketSkillKeys}
+        pluginSkillKeys={pluginSkillKeys}
       />
     )
   }
@@ -760,17 +766,33 @@ function SkillRankingPanel({
       onItemClick={onSkillClick}
       headerActions={<SkillRankingTabs activeTab={activeTab} onTabChange={setActiveTab} />}
       titleTooltipContent={<SkillUsageTooltip />}
-      renderNameAddon={(name) =>
-        hasMarketSkill(marketSkillKeys, name) ? <MarketSkillTag /> : null
-      }
+      renderNameAddon={(name) => (
+        <>
+          {hasMarketSkill(marketSkillKeys, name) ? <MarketSkillTag /> : null}
+          {hasPluginSkill(pluginSkillKeys, name) ? <PluginSkillTag /> : null}
+        </>
+      )}
     />
   )
+}
+
+function hasPluginSkill(pluginSkillKeys: Set<string>, skillName: string): boolean {
+  const key = normalizeMarketSkillKey(skillName)
+  return Boolean(key && pluginSkillKeys.has(key))
 }
 
 function MarketSkillTag(): React.JSX.Element {
   return (
     <span className="shrink-0 rounded-sm border border-emerald-200 bg-emerald-50 px-1 py-px text-[9px] font-medium leading-3 text-emerald-700">
       市场
+    </span>
+  )
+}
+
+function PluginSkillTag(): React.JSX.Element {
+  return (
+    <span className="shrink-0 rounded-sm border border-sky-200 bg-sky-50 px-1 py-px text-[9px] font-medium leading-3 text-sky-700">
+      Plugin
     </span>
   )
 }
@@ -840,13 +862,15 @@ export function OverviewPanel({
   loading,
   onSkillClick,
   onActiveUsersClick,
-  marketSkillKeys = new Set()
+  marketSkillKeys = new Set(),
+  pluginSkillKeys = new Set()
 }: {
   data: OverviewData | null
   loading: boolean
   onSkillClick?: (skill: string) => void
   onActiveUsersClick?: () => void
   marketSkillKeys?: Set<string>
+  pluginSkillKeys?: Set<string>
 }) {
   if (loading && !data) {
     return <div className="text-sm text-muted-foreground py-8 text-center">加载中...</div>
@@ -951,6 +975,7 @@ export function OverviewPanel({
           data={data}
           onSkillClick={onSkillClick}
           marketSkillKeys={marketSkillKeys}
+          pluginSkillKeys={pluginSkillKeys}
         />
         <ToolRankingPanel data={data} />
       </div>

@@ -3,7 +3,7 @@ import {
   getEnabledSkillHookMetadata,
   getEnabledHooks
 } from "../storage"
-import type { HookContext } from "./runner"
+import { hookMatchesRunCriteria, type HookContext } from "./runner"
 import type { HookConfig, HookEvent } from "./types"
 
 export interface HookScopeSnapshot {
@@ -180,9 +180,41 @@ export function mergeHookScopeSnapshot(
 
 export interface ScopedHookCandidates {
   baseHooks: HookConfig[]
-  pluginHooks: Array<HookConfig & { pluginId?: string }>
-  skillHooks: Array<HookConfig & { pluginId?: string; skillName?: string; skillPath?: string }>
+  /** Plugin hook entries also carry pluginName so the UI can show a friendly label. */
+  pluginHooks: Array<HookConfig & { pluginId?: string; pluginName?: string }>
+  skillHooks: Array<
+    HookConfig & {
+      pluginId?: string
+      pluginName?: string
+      skillName?: string
+      skillPath?: string
+    }
+  >
 }
+
+export type ScopeSkipReason =
+  | "plugin-not-active"
+  | "skill-name-only-shadowed"
+  | "skill-not-in-scope"
+
+/**
+ * Callback for diagnostic logging: notified when a hook MATCHED the event +
+ * matcher but was filtered out by the scope rules. Lets us surface "the hook
+ * exists but didn't fire here because <reason>" — the #1 source of confusion
+ * when a user's plugin hook silently doesn't run.
+ *
+ * Wiring is opt-in: the renderer only enables this in Hook diagnostic mode so
+ * normal runs don't accumulate the extra UI rows.
+ */
+export type ScopeSkipCallback = (
+  hook: HookConfig & {
+    pluginId?: string
+    pluginName?: string
+    skillName?: string
+    skillPath?: string
+  },
+  reason: ScopeSkipReason
+) => void
 
 /**
  * Pure scope-filter step — split out so tests can drive every branch without
@@ -192,7 +224,9 @@ export interface ScopedHookCandidates {
 export function filterScopedHooks(
   candidates: ScopedHookCandidates,
   context: HookContext,
-  scope?: HookScopeController
+  scope?: HookScopeController,
+  onSkipped?: ScopeSkipCallback,
+  event?: HookEvent
 ): HookConfig[] {
   const { baseHooks, pluginHooks, skillHooks } = candidates
   if (!scope) return baseHooks
@@ -211,45 +245,91 @@ export function filterScopedHooks(
   addPathAliases(allowedSkillPaths, context.skillPath)
   addPathAliases(allowedSkillPaths, context.skillRoot)
 
-  // runHooks() filters by hook.enabled before dispatch, so we don't repeat that
-  // here — keeping this resolver focused on scope/membership.
+  // Scope membership is the only criterion for inclusion; skipped diagnostics
+  // additionally mirror runHooks' event/matcher/once checks so a run doesn't
+  // report unrelated hooks as skipped for the current event.
   const shouldIncludePersistentHook = (hook: HookConfig): boolean =>
     hook.persistAfterInterrupt === true && scope.persistentHookKeys.has(getPersistentHookKey(hook))
+  const notifySkipped = (
+    hook: HookConfig & {
+      pluginId?: string
+      pluginName?: string
+      skillName?: string
+      skillPath?: string
+    },
+    reason: ScopeSkipReason
+  ): void => {
+    if (!onSkipped) return
+    if (event && !hookMatchesRunCriteria(hook, event, context)) return
+    onSkipped(hook, reason)
+  }
 
-  const filteredPluginHooks = pluginHooks.filter(
-    (hook) =>
-      shouldIncludePersistentHook(hook) ||
-      (allowedPluginIds.size > 0 && allowedPluginIds.has(normalizePluginId(hook.pluginId)))
-  )
+  const filteredPluginHooks: typeof pluginHooks = []
+  for (const hook of pluginHooks) {
+    if (shouldIncludePersistentHook(hook)) {
+      filteredPluginHooks.push(hook)
+      continue
+    }
+    const isAllowed =
+      allowedPluginIds.size > 0 && allowedPluginIds.has(normalizePluginId(hook.pluginId))
+    if (isAllowed) {
+      filteredPluginHooks.push(hook)
+    } else {
+      notifySkipped(hook, "plugin-not-active")
+    }
+  }
 
-  const filteredSkillHooks = skillHooks.filter((hook) => {
-    if (shouldIncludePersistentHook(hook)) return true
-    if (allowedSkillNames.size === 0 && allowedSkillPaths.size === 0) return false
+  const filteredSkillHooks: typeof skillHooks = []
+  for (const hook of skillHooks) {
+    if (shouldIncludePersistentHook(hook)) {
+      filteredSkillHooks.push(hook)
+      continue
+    }
+    if (allowedSkillNames.size === 0 && allowedSkillPaths.size === 0) {
+      notifySkipped(hook, "skill-not-in-scope")
+      continue
+    }
     const hookSkillPaths = new Set<string>()
     addPathAliases(hookSkillPaths, hook.skillPath)
     const pathMatches = pathSetIntersects(hookSkillPaths, allowedSkillPaths)
     const hookPluginId = normalizePluginId(hook.pluginId)
     if (hookPluginId) {
-      return allowedPluginIds.has(hookPluginId) && pathMatches
+      if (allowedPluginIds.has(hookPluginId) && pathMatches) {
+        filteredSkillHooks.push(hook)
+      } else {
+        notifySkipped(hook, "skill-not-in-scope")
+      }
+      continue
     }
-    if (pathMatches) return true
+    if (pathMatches) {
+      filteredSkillHooks.push(hook)
+      continue
+    }
     // Once any skill activation has contributed a path, fall back to name-only
     // matching is disabled — otherwise a name-only standalone hook could fire
     // for a different skill that just happens to share the name (the bug the
     // plugin/path scoping was added to fix). Only allow name fallback when
     // no path scope is active for this run.
-    if (allowedSkillPaths.size > 0) return false
-    return allowedSkillNames.has(normalizeSkillName(hook.skillName))
-  })
+    if (allowedSkillPaths.size > 0) {
+      notifySkipped(hook, "skill-name-only-shadowed")
+      continue
+    }
+    if (allowedSkillNames.has(normalizeSkillName(hook.skillName))) {
+      filteredSkillHooks.push(hook)
+    } else {
+      notifySkipped(hook, "skill-not-in-scope")
+    }
+  }
 
   return [...baseHooks, ...filteredPluginHooks, ...filteredSkillHooks]
 }
 
 export function resolveEnabledHooksForRun(
   workspacePath: string | undefined,
-  _event: HookEvent,
+  event: HookEvent,
   context: HookContext,
-  scope?: HookScopeController
+  scope?: HookScopeController,
+  onSkipped?: ScopeSkipCallback
 ): HookConfig[] {
   return filterScopedHooks(
     {
@@ -258,6 +338,8 @@ export function resolveEnabledHooksForRun(
       skillHooks: getEnabledSkillHookMetadata()
     },
     context,
-    scope
+    scope,
+    onSkipped,
+    event
   )
 }
