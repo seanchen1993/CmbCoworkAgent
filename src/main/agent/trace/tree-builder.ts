@@ -3,6 +3,7 @@ import type { AgentTrace, TraceNode, TraceNodeStatus, TraceToolCall } from "./ty
 function outcomeToStatus(outcome: AgentTrace["outcome"]): TraceNodeStatus {
   if (outcome === "error") return "error"
   if (outcome === "cancelled") return "cancelled"
+  if (outcome === "unknown") return "unknown"
   return "success"
 }
 
@@ -131,7 +132,10 @@ export function buildTraceTree(trace: AgentTrace): TraceNode[] {
     const llmStartedAt = modelCall?.startedAt ?? step?.startedAt ?? trace.startedAt
     const llmOutput = modelCall?.outputMessage?.content ?? step?.assistantText ?? ""
     const isLast = i === maxRuns - 1
-    const llmStatus: TraceNodeStatus = trace.outcome === "error" && isLast ? "error" : "success"
+    const llmStatus: TraceNodeStatus =
+      trace.outcome === "error" && isLast ? "error" :
+      trace.outcome === "unknown" && isLast ? "unknown" :
+      "success"
 
     nodes.push({
       id: llmId,
@@ -200,6 +204,17 @@ export function buildTraceTree(trace: AgentTrace): TraceNode[] {
       startedAt: trace.endedAt,
       endedAt: trace.endedAt,
       output: "Cancelled"
+    })
+  } else if (trace.outcome === "unknown") {
+    nodes.push({
+      id: `legacy:unknown:${trace.traceId}`,
+      type: "message",
+      parentId: rootId,
+      name: "Run Ended",
+      status: "unknown",
+      startedAt: trace.endedAt,
+      endedAt: trace.endedAt,
+      output: trace.errorMessage ?? "Run ended without a final success signal"
     })
   } else {
     nodes.push({

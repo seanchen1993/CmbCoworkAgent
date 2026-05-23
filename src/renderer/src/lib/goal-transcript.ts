@@ -141,6 +141,13 @@ function createGoalPromptFallbackMessage(rawMessage: Message): Message | null {
   }
 }
 
+function shouldCreateGoalPromptFallbackMessage(rawMessage: Message): boolean {
+  if (!isInternalGoalPromptMessage(rawMessage) || typeof rawMessage.content !== "string") {
+    return false
+  }
+  return !rawMessage.content.trimStart().startsWith("[Continuing active goal]")
+}
+
 function findMatchingGoalUserEventMessage(
   rawPrompt: Message,
   goalUserMessages: readonly Message[],
@@ -243,7 +250,11 @@ export function buildRestoredCheckpointTranscript(
         goalUserMessages,
         consumedGoalUserMessageIds
       )
-      const replacement = matched ?? createGoalPromptFallbackMessage(rawMessage)
+      const replacement =
+        matched ??
+        (shouldCreateGoalPromptFallbackMessage(rawMessage)
+          ? createGoalPromptFallbackMessage(rawMessage)
+          : null)
       if (replacement) {
         consumedGoalUserMessageIds.add(replacement.id)
         restored.push(replacement)

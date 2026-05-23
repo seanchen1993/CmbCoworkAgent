@@ -318,12 +318,14 @@ function outcomeLabel(outcome: string): string {
   if (outcome === "success") return "成功"
   if (outcome === "error") return "错误"
   if (outcome === "cancelled") return "取消"
+  if (outcome === "unknown") return "未定"
   return outcome || "未知"
 }
 
 function outcomeClass(outcome: string): string {
   if (outcome === "success") return "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30"
   if (outcome === "error") return "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30"
+  if (outcome === "unknown") return "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30"
   return "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400 border-zinc-500/20"
 }
 
@@ -342,6 +344,7 @@ function nodeStatusClass(status?: DashboardTraceNode["status"]): string {
   if (status === "error") return "text-red-500"
   if (status === "running") return "text-blue-500"
   if (status === "cancelled") return "text-zinc-500"
+  if (status === "unknown") return "text-amber-600"
   return "text-muted-foreground"
 }
 

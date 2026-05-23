@@ -594,10 +594,15 @@ export class TraceCollector {
   }
 
   private finalizeNodes(outcome: TraceOutcome, endedAt: string, resolvedUsedSkills: string[], errorMessage?: string): TraceNode[] {
+    const finalStatus: TraceNodeStatus =
+      outcome === "error" ? "error" :
+      outcome === "cancelled" ? "cancelled" :
+      outcome === "unknown" ? "unknown" :
+      "success"
     for (const node of this.nodes) {
       if (node.type === "llm" || node.type === "tool") {
         if (node.status === "running") {
-          node.status = outcome === "cancelled" ? "cancelled" : "success"
+          node.status = finalStatus
         }
         if (!node.endedAt) node.endedAt = endedAt
       }
@@ -619,6 +624,15 @@ export class TraceCollector {
           startedAt: endedAt,
           endedAt
         })
+      } else if (outcome === "unknown") {
+        this.addTerminalNode({
+          type: "message",
+          name: "Run Ended",
+          output: errorMessage ?? "Run ended without a final success signal",
+          status: "unknown",
+          startedAt: endedAt,
+          endedAt
+        })
       } else {
         this.addTerminalNode({
           type: "message",
@@ -632,7 +646,7 @@ export class TraceCollector {
 
     const root = this.getNode(this.rootNodeId)
     if (root) {
-      root.status = outcome === "error" ? "error" : outcome === "cancelled" ? "cancelled" : "success"
+      root.status = finalStatus
       root.endedAt = endedAt
       root.output = {
         outcome,

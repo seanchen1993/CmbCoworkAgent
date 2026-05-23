@@ -112,15 +112,31 @@ interface TraceDetail extends TraceEntry {
 
 type Tab = "candidates" | "traces"
 
+function traceOutcomeStatus(outcome: string): TraceNode["status"] {
+  if (outcome === "error") return "error"
+  if (outcome === "cancelled") return "cancelled"
+  if (outcome === "unknown") return "unknown"
+  return "success"
+}
+
+function traceOutcomeLabel(outcome: string): string {
+  if (outcome === "success") return "成功"
+  if (outcome === "error") return "错误"
+  if (outcome === "cancelled") return "取消"
+  if (outcome === "unknown") return "未定"
+  return outcome
+}
+
 function buildFallbackNodes(detail: TraceDetail): TraceNode[] {
   const rootId = `trace:${detail.traceId}`
+  const terminalStatus = traceOutcomeStatus(detail.outcome)
   const nodes: TraceNode[] = [
     {
       id: rootId,
       type: "trace",
       parentId: null,
       name: "Agent Trace",
-      status: detail.outcome === "error" ? "error" : detail.outcome === "cancelled" ? "cancelled" : "success",
+      status: terminalStatus,
       startedAt: detail.startedAt,
       endedAt: detail.endedAt,
       input: { userMessage: detail.userMessage },
@@ -187,11 +203,16 @@ function buildFallbackNodes(detail: TraceDetail): TraceNode[] {
     id: `terminal:${detail.traceId}`,
     type: detail.outcome === "error" ? "error" : detail.outcome === "cancelled" ? "cancel" : "message",
     parentId: rootId,
-    name: detail.outcome === "error" ? "Run Error" : detail.outcome === "cancelled" ? "Run Cancelled" : "Run Completed",
-    status: detail.outcome === "error" ? "error" : detail.outcome === "cancelled" ? "cancelled" : "success",
+    name:
+      detail.outcome === "error" ? "Run Error" :
+      detail.outcome === "cancelled" ? "Run Cancelled" :
+      detail.outcome === "unknown" ? "Run Ended" :
+      "Run Completed",
+    status: terminalStatus,
     startedAt: detail.endedAt,
     endedAt: detail.endedAt,
-    output: detail.errorMessage ?? (detail.outcome === "success" ? "Completed" : detail.outcome)
+    output: detail.errorMessage
+      ?? (detail.outcome === "success" ? "Completed" : "Run ended without a final success signal")
   })
 
   return nodes
@@ -234,7 +255,8 @@ function outcomeColor(outcome: string): string {
   return {
     success: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30",
     error: "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30",
-    cancelled: "bg-zinc-500/15 text-zinc-500 border-zinc-500/20"
+    cancelled: "bg-zinc-500/15 text-zinc-500 border-zinc-500/20",
+    unknown: "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30"
   }[outcome] ?? "bg-zinc-500/15 text-zinc-500 border-zinc-500/20"
 }
 
@@ -253,6 +275,7 @@ function nodeStatusClass(status?: TraceNode["status"]): string {
   if (status === "error") return "text-red-500"
   if (status === "running") return "text-blue-500"
   if (status === "cancelled") return "text-zinc-500"
+  if (status === "unknown") return "text-amber-600"
   return "text-muted-foreground"
 }
 
@@ -362,7 +385,9 @@ function TraceDetailView({ detail, onClose }: { detail: TraceDetail; onClose: ()
         </button>
         <span className="text-muted-foreground/40">/</span>
         <span className="text-xs font-mono text-muted-foreground">{detail.traceId.slice(0, 16)}</span>
-        <Badge className={cn("ml-auto border text-[10px]", outcomeColor(detail.outcome))}>{detail.outcome}</Badge>
+        <Badge className={cn("ml-auto border text-[10px]", outcomeColor(detail.outcome))}>
+          {traceOutcomeLabel(detail.outcome)}
+        </Badge>
       </div>
 
       <div className="shrink-0 border-b border-border grid grid-cols-4">
@@ -443,7 +468,7 @@ function TraceCard({
             className="size-3.5"
           />
           <Badge className={cn("border text-[10px] px-1.5 py-0 shrink-0", outcomeColor(trace.outcome))}>
-            {trace.outcome === "success" ? "成功" : trace.outcome === "error" ? "错误" : "取消"}
+            {traceOutcomeLabel(trace.outcome)}
           </Badge>
           <span className="text-[10px] font-mono text-muted-foreground/60">{trace.traceId.slice(0, 8)}</span>
           <button

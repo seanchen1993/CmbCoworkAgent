@@ -1272,14 +1272,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 const isInternalGoalPrompt =
                   role === "user" &&
                   typeof content === "string" &&
-                  isInternalGoalPromptMessage({
-                    id: messageId,
-                    role,
-                    content,
-                    created_at: fallbackTime,
-                    start_at: fallbackTime,
-                    end_at: fallbackTime
-                  })
+                  isInternalGoalPromptMessage({ role, content })
                 const currentInternalGoalPromptIndex = isInternalGoalPrompt
                   ? internalGoalPromptIndex++
                   : -1

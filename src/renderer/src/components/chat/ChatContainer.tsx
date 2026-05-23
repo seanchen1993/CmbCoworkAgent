@@ -92,14 +92,17 @@ import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-comman
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
 import { isInternalGoalPromptMessage } from "@/lib/goal-notice-messages"
+import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/lib/goal-transcript"
+import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
 import {
-  formatGoalEventMessage,
-  isVisibleCheckpointTranscriptMessage
-} from "@/lib/goal-transcript"
+  resolveGoalControlSubmitRoute,
+  shouldClearPendingApprovalAfterGoalControl
+} from "@/lib/goal-control-submit"
 import {
-  buildGoalPanelViewModel,
-  goalVerdictTone
-} from "@/lib/goal-panel-view"
+  releaseSubmitInFlightLock,
+  shouldUseSubmitInFlightLock,
+  tryAcquireSubmitInFlightLock
+} from "@/lib/submit-in-flight-lock"
 import { groupWelcomeSkills } from "./skill-grouping"
 
 type WelcomeSkillCard = {
@@ -371,8 +374,8 @@ function GoalStatusPanel({
                   {evaluatorReason}
                 </div>
                 <div className="mt-3 rounded-xl bg-white/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
-                  这里展示的是 evaluator 根据最近一轮 assistant 回复、工具结果和持久化
-                  ledger 做出的判断。它解释为什么 Goal 会继续、暂停或完成。
+                  这里展示的是 evaluator 根据最近一轮 assistant 回复、工具结果和持久化 ledger
+                  做出的判断。它解释为什么 Goal 会继续、暂停或完成。
                 </div>
               </section>
 
@@ -418,8 +421,8 @@ function GoalStatusPanel({
                   进展与证据
                 </div>
                 <div className="mb-3 text-xs leading-5 text-muted-foreground">
-                  以下条目来自 evaluator 返回的 ledger_patch，是它从对话、工具结果和
-                  assistant 验证摘要里提炼出的判断依据。
+                  以下条目来自 evaluator 返回的 ledger_patch，是它从对话、工具结果和 assistant
+                  验证摘要里提炼出的判断依据。
                 </div>
 
                 {!hasLedgerDetails ? (
@@ -507,10 +510,7 @@ function GoalStatusPanel({
                   ) : (
                     <div className="mt-3 space-y-3">
                       {latestEvents.map((event) => (
-                        <div
-                          key={event.event_id}
-                          className="border-l-2 border-black/[0.10] pl-3"
-                        >
+                        <div key={event.event_id} className="border-l-2 border-black/[0.10] pl-3">
                           <div className="mb-1 text-[11px] text-muted-foreground">
                             {goalEventTimeLabel(event.created_at)}
                           </div>
@@ -1078,9 +1078,7 @@ const getMessageTimeMap = (threadValues?: Record<string, unknown>): MessageTimeM
   return isMessageTimeMap(value) ? value : {}
 }
 
-const getInternalGoalMessageTimeMap = (
-  threadValues?: Record<string, unknown>
-): MessageTimeMap => {
+const getInternalGoalMessageTimeMap = (threadValues?: Record<string, unknown>): MessageTimeMap => {
   const value = threadValues?.[INTERNAL_GOAL_MESSAGE_TIMES_THREAD_VALUE_KEY]
   return isMessageTimeMap(value) ? value : {}
 }
@@ -1230,6 +1228,7 @@ export function ChatContainer({
   const requestedUserQuestionIndexRef = useRef<number | null>(null)
   const requestedUserQuestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isComposingRef = useRef(false)
+  const submitInFlightRef = useRef<Set<string>>(new Set())
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(new Set())
   const [skillsLoading, setSkillsLoading] = useState(true)
@@ -2477,45 +2476,50 @@ export function ChatContainer({
 
   const submitGoalResumeCommand = useCallback(async (): Promise<void> => {
     if (!stream || historyLoading || isLoading || scheduledTaskLoading) return
-    const pendingApprovalRecord = pendingApproval as unknown as Record<string, unknown> | null
-    if (pendingApproval && !pendingApprovalRecord?._orchestratorRequestId) {
-      setError("当前有待审批操作，请先处理审批卡片，再发送 /goal resume。")
-      return
-    }
-    if (threadError) {
-      clearError()
-    }
-    if (!currentModel) {
-      setError("请先在下方选择模型后再继续 goal。")
-      return
-    }
-    const selectedModel = models.find((m) => m.id === currentModel)
-    if (!selectedModel) {
-      setError("当前线程模型不存在，请重新选择模型。")
-      return
-    }
-    if (!selectedModel.available) {
-      setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
-      return
-    }
-    if (!workspacePath) {
-      setError("请先选择一个工作区文件夹再继续 goal。")
-      return
-    }
-    setInput("")
-    setAttachments([])
-    setSelectedSkill(null)
-    insertLog("send: /goal resume")
-    await stream.submit(
-      {
-        messages: [{ type: "human", content: "/goal resume" }]
-      },
-      {
-        config: {
-          configurable: { thread_id: threadId, model_id: currentModel }
-        }
+    if (!tryAcquireSubmitInFlightLock(submitInFlightRef, true, threadId)) return
+    try {
+      const pendingApprovalRecord = pendingApproval as unknown as Record<string, unknown> | null
+      if (pendingApproval && !pendingApprovalRecord?._orchestratorRequestId) {
+        setError("当前有待审批操作，请先处理审批卡片，再发送 /goal resume。")
+        return
       }
-    )
+      if (threadError) {
+        clearError()
+      }
+      if (!currentModel) {
+        setError("请先在下方选择模型后再继续 goal。")
+        return
+      }
+      const selectedModel = models.find((m) => m.id === currentModel)
+      if (!selectedModel) {
+        setError("当前线程模型不存在，请重新选择模型。")
+        return
+      }
+      if (!selectedModel.available) {
+        setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+        return
+      }
+      if (!workspacePath) {
+        setError("请先选择一个工作区文件夹再继续 goal。")
+        return
+      }
+      setInput("")
+      setAttachments([])
+      setSelectedSkill(null)
+      insertLog("send: /goal resume")
+      await stream.submit(
+        {
+          messages: [{ type: "human", content: "/goal resume" }]
+        },
+        {
+          config: {
+            configurable: { thread_id: threadId, model_id: currentModel }
+          }
+        }
+      )
+    } finally {
+      releaseSubmitInFlightLock(submitInFlightRef, true, threadId)
+    }
   }, [
     clearError,
     currentModel,
@@ -2612,23 +2616,94 @@ export function ChatContainer({
     }
 
     const bypassGoalControlValidation = isGoalSlashControlCommandInput(trimmedInput)
+    const goalControlRoute = resolveGoalControlSubmitRoute({
+      isGoalControlCommand: bypassGoalControlValidation,
+      isLoading
+    })
+    const isSideChannelGoalControl = goalControlRoute.isSideChannelGoalControl
 
-    if (isLoading && bypassGoalControlValidation) {
+    if (goalControlRoute.shouldUseGoalControlPlane) {
+      const shouldLockGoalControl = goalControlRoute.shouldUseSubmitLock
+      if (!tryAcquireSubmitInFlightLock(submitInFlightRef, shouldLockGoalControl, threadId)) return
+      try {
+        if (threadError) {
+          clearError()
+        }
+        setInput("")
+        if (shouldOpenGoalDetailsForStatus) {
+          setGoalDetailsOpen(true)
+        }
+        insertLog("send: " + trimmedInput)
+        const goalControlResult = await window.api.agent.goalControl(threadId, trimmedInput)
+        void refreshGoalUi({ includeEvents: false })
+        if (shouldClearPendingApprovalAfterGoalControl({
+          hasPendingApproval: Boolean(pendingApproval),
+          isTerminatingControlCommand: isGoalTerminatingControlCommandInput(trimmedInput),
+          terminatedCurrentRun: goalControlResult.terminatedCurrentRun
+        })) {
+          const approval = pendingApproval
+          if (!approval) return
+          const approvalAny = approval as unknown as Record<string, unknown>
+          if (approvalAny._orchestratorRequestId) {
+            window.api.sandbox.sendApprovalDecision({
+              requestId: approvalAny._orchestratorRequestId as string,
+              type: "reject",
+              tool_call_id: approval.tool_call?.id || ""
+            })
+          }
+          setSaveToolMetadataLoading(false)
+          setPendingApproval(null)
+        }
+      } finally {
+        releaseSubmitInFlightLock(submitInFlightRef, shouldLockGoalControl, threadId)
+      }
+      return
+    }
+
+    const shouldLockSubmit = shouldUseSubmitInFlightLock({ isSideChannelGoalControl })
+    if (!tryAcquireSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)) return
+
+    try {
+      const pendingApprovalRecord = pendingApproval as unknown as Record<string, unknown> | null
+      if (
+        pendingApproval &&
+        !pendingApprovalRecord?._orchestratorRequestId &&
+        isGoalSlashResumeCommandInput(trimmedInput)
+      ) {
+        setError("当前有待审批操作，请先处理审批卡片，再发送 /goal resume。")
+        return
+      }
+
+      if (!bypassGoalControlValidation) {
+        if (!currentModel) {
+          setError("请先在下方选择模型后再发送消息。")
+          return
+        }
+
+        const selectedModel = models.find((m) => m.id === currentModel)
+        if (!selectedModel) {
+          setError("当前线程模型不存在，请重新选择模型。")
+          return
+        }
+
+        if (!selectedModel.available) {
+          setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+          return
+        }
+
+        if (!workspacePath) {
+          setError("请先选择一个工作区文件夹再发送消息。")
+          return
+        }
+      }
+
       if (threadError) {
         clearError()
       }
-      setInput("")
-      if (shouldOpenGoalDetailsForStatus) {
-        setGoalDetailsOpen(true)
-      }
-      insertLog("send: " + trimmedInput)
-      const goalControlResult = await window.api.agent.goalControl(threadId, trimmedInput)
-      void refreshGoalUi({ includeEvents: false })
-      if (
-        pendingApproval &&
-        isGoalTerminatingControlCommandInput(trimmedInput) &&
-        goalControlResult.terminatedCurrentRun
-      ) {
+
+      if (pendingApproval) {
+        // P0 fix: notify main process to reject the pending approval instead of silently dropping it.
+        // Otherwise the orchestrator's Promise hangs until the 5-minute timeout.
         const approvalAny = pendingApproval as unknown as Record<string, unknown>
         if (approvalAny._orchestratorRequestId) {
           window.api.sandbox.sendApprovalDecision({
@@ -2637,209 +2712,158 @@ export function ChatContainer({
             tool_call_id: pendingApproval.tool_call?.id || ""
           })
         }
-        setSaveToolMetadataLoading(false)
         setPendingApproval(null)
       }
-      return
-    }
 
-    const pendingApprovalRecord = pendingApproval as unknown as Record<string, unknown> | null
-    if (
-      pendingApproval &&
-      !pendingApprovalRecord?._orchestratorRequestId &&
-      isGoalSlashResumeCommandInput(trimmedInput)
-    ) {
-      setError("当前有待审批操作，请先处理审批卡片，再发送 /goal resume。")
-      return
-    }
-
-    if (!bypassGoalControlValidation) {
-      if (!currentModel) {
-        setError("请先在下方选择模型后再发送消息。")
-        return
+      // Snapshot the skill selection before we clear it — synchronous path, no
+      // async gap, so no token/stillOurs needed.
+      const skill = selectedSkill
+      const rawMessage = trimmedInput
+      const currentAttachments = attachments.length > 0 ? [...attachments] : undefined
+      // If user only uploaded files without text, add a default prompt.
+      // skill-only sends (text empty, no attachments) still fall into this branch
+      // because the default prompt requires attachments — for skill-only we let
+      // userText stay empty and rely on the trailing skill-use block as the signal.
+      // When a skill is active we also skip the default prompt: the skill's own
+      // instruction will tell the model what to do with the attachment, and a
+      // generic "请分析以下文件内容" would compete with it.
+      const userText = rawMessage || (currentAttachments && !skill ? "请分析以下文件内容。" : "")
+      setInput("")
+      setAttachments([])
+      if (skill) setSelectedSkill(null)
+      if (shouldOpenGoalDetailsForStatus) {
+        setGoalDetailsOpen(true)
       }
+      insertLog("send: " + (userText || (skill ? `[skill-only: ${skill.name}]` : "")))
 
-      const selectedModel = models.find((m) => m.id === currentModel)
-      if (!selectedModel) {
-        setError("当前线程模型不存在，请重新选择模型。")
-        return
-      }
+      const isFirstMessage = threadMessages.length === 0
+      // Keep real user intent visible in the transcript. Goal status/pause/clear
+      // are side-channel controls, but `/goal <objective>` and `/goal resume`
+      // are user turns and should appear immediately in live UI.
+      const shouldAppendVisibleUserMessage = !bypassGoalControlValidation
 
-      if (!selectedModel.available) {
-        setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
-        return
-      }
-
-      if (!workspacePath) {
-        setError("请先选择一个工作区文件夹再发送消息。")
-        return
-      }
-    }
-
-    if (threadError) {
-      clearError()
-    }
-
-    if (pendingApproval) {
-      // P0 fix: notify main process to reject the pending approval instead of silently dropping it.
-      // Otherwise the orchestrator's Promise hangs until the 5-minute timeout.
-      const approvalAny = pendingApproval as unknown as Record<string, unknown>
-      if (approvalAny._orchestratorRequestId) {
-        window.api.sandbox.sendApprovalDecision({
-          requestId: approvalAny._orchestratorRequestId as string,
-          type: "reject",
-          tool_call_id: pendingApproval.tool_call?.id || ""
+      // Build the full message with attachments as XML tags (sent to model)
+      let fullMessage = userText
+      if (currentAttachments && currentAttachments.length > 0) {
+        const attachmentTexts = currentAttachments.map((att) => {
+          const truncAttr = att.truncated ? ' truncated="true"' : ""
+          const pathAttr = att.filePath ? ` path="${escXml(att.filePath)}"` : ""
+          const safeContent = att.content.replace(/<\/attachment>/gi, "< /attachment>")
+          return `\n\n<attachment filename="${escXml(att.filename)}"${pathAttr} type="${att.mimeType}" size="${att.size}"${truncAttr}>\n${safeContent}\n</attachment>`
         })
+        fullMessage = userText + attachmentTexts.join("")
       }
-      setPendingApproval(null)
-    }
 
-    // Snapshot the skill selection before we clear it — synchronous path, no
-    // async gap, so no token/stillOurs needed.
-    const skill = selectedSkill
-    const rawMessage = trimmedInput
-    const currentAttachments = attachments.length > 0 ? [...attachments] : undefined
-    // If user only uploaded files without text, add a default prompt.
-    // skill-only sends (text empty, no attachments) still fall into this branch
-    // because the default prompt requires attachments — for skill-only we let
-    // userText stay empty and rely on the trailing skill-use block as the signal.
-    // When a skill is active we also skip the default prompt: the skill's own
-    // instruction will tell the model what to do with the attachment, and a
-    // generic "请分析以下文件内容" would compete with it.
-    const userText = rawMessage || (currentAttachments && !skill ? "请分析以下文件内容。" : "")
-    setInput("")
-    setAttachments([])
-    if (skill) setSelectedSkill(null)
-    if (shouldOpenGoalDetailsForStatus) {
-      setGoalDetailsOpen(true)
-    }
-    insertLog("send: " + (userText || (skill ? `[skill-only: ${skill.name}]` : "")))
+      // Append the skill-use block at the very end. The model is told to `read`
+      // the SKILL.md on its own — we don't inline the body. Hooks/routing/memory
+      // see this block verbatim; they don't need to know it's a slash command.
+      // join(\n\n) on filtered parts avoids leading blank lines when the user
+      // sends a skill with no text or attachments (skill-only invocation).
+      const skillBlock = skill ? formatSkillUseBlock({ name: skill.name, path: skill.path }) : ""
+      fullMessage = [fullMessage, skillBlock].filter(Boolean).join("\n\n")
 
-    const isFirstMessage = threadMessages.length === 0
-    // Keep real user intent visible in the transcript. Goal status/pause/clear
-    // are side-channel controls, but `/goal <objective>` and `/goal resume`
-    // are user turns and should appear immediately in live UI.
-    const shouldAppendVisibleUserMessage = !bypassGoalControlValidation
-
-    // Build the full message with attachments as XML tags (sent to model)
-    let fullMessage = userText
-    if (currentAttachments && currentAttachments.length > 0) {
-      const attachmentTexts = currentAttachments.map((att) => {
-        const truncAttr = att.truncated ? ' truncated="true"' : ""
-        const pathAttr = att.filePath ? ` path="${escXml(att.filePath)}"` : ""
-        const safeContent = att.content.replace(/<\/attachment>/gi, "< /attachment>")
-        return `\n\n<attachment filename="${escXml(att.filename)}"${pathAttr} type="${att.mimeType}" size="${att.size}"${truncAttr}>\n${safeContent}\n</attachment>`
-      })
-      fullMessage = userText + attachmentTexts.join("")
-    }
-
-    // Append the skill-use block at the very end. The model is told to `read`
-    // the SKILL.md on its own — we don't inline the body. Hooks/routing/memory
-    // see this block verbatim; they don't need to know it's a slash command.
-    // join(\n\n) on filtered parts avoids leading blank lines when the user
-    // sends a skill with no text or attachments (skill-only invocation).
-    const skillBlock = skill ? formatSkillUseBlock({ name: skill.name, path: skill.path }) : ""
-    fullMessage = [fullMessage, skillBlock].filter(Boolean).join("\n\n")
-
-    // displayContent is what the user sees in their bubble while this run is
-    // in-memory. It carries the trailing skill block so MessageBubble's
-    // tail-anchored parser can render the chip and strip it back out.
-    //
-    // Note: the *checkpointed* version of this message is `fullMessage` (the
-    // full payload sent to the model, including <attachment>…</attachment>
-    // bodies), not displayContent. After a thread reload, MessageBubble
-    // therefore renders chip + raw attachment XML instead of chip + 📎 names.
-    // That replay-vs-live divergence is a pre-existing limitation of the
-    // attachment pipeline and is not introduced by the slash-command code.
-    let displayContent: string = userText
-    if (currentAttachments && currentAttachments.length > 0) {
-      const fileNames = currentAttachments.map((a) => `📎 ${a.filename}`).join("\n")
-      displayContent = `${fileNames}\n\n${userText}`
-    }
-    displayContent = [displayContent, skillBlock].filter(Boolean).join("\n\n")
-
-    // 用户消息本身不消耗 assistant 响应时间，start_at/end_at 都取发送时刻。
-    //
-    // 但 user.start_at 是本轮耗时计算的起点：展示 CMBDevClaw 后面的 duration 时，会找到
-    // 当前 user 后面的第一条 assistant，再减到下一个 user 之前最后一条消息的 end_at。
-    // 所以 user 也必须持久化 start_at/end_at，否则重启后无法还原该轮起点。
-    if (shouldAppendVisibleUserMessage) {
-      const userStartAt = new Date()
-      const userMessage: Message = {
-        id: crypto.randomUUID(),
-        role: "user",
-        content: displayContent,
-        created_at: new Date(),
-        start_at: userStartAt,
-        end_at: userStartAt
-      }
-      appendMessage(userMessage)
-      // 用户消息也需要持久化起止时间，后续 duration 用 user.start_at 作为起点。
+      // displayContent is what the user sees in their bubble while this run is
+      // in-memory. It carries the trailing skill block so MessageBubble's
+      // tail-anchored parser can render the chip and strip it back out.
       //
-      // 这里先立即写入 thread_values，是为了尽量保证即使 assistant 回复还没结束，
-      // 当前 user 的起点也已经保存下来；assistant/tool 的结束时间会在 loading 结束后补齐。
-      const userMessageTime: MessageTimeMap = {
-        [userMessage.id]: {
-          start_at: userStartAt.toISOString(),
-          end_at: userStartAt.toISOString()
-        }
+      // Note: the *checkpointed* version of this message is `fullMessage` (the
+      // full payload sent to the model, including <attachment>…</attachment>
+      // bodies), not displayContent. After a thread reload, MessageBubble
+      // therefore renders chip + raw attachment XML instead of chip + 📎 names.
+      // That replay-vs-live divergence is a pre-existing limitation of the
+      // attachment pipeline and is not introduced by the slash-command code.
+      let displayContent: string = userText
+      if (currentAttachments && currentAttachments.length > 0) {
+        const fileNames = currentAttachments.map((a) => `📎 ${a.filename}`).join("\n")
+        displayContent = `${fileNames}\n\n${userText}`
       }
-      setMessageTimes((prev) => ({ ...prev, ...userMessageTime }))
-      try {
-        const thread = await window.api.threads.get(threadId)
-        if (thread) {
-          await window.api.threads.update(threadId, {
-            thread_values: {
-              ...(thread.thread_values ?? {}),
-              // 保留 id map，优先支持按 message id 精确恢复。
-              //
-              // user message 在前端先 append，checkpoint 恢复时 id 可能不一定完全一致；
-              // 因此仍需要下面的顺序数组作为兜底。
-              [MESSAGE_TIMES_THREAD_VALUE_KEY]: {
-                ...getMessageTimeMap(thread.thread_values),
-                ...userMessageTime
-              },
-              // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。
-              //
-              // 这条 user 时间会成为顺序数组中的一个节点，后续 assistant/tool 时间会继续 append，
-              // 最终形成完整的 user -> assistant/tool... 时间线。
-              [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
-                getMessageTimeOrder(thread.thread_values),
-                userMessageTime
-              )
-            }
-          })
-        }
-      } catch (error) {
-        console.warn("[ChatContainer] Failed to save user message time:", error)
-      }
-    }
+      displayContent = [displayContent, skillBlock].filter(Boolean).join("\n\n")
 
-    if (isFirstMessage && shouldAppendVisibleUserMessage) {
-      const currentThread = threads.find((t) => t.thread_id === threadId)
-      const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
-      if (hasDefaultTitle) {
-        // skill-only sends have empty userText. Fall back to the skill name so
-        // the sidebar shows something meaningful instead of the raw thread id.
-        const titleSource =
-          (isGoalSlashInput ? userText.replace(/^\/goal\b/i, "").trim() : userText) ||
-          (skill ? `使用 ${skill.name}` : "")
-        if (titleSource) {
-          generateTitleForFirstMessage(threadId, titleSource)
+      // 用户消息本身不消耗 assistant 响应时间，start_at/end_at 都取发送时刻。
+      //
+      // 但 user.start_at 是本轮耗时计算的起点：展示 CMBDevClaw 后面的 duration 时，会找到
+      // 当前 user 后面的第一条 assistant，再减到下一个 user 之前最后一条消息的 end_at。
+      // 所以 user 也必须持久化 start_at/end_at，否则重启后无法还原该轮起点。
+      if (shouldAppendVisibleUserMessage) {
+        const userStartAt = new Date()
+        const userMessage: Message = {
+          id: crypto.randomUUID(),
+          role: "user",
+          content: displayContent,
+          created_at: new Date(),
+          start_at: userStartAt,
+          end_at: userStartAt
+        }
+        appendMessage(userMessage)
+        // 用户消息也需要持久化起止时间，后续 duration 用 user.start_at 作为起点。
+        //
+        // 这里先立即写入 thread_values，是为了尽量保证即使 assistant 回复还没结束，
+        // 当前 user 的起点也已经保存下来；assistant/tool 的结束时间会在 loading 结束后补齐。
+        const userMessageTime: MessageTimeMap = {
+          [userMessage.id]: {
+            start_at: userStartAt.toISOString(),
+            end_at: userStartAt.toISOString()
+          }
+        }
+        setMessageTimes((prev) => ({ ...prev, ...userMessageTime }))
+        try {
+          const thread = await window.api.threads.get(threadId)
+          if (thread) {
+            await window.api.threads.update(threadId, {
+              thread_values: {
+                ...(thread.thread_values ?? {}),
+                // 保留 id map，优先支持按 message id 精确恢复。
+                //
+                // user message 在前端先 append，checkpoint 恢复时 id 可能不一定完全一致；
+                // 因此仍需要下面的顺序数组作为兜底。
+                [MESSAGE_TIMES_THREAD_VALUE_KEY]: {
+                  ...getMessageTimeMap(thread.thread_values),
+                  ...userMessageTime
+                },
+                // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。
+                //
+                // 这条 user 时间会成为顺序数组中的一个节点，后续 assistant/tool 时间会继续 append，
+                // 最终形成完整的 user -> assistant/tool... 时间线。
+                [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
+                  getMessageTimeOrder(thread.thread_values),
+                  userMessageTime
+                )
+              }
+            })
+          }
+        } catch (error) {
+          console.warn("[ChatContainer] Failed to save user message time:", error)
         }
       }
-    }
 
-    await stream.submit(
-      {
-        messages: [{ type: "human", content: fullMessage }]
-      },
-      {
-        config: {
-          configurable: { thread_id: threadId, model_id: currentModel }
+      if (isFirstMessage && shouldAppendVisibleUserMessage) {
+        const currentThread = threads.find((t) => t.thread_id === threadId)
+        const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
+        if (hasDefaultTitle) {
+          // skill-only sends have empty userText. Fall back to the skill name so
+          // the sidebar shows something meaningful instead of the raw thread id.
+          const titleSource =
+            (isGoalSlashInput ? userText.replace(/^\/goal\b/i, "").trim() : userText) ||
+            (skill ? `使用 ${skill.name}` : "")
+          if (titleSource) {
+            generateTitleForFirstMessage(threadId, titleSource)
+          }
         }
       }
-    )
+
+      await stream.submit(
+        {
+          messages: [{ type: "human", content: fullMessage }]
+        },
+        {
+          config: {
+            configurable: { thread_id: threadId, model_id: currentModel }
+          }
+        }
+      )
+    } finally {
+      releaseSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)
+    }
   }
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
@@ -4394,7 +4418,10 @@ export function ChatContainer({
         )}
       {goalUi.goal && (
         <div
-          className={cn("px-4 pb-1", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}
+          className={cn(
+            "px-4 pb-1",
+            userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
+          )}
         >
           <GoalStatusPanel
             goalUi={goalUi}

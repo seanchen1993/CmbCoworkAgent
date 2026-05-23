@@ -2106,6 +2106,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     let highWaterInputTokens = 0
     // Actual model used after failover — hoisted for catch/finally routing feedback
     let usedModelId: string | undefined
+    let invokeFinalOutcome: "success" | "unknown" = "success"
+    let invokeFinalReason: string | undefined
+    const markInvokeIncomplete = (reason: string): void => {
+      invokeFinalOutcome = "unknown"
+      invokeFinalReason = reason
+    }
 
     try {
       // Get workspace path from thread metadata - REQUIRED
@@ -3064,7 +3070,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // A halt is an intentional stop condition for the current turn. Do not
           // auto-continue a goal after a hook explicitly halted the run.
           if (completionOutcome === "halted") {
-            pauseActiveGoalForRuntimeStop("Stop hook halted the turn.")
+            const reason = "Stop hook halted the turn."
+            pauseActiveGoalForRuntimeStop(reason)
+            markInvokeIncomplete(reason)
             break
           }
 
@@ -3127,6 +3135,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (!outcome.shouldContinue || !outcome.continuationPrompt) {
             sendGoalNotice(outcome.notice)
             cancelGoalBackgroundTasks()
+            if (outcome.goal.status !== "complete") {
+              markInvokeIncomplete(outcome.notice)
+            }
             break
           }
           const currentGoal = goalManager.getActive(threadId)
@@ -3185,112 +3196,120 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           await consumeGoalContinuationWithFailover(goalContinuationInput)
         }
 
-        await finalizeAutoCommit({
-          threadId,
-          workspacePath,
-          userPrompt: rootUserPrompt,
-          snapshot: autoCommit.snapshot,
-          window,
-          channel
-        })
+        if (invokeFinalOutcome === "success") {
+          await finalizeAutoCommit({
+            threadId,
+            workspacePath,
+            userPrompt: rootUserPrompt,
+            snapshot: autoCommit.snapshot,
+            window,
+            channel
+          })
+        }
         turnStateShouldDispose = true
         window.webContents.send(channel, { type: "done" })
-        notifyIfBackground("✅ 任务完成", lastFinalText || assistantText.trim() || "对话已完成")
+        if (invokeFinalOutcome === "success") {
+          notifyIfBackground("✅ 任务完成", lastFinalText || assistantText.trim() || "对话已完成")
+        }
 
         // Finish trace
         tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
-        await tracer.finish("success")
+        await tracer.finish(invokeFinalOutcome, invokeFinalReason)
 
         // Write routing feedback so next turn can use sticky/force logic
-        if (invokeRoutingResult) {
+        if (invokeRoutingResult && invokeFinalOutcome === "success") {
           rememberRoutingFeedback(threadId, {
             resolvedTier: invokeRoutingResult.resolvedTier,
             resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
-            outcome: "success",
+            outcome: invokeFinalOutcome,
             toolCallCount: toolCallCounter.getCount(),
             toolErrorCount,
             lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
           })
         }
 
-        if (isOnlineSkillEvolutionEnabled()) {
-          const proposalContext = appendTurnToProposalWindow("success")
+        if (invokeFinalOutcome === "success") {
+          if (isOnlineSkillEvolutionEnabled()) {
+            const proposalContext = appendTurnToProposalWindow("success")
 
-          // Check if this turn crossed the skill-evolution threshold.
-          const sessionToolCallCount = proposalContext.toolCallCount
-          const threshold = getSkillEvolutionThreshold()
-          if (shouldEvaluateSkillProposalWindow(sessionToolCallCount, threshold)) {
-            const mode = getSkillProposalMode(isSkillAutoProposeEnabled())
-            console.log(
-              `[SkillEvolution][${threadId}] Threshold reached ${JSON.stringify({
-                toolCallCount: sessionToolCallCount,
-                windowToolCallCount: proposalContext.toolCallCount,
-                threshold,
-                mode,
-                usedSkills: proposalContext.usedSkills,
-                turnCount: proposalContext.turnCount,
-                errorCount: proposalContext.errorCount,
-                toolCallSummary: proposalContext.toolCallSummary
-              })}`
-            )
-            if (proposalContext.usedSkills.length > 0) {
-              const names = ` [${proposalContext.usedSkills.join(", ")}]`
+            // Check if this turn crossed the skill-evolution threshold.
+            const sessionToolCallCount = proposalContext.toolCallCount
+            const threshold = getSkillEvolutionThreshold()
+            if (shouldEvaluateSkillProposalWindow(sessionToolCallCount, threshold)) {
+              const mode = getSkillProposalMode(isSkillAutoProposeEnabled())
               console.log(
-                `[SkillEvolution][${threadId}] Threshold skip because used skills were detected${names}`
+                `[SkillEvolution][${threadId}] Threshold reached ${JSON.stringify({
+                  toolCallCount: sessionToolCallCount,
+                  windowToolCallCount: proposalContext.toolCallCount,
+                  threshold,
+                  mode,
+                  usedSkills: proposalContext.usedSkills,
+                  turnCount: proposalContext.turnCount,
+                  errorCount: proposalContext.errorCount,
+                  toolCallSummary: proposalContext.toolCallSummary
+                })}`
               )
-            } else {
-              console.log(
-                `[SkillEvolution][${threadId}] Threshold passed without used skills, evaluating proposal mode`
-              )
-              await autoProposeSKill(threadId, proposalContext).catch((e) =>
-                console.warn("[Agent] autoProposeSKill failed:", e)
-              )
+              if (proposalContext.usedSkills.length > 0) {
+                const names = ` [${proposalContext.usedSkills.join(", ")}]`
+                console.log(
+                  `[SkillEvolution][${threadId}] Threshold skip because used skills were detected${names}`
+                )
+              } else {
+                console.log(
+                  `[SkillEvolution][${threadId}] Threshold passed without used skills, evaluating proposal mode`
+                )
+                await autoProposeSKill(threadId, proposalContext).catch((e) =>
+                  console.warn("[Agent] autoProposeSKill failed:", e)
+                )
+              }
             }
+          } else {
+            resetSkillEvolutionSession(threadId)
           }
-        } else {
-          resetSkillEvolutionSession(threadId)
         }
 
-        // If this is a ChatX-linked thread, also send reply via HTTP (only final answer, no tool reasoning)
-        const chatxReply = lastFinalText || stripThink(assistantText).trim()
-        if (metadata.chatxRobotChatId && chatxReply) {
-          trySendChatXReply(metadata.chatxRobotChatId as string, chatxReply)
-        }
+        if (invokeFinalOutcome === "success") {
+          // If this is a ChatX-linked thread, also send reply via HTTP (only final answer, no tool reasoning)
+          const chatxReply = lastFinalText || stripThink(assistantText).trim()
+          if (metadata.chatxRobotChatId && chatxReply) {
+            trySendChatXReply(metadata.chatxRobotChatId as string, chatxReply)
+          }
 
-        const conversation = assistantText.trim()
-          ? `User: ${rootUserPrompt}\n\nAssistant: ${assistantText}`
-          : ""
+          const conversation = assistantText.trim()
+            ? `User: ${rootUserPrompt}\n\nAssistant: ${assistantText}`
+            : ""
 
-        if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
-          const memoryStore = await getMemoryStore()
-          const allConfigs = getCustomModelConfigs()
+          if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
+            const memoryStore = await getMemoryStore()
+            const allConfigs = getCustomModelConfigs()
 
-          // Use routing to pick memory summarization model (economy in auto mode)
-          const memRoutingResult = await resolveModel({
-            taskSource: "memory_summarize",
-            threadId,
-            requestedModelId: modelId ?? undefined,
-            routingMode: getGlobalRoutingMode()
-          }).catch(() => null)
-          const memModelId = memRoutingResult?.resolvedModelId
-          const memCfgId =
-            memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
-          const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
+            // Use routing to pick memory summarization model (economy in auto mode)
+            const memRoutingResult = await resolveModel({
+              taskSource: "memory_summarize",
+              threadId,
+              requestedModelId: modelId ?? undefined,
+              routingMode: getGlobalRoutingMode()
+            }).catch(() => null)
+            const memModelId = memRoutingResult?.resolvedModelId
+            const memCfgId =
+              memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
+            const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
 
-          if (!config) {
-            console.warn("[Agent] No model config available — skipping memory summarization")
-          } else if (config?.apiKey) {
-            summarizeAndSave({
-              model: new ChatOpenAI({
-                model: config.model,
-                apiKey: config.apiKey,
-                configuration: { baseURL: config.baseUrl },
-                maxTokens: config.maxOutputTokens,
-                temperature: config.temperature
-              }),
-              conversation,
-              memoryDir: memoryStore.getMemoryDir()
-            }).catch((e) => console.warn("[Agent] Memory summarize failed:", e))
+            if (!config) {
+              console.warn("[Agent] No model config available — skipping memory summarization")
+            } else if (config?.apiKey) {
+              summarizeAndSave({
+                model: new ChatOpenAI({
+                  model: config.model,
+                  apiKey: config.apiKey,
+                  configuration: { baseURL: config.baseUrl },
+                  maxTokens: config.maxOutputTokens,
+                  temperature: config.temperature
+                }),
+                conversation,
+                memoryDir: memoryStore.getMemoryDir()
+              }).catch((e) => console.warn("[Agent] Memory summarize failed:", e))
+            }
           }
         }
       }
@@ -3702,7 +3721,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
           return
         }
-        // "halted" falls through to the done path so the renderer stops loading.
+        if (completionOutcome === "halted") {
+          pauseActiveGoalAfterBoundary(
+            threadId,
+            window,
+            channel,
+            "恢复处理被 Stop hook 停止。需要继续时发送 /goal resume。",
+            boundaryGoalId,
+            boundaryGoalActiveWindowId
+          )
+          turnStateShouldDispose = true
+          window.webContents.send(channel, { type: "done" })
+          return
+        }
 
         await finalizeAutoCommit({
           threadId,
@@ -4079,7 +4110,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnStateShouldDispose = true
             return
           }
-          // "halted" falls through to the done path so the renderer stops loading.
+          if (completionOutcome === "halted") {
+            pauseActiveGoalAfterBoundary(
+              threadId,
+              window,
+              channel,
+              "中断处理被 Stop hook 停止。需要继续时发送 /goal resume。",
+              boundaryGoalId,
+              boundaryGoalActiveWindowId
+            )
+            turnStateShouldDispose = true
+            window.webContents.send(channel, { type: "done" })
+            return
+          }
 
           await finalizeAutoCommit({
             threadId,

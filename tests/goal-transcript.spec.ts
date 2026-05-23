@@ -463,13 +463,8 @@ function testGoalResumePromptDoesNotMatchWrongPersistedGoalEvent(): void {
 
   assertArrayEqual(
     visible.map((item) => item.id),
-    ["goal-continue-prompt-internal-continue", "goal-user-event-20", "assistant-resumed"],
-    "internal continuation prompt must stay distinct from a persisted resume event from a different goal"
-  )
-  assertEqual(
-    visible[0]?.content,
-    "/goal resume",
-    "fallback continuation prompt should preserve the checkpoint resume command"
+    ["goal-user-event-20", "assistant-resumed"],
+    "internal continuation prompt must not synthesize /goal resume when the persisted event belongs to a different goal"
   )
 }
 
@@ -512,8 +507,42 @@ function testGoalResumePromptDoesNotMatchWrongActiveWindowEvent(): void {
 
   assertArrayEqual(
     visible.map((item) => item.id),
-    ["goal-continue-prompt-internal-continue", "goal-user-event-21", "assistant-resumed"],
-    "same goal_id resume events from a different active window must not replace the checkpoint prompt"
+    ["goal-user-event-21", "assistant-resumed"],
+    "same goal_id resume events from a different active window must not replace the checkpoint prompt or synthesize a fake resume"
+  )
+}
+
+function testUnmatchedGoalContinuationPromptStaysHidden(): void {
+  const rawCheckpointMessages = [
+    message(
+      "internal-continue",
+      "user",
+      buildGoalContinuationPrompt(
+        goalSnapshot({
+          goalId: "goal-auto",
+          activeWindowId: "window-auto",
+          objective: "自动续跑目标",
+          completionCondition: "自动续跑目标",
+          turnsUsed: 1,
+          lastVerdict: "continue",
+          lastReason: "还需要自动继续。"
+        })
+      ),
+      new Date("2026-05-22T10:00:00.000Z")
+    ),
+    message("assistant-auto", "assistant", "继续自动处理。", new Date("2026-05-22T10:00:01.000Z")),
+    message("tool-auto", "tool", "result", new Date("2026-05-22T10:00:02.000Z"), {
+      tool_call_id: "call-auto"
+    })
+  ]
+  const visibleCheckpointMessages = buildCheckpointTranscriptForDisplay(rawCheckpointMessages)
+
+  const visible = buildRestoredCheckpointTranscript(rawCheckpointMessages, visibleCheckpointMessages, [])
+
+  assertArrayEqual(
+    visible.map((item) => item.id),
+    ["assistant-auto", "tool-auto"],
+    "automatic goal continuation prompts must stay hidden instead of fabricating a /goal resume user message"
   )
 }
 
@@ -650,6 +679,7 @@ function run(): void {
     testGoalResumeUserMessageUsesCheckpointPromptPosition,
     testGoalResumePromptDoesNotMatchWrongPersistedGoalEvent,
     testGoalResumePromptDoesNotMatchWrongActiveWindowEvent,
+    testUnmatchedGoalContinuationPromptStaysHidden,
     testPersistedGoalControlEventsStayOutOfMainTranscript,
     testPersistedGoalUserEventsDoNotDuplicateCheckpointUserMessages,
     testGoalEventsStayInGoalUiState,
