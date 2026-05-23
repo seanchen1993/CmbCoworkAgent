@@ -112,6 +112,7 @@ export interface HarnessSessionBinding {
   createdAt: string
   lastActiveAt: string
   slug: string
+  source: string
 }
 
 export interface HarnessSessionBindingUpsertInput {

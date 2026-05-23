@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   AlertCircle,
-  Archive,
   ArrowLeft,
+  Archive,
   ChevronDown,
   ChevronRight,
   CheckCircle2,
@@ -11,8 +11,9 @@ import {
   FolderOpen,
   GitBranch,
   Loader2,
-  MessageSquare,
+  Maximize2,
   MessageSquarePlus,
+  Minimize2,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -26,6 +27,7 @@ import { Input } from "@/components/ui/input"
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle
@@ -41,8 +43,15 @@ import {
 } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { TabbedPanel } from "@/components/tabs"
+import { ThreadListItem } from "@/components/sidebar/ThreadSidebar"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
+import {
+  useAllStreamLoadingStates,
+  useAllThreadStates,
+  useThreadContext
+} from "@/lib/thread-context"
+import { toast } from "sonner"
 import type {
   HarnessArtifact,
   HarnessHookLogView,
@@ -108,6 +117,13 @@ interface SelectedFeature {
   initialSessionThreadId?: string
 }
 
+interface ProjectFeatureSessionGroup {
+  key: string
+  project: HarnessProjectListItem
+  run: HarnessFeatureSummary
+  sessions: HarnessSessionBinding[]
+}
+
 interface GitPanelFileChange {
   path: string
   diff: string
@@ -126,11 +142,11 @@ interface GitPanelDiffState {
 
 interface WorkspaceChangeGroup {
   key: string
-  workspacePath: string | null
+  workspacePath: string
   sessions: Array<{
     binding: HarnessSessionBinding
   }>
-  representativeThreadId: string | null
+  representativeThreadId: string
 }
 
 interface WorkspaceChangeState {
@@ -141,14 +157,94 @@ interface WorkspaceChangeState {
   error?: string
 }
 
+type ThreadWorkspaceStateMap = Record<string, { workspacePath?: string | null } | undefined>
+
 function getWorkspaceName(path: string): string {
   const segments = path.split(/[\\/]/).filter(Boolean)
   return segments.at(-1) || path
 }
 
+function isAbsoluteFilePath(filePath: string): boolean {
+  return filePath.startsWith("/") || /^[A-Za-z]:[\\/]/.test(filePath) || filePath.startsWith("\\\\")
+}
+
+function resolveWorkspaceFilePath(filePath: string, workspacePath: string): string {
+  const input = filePath.trim().replace(/\\/g, "/")
+  if (!input) return workspacePath
+  if (isAbsoluteFilePath(input)) return input
+
+  const workspaceRoot = workspacePath.replace(/\\/g, "/").replace(/\/+$/, "")
+  return `${workspaceRoot}/${input.replace(/^\/+/, "")}`
+}
+
+function normalizeWorkspacePath(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null
+}
+
 function getThreadWorkspacePath(thread: Thread | null | undefined): string | null {
-  const workspacePath = thread?.metadata?.workspacePath
-  return typeof workspacePath === "string" && workspacePath.trim() ? workspacePath : null
+  return normalizeWorkspacePath(thread?.metadata?.workspacePath)
+}
+
+async function getLatestSessionWorkspacePath(
+  sessions: HarnessSessionBinding[],
+  threadsById: Map<string, Thread>,
+  threadStates: ThreadWorkspaceStateMap
+): Promise<string | null> {
+  const sortedSessions = [...sessions].sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))
+
+  // First pass: check all sync sources (thread state + metadata) before making any IPC calls.
+  for (const session of sortedSessions) {
+    const statePath = normalizeWorkspacePath(threadStates[session.threadId]?.workspacePath)
+    if (statePath) return statePath
+
+    const metadataPath = getThreadWorkspacePath(threadsById.get(session.threadId))
+    if (metadataPath) return metadataPath
+  }
+
+  // Second pass: fall back to a single persisted workspace lookup for the latest session.
+  const latest = sortedSessions[0]
+  if (latest) {
+    try {
+      const persistedPath = normalizeWorkspacePath(await window.api.workspace.get(latest.threadId))
+      if (persistedPath) return persistedPath
+    } catch {
+      // Persisted workspace lookup is unavailable — return null.
+    }
+  }
+
+  return null
+}
+
+interface CreateHarnessSessionParams {
+  projectId: string
+  slug: string
+  titleSource: string
+  sessions: HarnessSessionBinding[]
+  threadsById: Map<string, Thread>
+  threadStates: ThreadWorkspaceStateMap
+  createThread: (
+    config: {
+      title: string
+      workspacePath: string | null
+      harnessFeature: { projectId: string; slug: string; source: string }
+    },
+    options?: { preserveView?: boolean }
+  ) => Promise<Thread>
+}
+
+async function createHarnessSession(params: CreateHarnessSessionParams): Promise<Thread> {
+  const { projectId, slug, titleSource, sessions, threadsById, threadStates, createThread } = params
+  const workspacePath = await getLatestSessionWorkspacePath(sessions, threadsById, threadStates)
+  const thread = await createThread(
+    {
+      title: `特性: ${titleSource}`,
+      workspacePath,
+      harnessFeature: { projectId, slug, source: "autobizdevops" }
+    },
+    { preserveView: true }
+  )
+  await window.api.harnessBoard.linkSession({ projectId, slug, threadId: thread.thread_id })
+  return thread
 }
 
 function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boolean {
@@ -198,16 +294,93 @@ function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectM
   }
 }
 
-function formatSessionTime(value: string): string {
-  if (!value) return "-"
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  })
+function getThreadTitle(thread: Thread): string {
+  const title = thread.title?.trim()
+  return title || thread.thread_id
+}
+
+function HarnessBreadcrumb({
+  project,
+  featureTitle,
+  sessionTitle,
+  onBack,
+  onProjectList,
+  onProject,
+  onFeature
+}: {
+  project?: Pick<HarnessProjectListItem, "name"> | null
+  featureTitle?: string | null
+  sessionTitle?: string | null
+  onBack?: () => void
+  onProjectList: () => void
+  onProject?: () => void
+  onFeature?: () => void
+}): React.JSX.Element {
+  return (
+    <nav className="flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
+      {onBack && (
+        <button
+          type="button"
+          className="mr-1 flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          title="返回"
+          onClick={onBack}
+        >
+          <ArrowLeft className="size-4" />
+        </button>
+      )}
+      <button
+        type="button"
+        className="shrink-0 cursor-pointer rounded-sm px-1 py-0.5 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        onClick={onProjectList}
+      >
+        项目列表
+      </button>
+      {project && (
+        <>
+          <span className="shrink-0">/</span>
+          {onProject ? (
+            <button
+              type="button"
+              className="min-w-0 cursor-pointer truncate rounded-sm px-1 py-0.5 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              onClick={onProject}
+            >
+              {project.name}
+            </button>
+          ) : (
+            <span className="min-w-0 truncate rounded-sm px-1 py-0.5 text-foreground">
+              {project.name}
+            </span>
+          )}
+        </>
+      )}
+      {featureTitle && (
+        <>
+          <span className="shrink-0">/</span>
+          {onFeature ? (
+            <button
+              type="button"
+              className="min-w-0 cursor-pointer truncate rounded-sm px-1 py-0.5 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              onClick={onFeature}
+            >
+              {featureTitle}
+            </button>
+          ) : (
+            <span className="min-w-0 truncate rounded-sm px-1 py-0.5 text-foreground">
+              {featureTitle}
+            </span>
+          )}
+        </>
+      )}
+      {sessionTitle && (
+        <>
+          <span className="shrink-0">/</span>
+          <span className="min-w-0 truncate rounded-sm px-1 py-0.5 text-foreground">
+            {sessionTitle}
+          </span>
+        </>
+      )}
+    </nav>
+  )
 }
 
 function statusTone(status?: HarnessStatus): string {
@@ -844,62 +1017,72 @@ function FeatureCard({
   )
 }
 
+function ProjectBadgeRow({
+  project,
+  children
+}: {
+  project: HarnessProjectListItem
+  children?: ReactNode
+}): React.JSX.Element {
+  const archived = project.lifecycle.status === "archived"
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      {children}
+      <span className="shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+        {project.projectCode}
+      </span>
+      {archived && (
+        <span className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+          已归档
+        </span>
+      )}
+    </div>
+  )
+}
+
 function ProjectCard({
   project,
   detail,
   loading,
-  expanded,
   archiving,
-  creatingFeature,
   onEditProject,
   onArchiveProject,
-  onCreateFeature,
-  onToggleFeatures,
-  onOpenFeature
+  onOpenProject
 }: {
   project: HarnessProjectListItem
   detail?: HarnessProjectDetailViewModel
   loading: boolean
-  expanded: boolean
   archiving: boolean
-  creatingFeature: boolean
   onEditProject: (project: HarnessProjectListItem) => void
   onArchiveProject: (project: HarnessProjectListItem) => void
-  onCreateFeature: (project: HarnessProjectListItem) => void
-  onToggleFeatures: () => void
-  onOpenFeature: (projectId: string, slug: string) => void
+  onOpenProject: (projectId: string) => void
 }): React.JSX.Element {
   const runs = detail?.runs ?? []
-  const detailError = detail?.error
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
-  const featureButtonLabel = expanded
-    ? "收起特性列表"
-    : detail
-      ? "展开特性列表"
-      : "加载特性"
 
   return (
     <article
+      role="button"
+      tabIndex={0}
       className={cn(
-        "w-[420px] flex-none overflow-hidden rounded-md border border-border border-t-[3px] shadow-sm",
+        "w-[420px] flex-none cursor-pointer overflow-hidden rounded-md border border-border border-t-[3px] shadow-sm transition-all hover:border-primary/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         archived ? "border-t-muted-foreground/50 bg-muted/20" : "border-t-status-info bg-background"
       )}
+      onClick={() => onOpenProject(project.projectId)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault()
+          onOpenProject(project.projectId)
+        }
+      }}
     >
       <div className="p-4">
         <div className="flex min-w-0 items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="flex min-w-0 items-center gap-2">
+            <ProjectBadgeRow project={project}>
               <h2 className="truncate text-base font-semibold">{project.name}</h2>
-              <span className="shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                {project.projectCode}
-              </span>
-              {archived && (
-                <span className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                  已归档
-                </span>
-              )}
-            </div>
+            </ProjectBadgeRow>
             <div className="mt-2 line-clamp-2 text-sm leading-5 text-muted-foreground">
               {project.description}
             </div>
@@ -940,69 +1123,7 @@ function ProjectCard({
             </strong>
           </div>
         </div>
-
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          className="mt-4 w-full justify-center gap-2"
-          onClick={onToggleFeatures}
-          aria-expanded={expanded}
-        >
-          {expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
-          {loading && expanded ? "读取中" : featureButtonLabel}
-        </Button>
-        {!archived && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="mt-2 w-full justify-center gap-2"
-            onClick={() => onCreateFeature(project)}
-            disabled={creatingFeature}
-          >
-            {creatingFeature ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-            创建特性
-          </Button>
-        )}
       </div>
-
-      {expanded && (
-        <div className="grid gap-2 border-t border-border bg-muted/30 p-3">
-          {loading ? (
-            <div className="flex items-center justify-center gap-2 rounded-md border border-dashed border-border bg-background px-3 py-6 text-sm text-muted-foreground">
-              <Loader2 className="size-4 animate-spin" />
-              读取特性列表
-            </div>
-          ) : detailError ? (
-            <div
-              className="flex h-[144px] items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-3 text-sm text-status-warning"
-              title={detailError}
-            >
-              <AlertCircle className="mt-0.5 size-4 shrink-0" />
-              <div className="min-w-0">
-                <div className="font-medium">无法读取特性列表</div>
-                <div className="mt-1 line-clamp-3 break-words text-xs leading-5">{detailError}</div>
-              </div>
-            </div>
-          ) : runs.length === 0 ? (
-            <div className="rounded-md border border-dashed border-border bg-background px-3 py-5 text-sm text-muted-foreground">
-              当前项目还没有特性。
-            </div>
-          ) : (
-            <div className="grid max-h-[296px] gap-2 overflow-y-auto pr-1">
-              {runs.map((run) => (
-                <FeatureCard
-                  key={run.slug}
-                  run={run}
-                  workflowNodes={detail?.workflow.nodes ?? []}
-                  onOpen={() => onOpenFeature(project.projectId, run.slug)}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
     </article>
   )
 }
@@ -1011,26 +1132,18 @@ function SystemSection({
   group,
   detailsByProjectId,
   loadingDetailIds,
-  expandedProjectIds,
   archivingProjectId,
-  creatingFeatureProjectId,
   onEditProject,
   onArchiveProject,
-  onCreateFeature,
-  onToggleProject,
-  onOpenFeature
+  onOpenProject
 }: {
   group: SystemGroup
   detailsByProjectId: Record<string, HarnessProjectDetailViewModel>
   loadingDetailIds: Set<string>
-  expandedProjectIds: Set<string>
   archivingProjectId: string | null
-  creatingFeatureProjectId: string | null
   onEditProject: (project: HarnessProjectListItem) => void
   onArchiveProject: (project: HarnessProjectListItem) => void
-  onCreateFeature: (project: HarnessProjectListItem) => void
-  onToggleProject: (projectId: string) => void
-  onOpenFeature: (projectId: string, slug: string) => void
+  onOpenProject: (projectId: string) => void
 }): React.JSX.Element {
   return (
     <section className="space-y-3">
@@ -1049,14 +1162,10 @@ function SystemSection({
               project={project}
               detail={detailsByProjectId[project.projectId]}
               loading={loadingDetailIds.has(project.projectId)}
-              expanded={expandedProjectIds.has(project.projectId)}
               archiving={archivingProjectId === project.projectId}
-              creatingFeature={creatingFeatureProjectId === project.projectId}
               onEditProject={onEditProject}
               onArchiveProject={onArchiveProject}
-              onCreateFeature={onCreateFeature}
-              onToggleFeatures={() => onToggleProject(project.projectId)}
-              onOpenFeature={onOpenFeature}
+              onOpenProject={onOpenProject}
             />
           ))}
         </div>
@@ -1065,11 +1174,41 @@ function SystemSection({
   )
 }
 
-function ArtifactLine({ artifact }: { artifact: HarnessArtifact }): React.JSX.Element {
+function artifactCanOpenInFileManager(artifact: HarnessArtifact): boolean {
+  if (!artifact.path) return false
+  if (artifact.kind === "external" || artifact.kind === "virtual") return false
+  return artifact.status.uiKind === "done" || artifact.status.uiKind === "ok" || artifact.exists === true
+}
+
+function ArtifactLine({
+  artifact,
+  workspacePath
+}: {
+  artifact: HarnessArtifact
+  workspacePath: string
+}): React.JSX.Element {
   const artifactPath = artifact.path ?? artifact.kind
   const artifactSummary = artifact.summary ?? "-"
+  const canOpenArtifact = artifactCanOpenInFileManager(artifact)
+
+  const openArtifactInFileManager = async (): Promise<void> => {
+    if (!artifact.path) return
+    try {
+      const fullPath = resolveWorkspaceFilePath(artifact.path, workspacePath)
+      const platform = await window.electron.ipcRenderer.invoke("get-platform")
+      const normalizedPath = platform === "win32" ? fullPath.replace(/\//g, "\\") : fullPath
+      const result = await window.electron.ipcRenderer.invoke("show-item-in-folder", normalizedPath)
+      if (result && typeof result === "object" && "success" in result && !result.success) {
+        const error = "error" in result && typeof result.error === "string" ? result.error : "无法打开产物位置"
+        toast.error(error)
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "无法打开产物位置")
+    }
+  }
+
   return (
-    <div className="grid grid-cols-[18px_minmax(140px,1fr)_90px_minmax(160px,1.5fr)] items-start gap-x-3 gap-y-2 border-t border-border px-3 py-3 text-sm">
+    <div className="grid grid-cols-[18px_minmax(140px,1fr)_90px_minmax(160px,1.5fr)_28px] items-start gap-x-3 gap-y-2 border-t border-border px-3 py-3 text-sm">
       <FileText className="row-span-2 mt-0.5 size-4 text-muted-foreground" />
       <div className="min-w-0">
         <div className="truncate font-medium" title={artifact.label}>{artifact.label}</div>
@@ -1081,8 +1220,22 @@ function ArtifactLine({ artifact }: { artifact: HarnessArtifact }): React.JSX.El
           <div className="truncate" title={artifact.validation.message}>{artifact.validation.message}</div>
         )}
       </div>
+      {canOpenArtifact ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          className="size-7"
+          title="在文件管理器中打开"
+          onClick={() => void openArtifactInFileManager()}
+        >
+          <FolderOpen className="size-3.5" />
+        </Button>
+      ) : (
+        <span aria-hidden="true" />
+      )}
       <div
-        className="col-span-3 min-w-0 break-all rounded border border-border/70 bg-muted/30 px-2 py-1.5 font-mono text-[11px] leading-5 text-muted-foreground"
+        className="col-span-4 min-w-0 break-all rounded border border-border/70 bg-muted/30 px-2 py-1.5 font-mono text-[11px] leading-5 text-muted-foreground"
         title={artifactPath}
       >
         {artifactPath}
@@ -1127,7 +1280,13 @@ function HookLine({ hook }: { hook: HarnessHookLogView }): React.JSX.Element {
   )
 }
 
-function StageArtifactPanel({ node }: { node: HarnessRunNode }): React.JSX.Element {
+function StageArtifactPanel({
+  node,
+  workspacePath
+}: {
+  node: HarnessRunNode
+  workspacePath: string
+}): React.JSX.Element {
   return (
     <section className="shrink-0 rounded-md border border-border bg-background">
       <div className="flex min-w-0 items-center gap-2 border-b border-border px-3 py-3">
@@ -1144,170 +1303,12 @@ function StageArtifactPanel({ node }: { node: HarnessRunNode }): React.JSX.Eleme
         </div>
       ) : (
         <div className="max-h-64 overflow-y-auto">
-          {node.artifacts.map((artifact) => <ArtifactLine key={artifact.id} artifact={artifact} />)}
+          {node.artifacts.map((artifact) => (
+            <ArtifactLine key={artifact.id} artifact={artifact} workspacePath={workspacePath} />
+          ))}
         </div>
       )}
     </section>
-  )
-}
-
-function FeatureWorkspaceSidebar({
-  detail,
-  loading,
-  sessions,
-  threadsById,
-  activeTab,
-  activeThreadId,
-  busy,
-  error,
-  onCreateSession,
-  onSelectFeature,
-  onSelectSession
-}: {
-  detail: HarnessRunDetailViewModel | null
-  loading: boolean
-  sessions: HarnessSessionBinding[]
-  threadsById: Map<string, Thread>
-  activeTab: "feature" | "session"
-  activeThreadId: string | null
-  busy: "create" | null
-  error: string | null
-  onCreateSession: () => void
-  onSelectFeature: () => void
-  onSelectSession: (threadId: string) => void
-}): React.JSX.Element {
-  const detailKey = detail ? `${detail.project.projectId}:${detail.run.slug}` : ""
-  const [sessionsCollapsed, setSessionsCollapsed] = useState(false)
-  const hasSelectedSession = activeTab === "session"
-
-  useEffect(() => {
-    setSessionsCollapsed(false)
-  }, [detailKey])
-
-  return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
-        <span className="min-w-0 flex-1 truncate">特性工作区</span>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          className="size-6 shrink-0"
-          title="发起新会话"
-          onClick={onCreateSession}
-          disabled={busy !== null || !detail}
-        >
-          {busy === "create" ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : (
-            <MessageSquarePlus className="size-3.5" />
-          )}
-        </Button>
-      </div>
-
-      {error && (
-        <div className="mx-2 mb-2 rounded-md border border-status-critical/25 bg-status-critical/10 px-2 py-1.5 text-xs text-status-critical">
-          {error}
-        </div>
-      )}
-
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="space-y-1 px-2 pb-2">
-          <button
-            type="button"
-            aria-pressed={activeTab === "feature"}
-            onClick={onSelectFeature}
-            className={cn(
-              "group flex min-h-[52px] w-full min-w-0 items-center gap-1.5 rounded-sm px-2 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-              activeTab === "feature"
-                ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                : hasSelectedSession
-                  ? "bg-sidebar-accent/70 text-sidebar-accent-foreground"
-                  : "hover:bg-sidebar-accent/40"
-            )}
-          >
-            <span
-              aria-expanded={!sessionsCollapsed}
-              role="button"
-              tabIndex={-1}
-              onClick={(event) => {
-                event.stopPropagation()
-                setSessionsCollapsed((current) => !current)
-              }}
-              className="flex size-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-sidebar-accent/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              title={sessionsCollapsed ? "展开会话" : "收起会话"}
-            >
-              {sessionsCollapsed ? (
-                <ChevronRight className="size-3.5" />
-              ) : (
-                <ChevronDown className="size-3.5" />
-              )}
-            </span>
-            <span className="flex min-w-0 flex-1 items-center gap-1.5">
-              <Workflow className="size-4 shrink-0 text-status-info" />
-              <span className="min-w-0 flex-1 truncate text-xs font-medium" title={detail?.run.slug}>
-                {detail ? detail.run.slug : loading ? "读取中" : "未选择 feature"}
-              </span>
-            </span>
-            {hasSelectedSession && (
-              <span className="shrink-0 rounded-sm px-1 text-[10px] text-muted-foreground transition-colors group-hover:text-foreground">
-                返回详情
-              </span>
-            )}
-            <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
-              {loading ? "-" : sessions.length}
-            </span>
-          </button>
-
-          {!sessionsCollapsed && (
-            <div className="ml-4 space-y-1 border-l border-border/70 pl-2">
-              {loading ? (
-                <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground">
-                  <Loader2 className="size-3.5 animate-spin" />
-                  读取关联会话
-                </div>
-              ) : sessions.length === 0 ? (
-                <div className="px-2 py-2 text-xs text-muted-foreground">
-                  暂无关联会话
-                </div>
-              ) : (
-                sessions.map((session) => {
-                  const thread = threadsById.get(session.threadId) ?? null
-                  const workspacePath = getThreadWorkspacePath(thread)
-                  const selected = activeTab === "session" && session.threadId === activeThreadId
-                  const label = thread?.title || session.threadId
-                  return (
-                    <button
-                      key={session.threadId}
-                      type="button"
-                      aria-pressed={selected}
-                      onClick={() => onSelectSession(session.threadId)}
-                      className={cn(
-                        "flex w-full min-w-0 items-start gap-2 rounded-sm px-2 py-1.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                        selected
-                          ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                          : "hover:bg-sidebar-accent/50"
-                      )}
-                    >
-                      <MessageSquare className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium" title={label}>
-                          {label}
-                        </div>
-                        <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
-                          <span className="truncate">{workspacePath ? getWorkspaceName(workspacePath) : session.threadId}</span>
-                          <span className="shrink-0">{formatSessionTime(session.lastActiveAt)}</span>
-                        </div>
-                      </div>
-                    </button>
-                  )
-                })
-              )}
-            </div>
-          )}
-        </div>
-      </ScrollArea>
-    </div>
   )
 }
 
@@ -1344,13 +1345,15 @@ function FeatureWorkspaceChangesPanel({
     for (const binding of sessions) {
       const thread = threadsById.get(binding.threadId) ?? null
       const workspacePath = getThreadWorkspacePath(thread)
-      const key = workspacePath ? `workspace:${workspacePath}` : "missing-workspace"
+      if (!workspacePath) continue
+
+      const key = `workspace:${workspacePath}`
       const existing = map.get(key)
       const item = { binding }
 
       if (existing) {
         existing.sessions.push(item)
-        if (!existing.representativeThreadId && workspacePath) {
+        if (!existing.representativeThreadId) {
           existing.representativeThreadId = binding.threadId
         }
         continue
@@ -1360,7 +1363,7 @@ function FeatureWorkspaceChangesPanel({
         key,
         workspacePath,
         sessions: [item],
-        representativeThreadId: workspacePath ? binding.threadId : null
+        representativeThreadId: binding.threadId
       })
     }
 
@@ -1380,20 +1383,6 @@ function FeatureWorkspaceChangesPanel({
   const [changesByGroup, setChangesByGroup] = useState<Record<string, WorkspaceChangeState>>({})
 
   const refreshGroup = useCallback(async (group: WorkspaceChangeGroup): Promise<void> => {
-    if (!group.workspacePath || !group.representativeThreadId) {
-      setChangesByGroup((current) => ({
-        ...current,
-        [group.key]: {
-          status: "error",
-          files: [],
-          changedFilesTotal: 0,
-          omittedFileCount: 0,
-          error: "该会话未配置工作区"
-        }
-      }))
-      return
-    }
-
     setChangesByGroup((current) => ({
       ...current,
       [group.key]: {
@@ -1453,11 +1442,10 @@ function FeatureWorkspaceChangesPanel({
       const next: Record<string, WorkspaceChangeState> = {}
       for (const group of groups) {
         next[group.key] = current[group.key] ?? {
-          status: group.workspacePath ? "loading" : "error",
+          status: "loading",
           files: [],
           changedFilesTotal: 0,
-          omittedFileCount: 0,
-          error: group.workspacePath ? undefined : "该会话未配置工作区"
+          omittedFileCount: 0
         }
       }
       return next
@@ -1507,7 +1495,7 @@ function FeatureWorkspaceChangesPanel({
           <GitBranch className="size-4 shrink-0 text-muted-foreground" />
           <span className="truncate">代码变更</span>
         </div>
-        {sessions.length > 0 && (
+        {groups.length > 0 && (
           <span className="shrink-0 text-xs text-muted-foreground">{visibleChangedFiles} files</span>
         )}
       </div>
@@ -1515,6 +1503,10 @@ function FeatureWorkspaceChangesPanel({
       {sessions.length === 0 ? (
         <div className="px-3 py-6 text-sm text-muted-foreground">
           当前特性还没有关联会话，暂无代码变更。
+        </div>
+      ) : groups.length === 0 ? (
+        <div className="px-3 py-6 text-sm text-muted-foreground">
+          暂无可展示的代码变更。
         </div>
       ) : (
         <div className="divide-y divide-border">
@@ -1525,7 +1517,7 @@ function FeatureWorkspaceChangesPanel({
               <div key={group.key} className="px-3 py-3">
                 <div className="min-w-0">
                   <div className="truncate text-sm font-medium">
-                    {group.workspacePath ? getWorkspaceName(group.workspacePath) : "未配置工作区"}
+                    {getWorkspaceName(group.workspacePath)}
                   </div>
                 </div>
 
@@ -1571,20 +1563,199 @@ function FeatureWorkspaceChangesPanel({
   )
 }
 
+function ProjectDetailPage({
+  project,
+  detail,
+  loading,
+  creatingFeature,
+  onBackToList,
+  onCreateFeature,
+  onRefresh,
+  onEditProject,
+  onOpenFeature
+}: {
+  project: HarnessProjectListItem
+  detail?: HarnessProjectDetailViewModel
+  loading: boolean
+  creatingFeature: boolean
+  onBackToList: () => void
+  onCreateFeature: (project: HarnessProjectListItem) => void
+  onRefresh: (projectId: string) => void
+  onEditProject: (project: HarnessProjectListItem) => void
+  onOpenFeature: (projectId: string, slug: string) => void
+}): React.JSX.Element {
+  const runs = detail?.runs ?? []
+  const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
+  const archived = project.lifecycle.status === "archived"
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <div className="shrink-0 border-b border-border bg-background/90 px-6 py-4 app-no-drag">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0 space-y-2">
+            <HarnessBreadcrumb
+              project={project}
+              onBack={onBackToList}
+              onProjectList={onBackToList}
+            />
+            <div className="flex min-w-0 items-center gap-2">
+              <Workflow className="size-5 shrink-0 text-status-info" />
+              <h1 className="truncate text-xl font-semibold">{project.name}</h1>
+              <ProjectBadgeRow project={project} />
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-2"
+              onClick={() => onRefresh(project.projectId)}
+            >
+              {loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+              刷新
+            </Button>
+            {!archived && (
+              <Button
+                size="sm"
+                className={cn("gap-2", harnessActionButtonClassName)}
+                onClick={() => onCreateFeature(project)}
+                disabled={creatingFeature}
+              >
+                <span aria-hidden="true" className={harnessActionOverlayClassName} />
+                <span className={harnessActionIconClassName}>
+                  {creatingFeature ? (
+                    <Loader2 className="size-2.5 animate-spin" />
+                  ) : (
+                    <Plus className="size-2.5" />
+                  )}
+                </span>
+                <span className="relative">新建特性</span>
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-2"
+              onClick={() => onEditProject(project)}
+            >
+              <Pencil className="size-4" />
+              编辑项目信息
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      <ScrollArea className="min-h-0 flex-1">
+        <main className="mx-auto max-w-7xl space-y-5 p-6">
+          <section className="rounded-md border border-border bg-background">
+            <div className="grid grid-cols-[minmax(260px,0.36fr)_minmax(0,1fr)] gap-0">
+              <aside className="border-r border-border p-4">
+                <div className="text-sm font-semibold">项目基础信息</div>
+                <dl className="mt-4 grid gap-3 text-sm">
+                  <div>
+                    <dt className="text-xs text-muted-foreground">项目名称</dt>
+                    <dd className="mt-1 truncate font-medium" title={project.name}>{project.name}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-muted-foreground">系统编号</dt>
+                    <dd className="mt-1 truncate font-medium" title={project.productCode}>
+                      {project.productCode}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-muted-foreground">系统名称</dt>
+                    <dd className="mt-1 truncate font-medium" title={project.productName}>
+                      {project.productName}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-muted-foreground">工作区</dt>
+                    <dd className="mt-1 truncate font-medium" title={project.workspacePath}>
+                      {getWorkspaceName(project.workspacePath)}
+                    </dd>
+                  </div>
+                </dl>
+                <div className="mt-4 grid grid-cols-2 gap-3 border-t border-border pt-4 text-xs text-muted-foreground">
+                  <div>
+                    特性数
+                    <strong className="mt-1 block text-sm text-foreground">
+                      {loading || !detail ? "-" : runs.length}
+                    </strong>
+                  </div>
+                  <div>
+                    进行中
+                    <strong className="mt-1 block text-sm text-foreground">
+                      {loading || !detail ? "-" : activeCount}
+                    </strong>
+                  </div>
+                </div>
+                {detail?.projectState && (
+                  <div className="mt-4">
+                    <StatusPill status={detail.projectState} />
+                  </div>
+                )}
+              </aside>
+
+              <div className="min-w-0 p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold">特性列表</div>
+                  <div className="text-xs text-muted-foreground">
+                    {loading || !detail ? "读取中" : `${runs.length} 个特性`}
+                  </div>
+                </div>
+
+                {loading || !detail ? (
+                  <div className="flex min-h-[260px] items-center justify-center text-sm text-muted-foreground">
+                    <Loader2 className="mr-2 size-4 animate-spin" />
+                    读取项目详情
+                  </div>
+                ) : detail.error ? (
+                  <div className="rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-3 text-sm text-status-warning">
+                    {detail.error}
+                  </div>
+                ) : runs.length === 0 ? (
+                  <div className="rounded-md border border-dashed border-border bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground">
+                    当前项目还没有特性。
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3">
+                    {runs.map((run) => (
+                      <FeatureCard
+                        key={run.slug}
+                        run={run}
+                        workflowNodes={detail.workflow.nodes}
+                        onOpen={() => onOpenFeature(project.projectId, run.slug)}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+        </main>
+      </ScrollArea>
+    </div>
+  )
+}
+
 function FeatureDetailPage({
   detail,
   loading,
   initialSessionThreadId,
-  onBack,
+  onBackToList,
+  onBackToProject,
+  onRefresh,
   onSessionLinked,
-  onFeatureWorkspaceChange
+  onSessionViewChange
 }: {
   detail: HarnessRunDetailViewModel | null
   loading: boolean
   initialSessionThreadId?: string
-  onBack: () => void
+  onBackToList: () => void
+  onBackToProject: () => void
+  onRefresh: () => void
   onSessionLinked: () => Promise<void>
-  onFeatureWorkspaceChange?: (workspace: ReactNode | null) => void
+  onSessionViewChange?: (viewing: boolean) => void
 }): React.JSX.Element {
   const defaultNodeId = useMemo(() => {
     if (!detail) return null
@@ -1625,9 +1796,9 @@ function FeatureDetailPage({
   }, [selectedGroupKey])
 
   const { createThread, selectThread, threads } = useAppStore()
+  const allThreadStates = useAllThreadStates()
   const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
   const [sessionBusy, setSessionBusy] = useState<"create" | null>(null)
-  const [sessionError, setSessionError] = useState<string | null>(null)
   const [selectedSessionState, setSelectedSessionState] = useState<{
     detailKey: string
     threadId: string | null
@@ -1650,6 +1821,9 @@ function FeatureDetailPage({
       if (current.detailKey !== detailKey) {
         return { detailKey, threadId: firstThreadId }
       }
+      if (initialThreadId && current.threadId !== initialThreadId) {
+        return { detailKey, threadId: initialThreadId }
+      }
       if (
         current.threadId &&
         detail.sessions.some((session) => session.threadId === current.threadId)
@@ -1664,6 +1838,10 @@ function FeatureDetailPage({
     setActiveDetailTab(initialSessionThreadId ? "session" : "feature")
   }, [detailKey, initialSessionThreadId])
 
+  useEffect(() => {
+    onSessionViewChange?.(activeDetailTab === "session")
+  }, [activeDetailTab, onSessionViewChange])
+
   const selectedSessionThreadId =
     selectedSessionState.detailKey === detailKey ? selectedSessionState.threadId : null
 
@@ -1676,77 +1854,25 @@ function FeatureDetailPage({
   const handleCreateSession = useCallback(async (): Promise<void> => {
     if (!detail || sessionBusy) return
     setSessionBusy("create")
-    setSessionError(null)
     try {
-      const title = `特性: ${detail.run.title}`
-      const thread = await createThread({
-        title,
-        workspacePath: null,
-        harnessFeature: {
-          projectId: detail.project.projectId,
-          slug: detail.run.slug
-        }
-      }, { preserveView: true })
-      await window.api.harnessBoard.linkSession({
+      const thread = await createHarnessSession({
         projectId: detail.project.projectId,
         slug: detail.run.slug,
-        threadId: thread.thread_id
+        titleSource: detail.run.title,
+        sessions: detail.sessions,
+        threadsById,
+        threadStates: allThreadStates,
+        createThread
       })
       setSelectedSessionState({ detailKey, threadId: thread.thread_id })
       await onSessionLinked()
       setActiveDetailTab("session")
     } catch (error) {
-      setSessionError(cleanIpcError(error))
+      toast.error(cleanIpcError(error))
     } finally {
       setSessionBusy(null)
     }
-  }, [createThread, detail, detailKey, onSessionLinked, sessionBusy])
-
-  const handleSelectSession = useCallback((threadId: string): void => {
-    setSelectedSessionState({ detailKey, threadId })
-    setActiveDetailTab("session")
-    void selectThread(threadId, { preserveView: true })
-  }, [detailKey, selectThread])
-
-  const handleSelectFeature = useCallback((): void => {
-    setActiveDetailTab("feature")
-  }, [])
-
-  const featureWorkspaceSidebar = useMemo(() => (
-    <FeatureWorkspaceSidebar
-      detail={detail}
-      loading={loading}
-      sessions={detail?.sessions ?? []}
-      threadsById={threadsById}
-      activeTab={activeDetailTab}
-      activeThreadId={selectedSessionThreadId}
-      busy={sessionBusy}
-      error={sessionError}
-      onCreateSession={() => void handleCreateSession()}
-      onSelectFeature={handleSelectFeature}
-      onSelectSession={handleSelectSession}
-    />
-  ), [
-    activeDetailTab,
-    detail,
-    handleCreateSession,
-    handleSelectFeature,
-    handleSelectSession,
-    loading,
-    selectedSessionThreadId,
-    sessionBusy,
-    sessionError,
-    threadsById
-  ])
-
-  useEffect(() => {
-    if (!onFeatureWorkspaceChange) return
-    onFeatureWorkspaceChange(featureWorkspaceSidebar)
-  }, [featureWorkspaceSidebar, onFeatureWorkspaceChange])
-
-  useEffect(() => {
-    return () => onFeatureWorkspaceChange?.(null)
-  }, [onFeatureWorkspaceChange])
+  }, [allThreadStates, createThread, detail, detailKey, onSessionLinked, sessionBusy, threadsById])
 
   const renderStageNodeStrip = (): React.JSX.Element | null => {
     if (!detail) return null
@@ -1851,13 +1977,22 @@ function FeatureDetailPage({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
-      <div className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-background/90 px-6 app-no-drag">
-        <div className="flex min-w-0 items-center gap-3">
-          <Button variant="ghost" size="sm" className="gap-2" onClick={onBack}>
-            <ArrowLeft className="size-4" />
-            返回
-          </Button>
-          <div className="min-w-0">
+      <div className="shrink-0 border-b border-border bg-background/90 px-6 py-4 app-no-drag">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0 space-y-2">
+            <HarnessBreadcrumb
+              project={detail ? { name: detail.project.name } : null}
+              featureTitle={detail?.run.title ?? "特性详情"}
+              sessionTitle={
+                activeDetailTab === "session" && selectedSessionThreadId
+                  ? threadsById.get(selectedSessionThreadId)?.title
+                  : undefined
+              }
+              onBack={activeDetailTab === "session" ? () => setActiveDetailTab("feature") : onBackToProject}
+              onProjectList={onBackToList}
+              onProject={onBackToProject}
+              onFeature={activeDetailTab === "session" ? () => setActiveDetailTab("feature") : undefined}
+            />
             <div className="flex min-w-0 items-center gap-2">
               <Workflow className="size-4 shrink-0 text-status-info" />
               <h1 className="truncate text-base font-semibold">
@@ -1869,28 +2004,41 @@ function FeatureDetailPage({
                 </span>
               )}
             </div>
-            <div className="mt-0.5 truncate text-xs text-muted-foreground">
+            <div className="truncate text-xs text-muted-foreground">
               {detail ? `${detail.project.name} · ${detail.run.slug}` : "加载中"}
             </div>
           </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="gap-2"
+              onClick={onRefresh}
+              disabled={loading || !detail}
+            >
+              {loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+              刷新
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              className={cn("gap-2", harnessActionButtonClassName)}
+              onClick={() => void handleCreateSession()}
+              disabled={loading || !detail || sessionBusy !== null}
+            >
+              <span aria-hidden="true" className={harnessActionOverlayClassName} />
+              <span className={harnessActionIconClassName}>
+                {sessionBusy === "create" ? (
+                  <Loader2 className="size-2.5 animate-spin" />
+                ) : (
+                  <MessageSquarePlus className="size-2.5" />
+                )}
+              </span>
+              <span className="relative">{sessionBusy === "create" ? "创建中" : "新增会话"}</span>
+            </Button>
+          </div>
         </div>
-        <Button
-          type="button"
-          size="sm"
-          className={cn("shrink-0 gap-2", harnessActionButtonClassName)}
-          onClick={() => void handleCreateSession()}
-          disabled={loading || !detail || sessionBusy !== null}
-        >
-          <span aria-hidden="true" className={harnessActionOverlayClassName} />
-          <span className={harnessActionIconClassName}>
-            {sessionBusy === "create" ? (
-              <Loader2 className="size-2.5 animate-spin" />
-            ) : (
-              <MessageSquarePlus className="size-2.5" />
-            )}
-          </span>
-          <span className="relative">{sessionBusy === "create" ? "创建中" : "新增会话"}</span>
-        </Button>
       </div>
 
       {loading || !detail ? (
@@ -1907,7 +2055,7 @@ function FeatureDetailPage({
                   {renderStageNodeStrip()}
 
                   {selectedNode ? (
-                    <StageArtifactPanel node={selectedNode} />
+                    <StageArtifactPanel node={selectedNode} workspacePath={detail.project.workspacePath} />
                   ) : (
                     <section className="rounded-md border border-dashed border-border bg-background px-3 py-8 text-center text-sm text-muted-foreground">
                       暂无阶段数据。
@@ -1944,6 +2092,179 @@ function FeatureDetailPage({
   )
 }
 
+function ProjectFeatureSidebar({
+  groups,
+  collapsedKeys,
+  allCollapsed,
+  creatingSessionKey,
+  threadsById,
+  allThreadStates,
+  allStreamLoadingStates,
+  selectedFeature,
+  currentThreadId,
+  exportingThreadId,
+  editingThreadId,
+  editingTitle,
+  onToggleCollapse,
+  onToggleAll,
+  onCreateSession,
+  onSelectSession,
+  onDeleteSession,
+  onExportSession,
+  onStartEditing,
+  onSaveTitle,
+  onCancelEditing,
+  onEditingTitleChange
+}: {
+  groups: ProjectFeatureSessionGroup[]
+  collapsedKeys: Set<string>
+  allCollapsed: boolean
+  creatingSessionKey: string | null
+  threadsById: Map<string, Thread>
+  allThreadStates: ThreadWorkspaceStateMap
+  allStreamLoadingStates: Record<string, boolean>
+  selectedFeature: SelectedFeature | null
+  currentThreadId: string | null
+  exportingThreadId: string | null
+  editingThreadId: string | null
+  editingTitle: string
+  onToggleCollapse: (key: string) => void
+  onToggleAll: () => void
+  onCreateSession: (project: HarnessProjectListItem, run: HarnessFeatureSummary, sessions: HarnessSessionBinding[]) => void
+  onSelectSession: (projectId: string, slug: string, threadId: string) => void
+  onDeleteSession: (thread: Thread) => void
+  onExportSession: (thread: Thread) => void
+  onStartEditing: (thread: Thread) => void
+  onSaveTitle: () => void
+  onCancelEditing: () => void
+  onEditingTitleChange: (value: string) => void
+}): React.JSX.Element {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
+        <span className="min-w-0 flex-1 truncate">特性会话 {groups.length}</span>
+        {groups.length > 0 && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="size-6 shrink-0 cursor-pointer"
+            title={allCollapsed ? "全部展开特性会话" : "全部收起特性会话"}
+            onClick={onToggleAll}
+          >
+            {allCollapsed ? <Maximize2 className="size-3.5" /> : <Minimize2 className="size-3.5" />}
+          </Button>
+        )}
+      </div>
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="space-y-1 px-2 pb-2">
+          {groups.map((group) => {
+            const isCollapsed = collapsedKeys.has(group.key)
+            const selected =
+              selectedFeature?.projectId === group.project.projectId &&
+              selectedFeature.slug === group.run.slug
+            const creatingSession = creatingSessionKey === group.key
+
+            return (
+              <div key={group.key} className="space-y-1">
+                <div
+                  className={cn(
+                    "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
+                    selected ? "bg-sidebar-accent/70 text-sidebar-accent-foreground" : "hover:bg-sidebar-accent/40"
+                  )}
+                >
+                  <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                    <button
+                      type="button"
+                      className="flex size-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-sidebar-accent/50"
+                      title={isCollapsed ? "展开会话" : "收起会话"}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onToggleCollapse(group.key)
+                      }}
+                    >
+                      {isCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+                    </button>
+                    <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                      <Workflow className="size-4 shrink-0 text-muted-foreground" />
+                      <span className="min-w-0 flex-1 truncate text-xs font-medium" title={group.run.title}>
+                        {group.run.title}
+                      </span>
+                    </div>
+                  </div>
+                  <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
+                    <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
+                      {group.sessions.length}
+                    </span>
+                    <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="size-6 shrink-0 opacity-70 hover:bg-accent/20"
+                        title="新增会话"
+                        disabled={creatingSession}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          void onCreateSession(group.project, group.run, group.sessions)
+                        }}
+                      >
+                        {creatingSession ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />}
+                      </Button>
+                    </span>
+                  </span>
+                </div>
+
+                {!isCollapsed && (
+                  <div className="ml-4 space-y-1 border-l border-border/70 pl-2">
+                    {group.sessions.length === 0 ? (
+                      <div className="px-2 py-2 text-xs text-muted-foreground">暂无关联会话</div>
+                    ) : (
+                      group.sessions.map((session) => {
+                        const thread = threadsById.get(session.threadId)
+                        if (!thread) return null
+                        const threadState = allThreadStates[thread.thread_id]
+                        const isLoading = allStreamLoadingStates[thread.thread_id] ?? false
+                        const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
+                        const hasPendingApproval = Boolean(threadState?.pendingApproval)
+
+                        return (
+                          <ThreadListItem
+                            key={thread.thread_id}
+                            thread={thread}
+                            isLoading={isLoading}
+                            hasPendingApproval={hasPendingApproval}
+                            scheduledTaskLoading={scheduledTaskLoading}
+                            isExporting={exportingThreadId === thread.thread_id}
+                            isSelected={currentThreadId === thread.thread_id}
+                            isEditing={editingThreadId === thread.thread_id}
+                            isUnread={false}
+                            editingTitle={editingTitle}
+                            hoverTitle={`所属项目：${group.project.name}`}
+                            onSelect={() => onSelectSession(group.project.projectId, group.run.slug, thread.thread_id)}
+                            onRunFinished={() => {}}
+                            onDelete={() => onDeleteSession(thread)}
+                            onExport={() => void onExportSession(thread)}
+                            onStartEditing={() => onStartEditing(thread)}
+                            onSaveTitle={onSaveTitle}
+                            onCancelEditing={onCancelEditing}
+                            onEditingTitleChange={onEditingTitleChange}
+                          />
+                        )
+                      })
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+          {groups.length === 0 && (
+            <div className="px-3 py-8 text-center text-sm text-muted-foreground">暂无特性会话</div>
+          )}
+        </div>
+      </ScrollArea>
+    </div>
+  )
+}
+
 export function HarnessBoardView({
   onFeatureWorkspaceChange
 }: {
@@ -1952,8 +2273,9 @@ export function HarnessBoardView({
   const [projects, setProjects] = useState<HarnessProjectListItem[]>([])
   const [detailsByProjectId, setDetailsByProjectId] = useState<Record<string, HarnessProjectDetailViewModel>>({})
   const [loadingDetailIds, setLoadingDetailIds] = useState<Set<string>>(new Set())
-  const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(new Set())
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const [selectedFeature, setSelectedFeature] = useState<SelectedFeature | null>(null)
+  const [isViewingSession, setIsViewingSession] = useState(false)
   const [runDetail, setRunDetail] = useState<HarnessRunDetailViewModel | null>(null)
   const [adapterRegistry, setAdapterRegistry] = useState<HarnessAdapterRegistryItem[]>([])
   const [query, setQuery] = useState("")
@@ -1975,7 +2297,24 @@ export function HarnessBoardView({
   const [featureError, setFeatureError] = useState<string | null>(null)
   const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const createThread = useAppStore((state) => state.createThread)
+  const {
+    threads,
+    currentThreadId,
+    createThread,
+    selectThread,
+    updateThread,
+    deleteThread
+  } = useAppStore()
+  const { cleanupThread } = useThreadContext()
+  const allThreadStates = useAllThreadStates()
+  const allStreamLoadingStates = useAllStreamLoadingStates()
+  const sidebarHighlightThreadId = isViewingSession ? currentThreadId : null
+  const [collapsedFeatureKeys, setCollapsedFeatureKeys] = useState<Set<string>>(new Set())
+  const [editingThreadId, setEditingThreadId] = useState<string | null>(null)
+  const [editingTitle, setEditingTitle] = useState("")
+  const [exportingThreadId, setExportingThreadId] = useState<string | null>(null)
+  const [sidebarThreadToDelete, setSidebarThreadToDelete] = useState<Thread | null>(null)
+  const [creatingSidebarSessionKey, setCreatingSidebarSessionKey] = useState<string | null>(null)
   const creatingFeatureRef = useRef(false)
 
   const loadProjectDetail = useCallback(async (projectId: string) => {
@@ -2005,16 +2344,12 @@ export function HarnessBoardView({
       ])
       setProjects(items)
       setAdapterRegistry(registry)
-      setExpandedProjectIds((current) => {
-        const next = new Set(current)
-        for (const item of items) {
-          next.add(item.projectId)
-        }
-        return next
-      })
       for (const item of items) {
         void loadProjectDetail(item.projectId)
       }
+      setSelectedProjectId((current) =>
+        current && items.some((item) => item.projectId === current) ? current : null
+      )
     } catch (error) {
       setLoadError(cleanIpcError(error))
     } finally {
@@ -2042,7 +2377,7 @@ export function HarnessBoardView({
   useEffect(() => {
     return window.api.harnessBoard.onWatchRefsChanged((event) => {
       const projectMatch = event.scopeKey.match(/^project:(.+)$/)
-      if (projectMatch && expandedProjectIds.has(projectMatch[1])) {
+      if (projectMatch) {
         void loadProjectDetail(projectMatch[1])
       }
       if (
@@ -2054,7 +2389,7 @@ export function HarnessBoardView({
           .then(setRunDetail)
       }
     })
-  }, [expandedProjectIds, loadProjectDetail, selectedFeature])
+  }, [loadProjectDetail, selectedFeature])
 
   const refreshSelectedRunDetail = useCallback(async (): Promise<void> => {
     if (!selectedFeature) return
@@ -2064,6 +2399,14 @@ export function HarnessBoardView({
     )
     setRunDetail(detail)
   }, [selectedFeature])
+
+  const refreshSelectedFeatureSessionData = useCallback(async (): Promise<void> => {
+    if (!selectedFeature) return
+    await Promise.all([
+      refreshSelectedRunDetail(),
+      loadProjectDetail(selectedFeature.projectId)
+    ])
+  }, [loadProjectDetail, refreshSelectedRunDetail, selectedFeature])
 
   const { activeSystemGroups, archivedSystemGroups } = useMemo<{
     activeSystemGroups: SystemGroup[]
@@ -2148,30 +2491,6 @@ export function HarnessBoardView({
     }
   }
 
-  const handleToggleProject = useCallback(
-    (projectId: string) => {
-      const shouldLoad =
-        !expandedProjectIds.has(projectId) &&
-        !detailsByProjectId[projectId] &&
-        !loadingDetailIds.has(projectId)
-
-      setExpandedProjectIds((current) => {
-        const next = new Set(current)
-        if (next.has(projectId)) {
-          next.delete(projectId)
-        } else {
-          next.add(projectId)
-        }
-        return next
-      })
-
-      if (shouldLoad) {
-        void loadProjectDetail(projectId)
-      }
-    },
-    [detailsByProjectId, expandedProjectIds, loadProjectDetail, loadingDetailIds]
-  )
-
   const handleSubmit = async (): Promise<void> => {
     setFormError(null)
     if (createRequiredMissing(form)) {
@@ -2226,9 +2545,7 @@ export function HarnessBoardView({
         return next
       })
       await loadProjects()
-      if (expandedProjectIds.has(projectId)) {
-        void loadProjectDetail(projectId)
-      }
+      void loadProjectDetail(projectId)
     } catch (error) {
       setEditError(cleanIpcError(error))
     } finally {
@@ -2251,6 +2568,10 @@ export function HarnessBoardView({
           delete next[project.projectId]
           return next
         })
+        if (selectedProjectId === project.projectId) {
+          setSelectedProjectId(null)
+          setSelectedFeature(null)
+        }
         await loadProjects()
       } catch (error) {
         setLoadError(cleanIpcError(error))
@@ -2258,7 +2579,7 @@ export function HarnessBoardView({
         setArchivingProjectId(null)
       }
     },
-    [archivingProjectId, loadProjects]
+    [archivingProjectId, loadProjects, selectedProjectId]
   )
 
   const openFeatureCreateDialog = useCallback((project: HarnessProjectListItem): void => {
@@ -2305,7 +2626,8 @@ export function HarnessBoardView({
           workspacePath: result.workspacePath,
           harnessFeature: {
             projectId: result.projectId,
-            slug: result.slug
+            slug: result.slug,
+            source: "autobizdevops"
           }
         },
         { preserveView: true }
@@ -2318,8 +2640,8 @@ export function HarnessBoardView({
 
       setFeatureDialogProject(null)
       setFeatureName("")
-      setExpandedProjectIds((current) => new Set(current).add(result.projectId))
       await loadProjectDetail(result.projectId)
+      setSelectedProjectId(result.projectId)
       setSelectedFeature({
         projectId: result.projectId,
         slug: result.slug,
@@ -2338,16 +2660,378 @@ export function HarnessBoardView({
     loadProjectDetail
   ])
 
+  const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
+  const selectedProject =
+    selectedProjectId ? projects.find((project) => project.projectId === selectedProjectId) ?? null : null
+  const selectedProjectDetail = selectedProjectId ? detailsByProjectId[selectedProjectId] : undefined
+
+  const openProjectDetail = useCallback(
+    (projectId: string): void => {
+      setSelectedFeature(null)
+      setSelectedProjectId(projectId)
+      if (!detailsByProjectId[projectId] && !loadingDetailIds.has(projectId)) {
+        void loadProjectDetail(projectId)
+      }
+    },
+    [detailsByProjectId, loadProjectDetail, loadingDetailIds]
+  )
+
+  const openFeatureDetail = useCallback(
+    (projectId: string, slug: string, initialSessionThreadId?: string): void => {
+      setSelectedProjectId(projectId)
+      setSelectedFeature({ projectId, slug, initialSessionThreadId })
+      setIsViewingSession(!!initialSessionThreadId)
+      if (!detailsByProjectId[projectId] && !loadingDetailIds.has(projectId)) {
+        void loadProjectDetail(projectId)
+      }
+    },
+    [detailsByProjectId, loadProjectDetail, loadingDetailIds]
+  )
+
+  const handleBackToProjectList = useCallback((): void => {
+    setSelectedFeature(null)
+    setSelectedProjectId(null)
+    setIsViewingSession(false)
+  }, [])
+
+  const handleBackToProject = useCallback((): void => {
+    setSelectedFeature(null)
+    setIsViewingSession(false)
+  }, [])
+
+  const projectSidebarGroups = useMemo<ProjectFeatureSessionGroup[]>(() => {
+    const groups: ProjectFeatureSessionGroup[] = []
+    const visibleProjects = selectedProjectId
+      ? projects.filter((project) => project.projectId === selectedProjectId)
+      : projects
+
+    for (const project of visibleProjects) {
+      const detail = detailsByProjectId[project.projectId]
+      if (!detail) continue
+
+      for (const run of detail.runs) {
+        if (
+          selectedFeature &&
+          (project.projectId !== selectedFeature.projectId || run.slug !== selectedFeature.slug)
+        ) {
+          continue
+        }
+
+        const sessions = (detail.sessionsBySlug[run.slug] ?? []).filter((session) =>
+          threadsById.has(session.threadId)
+        )
+        if (!selectedProjectId && sessions.length === 0) continue
+        groups.push({
+          key: `${project.projectId}:${run.slug}`,
+          project,
+          run,
+          sessions
+        })
+      }
+    }
+
+    return groups
+  }, [detailsByProjectId, projects, selectedFeature, selectedProjectId, threadsById])
+
+  const allFeatureGroupsCollapsed =
+    projectSidebarGroups.length > 0 &&
+    projectSidebarGroups.every((group) => collapsedFeatureKeys.has(group.key))
+
+  const toggleAllFeatureGroups = useCallback(() => {
+    setCollapsedFeatureKeys((current) => {
+      const next = new Set(current)
+      if (allFeatureGroupsCollapsed) {
+        for (const group of projectSidebarGroups) {
+          next.delete(group.key)
+        }
+      } else {
+        for (const group of projectSidebarGroups) {
+          next.add(group.key)
+        }
+      }
+      return next
+    })
+  }, [allFeatureGroupsCollapsed, projectSidebarGroups])
+
+  const saveSidebarThreadTitle = useCallback(async (): Promise<void> => {
+    if (editingThreadId && editingTitle.trim()) {
+      await updateThread(editingThreadId, { title: editingTitle.trim() })
+    }
+    setEditingThreadId(null)
+    setEditingTitle("")
+  }, [editingThreadId, editingTitle, updateThread])
+
+  const cancelSidebarThreadEditing = useCallback((): void => {
+    setEditingThreadId(null)
+    setEditingTitle("")
+  }, [])
+
+  const handleExportSidebarThread = useCallback(
+    async (thread: Thread): Promise<void> => {
+      if (exportingThreadId) return
+      setExportingThreadId(thread.thread_id)
+      try {
+        const result = await window.api.threads.exportSession(thread.thread_id)
+        if (result.canceled) return
+        if (result.success) {
+          toast.success("会话已导出")
+          return
+        }
+        toast.error(result.error || "导出会话失败")
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "导出会话失败")
+      } finally {
+        setExportingThreadId(null)
+      }
+    },
+    [exportingThreadId]
+  )
+
+  const confirmDeleteSidebarThread = useCallback(
+    async (): Promise<void> => {
+      if (!sidebarThreadToDelete) return
+      try {
+        cleanupThread(sidebarThreadToDelete.thread_id)
+        await deleteThread(sidebarThreadToDelete.thread_id)
+        const feature = sidebarThreadToDelete.metadata?.harnessFeature as Record<string, unknown> | undefined
+        const projectId = typeof feature?.projectId === "string" ? feature.projectId : null
+        setSidebarThreadToDelete(null)
+        if (projectId) {
+          await loadProjectDetail(projectId)
+        }
+        if (
+          selectedFeature &&
+          projectId === selectedFeature.projectId &&
+          typeof feature?.slug === "string" &&
+          feature.slug === selectedFeature.slug
+        ) {
+          await refreshSelectedRunDetail()
+        }
+      } catch (error) {
+        toast.error(cleanIpcError(error))
+        setSidebarThreadToDelete(null)
+      }
+    },
+    [
+      cleanupThread,
+      deleteThread,
+      loadProjectDetail,
+      refreshSelectedRunDetail,
+      selectedFeature,
+      sidebarThreadToDelete
+    ]
+  )
+
+  const handleCreateSidebarSession = useCallback(
+    async (
+      project: HarnessProjectListItem,
+      run: HarnessFeatureSummary,
+      sessions: HarnessSessionBinding[]
+    ): Promise<void> => {
+      const key = `${project.projectId}:${run.slug}`
+      if (creatingSidebarSessionKey) return
+      setCreatingSidebarSessionKey(key)
+      try {
+        const thread = await createHarnessSession({
+          projectId: project.projectId,
+          slug: run.slug,
+          titleSource: run.title || run.slug,
+          sessions,
+          threadsById,
+          threadStates: allThreadStates,
+          createThread
+        })
+        await loadProjectDetail(project.projectId)
+        openFeatureDetail(project.projectId, run.slug, thread.thread_id)
+      } catch (error) {
+        toast.error(cleanIpcError(error))
+      } finally {
+        setCreatingSidebarSessionKey(null)
+      }
+    },
+    [allThreadStates, createThread, creatingSidebarSessionKey, loadProjectDetail, openFeatureDetail, threadsById]
+  )
+
+  const sidebarCallbacksRef = useRef({
+    handleCreateSidebarSession,
+    handleExportSidebarThread,
+    toggleAllFeatureGroups,
+    saveSidebarThreadTitle,
+    cancelSidebarThreadEditing,
+    openFeatureDetail,
+    selectThread,
+    setEditingThreadId,
+    setEditingTitle,
+    setSidebarThreadToDelete
+  })
+  sidebarCallbacksRef.current = {
+    handleCreateSidebarSession,
+    handleExportSidebarThread,
+    toggleAllFeatureGroups,
+    saveSidebarThreadTitle,
+    cancelSidebarThreadEditing,
+    openFeatureDetail,
+    selectThread,
+    setEditingThreadId,
+    setEditingTitle,
+    setSidebarThreadToDelete
+  }
+
+  const projectFeatureSidebar = useMemo(
+    () => {
+      const callbacks = sidebarCallbacksRef.current
+      return (
+        <ProjectFeatureSidebar
+          groups={projectSidebarGroups}
+          collapsedKeys={collapsedFeatureKeys}
+          allCollapsed={allFeatureGroupsCollapsed}
+          creatingSessionKey={creatingSidebarSessionKey}
+          threadsById={threadsById}
+          allThreadStates={allThreadStates}
+          allStreamLoadingStates={allStreamLoadingStates}
+          selectedFeature={selectedFeature}
+          currentThreadId={sidebarHighlightThreadId}
+          exportingThreadId={exportingThreadId}
+          editingThreadId={editingThreadId}
+          editingTitle={editingTitle}
+          onToggleCollapse={(key) =>
+            setCollapsedFeatureKeys((current) => {
+              const next = new Set(current)
+              if (next.has(key)) next.delete(key)
+              else next.add(key)
+              return next
+            })
+          }
+          onToggleAll={callbacks.toggleAllFeatureGroups}
+          onCreateSession={(project, run, sessions) => {
+            void callbacks.handleCreateSidebarSession(project, run, sessions)
+          }}
+          onSelectSession={(projectId, slug, threadId) => {
+            callbacks.openFeatureDetail(projectId, slug, threadId)
+            void callbacks.selectThread(threadId, { preserveView: true })
+          }}
+          onDeleteSession={callbacks.setSidebarThreadToDelete}
+          onExportSession={(thread) => void callbacks.handleExportSidebarThread(thread)}
+          onStartEditing={(thread) => {
+            callbacks.setEditingThreadId(thread.thread_id)
+            callbacks.setEditingTitle(thread.title || "")
+          }}
+          onSaveTitle={callbacks.saveSidebarThreadTitle}
+          onCancelEditing={callbacks.cancelSidebarThreadEditing}
+          onEditingTitleChange={callbacks.setEditingTitle}
+        />
+      )
+    },
+    [
+      projectSidebarGroups,
+      collapsedFeatureKeys,
+      allFeatureGroupsCollapsed,
+      creatingSidebarSessionKey,
+      threadsById,
+      allThreadStates,
+      allStreamLoadingStates,
+      selectedFeature,
+      sidebarHighlightThreadId,
+      exportingThreadId,
+      editingThreadId,
+      editingTitle
+    ]
+  )
+
+  useEffect(() => {
+    if (!onFeatureWorkspaceChange) return
+    onFeatureWorkspaceChange(projectFeatureSidebar)
+    return () => onFeatureWorkspaceChange(null)
+  }, [onFeatureWorkspaceChange, projectFeatureSidebar])
+
+  const sidebarDeleteDialog = (
+    <Dialog
+      open={!!sidebarThreadToDelete}
+      onOpenChange={(open) => {
+        if (!open) setSidebarThreadToDelete(null)
+      }}
+    >
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>确认删除会话</DialogTitle>
+          <DialogDescription>
+            {`确定要删除「${sidebarThreadToDelete ? getThreadTitle(sidebarThreadToDelete) : ""}」吗？删除后不可恢复。`}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setSidebarThreadToDelete(null)}>
+            取消
+          </Button>
+          <Button variant="destructive" onClick={() => void confirmDeleteSidebarThread()}>
+            删除
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+
+  const handleSessionViewChange = useCallback((viewing: boolean): void => {
+    setIsViewingSession(viewing)
+  }, [])
+
   if (selectedFeature) {
     return (
-      <FeatureDetailPage
-        detail={runDetail}
-        loading={loadingRun}
-        initialSessionThreadId={selectedFeature.initialSessionThreadId}
-        onBack={() => setSelectedFeature(null)}
-        onSessionLinked={refreshSelectedRunDetail}
-        onFeatureWorkspaceChange={onFeatureWorkspaceChange}
-      />
+      <>
+        <FeatureDetailPage
+          detail={runDetail}
+          loading={loadingRun}
+          initialSessionThreadId={selectedFeature.initialSessionThreadId}
+          onBackToList={handleBackToProjectList}
+          onBackToProject={handleBackToProject}
+          onRefresh={() => void refreshSelectedRunDetail()}
+          onSessionLinked={refreshSelectedFeatureSessionData}
+          onSessionViewChange={handleSessionViewChange}
+        />
+        {sidebarDeleteDialog}
+      </>
+    )
+  }
+
+  if (selectedProject) {
+    return (
+      <>
+        <ProjectDetailPage
+          project={selectedProject}
+          detail={selectedProjectDetail}
+          loading={loadingDetailIds.has(selectedProject.projectId)}
+          creatingFeature={creatingFeatureProjectId === selectedProject.projectId}
+          onBackToList={handleBackToProjectList}
+          onCreateFeature={openFeatureCreateDialog}
+          onRefresh={(projectId) => void loadProjectDetail(projectId)}
+          onEditProject={handleEditProject}
+          onOpenFeature={openFeatureDetail}
+        />
+        <FeatureCreateDialog
+          project={featureDialogProject}
+          featureName={featureName}
+          creating={creatingFeatureProjectId !== null}
+          error={featureError}
+          onOpenChange={handleFeatureDialogOpenChange}
+          onChange={setFeatureName}
+          onSubmit={() => void handleSubmitFeature()}
+        />
+        <ProjectEditDialog
+          open={editingProject !== null}
+          saving={savingEdit}
+          form={editForm}
+          registry={adapterRegistry}
+          error={editError}
+          onOpenChange={(open) => {
+            if (!open && !savingEdit) {
+              setEditingProject(null)
+            }
+          }}
+          onChange={setEditForm}
+          onPickWorkspace={() => void handlePickEditWorkspace()}
+          onSubmit={() => void handleSubmitEdit()}
+        />
+        {sidebarDeleteDialog}
+      </>
     )
   }
 
@@ -2436,14 +3120,10 @@ export function HarnessBoardView({
                     group={group}
                     detailsByProjectId={detailsByProjectId}
                     loadingDetailIds={loadingDetailIds}
-                    expandedProjectIds={expandedProjectIds}
                     archivingProjectId={archivingProjectId}
-                    creatingFeatureProjectId={creatingFeatureProjectId}
                     onEditProject={handleEditProject}
                     onArchiveProject={(project) => void handleArchiveProject(project)}
-                    onCreateFeature={openFeatureCreateDialog}
-                    onToggleProject={handleToggleProject}
-                    onOpenFeature={(projectId, slug) => setSelectedFeature({ projectId, slug })}
+                    onOpenProject={openProjectDetail}
                   />
                 ))
               )}
@@ -2472,14 +3152,10 @@ export function HarnessBoardView({
                         group={group}
                         detailsByProjectId={detailsByProjectId}
                         loadingDetailIds={loadingDetailIds}
-                        expandedProjectIds={expandedProjectIds}
                         archivingProjectId={archivingProjectId}
-                        creatingFeatureProjectId={creatingFeatureProjectId}
                         onEditProject={handleEditProject}
                         onArchiveProject={(project) => void handleArchiveProject(project)}
-                        onCreateFeature={openFeatureCreateDialog}
-                        onToggleProject={handleToggleProject}
-                        onOpenFeature={(projectId, slug) => setSelectedFeature({ projectId, slug })}
+                        onOpenProject={openProjectDetail}
                       />
                     ))
                   )}
@@ -2525,6 +3201,7 @@ export function HarnessBoardView({
         onPickWorkspace={() => void handlePickEditWorkspace()}
         onSubmit={() => void handleSubmitEdit()}
       />
+      {sidebarDeleteDialog}
     </div>
   )
 }

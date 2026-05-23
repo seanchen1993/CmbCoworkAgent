@@ -1249,7 +1249,7 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
     if (raw.includes("已存在")) {
-      throw new Error("该特性在所选项目路径下存在")
+      throw new Error("该特性在当前项目路径下已存在")
     }
     throw new Error(`创建特性失败：${raw}`)
   }
@@ -1352,6 +1352,7 @@ export function upsertHarnessSessionBinding(input: HarnessSessionBindingUpsertIn
     projectId: project.projectId,
     slug,
     threadId,
+    source: "autobizdevops",
     createdAt: existing?.createdAt || now,
     lastActiveAt: now
   }

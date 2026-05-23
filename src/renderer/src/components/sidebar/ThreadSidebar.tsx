@@ -66,6 +66,15 @@ function getThreadWorkspacePath(thread: Thread, statePath?: string | null): stri
   return typeof metadataPath === "string" && metadataPath.trim() ? metadataPath : null
 }
 
+function isHarnessFeatureThread(thread: Thread): boolean {
+  const harnessFeature = thread.metadata?.harnessFeature
+  if (!harnessFeature || typeof harnessFeature !== "object") {
+    return false
+  }
+  const metadata = harnessFeature as Record<string, unknown>
+  return typeof metadata.projectId === "string" && typeof metadata.slug === "string"
+}
+
 function getWorkspaceName(path: string | null): string {
   if (!path) return "未关联工作区"
   const segments = path.split(/[\\/]/).filter(Boolean)
@@ -128,7 +137,7 @@ function ThreadStatusIcon({
   return null
 }
 
-function ThreadListItem({
+export function ThreadListItem({
   thread,
   isLoading,
   hasPendingApproval,
@@ -145,7 +154,8 @@ function ThreadListItem({
   onSaveTitle,
   onCancelEditing,
   onEditingTitleChange,
-  isExporting
+  isExporting,
+  hoverTitle
 }: {
   thread: Thread
   isLoading: boolean
@@ -164,6 +174,7 @@ function ThreadListItem({
   onSaveTitle: () => void
   onCancelEditing: () => void
   onEditingTitleChange: (value: string) => void
+  hoverTitle?: string
 }): React.JSX.Element {
   const isRunning = isLoading || scheduledTaskLoading
   const wasRunningRef = useRef(false)
@@ -221,7 +232,7 @@ function ThreadListItem({
             ) : (
               <div
                 className="flex min-w-0 items-center text-sm"
-                title={thread.title || thread.thread_id}
+                title={hoverTitle ?? thread.title ?? thread.thread_id}
               >
                 {thread.title?.startsWith("[定时]") ? (
                   <>
@@ -379,12 +390,15 @@ export function ThreadSidebar({
     setActiveSidebarTab("chat")
 
     if (mainView === "harness" || showHarnessBoardView) {
-      if (previousThreadId) {
+      const previousThread = previousThreadId
+        ? threads.find((thread) => thread.thread_id === previousThreadId)
+        : null
+      if (previousThread && !isHarnessFeatureThread(previousThread)) {
         setShowHarnessBoardView(false)
         return
       }
 
-      const firstThread = threads[0]
+      const firstThread = threads.find((thread) => !isHarnessFeatureThread(thread))
       if (firstThread) {
         await selectThread(firstThread.thread_id)
         return
@@ -444,7 +458,7 @@ export function ThreadSidebar({
   const threadProjects = useMemo<ThreadProject[]>(() => {
     const projectMap = new Map<string, ThreadProject>()
 
-    for (const thread of threads) {
+    for (const thread of threads.filter((item) => !isHarnessFeatureThread(item))) {
       const path = getThreadWorkspacePath(thread, allThreadStates[thread.thread_id]?.workspacePath)
       const key = path || NO_WORKSPACE_PROJECT_KEY
       const existing = projectMap.get(key)
@@ -1030,7 +1044,7 @@ export function ThreadSidebar({
             )
           })}
 
-          {threads.length === 0 && (
+          {threadProjects.length === 0 && (
             <div className="px-3 py-8 text-center text-sm text-muted-foreground">暂无任务</div>
           )}
         </div>
