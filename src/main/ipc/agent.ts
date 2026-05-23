@@ -100,6 +100,7 @@ import {
   type AgentGitSnapshot
 } from "../services/agent-auto-commit"
 import {
+  buildHarnessFeatureCreatePrompt,
   buildHarnessFeaturePluginDirPrompt,
   buildHarnessFeaturePluginOutputDir
 } from "../harness-board/service"
@@ -129,8 +130,13 @@ interface HarnessAgentContext {
 
 function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgentContext {
   try {
+    const promptBlocks = [
+      buildHarnessFeatureCreatePrompt(metadata),
+      buildHarnessFeaturePluginDirPrompt(metadata)
+    ].filter((item): item is string => Boolean(item?.trim()))
+
     return {
-      workingDirPromptAppendix: buildHarnessFeaturePluginDirPrompt(metadata) ?? undefined,
+      workingDirPromptAppendix: promptBlocks.length > 0 ? promptBlocks.join("\n") : undefined,
       pluginOutputDir: buildHarnessFeaturePluginOutputDir(metadata) ?? undefined
     }
   } catch (error) {

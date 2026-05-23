@@ -43,7 +43,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { TabbedPanel } from "@/components/tabs"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
-import { useThreadContext } from "@/lib/thread-context"
 import type {
   HarnessArtifact,
   HarnessHookLogView,
@@ -68,6 +67,13 @@ const harnessActionIconClassName =
   "relative flex size-4 items-center justify-center rounded-full bg-primary-foreground/15 ring-1 ring-primary-foreground/25 transition-transform duration-200 group-hover:scale-105"
 const harnessNamePattern = /^[\u4e00-\u9fffA-Za-z0-9]+$/u
 const harnessNameRuleMessage = "仅支持中文、英文字母和数字，不允许空格或特殊符号"
+
+function cleanIpcError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  return error.message
+    .replace(/^Error invoking remote method '[^']+':\s*/i, "")
+    .replace(/^Error:\s*/, "")
+}
 
 function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataUpdateInput {
   return {
@@ -709,11 +715,6 @@ function FeatureCreateDialog({
             />
             {featureNameError && <span className="text-status-critical">{featureNameError}</span>}
           </label>
-          {project && (
-            <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-              项目：{project.name} · {project.projectCode}
-            </div>
-          )}
           {error && (
             <div className="rounded-md border border-status-critical/30 bg-status-critical/10 px-3 py-2 text-sm text-status-critical">
               {error}
@@ -1436,7 +1437,7 @@ function FeatureWorkspaceChangesPanel({
           files: [],
           changedFilesTotal: 0,
           omittedFileCount: 0,
-          error: error instanceof Error ? error.message : String(error)
+          error: cleanIpcError(error)
         }
       }))
     }
@@ -1695,7 +1696,7 @@ function FeatureDetailPage({
       await onSessionLinked()
       setActiveDetailTab("session")
     } catch (error) {
-      setSessionError(error instanceof Error ? error.message : String(error))
+      setSessionError(cleanIpcError(error))
     } finally {
       setSessionBusy(null)
     }
@@ -1975,7 +1976,7 @@ export function HarnessBoardView({
   const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const createThread = useAppStore((state) => state.createThread)
-  const threadContext = useThreadContext()
+  const creatingFeatureRef = useRef(false)
 
   const loadProjectDetail = useCallback(async (projectId: string) => {
     setLoadingDetailIds((current) => new Set(current).add(projectId))
@@ -1984,7 +1985,7 @@ export function HarnessBoardView({
       const detail = await window.api.harnessBoard.getProjectDetail(projectId)
       setDetailsByProjectId((current) => ({ ...current, [projectId]: detail }))
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : String(error))
+      setLoadError(cleanIpcError(error))
     } finally {
       setLoadingDetailIds((current) => {
         const next = new Set(current)
@@ -2015,7 +2016,7 @@ export function HarnessBoardView({
         void loadProjectDetail(item.projectId)
       }
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : String(error))
+      setLoadError(cleanIpcError(error))
     } finally {
       setLoadingProjects(false)
     }
@@ -2034,7 +2035,7 @@ export function HarnessBoardView({
     window.api.harnessBoard
       .getRunDetail(selectedFeature.projectId, selectedFeature.slug)
       .then(setRunDetail)
-      .catch((error) => setLoadError(error instanceof Error ? error.message : String(error)))
+      .catch((error) => setLoadError(cleanIpcError(error)))
       .finally(() => setLoadingRun(false))
   }, [selectedFeature])
 
@@ -2189,7 +2190,7 @@ export function HarnessBoardView({
       resetCreateForm()
       await loadProjects()
     } catch (error) {
-      setFormError(error instanceof Error ? error.message : String(error))
+      setFormError(cleanIpcError(error))
     } finally {
       setCreating(false)
     }
@@ -2229,7 +2230,7 @@ export function HarnessBoardView({
         void loadProjectDetail(projectId)
       }
     } catch (error) {
-      setEditError(error instanceof Error ? error.message : String(error))
+      setEditError(cleanIpcError(error))
     } finally {
       setSavingEdit(false)
     }
@@ -2252,7 +2253,7 @@ export function HarnessBoardView({
         })
         await loadProjects()
       } catch (error) {
-        setLoadError(error instanceof Error ? error.message : String(error))
+        setLoadError(cleanIpcError(error))
       } finally {
         setArchivingProjectId(null)
       }
@@ -2278,7 +2279,7 @@ export function HarnessBoardView({
   )
 
   const handleSubmitFeature = useCallback(async (): Promise<void> => {
-    if (!featureDialogProject || creatingFeatureProjectId) return
+    if (!featureDialogProject || creatingFeatureRef.current) return
     const feature = featureName.trim()
     if (!feature) {
       setFeatureError("特性名称不能为空")
@@ -2290,6 +2291,7 @@ export function HarnessBoardView({
       return
     }
 
+    creatingFeatureRef.current = true
     setCreatingFeatureProjectId(featureDialogProject.projectId)
     setFeatureError(null)
     try {
@@ -2308,7 +2310,6 @@ export function HarnessBoardView({
         },
         { preserveView: true }
       )
-      threadContext.getThreadActions(thread.thread_id).setDraftInput(result.prompt)
       await window.api.harnessBoard.linkSession({
         projectId: result.projectId,
         slug: result.slug,
@@ -2325,17 +2326,16 @@ export function HarnessBoardView({
         initialSessionThreadId: thread.thread_id
       })
     } catch (error) {
-      setFeatureError(error instanceof Error ? error.message : String(error))
+      setFeatureError(cleanIpcError(error))
     } finally {
+      creatingFeatureRef.current = false
       setCreatingFeatureProjectId(null)
     }
   }, [
     createThread,
-    creatingFeatureProjectId,
     featureDialogProject,
     featureName,
-    loadProjectDetail,
-    threadContext
+    loadProjectDetail
   ])
 
   if (selectedFeature) {

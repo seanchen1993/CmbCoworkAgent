@@ -70,7 +70,6 @@ export interface HarnessFeatureCreateResult {
   projectId: string
   slug: string
   title: string
-  prompt: string
   workspacePath: string
 }
 

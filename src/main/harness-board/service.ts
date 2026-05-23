@@ -1,5 +1,5 @@
 import { execFileSync } from "child_process"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
@@ -1056,6 +1056,16 @@ function validateHarnessName(value: unknown, label: string): void {
   }
 }
 
+function validateProjectCodeUnique(code: string, store: HarnessProjectStoreFile, excludeProjectId?: string): void {
+  const trimmed = code.trim()
+  const duplicate = store.projects.find(
+    (item) => item.projectCode === trimmed && item.projectId !== excludeProjectId
+  )
+  if (duplicate) {
+    throw new Error(`项目编号：${trimmed} 已被使用，请更换`)
+  }
+}
+
 function validateFeatureCreateInput(input: HarnessFeatureCreateInput): void {
   const feature = normalizeText(input.feature).trim()
   if (!normalizeText(input.projectId).trim() || !feature) {
@@ -1140,24 +1150,12 @@ function initializeHarnessProject(project: HarnessProjectMetadata): void {
     mkdirSync(projectPath, { recursive: true })
     runHarnessInvocation(configured)
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    throw new Error(`创建项目失败：${message}`)
+    const raw = error instanceof Error ? error.message : String(error)
+    if (raw.includes("已存在")) {
+      throw new Error("该项目编号已在所选工作区存在")
+    }
+    throw new Error(`创建项目失败：${raw}`)
   }
-}
-
-function buildHarnessFeatureCreatePrompt(
-  project: HarnessProjectMetadata,
-  feature: string
-): string {
-  const cwd = adapterPluginDir(project)
-  const template = readBoardConfigPlatformText(cwd, "feature_create_prompt")
-  if (!template) {
-    throw new Error(
-      `Harness adapter prompt is not configured: inspectCommands.${process.platform}.feature_create_prompt`
-    )
-  }
-
-  return replaceHarnessConfigPlaceholders(template, project, "createFeature", cwd, feature).trim()
 }
 
 function readHarnessFeatureMetadata(metadata: unknown): { projectId: string; slug: string } | null {
@@ -1165,6 +1163,18 @@ function readHarnessFeatureMetadata(metadata: unknown): { projectId: string; slu
   const projectId = normalizeText(metadata.harnessFeature.projectId).trim()
   const slug = normalizeText(metadata.harnessFeature.slug).trim()
   return projectId && slug ? { projectId, slug } : null
+}
+
+export function buildHarnessFeatureCreatePrompt(metadata: unknown): string | null {
+  const feature = readHarnessFeatureMetadata(metadata)
+  if (!feature) return null
+
+  const project = requireProject(feature.projectId)
+  const cwd = adapterPluginDir(project)
+  const template = readBoardConfigPlatformText(cwd, "feature_create_prompt")
+  if (!template) return null
+
+  return replaceHarnessConfigPlaceholders(template, project, "createFeature", cwd, feature.slug).trim() || null
 }
 
 export function buildHarnessFeaturePluginDirPrompt(metadata: unknown): string | null {
@@ -1198,6 +1208,7 @@ export function listHarnessProjects(): HarnessProjectListItem[] {
 export function createHarnessProject(input: HarnessProjectCreateInput): HarnessProjectMetadata {
   validateCreateInput(input)
   const store = readProjectStore()
+  validateProjectCodeUnique(input.projectCode, store)
   const harnessAdapter = resolveHarnessAdapter(input.adapterId, input.adapterType)
   const project: HarnessProjectMetadata = {
     projectId: uuid(),
@@ -1228,7 +1239,6 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
   const project = requireProject(input.projectId)
   const feature = input.feature.trim()
   const workspacePath = projectDirectoryPath(project)
-  const prompt = buildHarnessFeatureCreatePrompt(project, feature)
 
   if (!existsSync(workspacePath)) {
     throw new Error(projectDirectoryMissingMessage(project))
@@ -1237,15 +1247,17 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
   try {
     runConfiguredHarnessCommand(project, "createFeature", feature)
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    throw new Error(`创建特性失败：${message}`)
+    const raw = error instanceof Error ? error.message : String(error)
+    if (raw.includes("已存在")) {
+      throw new Error("该特性在所选项目路径下存在")
+    }
+    throw new Error(`创建特性失败：${raw}`)
   }
 
   return {
     projectId: project.projectId,
     slug: feature,
     title: feature,
-    prompt,
     workspacePath
   }
 }
@@ -1262,7 +1274,24 @@ export function updateHarnessProjectMetadata(
     throw new Error("Project not found")
   }
 
+  validateProjectCodeUnique(input.projectCode, store, projectId)
   const existing = store.projects[index]
+  const newCode = input.projectCode.trim()
+  const codeChanged = existing.projectCode !== newCode
+  if (codeChanged) {
+    const oldPath = resolve(existing.workspace.path, existing.projectCode)
+    const newPath = resolve(existing.workspace.path, newCode)
+    if (existsSync(oldPath)) {
+      if (existsSync(newPath)) {
+        throw new Error(`重命名失败：目标目录已存在 ${newPath}`)
+      }
+      try {
+        renameSync(oldPath, newPath)
+      } catch (e) {
+        throw new Error(`重命名项目目录失败：${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+  }
   const updated: HarnessProjectMetadata = {
     ...existing,
     name: input.name.trim(),
