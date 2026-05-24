@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, useLayoutEffect, lazy, Suspense, type ReactNode } from "react"
+import { useEffect, useState, useCallback, useRef, useLayoutEffect, lazy, Suspense } from "react"
 import {
   Briefcase,
   Eye,
@@ -89,7 +89,7 @@ function App(): React.JSX.Element {
   const [previewFullscreen, setPreviewFullscreen] = useState(false)
   const [pendingGitDiffByThread, setPendingGitDiffByThread] = useState<Record<string, boolean>>({})
   const [isGitWorkspaceByThread, setIsGitWorkspaceByThread] = useState<Record<string, boolean>>({})
-  const [harnessFeatureWorkspace, setHarnessFeatureWorkspace] = useState<ReactNode | null>(null)
+
   const [zoomLevel, setZoomLevel] = useState(1)
   const [bus, setBus] = useState(true)
   // Delay loading ClaudeCodePanel code until user opens it once.
@@ -259,10 +259,6 @@ function App(): React.JSX.Element {
       if (prev[threadId] === pending) return prev
       return { ...prev, [threadId]: pending }
     })
-  }, [])
-
-  const handleHarnessFeatureWorkspaceChange = useCallback((workspace: ReactNode | null): void => {
-    setHarnessFeatureWorkspace(workspace)
   }, [])
 
   const handleThreadGitStatusChange = useCallback((threadId: string, isGit: boolean) => {
@@ -650,14 +646,14 @@ function App(): React.JSX.Element {
             {!sidebarCollapsed && (
               <>
                 <div style={{ width: leftWidth }} className="shrink-0">
-                  <ThreadSidebar workspaceSlot={harnessFeatureWorkspace} />
+                  <ThreadSidebar />
                 </div>
                 <ResizeHandle onDrag={handleLeftResize} />
               </>
             )}
             <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
               <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
-                <HarnessBoardView onFeatureWorkspaceChange={handleHarnessFeatureWorkspaceChange} />
+                <HarnessBoardView />
               </Suspense>
             </main>
           </div>

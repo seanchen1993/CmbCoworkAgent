@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef, type ReactNode } from "react"
+import { useState, useCallback, useEffect, useMemo, useRef } from "react"
 import {
   Plus,
   Trash2,
@@ -309,11 +309,7 @@ export function ThreadListItem({
   )
 }
 
-export function ThreadSidebar({
-  workspaceSlot
-}: {
-  workspaceSlot?: ReactNode
-}): React.JSX.Element {
+export function ThreadSidebar(): React.JSX.Element {
   const {
     threads,
     currentThreadId,
@@ -858,8 +854,8 @@ export function ThreadSidebar({
         )}
       </div>
 
-      {activeSidebarTab === "project" && workspaceSlot ? (
-        workspaceSlot
+      {activeSidebarTab === "project" ? (
+        <div id="harness-sidebar-portal" className="flex min-h-0 flex-1 flex-col" />
       ) : activeSidebarTab === "chat" ? (
         <>
           <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">

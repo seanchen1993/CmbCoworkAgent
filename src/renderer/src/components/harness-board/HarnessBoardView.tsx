@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { createPortal } from "react-dom"
 import {
   AlertCircle,
   ArrowLeft,
@@ -259,10 +260,6 @@ function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boole
     form.product.name,
     form.workspace.path
   ].some((value) => !value.trim())
-}
-
-function createRequiredMissing(form: HarnessProjectCreateInput): boolean {
-  return metadataRequiredMissing(form)
 }
 
 function getHarnessNameError(label: string, value: string): string | null {
@@ -672,7 +669,7 @@ function ProjectFormDialog({
           </Button>
           <Button
             onClick={onSubmit}
-            disabled={creating || createRequiredMissing(form) || metadataNameInvalid(form)}
+            disabled={creating || metadataRequiredMissing(form) || metadataNameInvalid(form)}
             className="gap-2"
           >
             {creating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
@@ -1795,7 +1792,9 @@ function FeatureDetailPage({
     return () => window.cancelAnimationFrame(frame)
   }, [selectedGroupKey])
 
-  const { createThread, selectThread, threads } = useAppStore()
+  const createThread = useAppStore((s) => s.createThread)
+  const selectThread = useAppStore((s) => s.selectThread)
+  const threads = useAppStore((s) => s.threads)
   const allThreadStates = useAllThreadStates()
   const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
   const [sessionBusy, setSessionBusy] = useState<"create" | null>(null)
@@ -1865,8 +1864,12 @@ function FeatureDetailPage({
         createThread
       })
       setSelectedSessionState({ detailKey, threadId: thread.thread_id })
-      await onSessionLinked()
       setActiveDetailTab("session")
+      try {
+        await onSessionLinked()
+      } catch {
+        // refresh failed but session already created — non-critical
+      }
     } catch (error) {
       toast.error(cleanIpcError(error))
     } finally {
@@ -2267,11 +2270,7 @@ function ProjectFeatureSidebar({
   )
 }
 
-export function HarnessBoardView({
-  onFeatureWorkspaceChange
-}: {
-  onFeatureWorkspaceChange?: (workspace: ReactNode | null) => void
-}): React.JSX.Element {
+export function HarnessBoardView(): React.JSX.Element {
   const [projects, setProjects] = useState<HarnessProjectListItem[]>([])
   const [detailsByProjectId, setDetailsByProjectId] = useState<Record<string, HarnessProjectDetailViewModel>>({})
   const [loadingDetailIds, setLoadingDetailIds] = useState<Set<string>>(new Set())
@@ -2316,6 +2315,8 @@ export function HarnessBoardView({
   const [sidebarThreadToDelete, setSidebarThreadToDelete] = useState<Thread | null>(null)
   const [creatingSidebarSessionKey, setCreatingSidebarSessionKey] = useState<string | null>(null)
   const creatingFeatureRef = useRef(false)
+  const selectedFeatureRef = useRef(selectedFeature)
+  selectedFeatureRef.current = selectedFeature
 
   const loadProjectDetail = useCallback(async (projectId: string) => {
     setLoadingDetailIds((current) => new Set(current).add(projectId))
@@ -2384,9 +2385,20 @@ export function HarnessBoardView({
         selectedFeature &&
         event.scopeKey === `run:${selectedFeature.projectId}:${selectedFeature.slug}`
       ) {
+        const capturedProjectId = selectedFeature.projectId
+        const capturedSlug = selectedFeature.slug
         void window.api.harnessBoard
-          .getRunDetail(selectedFeature.projectId, selectedFeature.slug)
-          .then(setRunDetail)
+          .getRunDetail(capturedProjectId, capturedSlug)
+          .then((detail) => {
+            const current = selectedFeatureRef.current
+            if (
+              current &&
+              current.projectId === capturedProjectId &&
+              current.slug === capturedSlug
+            ) {
+              setRunDetail(detail)
+            }
+          })
       }
     })
   }, [loadProjectDetail, selectedFeature])
@@ -2493,7 +2505,7 @@ export function HarnessBoardView({
 
   const handleSubmit = async (): Promise<void> => {
     setFormError(null)
-    if (createRequiredMissing(form)) {
+    if (metadataRequiredMissing(form)) {
       setFormError("所有字段均为必填")
       return
     }
@@ -2661,6 +2673,16 @@ export function HarnessBoardView({
   ])
 
   const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
+  const threadIdSetRef = useRef<Set<string>>(new Set())
+  const threadIdSet = useMemo(() => {
+    const next = new Set(threads.map((t) => t.thread_id))
+    const prev = threadIdSetRef.current
+    if (prev.size === next.size && [...next].every((id) => prev.has(id))) {
+      return prev
+    }
+    threadIdSetRef.current = next
+    return next
+  }, [threads])
   const selectedProject =
     selectedProjectId ? projects.find((project) => project.projectId === selectedProjectId) ?? null : null
   const selectedProjectDetail = selectedProjectId ? detailsByProjectId[selectedProjectId] : undefined
@@ -2718,7 +2740,7 @@ export function HarnessBoardView({
         }
 
         const sessions = (detail.sessionsBySlug[run.slug] ?? []).filter((session) =>
-          threadsById.has(session.threadId)
+          threadIdSet.has(session.threadId)
         )
         if (!selectedProjectId && sessions.length === 0) continue
         groups.push({
@@ -2731,7 +2753,7 @@ export function HarnessBoardView({
     }
 
     return groups
-  }, [detailsByProjectId, projects, selectedFeature, selectedProjectId, threadsById])
+  }, [detailsByProjectId, projects, selectedFeature, selectedProjectId, threadIdSet])
 
   const allFeatureGroupsCollapsed =
     projectSidebarGroups.length > 0 &&
@@ -2756,6 +2778,9 @@ export function HarnessBoardView({
   const saveSidebarThreadTitle = useCallback(async (): Promise<void> => {
     if (editingThreadId && editingTitle.trim()) {
       await updateThread(editingThreadId, { title: editingTitle.trim() })
+    } else if (editingThreadId) {
+      toast.warning("会话标题不能为空")
+      return
     }
     setEditingThreadId(null)
     setEditingTitle("")
@@ -2852,98 +2877,6 @@ export function HarnessBoardView({
     [allThreadStates, createThread, creatingSidebarSessionKey, loadProjectDetail, openFeatureDetail, threadsById]
   )
 
-  const sidebarCallbacksRef = useRef({
-    handleCreateSidebarSession,
-    handleExportSidebarThread,
-    toggleAllFeatureGroups,
-    saveSidebarThreadTitle,
-    cancelSidebarThreadEditing,
-    openFeatureDetail,
-    selectThread,
-    setEditingThreadId,
-    setEditingTitle,
-    setSidebarThreadToDelete
-  })
-  sidebarCallbacksRef.current = {
-    handleCreateSidebarSession,
-    handleExportSidebarThread,
-    toggleAllFeatureGroups,
-    saveSidebarThreadTitle,
-    cancelSidebarThreadEditing,
-    openFeatureDetail,
-    selectThread,
-    setEditingThreadId,
-    setEditingTitle,
-    setSidebarThreadToDelete
-  }
-
-  const projectFeatureSidebar = useMemo(
-    () => {
-      const callbacks = sidebarCallbacksRef.current
-      return (
-        <ProjectFeatureSidebar
-          groups={projectSidebarGroups}
-          collapsedKeys={collapsedFeatureKeys}
-          allCollapsed={allFeatureGroupsCollapsed}
-          creatingSessionKey={creatingSidebarSessionKey}
-          threadsById={threadsById}
-          allThreadStates={allThreadStates}
-          allStreamLoadingStates={allStreamLoadingStates}
-          selectedFeature={selectedFeature}
-          isViewingSession={isViewingSession}
-          exportingThreadId={exportingThreadId}
-          editingThreadId={editingThreadId}
-          editingTitle={editingTitle}
-          onToggleCollapse={(key) =>
-            setCollapsedFeatureKeys((current) => {
-              const next = new Set(current)
-              if (next.has(key)) next.delete(key)
-              else next.add(key)
-              return next
-            })
-          }
-          onToggleAll={callbacks.toggleAllFeatureGroups}
-          onCreateSession={(project, run, sessions) => {
-            void callbacks.handleCreateSidebarSession(project, run, sessions)
-          }}
-          onSelectSession={(projectId, slug, threadId) => {
-            callbacks.openFeatureDetail(projectId, slug, threadId)
-            void callbacks.selectThread(threadId, { preserveView: true })
-          }}
-          onDeleteSession={callbacks.setSidebarThreadToDelete}
-          onExportSession={(thread) => void callbacks.handleExportSidebarThread(thread)}
-          onStartEditing={(thread) => {
-            callbacks.setEditingThreadId(thread.thread_id)
-            callbacks.setEditingTitle(thread.title || "")
-          }}
-          onSaveTitle={callbacks.saveSidebarThreadTitle}
-          onCancelEditing={callbacks.cancelSidebarThreadEditing}
-          onEditingTitleChange={callbacks.setEditingTitle}
-        />
-      )
-    },
-    [
-      projectSidebarGroups,
-      collapsedFeatureKeys,
-      allFeatureGroupsCollapsed,
-      creatingSidebarSessionKey,
-      threadsById,
-      allThreadStates,
-      allStreamLoadingStates,
-      selectedFeature,
-      isViewingSession,
-      exportingThreadId,
-      editingThreadId,
-      editingTitle
-    ]
-  )
-
-  useEffect(() => {
-    if (!onFeatureWorkspaceChange) return
-    onFeatureWorkspaceChange(projectFeatureSidebar)
-    return () => onFeatureWorkspaceChange(null)
-  }, [onFeatureWorkspaceChange, projectFeatureSidebar])
-
   const sidebarDeleteDialog = (
     <Dialog
       open={!!sidebarThreadToDelete}
@@ -2974,6 +2907,53 @@ export function HarnessBoardView({
     setIsViewingSession(viewing)
   }, [])
 
+  const sidebarPortalNode = document.getElementById("harness-sidebar-portal")
+  const sidebarPortal =
+    sidebarPortalNode
+      ? createPortal(
+          <ProjectFeatureSidebar
+            groups={projectSidebarGroups}
+            collapsedKeys={collapsedFeatureKeys}
+            allCollapsed={allFeatureGroupsCollapsed}
+            creatingSessionKey={creatingSidebarSessionKey}
+            threadsById={threadsById}
+            allThreadStates={allThreadStates}
+            allStreamLoadingStates={allStreamLoadingStates}
+            selectedFeature={selectedFeature}
+            isViewingSession={isViewingSession}
+            exportingThreadId={exportingThreadId}
+            editingThreadId={editingThreadId}
+            editingTitle={editingTitle}
+            onToggleCollapse={(key) =>
+              setCollapsedFeatureKeys((current) => {
+                const next = new Set(current)
+                if (next.has(key)) next.delete(key)
+                else next.add(key)
+                return next
+              })
+            }
+            onToggleAll={toggleAllFeatureGroups}
+            onCreateSession={(project, run, sessions) => {
+              void handleCreateSidebarSession(project, run, sessions)
+            }}
+            onSelectSession={(projectId, slug, threadId) => {
+              openFeatureDetail(projectId, slug, threadId)
+              void selectThread(threadId, { preserveView: true })
+            }}
+            onDeleteSession={setSidebarThreadToDelete}
+            onExportSession={(thread) => void handleExportSidebarThread(thread)}
+            onStartEditing={(thread) => {
+              setEditingThreadId(thread.thread_id)
+              setEditingTitle(thread.title || "")
+            }}
+            onSaveTitle={saveSidebarThreadTitle}
+            onCancelEditing={cancelSidebarThreadEditing}
+            onEditingTitleChange={setEditingTitle}
+          />,
+          sidebarPortalNode
+        )
+      : null
+
   if (selectedFeature) {
     return (
       <>
@@ -2988,6 +2968,7 @@ export function HarnessBoardView({
           onSessionViewChange={handleSessionViewChange}
         />
         {sidebarDeleteDialog}
+        {sidebarPortal}
       </>
     )
   }
@@ -3031,6 +3012,7 @@ export function HarnessBoardView({
           onSubmit={() => void handleSubmitEdit()}
         />
         {sidebarDeleteDialog}
+        {sidebarPortal}
       </>
     )
   }
@@ -3202,6 +3184,7 @@ export function HarnessBoardView({
         onSubmit={() => void handleSubmitEdit()}
       />
       {sidebarDeleteDialog}
+      {sidebarPortal}
     </div>
   )
 }
