@@ -1743,7 +1743,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
         workspacePath,
         sessionId: threadId,
-        turnId: hookTurnId
+        turnId: hookTurnId,
         pluginOutputDir
       }
       runHooks(
