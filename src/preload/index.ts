@@ -44,8 +44,6 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
-  HarnessSessionBinding,
-  HarnessSessionBindingUpsertInput,
   HarnessAdapterRegistryItem,
   HarnessWatchRefChangedEvent
 } from "../shared/harness-board-types"
@@ -1892,8 +1890,6 @@ const api = {
       ipcRenderer.invoke("harnessBoard:getProjectDetail", projectId) as Promise<HarnessProjectDetailViewModel>,
     getRunDetail: (projectId: string, slug: string): Promise<HarnessRunDetailViewModel> =>
       ipcRenderer.invoke("harnessBoard:getRunDetail", { projectId, slug }) as Promise<HarnessRunDetailViewModel>,
-    linkSession: (input: HarnessSessionBindingUpsertInput): Promise<HarnessSessionBinding> =>
-      ipcRenderer.invoke("harnessBoard:linkSession", input) as Promise<HarnessSessionBinding>,
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void): (() => void) => {
       const handler = (_event: unknown, payload: HarnessWatchRefChangedEvent): void => callback(payload)
       ipcRenderer.on("harnessBoard:watchRefsChanged", handler)

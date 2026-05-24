@@ -43,8 +43,6 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
-  HarnessSessionBinding,
-  HarnessSessionBindingUpsertInput,
   HarnessAdapterRegistryItem,
   HarnessWatchRefChangedEvent
 } from "../shared/harness-board-types"
@@ -1148,7 +1146,6 @@ interface CustomAPI {
     archiveProject: (projectId: string) => Promise<HarnessProjectMetadata>
     getProjectDetail: (projectId: string) => Promise<HarnessProjectDetailViewModel>
     getRunDetail: (projectId: string, slug: string) => Promise<HarnessRunDetailViewModel>
-    linkSession: (input: HarnessSessionBindingUpsertInput) => Promise<HarnessSessionBinding>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
   }
   update: {

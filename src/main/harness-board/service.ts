@@ -22,22 +22,14 @@ import type {
   HarnessRunDetailViewModel,
   HarnessRunNode,
   HarnessFeatureSummary,
-  HarnessSessionBinding,
-  HarnessSessionBindingUpsertInput,
   HarnessStatus,
   HarnessWatchRef,
   HarnessWorkflow
 } from "../../shared/harness-board-types"
-import { HARNESS_SOURCE } from "../../shared/harness-board-types"
 
 interface HarnessProjectStoreFile {
   version: 1
   projects: HarnessProjectMetadata[]
-}
-
-interface HarnessSessionBindingStoreFile {
-  version: 1
-  bindings: HarnessSessionBinding[]
 }
 
 type HarnessHookLogRef = HarnessRunDetailViewModel["run"]["hookLogRefs"][number]
@@ -62,14 +54,13 @@ interface HarnessHookLogEntry {
 }
 
 const HARNESS_BOARD_FILE = join(getOpenworkDir(), "harness-board-projects.json")
-const HARNESS_SESSION_BINDINGS_FILE = join(getOpenworkDir(), "harness-board-session-bindings.json")
 
 const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
 const HARNESS_ADAPTER_MAX_BUFFER = 10 * 1024 * 1024
 const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
-const HARNESS_NAME_PATTERN = /^[\u4e00-\u9fffA-Za-z0-9]+$/u
-const HARNESS_NAME_RULE_MESSAGE = "仅支持中文、英文字母和数字，不允许空格或特殊符号"
+const HARNESS_NAME_PATTERN = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
+const HARNESS_NAME_RULE_MESSAGE = "仅支持中文、英文字母、数字、-、_，不允许空格"
 
 const HARNESS_UI_KINDS = new Set<HarnessStatus["uiKind"]>([
   "pending",
@@ -88,13 +79,6 @@ function emptyProjectStore(): HarnessProjectStoreFile {
   return {
     version: 1,
     projects: []
-  }
-}
-
-function emptySessionBindingStore(): HarnessSessionBindingStoreFile {
-  return {
-    version: 1,
-    bindings: []
   }
 }
 
@@ -912,25 +896,6 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
   }
 }
 
-function normalizeSessionBinding(value: unknown): HarnessSessionBinding | null {
-  if (!isObject(value)) return null
-  if (
-    typeof value.projectId !== "string" ||
-    typeof value.threadId !== "string" ||
-    typeof value.slug !== "string"
-  ) {
-    return null
-  }
-  return {
-    projectId: value.projectId,
-    threadId: value.threadId,
-    createdAt: normalizeText(value.createdAt),
-    lastActiveAt: normalizeText(value.lastActiveAt),
-    slug: value.slug,
-    source: normalizeText(value.source) || HARNESS_SOURCE
-  }
-}
-
 function readProjectStore(): HarnessProjectStoreFile {
   getOpenworkDir()
   if (!existsSync(HARNESS_BOARD_FILE)) return emptyProjectStore()
@@ -953,30 +918,6 @@ function readProjectStore(): HarnessProjectStoreFile {
 function writeProjectStore(store: HarnessProjectStoreFile): void {
   getOpenworkDir()
   writeFileSync(HARNESS_BOARD_FILE, `${JSON.stringify(store, null, 2)}\n`)
-}
-
-function readSessionBindingStore(): HarnessSessionBindingStoreFile {
-  getOpenworkDir()
-  if (!existsSync(HARNESS_SESSION_BINDINGS_FILE)) return emptySessionBindingStore()
-  try {
-    const parsed = JSON.parse(readFileSync(HARNESS_SESSION_BINDINGS_FILE, "utf-8")) as unknown
-    if (!isObject(parsed)) return emptySessionBindingStore()
-    return {
-      version: 1,
-      bindings: Array.isArray(parsed.bindings)
-        ? parsed.bindings
-            .map((item) => normalizeSessionBinding(item))
-            .filter((item): item is HarnessSessionBinding => item !== null)
-        : []
-    }
-  } catch {
-    return emptySessionBindingStore()
-  }
-}
-
-function writeSessionBindingStore(store: HarnessSessionBindingStoreFile): void {
-  getOpenworkDir()
-  writeFileSync(HARNESS_SESSION_BINDINGS_FILE, `${JSON.stringify(store, null, 2)}\n`)
 }
 
 function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
@@ -1006,14 +947,6 @@ function requireProject(projectId: string): HarnessProjectMetadata {
     throw new Error("Project not found")
   }
   return project
-}
-
-function sessionBindingKey(binding: Pick<HarnessSessionBinding, "projectId" | "slug" | "threadId">): string {
-  return `${binding.projectId}:${binding.slug}:${binding.threadId}`
-}
-
-function sortSessionBindings(bindings: HarnessSessionBinding[]): HarnessSessionBinding[] {
-  return [...bindings].sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))
 }
 
 function validateCreateInput(input: HarnessProjectCreateInput): void {
@@ -1096,21 +1029,11 @@ function makeWatchRefs(projectName: string, slug?: string): HarnessWatchRef[] {
       ]
 }
 
-function collectSessionsBySlug(projectId: string): Record<string, HarnessSessionBinding[]> {
-  const sessionStore = readSessionBindingStore()
-  const sessionsBySlug: Record<string, HarnessSessionBinding[]> = {}
-  for (const binding of sessionStore.bindings.filter((item) => item.projectId === projectId)) {
-    sessionsBySlug[binding.slug] = [...(sessionsBySlug[binding.slug] ?? []), binding]
-  }
-  return sessionsBySlug
-}
-
 function makeProjectDetailViewModel(
   project: HarnessProjectMetadata,
   data: {
     workflow: HarnessWorkflow
     runs: HarnessFeatureSummary[]
-    sessionsBySlug: Record<string, HarnessSessionBinding[]>
     watchRefs: HarnessWatchRef[]
     projectState: HarnessStatus
     error: string | null
@@ -1133,7 +1056,6 @@ function makeProjectDetailViewModel(
     projectState: data.projectState,
     workflow: data.workflow,
     runs: data.runs,
-    sessionsBySlug: data.sessionsBySlug,
     watchRefs: data.watchRefs,
     loading: false,
     error: data.error
@@ -1338,43 +1260,14 @@ export function archiveHarnessProject(projectId: string): HarnessProjectMetadata
   return archived
 }
 
-export function upsertHarnessSessionBinding(input: HarnessSessionBindingUpsertInput): HarnessSessionBinding {
-  const project = requireProject(input.projectId)
-  const slug = input.slug.trim()
-  const threadId = input.threadId.trim()
-  if (!slug || !threadId) {
-    throw new Error("Feature slug and thread id are required")
-  }
-
-  const store = readSessionBindingStore()
-  const now = new Date().toISOString()
-  const key = sessionBindingKey({ projectId: project.projectId, slug, threadId })
-  const existing = store.bindings.find((item) => sessionBindingKey(item) === key)
-  const binding: HarnessSessionBinding = {
-    projectId: project.projectId,
-    slug,
-    threadId,
-    source: HARNESS_SOURCE,
-    createdAt: existing?.createdAt || now,
-    lastActiveAt: now
-  }
-
-  const nextBindings = store.bindings.filter((item) => sessionBindingKey(item) !== key)
-  nextBindings.push(binding)
-  writeSessionBindingStore({ version: 1, bindings: sortSessionBindings(nextBindings) })
-  return binding
-}
-
 export function getHarnessProjectDetail(projectId: string): HarnessProjectDetailViewModel {
   const project = requireProject(projectId)
-  const sessionsBySlug = collectSessionsBySlug(projectId)
   const fallbackWatchRefs = makeWatchRefs(project.projectCode)
 
   if (!existsSync(projectDirectoryPath(project))) {
     return makeProjectDetailViewModel(project, {
       workflow: normalizeWorkflow(null),
       runs: [],
-      sessionsBySlug,
       watchRefs: fallbackWatchRefs,
       projectState: { label: "项目目录不存在", uiKind: "warning" },
       error: projectDirectoryMissingMessage(project)
@@ -1388,7 +1281,6 @@ export function getHarnessProjectDetail(projectId: string): HarnessProjectDetail
     return makeProjectDetailViewModel(project, {
       workflow,
       runs,
-      sessionsBySlug,
       watchRefs: normalizeWatchRefs(project, snapshot.watchRefs, fallbackWatchRefs),
       projectState: okStatus("inspected", "Inspect 已加载"),
       error: null
@@ -1397,7 +1289,6 @@ export function getHarnessProjectDetail(projectId: string): HarnessProjectDetail
     return makeProjectDetailViewModel(project, {
       workflow: normalizeWorkflow(null),
       runs: [],
-      sessionsBySlug,
       watchRefs: fallbackWatchRefs,
       projectState: { label: "Inspect 读取失败", uiKind: "warning" },
       error: formatProjectDetailError(project, error)
@@ -1407,7 +1298,6 @@ export function getHarnessProjectDetail(projectId: string): HarnessProjectDetail
 
 export function getHarnessRunDetail(projectId: string, slug: string): HarnessRunDetailViewModel {
   const project = requireProject(projectId)
-  const sessionStore = readSessionBindingStore()
   const snapshot = runInspectAdapter(project, "run", slug)
   const workflow = normalizeWorkflow(snapshot.workflow)
   const run = isObject(snapshot.run) ? snapshot.run : {}
@@ -1418,10 +1308,6 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
   const hookLogRefs = normalizeHookLogRefs(project, run.hookLogRefs)
   const hookLogEntries = readHookLogRefs(project, hookLogRefs)
   const { nodes: nodesWithHookLogs, unmatchedHooks } = applyHookLogEntries(nodes, hookLogEntries)
-  const sessions = sessionStore.bindings.filter(
-    (item) => item.projectId === projectId && item.slug === featureSlug
-  )
-
   return {
     project: {
       projectId: project.projectId,
@@ -1450,6 +1336,6 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
       nodes: nodesWithHookLogs,
       unmatchedHooks
     },
-    sessions
+    sessions: []
   }
 }

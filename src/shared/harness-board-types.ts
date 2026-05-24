@@ -117,12 +117,6 @@ export interface HarnessSessionBinding {
   source: string
 }
 
-export interface HarnessSessionBindingUpsertInput {
-  projectId: string
-  slug: string
-  threadId: string
-}
-
 export interface HarnessWatchRef {
   path: string
   purpose: "run-list" | "run-state" | "artifacts" | "hook-log" | string
@@ -166,7 +160,6 @@ export interface HarnessProjectDetailViewModel {
   projectState?: HarnessStatus
   workflow: HarnessWorkflow
   runs: HarnessFeatureSummary[]
-  sessionsBySlug: Record<string, HarnessSessionBinding[]>
   watchRefs: HarnessWatchRef[]
   loading: boolean
   error: string | null

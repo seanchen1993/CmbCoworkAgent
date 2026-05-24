@@ -7,12 +7,9 @@ import {
   getHarnessRunDetail,
   listHarnessAdapters,
   listHarnessProjects,
-  updateHarnessProjectMetadata,
-  upsertHarnessSessionBinding
+  updateHarnessProjectMetadata
 } from "../harness-board/service"
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
-import { getThread } from "../db"
-import { startWatching } from "../services/workspace-watcher"
 import type {
   HarnessProjectCreateInput,
   HarnessProjectDetailViewModel,
@@ -20,36 +17,12 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
-  HarnessSessionBinding,
-  HarnessSessionBindingUpsertInput,
   HarnessAdapterRegistryItem
 } from "../../shared/harness-board-types"
 import type {
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult
 } from "../../shared/harness-board-types"
-
-function getThreadWorkspacePath(threadId: string): string | null {
-  const thread = getThread(threadId)
-  if (!thread?.metadata) return null
-  try {
-    const metadata = JSON.parse(thread.metadata) as Record<string, unknown>
-    return typeof metadata.workspacePath === "string" && metadata.workspacePath.trim()
-      ? metadata.workspacePath
-      : null
-  } catch {
-    return null
-  }
-}
-
-function startSessionWorkspaceWatchers(detail: HarnessRunDetailViewModel): void {
-  for (const session of detail.sessions) {
-    const workspacePath = getThreadWorkspacePath(session.threadId)
-    if (workspacePath) {
-      startWatching(session.threadId, workspacePath)
-    }
-  }
-}
 
 export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   console.log("[HarnessBoard] Registering harness board handlers...")
@@ -114,15 +87,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
         detail.project.workspacePath,
         detail.run.watchRefs
       )
-      startSessionWorkspaceWatchers(detail)
       return detail
-    }
-  )
-
-  ipcMain.handle(
-    "harnessBoard:linkSession",
-    async (_event, input: HarnessSessionBindingUpsertInput): Promise<HarnessSessionBinding> => {
-      return upsertHarnessSessionBinding(input)
     }
   )
 }

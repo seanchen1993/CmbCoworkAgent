@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { createPortal } from "react-dom"
 import {
   AlertCircle,
@@ -76,8 +76,10 @@ const harnessActionOverlayClassName =
   "pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-primary-foreground/10 to-primary-foreground/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
 const harnessActionIconClassName =
   "relative flex size-4 items-center justify-center rounded-full bg-primary-foreground/15 ring-1 ring-primary-foreground/25 transition-transform duration-200 group-hover:scale-105"
-const harnessNamePattern = /^[\u4e00-\u9fffA-Za-z0-9]+$/u
-const harnessNameRuleMessage = "仅支持中文、英文字母和数字，不允许空格或特殊符号"
+const harnessNamePattern = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
+const harnessNameRuleMessage = "仅支持中文、英文字母、数字、-、_，不允许空格"
+const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
+const UNBOUND_FEATURE_GROUP_KEY = "__unbound_feature_sessions__"
 
 function cleanIpcError(error: unknown): string {
   if (!(error instanceof Error)) return String(error)
@@ -122,7 +124,8 @@ interface SelectedFeature {
 interface ProjectFeatureSessionGroup {
   key: string
   project: HarnessProjectListItem
-  run: HarnessFeatureSummary
+  run: HarnessFeatureSummary | null
+  title: string
   sessions: HarnessSessionBinding[]
 }
 
@@ -161,6 +164,17 @@ interface WorkspaceChangeState {
 
 type ThreadWorkspaceStateMap = Record<string, { workspacePath?: string | null } | undefined>
 
+interface HarnessFeatureThreadMetadata {
+  projectId: string
+  slug: string
+  source: string
+}
+
+interface HarnessSessionIndex {
+  byProject: Map<string, HarnessSessionBinding[]>
+  byProjectSlug: Map<string, Map<string, HarnessSessionBinding[]>>
+}
+
 function getWorkspaceName(path: string): string {
   const segments = path.split(/[\\/]/).filter(Boolean)
   return segments.at(-1) || path
@@ -185,6 +199,147 @@ function normalizeWorkspacePath(value: unknown): string | null {
 
 function getThreadWorkspacePath(thread: Thread | null | undefined): string | null {
   return normalizeWorkspacePath(thread?.metadata?.workspacePath)
+}
+
+function sanitizeHarnessNameInput(value: string): string {
+  return value.replace(/\s+/g, "")
+}
+
+function readThreadHarnessFeature(thread: Thread): HarnessFeatureThreadMetadata | null {
+  const harnessFeature = thread.metadata?.harnessFeature
+  if (!harnessFeature || typeof harnessFeature !== "object") return null
+
+  const metadata = harnessFeature as Record<string, unknown>
+  const projectId = typeof metadata.projectId === "string" ? metadata.projectId.trim() : ""
+  const slug = typeof metadata.slug === "string" ? metadata.slug.trim() : ""
+  if (!projectId || !slug) return null
+
+  const source =
+    typeof metadata.source === "string" && metadata.source.trim()
+      ? metadata.source
+      : HARNESS_SOURCE
+  return { projectId, slug, source }
+}
+
+function toSessionTimestamp(value: Date | string): string {
+  const date = typeof value === "string" ? new Date(value) : value
+  return Number.isNaN(date.getTime()) ? new Date(0).toISOString() : date.toISOString()
+}
+
+function buildHarnessSessionIndex(threads: Thread[]): HarnessSessionIndex {
+  const byProject = new Map<string, HarnessSessionBinding[]>()
+  const byProjectSlug = new Map<string, Map<string, HarnessSessionBinding[]>>()
+
+  for (const thread of threads) {
+    const metadata = readThreadHarnessFeature(thread)
+    if (!metadata) continue
+
+    const session: HarnessSessionBinding = {
+      projectId: metadata.projectId,
+      slug: metadata.slug,
+      threadId: thread.thread_id,
+      source: metadata.source,
+      createdAt: toSessionTimestamp(thread.created_at),
+      lastActiveAt: toSessionTimestamp(thread.updated_at)
+    }
+
+    let projectSessions = byProject.get(metadata.projectId)
+    if (!projectSessions) {
+      projectSessions = []
+      byProject.set(metadata.projectId, projectSessions)
+    }
+    projectSessions.push(session)
+
+    const slugMap = byProjectSlug.get(metadata.projectId) ?? new Map<string, HarnessSessionBinding[]>()
+    let slugSessions = slugMap.get(metadata.slug)
+    if (!slugSessions) {
+      slugSessions = []
+      slugMap.set(metadata.slug, slugSessions)
+    }
+    slugSessions.push(session)
+    byProjectSlug.set(metadata.projectId, slugMap)
+  }
+
+  const sortSessions = (sessions: HarnessSessionBinding[]): void => {
+    sessions.sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))
+  }
+  for (const sessions of byProject.values()) sortSessions(sessions)
+  for (const slugMap of byProjectSlug.values()) {
+    for (const sessions of slugMap.values()) sortSessions(sessions)
+  }
+
+  return { byProject, byProjectSlug }
+}
+
+function getProjectSessions(index: HarnessSessionIndex, projectId: string): HarnessSessionBinding[] {
+  return index.byProject.get(projectId) ?? []
+}
+
+function getFeatureSessions(index: HarnessSessionIndex, projectId: string, slug: string): HarnessSessionBinding[] {
+  return index.byProjectSlug.get(projectId)?.get(slug) ?? []
+}
+
+function withDerivedRunSessions(
+  detail: HarnessRunDetailViewModel | null,
+  sessions: HarnessSessionBinding[]
+): HarnessRunDetailViewModel | null {
+  return detail ? { ...detail, sessions } : null
+}
+
+function getHarnessSidebarPortalNode(): HTMLElement | null {
+  return document.getElementById(HARNESS_SIDEBAR_PORTAL_ID)
+}
+
+function useHarnessSidebarPortalNode(): HTMLElement | null {
+  const [portalNode, setPortalNode] = useState<HTMLElement | null>(() => getHarnessSidebarPortalNode())
+
+  useLayoutEffect(() => {
+    const syncPortalNode = (): void => {
+      const next = getHarnessSidebarPortalNode()
+      setPortalNode((current) => (current === next ? current : next))
+    }
+
+    syncPortalNode()
+    const observer = new MutationObserver(syncPortalNode)
+    observer.observe(document.body, { childList: true, subtree: true })
+    return () => observer.disconnect()
+  }, [])
+
+  return portalNode
+}
+
+function createUnboundRunDetail(
+  detail: HarnessProjectDetailViewModel,
+  slug: string,
+  sessions: HarnessSessionBinding[]
+): HarnessRunDetailViewModel {
+  return {
+    project: {
+      projectId: detail.project.projectId,
+      name: detail.project.name,
+      projectCode: detail.project.projectCode,
+      productCode: detail.project.productCode,
+      workspacePath: detail.project.workspacePath
+    },
+    adapterSnapshot: {
+      schemaVersion: "harness.adapter.inspect.v1",
+      mode: "run",
+      mock: false
+    },
+    workflow: detail.workflow,
+    run: {
+      id: slug,
+      kind: "feature",
+      slug,
+      title: slug,
+      hookLogRefs: [],
+      watchRefs: [],
+      currentNodeId: "",
+      nodes: [],
+      unmatchedHooks: []
+    },
+    sessions
+  }
 }
 
 async function getLatestSessionWorkspacePath(
@@ -237,7 +392,7 @@ interface CreateHarnessSessionParams {
 async function createHarnessSession(params: CreateHarnessSessionParams): Promise<Thread> {
   const { projectId, slug, titleSource, sessions, threadsById, threadStates, createThread } = params
   const workspacePath = await getLatestSessionWorkspacePath(sessions, threadsById, threadStates)
-  const thread = await createThread(
+  return createThread(
     {
       title: `特性: ${titleSource}`,
       workspacePath,
@@ -245,8 +400,6 @@ async function createHarnessSession(params: CreateHarnessSessionParams): Promise
     },
     { preserveView: true }
   )
-  await window.api.harnessBoard.linkSession({ projectId, slug, threadId: thread.thread_id })
-  return thread
 }
 
 function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boolean {
@@ -579,7 +732,9 @@ function ProjectFormDialog({
                 项目名称 *
                 <Input
                   value={form.name}
-                  onChange={(event) => onChange({ ...form, name: event.target.value })}
+                  onChange={(event) =>
+                    onChange({ ...form, name: sanitizeHarnessNameInput(event.target.value) })
+                  }
                   placeholder="请输入"
                   className="bg-background"
                   aria-invalid={projectNameError ? true : undefined}
@@ -590,7 +745,9 @@ function ProjectFormDialog({
                 项目编号 *
                 <Input
                   value={form.projectCode}
-                  onChange={(event) => onChange({ ...form, projectCode: event.target.value })}
+                  onChange={(event) =>
+                    onChange({ ...form, projectCode: sanitizeHarnessNameInput(event.target.value) })
+                  }
                   placeholder="请输入"
                   className="bg-background"
                   aria-invalid={projectCodeError ? true : undefined}
@@ -740,7 +897,9 @@ function ProjectEditDialog({
                 项目名称 *
                 <Input
                   value={form.name}
-                  onChange={(event) => onChange({ ...form, name: event.target.value })}
+                  onChange={(event) =>
+                    onChange({ ...form, name: sanitizeHarnessNameInput(event.target.value) })
+                  }
                   placeholder="请输入"
                   className="bg-background"
                   aria-invalid={projectNameError ? true : undefined}
@@ -751,7 +910,9 @@ function ProjectEditDialog({
                 项目编号 *
                 <Input
                   value={form.projectCode}
-                  onChange={(event) => onChange({ ...form, projectCode: event.target.value })}
+                  onChange={(event) =>
+                    onChange({ ...form, projectCode: sanitizeHarnessNameInput(event.target.value) })
+                  }
                   placeholder="请输入"
                   className="bg-background"
                   aria-invalid={projectCodeError ? true : undefined}
@@ -878,7 +1039,7 @@ function FeatureCreateDialog({
             特性名称 *
             <Input
               value={featureName}
-              onChange={(event) => onChange(event.target.value)}
+              onChange={(event) => onChange(sanitizeHarnessNameInput(event.target.value))}
               placeholder="请输入特性名称"
               className="bg-background"
               autoFocus
@@ -1738,6 +1899,7 @@ function ProjectDetailPage({
 function FeatureDetailPage({
   detail,
   loading,
+  unbound,
   initialSessionThreadId,
   onBackToList,
   onBackToProject,
@@ -1747,6 +1909,7 @@ function FeatureDetailPage({
 }: {
   detail: HarnessRunDetailViewModel | null
   loading: boolean
+  unbound?: boolean
   initialSessionThreadId?: string
   onBackToList: () => void
   onBackToProject: () => void
@@ -1851,7 +2014,7 @@ function FeatureDetailPage({
   }, [activeDetailTab, selectThread, selectedSessionThreadId])
 
   const handleCreateSession = useCallback(async (): Promise<void> => {
-    if (!detail || sessionBusy) return
+    if (!detail || sessionBusy || unbound) return
     setSessionBusy("create")
     try {
       const thread = await createHarnessSession({
@@ -1875,7 +2038,7 @@ function FeatureDetailPage({
     } finally {
       setSessionBusy(null)
     }
-  }, [allThreadStates, createThread, detail, detailKey, onSessionLinked, sessionBusy, threadsById])
+  }, [allThreadStates, createThread, detail, detailKey, onSessionLinked, sessionBusy, threadsById, unbound])
 
   const renderStageNodeStrip = (): React.JSX.Element | null => {
     if (!detail) return null
@@ -2018,7 +2181,7 @@ function FeatureDetailPage({
               size="sm"
               className="gap-2"
               onClick={onRefresh}
-              disabled={loading || !detail}
+              disabled={loading || !detail || unbound}
             >
               {loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
               刷新
@@ -2028,7 +2191,7 @@ function FeatureDetailPage({
               size="sm"
               className={cn("gap-2", harnessActionButtonClassName)}
               onClick={() => void handleCreateSession()}
-              disabled={loading || !detail || sessionBusy !== null}
+              disabled={loading || !detail || unbound || sessionBusy !== null}
             >
               <span aria-hidden="true" className={harnessActionOverlayClassName} />
               <span className={harnessActionIconClassName}>
@@ -2163,10 +2326,13 @@ function ProjectFeatureSidebar({
       <ScrollArea className="min-h-0 flex-1">
         <div className="space-y-1 px-2 pb-2">
           {groups.map((group) => {
+            const run = group.run
             const isCollapsed = collapsedKeys.has(group.key)
             const selected =
               selectedFeature?.projectId === group.project.projectId &&
-              selectedFeature.slug === group.run.slug
+              (run
+                ? selectedFeature.slug === run.slug
+                : group.sessions.some((session) => session.slug === selectedFeature.slug))
             const creatingSession = creatingSessionKey === group.key
 
             return (
@@ -2191,31 +2357,37 @@ function ProjectFeatureSidebar({
                     </button>
                     <div className="flex min-w-0 flex-1 items-center gap-1.5">
                       <Workflow className="size-4 shrink-0 text-muted-foreground" />
-                      <span className="min-w-0 flex-1 truncate text-xs font-medium" title={group.run.title}>
-                        {group.run.title}
+                      <span className="min-w-0 flex-1 truncate text-xs font-medium" title={group.title}>
+                        {group.title}
                       </span>
                     </div>
                   </div>
-                  <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
-                    <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
+                  {run ? (
+                    <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
+                      <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
+                        {group.sessions.length}
+                      </span>
+                      <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="size-6 shrink-0 opacity-70 hover:bg-accent/20"
+                          title="新增会话"
+                          disabled={creatingSession}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            void onCreateSession(group.project, run, group.sessions)
+                          }}
+                        >
+                          {creatingSession ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />}
+                        </Button>
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="ml-auto flex h-6 w-14 shrink-0 items-center justify-end px-1 text-[10px] tabular-nums text-muted-foreground">
                       {group.sessions.length}
                     </span>
-                    <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        className="size-6 shrink-0 opacity-70 hover:bg-accent/20"
-                        title="新增会话"
-                        disabled={creatingSession}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          void onCreateSession(group.project, group.run, group.sessions)
-                        }}
-                      >
-                        {creatingSession ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />}
-                      </Button>
-                    </span>
-                  </span>
+                  )}
                 </div>
 
                 {!isCollapsed && (
@@ -2243,8 +2415,8 @@ function ProjectFeatureSidebar({
                             isEditing={editingThreadId === thread.thread_id}
                             isUnread={false}
                             editingTitle={editingTitle}
-                            hoverTitle={`所属项目：${group.project.name}`}
-                            onSelect={() => onSelectSession(group.project.projectId, group.run.slug, thread.thread_id)}
+                            hoverTitle={`所属项目：${group.project.name} / ${group.title}`}
+                            onSelect={() => onSelectSession(group.project.projectId, session.slug, thread.thread_id)}
                             onRunFinished={() => {}}
                             onDelete={() => onDeleteSession(thread)}
                             onExport={() => void onExportSession(thread)}
@@ -2362,18 +2534,42 @@ export function HarnessBoardView(): React.JSX.Element {
     void loadProjects()
   }, [loadProjects])
 
+  const selectedFeatureProjectDetail = selectedFeature
+    ? detailsByProjectId[selectedFeature.projectId]
+    : undefined
+
   useEffect(() => {
     if (!selectedFeature) {
       setRunDetail(null)
       return
     }
+    if (
+      selectedFeatureProjectDetail &&
+      !selectedFeatureProjectDetail.runs.some((run) => run.slug === selectedFeature.slug)
+    ) {
+      setRunDetail(null)
+      setLoadingRun(false)
+      return
+    }
+    let cancelled = false
+    setRunDetail(null)
     setLoadingRun(true)
     window.api.harnessBoard
       .getRunDetail(selectedFeature.projectId, selectedFeature.slug)
-      .then(setRunDetail)
-      .catch((error) => setLoadError(cleanIpcError(error)))
-      .finally(() => setLoadingRun(false))
-  }, [selectedFeature])
+      .then((detail) => {
+        if (!cancelled) setRunDetail(detail)
+      })
+      .catch((error) => {
+        if (!cancelled) setLoadError(cleanIpcError(error))
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingRun(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectedFeature, selectedFeatureProjectDetail])
 
   useEffect(() => {
     return window.api.harnessBoard.onWatchRefsChanged((event) => {
@@ -2613,12 +2809,12 @@ export function HarnessBoardView(): React.JSX.Element {
 
   const handleSubmitFeature = useCallback(async (): Promise<void> => {
     if (!featureDialogProject || creatingFeatureRef.current) return
-    const feature = featureName.trim()
+    const feature = sanitizeHarnessNameInput(featureName).trim()
     if (!feature) {
       setFeatureError("特性名称不能为空")
       return
     }
-    const featureNameError = getHarnessNameError("特性名称", featureName)
+    const featureNameError = getHarnessNameError("特性名称", feature)
     if (featureNameError) {
       setFeatureError(featureNameError)
       return
@@ -2635,7 +2831,7 @@ export function HarnessBoardView(): React.JSX.Element {
       const thread = await createThread(
         {
           title: `特性: ${result.title || result.slug}`,
-          workspacePath: result.workspacePath,
+          workspacePath: null,
           harnessFeature: {
             projectId: result.projectId,
             slug: result.slug,
@@ -2644,11 +2840,6 @@ export function HarnessBoardView(): React.JSX.Element {
         },
         { preserveView: true }
       )
-      await window.api.harnessBoard.linkSession({
-        projectId: result.projectId,
-        slug: result.slug,
-        threadId: thread.thread_id
-      })
 
       setFeatureDialogProject(null)
       setFeatureName("")
@@ -2673,16 +2864,29 @@ export function HarnessBoardView(): React.JSX.Element {
   ])
 
   const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
-  const threadIdSetRef = useRef<Set<string>>(new Set())
-  const threadIdSet = useMemo(() => {
-    const next = new Set(threads.map((t) => t.thread_id))
-    const prev = threadIdSetRef.current
-    if (prev.size === next.size && [...next].every((id) => prev.has(id))) {
-      return prev
-    }
-    threadIdSetRef.current = next
-    return next
-  }, [threads])
+  const harnessSessionIndex = useMemo(() => buildHarnessSessionIndex(threads), [threads])
+  const selectedFeatureSessions = useMemo(
+    () =>
+      selectedFeature
+        ? getFeatureSessions(harnessSessionIndex, selectedFeature.projectId, selectedFeature.slug)
+        : [],
+    [harnessSessionIndex, selectedFeature]
+  )
+  const runDetailWithSessions = useMemo(
+    () => {
+      if (runDetail) return withDerivedRunSessions(runDetail, selectedFeatureSessions)
+      if (!selectedFeature || !selectedFeatureProjectDetail) {
+        return null
+      }
+      const featureExists = selectedFeatureProjectDetail.runs.some((run) => run.slug === selectedFeature.slug)
+      return featureExists
+        ? null
+        : createUnboundRunDetail(selectedFeatureProjectDetail, selectedFeature.slug, selectedFeatureSessions)
+    },
+    [runDetail, selectedFeature, selectedFeatureProjectDetail, selectedFeatureSessions]
+  )
+  const effectiveLoadingRun = loadingRun && !runDetailWithSessions
+  const showingUnboundRunDetail = runDetailWithSessions !== null && runDetail === null
   const selectedProject =
     selectedProjectId ? projects.find((project) => project.projectId === selectedProjectId) ?? null : null
   const selectedProjectDetail = selectedProjectId ? detailsByProjectId[selectedProjectId] : undefined
@@ -2739,21 +2943,42 @@ export function HarnessBoardView(): React.JSX.Element {
           continue
         }
 
-        const sessions = (detail.sessionsBySlug[run.slug] ?? []).filter((session) =>
-          threadIdSet.has(session.threadId)
-        )
+        const sessions = getFeatureSessions(harnessSessionIndex, project.projectId, run.slug)
         if (!selectedProjectId && sessions.length === 0) continue
         groups.push({
           key: `${project.projectId}:${run.slug}`,
           project,
           run,
+          title: run.title,
           sessions
+        })
+      }
+
+      const runSlugs = new Set(detail.runs.map((run) => run.slug))
+      let unboundSessions = getProjectSessions(harnessSessionIndex, project.projectId).filter(
+        (session) => !runSlugs.has(session.slug)
+      )
+      if (selectedFeature) {
+        if (selectedFeature.projectId !== project.projectId || runSlugs.has(selectedFeature.slug)) {
+          unboundSessions = []
+        } else {
+          unboundSessions = unboundSessions.filter((session) => session.slug === selectedFeature.slug)
+        }
+      }
+
+      if (unboundSessions.length > 0) {
+        groups.push({
+          key: `${project.projectId}:${UNBOUND_FEATURE_GROUP_KEY}`,
+          project,
+          run: null,
+          title: "未绑定会话",
+          sessions: unboundSessions
         })
       }
     }
 
     return groups
-  }, [detailsByProjectId, projects, selectedFeature, selectedProjectId, threadIdSet])
+  }, [detailsByProjectId, harnessSessionIndex, projects, selectedFeature, selectedProjectId])
 
   const allFeatureGroupsCollapsed =
     projectSidebarGroups.length > 0 &&
@@ -2907,7 +3132,7 @@ export function HarnessBoardView(): React.JSX.Element {
     setIsViewingSession(viewing)
   }, [])
 
-  const sidebarPortalNode = document.getElementById("harness-sidebar-portal")
+  const sidebarPortalNode = useHarnessSidebarPortalNode()
   const sidebarPortal =
     sidebarPortalNode
       ? createPortal(
@@ -2958,8 +3183,9 @@ export function HarnessBoardView(): React.JSX.Element {
     return (
       <>
         <FeatureDetailPage
-          detail={runDetail}
-          loading={loadingRun}
+          detail={runDetailWithSessions}
+          loading={effectiveLoadingRun}
+          unbound={showingUnboundRunDetail}
           initialSessionThreadId={selectedFeature.initialSessionThreadId}
           onBackToList={handleBackToProjectList}
           onBackToProject={handleBackToProject}

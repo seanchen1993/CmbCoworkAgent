@@ -17,7 +17,8 @@ import {
   Minimize2,
   FolderPlus,
   Download,
-  MessageSquare
+  MessageSquare,
+  Terminal
 } from "lucide-react"
 import { toast } from "sonner"
 import type { ChatXRobotConfig } from "@/types"
@@ -324,6 +325,8 @@ export function ThreadSidebar(): React.JSX.Element {
     setShowCustomizeView,
     showKanbanView,
     setShowKanbanView,
+    showClaudeCodeView,
+    setShowClaudeCodeView,
     showHarnessBoardView,
     setShowHarnessBoardView,
     showDashboardView,
@@ -372,19 +375,10 @@ export function ThreadSidebar(): React.JSX.Element {
   const [threadToDelete, setThreadToDelete] = useState<Thread | null>(null)
   const [exportingThreadId, setExportingThreadId] = useState<string | null>(null)
   const [projectToDelete, setProjectToDelete] = useState<ThreadProject | null>(null)
-  const [activeSidebarTab, setActiveSidebarTab] = useState<SidebarTab>(
+  const activeSidebarTab: SidebarTab =
     showHarnessBoardView || mainView === "harness" ? "project" : "chat"
-  )
-
-  useEffect(() => {
-    if (mainView === "harness") {
-      setActiveSidebarTab("project")
-    }
-  }, [mainView])
 
   const handleSelectChatTab = useCallback(async (): Promise<void> => {
-    setActiveSidebarTab("chat")
-
     if (mainView === "harness" || showHarnessBoardView) {
       const previousThread = previousThreadId
         ? threads.find((thread) => thread.thread_id === previousThreadId)
@@ -570,12 +564,10 @@ export function ThreadSidebar(): React.JSX.Element {
   }, [loadRobots, showCustomizeView])
 
   const handleNewThread = async (): Promise<void> => {
-    setActiveSidebarTab("chat")
     await createThread({ title: `Thread ${new Date().toLocaleDateString()}` })
   }
 
   const handleNewProjectThread = async (project: ThreadProject): Promise<void> => {
-    setActiveSidebarTab("chat")
     expandProject(project.key)
     await createThread({
       title: `Thread ${new Date().toLocaleDateString()}`,
@@ -586,7 +578,6 @@ export function ThreadSidebar(): React.JSX.Element {
   const [creatingRobot, setCreatingRobot] = useState(false)
 
   const handleAddProject = async (): Promise<void> => {
-    setActiveSidebarTab("chat")
     if (selectingProjectFolder) return
     setSelectingProjectFolder(true)
     try {
@@ -603,7 +594,6 @@ export function ThreadSidebar(): React.JSX.Element {
 
   const handleNewRobotThread = async (robot: ChatXRobotConfig): Promise<void> => {
     if (creatingRobot) return
-    setActiveSidebarTab("chat")
     setCreatingRobot(true)
     setShowRobotPicker(false)
     try {
@@ -727,7 +717,6 @@ export function ThreadSidebar(): React.JSX.Element {
                 : "text-muted-foreground hover:text-foreground"
             )}
             onClick={() => {
-              setActiveSidebarTab("project")
               setShowHarnessBoardView(true)
             }}
           >
@@ -757,7 +746,6 @@ export function ThreadSidebar(): React.JSX.Element {
                 mainView === "customize" && "bg-muted"
               )}
               onClick={() => {
-                setActiveSidebarTab("chat")
                 setShowCustomizeView(true, pendingEvolution ? "evolution" : undefined)
               }}
             >
@@ -775,7 +763,6 @@ export function ThreadSidebar(): React.JSX.Element {
                 showKanbanView && "bg-muted"
               )}
               onClick={() => {
-                setActiveSidebarTab("chat")
                 setShowKanbanView(!showKanbanView)
               }}
             >
@@ -783,6 +770,20 @@ export function ThreadSidebar(): React.JSX.Element {
                 <LayoutDashboard className="size-3" />
               </div>
               <span className="text-muted-foreground">看板视图</span>
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                "w-full justify-start gap-2 text-sm font-semibold",
+                showClaudeCodeView && "bg-muted"
+              )}
+              onClick={() => setShowClaudeCodeView(!showClaudeCodeView)}
+            >
+              <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+                <Terminal className="size-3" />
+              </div>
+              <span className="text-muted-foreground">Code</span>
             </Button>
             {dashboardAllowed && (
               <Button
@@ -793,7 +794,6 @@ export function ThreadSidebar(): React.JSX.Element {
                   showDashboardView && "bg-muted"
                 )}
                 onClick={() => {
-                  setActiveSidebarTab("chat")
                   setShowDashboardView(!showDashboardView)
                 }}
               >
@@ -833,25 +833,7 @@ export function ThreadSidebar(): React.JSX.Element {
               </div>
             )}
           </>
-        ) : (
-          <Button
-            variant="ghost"
-            size="sm"
-            className={cn(
-              "w-full justify-start gap-2 text-sm font-semibold",
-              showHarnessBoardView && "bg-muted"
-            )}
-            onClick={() => {
-              setActiveSidebarTab("project")
-              setShowHarnessBoardView(true)
-            }}
-          >
-            <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-              <Workflow className="size-3" />
-            </div>
-            <span className="text-muted-foreground">AUTOBIZDEVOPS项目</span>
-          </Button>
-        )}
+        ) : null}
       </div>
 
       {activeSidebarTab === "project" ? (
