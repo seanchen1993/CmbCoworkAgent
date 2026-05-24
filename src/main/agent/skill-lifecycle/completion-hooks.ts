@@ -1,6 +1,10 @@
 import { runHooksEnriched } from "../../hooks/required-skill"
 import type { HookContext, HookResultCallback } from "../../hooks/runner"
-import { resolveEnabledHooksForRun, type HookScopeController } from "../../hooks/scope"
+import {
+  resolveEnabledHooksForRun,
+  type HookScopeController,
+  type ScopeSkipCallback
+} from "../../hooks/scope"
 import type { HookConfig, HookEvent, HookResult } from "../../hooks/types"
 import type { SkillUseTracker } from "./tracker"
 
@@ -133,21 +137,25 @@ export function mergePostSkillUseResults(results: HookResult[]): HookResult | nu
 export async function runPostSkillUseHooksForActivatedSkills({
   threadId,
   workspacePath,
+  turnId,
   pluginOutputDir,
   getStopContext,
   hookScope,
   skillUseTracker,
   onHookResult,
+  onHookSkippedFactory,
   executeHooks = runHooksEnriched,
   resolveHooks
 }: {
   threadId: string
   workspacePath?: string
+  turnId?: string
   pluginOutputDir?: string
   getStopContext: () => StopHookContext
   hookScope: HookScopeController
   skillUseTracker?: SkillUseTracker
   onHookResult?: HookResultCallback
+  onHookSkippedFactory?: (event: HookEvent) => ScopeSkipCallback | undefined
   executeHooks?: HookExecutor
   resolveHooks?: (event: HookEvent, context: HookContext) => HookConfig[]
 }): Promise<HookResult | null> {
@@ -166,6 +174,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
       workspacePath,
       pluginOutputDir,
       sessionId: threadId,
+      turnId,
       skillName: skill.name,
       skillPath: skill.path,
       skillRoot: skill.rootDir,
@@ -179,7 +188,13 @@ export async function runPostSkillUseHooksForActivatedSkills({
     try {
       const hooks = resolveHooks
         ? resolveHooks("PostSkillUse", context)
-        : resolveEnabledHooksForRun(workspacePath, "PostSkillUse", context, hookScope)
+        : resolveEnabledHooksForRun(
+            workspacePath,
+            "PostSkillUse",
+            context,
+            hookScope,
+            onHookSkippedFactory?.("PostSkillUse")
+          )
       const result = await executeHooks(hooks, "PostSkillUse", context, onHookResult)
       if (result) results.push(result)
     } catch (e) {
@@ -195,6 +210,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
 export async function runCompletionHooksWithRevision({
   threadId,
   workspacePath,
+  turnId,
   pluginOutputDir,
   abortSignal,
   getStopContext,
@@ -204,6 +220,7 @@ export async function runCompletionHooksWithRevision({
   sendNotice,
   sendError,
   onHookResult,
+  onHookSkippedFactory,
   maxRevisionAttempts,
   revisionPromptPrefix,
   runPostSkillUseHooks,
@@ -211,6 +228,7 @@ export async function runCompletionHooksWithRevision({
 }: {
   threadId: string
   workspacePath?: string
+  turnId?: string
   pluginOutputDir?: string
   abortSignal: AbortSignal
   getStopContext: () => StopHookContext
@@ -220,6 +238,7 @@ export async function runCompletionHooksWithRevision({
   sendNotice: (message: string) => void
   sendError: (message: string) => void
   onHookResult?: HookResultCallback
+  onHookSkippedFactory?: (event: HookEvent) => ScopeSkipCallback | undefined
   maxRevisionAttempts: number
   revisionPromptPrefix: string
   runPostSkillUseHooks?: () => Promise<HookResult | null>
@@ -233,11 +252,13 @@ export async function runCompletionHooksWithRevision({
       : runPostSkillUseHooksForActivatedSkills({
           threadId,
           workspacePath,
+          turnId,
           pluginOutputDir,
           getStopContext,
           hookScope,
           skillUseTracker,
-          onHookResult
+          onHookResult,
+          onHookSkippedFactory
         }))
 
     // continue:false short-circuits — halt the turn immediately, no revision.
@@ -290,15 +311,18 @@ export async function runCompletionHooksWithRevision({
               workspacePath,
               pluginOutputDir,
               sessionId: threadId,
+              turnId,
               stopContext: getStopContext()
             },
-            hookScope
+            hookScope,
+            onHookSkippedFactory?.("Stop")
           ),
           "Stop",
           {
             workspacePath,
             pluginOutputDir,
             sessionId: threadId,
+            turnId,
             stopContext: getStopContext()
           },
           onHookResult

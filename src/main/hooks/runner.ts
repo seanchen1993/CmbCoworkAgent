@@ -7,7 +7,8 @@ import type { HookConfig, HookEvent, HookResult } from "./types"
 import type { PluginHookMetadata, SkillHookMetadata } from "../types"
 import { joinHookText } from "./text"
 import { mergeUpdatedInput } from "./updated-input"
-import { getCustomModelConfigs } from "../storage"
+import { getCustomModelConfigs, getHookLoggingConfig } from "../storage"
+import { persistHookResultRecord } from "./log-record"
 
 const DEFAULT_TIMEOUT = 10_000
 const MAX_OUTPUT_BYTES = 1_000_000 // 1 MB per hook
@@ -31,6 +32,8 @@ export interface HookContext {
   workspacePath?: string
   /** Session / thread identifier — exposed to hooks as SESSION_ID and session_id in stdin JSON */
   sessionId?: string
+  /** Renderer user message id that owns this hook event, used only for log grouping. */
+  turnId?: string
   /** Plugin that owns the capability currently being used, when known. */
   pluginId?: string
   pluginName?: string
@@ -57,7 +60,12 @@ export interface HookContext {
   pluginOutputDir?: string
 }
 
-function getCommandCwd(context: HookContext): string {
+/**
+ * Canonical cwd resolver used both for spawning the child process AND for
+ * populating `envelope.cwd` in diagnostic logs. Keep these two callers in
+ * sync so the UI's reported cwd is always what the hook actually saw.
+ */
+export function getCommandCwd(context: HookContext): string {
   return context.hookSourceRoot ?? context.workspacePath ?? process.cwd()
 }
 
@@ -306,7 +314,8 @@ function decodeHookOutput(
 function executeCommandHook(
   hook: HookConfig,
   env: Record<string, string>,
-  stdinPayload: string
+  stdinPayload: string,
+  cwd: string
 ): Promise<HookResult> {
   return new Promise((resolve) => {
     const command = hook.command ?? ""
@@ -325,7 +334,7 @@ function executeCommandHook(
       shell: isWindows ? true : false,
       stdio: ["pipe", "pipe", "pipe"],
       timeout,
-      cwd: env.HOOK_SOURCE_ROOT || env.WORKSPACE_PATH || process.cwd()
+      cwd
     })
 
     // Write the Claude Code JSON payload to stdin so hooks can parse structured input.
@@ -481,6 +490,35 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
   })
 }
 
+function buildPromptHookUserMessage(
+  event: HookEvent,
+  policy: string,
+  context: HookContext
+): string {
+  return JSON.stringify(
+    {
+      hook_event_name: event,
+      policy,
+      ...(context.userPrompt ? { prompt: context.userPrompt } : {}),
+      tool_name: context.toolName ?? "(unknown)",
+      tool_args: context.toolArgs ?? {},
+      ...(context.toolResult !== undefined ? { tool_result: context.toolResult } : {}),
+      ...(context.skillName ? { skill_name: context.skillName } : {}),
+      ...(context.skillPath ? { skill_path: context.skillPath } : {}),
+      ...(context.skillRoot ? { skill_root: context.skillRoot } : {}),
+      ...(context.pluginRoot ? { plugin_root: context.pluginRoot } : {}),
+      ...(context.hookSourceType ? { hook_source_type: context.hookSourceType } : {}),
+      ...(context.hookSourceRoot ? { hook_source_root: context.hookSourceRoot } : {}),
+      ...(context.hookSourcePath ? { hook_source_path: context.hookSourcePath } : {}),
+      cwd: getCommandCwd(context),
+      ...(context.stopContext ? { stop_context: context.stopContext } : {}),
+      workspace: context.workspacePath ?? ""
+    },
+    null,
+    2
+  )
+}
+
 /**
  * Execute a prompt-type hook: ask the configured LLM whether to allow or block.
  *
@@ -522,28 +560,7 @@ async function executePromptHook(
     return fallbackResult("[PromptHook] No model configured — cannot evaluate prompt hook")
   }
 
-  const userMsg = JSON.stringify(
-    {
-      hook_event_name: event,
-      policy,
-      ...(context.userPrompt ? { prompt: context.userPrompt } : {}),
-      tool_name: context.toolName ?? "(unknown)",
-      tool_args: context.toolArgs ?? {},
-      ...(context.toolResult !== undefined ? { tool_result: context.toolResult } : {}),
-      ...(context.skillName ? { skill_name: context.skillName } : {}),
-      ...(context.skillPath ? { skill_path: context.skillPath } : {}),
-      ...(context.skillRoot ? { skill_root: context.skillRoot } : {}),
-      ...(context.pluginRoot ? { plugin_root: context.pluginRoot } : {}),
-      ...(context.hookSourceType ? { hook_source_type: context.hookSourceType } : {}),
-      ...(context.hookSourceRoot ? { hook_source_root: context.hookSourceRoot } : {}),
-      ...(context.hookSourcePath ? { hook_source_path: context.hookSourcePath } : {}),
-      cwd: getCommandCwd(context),
-      ...(context.stopContext ? { stop_context: context.stopContext } : {}),
-      workspace: context.workspacePath ?? ""
-    },
-    null,
-    2
-  )
+  const userMsg = buildPromptHookUserMessage(event, policy, context)
 
   let timeoutId: ReturnType<typeof setTimeout> | undefined
   try {
@@ -721,6 +738,11 @@ function applyConfiguredOnBlock(result: HookResult, hook: HookConfig): HookResul
 
 /**
  * Execute a single hook (command or prompt type).
+ *
+ * Always records `durationMs` on the result (wall-clock from entry to return).
+ * Also attaches the stdin payload when Hook diagnostic mode is enabled — the
+ * UI / persisted log uses it for debugging "what did the hook actually see".
+ * Off by default to avoid streaming user input through IPC + disk on every run.
  */
 async function executeHook(
   hook: HookConfig,
@@ -728,15 +750,27 @@ async function executeHook(
   context: HookContext,
   event: HookEvent
 ): Promise<HookResult> {
+  const startedAt = Date.now()
+  const diagnostic = getHookLoggingConfig().diagnostic
   const hookType = hook.type ?? "command"
   let result: HookResult
+  let stdinPayload: string | undefined
   if (hookType === "prompt") {
+    if (diagnostic) {
+      const policy = hook.prompt?.trim()
+      if (policy) stdinPayload = buildPromptHookUserMessage(event, policy, context)
+    }
     result = await executePromptHook(hook, context, event)
   } else {
-    const stdinPayload = buildHookStdinPayload(event, context)
-    result = await executeCommandHook(hook, env, stdinPayload)
+    const builtPayload = buildHookStdinPayload(event, context)
+    if (diagnostic) stdinPayload = builtPayload
+    result = await executeCommandHook(hook, env, builtPayload, getCommandCwd(context))
   }
-  return applyConfiguredOnBlock(parseHookJsonOutput(result), hook)
+  const finalized = applyConfiguredOnBlock(parseHookJsonOutput(result), hook)
+  finalized.durationMs = Date.now() - startedAt
+  if (stdinPayload !== undefined) finalized.stdinPayload = stdinPayload
+  if (diagnostic) finalized.cwd = getCommandCwd(context)
+  return finalized
 }
 
 /**
@@ -848,19 +882,37 @@ function enrichContextFromHook(hook: HookConfig, context: HookContext): HookCont
   }
 }
 
+export function hookMatchesRunCriteria(
+  hook: HookConfig,
+  event: HookEvent,
+  context: HookContext
+): boolean {
+  return (
+    hook.enabled &&
+    hook.event === event &&
+    matchesName(hook.matcher, getMatcherTarget(event, context)) &&
+    !shouldSkipOnceHook(hook, event, context)
+  )
+}
+
+function recordHookResult(
+  event: HookEvent,
+  hook: HookConfig,
+  result: HookResult,
+  context: HookContext,
+  onHookResult?: HookResultCallback
+): void {
+  persistHookResultRecord(event, hook, result, context.turnId)
+  onHookResult?.(event, hook, result)
+}
+
 export async function runHooks(
   hooks: HookConfig[],
   event: HookEvent,
   context: HookContext,
   onHookResult?: HookResultCallback
 ): Promise<HookResult | null> {
-  const matched = hooks.filter(
-    (h) =>
-      h.enabled &&
-      h.event === event &&
-      matchesName(h.matcher, getMatcherTarget(event, context)) &&
-      !shouldSkipOnceHook(h, event, context)
-  )
+  const matched = hooks.filter((h) => hookMatchesRunCriteria(h, event, context))
 
   if (matched.length === 0) return null
 
@@ -878,7 +930,7 @@ export async function runHooks(
       console.log(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) "${(hook.command ?? hook.prompt ?? "").slice(0, 60)}" → exit=${result.exitCode}, blocked=${result.blocked}`
       )
-      onHookResult?.(event, hook, result)
+      recordHookResult(event, hook, result, hookContext, onHookResult)
       markOnceHookIfNeeded(hook, event, hookContext, result)
       // continue=false halts the entire agent turn, overrides everything else
       if (result.continue === false) {
@@ -954,7 +1006,7 @@ export async function runHooks(
       console.log(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
       )
-      onHookResult?.(event, hook, result)
+      recordHookResult(event, hook, result, hookContext, onHookResult)
       markOnceHookIfNeeded(hook, event, hookContext, result)
       if (result.continue === false) {
         shouldHalt = true
@@ -996,7 +1048,7 @@ export async function runHooks(
       console.log(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
       )
-      onHookResult?.(event, hook, result)
+      recordHookResult(event, hook, result, hookContext, onHookResult)
       markOnceHookIfNeeded(hook, event, hookContext, result)
 
       // continue:false → halt the turn (no revision); takes priority over decision:block.
@@ -1062,7 +1114,7 @@ export async function runHooks(
       console.log(
         `[Hooks] Stop hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
       )
-      onHookResult?.(event, hook, result)
+      recordHookResult(event, hook, result, hookContext, onHookResult)
       markOnceHookIfNeeded(hook, event, hookContext, result)
       if (result.continue === false) {
         stopReasons.push(
@@ -1129,7 +1181,7 @@ export async function runHooks(
       console.log(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
       )
-      onHookResult?.(event, hook, result)
+      recordHookResult(event, hook, result, hookContext, onHookResult)
       markOnceHookIfNeeded(hook, event, hookContext, result)
       if (result.continue === false) {
         stopReasons.push(
@@ -1164,7 +1216,46 @@ export async function runHooks(
     }
   }
 
-  // Notification / SessionStart / SessionEnd: fire-and-forget
+  // SessionEnd is awaited by thread deletion and app shutdown paths so hooks
+  // can finish and their diagnostic jsonl records can flush before teardown.
+  //
+  // Run hooks in parallel (each already has its own per-hook timeout — there's
+  // no ordering dependency at SessionEnd) and cap the total wall time so a
+  // single slow hook can't block the "delete thread" UI or app shutdown.
+  // Anything past the cap is allowed to keep running in the background; we
+  // just stop blocking the caller.
+  if (event === "SessionEnd") {
+    const SESSION_END_TOTAL_TIMEOUT_MS = 5_000
+    const tasks = matched.map(async (hook) => {
+      const hookContext = enrichContextFromHook(hook, context)
+      try {
+        const rawResult = await executeHook(
+          hook,
+          buildHookEnv(event, hookContext),
+          hookContext,
+          event
+        )
+        const result = applyForcedOutcome(rawResult, hook)
+        console.log(
+          `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
+        )
+        recordHookResult(event, hook, result, hookContext, onHookResult)
+        markOnceHookIfNeeded(hook, event, hookContext, result)
+        if (result.stderr) {
+          console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)
+        }
+      } catch (err) {
+        console.warn(`[Hooks] ${event} hook error:`, err)
+      }
+    })
+    await Promise.race([
+      Promise.allSettled(tasks),
+      new Promise<void>((resolve) => setTimeout(resolve, SESSION_END_TOTAL_TIMEOUT_MS))
+    ])
+    return null
+  }
+
+  // Notification / SessionStart: fire-and-forget
   for (const hook of matched) {
     const hookContext = enrichContextFromHook(hook, context)
     executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)
@@ -1173,7 +1264,7 @@ export async function runHooks(
         console.log(
           `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
         )
-        onHookResult?.(event, hook, result)
+        recordHookResult(event, hook, result, hookContext, onHookResult)
         markOnceHookIfNeeded(hook, event, hookContext, result)
         if (result.stderr) {
           console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)

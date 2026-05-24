@@ -15,6 +15,7 @@ export interface SkillActivationOptions {
   workspacePath?: string
   pluginOutputDir?: string
   sessionId?: string
+  turnId?: string
   hookScope?: HookScopeController
   firedSkillKeys?: Set<string>
   skillUseTracker?: SkillUseTracker
@@ -63,6 +64,7 @@ function buildSkillContext(options: SkillActivationOptions): HookContext {
     workspacePath: options.workspacePath,
     pluginOutputDir: options.pluginOutputDir,
     sessionId: options.sessionId,
+    turnId: options.turnId,
     skillName: options.skill.name,
     skillPath: options.skill.path,
     skillRoot: options.skill.rootDir,

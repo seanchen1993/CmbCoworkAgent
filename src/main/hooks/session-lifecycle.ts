@@ -1,6 +1,10 @@
 import { clearOnceStateForSession, runHooks, type HookResultCallback } from "./runner"
 import type { HookContext } from "./runner"
-import { resolveEnabledHooksForRun, type HookScopeController } from "./scope"
+import {
+  resolveEnabledHooksForRun,
+  type HookScopeController,
+  type ScopeSkipCallback
+} from "./scope"
 
 // Map<threadId, workspacePath?>. Cleanup paths:
 //   - fireSessionEnd(threadId)  ← threads:delete handler removes the entry
@@ -25,6 +29,8 @@ export function fireSessionStartOnce(
   workspacePath?: string,
   onHookResult?: HookResultCallback,
   hookScope?: HookScopeController,
+  onHookSkipped?: ScopeSkipCallback,
+  turnId?: string,
   pluginOutputDir?: string
 ): void {
   const existing = startedSessions.get(threadId)
@@ -39,11 +45,12 @@ export function fireSessionStartOnce(
   startedSessions.set(threadId, { workspacePath, pluginOutputDir, hookScope })
   const context: HookContext = {
     workspacePath,
-    pluginOutputDir,
-    sessionId: threadId
+    sessionId: threadId,
+    turnId,
+    pluginOutputDir
   }
   runHooks(
-    resolveEnabledHooksForRun(workspacePath, "SessionStart", context, hookScope),
+    resolveEnabledHooksForRun(workspacePath, "SessionStart", context, hookScope, onHookSkipped),
     "SessionStart",
     context,
     onHookResult

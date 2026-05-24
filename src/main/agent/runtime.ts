@@ -97,6 +97,7 @@ import {
   createHookScope,
   extractPluginIdFromProviderKey,
   resolveEnabledHooksForRun,
+  type ScopeSkipCallback,
   type HookScopeController
 } from "../hooks/scope"
 import { ApprovalStore } from "./approval-store"
@@ -447,7 +448,7 @@ function createScopedMcpCapabilityService(
     context: HookContext
   ) => ReturnType<typeof resolveEnabledHooksForRun>,
   onHookResult: HookResultCallback | undefined,
-  baseContext: { workspacePath: string; threadId: string; pluginOutputDir?: string }
+  baseContext: { workspacePath: string; threadId: string; turnId?: string; pluginOutputDir?: string }
 ): McpCapabilityService {
   const getPluginName = (pluginId: string): string | undefined => {
     try {
@@ -488,6 +489,7 @@ function createScopedMcpCapabilityService(
         toolArgs: args,
         workspacePath: baseContext.workspacePath,
         sessionId: baseContext.threadId,
+        turnId: baseContext.turnId,
         pluginOutputDir: baseContext.pluginOutputDir,
         pluginId,
         pluginName: pluginId ? getPluginName(pluginId) : undefined
@@ -1553,6 +1555,10 @@ export interface CreateAgentRuntimeOptions {
   maxRetryAttempts?: number
   /** Callback invoked after each hook executes — used to emit results to the renderer. */
   onHookResult?: HookResultCallback
+  /** Renderer user message id that owns this chat turn, used to group hook logs. */
+  hookTurnId?: string
+  /** Factory for diagnostic "matched but scope-filtered" hook rows. */
+  onHookSkippedFactory?: (event: HookEvent) => ScopeSkipCallback | undefined
   /** Run-scoped plugin/skill activation state for hook resolution. */
   hookScope?: HookScopeController
   /** Shared run-scoped set used to avoid firing skill lifecycle hooks twice. */
@@ -1578,6 +1584,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     maxRetryAttempts,
     enableAgentsPrompt = true,
     onHookResult,
+    hookTurnId,
+    onHookSkippedFactory,
     hookScope: providedHookScope,
     skillHookKeys,
     skillUseTracker,
@@ -1599,7 +1607,13 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Workspace path:", workspacePath)
   const hookScope = providedHookScope ?? createHookScope()
   const resolveHooksForContext = (event: HookEvent, context: HookContext) =>
-    resolveEnabledHooksForRun(workspacePath, event, context, hookScope)
+    resolveEnabledHooksForRun(
+      workspacePath,
+      event,
+      context,
+      hookScope,
+      onHookSkippedFactory?.(event)
+    )
 
   const selectedModelId = modelId?.startsWith("custom:")
     ? modelId.slice("custom:".length)
@@ -1675,6 +1689,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     hookResolver: resolveHooksForContext,
     hookScope,
     onHookResult,
+    hookTurnId,
     pluginOutputDir,
     onFileMutation,
     abortSignal: options.abortSignal,
@@ -1728,6 +1743,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
         workspacePath,
         sessionId: threadId,
+        turnId: hookTurnId
         pluginOutputDir
       }
       runHooks(
@@ -1865,7 +1881,7 @@ The workspace root is: ${workspacePath}`
     hookScope,
     resolveHooksForContext,
     onHookResult,
-    { workspacePath, threadId, pluginOutputDir }
+    { workspacePath, threadId, pluginOutputDir, turnId: hookTurnId }
   )
   const codeExecEnabled = isCodeExecEnabled()
   const allMcpTools = await capabilityService.listTools()
@@ -1996,6 +2012,7 @@ The workspace root is: ${workspacePath}`
     hookScope,
     resolveHooksForContext,
     onHookResult,
+    hookTurnId,
     skipToolNames: toolHookExclusions
   })
 
