@@ -118,7 +118,7 @@ interface SystemGroup {
 interface SelectedFeature {
   projectId: string
   slug: string
-  initialSessionThreadId?: string
+  activeSessionThreadId?: string
 }
 
 interface ProjectFeatureSessionGroup {
@@ -162,7 +162,14 @@ interface WorkspaceChangeState {
   error?: string
 }
 
-type ThreadWorkspaceStateMap = Record<string, { workspacePath?: string | null } | undefined>
+type ThreadWorkspaceStateMap = Record<
+  string,
+  {
+    workspacePath?: string | null
+    scheduledTaskLoading?: boolean
+    pendingApproval?: unknown
+  } | undefined
+>
 
 interface HarnessFeatureThreadMetadata {
   projectId: string
@@ -1900,21 +1907,23 @@ function FeatureDetailPage({
   detail,
   loading,
   unbound,
-  initialSessionThreadId,
+  activeSessionThreadId,
   onBackToList,
   onBackToProject,
   onRefresh,
   onSessionLinked,
+  onActiveSessionChange,
   onSessionViewChange
 }: {
   detail: HarnessRunDetailViewModel | null
   loading: boolean
   unbound?: boolean
-  initialSessionThreadId?: string
+  activeSessionThreadId?: string
   onBackToList: () => void
   onBackToProject: () => void
   onRefresh: () => void
   onSessionLinked: () => Promise<void>
+  onActiveSessionChange?: (threadId: string) => void
   onSessionViewChange?: (viewing: boolean) => void
 }): React.JSX.Element {
   const defaultNodeId = useMemo(() => {
@@ -1973,18 +1982,18 @@ function FeatureDetailPage({
       return
     }
 
-    const initialThreadId =
-      initialSessionThreadId &&
-      detail.sessions.some((session) => session.threadId === initialSessionThreadId)
-        ? initialSessionThreadId
+    const activeThreadId =
+      activeSessionThreadId &&
+      detail.sessions.some((session) => session.threadId === activeSessionThreadId)
+        ? activeSessionThreadId
         : null
-    const firstThreadId = initialThreadId ?? detail.sessions[0]?.threadId ?? null
+    const firstThreadId = activeThreadId ?? detail.sessions[0]?.threadId ?? null
     setSelectedSessionState((current) => {
       if (current.detailKey !== detailKey) {
         return { detailKey, threadId: firstThreadId }
       }
-      if (initialThreadId && current.threadId !== initialThreadId) {
-        return { detailKey, threadId: initialThreadId }
+      if (activeThreadId && current.threadId !== activeThreadId) {
+        return { detailKey, threadId: activeThreadId }
       }
       if (
         current.threadId &&
@@ -1994,11 +2003,11 @@ function FeatureDetailPage({
       }
       return { detailKey, threadId: firstThreadId }
     })
-  }, [detail, detailKey, initialSessionThreadId])
+  }, [activeSessionThreadId, detail, detailKey])
 
   useEffect(() => {
-    setActiveDetailTab(initialSessionThreadId ? "session" : "feature")
-  }, [detailKey, initialSessionThreadId])
+    setActiveDetailTab(activeSessionThreadId ? "session" : "feature")
+  }, [activeSessionThreadId, detailKey])
 
   useEffect(() => {
     onSessionViewChange?.(activeDetailTab === "session")
@@ -2027,6 +2036,7 @@ function FeatureDetailPage({
         createThread
       })
       setSelectedSessionState({ detailKey, threadId: thread.thread_id })
+      onActiveSessionChange?.(thread.thread_id)
       setActiveDetailTab("session")
       try {
         await onSessionLinked()
@@ -2038,7 +2048,17 @@ function FeatureDetailPage({
     } finally {
       setSessionBusy(null)
     }
-  }, [allThreadStates, createThread, detail, detailKey, onSessionLinked, sessionBusy, threadsById, unbound])
+  }, [
+    allThreadStates,
+    createThread,
+    detail,
+    detailKey,
+    onActiveSessionChange,
+    onSessionLinked,
+    sessionBusy,
+    threadsById,
+    unbound
+  ])
 
   const renderStageNodeStrip = (): React.JSX.Element | null => {
     if (!detail) return null
@@ -2848,7 +2868,7 @@ export function HarnessBoardView(): React.JSX.Element {
       setSelectedFeature({
         projectId: result.projectId,
         slug: result.slug,
-        initialSessionThreadId: thread.thread_id
+        activeSessionThreadId: thread.thread_id
       })
     } catch (error) {
       setFeatureError(cleanIpcError(error))
@@ -2903,10 +2923,10 @@ export function HarnessBoardView(): React.JSX.Element {
   )
 
   const openFeatureDetail = useCallback(
-    (projectId: string, slug: string, initialSessionThreadId?: string): void => {
+    (projectId: string, slug: string, activeSessionThreadId?: string): void => {
       setSelectedProjectId(projectId)
-      setSelectedFeature({ projectId, slug, initialSessionThreadId })
-      setIsViewingSession(!!initialSessionThreadId)
+      setSelectedFeature({ projectId, slug, activeSessionThreadId })
+      setIsViewingSession(!!activeSessionThreadId)
       if (!detailsByProjectId[projectId] && !loadingDetailIds.has(projectId)) {
         void loadProjectDetail(projectId)
       }
@@ -3132,6 +3152,15 @@ export function HarnessBoardView(): React.JSX.Element {
     setIsViewingSession(viewing)
   }, [])
 
+  const handleActiveSessionChange = useCallback((threadId: string): void => {
+    setSelectedFeature((current) => {
+      if (!current) return current
+      if (current.activeSessionThreadId === threadId) return current
+      return { ...current, activeSessionThreadId: threadId }
+    })
+    setIsViewingSession(true)
+  }, [])
+
   const sidebarPortalNode = useHarnessSidebarPortalNode()
   const sidebarPortal =
     sidebarPortalNode
@@ -3186,11 +3215,12 @@ export function HarnessBoardView(): React.JSX.Element {
           detail={runDetailWithSessions}
           loading={effectiveLoadingRun}
           unbound={showingUnboundRunDetail}
-          initialSessionThreadId={selectedFeature.initialSessionThreadId}
+          activeSessionThreadId={selectedFeature.activeSessionThreadId}
           onBackToList={handleBackToProjectList}
           onBackToProject={handleBackToProject}
           onRefresh={() => void refreshSelectedRunDetail()}
           onSessionLinked={refreshSelectedFeatureSessionData}
+          onActiveSessionChange={handleActiveSessionChange}
           onSessionViewChange={handleSessionViewChange}
         />
         {sidebarDeleteDialog}
