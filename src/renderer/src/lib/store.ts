@@ -42,13 +42,13 @@ interface AppState {
 
   // Claude Code view state
   showClaudeCodeView: boolean
-  previousThreadId: string | null  // 切换到 Claude Code 前保存的线程 ID
+  previousThreadId: string | null // 切换到 Claude Code 前保存的线程 ID
   setShowClaudeCodeView: (show: boolean) => void
 
   // Dashboard view state
   showDashboardView: boolean
   setShowDashboardView: (show: boolean) => void
-  dashboardAllowed: boolean | null  // null = loading
+  dashboardAllowed: boolean | null // null = loading
   loadDashboardAllowed: () => Promise<void>
 
   // Customize view state
@@ -58,6 +58,7 @@ interface AppState {
   marketInitialSkillSearchQuery: string | null
   marketInitialSkillDetailName: string | null
   marketInitialSkillFilters: string[] | null
+  marketInitialTab: string | null
 
   // Thread actions
   loadThreads: () => Promise<void>
@@ -93,6 +94,7 @@ interface AppState {
   setMarketInitialSkillSearchQuery: (query: string | null) => void
   setMarketInitialSkillDetailName: (name: string | null) => void
   setMarketInitialSkillFilters: (filters: string[] | null) => void
+  setMarketInitialTab: (tab: string | null) => void
   setMainView: (view: MainView) => void
 
   // Plugin state sync — increment to trigger RightPanel refresh
@@ -105,11 +107,14 @@ interface AppState {
 
   // Skill generation virtual subagent — shown in the right panel agents section.
   // State is stored per-thread so switching threads preserves each thread's card.
-  skillGenerationByThread: Map<string, {
-    phase: "generating" | "done" | "error" | null
-    streamedText: string
-    errorText: string
-  }>
+  skillGenerationByThread: Map<
+    string,
+    {
+      phase: "generating" | "done" | "error" | null
+      streamedText: string
+      errorText: string
+    }
+  >
   setSkillGenerationPhase: (phase: "generating" | "done" | "error" | null, text?: string) => void
   appendSkillGenerationToken: (token: string) => void
 
@@ -139,8 +144,20 @@ interface AppState {
   evolutionStreamError: string | null
   setEvolutionStreamError: (err: string | null) => void
   // Options used for the last optimizer run (for retry)
-  evolutionLastRunOpts: { mode?: "auto" | "selected"; traceIds?: string[]; threadId?: string; traceLimit?: number } | null
-  setEvolutionLastRunOpts: (opts: { mode?: "auto" | "selected"; traceIds?: string[]; threadId?: string; traceLimit?: number } | null) => void
+  evolutionLastRunOpts: {
+    mode?: "auto" | "selected"
+    traceIds?: string[]
+    threadId?: string
+    traceLimit?: number
+  } | null
+  setEvolutionLastRunOpts: (
+    opts: {
+      mode?: "auto" | "selected"
+      traceIds?: string[]
+      threadId?: string
+      traceLimit?: number
+    } | null
+  ) => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -166,6 +183,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   marketInitialSkillSearchQuery: null,
   marketInitialSkillDetailName: null,
   marketInitialSkillFilters: null,
+  marketInitialTab: null,
   pluginVersion: 0,
   evolutionTab: "candidates",
   evolutionRunning: false,
@@ -367,7 +385,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     } else {
       const restored = get().previousThreadId
-      set({ showKanbanView: false, mainView: "thread", ...(restored ? { currentThreadId: restored, previousThreadId: null } : {}) })
+      set({
+        showKanbanView: false,
+        mainView: "thread",
+        ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
+      })
     }
   },
 
@@ -410,6 +432,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setMarketInitialSkillFilters: (filters) => {
     set({ marketInitialSkillFilters: filters })
+  },
+
+  setMarketInitialTab: (tab) => {
+    set({ marketInitialTab: tab })
   },
 
   setMainView: (view) => {
@@ -536,8 +562,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => {
       const threadId = state.currentThreadId
       if (!threadId) return {}
-      const current = state.skillGenerationByThread.get(threadId)
-        ?? { phase: "generating" as const, streamedText: "", errorText: "" }
+      const current = state.skillGenerationByThread.get(threadId) ?? {
+        phase: "generating" as const,
+        streamedText: "",
+        errorText: ""
+      }
       const next = new Map(state.skillGenerationByThread)
       next.set(threadId, { ...current, streamedText: current.streamedText + token })
       return { skillGenerationByThread: next }

@@ -381,9 +381,28 @@ export function UpdateDialog({
             <DialogHeader>
               <DialogTitle>v{updateInfo.version} 已就绪</DialogTitle>
               <DialogDescription>
-                新版本已下载完成，重启应用即可完成更新。请先保存当前工作。
+                {updateInfo.updateType === "asar"
+                  ? "轻量更新已下载完成，重启应用即可完成更新。请先保存当前工作。"
+                  : "完整更新已下载完成，重启应用将自动安装新版本。请先保存当前工作。"}
               </DialogDescription>
             </DialogHeader>
+
+            {updateInfo.releaseNotes && (
+              <div className="space-y-3">
+                <div className="text-sm text-muted-foreground">
+                  <div className="font-medium text-foreground mb-1">更新内容：</div>
+                  <div className="whitespace-pre-line bg-muted/50 rounded-md p-3 max-h-40 overflow-y-auto">
+                    {updateInfo.releaseNotes}
+                  </div>
+                </div>
+                {updateInfo.size > 0 && (
+                  <div className="text-xs text-muted-foreground">
+                    下载大小：约 {formatSize(updateInfo.size)}
+                  </div>
+                )}
+              </div>
+            )}
+
             <DialogFooter>
               {!isMandatory && (
                 <Button variant="outline" onClick={handleDismiss}>

@@ -150,17 +150,16 @@ export async function checkForUpdate(baseUrl: string): Promise<UpdateCheckResult
     downloadSha256 = latest.asar.sha256
     downloadSize = latest.asar.size
   } else {
-    // Priority: platforms[platform].full → top-level full → fallback to asar
+    // Priority: platforms[platform].full → top-level full.
+    // A full update must have a real full package; installing an ASAR payload
+    // through the full-update path leaves the app in an invalid state.
     const fullInfo = platformInfo?.full ?? latest.full
     if (!fullInfo) {
-      downloadFile = latest.asar.file
-      downloadSha256 = latest.asar.sha256
-      downloadSize = latest.asar.size
-    } else {
-      downloadFile = fullInfo.file
-      downloadSha256 = fullInfo.sha256
-      downloadSize = fullInfo.size
+      throw new Error(`当前版本需要完整更新，但服务器未提供 ${platform} 的完整更新包`)
     }
+    downloadFile = fullInfo.file
+    downloadSha256 = fullInfo.sha256
+    downloadSize = fullInfo.size
   }
 
   // Rollback: platforms[platform].rollback → top-level rollback

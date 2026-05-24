@@ -6,7 +6,7 @@ import { markUploadedItemInStorage } from "./marketPublishStorage"
 type PublishMode = "upload" | "update"
 
 export type MarketPublishTarget = {
-  type: Exclude<MarketItemType, "skill">
+  type: Exclude<MarketItemType, "skill" | "orgSkill">
   name: string
   description?: string
   chineseName?: string
