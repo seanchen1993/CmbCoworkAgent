@@ -1908,6 +1908,9 @@ function FeatureDetailPage({
   loading,
   unbound,
   activeSessionThreadId,
+  fallbackProjectName,
+  fallbackFeatureTitle,
+  fallbackFeatureSlug,
   onBackToList,
   onBackToProject,
   onRefresh,
@@ -1919,6 +1922,9 @@ function FeatureDetailPage({
   loading: boolean
   unbound?: boolean
   activeSessionThreadId?: string
+  fallbackProjectName?: string
+  fallbackFeatureTitle?: string
+  fallbackFeatureSlug?: string
   onBackToList: () => void
   onBackToProject: () => void
   onRefresh: () => void
@@ -2167,8 +2173,14 @@ function FeatureDetailPage({
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0 space-y-2">
             <HarnessBreadcrumb
-              project={detail ? { name: detail.project.name } : null}
-              featureTitle={detail?.run.title ?? "特性详情"}
+              project={
+                detail
+                  ? { name: detail.project.name }
+                  : fallbackProjectName
+                    ? { name: fallbackProjectName }
+                    : null
+              }
+              featureTitle={detail?.run.title ?? fallbackFeatureTitle ?? "特性详情"}
               sessionTitle={
                 activeDetailTab === "session" && selectedSessionThreadId
                   ? threadsById.get(selectedSessionThreadId)?.title
@@ -2182,7 +2194,7 @@ function FeatureDetailPage({
             <div className="flex min-w-0 items-center gap-2">
               <Workflow className="size-4 shrink-0 text-status-info" />
               <h1 className="truncate text-base font-semibold">
-                {detail?.run.title ?? "特性详情"}
+                {detail?.run.title ?? fallbackFeatureTitle ?? "特性详情"}
               </h1>
               {detail?.adapterSnapshot.mock && (
                 <span className="shrink-0 rounded border border-status-warning/30 bg-status-warning/10 px-2 py-0.5 text-[11px] text-status-warning">
@@ -2191,7 +2203,11 @@ function FeatureDetailPage({
               )}
             </div>
             <div className="truncate text-xs text-muted-foreground">
-              {detail ? `${detail.project.name} · ${detail.run.slug}` : "加载中"}
+              {detail
+                ? `${detail.project.name} · ${detail.run.slug}`
+                : fallbackProjectName && fallbackFeatureSlug
+                  ? `${fallbackProjectName} · ${fallbackFeatureSlug}`
+                  : "加载中"}
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -2508,6 +2524,7 @@ export function HarnessBoardView(): React.JSX.Element {
   const [creatingSidebarSessionKey, setCreatingSidebarSessionKey] = useState<string | null>(null)
   const creatingFeatureRef = useRef(false)
   const selectedFeatureRef = useRef(selectedFeature)
+  const prefetchedRunDetailRef = useRef<HarnessRunDetailViewModel | null>(null)
   selectedFeatureRef.current = selectedFeature
 
   const loadProjectDetail = useCallback(async (projectId: string) => {
@@ -2569,6 +2586,24 @@ export function HarnessBoardView(): React.JSX.Element {
     ) {
       setRunDetail(null)
       setLoadingRun(false)
+      return
+    }
+    const prefetched = prefetchedRunDetailRef.current
+    if (
+      prefetched &&
+      prefetched.project.projectId === selectedFeature.projectId &&
+      prefetched.run.slug === selectedFeature.slug
+    ) {
+      setRunDetail(prefetched)
+      setLoadingRun(false)
+      prefetchedRunDetailRef.current = null
+      return
+    }
+    if (
+      runDetail &&
+      runDetail.project.projectId === selectedFeature.projectId &&
+      runDetail.run.slug === selectedFeature.slug
+    ) {
       return
     }
     let cancelled = false
@@ -3112,6 +3147,8 @@ export function HarnessBoardView(): React.JSX.Element {
           createThread
         })
         await loadProjectDetail(project.projectId)
+        const detail = await window.api.harnessBoard.getRunDetail(project.projectId, run.slug)
+        prefetchedRunDetailRef.current = detail
         openFeatureDetail(project.projectId, run.slug, thread.thread_id)
       } catch (error) {
         toast.error(cleanIpcError(error))
@@ -3208,6 +3245,9 @@ export function HarnessBoardView(): React.JSX.Element {
         )
       : null
 
+  const fallbackFeatureSummary =
+    selectedFeatureProjectDetail?.runs.find((run) => run.slug === selectedFeature?.slug)
+
   if (selectedFeature) {
     return (
       <>
@@ -3216,6 +3256,9 @@ export function HarnessBoardView(): React.JSX.Element {
           loading={effectiveLoadingRun}
           unbound={showingUnboundRunDetail}
           activeSessionThreadId={selectedFeature.activeSessionThreadId}
+          fallbackProjectName={selectedFeatureProjectDetail?.project?.name}
+          fallbackFeatureTitle={fallbackFeatureSummary?.title}
+          fallbackFeatureSlug={fallbackFeatureSummary?.slug}
           onBackToList={handleBackToProjectList}
           onBackToProject={handleBackToProject}
           onRefresh={() => void refreshSelectedRunDetail()}
