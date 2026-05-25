@@ -205,6 +205,26 @@ function shouldSkipDesignQuestions(prompt: string): boolean {
   return DIRECT_DESIGN_REQUEST_PATTERN.test(prompt)
 }
 
+const MULTI_VARIATION_INSTRUCTION =
+  "Generate 2 distinct variations (A / B) within one HTML file for exploration. " +
+  "Variation A should be conventional and safe; Variation B should be more distinctive. " +
+  "Use direct body children with id=\"variation-a\" and id=\"variation-b\" plus concise Chinese data-label values."
+
+const CANONICAL_ARTIFACT_INSTRUCTION =
+  "Generate exactly ONE canonical design artifact. Do NOT generate A/B variations, do NOT create elements with id=\"variation-a\" or id=\"variation-b\", and do NOT present alternative versions."
+
+function buildNewDesignPrompt(
+  basePrompt: string,
+  options: { designSystemId?: string | null; forceVariations?: boolean } = {}
+): string {
+  const instruction = options.forceVariations
+    ? MULTI_VARIATION_INSTRUCTION
+    : options.designSystemId
+      ? CANONICAL_ARTIFACT_INSTRUCTION
+      : MULTI_VARIATION_INSTRUCTION
+  return `${basePrompt}\n\n---\n${instruction}\n\n始终使用中文回答。`
+}
+
 function clampDesignProgressText(content: string): string {
   if (content.length <= MAX_DESIGN_PROGRESS_TEXT_CHARS) return content
   return `...${content.slice(-MAX_DESIGN_PROGRESS_TEXT_CHARS)}`
@@ -3321,7 +3341,10 @@ export function DesignView(): React.JSX.Element {
               }))
               tabSessionsRef.current.delete(tabId)
               startGeneration(
-                `${prompt}\n\n---\nNo clarifying answers were collected because the active design system already fixes visual direction. Generate exactly 2 variations (A / B) within one HTML file.\n\n始终使用中文回答。`,
+                buildNewDesignPrompt(
+                  `${prompt}\n\n---\nNo clarifying answers were collected because the active design system already fixes visual direction.`,
+                  { designSystemId }
+                ),
                 tabId,
                 false,
                 modelId,
@@ -4274,8 +4297,11 @@ ${noteLines || "无"}${variantNote}`
     if (!hasExistingDesign) {
       const activeDesignSystemId = tabStates[tabId]?.selectedDesignSystemId ?? null
       if (selectedSkill || shouldSkipDesignQuestions(prompt)) {
+        const generationPrompt = selectedSkill
+          ? prompt + contextSuffix
+          : buildNewDesignPrompt(prompt + contextSuffix, { designSystemId: activeDesignSystemId })
         startGeneration(
-          prompt + contextSuffix,
+          generationPrompt,
           tabId,
           false,
           selectedModelId,
@@ -4353,8 +4379,13 @@ ${noteLines || "无"}${variantNote}`
       .join("\n")
 
     const enrichedPrompt = answerLines
-      ? `${originalPrompt}\n\n---\nUser's answers to clarifying questions:\n${answerLines}\n\nRemember: Generate exactly 2 variations (A / B) within one HTML file.\n\n始终使用中文回答。`
-      : `${originalPrompt}\n\n---\nNo clarifying answers were provided. Generate exactly 2 variations (A / B) within one HTML file.\n\n始终使用中文回答。`
+      ? buildNewDesignPrompt(
+          `${originalPrompt}\n\n---\nUser's answers to clarifying questions:\n${answerLines}`,
+          { designSystemId: state.selectedDesignSystemId }
+        )
+      : buildNewDesignPrompt(`${originalPrompt}\n\n---\nNo clarifying answers were provided.`, {
+          designSystemId: state.selectedDesignSystemId
+        })
 
     // Build pill tags for the user message update
     const tags = questions
