@@ -64,11 +64,15 @@ import { ModelSwitcher } from "./ModelSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
-import type { Message, SkillMetadata, ToolCallState, ToolCallStatus } from "@/types"
+import type { Message, SkillMetadata, ToolCallState, ToolCallStatus, UserInputResponse } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator, type ChatScrollQuestion } from "./ChatScrollNavigator"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
+import {
+  UserInputRequestDialog,
+  type UserInputRequestDialogLayout
+} from "./UserInputRequestDialog"
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
 import {
@@ -853,6 +857,26 @@ const toTime = (value: Date | string | undefined): number | null => {
   return date ? date.getTime() : null
 }
 
+const getMessageDisplayTime = (message: Message): number | null => {
+  return toTime(message.start_at) ?? toTime(message.created_at) ?? toTime(message.end_at)
+}
+
+const sortMessagesForDisplay = (messages: Message[]): Message[] => {
+  return messages
+    .map((message, index) => ({
+      message,
+      index,
+      time: getMessageDisplayTime(message)
+    }))
+    .sort((a, b) => {
+      if (a.time !== null && b.time !== null && a.time !== b.time) {
+        return a.time - b.time
+      }
+      return a.index - b.index
+    })
+    .map((entry) => entry.message)
+}
+
 const getMessageText = (content: Message["content"]): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -931,6 +955,7 @@ export function ChatContainer({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const userMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
+  const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isAtBottomRef = useRef(true)
   const requestedUserQuestionIndexRef = useRef<number | null>(null)
   const requestedUserQuestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -942,6 +967,8 @@ export function ChatContainer({
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
   const [activeUserQuestionIndex, setActiveUserQuestionIndex] = useState(-1)
+  const [userInputDialogLayout, setUserInputDialogLayout] =
+    useState<UserInputRequestDialogLayout | null>(null)
   // Skill creation human-confirmation state
   const [skillConfirmRequest, setSkillConfirmRequest] = useState<SkillConfirmRequest | null>(null)
   // Skill intent banner state ("Want to save as a skill?")
@@ -979,6 +1006,7 @@ export function ChatContainer({
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
   const streamMessageTimesRef = useRef<Record<string, { start_at: Date; end_at?: Date }>>({})
   const streamMessageBaselineIdsRef = useRef<Set<string>>(new Set())
+  const streamMessageCapturePreparedRef = useRef(false)
   const [messageTimes, setMessageTimes] = useState<MessageTimeMap>({})
   const threadMessageIdsRef = useRef<Set<string>>(new Set())
 
@@ -1187,6 +1215,7 @@ export function ChatContainer({
     toolCallStates,
     pendingApprovals,
     pendingApproval,
+    pendingUserInput,
     todos,
     error: threadError,
     hookInterruption,
@@ -1202,6 +1231,7 @@ export function ChatContainer({
     setToolCallState,
     setTodos,
     removePendingApproval,
+    setPendingUserInput,
     appendMessage,
     setError,
     clearError,
@@ -1294,6 +1324,43 @@ export function ChatContainer({
   }, [pendingApproval])
   const isLoading = streamData.isLoading || scheduledTaskLoading
   const inputDisabled = isLoading || historyLoading
+  const userInputScrollPadding = pendingUserInput
+    ? Math.ceil((userInputDialogLayout?.height ?? 320) + 24)
+    : undefined
+
+  const handleUserInputDialogLayoutChange = useCallback(
+    (layout: UserInputRequestDialogLayout | null): void => {
+      setUserInputDialogLayout((prev) => {
+        if (!layout) return prev === null ? prev : null
+
+        const next = {
+          height: Math.ceil(layout.height),
+          top: Math.round(layout.top),
+          bottom: Math.round(layout.bottom)
+        }
+        if (
+          prev &&
+          prev.height === next.height &&
+          prev.top === next.top &&
+          prev.bottom === next.bottom
+        ) {
+          return prev
+        }
+        return next
+      })
+    },
+    []
+  )
+
+  const prepareStreamMessageCapture = useCallback((): void => {
+    streamMessageTimesRef.current = {}
+    streamMessageBaselineIdsRef.current = new Set(
+      ((streamData.messages || []) as StreamMessage[])
+        .map((msg) => msg.id)
+        .filter((id): id is string => !!id)
+    )
+    streamMessageCapturePreparedRef.current = true
+  }, [streamData.messages])
 
   useEffect(() => {
     let cancelled = false
@@ -1648,6 +1715,7 @@ export function ChatContainer({
       try {
         const legacyDecision =
           decision === "approve_session" || decision === "approve_permanent" ? "approve" : decision
+        prepareStreamMessageCapture()
         await stream.submit(null, {
           command: {
             resume: { decision: legacyDecision, pendingCount: pendingApproval.pendingCount }
@@ -1665,9 +1733,19 @@ export function ChatContainer({
       removePendingApproval,
       savedToolDescriptionInput,
       savedToolNameInput,
+      prepareStreamMessageCapture,
       stream,
       threadId
     ]
+  )
+
+  const handleUserInputSubmit = useCallback(
+    (response: UserInputResponse): void => {
+      window.api.userInput.sendResponse(response)
+      setPendingUserInput(null)
+      setUserInputDialogLayout(null)
+    },
+    [setPendingUserInput]
   )
 
   const agentValues = stream?.values as AgentStreamValues | undefined
@@ -1702,17 +1780,16 @@ export function ChatContainer({
   const prevLoadingRef = useRef(false)
   useEffect(() => {
     if (!prevLoadingRef.current && isLoading) {
-      // 本轮开始时记录已有 stream 消息，避免把历史回放消息当成本轮新消息计时。
+      // 本轮开始前应由 stream.submit 调用方采样 baseline。这里仅做兜底：
+      // 如果运行不是从 ChatContainer 的 submit 路径启动，就退回到已落库消息集合。
       //
-      // useStream 的 messages 里会同时包含历史消息和本轮新增消息。如果不先记 baseline，
-      // loading 期间遍历 streamData.messages 时就会把历史 assistant/tool 重新打时间戳，
-      // 导致历史耗时被当前时间污染。
-      streamMessageTimesRef.current = {}
-      streamMessageBaselineIdsRef.current = new Set(
-        ((streamData.messages || []) as StreamMessage[])
-          .map((msg) => msg.id)
-          .filter((id): id is string => !!id)
-      )
+      // 不能在 loading 已经变成 true 后再用当前 streamData.messages 采样；
+      // 第一条本轮 assistant/tool-call 可能已经到达，会被误判为历史消息而漏落库。
+      if (!streamMessageCapturePreparedRef.current) {
+        streamMessageTimesRef.current = {}
+        streamMessageBaselineIdsRef.current = new Set(threadMessageIdsRef.current)
+      }
+      streamMessageCapturePreparedRef.current = false
     }
 
     if (isLoading) {
@@ -1872,7 +1949,7 @@ export function ChatContainer({
         end_at: endAt
       }
     })
-    return allMessages.map((msg) => {
+    return sortMessagesForDisplay(allMessages).map((msg) => {
       if (
         msg.role !== "user" ||
         typeof msg.content !== "string" ||
@@ -1927,6 +2004,14 @@ export function ChatContainer({
     [displayMessages]
   )
 
+  const lastContentMessageId = useMemo(() => {
+    for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
+      const message = displayMessages[index]
+      if (message.role !== "tool") return message.id
+    }
+    return null
+  }, [displayMessages])
+
   const userQuestions = useMemo<ChatScrollQuestion[]>(
     () =>
       displayMessages
@@ -1938,14 +2023,20 @@ export function ChatContainer({
     [displayMessages]
   )
 
-  const setUserMessageRef = useCallback(
-    (messageId: string) =>
+  const setMessageRef = useCallback(
+    (messageId: string, role: Message["role"]) =>
       (node: HTMLDivElement | null): void => {
-        if (node) {
+        if (node && role === "user") {
           userMessageRefs.current.set(messageId, node)
+        } else {
+          userMessageRefs.current.delete(messageId)
+        }
+
+        if (node && role !== "tool") {
+          contentMessageRefs.current.set(messageId, node)
           return
         }
-        userMessageRefs.current.delete(messageId)
+        contentMessageRefs.current.delete(messageId)
       },
     []
   )
@@ -2170,6 +2261,39 @@ export function ChatContainer({
       isAtBottomRef.current = true
     }
   }, [pendingApproval, getViewport])
+
+  useEffect(() => {
+    if (!pendingUserInput || !userInputDialogLayout) return
+    const viewport = getViewport()
+    if (!viewport) return
+
+    const frame = requestAnimationFrame(() => {
+      const targetElement = lastContentMessageId
+        ? contentMessageRefs.current.get(lastContentMessageId)
+        : null
+      const viewportRect = viewport.getBoundingClientRect()
+      const targetBottom = Math.max(viewportRect.top + 24, userInputDialogLayout.top - 12)
+
+      if (targetElement) {
+        const targetRect = targetElement.getBoundingClientRect()
+        const scrollDelta = targetRect.bottom - targetBottom
+        if (Math.abs(scrollDelta) > 1) {
+          viewport.scrollTop = Math.max(0, viewport.scrollTop + scrollDelta)
+        }
+      } else {
+        viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+      }
+      isAtBottomRef.current = false
+    })
+
+    return () => cancelAnimationFrame(frame)
+  }, [
+    getViewport,
+    lastContentMessageId,
+    pendingUserInput,
+    userInputDialogLayout?.height,
+    userInputDialogLayout?.top
+  ])
 
   // Always scroll to bottom when switching threads
   useEffect(() => {
@@ -2409,6 +2533,7 @@ export function ChatContainer({
       }
     }
 
+    prepareStreamMessageCapture()
     await stream.submit(
       {
         messages: [{ type: "human", content: fullMessage }]
@@ -3307,7 +3432,15 @@ export function ChatContainer({
       {nuxDialog}
 
       <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
-        <div className={cn("p-4", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
+        <div
+          className={cn(
+            "p-4",
+            userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
+          )}
+          style={
+            userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined
+          }
+        >
           <div className="max-w-3xl mx-auto space-y-4">
             {historyLoading && displayMessages.length === 0 && (
               <div
@@ -3575,7 +3708,7 @@ export function ChatContainer({
               return (
                 <div
                   key={message.id}
-                  ref={message.role === "user" ? setUserMessageRef(message.id) : undefined}
+                  ref={setMessageRef(message.id, message.role)}
                   data-message-role={message.role}
                 >
                   <MessageBubble
@@ -3987,7 +4120,11 @@ export function ChatContainer({
                 ref={dropZoneRef}
                 className={cn(
                   "relative flex-1 min-w-0 flex flex-col rounded-3xl border border-border  transition-colors duration-300",
-                  glowVisible ? "bg-white/80" : "bg-white",
+                  pendingUserInput
+                    ? "border-primary/25 bg-background"
+                    : glowVisible
+                      ? "bg-white/80"
+                      : "bg-white",
                   dragOver && "border-primary"
                 )}
                 onDrop={handleDrop}
@@ -4000,7 +4137,7 @@ export function ChatContainer({
                     <SkillChip label={selectedSkill.name} onRemove={() => setSelectedSkill(null)} />
                   </div>
                 )}
-                {glowVisible && (
+                {glowVisible && !pendingUserInput && (
                   <div
                     className={cn("siri-bg-glow rounded-xl", !isLoading && "siri-bg-glow-out")}
                     onAnimationEnd={(e) => {
@@ -4151,6 +4288,11 @@ export function ChatContainer({
                     )}
                   </div>
                 </div>
+                <UserInputRequestDialog
+                  request={pendingUserInput}
+                  onSubmit={handleUserInputSubmit}
+                  onLayoutChange={handleUserInputDialogLayoutChange}
+                />
               </div>
             </div>
             {/*chat container bottom panel — moved inside input box above */}

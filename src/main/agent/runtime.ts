@@ -78,6 +78,7 @@ import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import { getThread } from "../db/index"
 import { createPlaywrightTool } from "./tools/playwright-tool"
+import { createRequestUserInputTool } from "./tools/user-input-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
 import { createToolHookMiddleware } from "./tool-hooks"
@@ -1537,6 +1538,8 @@ export interface CreateAgentRuntimeOptions {
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
   noSkillEvolutionTool?: boolean
+  /** Enable the interactive user-input tool. Only foreground, user-invoked runs should set this. */
+  enableRequestUserInput?: boolean
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
   /** AbortSignal — when signalled, any running child process is killed immediately. */
@@ -1829,6 +1832,7 @@ ${subagentShellGuidance}
 - grep: search for literal text within files (NOT regex). Do NOT use "|", ".*" or other regex syntax — call grep once per term instead.
 - Browser strategy: for browser tasks, first follow any matching enabled skill; only if no relevant skill is available, use browser_playwright.
 - browser_playwright: built-in browser automation and page interaction tool powered by project-local Playwright (fallback when no matching browser skill exists).
+- request_user_input: Only use in Plan mode, or when explicitly requested by the user or an active Skill/Plugin. Otherwise do not call this tool.
 The workspace root is: ${workspacePath}`
 
   const skillLifecycleRootSources = await getEnabledSkillsSources()
@@ -1909,6 +1913,14 @@ The workspace root is: ${workspacePath}`
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const extraTools: any[] = []
+  if (options.enableRequestUserInput) {
+    extraTools.push(
+      createRequestUserInputTool({
+        threadId: options.threadId,
+        abortSignal: options.abortSignal
+      })
+    )
+  }
   if (!options.noSchedulerTool) {
     let chatxRobotChatId: string | null = null
     if (options.threadId) {
