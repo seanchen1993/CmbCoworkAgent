@@ -35,6 +35,11 @@ import type {
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
+import type {
+  TaskMmdCompileModelInfo,
+  TaskMmdSettings,
+  TaskMmdSnapshot
+} from "../main/agent/task-mmd/types"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -653,6 +658,15 @@ interface CustomAPI {
       skipped: number
     }>
     onChanged: (callback: () => void) => () => void
+  }
+  taskMmd: {
+    getSettings: () => Promise<TaskMmdSettings>
+    setSettings: (patch: Partial<TaskMmdSettings>) => Promise<TaskMmdSettings>
+    getSnapshot: (threadId: string) => Promise<TaskMmdSnapshot>
+    clearThread: (threadId: string) => Promise<void>
+    getDirectorySize: (threadId: string) => Promise<number>
+    getCompileModelInfo: (threadId: string) => Promise<TaskMmdCompileModelInfo>
+    onChanged: (callback: (payload: { threadId?: string }) => void) => () => void
   }
   autoCommit: {
     getSettings: () => Promise<AgentAutoCommitSettings>

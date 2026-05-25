@@ -78,6 +78,7 @@ import { getThread } from "../db/index"
 import { createPlaywrightTool } from "./tools/playwright-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
+import { createTaskMmdMiddleware } from "./task-mmd/middleware"
 import { createToolHookMiddleware } from "./tool-hooks"
 import { listSavedCodeExecTools } from "../code-exec/saved-tool-store"
 import {
@@ -658,7 +659,8 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     summarizationTruncateArgsSettings,
     subagentExtraSystemPrompt,
     toolConcurrencyQueueId = "default",
-    toolHookMiddleware
+    toolHookMiddleware,
+    threadId
   } = params
 
   // --- systemPrompt handling (identical to original) ---
@@ -1004,6 +1006,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
     createFsMiddleware(),
+    ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "subagent" })] : []),
     createSkillHookContextMiddleware(filesystemBackend),
     subagentToolConcurrencyMiddleware,
     ...(toolHookMiddleware ? [toolHookMiddleware] : []),
@@ -1033,6 +1036,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     middleware: [
       todoListMiddleware(),
       createFsMiddleware(),
+      ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "main" })] : []),
       createSkillHookContextMiddleware(filesystemBackend),
       gradedToolConcurrencyMiddleware,
       ...(toolHookMiddleware ? [toolHookMiddleware] : []),
@@ -2091,6 +2095,7 @@ The workspace root is: ${workspacePath}`
       keep: { type: "tokens", value: keepTokens },
       maxLength: 2000
     },
+    threadId: options.threadId,
     toolConcurrencyQueueId: options.threadId ?? workspacePath,
     toolHookMiddleware
   })
