@@ -39,6 +39,7 @@ import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import { hasUnreadCloudEvolutionUpdates, markCloudEvolutionUpdatesSeen } from "@/lib/evolution-notices"
 import { buildBundleUnifiedDiff, extractTextBundleFromZip } from "@/lib/skill-bundle-diff"
+import { trackCloudEvolutionCandidateAccepted } from "@/lib/cloud-evolution-events"
 import type { SkillMetadata } from "@/types"
 import { SkillEvolutionReviewPanel } from "./SkillEvolutionReviewPanel"
 
@@ -1506,6 +1507,7 @@ export function EvolutionPanel(): React.JSX.Element {
 
   const handleInstallCloudUpdate = useCallback(async (candidate: EvolutionCandidate) => {
     setInstallingCloudCandidateId(candidate.candidate_id)
+    trackCloudEvolutionCandidateAccepted(candidate, candidate.source_version ?? null)
     let backupId: string | undefined
     try {
       const installedSkills = await window.api.skills.list()

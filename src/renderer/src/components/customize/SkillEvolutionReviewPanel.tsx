@@ -6,6 +6,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import { evolutionApi, type EvolutionCandidate } from "@/api/evolution"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
+import { trackCloudEvolutionCandidatePublished } from "@/lib/cloud-evolution-events"
 
 function statusLabel(status: string): string {
   return {
@@ -109,7 +110,8 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
         await evolutionApi.unpublish(candidate.candidate_id)
         toast.success("已撤回发布")
       } else {
-        await evolutionApi.publish(candidate.candidate_id, reviewer)
+        const published = await evolutionApi.publish(candidate.candidate_id, reviewer)
+        trackCloudEvolutionCandidatePublished(published, reviewer)
         toast.success("候选已发布到自进化更新通道")
       }
       await load()
