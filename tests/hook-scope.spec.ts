@@ -364,6 +364,61 @@ async function testPersistentHookKeyDoesNotLeakAcrossSameIdSkills(): Promise<voi
   assert(result[0].hookSourceRoot === "C:/skills/activated", "persistent hook key should include source")
 }
 
+async function testSkippedDiagnosticsOnlyReportRunnableHooks(): Promise<void> {
+  const runnable = {
+    ...makeHook({
+      id: "runnable",
+      event: "PreToolUse",
+      matcher: "test_tool",
+      command: "echo runnable"
+    }),
+    pluginId: "plugin-a"
+  } as HookConfig & { pluginId: string }
+  const wrongEvent = {
+    ...makeHook({
+      id: "wrong-event",
+      event: "PostToolUse",
+      matcher: "test_tool",
+      command: "echo wrong-event"
+    }),
+    pluginId: "plugin-a"
+  } as HookConfig & { pluginId: string }
+  const wrongMatcher = {
+    ...makeHook({
+      id: "wrong-matcher",
+      event: "PreToolUse",
+      matcher: "other_tool",
+      command: "echo wrong-matcher"
+    }),
+    pluginId: "plugin-a"
+  } as HookConfig & { pluginId: string }
+  const disabled = {
+    ...makeHook({
+      id: "disabled",
+      event: "PreToolUse",
+      matcher: "test_tool",
+      command: "echo disabled",
+      enabled: false
+    }),
+    pluginId: "plugin-a"
+  } as HookConfig & { pluginId: string }
+
+  const skippedIds: string[] = []
+  const result = filterScopedHooks(
+    { baseHooks: [], pluginHooks: [runnable, wrongEvent, wrongMatcher, disabled], skillHooks: [] },
+    emptyContext(),
+    createHookScope(),
+    (hook) => skippedIds.push(hook.id),
+    "PreToolUse"
+  )
+
+  assert(result.length === 0, `inactive plugin hooks should not pass scope, got ${result.length}`)
+  assert(
+    skippedIds.join(",") === "runnable",
+    `expected only runnable hook to be reported skipped, got ${skippedIds.join(",")}`
+  )
+}
+
 async function testEmptyCandidatesProduceEmptyResult(): Promise<void> {
   const scope = createHookScope()
   scope.activatePlugin("plugin-a")
@@ -399,6 +454,8 @@ async function run(): Promise<void> {
   console.log("PASS S10c persistent hook id fires without current skill scope")
   await testPersistentHookKeyDoesNotLeakAcrossSameIdSkills()
   console.log("PASS S10d persistent hook key does not leak across same-id skills")
+  await testSkippedDiagnosticsOnlyReportRunnableHooks()
+  console.log("PASS S10e skipped diagnostics only report runnable hooks")
   await testEmptyCandidatesProduceEmptyResult()
   console.log("PASS S11 empty candidates yield empty result regardless of scope")
 }

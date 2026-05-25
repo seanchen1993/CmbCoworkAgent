@@ -312,6 +312,8 @@ export interface LocalSandboxOptions {
   hookScope?: HookScopeController
   /** Optional callback invoked after each hook executes — used to emit results to the renderer. */
   onHookResult?: HookResultCallback
+  /** Renderer user message id that owns this chat turn, used to group hook logs. */
+  hookTurnId?: string
   /** AbortSignal for cancelling running child processes when the user aborts.
    *  When signalled, any in-flight execute() will kill its child process immediately
    *  (SIGTERM → 200ms → SIGKILL), matching OpenCode/Codex abort behaviour. */
@@ -393,6 +395,7 @@ export class LocalSandbox
   private readonly resolveHooks: LocalSandboxHookResolver
   private readonly _hookScope?: HookScopeController
   private readonly _onHookResult?: HookResultCallback
+  private readonly _hookTurnId?: string
   /** App-owned persistent cache root granted as a Codex writable root per workspace. */
   private readonly _sandboxCacheRoot: string
   private readonly _sandboxCacheRootPromise: Promise<string>
@@ -1569,6 +1572,7 @@ export class LocalSandbox
     this.resolveHooks = options.hookResolver ?? (() => this.getHooks())
     this._hookScope = options.hookScope
     this._onHookResult = options.onHookResult
+    this._hookTurnId = options.hookTurnId
     this._onFileMutation = options.onFileMutation
     this._skillLifecycleRegistry = options.skillLifecycleRegistry
     this._skillHooksFired = options.skillHookKeys ?? new Set<string>()
@@ -1756,8 +1760,9 @@ export class LocalSandbox
   }
 
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
-    const hooks = this.resolveHooks(event, context)
-    const result = await runHooksEnriched(hooks, event, context, this._onHookResult)
+    const hookContext: HookContext = { ...context, turnId: context.turnId ?? this._hookTurnId }
+    const hooks = this.resolveHooks(event, hookContext)
+    const result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
     if (result) {
       this._hookScope?.activatePersistentHooks(hooks)
     }

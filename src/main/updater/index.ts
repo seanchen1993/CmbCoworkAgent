@@ -182,10 +182,18 @@ export function registerUpdaterHandlers(): void {
 
     notifyAlways("正在安装更新", `正在安装 v${lastCheckResult.version}，完成后应用将自动重启`)
 
-    if (lastCheckResult.updateType === "asar") {
-      installAsarUpdate(downloadedFilePath, lastCheckResult.version)
-    } else {
-      installFullUpdate(downloadedFilePath, lastCheckResult.version)
+    try {
+      if (lastCheckResult.updateType === "asar") {
+        installAsarUpdate(downloadedFilePath, lastCheckResult.version)
+      } else {
+        installFullUpdate(downloadedFilePath, lastCheckResult.version)
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "安装失败"
+      updateStatus = "error"
+      lastErrorMessage = message
+      broadcast("update:error", { message })
+      throw err
     }
     // App will quit after this, no return needed
   })

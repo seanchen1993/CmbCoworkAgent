@@ -12,6 +12,7 @@ import {
   upsertPlugin,
   deletePlugin as deletePluginStorage,
   setPluginEnabled,
+  setPluginOriginsBatch,
   setPluginHookEnabled,
   invalidateEnabledSkillsCache,
   parseMcpJsonFile
@@ -152,7 +153,8 @@ function formatAuthor(author: PluginManifest["author"]): string {
 
 async function installPluginFromDir(
   dirPath: string,
-  fallbackName?: string
+  fallbackName?: string,
+  origin?: "market" | "local"
 ): Promise<{ success: boolean; pluginName?: string; error?: string }> {
   try {
     const parsed = await parsePluginDir(dirPath, fallbackName)
@@ -219,6 +221,10 @@ async function installPluginFromDir(
     }
 
     const now = new Date().toISOString()
+    // Origin is sticky: re-installing from a different surface (e.g. market →
+    // local upload) shouldn't silently flip it. Caller's explicit origin wins,
+    // otherwise inherit from the existing record, defaulting to "local".
+    const resolvedOrigin: "market" | "local" = origin ?? existing?.origin ?? "local"
     const meta: PluginMetadata = {
       id: existing?.id ?? uuid(),
       name: parsed.name,
@@ -231,6 +237,7 @@ async function installPluginFromDir(
       mcpServerCount: Object.keys(parsed.mcpConfigs).length,
       hookCount: parsed.hookCount,
       hookPath: parsed.hookPath,
+      origin: resolvedOrigin,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now
     }
@@ -297,7 +304,8 @@ async function selectExtractedPluginRoot(tempDir: string): Promise<string> {
 
 async function installPluginFromZip(
   buffer: ArrayBuffer,
-  fileName?: string
+  fileName?: string,
+  origin?: "market" | "local"
 ): Promise<{ success: boolean; pluginName?: string; error?: string }> {
   try {
     const zip = new AdmZip(Buffer.from(buffer))
@@ -396,7 +404,7 @@ async function installPluginFromZip(
           : rootName
 
       // Parse and install
-      const result = await installPluginFromDir(pluginRoot, fallbackName)
+      const result = await installPluginFromDir(pluginRoot, fallbackName, origin)
 
       // Clean up temp directory (the real copy is at destDir)
       if (existsSync(tempDir)) {
@@ -465,15 +473,25 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
     "plugins:install",
     async (
       _event,
-      payload: { buffer: ArrayBuffer; fileName: string }
+      payload: { buffer: ArrayBuffer; fileName: string; origin?: "market" | "local" }
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> => {
-      const { buffer, fileName } = payload
+      const { buffer, fileName, origin } = payload
       if (!buffer || !fileName) {
         return { success: false, error: "无效的文件" }
       }
+      // Default unspecified origin to "local". Every call site that doesn't
+      // pass a value is a user-initiated local install (the dialog upload
+      // path). Without this default the sticky-origin logic in
+      // installPluginFromDir would carry over an existing "market" tag, so a
+      // user re-installing a market-sourced plugin from a local zip could
+      // never flip it back to "local" — their explicit local action would be
+      // silently overridden. Market downloads pass "market" explicitly via
+      // marketApi.downloadItem.
+      const sanitizedOrigin: "market" | "local" =
+        origin === "market" || origin === "local" ? origin : "local"
       await pluginMutex.acquire()
       try {
-        return await installPluginFromZip(buffer, fileName)
+        return await installPluginFromZip(buffer, fileName, sanitizedOrigin)
       } finally {
         pluginMutex.release()
       }
@@ -492,7 +510,11 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       }
       await pluginMutex.acquire()
       try {
-        return await installPluginFromDir(result.filePaths[0])
+        // This IPC is only reached through the PluginsPanel "选择文件夹"
+        // button — an unambiguously local action. Pass "local" explicitly so
+        // it can override any sticky "market" tag from a prior install of
+        // the same plugin.
+        return await installPluginFromDir(result.filePaths[0], undefined, "local")
       } finally {
         pluginMutex.release()
       }
@@ -543,6 +565,33 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         invalidateEnabledSkillsCache()
         await invalidateGlobalMcpCapabilityService("plugin:setEnabled")
         notifyHooksChanged("plugin-enabled-changed")
+        return { success: true }
+      } catch (e) {
+        return { success: false, error: e instanceof Error ? e.message : "设置失败" }
+      } finally {
+        pluginMutex.release()
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "plugins:setOriginsBatch",
+    async (
+      _event,
+      payload: { updates: Array<{ id: string; origin: "market" | "local" }> }
+    ): Promise<{ success: boolean; error?: string }> => {
+      const raw = Array.isArray(payload?.updates) ? payload.updates : []
+      const sanitized = raw.filter(
+        (u): u is { id: string; origin: "market" | "local" } =>
+          !!u &&
+          typeof u.id === "string" &&
+          u.id.length > 0 &&
+          (u.origin === "market" || u.origin === "local")
+      )
+      if (sanitized.length === 0) return { success: true }
+      await pluginMutex.acquire()
+      try {
+        setPluginOriginsBatch(sanitized)
         return { success: true }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "设置失败" }

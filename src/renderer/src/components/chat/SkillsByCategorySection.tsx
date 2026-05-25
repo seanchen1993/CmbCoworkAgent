@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react"
 import {
-  Building2,
   Code2,
   Layers3,
   Loader2,
@@ -23,6 +22,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { getAllSkills, SCENE_CATEGORY_OPTIONS, type SkillWithUsage } from "@/lib/skill-data-service"
 import type { MarketItem } from "../../api/market"
+import { OrganizationSkillsSection } from "./OrganizationSkillsSection"
 
 export interface SkillsByCategoryItem {
   skill: SkillMetadata
@@ -40,6 +40,7 @@ interface SkillsByCategorySectionProps {
   skills: SkillMetadata[]
   previewLimit: number
   onOpenMarketByCategory: (category: string) => void
+  onOpenOrganizationSkillMarket: (skillName?: string) => void
   onOpenMarketBySkill: (skillName: string) => void
   onUseSkillPrompt: (skill: SkillMetadata, label?: string) => void
 }
@@ -59,13 +60,11 @@ function getCategoryKey(primary: string, secondary: string): string {
   return secondary ? `${primary}/${secondary}` : primary
 }
 
-const ORGANIZATION_CATEGORY = "组织级技能"
 const COMMON_CATEGORY = "通用场景"
 const LEGACY_RESEARCH_CATEGORY = "研发场景"
 const categoryIconMap: Record<string, React.ComponentType<{ className?: string }>> = {
   治理类场景: ShieldCheck,
   研发类场景: Code2,
-  组织级技能: Building2,
   通用场景: Sparkles,
   精品技能: Zap
 }
@@ -126,6 +125,7 @@ export function SkillsByCategorySection({
   skills,
   previewLimit,
   onOpenMarketByCategory,
+  onOpenOrganizationSkillMarket,
   onOpenMarketBySkill,
   onUseSkillPrompt
 }: SkillsByCategorySectionProps): React.JSX.Element {
@@ -137,11 +137,6 @@ export function SkillsByCategorySection({
     let canceled = false
 
     const loadMarketSkills = async (): Promise<void> => {
-      if (cachedMarketSkillsData) {
-        setMarketSkillsData(cachedMarketSkillsData)
-        setMarketSkillsLoading(false)
-        return
-      }
       setMarketSkillsLoading(true)
       const data = await loadMarketSkillsOnce()
       if (canceled) return
@@ -165,9 +160,8 @@ export function SkillsByCategorySection({
     for (const item of marketSkillsData) {
       const localSkill = localSkillMap.get(item.name)
       const { primary, secondary } = splitCategory(item.category)
-      const isOrganizationSkill = primary === ORGANIZATION_CATEGORY
       if (primary === LEGACY_RESEARCH_CATEGORY) continue
-      if (!isOrganizationSkill && item.featured !== "精品" && item.tag !== "认证") continue
+      if (item.featured !== "精品" && item.tag !== "认证") continue
 
       if (!groups.has(primary)) groups.set(primary, new Map())
       const secondaryGroups = groups.get(primary)!
@@ -266,6 +260,128 @@ export function SkillsByCategorySection({
     )
   }, [marketSkillsData, skills])
 
+  const renderCategorySection = (
+    [primaryCategory, secondaryGroups]: [string, Map<string, SkillsByCategoryItem[]>],
+    showDivider: boolean
+  ): React.JSX.Element => {
+    const onlyPrimaryLevel = secondaryGroups.size === 1 && secondaryGroups.has("")
+    const primaryLevelItems = onlyPrimaryLevel ? secondaryGroups.get("") || [] : []
+    const CategoryIcon = categoryIconMap[primaryCategory] ?? Layers3
+    const primaryMoreCount = Math.max(0, primaryLevelItems.length - previewLimit)
+
+    return (
+      <div
+        key={primaryCategory}
+        className={`space-y-2.5 py-4 ${showDivider ? "pt-5" : "pt-0"} last:pb-0`}
+      >
+        {showDivider && (
+          <div className="h-px bg-gradient-to-r from-transparent via-slate-400/90 to-transparent dark:via-slate-500/85 -mt-2 mb-4" />
+        )}
+        <div className="text-xs text-muted-foreground font-medium tracking-wider flex items-center justify-between gap-1">
+          <div className="flex items-center gap-1">
+            <CategoryIcon className="size-3 text-amber-500" />
+            <span className={"text-black"}>{primaryCategory}</span>
+          </div>
+          {onlyPrimaryLevel && (
+            <button
+              type="button"
+              onClick={() => onOpenMarketByCategory(primaryCategory)}
+              className="text-xs text-amber-600 hover:text-amber-700 transition-colors cursor-pointer"
+            >
+              更多{primaryMoreCount > 0 ? `（+${primaryMoreCount}）` : ""}
+            </button>
+          )}
+        </div>
+        {Array.from(secondaryGroups.entries()).map(([secondaryCategory, items]) => {
+          const hideSecondaryHeader = onlyPrimaryLevel && !secondaryCategory
+          const visibleItems = items.slice(0, previewLimit)
+          const secondaryMoreCount = Math.max(0, items.length - previewLimit)
+          return (
+            <div
+              key={`${primaryCategory}/${secondaryCategory || "__no_secondary__"}`}
+              className="space-y-2"
+            >
+              {!hideSecondaryHeader && (
+                <div
+                  className={`flex items-center px-1 ${secondaryCategory ? "justify-between" : "justify-end"}`}
+                >
+                  {secondaryCategory ? (
+                    <div className="text-xs text-gray-700 dark:text-gray-300">
+                      {secondaryCategory}
+                    </div>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => onOpenMarketByCategory(secondaryCategory || primaryCategory)}
+                    className="text-xs text-amber-600 hover:text-amber-700 transition-colors cursor-pointer"
+                  >
+                    更多{secondaryMoreCount > 0 ? `（+${secondaryMoreCount}）` : ""}
+                  </button>
+                </div>
+              )}
+              <div className="grid grid-cols-4 gap-2">
+                {visibleItems.map((item) => {
+                  const { skill, label, marketItem, isInstalled, isFeatured, isCertified } = item
+                  const tags = [isFeatured ? "精品" : "", isCertified ? "认证" : ""].filter(Boolean)
+                  const displayLabel = label
+                  return (
+                    <Tooltip key={marketItem.name}>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!isInstalled) {
+                              setInstallPromptItem(item)
+                              return
+                            }
+                            onUseSkillPrompt(skill, label)
+                          }}
+                          className="group relative w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                        >
+                          {tags.length > 0 && (
+                            <div className="absolute right-1 top-1 flex flex-col items-end gap-0.5">
+                              {tags.map((tag) => (
+                                <span
+                                  key={tag}
+                                  className={
+                                    tag === "精品"
+                                      ? "relative rounded-sm border border-amber-200 bg-amber-50 px-0.5 text-[9px] leading-3 text-amber-700 hover:z-10 hover:after:absolute hover:after:left-full hover:after:top-1/2 hover:after:ml-1.5 hover:after:-translate-y-1/2 hover:after:whitespace-nowrap hover:after:rounded-md hover:after:border hover:after:border-slate-200 hover:after:bg-popover hover:after:px-2 hover:after:py-1 hover:after:text-[11px] hover:after:leading-none hover:after:text-popover-foreground hover:after:shadow-md hover:after:content-['团队级']"
+                                      : "relative rounded-sm border border-emerald-200 bg-emerald-50 px-0.5 text-[9px] leading-3 text-emerald-700 hover:z-10 hover:after:absolute hover:after:left-full hover:after:top-1/2 hover:after:ml-1.5 hover:after:-translate-y-1/2 hover:after:whitespace-nowrap hover:after:rounded-md hover:after:border hover:after:border-slate-200 hover:after:bg-popover hover:after:px-2 hover:after:py-1 hover:after:text-[11px] hover:after:leading-none hover:after:text-popover-foreground hover:after:shadow-md hover:after:content-['室组级']"
+                                  }
+                                >
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          <div
+                            className={`flex items-center gap-2 min-w-0 ${tags.length > 0 ? "pr-8" : ""}`}
+                          >
+                            <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
+                              <Wrench className="size-4" />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
+                                {displayLabel}
+                              </div>
+                            </div>
+                          </div>
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" sideOffset={6}>
+                        <p className="max-w-xs break-words">{displayLabel}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  )
+                })}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
   if (marketSkillsLoading) {
     return (
       <div className="rounded-xl border border-border/60 bg-background/80 px-4 py-8">
@@ -285,138 +401,25 @@ export function SkillsByCategorySection({
     )
   }
 
+  const categoryEntries = Array.from(skillsByCategory.entries())
+  const commonCategoryEntry = categoryEntries.find(
+    ([primaryCategory]) => primaryCategory === COMMON_CATEGORY
+  )
+  const sceneCategoryEntries = categoryEntries.filter(
+    ([primaryCategory]) => primaryCategory !== COMMON_CATEGORY
+  )
+
   return (
     <TooltipProvider delayDuration={250}>
       <div className="space-y-0">
-        {Array.from(skillsByCategory.entries()).map(([primaryCategory, secondaryGroups], index) => {
-          const onlyPrimaryLevel = secondaryGroups.size === 1 && secondaryGroups.has("")
-          const primaryLevelItems = onlyPrimaryLevel ? secondaryGroups.get("") || [] : []
-          const showAllPrimaryItems = primaryCategory === ORGANIZATION_CATEGORY
-          const CategoryIcon = categoryIconMap[primaryCategory] ?? Layers3
-
-          return (
-            <div
-              key={primaryCategory}
-              className={`space-y-2.5 py-4 ${index > 0 ? "pt-5" : "pt-0"} last:pb-0`}
-            >
-              {index > 0 && (
-                <div className="h-px bg-gradient-to-r from-transparent via-slate-400/90 to-transparent dark:via-slate-500/85 -mt-2 mb-4" />
-              )}
-              <div className="text-xs text-muted-foreground font-medium tracking-wider flex items-center justify-between gap-1">
-                <div className="flex items-center gap-1">
-                  <CategoryIcon className="size-3 text-amber-500" />
-                  <span className={"text-black"}>{primaryCategory}</span>
-                </div>
-                {onlyPrimaryLevel && (
-                  <button
-                    type="button"
-                    onClick={() => onOpenMarketByCategory(primaryCategory)}
-                    className="text-xs text-amber-600 hover:text-amber-700 transition-colors cursor-pointer"
-                  >
-                    更多
-                    {!showAllPrimaryItems && primaryLevelItems.length > previewLimit
-                      ? `（+${primaryLevelItems.length - previewLimit}）`
-                      : ""}
-                  </button>
-                )}
-              </div>
-              {Array.from(secondaryGroups.entries()).map(([secondaryCategory, items]) => {
-                const hideSecondaryHeader = onlyPrimaryLevel && !secondaryCategory
-                const showAllItems = primaryCategory === ORGANIZATION_CATEGORY
-                const visibleItems = showAllItems ? items : items.slice(0, previewLimit)
-                return (
-                  <div
-                    key={`${primaryCategory}/${secondaryCategory || "__no_secondary__"}`}
-                    className="space-y-2"
-                  >
-                    {!hideSecondaryHeader && (
-                      <div
-                        className={`flex items-center px-1 ${secondaryCategory ? "justify-between" : "justify-end"}`}
-                      >
-                        {secondaryCategory ? (
-                          <div className="text-xs text-gray-700 dark:text-gray-300">
-                            {secondaryCategory}
-                          </div>
-                        ) : null}
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onOpenMarketByCategory(secondaryCategory || primaryCategory)
-                          }
-                          className="text-xs text-amber-600 hover:text-amber-700 transition-colors cursor-pointer"
-                        >
-                          更多
-                          {!showAllItems && items.length > previewLimit
-                            ? `（+${items.length - previewLimit}）`
-                            : ""}
-                        </button>
-                      </div>
-                    )}
-                    <div className="grid grid-cols-4 gap-2">
-                      {visibleItems.map((item) => {
-                        const { skill, label, marketItem, isInstalled, isFeatured, isCertified } =
-                          item
-                        const tags = [isFeatured ? "精品" : "", isCertified ? "认证" : ""].filter(
-                          Boolean
-                        )
-                        const displayLabel = label
-                        return (
-                          <Tooltip key={marketItem.name}>
-                            <TooltipTrigger asChild>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  if (!isInstalled) {
-                                    setInstallPromptItem(item)
-                                    return
-                                  }
-                                  onUseSkillPrompt(skill, label)
-                                }}
-                                className="group relative w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
-                              >
-                                {tags.length > 0 && (
-                                  <div className="absolute right-1 top-1 flex flex-col items-end gap-0.5">
-                                    {tags.map((tag) => (
-                                      <span
-                                        key={tag}
-                                        className={
-                                          tag === "精品"
-                                            ? "relative rounded-sm border border-amber-200 bg-amber-50 px-0.5 text-[9px] leading-3 text-amber-700 hover:z-10 hover:after:absolute hover:after:left-full hover:after:top-1/2 hover:after:ml-1.5 hover:after:-translate-y-1/2 hover:after:whitespace-nowrap hover:after:rounded-md hover:after:border hover:after:border-slate-200 hover:after:bg-popover hover:after:px-2 hover:after:py-1 hover:after:text-[11px] hover:after:leading-none hover:after:text-popover-foreground hover:after:shadow-md hover:after:content-['团队级']"
-                                            : "relative rounded-sm border border-emerald-200 bg-emerald-50 px-0.5 text-[9px] leading-3 text-emerald-700 hover:z-10 hover:after:absolute hover:after:left-full hover:after:top-1/2 hover:after:ml-1.5 hover:after:-translate-y-1/2 hover:after:whitespace-nowrap hover:after:rounded-md hover:after:border hover:after:border-slate-200 hover:after:bg-popover hover:after:px-2 hover:after:py-1 hover:after:text-[11px] hover:after:leading-none hover:after:text-popover-foreground hover:after:shadow-md hover:after:content-['室组级']"
-                                        }
-                                      >
-                                        {tag}
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
-                                <div
-                                  className={`flex items-center gap-2 min-w-0 ${tags.length > 0 ? "pr-8" : ""}`}
-                                >
-                                  <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
-                                    <Wrench className="size-4" />
-                                  </div>
-                                  <div className="min-w-0 flex-1">
-                                    <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
-                                      {displayLabel}
-                                    </div>
-                                  </div>
-                                </div>
-                              </button>
-                            </TooltipTrigger>
-                            <TooltipContent side="top" sideOffset={6}>
-                              <p className="max-w-xs break-words">{displayLabel}</p>
-                            </TooltipContent>
-                          </Tooltip>
-                        )
-                      })}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          )
-        })}
+        {sceneCategoryEntries.map((entry, index) => renderCategorySection(entry, index > 0))}
+        <OrganizationSkillsSection
+          skills={skills}
+          showDivider={sceneCategoryEntries.length > 0}
+          onOpenOrganizationSkillMarket={onOpenOrganizationSkillMarket}
+          onUseSkillPrompt={onUseSkillPrompt}
+        />
+        {commonCategoryEntry ? renderCategorySection(commonCategoryEntry, true) : null}
       </div>
       <Dialog
         open={!!installPromptItem}

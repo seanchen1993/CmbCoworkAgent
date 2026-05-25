@@ -20,6 +20,7 @@ import type {
   LspCallHierarchyOutgoingCall,
   LspStatus,
   ChatXConfig,
+  HookLoggingConfig,
   PluginHookMetadata,
   PluginMetadata,
   PluginManifest,
@@ -230,6 +231,14 @@ interface DashboardUserListOptions {
   afterKey?: Record<string, string | number> | null
 }
 
+interface DashboardAllUserItem {
+  sapId: string
+  userName: string
+  orgName: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+}
+
 interface DashboardUserDetailOptions {
   traceLimit?: number
 }
@@ -240,14 +249,16 @@ interface CustomAPI {
       threadId: string,
       message: string,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      userMessageId?: string
     ) => () => void
     streamAgent: (
       threadId: string,
       message: string,
       command: unknown,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      userMessageId?: string
     ) => () => void
     interrupt: (
       threadId: string,
@@ -492,14 +503,14 @@ interface CustomAPI {
     }>
     commitWorktree: (
       threadId: string,
-      message: string
+      message: string,
+      filePaths?: string[]
     ) => Promise<{
       success: boolean
       error?: string
     }>
     pushWorktree: (
-      threadId: string,
-      message?: string
+      threadId: string
     ) => Promise<{
       success: boolean
       autoCommitted?: boolean
@@ -770,7 +781,8 @@ interface CustomAPI {
     list: () => Promise<PluginMetadata[]>
     install: (
       buffer: ArrayBuffer,
-      fileName: string
+      fileName: string,
+      origin?: "market" | "local"
     ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
     installFromDir: () => Promise<{ success: boolean; pluginName?: string; error?: string }>
     exportForMarket: (
@@ -778,6 +790,9 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (id: string) => Promise<{ success: boolean; error?: string }>
     setEnabled: (id: string, enabled: boolean) => Promise<void>
+    setOriginsBatch: (
+      updates: Array<{ id: string; origin: "market" | "local" }>
+    ) => Promise<{ success: boolean; error?: string }>
     getDetail: (id: string) => Promise<{
       skills: string[]
       mcpServers: string[]
@@ -1146,6 +1161,13 @@ interface CustomAPI {
         callback: (data: { threadId: string; workspacePath: string }) => void
       ) => () => void
     }
+    logging: {
+      get: () => Promise<HookLoggingConfig>
+      save: (updates: Partial<HookLoggingConfig>) => Promise<HookLoggingConfig>
+      getLogDir: () => Promise<string>
+      openLogDir: () => Promise<{ success: boolean; error?: string }>
+      onChanged: (callback: (config: HookLoggingConfig) => void) => () => void
+    }
   }
   codeExecTools: {
     list: () => Promise<ManagedSavedCodeExecTool[]>
@@ -1202,6 +1224,11 @@ interface CustomAPI {
     userProfiles: (
       sapIds: string[]
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    queryAllUser: () => Promise<{
+      success: boolean
+      data?: DashboardAllUserItem[]
+      error?: string
+    }>
     productivity: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"
@@ -1320,7 +1347,8 @@ interface CustomAPI {
       cwd?: string
     ) => Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }>
     listBranches: (
-      cwd?: string
+      cwd?: string,
+      options?: { refreshRemote?: boolean }
     ) => Promise<{ success: boolean; branches: string[]; error?: string }>
     switchBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
     createBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>

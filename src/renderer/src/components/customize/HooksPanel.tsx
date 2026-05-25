@@ -1,8 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Plus, Search, X, Pencil, Trash2, Webhook, Terminal, BrainCircuit } from "lucide-react"
+import {
+  Plus,
+  Search,
+  X,
+  Pencil,
+  Trash2,
+  Webhook,
+  Terminal,
+  BrainCircuit,
+  FolderOpen
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { toast } from "sonner"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
@@ -784,6 +795,7 @@ export function HooksPanel(): React.JSX.Element {
             )}
           </div>
         </ScrollArea>
+        <HookLoggingControls />
       </div>
 
       {/* Right detail column */}
@@ -814,6 +826,142 @@ export function HooksPanel(): React.JSX.Element {
         editHook={editHook}
       />
     </>
+  )
+}
+
+/* ── Hook logging controls ─────────────────────────────────────────────
+ *
+ * Rendered as a compact footer at the bottom of the hook list. Two toggles:
+ *
+ *   - "启用 Hook 日志"  (default off): when on, each chat turn that fired
+ *     hooks gets a small chip below the user message — click for the modal
+ *     with per-execution detail. Off by default to keep the chat clean for
+ *     users who don't author hooks.
+ *
+ *   - "诊断模式"        (default off, requires the main toggle): adds
+ *     stdin payload, full command/cwd, skipped-hook rows, and persists
+ *     everything to a daily jsonl file under the openwork dir.
+ *
+ * Both flags are settings — they live in hook-logging.json, not per-thread.
+ */
+function HookLoggingControls(): React.JSX.Element {
+  const [config, setConfig] = useState<{ enabled: boolean; diagnostic: boolean }>({
+    enabled: false,
+    diagnostic: false
+  })
+  const [logDir, setLogDir] = useState("")
+  const [loading, setLoading] = useState(true)
+  useEffect(() => {
+    let cancelled = false
+    const unsubscribe = window.api.hooks.logging.onChanged((cfg) => {
+      if (!cancelled) setConfig(cfg)
+    })
+    void Promise.all([window.api.hooks.logging.get(), window.api.hooks.logging.getLogDir()])
+      .then(([cfg, dir]) => {
+        if (!cancelled) setConfig(cfg)
+        if (!cancelled) setLogDir(dir)
+      })
+      .catch((e) => {
+        console.warn("[HooksPanel] failed to load logging config:", e)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [])
+
+  const save = useCallback(
+    async (next: Partial<{ enabled: boolean; diagnostic: boolean }>) => {
+      try {
+        const updated = await window.api.hooks.logging.save(next)
+        setConfig(updated)
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "保存失败")
+      }
+    },
+    []
+  )
+
+  const openLogDir = useCallback(async () => {
+    try {
+      const res = await window.api.hooks.logging.openLogDir()
+      if (!res.success) toast.error(res.error || "无法打开日志目录")
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "无法打开日志目录")
+    }
+  }, [])
+
+  if (loading) {
+    return <div className="border-t border-border/60 px-3 py-2 text-[11px] text-muted-foreground/60">加载中…</div>
+  }
+
+  return (
+    <div className="border-t border-border/60 px-3 py-2.5 space-y-2 bg-muted/20">
+      <div className="flex items-center justify-between gap-2">
+        <label className="flex items-center gap-2 cursor-pointer flex-1 min-w-0">
+          <input
+            type="checkbox"
+            className="size-3.5 shrink-0"
+            checked={config.enabled}
+            onChange={(e) => void save({ enabled: e.target.checked })}
+          />
+          <span className="text-xs font-medium">启用 Hook 日志</span>
+        </label>
+      </div>
+      <p className="text-[10px] text-muted-foreground/70 leading-relaxed pl-5">
+        每个产生过 hook 执行的消息会出现一个小入口，点开查看本轮的执行记录。
+      </p>
+
+      <div className="flex items-center justify-between gap-2 pt-1">
+        <label
+          className={cn(
+            "flex items-center gap-2 flex-1 min-w-0",
+            config.enabled ? "cursor-pointer" : "cursor-not-allowed opacity-40"
+          )}
+        >
+          <input
+            type="checkbox"
+            className="size-3.5 shrink-0"
+            checked={config.diagnostic}
+            disabled={!config.enabled}
+            onChange={(e) => void save({ diagnostic: e.target.checked })}
+          />
+          <span className="text-xs font-medium">诊断模式</span>
+        </label>
+      </div>
+      <p
+        className={cn(
+          "text-[10px] leading-relaxed pl-5",
+          config.enabled ? "text-muted-foreground/70" : "text-muted-foreground/40"
+        )}
+      >
+        额外展示 stdin payload、完整 command、cwd，以及被 scope 过滤掉的 hook；同时把日志按天落到
+        <code className="mx-0.5 font-mono">hooks/log/hooks.&lt;日期&gt;.jsonl</code>（保留 7 天）。
+        stdin 可能含敏感用户输入。
+      </p>
+
+      {config.enabled && config.diagnostic && (
+        <div className="flex flex-col gap-2 pt-1 sm:flex-row sm:items-center">
+          {logDir && (
+            <code className="min-w-0 flex-1 rounded border border-border/60 bg-background/70 px-2 py-1 font-mono text-[10px] text-muted-foreground break-all">
+              {logDir}
+            </code>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 gap-1.5 text-xs justify-center sm:w-auto"
+            onClick={() => void openLogDir()}
+          >
+            <FolderOpen className="size-3.5" />
+            打开日志目录
+          </Button>
+        </div>
+      )}
+    </div>
   )
 }
 
