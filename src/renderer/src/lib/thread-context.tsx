@@ -110,10 +110,20 @@ export interface ModelRetryState {
 
 export interface HookLogEntry {
   id: string
+  /** "executed" = ran to completion; "skipped" = matched event but scope-filtered. */
+  kind: "executed" | "skipped"
   event: string
   hookType: string
   label: string
+  command?: string
   toolSuffix: string
+  pluginId?: string
+  pluginName?: string
+  skillName?: string
+  skillPath?: string
+  hookSourcePath?: string
+  cwd?: string
+  durationMs?: number
   exitCode: number | null
   blocked: boolean
   continue?: boolean
@@ -124,8 +134,39 @@ export interface HookLogEntry {
   stderr: string
   additionalContext?: string
   systemMessage?: string
+  stdinPayload?: string
+  skipReason?: string
   timestamp: Date
+  turnId?: string
 }
+
+/**
+ * Per-turn bucket of hook log entries.
+ *
+ * `turnId` is the id of the user message that opened the turn — used as the
+ * grouping key so historical turns can still be looked up after subsequent
+ * user messages arrive. Without this we'd lose old turns the moment a new
+ * user message landed (the original behavior, which made post-mortem
+ * debugging impossible).
+ */
+export interface HookLogBucket {
+  turnId: string
+  /** First user message text preview — shown in the modal title. */
+  turnPreview: string
+  /**
+   * True when this bucket was opened by an early hook event (or the
+   * background sentinel) and is still waiting for the real user message to
+   * arrive. `openHookLogBucket` upgrades placeholders in place; we use this
+   * flag (not a `turnPreview.startsWith("(")` heuristic) so users whose own
+   * messages happen to start with `(` aren't misclassified.
+   */
+  isPlaceholder?: boolean
+  startedAt: Date
+  entries: HookLogEntry[]
+}
+
+/** Max per-thread retention of historical turn buckets, in-memory. */
+const HOOK_LOG_BUCKET_RING_SIZE = 10
 
 export interface HookInterruptionState {
   event: string
@@ -217,9 +258,12 @@ interface ThreadContextValue {
   // Stream subscription
   subscribeToStream: (threadId: string, callback: () => void) => () => void
   getStreamData: (threadId: string) => StreamData
-  // Hook log subscription (external store — no re-renders on ThreadProvider)
+  // Hook log subscription (external store — no re-renders on ThreadProvider).
+  // Returns the per-turn buckets in chronological order; the most recent
+  // bucket is the current turn. Capped at HOOK_LOG_BUCKET_RING_SIZE buckets
+  // per thread to bound memory.
   subscribeToHookLogs: (threadId: string, callback: () => void) => () => void
-  getHookLogs: (threadId: string) => HookLogEntry[]
+  getHookLogBuckets: (threadId: string) => HookLogBucket[]
   // Get all initialized thread states (for kanban view)
   getAllThreadStates: () => Record<string, ThreadState>
   // Get all stream loading states (for kanban view)
@@ -336,7 +380,7 @@ const defaultStreamData: StreamData = {
   isLoading: false,
   stream: null
 }
-const EMPTY_HOOK_LOGS: HookLogEntry[] = []
+const EMPTY_HOOK_LOG_BUCKETS: HookLogBucket[] = []
 
 function getPendingApprovalId(request: HITLRequest): string {
   const approval = request as unknown as Record<string, unknown>
@@ -491,12 +535,21 @@ interface CustomEventData {
   message?: string
   delayMs?: number
   // hook_executed fields
+  kind?: "executed" | "skipped"
   event?: string
   hookType?: string
   hookEvent?: string
   action?: string
   label?: string
+  command?: string
   toolSuffix?: string
+  pluginId?: string
+  pluginName?: string
+  skillName?: string
+  skillPath?: string
+  hookSourcePath?: string
+  cwd?: string
+  durationMs?: number
   exitCode?: number | null
   blocked?: boolean
   continue?: boolean
@@ -506,6 +559,10 @@ interface CustomEventData {
   stderr?: string
   additionalContext?: string
   systemMessage?: string
+  stdinPayload?: string
+  skipReason?: string
+  timestamp?: string
+  turnId?: string
   result?: AgentAutoCommitResult
 }
 
@@ -598,8 +655,17 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const streamSubscribersRef = useRef<Record<string, Set<() => void>>>({})
   const allStreamSubscribersRef = useRef<Set<() => void>>(new Set())
 
-  // Hook logs store (not React state — avoids re-rendering chat on every hook fire)
-  const hookLogsRef = useRef<Record<string, HookLogEntry[]>>({})
+  // Hook logs store (not React state — avoids re-rendering chat on every hook fire).
+  //
+  // Structure: per-thread → ordered list of per-turn buckets (oldest first).
+  // A bucket is opened by `openHookLogBucket(threadId, userMessage)` at the
+  // start of each new user turn; subsequent `hook_executed` events append to
+  // the most recent bucket. Buckets are not cleared on new user messages —
+  // they're kept up to HOOK_LOG_BUCKET_RING_SIZE so the user can scroll back
+  // and inspect what hooks ran in earlier turns. Old buckets fall off the
+  // front when the ring fills; the jsonl log file (diagnostic mode) holds
+  // anything older.
+  const hookLogBucketsRef = useRef<Record<string, HookLogBucket[]>>({})
   const hookLogsSubscribersRef = useRef<Record<string, Set<() => void>>>({})
 
   const notifyHookLogSubscribers = useCallback((threadId: string) => {
@@ -616,9 +682,62 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const getHookLogs = useCallback((threadId: string): HookLogEntry[] => {
-    return hookLogsRef.current[threadId] ?? EMPTY_HOOK_LOGS
+  const getHookLogBuckets = useCallback((threadId: string): HookLogBucket[] => {
+    return hookLogBucketsRef.current[threadId] ?? EMPTY_HOOK_LOG_BUCKETS
   }, [])
+
+  // Opens a new bucket for the incoming user turn. Trims the ring to size.
+  // Called from appendMessage when a `role === "user"` message arrives.
+  const openHookLogBucket = useCallback((threadId: string, userMessage: Message): void => {
+    const preview =
+      typeof userMessage.content === "string"
+        ? userMessage.content
+        : Array.isArray(userMessage.content)
+          ? userMessage.content
+              .map((block) => {
+                const text = (block as { text?: unknown })?.text
+                return typeof text === "string" ? text : ""
+              })
+              .join(" ")
+          : ""
+    const bucket: HookLogBucket = {
+      turnId: userMessage.id,
+      turnPreview: preview.trim().slice(0, 120),
+      startedAt: new Date(),
+      entries: []
+    }
+    const existing = hookLogBucketsRef.current[threadId] ?? []
+    // Idempotent: if appendMessage fires twice for the same id, don't open
+    // duplicate buckets. If a hook event arrived first and created a
+    // placeholder bucket, fill in the real user preview while preserving
+    // existing entries. Use the explicit isPlaceholder flag (not a
+    // turnPreview prefix heuristic) so user messages that legitimately start
+    // with "(" aren't misclassified.
+    const existingIdx = existing.findIndex((b) => b.turnId === bucket.turnId)
+    if (existingIdx >= 0) {
+      const current = existing[existingIdx]
+      if (current.isPlaceholder && bucket.turnPreview) {
+        hookLogBucketsRef.current[threadId] = [
+          ...existing.slice(0, existingIdx),
+          {
+            ...current,
+            turnPreview: bucket.turnPreview,
+            startedAt: bucket.startedAt,
+            isPlaceholder: false
+          },
+          ...existing.slice(existingIdx + 1)
+        ]
+        notifyHookLogSubscribers(threadId)
+      }
+      return
+    }
+    const next = [...existing, bucket]
+    if (next.length > HOOK_LOG_BUCKET_RING_SIZE) {
+      next.splice(0, next.length - HOOK_LOG_BUCKET_RING_SIZE)
+    }
+    hookLogBucketsRef.current[threadId] = next
+    notifyHookLogSubscribers(threadId)
+  }, [notifyHookLogSubscribers])
 
   // Notify subscribers for a thread
   const notifyStreamSubscribers = useCallback((threadId: string) => {
@@ -713,6 +832,31 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
     },
     []
+  )
+
+  const loadWorkspaceFilesInBackground = useCallback(
+    (threadId: string, workspacePath: string) => {
+      // 工作区文件树可能很大，不能阻塞会话历史首屏恢复。
+      // 这里后台加载，避免 “正在加载会话历史” 被完整目录扫描拖住。
+      window.api.workspace
+        .loadFromDisk(threadId)
+        .then((diskResult) => {
+          if (!diskResult.success) return
+
+          // 后台扫描期间用户可能切走/关闭了这个线程，避免把旧结果写回已清理状态。
+          if (!initializedThreadsRef.current.has(threadId)) return
+
+          updateThreadState(threadId, (state) => {
+            // 如果扫描完成前用户切换了工作区，丢弃旧 workspace 的文件树结果。
+            if (state.workspacePath !== workspacePath) return {}
+            return { workspaceFiles: diskResult.files }
+          })
+        })
+        .catch((error) => {
+          console.error("[ThreadContext] Failed to load workspace files:", error)
+        })
+    },
+    [updateThreadState]
   )
 
   // Parse error messages into user-friendly format
@@ -911,10 +1055,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         case "hook_executed": {
           const entry: HookLogEntry = {
             id: `${Date.now()}-${Math.random()}`,
+            kind: data.kind === "skipped" ? "skipped" : "executed",
             event: data.event ?? "",
             hookType: data.hookType ?? "command",
             label: data.label ?? "",
+            command: data.command,
             toolSuffix: data.toolSuffix ?? "",
+            pluginId: data.pluginId,
+            pluginName: data.pluginName,
+            skillName: data.skillName,
+            skillPath: data.skillPath,
+            hookSourcePath: data.hookSourcePath,
+            cwd: data.cwd,
+            durationMs: data.durationMs,
             exitCode: data.exitCode ?? null,
             blocked: data.blocked ?? false,
             continue: data.continue,
@@ -925,9 +1078,84 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             stderr: data.stderr ?? "",
             additionalContext: data.additionalContext,
             systemMessage: data.systemMessage,
-            timestamp: new Date()
+            stdinPayload: data.stdinPayload,
+            skipReason: data.skipReason,
+            timestamp: data.timestamp ? new Date(data.timestamp) : new Date(),
+            turnId: data.turnId
           }
-          hookLogsRef.current[threadId] = [...(hookLogsRef.current[threadId] ?? []), entry]
+          // Prefer the explicit turn id from main. Falling back to the latest
+          // bucket keeps legacy/background events visible, but normal chat
+          // turns no longer drift when async hook events arrive late.
+          //
+          // IMPORTANT: we MUST produce a new outer array (and a new bucket
+          // object). useSyncExternalStore compares the snapshot by reference
+          // identity — mutating bucket.entries in place would leave the outer
+          // array pointer unchanged and the chip would never re-render.
+          // Bucket assignment rules:
+          //   1. entry.turnId matches an existing bucket → append.
+          //   2. entry.turnId set but no matching bucket → create a new
+          //      "earlier hook event" bucket (subject to ring trim).
+          //   3. entry.turnId missing → create / append to a dedicated
+          //      background-events bucket. Older code routed these to
+          //      `buckets[last]` which polluted whichever user turn happened
+          //      to be most recent (e.g. SessionStart firing after a new
+          //      conversation began would inflate the previous chip).
+          const buckets = hookLogBucketsRef.current[threadId] ?? []
+          const BACKGROUND_BUCKET_ID = "__background__"
+          const trim = (list: HookLogBucket[]): HookLogBucket[] => {
+            if (list.length > HOOK_LOG_BUCKET_RING_SIZE) {
+              list.splice(0, list.length - HOOK_LOG_BUCKET_RING_SIZE)
+            }
+            return list
+          }
+          let nextBuckets: HookLogBucket[]
+          if (entry.turnId) {
+            const explicitIdx = buckets.findIndex((bucket) => bucket.turnId === entry.turnId)
+            if (explicitIdx >= 0) {
+              const target = buckets[explicitIdx]
+              nextBuckets = [
+                ...buckets.slice(0, explicitIdx),
+                { ...target, entries: [...target.entries, entry] },
+                ...buckets.slice(explicitIdx + 1)
+              ]
+            } else {
+              nextBuckets = trim([
+                ...buckets,
+                {
+                  turnId: entry.turnId,
+                  turnPreview: "(较早的 Hook 事件)",
+                  isPlaceholder: true,
+                  startedAt: new Date(),
+                  entries: [entry]
+                }
+              ])
+            }
+          } else {
+            const bgIdx = buckets.findIndex((bucket) => bucket.turnId === BACKGROUND_BUCKET_ID)
+            if (bgIdx >= 0) {
+              const target = buckets[bgIdx]
+              nextBuckets = [
+                ...buckets.slice(0, bgIdx),
+                { ...target, entries: [...target.entries, entry] },
+                ...buckets.slice(bgIdx + 1)
+              ]
+            } else {
+              // The background bucket has no corresponding user message so it
+              // never gets "upgraded" — mark it placeholder anyway for any
+              // future code that wants to treat it as not-a-real-turn.
+              nextBuckets = trim([
+                ...buckets,
+                {
+                  turnId: BACKGROUND_BUCKET_ID,
+                  turnPreview: "(会话生命周期事件)",
+                  isPlaceholder: true,
+                  startedAt: new Date(),
+                  entries: [entry]
+                }
+              ])
+            }
+          }
+          hookLogBucketsRef.current[threadId] = nextBuckets
           notifyHookLogSubscribers(threadId)
           break
         }
@@ -978,10 +1206,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       const actions: ThreadActions = {
         appendMessage: (message: Message) => {
-          // Clear hook logs (external store) at the start of each new user turn
+          // Open a new hook-log bucket for each user turn instead of clearing.
+          // Old buckets stay around (up to HOOK_LOG_BUCKET_RING_SIZE) so a
+          // user can scroll back and inspect what hooks ran in earlier turns.
           if (message.role === "user") {
-            hookLogsRef.current[threadId] = []
-            notifyHookLogSubscribers(threadId)
+            openHookLogBucket(threadId, message)
           }
           updateThreadState(threadId, (state) => {
             const exists = state.messages.some((m) => m.id === message.id)
@@ -1150,7 +1379,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       actionsCache.current[threadId] = actions
       return actions
     },
-    [updateThreadState]
+    [updateThreadState, openHookLogBucket]
   )
 
   const loadThreadHistory = useCallback(
@@ -1169,11 +1398,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const metadata = thread.metadata || {}
           actions.setGitContext(getGitContextFromMetadata(metadata))
           if (metadata.workspacePath) {
-            actions.setWorkspacePath(metadata.workspacePath as string)
-            const diskResult = await window.api.workspace.loadFromDisk(threadId)
-            if (diskResult.success) {
-              actions.setWorkspaceFiles(diskResult.files)
-            }
+            const workspacePath = metadata.workspacePath as string
+            actions.setWorkspacePath(workspacePath)
+            // 文件树仅用于侧边栏/文件面板展示，和聊天历史恢复解耦后可显著缩短首屏等待。
+            loadWorkspaceFilesInBackground(threadId, workspacePath)
           }
           // Restore the effective model: prefer the routing-resolved model (smart routing),
           // fall back to user's pinned model selection.
@@ -1358,7 +1586,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       updateThreadState(threadId, () => ({ historyLoading: false }))
     },
-    [getThreadActions, updateThreadState]
+    [getThreadActions, loadWorkspaceFilesInBackground, updateThreadState]
   )
 
   // Track passive scheduler/heartbeat stream listeners per thread
@@ -1391,10 +1619,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         return
       }
 
-      // "started" fires before agent runtime creation — show loading immediately
+      // "started" fires before agent runtime creation — show loading immediately.
+      // Hook-log buckets are now per-turn and not cleared here; the new bucket
+      // is opened when the scheduled task's user message lands via appendMessage.
       if (event.type === "started") {
-        hookLogsRef.current[threadId] = []
-        notifyHookLogSubscribers(threadId)
         updateThreadState(threadId, () => ({ scheduledTaskLoading: true }))
         return
       }
@@ -1689,7 +1917,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     delete actionsCache.current[threadId]
     delete streamDataRef.current[threadId]
     delete streamSubscribersRef.current[threadId]
-    delete hookLogsRef.current[threadId]
+    delete hookLogBucketsRef.current[threadId]
     delete hookLogsSubscribersRef.current[threadId]
     setActiveThreadIds((prev) => {
       const next = new Set(prev)
@@ -1712,7 +1940,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       subscribeToStream,
       getStreamData,
       subscribeToHookLogs,
-      getHookLogs,
+      getHookLogBuckets,
       getAllThreadStates,
       getAllStreamLoadingStates,
       subscribeToAllStreams
@@ -1725,7 +1953,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       subscribeToStream,
       getStreamData,
       subscribeToHookLogs,
-      getHookLogs,
+      getHookLogBuckets,
       getAllThreadStates,
       getAllStreamLoadingStates,
       subscribeToAllStreams

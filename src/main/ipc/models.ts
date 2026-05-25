@@ -38,9 +38,19 @@ export interface WorktreeInfo {
 
 interface GitPanelFileDiff {
   path: string
+  previousPath?: string
+  status: GitPanelFileStatus
   diff: string
   additions: number
   deletions: number
+}
+
+type GitPanelFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+
+interface GitPanelChangedFile {
+  path: string
+  previousPath?: string
+  status: GitPanelFileStatus
 }
 
 interface GitPanelMetaStatePayload {
@@ -100,8 +110,7 @@ async function prepareWorkspaceSelectionSandbox(
       ? {
           type: "warning",
           title: "Elevated 工作区受限",
-          message:
-            "Elevated 模式可以读取系统目录，也可能执行不涉及写入的命令；但当前模式需要为工作区准备写入权限，不支持将系统敏感目录作为工作区。",
+          message: "Elevated 模式可以读取系统目录，也可能执行不涉及写入的命令；但当前模式需要为工作区准备写入权限，不支持将系统敏感目录作为工作区。",
           detail: result.error,
           buttons: ["知道了"],
           defaultId: 0
@@ -173,9 +182,7 @@ async function collectThreadSkillStatsAsync(threadId: string): Promise<string[]>
           if (Array.isArray(trace.usedSkills)) {
             for (const skill of trace.usedSkills) skillSet.add(skill)
           }
-        } catch {
-          /* skip malformed lines */
-        }
+        } catch { /* skip malformed lines */ }
       }
     }
     return Array.from(skillSet)
@@ -216,10 +223,7 @@ function notifyWorkspaceFilesChanged(threadId: string, workspacePath: string): v
 }
 
 function normalizeTrackedPath(input: string): string {
-  return String(input || "")
-    .trim()
-    .replace(/^"(.*)"$/, "$1")
-    .replace(/\\/g, "/")
+  return String(input || "").trim().replace(/^"(.*)"$/, "$1").replace(/\\/g, "/")
 }
 
 function normalizeGitRelativePath(input: string): string {
@@ -314,8 +318,19 @@ function isRenameOrCopyStatus(status: string): boolean {
   return x === "R" || x === "C" || y === "R" || y === "C"
 }
 
+function getGitPanelFileStatus(status: string): GitPanelFileStatus {
+  const x = status[0] || " "
+  const y = status[1] || " "
+  if (x === "?" && y === "?") return "untracked"
+  if (x === "R" || y === "R") return "renamed"
+  if (x === "C" || y === "C") return "copied"
+  if (x === "D" || y === "D") return "deleted"
+  if (x === "A" || y === "A") return "added"
+  return "modified"
+}
+
 function decodeGitQuotedPath(rawPath: string): string {
-  const quoted = rawPath.startsWith('"') && rawPath.endsWith('"')
+  const quoted = rawPath.startsWith("\"") && rawPath.endsWith("\"")
   if (!quoted) return rawPath
   const source = quoted ? rawPath.slice(1, -1) : rawPath
   const bytes: number[] = []
@@ -334,7 +349,7 @@ function decodeGitQuotedPath(rawPath: string): string {
     }
 
     const next = source[++i]
-    if (next === "\\" || next === '"') {
+    if (next === "\\" || next === "\"") {
       bytes.push(next.charCodeAt(0))
       continue
     }
@@ -385,48 +400,56 @@ function decodeGitQuotedPath(rawPath: string): string {
   return Buffer.from(bytes).toString("utf8")
 }
 
-function parsePorcelainPaths(output: string): string[] {
+function parsePorcelainPathEntries(output: string): GitPanelChangedFile[] {
   // Prefer NUL-delimited porcelain (`git status --porcelain -z`) to avoid
   // C-style quoted paths (e.g. "\\345\\220...") being misparsed as "345/220/...".
   if (output.includes("\0")) {
     const entries = output.split("\0").filter(Boolean)
-    const files: string[] = []
+    const files: GitPanelChangedFile[] = []
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i]
       if (entry.length < 4) continue
       const status = entry.slice(0, 2)
       const rawPath = entry.slice(3)
       if (!rawPath) continue
+      const fileStatus = getGitPanelFileStatus(status)
       if (isRenameOrCopyStatus(status) && i + 1 < entries.length) {
-        // In -z mode rename/copy record layout is:
-        //   "R100 <old-path>\0<new-path>\0"
-        // We want the destination/current path.
-        const renamedTo = normalizeGitRelativePath(entries[i + 1] || "")
-        if (renamedTo) files.push(renamedTo)
+        // In `status -z`, rename/copy records use:
+        //   "R  <new-path>\0<old-path>\0"
+        // Keep the current path for git add/commit and skip the historical source path.
+        files.push({
+          path: normalizeGitRelativePath(rawPath),
+          previousPath: normalizeGitRelativePath(entries[i + 1] || ""),
+          status: fileStatus
+        })
         i += 1
       } else {
-        files.push(normalizeGitRelativePath(rawPath))
+        files.push({ path: normalizeGitRelativePath(rawPath), status: fileStatus })
       }
     }
     return files
   }
 
   // Fallback for newline-delimited porcelain output.
-  const lines = output
-    .split("\n")
-    .map((line) => line.trimEnd())
-    .filter(Boolean)
-  const files: string[] = []
+  const lines = output.split("\n").map((line) => line.trimEnd()).filter(Boolean)
+  const files: GitPanelChangedFile[] = []
   for (const line of lines) {
     if (line.length < 4) continue
     const status = line.slice(0, 2)
     let rawPath = line.slice(3).trim()
     if (!rawPath) continue
+    let previousPath: string | undefined
     if (isRenameOrCopyStatus(status) && rawPath.includes(" -> ")) {
-      rawPath = rawPath.split(" -> ").pop() || rawPath
+      const parts = rawPath.split(" -> ")
+      previousPath = decodeGitQuotedPath(parts.slice(0, -1).join(" -> "))
+      rawPath = parts[parts.length - 1] || rawPath
     }
     rawPath = decodeGitQuotedPath(rawPath)
-    files.push(normalizeGitRelativePath(rawPath))
+    files.push({
+      path: normalizeGitRelativePath(rawPath),
+      previousPath: previousPath ? normalizeGitRelativePath(previousPath) : undefined,
+      status: getGitPanelFileStatus(status)
+    })
   }
   return files
 }
@@ -439,11 +462,14 @@ async function runStatusPorcelain(
   const silent = Boolean(options?.silent)
 
   try {
+    // Git 的 pathspec 默认支持 glob 语法，文件名中包含 []、*、? 等字符时会被当作模式匹配。
+    // Git 面板传入的是已经解析出的真实文件路径，因此这里必须按字面量处理 pathspec。
     return await runGit(
       worktreePath,
       [
         "-c",
         "core.quotepath=false",
+        "--literal-pathspecs",
         "status",
         "--porcelain",
         "--untracked-files=all",
@@ -454,13 +480,14 @@ async function runStatusPorcelain(
       { silent, timeoutMs: 15_000 }
     )
   } catch {
-    // Older Git may not support `-z` with this porcelain invocation.
-    // Fallback keeps compatibility, and parsePorcelainPaths handles quoted paths.
+    // 旧版 Git 可能不支持当前 porcelain 命令组合里的 -z。
+    // 回退到非 NUL 分隔输出以保持兼容，路径反引号/转义由 parsePorcelainPathEntries 统一处理。
     return runGit(
       worktreePath,
       [
         "-c",
         "core.quotepath=false",
+        "--literal-pathspecs",
         "status",
         "--porcelain",
         "--untracked-files=all",
@@ -577,12 +604,7 @@ function clearThreadGitContextCache(metadata: Record<string, unknown>): void {
  */
 function writeThreadGitContextCache(
   metadata: Record<string, unknown>,
-  payload: {
-    workspacePath: string
-    isGitRepo: boolean
-    isWorktreePath: boolean
-    gitRoot: string | null
-  }
+  payload: { workspacePath: string; isGitRepo: boolean; isWorktreePath: boolean; gitRoot: string | null }
 ): void {
   // 写入前先清掉新旧缓存字段，避免 metadata 同时存在两套 Git context 表达。
   clearThreadGitContextCache(metadata)
@@ -612,9 +634,7 @@ function readThreadGitContextCache(
   if (!workspacePath) return null
   // 优先读取新版结构：所有 Git 探测结果都收敛在 metadata.gitContext 中。
   const gitContext =
-    metadata.gitContext &&
-    typeof metadata.gitContext === "object" &&
-    !Array.isArray(metadata.gitContext)
+    metadata.gitContext && typeof metadata.gitContext === "object" && !Array.isArray(metadata.gitContext)
       ? (metadata.gitContext as Record<string, unknown>)
       : null
   if (gitContext) {
@@ -676,9 +696,13 @@ function readThreadGitContextCache(
   }
 
   const cachedIsGitRepo =
-    typeof metadata.cachedIsGitRepo === "boolean" ? metadata.cachedIsGitRepo : null
+    typeof metadata.cachedIsGitRepo === "boolean"
+      ? metadata.cachedIsGitRepo
+      : null
   const cachedIsWorktreePath =
-    typeof metadata.cachedIsWorktreePath === "boolean" ? metadata.cachedIsWorktreePath : null
+    typeof metadata.cachedIsWorktreePath === "boolean"
+      ? metadata.cachedIsWorktreePath
+      : null
   const cachedGitRoot =
     typeof metadata.cachedGitRoot === "string" && metadata.cachedGitRoot.trim()
       ? metadata.cachedGitRoot
@@ -695,12 +719,16 @@ function readThreadGitContextCache(
   }
 }
 
-function collectChangedFilesFromStatus(
+function pickBestWorktreeRelativePath(candidates: string[]): string | null {
+  return candidates.find((candidate) => candidate && !candidate.startsWith("../") && !path.isAbsolute(candidate)) ?? null
+}
+
+function collectChangedFileEntriesFromStatus(
   worktreePath: string,
   statusOutput: string,
   trackedFiles: string[],
   options?: { filterByTracked?: boolean }
-): string[] {
+): GitPanelChangedFile[] {
   const trackedSet = new Set<string>()
   for (const tracked of trackedFiles) {
     for (const rel of toWorktreeRelativePath(worktreePath, tracked)) {
@@ -709,27 +737,122 @@ function collectChangedFilesFromStatus(
   }
 
   const filterByTracked = Boolean(options?.filterByTracked) && trackedSet.size > 0
-  const changedSet = new Set<string>()
+  const changedMap = new Map<string, GitPanelChangedFile>()
 
-  for (const raw of parsePorcelainPaths(statusOutput)) {
-    const candidates = toWorktreeRelativePath(worktreePath, raw)
-    if (candidates.length === 0) continue
+  for (const entry of parsePorcelainPathEntries(statusOutput)) {
+    const pathCandidates = toWorktreeRelativePath(worktreePath, entry.path)
+    if (pathCandidates.length === 0) continue
+
+    const previousPathCandidates = entry.previousPath
+      ? toWorktreeRelativePath(worktreePath, entry.previousPath)
+      : []
+    const mappedPreviousPath =
+      pickBestWorktreeRelativePath(previousPathCandidates) ??
+      (entry.previousPath ? normalizeGitRelativePath(entry.previousPath) : undefined)
 
     if (filterByTracked) {
-      const matched = candidates.find((candidate) => trackedSet.has(candidate))
-      if (matched) changedSet.add(matched)
+      const matched = pathCandidates.find((candidate) => trackedSet.has(candidate))
+      if (matched) changedMap.set(matched, { ...entry, path: matched, previousPath: mappedPreviousPath })
       continue
     }
 
-    const best = candidates.find(
-      (candidate) => candidate && !candidate.startsWith("../") && !path.isAbsolute(candidate)
-    )
+    const best = pickBestWorktreeRelativePath(pathCandidates)
     if (best) {
-      changedSet.add(best)
+      changedMap.set(best, { ...entry, path: best, previousPath: mappedPreviousPath })
     }
   }
 
-  return Array.from(changedSet)
+  return Array.from(changedMap.values())
+}
+
+function collectChangedFilesFromStatus(
+  worktreePath: string,
+  statusOutput: string,
+  trackedFiles: string[],
+  options?: { filterByTracked?: boolean }
+): string[] {
+  return collectChangedFileEntriesFromStatus(worktreePath, statusOutput, trackedFiles, options).map(
+    (entry) => entry.path
+  )
+}
+
+async function getHeadBlobHash(worktreePath: string, relPath: string, options?: { silent?: boolean }): Promise<string | null> {
+  try {
+    const out = await runGitWithLiteralPathspecs(
+      worktreePath,
+      ["ls-files", "-s"],
+      [relPath],
+      { silent: Boolean(options?.silent), timeoutMs: 10_000 }
+    )
+    const match = out.match(/^\d+\s+([0-9a-f]{40,64})\s+\d+\t/)
+    return match?.[1] ?? null
+  } catch {
+    return null
+  }
+}
+
+async function getWorktreeBlobHash(worktreePath: string, relPath: string, options?: { silent?: boolean }): Promise<string | null> {
+  try {
+    const out = await runGitWithLiteralPathspecs(
+      worktreePath,
+      ["hash-object"],
+      [relPath],
+      { silent: Boolean(options?.silent), timeoutMs: 10_000 }
+    )
+    const hash = out.trim()
+    return /^[0-9a-f]{40,64}$/i.test(hash) ? hash : null
+  } catch {
+    return null
+  }
+}
+
+async function combineFilesystemMovesForDisplay(
+  worktreePath: string,
+  entries: GitPanelChangedFile[],
+  options?: { silent?: boolean }
+): Promise<GitPanelChangedFile[]> {
+  const deletedEntries = entries.filter((entry) => entry.status === "deleted" && !entry.previousPath)
+  const newEntries = entries.filter(
+    (entry) => (entry.status === "untracked" || entry.status === "added") && !entry.previousPath
+  )
+  if (deletedEntries.length === 0 || newEntries.length === 0) {
+    return entries
+  }
+
+  const deletedByHash = new Map<string, GitPanelChangedFile[]>()
+  await Promise.all(
+    deletedEntries.map(async (entry) => {
+      const hash = await getHeadBlobHash(worktreePath, entry.path, options)
+      if (!hash) return
+      const bucket = deletedByHash.get(hash) ?? []
+      bucket.push(entry)
+      deletedByHash.set(hash, bucket)
+    })
+  )
+
+  const matchedDeleted = new Set<string>()
+  const replacements = new Map<string, GitPanelChangedFile>()
+  for (const entry of newEntries) {
+    const hash = await getWorktreeBlobHash(worktreePath, entry.path, options)
+    if (!hash) continue
+    const candidates = deletedByHash.get(hash)
+    const previous = candidates?.find((candidate) => !matchedDeleted.has(candidate.path))
+    if (!previous) continue
+    matchedDeleted.add(previous.path)
+    replacements.set(entry.path, {
+      ...entry,
+      previousPath: previous.path,
+      status: "renamed"
+    })
+  }
+
+  if (matchedDeleted.size === 0) {
+    return entries
+  }
+
+  return entries
+    .filter((entry) => !matchedDeleted.has(entry.path))
+    .map((entry) => replacements.get(entry.path) ?? entry)
 }
 
 function parseNumstatTotals(output: string): { additions: number; deletions: number } {
@@ -784,18 +907,16 @@ function parseNumstatByPath(output: string): Map<string, { additions: number; de
 function getExecErrorText(error: unknown): string {
   if (!(error instanceof Error)) return String(error || "")
   const execError = error as ExecFileError
-  const stderr =
-    typeof execError.stderr === "string"
-      ? execError.stderr
-      : execError.stderr
-        ? execError.stderr.toString("utf-8")
-        : ""
-  const stdout =
-    typeof execError.stdout === "string"
-      ? execError.stdout
-      : execError.stdout
-        ? execError.stdout.toString("utf-8")
-        : ""
+  const stderr = typeof execError.stderr === "string"
+    ? execError.stderr
+    : execError.stderr
+      ? execError.stderr.toString("utf-8")
+      : ""
+  const stdout = typeof execError.stdout === "string"
+    ? execError.stdout
+    : execError.stdout
+      ? execError.stdout.toString("utf-8")
+      : ""
   return [stderr, stdout, execError.message].filter(Boolean).join("\n").trim()
 }
 
@@ -820,6 +941,11 @@ const GIT_BASE_ENV: NodeJS.ProcessEnv = {
   [CMBDEVCLAW_INTERNAL_GIT_ENV]: "1"
 }
 
+function isGitLfsVersionHookError(error: unknown): boolean {
+  const text = getExecErrorText(error).toLowerCase()
+  return text.includes("git version >= 1.8.2 is required for git lfs")
+}
+
 async function addSafeDirectory(worktreePath: string): Promise<void> {
   console.log(`[GitPanel][exec] git config --global --add safe.directory ${quoteArg(worktreePath)}`)
   await execFileAsync("git", ["config", "--global", "--add", "safe.directory", worktreePath])
@@ -828,7 +954,12 @@ async function addSafeDirectory(worktreePath: string): Promise<void> {
 async function runGit(
   worktreePath: string,
   args: string[],
-  options?: { silent?: boolean; timeoutMs?: number; maxBufferBytes?: number }
+  options?: {
+    silent?: boolean
+    timeoutMs?: number
+    maxBufferBytes?: number
+    env?: NodeJS.ProcessEnv
+  }
 ): Promise<string> {
   const silent = Boolean(options?.silent)
   const maxBufferBytes = options?.maxBufferBytes ?? GIT_EXEC_MAX_BUFFER_BYTES
@@ -837,7 +968,7 @@ async function runGit(
   if (!silent) console.log(`[GitPanel][exec] ${command}`)
   try {
     const { stdout } = await execFileAsync("git", baseArgs, {
-      env: GIT_BASE_ENV,
+      env: { ...GIT_BASE_ENV, ...options?.env },
       timeout: options?.timeoutMs,
       maxBuffer: maxBufferBytes
     })
@@ -853,13 +984,119 @@ async function runGit(
     // 保证正常用户路径能自愈，同时限制为“仅一次重试”避免无限循环。
     await addSafeDirectory(worktreePath)
     const { stdout } = await execFileAsync("git", baseArgs, {
-      env: GIT_BASE_ENV,
+      env: { ...GIT_BASE_ENV, ...options?.env },
       timeout: options?.timeoutMs,
       maxBuffer: maxBufferBytes
     })
     if (!silent) console.log(`[GitPanel][exec][ok-after-retry] ${command}`)
     return stdout
   }
+}
+
+async function runGitPushWithLfsCompat(
+  threadId: string,
+  worktreePath: string,
+  args: string[]
+): Promise<string> {
+  try {
+    return await runGit(worktreePath, args)
+  } catch (error) {
+    if (!isGitLfsVersionHookError(error)) {
+      throw error
+    }
+
+    logGitStep(threadId, "push", "检测到 Git LFS pre-push 版本误报，跳过 LFS pre-push hook 后重试一次")
+    return runGit(worktreePath, args, {
+      env: {
+        // Enterprise Windows Git setups can occasionally make the Git LFS hook
+        // fail to read `git --version` and report an empty version string. The
+        // normal push already failed before updating refs, so retry once without
+        // the LFS pre-push hook to keep non-LFS pushes from being blocked.
+        GIT_LFS_SKIP_PUSH: "1"
+      }
+    })
+  }
+}
+
+async function runGitWithLiteralPathspecs(
+  worktreePath: string,
+  args: string[],
+  pathspecs: string[],
+  options?: { silent?: boolean; timeoutMs?: number; maxBufferBytes?: number }
+): Promise<string> {
+  // 提交面板里的文件列表来自 git status / diff 结果，语义上是“文件名”而不是“匹配模式”。
+  // 使用 --literal-pathspecs 可以避免带方括号、星号或问号的真实文件名触发 pathspec 匹配失败。
+  return runGit(worktreePath, ["--literal-pathspecs", ...args, "--", ...pathspecs], options)
+}
+
+async function pathExistsForGitAdd(worktreePath: string, relPath: string): Promise<boolean> {
+  try {
+    await fs.stat(path.join(worktreePath, relPath))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 暂存 GitPanel 中用户勾选的文件。
+ *
+ * 这里不能简单使用 `git add .`，因为 GitPanel 支持“只提交已勾选文件”；
+ * 也不能把所有 path 都直接交给 `git add -- <path>`，因为删除文件或移动文件的旧路径
+ * 在工作区中已经不存在，Windows Git/WebStorm 场景下可能报：
+ *
+ *   fatal: pathspec 'test/maxSubArray.js' did not match any files
+ *
+ * 因此按路径是否仍存在拆成两类：
+ *
+ * 1. 新增/修改/移动后的新路径：
+ *
+ *   git -C <repo> --literal-pathspecs add -- test/fibonacci.js
+ *
+ * 2. 删除文件或移动前的旧路径：
+ *
+ *   git -C <repo> --literal-pathspecs update-index --remove -- fibonacci.js
+ *
+ * 移动文件本质上是“删除旧路径 + 新增新路径”。例如：
+ *
+ *   fibonacci.js -> test/fibonacci.js
+ *
+ * 会分解为：
+ *
+ *   git -C <repo> --literal-pathspecs add -- test/fibonacci.js
+ *   git -C <repo> --literal-pathspecs update-index --remove -- fibonacci.js
+ *
+ * 最后 commit 时仍带上用户勾选的 pathspec，保证只提交本次选择范围内的变更。
+ */
+async function stageFilesForCommit(
+  worktreePath: string,
+  pathspecs: string[]
+): Promise<{ existingPathspecs: string[]; removedPathspecs: string[] }> {
+  const normalizedPathspecs = Array.from(new Set(pathspecs.map(normalizeGitRelativePath).filter(Boolean)))
+  const existingPathspecs: string[] = []
+  const removedPathspecs: string[] = []
+
+  await Promise.all(
+    normalizedPathspecs.map(async (pathspec) => {
+      if (await pathExistsForGitAdd(worktreePath, pathspec)) {
+        existingPathspecs.push(pathspec)
+      } else {
+        removedPathspecs.push(pathspec)
+      }
+    })
+  )
+
+  if (existingPathspecs.length > 0) {
+    // 示例：git -C <repo> --literal-pathspecs add -- test/fibonacci.js
+    await runGitWithLiteralPathspecs(worktreePath, ["add"], existingPathspecs)
+  }
+
+  if (removedPathspecs.length > 0) {
+    // 示例：git -C <repo> --literal-pathspecs update-index --remove -- fibonacci.js
+    await runGitWithLiteralPathspecs(worktreePath, ["update-index", "--remove"], removedPathspecs)
+  }
+
+  return { existingPathspecs, removedPathspecs }
 }
 
 function isGitDirWorktree(gitDir: string): boolean {
@@ -897,12 +1134,10 @@ async function getCurrentBranchCached(
   // 1s 短缓存覆盖 UI 高频读取分支名场景（打开面板、提交后刷新、推送流程中多处读取）。
   return getCachedPromise(branchCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, async () => {
     try {
-      const branch = (
-        await runGit(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"], {
-          silent: Boolean(options?.silent),
-          timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
-        })
-      ).trim()
+      const branch = (await runGit(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"], {
+        silent: Boolean(options?.silent),
+        timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
+      })).trim()
       return branch && branch !== "HEAD" ? branch : null
     } catch {
       return null
@@ -921,12 +1156,10 @@ async function getHeadCommitCached(
   // 与分支缓存配套：提交/回滚后可 forceRefresh，其他路径默认复用短缓存减少 rev-parse 频次。
   return getCachedPromise(headCommitCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, async () => {
     try {
-      const head = (
-        await runGit(worktreePath, ["rev-parse", "HEAD"], {
-          silent: Boolean(options?.silent),
-          timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
-        })
-      ).trim()
+      const head = (await runGit(worktreePath, ["rev-parse", "HEAD"], {
+        silent: Boolean(options?.silent),
+        timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
+      })).trim()
       return head || null
     } catch {
       return null
@@ -941,7 +1174,10 @@ async function resolvePushBaseRef(
 ): Promise<string | null> {
   const silent = Boolean(options?.silent)
 
-  const candidates = ["@{upstream}", `refs/remotes/origin/${branch}`]
+  const candidates = [
+    "@{upstream}",
+    `refs/remotes/origin/${branch}`
+  ]
 
   for (const candidate of candidates) {
     try {
@@ -971,10 +1207,7 @@ async function getPushabilitySnapshot(
   branch: string,
   baseCommit: string | null,
   options?: { silent?: boolean }
-): Promise<{
-  hasPushableCommit: boolean
-  pendingCommits: Array<{ hash: string; message: string; date: string }>
-}> {
+): Promise<{ hasPushableCommit: boolean; pendingCommits: Array<{ hash: string; message: string; date: string }> }> {
   const silent = Boolean(options?.silent)
   const logFormat = "%H\x1f%s\x1f%ci"
   const pushBaseRef = await resolvePushBaseRef(worktreePath, branch, { silent })
@@ -1024,9 +1257,7 @@ async function getPushabilitySnapshot(
   }
 
   try {
-    const raw = (
-      await runGit(worktreePath, ["log", "-1", `--format=${logFormat}`], { silent })
-    ).trim()
+    const raw = (await runGit(worktreePath, ["log", "-1", `--format=${logFormat}`], { silent })).trim()
     return { hasPushableCommit: true, pendingCommits: parseCommitLog(raw) }
   } catch {
     return { hasPushableCommit: true, pendingCommits: [] }
@@ -1044,15 +1275,7 @@ function isGitRestoreUnsupportedError(error: unknown): boolean {
 
 async function restorePathToHeadCompat(worktreePath: string, targetPath: string): Promise<void> {
   try {
-    await runGit(worktreePath, [
-      "restore",
-      "--source",
-      "HEAD",
-      "--staged",
-      "--worktree",
-      "--",
-      targetPath
-    ])
+    await runGit(worktreePath, ["restore", "--source", "HEAD", "--staged", "--worktree", "--", targetPath])
     return
   } catch (error) {
     if (!isGitRestoreUnsupportedError(error)) {
@@ -1071,50 +1294,9 @@ async function restorePathToHeadCompat(worktreePath: string, targetPath: string)
 
 function isMissingRemoteBranchError(error: unknown): boolean {
   const text = getExecErrorText(error).toLowerCase()
-  return (
-    text.includes("couldn't find remote ref") ||
+  return text.includes("couldn't find remote ref") ||
     text.includes("no such ref was fetched") ||
     text.includes("couldn't find remote branch")
-  )
-}
-
-async function getUnmergedFiles(worktreePath: string): Promise<string[]> {
-  const out = await runGit(worktreePath, ["diff", "--name-only", "--diff-filter=U"]).catch(() => "")
-  return out
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-}
-
-async function getFilesWithConflictMarkers(
-  worktreePath: string,
-  files: string[]
-): Promise<string[]> {
-  const relSet = new Set<string>()
-  for (const file of files) {
-    for (const rel of toWorktreeRelativePath(worktreePath, file)) {
-      relSet.add(rel)
-    }
-  }
-  const relFiles = Array.from(relSet)
-  if (relFiles.length === 0) return []
-  const out = await runGit(worktreePath, [
-    "grep",
-    "-n",
-    "-E",
-    "^(<<<<<<<|=======|>>>>>>>)",
-    "--",
-    ...relFiles
-  ]).catch(() => "")
-  const matched = new Set<string>()
-  for (const line of out.split("\n")) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    const idx = trimmed.indexOf(":")
-    if (idx <= 0) continue
-    matched.add(trimmed.slice(0, idx))
-  }
-  return Array.from(matched)
 }
 
 async function resolveThreadWorkspaceContext(threadId: string): Promise<{
@@ -1165,31 +1347,26 @@ async function resolveThreadWorkspaceContext(threadId: string): Promise<{
   return { metadata, workspacePath, isWorktree, isGitRepo, worktreeBaseCommit, worktreeBranch }
 }
 
-function getFileHistoryMap(
-  metadata: Record<string, unknown>
-): Record<string, FileHistorySnapshot[]> {
+function getFileHistoryMap(metadata: Record<string, unknown>): Record<string, FileHistorySnapshot[]> {
   const raw = metadata.llmFileHistory
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
   const map: Record<string, FileHistorySnapshot[]> = {}
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!Array.isArray(value)) continue
-    map[key] = value.filter(
-      (v): v is FileHistorySnapshot =>
-        Boolean(v) &&
-        typeof v === "object" &&
-        typeof (v as FileHistorySnapshot).exists === "boolean" &&
-        typeof (v as FileHistorySnapshot).ts === "string" &&
-        ((v as FileHistorySnapshot).content === null ||
-          typeof (v as FileHistorySnapshot).content === "string")
-    )
+    map[key] = value
+      .filter(
+        (v): v is FileHistorySnapshot =>
+          Boolean(v) &&
+          typeof v === "object" &&
+          typeof (v as FileHistorySnapshot).exists === "boolean" &&
+          typeof (v as FileHistorySnapshot).ts === "string" &&
+          (((v as FileHistorySnapshot).content === null) || typeof (v as FileHistorySnapshot).content === "string")
+      )
   }
   return map
 }
 
-async function readFileSnapshot(
-  worktreePath: string,
-  relPath: string
-): Promise<FileHistorySnapshot> {
+async function readFileSnapshot(worktreePath: string, relPath: string): Promise<FileHistorySnapshot> {
   const absPath = path.join(worktreePath, relPath)
   try {
     const stat = await fs.stat(absPath)
@@ -1211,11 +1388,7 @@ function shouldAppendSnapshot(history: FileHistorySnapshot[], next: FileHistoryS
   return last.content !== next.content
 }
 
-async function applyFileSnapshot(
-  worktreePath: string,
-  relPath: string,
-  snapshot: FileHistorySnapshot
-): Promise<void> {
+async function applyFileSnapshot(worktreePath: string, relPath: string, snapshot: FileHistorySnapshot): Promise<void> {
   const absPath = path.join(worktreePath, relPath)
   if (!snapshot.exists) {
     await fs.rm(absPath, { force: true })
@@ -1246,9 +1419,10 @@ function getRecentlyRevertedFiles(metadata: Record<string, unknown>): string[] {
 async function buildGitPanelFileDiff(
   worktreePath: string,
   relPath: string,
-  options?: { silent?: boolean }
+  options?: { silent?: boolean; status?: GitPanelFileStatus }
 ): Promise<GitPanelFileDiff | null> {
   const silent = Boolean(options?.silent)
+  const fileStatus = options?.status ?? "modified"
   const targetPath = normalizeGitRelativePath(relPath)
   if (!targetPath) {
     return null
@@ -1282,14 +1456,10 @@ async function buildGitPanelFileDiff(
         silent,
         timeoutMs: 20_000
       }),
-      runGit(
-        worktreePath,
-        ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "HEAD", "--", targetPath],
-        {
-          silent,
-          timeoutMs: 20_000
-        }
-      )
+      runGit(worktreePath, ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "HEAD", "--", targetPath], {
+        silent,
+        timeoutMs: 20_000
+      })
     ])
     diffText = diffHead
     numstatOut = numstatHead
@@ -1297,34 +1467,22 @@ async function buildGitPanelFileDiff(
     // Fallback for repos where HEAD is not available (e.g. unborn branch).
     // 降级分支仍保持并发，避免回退路径性能过差。
     const [cachedDiff, worktreeDiff, cachedNumstat, worktreeNumstat] = await Promise.all([
-      runGit(
-        worktreePath,
-        ["diff", "--no-ext-diff", "--no-textconv", "--cached", "--", targetPath],
-        {
-          silent,
-          timeoutMs: 20_000
-        }
-      ).catch(() => ""),
+      runGit(worktreePath, ["diff", "--no-ext-diff", "--no-textconv", "--cached", "--", targetPath], {
+        silent,
+        timeoutMs: 20_000
+      }).catch(() => ""),
       runGit(worktreePath, ["diff", "--no-ext-diff", "--no-textconv", "--", targetPath], {
         silent,
         timeoutMs: 20_000
       }).catch(() => ""),
-      runGit(
-        worktreePath,
-        ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "--cached", "--", targetPath],
-        {
-          silent,
-          timeoutMs: 20_000
-        }
-      ).catch(() => ""),
-      runGit(
-        worktreePath,
-        ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "--", targetPath],
-        {
-          silent,
-          timeoutMs: 20_000
-        }
-      ).catch(() => "")
+      runGit(worktreePath, ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "--cached", "--", targetPath], {
+        silent,
+        timeoutMs: 20_000
+      }).catch(() => ""),
+      runGit(worktreePath, ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "--", targetPath], {
+        silent,
+        timeoutMs: 20_000
+      }).catch(() => "")
     ])
 
     diffText = [cachedDiff, worktreeDiff].filter(Boolean).join("\n")
@@ -1346,7 +1504,7 @@ async function buildGitPanelFileDiff(
     // New untracked file: synthesize a minimal unified diff and stats.
     // To avoid loading huge files into memory, cap synthesized preview size.
     try {
-      const statForPreview = currentStat ?? (await fs.stat(absPath))
+      const statForPreview = currentStat ?? await fs.stat(absPath)
       if (statForPreview.size > MAX_SYNTHETIC_DIFF_BYTES) {
         const sizeKb = Math.max(1, Math.ceil(statForPreview.size / 1024))
         additions = 1
@@ -1378,6 +1536,7 @@ async function buildGitPanelFileDiff(
 
   return {
     path: targetPath,
+    status: fileStatus,
     diff: diffText,
     additions,
     deletions
@@ -1430,16 +1589,24 @@ async function buildGitPanelState(
 
   const statusPathspecs = filterByTracked ? normalizedTrackedFiles : ["."]
   const statusOut = await runStatusPorcelain(worktreePath, statusPathspecs, { silent })
-  const changedFiles = collectChangedFilesFromStatus(
+  const rawChangedFileEntries = collectChangedFileEntriesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
+    filterByTracked
+  })
+  const changedFileEntries = await combineFilesystemMovesForDisplay(
     worktreePath,
-    statusOut,
-    normalizedTrackedFiles,
-    {
-      filterByTracked
-    }
+    rawChangedFileEntries,
+    { silent }
   )
+  const changedFiles = Array.from(
+    new Set(
+      changedFileEntries.flatMap((entry) =>
+        entry.previousPath ? [entry.previousPath, entry.path] : [entry.path]
+      )
+    )
+  )
+  const displayChangedFiles = changedFileEntries.map((entry) => entry.path)
 
-  if (changedFiles.length === 0) {
+  if (displayChangedFiles.length === 0) {
     return {
       files: [],
       changedFiles: [],
@@ -1450,19 +1617,17 @@ async function buildGitPanelState(
   }
 
   // 保留文件数量上限，避免超大仓库一次返回过多数据导致渲染阻塞。
-  const visibleChangedFiles = changedFiles.slice(0, GIT_PANEL_MAX_VISIBLE_FILES)
-  const omittedFileCount = Math.max(0, changedFiles.length - visibleChangedFiles.length)
+  const visibleChangedFiles = displayChangedFiles.slice(0, GIT_PANEL_MAX_VISIBLE_FILES)
+  const statusByPath = new Map(changedFileEntries.map((entry) => [entry.path, entry.status]))
+  const previousPathByPath = new Map(changedFileEntries.map((entry) => [entry.path, entry.previousPath]))
+  const omittedFileCount = Math.max(0, displayChangedFiles.length - visibleChangedFiles.length)
 
   let numstatMap = new Map<string, { additions: number; deletions: number }>()
   try {
-    const numstatOut = await runGit(
-      worktreePath,
-      ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "HEAD"],
-      {
-        silent,
-        timeoutMs: 20_000
-      }
-    )
+    const numstatOut = await runGit(worktreePath, ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "HEAD"], {
+      silent,
+      timeoutMs: 20_000
+    })
     numstatMap = parseNumstatByPath(numstatOut)
   } catch {
     // unborn HEAD 等场景：合并 cached + worktree 两份统计作为降级路径。
@@ -1494,29 +1659,32 @@ async function buildGitPanelState(
     if (!normalizedPath) {
       continue
     }
-    const resolvedDiff = await buildGitPanelFileDiff(worktreePath, normalizedPath, { silent })
+    const fileStatus = statusByPath.get(normalizedPath) ?? "modified"
+    const resolvedDiff = await buildGitPanelFileDiff(worktreePath, normalizedPath, {
+      silent,
+      status: fileStatus
+    })
     const stats = numstatMap.get(normalizedPath) || { additions: 0, deletions: 0 }
     fileDiffs.push({
       path: normalizedPath,
+      previousPath: previousPathByPath.get(normalizedPath),
+      status: resolvedDiff?.status ?? fileStatus,
       diff: truncateGitPanelDiff(resolvedDiff?.diff || ""),
       additions: resolvedDiff?.additions ?? stats.additions,
       deletions: resolvedDiff?.deletions ?? stats.deletions
     })
   }
 
-  const totals = fileDiffs.reduce(
-    (acc, file) => {
-      acc.additions += file.additions
-      acc.deletions += file.deletions
-      return acc
-    },
-    { additions: 0, deletions: 0 }
-  )
+  const totals = fileDiffs.reduce((acc, file) => {
+    acc.additions += file.additions
+    acc.deletions += file.deletions
+    return acc
+  }, { additions: 0, deletions: 0 })
 
   return {
     files: fileDiffs,
     changedFiles,
-    changedFilesTotal: changedFiles.length,
+    changedFilesTotal: displayChangedFiles.length,
     omittedFileCount,
     totals: {
       additions: totals.additions,
@@ -1532,11 +1700,11 @@ async function buildGitPanelState(
  * Unlike buildGitPanelState(), this only computes changed file paths from
  * porcelain status and does not calculate per-file diffs/numstat.
  */
-async function getChangedFilesForGitOps(
+async function getChangedFileEntriesForGitOps(
   worktreePath: string,
   trackedFiles: string[],
   options?: { silent?: boolean; includeAllWhenNoTracked?: boolean }
-): Promise<string[]> {
+): Promise<GitPanelChangedFile[]> {
   // commit/push 场景只需要“文件列表”即可，不做重型 diff 计算。
   // 该函数是 Git 提交流程的轻量快速路径。
   const silent = Boolean(options?.silent)
@@ -1555,9 +1723,52 @@ async function getChangedFilesForGitOps(
 
   const statusPathspecs = filterByTracked ? normalizedTrackedFiles : ["."]
   const statusOut = await runStatusPorcelain(worktreePath, statusPathspecs, { silent })
-  return collectChangedFilesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
+  const rawEntries = collectChangedFileEntriesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
     filterByTracked
   })
+  return combineFilesystemMovesForDisplay(worktreePath, rawEntries, { silent })
+}
+
+function normalizeSelectedChangedFileEntries(
+  worktreePath: string,
+  changedEntries: GitPanelChangedFile[],
+  selectedFilePaths?: string[]
+): string[] {
+  const changedFiles = Array.from(
+    new Set(
+      changedEntries.flatMap((entry) => entry.previousPath ? [entry.previousPath, entry.path] : [entry.path])
+    )
+  )
+  if (!Array.isArray(selectedFilePaths)) {
+    return changedFiles
+  }
+  if (selectedFilePaths.length === 0) return []
+
+  const changedSet = new Set(changedFiles.map(normalizeGitRelativePath))
+  const entryByPath = new Map<string, GitPanelChangedFile>()
+  for (const entry of changedEntries) {
+    entryByPath.set(normalizeGitRelativePath(entry.path), entry)
+    if (entry.previousPath) {
+      entryByPath.set(normalizeGitRelativePath(entry.previousPath), entry)
+    }
+  }
+  const selectedSet = new Set<string>()
+  for (const selected of selectedFilePaths) {
+    if (typeof selected !== "string" || !selected.trim()) continue
+    for (const rel of toWorktreeRelativePath(worktreePath, selected)) {
+      const normalized = normalizeGitRelativePath(rel)
+      if (changedSet.has(normalized)) {
+        const entry = entryByPath.get(normalized)
+        if (entry?.previousPath) {
+          selectedSet.add(normalizeGitRelativePath(entry.previousPath))
+          selectedSet.add(normalizeGitRelativePath(entry.path))
+        } else {
+          selectedSet.add(normalized)
+        }
+      }
+    }
+  }
+  return Array.from(selectedSet)
 }
 
 async function getHeadCommitStats(
@@ -1658,8 +1869,11 @@ async function buildGitPanelMetaState(
   const workspacePath = context.workspacePath
   const tracked = getTrackedLlmFiles(context.metadata)
   const cacheKey = getCacheKeyForPath(workspacePath)
-  const summaryPromise = getCachedPromise(summaryCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, () =>
-    getGitPanelSummaryQuick(workspacePath)
+  const summaryPromise = getCachedPromise(
+    summaryCache,
+    cacheKey,
+    GIT_CONTEXT_CACHE_TTL_MS,
+    () => getGitPanelSummaryQuick(workspacePath)
   )
   const branchPromise = context.worktreeBranch
     ? Promise.resolve(context.worktreeBranch)
@@ -1668,8 +1882,8 @@ async function buildGitPanelMetaState(
   const worktreeBranch = await branchPromise
   const pushabilityPromise = worktreeBranch
     ? getPushabilitySnapshot(workspacePath, worktreeBranch, context.worktreeBaseCommit, {
-        silent: true
-      })
+      silent: true
+    })
     : Promise.resolve({ hasPushableCommit: false, pendingCommits: [] })
 
   const [summary, pushability] = await Promise.all([summaryPromise, pushabilityPromise])
@@ -1749,17 +1963,8 @@ async function listWorktrees(gitRoot: string): Promise<WorktreeInfo[]> {
     const block = blocks[i]
     if (!block.trim()) continue
     const lines = block.trim().split("\n")
-    const worktreePath =
-      lines
-        .find((l) => l.startsWith("worktree "))
-        ?.slice(9)
-        .trim() ?? ""
-    const branch =
-      lines
-        .find((l) => l.startsWith("branch "))
-        ?.slice(7)
-        .trim()
-        .replace("refs/heads/", "") ?? "(detached)"
+    const worktreePath = lines.find((l) => l.startsWith("worktree "))?.slice(9).trim() ?? ""
+    const branch = lines.find((l) => l.startsWith("branch "))?.slice(7).trim().replace("refs/heads/", "") ?? "(detached)"
     const isMain = lines.some((l) => l === "bare") || i === 0
 
     let createdAt: Date | undefined
@@ -1795,12 +2000,7 @@ import {
   MIN_MAX_OUTPUT_TOKENS,
   MAX_MAX_OUTPUT_TOKENS,
   DEFAULT_TEMPERATURE,
-  MAX_TEMPERATURE,
-  DEFAULT_TOP_P,
-  MAX_TOP_P,
-  DEFAULT_TOP_K,
-  MIN_TOP_K,
-  MAX_TOP_K
+  MAX_TEMPERATURE
 } from "../storage"
 import type { CustomModelConfig } from "../storage"
 
@@ -1810,7 +2010,9 @@ const store = new Store({
   cwd: getOpenworkDir()
 })
 
-const PROVIDERS: Omit<Provider, "hasAnyModelApiKey">[] = [{ id: "custom", name: "Custom" }]
+const PROVIDERS: Omit<Provider, "hasAnyModelApiKey">[] = [
+  { id: "custom", name: "Custom" }
+]
 
 function resolveDefaultModelId(): string {
   const customConfigs = getCustomModelPublicConfigs()
@@ -1866,10 +2068,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  ipcMain.handle("models:getUserInfo", async () => {
-    const userInfo = getUserInfo()
-    return userInfo
-  })
+  ipcMain.handle(
+    "models:getUserInfo",
+    async () => {
+      const userInfo = getUserInfo()
+      return userInfo
+    }
+  )
 
   ipcMain.handle("models:deleteCustomConfig", async (_event, id: string) => {
     if (!id) throw new Error("Model id is required for deletion")
@@ -1905,12 +2110,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       minMaxOutputTokens: MIN_MAX_OUTPUT_TOKENS,
       maxMaxOutputTokens: MAX_MAX_OUTPUT_TOKENS,
       defaultTemperature: DEFAULT_TEMPERATURE,
-      maxTemperature: MAX_TEMPERATURE,
-      defaultTopP: DEFAULT_TOP_P,
-      maxTopP: MAX_TOP_P,
-      defaultTopK: DEFAULT_TOP_K,
-      minTopK: MIN_TOP_K,
-      maxTopK: MAX_TOP_K
+      maxTemperature: MAX_TEMPERATURE
     }
   })
 
@@ -1926,8 +2126,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         apiKey?: string
         maxOutputTokens?: number
         temperature?: number
-        topP?: number
-        topK?: number
       }
     ): Promise<{ success: boolean; error?: string; latencyMs?: number }> => {
       let baseUrl: string
@@ -1935,8 +2133,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       let apiKey: string
       let maxOutputTokens: number
       let temperature: number
-      let topP: number
-      let topK: number
 
       if (params.id) {
         // Test an existing saved config — read API key from storage
@@ -1945,19 +2141,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         baseUrl = params.baseUrl || saved.baseUrl
         model = params.model || saved.model
         apiKey = params.apiKey || saved.apiKey || ""
-        maxOutputTokens =
-          params.maxOutputTokens ?? saved.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+        maxOutputTokens = params.maxOutputTokens ?? saved.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
         temperature = params.temperature ?? saved.temperature ?? DEFAULT_TEMPERATURE
-        topP = params.topP ?? saved.topP ?? DEFAULT_TOP_P
-        topK = params.topK ?? saved.topK ?? DEFAULT_TOP_K
       } else {
         baseUrl = params.baseUrl || ""
         model = params.model || ""
         apiKey = params.apiKey || ""
         maxOutputTokens = params.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
         temperature = params.temperature ?? DEFAULT_TEMPERATURE
-        topP = params.topP ?? DEFAULT_TOP_P
-        topK = params.topK ?? DEFAULT_TOP_K
       }
 
       if (!baseUrl) return { success: false, error: "接口地址不能为空" }
@@ -1974,41 +2165,28 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       if (!["http:", "https:"].includes(urlObj.protocol)) {
         return { success: false, error: "仅支持 http/https 协议" }
       }
-      urlObj.pathname =
-        urlObj.pathname.replace(/\/chat\/completions\/?$/, "").replace(/\/+$/, "") +
-        "/chat/completions"
+      urlObj.pathname = urlObj.pathname
+        .replace(/\/chat\/completions\/?$/, "")
+        .replace(/\/+$/, "") + "/chat/completions"
       const url = urlObj.toString()
 
       const start = Date.now()
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), 15_000)
       try {
-        const body = {
-          model,
-          messages: [{ role: "user", content: "Hi" }],
-          max_tokens: maxOutputTokens,
-          temperature,
-          top_p: topP,
-          ...(topK > 0 ? { top_k: topK } : {}),
-          stream: false
-        }
-
-        console.log("[Models] Testing model connection:", {
-          host: urlObj.host,
-          model,
-          max_tokens: maxOutputTokens,
-          temperature,
-          top_p: topP,
-          ...(topK > 0 ? { top_k: topK } : {})
-        })
-
         const res = await fetch(url, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${apiKey}`
           },
-          body: JSON.stringify(body),
+          body: JSON.stringify({
+            model,
+            messages: [{ role: "user", content: "Hi" }],
+            max_tokens: maxOutputTokens,
+            temperature,
+            stream: false
+          }),
           signal: controller.signal
         })
 
@@ -2033,32 +2211,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         return { success: true, latencyMs }
       } catch (e) {
         const latencyMs = Date.now() - start
-        const cause =
-          e instanceof Error && "cause" in e && e.cause instanceof Error ? e.cause : undefined
         const msg =
           e instanceof Error
             ? e.name === "AbortError"
               ? "连接超时（15 秒）"
-              : [
-                  e.message,
-                  cause &&
-                    [
-                      "cause:",
-                      "code" in cause && typeof cause.code === "string" ? cause.code : undefined,
-                      cause.message
-                    ]
-                      .filter(Boolean)
-                      .join(" ")
-                ]
-                  .filter(Boolean)
-                  .join(" | ")
+              : e.message
             : "未知错误"
-        console.warn("[Models] Test connection failed:", {
-          host: urlObj.host,
-          model,
-          latencyMs,
-          error: msg
-        })
         return { success: false, error: msg, latencyMs }
       } finally {
         clearTimeout(timeout)
@@ -2147,7 +2305,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       if (thread?.metadata) {
         try {
           const metadata = JSON.parse(thread.metadata) as Record<string, unknown>
-          preferredPath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
+          preferredPath =
+            typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
         } catch {
           preferredPath = null
         }
@@ -2160,7 +2319,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     }
 
     // 仅当目录真实存在时才作为 defaultPath，避免对话框落到不存在路径。
-    const defaultPath = preferredPath && existsSync(preferredPath) ? preferredPath : undefined
+    const defaultPath =
+      preferredPath && existsSync(preferredPath) ? preferredPath : undefined
 
     const result = await dialog.showOpenDialog({
       properties: ["openDirectory", "createDirectory"],
@@ -2331,9 +2491,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       payload: string | { folderPath: string; includeWorktrees?: boolean; threadId?: string }
     ) => {
       const folderPath = typeof payload === "string" ? payload : payload.folderPath
-      const includeWorktrees =
-        typeof payload === "string" ? true : Boolean(payload.includeWorktrees)
-      const threadId = typeof payload === "string" ? null : payload.threadId || null
+      const includeWorktrees = typeof payload === "string" ? true : Boolean(payload.includeWorktrees)
+      const threadId = typeof payload === "string" ? null : (payload.threadId || null)
 
       const gitRoot = await getGitRoot(folderPath)
       const isGit = Boolean(gitRoot)
@@ -2355,10 +2514,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
             const threadWorkspacePath =
               typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
-            if (
-              threadWorkspacePath &&
-              path.resolve(threadWorkspacePath) === path.resolve(folderPath)
-            ) {
+            if (threadWorkspacePath && path.resolve(threadWorkspacePath) === path.resolve(folderPath)) {
               writeThreadGitContextCache(metadata, {
                 workspacePath: threadWorkspacePath,
                 isGitRepo: result.isGit,
@@ -2452,9 +2608,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           runGit(gitRoot, ["rev-parse", "HEAD"])
         ])
         const baseBranch =
-          baseBranchResult.status === "fulfilled" ? baseBranchResult.value.trim() || "main" : "main"
+          baseBranchResult.status === "fulfilled"
+            ? baseBranchResult.value.trim() || "main"
+            : "main"
         const baseCommit =
-          baseCommitResult.status === "fulfilled" ? baseCommitResult.value.trim() : ""
+          baseCommitResult.status === "fulfilled"
+            ? baseCommitResult.value.trim()
+            : ""
 
         await runGit(gitRoot, ["worktree", "add", "-b", safeBranch, worktreePath])
         return { success: true, path: worktreePath, branch: safeBranch, baseBranch, baseCommit }
@@ -2490,18 +2650,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       const thread = getThread(threadId)
       if (!thread) return
       let metadata: Record<string, unknown> = {}
-      try {
-        metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-      } catch {
-        /* corrupted, reset */
-      }
+      try { metadata = thread.metadata ? JSON.parse(thread.metadata) : {} } catch { /* corrupted, reset */ }
       metadata.gitRoot = gitRoot
       metadata.isWorktree = true
       metadata.worktreeBranch = branch
       if (baseBranch) metadata.worktreeBaseBranch = baseBranch
       if (baseCommit) metadata.worktreeBaseCommit = baseCommit
-      const workspacePath =
-        typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
+      const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
       if (workspacePath) {
         writeThreadGitContextCache(metadata, {
           workspacePath,
@@ -2523,11 +2678,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     const thread = getThread(threadId)
     if (!thread) return
     let metadata: Record<string, unknown> = {}
-    try {
-      metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-    } catch {
-      /* corrupted, reset */
-    }
+    try { metadata = thread.metadata ? JSON.parse(thread.metadata) : {} } catch { /* corrupted, reset */ }
     delete metadata.isWorktree
     delete metadata.gitRoot
     delete metadata.worktreeBranch
@@ -2547,13 +2698,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       const thread = getThread(threadId)
       if (!thread) return { success: false, error: "Thread not found" }
       let metadata: Record<string, unknown> = {}
-      try {
-        metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-      } catch {
-        metadata = {}
-      }
-      const workspacePath =
-        typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
+      try { metadata = thread.metadata ? JSON.parse(thread.metadata) : {} } catch { metadata = {} }
+      const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
       const existing = new Set(getTrackedLlmFiles(metadata))
       const revertedSet = new Set(getRecentlyRevertedFiles(metadata))
       const fileHistory = getFileHistoryMap(metadata)
@@ -2587,140 +2733,115 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  ipcMain.handle(
-    "workspace:getGitPanelMeta",
-    async (_event, { threadId }: { threadId: string }) => {
-      let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
-      try {
-        context = await resolveThreadWorkspaceContext(threadId)
-        return await buildGitPanelMetaState(threadId, context)
-      } catch (e) {
-        return createEmptyGitPanelMetaState(threadId, {
+  ipcMain.handle("workspace:getGitPanelMeta", async (_event, { threadId }: { threadId: string }) => {
+    let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+    try {
+      context = await resolveThreadWorkspaceContext(threadId)
+      return await buildGitPanelMetaState(threadId, context)
+    } catch (e) {
+      return createEmptyGitPanelMetaState(threadId, {
+        isWorktree: Boolean(context?.isWorktree),
+        isGitRepo: Boolean(context?.isGitRepo),
+        error: e instanceof Error ? e.message : "加载 Git 仓库信息失败"
+      })
+    }
+  })
+
+  ipcMain.handle("workspace:getGitPanelDiffs", async (_event, { threadId }: { threadId: string }) => {
+    let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+    try {
+      context = await resolveThreadWorkspaceContext(threadId)
+      return await buildGitPanelDiffState(threadId, context)
+    } catch (e) {
+      return createEmptyGitPanelDiffState(threadId, {
+        isWorktree: Boolean(context?.isWorktree),
+        isGitRepo: Boolean(context?.isGitRepo),
+        error: e instanceof Error ? e.message : "加载 Git 文件变更失败"
+      })
+    }
+  })
+
+  ipcMain.handle("workspace:getGitPanelState", async (_event, { threadId }: { threadId: string }) => {
+    let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+    try {
+      context = await resolveThreadWorkspaceContext(threadId)
+      const [meta, diff] = await Promise.all([
+        buildGitPanelMetaState(threadId, context),
+        buildGitPanelDiffState(threadId, context)
+      ])
+      return {
+        success: meta.success && diff.success,
+        isWorktree: meta.isWorktree || diff.isWorktree,
+        isGitRepo: meta.isGitRepo ?? diff.isGitRepo,
+        taskId: threadId,
+        files: diff.files,
+        changedFilesTotal: diff.changedFilesTotal ?? meta.changedFilesTotal,
+        omittedFileCount: diff.omittedFileCount,
+        totals: diff.totals,
+        hasPendingDiff: diff.hasPendingDiff,
+        hasPushableCommit: meta.hasPushableCommit,
+        pendingCommits: meta.pendingCommits,
+        trackedFiles: meta.trackedFiles,
+        worktreeBranch: meta.worktreeBranch,
+        suggestedCommitMessage: diff.suggestedCommitMessage,
+        error: meta.error || diff.error
+      }
+    } catch (e) {
+      return {
+        ...createEmptyGitPanelDiffState(threadId, {
           isWorktree: Boolean(context?.isWorktree),
-          isGitRepo: Boolean(context?.isGitRepo),
-          error: e instanceof Error ? e.message : "加载 Git 仓库信息失败"
-        })
+          isGitRepo: Boolean(context?.isGitRepo)
+        }),
+        hasPushableCommit: false,
+        pendingCommits: [],
+        trackedFiles: [],
+        worktreeBranch: context?.worktreeBranch ?? null,
+        error: e instanceof Error ? e.message : "加载 Git Panel 失败"
       }
     }
-  )
+  })
 
-  ipcMain.handle(
-    "workspace:getGitPanelDiffs",
-    async (_event, { threadId }: { threadId: string }) => {
-      let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
-      try {
-        context = await resolveThreadWorkspaceContext(threadId)
-        return await buildGitPanelDiffState(threadId, context)
-      } catch (e) {
-        return createEmptyGitPanelDiffState(threadId, {
-          isWorktree: Boolean(context?.isWorktree),
-          isGitRepo: Boolean(context?.isGitRepo),
-          error: e instanceof Error ? e.message : "加载 Git 文件变更失败"
-        })
+  ipcMain.handle("workspace:getGitPanelSummary", async (_event, { threadId }: { threadId: string }) => {
+    try {
+      logGitStep(threadId, "summary", "请求 getGitPanelSummary")
+      const context = await resolveThreadWorkspaceContext(threadId)
+      if (!context.workspacePath || !context.isGitRepo) {
+        logGitStep(threadId, "summary", "非 Git 工作区，返回空摘要")
+        return { success: true, isWorktree: false, isGitRepo: false, hasPendingDiff: false, changedFiles: 0 }
       }
-    }
-  )
-
-  ipcMain.handle(
-    "workspace:getGitPanelState",
-    async (_event, { threadId }: { threadId: string }) => {
-      let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
-      try {
-        context = await resolveThreadWorkspaceContext(threadId)
-        const [meta, diff] = await Promise.all([
-          buildGitPanelMetaState(threadId, context),
-          buildGitPanelDiffState(threadId, context)
-        ])
-        return {
-          success: meta.success && diff.success,
-          isWorktree: meta.isWorktree || diff.isWorktree,
-          isGitRepo: meta.isGitRepo ?? diff.isGitRepo,
-          taskId: threadId,
-          files: diff.files,
-          changedFilesTotal: diff.changedFilesTotal ?? meta.changedFilesTotal,
-          omittedFileCount: diff.omittedFileCount,
-          totals: diff.totals,
-          hasPendingDiff: diff.hasPendingDiff,
-          hasPushableCommit: meta.hasPushableCommit,
-          pendingCommits: meta.pendingCommits,
-          trackedFiles: meta.trackedFiles,
-          worktreeBranch: meta.worktreeBranch,
-          suggestedCommitMessage: diff.suggestedCommitMessage,
-          error: meta.error || diff.error
-        }
-      } catch (e) {
-        return {
-          ...createEmptyGitPanelDiffState(threadId, {
-            isWorktree: Boolean(context?.isWorktree),
-            isGitRepo: Boolean(context?.isGitRepo)
-          }),
-          hasPushableCommit: false,
-          pendingCommits: [],
-          trackedFiles: [],
-          worktreeBranch: context?.worktreeBranch ?? null,
-          error: e instanceof Error ? e.message : "加载 Git Panel 失败"
-        }
+      const workspacePath = context.workspacePath
+      const cacheKey = getCacheKeyForPath(workspacePath)
+      const { hasPendingDiff, changedFiles } = await getCachedPromise(
+        summaryCache,
+        cacheKey,
+        GIT_CONTEXT_CACHE_TTL_MS,
+        () => getGitPanelSummaryQuick(workspacePath)
+      )
+      logGitStep(threadId, "summary", `完成 hasPendingDiff=${hasPendingDiff} changedFiles=${changedFiles}`)
+      return {
+        success: true,
+        isWorktree: context.isWorktree,
+        isGitRepo: true,
+        hasPendingDiff,
+        changedFiles
       }
+    } catch (error) {
+      logGitStep(
+        threadId,
+        "summary",
+        `异常：${error instanceof Error ? error.message : String(error)}`
+      )
+      return { success: true, isWorktree: false, isGitRepo: false, hasPendingDiff: false, changedFiles: 0 }
     }
-  )
-
-  ipcMain.handle(
-    "workspace:getGitPanelSummary",
-    async (_event, { threadId }: { threadId: string }) => {
-      try {
-        logGitStep(threadId, "summary", "请求 getGitPanelSummary")
-        const context = await resolveThreadWorkspaceContext(threadId)
-        if (!context.workspacePath || !context.isGitRepo) {
-          logGitStep(threadId, "summary", "非 Git 工作区，返回空摘要")
-          return {
-            success: true,
-            isWorktree: false,
-            isGitRepo: false,
-            hasPendingDiff: false,
-            changedFiles: 0
-          }
-        }
-        const workspacePath = context.workspacePath
-        const cacheKey = getCacheKeyForPath(workspacePath)
-        const { hasPendingDiff, changedFiles } = await getCachedPromise(
-          summaryCache,
-          cacheKey,
-          GIT_CONTEXT_CACHE_TTL_MS,
-          () => getGitPanelSummaryQuick(workspacePath)
-        )
-        logGitStep(
-          threadId,
-          "summary",
-          `完成 hasPendingDiff=${hasPendingDiff} changedFiles=${changedFiles}`
-        )
-        return {
-          success: true,
-          isWorktree: context.isWorktree,
-          isGitRepo: true,
-          hasPendingDiff,
-          changedFiles
-        }
-      } catch (error) {
-        logGitStep(
-          threadId,
-          "summary",
-          `异常：${error instanceof Error ? error.message : String(error)}`
-        )
-        return {
-          success: true,
-          isWorktree: false,
-          isGitRepo: false,
-          hasPendingDiff: false,
-          changedFiles: 0
-        }
-      }
-    }
-  )
+  })
 
   // Commit workspace changes in Git repo with a user-provided message.
   ipcMain.handle(
     "workspace:commitWorktree",
-    async (_event, { threadId, message }: { threadId: string; message: string }) => {
+    async (
+      _event,
+      { threadId, message, filePaths }: { threadId: string; message: string; filePaths?: string[] }
+    ) => {
       try {
         logGitStep(threadId, "commit", "开始提交")
         const context = await resolveThreadWorkspaceContext(threadId)
@@ -2730,31 +2851,51 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "当前任务不在 Git 仓库中" }
         }
         const tracked = getTrackedLlmFiles(context.metadata)
-        const changedFiles = await getChangedFilesForGitOps(worktreePath, tracked, {
+        const changedEntries = await getChangedFileEntriesForGitOps(worktreePath, tracked, {
           includeAllWhenNoTracked: true
         })
-        if (changedFiles.length === 0) {
+        const filesToCommit = normalizeSelectedChangedFileEntries(worktreePath, changedEntries, filePaths)
+        logGitStep(
+          threadId,
+          "commit",
+          `前端选择路径：${Array.isArray(filePaths) ? filePaths.join(", ") || "(空)" : "(未指定，提交全部)"}`
+        )
+        logGitStep(
+          threadId,
+          "commit",
+          `后端展开路径：${filesToCommit.join(", ") || "(空)"}`
+        )
+        if (filesToCommit.length === 0) {
           logGitStep(threadId, "commit", "失败：没有需要提交的改动")
           return { success: false, error: "没有需要提交的改动" }
         }
 
-        logGitStep(threadId, "commit", `add 文件数：${changedFiles.length}`)
-        await runGit(worktreePath, ["add", "--", ...changedFiles])
+        logGitStep(threadId, "commit", `add 文件数：${filesToCommit.length}`)
+        // 这里会按文件是否存在拆分暂存命令：
+        // - 存在路径：git add -- <path>
+        // - 删除路径：git update-index --remove -- <path>
+        // 详见 stageFilesForCommit 上方注释中的 Windows 兼容说明和完整命令案例。
+        const stagedPaths = await stageFilesForCommit(worktreePath, filesToCommit)
+        logGitStep(
+          threadId,
+          "commit",
+          `暂存分组：add=[${stagedPaths.existingPathspecs.join(", ")}] remove=[${stagedPaths.removedPathspecs.join(", ")}]`
+        )
         const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
         logGitStep(threadId, "commit", `commit message: ${message}`)
-        await runGit(worktreePath, ["commit", "-m", message])
+        if (Array.isArray(filePaths) && filePaths.length > 0) {
+          await runGitWithLiteralPathspecs(worktreePath, ["commit", "-m", message], filesToCommit)
+        } else {
+          await runGit(worktreePath, ["commit", "-m", message])
+        }
         let commitSha: string | undefined
         try {
-          commitSha =
-            (await runGit(worktreePath, ["rev-parse", "HEAD"], { silent: true })).trim() ||
-            undefined
+          commitSha = (await runGit(worktreePath, ["rev-parse", "HEAD"], { silent: true })).trim() || undefined
         } catch {
           // best-effort: adoption can still be measured without the SHA
         }
         // 提交后主动刷新 HEAD 短缓存，保证后续 push/telemetry 读取到最新提交。
-        void getHeadCommitCached(worktreePath, { silent: true, forceRefresh: true }).catch(
-          () => null
-        )
+        void getHeadCommitCached(worktreePath, { silent: true, forceRefresh: true }).catch(() => null)
         if (adoptionSnapshots.length > 0) {
           measureForCommit(adoptionSnapshots, commitSha)
         }
@@ -2762,11 +2903,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         const thread = getThread(threadId)
         if (thread) {
           let metadata: Record<string, unknown> = {}
-          try {
-            metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-          } catch {
-            metadata = {}
-          }
+          try { metadata = thread.metadata ? JSON.parse(thread.metadata) : {} } catch { metadata = {} }
           metadata.llmModifiedFiles = []
           metadata.llmFileHistory = {}
           metadata.llmRecentlyRevertedFiles = []
@@ -2783,23 +2920,19 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             getCurrentBranchCached(worktreePath, { silent: true })
           ])
           trackGitEventWithSkills("git.commit.created", threadId, {
-            repoPath: worktreePath,
+            repoPath:     worktreePath,
             branch: branch || "",
             commitSha: commitSha ?? "",
-            filesChanged: commitStats.fileCount || changedFiles.length,
+            filesChanged: commitStats.fileCount || filesToCommit.length,
             insertions: commitStats.additions,
             deletions: commitStats.deletions,
-            triggeredBy: "manual"
+            triggeredBy:  "manual"
           })
         }
 
         return { success: true }
       } catch (e) {
-        logGitStep(
-          threadId,
-          "commit",
-          `异常：${getExecErrorText(e) || (e instanceof Error ? e.message : "提交失败")}`
-        )
+        logGitStep(threadId, "commit", `异常：${getExecErrorText(e) || (e instanceof Error ? e.message : "提交失败")}`)
         return { success: false, error: e instanceof Error ? e.message : "提交失败" }
       }
     }
@@ -2807,11 +2940,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "workspace:pushWorktree",
-    async (_event, { threadId, message }: { threadId: string; message?: string }) => {
+    async (
+      _event,
+      { threadId }: { threadId: string }
+    ) => {
       logGitStep(threadId, "push", "开始推送流程")
-      let autoCommitted = false
-      let autoCommitHead: string | null = null
-      let pushedCommits: Array<{ hash: string; message: string; date: string }> = []
       const steps: PushStepResult[] = []
       try {
         const context = await resolveThreadWorkspaceContext(threadId)
@@ -2822,129 +2955,33 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "当前任务不在 Git 仓库中", steps }
         }
 
-        const rollbackAutoCommit = async (): Promise<void> => {
-          if (!autoCommitted || !autoCommitHead) return
-          try {
-            // 对比当前 HEAD 与自动提交产生的 commit，只有一致时才回滚，避免误回滚用户后续提交。
-            const currentHead = await getHeadCommitCached(worktreePath, {
-              silent: true,
-              forceRefresh: true
-            })
-            if (currentHead === autoCommitHead) {
-              await runGit(worktreePath, ["reset", "--mixed", "HEAD~1"])
-            }
-          } catch {
-            // ignore rollback failure; return original error to user
-          }
-        }
-
         const branch =
-          context.worktreeBranch ||
-          (await getCurrentBranchCached(worktreePath, { silent: true })) ||
-          "HEAD"
+          context.worktreeBranch || (await getCurrentBranchCached(worktreePath, { silent: true })) || "HEAD"
 
-        // Step 1: Auto-commit pending workspace changes first.
-        const tracked = getTrackedLlmFiles(context.metadata)
-        // push 前走轻量 changed-files 快速路径，不构建完整 diff，减少等待。
-        const pendingChangedFiles = await getChangedFilesForGitOps(worktreePath, tracked, {
-          includeAllWhenNoTracked: true
-        })
-        if (pendingChangedFiles.length > 0) {
-          const commitMessage =
-            (message || "").trim() || `chore(task:${threadId.slice(0, 8)}): auto commit before push`
-          try {
-            logGitStep(threadId, "push", `自动提交 message: ${commitMessage}`)
-            await runGit(worktreePath, ["add", "--", ...pendingChangedFiles])
-            const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
-            await runGit(worktreePath, ["commit", "-m", commitMessage])
-            autoCommitted = true
-            autoCommitHead = await getHeadCommitCached(worktreePath, {
-              silent: true,
-              forceRefresh: true
-            })
-            if (!autoCommitHead) {
-              // 极端情况下缓存刷新失败，回退到直接 rev-parse，保证流程鲁棒性。
-              autoCommitHead = (
-                await runGit(worktreePath, ["rev-parse", "HEAD"], { silent: true })
-              ).trim()
-            }
-            if (adoptionSnapshots.length > 0) {
-              measureForCommit(adoptionSnapshots, autoCommitHead || undefined)
-            }
-            steps.push({ step: "commit", status: "ok", detail: `自动提交成功：${commitMessage}` })
-
-            // Operational telemetry (fire-and-forget, never blocks push flow)
-            {
-              // 提交后直接读取 HEAD 统计，避免重复计算 pending diff totals。
-              const commitStats = await getHeadCommitStats(worktreePath, { silent: true })
-              trackGitEventWithSkills("git.commit.created", threadId, {
-                repoPath: worktreePath,
-                branch,
-                commitSha: autoCommitHead || "",
-                filesChanged: commitStats.fileCount || pendingChangedFiles.length,
-                insertions: commitStats.additions,
-                deletions: commitStats.deletions,
-                triggeredBy: "auto-push"
-              })
-            }
-          } catch (commitError) {
-            const detail = getExecErrorText(commitError)
-            steps.push({ step: "commit", status: "failed", detail: detail || "自动提交失败" })
-            steps.push({ step: "final", status: "failed", detail: "流程中断：commit 失败" })
-            return { success: false, error: detail || "自动提交失败", steps }
-          }
-        } else {
-          steps.push({ step: "commit", status: "skipped", detail: "无待提交改动，跳过自动提交" })
-        }
+        steps.push({ step: "commit", status: "skipped", detail: "Push 不执行提交，仅推送已有 commit" })
 
         // 快速路径：push 流程跳过 pull --rebase，减少端到端等待。
         // 若后续 push 失败，会把错误精确返回给用户处理（例如非 fast-forward）。
         steps.push({ step: "pull", status: "skipped", detail: "快速模式：跳过 pull --rebase" })
 
-        const unmerged = await getUnmergedFiles(worktreePath)
-        if (unmerged.length > 0) {
-          steps.push({
-            step: "final",
-            status: "failed",
-            detail: `检测到未解决冲突文件：${unmerged.slice(0, 3).join(", ")}${unmerged.length > 3 ? "..." : ""}`
-          })
-          steps.push({ step: "final", status: "failed", detail: "流程中断：存在未解决冲突" })
-          return {
-            success: false,
-            error: "存在未解决的 Git 冲突，请先解决后再 Push。",
-            steps
-          }
-        }
-
-        const markerFiles = await getFilesWithConflictMarkers(worktreePath, tracked)
-        if (markerFiles.length > 0) {
-          steps.push({
-            step: "final",
-            status: "failed",
-            detail: `检测到冲突标记（<<<<<<< / ======= / >>>>>>>）：${markerFiles.slice(0, 3).join(", ")}${markerFiles.length > 3 ? "..." : ""}`
-          })
-          return {
-            success: false,
-            error: "检测到代码中仍有 Git 冲突标记，请先处理后再 Push。",
-            steps
-          }
-        }
-
-        const pushabilityBeforePush = await getPushabilitySnapshot(
+        const pushedCommitsPromise = getPushabilitySnapshot(
           worktreePath,
           branch,
           context.worktreeBaseCommit,
           { silent: true }
         )
-        pushedCommits = pushabilityBeforePush.pendingCommits
+          .then((snapshot) => snapshot.pendingCommits)
+          .catch((e) => {
+            console.warn("[GitPush] failed to capture push telemetry commit snapshot:", e)
+            return [] as Array<{ hash: string; message: string; date: string }>
+          })
 
         // Step 2: Push
         try {
           logGitStep(threadId, "push", `执行 push origin ${branch}`)
-          await runGit(worktreePath, ["push", "-u", "origin", branch])
+          await runGitPushWithLfsCompat(threadId, worktreePath, ["push", "-u", "origin", branch])
           steps.push({ step: "push", status: "ok", detail: `push origin ${branch} 成功` })
         } catch (pushError) {
-          await rollbackAutoCommit()
           const detail = getExecErrorText(pushError)
           if (detail.toLowerCase().includes("detected dubious ownership")) {
             steps.push({ step: "push", status: "failed", detail: "Git safe.directory 校验失败" })
@@ -2960,43 +2997,20 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           return { success: false, error: detail || "推送失败", steps }
         }
 
-        if (autoCommitted) {
-          const { getThread, updateThread } = await import("../db")
-          const thread = getThread(threadId)
-          if (thread) {
-            let metadata: Record<string, unknown> = {}
-            try {
-              metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-            } catch {
-              metadata = {}
-            }
-            metadata.llmModifiedFiles = []
-            metadata.llmFileHistory = {}
-            metadata.llmRecentlyRevertedFiles = []
-            updateThread(threadId, { metadata: JSON.stringify(metadata) })
-          }
-        }
-
-        steps.push({
-          step: "final",
-          status: "ok",
-          detail: autoCommitted ? "自动提交并推送成功" : "推送成功"
-        })
+        steps.push({ step: "final", status: "ok", detail: "推送成功" })
         notifyWorkspaceFilesChanged(threadId, worktreePath)
         logGitStep(threadId, "push", "推送流程成功")
 
-        // Operational telemetry (fire-and-forget, never blocks return)
-        {
+        // Operational telemetry and code-adoption marking run in the background so
+        // the user sees push success as soon as git push itself completes.
+        void (async () => {
+          const pushedCommits = await pushedCommitsPromise
           const pushOperationId = randomUUID()
           const pushedAt = nowIsoLocal()
           let remoteUrl = ""
           try {
-            remoteUrl = (
-              await runGit(worktreePath, ["remote", "get-url", "origin"], { silent: true })
-            ).trim()
-          } catch {
-            /* best-effort */
-          }
+            remoteUrl = (await runGit(worktreePath, ["remote", "get-url", "origin"], { silent: true })).trim()
+          } catch { /* best-effort */ }
           const remoteInfo = parseGitRemoteInfo(remoteUrl)
           const pushedCommitShas = pushedCommits.map((commit) => commit.hash)
           console.log(
@@ -3028,16 +3042,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             pushedAt,
             pushOperationId
           })
-        }
+        })().catch((e) => {
+          console.warn("[GitPush] background telemetry failed:", e)
+        })
 
-        return { success: true, autoCommitted, steps }
+        return { success: true, autoCommitted: false, steps }
       } catch (e) {
         const detail = getExecErrorText(e)
-        logGitStep(
-          threadId,
-          "push",
-          `异常：${detail || (e instanceof Error ? e.message : "推送失败")}`
-        )
+        logGitStep(threadId, "push", `异常：${detail || (e instanceof Error ? e.message : "推送失败")}`)
         steps.push({ step: "final", status: "failed", detail: detail || "流程异常中断" })
         return {
           success: false,
@@ -3058,9 +3070,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         return { success: false, error: "当前任务不在 Git 仓库中" }
       }
       const branch =
-        context.worktreeBranch ||
-        (await getCurrentBranchCached(worktreePath, { silent: true })) ||
-        "HEAD"
+        context.worktreeBranch || (await getCurrentBranchCached(worktreePath, { silent: true })) || "HEAD"
       logGitStep(threadId, "pull", `执行 pull --rebase origin ${branch}`)
       try {
         await runGit(worktreePath, ["pull", "--rebase", "origin", branch])
@@ -3083,99 +3093,80 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       return { success: true }
     } catch (e) {
       const detail = getExecErrorText(e)
-      logGitStep(
-        threadId,
-        "pull",
-        `异常：${detail || (e instanceof Error ? e.message : "拉取失败")}`
-      )
+      logGitStep(threadId, "pull", `异常：${detail || (e instanceof Error ? e.message : "拉取失败")}`)
       return { success: false, error: detail || (e instanceof Error ? e.message : "拉取失败") }
     }
   })
 
-  ipcMain.handle(
-    "workspace:rejectWorktreeChanges",
-    async (_event, { threadId }: { threadId: string }) => {
-      try {
-        logGitStep(threadId, "reject_all", "开始全部回退")
-        const context = await resolveThreadWorkspaceContext(threadId)
-        const worktreePath = context.workspacePath
-        if (!worktreePath || !context.isGitRepo) {
-          logGitStep(threadId, "reject_all", "失败：当前任务不在 Git 仓库中")
-          return { success: false, error: "当前任务不在 Git 仓库中" }
-        }
-        const tracked = getTrackedLlmFiles(context.metadata)
-        const historyMap = getFileHistoryMap(context.metadata)
-
-        const targetPathSet = new Set<string>()
-        if (tracked.length > 0) {
-          for (const item of tracked) {
-            for (const rel of toWorktreeRelativePath(worktreePath, item)) {
-              targetPathSet.add(rel)
-            }
-          }
-        } else {
-          const pendingState = await buildGitPanelState(worktreePath, tracked, {
-            includeAllWhenNoTracked: true
-          })
-          for (const file of pendingState.changedFiles) {
-            targetPathSet.add(file)
-          }
-        }
-        const targetPaths = Array.from(targetPathSet)
-
-        for (const targetPath of targetPaths) {
-          const fileHistory = historyMap[targetPath] || []
-          if (fileHistory.length >= 2) {
-            const previous = fileHistory[fileHistory.length - 2]
-            await applyFileSnapshot(worktreePath, targetPath, previous)
-            fileHistory.pop()
-            historyMap[targetPath] = fileHistory
-            continue
-          }
-
-          try {
-            await restorePathToHeadCompat(worktreePath, targetPath)
-          } catch (error) {
-            if (!isPathspecNoMatchError(error)) {
-              throw error
-            }
-          }
-          await runGit(worktreePath, ["clean", "-f", "--", targetPath]).catch(() => {})
-        }
-
-        const postState = await buildGitPanelState(worktreePath, tracked, {
-          includeAllWhenNoTracked: true
-        })
-
-        const { getThread, updateThread } = await import("../db")
-        const thread = getThread(threadId)
-        if (thread) {
-          let metadata: Record<string, unknown> = {}
-          try {
-            metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-          } catch {
-            metadata = {}
-          }
-          metadata.llmModifiedFiles = postState.changedFiles
-          metadata.llmFileHistory = historyMap
-          metadata.llmRecentlyRevertedFiles = []
-          updateThread(threadId, { metadata: JSON.stringify(metadata) })
-        }
-
-        notifyWorkspaceFilesChanged(threadId, worktreePath)
-        logGitStep(threadId, "reject_all", `完成，处理文件数：${targetPaths.length}`)
-
-        return { success: true }
-      } catch (e) {
-        logGitStep(
-          threadId,
-          "reject_all",
-          `异常：${getExecErrorText(e) || (e instanceof Error ? e.message : "回滚失败")}`
-        )
-        return { success: false, error: e instanceof Error ? e.message : "回滚失败" }
+  ipcMain.handle("workspace:rejectWorktreeChanges", async (_event, { threadId }: { threadId: string }) => {
+    try {
+      logGitStep(threadId, "reject_all", "开始全部回退")
+      const context = await resolveThreadWorkspaceContext(threadId)
+      const worktreePath = context.workspacePath
+      if (!worktreePath || !context.isGitRepo) {
+        logGitStep(threadId, "reject_all", "失败：当前任务不在 Git 仓库中")
+        return { success: false, error: "当前任务不在 Git 仓库中" }
       }
+      const tracked = getTrackedLlmFiles(context.metadata)
+      const historyMap = getFileHistoryMap(context.metadata)
+
+      const targetPathSet = new Set<string>()
+      if (tracked.length > 0) {
+        for (const item of tracked) {
+          for (const rel of toWorktreeRelativePath(worktreePath, item)) {
+            targetPathSet.add(rel)
+          }
+        }
+      } else {
+        const pendingState = await buildGitPanelState(worktreePath, tracked, { includeAllWhenNoTracked: true })
+        for (const file of pendingState.changedFiles) {
+          targetPathSet.add(file)
+        }
+      }
+      const targetPaths = Array.from(targetPathSet)
+
+      for (const targetPath of targetPaths) {
+        const fileHistory = historyMap[targetPath] || []
+        if (fileHistory.length >= 2) {
+          const previous = fileHistory[fileHistory.length - 2]
+          await applyFileSnapshot(worktreePath, targetPath, previous)
+          fileHistory.pop()
+          historyMap[targetPath] = fileHistory
+          continue
+        }
+
+        try {
+          await restorePathToHeadCompat(worktreePath, targetPath)
+        } catch (error) {
+          if (!isPathspecNoMatchError(error)) {
+            throw error
+          }
+        }
+        await runGit(worktreePath, ["clean", "-f", "--", targetPath]).catch(() => {})
+      }
+
+      const postState = await buildGitPanelState(worktreePath, tracked, { includeAllWhenNoTracked: true })
+
+      const { getThread, updateThread } = await import("../db")
+      const thread = getThread(threadId)
+      if (thread) {
+        let metadata: Record<string, unknown> = {}
+        try { metadata = thread.metadata ? JSON.parse(thread.metadata) : {} } catch { metadata = {} }
+        metadata.llmModifiedFiles = postState.changedFiles
+        metadata.llmFileHistory = historyMap
+        metadata.llmRecentlyRevertedFiles = []
+        updateThread(threadId, { metadata: JSON.stringify(metadata) })
+      }
+
+      notifyWorkspaceFilesChanged(threadId, worktreePath)
+      logGitStep(threadId, "reject_all", `完成，处理文件数：${targetPaths.length}`)
+
+      return { success: true }
+    } catch (e) {
+      logGitStep(threadId, "reject_all", `异常：${getExecErrorText(e) || (e instanceof Error ? e.message : "回滚失败")}`)
+      return { success: false, error: e instanceof Error ? e.message : "回滚失败" }
     }
-  )
+  })
 
   ipcMain.handle(
     "workspace:rejectWorktreeFile",
@@ -3192,10 +3183,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         const tracked = getTrackedLlmFiles(context.metadata)
         const historyMap = getFileHistoryMap(context.metadata)
         const candidates = toWorktreeRelativePath(worktreePath, filePath)
-        const targetPath =
-          candidates.find((c) =>
-            tracked.some((t) => toWorktreeRelativePath(worktreePath, t).includes(c))
-          ) || candidates[0]
+        const targetPath = candidates.find((c) => tracked.some((t) => toWorktreeRelativePath(worktreePath, t).includes(c)))
+          || candidates[0]
         if (!targetPath) {
           logGitStep(threadId, "reject_file", "失败：无法解析待回退文件路径")
           return { success: false, error: "无法解析待回退文件路径" }
@@ -3222,18 +3211,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           await runGit(worktreePath, ["clean", "-f", "--", targetPath]).catch(() => {})
         }
 
-        const postState = await buildGitPanelState(worktreePath, tracked, {
-          includeAllWhenNoTracked: true
-        })
+        const postState = await buildGitPanelState(worktreePath, tracked, { includeAllWhenNoTracked: true })
         const { getThread, updateThread } = await import("../db")
         const thread = getThread(threadId)
         if (thread) {
           let metadata: Record<string, unknown> = {}
-          try {
-            metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-          } catch {
-            metadata = {}
-          }
+          try { metadata = thread.metadata ? JSON.parse(thread.metadata) : {} } catch { metadata = {} }
           metadata.llmModifiedFiles = postState.changedFiles
           metadata.llmFileHistory = historyMap
           const reverted = new Set(getRecentlyRevertedFiles(metadata))
@@ -3246,15 +3229,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         logGitStep(threadId, "reject_file", `回退成功：${targetPath}`)
         return { success: true }
       } catch (e) {
-        logGitStep(
-          threadId,
-          "reject_file",
-          `异常：${getExecErrorText(e) || (e instanceof Error ? e.message : "文件回滚失败")}`
-        )
-        return {
-          success: false,
-          error: getExecErrorText(e) || (e instanceof Error ? e.message : "文件回滚失败")
-        }
+        logGitStep(threadId, "reject_file", `异常：${getExecErrorText(e) || (e instanceof Error ? e.message : "文件回滚失败")}`)
+        return { success: false, error: getExecErrorText(e) || (e instanceof Error ? e.message : "文件回滚失败") }
       }
     }
   )
@@ -3364,11 +3340,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   // Parse a file and extract text content for chat attachments
   ipcMain.handle(
     "file:parse",
-    async (
-      _event,
-      filePath: string,
-      maxLength?: number
-    ): Promise<{
+    async (_event, filePath: string, maxLength?: number): Promise<{
       success: boolean
       attachment?: import("../file-parser").ParsedAttachment
       error?: string
@@ -3399,20 +3371,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     const result = await dialog.showOpenDialog(win, {
       properties: ["openFile", "multiSelections"],
       title: "选择附件",
-      filters: [{ name: "支持的文件", extensions: ["txt", "md", "csv", "docx", "xlsx", "xls"] }]
-    })
-    if (result.canceled || result.filePaths.length === 0) {
-      return { canceled: true, filePaths: [] }
-    }
-    return { canceled: false, filePaths: result.filePaths }
-  })
-
-  ipcMain.handle("file:selectDirectory", async (event, options?: { title?: string }) => {
-    const win = BrowserWindow.fromWebContents(event.sender)
-    if (!win) return { canceled: true, filePaths: [] }
-    const result = await dialog.showOpenDialog(win, {
-      properties: ["openDirectory", "createDirectory"],
-      title: options?.title || "选择目录"
+      filters: [
+        { name: "支持的文件", extensions: ["txt", "md", "csv", "docx", "xlsx", "xls"] }
+      ]
     })
     if (result.canceled || result.filePaths.length === 0) {
       return { canceled: true, filePaths: [] }

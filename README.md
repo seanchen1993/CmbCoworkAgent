@@ -173,7 +173,6 @@ npm run dist
 | `VITE_LOGIN_PT` | 登录环境标识 |
 | `VITE_INTRUCTION_URL` | 使用说明地址（前端展示） |
 | `VITE_APP_DOWNLOAD_URL` | 应用下载地址（前端展示） |
-| `VITE_MARKET_MOCK_ON_ERROR` | 市场请求失败时是否启用 mock 回退 |
 | `VITE_CONSOLE_LOG_DEFAULT_ON` | DevTools Console 日志默认开关（`true/1/on/yes` 为开启） |
 
 ## 安全建议

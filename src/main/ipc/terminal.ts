@@ -18,6 +18,35 @@ import { homedir } from "os"
 // 参考 claude-code/src/memdir/paths.ts 的 getAutoMemPath() 实现。
 const MEMORY_DIR = path.join(homedir(), ".cmbcoworkagent", "memory")
 
+function isFullBackupPath(candidate: string): boolean {
+  const appDir = path.dirname(app.getPath("exe"))
+  const fullBackupDir = `${appDir}.bak`
+  const normalizeForCompare = (value: string): string => {
+    const resolved = path.resolve(value)
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved
+  }
+
+  const normalizedCandidate = normalizeForCompare(candidate)
+  const normalizedBackupDir = normalizeForCompare(fullBackupDir)
+  return normalizedCandidate === normalizedBackupDir ||
+    normalizedCandidate.startsWith(`${normalizedBackupDir}${path.sep}`)
+}
+
+function assertNotFullBackupPath(kind: string, candidate: string): void {
+  if (isFullBackupPath(candidate)) {
+    throw new Error(`${kind} resolved to full-update backup path: ${candidate}`)
+  }
+}
+
+function pathExistsSync(candidate: string): boolean {
+  try {
+    accessSync(candidate)
+    return true
+  } catch {
+    return false
+  }
+}
+
 // 从 .env 读取代理地址，和项目其他地方一致用 import.meta.env
 function getClaudeCodeProxyBase(): string {
   return (import.meta.env.VITE_CLAUDE_CODE_PROXY_BASE as string) || ""
@@ -67,14 +96,26 @@ function getClaudePath(): string {
   // 方式1: 直接用 @anthropic-ai/claude-code 的 cli.js（最可靠，不依赖 .bin shim）
   const cliJs = path.join(app.getAppPath(), "node_modules", "@anthropic-ai", "claude-code", "cli.js")
   const unpackedCliJs = cliJs.replace("app.asar", "app.asar.unpacked")
-  try { accessSync(unpackedCliJs); return unpackedCliJs } catch { /* continue */ }
-  try { accessSync(cliJs); return cliJs } catch { /* continue */ }
+  if (pathExistsSync(unpackedCliJs)) {
+    assertNotFullBackupPath("Claude Code CLI", unpackedCliJs)
+    return unpackedCliJs
+  }
+  if (pathExistsSync(cliJs)) {
+    assertNotFullBackupPath("Claude Code CLI", cliJs)
+    return cliJs
+  }
 
   // 方式2: .bin shim
   const localBin = path.join(app.getAppPath(), "node_modules", ".bin", binName)
   const unpackedBin = localBin.replace("app.asar", "app.asar.unpacked")
-  try { accessSync(unpackedBin); return unpackedBin } catch { /* continue */ }
-  try { accessSync(localBin); return localBin } catch { /* continue */ }
+  if (pathExistsSync(unpackedBin)) {
+    assertNotFullBackupPath("Claude Code bin", unpackedBin)
+    return unpackedBin
+  }
+  if (pathExistsSync(localBin)) {
+    assertNotFullBackupPath("Claude Code bin", localBin)
+    return localBin
+  }
 
   console.warn("[Terminal] Claude Code not found in node_modules, falling back to PATH lookup")
   return binName
@@ -84,17 +125,18 @@ function getPtyHostPath(): string {
   // #1 fix: fork() 不能从 asar 内加载，需要用 unpacked 路径
   const outPath = path.join(app.getAppPath(), "out", "main", "pty-host.js")
   const unpackedPath = outPath.replace("app.asar", "app.asar.unpacked")
-  try {
-    accessSync(unpackedPath)
+  if (pathExistsSync(unpackedPath)) {
+    assertNotFullBackupPath("Pty Host", unpackedPath)
     return unpackedPath
-  } catch {
-    try {
-      accessSync(outPath)
-      return outPath
-    } catch {
-      return path.join(__dirname, "pty-host.js")
-    }
   }
+  if (pathExistsSync(outPath)) {
+    assertNotFullBackupPath("Pty Host", outPath)
+    return outPath
+  }
+
+  const fallbackPath = path.join(__dirname, "pty-host.js")
+  assertNotFullBackupPath("Pty Host", fallbackPath)
+  return fallbackPath
 }
 
 let ptyHostReadyPromise: Promise<void> | null = null

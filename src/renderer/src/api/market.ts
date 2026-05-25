@@ -1,7 +1,9 @@
 import { MOCK_MARKET_DATA } from "../components/customize/MarketMockData"
 import { toast } from "sonner"
+import { getMockOrgSkillMarketResponse, orgSkillMarketApi } from "./org-skill-market"
+import { USE_MARKET_MOCK_ON_ERROR } from "./market-flags"
 
-export type MarketItemType = "skill" | "mcp" | "plugin"
+export type MarketItemType = "skill" | "orgSkill" | "mcp" | "plugin"
 
 export interface MarketListResponse {
   type: string
@@ -23,6 +25,12 @@ export interface MarketApiResponse {
   success: boolean
   data?: MarketItem[]
   error?: string
+  pageNum?: number
+  pageSize?: number
+  total?: number
+  pages?: number
+  hasNextPage?: boolean
+  hasPreviousPage?: boolean
 }
 
 export interface DownloadResponse {
@@ -40,6 +48,7 @@ export interface MarketItem {
   description: string
   filename: string
   created_at: string
+  updated_at?: string
   category?: string // Add category field
   tag?: string
   featured?: string // eg:官方推荐；精品；热门；个人；
@@ -62,6 +71,12 @@ export interface MarketItem {
   published_at?: string
   installedVersion?: string
   updateAvailable?: boolean
+  orgSkillId?: number
+  orgSkillVersionId?: number
+  sourceOriginName?: string
+  managerName?: string
+  managerDepartment?: string
+  subscriptionCount?: number
 }
 
 export interface MarketUpdateResponse {
@@ -71,11 +86,6 @@ export interface MarketUpdateResponse {
   s3_path: string
 }
 
-const USE_MARKET_MOCK_ON_ERROR =
-  String(import.meta.env.VITE_MARKET_MOCK_ON_ERROR ?? "false")
-    .trim()
-    .toLowerCase() === "true"
-
 function getMockMarketResponse(type: MarketItemType, error?: unknown): MarketApiResponse {
   const reason = error instanceof Error ? error.message : String(error ?? "unknown error")
   console.warn(`[marketApi] ${type} request failed, fallback to mock data. reason=${reason}`)
@@ -83,6 +93,14 @@ function getMockMarketResponse(type: MarketItemType, error?: unknown): MarketApi
     success: true,
     data: MOCK_MARKET_DATA[type]
   }
+}
+
+export function isAutoOptimizedMarketItem(item: MarketItem): boolean {
+  return (
+    item.auto_optimized === true ||
+    item.auto_optimized === "true" ||
+    item.evolution_source === "trace_evolver"
+  )
 }
 
 // Updated API endpoints to match exact specification
@@ -143,6 +161,29 @@ async function throwMarketError(response: Response): Promise<never> {
   throw new Error(message)
 }
 
+async function readOptionalJsonResponse<T>(response: Response): Promise<T | undefined> {
+  try {
+    const text = await response.text()
+    if (!text.trim()) return undefined
+    return JSON.parse(text) as T
+  } catch (error) {
+    console.warn("[marketApi] Successful response was not JSON:", error)
+    return undefined
+  }
+}
+
+function getSuccessfulResponseFailureMessage(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null
+
+  const payload = body as Record<string, unknown>
+  const status = typeof payload.status === "string" ? payload.status.trim().toLowerCase() : ""
+  if (payload.success === false || payload.ok === false || status === "error" || status === "fail") {
+    return getErrorMessageFromBody(body) || "市场接口返回失败"
+  }
+
+  return null
+}
+
 // Utility function to download blob as file
 const downloadBlobAsFile = (blob: Blob, filename: string) => {
   const url = URL.createObjectURL(blob)
@@ -162,64 +203,6 @@ interface CacheEntry {
 }
 
 const API_CACHE = new Map<string, CacheEntry>()
-const INSTALLED_MARKET_SKILLS_KEY = "cmbcowork-installed-market-skills"
-
-export interface InstalledMarketSkillRecord {
-  name: string
-  version: string
-  installedAt: string
-}
-
-function normalizeVersion(version?: string | null): string | null {
-  const raw = String(version ?? "").trim()
-  if (!raw) return null
-  return raw.startsWith("v") ? raw.slice(1) : raw
-}
-
-export function compareVersions(left?: string | null, right?: string | null): number {
-  const lv = normalizeVersion(left)
-  const rv = normalizeVersion(right)
-  // If either side is missing, no reliable comparison — suppress the update.
-  if (lv === null || rv === null) return 0
-  const l = lv.split(".").map((part) => Number(part) || 0)
-  const r = rv.split(".").map((part) => Number(part) || 0)
-  for (let i = 0; i < 3; i++) {
-    const diff = (l[i] || 0) - (r[i] || 0)
-    if (diff !== 0) return diff
-  }
-  return 0
-}
-
-export function getInstalledMarketSkills(): InstalledMarketSkillRecord[] {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(INSTALLED_MARKET_SKILLS_KEY) || "[]") as unknown
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is InstalledMarketSkillRecord => {
-          return Boolean(
-            item &&
-            typeof item === "object" &&
-            typeof (item as InstalledMarketSkillRecord).name === "string" &&
-            typeof (item as InstalledMarketSkillRecord).version === "string"
-          )
-        })
-      : []
-  } catch {
-    return []
-  }
-}
-
-export function recordInstalledMarketSkill(name: string, version?: string | null): void {
-  const normalizedName = name.trim()
-  const normalizedVersion = normalizeVersion(version)
-  if (!normalizedName || !normalizedVersion) return
-  const existing = getInstalledMarketSkills().filter((item) => item.name !== normalizedName)
-  existing.push({ name: normalizedName, version: normalizedVersion, installedAt: new Date().toISOString() })
-  localStorage.setItem(INSTALLED_MARKET_SKILLS_KEY, JSON.stringify(existing))
-}
-
-export function isAutoOptimizedMarketItem(item: MarketItem): boolean {
-  return item.auto_optimized === true || item.auto_optimized === "true" || item.evolution_source === "trace_evolver"
-}
 
 // Helper function to set cached data
 const setCachedData = (key: string, data: MarketApiResponse): void => {
@@ -232,6 +215,10 @@ const setCachedData = (key: string, data: MarketApiResponse): void => {
 // Updated API functions with caching
 export const marketApi = {
   async fetchInstallFile(name: string, type: MarketItemType): Promise<DownloadedItemFile> {
+    if (type === "orgSkill") {
+      throw new Error("组织级技能下载需要 skillId 和 versionId")
+    }
+
     console.log(`Fetching install file for ${type} item: ${name}`)
     const response = await fetch(ENDPOINTS.download(type, name), {
       method: "GET",
@@ -250,6 +237,10 @@ export const marketApi = {
     const filename = contentDisposition?.match(/filename="([^"]+)"/)?.[1] || `${name}.${defaultExt}`
 
     return { blob, filename }
+  },
+
+  async fetchOrgSkillInstallFile(item: MarketItem): Promise<DownloadedItemFile> {
+    return orgSkillMarketApi.fetchInstallFile(item)
   },
 
   async downloadLspVsix(): Promise<DownloadResponse> {
@@ -432,6 +423,29 @@ export const marketApi = {
     }
   },
 
+  async getOrgSkills(
+    pageNum = 1,
+    pageSize = 10,
+    labelIds: string[] = [],
+    keyword = ""
+  ): Promise<MarketApiResponse> {
+    console.log("Fetching organization skills from API...")
+    try {
+      return await orgSkillMarketApi.getOrgSkills(pageNum, pageSize, labelIds, keyword)
+    } catch (error) {
+      console.error("Error fetching organization skills:", error)
+      if (USE_MARKET_MOCK_ON_ERROR) {
+        const reason = error instanceof Error ? error.message : String(error ?? "unknown error")
+        console.warn(`[marketApi] orgSkill request failed, fallback to mock data. reason=${reason}`)
+        return getMockOrgSkillMarketResponse(pageNum, pageSize, labelIds, keyword)
+      }
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Unknown error"
+      }
+    }
+  },
+
   async deleteItem(name: string, type: MarketItemType): Promise<MarketDeleteResponse> {
     console.log(`Deleting ${type} item: ${name}`)
     const response = await fetch(ENDPOINTS.delete(type, name), {
@@ -454,11 +468,14 @@ export const marketApi = {
     type: MarketItemType,
     downloadToLocal = false,
     _isFeatured = false,
-    marketVersion?: string | null
+    item?: MarketItem
   ): Promise<DownloadResponse> {
     void _isFeatured
     console.log(`Downloading ${type} item: ${name}`)
-    const { blob, filename } = await this.fetchInstallFile(name, type)
+    const { blob, filename } =
+      type === "orgSkill" && item
+        ? await this.fetchOrgSkillInstallFile(item)
+        : await this.fetchInstallFile(name, type)
 
     // If user wants to download to local file system
     if (downloadToLocal) {
@@ -467,14 +484,11 @@ export const marketApi = {
     }
 
     // For skills, we need to handle the downloaded file
-    if (type === "skill") {
+    if (type === "skill" || type === "orgSkill") {
       try {
         const arrayBuffer = await blob.arrayBuffer()
         if (typeof window.api?.skills?.upload === "function") {
           const uploadResult = await window.api.skills.upload(arrayBuffer, filename)
-          if (uploadResult.success) {
-            recordInstalledMarketSkill(name, marketVersion)
-          }
           return {
             success: uploadResult.success,
             error: uploadResult.error
@@ -494,7 +508,7 @@ export const marketApi = {
       try {
         const arrayBuffer = await blob.arrayBuffer()
         if (typeof window.api?.plugins?.install === "function") {
-          const installResult = await window.api.plugins.install(arrayBuffer, filename)
+          const installResult = await window.api.plugins.install(arrayBuffer, filename, "market")
           return {
             success: installResult.success,
             error: installResult.error
@@ -655,7 +669,17 @@ export const marketApi = {
       await throwMarketError(response)
     }
 
-    const data: MarketUploadResponse = await response.json()
+    const data = await readOptionalJsonResponse<MarketUploadResponse & Record<string, unknown>>(
+      response
+    )
+    const failureMessage = getSuccessfulResponseFailureMessage(data)
+    if (failureMessage) {
+      return {
+        success: false,
+        error: failureMessage
+      }
+    }
+
     return {
       success: true,
       data
@@ -721,7 +745,17 @@ export const marketApi = {
       await throwMarketError(response)
     }
 
-    const data: MarketUpdateResponse = await response.json()
+    const data = await readOptionalJsonResponse<MarketUpdateResponse & Record<string, unknown>>(
+      response
+    )
+    const failureMessage = getSuccessfulResponseFailureMessage(data)
+    if (failureMessage) {
+      return {
+        success: false,
+        error: failureMessage
+      }
+    }
+
     return {
       success: true,
       data
@@ -755,6 +789,8 @@ export const marketApi = {
         return this.getMcps()
       case "plugin":
         return this.getPlugins()
+      case "orgSkill":
+        return this.getOrgSkills()
       default:
         throw new Error(`Unknown resource type: ${resourceType}`)
     }

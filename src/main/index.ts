@@ -139,6 +139,7 @@ import { registerSandboxHandlers } from "./ipc/sandbox"
 import { registerOptimizerHandlers } from "./ipc/optimizer"
 import { registerChatXHandlers } from "./ipc/chatx"
 import { registerHooksHandlers } from "./ipc/hooks"
+import { flushHookLogs, pruneOldHookLogs } from "./hooks/persistence"
 import { registerTerminalHandlers, disposeAllTerminals } from "./ipc/terminal"
 import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
@@ -164,11 +165,16 @@ import { closeRuntime } from "./agent/runtime"
 import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
-import { runStartupSelfCheck } from "./updater/rollback"
+import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
 import { isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
-import { configurePetWindow, createPetWindow, registerPetHandlers } from "./pet"
+import {
+  configurePetWindow,
+  createPetWindow,
+  getPetWindowDebugInfo,
+  registerPetHandlers
+} from "./pet"
 
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
@@ -333,7 +339,17 @@ function createWindow(): void {
     }
   }
 
+  mainWindow.on("close", () => {
+    console.warn("[Main] Main window close requested", {
+      pet: getPetWindowDebugInfo()
+    })
+  })
+
   mainWindow.on("closed", () => {
+    console.warn("[Main] Main window closed", {
+      platform: process.platform,
+      pet: getPetWindowDebugInfo()
+    })
     mainWindow = null
     if (process.platform !== "darwin") {
       app.quit()
@@ -462,6 +478,8 @@ if (!gotTheLock) {
     registerOptimizerHandlers(ipcMain)
     registerChatXHandlers(ipcMain)
     registerHooksHandlers(ipcMain)
+    // Best-effort cleanup of stale hook-log jsonl files. Doesn't block startup.
+    void pruneOldHookLogs().catch((e) => console.warn("[Main] pruneOldHookLogs error:", e))
     registerTerminalHandlers(ipcMain)
     registerCodeExecToolsHandlers(ipcMain)
     registerRoutingHandlers(ipcMain)
@@ -575,14 +593,16 @@ if (!gotTheLock) {
       }
     })
 
-    createWindow()
-    createPetWindow()
-
-    // Run post-update self-check before anything else
+    // Run post-update self-check before creating windows or starting services.
+    // This keeps backup cleanup ahead of renderer startup and lazy child process
+    // creation, reducing the chance that fresh app activity races .bak removal.
     const selfCheckResult = await runStartupSelfCheck()
 
     // Expose result to renderer — renderer polls this on mount to show update toast
     ipcMain.handle("update:get-startup-result", () => selfCheckResult)
+
+    createWindow()
+    createPetWindow()
 
     // Start scheduled task scheduler and heartbeat service
     startScheduler()
@@ -590,6 +610,7 @@ if (!gotTheLock) {
     startChatX()
     startHookConfigWatcher()
     startUpdateChecker()
+    markFullBackupCleanupReady(selfCheckResult)
 
     // ── Keep Awake ──
     applyKeepAwake(isKeepAwakeEnabled())
@@ -609,6 +630,10 @@ if (!gotTheLock) {
   })
 
   app.on("window-all-closed", () => {
+    console.warn("[Main] window-all-closed", {
+      platform: process.platform,
+      pet: getPetWindowDebugInfo()
+    })
     if (process.platform !== "darwin") {
       app.quit()
     }
@@ -619,6 +644,11 @@ if (!gotTheLock) {
   // queued there have no guarantee of completing before the process exits.
   let sessionEndDone = false
   app.on("before-quit", (event) => {
+    console.warn("[Main] before-quit", {
+      sessionEndDone,
+      hasActiveSessions: hasActiveSessions(),
+      pet: getPetWindowDebugInfo()
+    })
     if (sessionEndDone) return
     if (!hasActiveSessions()) {
       sessionEndDone = true
@@ -636,6 +666,10 @@ if (!gotTheLock) {
 
   let quitting = false
   app.on("will-quit", (e) => {
+    console.warn("[Main] will-quit", {
+      quitting,
+      pet: getPetWindowDebugInfo()
+    })
     if (quitting) {
       // Re-entry: user pressed Cmd+Q again while cleanup is running. Just block.
       e.preventDefault()
@@ -660,7 +694,8 @@ if (!gotTheLock) {
 
     const cleanup = Promise.all([
       stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
-      closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err))
+      closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err)),
+      flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
     ])
 
     // Single-fire exit guard so timeout + finally don't both call app.exit

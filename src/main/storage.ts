@@ -1850,6 +1850,45 @@ export function setPluginEnabled(id: string, enabled: boolean): void {
   writePlugins(next)
 }
 
+/**
+ * Backfill origin for plugins installed before the field existed.
+ *
+ * Used by the renderer's one-shot legacy migration. Writes plugins.json once
+ * for the whole batch — for a user with N legacy plugins this avoids N IPC
+ * round-trips and N file writes through the mutex.
+ *
+ * - No-op for unknown ids or when the stored origin already matches.
+ * - Does NOT touch `updatedAt`: origin is a back-fill of latent metadata, not
+ *   a user-visible change; bumping the timestamp would corrupt any UI sorted
+ *   by updatedAt the first time a session backfills many legacy plugins.
+ * - Callers must hold `pluginMutex`.
+ */
+export function setPluginOriginsBatch(
+  updates: ReadonlyArray<{ id: string; origin: "market" | "local" }>
+): void {
+  // INVARIANT: caller must already hold `pluginMutex`. Same reasoning as
+  // setPluginOrigin — reads + writes plugins.json without taking the lock.
+  // The only current call site is the `plugins:setOriginsBatch` IPC handler.
+  // No `updates.length === 0` early return: the IPC handler already filters
+  // and short-circuits on empty input.
+  const byId = new Map<string, "market" | "local">()
+  for (const u of updates) {
+    if (u && typeof u.id === "string" && (u.origin === "market" || u.origin === "local")) {
+      byId.set(u.id, u.origin)
+    }
+  }
+  if (byId.size === 0) return
+  const items = getPlugins()
+  let changed = false
+  const next = items.map((i) => {
+    const desired = byId.get(i.id)
+    if (!desired || i.origin === desired) return i
+    changed = true
+    return { ...i, origin: desired }
+  })
+  if (changed) writePlugins(next)
+}
+
 export function getEnabledPluginSkillsSources(): string[] {
   if (_pluginSkillsCache) return _pluginSkillsCache
   _pluginSkillsCache = getEnabledPluginSkillSourceMetadata().map((source) => source.sourceDir)
@@ -1876,7 +1915,12 @@ export interface PluginSkillSourceMetadata {
 
 export function getEnabledPluginSkillSourceMetadata(): PluginSkillSourceMetadata[] {
   if (_pluginSkillSourcesCache) return _pluginSkillSourcesCache
-  const plugins = getPlugins().filter((p) => p.enabled && p.skillCount > 0)
+  // Don't gate on the stored `skillCount` — that value is computed once at
+  // install time and stays stale if the in-tree layout shifts (or was wrong
+  // to begin with). The downstream discovery walks the filesystem live, so
+  // an over-broad enabled-only filter is harmless and catches plugins whose
+  // install-time count was 0 due to manifest/layout mismatch.
+  const plugins = getPlugins().filter((p) => p.enabled)
   const sources: PluginSkillSourceMetadata[] = []
   for (const plugin of plugins) {
     const manifest = readPluginManifest(plugin.path)?.manifest ?? null
@@ -1896,7 +1940,14 @@ export function getEnabledPluginSkillSourceMetadata(): PluginSkillSourceMetadata
 
 export function getEnabledPluginMcpConfigs(): Record<string, PluginMcpServerConfig> {
   if (_pluginMcpCache) return _pluginMcpCache
-  const plugins = getPlugins().filter((p) => p.enabled && p.mcpServerCount > 0)
+  // Same rationale as getEnabledPluginSkillSourceMetadata: don't gate on the
+  // stored mcpServerCount. The path here (.mcp.json at plugin root) is fixed
+  // so the manifest-mismatch failure mode that bites skills doesn't apply,
+  // but the file can also appear or change after install — keeping this
+  // count-free means a plugin that didn't ship MCP at install time can grow
+  // one without needing to be re-registered. parseMcpJsonFile fast-fails on
+  // missing/invalid files so the extra reads cost effectively nothing.
+  const plugins = getPlugins().filter((p) => p.enabled)
   const configs: Record<string, PluginMcpServerConfig> = {}
   for (const plugin of plugins) {
     const mcpJsonPath = join(plugin.path, ".mcp.json")
@@ -2008,6 +2059,93 @@ export function saveChatXConfig(updates: Partial<import("./types").ChatXConfig>)
   const current = getChatXConfig()
   const merged = { ...current, ...updates }
   writeFileSync(CHATX_CONFIG_FILE, JSON.stringify(merged, null, 2))
+}
+
+// ── Hook Logging ──────────────────────────────────────────────────────────────
+//
+// Both flags default to false: no chat UI footprint, no IPC overhead, no disk
+// writes unless the user opts in. See HookLoggingConfig in types.ts for the
+// behavioral split.
+
+const HOOK_LOGGING_CONFIG_FILE = join(OPENWORK_DIR, "hook-logging.json")
+
+// Read once and cache — checked on every hook execution, doesn't need to hit
+// the disk each time. The setter invalidates by overwriting.
+let _hookLoggingCache: import("./types").HookLoggingConfig | null = null
+
+function defaultHookLoggingConfig(): import("./types").HookLoggingConfig {
+  return { enabled: false, diagnostic: false }
+}
+
+export function getHookLoggingConfig(): import("./types").HookLoggingConfig {
+  if (_hookLoggingCache) return _hookLoggingCache
+  getOpenworkDir()
+  if (!existsSync(HOOK_LOGGING_CONFIG_FILE)) {
+    _hookLoggingCache = defaultHookLoggingConfig()
+    return _hookLoggingCache
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(HOOK_LOGGING_CONFIG_FILE, "utf-8")) as Record<
+      string,
+      unknown
+    >
+    const defaults = defaultHookLoggingConfig()
+    _hookLoggingCache = {
+      enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : defaults.enabled,
+      diagnostic: typeof parsed.diagnostic === "boolean" ? parsed.diagnostic : defaults.diagnostic
+    }
+    // Diagnostic requires enabled — clamp here so callers don't need to repeat.
+    if (!_hookLoggingCache.enabled) _hookLoggingCache.diagnostic = false
+    return _hookLoggingCache
+  } catch {
+    _hookLoggingCache = defaultHookLoggingConfig()
+    return _hookLoggingCache
+  }
+}
+
+export function saveHookLoggingConfig(
+  updates: Partial<import("./types").HookLoggingConfig>
+): import("./types").HookLoggingConfig {
+  getOpenworkDir()
+  const current = getHookLoggingConfig()
+  const next: import("./types").HookLoggingConfig = {
+    enabled: typeof updates.enabled === "boolean" ? updates.enabled : current.enabled,
+    diagnostic: typeof updates.diagnostic === "boolean" ? updates.diagnostic : current.diagnostic
+  }
+  if (!next.enabled) next.diagnostic = false
+  writeFileSync(HOOK_LOGGING_CONFIG_FILE, JSON.stringify(next, null, 2))
+  _hookLoggingCache = next
+  return next
+}
+
+/**
+ * Path-only resolver for the log directory — never creates anything. Use this
+ * from read-only paths (e.g. startup prune) so disabling Hook logging really
+ * means "no disk footprint".
+ */
+export function resolveHookLogDir(): string {
+  return join(OPENWORK_DIR, "hooks", "log")
+}
+
+/**
+ * Directory holding the rolling jsonl files. Lives at
+ * `<openworkDir>/hooks/log/` so the daily files don't pollute the top-level
+ * config folder and the "open folder" button can drop the user straight into
+ * the right place. Created on demand — only call this when about to write.
+ */
+export function getHookLogDir(): string {
+  getOpenworkDir()
+  const dir = resolveHookLogDir()
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/** Absolute path to the jsonl log file for a given local date. */
+export function getHookLogFilePath(date: Date = new Date()): string {
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, "0")
+  const d = String(date.getDate()).padStart(2, "0")
+  return join(getHookLogDir(), `hooks.${y}-${m}-${d}.jsonl`)
 }
 
 // ── Sandbox Settings ──────────────────────────────────────────────────────────

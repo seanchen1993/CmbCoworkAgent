@@ -744,12 +744,18 @@ function parseUserStats(raw: any, selectedUpperOrgLv1: string | null): UserStats
 
 export function parseTopUsersFromAgg(raw: any): ParsedTopUser[] {
   const aggs = raw?.aggregations ?? {}
-  return (aggs.top_users?.buckets ?? []).map((b: any) => ({
-    sapId: b.key,
-    userName: b.user_name?.buckets?.[0]?.key ?? b.key,
-    orgName: b.org_name?.buckets?.[0]?.key ?? "",
-    count: b.doc_count
-  }))
+  return (aggs.top_users?.buckets ?? []).map((b: any) => {
+    const userName = getLatestUserMetric(b, "userName") || b.user_name?.buckets?.[0]?.key || b.key
+    const orgName = getLatestUserMetric(b, "orgName") || b.org_name?.buckets?.[0]?.key || ""
+    const upperOrgLv1 = getLatestUserMetric(b, "upperOrgLv1")
+    const upperOrgLv0 = getLatestUserMetric(b, "upperOrgLv0")
+    return {
+      sapId: b.key,
+      userName,
+      orgName: formatTopUserOrgName(orgName, upperOrgLv1, upperOrgLv0),
+      count: b.doc_count
+    }
+  })
 }
 
 function parseProductivity(raw: any, granularity: Granularity, range: TimeRange): ProductivityData {

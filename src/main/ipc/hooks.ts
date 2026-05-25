@@ -1,7 +1,10 @@
-import { IpcMain } from "electron"
+import { IpcMain, shell } from "electron"
 import {
   getHooks,
   getEnabledSkillHookMetadata,
+  getHookLoggingConfig,
+  getHookLogDir,
+  saveHookLoggingConfig,
   upsertHook,
   deleteHook,
   setHookEnabled,
@@ -10,8 +13,8 @@ import {
   trustWorkspaceHookFile
 } from "../storage"
 import type { UntrustedWorkspaceHook } from "../storage"
-import type { SkillHookMetadata } from "../types"
-import { notifyHooksChanged } from "../hooks/notifications"
+import type { HookLoggingConfig, SkillHookMetadata } from "../types"
+import { notifyHookLoggingChanged, notifyHooksChanged } from "../hooks/notifications"
 import { clearOnceStateForHook } from "../hooks/runner"
 import {
   isSupportedHookEvent,
@@ -103,6 +106,36 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle("hooks:list", async (): Promise<HookConfig[]> => {
     return getHooks()
+  })
+
+  ipcMain.handle("hooks:logging:get", async (): Promise<HookLoggingConfig> => {
+    return getHookLoggingConfig()
+  })
+
+  ipcMain.handle(
+    "hooks:logging:save",
+    async (_event, updates: Partial<HookLoggingConfig>): Promise<HookLoggingConfig> => {
+      const sanitized: Partial<HookLoggingConfig> = {}
+      if (typeof updates?.enabled === "boolean") sanitized.enabled = updates.enabled
+      if (typeof updates?.diagnostic === "boolean") sanitized.diagnostic = updates.diagnostic
+      const updated = saveHookLoggingConfig(sanitized)
+      notifyHookLoggingChanged(updated)
+      return updated
+    }
+  )
+
+  ipcMain.handle("hooks:logging:getLogDir", async (): Promise<string> => {
+    return getHookLogDir()
+  })
+
+  ipcMain.handle("hooks:logging:openLogDir", async (): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const result = await shell.openPath(getHookLogDir())
+      if (result) return { success: false, error: result }
+      return { success: true }
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
   })
 
   ipcMain.handle("hooks:skills:list", async (): Promise<SkillHookMetadata[]> => {
