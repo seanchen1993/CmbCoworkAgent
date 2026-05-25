@@ -345,6 +345,7 @@ export function OrgSkillMarketContent({
           <span className="text-base">!</span>
         </div>
         <p className="text-sm text-[#b53333] mb-3 text-center">{error}</p>
+        {error?.includes('凭证已过期') && (<p className="text-sm text-[#b53333] mb-3 text-center">需要重新登陆，请退出app之后重新进入/登陆～</p>)}
         <Button
           variant="outline"
           size="sm"
