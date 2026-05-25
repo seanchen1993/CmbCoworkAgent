@@ -907,7 +907,8 @@ interface CustomAPI {
       sessionId: string,
       prompt: string,
       onEvent: (event: { type: string; questions?: unknown[]; error?: string }) => void,
-      modelId?: string
+      modelId?: string,
+      designSystemId?: string
     ) => () => void
     generateFromImage: (
       sessionId: string,

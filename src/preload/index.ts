@@ -2085,7 +2085,8 @@ const api = {
       sessionId: string,
       prompt: string,
       onEvent: (event: { type: string; questions?: unknown[]; error?: string }) => void,
-      modelId?: string
+      modelId?: string,
+      designSystemId?: string
     ): (() => void) => {
       const channel = `design:questions:${sessionId}`
       const handler = (_: unknown, data: { type: string; questions?: unknown[]; error?: string }): void => {
@@ -2098,7 +2099,7 @@ const api = {
         }
       }
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("design:ask-questions", { sessionId, prompt, modelId })
+      ipcRenderer.send("design:ask-questions", { sessionId, prompt, modelId, designSystemId })
       return () => ipcRenderer.removeListener(channel, handler)
     },
     generateFromImage: (

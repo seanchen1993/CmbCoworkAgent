@@ -198,6 +198,12 @@ const THINK_OPEN_PATTERN = /<think\b[^>]*>?/i
 const THINK_CLOSE_PATTERN = /<\/think>/i
 const THINK_PARTIAL_OPEN_PATTERN = /<t(?:h(?:i(?:n(?:k(?:\b[^>]*)?)?)?)?)?$/i
 const THINK_PARTIAL_CLOSE_PATTERN = /<\/t(?:h(?:i(?:n(?:k)?)?)?)?$/i
+const DIRECT_DESIGN_REQUEST_PATTERN =
+  /\b(skip questions|no questions|just build|build directly|directly generate)\b|(?:直接|马上|立刻)(?:生成|开始|做|出图|出页面)|(?:不要|不用|无需|别)(?:问|提问|问题|澄清|确认)|跳过(?:问题|问答|提问|澄清)/i
+
+function shouldSkipDesignQuestions(prompt: string): boolean {
+  return DIRECT_DESIGN_REQUEST_PATTERN.test(prompt)
+}
 
 function clampDesignProgressText(content: string): string {
   if (content.length <= MAX_DESIGN_PROGRESS_TEXT_CHARS) return content
@@ -2934,102 +2940,6 @@ export function DesignView(): React.JSX.Element {
     return () => window.removeEventListener("message", handler)
   }, [scheduleArtifactSave, updatePreviewScrollState, updateTs, workspacePath])
 
-  // ── Ask Questions ─────────────────────────────────────────
-
-  const startAskQuestions = useCallback(
-    (prompt: string, tabId: string, modelId?: string) => {
-      const sessionId = uuid()
-      const designSessionId = currentSessionIdRef.current
-      updateTs(tabId, {
-        generationState: "asking",
-        originalPrompt: prompt,
-        rightTab: "questions",
-        questions: []
-      })
-
-      // Cancel any existing session for this tab before starting a new one
-      cancelDesignRunForTab(tabId)
-      tabSessionsRef.current.set(tabId, { cleanup: () => {}, sessionId })
-
-      const cleanup = window.api.design.askQuestions(
-        sessionId,
-        prompt,
-        (event) => {
-          if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
-
-          if (event.type === "model_retry") {
-            const retry = asDesignModelRetryState(event)
-            if (!retry) return
-            updateTs(tabId, (prev) => {
-              const msgs = [...prev.messages]
-              const last = msgs.length - 1
-              const lastMessage = msgs[last]
-              if (
-                lastMessage?.role === "assistant" &&
-                lastMessage.isStreaming &&
-                lastMessage.modelRetry
-              ) {
-                msgs[last] = { ...lastMessage, modelRetry: retry }
-                return { messages: msgs }
-              }
-              return {
-                messages: [
-                  ...prev.messages,
-                  { role: "assistant" as const, content: "", isStreaming: true, modelRetry: retry }
-                ]
-              }
-            })
-            return
-          }
-
-          if (event.type === "model_retry_clear") {
-            updateTs(tabId, (prev) => ({
-              messages: patchLastAssistantMessage(prev.messages, { modelRetry: null })
-            }))
-            return
-          }
-
-          if (event.type === "done") {
-            const qs = Array.isArray(event.questions)
-              ? event.questions
-                  .map(normalizeQuestionDef)
-                  .filter((question): question is QuestionDef => Boolean(question))
-              : []
-            updateTs(tabId, (prev) => ({
-              generationState: "questions_ready",
-              questions: qs,
-              rightTab: "questions", // re-assert — guards against any interleaved update
-              messages: [
-                ...prev.messages.filter(
-                  (msg) => !(msg.role === "assistant" && msg.isStreaming && msg.modelRetry)
-                ),
-                { role: "questions-prompt" as const, content: "请补充相关问题 →" }
-              ]
-            }))
-            tabSessionsRef.current.delete(tabId)
-          } else if (event.type === "error") {
-            updateTs(tabId, (prev) => ({
-              generationState: "error",
-              messages: [
-                ...prev.messages.filter(
-                  (msg) => !(msg.role === "assistant" && msg.isStreaming && msg.modelRetry)
-                ),
-                {
-                  role: "assistant" as const,
-                  content: `❌ ${event.error ?? "Failed to generate questions"}`
-                }
-              ]
-            }))
-            tabSessionsRef.current.delete(tabId)
-          }
-        },
-        modelId
-      )
-      tabSessionsRef.current.set(tabId, { cleanup, sessionId })
-    },
-    [cancelDesignRunForTab, isCurrentDesignRun, updateTs]
-  )
-
   // ── Generate Design ───────────────────────────────────────
 
   const startGeneration = useCallback(
@@ -3337,6 +3247,122 @@ export function DesignView(): React.JSX.Element {
       tabSessionsRef.current.set(tabId, { cleanup, sessionId })
     },
     [cancelDesignRunForTab, designSystems, isCurrentDesignRun, updateTs, workspacePath]
+  )
+
+  // ── Ask Questions ─────────────────────────────────────────
+
+  const startAskQuestions = useCallback(
+    (prompt: string, tabId: string, modelId?: string, designSystemId?: string | null) => {
+      const sessionId = uuid()
+      const designSessionId = currentSessionIdRef.current
+      updateTs(tabId, {
+        generationState: "asking",
+        originalPrompt: prompt,
+        rightTab: "questions",
+        questions: []
+      })
+
+      // Cancel any existing session for this tab before starting a new one
+      cancelDesignRunForTab(tabId)
+      tabSessionsRef.current.set(tabId, { cleanup: () => {}, sessionId })
+
+      const cleanup = window.api.design.askQuestions(
+        sessionId,
+        prompt,
+        (event) => {
+          if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
+
+          if (event.type === "model_retry") {
+            const retry = asDesignModelRetryState(event)
+            if (!retry) return
+            updateTs(tabId, (prev) => {
+              const msgs = [...prev.messages]
+              const last = msgs.length - 1
+              const lastMessage = msgs[last]
+              if (
+                lastMessage?.role === "assistant" &&
+                lastMessage.isStreaming &&
+                lastMessage.modelRetry
+              ) {
+                msgs[last] = { ...lastMessage, modelRetry: retry }
+                return { messages: msgs }
+              }
+              return {
+                messages: [
+                  ...prev.messages,
+                  { role: "assistant" as const, content: "", isStreaming: true, modelRetry: retry }
+                ]
+              }
+            })
+            return
+          }
+
+          if (event.type === "model_retry_clear") {
+            updateTs(tabId, (prev) => ({
+              messages: patchLastAssistantMessage(prev.messages, { modelRetry: null })
+            }))
+            return
+          }
+
+          if (event.type === "done") {
+            const qs = Array.isArray(event.questions)
+              ? event.questions
+                  .map(normalizeQuestionDef)
+                  .filter((question): question is QuestionDef => Boolean(question))
+              : []
+            if (designSystemId && qs.length <= 1) {
+              updateTs(tabId, (prev) => ({
+                messages: prev.messages.filter(
+                  (msg) => !(msg.role === "assistant" && msg.isStreaming && msg.modelRetry)
+                ),
+                questions: [],
+                answers: {},
+                rightTab: "design"
+              }))
+              tabSessionsRef.current.delete(tabId)
+              startGeneration(
+                `${prompt}\n\n---\nNo clarifying answers were collected because the active design system already fixes visual direction. Generate exactly 2 variations (A / B) within one HTML file.\n\n始终使用中文回答。`,
+                tabId,
+                false,
+                modelId,
+                prompt
+              )
+              return
+            }
+            updateTs(tabId, (prev) => ({
+              generationState: "questions_ready",
+              questions: qs,
+              rightTab: "questions", // re-assert — guards against any interleaved update
+              messages: [
+                ...prev.messages.filter(
+                  (msg) => !(msg.role === "assistant" && msg.isStreaming && msg.modelRetry)
+                ),
+                { role: "questions-prompt" as const, content: "请补充相关问题 →" }
+              ]
+            }))
+            tabSessionsRef.current.delete(tabId)
+          } else if (event.type === "error") {
+            updateTs(tabId, (prev) => ({
+              generationState: "error",
+              messages: [
+                ...prev.messages.filter(
+                  (msg) => !(msg.role === "assistant" && msg.isStreaming && msg.modelRetry)
+                ),
+                {
+                  role: "assistant" as const,
+                  content: `❌ ${event.error ?? "Failed to generate questions"}`
+                }
+              ]
+            }))
+            tabSessionsRef.current.delete(tabId)
+          }
+        },
+        modelId,
+        designSystemId ?? undefined
+      )
+      tabSessionsRef.current.set(tabId, { cleanup, sessionId })
+    },
+    [cancelDesignRunForTab, isCurrentDesignRun, startGeneration, updateTs]
   )
 
   // ── Generate Design from Screenshot ──────────────────────
@@ -4246,7 +4272,8 @@ ${noteLines || "无"}${variantNote}`
     // is explicitly selected. Chat history alone is not enough to count as an
     // iteration because failed or question-only runs may leave messages without HTML.
     if (!hasExistingDesign) {
-      if (selectedSkill) {
+      const activeDesignSystemId = tabStates[tabId]?.selectedDesignSystemId ?? null
+      if (selectedSkill || shouldSkipDesignQuestions(prompt)) {
         startGeneration(
           prompt + contextSuffix,
           tabId,
@@ -4257,7 +4284,7 @@ ${noteLines || "无"}${variantNote}`
           skillReference
         )
       } else {
-        startAskQuestions(prompt + contextSuffix, tabId, selectedModelId)
+        startAskQuestions(prompt + contextSuffix, tabId, selectedModelId, activeDesignSystemId)
       }
     } else {
       // Subsequent messages → iterate on existing design

@@ -65,6 +65,7 @@ Each question object must have:
 3. **Mix question types thoughtfully** — use "chips" for categorical choices, "multi:true chips" for features/sections (user may want several), "text" for names/short facts, "textarea" for descriptions or content.
 4. **Options must be relevant and non-obvious** — tailor chip options to the domain, not generic catch-all lists.
 5. **Direction cards** — if needed, choose from these ids: neutral-modern, warm-editorial, brand-vercel, brand-claude, brand-linear-app. Include OKLCH palettes so the UI can render swatches.
+6. **Active design system exception** — when the user has selected an active DESIGN.md, the visual system is already fixed. Do NOT ask about brand, theme color, palette, typography mood, visual direction, style direction, tone, or direction cards. Ask only product, content, scope, data, navigation, feature, audience, workflow, and fidelity questions needed to build the requested artifact.
 
 ## Examples of differentiated questions by request type
 
@@ -94,6 +95,38 @@ For "帮我做一个产品宣传落地页":
   {"id":"cta","type":"text","label":"主要行动按钮的文案是什么？","hint":"如"免费试用"、"立即下载""},
   {"id":"style","type":"chips","label":"视觉风格方向","options":["极简留白","科技深色","插画轻松","商务稳重","大胆撞色"],"multi":false}
 ]`
+
+function buildQuestionsSystemPrompt(designSystemId: string | undefined): string {
+  const selected = getDesignSystemById(designSystemId)
+  if (!selected.info) return QUESTIONS_SYSTEM_PROMPT
+  return `${QUESTIONS_SYSTEM_PROMPT}
+
+## Active DESIGN.md
+
+The user selected "${selected.info.name}" as the active design system. Treat brand, visual direction, palette, type, spacing, component styling, and motion as already answered by that DESIGN.md. Your question form must not include direction-cards or any style/brand/color/font/tone question.`
+}
+
+function filterActiveDesignSystemQuestions(questions: unknown[], designSystemId: string | undefined): unknown[] {
+  if (!getDesignSystemById(designSystemId).info) return questions
+  const visualQuestionPattern =
+    /(视觉|配色|色彩|颜色|主色|品牌|字体|字重|排版|氛围|调性|情绪|美学|视觉方向|风格方向|设计方向|theme|palette|color|colour|typography|font|mood|aesthetic|visual|brand|style direction|design style)/i
+  return questions.filter((question) => {
+    if (!question || typeof question !== "object") return false
+    const q = question as {
+      type?: unknown
+      label?: unknown
+      hint?: unknown
+      options?: unknown
+    }
+    if (q.type === "direction-cards") return false
+    const textParts = [
+      typeof q.label === "string" ? q.label : "",
+      typeof q.hint === "string" ? q.hint : "",
+      Array.isArray(q.options) ? q.options.filter((option): option is string => typeof option === "string").join(" ") : ""
+    ]
+    return !visualQuestionPattern.test(textParts.join(" "))
+  })
+}
 
 // ─────────────────────────────────────────────────────────
 // System Prompt — Claude Design style
@@ -2726,7 +2759,15 @@ export function registerDesignHandlers(): void {
   // design:ask-questions — stream questions JSON from model
   ipcMain.on(
     "design:ask-questions",
-    async (event, { sessionId, prompt, modelId }: { sessionId: string; prompt: string; modelId?: string }) => {
+    async (
+      event,
+      { sessionId, prompt, modelId, designSystemId }: {
+        sessionId: string
+        prompt: string
+        modelId?: string
+        designSystemId?: string
+      }
+    ) => {
       const channel = `design:questions:${sessionId}`
       const window = BrowserWindow.fromWebContents(event.sender)
 
@@ -2754,7 +2795,7 @@ export function registerDesignHandlers(): void {
         send({ type: "start" })
 
         const stream = await model.stream(
-          [new SystemMessage(QUESTIONS_SYSTEM_PROMPT), new HumanMessage(prompt)],
+          [new SystemMessage(buildQuestionsSystemPrompt(designSystemId)), new HumanMessage(prompt)],
           { signal: controller.signal }
         )
 
@@ -2765,7 +2806,7 @@ export function registerDesignHandlers(): void {
         }
 
         // Parse JSON questions from model output
-        const questions = parseQuestionsJson(fullText)
+        const questions = filterActiveDesignSystemQuestions(parseQuestionsJson(fullText), designSystemId)
         send({ type: "done", questions })
       } catch (err) {
         if (controller.signal.aborted) {
