@@ -554,12 +554,12 @@ function normalizeProjectRun(value: unknown, workflow: HarnessWorkflow): Harness
   if (!slug) return null
 
   const currentNodeId = normalizeText(value.currentNodeId) || "unknown"
-  const currentNodeDefinition = workflow.nodes.find((node) => node.id === currentNodeId)
-  const status = statusFromWorkflowStateId(
-    workflow,
-    currentNodeDefinition,
-    normalizeText(value.currentStateId)
-  )
+  const currentNodeIndex = workflow.nodes.findIndex((node) => node.id === currentNodeId)
+  const currentNodeDefinition = currentNodeIndex >= 0 ? workflow.nodes[currentNodeIndex] : undefined
+  const isFinalNode = currentNodeIndex >= 0 && currentNodeIndex === workflow.nodes.length - 1
+  const status = isFinalNode
+    ? statusFromWorkflowStateId(workflow, currentNodeDefinition, normalizeText(value.currentStateId))
+    : { label: "进行中", uiKind: "active" as const }
   const currentNodeLabel = currentNodeDefinition?.label ?? currentNodeId
   const summaryText = currentNodeLabel ? `${currentNodeLabel} · ${status.label}` : status.label
 
