@@ -11,6 +11,8 @@
     "out/",
     "bin/",
     "resources/",
+    "design-systems/",
+    "design-templates/",
     "pets/",
     "skills/",
     "LICENSE",
@@ -105,6 +107,14 @@
       {
         "from": "pets",
         "to": "pets"
+      },
+      {
+        "from": "design-systems",
+        "to": "design-systems"
+      },
+      {
+        "from": "design-templates",
+        "to": "design-templates"
       }
     ],
     "electronVersion": "39.8.0"

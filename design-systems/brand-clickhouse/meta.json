@@ -1,0 +1,8 @@
+{
+  "name": "ClickHouse",
+  "description": "A high-performance database interface anchored on near-pure black canvas with electric yellow as the brand voltage. White typography in confident sans, yellow CTAs, and yellow-text stat numbers carry the brand voice across every page. Code blocks and product UI fragments embed directly in dark cards. The yellow + black pairing (and yellow used scarcely as accent) is the system's signature — brand identity without atmospheric decoration.",
+  "category": "Backend, Database & DevOps",
+  "source": "awesome-design-md",
+  "origin": "https://github.com/VoltAgent/awesome-design-md/tree/main/design-md/clickhouse",
+  "license": "MIT"
+}

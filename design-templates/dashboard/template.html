@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>数据看板</title>
+  <style>
+    :root { --bg:#f6f7f8; --surface:#fff; --fg:#161616; --muted:#667085; --border:#e4e7ec; --accent:#2563eb; }
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font-family:Inter,system-ui,sans-serif}
+    .app{min-height:100vh;display:grid;grid-template-columns:232px 1fr}.side{border-right:1px solid var(--border);background:var(--surface);padding:18px}.main{min-width:0}.top{height:56px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 24px;background:var(--surface)}
+    .content{padding:24px;display:grid;gap:16px}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px}.chart{height:280px;display:flex;align-items:end;gap:8px}.bar{flex:1;background:var(--accent);border-radius:4px 4px 0 0;opacity:.85}
+    table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:11px 8px;border-bottom:1px solid var(--border);text-align:left}th{color:var(--muted);font-weight:700}
+    @media(max-width:900px){.app{grid-template-columns:1fr}.side{display:none}.kpis{grid-template-columns:repeat(2,1fr)}}@media(max-width:560px){.kpis{grid-template-columns:1fr}.content{padding:16px}}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="side"><strong>Ops</strong><p style="color:var(--muted)">概览 / 客户 / 风险</p></aside>
+    <section class="main">
+      <div class="top"><strong>运营总览</strong><button>导出</button></div>
+      <main class="content" id="dashboard-content">
+        <section class="kpis"><div class="card">收入<br><b>¥128.4万</b></div><div class="card">转化<br><b>14.8%</b></div><div class="card">告警<br><b>7</b></div><div class="card">SLA<br><b>99.96%</b></div></section>
+        <section class="card"><h2>趋势</h2><div class="chart"><div class="bar" style="height:45%"></div><div class="bar" style="height:72%"></div><div class="bar" style="height:62%"></div><div class="bar" style="height:88%"></div></div></section>
+        <section class="card"><table><thead><tr><th>项目</th><th>状态</th><th>负责人</th></tr></thead><tbody><tr><td>替换为真实数据</td><td>进行中</td><td>Design Agent</td></tr></tbody></table></section>
+      </main>
+    </section>
+  </div>
+  <script>var TWEAK_DEFAULTS=/*EDITMODE-BEGIN*/{"accent":"#2563eb"}/*EDITMODE-END*/;function applyTweaks(e){var t=Object.assign({},TWEAK_DEFAULTS,e||{});document.documentElement.style.setProperty("--accent",String(t.accent));}window.addEventListener("message",function(e){if(e.data&&e.data.type==="__set_tweak_keys")applyTweaks(e.data.edits);});window.parent.postMessage({type:"__edit_mode_available"},"*");applyTweaks({});</script>
+</body>
+</html>

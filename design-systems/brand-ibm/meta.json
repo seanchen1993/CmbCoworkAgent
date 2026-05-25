@@ -1,0 +1,8 @@
+{
+  "name": "IBM",
+  "description": "An enterprise-marketing canvas faithful to Carbon Design System: white surfaces, charcoal type, IBM Blue (#0f62fe) as the single confident accent, and a deliberately flat-square aesthetic where corners stay at 0–4px. Type runs IBM Plex Sans at light weight 300 for display sizes (a brand signature) and 400/600 for body and emphasis. Cards live as thin-bordered tiles with no shadow; sections separate via subtle gray rows. The chrome is square, the typography is light, and the only color in the system is one assertive blue — the result reads as old-world enterprise gravitas reframed for the cloud era.",
+  "category": "Media & Consumer Tech",
+  "source": "awesome-design-md",
+  "origin": "https://github.com/VoltAgent/awesome-design-md/tree/main/design-md/ibm",
+  "license": "MIT"
+}

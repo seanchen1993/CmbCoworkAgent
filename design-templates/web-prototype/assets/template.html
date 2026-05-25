@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Web 原型</title>
+  <style>
+    :root {
+      --bg: #f7f7f4;
+      --surface: #ffffff;
+      --fg: #171717;
+      --muted: #666666;
+      --border: #e5e2dc;
+      --accent: #2563eb;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--fg); }
+    .shell { min-height: 100vh; display: flex; flex-direction: column; }
+    header { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 32px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 88%, transparent); }
+    main { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 48px 0 72px; }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 20px; }
+    .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 24px; }
+    .btn { height: 40px; border: 0; border-radius: 8px; padding: 0 16px; background: var(--fg); color: var(--surface); font-weight: 700; }
+    @media (max-width: 760px) { header { padding: 0 18px; } main { width: min(100% - 28px, 1180px); padding-top: 28px; } .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <strong>原型</strong>
+      <button class="btn">主要操作</button>
+    </header>
+    <main id="content">
+      <section class="grid">
+        <div class="panel" style="grid-column: span 7;">
+          <p style="margin:0 0 10px;color:var(--muted);font-weight:700;">核心页面</p>
+          <h1 style="margin:0;font-size:clamp(36px,6vw,68px);line-height:1.02;">把这里替换为真实原型内容</h1>
+        </div>
+        <div class="panel" style="grid-column: span 5;">
+          <p style="margin:0;color:var(--muted);line-height:1.6;">使用 layouts.md 中的模块组合出完整页面。</p>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script>
+    var TWEAK_DEFAULTS=/*EDITMODE-BEGIN*/{"accent":"#2563eb","radius":8}/*EDITMODE-END*/;
+    function applyTweaks(edits){var t=Object.assign({},TWEAK_DEFAULTS,edits||{});document.documentElement.style.setProperty("--accent",String(t.accent));}
+    window.addEventListener("message",function(e){if(e.data&&e.data.type==="__set_tweak_keys")applyTweaks(e.data.edits);});
+    window.parent.postMessage({type:"__edit_mode_available"},"*");
+    applyTweaks({});
+  </script>
+</body>
+</html>
