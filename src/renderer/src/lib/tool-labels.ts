@@ -11,6 +11,7 @@ const TOOL_LABELS: Record<string, string> = {
   git_push: "Git 推送",
   browser_playwright: "Playwright 浏览器操作",
   code_exec: "编程式工具调用",
+  request_user_input: "请求用户输入",
   invoke_deferred_tool: "调用延迟加载的工具",
   inspect_tool: "查看工具定义",
   search_tool: "搜索工具"

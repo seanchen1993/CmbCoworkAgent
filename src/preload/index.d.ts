@@ -25,7 +25,9 @@ import type {
   PluginMetadata,
   PluginManifest,
   SkillHookMetadata,
-  AgentAutoCommitSettings
+  AgentAutoCommitSettings,
+  UserInputRequest,
+  UserInputResponse
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -829,6 +831,14 @@ interface CustomAPI {
       callback: (data: { requestId: string }) => void
     ) => () => void
     onChanged: (callback: () => void) => () => void
+  }
+  userInput: {
+    sendResponse: (response: UserInputResponse) => void
+    onRequest: (threadId: string, callback: (request: UserInputRequest) => void) => () => void
+    onCancel: (
+      threadId: string,
+      callback: (data: { requestId: string; reason?: string }) => void
+    ) => () => void
   }
   skillEvolution: {
     /** Phase 1 — intent banner: "Want to save this as a skill?" */
