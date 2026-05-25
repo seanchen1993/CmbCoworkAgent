@@ -82,6 +82,7 @@ import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
 import { useSlashCommands } from "@/features/slash-commands/useSlashCommands"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
+import { mergeChatSkills } from "@/features/slash-commands/skill-merge"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
@@ -1041,7 +1042,8 @@ export function ChatContainer({
     models,
     generateTitleForFirstMessage,
     setShowCustomizeView,
-    rightPanelCollapsed
+    rightPanelCollapsed,
+    pluginVersion
   } = useAppStore()
 
   const allSkillsRef = useRef<MarketItem[]>([])
@@ -1073,10 +1075,9 @@ export function ChatContainer({
       const availableSkills = loadedSkills.filter(
         (s) => s.source === "project" || s.source === "user"
       )
-      // Built-in/custom names win over plugin names: plugins are third-party
-      // and shouldn't shadow first-party skills the user expects to see.
-      const seen = new Set(availableSkills.map((s) => s.name))
-      const merged = [...availableSkills, ...pluginSkills.filter((p) => !seen.has(p.name))]
+      // Enabled built-in/custom names win over plugin names; disabled local
+      // skills should not hide a plugin skill with the same name from slash.
+      const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet)
       setSkills([...merged].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
     } catch (error) {
       console.error("[ChatContainer] Failed to load skills:", error)
@@ -2535,7 +2536,7 @@ export function ChatContainer({
 
   useEffect(() => {
     void loadSkills()
-  }, [])
+  }, [loadSkills, pluginVersion])
 
   // ── Skill creation human-confirmation listener ──────────
   useEffect(() => {

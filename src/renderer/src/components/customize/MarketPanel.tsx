@@ -541,7 +541,8 @@ export function MarketPanel(): React.JSX.Element {
     marketInitialSkillDetailName,
     setMarketInitialSkillDetailName,
     marketInitialSkillFilters,
-    marketInitialTab
+    marketInitialTab,
+    bumpPluginVersion
   } = useAppStore()
   const [activeTab, setActiveTab] = useState<MarketItemType>("skill")
   const [searchQuery, setSearchQuery] = useState("")
@@ -1123,6 +1124,7 @@ export function MarketPanel(): React.JSX.Element {
           await loadInstalledMcps()
         } else if (activeTab === "plugin") {
           await loadInstalledPlugins()
+          bumpPluginVersion()
         }
         triggerReload()
       } else {
@@ -1677,6 +1679,7 @@ export function MarketPanel(): React.JSX.Element {
         }
         marketInstalledVersionStorage.removeVersion(itemName, activeTab)
         await loadInstalledPlugins()
+        bumpPluginVersion()
       }
       setSelectedItemSnapshot((prev) =>
         prev && getItemKey(prev) === getItemKey(item)
@@ -1783,6 +1786,7 @@ export function MarketPanel(): React.JSX.Element {
             await loadInstalledMcps()
           } else if (activeTab === "plugin") {
             await loadInstalledPlugins()
+            bumpPluginVersion()
           }
         }
       } else {
