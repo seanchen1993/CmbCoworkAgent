@@ -169,7 +169,9 @@ Before writing a single line of HTML, decide what format best serves the content
    </body>
    - Do NOT nest variations inside any other wrapper element.
    - Each variation div must be fully self-contained (complete UI, no shared DOM between variations).
+   - Close Variation A completely before starting Variation B. Never let one variation contain another variation.
    - Shared CSS/JS in \`<head>\` is fine — it will be inherited by each split view.
+   - Never output model control tokens such as \`<|begin_of_sentence|>\`, \`<｜begin▁of▁sentence｜>\`, \`<|end_of_sentence|>\`, or similar tokenizer artifacts anywhere in the HTML.
 
 4. **No filler content** — every element must earn its place. Never pad with placeholder stats, dummy icons, or lorem ipsum sections. Less is more.
 
@@ -1224,7 +1226,7 @@ function exportDesignArtifactPackage(
 }
 
 interface DesignBrowserValidationIssue {
-  type: "console" | "load" | "crash" | "timeout"
+  type: "console" | "load" | "crash" | "timeout" | "structure"
   message: string
   source?: string
   line?: number
@@ -1237,6 +1239,60 @@ interface DesignBrowserValidationResult {
 
 const DESIGN_BROWSER_RUNTIME_ERROR_RE =
   /^\[DesignValidation(?:Error|UnhandledRejection)\]\s*(.*)$/i
+const DESIGN_CONTROL_TOKEN_PATTERN = String.raw`<\s*[|｜][^<>|｜\s][^<>]{0,80}[|｜]\s*>`
+const DESIGN_CONTROL_TOKEN_RE = new RegExp(DESIGN_CONTROL_TOKEN_PATTERN, "gi")
+const DESIGN_VARIATION_STRUCTURE_CHECK_JS = `(() => {
+  const out = [];
+  const a = document.getElementById('variation-a');
+  const b = document.getElementById('variation-b');
+  if (a || b) {
+    if (!a) out.push('缺少 #variation-a。两个方案必须分别是 body 的直接子元素。');
+    if (!b) out.push('缺少 #variation-b。两个方案必须分别是 body 的直接子元素。');
+    if (a && a.parentElement !== document.body) out.push('#variation-a 不是 body 的直接子元素，可能被包在其他容器中。');
+    if (b && b.parentElement !== document.body) out.push('#variation-b 不是 body 的直接子元素，通常说明 Variation A 没有正确闭合或两个方案互相嵌套。');
+    if (a && b && (a.contains(b) || b.contains(a))) out.push('variation-a 和 variation-b 发生嵌套。请先完整闭合 Variation A，再开始 Variation B。');
+  }
+  return out;
+})()`
+
+function countDesignVariationOpenTags(html: string, id: "a" | "b"): number {
+  const re = new RegExp(`<div[^>]*\\sid=["']variation-${id}["'][^>]*>`, "gi")
+  return html.match(re)?.length ?? 0
+}
+
+function validateDesignArtifactSourceStructure(html: string): DesignBrowserValidationIssue[] {
+  const issues: DesignBrowserValidationIssue[] = []
+  const tokens = Array.from(html.matchAll(DESIGN_CONTROL_TOKEN_RE))
+    .map((match) => match[0])
+    .slice(0, 5)
+  if (tokens.length > 0) {
+    issues.push({
+      type: "structure",
+      message: `HTML 中包含模型控制 token：${tokens.join(", ")}。请移除这些 token，并重新生成完整的变体结构。`,
+    })
+  }
+
+  for (const id of ["a", "b"] as const) {
+    const count = countDesignVariationOpenTags(html, id)
+    if (count > 1) {
+      issues.push({
+        type: "structure",
+        message: `#variation-${id} 出现 ${count} 次。每个 variation id 只能出现一次，请移除重复结构并保留一个完整方案。`,
+      })
+    }
+  }
+
+  return issues
+}
+
+function normalizeDesignValidationMessages(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+}
+
+function hasDesignStructureValidationIssue(message: string): boolean {
+  return /variation-[ab]|控制 token|模型控制 token/i.test(message)
+}
 
 function formatDesignBrowserValidation(result: DesignBrowserValidationResult): string {
   if (result.issues.length === 0) return "浏览器运行校验通过"
@@ -1295,7 +1351,10 @@ async function validateDesignArtifactInHiddenBrowser(
   filePath: string,
   signal: AbortSignal
 ): Promise<DesignBrowserValidationResult> {
-  const issues: DesignBrowserValidationIssue[] = []
+  const sourceHtml = fs.existsSync(filePath) && fs.statSync(filePath).isFile()
+    ? fs.readFileSync(filePath, "utf-8")
+    : ""
+  const issues: DesignBrowserValidationIssue[] = validateDesignArtifactSourceStructure(sourceHtml)
   let validationWindow: BrowserWindow | null = null
 
   try {
@@ -1358,6 +1417,13 @@ async function validateDesignArtifactInHiddenBrowser(
     try {
       await Promise.race([loadPromise, timeoutPromise])
       await waitForDesignBrowserValidation(DESIGN_BROWSER_VALIDATION_SETTLE_MS, signal)
+      const structureMessages = await validationWindow.webContents.executeJavaScript(
+        DESIGN_VARIATION_STRUCTURE_CHECK_JS,
+        true
+      )
+      for (const message of normalizeDesignValidationMessages(structureMessages)) {
+        issues.push({ type: "structure", message })
+      }
     } catch (err) {
       if (signal.aborted) throw err
       issues.push({
@@ -4004,9 +4070,13 @@ export function registerDesignHandlers(): void {
               false,
               repairSourcePath
             )
+            const structureRepairInstruction = hasDesignStructureValidationIssue(lastValidationFailureMessage)
+              ? `必须保证 #variation-a 和 #variation-b 都是 body 的直接子元素，两个方案不能互相嵌套，并且 Variation A 必须完整闭合后才能开始 Variation B。移除任何 <|...|> 或 <｜...｜> 模型控制 token。\n\n`
+              : ""
             const repairPrompt =
               `${promptWithSkill}\n\n---\n[Design validation failed]\n` +
               `生成的 HTML 没有通过宿主应用校验。请先读取失败的 HTML，再修复问题，并写出完整、可独立运行的 HTML artifact。\n\n` +
+              structureRepairInstruction +
               `校验错误：\n${lastValidationFailureMessage || "隐藏浏览器运行校验失败。"}\n\n` +
               (repairSourcePath
                 ? `修复前必须先用 read_file 读取这个失败的 HTML 文件：\n${repairSourcePath}\n\n`
