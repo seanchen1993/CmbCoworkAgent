@@ -231,6 +231,14 @@ interface DashboardUserListOptions {
   afterKey?: Record<string, string | number> | null
 }
 
+interface DashboardAllUserItem {
+  sapId: string
+  userName: string
+  orgName: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+}
+
 interface DashboardUserDetailOptions {
   traceLimit?: number
 }
@@ -495,14 +503,14 @@ interface CustomAPI {
     }>
     commitWorktree: (
       threadId: string,
-      message: string
+      message: string,
+      filePaths?: string[]
     ) => Promise<{
       success: boolean
       error?: string
     }>
     pushWorktree: (
-      threadId: string,
-      message?: string
+      threadId: string
     ) => Promise<{
       success: boolean
       autoCommitted?: boolean
@@ -1101,6 +1109,11 @@ interface CustomAPI {
     userProfiles: (
       sapIds: string[]
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    queryAllUser: () => Promise<{
+      success: boolean
+      data?: DashboardAllUserItem[]
+      error?: string
+    }>
     productivity: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"
@@ -1219,7 +1232,8 @@ interface CustomAPI {
       cwd?: string
     ) => Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }>
     listBranches: (
-      cwd?: string
+      cwd?: string,
+      options?: { refreshRemote?: boolean }
     ) => Promise<{ success: boolean; branches: string[]; error?: string }>
     switchBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
     createBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>

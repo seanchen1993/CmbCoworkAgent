@@ -1780,7 +1780,8 @@ export function ChatContainer({
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
           ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
-          ...(role === "tool" && streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
+          ...(role === "tool" &&
+            streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
           created_at: new Date(),
           start_at: trackedTime.start_at,
           end_at: trackedTime.end_at
@@ -1841,7 +1842,8 @@ export function ChatContainer({
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
           ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
-          ...(role === "tool" && streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
+          ...(role === "tool" &&
+            streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
           created_at: new Date(),
           ...(streamMessageTimesRef.current[streamMsg.id]?.start_at && {
             start_at: streamMessageTimesRef.current[streamMsg.id].start_at
@@ -2932,6 +2934,20 @@ export function ChatContainer({
     [setShowCustomizeView]
   )
 
+  const handleOpenOrganizationSkillMarket = useCallback(
+    (skillName?: string): void => {
+      useAppStore.setState({
+        marketInitialTab: "orgSkill",
+        marketInitialSkillCategory: null,
+        marketInitialSkillFilters: null,
+        marketInitialSkillSearchQuery: null,
+        marketInitialSkillDetailName: skillName || null
+      })
+      setShowCustomizeView(true, "market")
+    },
+    [setShowCustomizeView]
+  )
+
   const programmingSkillCards = useMemo(() => {
     const source = showAllProgrammingSkills ? programmingSkills : programmingSkills.slice(0, 8)
     return source.map((skill) => ({
@@ -3385,6 +3401,7 @@ export function ChatContainer({
                           skills={enabledSkillsForSlash}
                           previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
                           onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
+                          onOpenOrganizationSkillMarket={handleOpenOrganizationSkillMarket}
                           onOpenMarketBySkill={handleOpenMarketBySkill}
                           onUseSkillPrompt={handleUseSkillPrompt}
                         />

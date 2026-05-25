@@ -647,16 +647,16 @@ const api = {
     },
     commitWorktree: (
       threadId: string,
-      message: string
+      message: string,
+      filePaths?: string[]
     ): Promise<{ success: boolean; error?: string }> => {
-      return ipcRenderer.invoke("workspace:commitWorktree", { threadId, message }) as Promise<{
+      return ipcRenderer.invoke("workspace:commitWorktree", { threadId, message, filePaths }) as Promise<{
         success: boolean
         error?: string
       }>
     },
     pushWorktree: (
-      threadId: string,
-      message?: string
+      threadId: string
     ): Promise<{
       success: boolean
       autoCommitted?: boolean
@@ -667,7 +667,7 @@ const api = {
         detail: string
       }>
     }> => {
-      return ipcRenderer.invoke("workspace:pushWorktree", { threadId, message }) as Promise<{
+      return ipcRenderer.invoke("workspace:pushWorktree", { threadId }) as Promise<{
         success: boolean
         autoCommitted?: boolean
         error?: string
@@ -1851,6 +1851,8 @@ const api = {
       sapIds: string[]
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userProfiles", sapIds),
+    queryAllUser: (): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:queryAllUser"),
     productivity: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"
@@ -1997,9 +1999,13 @@ const api = {
         isWorktree: boolean
       }>,
     listBranches: (
-      cwd?: string
+      cwd?: string,
+      options?: { refreshRemote?: boolean }
     ): Promise<{ success: boolean; branches: string[]; error?: string }> =>
-      ipcRenderer.invoke("git:listBranches", cwd) as Promise<{
+      ipcRenderer.invoke("git:listBranches", {
+        cwd,
+        refreshRemote: Boolean(options?.refreshRemote)
+      }) as Promise<{
         success: boolean
         branches: string[]
         error?: string
