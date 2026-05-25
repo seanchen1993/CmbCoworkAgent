@@ -1987,7 +1987,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!Array.isArray(state.messages)) return
 
+          const currentMessageTexts = new Set(
+            [message, effectiveMessage].map(normalizeMessageText).filter(Boolean)
+          )
           let currentTurnStartIndex = -1
+          let latestUserMessageIndex = -1
           for (let i = state.messages.length - 1; i >= 0; i--) {
             const msg = state.messages[i]
             const kwargs = msg?.kwargs || {}
@@ -1995,15 +1999,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const className = classId[classId.length - 1] || ""
             const role = toRole(className, kwargs)
             if (role !== "user") continue
-            if (
-              normalizeMessageText(extractText(kwargs.content)) === normalizeMessageText(message)
-            ) {
+            if (latestUserMessageIndex < 0) latestUserMessageIndex = i
+            if (currentMessageTexts.has(normalizeMessageText(extractText(kwargs.content)))) {
               currentTurnStartIndex = i
               break
             }
           }
 
-          const valuesStartIndex = currentTurnStartIndex >= 0 ? currentTurnStartIndex + 1 : 0
+          const valuesStartIndex =
+            currentTurnStartIndex >= 0
+              ? currentTurnStartIndex + 1
+              : latestUserMessageIndex >= 0
+                ? latestUserMessageIndex + 1
+                : 0
 
           for (let i = valuesStartIndex; i < state.messages.length; i++) {
             const msg = state.messages[i]
