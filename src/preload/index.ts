@@ -26,7 +26,7 @@ import type {
   SkillHookMetadata,
   ChatXConfig,
   HookLoggingConfig,
-  AgentAutoCommitSettings
+  AgentAutoCommitSettings,
   UserInputRequest,
   UserInputResponse
 } from "../main/types"
