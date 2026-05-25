@@ -75,7 +75,11 @@ function isDashboardAllowedForCurrentUser(): boolean {
 
 let nodeIndex = 0
 
-async function esQuery(index: string, body: Record<string, unknown>): Promise<unknown> {
+async function esQuery(
+  index: string,
+  body: Record<string, unknown>,
+  options?: { timeoutMs?: number }
+): Promise<unknown> {
   const nodes = getEsNodes()
   if (nodes.length === 0) throw new Error("ES_NODES not configured")
 
@@ -100,7 +104,7 @@ async function esQuery(index: string, body: Record<string, unknown>): Promise<un
         method: "POST",
         headers,
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(15_000)
+        signal: AbortSignal.timeout(options?.timeoutMs ?? 15_000)
       })
       if (!resp.ok) {
         const text = await resp.text().catch(() => "")
@@ -521,13 +525,14 @@ function buildSkillUsageWildcardFilter(skillName: string): Record<string, unknow
   }
 }
 
-const SKILL_EVAL_STATS_PAGE_SIZE = 1000
+const SKILL_EVAL_STATS_PAGE_SIZE = 500
 const SKILL_EVAL_STATS_TRACE_LIMIT = 2000
 const SKILL_EVAL_PAGE_STATS_TRACE_LIMIT = 5000
 const SKILL_EVAL_MISSING_PAGE_SKILL_TRACE_LIMIT = 300
 const SKILL_EVAL_STATS_CONCURRENCY = 4
 const SKILL_EVAL_STAT_CACHE_TTL_MS = 60_000
 const SKILL_EVAL_STAT_CACHE_LIMIT = 30
+const SKILL_EVAL_STATS_QUERY_TIMEOUT_MS = 45_000
 
 /**
  * 清洗技能名参数：
@@ -1857,7 +1862,7 @@ async function fetchSkillEvalSummary(
   if (recentOnly && explicitRecentFilter) {
     const focusedQuery = skillEvalTraceQuery(range, explicitRecentFilter)
     const [statsResult, recentRaw] = await Promise.all([
-      fetchSkillEvalStatTraces(range, explicitRecentFilter, source),
+      fetchSkillEvalStatTraces(range, explicitRecentFilter, source, sampleLimit),
       esQuery(getEsIndex("trace"), buildRecentBody(focusedQuery)) as Promise<EsSearchResponse>
     ])
     const recentTraceHits = getTotalHits(recentRaw, recentRaw.hits?.hits?.length ?? 0)
@@ -1903,7 +1908,12 @@ async function fetchSkillEvalSummary(
     }
     recentSkillFilter = getFirstSkillFilterFromSummaries(skillList.skills) ?? skillNamesFilter
     const focusedQuery = skillEvalTraceQuery(range, recentSkillFilter)
-    const statsResultPromise = fetchSkillEvalStatTraces(range, recentSkillFilter, source)
+    const statsResultPromise = fetchSkillEvalStatTraces(
+      range,
+      recentSkillFilter,
+      source,
+      sampleLimit
+    )
     const prefetchedStatsBySkill = isSkillEvalExactFilter(recentSkillFilter)
       ? new Map([
           [
@@ -2229,7 +2239,9 @@ async function fetchSkillEvalStatTraces(
       _source: source
     }
     if (searchAfter) body.search_after = searchAfter
-    const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+    const raw = (await esQuery(getEsIndex("trace"), body, {
+      timeoutMs: SKILL_EVAL_STATS_QUERY_TIMEOUT_MS
+    })) as EsSearchResponse
     const hits = raw.hits?.hits ?? []
     const hitCount = hits.length
     if (loadedHits === 0) totalTraceHits = getTotalHits(raw, hitCount)
