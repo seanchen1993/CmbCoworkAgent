@@ -157,16 +157,17 @@ const ORG_SKILL_GATEWAY_URL = String(
 ).replace(/\/+$/, "")
 
 const ORG_SKILL_ENDPOINTS = {
-  page: (pageNum: number, pageSize: number, labelIds: string[] = []) => {
+  page: (pageNum: number, pageSize: number, labelIds: string[] = [], keyword = "") => {
     const labelIdsParam = labelIds
       .map((id) => id.trim())
       .filter(Boolean)
       .map(encodeURIComponent)
       .join(",")
-    const query = `pageNum=${pageNum}&pageSize=${pageSize}`
-    return `${ORG_SKILL_GATEWAY_URL}/gw/mgr/open-api/skill/page?${
-      labelIdsParam ? `${query}&labelIds=${labelIdsParam}` : query
-    }`
+    const normalizedKeyword = keyword.trim()
+    const queryParts = [`pageNum=${pageNum}`, `pageSize=${pageSize}`]
+    if (labelIdsParam) queryParts.push(`labelIds=${labelIdsParam}`)
+    if (normalizedKeyword) queryParts.push(`keyword=${encodeURIComponent(normalizedKeyword)}`)
+    return `${ORG_SKILL_GATEWAY_URL}/gw/mgr/open-api/skill/page?${queryParts.join("&")}`
   },
   labels: `${ORG_SKILL_GATEWAY_URL}/gw/mgr/open-api/skill/labels`,
   download: (skillId: number, versionId: number) =>
@@ -234,15 +235,25 @@ function toMarketResponse(data: OrgSkillPageResponse): MarketApiResponse {
 export function getMockOrgSkillMarketResponse(
   pageNum = 1,
   pageSize = 10,
-  labelIds: string[] = []
+  labelIds: string[] = [],
+  keyword = ""
 ): MarketApiResponse {
   const selectedLabelIds = new Set(labelIds.map((id) => id.trim()).filter(Boolean))
-  const filteredItems =
+  const normalizedKeyword = keyword.trim().toLowerCase()
+  const labelFilteredItems =
     selectedLabelIds.size === 0
       ? MOCK_ORG_SKILL_ITEMS
       : MOCK_ORG_SKILL_ITEMS.filter((item) =>
           item.labels?.some((label) => selectedLabelIds.has(label.labelId))
         )
+  const filteredItems = normalizedKeyword
+    ? labelFilteredItems.filter(
+        (item) =>
+          item.slug.toLowerCase().includes(normalizedKeyword) ||
+          item.name.toLowerCase().includes(normalizedKeyword) ||
+          item.description.toLowerCase().includes(normalizedKeyword)
+      )
+    : labelFilteredItems
   const total = filteredItems.length
   const pages = Math.max(1, Math.ceil(total / pageSize))
   const safePageNum = Math.min(Math.max(1, pageNum), pages)
@@ -382,9 +393,10 @@ export const orgSkillMarketApi = {
   async getOrgSkills(
     pageNum = 1,
     pageSize = 10,
-    labelIds: string[] = []
+    labelIds: string[] = [],
+    keyword = ""
   ): Promise<MarketApiResponse> {
-    const response = await fetch(ORG_SKILL_ENDPOINTS.page(pageNum, pageSize, labelIds), {
+    const response = await fetch(ORG_SKILL_ENDPOINTS.page(pageNum, pageSize, labelIds, keyword), {
       method: "GET",
       headers: {
         "Content-Type": "application/json",

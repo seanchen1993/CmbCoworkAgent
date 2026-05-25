@@ -11,6 +11,7 @@ import {
   Tag,
   Trash2,
   User,
+  X,
   Zap
 } from "lucide-react"
 import {
@@ -22,6 +23,7 @@ import {
 import { USE_MARKET_MOCK_ON_ERROR } from "../../api/market-flags"
 import type { MarketApiResponse, MarketItem } from "../../api/market"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { buildMarketInstalledFlags } from "./MarketUpdateBadge"
 import { TabsTrigger } from "@/components/ui/tabs"
 import { getOrgSkillUploaderProfile, renderUploaderProfile } from "./MarketUploaderProfile"
@@ -61,7 +63,7 @@ interface OrgSkillPaginationState {
 }
 
 interface OrgSkillMarketContentProps {
-  searchQuery: string
+  initialSearchQuery?: string
   installedSkills: string[]
   reloadToken: number
   downloadingItems: Set<string>
@@ -326,7 +328,7 @@ function OrgSkillLabelFilter({
 }
 
 export function OrgSkillMarketContent({
-  searchQuery,
+  initialSearchQuery = "",
   installedSkills,
   reloadToken,
   downloadingItems,
@@ -354,6 +356,8 @@ export function OrgSkillMarketContent({
   const [labelsLoading, setLabelsLoading] = useState(false)
   const [labelsError, setLabelsError] = useState<string | null>(null)
   const [retryToken, setRetryToken] = useState(0)
+  const [searchInput, setSearchInput] = useState(initialSearchQuery)
+  const [submittedKeyword, setSubmittedKeyword] = useState(initialSearchQuery.trim())
 
   useEffect(() => {
     let cancelled = false
@@ -397,7 +401,8 @@ export function OrgSkillMarketContent({
         const response = await orgSkillMarketApi.getOrgSkills(
           pageNum,
           ORG_SKILL_PAGE_SIZE,
-          selectedLabelIds
+          selectedLabelIds,
+          submittedKeyword
         )
         if (!response.success || !response.data) {
           throw new Error(response.error || "加载组织级技能失败")
@@ -412,7 +417,8 @@ export function OrgSkillMarketContent({
           const mockResponse = getMockOrgSkillMarketResponse(
             pageNum,
             ORG_SKILL_PAGE_SIZE,
-            selectedLabelIds
+            selectedLabelIds,
+            submittedKeyword
           )
           setPagination(toPaginationState(mockResponse, pageNum))
           setItems(addOrgSkillInstalledFlags(mockResponse.data || [], installedSkills))
@@ -430,7 +436,7 @@ export function OrgSkillMarketContent({
     return () => {
       cancelled = true
     }
-  }, [installedSkills, pageNum, reloadToken, retryToken, selectedLabelIds])
+  }, [installedSkills, pageNum, reloadToken, retryToken, selectedLabelIds, submittedKeyword])
 
   const selectedLabels = useMemo(() => {
     const selectedLabelSet = new Set(selectedLabelIds)
@@ -449,6 +455,53 @@ export function OrgSkillMarketContent({
     setSelectedLabelIds([])
   }
 
+  const submitSearch = () => {
+    setPageNum(1)
+    setSubmittedKeyword(searchInput.trim())
+  }
+
+  const clearSearch = () => {
+    setSearchInput("")
+    setPageNum(1)
+    setSubmittedKeyword("")
+  }
+
+  const renderSearchToolbar = () => (
+    <div className="flex items-center gap-2">
+      <div className="relative flex-1">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-[#87867f] pointer-events-none" />
+        <Input
+          placeholder="搜索组织级技能…"
+          value={searchInput}
+          onChange={(event) => setSearchInput(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") submitSearch()
+          }}
+          className="pl-9 pr-9 h-9 text-sm bg-white border-[#e8e6dc] text-[#141413] placeholder:text-[#b0aea5] rounded-xl focus-visible:ring-[#3898ec] focus-visible:border-[#3898ec]"
+        />
+        {searchInput && (
+          <button
+            type="button"
+            aria-label="清空搜索"
+            onClick={clearSearch}
+            className="absolute right-2.5 top-1/2 -translate-y-1/2 size-5 inline-flex items-center justify-center rounded-md text-[#87867f] hover:text-[#5e5d59] hover:bg-[#f5f4ed] transition-colors cursor-pointer"
+          >
+            <X className="size-3.5" />
+          </button>
+        )}
+      </div>
+      <Button
+        size="sm"
+        className="h-9 px-4 gap-1.5 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 rounded-xl cursor-pointer"
+        onClick={submitSearch}
+        disabled={loading}
+      >
+        <Search className="size-3.5" />
+        查询
+      </Button>
+    </div>
+  )
+
   const renderLabelFilter = () => (
     <OrgSkillLabelFilter
       labels={labels}
@@ -460,17 +513,6 @@ export function OrgSkillMarketContent({
       onRetry={() => setRetryToken((prev) => prev + 1)}
     />
   )
-
-  const visibleItems = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase()
-    if (!query) return items
-    return items.filter(
-      (item) =>
-        item.name.toLowerCase().includes(query) ||
-        item.chinese_name?.toLowerCase().includes(query) ||
-        item.description.toLowerCase().includes(query)
-    )
-  }, [items, searchQuery])
 
   useEffect(() => {
     const detailName = initialDetailName?.trim()
@@ -493,12 +535,15 @@ export function OrgSkillMarketContent({
 
   if (loading) {
     return (
-      <div className="grid grid-cols-1 xl:grid-cols-[240px_minmax(0,1fr)] gap-4 items-start">
-        {renderLabelFilter()}
-        <div className="space-y-3 min-w-0">
-          <div className="flex flex-col items-center justify-center py-16 text-[#87867f]">
-            <div className="size-6 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin mb-3" />
-            <span className="text-sm">加载中…</span>
+      <div className="space-y-3">
+        {renderSearchToolbar()}
+        <div className="grid grid-cols-1 xl:grid-cols-[240px_minmax(0,1fr)] gap-4 items-start">
+          {renderLabelFilter()}
+          <div className="space-y-3 min-w-0">
+            <div className="flex flex-col items-center justify-center py-16 text-[#87867f]">
+              <div className="size-6 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin mb-3" />
+              <span className="text-sm">加载中…</span>
+            </div>
           </div>
         </div>
       </div>
@@ -507,27 +552,30 @@ export function OrgSkillMarketContent({
 
   if (error) {
     return (
-      <div className="grid grid-cols-1 xl:grid-cols-[240px_minmax(0,1fr)] gap-4 items-start">
-        {renderLabelFilter()}
-        <div className="space-y-3 min-w-0">
-          <div className="flex flex-col items-center justify-center py-16">
-            <div className="size-10 rounded-2xl bg-[#fdf2f2] border border-[#fad4d4] flex items-center justify-center mb-3">
-              <span className="text-base">!</span>
+      <div className="space-y-3">
+        {renderSearchToolbar()}
+        <div className="grid grid-cols-1 xl:grid-cols-[240px_minmax(0,1fr)] gap-4 items-start">
+          {renderLabelFilter()}
+          <div className="space-y-3 min-w-0">
+            <div className="flex flex-col items-center justify-center py-16">
+              <div className="size-10 rounded-2xl bg-[#fdf2f2] border border-[#fad4d4] flex items-center justify-center mb-3">
+                <span className="text-base">!</span>
+              </div>
+              <p className="text-sm text-[#b53333] mb-3 text-center">{error}</p>
+              {error?.includes("凭证已过期") && (
+                <p className="text-sm text-[#b53333] mb-3 text-center">
+                  需要重新登陆，请退出app之后重新进入/登陆～
+                </p>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 px-4 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] rounded-lg"
+                onClick={() => setRetryToken((prev) => prev + 1)}
+              >
+                重试
+              </Button>
             </div>
-            <p className="text-sm text-[#b53333] mb-3 text-center">{error}</p>
-            {error?.includes("凭证已过期") && (
-              <p className="text-sm text-[#b53333] mb-3 text-center">
-                需要重新登陆，请退出app之后重新进入/登陆～
-              </p>
-            )}
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-8 px-4 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] rounded-lg"
-              onClick={() => setRetryToken((prev) => prev + 1)}
-            >
-              重试
-            </Button>
           </div>
         </div>
       </div>
@@ -535,66 +583,69 @@ export function OrgSkillMarketContent({
   }
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-[240px_minmax(0,1fr)] gap-4 items-start">
-      {renderLabelFilter()}
-      <div
-        key={visibleItems.length === 0 ? "org-skill-results-empty" : "org-skill-results-list"}
-        className="space-y-3 min-w-0"
-      >
-        <div className="flex items-center justify-between text-xs text-[#87867f] px-1">
-          <span>
-            {selectedLabels.length > 0
-              ? `当前分类：${selectedLabels.map((label) => label.labelName).join("、")}`
-              : "全部 组织级技能"}
-            {` · 总数 ${pagination.total} 个 · 筛选结果 ${visibleItems.length} 个 · 按更新时间排序`}
-          </span>
-        </div>
-        {visibleItems.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 text-[#87867f]">
-            <div className="size-10 rounded-2xl bg-[#f5f4ed] border border-[#e8e6dc] flex items-center justify-center mb-3">
-              <Search className="size-5 text-[#b0aea5]" />
+    <div className="space-y-3">
+      {renderSearchToolbar()}
+      <div className="grid grid-cols-1 xl:grid-cols-[240px_minmax(0,1fr)] gap-4 items-start">
+        {renderLabelFilter()}
+        <div
+          key={items.length === 0 ? "org-skill-results-empty" : "org-skill-results-list"}
+          className="space-y-3 min-w-0"
+        >
+          <div className="flex items-center justify-between text-xs text-[#87867f] px-1">
+            <span>
+              {selectedLabels.length > 0
+                ? `当前分类：${selectedLabels.map((label) => label.labelName).join("、")}`
+                : "全部 组织级技能"}
+              {` · 总数 ${pagination.total} 个 · 当前页 ${items.length} 个 · 按更新时间排序`}
+            </span>
+          </div>
+          {items.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16 text-[#87867f]">
+              <div className="size-10 rounded-2xl bg-[#f5f4ed] border border-[#e8e6dc] flex items-center justify-center mb-3">
+                <Search className="size-5 text-[#b0aea5]" />
+              </div>
+              <p className="text-sm">
+                {submittedKeyword ? "未找到匹配的组织级技能" : "暂无组织级技能"}
+              </p>
             </div>
-            <p className="text-sm">
-              {searchQuery.trim() ? "当前页未找到匹配的组织级技能" : "暂无组织级技能"}
-            </p>
+          ) : (
+            <div className="grid grid-cols-1 2xl:grid-cols-2 gap-3">
+              {items.map((item) => (
+                <OrgSkillCard
+                  key={getOrgSkillItemKey(item)}
+                  item={item}
+                  isDownloading={downloadingItems.has(getOrgSkillItemKey(item))}
+                  onOpenDetail={onOpenDetail}
+                  onDownload={onDownload}
+                  onUninstall={onUninstall}
+                />
+              ))}
+            </div>
+          )}
+          <div className="flex items-center justify-end gap-2 border-t border-[#f0eee6] pt-3 text-xs text-[#87867f]">
+            <span className={"mr-2"}>共 {pagination.total} 条</span>
+            <span className="mr-1 tabular-nums">
+              第 {pagination.pageNum} / {pagination.pages} 页
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-2.5 text-[11px] rounded-lg border-[#e8e6dc] bg-white text-[#5e5d59] hover:bg-[#f5f4ed]"
+              onClick={() => setPageNum((prev) => Math.max(1, prev - 1))}
+              disabled={loading || !pagination.hasPreviousPage}
+            >
+              上一页
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-2.5 text-[11px] rounded-lg border-[#e8e6dc] bg-white text-[#5e5d59] hover:bg-[#f5f4ed]"
+              onClick={() => setPageNum((prev) => Math.min(pagination.pages, prev + 1))}
+              disabled={loading || !pagination.hasNextPage}
+            >
+              下一页
+            </Button>
           </div>
-        ) : (
-          <div className="grid grid-cols-1 2xl:grid-cols-2 gap-3">
-            {visibleItems.map((item) => (
-              <OrgSkillCard
-                key={getOrgSkillItemKey(item)}
-                item={item}
-                isDownloading={downloadingItems.has(getOrgSkillItemKey(item))}
-                onOpenDetail={onOpenDetail}
-                onDownload={onDownload}
-                onUninstall={onUninstall}
-              />
-            ))}
-          </div>
-        )}
-        <div className="flex items-center justify-end gap-2 border-t border-[#f0eee6] pt-3 text-xs text-[#87867f]">
-          <span className={"mr-2"}>共 {pagination.total} 条</span>
-          <span className="mr-1 tabular-nums">
-            第 {pagination.pageNum} / {pagination.pages} 页
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 px-2.5 text-[11px] rounded-lg border-[#e8e6dc] bg-white text-[#5e5d59] hover:bg-[#f5f4ed]"
-            onClick={() => setPageNum((prev) => Math.max(1, prev - 1))}
-            disabled={loading || !pagination.hasPreviousPage}
-          >
-            上一页
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 px-2.5 text-[11px] rounded-lg border-[#e8e6dc] bg-white text-[#5e5d59] hover:bg-[#f5f4ed]"
-            onClick={() => setPageNum((prev) => Math.min(pagination.pages, prev + 1))}
-            disabled={loading || !pagination.hasNextPage}
-          >
-            下一页
-          </Button>
         </div>
       </div>
     </div>

@@ -544,7 +544,12 @@ export function MarketPanel(): React.JSX.Element {
     marketInitialTab
   } = useAppStore()
   const [activeTab, setActiveTab] = useState<MarketItemType>("skill")
-  const [searchQuery, setSearchQuery] = useState("")
+  const [searchQueries, setSearchQueries] = useState<Record<MarketItemType, string>>({
+    skill: "",
+    orgSkill: "",
+    mcp: "",
+    plugin: ""
+  })
   const [uploadFilterModes, setUploadFilterModes] = useState<UploadFilterMode[]>([])
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
   const [pendingInitialCategoryFilter, setPendingInitialCategoryFilter] = useState<string | null>(
@@ -626,6 +631,14 @@ export function MarketPanel(): React.JSX.Element {
         : type === "mcp"
           ? "MCPs"
           : "Plugins"
+  const getMarketSearchPlaceholder = (type: MarketItemType) =>
+    type === "skill"
+      ? "搜索技能…"
+      : type === "orgSkill"
+        ? "搜索组织级技能…"
+        : type === "mcp"
+          ? "搜索 MCP 连接器…"
+          : "搜索插件…"
   const tabIntros: Record<MarketItemType, { title: string; description: string }> = {
     skill: {
       title: "Skills 是可直接调用的专项能力",
@@ -644,6 +657,11 @@ export function MarketPanel(): React.JSX.Element {
     }
   }
   const activeTabIntro = tabIntros[activeTab]
+  const activeSearchQuery = searchQueries[activeTab] ?? ""
+
+  const setSearchQueryForTab = useCallback((tab: MarketItemType, query: string) => {
+    setSearchQueries((prev) => (prev[tab] === query ? prev : { ...prev, [tab]: query }))
+  }, [])
 
   const resetDetailState = () => {
     setDetailError(null)
@@ -930,7 +948,7 @@ export function MarketPanel(): React.JSX.Element {
       resetDetailState()
       setCategoryFilter(null)
       setPendingInitialCategoryFilter(null)
-      setSearchQuery(detailName || "")
+      setSearchQueryForTab(marketInitialTab as MarketItemType, detailName || "")
       useAppStore.setState({
         marketInitialTab: null,
         marketInitialSkillDetailName: null,
@@ -965,7 +983,8 @@ export function MarketPanel(): React.JSX.Element {
       setPendingInitialCategoryFilter(null)
       setCategoryFilter(null)
     }
-    setSearchQuery(
+    setSearchQueryForTab(
+      "skill",
       marketInitialSkillDetailName?.trim() || marketInitialSkillSearchQuery?.trim() || ""
     )
     useAppStore.setState({
@@ -978,7 +997,8 @@ export function MarketPanel(): React.JSX.Element {
     marketInitialSkillDetailName,
     marketInitialSkillFilters,
     marketInitialSkillSearchQuery,
-    marketInitialTab
+    marketInitialTab,
+    setSearchQueryForTab
   ])
 
   // 同步已安装状态，不触发额外的 market 接口请求
@@ -1504,11 +1524,11 @@ export function MarketPanel(): React.JSX.Element {
   const filteredData = useMemo(
     () =>
       currentData.filter((item) => {
-        const query = searchQuery.toLowerCase()
+        const query = activeSearchQuery.trim().toLowerCase()
         const matchesSearch =
           item.chinese_name?.toLowerCase().includes(query) ||
           item.name.toLowerCase().includes(query) ||
-          item.description.toLowerCase().includes(query)
+          item.description?.toLowerCase().includes(query)
         if (!matchesSearch) return false
         if (
           uploadFilterModes.length > 0 &&
@@ -1526,7 +1546,7 @@ export function MarketPanel(): React.JSX.Element {
         if (!categoryFilter) return true
         return getCategoryFilterName(item.category) === categoryFilter
       }),
-    [categoryFilter, currentData, isMineUploadedItem, searchQuery, uploadFilterModes]
+    [activeSearchQuery, categoryFilter, currentData, isMineUploadedItem, uploadFilterModes]
   )
 
   const sortedSkillData = useMemo(() => {
@@ -1535,7 +1555,7 @@ export function MarketPanel(): React.JSX.Element {
     return sortSkillItemsByUsage(filteredData, skillUsageSummary, skillSortMode)
   }, [activeTab, filteredData, skillSortMode, skillUsageSummary])
   const visibleMarketData = activeTab === "skill" ? sortedSkillData : filteredData
-  const emptyResultMessage = searchQuery
+  const emptyResultMessage = activeSearchQuery.trim()
     ? "未找到匹配的项目"
     : uploadFilterModes.length > 1
       ? "未找到符合筛选的项目"
@@ -2055,16 +2075,7 @@ export function MarketPanel(): React.JSX.Element {
               )}
             </div>
           </div>
-          {detailMode === "list" && activeTab !== "orgSkill" ? (
-            <Button
-              size="sm"
-              className="h-8 px-3 gap-1.5 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c4956a_0px_0px_0px_0px,#c4956a_0px_0px_0px_1px] rounded-lg cursor-pointer"
-              onClick={handleUploadClick}
-            >
-              <Plus className="size-3.5" />
-              {activeTab === "skill" ? "上传技能" : activeTab === "mcp" ? "上传连接器" : "上传插件"}
-            </Button>
-          ) : detailMode === "detail" ? (
+          {detailMode === "detail" ? (
             <Button
               variant="outline"
               size="sm"
@@ -2076,78 +2087,6 @@ export function MarketPanel(): React.JSX.Element {
             </Button>
           ) : null}
         </div>
-        {detailMode === "list" && (
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-[#87867f] pointer-events-none" />
-                <Input
-                  placeholder="搜索技能、连接器、插件…"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-9 pr-9 h-9 text-sm bg-white border-[#e8e6dc] text-[#141413] placeholder:text-[#b0aea5] rounded-xl focus-visible:ring-[#3898ec] focus-visible:border-[#3898ec]"
-                />
-                {searchQuery && (
-                  <button
-                    type="button"
-                    aria-label="清空搜索"
-                    onClick={() => setSearchQuery("")}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 size-5 inline-flex items-center justify-center rounded-md text-[#87867f] hover:text-[#5e5d59] hover:bg-[#f5f4ed] transition-colors cursor-pointer"
-                  >
-                    <X className="size-3.5" />
-                  </button>
-                )}
-              </div>
-              <Popover>
-                <PopoverTrigger asChild>
-                  <Button
-                    variant="outline"
-                    className="h-9 w-[132px] justify-between rounded-xl border-[#e8e6dc] bg-white px-3 text-xs font-normal text-[#5e5d59] hover:bg-white hover:text-[#141413]"
-                  >
-                    <span className="truncate">{uploadFilterLabel}</span>
-                    <ChevronDown className="size-3.5 text-[#87867f]" />
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent
-                  align="end"
-                  className="w-[164px] rounded-xl border-[#e8e6dc] bg-white p-1.5"
-                >
-                  <button
-                    type="button"
-                    onClick={() => setUploadFilterModes([])}
-                    className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs transition-colors cursor-pointer ${
-                      uploadFilterModes.length === 0
-                        ? "bg-[#fdf3e7] text-[#8b623d]"
-                        : "text-[#5e5d59] hover:bg-[#f5f4ed]"
-                    }`}
-                  >
-                    <span>全部项目</span>
-                    {uploadFilterModes.length === 0 && <Check className="size-3.5" />}
-                  </button>
-                  <div className="my-1 h-px bg-[#f0eee6]" />
-                  {uploadFilterOptions.map((option) => {
-                    const checked = uploadFilterModes.includes(option.value)
-                    return (
-                      <button
-                        key={option.value}
-                        type="button"
-                        onClick={() => toggleUploadFilterMode(option.value)}
-                        className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs transition-colors cursor-pointer ${
-                          checked
-                            ? "bg-[#fdf3e7] text-[#8b623d]"
-                            : "text-[#5e5d59] hover:bg-[#f5f4ed]"
-                        }`}
-                      >
-                        <span>{option.label}</span>
-                        {checked && <Check className="size-3.5" />}
-                      </button>
-                    )
-                  })}
-                </PopoverContent>
-              </Popover>
-            </div>
-          </div>
-        )}
       </div>
 
       {detailMode === "detail" && selectedItem ? (
@@ -2477,9 +2416,93 @@ export function MarketPanel(): React.JSX.Element {
             <TabsContent value={activeTab} className="mt-0 h-full">
               <ScrollArea className="h-full">
                 <div className="p-4 space-y-3">
+                  {activeTab !== ORG_SKILL_MARKET_TYPE && (
+                    <div className="flex items-center gap-2">
+                      <div className="relative flex-1">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-[#87867f] pointer-events-none" />
+                        <Input
+                          placeholder={getMarketSearchPlaceholder(activeTab)}
+                          value={activeSearchQuery}
+                          onChange={(e) => setSearchQueryForTab(activeTab, e.target.value)}
+                          className="pl-9 pr-9 h-9 text-sm bg-white border-[#e8e6dc] text-[#141413] placeholder:text-[#b0aea5] rounded-xl focus-visible:ring-[#3898ec] focus-visible:border-[#3898ec]"
+                        />
+                        {activeSearchQuery && (
+                          <button
+                            type="button"
+                            aria-label="清空搜索"
+                            onClick={() => setSearchQueryForTab(activeTab, "")}
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 size-5 inline-flex items-center justify-center rounded-md text-[#87867f] hover:text-[#5e5d59] hover:bg-[#f5f4ed] transition-colors cursor-pointer"
+                          >
+                            <X className="size-3.5" />
+                          </button>
+                        )}
+                      </div>
+                      <>
+                        <Popover>
+                          <PopoverTrigger asChild>
+                            <Button
+                              variant="outline"
+                              className="h-9 w-[132px] justify-between rounded-xl border-[#e8e6dc] bg-white px-3 text-xs font-normal text-[#5e5d59] hover:bg-white hover:text-[#141413]"
+                            >
+                              <span className="truncate">{uploadFilterLabel}</span>
+                              <ChevronDown className="size-3.5 text-[#87867f]" />
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent
+                            align="end"
+                            className="w-[164px] rounded-xl border-[#e8e6dc] bg-white p-1.5"
+                          >
+                            <button
+                              type="button"
+                              onClick={() => setUploadFilterModes([])}
+                              className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs transition-colors cursor-pointer ${
+                                uploadFilterModes.length === 0
+                                  ? "bg-[#fdf3e7] text-[#8b623d]"
+                                  : "text-[#5e5d59] hover:bg-[#f5f4ed]"
+                              }`}
+                            >
+                              <span>全部项目</span>
+                              {uploadFilterModes.length === 0 && <Check className="size-3.5" />}
+                            </button>
+                            <div className="my-1 h-px bg-[#f0eee6]" />
+                            {uploadFilterOptions.map((option) => {
+                              const checked = uploadFilterModes.includes(option.value)
+                              return (
+                                <button
+                                  key={option.value}
+                                  type="button"
+                                  onClick={() => toggleUploadFilterMode(option.value)}
+                                  className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs transition-colors cursor-pointer ${
+                                    checked
+                                      ? "bg-[#fdf3e7] text-[#8b623d]"
+                                      : "text-[#5e5d59] hover:bg-[#f5f4ed]"
+                                  }`}
+                                >
+                                  <span>{option.label}</span>
+                                  {checked && <Check className="size-3.5" />}
+                                </button>
+                              )
+                            })}
+                          </PopoverContent>
+                        </Popover>
+                        <Button
+                          size="sm"
+                          className="h-9 px-3 gap-1.5 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c4956a_0px_0px_0px_0px,#c4956a_0px_0px_0px_1px] rounded-xl cursor-pointer"
+                          onClick={handleUploadClick}
+                        >
+                          <Plus className="size-3.5" />
+                          {activeTab === "skill"
+                            ? "上传技能"
+                            : activeTab === "mcp"
+                              ? "上传连接器"
+                              : "上传插件"}
+                        </Button>
+                      </>
+                    </div>
+                  )}
                   {activeTab === "orgSkill" ? (
                     <OrgSkillMarketContent
-                      searchQuery={searchQuery}
+                      initialSearchQuery={activeSearchQuery}
                       installedSkills={installedSkills}
                       reloadToken={reloadToken}
                       downloadingItems={downloadingItems}
@@ -2618,7 +2641,7 @@ export function MarketPanel(): React.JSX.Element {
                         ) : (
                           <div
                             key="market-card-results"
-                            className="grid grid-cols-1 2xl:grid-cols-2 gap-3"
+                            className="grid max-h-[calc(100vh-330px)] grid-cols-1 gap-3 overflow-y-auto pr-1 2xl:grid-cols-2"
                           >
                             {visibleMarketData.map((item) => (
                               <MarketItemCard
