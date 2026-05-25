@@ -85,7 +85,6 @@ const harnessProjectCreateSelectClassName =
 const harnessNamePattern = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
 const harnessNameRuleMessage = "仅支持中文、英文字母、数字、-、_"
 const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
-const UNBOUND_FEATURE_GROUP_KEY = "__unbound_feature_sessions__"
 
 function cleanIpcError(error: unknown): string {
   if (!(error instanceof Error)) return String(error)
@@ -127,12 +126,15 @@ interface SelectedFeature {
   activeSessionThreadId?: string
 }
 
+type ProjectFeatureSessionGroupSection = "current" | "project" | "other"
+
 interface ProjectFeatureSessionGroup {
   key: string
   project: HarnessProjectListItem
-  run: HarnessFeatureSummary | null
+  slug: string
   title: string
   sessions: HarnessSessionBinding[]
+  section: ProjectFeatureSessionGroupSection
 }
 
 interface GitPanelFileChange {
@@ -290,6 +292,24 @@ function getProjectSessions(index: HarnessSessionIndex, projectId: string): Harn
 
 function getFeatureSessions(index: HarnessSessionIndex, projectId: string, slug: string): HarnessSessionBinding[] {
   return index.byProjectSlug.get(projectId)?.get(slug) ?? []
+}
+
+function getProjectFeatureGroupSectionLabel(
+  previousSection: ProjectFeatureSessionGroupSection | undefined,
+  section: ProjectFeatureSessionGroupSection,
+  hasSelectedFeature: boolean
+): string | null {
+  if (!previousSection || previousSection === section) return null
+  if (hasSelectedFeature && previousSection === "current" && section === "project") {
+    return "同项目其他特性会话"
+  }
+  if (hasSelectedFeature && section === "other") {
+    return "其他项目特性会话"
+  }
+  if (section === "other") {
+    return "其他特性会话"
+  }
+  return null
 }
 
 function withDerivedRunSessions(
@@ -2406,7 +2426,12 @@ function ProjectFeatureSidebar({
   editingTitle: string
   onToggleCollapse: (key: string) => void
   onToggleAll: () => void
-  onCreateSession: (project: HarnessProjectListItem, run: HarnessFeatureSummary, sessions: HarnessSessionBinding[]) => void
+  onCreateSession: (
+    project: HarnessProjectListItem,
+    slug: string,
+    title: string,
+    sessions: HarnessSessionBinding[]
+  ) => void
   onSelectSession: (projectId: string, slug: string, threadId: string) => void
   onDeleteSession: (thread: Thread) => void
   onExportSession: (thread: Thread) => void
@@ -2435,18 +2460,27 @@ function ProjectFeatureSidebar({
       </div>
       <ScrollArea className="min-h-0 flex-1">
         <div className="space-y-1 px-2 pb-2">
-          {groups.map((group) => {
-            const run = group.run
+          {groups.map((group, index) => {
             const isCollapsed = collapsedKeys.has(group.key)
             const selected =
               selectedFeature?.projectId === group.project.projectId &&
-              (run
-                ? selectedFeature.slug === run.slug
-                : group.sessions.some((session) => session.slug === selectedFeature.slug))
+              selectedFeature.slug === group.slug
             const creatingSession = creatingSessionKey === group.key
+            const sectionLabel = getProjectFeatureGroupSectionLabel(
+              groups[index - 1]?.section,
+              group.section,
+              !!selectedFeature
+            )
 
             return (
               <div key={group.key} className="space-y-1">
+                {sectionLabel && (
+                  <div className="flex items-center gap-2 px-2 py-1.5 text-[10px] text-muted-foreground/70">
+                    <span className="h-px flex-1 bg-border/70" />
+                    <span className="shrink-0">{sectionLabel}</span>
+                    <span className="h-px flex-1 bg-border/70" />
+                  </div>
+                )}
                 <div
                   className={cn(
                     "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
@@ -2472,32 +2506,26 @@ function ProjectFeatureSidebar({
                       </span>
                     </div>
                   </div>
-                  {run ? (
-                    <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
-                      <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
-                        {group.sessions.length}
-                      </span>
-                      <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          className="size-6 shrink-0 opacity-70 hover:bg-accent/20"
-                          title="新增会话"
-                          disabled={creatingSession}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            void onCreateSession(group.project, run, group.sessions)
-                          }}
-                        >
-                          {creatingSession ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />}
-                        </Button>
-                      </span>
-                    </span>
-                  ) : (
-                    <span className="ml-auto flex h-6 w-14 shrink-0 items-center justify-end px-1 text-[10px] tabular-nums text-muted-foreground">
+                  <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
+                    <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
                       {group.sessions.length}
                     </span>
-                  )}
+                    <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="size-6 shrink-0 opacity-70 hover:bg-accent/20"
+                        title="新增会话"
+                        disabled={creatingSession}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          void onCreateSession(group.project, group.slug, group.title, group.sessions)
+                        }}
+                      >
+                        {creatingSession ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />}
+                      </Button>
+                    </span>
+                  </span>
                 </div>
 
                 {!isCollapsed && (
@@ -3050,58 +3078,45 @@ export function HarnessBoardView(): React.JSX.Element {
 
   const projectSidebarGroups = useMemo<ProjectFeatureSessionGroup[]>(() => {
     const groups: ProjectFeatureSessionGroup[] = []
-    const visibleProjects = selectedProjectId
-      ? projects.filter((project) => project.projectId === selectedProjectId)
-      : projects
+    const activeProjectId = selectedFeature?.projectId ?? selectedProjectId
 
-    for (const project of visibleProjects) {
-      const detail = detailsByProjectId[project.projectId]
-      if (!detail) continue
-
-      for (const run of detail.runs) {
-        if (
-          selectedFeature &&
-          (project.projectId !== selectedFeature.projectId || run.slug !== selectedFeature.slug)
-        ) {
-          continue
-        }
-
-        const sessions = getFeatureSessions(harnessSessionIndex, project.projectId, run.slug)
-        if (!selectedProjectId && sessions.length === 0) continue
-        groups.push({
-          key: `${project.projectId}:${run.slug}`,
-          project,
-          run,
-          title: run.title,
-          sessions
-        })
+    for (const project of projects) {
+      const sessionsBySlug = new Map<string, HarnessSessionBinding[]>()
+      for (const session of getProjectSessions(harnessSessionIndex, project.projectId)) {
+        const sessions = sessionsBySlug.get(session.slug) ?? []
+        sessions.push(session)
+        sessionsBySlug.set(session.slug, sessions)
       }
 
-      const runSlugs = new Set(detail.runs.map((run) => run.slug))
-      let unboundSessions = getProjectSessions(harnessSessionIndex, project.projectId).filter(
-        (session) => !runSlugs.has(session.slug)
-      )
-      if (selectedFeature) {
-        if (selectedFeature.projectId !== project.projectId || runSlugs.has(selectedFeature.slug)) {
-          unboundSessions = []
-        } else {
-          unboundSessions = unboundSessions.filter((session) => session.slug === selectedFeature.slug)
-        }
-      }
+      for (const [slug, sessions] of sessionsBySlug) {
+        const section: ProjectFeatureSessionGroupSection =
+          selectedFeature && project.projectId === selectedFeature.projectId && slug === selectedFeature.slug
+            ? "current"
+            : activeProjectId && project.projectId === activeProjectId
+              ? "project"
+              : "other"
 
-      if (unboundSessions.length > 0) {
         groups.push({
-          key: `${project.projectId}:${UNBOUND_FEATURE_GROUP_KEY}`,
+          key: `${project.projectId}:${slug}`,
           project,
-          run: null,
-          title: "未绑定会话",
-          sessions: unboundSessions
+          slug,
+          title: slug,
+          sessions,
+          section
         })
       }
     }
 
+    if (!activeProjectId) return groups
+
     return groups
-  }, [detailsByProjectId, harnessSessionIndex, projects, selectedFeature, selectedProjectId])
+      .map((group, index) => {
+        const priority = group.section === "current" ? 0 : group.section === "project" ? 1 : 2
+        return { group, index, priority }
+      })
+      .sort((a, b) => a.priority - b.priority || a.index - b.index)
+      .map(({ group }) => group)
+  }, [harnessSessionIndex, projects, selectedFeature, selectedProjectId])
 
   const allFeatureGroupsCollapsed =
     projectSidebarGroups.length > 0 &&
@@ -3198,33 +3213,31 @@ export function HarnessBoardView(): React.JSX.Element {
   const handleCreateSidebarSession = useCallback(
     async (
       project: HarnessProjectListItem,
-      run: HarnessFeatureSummary,
+      slug: string,
+      title: string,
       sessions: HarnessSessionBinding[]
     ): Promise<void> => {
-      const key = `${project.projectId}:${run.slug}`
+      const key = `${project.projectId}:${slug}`
       if (creatingSidebarSessionKey) return
       setCreatingSidebarSessionKey(key)
       try {
         const thread = await createHarnessSession({
           projectId: project.projectId,
-          slug: run.slug,
-          titleSource: run.title || run.slug,
+          slug,
+          titleSource: title || slug,
           sessions,
           threadsById,
           threadStates: allThreadStates,
           createThread
         })
-        await loadProjectDetail(project.projectId)
-        const detail = await window.api.harnessBoard.getRunDetail(project.projectId, run.slug)
-        prefetchedRunDetailRef.current = detail
-        openFeatureDetail(project.projectId, run.slug, thread.thread_id)
+        openFeatureDetail(project.projectId, slug, thread.thread_id)
       } catch (error) {
         toast.error(cleanIpcError(error))
       } finally {
         setCreatingSidebarSessionKey(null)
       }
     },
-    [allThreadStates, createThread, creatingSidebarSessionKey, loadProjectDetail, openFeatureDetail, threadsById]
+    [allThreadStates, createThread, creatingSidebarSessionKey, openFeatureDetail, threadsById]
   )
 
   const sidebarDeleteDialog = (
@@ -3311,8 +3324,8 @@ export function HarnessBoardView(): React.JSX.Element {
                 })
               }
               onToggleAll={toggleAllFeatureGroups}
-              onCreateSession={(project, run, sessions) => {
-                void handleCreateSidebarSession(project, run, sessions)
+              onCreateSession={(project, slug, title, sessions) => {
+                void handleCreateSidebarSession(project, slug, title, sessions)
               }}
               onSelectSession={(projectId, slug, threadId) => {
                 openFeatureDetail(projectId, slug, threadId)
