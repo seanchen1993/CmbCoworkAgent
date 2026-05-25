@@ -1919,6 +1919,7 @@ function FeatureDetailPage({
   loading,
   unbound,
   activeSessionThreadId,
+  isViewingSession,
   fallbackProjectName,
   fallbackFeatureTitle,
   fallbackFeatureSlug,
@@ -1933,6 +1934,7 @@ function FeatureDetailPage({
   loading: boolean
   unbound?: boolean
   activeSessionThreadId?: string
+  isViewingSession: boolean
   fallbackProjectName?: string
   fallbackFeatureTitle?: string
   fallbackFeatureSlug?: string
@@ -2023,15 +2025,16 @@ function FeatureDetailPage({
   }, [activeSessionThreadId, detail, detailKey])
 
   useEffect(() => {
-    setActiveDetailTab(activeSessionThreadId ? "session" : "feature")
-  }, [activeSessionThreadId, detailKey])
-
-  useEffect(() => {
-    onSessionViewChange?.(activeDetailTab === "session")
-  }, [activeDetailTab, onSessionViewChange])
+    setActiveDetailTab(isViewingSession && activeSessionThreadId ? "session" : "feature")
+  }, [activeSessionThreadId, detailKey, isViewingSession])
 
   const selectedSessionThreadId =
     selectedSessionState.detailKey === detailKey ? selectedSessionState.threadId : null
+
+  const handleBackToFeature = (): void => {
+    setActiveDetailTab("feature")
+    onSessionViewChange?.(false)
+  }
 
   useEffect(() => {
     if (activeDetailTab !== "session") return
@@ -2197,10 +2200,10 @@ function FeatureDetailPage({
                   ? threadsById.get(selectedSessionThreadId)?.title
                   : undefined
               }
-              onBack={activeDetailTab === "session" ? () => setActiveDetailTab("feature") : onBackToProject}
+              onBack={activeDetailTab === "session" ? handleBackToFeature : onBackToProject}
               onProjectList={onBackToList}
               onProject={onBackToProject}
-              onFeature={activeDetailTab === "session" ? () => setActiveDetailTab("feature") : undefined}
+              onFeature={activeDetailTab === "session" ? handleBackToFeature : undefined}
             />
             <div className="flex min-w-0 items-center gap-2">
               <Workflow className="size-4 shrink-0 text-status-info" />
@@ -2909,6 +2912,7 @@ export function HarnessBoardView(): React.JSX.Element {
         slug: result.slug,
         activeSessionThreadId: thread.thread_id
       })
+      setIsViewingSession(true)
     } catch (error) {
       setFeatureError(cleanIpcError(error))
     } finally {
@@ -3260,6 +3264,7 @@ export function HarnessBoardView(): React.JSX.Element {
           loading={effectiveLoadingRun}
           unbound={showingUnboundRunDetail}
           activeSessionThreadId={selectedFeature.activeSessionThreadId}
+          isViewingSession={isViewingSession}
           fallbackProjectName={selectedFeatureProjectDetail?.project?.name}
           fallbackFeatureTitle={fallbackFeatureSummary?.title}
           fallbackFeatureSlug={fallbackFeatureSummary?.slug}
