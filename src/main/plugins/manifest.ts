@@ -124,22 +124,19 @@ export function getPluginSkillSearchSources(
   const manifestSkillPaths = getPluginManifestSkillPaths(manifest)
   if (manifestSkillPaths.length > 0) {
     for (const relPath of manifestSkillPaths) add(relPath)
-    // If the manifest declared paths but none of them exist on disk (path
-    // mismatch between declared layout and the actual extracted layout — a
-    // common footgun for market-published plugins authored against a dev
-    // tree), fall through to the convention-based defaults below instead of
-    // giving up. Without this fallback the plugin's skills are silently
-    // invisible everywhere they're consumed. If even one declared path
-    // resolves we trust the manifest's intent (it may have been narrowing on
-    // purpose).
-    if (result.length > 0) return result
-    console.warn(
-      `[Plugins] manifest.skills paths did not resolve for plugin at "${pluginRoot}" ` +
-        `(declared: ${JSON.stringify(manifestSkillPaths)}). ` +
-        `Falling back to convention-based search (root SKILL.md / "skills/"). ` +
-        `If this plugin's skills are missing from the slash popover, the manifest's ` +
-        `"skills" field likely points at a path that didn't survive packaging.`
-    )
+    // Plugin manifest paths supplement convention-based discovery. Some
+    // market packages declare a custom path while still shipping root
+    // SKILL.md or skills/ entries; returning early here made those skills
+    // invisible after install/reinstall even though they were present on disk.
+    if (result.length === 0) {
+      console.warn(
+        `[Plugins] manifest.skills paths did not resolve for plugin at "${pluginRoot}" ` +
+          `(declared: ${JSON.stringify(manifestSkillPaths)}). ` +
+          `Falling back to convention-based search (root SKILL.md / "skills/"). ` +
+          `If this plugin's skills are missing from the slash popover, the manifest's ` +
+          `"skills" field likely points at a path that didn't survive packaging.`
+      )
+    }
   }
 
   const rootSkillMd = join(pluginRoot, "SKILL.md")

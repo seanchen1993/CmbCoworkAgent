@@ -516,7 +516,8 @@ export function MarketPanel(): React.JSX.Element {
     marketInitialSkillSearchQuery,
     marketInitialSkillDetailName,
     setMarketInitialSkillDetailName,
-    marketInitialSkillFilters
+    marketInitialSkillFilters,
+    bumpPluginVersion
   } = useAppStore()
   const [activeTab, setActiveTab] = useState<MarketItemType>("skill")
   const [searchQuery, setSearchQuery] = useState("")
@@ -1058,6 +1059,7 @@ export function MarketPanel(): React.JSX.Element {
           await loadInstalledMcps()
         } else if (activeTab === "plugin") {
           await loadInstalledPlugins()
+          bumpPluginVersion()
         }
         triggerReload()
       } else {
@@ -1576,6 +1578,7 @@ export function MarketPanel(): React.JSX.Element {
         }
         marketInstalledVersionStorage.removeVersion(itemName, activeTab)
         await loadInstalledPlugins()
+        bumpPluginVersion()
       }
     } catch (error) {
       console.error("Failed to uninstall item:", error)
@@ -1667,6 +1670,7 @@ export function MarketPanel(): React.JSX.Element {
             await loadInstalledMcps()
           } else if (activeTab === "plugin") {
             await loadInstalledPlugins()
+            bumpPluginVersion()
           }
         }
       } else {
