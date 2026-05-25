@@ -49,29 +49,41 @@ interface OrgSkillApiItem {
   downloadCount?: number | null
 }
 
+interface OrgSkillPageBody {
+  total?: number | null
+  list?: OrgSkillApiItem[] | null
+  pageNum?: number | null
+  pageSize?: number | null
+  size?: number | null
+  startRow?: number | null
+  endRow?: number | null
+  pages?: number | null
+  prePage?: number | null
+  nextPage?: number | null
+  isFirstPage?: boolean | null
+  isLastPage?: boolean | null
+  hasPreviousPage?: boolean | null
+  hasNextPage?: boolean | null
+  navigatePages?: number | null
+  navigatepageNums?: number[] | null
+  navigateFirstPage?: number | null
+  navigateLastPage?: number | null
+}
+
+interface NormalizedOrgSkillPageBody {
+  total: number
+  list: OrgSkillApiItem[]
+  pageNum: number
+  pageSize: number
+  pages: number
+  hasPreviousPage: boolean
+  hasNextPage: boolean
+}
+
 interface OrgSkillPageResponse {
   returnCode: string
   errorMsg?: string | null
-  body: {
-    total: number
-    list: OrgSkillApiItem[]
-    pageNum: number
-    pageSize: number
-    size: number
-    startRow: number
-    endRow: number
-    pages: number
-    prePage: number
-    nextPage: number
-    isFirstPage: boolean
-    isLastPage: boolean
-    hasPreviousPage: boolean
-    hasNextPage: boolean
-    navigatePages: number
-    navigatepageNums: number[]
-    navigateFirstPage: number
-    navigateLastPage: number
-  } | null
+  body: OrgSkillPageBody | null
 }
 
 interface OrgSkillLabelsResponse {
@@ -184,7 +196,28 @@ function getLatestOrgSkillVersion(item: OrgSkillApiItem): OrgSkillVersion | unde
   return item.versions?.[0]
 }
 
-function assertOrgSkillPageResponse(data: OrgSkillPageResponse): void {
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
+function toPositiveInteger(value: unknown, fallback: number): number {
+  const parsed = toFiniteNumber(value)
+  if (parsed === null || parsed <= 0) return fallback
+  return Math.trunc(parsed)
+}
+
+function toNonNegativeInteger(value: unknown, fallback: number): number {
+  const parsed = toFiniteNumber(value)
+  if (parsed === null || parsed < 0) return fallback
+  return Math.trunc(parsed)
+}
+
+function assertOrgSkillPageSuccess(data: OrgSkillPageResponse): void {
   if (data.returnCode !== "SUC0000") {
     const message = data.errorMsg || "组织级技能列表加载失败"
     if (data.returnCode === "SCG1005") {
@@ -192,13 +225,57 @@ function assertOrgSkillPageResponse(data: OrgSkillPageResponse): void {
     }
     throw new Error(message)
   }
+}
 
-  if (!data.body || typeof data.body !== "object") {
-    throw new Error("组织级技能列表响应缺少 body")
+function normalizeOrgSkillPageBody(
+  data: OrgSkillPageResponse,
+  fallbackPageNum: number,
+  fallbackPageSize: number
+): NormalizedOrgSkillPageBody {
+  assertOrgSkillPageSuccess(data)
+
+  const pageNumFallback = toPositiveInteger(fallbackPageNum, 1)
+  const pageSizeFallback = toPositiveInteger(fallbackPageSize, 10)
+  const emptyBody: NormalizedOrgSkillPageBody = {
+    total: 0,
+    list: [],
+    pageNum: pageNumFallback,
+    pageSize: pageSizeFallback,
+    pages: 1,
+    hasNextPage: false,
+    hasPreviousPage: pageNumFallback > 1
   }
 
-  if (!Array.isArray(data.body.list)) {
+  if (!data.body || typeof data.body !== "object") {
+    return emptyBody
+  }
+
+  const rawBody = data.body as Record<string, unknown>
+  const rawList = rawBody.list
+  if (!Array.isArray(rawList)) {
+    if (rawList == null) return emptyBody
     throw new Error("组织级技能列表响应 body.list 格式不正确")
+  }
+
+  const list = rawList as OrgSkillApiItem[]
+  const pageSize = toPositiveInteger(rawBody.pageSize, pageSizeFallback)
+  const pageNum = toPositiveInteger(rawBody.pageNum, pageNumFallback)
+  const total = toNonNegativeInteger(rawBody.total, list.length)
+  const derivedPages = Math.max(1, Math.ceil(total / pageSize))
+  const pages = toPositiveInteger(rawBody.pages, derivedPages)
+  const hasNextPage =
+    typeof rawBody.hasNextPage === "boolean" ? rawBody.hasNextPage : pageNum < pages
+  const hasPreviousPage =
+    typeof rawBody.hasPreviousPage === "boolean" ? rawBody.hasPreviousPage : pageNum > 1
+
+  return {
+    total,
+    list,
+    pageNum,
+    pageSize,
+    pages,
+    hasNextPage,
+    hasPreviousPage
   }
 }
 
@@ -212,21 +289,20 @@ function assertOrgSkillLabelsResponse(data: OrgSkillLabelsResponse): void {
   }
 }
 
-function toMarketResponse(data: OrgSkillPageResponse): MarketApiResponse {
-  assertOrgSkillPageResponse(data)
-
-  const body = data.body!
-  const total = body.total
-  const resolvedPageSize = body.pageSize
-  const pages = body.pages || Math.max(1, Math.ceil(total / resolvedPageSize))
+function toMarketResponse(
+  data: OrgSkillPageResponse,
+  fallbackPageNum = 1,
+  fallbackPageSize = 10
+): MarketApiResponse {
+  const body = normalizeOrgSkillPageBody(data, fallbackPageNum, fallbackPageSize)
 
   return {
     success: true,
     data: body.list.map(mapOrgSkillItem),
     pageNum: body.pageNum,
-    pageSize: resolvedPageSize,
-    total,
-    pages,
+    pageSize: body.pageSize,
+    total: body.total,
+    pages: body.pages,
     hasNextPage: body.hasNextPage,
     hasPreviousPage: body.hasPreviousPage
   }
@@ -409,7 +485,7 @@ export const orgSkillMarketApi = {
     }
 
     const data = (await response.json()) as OrgSkillPageResponse
-    return toMarketResponse(data)
+    return toMarketResponse(data, pageNum, pageSize)
   },
 
   async getOrgSkillLabels(): Promise<OrgSkillLabel[]> {

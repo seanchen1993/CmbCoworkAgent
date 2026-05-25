@@ -488,15 +488,35 @@ export function PluginsPanel(): React.JSX.Element {
 
   useEffect(() => {
     if (!marketPluginsLoaded || !selectedPlugin) return
-    const shouldLogWithoutDetail = shouldHidePluginDetails(selectedPlugin)
-    if (!shouldLogWithoutDetail && !detail) return
+    const shouldHideUiDetail = shouldHidePluginDetails(selectedPlugin)
+    if (!shouldHideUiDetail && !detail) return
     if (loggedPluginSelectionRef.current === selectedPlugin.id) return
 
+    let cancelled = false
+    const plugin = selectedPlugin
     const marketInfo = resolvePluginMarketInfo(selectedPlugin, marketPluginMap)
-    console.log(
-      buildPluginConsoleInfo(selectedPlugin, shouldLogWithoutDetail ? null : detail, marketInfo)
-    )
-    loggedPluginSelectionRef.current = selectedPlugin.id
+
+    const logPluginInfo = async () => {
+      let consoleDetail = detail
+      if (shouldHideUiDetail) {
+        try {
+          consoleDetail = await window.api.plugins.getDetail(plugin.id)
+        } catch (error) {
+          console.warn("[PluginsPanel] Failed to load plugin detail for console:", error)
+          consoleDetail = getEmptyPluginDetail()
+        }
+      }
+
+      if (cancelled || loggedPluginSelectionRef.current === plugin.id) return
+      console.log(buildPluginConsoleInfo(plugin, consoleDetail, marketInfo))
+      loggedPluginSelectionRef.current = plugin.id
+    }
+
+    void logPluginInfo()
+
+    return () => {
+      cancelled = true
+    }
   }, [detail, marketPluginMap, marketPluginsLoaded, selectedPlugin, shouldHidePluginDetails])
 
   const handleSelectPlugin = useCallback(
