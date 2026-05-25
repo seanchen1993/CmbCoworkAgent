@@ -2,6 +2,7 @@ import type React from "react"
 import { useEffect, useMemo, useState } from "react"
 import {
   Calendar,
+  Check,
   CheckCircle,
   FileText,
   GitBranch,
@@ -12,7 +13,12 @@ import {
   User,
   Zap
 } from "lucide-react"
-import { getMockOrgSkillMarketResponse, orgSkillMarketApi } from "../../api/org-skill-market"
+import {
+  getMockOrgSkillLabels,
+  getMockOrgSkillMarketResponse,
+  orgSkillMarketApi,
+  type OrgSkillLabel
+} from "../../api/org-skill-market"
 import { USE_MARKET_MOCK_ON_ERROR } from "../../api/market-flags"
 import type { MarketApiResponse, MarketItem } from "../../api/market"
 import { Button } from "@/components/ui/button"
@@ -81,8 +87,8 @@ function getCategoryFilterName(category?: string): string {
   return parts.slice(1).join("/") || "未分类"
 }
 
-function getOrgSkillMockPageResponse(pageNum: number): MarketApiResponse {
-  return getMockOrgSkillMarketResponse(pageNum, ORG_SKILL_PAGE_SIZE)
+function getOrgSkillMockLabels(): OrgSkillLabel[] {
+  return getMockOrgSkillLabels()
 }
 
 function toPaginationState(
@@ -236,6 +242,88 @@ function OrgSkillCard({
   )
 }
 
+function OrgSkillLabelFilter({
+  labels,
+  selectedLabelIds,
+  loading,
+  error,
+  onToggleLabel,
+  onClearLabels,
+  onRetry
+}: {
+  labels: OrgSkillLabel[]
+  selectedLabelIds: string[]
+  loading: boolean
+  error: string | null
+  onToggleLabel: (labelId: string) => void
+  onClearLabels: () => void
+  onRetry: () => void
+}): React.JSX.Element | null {
+  const selectedLabelSet = new Set(selectedLabelIds)
+
+  return (
+    <aside className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-3 xl:sticky xl:top-4">
+      <div className="flex items-center justify-between mb-2 px-1">
+        <h3 className="text-xs font-medium text-[#5e5d59]">分类</h3>
+        {selectedLabelIds.length > 0 && (
+          <button
+            type="button"
+            onClick={onClearLabels}
+            className="text-xs text-[#b85a3a] hover:text-[#9f472d] transition-colors cursor-pointer"
+          >
+            清除
+          </button>
+        )}
+      </div>
+      <div className="space-y-1.5 max-h-[60vh] overflow-y-auto pr-1">
+        {loading ? (
+          <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-[#87867f]">
+            <div className="size-3.5 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin" />
+            <span>分类加载中…</span>
+          </div>
+        ) : error ? (
+          <div className="space-y-2 px-2 py-1.5">
+            <p className="text-xs leading-relaxed text-[#b53333]">{error}</p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-2.5 text-[11px] border-[#fad4d4] bg-white text-[#b53333] hover:bg-[#fdf2f2] rounded-lg"
+              onClick={onRetry}
+            >
+              重试
+            </Button>
+          </div>
+        ) : labels.length === 0 ? (
+          <p className="text-xs text-[#87867f] px-2 py-1.5">暂无分类</p>
+        ) : (
+          labels.map((label) => {
+            const isActive = selectedLabelSet.has(label.labelId)
+            return (
+              <button
+                key={label.labelId}
+                type="button"
+                onClick={() => onToggleLabel(label.labelId)}
+                className={`w-full flex items-center justify-between rounded-xl px-2.5 py-2 text-left transition-colors cursor-pointer ${
+                  isActive
+                    ? "bg-[#fdf3e7] border border-[#f5d9c4] text-[#8b623d]"
+                    : "border border-transparent text-[#5e5d59] hover:bg-[#f5f4ed]"
+                }`}
+              >
+                <span className="text-[13px] leading-tight pr-2 break-all">{label.labelName}</span>
+                {isActive && (
+                  <span className="inline-flex items-center justify-center rounded-full bg-[#f5d9c4] px-1.5 py-0.5 text-[#8b623d] shrink-0">
+                    <Check className="size-3" />
+                  </span>
+                )}
+              </button>
+            )
+          })
+        )}
+      </div>
+    </aside>
+  )
+}
+
 export function OrgSkillMarketContent({
   searchQuery,
   installedSkills,
@@ -250,6 +338,8 @@ export function OrgSkillMarketContent({
 }: OrgSkillMarketContentProps): React.JSX.Element {
   const [pageNum, setPageNum] = useState(1)
   const [items, setItems] = useState<MarketItem[]>([])
+  const [labels, setLabels] = useState<OrgSkillLabel[]>([])
+  const [selectedLabelIds, setSelectedLabelIds] = useState<string[]>([])
   const [pagination, setPagination] = useState<OrgSkillPaginationState>({
     pageNum: 1,
     pageSize: ORG_SKILL_PAGE_SIZE,
@@ -260,7 +350,41 @@ export function OrgSkillMarketContent({
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [labelsLoading, setLabelsLoading] = useState(false)
+  const [labelsError, setLabelsError] = useState<string | null>(null)
   const [retryToken, setRetryToken] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+
+    const loadOrgSkillLabels = async () => {
+      setLabelsLoading(true)
+      setLabelsError(null)
+      try {
+        const response = await orgSkillMarketApi.getOrgSkillLabels()
+        if (cancelled) return
+        setLabels(response)
+      } catch (loadError) {
+        if (cancelled) return
+        if (USE_MARKET_MOCK_ON_ERROR) {
+          console.warn("[OrgSkillMarket] fallback to mock labels:", loadError)
+          setLabels(getOrgSkillMockLabels())
+          setLabelsError(null)
+        } else {
+          setLabels([])
+          setSelectedLabelIds([])
+          setLabelsError(loadError instanceof Error ? loadError.message : "加载组织级技能分类失败")
+        }
+      } finally {
+        if (!cancelled) setLabelsLoading(false)
+      }
+    }
+
+    void loadOrgSkillLabels()
+    return () => {
+      cancelled = true
+    }
+  }, [retryToken])
 
   useEffect(() => {
     let cancelled = false
@@ -269,7 +393,11 @@ export function OrgSkillMarketContent({
       setLoading(true)
       setError(null)
       try {
-        const response = await orgSkillMarketApi.getOrgSkills(pageNum, ORG_SKILL_PAGE_SIZE)
+        const response = await orgSkillMarketApi.getOrgSkills(
+          pageNum,
+          ORG_SKILL_PAGE_SIZE,
+          selectedLabelIds
+        )
         if (!response.success || !response.data) {
           throw new Error(response.error || "加载组织级技能失败")
         }
@@ -280,7 +408,11 @@ export function OrgSkillMarketContent({
         if (cancelled) return
         if (USE_MARKET_MOCK_ON_ERROR) {
           console.warn("[OrgSkillMarket] fallback to mock data:", loadError)
-          const mockResponse = getOrgSkillMockPageResponse(pageNum)
+          const mockResponse = getMockOrgSkillMarketResponse(
+            pageNum,
+            ORG_SKILL_PAGE_SIZE,
+            selectedLabelIds
+          )
           setPagination(toPaginationState(mockResponse, pageNum))
           setItems(addOrgSkillInstalledFlags(mockResponse.data || [], installedSkills))
           setError(null)
@@ -297,7 +429,36 @@ export function OrgSkillMarketContent({
     return () => {
       cancelled = true
     }
-  }, [installedSkills, pageNum, reloadToken, retryToken])
+  }, [installedSkills, pageNum, reloadToken, retryToken, selectedLabelIds])
+
+  const selectedLabels = useMemo(() => {
+    const selectedLabelSet = new Set(selectedLabelIds)
+    return labels.filter((label) => selectedLabelSet.has(label.labelId))
+  }, [labels, selectedLabelIds])
+
+  const toggleLabel = (labelId: string) => {
+    setPageNum(1)
+    setSelectedLabelIds((prev) =>
+      prev.includes(labelId) ? prev.filter((id) => id !== labelId) : [...prev, labelId]
+    )
+  }
+
+  const clearLabels = () => {
+    setPageNum(1)
+    setSelectedLabelIds([])
+  }
+
+  const renderLabelFilter = () => (
+    <OrgSkillLabelFilter
+      labels={labels}
+      selectedLabelIds={selectedLabelIds}
+      loading={labelsLoading}
+      error={labelsError}
+      onToggleLabel={toggleLabel}
+      onClearLabels={clearLabels}
+      onRetry={() => setRetryToken((prev) => prev + 1)}
+    />
+  )
 
   const visibleItems = useMemo(() => {
     const query = searchQuery.trim().toLowerCase()
@@ -331,86 +492,109 @@ export function OrgSkillMarketContent({
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-[#87867f]">
-        <div className="size-6 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin mb-3" />
-        <span className="text-sm">加载中…</span>
+      <div className="grid grid-cols-1 xl:grid-cols-[240px_minmax(0,1fr)] gap-4 items-start">
+        {renderLabelFilter()}
+        <div className="space-y-3 min-w-0">
+          <div className="flex flex-col items-center justify-center py-16 text-[#87867f]">
+            <div className="size-6 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin mb-3" />
+            <span className="text-sm">加载中…</span>
+          </div>
+        </div>
       </div>
     )
   }
 
   if (error) {
     return (
-      <div className="flex flex-col items-center justify-center py-16">
-        <div className="size-10 rounded-2xl bg-[#fdf2f2] border border-[#fad4d4] flex items-center justify-center mb-3">
-          <span className="text-base">!</span>
+      <div className="grid grid-cols-1 xl:grid-cols-[240px_minmax(0,1fr)] gap-4 items-start">
+        {renderLabelFilter()}
+        <div className="space-y-3 min-w-0">
+          <div className="flex flex-col items-center justify-center py-16">
+            <div className="size-10 rounded-2xl bg-[#fdf2f2] border border-[#fad4d4] flex items-center justify-center mb-3">
+              <span className="text-base">!</span>
+            </div>
+            <p className="text-sm text-[#b53333] mb-3 text-center">{error}</p>
+            {error?.includes("凭证已过期") && (
+              <p className="text-sm text-[#b53333] mb-3 text-center">
+                需要重新登陆，请退出app之后重新进入/登陆～
+              </p>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 px-4 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] rounded-lg"
+              onClick={() => setRetryToken((prev) => prev + 1)}
+            >
+              重试
+            </Button>
+          </div>
         </div>
-        <p className="text-sm text-[#b53333] mb-3 text-center">{error}</p>
-        {error?.includes('凭证已过期') && (<p className="text-sm text-[#b53333] mb-3 text-center">需要重新登陆，请退出app之后重新进入/登陆～</p>)}
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-8 px-4 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] rounded-lg"
-          onClick={() => setRetryToken((prev) => prev + 1)}
-        >
-          重试
-        </Button>
       </div>
     )
   }
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between text-xs text-[#87867f] px-1">
-        <span>
-          {searchQuery.trim() ? `当前页匹配 ${visibleItems.length} 个组织级技能` : "组织级技能"}
-        </span>
-      </div>
-      {visibleItems.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-[#87867f]">
-          <div className="size-10 rounded-2xl bg-[#f5f4ed] border border-[#e8e6dc] flex items-center justify-center mb-3">
-            <Search className="size-5 text-[#b0aea5]" />
+    <div className="grid grid-cols-1 xl:grid-cols-[240px_minmax(0,1fr)] gap-4 items-start">
+      {renderLabelFilter()}
+      <div
+        key={visibleItems.length === 0 ? "org-skill-results-empty" : "org-skill-results-list"}
+        className="space-y-3 min-w-0"
+      >
+        <div className="flex items-center justify-between text-xs text-[#87867f] px-1">
+          <span>
+            {selectedLabels.length > 0
+              ? `当前分类：${selectedLabels.map((label) => label.labelName).join("、")}`
+              : "全部 组织级技能"}
+            {` · 筛选结果 ${visibleItems.length} 个`}
+          </span>
+        </div>
+        {visibleItems.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-16 text-[#87867f]">
+            <div className="size-10 rounded-2xl bg-[#f5f4ed] border border-[#e8e6dc] flex items-center justify-center mb-3">
+              <Search className="size-5 text-[#b0aea5]" />
+            </div>
+            <p className="text-sm">
+              {searchQuery.trim() ? "当前页未找到匹配的组织级技能" : "暂无组织级技能"}
+            </p>
           </div>
-          <p className="text-sm">
-            {searchQuery.trim() ? "当前页未找到匹配的组织级技能" : "暂无组织级技能"}
-          </p>
+        ) : (
+          <div className="grid grid-cols-1 2xl:grid-cols-2 gap-3">
+            {visibleItems.map((item) => (
+              <OrgSkillCard
+                key={getOrgSkillItemKey(item)}
+                item={item}
+                isDownloading={downloadingItems.has(getOrgSkillItemKey(item))}
+                onOpenDetail={onOpenDetail}
+                onDownload={onDownload}
+                onUninstall={onUninstall}
+              />
+            ))}
+          </div>
+        )}
+        <div className="flex items-center justify-end gap-2 border-t border-[#f0eee6] pt-3 text-xs text-[#87867f]">
+          <span className={"mr-2"}>共 {pagination.total} 条</span>
+          <span className="mr-1 tabular-nums">
+            第 {pagination.pageNum} / {pagination.pages} 页
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 px-2.5 text-[11px] rounded-lg border-[#e8e6dc] bg-white text-[#5e5d59] hover:bg-[#f5f4ed]"
+            onClick={() => setPageNum((prev) => Math.max(1, prev - 1))}
+            disabled={loading || !pagination.hasPreviousPage}
+          >
+            上一页
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 px-2.5 text-[11px] rounded-lg border-[#e8e6dc] bg-white text-[#5e5d59] hover:bg-[#f5f4ed]"
+            onClick={() => setPageNum((prev) => Math.min(pagination.pages, prev + 1))}
+            disabled={loading || !pagination.hasNextPage}
+          >
+            下一页
+          </Button>
         </div>
-      ) : (
-        <div className="grid grid-cols-1 2xl:grid-cols-2 gap-3">
-          {visibleItems.map((item) => (
-            <OrgSkillCard
-              key={getOrgSkillItemKey(item)}
-              item={item}
-              isDownloading={downloadingItems.has(getOrgSkillItemKey(item))}
-              onOpenDetail={onOpenDetail}
-              onDownload={onDownload}
-              onUninstall={onUninstall}
-            />
-          ))}
-        </div>
-      )}
-      <div className="flex items-center justify-end gap-2 border-t border-[#f0eee6] pt-3 text-xs text-[#87867f]">
-        <span className={"mr-2"}>共 {pagination.total} 条</span>
-        <span className="mr-1 tabular-nums">
-          第 {pagination.pageNum} / {pagination.pages} 页
-        </span>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 px-2.5 text-[11px] rounded-lg border-[#e8e6dc] bg-white text-[#5e5d59] hover:bg-[#f5f4ed]"
-          onClick={() => setPageNum((prev) => Math.max(1, prev - 1))}
-          disabled={loading || !pagination.hasPreviousPage}
-        >
-          上一页
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 px-2.5 text-[11px] rounded-lg border-[#e8e6dc] bg-white text-[#5e5d59] hover:bg-[#f5f4ed]"
-          onClick={() => setPageNum((prev) => Math.min(pagination.pages, prev + 1))}
-          disabled={loading || !pagination.hasNextPage}
-        >
-          下一页
-        </Button>
       </div>
     </div>
   )

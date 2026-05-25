@@ -22,7 +22,7 @@ interface OrgSkillSystem {
   name: string
 }
 
-interface OrgSkillLabel {
+export interface OrgSkillLabel {
   labelId: string
   labelName: string
 }
@@ -71,6 +71,12 @@ interface OrgSkillPageResponse {
     navigateFirstPage: number
     navigateLastPage: number
   } | null
+}
+
+interface OrgSkillLabelsResponse {
+  returnCode: string
+  errorMsg?: string | null
+  body: OrgSkillLabel[] | null
 }
 
 const MOCK_ORG_SKILL_ITEMS: OrgSkillApiItem[] = [
@@ -150,8 +156,18 @@ const ORG_SKILL_GATEWAY_URL = String(
 ).replace(/\/+$/, "")
 
 const ORG_SKILL_ENDPOINTS = {
-  page: (pageNum: number, pageSize: number) =>
-    `${ORG_SKILL_GATEWAY_URL}/gw/mgr/open-api/skill/page?pageNum=${pageNum}&pageSize=${pageSize}`,
+  page: (pageNum: number, pageSize: number, labelIds: string[] = []) => {
+    const labelIdsParam = labelIds
+      .map((id) => id.trim())
+      .filter(Boolean)
+      .map(encodeURIComponent)
+      .join(",")
+    const query = `pageNum=${pageNum}&pageSize=${pageSize}`
+    return `${ORG_SKILL_GATEWAY_URL}/gw/mgr/open-api/skill/page?${
+      labelIdsParam ? `${query}&labelIds=${labelIdsParam}` : query
+    }`
+  },
+  labels: `${ORG_SKILL_GATEWAY_URL}/gw/mgr/open-api/skill/labels`,
   download: (skillId: number, versionId: number) =>
     `${ORG_SKILL_GATEWAY_URL}/gw/mgr/open-api/skill/document/download?skillId=${skillId}&versionId=${versionId}`
 }
@@ -184,6 +200,16 @@ function assertOrgSkillPageResponse(data: OrgSkillPageResponse): void {
   }
 }
 
+function assertOrgSkillLabelsResponse(data: OrgSkillLabelsResponse): void {
+  if (data.returnCode !== "SUC0000") {
+    throw new Error(data.errorMsg || "组织级技能分类加载失败")
+  }
+
+  if (!Array.isArray(data.body)) {
+    throw new Error("组织级技能分类响应 body 格式不正确")
+  }
+}
+
 function toMarketResponse(data: OrgSkillPageResponse): MarketApiResponse {
   assertOrgSkillPageResponse(data)
 
@@ -204,12 +230,23 @@ function toMarketResponse(data: OrgSkillPageResponse): MarketApiResponse {
   }
 }
 
-export function getMockOrgSkillMarketResponse(pageNum = 1, pageSize = 10): MarketApiResponse {
-  const total = MOCK_ORG_SKILL_ITEMS.length
+export function getMockOrgSkillMarketResponse(
+  pageNum = 1,
+  pageSize = 10,
+  labelIds: string[] = []
+): MarketApiResponse {
+  const selectedLabelIds = new Set(labelIds.map((id) => id.trim()).filter(Boolean))
+  const filteredItems =
+    selectedLabelIds.size === 0
+      ? MOCK_ORG_SKILL_ITEMS
+      : MOCK_ORG_SKILL_ITEMS.filter((item) =>
+          item.labels?.some((label) => selectedLabelIds.has(label.labelId))
+        )
+  const total = filteredItems.length
   const pages = Math.max(1, Math.ceil(total / pageSize))
   const safePageNum = Math.min(Math.max(1, pageNum), pages)
   const start = (safePageNum - 1) * pageSize
-  const list = MOCK_ORG_SKILL_ITEMS.slice(start, start + pageSize)
+  const list = filteredItems.slice(start, start + pageSize)
   const size = list.length
   const response: OrgSkillPageResponse = {
     returnCode: "SUC0000",
@@ -237,6 +274,18 @@ export function getMockOrgSkillMarketResponse(pageNum = 1, pageSize = 10): Marke
   }
 
   return toMarketResponse(response)
+}
+
+export function getMockOrgSkillLabels(): OrgSkillLabel[] {
+  const labels = new Map<string, OrgSkillLabel>()
+  for (const item of MOCK_ORG_SKILL_ITEMS) {
+    for (const label of item.labels || []) {
+      if (label.labelId && label.labelName) {
+        labels.set(label.labelId, label)
+      }
+    }
+  }
+  return Array.from(labels.values())
 }
 
 function mapOrgSkillItem(item: OrgSkillApiItem): MarketItem {
@@ -327,8 +376,12 @@ async function getOrgSkillAuthHeaders(): Promise<HeadersInit> {
 }
 
 export const orgSkillMarketApi = {
-  async getOrgSkills(pageNum = 1, pageSize = 10): Promise<MarketApiResponse> {
-    const response = await fetch(ORG_SKILL_ENDPOINTS.page(pageNum, pageSize), {
+  async getOrgSkills(
+    pageNum = 1,
+    pageSize = 10,
+    labelIds: string[] = []
+  ): Promise<MarketApiResponse> {
+    const response = await fetch(ORG_SKILL_ENDPOINTS.page(pageNum, pageSize, labelIds), {
       method: "GET",
       headers: {
         "Content-Type": "application/json",
@@ -342,6 +395,24 @@ export const orgSkillMarketApi = {
 
     const data = (await response.json()) as OrgSkillPageResponse
     return toMarketResponse(data)
+  },
+
+  async getOrgSkillLabels(): Promise<OrgSkillLabel[]> {
+    const response = await fetch(ORG_SKILL_ENDPOINTS.labels, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        ...(await getOrgSkillAuthHeaders())
+      }
+    })
+
+    if (!response.ok) {
+      await throwOrgSkillError(response)
+    }
+
+    const data = (await response.json()) as OrgSkillLabelsResponse
+    assertOrgSkillLabelsResponse(data)
+    return data.body!
   },
 
   async fetchInstallFile(item: MarketItem): Promise<DownloadedItemFile> {

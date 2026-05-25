@@ -385,16 +385,20 @@ export const marketApi = {
     }
   },
 
-  async getOrgSkills(pageNum = 1, pageSize = 10): Promise<MarketApiResponse> {
+  async getOrgSkills(
+    pageNum = 1,
+    pageSize = 10,
+    labelIds: string[] = []
+  ): Promise<MarketApiResponse> {
     console.log("Fetching organization skills from API...")
     try {
-      return await orgSkillMarketApi.getOrgSkills(pageNum, pageSize)
+      return await orgSkillMarketApi.getOrgSkills(pageNum, pageSize, labelIds)
     } catch (error) {
       console.error("Error fetching organization skills:", error)
       if (USE_MARKET_MOCK_ON_ERROR) {
         const reason = error instanceof Error ? error.message : String(error ?? "unknown error")
         console.warn(`[marketApi] orgSkill request failed, fallback to mock data. reason=${reason}`)
-        return getMockOrgSkillMarketResponse(pageNum, pageSize)
+        return getMockOrgSkillMarketResponse(pageNum, pageSize, labelIds)
       }
       return {
         success: false,
