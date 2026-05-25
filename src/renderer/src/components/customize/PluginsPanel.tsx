@@ -47,8 +47,47 @@ interface PluginDetail {
   manifest: PluginManifest | null
 }
 
+interface PluginConsoleInfo {
+  name: string
+  chineseName: string
+  market: boolean
+  uploadUser: string
+  skills: string[]
+  mcps: string[]
+  hooks: string[]
+}
+
+function getEmptyPluginDetail(): PluginDetail {
+  return { skills: [], mcpServers: [], hookCount: 0, hooks: [], manifest: null }
+}
+
 function normalizePluginNameKey(name: string): string {
-  return String(name || "").trim().toLowerCase()
+  return String(name || "")
+    .trim()
+    .toLowerCase()
+}
+
+function resolvePluginMarketInfo(
+  plugin: PluginMetadata,
+  marketPluginMap: Record<string, MarketItem>
+): MarketItem | undefined {
+  return marketPluginMap[normalizePluginNameKey(plugin.name)]
+}
+
+function buildPluginConsoleInfo(
+  plugin: PluginMetadata,
+  detail: PluginDetail | null,
+  marketInfo: MarketItem | undefined
+): PluginConsoleInfo {
+  return {
+    name: plugin.name,
+    chineseName: marketInfo?.chinese_name?.trim() || "",
+    market: Boolean(marketInfo),
+    uploadUser: marketInfo?.user_id?.trim() || marketInfo?.managerName?.trim() || "",
+    skills: detail?.skills ?? [],
+    mcps: detail?.mcpServers ?? [],
+    hooks: detail?.hooks.map((hook) => hook.id) ?? []
+  }
 }
 
 function readLocalUploadedPluginNamesFromStorage(): Set<string> {
@@ -320,6 +359,7 @@ export function PluginsPanel(): React.JSX.Element {
   const [searchQuery, setSearchQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const loggedPluginSelectionRef = useRef<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<PluginMetadata | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
@@ -369,37 +409,46 @@ export function PluginsPanel(): React.JSX.Element {
   }, [])
 
   // After install/update, refresh the selected plugin's detail if it was affected
-  const handleInstallSuccess = useCallback((pluginName?: string) => {
-    if (pluginName) {
-      markLocalUploadedPluginNameInStorage(pluginName)
-      setLocalUploadedPluginNames(readLocalUploadedPluginNamesFromStorage())
-    }
-    window.api.plugins
-      .list()
-      .then((list) => {
-        setPlugins(list)
-        bumpPluginVersion()
-        if (selectedPlugin) {
-          const updated = list.find(
-            (p) => p.id === selectedPlugin.id || p.name === selectedPlugin.name
-          )
-          if (updated) {
-            setSelectedPlugin(updated)
-            if (shouldHidePluginDetails(updated)) {
-              setDetail(null)
-            } else {
-              window.api.plugins
-                .getDetail(updated.id)
-                .then(setDetail)
-                .catch(() => {
-                  setDetail({ skills: [], mcpServers: [], hookCount: 0, hooks: [], manifest: null })
-                })
+  const handleInstallSuccess = useCallback(
+    (pluginName?: string) => {
+      if (pluginName) {
+        markLocalUploadedPluginNameInStorage(pluginName)
+        setLocalUploadedPluginNames(readLocalUploadedPluginNamesFromStorage())
+      }
+      window.api.plugins
+        .list()
+        .then((list) => {
+          setPlugins(list)
+          bumpPluginVersion()
+          if (selectedPlugin) {
+            const updated = list.find(
+              (p) => p.id === selectedPlugin.id || p.name === selectedPlugin.name
+            )
+            if (updated) {
+              setSelectedPlugin(updated)
+              if (shouldHidePluginDetails(updated)) {
+                setDetail(null)
+              } else {
+                window.api.plugins
+                  .getDetail(updated.id)
+                  .then(setDetail)
+                  .catch(() => {
+                    setDetail({
+                      skills: [],
+                      mcpServers: [],
+                      hookCount: 0,
+                      hooks: [],
+                      manifest: null
+                    })
+                  })
+              }
             }
           }
-        }
-      })
-      .catch(console.error)
-  }, [bumpPluginVersion, selectedPlugin, shouldHidePluginDetails])
+        })
+        .catch(console.error)
+    },
+    [bumpPluginVersion, selectedPlugin, shouldHidePluginDetails]
+  )
 
   const shouldHideSelectedPluginDetails = shouldHidePluginDetails(selectedPlugin)
 
@@ -418,12 +467,15 @@ export function PluginsPanel(): React.JSX.Element {
     async (plugin: PluginMetadata) => {
       setSelectedPlugin(plugin)
       setDetail(null)
-      if (shouldHidePluginDetails(plugin)) return
+      if (shouldHidePluginDetails(plugin)) {
+        return
+      }
       try {
         const d = await window.api.plugins.getDetail(plugin.id)
         setDetail(d)
       } catch {
-        setDetail({ skills: [], mcpServers: [], hookCount: 0, hooks: [], manifest: null })
+        const emptyDetail = getEmptyPluginDetail()
+        setDetail(emptyDetail)
       }
     },
     [shouldHidePluginDetails]
@@ -434,9 +486,23 @@ export function PluginsPanel(): React.JSX.Element {
     void loadDetail(selectedPlugin)
   }, [detail, loadDetail, marketPluginsLoaded, selectedPlugin, shouldHideSelectedPluginDetails])
 
+  useEffect(() => {
+    if (!marketPluginsLoaded || !selectedPlugin) return
+    const shouldLogWithoutDetail = shouldHidePluginDetails(selectedPlugin)
+    if (!shouldLogWithoutDetail && !detail) return
+    if (loggedPluginSelectionRef.current === selectedPlugin.id) return
+
+    const marketInfo = resolvePluginMarketInfo(selectedPlugin, marketPluginMap)
+    console.log(
+      buildPluginConsoleInfo(selectedPlugin, shouldLogWithoutDetail ? null : detail, marketInfo)
+    )
+    loggedPluginSelectionRef.current = selectedPlugin.id
+  }, [detail, marketPluginMap, marketPluginsLoaded, selectedPlugin, shouldHidePluginDetails])
+
   const handleSelectPlugin = useCallback(
     (plugin: PluginMetadata) => {
       if (selectedPlugin?.id === plugin.id) return
+      loggedPluginSelectionRef.current = null
       loadDetail(plugin)
     },
     [selectedPlugin, loadDetail]
@@ -608,69 +674,77 @@ export function PluginsPanel(): React.JSX.Element {
                 )}
               </div>
             ) : (
-              filteredPlugins.map((plugin) => (
-                <button
-                  key={plugin.id}
-                  className={cn(
-                    "w-full text-left rounded-md border border-border/70 p-2.5 transition-colors",
-                    selectedPlugin?.id === plugin.id
-                      ? "bg-muted/70 border-border"
-                      : "hover:bg-muted/50"
-                  )}
-                  onClick={() => handleSelectPlugin(plugin)}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0 flex-1">
-                      <Puzzle
-                        className={cn(
-                          "size-4 shrink-0",
-                          plugin.enabled ? "text-primary" : "text-muted-foreground/40"
+              filteredPlugins.map((plugin) => {
+                const isMarketPlugin = Boolean(resolvePluginMarketInfo(plugin, marketPluginMap))
+                return (
+                  <button
+                    key={plugin.id}
+                    className={cn(
+                      "w-full text-left rounded-md border border-border/70 p-2.5 transition-colors",
+                      selectedPlugin?.id === plugin.id
+                        ? "bg-muted/70 border-border"
+                        : "hover:bg-muted/50"
+                    )}
+                    onClick={() => handleSelectPlugin(plugin)}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <Puzzle
+                          className={cn(
+                            "size-4 shrink-0",
+                            plugin.enabled ? "text-primary" : "text-muted-foreground/40"
+                          )}
+                        />
+                        <span
+                          className={cn(
+                            "text-sm font-medium truncate",
+                            !plugin.enabled && "text-muted-foreground"
+                          )}
+                        >
+                          {plugin.name}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {isMarketPlugin && (
+                          <Badge variant="secondary" className="text-[10px] h-4 px-1.5">
+                            市场
+                          </Badge>
                         )}
-                      />
-                      <span
-                        className={cn(
-                          "text-sm font-medium truncate",
-                          !plugin.enabled && "text-muted-foreground"
+                        {plugin.version && (
+                          <Badge variant="outline" className="text-[10px] h-4 px-1.5">
+                            v{plugin.version}
+                          </Badge>
                         )}
-                      >
-                        {plugin.name}
-                      </span>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {plugin.version && (
-                        <Badge variant="outline" className="text-[10px] h-4 px-1.5">
-                          v{plugin.version}
-                        </Badge>
+                    {plugin.description && (
+                      <p className="text-xs text-muted-foreground mt-1 whitespace-pre-wrap break-words">
+                        {plugin.description}
+                      </p>
+                    )}
+                    <div className="flex items-center gap-3 mt-1.5">
+                      {plugin.skillCount > 0 && (
+                        <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                          <Sparkles className="size-3" />
+                          {plugin.skillCount} skills
+                        </span>
+                      )}
+                      {plugin.mcpServerCount > 0 && (
+                        <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                          <Plug className="size-3" />
+                          {plugin.mcpServerCount} MCPs
+                        </span>
+                      )}
+                      {(plugin.hookCount ?? 0) > 0 && (
+                        <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                          <Webhook className="size-3" />
+                          {plugin.hookCount ?? 0} Hooks
+                        </span>
                       )}
                     </div>
-                  </div>
-                  {plugin.description && (
-                    <p className="text-xs text-muted-foreground mt-1 whitespace-pre-wrap break-words">
-                      {plugin.description}
-                    </p>
-                  )}
-                  <div className="flex items-center gap-3 mt-1.5">
-                    {plugin.skillCount > 0 && (
-                      <span className="text-[10px] text-muted-foreground flex items-center gap-1">
-                        <Sparkles className="size-3" />
-                        {plugin.skillCount} skills
-                      </span>
-                    )}
-                    {plugin.mcpServerCount > 0 && (
-                      <span className="text-[10px] text-muted-foreground flex items-center gap-1">
-                        <Plug className="size-3" />
-                        {plugin.mcpServerCount} MCPs
-                      </span>
-                    )}
-                    {(plugin.hookCount ?? 0) > 0 && (
-                      <span className="text-[10px] text-muted-foreground flex items-center gap-1">
-                        <Webhook className="size-3" />
-                        {plugin.hookCount ?? 0} Hooks
-                      </span>
-                    )}
-                  </div>
-                </button>
-              ))
+                  </button>
+                )
+              })
             )}
           </div>
         </ScrollArea>
@@ -694,6 +768,9 @@ export function PluginsPanel(): React.JSX.Element {
             : "发布到市场"
         }
         hideComponentDetails={shouldHideSelectedPluginDetails}
+        isMarketPlugin={
+          selectedPlugin ? Boolean(resolvePluginMarketInfo(selectedPlugin, marketPluginMap)) : false
+        }
       />
 
       <UploadPluginDialog
@@ -752,6 +829,7 @@ export function PluginDetailPanel(props: {
   publishLabel?: string
   hideActions?: boolean
   hideComponentDetails?: boolean
+  isMarketPlugin?: boolean
 }): React.JSX.Element {
   const {
     plugin,
@@ -762,7 +840,8 @@ export function PluginDetailPanel(props: {
     onPublish,
     publishLabel = "发布到市场",
     hideActions = false,
-    hideComponentDetails = false
+    hideComponentDetails = false,
+    isMarketPlugin = false
   } = props
 
   if (!plugin) {
@@ -873,6 +952,11 @@ export function PluginDetailPanel(props: {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h2 className="text-base font-semibold truncate">{plugin.name}</h2>
+            {isMarketPlugin && (
+              <Badge variant="secondary" className="text-[10px] h-4 px-1.5 shrink-0">
+                市场
+              </Badge>
+            )}
             {plugin.version && (
               <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
                 v{plugin.version}
