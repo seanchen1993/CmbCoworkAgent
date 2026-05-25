@@ -170,8 +170,6 @@ export function CustomizeView(): React.JSX.Element {
     setShowCustomizeView,
     customizeInitialTab,
     pendingEvolution,
-    cloudEvolutionUpdates,
-    setPendingEvolution,
     currentThreadId,
   } = useAppStore()
   const [activeTab, setActiveTab] = useState<CustomizeTab>(
@@ -188,12 +186,6 @@ export function CustomizeView(): React.JSX.Element {
       setActiveTab(customizeInitialTab as CustomizeTab)
     }
   }, [customizeInitialTab])
-
-  useEffect(() => {
-    if (activeTab === "evolution" && pendingEvolution && cloudEvolutionUpdates.length === 0) {
-      setPendingEvolution(false)
-    }
-  }, [activeTab, cloudEvolutionUpdates.length, pendingEvolution, setPendingEvolution])
 
   const toggleGroup = (groupId: MenuGroupId): void => {
     setExpandedGroups((groups) => ({ ...groups, [groupId]: !groups[groupId] }))

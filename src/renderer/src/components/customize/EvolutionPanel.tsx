@@ -37,6 +37,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
+import { hasUnreadCloudEvolutionUpdates, markCloudEvolutionUpdatesSeen } from "@/lib/evolution-notices"
 import { buildBundleUnifiedDiff, extractTextBundleFromZip } from "@/lib/skill-bundle-diff"
 import type { SkillMetadata } from "@/types"
 import { SkillEvolutionReviewPanel } from "./SkillEvolutionReviewPanel"
@@ -1296,16 +1297,21 @@ export function EvolutionPanel(): React.JSX.Element {
   const refreshCloudEvolutionUpdates = useCallback(async () => {
     setCloudUpdateLoading(true)
     try {
-	      const installedSkills = await window.api.skills.list()
-	      const updates = await evolutionApi.listAvailableUpdates(installedSkills)
-	      setCloudEvolutionUpdates(updates)
-	      setPendingEvolution(updates.some((candidate) => candidate.local_adoption_status !== "adopted"))
+      const installedSkills = await window.api.skills.list()
+      const updates = await evolutionApi.listAvailableUpdates(installedSkills)
+      setCloudEvolutionUpdates(updates)
+      if (tab === "candidates") {
+        markCloudEvolutionUpdatesSeen(updates)
+        setPendingEvolution(false)
+      } else {
+        setPendingEvolution(hasUnreadCloudEvolutionUpdates(updates))
+      }
     } catch (error) {
       console.warn("[Evolution] failed to refresh cloud evolution updates:", error)
     } finally {
       setCloudUpdateLoading(false)
     }
-  }, [setCloudEvolutionUpdates, setPendingEvolution])
+  }, [setCloudEvolutionUpdates, setPendingEvolution, tab])
 
   const runOptimizer = useCallback(async (
     opts?: {
@@ -1364,8 +1370,6 @@ export function EvolutionPanel(): React.JSX.Element {
   }, [tab, showEvolutionReview, setTab])
 
   useEffect(() => {
-    setPendingEvolution(pendingCount > 0)
-
     const signature = localPendingCandidateSignature(candidates)
     if (!signature) {
       storeLocalCandidatePromptSignature("")
@@ -1387,7 +1391,13 @@ export function EvolutionPanel(): React.JSX.Element {
         onClick: () => setTab("candidates")
       }
     })
-  }, [candidates, localPendingCandidateCount, pendingCount, setPendingEvolution, setTab, tab])
+  }, [candidates, localPendingCandidateCount, setTab, tab])
+
+  useEffect(() => {
+    if (tab !== "candidates") return
+    markCloudEvolutionUpdatesSeen(cloudEvolutionUpdates)
+    setPendingEvolution(false)
+  }, [cloudEvolutionUpdates, setPendingEvolution, tab])
 
   useEffect(() => {
     if (tab === "traces" && !selectedTrace) {
@@ -1580,7 +1590,8 @@ export function EvolutionPanel(): React.JSX.Element {
           : item
       ))
       setCloudEvolutionUpdates(nextUpdates)
-      setPendingEvolution(true)
+      markCloudEvolutionUpdatesSeen(nextUpdates)
+      setPendingEvolution(false)
       toast.success(`已回滚「${candidate.skill_name}」到旧版本`)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "回滚旧版 Skill 失败")

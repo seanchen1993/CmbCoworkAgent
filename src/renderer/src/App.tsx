@@ -30,7 +30,15 @@ import { useAppStore } from "@/lib/store"
 import { ThreadProvider } from "@/lib/thread-context"
 import { initMMJ } from "../js/mmjUtils"
 import { toast, Toaster } from "sonner"
-import { evolutionApi, type EvolutionCandidate } from "@/api/evolution"
+import { evolutionApi } from "@/api/evolution"
+import {
+  cloudEvolutionUpdateSignature,
+  getCloudEvolutionPromptSignature,
+  hasUnreadCloudEvolutionUpdates,
+  markCloudEvolutionUpdatesSeen,
+  pendingCloudEvolutionUpdates,
+  setCloudEvolutionPromptSignature
+} from "@/lib/evolution-notices"
 interface UserInfoConfig {
   sapId: '',//8
   ystId: '',//6
@@ -66,31 +74,6 @@ const RIGHT_MIN = 250
 const RIGHT_MAX = 1600
 const RIGHT_DEFAULT = 300
 const RIGHT_PREVIEW_EXPAND_VW = 0.35
-
-const CLOUD_EVOLUTION_PROMPT_SIGNATURE_KEY = "trace-evolver-cloud-update-prompt-signature"
-
-function cloudEvolutionUpdateSignature(updates: EvolutionCandidate[]): string {
-  return updates
-    .map((update) => `${update.candidate_id}:${update.target_version || ""}`)
-    .sort()
-    .join("|")
-}
-
-function getCloudEvolutionPromptSignature(): string {
-  try {
-    return localStorage.getItem(CLOUD_EVOLUTION_PROMPT_SIGNATURE_KEY) || ""
-  } catch {
-    return ""
-  }
-}
-
-function setCloudEvolutionPromptSignature(signature: string): void {
-  try {
-    localStorage.setItem(CLOUD_EVOLUTION_PROMPT_SIGNATURE_KEY, signature)
-  } catch {
-    // Prompt de-duplication is best-effort; the update list and red dot still work without storage.
-  }
-}
 
 function App(): React.JSX.Element {
   const {
@@ -376,24 +359,27 @@ function App(): React.JSX.Element {
         if (cancelled) return
 
         setCloudEvolutionUpdates(updates)
-        setPendingEvolution(updates.length > 0)
+        setPendingEvolution(hasUnreadCloudEvolutionUpdates(updates))
 
-        if (updates.length === 0) return
+        const pendingUpdates = pendingCloudEvolutionUpdates(updates)
+        if (pendingUpdates.length === 0) return
 
-        const signature = cloudEvolutionUpdateSignature(updates)
+        const signature = cloudEvolutionUpdateSignature(pendingUpdates)
         if (!signature || signature === getCloudEvolutionPromptSignature()) return
         setCloudEvolutionPromptSignature(signature)
 
-        const updateItem = updates[0]
+        const updateItem = pendingUpdates[0]
         const message =
-          updates.length === 1
+          pendingUpdates.length === 1
             ? `「${updateItem.skill_name}」有云端自进化版本可用`
-            : `有 ${updates.length} 个云端自进化版本可用`
+            : `有 ${pendingUpdates.length} 个云端自进化版本可用`
         toast.info(message, {
           duration: 8000,
           action: {
             label: "查看候选",
             onClick: () => {
+              markCloudEvolutionUpdatesSeen(pendingUpdates)
+              setPendingEvolution(false)
               setEvolutionTab("candidates")
               setShowCustomizeView(true, "evolution")
             }
