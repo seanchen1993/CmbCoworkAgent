@@ -34,11 +34,20 @@ interface HarnessProjectStoreFile {
 
 type HarnessHookLogRef = HarnessRunDetailViewModel["run"]["hookLogRefs"][number]
 type HarnessInspectCommandName = "project" | "run" | "createProject" | "createFeature"
+type HarnessInspectCommandConfigKey = "projectStatus" | "featureStatus" | "createProject" | "createFeature"
 type HarnessPlatformConfigKey =
-  | HarnessInspectCommandName
+  | HarnessInspectCommandConfigKey
   | "plugin_dir_prompt"
-  | "plugin_dir"
+  | "plugin_dir_hook"
+  | "dialog_tips"
   | "feature_create_prompt"
+
+const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<HarnessInspectCommandName, HarnessInspectCommandConfigKey> = {
+  project: "projectStatus",
+  run: "featureStatus",
+  createProject: "createProject",
+  createFeature: "createFeature"
+}
 
 interface ConfiguredHarnessInvocation {
   cwd: string
@@ -346,7 +355,7 @@ function readBoardConfigPlatformText(cwd: string, key: HarnessPlatformConfigKey)
 }
 
 function readBoardConfigInspectCommand(cwd: string, mode: HarnessInspectCommandName): string | null {
-  return readBoardConfigPlatformText(cwd, mode)
+  return readBoardConfigPlatformText(cwd, HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode])
 }
 
 function projectDirectoryPath(project: HarnessProjectMetadata): string {
@@ -416,7 +425,8 @@ function buildConfiguredHarnessInvocation(
 ): ConfiguredHarnessInvocation {
   const configured = buildOptionalConfiguredHarnessInvocation(project, mode, feature)
   if (!configured) {
-    throw new Error(`插件未配置 inspectCommands.${process.platform}.${mode}，请检查插件设置`)
+    const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
+    throw new Error(`插件未配置 inspectCommands.${process.platform}.${configKey}，请检查插件设置`)
   }
   return configured
 }
@@ -1121,10 +1131,23 @@ export function buildHarnessFeaturePluginOutputDir(metadata: unknown): string | 
 
   const project = requireProject(feature.projectId)
   const cwd = adapterPluginDir(project)
-  const template = readBoardConfigPlatformText(cwd, "plugin_dir")
+  const template = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
   if (!template) return null
 
   return replaceHarnessConfigPlaceholders(template, project, "run", cwd, feature.slug).trim() || null
+}
+
+export function buildHarnessFeatureDialogTips(projectId: string, slug: string): string | null {
+  const normalizedProjectId = normalizeText(projectId).trim()
+  const feature = normalizeText(slug).trim()
+  if (!normalizedProjectId || !feature) return null
+
+  const project = requireProject(normalizedProjectId)
+  const cwd = adapterPluginDir(project)
+  const template = readBoardConfigPlatformText(cwd, "dialog_tips")
+  if (!template) return null
+
+  return replaceHarnessConfigPlaceholders(template, project, "run", cwd, feature).trim() || null
 }
 
 export function listHarnessProjects(): HarnessProjectListItem[] {

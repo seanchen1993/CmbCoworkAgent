@@ -1,7 +1,7 @@
 import { lazy, Suspense } from "react"
 import { useCurrentThread } from "@/lib/thread-context"
 import { TabBar } from "./TabBar"
-import { ChatContainer } from "@/components/chat/ChatContainer"
+import { ChatContainer, type ChatSurface } from "@/components/chat/ChatContainer"
 import { ArrowLeft, Loader2 } from "lucide-react"
 
 const FileViewer = lazy(() => import("./FileViewer").then((m) => ({ default: m.FileViewer })))
@@ -10,6 +10,7 @@ interface TabbedPanelProps {
   threadId: string
   showTabBar?: boolean
   hasPendingGitDiffNotice?: boolean
+  chatSurface?: ChatSurface
   hideWelcomeSkillTabs?: boolean
   onRequestOpenGitPanel?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
@@ -19,6 +20,7 @@ export function TabbedPanel({
   threadId,
   showTabBar = true,
   hasPendingGitDiffNotice = false,
+  chatSurface = "default",
   hideWelcomeSkillTabs = false,
   onRequestOpenGitPanel,
   onThreadGitStatusChange
@@ -43,6 +45,7 @@ export function TabbedPanel({
           <ChatContainer
             threadId={threadId}
             showGitChangeNotice={hasPendingGitDiffNotice}
+            surface={chatSurface}
             hideWelcomeSkillTabs={hideWelcomeSkillTabs}
             onOpenGitPanel={onRequestOpenGitPanel}
             onThreadGitStatusChange={onThreadGitStatusChange}

@@ -3,6 +3,7 @@ import {
   archiveHarnessProject,
   createHarnessFeature,
   createHarnessProject,
+  buildHarnessFeatureDialogTips,
   getHarnessProjectDetail,
   getHarnessRunDetail,
   listHarnessAdapters,
@@ -88,6 +89,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
         detail.run.watchRefs
       )
       return detail
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getDialogTips",
+    async (_event, payload: { projectId: string; slug: string }): Promise<string | null> => {
+      return buildHarnessFeatureDialogTips(payload.projectId, payload.slug)
     }
   )
 }

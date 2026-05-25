@@ -78,8 +78,12 @@ const harnessActionOverlayClassName =
   "pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-primary-foreground/10 to-primary-foreground/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
 const harnessActionIconClassName =
   "relative flex size-4 items-center justify-center rounded-full bg-primary-foreground/15 ring-1 ring-primary-foreground/25 transition-transform duration-200 group-hover:scale-105"
+const harnessProjectCreateInputClassName =
+  "bg-background text-foreground placeholder:text-muted-foreground/45"
+const harnessProjectCreateSelectClassName =
+  "bg-background text-foreground data-[placeholder]:text-muted-foreground/45"
 const harnessNamePattern = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
-const harnessNameRuleMessage = "仅支持中文、英文字母、数字、-、_，不允许空格"
+const harnessNameRuleMessage = "仅支持中文、英文字母、数字、-、_"
 const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
 const UNBOUND_FEATURE_GROUP_KEY = "__unbound_feature_sessions__"
 
@@ -682,6 +686,27 @@ function groupStageNodes(nodes: HarnessRunNode[]): StageNodeGroup[] {
   return groups
 }
 
+function ProjectWorkspacePathTip(): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label="项目工作区提示"
+            className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Info className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-72">
+          本项目的插件产物将统一在该路径管理。非代码仓库路径
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
 function ProjectFormDialog({
   open,
   creating,
@@ -720,7 +745,7 @@ function ProjectFormDialog({
                 value={form.adapterId}
                 onValueChange={(adapterId) => onChange({ ...form, adapterId, adapterType: "plugin" })}
               >
-                <SelectTrigger className="bg-background">
+                <SelectTrigger className={harnessProjectCreateSelectClassName}>
                   <SelectValue placeholder="请选择已安装的 AUTOBIZDEVOPS 插件" />
                 </SelectTrigger>
                 <SelectContent>
@@ -745,7 +770,7 @@ function ProjectFormDialog({
                     onChange({ ...form, name: sanitizeHarnessNameInput(event.target.value) })
                   }
                   placeholder="请输入"
-                  className="bg-background"
+                  className={harnessProjectCreateInputClassName}
                   aria-invalid={projectNameError ? true : undefined}
                 />
                 {projectNameError && <span className="text-status-critical">{projectNameError}</span>}
@@ -758,7 +783,7 @@ function ProjectFormDialog({
                     onChange({ ...form, projectCode: sanitizeHarnessNameInput(event.target.value) })
                   }
                   placeholder="请输入"
-                  className="bg-background"
+                  className={harnessProjectCreateInputClassName}
                   aria-invalid={projectCodeError ? true : undefined}
                 />
                 {projectCodeError && <span className="text-status-critical">{projectCodeError}</span>}
@@ -769,7 +794,7 @@ function ProjectFormDialog({
                   value={form.description}
                   onChange={(event) => onChange({ ...form, description: event.target.value })}
                   placeholder="请输入"
-                  className="bg-background"
+                  className={harnessProjectCreateInputClassName}
                 />
               </label>
             </div>
@@ -786,7 +811,7 @@ function ProjectFormDialog({
                     onChange({ ...form, product: { ...form.product, code: event.target.value } })
                   }
                   placeholder="请输入"
-                  className="bg-background"
+                  className={harnessProjectCreateInputClassName}
                 />
               </label>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
@@ -797,17 +822,20 @@ function ProjectFormDialog({
                     onChange({ ...form, product: { ...form.product, name: event.target.value } })
                   }
                   placeholder="请输入"
-                  className="bg-background"
+                  className={harnessProjectCreateInputClassName}
                 />
               </label>
               <div className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
-                项目工作区 *
+                <div className="flex items-center gap-1.5">
+                  <span>项目工作区 *</span>
+                  <ProjectWorkspacePathTip />
+                </div>
                 <div className="flex min-w-0 gap-2">
                   <Input
                     value={form.workspace.path}
                     readOnly
                     placeholder="请选择 AUTOBIZDEVOPS 插件工作区路径"
-                    className="bg-background"
+                    className={harnessProjectCreateInputClassName}
                   />
                   <Button
                     type="button"
@@ -883,7 +911,7 @@ function ProjectEditDialog({
                 value={form.adapterId}
                 onValueChange={(adapterId) => onChange({ ...form, adapterId, adapterType: "plugin" })}
               >
-                <SelectTrigger className="bg-background">
+                <SelectTrigger className={harnessProjectCreateSelectClassName}>
                   <SelectValue placeholder="请选择已安装的 AUTOBIZDEVOPS 插件" />
                 </SelectTrigger>
                 <SelectContent>
@@ -908,7 +936,7 @@ function ProjectEditDialog({
                     onChange({ ...form, name: sanitizeHarnessNameInput(event.target.value) })
                   }
                   placeholder="请输入"
-                  className="bg-background"
+                  className={harnessProjectCreateInputClassName}
                   aria-invalid={projectNameError ? true : undefined}
                 />
                 {projectNameError && <span className="text-status-critical">{projectNameError}</span>}
@@ -940,7 +968,7 @@ function ProjectEditDialog({
                     onChange({ ...form, projectCode: sanitizeHarnessNameInput(event.target.value) })
                   }
                   placeholder="请输入"
-                  className="bg-background"
+                  className={harnessProjectCreateInputClassName}
                   aria-invalid={projectCodeError ? true : undefined}
                 />
                 {projectCodeError && <span className="text-status-critical">{projectCodeError}</span>}
@@ -951,7 +979,7 @@ function ProjectEditDialog({
                   value={form.description}
                   onChange={(event) => onChange({ ...form, description: event.target.value })}
                   placeholder="请输入"
-                  className="bg-background"
+                  className={harnessProjectCreateInputClassName}
                 />
               </label>
             </div>
@@ -968,7 +996,7 @@ function ProjectEditDialog({
                     onChange({ ...form, product: { ...form.product, code: event.target.value } })
                   }
                   placeholder="请输入"
-                  className="bg-background"
+                  className={harnessProjectCreateInputClassName}
                 />
               </label>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
@@ -979,12 +1007,13 @@ function ProjectEditDialog({
                     onChange({ ...form, product: { ...form.product, name: event.target.value } })
                   }
                   placeholder="请输入"
-                  className="bg-background"
+                  className={harnessProjectCreateInputClassName}
                 />
               </label>
               <div className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5">
                   <span>项目工作区 *</span>
+                  <ProjectWorkspacePathTip />
                 </div>
                 <Input
                   value={form.workspace.path}
@@ -1173,7 +1202,7 @@ function FeatureCard({
   return (
     <button
       type="button"
-      className="flex h-[112px] w-full flex-col gap-2 rounded-md border border-border bg-background px-3 py-3 text-left transition-all hover:border-primary/50 hover:shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      className="flex h-[112px] w-full cursor-pointer flex-col gap-2 rounded-md border border-border bg-background px-3 py-3 text-left transition-all hover:border-primary/50 hover:shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       onClick={onOpen}
     >
       <div className="flex min-w-0 items-start justify-between gap-3">
@@ -1498,7 +1527,12 @@ function FeatureConversationPanel({
     <section className="flex min-h-0 flex-1 overflow-hidden rounded-md border border-border bg-background">
       {threadId ? (
         <div className="flex min-h-0 flex-1">
-          <TabbedPanel threadId={threadId} showTabBar={false} hideWelcomeSkillTabs />
+          <TabbedPanel
+            threadId={threadId}
+            showTabBar={false}
+            chatSurface="harness-project"
+            hideWelcomeSkillTabs
+          />
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
@@ -1558,6 +1592,20 @@ function FeatureWorkspaceChangesPanel({
   }, [groups])
 
   const [changesByGroup, setChangesByGroup] = useState<Record<string, WorkspaceChangeState>>({})
+
+  const openWorkspacePathInFileManager = useCallback(async (workspacePath: string): Promise<void> => {
+    try {
+      const platform = await window.electron.ipcRenderer.invoke("get-platform")
+      const normalizedPath = platform === "win32" ? workspacePath.replace(/\//g, "\\") : workspacePath
+      const result = await window.electron.ipcRenderer.invoke("show-item-in-folder", normalizedPath)
+      if (result && typeof result === "object" && "success" in result && !result.success) {
+        const error = "error" in result && typeof result.error === "string" ? result.error : "无法打开会话路径"
+        toast.error(error)
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "无法打开会话路径")
+    }
+  }, [])
 
   const refreshGroup = useCallback(async (group: WorkspaceChangeGroup): Promise<void> => {
     setChangesByGroup((current) => ({
@@ -1670,7 +1718,7 @@ function FeatureWorkspaceChangesPanel({
       <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-3">
         <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
           <GitBranch className="size-4 shrink-0 text-muted-foreground" />
-          <span className="truncate">代码变更</span>
+          <span className="truncate">Git 变更</span>
         </div>
         {groups.length > 0 && (
           <span className="shrink-0 text-xs text-muted-foreground">{visibleChangedFiles} files</span>
@@ -1692,10 +1740,22 @@ function FeatureWorkspaceChangesPanel({
 
             return (
               <div key={group.key} className="px-3 py-3">
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium">
-                    {getWorkspaceName(group.workspacePath)}
+                <div className="flex min-w-0 items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium" title={group.workspacePath}>
+                      {getWorkspaceName(group.workspacePath)}
+                    </div>
                   </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="size-7 shrink-0"
+                    title="打开会话路径"
+                    onClick={() => void openWorkspacePathInFileManager(group.workspacePath)}
+                  >
+                    <FolderOpen className="size-3.5" />
+                  </Button>
                 </div>
 
                 {!state || state.status === "loading" ? (
@@ -2096,7 +2156,7 @@ function FeatureDetailPage({
           aria-pressed={selected}
           title={node.label}
           className={cn(
-            "w-[210px] rounded-md border px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            "w-[210px] cursor-pointer rounded-md border px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
             selected
               ? "border-status-info bg-status-info/10 shadow-sm"
               : "border-border bg-background hover:border-primary/45"
@@ -2139,7 +2199,7 @@ function FeatureDetailPage({
                     aria-pressed={selected}
                     title={group.label}
                     className={cn(
-                      "flex h-[92px] w-[190px] flex-none flex-col gap-2 rounded-md border px-3 py-3 text-left transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                      "flex h-[92px] w-[190px] flex-none cursor-pointer flex-col gap-2 rounded-md border px-3 py-3 text-left transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
                       selected
                         ? "border-status-info bg-status-info/10 shadow-sm"
                         : "border-border bg-background hover:border-primary/50 hover:shadow-sm"
@@ -3207,48 +3267,68 @@ export function HarnessBoardView(): React.JSX.Element {
   }, [])
 
   const sidebarPortalNode = useHarnessSidebarPortalNode()
+  const projectListSelected = selectedProjectId === null && selectedFeature === null
   const sidebarPortal =
     sidebarPortalNode
       ? createPortal(
-          <ProjectFeatureSidebar
-            groups={projectSidebarGroups}
-            collapsedKeys={collapsedFeatureKeys}
-            allCollapsed={allFeatureGroupsCollapsed}
-            creatingSessionKey={creatingSidebarSessionKey}
-            threadsById={threadsById}
-            allThreadStates={allThreadStates}
-            allStreamLoadingStates={allStreamLoadingStates}
-            selectedFeature={selectedFeature}
-            isViewingSession={isViewingSession}
-            exportingThreadId={exportingThreadId}
-            editingThreadId={editingThreadId}
-            editingTitle={editingTitle}
-            onToggleCollapse={(key) =>
-              setCollapsedFeatureKeys((current) => {
-                const next = new Set(current)
-                if (next.has(key)) next.delete(key)
-                else next.add(key)
-                return next
-              })
-            }
-            onToggleAll={toggleAllFeatureGroups}
-            onCreateSession={(project, run, sessions) => {
-              void handleCreateSidebarSession(project, run, sessions)
-            }}
-            onSelectSession={(projectId, slug, threadId) => {
-              openFeatureDetail(projectId, slug, threadId)
-              void selectThread(threadId, { preserveView: true })
-            }}
-            onDeleteSession={setSidebarThreadToDelete}
-            onExportSession={(thread) => void handleExportSidebarThread(thread)}
-            onStartEditing={(thread) => {
-              setEditingThreadId(thread.thread_id)
-              setEditingTitle(thread.title || "")
-            }}
-            onSaveTitle={saveSidebarThreadTitle}
-            onCancelEditing={cancelSidebarThreadEditing}
-            onEditingTitleChange={setEditingTitle}
-          />,
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="px-2 pb-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                className={cn(
+                  "w-full justify-start gap-2 text-sm font-semibold",
+                  projectListSelected && "bg-muted"
+                )}
+                aria-current={projectListSelected ? "page" : undefined}
+                onClick={handleBackToProjectList}
+              >
+                <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+                  <Workflow className="size-3" />
+                </div>
+                <span className="text-muted-foreground">项目列表</span>
+              </Button>
+            </div>
+            <ProjectFeatureSidebar
+              groups={projectSidebarGroups}
+              collapsedKeys={collapsedFeatureKeys}
+              allCollapsed={allFeatureGroupsCollapsed}
+              creatingSessionKey={creatingSidebarSessionKey}
+              threadsById={threadsById}
+              allThreadStates={allThreadStates}
+              allStreamLoadingStates={allStreamLoadingStates}
+              selectedFeature={selectedFeature}
+              isViewingSession={isViewingSession}
+              exportingThreadId={exportingThreadId}
+              editingThreadId={editingThreadId}
+              editingTitle={editingTitle}
+              onToggleCollapse={(key) =>
+                setCollapsedFeatureKeys((current) => {
+                  const next = new Set(current)
+                  if (next.has(key)) next.delete(key)
+                  else next.add(key)
+                  return next
+                })
+              }
+              onToggleAll={toggleAllFeatureGroups}
+              onCreateSession={(project, run, sessions) => {
+                void handleCreateSidebarSession(project, run, sessions)
+              }}
+              onSelectSession={(projectId, slug, threadId) => {
+                openFeatureDetail(projectId, slug, threadId)
+                void selectThread(threadId, { preserveView: true })
+              }}
+              onDeleteSession={setSidebarThreadToDelete}
+              onExportSession={(thread) => void handleExportSidebarThread(thread)}
+              onStartEditing={(thread) => {
+                setEditingThreadId(thread.thread_id)
+                setEditingTitle(thread.title || "")
+              }}
+              onSaveTitle={saveSidebarThreadTitle}
+              onCancelEditing={cancelSidebarThreadEditing}
+              onEditingTitleChange={setEditingTitle}
+            />
+          </div>,
           sidebarPortalNode
         )
       : null
@@ -3327,14 +3407,17 @@ export function HarnessBoardView(): React.JSX.Element {
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
       <div className="shrink-0 border-b border-border bg-background/90 px-6 py-4 app-no-drag">
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <div className="mt-1 flex items-center gap-2">
-              <Workflow className="size-5 text-status-info" />
-              <h1 className="truncate text-xl font-semibold">AUTOBIZDEVOPS项目</h1>
-            </div>
+        <div className="flex items-center gap-3">
+          <div className="flex w-[360px] max-w-[48vw] min-w-[220px] items-center gap-3 rounded-md border border-border bg-background px-3 py-2">
+            <Search className="size-4 shrink-0 text-muted-foreground" />
+            <Input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索项目、系统编号或特性"
+              className="h-8 border-0 bg-transparent px-0 shadow-none focus-visible:ring-0"
+            />
           </div>
-          <div className="flex items-center gap-2">
+          <div className="ml-auto flex items-center gap-2">
             <Button variant="ghost" size="sm" className="gap-2" onClick={() => void loadProjects()}>
               {loadingProjects ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
               刷新
@@ -3351,16 +3434,6 @@ export function HarnessBoardView(): React.JSX.Element {
               <span className="relative">新建项目</span>
             </Button>
           </div>
-        </div>
-
-        <div className="mt-4 flex items-center gap-3 rounded-md border border-border bg-background px-3 py-2">
-          <Search className="size-4 text-muted-foreground" />
-          <Input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索项目、系统编号或特性"
-            className="h-8 border-0 bg-transparent px-0 shadow-none focus-visible:ring-0"
-          />
         </div>
       </div>
 

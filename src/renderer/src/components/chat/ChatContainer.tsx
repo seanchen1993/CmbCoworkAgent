@@ -6,6 +6,8 @@ import React, {
   useState,
   useSyncExternalStore
 } from "react"
+import ReactMarkdown, { type Components } from "react-markdown"
+import remarkBreaks from "remark-breaks"
 import {
   Send,
   Square,
@@ -64,7 +66,7 @@ import { ModelSwitcher } from "./ModelSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
-import type { Message, SkillMetadata, ToolCallState, ToolCallStatus } from "@/types"
+import type { Message, SkillMetadata, Thread, ToolCallState, ToolCallStatus } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator, type ChatScrollQuestion } from "./ChatScrollNavigator"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
@@ -655,9 +657,36 @@ interface StreamMessage {
   is_error?: boolean
 }
 
+export type ChatSurface = "default" | "harness-project" | "harness-feature-session"
+
+interface ChatSurfaceConfig {
+  showWelcomeHeadline: boolean
+  showWelcomeSkillTabs: boolean
+  showHarnessDialogTips: boolean
+}
+
+const CHAT_SURFACE_CONFIG: Record<ChatSurface, ChatSurfaceConfig> = {
+  default: {
+    showWelcomeHeadline: true,
+    showWelcomeSkillTabs: true,
+    showHarnessDialogTips: false
+  },
+  "harness-project": {
+    showWelcomeHeadline: false,
+    showWelcomeSkillTabs: true,
+    showHarnessDialogTips: true
+  },
+  "harness-feature-session": {
+    showWelcomeHeadline: false,
+    showWelcomeSkillTabs: false,
+    showHarnessDialogTips: false
+  }
+}
+
 interface ChatContainerProps {
   threadId: string
   showGitChangeNotice?: boolean
+  surface?: ChatSurface
   hideWelcomeSkillTabs?: boolean
   onOpenGitPanel?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
@@ -922,13 +951,134 @@ function RotatingHeadline() {
   )
 }
 
+interface HarnessFeatureBinding {
+  projectId: string
+  slug: string
+}
+
+function getHarnessFeatureBinding(thread: Thread | null | undefined): HarnessFeatureBinding | null {
+  const harnessFeature = thread?.metadata?.harnessFeature
+  if (!harnessFeature || typeof harnessFeature !== "object") {
+    return null
+  }
+
+  const metadata = harnessFeature as Record<string, unknown>
+  const projectId = typeof metadata.projectId === "string" ? metadata.projectId.trim() : ""
+  const slug = typeof metadata.slug === "string" ? metadata.slug.trim() : ""
+  return projectId && slug ? { projectId, slug } : null
+}
+
+function getSafeHttpUrl(href: unknown): string | null {
+  if (typeof href !== "string") return null
+  try {
+    const url = new URL(href)
+    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null
+  } catch {
+    return null
+  }
+}
+
+const dialogTipsMarkdownComponents: Components = {
+  p({ children }) {
+    return <p className="my-1 leading-6 first:mt-0 last:mb-0">{children}</p>
+  },
+  ul({ children }) {
+    return <ul className="my-1 ml-4 list-disc space-y-1 leading-6">{children}</ul>
+  },
+  ol({ children }) {
+    return <ol className="my-1 ml-4 list-decimal space-y-1 leading-6">{children}</ol>
+  },
+  li({ children }) {
+    return <li className="pl-1">{children}</li>
+  },
+  a({ href, children }) {
+    const safeHref = getSafeHttpUrl(href)
+    if (!safeHref) return <span>{children}</span>
+    return (
+      <a
+        href={safeHref}
+        className="font-medium text-primary underline underline-offset-4"
+        onClick={(event) => {
+          event.preventDefault()
+          void window.electron.openExternal(safeHref)
+        }}
+      >
+        {children}
+      </a>
+    )
+  },
+  code({ children }) {
+    return (
+      <code className="rounded border border-border/70 bg-background/80 px-1 py-0.5 font-mono text-[0.92em] text-foreground">
+        {children}
+      </code>
+    )
+  },
+  pre() {
+    return null
+  },
+  img() {
+    return null
+  },
+  table() {
+    return null
+  },
+  h1({ children }) {
+    return <p className="my-1 font-semibold leading-6 text-foreground">{children}</p>
+  },
+  h2({ children }) {
+    return <p className="my-1 font-semibold leading-6 text-foreground">{children}</p>
+  },
+  h3({ children }) {
+    return <p className="my-1 font-semibold leading-6 text-foreground">{children}</p>
+  }
+}
+
+class DialogTipsErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false }
+
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true }
+  }
+
+  render(): React.ReactNode {
+    return this.state.hasError ? null : this.props.children
+  }
+}
+
+function DialogTipsMarkdown({ content }: { content: string }): React.JSX.Element | null {
+  const trimmed = content.trim()
+  if (!trimmed) return null
+
+  return (
+    <DialogTipsErrorBoundary key={trimmed}>
+      <div className="mb-6 max-w-3xl rounded-md border border-border/70 bg-muted/30 px-4 py-3 text-sm text-muted-foreground shadow-sm">
+        <ReactMarkdown
+          remarkPlugins={[remarkBreaks]}
+          components={dialogTipsMarkdownComponents}
+        >
+          {trimmed}
+        </ReactMarkdown>
+      </div>
+    </DialogTipsErrorBoundary>
+  )
+}
+
 export function ChatContainer({
   threadId,
   showGitChangeNotice = false,
+  surface = "default",
   hideWelcomeSkillTabs = false,
   onOpenGitPanel,
   onThreadGitStatusChange
 }: ChatContainerProps): React.JSX.Element {
+  const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
+  const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
+  const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
+  const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const userMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -1045,6 +1195,35 @@ export function ChatContainer({
     setShowCustomizeView,
     rightPanelCollapsed
   } = useAppStore()
+  const currentThread = useMemo(
+    () => threads.find((thread) => thread.thread_id === threadId) ?? null,
+    [threadId, threads]
+  )
+  const harnessFeatureBinding = useMemo(() => getHarnessFeatureBinding(currentThread), [currentThread])
+  const [harnessDialogTips, setHarnessDialogTips] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!shouldShowHarnessDialogTips || !harnessFeatureBinding) {
+      setHarnessDialogTips(null)
+      return
+    }
+
+    let cancelled = false
+    setHarnessDialogTips(null)
+    window.api.harnessBoard
+      .getDialogTips(harnessFeatureBinding.projectId, harnessFeatureBinding.slug)
+      .then((tips) => {
+        if (!cancelled) setHarnessDialogTips(tips?.trim() || null)
+      })
+      .catch((error) => {
+        console.warn("[ChatContainer] Failed to load harness dialog tips:", error)
+        if (!cancelled) setHarnessDialogTips(null)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [harnessFeatureBinding?.projectId, harnessFeatureBinding?.slug, shouldShowHarnessDialogTips])
 
   const allSkillsRef = useRef<MarketItem[]>([])
   const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
@@ -3329,7 +3508,11 @@ export function ChatContainer({
             )}
             {displayMessages.length === 0 && !isLoading && !historyLoading && (
               <div className="pt-6 pb-8">
-                <RotatingHeadline />
+                {shouldShowHarnessDialogTips && harnessDialogTips ? (
+                  <DialogTipsMarkdown content={harnessDialogTips} />
+                ) : !shouldShowWelcomeHeadline || harnessFeatureBinding ? null : (
+                  <RotatingHeadline />
+                )}
                 {skillsLoading ? (
                   <div className="text-sm text-muted-foreground text-center py-10">
                     正在加载技能列表...
@@ -3379,7 +3562,7 @@ export function ChatContainer({
                         )}
                       </div>
                     )}
-                    {!hideWelcomeSkillTabs && (
+                    {shouldShowWelcomeSkillTabs && (
                       <Tabs defaultValue="skills-by-category" className="space-y-3">
                         <TabsList className="grid h-9 w-full grid-cols-3">
                           <TabsTrigger value="skills-by-category" className="text-xs">

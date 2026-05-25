@@ -1923,6 +1923,8 @@ const api = {
       ipcRenderer.invoke("harnessBoard:getProjectDetail", projectId) as Promise<HarnessProjectDetailViewModel>,
     getRunDetail: (projectId: string, slug: string): Promise<HarnessRunDetailViewModel> =>
       ipcRenderer.invoke("harnessBoard:getRunDetail", { projectId, slug }) as Promise<HarnessRunDetailViewModel>,
+    getDialogTips: (projectId: string, slug: string): Promise<string | null> =>
+      ipcRenderer.invoke("harnessBoard:getDialogTips", { projectId, slug }) as Promise<string | null>,
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void): (() => void) => {
       const handler = (_event: unknown, payload: HarnessWatchRefChangedEvent): void => callback(payload)
       ipcRenderer.on("harnessBoard:watchRefsChanged", handler)
