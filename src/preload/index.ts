@@ -179,6 +179,9 @@ const api = {
     update: (threadId: string, updates: Partial<Thread>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:update", { threadId, updates })
     },
+    mergeThreadValues: (threadId: string, patch: Record<string, unknown>): Promise<Thread> => {
+      return ipcRenderer.invoke("threads:mergeThreadValues", { threadId, patch })
+    },
     delete: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("threads:delete", threadId)
     },
@@ -186,7 +189,8 @@ const api = {
       return ipcRenderer.invoke("threads:history", threadId)
     },
     getGoalEvents: (
-      threadId: string
+      threadId: string,
+      options?: { restore?: boolean }
     ): Promise<
       Array<{
         event_id: number
@@ -197,15 +201,15 @@ const api = {
         created_at: Date | string | number
       }>
     > => {
-      return ipcRenderer.invoke("threads:goalEvents", threadId) as Promise<
+      return ipcRenderer.invoke("threads:goalEvents", threadId, options) as Promise<
         Array<{
-            event_id: number
-            thread_id: string
-            goal_id: string | null
-            active_window_id: string | null
-            message: string
-            created_at: Date | string | number
-          }>
+          event_id: number
+          thread_id: string
+          goal_id: string | null
+          active_window_id: string | null
+          message: string
+          created_at: Date | string | number
+        }>
       >
     },
     getGoalState: (
@@ -1114,9 +1118,7 @@ const api = {
   autoCommit: {
     getSettings: (): Promise<AgentAutoCommitSettings> =>
       ipcRenderer.invoke("autoCommit:getSettings") as Promise<AgentAutoCommitSettings>,
-    saveSettings: (
-      updates: Partial<AgentAutoCommitSettings>
-    ): Promise<AgentAutoCommitSettings> =>
+    saveSettings: (updates: Partial<AgentAutoCommitSettings>): Promise<AgentAutoCommitSettings> =>
       ipcRenderer.invoke("autoCommit:saveSettings", updates) as Promise<AgentAutoCommitSettings>
   },
   heartbeat: {
@@ -1737,9 +1739,7 @@ const api = {
     skills: {
       list: (): Promise<SkillHookMetadata[]> => ipcRenderer.invoke("hooks:skills:list")
     },
-    onChanged: (
-      callback: (data: { reason?: string; at: string }) => void
-    ): (() => void) => {
+    onChanged: (callback: (data: { reason?: string; at: string }) => void): (() => void) => {
       const handler = (_: unknown, data: { reason?: string; at: string }): void => {
         callback(data)
       }

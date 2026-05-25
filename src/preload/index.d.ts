@@ -173,17 +173,23 @@ interface CustomAPI {
     get: (threadId: string) => Promise<Thread | null>
     create: (metadata?: Record<string, unknown>) => Promise<Thread>
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
+    mergeThreadValues: (threadId: string, patch: Record<string, unknown>) => Promise<Thread>
     delete: (threadId: string) => Promise<void>
     getHistory: (threadId: string) => Promise<unknown[]>
-    getGoalEvents: (threadId: string) => Promise<Array<{
-      event_id: number
-      thread_id: string
-      goal_id: string | null
-      active_window_id: string | null
-      message: string
-      created_at: Date | string | number
-    }>>
-    getGoalState: (threadId: string, options?: { includeEvents?: boolean }) => Promise<{
+    getGoalEvents: (threadId: string, options?: { restore?: boolean }) => Promise<
+      Array<{
+        event_id: number
+        thread_id: string
+        goal_id: string | null
+        active_window_id: string | null
+        message: string
+        created_at: Date | string | number
+      }>
+    >
+    getGoalState: (
+      threadId: string,
+      options?: { includeEvents?: boolean }
+    ) => Promise<{
       goal: {
         threadId: string
         goalId: string
@@ -238,18 +244,20 @@ interface CustomAPI {
       defaultTemperature: number
       maxTemperature: number
     }>
-    getCustomConfigs: () => Promise<Array<{
-      id: string
-      name: string
-      baseUrl: string
-      model: string
-      hasApiKey: boolean
-      maxTokens: number
-      maxOutputTokens: number
-      temperature: number
-      interleavedThinking?: boolean
-      tier?: "premium" | "economy"
-    }>>
+    getCustomConfigs: () => Promise<
+      Array<{
+        id: string
+        name: string
+        baseUrl: string
+        model: string
+        hasApiKey: boolean
+        maxTokens: number
+        maxOutputTokens: number
+        temperature: number
+        interleavedThinking?: boolean
+        tier?: "premium" | "economy"
+      }>
+    >
     getCustomConfig: (id?: string) => Promise<{
       id: string
       name: string
@@ -566,9 +574,7 @@ interface CustomAPI {
   }
   autoCommit: {
     getSettings: () => Promise<AgentAutoCommitSettings>
-    saveSettings: (
-      updates: Partial<AgentAutoCommitSettings>
-    ) => Promise<AgentAutoCommitSettings>
+    saveSettings: (updates: Partial<AgentAutoCommitSettings>) => Promise<AgentAutoCommitSettings>
   }
   lsp: {
     getConfig: () => Promise<LspConfig>
@@ -1039,7 +1045,13 @@ interface CustomAPI {
       options?: DashboardCommitDetailsOptions
     ) => Promise<{
       success: boolean
-      data?: { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }
+      data?: {
+        total: number
+        page: number
+        pageSize: number
+        pushedOnly: boolean
+        items: DashboardCommitDetail[]
+      }
       error?: string
     }>
     exportExcel: (

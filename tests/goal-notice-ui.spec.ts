@@ -405,6 +405,26 @@ function testRuntimeRestoreGoalPauseSuppressesStaleCheckpointApproval(): void {
     "interrupt failure should suppress stale checkpoint approval restore"
   )
   assert(
+    shouldSuppressCheckpointApprovalRestore([
+      {
+        event_id: 291,
+        message: "Goal 已暂停：恢复处理被 Stop hook 停止。需要继续时发送 /goal resume。",
+        created_at: 291
+      }
+    ]),
+    "resume halted by Stop hook should suppress stale checkpoint approval restore"
+  )
+  assert(
+    shouldSuppressCheckpointApprovalRestore([
+      {
+        event_id: 292,
+        message: "Goal 已暂停：中断处理被 Stop hook 停止。需要继续时发送 /goal resume。",
+        created_at: 292
+      }
+    ]),
+    "interrupt halted by Stop hook should suppress stale checkpoint approval restore"
+  )
+  assert(
     !shouldSuppressCheckpointApprovalRestore(
       [
         {

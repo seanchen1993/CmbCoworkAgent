@@ -50,7 +50,11 @@ import { join, resolve } from "path"
 import { v4 as uuid } from "uuid"
 import { LocalSandbox } from "../agent/local-sandbox"
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
-import { ToolCallCounter } from "../agent/skill-evolution/tool-call-counter"
+import {
+  buildToolResultFallbackKey,
+  stableToolArgsDigest,
+  ToolCallCounter
+} from "../agent/skill-evolution/tool-call-counter"
 import {
   resetSkillEvolutionSession,
   shouldResetSkillEvolutionSessionAfterIntent
@@ -130,8 +134,10 @@ import {
 import {
   evaluateGoalWithModel,
   getCurrentTurnAssistantResponse,
+  resolveEvaluatorConfig,
   shouldPauseGoalForEmptyTurn
 } from "../agent/goals/evaluator"
+import { evaluateGoalWithRuntimeRetry } from "../agent/goals/evaluator-runtime"
 import { GoalEvidenceBuffer } from "../agent/goals/evidence"
 import {
   RUNTIME_RESTORED_ACTIVE_GOAL_REASON,
@@ -153,6 +159,7 @@ import type {
 const MIN_CHARS_FOR_MEMORY = 200
 const MAX_STOP_HOOK_REVISIONS = 2
 const MAX_STOP_CONTEXT_TEXT_CHARS = 40_000
+const MAX_POST_RUN_ASSISTANT_TEXT_CHARS = 60_000
 const MAX_PERSISTED_GOAL_ATTACHMENT_NAMES = 5
 const MAX_PERSISTED_GOAL_ATTACHMENT_SUMMARY_CHARS = 260
 const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
@@ -243,14 +250,14 @@ function persistGoalUserMessage(
   }
 }
 
-function buildPersistedGoalSetUserMessage(
-  displayText: string,
-  transportPayload: string
-): string {
+function buildPersistedGoalSetUserMessage(displayText: string, transportPayload: string): string {
   const command = `/goal ${displayText.trim()}`.trimEnd()
   const attachmentNames = extractGoalTransportAttachmentNames(transportPayload)
   const visibleAttachmentNames = attachmentNames.slice(0, MAX_PERSISTED_GOAL_ATTACHMENT_NAMES)
-  const remainingAttachmentCount = Math.max(0, attachmentNames.length - visibleAttachmentNames.length)
+  const remainingAttachmentCount = Math.max(
+    0,
+    attachmentNames.length - visibleAttachmentNames.length
+  )
   const attachmentSummary =
     visibleAttachmentNames.length > 0
       ? `启动附件：${[
@@ -262,20 +269,13 @@ function buildPersistedGoalSetUserMessage(
       : null
   const skill = parseSkillUseBlock(transportPayload)
   const skillName = skill?.skillName.replace(/\s+/g, " ").trim()
-  return [
-    command,
-    attachmentSummary,
-    skillName ? `显式技能：${skillName}` : null
-  ]
+  return [command, attachmentSummary, skillName ? `显式技能：${skillName}` : null]
     .filter(Boolean)
     .join("\n")
 }
 
 function escapeXmlText(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 }
 
 function appendGoalStartTurnContext(prompt: string, payload: string): string {
@@ -293,8 +293,9 @@ function appendGoalStartTurnContext(prompt: string, payload: string): string {
 }
 
 function appendGoalExplicitSkillContext(prompt: string, goal: { context?: unknown }): string {
-  const explicitSkill = (goal.context as { explicitSkill?: { name?: unknown; path?: unknown } } | undefined)
-    ?.explicitSkill
+  const explicitSkill = (
+    goal.context as { explicitSkill?: { name?: unknown; path?: unknown } } | undefined
+  )?.explicitSkill
   const name = typeof explicitSkill?.name === "string" ? explicitSkill.name.trim() : ""
   const path = typeof explicitSkill?.path === "string" ? explicitSkill.path.trim() : ""
   if (!name || !path) return prompt
@@ -446,7 +447,8 @@ function handleGoalNonStartingControlCommand(params: {
       channel,
       threadId,
       terminatedCurrentRun ? "Goal 已清除。当前运行已终止。" : "Goal 已清除。",
-      existingGoal.goalId
+      existingGoal.goalId,
+      existingGoal.activeWindowId
     )
     if (existingGoal.status === "active") {
       doneAfterTerminatingControl()
@@ -467,6 +469,10 @@ function pauseActiveGoalAfterBoundary(
   expectedGoalId?: string | null,
   expectedActiveWindowId?: string | null
 ): void {
+  // Legacy LangGraph checkpoint/HITL resume paths are treated as manual goal
+  // boundaries. The supported CMBDevClaw approval flow is the custom approval
+  // path; if legacy HITL needs auto-continuation later, route those callers
+  // through the shared post-turn goal evaluator instead of pausing here.
   const activeGoal = goalManager.getActive(threadId)
   if (!activeGoal) return
   if (
@@ -1037,6 +1043,15 @@ function trimStopContextText(text: string): string {
   const trimmed = text.trim()
   if (trimmed.length <= MAX_STOP_CONTEXT_TEXT_CHARS) return trimmed
   return `${trimmed.slice(0, MAX_STOP_CONTEXT_TEXT_CHARS)}\n...(truncated)`
+}
+
+function trimPostRunAssistantText(text: string): string {
+  const trimmed = text.trim()
+  if (trimmed.length <= MAX_POST_RUN_ASSISTANT_TEXT_CHARS) return trimmed
+  return [
+    "(earlier assistant output truncated for post-run summary)",
+    trimmed.slice(-MAX_POST_RUN_ASSISTANT_TEXT_CHARS)
+  ].join("\n")
 }
 
 function extractStopContextText(raw: unknown): string {
@@ -1824,6 +1839,33 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       (error.name === "AbortError" ||
         error.message.includes("aborted") ||
         error.message.includes("Controller is already closed"))
+    const createAbortError = (): Error =>
+      Object.assign(new Error("aborted"), { name: "AbortError" })
+    const throwIfInvokeAborted = (): void => {
+      if (abortController.signal.aborted) throw createAbortError()
+    }
+    const getRequestedModelIdForGoalEvaluator = (): string | undefined => {
+      const thread = getThread(threadId)
+      if (!thread?.metadata) return modelId
+      try {
+        const metadata = JSON.parse(thread.metadata) as Record<string, unknown>
+        return modelId || (typeof metadata.model === "string" ? metadata.model : undefined)
+      } catch {
+        return modelId
+      }
+    }
+    const ensureGoalEvaluatorConfigured = (): boolean => {
+      const requestedModelId = getRequestedModelIdForGoalEvaluator()
+      if (resolveEvaluatorConfig(requestedModelId)) return true
+      window.webContents.send(channel, {
+        type: "error",
+        error: "GOAL_EVALUATOR_UNAVAILABLE",
+        message:
+          "Goal evaluator model is not configured. Please configure a valid goal evaluator model before starting or resuming a goal."
+      })
+      window.webContents.send(channel, { type: "done" })
+      return false
+    }
 
     const pauseActiveGoalForRuntimeStop = (reason: string): void => {
       const activeGoal = goalManager.getActive(threadId)
@@ -1903,6 +1945,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             window.webContents.send(channel, { type: "done" })
             return
           }
+          if (!ensureGoalEvaluatorConfigured()) {
+            return
+          }
           const resumeReason = currentGoal.lastReason?.trim() || "Goal resumed by user."
           const goal = goalManager.resume(threadId, {
             resetActiveWindow: currentGoal.status === "active"
@@ -1925,6 +1970,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
         }
         if (goalCommand.type === "set") {
+          if (activeRuns.has(threadId)) {
+            sendGoalNotice(
+              "当前线程正在运行，稍后再设置新的 goal。暂停请发送 /goal pause，清除请发送 /goal clear。"
+            )
+            window.webContents.send(channel, { type: "done" })
+            return
+          }
           const validatedGoalText = validateGoalText(goalCommand.text)
           const transportPayload = extractGoalTransportPayload(message)
           if (!getThreadWorkspacePath(threadId)) {
@@ -1947,9 +1999,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             window.webContents.send(channel, { type: "done" })
             return
           }
+          if (!ensureGoalEvaluatorConfigured()) {
+            return
+          }
           abortActiveRun(threadId)
           cancelGoalBackgroundTasks()
-          const goal = goalManager.set(threadId, validatedGoalText, { context: goalCommand.context })
+          const goal = goalManager.set(threadId, validatedGoalText, {
+            context: goalCommand.context
+          })
           persistGoalUserMessage(
             threadId,
             buildPersistedGoalSetUserMessage(goalCommand.displayText, transportPayload),
@@ -1988,346 +2045,1025 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
-    const runGoal = goalManager.getActive(threadId)
-    runGoalId = runGoalId ?? runGoal?.goalId ?? null
-    runGoalActiveWindowId = runGoalActiveWindowId ?? runGoal?.activeWindowId ?? null
-    const turnState = getOrCreateTurnState(threadId, message)
-    resetTurnStateForNewInvoke(threadId, turnState, message)
-    const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
-    const runToken = startTurnStateRun(turnState)
-    let turnStateShouldDispose = false
-    let preserveAutoCommitTrackingForInterrupt = false
-
-    // Abort the stream if the window is closed/destroyed
-    const onWindowClosed = (): void => {
-      console.log("[Agent] Window closed, aborting stream for thread:", threadId)
-      abortController.abort()
-    }
-    window.once("closed", onWindowClosed)
-
-    // Start trace collection for this invocation (modelId resolved later)
-    const tracer = new TraceCollector(threadId, rootUserPrompt, modelId ?? "unknown")
-    const skillUsageDetector = new SkillUsageDetector()
-    const toolCallCounter = new ToolCallCounter()
-    let assistantText = ""
-    const recentCompletedTurns = snapshotSkillProposalWindow(threadId).slice(-2)
-
-    const computeCodeGenAttributionSkills = (currentRunSkills: string[]): string[] => {
-      const inheritedTurns =
-        currentRunSkills.length > 0 ? recentCompletedTurns.slice(-1) : recentCompletedTurns
-
-      return Array.from(
-        new Set([...currentRunSkills, ...inheritedTurns.flatMap((turn) => turn.usedSkills)])
-      )
-    }
-
-    const syncUsedSkillsContext = (): void => {
-      const currentRunSkills = skillUsageDetector.getUsedSkillNames()
-      tracer.setUsedSkills(currentRunSkills)
-      setAdoptionContext(threadId, {
-        usedSkills: computeCodeGenAttributionSkills(currentRunSkills)
-      })
-    }
-
-    syncUsedSkillsContext()
-    // stopContextCollector lives in turnState (destructured above) so it survives HITL pauses.
-
-    const sendHookNotice = (notice: string): void => {
-      window.webContents.send(channel, {
-        type: "custom",
-        data: { type: "hook_notice", message: notice }
-      })
-    }
-
-    const sendStreamError = (error: string): void => {
-      window.webContents.send(channel, {
-        type: "error",
-        error
-      })
-    }
-
-    const sendHookBlocked = (
-      event: HookEvent,
-      result: HookResult,
-      fallbackReason: string
-    ): void => {
-      const reason =
-        result.stopReason || result.reason || result.stderr || result.stdout || fallbackReason
-      const action = result.continue === false ? "halt" : "block"
-      window.webContents.send(channel, {
-        type: "custom",
-        data: {
-          type: "hook_blocked",
-          hookEvent: event,
-          action,
-          reason,
-          systemMessage: result.systemMessage
-        }
-      })
-      turnStateShouldDispose = true
-      window.webContents.send(channel, { type: "done" })
-    }
-
-    const onHookResult = makeHookResultCallback(window, channel)
-
-    const appendTurnToProposalWindow = (
-      status: "success" | "error",
-      errorMessage?: string
-    ): SkillProposalWindowContext => {
-      appendSkillProposalWindowTurn(threadId, {
-        userMessage: message,
-        assistantText,
-        toolCallNames: toolCallCounter.getNames(),
-        toolCallCount: toolCallCounter.getCount(),
-        status,
-        errorMessage,
-        usedSkills: skillUsageDetector.getUsedSkillNames(),
-        finishedAt: nowIsoLocal()
-      })
-
-      const context = buildSkillProposalWindowContext(snapshotSkillProposalWindow(threadId))
-      console.log(
-        `[SkillEvolution][${threadId}] Window append ${JSON.stringify({
-          status,
-          currentTurnToolCallCount: toolCallCounter.getCount(),
-          windowTurnCount: context.turnCount,
-          windowToolCallCount: context.toolCallCount,
-          usedSkills: context.usedSkills
-        })}`
-      )
-      return context
-    }
-
-    // Hoisted so catch/finally block can access them
-    let sessionWorkspacePath: string | undefined
-    let invokeRoutingResult: Awaited<ReturnType<typeof resolveModel>> | null = null
-    let toolErrorCount = 0
-    // High-water mark of input tokens — hoisted for catch/finally access
-    let highWaterInputTokens = 0
-    // Actual model used after failover — hoisted for catch/finally routing feedback
-    let usedModelId: string | undefined
-    let invokeFinalOutcome: "success" | "unknown" = "success"
-    let invokeFinalReason: string | undefined
-    const markInvokeIncomplete = (reason: string): void => {
-      invokeFinalOutcome = "unknown"
-      invokeFinalReason = reason
-    }
-
+    let onWindowClosed: (() => void) | null = null
     try {
-      // Get workspace path from thread metadata - REQUIRED
-      const thread = getThread(threadId)
-      let metadata: Record<string, unknown> = {}
-      if (thread?.metadata) {
-        try {
-          metadata = JSON.parse(thread.metadata)
-        } catch {
-          console.warn("[Agent] Failed to parse thread metadata, using empty object")
-        }
+      const runGoal = goalManager.getActive(threadId)
+      runGoalId = runGoalId ?? runGoal?.goalId ?? null
+      runGoalActiveWindowId = runGoalActiveWindowId ?? runGoal?.activeWindowId ?? null
+      const turnState = getOrCreateTurnState(threadId, message)
+      resetTurnStateForNewInvoke(threadId, turnState, message)
+      const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
+      const runToken = startTurnStateRun(turnState)
+      let turnStateShouldDispose = false
+      let preserveAutoCommitTrackingForInterrupt = false
+
+      // Abort the stream if the window is closed/destroyed
+      onWindowClosed = (): void => {
+        console.log("[Agent] Window closed, aborting stream for thread:", threadId)
+        abortController.abort()
       }
-      console.log("[Agent] Thread metadata:", metadata)
 
-      const workspacePath = metadata.workspacePath as string | undefined
-      sessionWorkspacePath = workspacePath ?? undefined
+      // Start trace collection for this invocation (modelId resolved later)
+      const tracer = new TraceCollector(threadId, rootUserPrompt, modelId ?? "unknown")
+      const skillUsageDetector = new SkillUsageDetector()
+      const toolCallCounter = new ToolCallCounter()
+      let assistantText = ""
+      const recentCompletedTurns = snapshotSkillProposalWindow(threadId).slice(-2)
 
-      if (!workspacePath) {
-        pauseActiveGoalForRuntimeStop("WORKSPACE_REQUIRED")
-        window.webContents.send(channel, {
-          type: "error",
-          error: "WORKSPACE_REQUIRED",
-          message: "Please select a workspace folder before sending messages."
+      const computeCodeGenAttributionSkills = (currentRunSkills: string[]): string[] => {
+        const inheritedTurns =
+          currentRunSkills.length > 0 ? recentCompletedTurns.slice(-1) : recentCompletedTurns
+
+        return Array.from(
+          new Set([...currentRunSkills, ...inheritedTurns.flatMap((turn) => turn.usedSkills)])
+        )
+      }
+
+      const syncUsedSkillsContext = (): void => {
+        const currentRunSkills = skillUsageDetector.getUsedSkillNames()
+        tracer.setUsedSkills(currentRunSkills)
+        setAdoptionContext(threadId, {
+          usedSkills: computeCodeGenAttributionSkills(currentRunSkills)
         })
-        await tracer.finish("error", "WORKSPACE_REQUIRED")
-        turnStateShouldDispose = true
-        return
       }
 
-      const explicitSkillActivationMessage = parseSkillUseBlock(message) ? message : modelInputMessage
-      const explicitSkillActivation = await activateExplicitSkillFromMessage({
-        message: explicitSkillActivationMessage,
-        workspacePath,
-        sessionId: threadId,
-        hookScope,
-        firedSkillKeys: skillHookKeys,
-        skillUseTracker,
-        onHookResult
-      })
-      if (explicitSkillActivation?.blocked) {
-        const reason = explicitSkillActivation.reason || "显式选择的技能被 Hook 拦截"
-        pauseActiveGoalForRuntimeStop(reason)
-        window.webContents.send(channel, {
-          type: "error",
-          error: reason
-        })
-        await tracer.finish("error", reason)
-        turnStateShouldDispose = true
-        return
-      }
-      if (explicitSkillActivation?.skill) {
-        skillUsageDetector.onSkillsMetadata([
-          {
-            name: explicitSkillActivation.skill.name,
-            path: explicitSkillActivation.skill.path
-          }
-        ])
-        skillUsageDetector.onReadFilePath(explicitSkillActivation.skill.path)
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
-      }
+      syncUsedSkillsContext()
+      // stopContextCollector lives in turnState (destructured above) so it survives HITL pauses.
 
-      // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
-      // thread is deleted (threads:delete) or the app is quitting.
-      fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult, hookScope)
-      sendActiveHookNotice(window, channel, workspacePath)
-
-      // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
-      // or inject additional context that the LLM should see alongside the user's message.
-      const hookVisibleMessage =
-        modelInputMessage.startsWith("[Starting active goal]") ||
-        modelInputMessage.startsWith("[Continuing active goal]")
-          ? modelInputMessage
-          : message
-      const promptSubmitContext: HookContext = {
-        toolArgs: { message: hookVisibleMessage, rawMessage: message },
-        userPrompt: hookVisibleMessage,
-        workspacePath: workspacePath ?? undefined,
-        sessionId: threadId
-      }
-      const promptSubmitResult = await runHooksEnriched(
-        resolveEnabledHooksForRun(
-          workspacePath ?? undefined,
-          "UserPromptSubmit",
-          promptSubmitContext,
-          hookScope
-        ),
-        "UserPromptSubmit",
-        promptSubmitContext,
-        onHookResult
-      )
-      if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
-        pauseActiveGoalForRuntimeStop("UserPromptSubmit hook stopped the turn.")
-        sendHookBlocked("UserPromptSubmit", promptSubmitResult, "消息被 Hook 策略拦截")
-        await tracer.finish("cancelled", "UserPromptSubmit hook stopped the turn")
-        turnStateShouldDispose = true
-        return
-      }
-      // Apply hook-supplied prompt rewrite / context injection. `message` remains the raw
-      // user input for hooks/routing/tracing/proposal capture; `effectiveMessage` is what
-      // the LLM sees. Goal start/continuation prompts are internal model inputs and must keep
-      // their marker at the beginning so restored UI history can hide them reliably.
-      let effectiveMessage = modelInputMessage
-      const isInternalGoalModelInput =
-        modelInputMessage.startsWith("[Starting active goal]") ||
-        modelInputMessage.startsWith("[Continuing active goal]")
-      const updatedMessage =
-        promptSubmitResult?.updatedInput?.message ??
-        promptSubmitResult?.updatedInput?.prompt ??
-        promptSubmitResult?.updatedInput?.userPrompt
-      if (isInternalGoalModelInput) {
-        effectiveMessage = buildInternalGoalPromptFromHookResult(modelInputMessage, {
-          updatedInput: promptSubmitResult?.updatedInput,
-          additionalContexts: [explicitSkillActivation?.hookContext, promptSubmitResult?.additionalContext]
-        })
-      } else if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
-        effectiveMessage = applyPromptRewritePreservingGoalMarker(modelInputMessage, updatedMessage)
-      }
-      if (
-        !isInternalGoalModelInput &&
-        explicitSkillActivation?.parsed &&
-        !parseSkillUseBlock(effectiveMessage)
-      ) {
-        effectiveMessage = [effectiveMessage.trimEnd(), explicitSkillActivation.parsed.block]
-          .filter(Boolean)
-          .join("\n\n")
-      }
-      const promptContextBlocks = [
-        explicitSkillActivation?.hookContext,
-        promptSubmitResult?.additionalContext
-      ].filter((item): item is string => Boolean(item?.trim()))
-      if (promptContextBlocks.length > 0) {
-        if (!isInternalGoalModelInput) {
-          effectiveMessage = `${promptContextBlocks.join("\n\n")}\n\n${effectiveMessage}`
-        }
-      }
-      if (promptSubmitResult?.systemMessage) {
+      const sendHookNotice = (notice: string): void => {
         window.webContents.send(channel, {
           type: "custom",
-          data: { type: "hook_notice", message: promptSubmitResult.systemMessage }
+          data: { type: "hook_notice", message: notice }
         })
       }
-      let currentTurnUserMessageForEvidence = effectiveMessage
 
-      // Sync FTS index with any memory files changed since last invocation
-      if (isMemoryEnabled()) {
-        try {
-          const memoryStore = await getMemoryStore()
-          memoryStore.syncMemoryFiles()
-        } catch {
-          /* non-critical */
-        }
+      const sendStreamError = (error: string): void => {
+        window.webContents.send(channel, {
+          type: "error",
+          error
+        })
       }
 
-      const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)
-      turnState.autoCommitSnapshot = autoCommit.snapshot
-
-      const requestedModelId = modelId || (metadata.model as string | undefined)
-      invokeRoutingResult = await resolveModel({
-        taskSource: "chat",
-        message: routingMessage,
-        threadId,
-        requestedModelId,
-        routingMode: getGlobalRoutingMode()
-      }).catch(() => null)
-      let effectiveModelId = invokeRoutingResult?.resolvedModelId ?? requestedModelId
-
-      // Persist routing decision for thread continuity (sticky/force logic next turn)
-      if (invokeRoutingResult) rememberRoutingDecision(threadId, invokeRoutingResult)
-
-      // Attach routing funnel record to trace (setRoutingTrace is internally safe, never throws)
-      if (invokeRoutingResult?.routingTrace) {
-        tracer.setRoutingTrace(invokeRoutingResult.routingTrace)
-      }
-
-      // Emit routing result so the frontend can display which model was selected
-      if (invokeRoutingResult) {
+      const sendHookBlocked = (
+        event: HookEvent,
+        result: HookResult,
+        fallbackReason: string
+      ): void => {
+        const reason =
+          result.stopReason || result.reason || result.stderr || result.stdout || fallbackReason
+        const action = result.continue === false ? "halt" : "block"
         window.webContents.send(channel, {
           type: "custom",
           data: {
-            type: "routing_result",
-            resolvedModelId: invokeRoutingResult.resolvedModelId,
-            resolvedTier: invokeRoutingResult.resolvedTier,
-            routeReason: invokeRoutingResult.routeReason
+            type: "hook_blocked",
+            hookEvent: event,
+            action,
+            reason,
+            systemMessage: result.systemMessage
           }
         })
+        turnStateShouldDispose = true
+        window.webContents.send(channel, { type: "done" })
       }
 
-      const humanMessage = new HumanMessage(effectiveMessage)
-      const streamConfig = {
-        configurable: { thread_id: threadId },
-        signal: abortController.signal,
-        streamMode: ["messages", "values"] as ("messages" | "values")[],
-        recursionLimit: 1000
+      const onHookResult = makeHookResultCallback(window, channel)
+
+      const appendTurnToProposalWindow = (
+        status: "success" | "error",
+        errorMessage?: string
+      ): SkillProposalWindowContext => {
+        appendSkillProposalWindowTurn(threadId, {
+          userMessage: message,
+          assistantText,
+          toolCallNames: toolCallCounter.getNames(),
+          toolCallCount: toolCallCounter.getCount(),
+          status,
+          errorMessage,
+          usedSkills: skillUsageDetector.getUsedSkillNames(),
+          finishedAt: nowIsoLocal()
+        })
+
+        const context = buildSkillProposalWindowContext(snapshotSkillProposalWindow(threadId))
+        console.log(
+          `[SkillEvolution][${threadId}] Window append ${JSON.stringify({
+            status,
+            currentTurnToolCallCount: toolCallCounter.getCount(),
+            windowTurnCount: context.turnCount,
+            windowToolCallCount: context.toolCallCount,
+            usedSkills: context.usedSkills
+          })}`
+        )
+        return context
       }
 
-      // ── Failover loop: try models in order, resume from checkpoint on retryable errors ──
-      const primaryTier = invokeRoutingResult?.resolvedTier ?? "premium"
-      const orderedChain = buildOrderedChain(
-        effectiveModelId,
-        invokeRoutingResult?.fallbackChain,
-        primaryTier,
-        invokeRoutingResult?.layer !== "pinned"
-      )
-      const failoverAttempts: FailoverAttempt[] = []
-      usedModelId = effectiveModelId
-      const isFirstAttempt = true
-      let agent: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
-      let stream: AsyncIterable<unknown> | null = null
+      // Hoisted so catch/finally block can access them
+      let sessionWorkspacePath: string | undefined
+      let invokeRoutingResult: Awaited<ReturnType<typeof resolveModel>> | null = null
+      let toolErrorCount = 0
+      // High-water mark of input tokens — hoisted for catch/finally access
+      let highWaterInputTokens = 0
+      // Actual model used after failover — hoisted for catch/finally routing feedback
+      let usedModelId: string | undefined
+      let invokeFinalOutcome: "success" | "unknown" = "success"
+      let invokeFinalReason: string | undefined
+      const markInvokeIncomplete = (reason: string): void => {
+        invokeFinalOutcome = "unknown"
+        invokeFinalReason = reason
+      }
 
-      for (const candidateId of orderedChain) {
-        if (abortController.signal.aborted) break
-        try {
+      window.once("closed", onWindowClosed)
+      try {
+        // Get workspace path from thread metadata - REQUIRED
+        const thread = getThread(threadId)
+        let metadata: Record<string, unknown> = {}
+        if (thread?.metadata) {
+          try {
+            metadata = JSON.parse(thread.metadata)
+          } catch {
+            console.warn("[Agent] Failed to parse thread metadata, using empty object")
+          }
+        }
+        console.log("[Agent] Thread metadata:", metadata)
+
+        const workspacePath = metadata.workspacePath as string | undefined
+        sessionWorkspacePath = workspacePath ?? undefined
+
+        if (!workspacePath) {
+          pauseActiveGoalForRuntimeStop("WORKSPACE_REQUIRED")
+          window.webContents.send(channel, {
+            type: "error",
+            error: "WORKSPACE_REQUIRED",
+            message: "Please select a workspace folder before sending messages."
+          })
+          await tracer.finish("error", "WORKSPACE_REQUIRED")
+          turnStateShouldDispose = true
+          return
+        }
+
+        const explicitSkillActivationMessage = parseSkillUseBlock(message)
+          ? message
+          : modelInputMessage
+        const explicitSkillActivation = await activateExplicitSkillFromMessage({
+          message: explicitSkillActivationMessage,
+          workspacePath,
+          sessionId: threadId,
+          hookScope,
+          firedSkillKeys: skillHookKeys,
+          skillUseTracker,
+          onHookResult
+        })
+        if (explicitSkillActivation?.blocked) {
+          const reason = explicitSkillActivation.reason || "显式选择的技能被 Hook 拦截"
+          pauseActiveGoalForRuntimeStop(reason)
+          window.webContents.send(channel, {
+            type: "error",
+            error: reason
+          })
+          await tracer.finish("error", reason)
+          turnStateShouldDispose = true
+          return
+        }
+        if (explicitSkillActivation?.skill) {
+          skillUsageDetector.onSkillsMetadata([
+            {
+              name: explicitSkillActivation.skill.name,
+              path: explicitSkillActivation.skill.path
+            }
+          ])
+          skillUsageDetector.onReadFilePath(explicitSkillActivation.skill.path)
+          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+        }
+
+        // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
+        // thread is deleted (threads:delete) or the app is quitting.
+        fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult, hookScope)
+        sendActiveHookNotice(window, channel, workspacePath)
+
+        // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
+        // or inject additional context that the LLM should see alongside the user's message.
+        const hookVisibleMessage =
+          modelInputMessage.startsWith("[Starting active goal]") ||
+          modelInputMessage.startsWith("[Continuing active goal]")
+            ? modelInputMessage
+            : message
+        const promptSubmitContext: HookContext = {
+          toolArgs: { message: hookVisibleMessage, rawMessage: message },
+          userPrompt: hookVisibleMessage,
+          workspacePath: workspacePath ?? undefined,
+          sessionId: threadId
+        }
+        const promptSubmitResult = await runHooksEnriched(
+          resolveEnabledHooksForRun(
+            workspacePath ?? undefined,
+            "UserPromptSubmit",
+            promptSubmitContext,
+            hookScope
+          ),
+          "UserPromptSubmit",
+          promptSubmitContext,
+          onHookResult
+        )
+        if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
+          pauseActiveGoalForRuntimeStop("UserPromptSubmit hook stopped the turn.")
+          sendHookBlocked("UserPromptSubmit", promptSubmitResult, "消息被 Hook 策略拦截")
+          await tracer.finish("cancelled", "UserPromptSubmit hook stopped the turn")
+          turnStateShouldDispose = true
+          return
+        }
+        // Apply hook-supplied prompt rewrite / context injection. `message` remains the raw
+        // user input for hooks/routing/tracing/proposal capture; `effectiveMessage` is what
+        // the LLM sees. Goal start/continuation prompts are internal model inputs and must keep
+        // their marker at the beginning so restored UI history can hide them reliably.
+        let effectiveMessage = modelInputMessage
+        const isInternalGoalModelInput =
+          modelInputMessage.startsWith("[Starting active goal]") ||
+          modelInputMessage.startsWith("[Continuing active goal]")
+        const updatedMessage =
+          promptSubmitResult?.updatedInput?.message ??
+          promptSubmitResult?.updatedInput?.prompt ??
+          promptSubmitResult?.updatedInput?.userPrompt
+        if (isInternalGoalModelInput) {
+          effectiveMessage = buildInternalGoalPromptFromHookResult(modelInputMessage, {
+            updatedInput: promptSubmitResult?.updatedInput,
+            additionalContexts: [
+              explicitSkillActivation?.hookContext,
+              promptSubmitResult?.additionalContext
+            ]
+          })
+        } else if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
+          effectiveMessage = applyPromptRewritePreservingGoalMarker(
+            modelInputMessage,
+            updatedMessage
+          )
+        }
+        if (
+          !isInternalGoalModelInput &&
+          explicitSkillActivation?.parsed &&
+          !parseSkillUseBlock(effectiveMessage)
+        ) {
+          effectiveMessage = [effectiveMessage.trimEnd(), explicitSkillActivation.parsed.block]
+            .filter(Boolean)
+            .join("\n\n")
+        }
+        const promptContextBlocks = [
+          explicitSkillActivation?.hookContext,
+          promptSubmitResult?.additionalContext
+        ].filter((item): item is string => Boolean(item?.trim()))
+        if (promptContextBlocks.length > 0) {
+          if (!isInternalGoalModelInput) {
+            effectiveMessage = `${promptContextBlocks.join("\n\n")}\n\n${effectiveMessage}`
+          }
+        }
+        if (promptSubmitResult?.systemMessage) {
+          window.webContents.send(channel, {
+            type: "custom",
+            data: { type: "hook_notice", message: promptSubmitResult.systemMessage }
+          })
+        }
+        let currentTurnUserMessageForEvidence = effectiveMessage
+
+        // Sync FTS index with any memory files changed since last invocation
+        if (isMemoryEnabled()) {
+          try {
+            const memoryStore = await getMemoryStore()
+            memoryStore.syncMemoryFiles()
+          } catch {
+            /* non-critical */
+          }
+        }
+
+        const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)
+        turnState.autoCommitSnapshot = autoCommit.snapshot
+
+        const requestedModelId = modelId || (metadata.model as string | undefined)
+        invokeRoutingResult = await resolveModel({
+          taskSource: "chat",
+          message: routingMessage,
+          threadId,
+          requestedModelId,
+          routingMode: getGlobalRoutingMode()
+        }).catch(() => null)
+        let effectiveModelId = invokeRoutingResult?.resolvedModelId ?? requestedModelId
+
+        // Persist routing decision for thread continuity (sticky/force logic next turn)
+        if (invokeRoutingResult) rememberRoutingDecision(threadId, invokeRoutingResult)
+
+        // Attach routing funnel record to trace (setRoutingTrace is internally safe, never throws)
+        if (invokeRoutingResult?.routingTrace) {
+          tracer.setRoutingTrace(invokeRoutingResult.routingTrace)
+        }
+
+        // Emit routing result so the frontend can display which model was selected
+        if (invokeRoutingResult) {
+          window.webContents.send(channel, {
+            type: "custom",
+            data: {
+              type: "routing_result",
+              resolvedModelId: invokeRoutingResult.resolvedModelId,
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              routeReason: invokeRoutingResult.routeReason
+            }
+          })
+        }
+
+        const humanMessage = new HumanMessage(effectiveMessage)
+        const streamConfig = {
+          configurable: { thread_id: threadId },
+          signal: abortController.signal,
+          streamMode: ["messages", "values"] as ("messages" | "values")[],
+          recursionLimit: 1000
+        }
+
+        // ── Failover loop: try models in order, resume from checkpoint on retryable errors ──
+        const primaryTier = invokeRoutingResult?.resolvedTier ?? "premium"
+        const orderedChain = buildOrderedChain(
+          effectiveModelId,
+          invokeRoutingResult?.fallbackChain,
+          primaryTier,
+          invokeRoutingResult?.layer !== "pinned"
+        )
+        const failoverAttempts: FailoverAttempt[] = []
+        usedModelId = effectiveModelId
+        const isFirstAttempt = true
+        let agent: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
+        let stream: AsyncIterable<unknown> | null = null
+
+        for (const candidateId of orderedChain) {
+          if (abortController.signal.aborted) break
+          try {
+            agent = await createAgentRuntime({
+              threadId,
+              workspacePath,
+              modelId: candidateId,
+              abortSignal: abortController.signal,
+              noSkillEvolutionTool: true,
+              retryHooks: buildModelRetryHooks(window, channel),
+              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+              onHookResult,
+              hookScope,
+              skillHookKeys,
+              skillUseTracker,
+              onFileMutation: autoCommit.onFileMutation
+            })
+            // First attempt sends the message; subsequent attempts resume from checkpoint
+            const input = isFirstAttempt ? { messages: [humanMessage] } : null
+            stream = await agent.stream(input, streamConfig)
+            usedModelId = candidateId
+            break
+          } catch (err) {
+            if (!isRetryableApiError(err)) throw err
+            failoverAttempts.push({
+              modelId: candidateId,
+              error: String(err),
+              timestamp: Date.now()
+            })
+            console.warn(`[Agent][Failover] ${candidateId} failed: ${err}, trying next...`)
+            // Keep isFirstAttempt=true: init-time errors (createAgentRuntime / agent.stream)
+            // happen before any graph tick, so HumanMessage is NOT yet checkpointed.
+            // Next candidate must still send { messages: [humanMessage] }.
+            if (!abortController.signal.aborted) {
+              await new Promise((r) => setTimeout(r, 500))
+            }
+          }
+        }
+
+        // P3: user cancellation during failover should not be reported as hard error
+        if (abortController.signal.aborted) {
+          // Fall through to outer abort handling
+          throw createAbortError()
+        }
+
+        if (!stream || !agent) {
+          const allErrors = failoverAttempts.map((a) => `${a.modelId}: ${a.error}`).join("; ")
+          throw new Error(`All models failed: ${allErrors}`)
+        }
+
+        // Notify frontend if failover happened — update model display + context window
+        const notifyFailover = (): void => {
+          if (failoverAttempts.length > 0 && usedModelId !== effectiveModelId) {
+            const usedCfgId = usedModelId?.startsWith("custom:")
+              ? usedModelId.slice("custom:".length)
+              : usedModelId
+            const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
+            window.webContents.send(channel, {
+              type: "custom",
+              data: {
+                type: "routing_result",
+                resolvedModelId: usedModelId,
+                resolvedTier: usedCfg?.tier ?? "premium",
+                routeReason: `failover from ${failoverAttempts[0].modelId}`
+              }
+            })
+            window.webContents.send(channel, {
+              type: "custom",
+              data: {
+                type: "model_failover",
+                attempts: failoverAttempts,
+                activeModelId: usedModelId
+              }
+            })
+            // P2: persist failover model + sticky in a single atomic write
+            rememberRoutingDecision(
+              threadId,
+              {
+                resolvedModelId: usedModelId!,
+                resolvedTier: usedCfg?.tier ?? "premium",
+                routeReason: `failover from ${failoverAttempts[0].modelId}`,
+                fallbackChain: [],
+                layer: "pinned"
+              },
+              usedModelId!
+            )
+            // Update effectiveModelId for downstream trace/feedback
+            effectiveModelId = usedModelId
+          }
+        }
+        notifyFailover()
+
+        // Update tracer with resolved modelId.
+        // Set modelName from config.model (the real API model name, e.g. "MiniMax-M2.7") as an
+        // initial fallback — it will be overwritten later by the actual model name from the API
+        // response metadata once the first AI message arrives (see response_metadata.model_name below).
+        if (effectiveModelId) {
+          tracer.setModelId(effectiveModelId)
+          const cfgIdForName = effectiveModelId.startsWith("custom:")
+            ? effectiveModelId.slice("custom:".length)
+            : effectiveModelId
+          const cfgForName = getCustomModelConfigs().find((c) => c.id === cfgIdForName)
+          // Use config.model (the actual API model name) as fallback, not config.name (display label)
+          if (cfgForName?.model) tracer.setModelName(cfgForName.model)
+        }
+
+        // ── Tool-call extraction (tested in __tests__/tool-call-extraction.test.ts)
+        //
+        // "messages" mode delivers one [msgChunk, metadata?] tuple per LangGraph message.
+        // AI messages carry a complete tool_calls array even in streaming mode —
+        // confirmed by stream-converter.ts and unit tests.
+        //
+        // Deduplication: same AI message ID can appear in multiple chunks
+        // (e.g. once as AIMessageChunk, once as AIMessage in a values snapshot).
+        // We track seen IDs to count each unique tool invocation exactly once.
+        // ─────────────────────────────────────────────────────────────────────────
+
+        const _countedAiMsgIds = new Set<string>()
+        const _countedModelMsgIds = new Set<string>()
+        const _countedToolResultMsgIds = new Set<string>()
+        // Track which subagent tool-call IDs we've already emitted SubagentStop for (dedupe)
+        const _subagentStopFired = new Set<string>()
+        const _llmNodeByMessageId = new Map<string, string>()
+        const _toolNodeByRef = new Map<string, string>()
+        const _toolNameByCallId = new Map<string, string>()
+        const MODEL_INPUT_WINDOW = 12
+        const MAX_TRACE_CONTENT = 2000
+        const MAX_GOAL_TOOL_EVIDENCE_ITEMS = 60
+        const goalEvidenceBuffer = new GoalEvidenceBuffer(MAX_GOAL_TOOL_EVIDENCE_ITEMS)
+        let currentTurnToolCallStart = 0
+        let currentTurnEvidenceStart = 0
+
+        const trimContent = (s: string): string =>
+          s.length > MAX_TRACE_CONTENT ? `${s.slice(0, MAX_TRACE_CONTENT)}\n…(truncated)` : s
+
+        const getCurrentTurnToolCalls = (): string[] =>
+          toolCallCounter.getNamesSince(currentTurnToolCallStart)
+        const getCurrentTurnGoalToolEvidence = (): string[] =>
+          goalEvidenceBuffer.getItemsSince(currentTurnEvidenceStart)
+
+        const normalizeMessageText = (s: string): string => s.replace(/\r\n/g, "\n").trim()
+
+        const asRecord = (value: unknown): Record<string, unknown> | null =>
+          value && typeof value === "object" ? (value as Record<string, unknown>) : null
+
+        // Providers may surface usage as top-level `usage_metadata` or under
+        // `response_metadata.token_usage` / `response_metadata.usage`.
+        // Normalize all variants so trace capture and UI stay aligned.
+        const getUsageMetadata = (kwargs: unknown): unknown => {
+          const record = asRecord(kwargs)
+          const responseMetadata = asRecord(record?.response_metadata)
+          return record?.usage_metadata ?? responseMetadata?.token_usage ?? responseMetadata?.usage
+        }
+
+        const extractRawText = (raw: unknown): string => {
+          if (typeof raw === "string") return raw
+          if (!Array.isArray(raw)) {
+            const record = asRecord(raw)
+            if (!record) return ""
+            if (typeof record.text === "string") return record.text
+            if (typeof record.output_text === "string") return record.output_text
+            if (typeof record.content === "string") return record.content
+            if (Array.isArray(record.content)) return extractRawText(record.content)
+            return ""
+          }
+          return raw
+            .map((b) => {
+              if (typeof b === "string") return b
+              const record = asRecord(b)
+              if (!record) return ""
+              if (typeof record.text === "string") return record.text
+              if (typeof record.output_text === "string") return record.output_text
+              if (typeof record.content === "string") return record.content
+              if (Array.isArray(record.content)) return extractRawText(record.content)
+              return ""
+            })
+            .filter(Boolean)
+            .join("\n")
+        }
+
+        const extractText = (raw: unknown): string => trimContent(extractRawText(raw))
+
+        const toRole = (
+          className: string,
+          kwargs: unknown
+        ): "system" | "user" | "assistant" | "tool" | "unknown" => {
+          const record = asRecord(kwargs)
+          if (className.includes("Human")) return "user"
+          if (className.includes("AI")) return "assistant"
+          if (className.includes("System")) return "system"
+          if (className.includes("Tool")) return "tool"
+          if (record?.type === "human") return "user"
+          if (record?.type === "ai") return "assistant"
+          if (record?.type === "system") return "system"
+          if (record?.type === "tool") return "tool"
+          return "unknown"
+        }
+
+        const normalizeTokenUsage = (
+          usage: unknown
+        ):
+          | {
+              inputTokens?: number
+              outputTokens?: number
+              totalTokens?: number
+              cacheReadTokens?: number
+              cacheCreationTokens?: number
+            }
+          | undefined => {
+          const record = asRecord(usage)
+          if (!record) return undefined
+          const toNum = (v: unknown): number | undefined =>
+            typeof v === "number" && Number.isFinite(v) ? v : undefined
+          const inputTokens = toNum(record.input_tokens ?? record.inputTokens)
+          const outputTokens = toNum(record.output_tokens ?? record.outputTokens)
+          const totalTokens = toNum(record.total_tokens ?? record.totalTokens)
+          const cacheReadTokens = toNum(
+            record.cache_read_input_tokens ?? record.cacheReadInputTokens ?? record.cacheReadTokens
+          )
+          const cacheCreationTokens = toNum(
+            record.cache_creation_input_tokens ??
+              record.cacheCreationInputTokens ??
+              record.cacheCreationTokens
+          )
+          if (
+            inputTokens === undefined &&
+            outputTokens === undefined &&
+            totalTokens === undefined &&
+            cacheReadTokens === undefined &&
+            cacheCreationTokens === undefined
+          )
+            return undefined
+          return { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens }
+        }
+
+        const extractTextBlocks = (raw: unknown): string => {
+          return extractRawText(raw)
+        }
+
+        const forwardStreamChunk = (mode: string, payload: unknown): void => {
+          window.webContents.send(channel, {
+            type: "stream",
+            mode,
+            data: payload
+          })
+        }
+
+        const processMessagesSideEffects = async (payload: unknown): Promise<void> => {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const [msgChunk] = payload as [any]
+            if (!msgChunk) return
+
+            const kwargs = (msgChunk.kwargs || {}) as Record<string, unknown>
+            const classId: string[] = Array.isArray(msgChunk.id) ? msgChunk.id : []
+            const className = classId[classId.length - 1] || ""
+            const isAI = className.includes("AI")
+            await maybeRunSubagentStopHooksFromStreamPayload({
+              payload,
+              workspacePath: sessionWorkspacePath,
+              threadId,
+              hookScope,
+              firedToolCallIds: _subagentStopFired,
+              onHookResult
+            })
+
+            if (!isAI) return
+
+            const rawContent = kwargs.content ?? msgChunk.content
+            const visibleText = extractTextBlocks(rawContent)
+            if (visibleText) assistantText += visibleText
+
+            // Tool-call extraction — deduped by message ID.
+            const toolCalls = kwargs.tool_calls as
+              | Array<{
+                  id?: string
+                  name?: string
+                  args?: Record<string, unknown>
+                }>
+              | undefined
+            const msgId = (kwargs.id as string) || ""
+            if (!toolCalls || toolCalls.length === 0) return
+            if (msgId && _countedAiMsgIds.has(msgId)) return
+            if (msgId) _countedAiMsgIds.add(msgId)
+
+            tracer.beginStep()
+            for (let tcIndex = 0; tcIndex < toolCalls.length; tcIndex++) {
+              const tc = toolCalls[tcIndex]
+              const tcName = tc.name ?? "unknown"
+              if (tc.id) _toolNameByCallId.set(tc.id, tcName)
+              goalEvidenceBuffer.rememberToolCall(tc.id, tc.args)
+              tracer.recordToolCall({ name: tcName, args: tc.args ?? {} })
+              const counted = toolCallCounter.register(tc, msgId, tcIndex)
+
+              if (tcName === "read_file") {
+                const readPathRaw =
+                  (typeof tc.args?.path === "string" && tc.args.path) ||
+                  (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
+                  ""
+                if (readPathRaw) {
+                  const hit = skillUsageDetector.onReadFilePath(readPathRaw)
+                  // Sync tracer + adoption context immediately when the hit set
+                  // grows. Without this, a write_file/edit_file that follows in
+                  // the *same* values batch would snapshot an empty usedSkills
+                  // and the resulting code_gen would be missing skill attribution.
+                  if (hit) {
+                    syncUsedSkillsContext()
+                  }
+                }
+              }
+
+              if (counted) {
+                const turnCount = toolCallCounter.getCount()
+                console.log(
+                  `[Agent] Turn tool call #${turnCount} (${tcName}) in thread ${threadId}`
+                )
+              }
+            }
+            tracer.endStep(visibleText)
+          } catch (e) {
+            if (isHookHaltError(e)) throw e
+            console.error("[Agent] Tool-call extraction error:", e)
+          }
+        }
+
+        const processValuesSideEffects = async (payload: unknown): Promise<void> => {
+          try {
+            const state = payload as {
+              skillsMetadata?: Array<{ name?: string; path?: string; version?: string }>
+              messages?: Array<{
+                id?: string[]
+                kwargs?: {
+                  id?: string
+                  type?: string
+                  content?: unknown
+                  name?: string
+                  tool_call_id?: string
+                  usage_metadata?: unknown
+                  response_metadata?: {
+                    token_usage?: unknown
+                    usage?: unknown
+                    model_name?: string
+                    model?: string
+                  }
+                  status?: string
+                  is_error?: boolean
+                  additional_kwargs?: Record<string, unknown>
+                  tool_calls?: Array<{
+                    id?: string
+                    name?: string
+                    args?: Record<string, unknown>
+                  }>
+                }
+              }>
+            }
+            const skillsMetadata = Array.isArray(state.skillsMetadata) ? state.skillsMetadata : []
+            if (skillsMetadata.length > 0) {
+              skillUsageDetector.onSkillsMetadata(skillsMetadata)
+              syncUsedSkillsContext()
+            }
+
+            if (!Array.isArray(state.messages)) return
+
+            const turnPromptCandidates = [
+              currentTurnUserMessageForEvidence,
+              modelInputMessage,
+              message,
+              rootUserPrompt
+            ]
+              .map((candidate) => normalizeMessageText(candidate))
+              .filter(Boolean)
+            let currentTurnStartIndex = -1
+            for (let i = state.messages.length - 1; i >= 0; i--) {
+              const msg = state.messages[i]
+              const kwargs = msg?.kwargs || {}
+              const classId = Array.isArray(msg?.id) ? msg.id : []
+              const className = classId[classId.length - 1] || ""
+              const role = toRole(className, kwargs)
+              if (role !== "user") continue
+              // Use the untruncated content for turn-boundary matching. Goal start
+              // and continuation prompts can exceed the trace preview limit; using
+              // the truncated display text here makes the match fail and would let
+              // evaluator/tool evidence bleed in from earlier turns.
+              if (
+                turnPromptCandidates.includes(normalizeMessageText(extractRawText(kwargs.content)))
+              ) {
+                currentTurnStartIndex = i
+                break
+              }
+            }
+
+            const valuesStartIndex = currentTurnStartIndex >= 0 ? currentTurnStartIndex + 1 : 0
+
+            for (let i = valuesStartIndex; i < state.messages.length; i++) {
+              const msg = state.messages[i]
+              const tcs = msg?.kwargs?.tool_calls
+
+              const kwargs = msg?.kwargs || {}
+              const classId = Array.isArray(msg?.id) ? msg.id : []
+              const className = classId[classId.length - 1] || ""
+              const isAI = className.includes("AI") || kwargs.type === "ai"
+              const isToolMessage = className.includes("Tool") || kwargs.type === "tool"
+              const aiMsgId = typeof kwargs.id === "string" ? kwargs.id : ""
+              if (isAI && aiMsgId && !_countedModelMsgIds.has(aiMsgId)) {
+                _countedModelMsgIds.add(aiMsgId)
+
+                // Extract the real model name from API response metadata (e.g. "MiniMax-M2.7")
+                // This takes precedence over the user-configured model name (config.model)
+                const apiModelName =
+                  kwargs.response_metadata?.model_name ?? kwargs.response_metadata?.model
+                if (typeof apiModelName === "string" && apiModelName) {
+                  tracer.setModelName(apiModelName)
+                }
+
+                const inputSlice = state.messages
+                  .slice(Math.max(0, i - MODEL_INPUT_WINDOW), i)
+                  .map((m) => {
+                    const k = m?.kwargs || {}
+                    const cid = Array.isArray(m?.id) ? m.id : []
+                    const cname = cid[cid.length - 1] || ""
+                    return {
+                      role: toRole(cname, k),
+                      content: extractText(k.content),
+                      ...(typeof k.name === "string" ? { name: k.name } : {}),
+                      ...(typeof k.tool_call_id === "string" ? { toolCallId: k.tool_call_id } : {})
+                    }
+                  })
+                  .filter((m) => m.content || m.role === "tool")
+
+                const outputToolCalls = Array.isArray(tcs)
+                  ? tcs.map((tc) => ({
+                      name: tc?.name ?? "unknown",
+                      args: tc?.args ?? {}
+                    }))
+                  : []
+
+                const llmNodeId = tracer.beginLlmNode({
+                  messageId: aiMsgId,
+                  startedAt: nowIsoLocal(),
+                  input: inputSlice,
+                  metadata: {
+                    toolCallCount: outputToolCalls.length
+                  }
+                })
+                _llmNodeByMessageId.set(aiMsgId, llmNodeId)
+
+                const usageForTrace = normalizeTokenUsage(getUsageMetadata(kwargs))
+
+                // Track high-water mark of input tokens for context window capacity guard
+                if (
+                  usageForTrace?.inputTokens &&
+                  usageForTrace.inputTokens > highWaterInputTokens
+                ) {
+                  highWaterInputTokens = usageForTrace.inputTokens
+                }
+
+                tracer.recordModelCall({
+                  messageId: aiMsgId,
+                  startedAt: nowIsoLocal(),
+                  inputMessages: inputSlice,
+                  outputMessage: {
+                    role: "assistant",
+                    content: extractText(kwargs.content)
+                  },
+                  toolCalls: outputToolCalls,
+                  tokenUsage: usageForTrace
+                })
+
+                tracer.endLlmNode({
+                  nodeId: llmNodeId,
+                  output: extractText(kwargs.content),
+                  status: "success",
+                  metadata: {
+                    tokenUsage: usageForTrace
+                  }
+                })
+              }
+
+              if (Array.isArray(tcs)) {
+                for (let tcIndex = 0; tcIndex < tcs.length; tcIndex++) {
+                  const tc = tcs[tcIndex]
+                  const tcId = typeof tc?.id === "string" ? tc.id : ""
+                  if (tcId) _toolNameByCallId.set(tcId, tc?.name ?? "unknown")
+                  goalEvidenceBuffer.rememberToolCall(tcId, tc?.args)
+                  const toolRef =
+                    tcId ||
+                    `${aiMsgId || "ai_unknown"}:${tcIndex}:args:${stableToolArgsDigest(tc?.args ?? {})}`
+                  const counted = toolCallCounter.register(tc, aiMsgId, tcIndex)
+                  if (!_toolNodeByRef.has(toolRef)) {
+                    const parentId = aiMsgId ? _llmNodeByMessageId.get(aiMsgId) : undefined
+                    const toolNodeId = tracer.addToolNode({
+                      name: tc?.name ?? "unknown",
+                      input: tc?.args ?? {},
+                      parentId,
+                      llmMessageId: aiMsgId || undefined,
+                      toolCallId: tcId || undefined,
+                      metadata: { index: tcIndex }
+                    })
+                    _toolNodeByRef.set(toolRef, toolNodeId)
+                  }
+
+                  if (counted) {
+                    const turnCount = toolCallCounter.getCount()
+                    console.log(
+                      `[Agent] Turn tool call #${turnCount} (${tc?.name ?? "unknown"}) in thread ${threadId} [values]`
+                    )
+                  }
+
+                  if (tc?.name !== "read_file") continue
+                  const readPathRaw =
+                    (typeof tc.args?.path === "string" && tc.args.path) ||
+                    (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
+                    ""
+                  if (readPathRaw) {
+                    const hit = skillUsageDetector.onReadFilePath(readPathRaw)
+                    // See the read_file branch in processMessagesSideEffects —
+                    // a following write/edit in this same messages loop would
+                    // otherwise see a stale usedSkills snapshot.
+                    if (hit) {
+                      syncUsedSkillsContext()
+                    }
+                  }
+                }
+              }
+
+              if (isToolMessage) {
+                await maybeRunSubagentStopHooksFromStreamPayload({
+                  payload: [msg],
+                  workspacePath: sessionWorkspacePath,
+                  threadId,
+                  hookScope,
+                  firedToolCallIds: _subagentStopFired,
+                  onHookResult
+                })
+                const toolMsgId =
+                  typeof kwargs.id === "string"
+                    ? kwargs.id
+                    : buildToolResultFallbackKey(
+                        kwargs.tool_call_id,
+                        i,
+                        extractRawText(kwargs.content)
+                      )
+                if (_countedToolResultMsgIds.has(toolMsgId)) continue
+                const toolCallId =
+                  typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
+                _countedToolResultMsgIds.add(toolMsgId)
+                const parentId = toolCallId ? _toolNodeByRef.get(toolCallId) : undefined
+                const toolOutput = extractRawText(kwargs.content)
+                const toolName =
+                  (typeof kwargs.name === "string" && kwargs.name) ||
+                  (toolCallId ? _toolNameByCallId.get(toolCallId) : undefined) ||
+                  "tool"
+                goalEvidenceBuffer.appendToolResult({ toolName, output: toolOutput, toolCallId })
+                // Detect tool error: explicit status field, is_error flag, or error-prefix in output
+                const additionalKwargs = kwargs.additional_kwargs as
+                  | Record<string, unknown>
+                  | undefined
+                const isToolError =
+                  kwargs.status === "error" ||
+                  kwargs.is_error === true ||
+                  additionalKwargs?.is_error === true ||
+                  /^(error:|mcp tool error:|tool error:|failed:)/i.test(toolOutput.trim())
+                if (isToolError) toolErrorCount += 1
+                tracer.addToolResultNode({
+                  parentId,
+                  toolCallId: toolCallId || undefined,
+                  output: toolOutput,
+                  status: isToolError ? "error" : "success",
+                  metadata: {
+                    messageId: toolMsgId
+                  }
+                })
+              }
+            }
+
+            const finalMsgs = state.messages.slice(valuesStartIndex).filter((m) => {
+              const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
+              const kw = m.kwargs || {}
+              const role = toRole(cn, kw)
+              return (
+                role === "assistant" &&
+                (!kw.tool_calls || !Array.isArray(kw.tool_calls) || kw.tool_calls.length === 0)
+              )
+            })
+            const last = finalMsgs[finalMsgs.length - 1]
+            if (last) {
+              const kw = last.kwargs || {}
+              const text = extractTextBlocks(kw.content).trim()
+              if (text) lastFinalText = text
+            }
+          } catch (e) {
+            if (isHookHaltError(e)) throw e
+            console.error("[Agent] Values side-effect processing error:", e)
+          }
+        }
+
+        let sawCheckpointInterrupt = false
+        const processChunkSideEffects = async (mode: string, payload: unknown): Promise<void> => {
+          if (mode === "messages") {
+            await processMessagesSideEffects(payload)
+            return
+          }
+          if (mode === "values") {
+            if (hasCheckpointInterruptPayload(payload)) {
+              sawCheckpointInterrupt = true
+            }
+            await processValuesSideEffects(payload)
+          }
+        }
+
+        let lastFinalText = "" // 最终回复（不含中间工具推理），用于 ChatX HTTP 回复
+        let currentTurnAssistantStart = 0
+        const getCurrentAssistantResponse = (): string =>
+          getCurrentTurnAssistantResponse({
+            assistantText,
+            currentTurnAssistantStart,
+            lastFinalText
+          })
+
+        // P1: Mid-stream failover — if the stream fails with a retryable error,
+        // try remaining models in the chain using resume semantics.
+        const remainingCandidates = orderedChain.slice(
+          usedModelId ? orderedChain.indexOf(usedModelId) + 1 : orderedChain.length
+        )
+        let activeStream: AsyncIterable<unknown> = stream
+
+        const consumeStreamWithSideEffects = async (
+          source: AsyncIterable<unknown>
+        ): Promise<void> => {
+          throwIfInvokeAborted()
+          for await (const chunk of source) {
+            throwIfInvokeAborted()
+
+            const [mode, data] = chunk as unknown as [string, unknown]
+
+            // Serialize first — live BaseMessage objects must be serialized before
+            // we can inspect the LangChain class path (msgChunk.id becomes the
+            // class array ["langchain_core","messages","AIMessageChunk"] only after
+            // toJSON() / JSON.stringify; on the live object, .id is the msg-id string).
+            const serialized = serializeStreamData(data)
+            // UI forwarding is the primary path. Most processing below is best-effort;
+            // SubagentStop hooks are awaited so `continue:false` can halt the parent turn.
+            forwardStreamChunk(mode, serialized)
+            await processChunkSideEffects(mode, serialized)
+            stopContextCollector.processStreamChunk(mode, serialized)
+          }
+          throwIfInvokeAborted()
+        }
+
+        const switchToNextFailoverCandidate = async (
+          error: unknown,
+          label: string
+        ): Promise<boolean> => {
+          throwIfInvokeAborted()
+          if (!isRetryableApiError(error) || remainingCandidates.length === 0) {
+            return false
+          }
+
+          const failedModelId = usedModelId ?? "unknown"
+          failoverAttempts.push({
+            modelId: failedModelId,
+            error: String(error),
+            timestamp: Date.now()
+          })
+          console.warn(
+            `[Agent][Failover] ${label} ${failedModelId} failed: ${error}, trying next...`
+          )
+
+          await new Promise((r) => setTimeout(r, 500))
+          throwIfInvokeAborted()
+
+          const nextCandidate = remainingCandidates.shift()!
           agent = await createAgentRuntime({
             threadId,
             workspacePath,
-            modelId: candidateId,
+            modelId: nextCandidate,
             abortSignal: abortController.signal,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
@@ -2338,1065 +3074,473 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             skillUseTracker,
             onFileMutation: autoCommit.onFileMutation
           })
-          // First attempt sends the message; subsequent attempts resume from checkpoint
-          const input = isFirstAttempt ? { messages: [humanMessage] } : null
-          stream = await agent.stream(input, streamConfig)
-          usedModelId = candidateId
-          break
-        } catch (err) {
-          if (!isRetryableApiError(err)) throw err
-          failoverAttempts.push({ modelId: candidateId, error: String(err), timestamp: Date.now() })
-          console.warn(`[Agent][Failover] ${candidateId} failed: ${err}, trying next...`)
-          // Keep isFirstAttempt=true: init-time errors (createAgentRuntime / agent.stream)
-          // happen before any graph tick, so HumanMessage is NOT yet checkpointed.
-          // Next candidate must still send { messages: [humanMessage] }.
-          if (!abortController.signal.aborted) {
-            await new Promise((r) => setTimeout(r, 500))
-          }
-        }
-      }
-
-      // P3: user cancellation during failover should not be reported as hard error
-      if (abortController.signal.aborted) {
-        // Fall through to outer abort handling
-        throw Object.assign(new Error("aborted"), { name: "AbortError" })
-      }
-
-      if (!stream || !agent) {
-        const allErrors = failoverAttempts.map((a) => `${a.modelId}: ${a.error}`).join("; ")
-        throw new Error(`All models failed: ${allErrors}`)
-      }
-
-      // Notify frontend if failover happened — update model display + context window
-      const notifyFailover = (): void => {
-        if (failoverAttempts.length > 0 && usedModelId !== effectiveModelId) {
-          const usedCfgId = usedModelId?.startsWith("custom:")
-            ? usedModelId.slice("custom:".length)
-            : usedModelId
-          const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
-          window.webContents.send(channel, {
-            type: "custom",
-            data: {
-              type: "routing_result",
-              resolvedModelId: usedModelId,
-              resolvedTier: usedCfg?.tier ?? "premium",
-              routeReason: `failover from ${failoverAttempts[0].modelId}`
-            }
-          })
-          window.webContents.send(channel, {
-            type: "custom",
-            data: { type: "model_failover", attempts: failoverAttempts, activeModelId: usedModelId }
-          })
-          // P2: persist failover model + sticky in a single atomic write
-          rememberRoutingDecision(
-            threadId,
-            {
-              resolvedModelId: usedModelId!,
-              resolvedTier: usedCfg?.tier ?? "premium",
-              routeReason: `failover from ${failoverAttempts[0].modelId}`,
-              fallbackChain: [],
-              layer: "pinned"
-            },
-            usedModelId!
-          )
-          // Update effectiveModelId for downstream trace/feedback
-          effectiveModelId = usedModelId
-        }
-      }
-      notifyFailover()
-
-      // Update tracer with resolved modelId.
-      // Set modelName from config.model (the real API model name, e.g. "MiniMax-M2.7") as an
-      // initial fallback — it will be overwritten later by the actual model name from the API
-      // response metadata once the first AI message arrives (see response_metadata.model_name below).
-      if (effectiveModelId) {
-        tracer.setModelId(effectiveModelId)
-        const cfgIdForName = effectiveModelId.startsWith("custom:")
-          ? effectiveModelId.slice("custom:".length)
-          : effectiveModelId
-        const cfgForName = getCustomModelConfigs().find((c) => c.id === cfgIdForName)
-        // Use config.model (the actual API model name) as fallback, not config.name (display label)
-        if (cfgForName?.model) tracer.setModelName(cfgForName.model)
-      }
-
-      // ── Tool-call extraction (tested in __tests__/tool-call-extraction.test.ts)
-      //
-      // "messages" mode delivers one [msgChunk, metadata?] tuple per LangGraph message.
-      // AI messages carry a complete tool_calls array even in streaming mode —
-      // confirmed by stream-converter.ts and unit tests.
-      //
-      // Deduplication: same AI message ID can appear in multiple chunks
-      // (e.g. once as AIMessageChunk, once as AIMessage in a values snapshot).
-      // We track seen IDs to count each unique tool invocation exactly once.
-      // ─────────────────────────────────────────────────────────────────────────
-
-      const _countedAiMsgIds = new Set<string>()
-      const _countedModelMsgIds = new Set<string>()
-      const _countedToolResultMsgIds = new Set<string>()
-      // Track which subagent tool-call IDs we've already emitted SubagentStop for (dedupe)
-      const _subagentStopFired = new Set<string>()
-      const _llmNodeByMessageId = new Map<string, string>()
-      const _toolNodeByRef = new Map<string, string>()
-      const _toolNameByCallId = new Map<string, string>()
-      const MODEL_INPUT_WINDOW = 12
-      const MAX_TRACE_CONTENT = 2000
-      const MAX_GOAL_TOOL_EVIDENCE_ITEMS = 60
-      const goalEvidenceBuffer = new GoalEvidenceBuffer(MAX_GOAL_TOOL_EVIDENCE_ITEMS)
-      let currentTurnToolCallStart = 0
-      let currentTurnEvidenceStart = 0
-
-      const trimContent = (s: string): string =>
-        s.length > MAX_TRACE_CONTENT ? `${s.slice(0, MAX_TRACE_CONTENT)}\n…(truncated)` : s
-
-      const getCurrentTurnToolCalls = (): string[] =>
-        toolCallCounter.getNamesSince(currentTurnToolCallStart)
-      const getCurrentTurnGoalToolEvidence = (): string[] =>
-        goalEvidenceBuffer.getItemsSince(currentTurnEvidenceStart)
-
-      const normalizeMessageText = (s: string): string => s.replace(/\r\n/g, "\n").trim()
-
-      const asRecord = (value: unknown): Record<string, unknown> | null =>
-        value && typeof value === "object" ? (value as Record<string, unknown>) : null
-
-      // Providers may surface usage as top-level `usage_metadata` or under
-      // `response_metadata.token_usage` / `response_metadata.usage`.
-      // Normalize all variants so trace capture and UI stay aligned.
-      const getUsageMetadata = (kwargs: unknown): unknown => {
-        const record = asRecord(kwargs)
-        const responseMetadata = asRecord(record?.response_metadata)
-        return record?.usage_metadata ?? responseMetadata?.token_usage ?? responseMetadata?.usage
-      }
-
-      const extractRawText = (raw: unknown): string => {
-        if (typeof raw === "string") return raw
-        if (!Array.isArray(raw)) return ""
-        return raw
-          .map((b) => {
-            if (typeof b === "string") return b
-            const record = asRecord(b)
-            if (!record) return ""
-            if (typeof record.text === "string") return record.text
-            if (typeof record.content === "string") return record.content
-            return ""
-          })
-          .filter(Boolean)
-          .join("\n")
-      }
-
-      const extractText = (raw: unknown): string => trimContent(extractRawText(raw))
-
-      const toRole = (
-        className: string,
-        kwargs: unknown
-      ): "system" | "user" | "assistant" | "tool" | "unknown" => {
-        const record = asRecord(kwargs)
-        if (className.includes("Human")) return "user"
-        if (className.includes("AI")) return "assistant"
-        if (className.includes("System")) return "system"
-        if (className.includes("Tool")) return "tool"
-        if (record?.type === "human") return "user"
-        if (record?.type === "ai") return "assistant"
-        if (record?.type === "system") return "system"
-        if (record?.type === "tool") return "tool"
-        return "unknown"
-      }
-
-      const normalizeTokenUsage = (
-        usage: unknown
-      ):
-        | {
-            inputTokens?: number
-            outputTokens?: number
-            totalTokens?: number
-            cacheReadTokens?: number
-            cacheCreationTokens?: number
-          }
-        | undefined => {
-        const record = asRecord(usage)
-        if (!record) return undefined
-        const toNum = (v: unknown): number | undefined =>
-          typeof v === "number" && Number.isFinite(v) ? v : undefined
-        const inputTokens = toNum(record.input_tokens ?? record.inputTokens)
-        const outputTokens = toNum(record.output_tokens ?? record.outputTokens)
-        const totalTokens = toNum(record.total_tokens ?? record.totalTokens)
-        const cacheReadTokens = toNum(
-          record.cache_read_input_tokens ?? record.cacheReadInputTokens ?? record.cacheReadTokens
-        )
-        const cacheCreationTokens = toNum(
-          record.cache_creation_input_tokens ??
-            record.cacheCreationInputTokens ??
-            record.cacheCreationTokens
-        )
-        if (
-          inputTokens === undefined &&
-          outputTokens === undefined &&
-          totalTokens === undefined &&
-          cacheReadTokens === undefined &&
-          cacheCreationTokens === undefined
-        )
-          return undefined
-        return { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens }
-      }
-
-      const extractTextBlocks = (raw: unknown): string => {
-        if (typeof raw === "string") return raw
-        if (Array.isArray(raw)) {
-          return (raw as Array<{ type?: string; text?: string }>)
-            .filter((b) => b?.type === "text")
-            .map((b) => b.text ?? "")
-            .join("")
-        }
-        return ""
-      }
-
-      const forwardStreamChunk = (mode: string, payload: unknown): void => {
-        window.webContents.send(channel, {
-          type: "stream",
-          mode,
-          data: payload
-        })
-      }
-
-      const processMessagesSideEffects = async (payload: unknown): Promise<void> => {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const [msgChunk] = payload as [any]
-          if (!msgChunk) return
-
-          const kwargs = (msgChunk.kwargs || {}) as Record<string, unknown>
-          const classId: string[] = Array.isArray(msgChunk.id) ? msgChunk.id : []
-          const className = classId[classId.length - 1] || ""
-          const isAI = className.includes("AI")
-          await maybeRunSubagentStopHooksFromStreamPayload({
-            payload,
-            workspacePath: sessionWorkspacePath,
-            threadId,
-            hookScope,
-            firedToolCallIds: _subagentStopFired,
-            onHookResult
-          })
-
-          if (!isAI) return
-
-          const rawContent = kwargs.content ?? msgChunk.content
-          const visibleText = extractTextBlocks(rawContent)
-          if (visibleText) assistantText += visibleText
-
-          // Tool-call extraction — deduped by message ID.
-          const toolCalls = kwargs.tool_calls as
-            | Array<{
-                id?: string
-                name?: string
-                args?: Record<string, unknown>
-              }>
-            | undefined
-          const msgId = (kwargs.id as string) || ""
-          if (!toolCalls || toolCalls.length === 0) return
-          if (msgId && _countedAiMsgIds.has(msgId)) return
-          if (msgId) _countedAiMsgIds.add(msgId)
-
-          tracer.beginStep()
-          for (let tcIndex = 0; tcIndex < toolCalls.length; tcIndex++) {
-            const tc = toolCalls[tcIndex]
-            const tcName = tc.name ?? "unknown"
-            if (tc.id) _toolNameByCallId.set(tc.id, tcName)
-            goalEvidenceBuffer.rememberToolCall(tc.id, tc.args)
-            tracer.recordToolCall({ name: tcName, args: tc.args ?? {} })
-            const counted = toolCallCounter.register(tc, msgId, tcIndex)
-
-            if (tcName === "read_file") {
-              const readPathRaw =
-                (typeof tc.args?.path === "string" && tc.args.path) ||
-                (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
-                ""
-              if (readPathRaw) {
-                const hit = skillUsageDetector.onReadFilePath(readPathRaw)
-                // Sync tracer + adoption context immediately when the hit set
-                // grows. Without this, a write_file/edit_file that follows in
-                // the *same* values batch would snapshot an empty usedSkills
-                // and the resulting code_gen would be missing skill attribution.
-                if (hit) {
-                  syncUsedSkillsContext()
-                }
-              }
-            }
-
-            if (counted) {
-              const turnCount = toolCallCounter.getCount()
-              console.log(`[Agent] Turn tool call #${turnCount} (${tcName}) in thread ${threadId}`)
-            }
-          }
-          tracer.endStep(visibleText)
-        } catch (e) {
-          if (isHookHaltError(e)) throw e
-          console.error("[Agent] Tool-call extraction error:", e)
-        }
-      }
-
-      const processValuesSideEffects = async (payload: unknown): Promise<void> => {
-        try {
-          const state = payload as {
-            skillsMetadata?: Array<{ name?: string; path?: string; version?: string }>
-            messages?: Array<{
-              id?: string[]
-              kwargs?: {
-                id?: string
-                type?: string
-                content?: unknown
-                name?: string
-                tool_call_id?: string
-                usage_metadata?: unknown
-                response_metadata?: {
-                  token_usage?: unknown
-                  usage?: unknown
-                  model_name?: string
-                  model?: string
-                }
-                status?: string
-                is_error?: boolean
-                additional_kwargs?: Record<string, unknown>
-                tool_calls?: Array<{
-                  id?: string
-                  name?: string
-                  args?: Record<string, unknown>
-                }>
-              }
-            }>
-          }
-          const skillsMetadata = Array.isArray(state.skillsMetadata) ? state.skillsMetadata : []
-          if (skillsMetadata.length > 0) {
-            skillUsageDetector.onSkillsMetadata(skillsMetadata)
-            syncUsedSkillsContext()
-          }
-
-          if (!Array.isArray(state.messages)) return
-
-          const turnPromptCandidates = [
-            currentTurnUserMessageForEvidence,
-            modelInputMessage,
-            message,
-            rootUserPrompt
-          ]
-            .map((candidate) => normalizeMessageText(candidate))
-            .filter(Boolean)
-          let currentTurnStartIndex = -1
-          for (let i = state.messages.length - 1; i >= 0; i--) {
-            const msg = state.messages[i]
-            const kwargs = msg?.kwargs || {}
-            const classId = Array.isArray(msg?.id) ? msg.id : []
-            const className = classId[classId.length - 1] || ""
-            const role = toRole(className, kwargs)
-            if (role !== "user") continue
-            if (turnPromptCandidates.includes(normalizeMessageText(extractText(kwargs.content)))) {
-              currentTurnStartIndex = i
-              break
-            }
-          }
-
-          const valuesStartIndex = currentTurnStartIndex >= 0 ? currentTurnStartIndex + 1 : 0
-
-          for (let i = valuesStartIndex; i < state.messages.length; i++) {
-            const msg = state.messages[i]
-            const tcs = msg?.kwargs?.tool_calls
-
-            const kwargs = msg?.kwargs || {}
-            const classId = Array.isArray(msg?.id) ? msg.id : []
-            const className = classId[classId.length - 1] || ""
-            const isAI = className.includes("AI") || kwargs.type === "ai"
-            const isToolMessage = className.includes("Tool") || kwargs.type === "tool"
-            const aiMsgId = typeof kwargs.id === "string" ? kwargs.id : ""
-            if (isAI && aiMsgId && !_countedModelMsgIds.has(aiMsgId)) {
-              _countedModelMsgIds.add(aiMsgId)
-
-              // Extract the real model name from API response metadata (e.g. "MiniMax-M2.7")
-              // This takes precedence over the user-configured model name (config.model)
-              const apiModelName =
-                kwargs.response_metadata?.model_name ?? kwargs.response_metadata?.model
-              if (typeof apiModelName === "string" && apiModelName) {
-                tracer.setModelName(apiModelName)
-              }
-
-              const inputSlice = state.messages
-                .slice(Math.max(0, i - MODEL_INPUT_WINDOW), i)
-                .map((m) => {
-                  const k = m?.kwargs || {}
-                  const cid = Array.isArray(m?.id) ? m.id : []
-                  const cname = cid[cid.length - 1] || ""
-                  return {
-                    role: toRole(cname, k),
-                    content: extractText(k.content),
-                    ...(typeof k.name === "string" ? { name: k.name } : {}),
-                    ...(typeof k.tool_call_id === "string" ? { toolCallId: k.tool_call_id } : {})
-                  }
-                })
-                .filter((m) => m.content || m.role === "tool")
-
-              const outputToolCalls = Array.isArray(tcs)
-                ? tcs.map((tc) => ({
-                    name: tc?.name ?? "unknown",
-                    args: tc?.args ?? {}
-                  }))
-                : []
-
-              const llmNodeId = tracer.beginLlmNode({
-                messageId: aiMsgId,
-                startedAt: nowIsoLocal(),
-                input: inputSlice,
-                metadata: {
-                  toolCallCount: outputToolCalls.length
-                }
-              })
-              _llmNodeByMessageId.set(aiMsgId, llmNodeId)
-
-              const usageForTrace = normalizeTokenUsage(getUsageMetadata(kwargs))
-
-              // Track high-water mark of input tokens for context window capacity guard
-              if (usageForTrace?.inputTokens && usageForTrace.inputTokens > highWaterInputTokens) {
-                highWaterInputTokens = usageForTrace.inputTokens
-              }
-
-              tracer.recordModelCall({
-                messageId: aiMsgId,
-                startedAt: nowIsoLocal(),
-                inputMessages: inputSlice,
-                outputMessage: {
-                  role: "assistant",
-                  content: extractText(kwargs.content)
-                },
-                toolCalls: outputToolCalls,
-                tokenUsage: usageForTrace
-              })
-
-              tracer.endLlmNode({
-                nodeId: llmNodeId,
-                output: extractText(kwargs.content),
-                status: "success",
-                metadata: {
-                  tokenUsage: usageForTrace
-                }
-              })
-            }
-
-            if (Array.isArray(tcs)) {
-              for (let tcIndex = 0; tcIndex < tcs.length; tcIndex++) {
-                const tc = tcs[tcIndex]
-                const tcId = typeof tc?.id === "string" ? tc.id : ""
-                if (tcId) _toolNameByCallId.set(tcId, tc?.name ?? "unknown")
-                goalEvidenceBuffer.rememberToolCall(tcId, tc?.args)
-                const toolRef =
-                  tcId || `${aiMsgId || "ai_unknown"}:${tcIndex}:${JSON.stringify(tc?.args ?? {})}`
-                const counted = toolCallCounter.register(tc, aiMsgId, tcIndex)
-                if (!_toolNodeByRef.has(toolRef)) {
-                  const parentId = aiMsgId ? _llmNodeByMessageId.get(aiMsgId) : undefined
-                  const toolNodeId = tracer.addToolNode({
-                    name: tc?.name ?? "unknown",
-                    input: tc?.args ?? {},
-                    parentId,
-                    llmMessageId: aiMsgId || undefined,
-                    toolCallId: tcId || undefined,
-                    metadata: { index: tcIndex }
-                  })
-                  _toolNodeByRef.set(toolRef, toolNodeId)
-                }
-
-                if (counted) {
-                  const turnCount = toolCallCounter.getCount()
-                  console.log(
-                    `[Agent] Turn tool call #${turnCount} (${tc?.name ?? "unknown"}) in thread ${threadId} [values]`
-                  )
-                }
-
-                if (tc?.name !== "read_file") continue
-                const readPathRaw =
-                  (typeof tc.args?.path === "string" && tc.args.path) ||
-                  (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
-                  ""
-                if (readPathRaw) {
-                  const hit = skillUsageDetector.onReadFilePath(readPathRaw)
-                  // See the read_file branch in processMessagesSideEffects —
-                  // a following write/edit in this same messages loop would
-                  // otherwise see a stale usedSkills snapshot.
-                  if (hit) {
-                    syncUsedSkillsContext()
-                  }
-                }
-              }
-            }
-
-            if (isToolMessage) {
-              await maybeRunSubagentStopHooksFromStreamPayload({
-                payload: [msg],
-                workspacePath: sessionWorkspacePath,
-                threadId,
-                hookScope,
-                firedToolCallIds: _subagentStopFired,
-                onHookResult
-              })
-              const toolMsgId =
-                typeof kwargs.id === "string"
-                  ? kwargs.id
-                  : `${kwargs.tool_call_id ?? "tool"}:${i}:${extractText(kwargs.content)}`
-              if (_countedToolResultMsgIds.has(toolMsgId)) continue
-              const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
-              _countedToolResultMsgIds.add(toolMsgId)
-              const parentId = toolCallId ? _toolNodeByRef.get(toolCallId) : undefined
-              const toolOutput = extractRawText(kwargs.content)
-              const toolName =
-                (typeof kwargs.name === "string" && kwargs.name) ||
-                (toolCallId ? _toolNameByCallId.get(toolCallId) : undefined) ||
-                "tool"
-              goalEvidenceBuffer.appendToolResult({ toolName, output: toolOutput, toolCallId })
-              // Detect tool error: explicit status field, is_error flag, or error-prefix in output
-              const additionalKwargs = kwargs.additional_kwargs as
-                | Record<string, unknown>
-                | undefined
-              const isToolError =
-                kwargs.status === "error" ||
-                kwargs.is_error === true ||
-                additionalKwargs?.is_error === true ||
-                /^(error:|mcp tool error:|tool error:|failed:)/i.test(toolOutput.trim())
-              if (isToolError) toolErrorCount += 1
-              tracer.addToolResultNode({
-                parentId,
-                toolCallId: toolCallId || undefined,
-                output: toolOutput,
-                status: isToolError ? "error" : "success",
-                metadata: {
-                  messageId: toolMsgId
-                }
-              })
-            }
-          }
-
-          const finalMsgs = state.messages.slice(valuesStartIndex).filter((m) => {
-            const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
-            const kw = m.kwargs || {}
-            return (
-              cn.includes("AI") &&
-              (!kw.tool_calls || !Array.isArray(kw.tool_calls) || kw.tool_calls.length === 0)
-            )
-          })
-          const last = finalMsgs[finalMsgs.length - 1]
-          if (last) {
-            const kw = last.kwargs || {}
-            const text = extractTextBlocks(kw.content).trim()
-            if (text) lastFinalText = text
-          }
-        } catch (e) {
-          if (isHookHaltError(e)) throw e
-          console.error("[Agent] Values side-effect processing error:", e)
-        }
-      }
-
-      let sawCheckpointInterrupt = false
-      const processChunkSideEffects = async (mode: string, payload: unknown): Promise<void> => {
-        if (mode === "messages") {
-          await processMessagesSideEffects(payload)
-          return
-        }
-        if (mode === "values") {
-          if (hasCheckpointInterruptPayload(payload)) {
-            sawCheckpointInterrupt = true
-          }
-          await processValuesSideEffects(payload)
-        }
-      }
-
-      let lastFinalText = "" // 最终回复（不含中间工具推理），用于 ChatX HTTP 回复
-      let currentTurnAssistantStart = 0
-      let consecutiveGoalEvaluatorErrors = 0
-      const getCurrentAssistantResponse = (): string =>
-        getCurrentTurnAssistantResponse({
-          assistantText,
-          currentTurnAssistantStart,
-          lastFinalText
-        })
-
-      // P1: Mid-stream failover — if the stream fails with a retryable error,
-      // try remaining models in the chain using resume semantics.
-      const remainingCandidates = orderedChain.slice(
-        usedModelId ? orderedChain.indexOf(usedModelId) + 1 : orderedChain.length
-      )
-      let activeStream: AsyncIterable<unknown> = stream
-
-      const consumeStreamWithSideEffects = async (
-        source: AsyncIterable<unknown>
-      ): Promise<void> => {
-        for await (const chunk of source) {
-          if (abortController.signal.aborted) break
-
-          const [mode, data] = chunk as unknown as [string, unknown]
-
-          // Serialize first — live BaseMessage objects must be serialized before
-          // we can inspect the LangChain class path (msgChunk.id becomes the
-          // class array ["langchain_core","messages","AIMessageChunk"] only after
-          // toJSON() / JSON.stringify; on the live object, .id is the msg-id string).
-          const serialized = serializeStreamData(data)
-          // UI forwarding is the primary path. Most processing below is best-effort;
-          // SubagentStop hooks are awaited so `continue:false` can halt the parent turn.
-          forwardStreamChunk(mode, serialized)
-          await processChunkSideEffects(mode, serialized)
-          stopContextCollector.processStreamChunk(mode, serialized)
-        }
-      }
-
-      const switchToNextFailoverCandidate = async (
-        error: unknown,
-        label: string
-      ): Promise<boolean> => {
-        if (!isRetryableApiError(error) || remainingCandidates.length === 0) {
-          return false
-        }
-        if (abortController.signal.aborted) throw error
-
-        const failedModelId = usedModelId ?? "unknown"
-        failoverAttempts.push({
-          modelId: failedModelId,
-          error: String(error),
-          timestamp: Date.now()
-        })
-        console.warn(
-          `[Agent][Failover] ${label} ${failedModelId} failed: ${error}, trying next...`
-        )
-
-        if (!abortController.signal.aborted) {
-          await new Promise((r) => setTimeout(r, 500))
+          usedModelId = nextCandidate
+          return true
         }
 
-        const nextCandidate = remainingCandidates.shift()!
-        agent = await createAgentRuntime({
-          threadId,
-          workspacePath,
-          modelId: nextCandidate,
-          abortSignal: abortController.signal,
-          noSkillEvolutionTool: true,
-          retryHooks: buildModelRetryHooks(window, channel),
-          maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-          onHookResult,
-          hookScope,
-          skillHookKeys,
-          skillUseTracker,
-          onFileMutation: autoCommit.onFileMutation
-        })
-        usedModelId = nextCandidate
-        return true
-      }
-
-      const consumeGoalContinuationWithFailover = async (
-        goalContinuationInput: string
-      ): Promise<void> => {
-        let inputCheckpointed = false
-
-        while (true) {
-          try {
-            if (!agent) throw new Error("Cannot continue goal: agent runtime is unavailable")
-            const goalStream = await agent.stream(
-              inputCheckpointed
-                ? null
-                : { messages: [new HumanMessage(goalContinuationInput)] },
-              streamConfig
-            )
-            notifyFailover()
-            inputCheckpointed = true
-            await consumeStreamWithSideEffects(goalStream)
-            return
-          } catch (goalStreamErr) {
-            const switched = await switchToNextFailoverCandidate(
-              goalStreamErr,
-              "Goal continuation"
-            )
-            if (!switched) throw goalStreamErr
-          }
-        }
-      }
-
-      while (true) {
-        try {
-          await consumeStreamWithSideEffects(activeStream)
-          break // Stream completed successfully
-        } catch (midStreamErr) {
-          const switched = await switchToNextFailoverCandidate(midStreamErr, "Mid-stream")
-          if (!switched) throw midStreamErr
-          if (!agent) throw new Error("Cannot resume after failover: agent runtime is unavailable")
-          activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
-          notifyFailover()
-        }
-      }
-
-      if (!abortController.signal.aborted) {
-        if (sawCheckpointInterrupt) {
-          turnStateShouldDispose = false
-          preserveAutoCommitTrackingForInterrupt = true
-          window.webContents.send(channel, { type: "done" })
-          return
-        }
-
-        while (!abortController.signal.aborted) {
-          const completionOutcome = await runCompletionHooksWithRevision({
-            threadId,
-            workspacePath: workspacePath ?? undefined,
-            abortSignal: abortController.signal,
-            getStopContext: () =>
-              stopContextCollector.snapshot({
-                userMessage: message,
-                assistantResponse: getCurrentAssistantResponse(),
-                toolCalls: getCurrentTurnToolCalls(),
-                usedSkills: skillUsageDetector.getUsedSkillNames()
-              }),
-            runRevision: async (revisionPrompt) => {
-              if (!agent)
-                throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
-              const revisionStream = await agent.stream(
-                { messages: [new HumanMessage(revisionPrompt)] },
-                streamConfig
-              )
-              await consumeStreamWithSideEffects(revisionStream)
-            },
-            sendNotice: sendHookNotice,
-            sendError: sendStreamError,
-            hookScope,
-            skillUseTracker,
-            maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
-            revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
-            onHookResult
-          })
-
-          if (completionOutcome === "failed") {
-            pauseActiveGoalForRuntimeStop("Stop hook blocked completion.")
-            await tracer.finish("error", "Stop hook blocked completion")
-            turnStateShouldDispose = true
-            return
-          }
-          // A halt is an intentional stop condition for the current turn. Do not
-          // auto-continue a goal after a hook explicitly halted the run.
-          if (completionOutcome === "halted") {
-            const reason = "Stop hook halted the turn."
-            pauseActiveGoalForRuntimeStop(reason)
-            markInvokeIncomplete(reason)
-            break
-          }
-
-          const activeGoal = goalManager.getActive(threadId)
+        const getCurrentGoalForContinuation = (expectedGoal: ThreadGoal): ThreadGoal | null => {
+          throwIfInvokeAborted()
+          const latestGoal = goalManager.getActive(threadId)
           if (
-            !activeGoal ||
+            !latestGoal ||
             !isGoalBoundaryStillCurrent(
-              activeGoal.goalId,
+              latestGoal.goalId,
+              expectedGoal.goalId,
+              latestGoal.activeWindowId,
+              expectedGoal.activeWindowId
+            ) ||
+            !isGoalBoundaryStillCurrent(
+              latestGoal.goalId,
               runGoalId,
-              activeGoal.activeWindowId,
+              latestGoal.activeWindowId,
               runGoalActiveWindowId
             )
           ) {
-            break
+            return null
           }
+          return latestGoal
+        }
 
-          const goalEvaluationInput = {
-            goal: activeGoal,
-            assistantResponse: getCurrentAssistantResponse(),
-            toolCalls: getCurrentTurnToolCalls(),
-            toolEvidence: getCurrentTurnGoalToolEvidence(),
-            usedSkills: skillUsageDetector.getUsedSkillNames()
+        const consumeGoalContinuationWithFailover = async (
+          goalContinuationInput: string,
+          expectedGoal: ThreadGoal
+        ): Promise<boolean> => {
+          let inputCheckpointed = false
+
+          while (true) {
+            try {
+              if (!getCurrentGoalForContinuation(expectedGoal)) return false
+              if (!agent) throw new Error("Cannot continue goal: agent runtime is unavailable")
+              const goalStream = await agent.stream(
+                inputCheckpointed ? null : { messages: [new HumanMessage(goalContinuationInput)] },
+                streamConfig
+              )
+              notifyFailover()
+              inputCheckpointed = true
+              await consumeStreamWithSideEffects(goalStream)
+              return true
+            } catch (goalStreamErr) {
+              const switched = await switchToNextFailoverCandidate(
+                goalStreamErr,
+                "Goal continuation"
+              )
+              if (!switched) throw goalStreamErr
+            }
           }
-          const judgeDecision: GoalJudgeDecision = shouldPauseGoalForEmptyTurn(goalEvaluationInput)
-            ? {
-                verdict: "blocked",
-                reason:
-                  "Goal paused because the last turn produced no assistant response or tool evidence."
-              }
-            : await evaluateGoalWithModel(goalEvaluationInput, {
-                modelId: usedModelId ?? effectiveModelId,
-                abortSignal: abortController.signal
-              })
-                .then((decision) => {
-                  consecutiveGoalEvaluatorErrors = 0
-                  return decision
-                })
-                .catch((error) => {
-                  if (abortController.signal.aborted || isAbortLikeError(error)) throw error
-                  consecutiveGoalEvaluatorErrors += 1
-                  console.warn("[Goal] evaluator failed:", error)
-                  if (consecutiveGoalEvaluatorErrors < 3) {
+        }
+
+        const finishCheckpointInterruptIfNeeded = (): boolean => {
+          if (!sawCheckpointInterrupt || abortController.signal.aborted) return false
+          turnStateShouldDispose = false
+          preserveAutoCommitTrackingForInterrupt = true
+          window.webContents.send(channel, { type: "done" })
+          return true
+        }
+
+        while (true) {
+          try {
+            await consumeStreamWithSideEffects(activeStream)
+            break // Stream completed successfully
+          } catch (midStreamErr) {
+            const switched = await switchToNextFailoverCandidate(midStreamErr, "Mid-stream")
+            if (!switched) throw midStreamErr
+            if (!agent)
+              throw new Error("Cannot resume after failover: agent runtime is unavailable")
+            activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
+            notifyFailover()
+          }
+        }
+
+        if (!abortController.signal.aborted) {
+          if (finishCheckpointInterruptIfNeeded()) return
+
+          while (!abortController.signal.aborted) {
+            const completionOutcome = await runCompletionHooksWithRevision({
+              threadId,
+              workspacePath: workspacePath ?? undefined,
+              abortSignal: abortController.signal,
+              getStopContext: () =>
+                stopContextCollector.snapshot({
+                  userMessage: message,
+                  assistantResponse: getCurrentAssistantResponse(),
+                  toolCalls: getCurrentTurnToolCalls(),
+                  usedSkills: skillUsageDetector.getUsedSkillNames()
+                }),
+              runRevision: async (revisionPrompt) => {
+                if (!agent)
+                  throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+                const revisionStream = await agent.stream(
+                  { messages: [new HumanMessage(revisionPrompt)] },
+                  streamConfig
+                )
+                await consumeStreamWithSideEffects(revisionStream)
+              },
+              sendNotice: sendHookNotice,
+              sendError: sendStreamError,
+              hookScope,
+              skillUseTracker,
+              maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
+              revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
+              onHookResult
+            })
+
+            if (finishCheckpointInterruptIfNeeded()) return
+
+            if (completionOutcome === "failed") {
+              pauseActiveGoalForRuntimeStop("Stop hook blocked completion.")
+              await tracer.finish("error", "Stop hook blocked completion")
+              turnStateShouldDispose = true
+              return
+            }
+            // A halt is an intentional stop condition for the current turn. Do not
+            // auto-continue a goal after a hook explicitly halted the run.
+            if (completionOutcome === "halted") {
+              const reason = "Stop hook halted the turn."
+              pauseActiveGoalForRuntimeStop(reason)
+              markInvokeIncomplete(reason)
+              break
+            }
+
+            const activeGoal = goalManager.getActive(threadId)
+            if (
+              !activeGoal ||
+              !isGoalBoundaryStillCurrent(
+                activeGoal.goalId,
+                runGoalId,
+                activeGoal.activeWindowId,
+                runGoalActiveWindowId
+              )
+            ) {
+              break
+            }
+
+            const goalEvaluationInput = {
+              goal: activeGoal,
+              assistantResponse: getCurrentAssistantResponse(),
+              toolCalls: getCurrentTurnToolCalls(),
+              toolEvidence: getCurrentTurnGoalToolEvidence(),
+              usedSkills: skillUsageDetector.getUsedSkillNames()
+            }
+            const judgeDecision: GoalJudgeDecision = shouldPauseGoalForEmptyTurn(
+              goalEvaluationInput
+            )
+              ? {
+                  verdict: "blocked",
+                  reason:
+                    "Goal paused because the last turn produced no assistant response or tool evidence."
+                }
+              : await evaluateGoalWithRuntimeRetry(goalEvaluationInput, {
+                  evaluate: evaluateGoalWithModel,
+                  modelId: usedModelId ?? effectiveModelId,
+                  abortSignal: abortController.signal,
+                  isAbortLikeError,
+                  onRetry: (error, attempt, maxAttempts) => {
+                    console.warn(
+                      `[Goal] evaluator failed; retrying (${attempt}/${maxAttempts}):`,
+                      error
+                    )
+                  },
+                  onFinalFailure: (error) => {
+                    console.warn("[Goal] evaluator failed after retry:", error)
                     return {
-                      verdict: "continue" as const,
-                      reason: "评估器暂时不可用，本轮按未完成继续处理。"
+                      verdict: "blocked",
+                      reason: "评估器暂时不可用。Goal 已暂停，请稍后使用 /goal resume 重试。"
                     }
                   }
-                  return {
-                    verdict: "blocked" as const,
-                    reason: "评估器连续不可用。请稍后使用 /goal resume 重试。"
-                  }
                 })
 
-          const outcome = goalManager.recordJudgeDecision(threadId, judgeDecision, {
-            expectedGoalId: activeGoal.goalId,
-            expectedActiveWindowId: activeGoal.activeWindowId
-          })
-          if (!outcome) break
+            const outcome = goalManager.recordJudgeDecision(threadId, judgeDecision, {
+              expectedGoalId: activeGoal.goalId,
+              expectedActiveWindowId: activeGoal.activeWindowId
+            })
+            if (!outcome) break
 
-          if (!outcome.shouldContinue || !outcome.continuationPrompt) {
-            sendGoalNotice(outcome.notice)
-            cancelGoalBackgroundTasks()
-            if (outcome.goal.status !== "complete") {
-              markInvokeIncomplete(outcome.notice)
+            if (!outcome.shouldContinue || !outcome.continuationPrompt) {
+              sendGoalNotice(outcome.notice)
+              if (outcome.goal.status !== "complete") {
+                cancelGoalBackgroundTasks()
+                markInvokeIncomplete(outcome.notice)
+              }
+              break
             }
-            break
-          }
-          const currentGoal = goalManager.getActive(threadId)
-          if (!currentGoal || currentGoal.goalId !== outcome.goal.goalId) break
-          if (!agent) throw new Error("Cannot continue goal: agent runtime is unavailable")
+            const currentGoal = getCurrentGoalForContinuation(outcome.goal)
+            if (!currentGoal) break
+            if (!agent) throw new Error("Cannot continue goal: agent runtime is unavailable")
 
-          let continuationPrompt = outcome.continuationPrompt
-          const promptSubmitContext: HookContext = {
-            toolArgs: { message: continuationPrompt },
-            userPrompt: continuationPrompt,
-            workspacePath: workspacePath ?? undefined,
-            sessionId: threadId
-          }
-          const promptSubmitResult = await runHooksEnriched(
-            resolveEnabledHooksForRun(
-              workspacePath ?? undefined,
+            let continuationPrompt = outcome.continuationPrompt
+            const promptSubmitContext: HookContext = {
+              toolArgs: { message: continuationPrompt },
+              userPrompt: continuationPrompt,
+              workspacePath: workspacePath ?? undefined,
+              sessionId: threadId
+            }
+            const promptSubmitResult = await runHooksEnriched(
+              resolveEnabledHooksForRun(
+                workspacePath ?? undefined,
+                "UserPromptSubmit",
+                promptSubmitContext,
+                hookScope
+              ),
               "UserPromptSubmit",
               promptSubmitContext,
-              hookScope
-            ),
-            "UserPromptSubmit",
-            promptSubmitContext,
-            onHookResult
-          )
-          if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
-            pauseActiveGoalForRuntimeStop("UserPromptSubmit hook stopped goal continuation.")
-            sendHookBlocked("UserPromptSubmit", promptSubmitResult, "Goal 续跑被 Hook 策略拦截")
-            await tracer.finish("cancelled", "UserPromptSubmit hook stopped goal continuation")
-            turnStateShouldDispose = true
-            return
+              onHookResult
+            )
+            if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
+              pauseActiveGoalForRuntimeStop("UserPromptSubmit hook stopped goal continuation.")
+              sendHookBlocked("UserPromptSubmit", promptSubmitResult, "Goal 续跑被 Hook 策略拦截")
+              await tracer.finish("cancelled", "UserPromptSubmit hook stopped goal continuation")
+              turnStateShouldDispose = true
+              return
+            }
+            continuationPrompt = buildGoalContinuationPromptFromHookContexts(continuationPrompt, {
+              updatedInput: promptSubmitResult?.updatedInput,
+              explicitSkillHookContext: explicitSkillActivation?.hookContext,
+              promptSubmitAdditionalContext: promptSubmitResult?.additionalContext
+            })
+            if (promptSubmitResult?.systemMessage) {
+              window.webContents.send(channel, {
+                type: "custom",
+                data: { type: "hook_notice", message: promptSubmitResult.systemMessage }
+              })
+            }
+
+            const latestGoal = getCurrentGoalForContinuation(outcome.goal)
+            if (!latestGoal) break
+
+            const goalContinuationInput = appendGoalExplicitSkillContext(
+              continuationPrompt,
+              latestGoal
+            )
+            modelInputMessage = goalContinuationInput
+            currentTurnUserMessageForEvidence = goalContinuationInput
+            currentTurnAssistantStart = assistantText.length
+            currentTurnToolCallStart = toolCallCounter.getCount()
+            currentTurnEvidenceStart = goalEvidenceBuffer.getCount()
+            lastFinalText = ""
+            sendGoalNotice(outcome.notice)
+            const continued = await consumeGoalContinuationWithFailover(
+              goalContinuationInput,
+              outcome.goal
+            )
+            if (!continued) break
+            if (finishCheckpointInterruptIfNeeded()) return
           }
-          continuationPrompt = buildGoalContinuationPromptFromHookContexts(continuationPrompt, {
-            updatedInput: promptSubmitResult?.updatedInput,
-            explicitSkillHookContext: explicitSkillActivation?.hookContext,
-            promptSubmitAdditionalContext: promptSubmitResult?.additionalContext
-          })
-          if (promptSubmitResult?.systemMessage) {
-            window.webContents.send(channel, {
-              type: "custom",
-              data: { type: "hook_notice", message: promptSubmitResult.systemMessage }
+
+          throwIfInvokeAborted()
+
+          if (invokeFinalOutcome === "success") {
+            await finalizeAutoCommit({
+              threadId,
+              workspacePath,
+              userPrompt: rootUserPrompt,
+              snapshot: autoCommit.snapshot,
+              window,
+              channel
+            })
+          }
+          turnStateShouldDispose = true
+          window.webContents.send(channel, { type: "done" })
+          const postRunAssistantText = trimPostRunAssistantText(assistantText)
+          if (invokeFinalOutcome === "success") {
+            notifyIfBackground("✅ 任务完成", lastFinalText || postRunAssistantText || "对话已完成")
+          }
+
+          // Finish trace
+          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+          await tracer.finish(invokeFinalOutcome, invokeFinalReason)
+
+          // Write routing feedback so next turn can use sticky/force logic
+          if (invokeRoutingResult && invokeFinalOutcome === "success") {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: invokeFinalOutcome,
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
             })
           }
 
-          if (abortController.signal.aborted) break
-          const latestGoal = goalManager.getActive(threadId)
-          if (!latestGoal || latestGoal.goalId !== outcome.goal.goalId) break
+          if (invokeFinalOutcome === "success") {
+            if (isOnlineSkillEvolutionEnabled()) {
+              const proposalContext = appendTurnToProposalWindow("success")
 
-          const goalContinuationInput = appendGoalExplicitSkillContext(continuationPrompt, latestGoal)
-          modelInputMessage = goalContinuationInput
-          currentTurnUserMessageForEvidence = goalContinuationInput
-          currentTurnAssistantStart = assistantText.length
-          currentTurnToolCallStart = toolCallCounter.getCount()
-          currentTurnEvidenceStart = goalEvidenceBuffer.getCount()
-          lastFinalText = ""
-          sendGoalNotice(outcome.notice)
-          await consumeGoalContinuationWithFailover(goalContinuationInput)
-        }
-
-        if (invokeFinalOutcome === "success") {
-          await finalizeAutoCommit({
-            threadId,
-            workspacePath,
-            userPrompt: rootUserPrompt,
-            snapshot: autoCommit.snapshot,
-            window,
-            channel
-          })
-        }
-        turnStateShouldDispose = true
-        window.webContents.send(channel, { type: "done" })
-        if (invokeFinalOutcome === "success") {
-          notifyIfBackground("✅ 任务完成", lastFinalText || assistantText.trim() || "对话已完成")
-        }
-
-        // Finish trace
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
-        await tracer.finish(invokeFinalOutcome, invokeFinalReason)
-
-        // Write routing feedback so next turn can use sticky/force logic
-        if (invokeRoutingResult && invokeFinalOutcome === "success") {
-          rememberRoutingFeedback(threadId, {
-            resolvedTier: invokeRoutingResult.resolvedTier,
-            resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
-            outcome: invokeFinalOutcome,
-            toolCallCount: toolCallCounter.getCount(),
-            toolErrorCount,
-            lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
-          })
-        }
-
-        if (invokeFinalOutcome === "success") {
-          if (isOnlineSkillEvolutionEnabled()) {
-            const proposalContext = appendTurnToProposalWindow("success")
-
-            // Check if this turn crossed the skill-evolution threshold.
-            const sessionToolCallCount = proposalContext.toolCallCount
-            const threshold = getSkillEvolutionThreshold()
-            if (shouldEvaluateSkillProposalWindow(sessionToolCallCount, threshold)) {
-              const mode = getSkillProposalMode(isSkillAutoProposeEnabled())
-              console.log(
-                `[SkillEvolution][${threadId}] Threshold reached ${JSON.stringify({
-                  toolCallCount: sessionToolCallCount,
-                  windowToolCallCount: proposalContext.toolCallCount,
-                  threshold,
-                  mode,
-                  usedSkills: proposalContext.usedSkills,
-                  turnCount: proposalContext.turnCount,
-                  errorCount: proposalContext.errorCount,
-                  toolCallSummary: proposalContext.toolCallSummary
-                })}`
-              )
-              if (proposalContext.usedSkills.length > 0) {
-                const names = ` [${proposalContext.usedSkills.join(", ")}]`
+              // Check if this turn crossed the skill-evolution threshold.
+              const sessionToolCallCount = proposalContext.toolCallCount
+              const threshold = getSkillEvolutionThreshold()
+              if (shouldEvaluateSkillProposalWindow(sessionToolCallCount, threshold)) {
+                const mode = getSkillProposalMode(isSkillAutoProposeEnabled())
                 console.log(
-                  `[SkillEvolution][${threadId}] Threshold skip because used skills were detected${names}`
+                  `[SkillEvolution][${threadId}] Threshold reached ${JSON.stringify({
+                    toolCallCount: sessionToolCallCount,
+                    windowToolCallCount: proposalContext.toolCallCount,
+                    threshold,
+                    mode,
+                    usedSkills: proposalContext.usedSkills,
+                    turnCount: proposalContext.turnCount,
+                    errorCount: proposalContext.errorCount,
+                    toolCallSummary: proposalContext.toolCallSummary
+                  })}`
                 )
-              } else {
-                console.log(
-                  `[SkillEvolution][${threadId}] Threshold passed without used skills, evaluating proposal mode`
-                )
-                await autoProposeSKill(threadId, proposalContext).catch((e) =>
-                  console.warn("[Agent] autoProposeSKill failed:", e)
-                )
+                if (proposalContext.usedSkills.length > 0) {
+                  const names = ` [${proposalContext.usedSkills.join(", ")}]`
+                  console.log(
+                    `[SkillEvolution][${threadId}] Threshold skip because used skills were detected${names}`
+                  )
+                } else {
+                  console.log(
+                    `[SkillEvolution][${threadId}] Threshold passed without used skills, evaluating proposal mode`
+                  )
+                  await autoProposeSKill(threadId, proposalContext).catch((e) =>
+                    console.warn("[Agent] autoProposeSKill failed:", e)
+                  )
+                }
+              }
+            } else {
+              resetSkillEvolutionSession(threadId)
+            }
+          }
+
+          if (invokeFinalOutcome === "success") {
+            // If this is a ChatX-linked thread, also send reply via HTTP (only final answer, no tool reasoning)
+            const chatxReply = lastFinalText || stripThink(postRunAssistantText).trim()
+            if (metadata.chatxRobotChatId && chatxReply) {
+              trySendChatXReply(metadata.chatxRobotChatId as string, chatxReply)
+            }
+
+            const conversation = postRunAssistantText
+              ? `User: ${rootUserPrompt}\n\nAssistant: ${postRunAssistantText}`
+              : ""
+
+            if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
+              const memoryStore = await getMemoryStore()
+              const allConfigs = getCustomModelConfigs()
+
+              // Use routing to pick memory summarization model (economy in auto mode)
+              const memRoutingResult = await resolveModel({
+                taskSource: "memory_summarize",
+                threadId,
+                requestedModelId: modelId ?? undefined,
+                routingMode: getGlobalRoutingMode()
+              }).catch(() => null)
+              const memModelId = memRoutingResult?.resolvedModelId
+              const memCfgId =
+                memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
+              const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
+
+              if (!config) {
+                console.warn("[Agent] No model config available — skipping memory summarization")
+              } else if (config?.apiKey) {
+                summarizeAndSave({
+                  model: new ChatOpenAI({
+                    model: config.model,
+                    apiKey: config.apiKey,
+                    configuration: { baseURL: config.baseUrl },
+                    maxTokens: config.maxOutputTokens,
+                    temperature: config.temperature
+                  }),
+                  conversation,
+                  memoryDir: memoryStore.getMemoryDir()
+                }).catch((e) => console.warn("[Agent] Memory summarize failed:", e))
               }
             }
+          }
+        }
+      } catch (error) {
+        if (isHookHaltError(error)) {
+          console.warn("[Agent] Hook halted turn:", error.reason)
+          pauseActiveGoalForRuntimeStop(error.reason)
+          sendHookHalt(window, channel, error)
+          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+          tracer.finish("cancelled", error.reason).catch(() => {})
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "cancelled",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
+          }
+          turnStateShouldDispose = true
+          return
+        }
+        // Ignore abort-related errors (expected when stream is cancelled)
+        const isAbortError = isAbortLikeError(error)
+
+        if (!isAbortError) {
+          const errMsg = error instanceof Error ? error.message : "Unknown error"
+          pauseActiveGoalForRuntimeStop(`Agent run failed: ${errMsg}`)
+          console.error("[Agent] Error:", error)
+          window.webContents.send(channel, {
+            type: "error",
+            error: errMsg
+          })
+          notifyIfBackground("❌ 任务失败", errMsg)
+          if (isOnlineSkillEvolutionEnabled()) {
+            appendTurnToProposalWindow("error", errMsg)
           } else {
             resetSkillEvolutionSession(threadId)
           }
-        }
-
-        if (invokeFinalOutcome === "success") {
-          // If this is a ChatX-linked thread, also send reply via HTTP (only final answer, no tool reasoning)
-          const chatxReply = lastFinalText || stripThink(assistantText).trim()
-          if (metadata.chatxRobotChatId && chatxReply) {
-            trySendChatXReply(metadata.chatxRobotChatId as string, chatxReply)
+          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+          tracer.finish("error", errMsg).catch(() => {})
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "error",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
           }
-
-          const conversation = assistantText.trim()
-            ? `User: ${rootUserPrompt}\n\nAssistant: ${assistantText}`
-            : ""
-
-          if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
-            const memoryStore = await getMemoryStore()
-            const allConfigs = getCustomModelConfigs()
-
-            // Use routing to pick memory summarization model (economy in auto mode)
-            const memRoutingResult = await resolveModel({
-              taskSource: "memory_summarize",
-              threadId,
-              requestedModelId: modelId ?? undefined,
-              routingMode: getGlobalRoutingMode()
-            }).catch(() => null)
-            const memModelId = memRoutingResult?.resolvedModelId
-            const memCfgId =
-              memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
-            const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
-
-            if (!config) {
-              console.warn("[Agent] No model config available — skipping memory summarization")
-            } else if (config?.apiKey) {
-              summarizeAndSave({
-                model: new ChatOpenAI({
-                  model: config.model,
-                  apiKey: config.apiKey,
-                  configuration: { baseURL: config.baseUrl },
-                  maxTokens: config.maxOutputTokens,
-                  temperature: config.temperature
-                }),
-                conversation,
-                memoryDir: memoryStore.getMemoryDir()
-              }).catch((e) => console.warn("[Agent] Memory summarize failed:", e))
-            }
-          }
-        }
-      }
-    } catch (error) {
-      if (isHookHaltError(error)) {
-        console.warn("[Agent] Hook halted turn:", error.reason)
-        pauseActiveGoalForRuntimeStop(error.reason)
-        sendHookHalt(window, channel, error)
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
-        tracer.finish("cancelled", error.reason).catch(() => {})
-        if (invokeRoutingResult) {
-          rememberRoutingFeedback(threadId, {
-            resolvedTier: invokeRoutingResult.resolvedTier,
-            resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
-            outcome: "cancelled",
-            toolCallCount: toolCallCounter.getCount(),
-            toolErrorCount,
-            lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
-          })
-        }
-        turnStateShouldDispose = true
-        return
-      }
-      // Ignore abort-related errors (expected when stream is cancelled)
-      const isAbortError = isAbortLikeError(error)
-
-      if (!isAbortError) {
-        const errMsg = error instanceof Error ? error.message : "Unknown error"
-        pauseActiveGoalForRuntimeStop(`Agent run failed: ${errMsg}`)
-        console.error("[Agent] Error:", error)
-        window.webContents.send(channel, {
-          type: "error",
-          error: errMsg
-        })
-        notifyIfBackground("❌ 任务失败", errMsg)
-        if (isOnlineSkillEvolutionEnabled()) {
-          appendTurnToProposalWindow("error", errMsg)
+          turnStateShouldDispose = true
         } else {
-          resetSkillEvolutionSession(threadId)
+          pauseActiveGoalForRuntimeStop("Agent run was aborted.")
+          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+          tracer.finish("cancelled").catch(() => {})
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "cancelled",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
+          }
+          turnStateShouldDispose = true
         }
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
-        tracer.finish("error", errMsg).catch(() => {})
-        if (invokeRoutingResult) {
-          rememberRoutingFeedback(threadId, {
-            resolvedTier: invokeRoutingResult.resolvedTier,
-            resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
-            outcome: "error",
-            toolCallCount: toolCallCounter.getCount(),
-            toolErrorCount,
-            lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
-          })
+      } finally {
+        if (onWindowClosed) {
+          window.off("closed", onWindowClosed)
         }
-        turnStateShouldDispose = true
-      } else {
-        pauseActiveGoalForRuntimeStop("Agent run was aborted.")
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
-        tracer.finish("cancelled").catch(() => {})
-        if (invokeRoutingResult) {
-          rememberRoutingFeedback(threadId, {
-            resolvedTier: invokeRoutingResult.resolvedTier,
-            resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
-            outcome: "cancelled",
-            toolCallCount: toolCallCounter.getCount(),
-            toolErrorCount,
-            lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
-          })
+        if (activeRuns.get(threadId) === abortController) {
+          activeRuns.delete(threadId)
         }
-        turnStateShouldDispose = true
+        if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
+          disposeTurnRuntimeState(threadId, turnState)
+        }
+        if (!preserveAutoCommitTrackingForInterrupt) {
+          discardAgentAutoCommitTracking(threadId)
+        }
+        // Clean up sandbox ACLs granted during this run (unelevated mode keeps them
+        // across commands for performance, so we revoke them when the run ends).
+        // Uses threadId to only release this run's ref-counts, not other concurrent runs'.
+        LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
+          console.warn("[Agent] ACL cleanup error:", err)
+        })
+        // SessionEnd is NOT fired here — it belongs to thread lifecycle (delete / app quit),
+        // not turn completion. See fireSessionEnd call in threads:delete handler.
       }
     } finally {
+      if (onWindowClosed) {
+        window.off("closed", onWindowClosed)
+      }
       if (activeRuns.get(threadId) === abortController) {
         activeRuns.delete(threadId)
       }
-      if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
-        disposeTurnRuntimeState(threadId, turnState)
-      }
-      if (!preserveAutoCommitTrackingForInterrupt) {
-        discardAgentAutoCommitTracking(threadId)
-      }
-      // Clean up sandbox ACLs granted during this run (unelevated mode keeps them
-      // across commands for performance, so we revoke them when the run ends).
-      // Uses threadId to only release this run's ref-counts, not other concurrent runs'.
-      LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
-        console.warn("[Agent] ACL cleanup error:", err)
-      })
-      // SessionEnd is NOT fired here — it belongs to thread lifecycle (delete / app quit),
-      // not turn completion. See fireSessionEnd call in threads:delete handler.
     }
   })
 
@@ -3476,14 +3620,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       abortController.abort()
     }
     window.once("closed", onWindowClosed)
-    sendActiveHookNotice(window, channel, workspacePath)
-    const autoCommit = await beginAutoCommitTracking(threadId, workspacePath, {
-      reuseSnapshot: turnState.autoCommitSnapshot !== undefined,
-      snapshot: turnState.autoCommitSnapshot
-    })
-    turnState.autoCommitSnapshot = autoCommit.snapshot
 
     try {
+      sendActiveHookNotice(window, channel, workspacePath)
+      const autoCommit = await beginAutoCommitTracking(threadId, workspacePath, {
+        reuseSnapshot: turnState.autoCommitSnapshot !== undefined,
+        snapshot: turnState.autoCommitSnapshot
+      })
+      turnState.autoCommitSnapshot = autoCommit.snapshot
+
       const requestedModelIdResume = modelId || (metadata.model as string | undefined)
       const resumeRoutingResult = await resolveModel({
         taskSource: "chat",
@@ -3743,6 +3888,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           window,
           channel
         })
+        // Legacy checkpoint resume completes at a manual boundary by design.
+        // It does not re-enter the goal evaluator/continuation loop today.
         pauseActiveGoalAfterBoundary(
           threadId,
           window,
@@ -3792,6 +3939,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
       turnStateShouldDispose = true
     } finally {
+      window.off("closed", onWindowClosed)
       if (activeRuns.get(threadId) === abortController) {
         activeRuns.delete(threadId)
       }
@@ -3877,14 +4025,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       abortController.abort()
     }
     window.once("closed", onWindowClosed)
-    sendActiveHookNotice(window, channel, workspacePath)
-    const autoCommit = await beginAutoCommitTracking(threadId, workspacePath, {
-      reuseSnapshot: turnState.autoCommitSnapshot !== undefined,
-      snapshot: turnState.autoCommitSnapshot
-    })
-    turnState.autoCommitSnapshot = autoCommit.snapshot
 
     try {
+      sendActiveHookNotice(window, channel, workspacePath)
+      const autoCommit = await beginAutoCommitTracking(threadId, workspacePath, {
+        reuseSnapshot: turnState.autoCommitSnapshot !== undefined,
+        snapshot: turnState.autoCommitSnapshot
+      })
+      turnState.autoCommitSnapshot = autoCommit.snapshot
+
       const interruptRoutingResult = await resolveModel({
         taskSource: "chat",
         threadId,
@@ -4132,6 +4281,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             window,
             channel
           })
+          // Legacy checkpoint interrupt approval completes at a manual boundary
+          // by design. It does not re-enter the goal evaluator/continuation loop today.
           pauseActiveGoalAfterBoundary(
             threadId,
             window,
@@ -4196,6 +4347,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
       turnStateShouldDispose = true
     } finally {
+      window.off("closed", onWindowClosed)
       if (activeRuns.get(threadId) === abortController) {
         activeRuns.delete(threadId)
       }
@@ -4222,26 +4374,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     if (paused?.status === "paused") {
       const pausedReason = displayGoalPausedReason(paused.pausedReason)
       const notice = pausedReason ? `Goal 已暂停：${pausedReason}` : "Goal 已暂停。"
-      let eventId: number | null = null
-      let createdAt = Date.now()
-      try {
-        const event = addThreadGoalEvent(threadId, notice, paused.goalId, createdAt, paused.activeWindowId)
-        eventId = event.event_id
-        createdAt = event.created_at
-      } catch (error) {
-        console.warn("[Goal] failed to persist cancel goal notice:", error)
-      }
-      window?.webContents.send(channel, {
-        type: "custom",
-        data: {
-          type: "goal_notice",
-          message: notice,
-          goalId: paused.goalId,
-          activeWindowId: paused.activeWindowId,
-          eventId,
-          createdAt
-        }
-      })
+      emitGoalNotice(window, channel, threadId, notice, paused.goalId, paused.activeWindowId)
     }
     if (controller) {
       controller.abort()

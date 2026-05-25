@@ -6,8 +6,10 @@ import {
   getAllThreads,
   getThread,
   getThreadGoalEvents,
+  getThreadGoalEventsForRestore,
   createThread as dbCreateThread,
   updateThread as dbUpdateThread,
+  mergeThreadValues as dbMergeThreadValues,
   deleteThread as dbDeleteThread
 } from "../db"
 import { getCheckpointer, closeCheckpointer } from "../agent/runtime"
@@ -16,9 +18,10 @@ import { generateTitle } from "../services/title-generator"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import { disposeAgentThreadState } from "./agent"
-import type { Thread, ThreadUpdateParams } from "../types"
+import type { Thread, ThreadUpdateParams, ThreadValuesMergeParams } from "../types"
 import { SqlGoalStore } from "../agent/goals/goal-store"
 import type { ThreadGoal } from "../agent/goals/types"
+import { GOAL_UI_EVENT_LIMIT } from "../../shared/goal-events"
 
 // 复用主进程 settings 存储，用于读取“最近一次选择的工作区”。
 // 这里不存敏感信息，只读写路径类配置。
@@ -51,7 +54,6 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       updated_at: new Date(row.updated_at),
       metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
       status: row.status as Thread["status"],
-      thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
       title: row.title
     }))
   })
@@ -135,6 +137,24 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   })
 
+  ipcMain.handle(
+    "threads:mergeThreadValues",
+    async (_event, { threadId, patch }: ThreadValuesMergeParams) => {
+      const row = dbMergeThreadValues(threadId, patch)
+      if (!row) throw new Error("Thread not found")
+
+      return {
+        thread_id: row.thread_id,
+        created_at: new Date(row.created_at),
+        updated_at: new Date(row.updated_at),
+        metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+        status: row.status as Thread["status"],
+        thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
+        title: row.title
+      }
+    }
+  )
+
   // Delete a thread
   ipcMain.handle("threads:delete", async (event, threadId: string) => {
     console.log("[Threads] Deleting thread:", threadId)
@@ -146,7 +166,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     if (existingThread?.metadata) {
       try {
         const metadata = JSON.parse(existingThread.metadata) as Record<string, unknown>
-        workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+        workspacePath =
+          typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
       } catch {
         workspacePath = undefined
       }
@@ -200,8 +221,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   })
 
-  ipcMain.handle("threads:goalEvents", async (_event, threadId: string) => {
-    return getThreadGoalEvents(threadId).map((event) => ({
+  ipcMain.handle("threads:goalEvents", async (_event, threadId: string, options?: { restore?: boolean }) => {
+    const events = options?.restore
+      ? getThreadGoalEventsForRestore(threadId, { recentLimit: GOAL_UI_EVENT_LIMIT })
+      : getThreadGoalEvents(threadId)
+    return events.map((event) => ({
       ...event,
       created_at: new Date(event.created_at)
     }))
@@ -215,7 +239,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       return {
         goal: serializeGoal(goalStore.get(threadId)),
         events: includeEvents
-          ? getThreadGoalEvents(threadId).map((event) => ({
+          ? getThreadGoalEvents(threadId, { limit: GOAL_UI_EVENT_LIMIT }).map((event) => ({
               ...event,
               created_at: new Date(event.created_at)
             }))

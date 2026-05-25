@@ -13,7 +13,9 @@ export function isGoalTranscriptArtifact(message: Pick<Message, "role" | "conten
     content.startsWith("● Goal") ||
     content.startsWith("Ⅱ Goal") ||
     content.startsWith("当前没有 active goal") ||
-    content.startsWith("你发送了新消息，active goal 已暂停")
+    content.startsWith("你发送了新消息，active goal 已暂停") ||
+    content.startsWith("没有可继续的 goal") ||
+    content.startsWith("附件和显式技能不会用于 /goal 控制命令")
   )
 }
 
@@ -178,14 +180,15 @@ function findMatchingGoalUserEventMessage(
 
   if (!match) return null
 
-  const createdAt = rawPrompt.start_at ?? rawPrompt.created_at
+  const createdAt = match.start_at ?? match.created_at
+  const endAt = match.end_at ?? createdAt
   return {
     ...match,
     goal_id: match.goal_id ?? goalId,
     active_window_id: match.active_window_id ?? activeWindowId,
     created_at: createdAt,
     start_at: createdAt,
-    end_at: rawPrompt.end_at ?? createdAt
+    end_at: endAt
   }
 }
 

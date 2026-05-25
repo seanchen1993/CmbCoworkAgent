@@ -40,7 +40,10 @@ import {
   isVisibleCheckpointTranscriptMessage,
 } from "./goal-transcript"
 import { mergeGoalUiEvents } from "./goal-ui-events"
-import { restoreRawCheckpointMessageTime } from "./checkpoint-message-times"
+import {
+  restoreRawCheckpointMessageTime,
+  restoreVisibleCheckpointMessageTimes
+} from "./checkpoint-message-times"
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
@@ -109,83 +112,6 @@ const toDate = (value: string | undefined): Date | undefined => {
   return Number.isFinite(parsed.getTime()) ? parsed : undefined
 }
 
-const offsetDate = (date: Date, offsetMs: number): Date => new Date(date.getTime() + offsetMs)
-
-const restoreVisibleMessageTimes = (
-  messages: Message[],
-  persistedMessageTimes: MessageTimeMap,
-  persistedMessageTimeOrder: MessageTimeEntry[]
-): Message[] => {
-  const idRestored = messages.map((message, index) => {
-    const persistedTime = persistedMessageTimes[message.id]
-    const startAt = toDate(persistedTime?.start_at)
-    const endAt = toDate(persistedTime?.end_at) ?? startAt
-    return {
-      index,
-      message,
-      startAt,
-      endAt
-    }
-  })
-
-  const hasAnyIdMatch = idRestored.some((entry) => entry.startAt)
-
-  return idRestored.map((entry) => {
-    if (entry.startAt) {
-      return {
-        ...entry.message,
-        created_at: entry.startAt,
-        start_at: entry.startAt,
-        end_at: entry.endAt ?? entry.startAt
-      }
-    }
-
-    let previousKnown: (typeof idRestored)[number] | undefined
-    for (let i = entry.index - 1; i >= 0; i -= 1) {
-      if (idRestored[i].startAt) {
-        previousKnown = idRestored[i]
-        break
-      }
-    }
-
-    let nextKnown: (typeof idRestored)[number] | undefined
-    for (let i = entry.index + 1; i < idRestored.length; i += 1) {
-      if (idRestored[i].startAt) {
-        nextKnown = idRestored[i]
-        break
-      }
-    }
-
-    // User ids can change between LangGraph checkpoint serialization and the
-    // UI-side message time store. A plain index fallback is unsafe here because
-    // /goal status events are persisted in the UI transcript but are not present
-    // in the LangGraph checkpoint, shifting every later index. For unmatched
-    // users, anchor them just before their next known response instead.
-    let startAt: Date | undefined
-    if (entry.message.role === "user" && nextKnown?.startAt) {
-      startAt = offsetDate(nextKnown.startAt, -1000)
-    } else if (previousKnown?.startAt) {
-      startAt = offsetDate(previousKnown.startAt, (entry.index - previousKnown.index) * 1000)
-    } else if (nextKnown?.startAt) {
-      startAt = offsetDate(nextKnown.startAt, -(nextKnown.index - entry.index) * 1000)
-    }
-
-    if (!startAt && !hasAnyIdMatch) {
-      const orderTime = persistedMessageTimeOrder[entry.index]
-      startAt = toDate(orderTime?.start_at)
-    }
-
-    startAt = startAt ?? entry.message.start_at ?? entry.message.created_at
-    const endAt = entry.message.end_at && entry.message.end_at > startAt ? entry.message.end_at : startAt
-    return {
-      ...entry.message,
-      created_at: startAt,
-      start_at: startAt,
-      end_at: endAt
-    }
-  })
-}
-
 const latestDate = (dates: Array<Date | undefined>): Date | undefined => {
   return dates.reduce<Date | undefined>((latest, date) => {
     if (!date) return latest
@@ -218,7 +144,7 @@ const getLatestTrustedCheckpointMessageAt = (
   ])
   if (latestExactOrInternalGoalTime) return latestExactOrInternalGoalTime
 
-  // Match restoreVisibleMessageTimes(): if checkpoint message ids changed across
+  // Match restoreVisibleCheckpointMessageTimes(): if checkpoint message ids changed across
   // serialization, use the post-normalization visible-message index as the only
   // trusted fallback. Never use the synthetic "now" fallback for approval restore
   // gating, or old checkpoints would look newer than a runtime-restore pause.
@@ -1179,7 +1105,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       }
 
       try {
-        restoredGoalEvents = await window.api.threads.getGoalEvents(threadId)
+        restoredGoalEvents = await window.api.threads.getGoalEvents(threadId, { restore: true })
       } catch (error) {
         console.error("[ThreadContext] Failed to load goal events:", error)
       }
@@ -1265,10 +1191,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   typeof msg.id === "string" ? msg.id : msg.kwargs?.id || `msg-${index}`
                 const fallbackTime = new Date()
                 // Visible messages only use id-based restore here. Their order fallback
-                // is applied after hidden internal goal prompts are filtered out, otherwise
-                // [Starting/Continuing active goal] would shift messageTimeOrder indexes.
+                // is applied after hidden internal goal prompts are replaced/filtered and
+                // restored /goal user bubbles are inserted, otherwise messageTimeOrder
+                // indexes can shift across the final transcript.
                 // Internal goal prompts have a separate order list because they are hidden
-                // from the visible transcript but still anchor restored /goal user bubbles.
+                // from the checkpoint transcript but still anchor restored /goal user bubbles.
                 const isInternalGoalPrompt =
                   role === "user" &&
                   typeof content === "string" &&
@@ -1314,11 +1241,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               persistedInternalGoalMessageTimeOrder,
               rawRestoredMessages
             )
-            restoredMessages = restoreVisibleMessageTimes(
-              visibleRestoredMessages,
-              persistedMessageTimes,
-              persistedMessageTimeOrder
-            )
+            restoredMessages = visibleRestoredMessages
           }
 
           if (channelValues?.todos && Array.isArray(channelValues.todos)) {
@@ -1381,11 +1304,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         console.error("[ThreadContext] Failed to load thread history:", error)
       }
 
+      const checkpointTranscript = buildRestoredCheckpointTranscript(
+        rawRestoredMessages,
+        restoredMessages,
+        goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
+      )
       actions.setMessages(
-        buildRestoredCheckpointTranscript(
-          rawRestoredMessages,
-          restoredMessages,
-          goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
+        restoreVisibleCheckpointMessageTimes(
+          checkpointTranscript,
+          persistedMessageTimes,
+          persistedMessageTimeOrder
         )
       )
       try {

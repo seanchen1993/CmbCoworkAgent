@@ -11,9 +11,11 @@
 import {
   buildGoalJudgeUserPrompt,
   parseGoalJudgeResult,
-  shouldPauseGoalForEmptyTurn
+  shouldPauseGoalForEmptyTurn,
+  type GoalEvaluationInput
 } from "../src/main/agent/goals/evaluator.ts"
-import type { ThreadGoal } from "../src/main/agent/goals/types.ts"
+import { evaluateGoalWithRuntimeRetry } from "../src/main/agent/goals/evaluator-runtime.ts"
+import type { GoalJudgeDecision, ThreadGoal } from "../src/main/agent/goals/types.ts"
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message)
@@ -53,6 +55,16 @@ function goal(overrides: Partial<ThreadGoal> = {}): ThreadGoal {
   }
 }
 
+function goalEvaluationInput(): GoalEvaluationInput {
+  return {
+    goal: goal(),
+    assistantResponse: "已读取 controller 文件，继续等待 judge 判定。",
+    toolCalls: ["read_file AuthController.java"],
+    toolEvidence: ["AuthController.java read ok"],
+    usedSkills: ["audit"]
+  }
+}
+
 function testJudgePromptIncludesAllEvidenceWithUntrustedFencing(): void {
   const prompt = buildGoalJudgeUserPrompt({
     goal: goal(),
@@ -66,15 +78,15 @@ function testJudgePromptIncludesAllEvidenceWithUntrustedFencing(): void {
   })
 
   assert(prompt.includes("<untrusted_objective>"), "objective should be fenced")
-  assert(prompt.includes("检查 &lt;controller&gt; 日志 &amp; 不修改配置"), "objective should be XML escaped")
+  assert(
+    prompt.includes("检查 &lt;controller&gt; 日志 &amp; 不修改配置"),
+    "objective should be XML escaped"
+  )
   assert(
     prompt.includes("<untrusted_completion_condition>"),
     "completion condition should be fenced"
   )
-  assert(
-    prompt.includes("必须证明没有 log.info 残留"),
-    "completion condition should be included"
-  )
+  assert(prompt.includes("必须证明没有 log.info 残留"), "completion condition should be included")
   assert(
     prompt.includes("<untrusted_launch_context_summary>"),
     "launch context summary should be fenced"
@@ -91,10 +103,7 @@ function testJudgePromptIncludesAllEvidenceWithUntrustedFencing(): void {
   assert(prompt.includes("已读取 AuthController.java"), "progress ledger should be included")
   assert(prompt.includes("grep controller 未发现 log.debug"), "evidence ledger should be included")
   assert(prompt.includes("等待确认是否包含 generated 目录"), "blocker ledger should be included")
-  assert(
-    prompt.includes("<untrusted_assistant_response>"),
-    "assistant response should be fenced"
-  )
+  assert(prompt.includes("<untrusted_assistant_response>"), "assistant response should be fenced")
   assert(
     prompt.includes("验证摘要：读取 controller 后未发现 log.info。"),
     "assistant response should be included"
@@ -194,11 +203,7 @@ function testJudgeParserRejectsMalformedStateChangingResults(): void {
   assertEqual(blockedWithoutReason.parseFailed, true, "missing reason should be parse failure")
 
   const invalidVerdict = parseGoalJudgeResult('{"verdict":"in_progress","reason":"still working"}')
-  assertEqual(
-    invalidVerdict.verdict,
-    "continue",
-    "unknown verdict should degrade to continue"
-  )
+  assertEqual(invalidVerdict.verdict, "continue", "unknown verdict should degrade to continue")
   assertEqual(invalidVerdict.parseFailed, true, "unknown verdict should be parse failure")
 }
 
@@ -237,20 +242,73 @@ function testEmptyTurnPauseHeuristic(): void {
   )
 }
 
-function run(): void {
+async function testRuntimeEvaluatorRetrySucceedsAfterTransientFailure(): Promise<void> {
+  let calls = 0
+  const decision = await evaluateGoalWithRuntimeRetry(goalEvaluationInput(), {
+    retryDelayMs: 0,
+    evaluate: async () => {
+      calls += 1
+      if (calls === 1) throw new Error("temporary evaluator timeout")
+      return {
+        verdict: "continue",
+        reason: "评估器重试成功，需要继续检查。",
+        nextPrompt: "继续验证 controller 日志。"
+      }
+    }
+  })
+
+  assertEqual(calls, 2, "runtime evaluator should retry once after a transient failure")
+  assertEqual(decision.verdict, "continue", "successful retry should preserve evaluator decision")
+  assertEqual(
+    decision.reason,
+    "评估器重试成功，需要继续检查。",
+    "successful retry should return the second evaluator result"
+  )
+}
+
+async function testRuntimeEvaluatorRetryFallsBackAfterRepeatedFailure(): Promise<void> {
+  let calls = 0
+  const fallbackDecision: GoalJudgeDecision = {
+    verdict: "blocked",
+    reason: "评估器暂时不可用。Goal 已暂停，请稍后使用 /goal resume 重试。"
+  }
+  const decision = await evaluateGoalWithRuntimeRetry(goalEvaluationInput(), {
+    retryDelayMs: 0,
+    evaluate: async () => {
+      calls += 1
+      throw new Error(`temporary evaluator timeout ${calls}`)
+    },
+    onFinalFailure: () => fallbackDecision
+  })
+
+  assertEqual(calls, 2, "runtime evaluator should stop after the configured retry attempts")
+  assertEqual(decision.verdict, "blocked", "repeated evaluator failures should fall back to pause")
+  assertEqual(
+    decision.reason,
+    fallbackDecision.reason,
+    "repeated evaluator failures should use the configured fallback decision"
+  )
+}
+
+async function run(): Promise<void> {
   const tests = [
     testJudgePromptIncludesAllEvidenceWithUntrustedFencing,
     testJudgePromptEscapesTranscriptInjectionText,
     testJudgePromptBudgetsAssistantAndToolEvidence,
     testJudgeParserRejectsMalformedStateChangingResults,
     testNeedsUserInputInference,
-    testEmptyTurnPauseHeuristic
+    testEmptyTurnPauseHeuristic,
+    testRuntimeEvaluatorRetrySucceedsAfterTransientFailure,
+    testRuntimeEvaluatorRetryFallsBackAfterRepeatedFailure
   ]
 
   for (const test of tests) {
-    test()
+    await test()
     console.log(`✓ ${test.name}`)
   }
 }
 
-run()
+run().catch((error) => {
+  console.error(error)
+  process.exit(1)
+})

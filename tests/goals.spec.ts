@@ -43,7 +43,11 @@ import {
   parseGoalSlashCommand,
   sanitizeGoalSlashCommandForPersistence
 } from "../src/main/agent/goals/slash.ts"
-import { ToolCallCounter } from "../src/main/agent/skill-evolution/tool-call-counter.ts"
+import {
+  buildToolResultFallbackKey,
+  stableToolArgsDigest,
+  ToolCallCounter
+} from "../src/main/agent/skill-evolution/tool-call-counter.ts"
 import type { GoalJudgeDecision } from "../src/main/agent/goals/types.ts"
 
 function assert(condition: unknown, message: string): void {
@@ -1939,6 +1943,46 @@ async function testToolCallCounterSupportsPerTurnWindows(): Promise<void> {
   assertEqual(counter.getNamesSince(999).length, 0, "future start index should be empty")
 }
 
+async function testToolCallCounterUsesBoundedFallbackKey(): Promise<void> {
+  const hugeArgs = {
+    path: "/tmp/large.json",
+    payload: "x".repeat(20_000),
+    nested: { z: 1, a: 2 }
+  }
+  const sameArgsDifferentOrder = {
+    nested: { a: 2, z: 1 },
+    payload: "x".repeat(20_000),
+    path: "/tmp/large.json"
+  }
+  const digest = stableToolArgsDigest(hugeArgs)
+
+  assertEqual(digest.length, 16, "tool args fallback digest should stay short")
+  assert(!digest.includes("x".repeat(100)), "digest should not retain large raw args")
+  assertEqual(
+    digest,
+    stableToolArgsDigest(sameArgsDifferentOrder),
+    "tool args digest should be stable across object key order"
+  )
+}
+
+async function testToolResultFallbackKeyDoesNotRetainLargeOutput(): Promise<void> {
+  const hugeOutput = `first line\n${"x".repeat(20_000)}\nlast line`
+  const key = buildToolResultFallbackKey(undefined, 3, hugeOutput)
+
+  assert(key.length < 80, "tool result fallback key should stay bounded")
+  assert(key.includes("len:20021"), "tool result fallback key should retain output length")
+  assert(!key.includes("x".repeat(100)), "tool result fallback key should not retain raw output")
+  assertEqual(
+    key,
+    buildToolResultFallbackKey(undefined, 3, hugeOutput),
+    "tool result fallback key should be stable"
+  )
+  assert(
+    key !== buildToolResultFallbackKey(undefined, 3, `${hugeOutput}!`),
+    "tool result fallback key should change when output changes"
+  )
+}
+
 async function testLedgerPatchIsCappedAndFenced(): Promise<void> {
   const manager = makeManager()
   manager.set("thread-ledger-cap", "keep ledger small")
@@ -2020,6 +2064,8 @@ async function main(): Promise<void> {
     testGoalEvidenceBufferWindowSurvivesTrimming,
     testGoalEvidenceBufferClearsAndCapsPendingInputSummaries,
     testToolCallCounterSupportsPerTurnWindows,
+    testToolCallCounterUsesBoundedFallbackKey,
+    testToolResultFallbackKeyDoesNotRetainLargeOutput,
     testLedgerPatchIsCappedAndFenced
   ]
 

@@ -1,4 +1,5 @@
 import type { GoalEvent } from "@/types"
+import { GOAL_UI_EVENT_LIMIT } from "../../../shared/goal-events"
 
 const goalEventTimeMs = (event: GoalEvent): number => {
   const date = event.created_at instanceof Date ? event.created_at : new Date(event.created_at)
@@ -16,5 +17,5 @@ export function mergeGoalUiEvents(
   return Array.from(byId.values()).sort((left, right) => {
     const timeDelta = goalEventTimeMs(left) - goalEventTimeMs(right)
     return timeDelta || left.event_id - right.event_id
-  })
+  }).slice(-GOAL_UI_EVENT_LIMIT)
 }

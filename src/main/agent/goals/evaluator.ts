@@ -468,9 +468,7 @@ export function resolveEvaluatorConfig(modelId?: string): CustomModelConfig | nu
   const configs = getCustomModelConfigs()
   const configuredJudgeId = normalizeModelId(getGoalSettings().evaluatorModelId)
   if (configuredJudgeId) {
-    const configuredJudge = configs.find(
-      (config) => config.id === configuredJudgeId || config.model === configuredJudgeId
-    )
+    const configuredJudge = findEvaluatorConfig(configs, configuredJudgeId)
     if (configuredJudge?.apiKey) return configuredJudge
     console.warn(
       `[Goal] configured evaluator model "${configuredJudgeId}" is unavailable.`
@@ -479,12 +477,20 @@ export function resolveEvaluatorConfig(modelId?: string): CustomModelConfig | nu
   }
 
   const requestedId = normalizeModelId(modelId)
-  const requested = requestedId
-    ? configs.find((config) => config.id === requestedId || config.model === requestedId)
-    : null
+  const requested = requestedId ? findEvaluatorConfig(configs, requestedId) : null
   if (requested?.apiKey) return requested
 
   return null
+}
+
+function findEvaluatorConfig(
+  configs: CustomModelConfig[],
+  normalizedIdOrModel: string
+): CustomModelConfig | null {
+  const byId = configs.find((config) => config.id === normalizedIdOrModel)
+  if (byId) return byId.apiKey ? byId : null
+
+  return configs.find((config) => config.model === normalizedIdOrModel && config.apiKey) ?? null
 }
 
 export async function evaluateGoalWithModel(

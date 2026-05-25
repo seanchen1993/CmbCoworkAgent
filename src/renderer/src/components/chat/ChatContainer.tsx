@@ -1063,44 +1063,9 @@ const isMessageTimeMap = (value: unknown): value is MessageTimeMap => {
   return !!value && typeof value === "object" && !Array.isArray(value)
 }
 
-const isMessageTimeEntryArray = (value: unknown): value is MessageTimeEntry[] => {
-  return (
-    Array.isArray(value) &&
-    value.every(
-      (entry) =>
-        !!entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string"
-    )
-  )
-}
-
 const getMessageTimeMap = (threadValues?: Record<string, unknown>): MessageTimeMap => {
   const value = threadValues?.[MESSAGE_TIMES_THREAD_VALUE_KEY]
   return isMessageTimeMap(value) ? value : {}
-}
-
-const getInternalGoalMessageTimeMap = (threadValues?: Record<string, unknown>): MessageTimeMap => {
-  const value = threadValues?.[INTERNAL_GOAL_MESSAGE_TIMES_THREAD_VALUE_KEY]
-  return isMessageTimeMap(value) ? value : {}
-}
-
-const getInternalGoalMessageTimeOrder = (
-  threadValues?: Record<string, unknown>
-): MessageTimeEntry[] => {
-  const value = threadValues?.[INTERNAL_GOAL_MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]
-  if (isMessageTimeEntryArray(value)) return value
-  return Object.entries(getInternalGoalMessageTimeMap(threadValues)).map(([id, time]) => ({
-    id,
-    ...time
-  }))
-}
-
-const getMessageTimeOrder = (threadValues?: Record<string, unknown>): MessageTimeEntry[] => {
-  const value = threadValues?.[MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]
-  if (isMessageTimeEntryArray(value)) return value
-  // 兼容旧数据：早期只保存了 messageTimes map，没有保存顺序数组。
-  // JS 对普通对象会保留字符串 key 的插入顺序；虽然这不如显式数组可靠，但对旧数据可以
-  // 最大程度恢复出当时写入的消息顺序，避免老会话重启后完全看不到耗时。
-  return Object.entries(getMessageTimeMap(threadValues)).map(([id, time]) => ({ id, ...time }))
 }
 
 // messageTimes 用 id 做精确匹配；messageTimeOrder 用顺序做兜底，解决重启后 checkpoint
@@ -1111,27 +1076,8 @@ const getMessageTimeOrder = (threadValues?: Record<string, unknown>): MessageTim
 // - messageTimeOrder: app 重启后历史消息来自 LangGraph checkpoint，某些消息 id 可能变化；
 //   此时仍可用“消息展示顺序”和“时间写入顺序”对齐，恢复 start_at/end_at。
 //
-// merge 时不重排已有数组，只更新同 id 的时间并把新 id 追加到末尾，保证顺序数组能持续
-// 表达整条会话的消息时间线。
-const mergeMessageTimeOrder = (
-  existingOrder: MessageTimeEntry[],
-  updates: MessageTimeMap
-): MessageTimeEntry[] => {
-  const nextOrder = [...existingOrder]
-  const indexes = new Map(nextOrder.map((entry, index) => [entry.id, index]))
-
-  for (const [id, time] of Object.entries(updates)) {
-    const nextEntry = { id, ...time }
-    const existingIndex = indexes.get(id)
-    if (existingIndex === undefined) {
-      indexes.set(id, nextOrder.length)
-      nextOrder.push(nextEntry)
-    } else {
-      nextOrder[existingIndex] = { ...nextOrder[existingIndex], ...nextEntry }
-    }
-  }
-
-  return nextOrder
+const messageTimeOrderEntries = (updates: MessageTimeMap): MessageTimeEntry[] => {
+  return Object.entries(updates).map(([id, time]) => ({ id, ...time }))
 }
 
 const toDate = (value: Date | string | undefined): Date | undefined => {
@@ -2038,43 +1984,24 @@ export function ChatContainer({
       ) {
         setMessageTimes((prev) => ({ ...prev, ...nextMessageTimes }))
         window.api.threads
-          .get(threadId)
-          .then((thread) => {
-            if (!thread) return
-            const existingTimes = getMessageTimeMap(thread.thread_values)
-            const existingInternalGoalTimes = getInternalGoalMessageTimeMap(thread.thread_values)
-            return window.api.threads.update(threadId, {
-              thread_values: {
-                ...(thread.thread_values ?? {}),
-                // id map 用于当前会话和 id 稳定时的精确恢复。
-                //
-                // 例如用户还没有关闭 app，只是在同一个运行时切换线程或重新渲染，
-                // message id 仍然可靠，此时直接按 id 取 start_at/end_at。
-                [MESSAGE_TIMES_THREAD_VALUE_KEY]: {
-                  ...existingTimes,
-                  ...nextMessageTimes
-                },
-                // Internal goal prompts are hidden from the transcript, so they must not
-                // enter messageTimeOrder. Keep their exact checkpoint ids only for
-                // runtime-restore approval freshness checks.
-                [INTERNAL_GOAL_MESSAGE_TIMES_THREAD_VALUE_KEY]: {
-                  ...existingInternalGoalTimes,
-                  ...nextInternalGoalMessageTimes
-                },
-                [INTERNAL_GOAL_MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
-                  getInternalGoalMessageTimeOrder(thread.thread_values),
-                  nextInternalGoalMessageTimes
-                ),
-                // 顺序数组用于 app 重启后，checkpoint 恢复出的 message id 不一致时兜底匹配。
-                //
-                // 它不是用来计算 duration 的新字段，只是保存每条消息时间的展示顺序；
-                // duration 仍由 user.start_at 和分组内最后一条消息 end_at 动态计算。
-                [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
-                  getMessageTimeOrder(thread.thread_values),
-                  nextMessageTimes
-                )
-              }
-            })
+          .mergeThreadValues(threadId, {
+            // id map 用于当前会话和 id 稳定时的精确恢复。
+            //
+            // 例如用户还没有关闭 app，只是在同一个运行时切换线程或重新渲染，
+            // message id 仍然可靠，此时直接按 id 取 start_at/end_at。
+            [MESSAGE_TIMES_THREAD_VALUE_KEY]: nextMessageTimes,
+            // Internal goal prompts are hidden from the transcript, so they must not
+            // enter messageTimeOrder. Keep their exact checkpoint ids only for
+            // runtime-restore approval freshness checks.
+            [INTERNAL_GOAL_MESSAGE_TIMES_THREAD_VALUE_KEY]: nextInternalGoalMessageTimes,
+            [INTERNAL_GOAL_MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: messageTimeOrderEntries(
+              nextInternalGoalMessageTimes
+            ),
+            // 顺序数组用于 app 重启后，checkpoint 恢复出的 message id 不一致时兜底匹配。
+            //
+            // 它不是用来计算 duration 的新字段，只是保存每条消息时间的展示顺序；
+            // duration 仍由 user.start_at 和分组内最后一条消息 end_at 动态计算。
+            [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: messageTimeOrderEntries(nextMessageTimes)
           })
           .catch((error) => console.warn("[ChatContainer] Failed to save message times:", error))
       }
@@ -2474,6 +2401,42 @@ export function ChatContainer({
     [setInput, slashResetSelection]
   )
 
+  const appendVisibleUserMessageWithTime = useCallback(
+    async (
+      content: string,
+      options: { persistTiming?: boolean } = {}
+    ): Promise<void> => {
+      const userStartAt = new Date()
+      const userMessage: Message = {
+        id: crypto.randomUUID(),
+        role: "user",
+        content,
+        created_at: new Date(),
+        start_at: userStartAt,
+        end_at: userStartAt
+      }
+      appendMessage(userMessage)
+      if (options.persistTiming === false) return
+
+      const userMessageTime: MessageTimeMap = {
+        [userMessage.id]: {
+          start_at: userStartAt.toISOString(),
+          end_at: userStartAt.toISOString()
+        }
+      }
+      setMessageTimes((prev) => ({ ...prev, ...userMessageTime }))
+      try {
+        await window.api.threads.mergeThreadValues(threadId, {
+          [MESSAGE_TIMES_THREAD_VALUE_KEY]: userMessageTime,
+          [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: messageTimeOrderEntries(userMessageTime)
+        })
+      } catch (error) {
+        console.warn("[ChatContainer] Failed to save user message time:", error)
+      }
+    },
+    [appendMessage, threadId]
+  )
+
   const submitGoalResumeCommand = useCallback(async (): Promise<void> => {
     if (!stream || historyLoading || isLoading || scheduledTaskLoading) return
     if (!tryAcquireSubmitInFlightLock(submitInFlightRef, true, threadId)) return
@@ -2507,6 +2470,7 @@ export function ChatContainer({
       setAttachments([])
       setSelectedSkill(null)
       insertLog("send: /goal resume")
+      await appendVisibleUserMessageWithTime("/goal resume", { persistTiming: false })
       await stream.submit(
         {
           messages: [{ type: "human", content: "/goal resume" }]
@@ -2532,6 +2496,7 @@ export function ChatContainer({
     setAttachments,
     setInput,
     setSelectedSkill,
+    appendVisibleUserMessageWithTime,
     stream,
     threadError,
     threadId,
@@ -2554,7 +2519,7 @@ export function ChatContainer({
         if (command === "/goal" || command === "/goal status") {
           setGoalDetailsOpen(true)
         }
-        void refreshGoalUi({ includeEvents: false })
+        void refreshGoalUi({ includeEvents: true })
         if (
           pendingApproval &&
           isGoalTerminatingControlCommandInput(command) &&
@@ -2635,12 +2600,14 @@ export function ChatContainer({
         }
         insertLog("send: " + trimmedInput)
         const goalControlResult = await window.api.agent.goalControl(threadId, trimmedInput)
-        void refreshGoalUi({ includeEvents: false })
-        if (shouldClearPendingApprovalAfterGoalControl({
-          hasPendingApproval: Boolean(pendingApproval),
-          isTerminatingControlCommand: isGoalTerminatingControlCommandInput(trimmedInput),
-          terminatedCurrentRun: goalControlResult.terminatedCurrentRun
-        })) {
+        void refreshGoalUi({ includeEvents: true })
+        if (
+          shouldClearPendingApprovalAfterGoalControl({
+            hasPendingApproval: Boolean(pendingApproval),
+            isTerminatingControlCommand: isGoalTerminatingControlCommandInput(trimmedInput),
+            terminatedCurrentRun: goalControlResult.terminatedCurrentRun
+          })
+        ) {
           const approval = pendingApproval
           if (!approval) return
           const approvalAny = approval as unknown as Record<string, unknown>
@@ -2785,58 +2752,19 @@ export function ChatContainer({
       // 当前 user 后面的第一条 assistant，再减到下一个 user 之前最后一条消息的 end_at。
       // 所以 user 也必须持久化 start_at/end_at，否则重启后无法还原该轮起点。
       if (shouldAppendVisibleUserMessage) {
-        const userStartAt = new Date()
-        const userMessage: Message = {
-          id: crypto.randomUUID(),
-          role: "user",
-          content: displayContent,
-          created_at: new Date(),
-          start_at: userStartAt,
-          end_at: userStartAt
-        }
-        appendMessage(userMessage)
         // 用户消息也需要持久化起止时间，后续 duration 用 user.start_at 作为起点。
         //
         // 这里先立即写入 thread_values，是为了尽量保证即使 assistant 回复还没结束，
         // 当前 user 的起点也已经保存下来；assistant/tool 的结束时间会在 loading 结束后补齐。
-        const userMessageTime: MessageTimeMap = {
-          [userMessage.id]: {
-            start_at: userStartAt.toISOString(),
-            end_at: userStartAt.toISOString()
-          }
-        }
-        setMessageTimes((prev) => ({ ...prev, ...userMessageTime }))
-        try {
-          const thread = await window.api.threads.get(threadId)
-          if (thread) {
-            await window.api.threads.update(threadId, {
-              thread_values: {
-                ...(thread.thread_values ?? {}),
-                // 保留 id map，优先支持按 message id 精确恢复。
-                //
-                // user message 在前端先 append，checkpoint 恢复时 id 可能不一定完全一致；
-                // 因此仍需要下面的顺序数组作为兜底。
-                [MESSAGE_TIMES_THREAD_VALUE_KEY]: {
-                  ...getMessageTimeMap(thread.thread_values),
-                  ...userMessageTime
-                },
-                // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。
-                //
-                // 这条 user 时间会成为顺序数组中的一个节点，后续 assistant/tool 时间会继续 append，
-                // 最终形成完整的 user -> assistant/tool... 时间线。
-                [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
-                  getMessageTimeOrder(thread.thread_values),
-                  userMessageTime
-                )
-              }
-            })
-          }
-        } catch (error) {
-          console.warn("[ChatContainer] Failed to save user message time:", error)
-        }
+        //
+        // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。user message 在前端先 append，
+        // checkpoint 恢复时 id 可能不一定完全一致；因此仍需要顺序数组作为兜底。
+        await appendVisibleUserMessageWithTime(displayContent, {
+          persistTiming: !isGoalSlashInput
+        })
       }
 
-      if (isFirstMessage && shouldAppendVisibleUserMessage) {
+      if (isFirstMessage && shouldAppendVisibleUserMessage && !isGoalSlashInput) {
         const currentThread = threads.find((t) => t.thread_id === threadId)
         const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
         if (hasDefaultTitle) {

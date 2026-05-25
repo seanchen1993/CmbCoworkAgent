@@ -2,6 +2,14 @@ import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs"
 import { dirname } from "path"
 import { getDbPath } from "../storage"
+import { mergeThreadValueObjects } from "../../shared/thread-values"
+import {
+  GOAL_UI_EVENT_LIMIT,
+  GOAL_USER_MESSAGE_EVENT_PREFIX,
+  STALE_CHECKPOINT_BOUNDARY_NOTICE_MESSAGES,
+  STALE_CHECKPOINT_BOUNDARY_NOTICE_PREFIXES
+} from "../../shared/goal-events"
+import { GOAL_CLEAR_ALIASES } from "../../shared/goal-slash"
 
 let db: SqlJsDatabase | null = null
 let saveTimer: ReturnType<typeof setTimeout> | null = null
@@ -173,7 +181,9 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
   db.run(`CREATE INDEX IF NOT EXISTS idx_runs_thread_id ON runs(thread_id)`)
   db.run(`CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status)`)
   db.run(`CREATE INDEX IF NOT EXISTS idx_thread_goals_status ON thread_goals(status)`)
-  db.run(`CREATE INDEX IF NOT EXISTS idx_thread_goal_events_thread_id ON thread_goal_events(thread_id)`)
+  db.run(
+    `CREATE INDEX IF NOT EXISTS idx_thread_goal_events_thread_id ON thread_goal_events(thread_id)`
+  )
   db.run(
     `CREATE INDEX IF NOT EXISTS idx_thread_goal_events_thread_order ON thread_goal_events(thread_id, created_at, event_id)`
   )
@@ -304,6 +314,29 @@ export function updateThread(
   return getThread(threadId)
 }
 
+const parseThreadValues = (raw: string | null): Record<string, unknown> => {
+  if (!raw) return {}
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+export function mergeThreadValues(
+  threadId: string,
+  patch: Record<string, unknown>
+): ThreadRow | null {
+  const existing = getThread(threadId)
+  if (!existing) return null
+
+  const merged = mergeThreadValueObjects(parseThreadValues(existing.thread_values), patch)
+  return updateThread(threadId, { thread_values: JSON.stringify(merged) })
+}
+
 export function deleteThread(threadId: string): void {
   const database = getDb()
   database.run("DELETE FROM thread_goal_events WHERE thread_id = ?", [threadId])
@@ -354,12 +387,26 @@ export function addThreadGoalEvent(
   }
 }
 
-export function getThreadGoalEvents(threadId: string): ThreadGoalEventRow[] {
+export function getThreadGoalEvents(
+  threadId: string,
+  options: { limit?: number } = {}
+): ThreadGoalEventRow[] {
   const database = getDb()
+  const limit =
+    typeof options.limit === "number" && Number.isFinite(options.limit) && options.limit > 0
+      ? Math.floor(options.limit)
+      : null
   const stmt = database.prepare(
-    "SELECT * FROM thread_goal_events WHERE thread_id = ? ORDER BY created_at ASC, event_id ASC"
+    limit
+      ? `SELECT * FROM (
+          SELECT * FROM thread_goal_events
+          WHERE thread_id = ?
+          ORDER BY created_at DESC, event_id DESC
+          LIMIT ?
+        ) ORDER BY created_at ASC, event_id ASC`
+      : "SELECT * FROM thread_goal_events WHERE thread_id = ? ORDER BY created_at ASC, event_id ASC"
   )
-  stmt.bind([threadId])
+  stmt.bind(limit ? [threadId, limit] : [threadId])
   const events: ThreadGoalEventRow[] = []
   try {
     while (stmt.step()) {
@@ -377,4 +424,95 @@ export function getThreadGoalEvents(threadId: string): ThreadGoalEventRow[] {
     stmt.free()
   }
   return events
+}
+
+function readThreadGoalEvents(sql: string, params: Array<string | number | null>): ThreadGoalEventRow[] {
+  const database = getDb()
+  const stmt = database.prepare(sql)
+  stmt.bind(params)
+  const events: ThreadGoalEventRow[] = []
+  try {
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as unknown as ThreadGoalEventRow
+      events.push({
+        event_id: Number(row.event_id),
+        thread_id: row.thread_id,
+        goal_id: row.goal_id,
+        active_window_id: row.active_window_id ?? null,
+        message: row.message,
+        created_at: Number(row.created_at)
+      })
+    }
+  } finally {
+    stmt.free()
+  }
+  return events
+}
+
+export function getThreadGoalEventsForRestore(
+  threadId: string,
+  options: { recentLimit?: number } = {}
+): ThreadGoalEventRow[] {
+  const recentLimit =
+    typeof options.recentLimit === "number" &&
+    Number.isFinite(options.recentLimit) &&
+    options.recentLimit > 0
+      ? Math.floor(options.recentLimit)
+      : GOAL_UI_EVENT_LIMIT
+
+  const eventById = new Map<number, ThreadGoalEventRow>()
+  const addEvents = (events: ThreadGoalEventRow[]) => {
+    for (const event of events) {
+      eventById.set(event.event_id, event)
+    }
+  }
+  const nonTranscriptGoalCommands = [
+    "/goal",
+    "/goal status",
+    "/goal pause",
+    ...GOAL_CLEAR_ALIASES.map((alias) => `/goal ${alias}`)
+  ]
+
+  addEvents(
+    readThreadGoalEvents(
+      `SELECT * FROM thread_goal_events
+       WHERE thread_id = ?
+         AND substr(message, 1, ?) = ?
+         AND lower(trim(substr(message, ?))) NOT IN (${nonTranscriptGoalCommands
+           .map(() => "?")
+           .join(", ")})
+       ORDER BY created_at ASC, event_id ASC`,
+      [
+        threadId,
+        GOAL_USER_MESSAGE_EVENT_PREFIX.length,
+        GOAL_USER_MESSAGE_EVENT_PREFIX,
+        GOAL_USER_MESSAGE_EVENT_PREFIX.length + 1,
+        ...nonTranscriptGoalCommands
+      ]
+    )
+  )
+
+  const boundaryPredicates = [
+    ...STALE_CHECKPOINT_BOUNDARY_NOTICE_MESSAGES.map(() => "message = ?"),
+    ...STALE_CHECKPOINT_BOUNDARY_NOTICE_PREFIXES.map(() => "substr(message, 1, ?) = ?")
+  ]
+  const boundaryParams: Array<string | number | null> = [
+    threadId,
+    ...STALE_CHECKPOINT_BOUNDARY_NOTICE_MESSAGES,
+    ...STALE_CHECKPOINT_BOUNDARY_NOTICE_PREFIXES.flatMap((prefix) => [prefix.length, prefix])
+  ]
+  addEvents(
+    readThreadGoalEvents(
+      `SELECT * FROM thread_goal_events
+       WHERE thread_id = ? AND (${boundaryPredicates.join(" OR ")})
+       ORDER BY created_at ASC, event_id ASC`,
+      boundaryParams
+    )
+  )
+
+  addEvents(getThreadGoalEvents(threadId, { limit: recentLimit }))
+
+  return [...eventById.values()].sort(
+    (a, b) => a.created_at - b.created_at || a.event_id - b.event_id
+  )
 }

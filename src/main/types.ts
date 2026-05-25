@@ -49,6 +49,11 @@ export interface ThreadUpdateParams {
   updates: Partial<Thread>
 }
 
+export interface ThreadValuesMergeParams {
+  threadId: string
+  patch: Record<string, unknown>
+}
+
 // Workspace IPC
 export interface WorkspaceSetParams {
   threadId?: string

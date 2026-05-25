@@ -94,6 +94,20 @@ function testGoalArtifactsAreNotCheckpointTranscript(): void {
     "legacy rendered goal notices should be filtered if they remain in memory"
   )
   assert(
+    isGoalTranscriptArtifact(message("legacy-no-resume", "system", "没有可继续的 goal。")),
+    "legacy no-resume notices should be filtered if they remain in checkpoint transcript"
+  )
+  assert(
+    isGoalTranscriptArtifact(
+      message(
+        "legacy-control-transport",
+        "system",
+        "附件和显式技能不会用于 /goal 控制命令。请先移除附件/技能。"
+      )
+    ),
+    "legacy control transport notices should be filtered if they remain in checkpoint transcript"
+  )
+  assert(
     !isGoalTranscriptArtifact(message("normal-user", "user", "请解释 /goal status 的含义")),
     "ordinary user text that mentions /goal should remain visible"
   )
@@ -234,7 +248,7 @@ function testPersistedGoalUserEventsRestoreAsUserMessages(): void {
   assertEqual(visible[1]?.content, "/goal 分析项目", "goal user event should restore the original command")
 }
 
-function testGoalStartUserMessageUsesCheckpointPromptPosition(): void {
+function testGoalStartUserMessageUsesCheckpointPositionAndEventTime(): void {
   const promptGoal = goalSnapshot({
     goalId: "goal-1",
     activeWindowId: "window-1",
@@ -277,8 +291,8 @@ function testGoalStartUserMessageUsesCheckpointPromptPosition(): void {
   assertEqual(visible[0]?.content, "/goal 讲解项目功能", "start prompt should show the user command")
   assertEqual(
     visible[0]?.created_at.toISOString(),
-    "2026-05-22T10:00:00.000Z",
-    "restored /goal command should inherit the checkpoint prompt time"
+    "2026-05-22T10:00:05.000Z",
+    "restored /goal command should preserve the persisted user event time"
   )
 }
 
@@ -327,8 +341,58 @@ function testGoalStartUserMessageWithGeneratedMetadataDoesNotDuplicate(): void {
   )
   assertEqual(
     visible[0]?.created_at.toISOString(),
-    "2026-05-22T10:00:00.000Z",
-    "metadata-rich /goal command should still inherit the checkpoint prompt time"
+    "2026-05-22T10:00:05.000Z",
+    "metadata-rich /goal command should still preserve the persisted user event time"
+  )
+}
+
+function testMatchedGoalPromptDoesNotOverwriteEventTimeWithFallbackNow(): void {
+  const promptGoal = goalSnapshot({
+    goalId: "goal-time",
+    activeWindowId: "window-time",
+    objective: "讲解项目功能",
+    completionCondition: "讲解项目功能"
+  })
+  const rawCheckpointMessages = [
+    message(
+      "internal-start-current-time",
+      "user",
+      buildGoalStartPrompt(promptGoal),
+      new Date("2026-05-24T12:00:00.000Z")
+    ),
+    message(
+      "assistant-after",
+      "assistant",
+      "我来检查。",
+      new Date("2026-05-24T12:00:01.000Z")
+    )
+  ]
+  const visibleCheckpointMessages = buildCheckpointTranscriptForDisplay(rawCheckpointMessages)
+  const events = goalNoticeEventsToGoalUiEvents("thread-1", [
+    {
+      event_id: 12,
+      goal_id: "goal-time",
+      active_window_id: "window-time",
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal 讲解项目功能`,
+      created_at: "2026-05-22T10:00:05.000Z"
+    }
+  ])
+
+  const visible = buildRestoredCheckpointTranscript(
+    rawCheckpointMessages,
+    visibleCheckpointMessages,
+    events
+  )
+
+  assertArrayEqual(
+    visible.map((item) => item.id),
+    ["goal-user-event-12", "assistant-after"],
+    "matched persisted goal event should still replace the internal prompt"
+  )
+  assertEqual(
+    visible[0]?.created_at.toISOString(),
+    "2026-05-22T10:00:05.000Z",
+    "fallback raw prompt time must not overwrite persisted goal user event time"
   )
 }
 
@@ -378,7 +442,7 @@ function testGoalStartPromptDoesNotMatchWrongPersistedGoalEvent(): void {
   )
 }
 
-function testGoalResumeUserMessageUsesCheckpointPromptPosition(): void {
+function testGoalResumeUserMessageUsesCheckpointPositionAndEventTime(): void {
   const promptGoal = goalSnapshot({
     goalId: "goal-1",
     activeWindowId: "window-resume-1",
@@ -673,10 +737,11 @@ function run(): void {
     testKnownGoalNoticeVariantsStayOutOfCheckpointTranscript,
     testAssistantToolAdjacencyAndPayloadArePreserved,
     testPersistedGoalUserEventsRestoreAsUserMessages,
-    testGoalStartUserMessageUsesCheckpointPromptPosition,
+    testGoalStartUserMessageUsesCheckpointPositionAndEventTime,
     testGoalStartUserMessageWithGeneratedMetadataDoesNotDuplicate,
+    testMatchedGoalPromptDoesNotOverwriteEventTimeWithFallbackNow,
     testGoalStartPromptDoesNotMatchWrongPersistedGoalEvent,
-    testGoalResumeUserMessageUsesCheckpointPromptPosition,
+    testGoalResumeUserMessageUsesCheckpointPositionAndEventTime,
     testGoalResumePromptDoesNotMatchWrongPersistedGoalEvent,
     testGoalResumePromptDoesNotMatchWrongActiveWindowEvent,
     testUnmatchedGoalContinuationPromptStaysHidden,

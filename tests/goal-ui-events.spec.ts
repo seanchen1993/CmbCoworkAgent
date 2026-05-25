@@ -6,6 +6,7 @@
  */
 
 import { mergeGoalUiEvents } from "../src/renderer/src/lib/goal-ui-events.ts"
+import { GOAL_UI_EVENT_LIMIT } from "../src/shared/goal-events.ts"
 import type { GoalEvent } from "../src/renderer/src/types.ts"
 
 function assertEqual<T>(actual: T, expected: T, message: string): void {
@@ -65,9 +66,26 @@ function testInvalidDatesFallBackToEventIdOrdering(): void {
   assertEqual(merged[1]?.event_id, 5, "invalid dates should sort by event_id")
 }
 
+function testMergeKeepsOnlyRecentUiEvents(): void {
+  const restored = Array.from({ length: GOAL_UI_EVENT_LIMIT + 5 }, (_, index) =>
+    event(index + 1, new Date(Date.UTC(2026, 4, 23, 1, 0, index)).toISOString())
+  )
+
+  const merged = mergeGoalUiEvents(restored, [])
+
+  assertEqual(merged.length, GOAL_UI_EVENT_LIMIT, "UI merge should cap retained events")
+  assertEqual(merged[0]?.event_id, 6, "UI merge should drop oldest events")
+  assertEqual(
+    merged[merged.length - 1]?.event_id,
+    GOAL_UI_EVENT_LIMIT + 5,
+    "UI merge should keep newest events"
+  )
+}
+
 const tests: Array<[string, () => void]> = [
   ["testRestoredEventsDoNotOverwriteLiveEvents", testRestoredEventsDoNotOverwriteLiveEvents],
-  ["testInvalidDatesFallBackToEventIdOrdering", testInvalidDatesFallBackToEventIdOrdering]
+  ["testInvalidDatesFallBackToEventIdOrdering", testInvalidDatesFallBackToEventIdOrdering],
+  ["testMergeKeepsOnlyRecentUiEvents", testMergeKeepsOnlyRecentUiEvents]
 ]
 
 for (const [name, fn] of tests) {

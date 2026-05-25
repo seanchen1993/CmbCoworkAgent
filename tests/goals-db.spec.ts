@@ -8,6 +8,10 @@
 import { mkdtemp, rm } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
+import {
+  GOAL_USER_MESSAGE_EVENT_PREFIX,
+  RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
+} from "../src/shared/goal-events.ts"
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message)
@@ -136,6 +140,108 @@ async function testGoalEventsPersistAndDeleteWithThread(): Promise<void> {
     db.getThreadGoalEvents("thread-events").length,
     0,
     "deleteThread should remove goal events"
+  )
+
+  db.closeDatabase()
+}
+
+async function testGoalEventsCanBeLimitedForUi(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+
+  await db.initializeDatabase()
+  db.createThread("thread-events-limit", { title: "Goal events limit regression" })
+
+  for (let index = 1; index <= 5; index += 1) {
+    db.addThreadGoalEvent(
+      "thread-events-limit",
+      `Goal event ${index}`,
+      "goal-limit",
+      index * 1_000,
+      "window-limit"
+    )
+  }
+
+  const allEvents = db.getThreadGoalEvents("thread-events-limit")
+  const limitedEvents = db.getThreadGoalEvents("thread-events-limit", { limit: 3 })
+
+  assertEqual(allEvents.length, 5, "default goal event query should remain unbounded")
+  assertEqual(limitedEvents.length, 3, "limited goal event query should return requested size")
+  assertEqual(limitedEvents[0]?.message, "Goal event 3", "limited query should keep oldest of tail")
+  assertEqual(limitedEvents[2]?.message, "Goal event 5", "limited query should keep newest event")
+
+  db.closeDatabase()
+}
+
+async function testGoalEventsRestoreQueryKeepsRequiredEventsAndRecentTail(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+
+  await db.initializeDatabase()
+  db.createThread("thread-events-restore-limit", { title: "Goal restore events regression" })
+
+  db.addThreadGoalEvent(
+    "thread-events-restore-limit",
+    `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal status`,
+    "goal-old",
+    500,
+    "window-old"
+  )
+  db.addThreadGoalEvent(
+    "thread-events-restore-limit",
+    `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal old objective`,
+    "goal-old",
+    1_000,
+    "window-old"
+  )
+  db.addThreadGoalEvent(
+    "thread-events-restore-limit",
+    RUNTIME_RESTORED_GOAL_PAUSE_NOTICE,
+    "goal-old",
+    2_000,
+    "window-old"
+  )
+  for (let index = 1; index <= 5; index += 1) {
+    db.addThreadGoalEvent(
+      "thread-events-restore-limit",
+      `Ordinary goal notice ${index}`,
+      "goal-new",
+      (index + 2) * 1_000,
+      "window-new"
+    )
+  }
+
+  const full = db.getThreadGoalEvents("thread-events-restore-limit")
+  const restore = db.getThreadGoalEventsForRestore("thread-events-restore-limit", {
+    recentLimit: 2
+  })
+  const restoreMessages = restore.map((event) => event.message)
+
+  assertEqual(full.length, 8, "default goal event query should still return all events")
+  assertEqual(restore.length, 4, "restore query should keep required events and recent tail")
+  assert(
+    restoreMessages.includes(`${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal old objective`),
+    "restore query should keep old persisted goal user events"
+  )
+  assert(
+    restoreMessages.includes(RUNTIME_RESTORED_GOAL_PAUSE_NOTICE),
+    "restore query should keep stale-approval boundary events"
+  )
+  assert(
+    !restoreMessages.includes(`${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal status`),
+    "restore query should omit old non-transcript goal control events"
+  )
+  assert(
+    !restoreMessages.includes("Ordinary goal notice 1"),
+    "restore query should omit older ordinary notices outside the tail"
+  )
+  assertEqual(
+    restoreMessages.at(-2),
+    "Ordinary goal notice 4",
+    "restore query should keep the oldest retained tail notice"
+  )
+  assertEqual(
+    restoreMessages.at(-1),
+    "Ordinary goal notice 5",
+    "restore query should keep the newest retained tail notice"
   )
 
   db.closeDatabase()
@@ -438,6 +544,39 @@ async function testGoalJudgeModelSettings(): Promise<void> {
     null,
     "misconfigured explicit evaluator should still block when the current model is unavailable"
   )
+
+  storage.upsertCustomModelConfig({
+    id: "shared-judge-no-key",
+    name: "Shared Judge Without Key",
+    baseUrl: "https://example.com/v1",
+    model: "shared-judge-model",
+    apiKey: "",
+    maxTokens: 128_000,
+    maxOutputTokens: 8_192,
+    temperature: 0.1
+  })
+  storage.upsertCustomModelConfig({
+    id: "shared-judge-with-key",
+    name: "Shared Judge With Key",
+    baseUrl: "https://example.com/v1",
+    model: "shared-judge-model",
+    apiKey: "shared-judge-key",
+    maxTokens: 128_000,
+    maxOutputTokens: 8_192,
+    temperature: 0.1
+  })
+  storage.setGoalSettings({ evaluatorModelId: "shared-judge-model" })
+  assertEqual(
+    evaluator.resolveEvaluatorConfig("custom:main-model")?.id,
+    "shared-judge-with-key",
+    "model-name evaluator fallback should choose a config with an API key"
+  )
+  storage.setGoalSettings({})
+  assertEqual(
+    evaluator.resolveEvaluatorConfig("custom:shared-judge-model")?.id,
+    "shared-judge-with-key",
+    "current-model fallback should choose a same-model config with an API key"
+  )
 }
 
 async function main(): Promise<void> {
@@ -445,6 +584,8 @@ async function main(): Promise<void> {
     testSqlGoalStorePersistsAcrossDatabaseReopen,
     testDeleteThreadDeletesGoal,
     testGoalEventsPersistAndDeleteWithThread,
+    testGoalEventsCanBeLimitedForUi,
+    testGoalEventsRestoreQueryKeepsRequiredEventsAndRecentTail,
     testReplacingSqlGoalRefreshesCreatedAt,
     testResumingSqlGoalRefreshesCreatedAtBaseline,
     testResettingActiveSqlGoalRefreshesCreatedAtBaseline,

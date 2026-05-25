@@ -1,7 +1,7 @@
 import type { Message } from "@/types"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
-  RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
+  isStaleCheckpointBoundaryNoticeMessage
 } from "../../../shared/goal-events"
 import { splitGoalTransportPayload } from "../../../shared/goal-slash"
 import { stripLegacyGoalTransportSummary } from "./goal-transport-summary"
@@ -20,28 +20,6 @@ function toTime(value: Date | string | number | null | undefined): number | null
   return Number.isFinite(time) ? time : null
 }
 
-function isStaleCheckpointBoundaryNotice(message: string): boolean {
-  if (
-    message.startsWith("Goal 已暂停：恢复处理失败：") ||
-    message.startsWith("Goal 已暂停：中断处理失败：")
-  ) {
-    return true
-  }
-
-  return (
-    message === RUNTIME_RESTORED_GOAL_PAUSE_NOTICE ||
-    message === "Goal 已暂停：已手动暂停。" ||
-    message === "Goal 已暂停：你已取消当前运行。" ||
-    message === "你发送了新消息，active goal 已暂停。需要继续时发送 /goal resume。" ||
-    message === "Goal 已暂停：恢复处理已结束。需要继续 goal 时发送 /goal resume。" ||
-    message === "Goal 已暂停：中断处理已结束。需要继续 goal 时发送 /goal resume。" ||
-    message === "Goal 已暂停：中断请求已拒绝。需要继续 goal 时发送 /goal resume。" ||
-    message === "Goal 已暂停：恢复处理被 Stop hook 阻止。需要继续时发送 /goal resume。" ||
-    message === "Goal 已暂停：中断恢复被 Stop hook 阻止。需要继续时发送 /goal resume。" ||
-    message === "Goal 已清除。当前运行已终止。"
-  )
-}
-
 export function shouldSuppressCheckpointApprovalRestore(
   events: readonly Pick<GoalNoticeEvent, "message" | "created_at">[],
   latestCheckpointMessageAt?: Date | string | number | null
@@ -50,7 +28,7 @@ export function shouldSuppressCheckpointApprovalRestore(
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     const message = event.message.trim()
-    if (isStaleCheckpointBoundaryNotice(message)) {
+    if (isStaleCheckpointBoundaryNoticeMessage(message)) {
       const boundaryTime = toTime(event.created_at)
       if (
         latestCheckpointTime != null &&

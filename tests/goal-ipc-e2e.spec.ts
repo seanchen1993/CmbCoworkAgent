@@ -13,6 +13,8 @@
 
 import { _electron as electron, type ElectronApplication, type Page } from "playwright"
 import { existsSync } from "fs"
+import { mkdtemp, rm } from "fs/promises"
+import { tmpdir } from "os"
 import path from "path"
 
 const PROJECT_ROOT = path.resolve(__dirname, "..")
@@ -61,16 +63,59 @@ interface WindowWithApi {
       getGoalState: (threadId: string) => Promise<{
         goal: null | {
           status: "active" | "paused" | "complete"
+          activeWindowId: string
           turnsUsed: number
+          pausedReason: string | null
           lastReason: string | null
           ledger: { progress: string[]; evidence: string[]; blockers: string[] }
         }
       }>
     }
+    models: {
+      getGoalSettings: () => Promise<{ evaluatorModelId?: string }>
+      setGoalSettings: (settings: { evaluatorModelId?: string }) => Promise<void>
+    }
     workspace: {
       set: (threadId: string, workspacePath: string) => Promise<unknown>
     }
   }
+}
+
+interface InvokeResult {
+  events: InvokeEvent[]
+  timedOut?: boolean
+}
+
+async function seedPausedGoalThread(threadId: string): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { createNewGoal, SqlGoalStore } = await import("../src/main/agent/goals/goal-store.ts")
+
+  await db.initializeDatabase()
+  db.deleteThread(threadId)
+  db.createThread(threadId, {
+    workspacePath: process.env.GOAL_E2E_WORKSPACE || DEFAULT_WORKSPACE,
+    model: process.env.GOAL_E2E_MODEL_ID || DEFAULT_MODEL_ID,
+    title: "Goal IPC E2E - resume evaluator preflight"
+  })
+
+  const now = Date.now() - 60_000
+  const goal = createNewGoal({
+    threadId,
+    text: "这个 paused goal 不应该被不可用 evaluator 的 resume 重置。",
+    maxTurns: 15
+  })
+  new SqlGoalStore().upsert({
+    ...goal,
+    activeWindowId: "goal-ipc-e2e-paused-window-before-resume",
+    status: "paused",
+    turnsUsed: 4,
+    pausedReason: "user-paused",
+    lastReason: "等待用户手动继续。",
+    createdAt: now,
+    updatedAt: now
+  })
+  await db.flush()
+  db.closeDatabase()
 }
 
 function log(message: string): void {
@@ -96,12 +141,16 @@ async function launchApp(): Promise<{ app: ElectronApplication; page: Page }> {
     executablePath: ELECTRON_BIN,
     args: [MAIN_ENTRY],
     cwd: PROJECT_ROOT,
+    env: { ...process.env },
     timeout: 60_000
   })
   const page = await app.firstWindow()
   await page.waitForLoadState("domcontentloaded")
   await page.waitForFunction(() => Boolean((window as unknown as Partial<WindowWithApi>).api), {
     timeout: 30_000
+  })
+  await page.evaluate(() => {
+    ;(globalThis as unknown as { __name?: <T>(value: T) => T }).__name ??= (value) => value
   })
   return { app, page }
 }
@@ -216,6 +265,196 @@ async function testGoalControlCommandsDoNotTouchCheckpoint(page: Page): Promise<
   }
 }
 
+async function testGoalSetPreflightRejectsUnavailableEvaluator(page: Page): Promise<void> {
+  const threadId = await createThread(page, "Goal IPC E2E - evaluator preflight")
+  try {
+    const result = await page.evaluate<
+      Promise<{
+        invokeResult: InvokeResult
+        goal: unknown
+        historyCount: number
+        events: string[]
+      }>,
+      { id: string }
+    >(
+      async ({ id }) => {
+        const api = (window as unknown as WindowWithApi).api
+        const previousGoalSettings = await api.models.getGoalSettings()
+        await api.models.setGoalSettings({ evaluatorModelId: "custom:missing-goal-e2e-judge" })
+        try {
+          const invokeResult = await new Promise<InvokeResult>((resolve) => {
+            const events: InvokeEvent[] = []
+            let cleanup = (): void => {}
+            const timeout = window.setTimeout(() => {
+              cleanup()
+              resolve({ events, timedOut: true })
+            }, 30_000)
+
+            cleanup = api.agent.invoke(
+              id,
+              "/goal 这个 goal 不应该启动，因为 evaluator 配置不可用。",
+              (event) => {
+                events.push(event)
+                if (event.type === "done" || event.type === "error") {
+                  window.clearTimeout(timeout)
+                  cleanup()
+                  resolve({ events })
+                }
+              },
+              "custom:deepseek-chat"
+            )
+          })
+          const goalState = await api.threads.getGoalState(id)
+          const history = await api.threads.getHistory(id)
+          const goalEvents = await api.threads.getGoalEvents(id)
+          return {
+            invokeResult,
+            goal: goalState.goal,
+            historyCount: history.length,
+            events: goalEvents.map((event) => event.message)
+          }
+        } finally {
+          await api.models.setGoalSettings(previousGoalSettings)
+        }
+      },
+      { id: threadId }
+    )
+
+    assert(!result.invokeResult.timedOut, "unavailable evaluator preflight should finish promptly")
+    assert(
+      result.invokeResult.events.some(
+        (event) => event.type === "error" && event.error === "GOAL_EVALUATOR_UNAVAILABLE"
+      ),
+      "unavailable evaluator should emit GOAL_EVALUATOR_UNAVAILABLE before starting"
+    )
+    assertEqual(result.goal, null, "unavailable evaluator must not create a goal")
+    assertEqual(result.historyCount, 0, "unavailable evaluator must not write checkpoint history")
+    assert(
+      !result.events.some((message) => message.startsWith("__cmb_goal_user_message__:/goal")),
+      "unavailable evaluator must not persist a /goal user event"
+    )
+    assert(
+      !result.events.some((message) => message.includes("Goal 已设置")),
+      "unavailable evaluator must not persist Goal set notice"
+    )
+    log("PASS unavailable evaluator preflight rejects goal set without side effects")
+  } finally {
+    await deleteThread(page, threadId)
+  }
+}
+
+async function testGoalResumePreflightKeepsPausedGoal(
+  page: Page,
+  threadId: string
+): Promise<void> {
+  try {
+    const result = await page.evaluate<
+      Promise<{
+        invokeResult: InvokeResult
+        before: NonNullable<
+          Awaited<ReturnType<WindowWithApi["api"]["threads"]["getGoalState"]>>["goal"]
+        >
+        after: NonNullable<
+          Awaited<ReturnType<WindowWithApi["api"]["threads"]["getGoalState"]>>["goal"]
+        >
+        historyBeforeCount: number
+        historyAfterCount: number
+        events: string[]
+      }>,
+      { id: string }
+    >(
+      async ({ id }) => {
+        const api = (window as unknown as WindowWithApi).api
+        const previousGoalSettings = await api.models.getGoalSettings()
+        await api.models.setGoalSettings({ evaluatorModelId: "custom:missing-goal-e2e-judge" })
+        try {
+          const beforeState = await api.threads.getGoalState(id)
+          if (!beforeState.goal) throw new Error("seeded paused goal missing before resume")
+          const historyBefore = await api.threads.getHistory(id)
+          const invokeResult = await new Promise<InvokeResult>((resolve) => {
+            const events: InvokeEvent[] = []
+            let cleanup = (): void => {}
+            const timeout = window.setTimeout(() => {
+              cleanup()
+              resolve({ events, timedOut: true })
+            }, 30_000)
+
+            cleanup = api.agent.invoke(
+              id,
+              "/goal resume",
+              (event) => {
+                events.push(event)
+                if (event.type === "done" || event.type === "error") {
+                  window.clearTimeout(timeout)
+                  cleanup()
+                  resolve({ events })
+                }
+              },
+              "custom:deepseek-chat"
+            )
+          })
+          const afterState = await api.threads.getGoalState(id)
+          if (!afterState.goal) throw new Error("seeded paused goal missing after resume")
+          const historyAfter = await api.threads.getHistory(id)
+          const goalEvents = await api.threads.getGoalEvents(id)
+          return {
+            invokeResult,
+            before: beforeState.goal,
+            after: afterState.goal,
+            historyBeforeCount: historyBefore.length,
+            historyAfterCount: historyAfter.length,
+            events: goalEvents.map((event) => event.message)
+          }
+        } finally {
+          await api.models.setGoalSettings(previousGoalSettings)
+        }
+      },
+      { id: threadId }
+    )
+
+    assert(!result.invokeResult.timedOut, "unavailable evaluator resume preflight should finish promptly")
+    assert(
+      result.invokeResult.events.some(
+        (event) => event.type === "error" && event.error === "GOAL_EVALUATOR_UNAVAILABLE"
+      ),
+      "unavailable evaluator resume should emit GOAL_EVALUATOR_UNAVAILABLE"
+    )
+    assertEqual(result.before.status, "paused", "seeded goal should start paused")
+    assertEqual(result.after.status, "paused", "unavailable evaluator must keep goal paused")
+    assertEqual(
+      result.after.activeWindowId,
+      result.before.activeWindowId,
+      "unavailable evaluator must not reset activeWindowId on resume"
+    )
+    assertEqual(
+      result.after.turnsUsed,
+      result.before.turnsUsed,
+      "unavailable evaluator must not reset turnsUsed on resume"
+    )
+    assertEqual(
+      result.after.pausedReason,
+      result.before.pausedReason,
+      "unavailable evaluator must not clear paused reason on resume"
+    )
+    assertEqual(
+      result.historyAfterCount,
+      result.historyBeforeCount,
+      "unavailable evaluator resume must not write checkpoint history"
+    )
+    assert(
+      !result.events.some((message) => message === "__cmb_goal_user_message__:/goal resume"),
+      "unavailable evaluator resume must not persist a stale /goal resume event"
+    )
+    assert(
+      !result.events.some((message) => message.includes("Goal 已继续")),
+      "unavailable evaluator resume must not persist Goal resumed notice"
+    )
+    log("PASS unavailable evaluator preflight rejects goal resume without resetting paused goal")
+  } finally {
+    await deleteThread(page, threadId)
+  }
+}
+
 async function testRealModelGoalCompletionSmoke(page: Page): Promise<void> {
   if (process.env.RUN_GOAL_E2E_REAL_MODEL !== "1") {
     log("SKIP real-model goal completion smoke; set RUN_GOAL_E2E_REAL_MODEL=1 to run it")
@@ -286,16 +525,30 @@ async function testRealModelGoalCompletionSmoke(page: Page): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  log("Launching Electron app")
-  let app: ElectronApplication | undefined
+  const previousHome = process.env.HOME
+  const isolatedHome = await mkdtemp(path.join(tmpdir(), "cmb-goal-ipc-e2e-"))
   try {
-    const launched = await launchApp()
-    app = launched.app
-    await testGoalControlCommandsDoNotTouchCheckpoint(launched.page)
-    await testRealModelGoalCompletionSmoke(launched.page)
-    log("All goal IPC E2E tests passed")
+    process.env.HOME = isolatedHome
+    const resumePreflightThreadId = `goal-ipc-resume-preflight-${Date.now()}`
+    await seedPausedGoalThread(resumePreflightThreadId)
+    log(`Using isolated HOME for Goal IPC E2E: ${isolatedHome}`)
+    log("Launching Electron app")
+    let app: ElectronApplication | undefined
+    try {
+      const launched = await launchApp()
+      app = launched.app
+      await testGoalSetPreflightRejectsUnavailableEvaluator(launched.page)
+      await testGoalResumePreflightKeepsPausedGoal(launched.page, resumePreflightThreadId)
+      await testGoalControlCommandsDoNotTouchCheckpoint(launched.page)
+      await testRealModelGoalCompletionSmoke(launched.page)
+      log("All goal IPC E2E tests passed")
+    } finally {
+      if (app) await app.close().catch(() => {})
+    }
   } finally {
-    if (app) await app.close().catch(() => {})
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(isolatedHome, { recursive: true, force: true })
   }
 }
 

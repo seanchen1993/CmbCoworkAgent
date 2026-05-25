@@ -203,6 +203,46 @@ function testTurnBudgetStopsContinuation(): void {
   assertEqual(goal?.pausedReason, "Turn budget exhausted (2/2).", "budget pause reason should include count")
 }
 
+function testEvaluatorRuntimeFailurePausesWithoutContinuation(): void {
+  const threadId = "thread-goal-runtime-evaluator-failure"
+  const harness = new GoalRuntimeHarness({ maxTurns: 5 })
+  harness.start(threadId, "检查 controller 日志并确认无残留")
+
+  const results = harness.runUntilSettled(
+    threadId,
+    [
+      {
+        assistantResponse: "已读取 AuthController，还需要 evaluator 判断下一步。",
+        toolCalls: ["read_file AuthController.java"],
+        toolEvidence: ["AuthController.java read ok"]
+      },
+      {
+        assistantResponse: "不应该在 evaluator runtime failure 后继续第二轮。",
+        toolCalls: ["execute rg log src/main"]
+      }
+    ],
+    () => ({
+      verdict: "blocked",
+      reason: "评估器暂时不可用。Goal 已暂停，请稍后使用 /goal resume 重试。"
+    })
+  )
+
+  assertEqual(results.length, 1, "evaluator runtime failure should stop auto continuation")
+  assertEqual(results[0].outcome?.shouldContinue, false, "blocked evaluator failure must not continue")
+  assert(
+    !results[0].outcome?.continuationPrompt,
+    "blocked evaluator failure must not produce a continuation prompt"
+  )
+  const goal = harness.goal(threadId)
+  assertEqual(goal?.status, "paused", "evaluator runtime failure should pause goal")
+  assertEqual(goal?.turnsUsed, 1, "failed evaluator turn should still be accounted")
+  assertEqual(
+    goal?.pausedReason,
+    "评估器暂时不可用。Goal 已暂停，请稍后使用 /goal resume 重试。",
+    "paused reason should explain evaluator runtime failure"
+  )
+}
+
 function testStaleWindowDecisionCannotMutateResumedGoal(): void {
   const threadId = "thread-goal-runtime-stale-window"
   const harness = new GoalRuntimeHarness()
@@ -241,6 +281,7 @@ function run(): void {
   testBlockedNeedsUserInputStopsLoop()
   testParseFailureBackstopPausesAfterThreeTurns()
   testTurnBudgetStopsContinuation()
+  testEvaluatorRuntimeFailurePausesWithoutContinuation()
   testStaleWindowDecisionCannotMutateResumedGoal()
   console.log("goals-runtime-harness.spec.ts passed")
 }

@@ -41,10 +41,11 @@ function unescapeXmlText(value: string): string {
 }
 
 function sanitizeTransportLabel(value: string): string {
-  return unescapeXmlText(value)
-    .replace(/[\u0000-\u001f\u007f]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
+  const withoutControlChars = Array.from(unescapeXmlText(value), (char) => {
+    const code = char.charCodeAt(0)
+    return code <= 0x1f || code === 0x7f ? " " : char
+  }).join("")
+  return withoutControlChars.replace(/\s+/g, " ").trim()
 }
 
 function extractAttachmentNames(payload: string): string[] {

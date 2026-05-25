@@ -1,3 +1,5 @@
+import { createHash } from "crypto"
+
 export interface CountableToolCall {
   id?: string
   name?: string
@@ -13,6 +15,23 @@ function stableJson(value: unknown): string {
   return `{${keys.map((k) => `${JSON.stringify(k)}:${stableJson(obj[k])}`).join(",")}}`
 }
 
+export function stableToolArgsDigest(value: unknown): string {
+  return createHash("sha256").update(stableJson(value)).digest("hex").slice(0, 16)
+}
+
+export function stableToolOutputDigest(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16)
+}
+
+export function buildToolResultFallbackKey(
+  toolCallId: unknown,
+  index: number,
+  output: string
+): string {
+  const callId = typeof toolCallId === "string" && toolCallId.trim() ? toolCallId : "tool"
+  return `${callId}:${index}:len:${output.length}:out:${stableToolOutputDigest(output)}`
+}
+
 export class ToolCallCounter {
   private readonly seen = new Set<string>()
   private count = 0
@@ -21,7 +40,7 @@ export class ToolCallCounter {
   private buildKey(tc: CountableToolCall, aiMessageId: string, index: number): string {
     if (typeof tc.id === "string" && tc.id.trim()) return `id:${tc.id}`
     const name = tc.name ?? "unknown"
-    const argsHash = stableJson(tc.args ?? {})
+    const argsHash = stableToolArgsDigest(tc.args ?? {})
     return `msg:${aiMessageId || "unknown"}#${index}:${name}:${argsHash}`
   }
 

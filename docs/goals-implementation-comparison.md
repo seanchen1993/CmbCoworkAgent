@@ -16,7 +16,7 @@
 | 核心定位     | runtime 内建长期目标框架                        | 外部 goal loop                       | session-scoped completion condition                              | 轻量 thread goal loop                       |
 | 目标粒度     | 一个 thread 一个 goal                           | 一个 session 一个 goal               | 一个 session 一个 goal                                           | 一个 thread 一个 goal                       |
 | 持久化       | SQLite `thread_goals` 专表                      | `SessionDB.state_meta` JSON          | 会话级 goal，active goal 可随 resume 恢复                        | SQLite `thread_goals` 专表                  |
-| 完成判断     | 主模型调用 `update_goal(status="complete")`     | 独立辅助 judge 模型                  | 小快 evaluator 模型，默认 Haiku                                  | 独立 evaluator 模型，优先 economy           |
+| 完成判断     | 主模型调用 `update_goal(status="complete")`     | 独立辅助 judge 模型                  | 小快 evaluator 模型，默认 Haiku                                  | 独立 evaluator 模型，显式配置优先，否则跟随当前有效模型 |
 | 续跑方式     | runtime 注入隐藏 goal context 并启动新 turn     | 普通 user message continuation       | Stop hook wrapper 触发下一轮                                     | 同一次 `agent:invoke` 内继续 `agent.stream` |
 | 预算         | token budget + wall clock                       | turn budget，默认 20                 | 文档建议可把 turn/time 限制写进 condition；状态展示 tokens/turns | turn budget，默认 15                        |
 | Prompt cache | goal context 会进入模型上下文，可能影响缓存前缀 | 不改 system prompt/toolset，缓存友好 | 基于 hooks/evaluator，不让 evaluator 调工具                      | 不改 system prompt/toolset，缓存友好        |
@@ -570,7 +570,7 @@ used skills
 
 - 工具输入会压缩成摘要，例如命令、路径、查询参数。
 - 工具输出保留 head/tail，并保留重要行，例如测试结果、错误、diff、文件路径、controller/method/log 相关行。
-- evidence window 会根据 evaluator 实际使用模型的 `maxTokens` 动态计算：约为上下文的 25%，下限 12K tokens，上限 80K tokens，再把其中约 65% 分给工具证据。
+- evaluator window 会根据实际使用模型的 `maxTokens` 动态计算：约为上下文的 25%，下限 1K tokens，上限 80K tokens；工具证据在该窗口内按字符预算裁剪，约占 65%，下限 2K 字符，上限 40K 字符。
 
 这样比 Hermes 只看最后回复更稳，也比无脑传完整 transcript 更适合 CmbCoworkAgent 的性能目标。
 
