@@ -28,7 +28,8 @@ import {
   getEnabledSkillHooks,
   getEnabledSkillsSources,
   getEnabledPluginSkillSourceMetadata,
-  getDisabledSkillDirs
+  getDisabledSkillDirs,
+  getHookLoggingConfig
 } from "../storage"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
@@ -578,6 +579,7 @@ function sendActiveHookNotice(
   channel: string,
   workspacePath?: string
 ): void {
+  if (!getHookLoggingConfig().enabled) return
   const message = formatActiveHookNotice(getActiveHookSummary(workspacePath))
   if (!message) return
   sendHookNotice(window, channel, message)
@@ -1757,6 +1759,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath,
             modelId: candidateId,
             abortSignal: abortController.signal,
+            enableRequestUserInput: true,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
@@ -2368,6 +2371,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath,
             modelId: nextCandidate,
             abortSignal: abortController.signal,
+            enableRequestUserInput: true,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
@@ -2746,6 +2750,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath,
             modelId: candidateId,
             abortSignal: abortController.signal,
+            enableRequestUserInput: true,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
@@ -2890,6 +2895,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath,
             modelId: nextCandidate,
             abortSignal: abortController.signal,
+            enableRequestUserInput: true,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
@@ -3101,6 +3107,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               workspacePath,
               modelId: candidateId,
               abortSignal: abortController.signal,
+              enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
@@ -3242,6 +3249,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               workspacePath,
               modelId: nextCandidate,
               abortSignal: abortController.signal,
+              enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),

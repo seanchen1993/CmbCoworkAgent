@@ -76,6 +76,9 @@ import type {
   LspCallHierarchyIncomingCall,
   LspCallHierarchyOutgoingCall,
   LspStatus,
+  UserInputRequest,
+  UserInputResponse,
+  UserInputAnswer,
 } from "../../main/types"
 import type {
   AgentAutoCommitMessageStrategy,
@@ -131,6 +134,9 @@ export type {
   LspCallHierarchyIncomingCall,
   LspCallHierarchyOutgoingCall,
   LspStatus,
+  UserInputRequest,
+  UserInputResponse,
+  UserInputAnswer,
   AgentAutoCommitMode,
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitSettings,

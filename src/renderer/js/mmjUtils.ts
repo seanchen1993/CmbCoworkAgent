@@ -65,7 +65,10 @@ export function initMMJ(): void {
         userId: ip || "游客",
         positionId: localStorage.getItem("version") || "",
         openWs: "true",
-        errorCode:'MMJ0001'
+        errorCode:'MMJ0001',
+        wsErrorCodeMap: [
+          {url:'', errorCode:'MMJ0001'}
+        ]
       })
 
       updateMMJUserInfo()

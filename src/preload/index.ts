@@ -27,6 +27,8 @@ import type {
   ChatXConfig,
   HookLoggingConfig,
   AgentAutoCommitSettings
+  UserInputRequest,
+  UserInputResponse
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
@@ -1393,6 +1395,41 @@ const api = {
       ipcRenderer.on("sandbox:changed", handler)
       return () => {
         ipcRenderer.removeListener("sandbox:changed", handler)
+      }
+    }
+  },
+  userInput: {
+    sendResponse: (response: UserInputResponse): void => {
+      ipcRenderer.send("userInput:response", response)
+    },
+    onRequest: (
+      threadId: string,
+      callback: (request: UserInputRequest) => void
+    ): (() => void) => {
+      const channel = `userInput:request:${threadId}`
+      const handler = (_: unknown, request: UserInputRequest): void => {
+        ipcRenderer.send("userInput:ack", {
+          requestId: request.requestId,
+          threadId: request.threadId
+        })
+        callback(request)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
+    onCancel: (
+      threadId: string,
+      callback: (data: { requestId: string; reason?: string }) => void
+    ): (() => void) => {
+      const channel = `userInput:cancel:${threadId}`
+      const handler = (_: unknown, data: { requestId: string; reason?: string }): void => {
+        callback(data)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
       }
     }
   },

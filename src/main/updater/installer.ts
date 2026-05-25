@@ -6,9 +6,11 @@ import { getUpdatesDir } from "./downloader"
 
 const isWindows = process.platform === "win32"
 const isLinux = process.platform === "linux"
+const LINUX_WRAPPER_NAME = "CMBDevClaw"
+const LINUX_REAL_EXE_NAME = "cmbdevclaw"
 
 /** Executable name varies by platform */
-const EXE_NAME = isWindows ? "CMBDevClaw.exe" : "cmbdevclaw"
+const EXE_NAME = isWindows ? "CMBDevClaw.exe" : LINUX_REAL_EXE_NAME
 
 /**
  * Process name used to detect running instances.
@@ -291,11 +293,11 @@ exec > "$LOG_FILE" 2>&1
 
 # Wait for process to exit (up to 30s)
 n=0
-while pgrep -x "$PROC_NAME" > /dev/null 2>&1 && [ $n -lt 30 ]; do
+while { pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/null 2>&1; } && [ $n -lt 30 ]; do
   sleep 1
   n=$((n+1))
 done
-if pgrep -x "$PROC_NAME" > /dev/null 2>&1; then
+if pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/null 2>&1; then
   echo "Process still running after 30s, aborting"
   exit 1
 fi
@@ -355,11 +357,11 @@ exec > "$LOG_FILE" 2>&1
 
 # Wait for process to exit (up to 30s)
 n=0
-while pgrep -x "$PROC_NAME" > /dev/null 2>&1 && [ $n -lt 30 ]; do
+while { pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/null 2>&1; } && [ $n -lt 30 ]; do
   sleep 1
   n=$((n+1))
 done
-if pgrep -x "$PROC_NAME" > /dev/null 2>&1; then
+if pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/null 2>&1; then
   echo "Process still running after 30s, aborting"
   exit 1
 fi
@@ -402,6 +404,9 @@ PROC_NAME=${toBashString(processName)}
 TEMP_DIR="/tmp/cmbdevclaw_update_tmp"
 STAGE_DIR="$APP_DIR.new"
 EXE_FILE="$(basename "$EXE")"
+PRODUCT_WRAPPER=${toBashString(LINUX_WRAPPER_NAME)}
+PACKAGE_EXE=${toBashString(LINUX_REAL_EXE_NAME)}
+PRODUCT_BIN="$PRODUCT_WRAPPER.bin"
 STAGE_MARKER="$STAGE_DIR/resources/update-marker.json"
 LOG_FILE="\${UPDATE_LOG:-/tmp/cmbdevclaw-full-update.log}"
 
@@ -409,11 +414,11 @@ exec > "$LOG_FILE" 2>&1
 
 # Wait for process to exit (up to 30s)
 n=0
-while pgrep -x "$PROC_NAME" > /dev/null 2>&1 && [ $n -lt 30 ]; do
+while { pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/null 2>&1; } && [ $n -lt 30 ]; do
   sleep 1
   n=$((n+1))
 done
-if pgrep -x "$PROC_NAME" > /dev/null 2>&1; then
+if pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/null 2>&1; then
   echo "Process still running after 30s, aborting"
   exit 1
 fi
@@ -426,10 +431,44 @@ mkdir -p "$STAGE_DIR"
 unzip -o "$ZIP" -d "$TEMP_DIR" || { echo "Unzip failed"; exit 1; }
 
 cp -a "$TEMP_DIR"/. "$STAGE_DIR"/ || { echo "Stage copy failed"; exit 1; }
-if [ ! -f "$STAGE_DIR/$EXE_FILE" ]; then
-  echo "Staged app is missing expected executable: $STAGE_DIR/$EXE_FILE"
+
+# Repair Linux launcher layout and executable bits. Zip archives produced on
+# non-Linux hosts often lose mode bits, and older packages may contain a wrapper
+# that points at a missing binary.
+STAGE_WRAPPER="$STAGE_DIR/$PRODUCT_WRAPPER"
+if [ -f "$STAGE_WRAPPER" ] && [ ! -f "$STAGE_DIR/$PACKAGE_EXE" ] && [ ! -f "$STAGE_DIR/$PRODUCT_BIN" ]; then
+  if ! head -c 2 "$STAGE_WRAPPER" | grep -q '#!'; then
+    mv "$STAGE_WRAPPER" "$STAGE_DIR/$PACKAGE_EXE"
+  fi
+fi
+
+REAL_BIN=""
+for candidate in "$PACKAGE_EXE" "$PRODUCT_BIN" "$EXE_FILE"; do
+  if [ "$candidate" != "$PRODUCT_WRAPPER" ] && [ -f "$STAGE_DIR/$candidate" ]; then
+    REAL_BIN="$candidate"
+    break
+  fi
+done
+if [ -z "$REAL_BIN" ]; then
+  echo "Staged app is missing expected executable binary"
   exit 1
 fi
+chmod 755 "$STAGE_DIR/$REAL_BIN" || true
+
+cat > "$STAGE_WRAPPER" << 'WRAPPER_EOF'
+#!/usr/bin/env bash
+DIR="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+cd "$DIR"
+for bin in "cmbdevclaw" "CMBDevClaw.bin"; do
+  if [ -x "./$bin" ]; then
+    exec "./$bin" --no-sandbox "$@"
+  fi
+done
+echo "CMBDevClaw launcher could not find an executable binary." >&2
+exit 1
+WRAPPER_EOF
+chmod 755 "$STAGE_WRAPPER" || true
+UPDATED_EXE="$APP_DIR/$REAL_BIN"
 
 mkdir -p "$(dirname "$STAGE_MARKER")"
 printf '%s\n' ${toBashString(markerJson)} > "$STAGE_MARKER"
@@ -449,7 +488,7 @@ rm -rf "$TEMP_DIR"
 rm -f "$ZIP"
 
 # Restart
-nohup "$EXE" --no-sandbox > /dev/null 2>&1 &
+nohup "$UPDATED_EXE" --no-sandbox > /dev/null 2>&1 &
 `
 }
 

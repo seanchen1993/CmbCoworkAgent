@@ -166,6 +166,7 @@ import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
+import { registerUserInputHandlers } from "./ipc/user-input"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
@@ -505,6 +506,7 @@ if (!gotTheLock) {
     prewarmRecentSandboxWorkspaces()
     registerAutoCommitHandlers(ipcMain)
     registerPetHandlers(ipcMain)
+    registerUserInputHandlers(ipcMain)
 
     ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
       mainLogForwardingEnabled = Boolean(enabled)

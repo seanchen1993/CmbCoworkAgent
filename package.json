@@ -1,6 +1,6 @@
 {
   "name": "cmbdevclaw",
-  "version": "1.3.10",
+  "version": "1.4.0",
   "description": "CMBDevClaw description",
   "author": {
     "name": "CMBDevClaw",
@@ -38,6 +38,8 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "start": "electron-vite preview",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
@@ -198,6 +200,7 @@
     "react-dom": "^19.2.1",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.9.3",
-    "vite": "^7.2.6"
+    "vite": "^7.2.6",
+    "vitest": "^3.2.4"
   }
 }
