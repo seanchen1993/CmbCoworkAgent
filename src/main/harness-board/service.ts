@@ -366,13 +366,14 @@ function isInsideDirectory(basePath: string, targetPath: string): boolean {
 function resolveAdapterFilePath(project: HarnessProjectMetadata, value: unknown): string | null {
   const rawPath = normalizeText(value).trim()
   if (!rawPath) return null
+  const normalizedPath = rawPath.replace(/\\/g, "/")
 
   const projectPath = projectDirectoryPath(project)
-  const resolvedPath = isAbsolute(rawPath)
-    ? resolve(rawPath)
-    : rawPath === project.projectCode || rawPath.startsWith(`${project.projectCode}/`)
-      ? resolve(project.workspace.path, rawPath)
-      : resolve(projectPath, rawPath)
+  const resolvedPath = isAbsolute(normalizedPath)
+    ? resolve(normalizedPath)
+    : normalizedPath === project.projectCode || normalizedPath.startsWith(`${project.projectCode}/`)
+      ? resolve(project.workspace.path, normalizedPath)
+      : resolve(projectPath, normalizedPath)
 
   return isInsideDirectory(projectPath, resolvedPath) ? resolvedPath : null
 }
@@ -503,17 +504,18 @@ function normalizeArtifactKind(value: unknown): HarnessArtifactKind {
 function normalizeAdapterPath(project: HarnessProjectMetadata, value: unknown): string | null {
   const rawPath = normalizeText(value).trim()
   if (!rawPath) return null
-  if (isAbsolute(rawPath)) {
-    const relativePath = relative(project.workspace.path, rawPath)
+  const normalizedPath = rawPath.replace(/\\/g, "/")
+  if (isAbsolute(normalizedPath)) {
+    const relativePath = relative(project.workspace.path, normalizedPath)
     if (relativePath && !relativePath.startsWith("..") && !isAbsolute(relativePath)) {
-      return relativePath
+      return relativePath.replace(/\\/g, "/")
     }
-    return rawPath
+    return normalizedPath
   }
-  if (rawPath === ".autobizdevops" || rawPath.startsWith(".autobizdevops/")) {
-    return `${project.projectCode}/${rawPath}`
+  if (normalizedPath === ".autobizdevops" || normalizedPath.startsWith(".autobizdevops/")) {
+    return `${project.projectCode}/${normalizedPath}`
   }
-  return rawPath
+  return normalizedPath
 }
 
 function normalizeWatchRefs(
@@ -1200,6 +1202,11 @@ export function updateHarnessProjectMetadata(
 
   validateProjectCodeUnique(input.projectCode, store, projectId)
   const existing = store.projects[index]
+  const existingWorkspacePath = existing.workspace.path.trim()
+  const requestedWorkspacePath = input.workspace.path.trim()
+  if (requestedWorkspacePath !== existingWorkspacePath) {
+    throw new Error("项目工作区路径不允许修改")
+  }
   const newCode = input.projectCode.trim()
   const codeChanged = existing.projectCode !== newCode
   if (codeChanged) {
@@ -1226,7 +1233,7 @@ export function updateHarnessProjectMetadata(
       name: input.product.name.trim()
     },
     workspace: {
-      path: input.workspace.path.trim()
+      path: existing.workspace.path
     },
     "harness-adapter": harnessAdapter,
     lifecycle: {

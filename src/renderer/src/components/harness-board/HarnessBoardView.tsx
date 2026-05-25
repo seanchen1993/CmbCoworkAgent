@@ -11,6 +11,7 @@ import {
   FileText,
   FolderOpen,
   GitBranch,
+  Info,
   Loader2,
   Maximize2,
   MessageSquarePlus,
@@ -43,6 +44,7 @@ import {
   SelectValue
 } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TabbedPanel } from "@/components/tabs"
 import { ThreadListItem } from "@/components/sidebar/ThreadSidebar"
 import { cn } from "@/lib/utils"
@@ -853,7 +855,6 @@ function ProjectEditDialog({
   error,
   onOpenChange,
   onChange,
-  onPickWorkspace,
   onSubmit
 }: {
   open: boolean
@@ -863,7 +864,6 @@ function ProjectEditDialog({
   error: string | null
   onOpenChange: (open: boolean) => void
   onChange: (form: HarnessProjectMetadataUpdateInput) => void
-  onPickWorkspace: () => void
   onSubmit: () => void
 }): React.JSX.Element {
   const projectNameError = getHarnessNameError("项目名称", form.name)
@@ -913,9 +913,28 @@ function ProjectEditDialog({
                 />
                 {projectNameError && <span className="text-status-critical">{projectNameError}</span>}
               </label>
-              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                项目编号 *
+              <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                <div className="flex items-center gap-1.5">
+                  <label htmlFor="harness-edit-project-code">项目编号 *</label>
+                  <TooltipProvider delayDuration={150}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label="项目编号修改提示"
+                          className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <Info className="size-3.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="max-w-72">
+                        请勿在技能会话运行期间修改项目编号，以免造成产物路径错误
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
                 <Input
+                  id="harness-edit-project-code"
                   value={form.projectCode}
                   onChange={(event) =>
                     onChange({ ...form, projectCode: sanitizeHarnessNameInput(event.target.value) })
@@ -925,7 +944,7 @@ function ProjectEditDialog({
                   aria-invalid={projectCodeError ? true : undefined}
                 />
                 {projectCodeError && <span className="text-status-critical">{projectCodeError}</span>}
-              </label>
+              </div>
               <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目描述 *
                 <Input
@@ -964,24 +983,16 @@ function ProjectEditDialog({
                 />
               </label>
               <div className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
-                项目工作区 *
-                <div className="flex min-w-0 gap-2">
-                  <Input
-                    value={form.workspace.path}
-                    readOnly
-                    placeholder="请选择 AUTOBIZDEVOPS 插件工作区路径"
-                    className="bg-background"
-                  />
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    className="shrink-0 gap-2"
-                    onClick={onPickWorkspace}
-                  >
-                    <FolderOpen className="size-4" />
-                    选择
-                  </Button>
+                <div className="flex items-center justify-between gap-2">
+                  <span>项目工作区 *</span>
                 </div>
+                <Input
+                  value={form.workspace.path}
+                  readOnly
+                  aria-readonly="true"
+                  placeholder="请选择 AUTOBIZDEVOPS 插件工作区路径"
+                  className="bg-muted text-muted-foreground"
+                />
               </div>
             </div>
           </section>
@@ -2747,13 +2758,6 @@ export function HarnessBoardView(): React.JSX.Element {
     }
   }
 
-  const handlePickEditWorkspace = async (): Promise<void> => {
-    const workspacePath = await window.api.workspace.select()
-    if (workspacePath) {
-      setEditForm((current) => ({ ...current, workspace: { path: workspacePath } }))
-    }
-  }
-
   const handleSubmit = async (): Promise<void> => {
     setFormError(null)
     if (metadataRequiredMissing(form)) {
@@ -3307,7 +3311,6 @@ export function HarnessBoardView(): React.JSX.Element {
             }
           }}
           onChange={setEditForm}
-          onPickWorkspace={() => void handlePickEditWorkspace()}
           onSubmit={() => void handleSubmitEdit()}
         />
         {sidebarDeleteDialog}
@@ -3479,7 +3482,6 @@ export function HarnessBoardView(): React.JSX.Element {
           }
         }}
         onChange={setEditForm}
-        onPickWorkspace={() => void handlePickEditWorkspace()}
         onSubmit={() => void handleSubmitEdit()}
       />
       {sidebarDeleteDialog}

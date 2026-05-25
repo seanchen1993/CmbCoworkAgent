@@ -6,13 +6,31 @@ if (process.platform === "linux") {
   app.commandLine.appendSwitch("no-sandbox")
 }
 
-import { existsSync } from "fs"
+import { existsSync, statSync } from "fs"
 import { join } from "path"
 import { writeMainLog, writeRendererLog } from "./logging"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
 let mainLogForwardingEnabled = false
+
+async function showPathInFileManager(filePath: string): Promise<{ success: boolean; error?: string }> {
+  if (typeof filePath !== "string" || !filePath.trim()) {
+    return { success: false, error: "Invalid path" }
+  }
+
+  if (!existsSync(filePath)) {
+    return { success: false, error: `Path does not exist: ${filePath}` }
+  }
+
+  if (statSync(filePath).isDirectory()) {
+    const error = await shell.openPath(filePath)
+    return error ? { success: false, error } : { success: true }
+  }
+
+  shell.showItemInFolder(filePath)
+  return { success: true }
+}
 
 function getConsoleLevelName(level: number): string {
   switch (level) {
@@ -529,8 +547,7 @@ if (!gotTheLock) {
 
     ipcMain.handle("show-item-in-folder", async (_, filePath: string) => {
       try {
-        shell.showItemInFolder(filePath)
-        return { success: true }
+        return await showPathInFileManager(filePath)
       } catch (error) {
         console.error("Failed to show item in folder:", error)
         return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
@@ -539,8 +556,7 @@ if (!gotTheLock) {
 
     ipcMain.handle("shell-show-item-in-folder", async (_, filePath: string) => {
       try {
-        shell.showItemInFolder(filePath)
-        return { success: true }
+        return await showPathInFileManager(filePath)
       } catch (error) {
         console.error("Failed to show item in folder:", error)
         return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
