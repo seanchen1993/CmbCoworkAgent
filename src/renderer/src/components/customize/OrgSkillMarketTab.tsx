@@ -134,6 +134,7 @@ function OrgSkillCard({
   onUninstall: (item: MarketItem) => void | Promise<void>
 }): React.JSX.Element {
   const uploaderProfile = getOrgSkillUploaderProfile(item)
+  const updatedAt = item.updated_at || item.created_at
 
   return (
     <div
@@ -181,7 +182,7 @@ function OrgSkillCard({
           )}
           <span className="inline-flex items-center gap-1">
             <Calendar className="size-3" />
-            {new Date(item.created_at).toLocaleDateString("zh-CN")}
+            更新于 {new Date(updatedAt).toLocaleDateString("zh-CN")}
           </span>
           {(item.user_id || item.managerName || item.managerDepartment) && (
             <span className="inline-flex min-w-0 items-center gap-1">
@@ -545,7 +546,7 @@ export function OrgSkillMarketContent({
             {selectedLabels.length > 0
               ? `当前分类：${selectedLabels.map((label) => label.labelName).join("、")}`
               : "全部 组织级技能"}
-            {` · 筛选结果 ${visibleItems.length} 个`}
+            {` · 总数 ${pagination.total} 个 · 筛选结果 ${visibleItems.length} 个 · 按更新时间排序`}
           </span>
         </div>
         {visibleItems.length === 0 ? (

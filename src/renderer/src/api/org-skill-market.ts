@@ -42,6 +42,7 @@ interface OrgSkillApiItem {
   isDuplicated: boolean | null
   versions: OrgSkillVersion[]
   createdAt: string
+  updateAt?: string
   updatedAt: string
   isSubscribe: boolean
   subscriptionCount: number
@@ -291,6 +292,7 @@ export function getMockOrgSkillLabels(): OrgSkillLabel[] {
 function mapOrgSkillItem(item: OrgSkillApiItem): MarketItem {
   const latestVersion = getLatestOrgSkillVersion(item)
   const labelName = item.labels?.[0]?.labelName || item.category || "未分类"
+  const updatedAt = item.updateAt || item.updatedAt || item.createdAt || new Date().toISOString()
 
   return {
     id: `org-skill-${item.id}`,
@@ -299,7 +301,8 @@ function mapOrgSkillItem(item: OrgSkillApiItem): MarketItem {
     chinese_name: item.name,
     description: item.description || "",
     filename: `${item.slug || item.name}.zip`,
-    created_at: item.createdAt || item.updatedAt || new Date().toISOString(),
+    created_at: item.createdAt || updatedAt,
+    updated_at: updatedAt,
     category: `组织级技能/${labelName}`,
     tag: item.sourceOriginName || item.sourceOrigin || undefined,
     featured: "",

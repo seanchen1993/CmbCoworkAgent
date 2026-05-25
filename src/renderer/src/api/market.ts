@@ -48,6 +48,7 @@ export interface MarketItem {
   description: string
   filename: string
   created_at: string
+  updated_at?: string
   category?: string // Add category field
   tag?: string
   featured?: string // eg:官方推荐；精品；热门；个人；
