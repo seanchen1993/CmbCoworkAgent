@@ -1479,10 +1479,7 @@ function HookLine({
 }): React.JSX.Element {
   const status = hookResultStatus(hook.resultCode)
   const canSelectSession = Boolean(hook.sessionId && onSelectSession)
-  const metaItems = [
-    hook.ts,
-    hook.source
-  ].filter((item): item is string => Boolean(item))
+  const metaItems = [hook.ts].filter((item): item is string => Boolean(item))
 
   return (
     <button
@@ -2410,7 +2407,10 @@ function FeatureDetailPage({
                   <FeatureWorkspaceChangesPanel sessions={detail.sessions} threadsById={threadsById} />
 
                   <section className="rounded-md border border-border bg-background">
-                    <div className="border-b border-border px-3 py-3 text-sm font-semibold">Hook 事件</div>
+                    <div className="flex min-w-0 items-center gap-2 border-b border-border px-3 py-3 text-sm font-semibold">
+                      <Workflow className="size-4 shrink-0 text-muted-foreground" />
+                      <span className="truncate">运行事件</span>
+                    </div>
                     {selectedNode && selectedNodeHooks.length > 0 ? (
                       <div className="max-h-64 overflow-y-auto">
                         {selectedNodeHooks.map((hook, index) => (
@@ -2423,7 +2423,7 @@ function FeatureDetailPage({
                       </div>
                     ) : (
                       <div className="px-3 py-6 text-sm text-muted-foreground">
-                        当前阶段暂无 Hook 事件。
+                        当前阶段暂无运行事件。
                       </div>
                     )}
                   </section>
