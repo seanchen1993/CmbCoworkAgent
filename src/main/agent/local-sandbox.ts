@@ -1513,6 +1513,7 @@ export class LocalSandbox
     this.timeout = options.timeout ?? 60_000 // 1 minute default
     this.maxOutputBytes = options.maxOutputBytes ?? 100_000 // ~100KB default
     const baseEnv = options.env ?? ({ ...process.env } as Record<string, string>)
+    baseEnv.SESSION_ID = this.runId
     // Ensure UTF-8 locale for spawned shells (Git Bash via pipe defaults to
     // Windows console code page, e.g. GBK, producing garbled CJK output)
     if (process.platform === "win32") {

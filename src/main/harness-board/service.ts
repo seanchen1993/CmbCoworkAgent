@@ -34,7 +34,7 @@ interface HarnessProjectStoreFile {
 
 type HarnessHookLogRef = HarnessRunDetailViewModel["run"]["hookLogRefs"][number]
 type HarnessInspectCommandName = "project" | "run" | "createProject" | "createFeature"
-type HarnessInspectCommandConfigKey = "projectStatus" | "featureStatus" | "createProject" | "createFeature"
+type HarnessInspectCommandConfigKey = "project_status" | "feature_status" | "create_project" | "create_feature"
 type HarnessPlatformConfigKey =
   | HarnessInspectCommandConfigKey
   | "plugin_dir_prompt"
@@ -43,10 +43,10 @@ type HarnessPlatformConfigKey =
   | "feature_create_prompt"
 
 const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<HarnessInspectCommandName, HarnessInspectCommandConfigKey> = {
-  project: "projectStatus",
-  run: "featureStatus",
-  createProject: "createProject",
-  createFeature: "createFeature"
+  project: "project_status",
+  run: "feature_status",
+  createProject: "create_project",
+  createFeature: "create_feature"
 }
 
 interface ConfiguredHarnessInvocation {
@@ -738,18 +738,18 @@ function normalizeArtifact(
 
 function normalizeHook(value: unknown): HarnessRunNode["hooks"][number] | null {
   if (!isObject(value)) return null
-  const hookId = normalizeText(value.hookId)
-  if (!hookId) return null
+  const eventId = normalizeText(value.eventId)
+  if (!eventId) return null
   return {
-    hookId,
-    label: normalizeText(value.label) || hookId,
-    event: normalizeText(value.event) || undefined,
-    status: normalizeStatus(value.status),
-    decision: normalizeText(value.decision) || undefined,
-    exitCode: typeof value.exitCode === "number" ? value.exitCode : undefined,
-    durationMs: typeof value.durationMs === "number" ? value.durationMs : undefined,
-    summary: normalizeText(value.summary),
-    ts: normalizeText(value.ts) || undefined
+    ts: normalizeText(value.ts),
+    source: normalizeText(value.source),
+    sessionId: normalizeText(value.sessionId),
+    pluginId: normalizeText(value.pluginId),
+    featureId: normalizeText(value.featureId),
+    eventId,
+    resultCode: normalizeText(value.resultCode),
+    message: normalizeText(value.message),
+    nodeId: normalizeText(value.nodeId)
   }
 }
 
@@ -794,7 +794,7 @@ function readHookLogRefs(
         const hook = normalizeHook(parsed)
         if (!hook) continue
         entries.push({
-          nodeId: normalizeText(parsed.nodeId),
+          nodeId: hook.nodeId,
           hook
         })
       } catch {

@@ -41,6 +41,7 @@ import {
   useThreadContext
 } from "@/lib/thread-context"
 import { cn, truncate } from "@/lib/utils"
+import { isHarnessFeatureThread } from "@/lib/thread-classification"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -65,15 +66,6 @@ function getThreadWorkspacePath(thread: Thread, statePath?: string | null): stri
   if (statePath) return statePath
   const metadataPath = thread.metadata?.workspacePath
   return typeof metadataPath === "string" && metadataPath.trim() ? metadataPath : null
-}
-
-function isHarnessFeatureThread(thread: Thread): boolean {
-  const harnessFeature = thread.metadata?.harnessFeature
-  if (!harnessFeature || typeof harnessFeature !== "object") {
-    return false
-  }
-  const metadata = harnessFeature as Record<string, unknown>
-  return typeof metadata.projectId === "string" && typeof metadata.slug === "string"
 }
 
 function getWorkspaceName(path: string | null): string {

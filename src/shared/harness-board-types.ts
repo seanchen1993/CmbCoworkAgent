@@ -217,15 +217,15 @@ export interface HarnessArtifact {
 }
 
 export interface HarnessHookLogView {
-  hookId: string
-  label: string
-  event?: string
-  status: HarnessStatus
-  decision?: string
-  exitCode?: number
-  durationMs?: number
-  summary: string
-  ts?: string
+  ts: string
+  source: string
+  sessionId: string
+  pluginId: string
+  featureId: string
+  eventId: string
+  resultCode: "done" | "blocked" | "skipped" | "error" | string
+  message: string
+  nodeId: string
 }
 
 export interface HarnessRunNode {

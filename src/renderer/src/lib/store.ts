@@ -1,5 +1,6 @@
 import { create } from "zustand"
 import type { Thread, ModelConfig, Provider } from "@/types"
+import { findFirstChatThread, isHarnessFeatureThread } from "@/lib/thread-classification"
 
 type EvolutionTab = "candidates" | "traces"
 type MainView =
@@ -13,6 +14,16 @@ type MainView =
 
 interface ThreadNavigationOptions {
   preserveView?: boolean
+}
+
+function resolveChatThreadId(threads: Thread[], preferredThreadId?: string | null): string | null {
+  const preferredThread = preferredThreadId
+    ? threads.find((thread) => thread.thread_id === preferredThreadId)
+    : null
+  if (preferredThread && !isHarnessFeatureThread(preferredThread)) {
+    return preferredThread.thread_id
+  }
+  return findFirstChatThread(threads)?.thread_id ?? null
 }
 
 interface EvolutionRunProgress {
@@ -218,9 +229,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     const threads = await window.api.threads.list()
     set({ threads })
 
-    // Select first thread if none selected
-    if (!get().currentThreadId && threads.length > 0) {
-      await get().selectThread(threads[0].thread_id)
+    // Select the first chat thread if none selected. Harness feature threads
+    // are rendered inside project mode and should not become the default chat.
+    if (!get().currentThreadId) {
+      const firstChatThread = findFirstChatThread(threads)
+      if (firstChatThread) {
+        await get().selectThread(firstChatThread.thread_id)
+      }
     }
   },
 
@@ -275,7 +290,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         const threads = state.threads.filter((t) => t.thread_id !== threadId)
         const wasCurrentThread = state.currentThreadId === threadId
         const newCurrentId = wasCurrentThread
-          ? threads[0]?.thread_id || null
+          ? state.mainView === "harness"
+            ? null
+            : findFirstChatThread(threads)?.thread_id || null
           : state.currentThreadId
 
         return {
@@ -361,10 +378,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     } else {
       const restored = get().previousThreadId
+      const currentThreadId = resolveChatThreadId(get().threads, restored)
       set({
         showClaudeCodeView: false,
         mainView: "thread",
-        currentThreadId: restored,
+        currentThreadId,
         previousThreadId: null
       })
     }
@@ -391,10 +409,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     } else {
       const restored = get().previousThreadId
+      const currentThreadId = resolveChatThreadId(get().threads, restored)
       set({
         showDashboardView: false,
         mainView: "thread",
-        ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
+        currentThreadId,
+        previousThreadId: null
       })
     }
   },
@@ -416,10 +436,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     } else {
       const restored = get().previousThreadId
+      const currentThreadId = resolveChatThreadId(get().threads, restored)
       set({
         showKanbanView: false,
         mainView: "thread",
-        ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
+        currentThreadId,
+        previousThreadId: null
       })
     }
   },
@@ -444,10 +466,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     } else {
       const restored = get().previousThreadId
+      const chatThreadId = resolveChatThreadId(get().threads, restored)
       set({
         showHarnessBoardView: false,
         mainView: "thread",
-        ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
+        currentThreadId: chatThreadId,
+        previousThreadId: null
       })
     }
   },
@@ -465,11 +489,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     } else {
       const restored = get().previousThreadId
+      const currentThreadId = resolveChatThreadId(get().threads, restored)
       set({
         showCustomizeView: false,
         customizeInitialTab: null,
         mainView: "thread",
-        ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
+        currentThreadId,
+        previousThreadId: null
       })
     }
   },
@@ -575,13 +601,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     const restored = get().previousThreadId
+    const chatThreadId = resolveChatThreadId(get().threads, restored)
     set({
       mainView: "thread",
       showCustomizeView: false,
       showKanbanView: false,
       showHarnessBoardView: false,
       showClaudeCodeView: false,
-      ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
+      currentThreadId: chatThreadId,
+      previousThreadId: null
     })
   },
 

@@ -1470,29 +1470,49 @@ function ArtifactLine({
   )
 }
 
-function HookLine({ hook }: { hook: HarnessHookLogView }): React.JSX.Element {
+function HookLine({
+  hook,
+  onSelectSession
+}: {
+  hook: HarnessHookLogView
+  onSelectSession?: (threadId: string) => void
+}): React.JSX.Element {
+  const status = hookResultStatus(hook.resultCode)
+  const canSelectSession = Boolean(hook.sessionId && onSelectSession)
   const metaItems = [
     hook.ts,
-    hook.event,
-    hook.decision ? `decision: ${hook.decision}` : "",
-    typeof hook.exitCode === "number" ? `exit ${hook.exitCode}` : ""
+    hook.source
   ].filter((item): item is string => Boolean(item))
 
   return (
-    <div className="grid min-w-0 grid-cols-[18px_minmax(0,1fr)] gap-2 border-t border-border px-3 py-3 text-sm">
-      {statusIcon(hook.status)}
+    <button
+      type="button"
+      className={cn(
+        "grid min-w-0 w-full grid-cols-[18px_minmax(0,1fr)] gap-2 border-t border-border px-3 py-3 text-left text-sm",
+        canSelectSession
+          ? "cursor-pointer hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0"
+          : "cursor-default"
+      )}
+      disabled={!canSelectSession}
+      onClick={() => {
+        if (!hook.sessionId) return
+        onSelectSession?.(hook.sessionId)
+      }}
+      title={canSelectSession ? "跳转到对应会话" : undefined}
+    >
+      {statusIcon(status)}
       <div className="min-w-0">
         <div className="flex min-w-0 items-start justify-between gap-2">
           <div className="min-w-0">
-            <div className="truncate font-medium" title={hook.label}>{hook.label}</div>
-            <div className="mt-1 truncate text-xs text-muted-foreground" title={hook.hookId}>
-              {hook.hookId}
+            <div className="truncate font-medium" title={hook.eventId}>{hook.eventId}</div>
+            <div className="mt-1 truncate text-xs text-muted-foreground" title={hook.resultCode}>
+              {hook.resultCode}
             </div>
           </div>
-          <StatusPill status={hook.status} />
+          <StatusPill status={status} />
         </div>
         <div className="mt-2 min-w-0 text-xs leading-5 text-muted-foreground">
-          <div className="break-words">{hook.summary}</div>
+          <div className="break-words">{hook.message}</div>
           {metaItems.length > 0 && (
             <div className="mt-1 flex min-w-0 flex-wrap gap-x-2 gap-y-1">
               {metaItems.map((item) => (
@@ -1502,8 +1522,23 @@ function HookLine({ hook }: { hook: HarnessHookLogView }): React.JSX.Element {
           )}
         </div>
       </div>
-    </div>
+    </button>
   )
+}
+
+function hookResultStatus(resultCode: string): HarnessStatus {
+  switch (resultCode) {
+    case "done":
+      return { label: "通过", uiKind: "ok" }
+    case "blocked":
+      return { label: "阻断", uiKind: "blocked" }
+    case "skipped":
+      return { label: "跳过", uiKind: "pending" }
+    case "error":
+      return { label: "异常", uiKind: "blocked" }
+    default:
+      return { label: resultCode || "未知", uiKind: "unknown" }
+  }
 }
 
 function StageArtifactPanel({
@@ -2044,6 +2079,10 @@ function FeatureDetailPage({
   const effectiveSelectedNodeId = selectedNodeId ?? defaultNodeId
   const selectedNode =
     detail?.run.nodes.find((node) => node.id === effectiveSelectedNodeId) ?? detail?.run.nodes[0] ?? null
+  const selectedNodeHooks = useMemo(
+    () => [...(selectedNode?.hooks ?? [])].sort((a, b) => (b.ts || "").localeCompare(a.ts || "")),
+    [selectedNode]
+  )
   const nodeGroups = useMemo(() => groupStageNodes(detail?.run.nodes ?? []), [detail])
   const selectedGroup = nodeGroups.length > 0
     ? nodeGroups.find((group) => selectedNode && group.nodes.some((node) => node.id === selectedNode.id)) ??
@@ -2115,6 +2154,14 @@ function FeatureDetailPage({
     setActiveDetailTab("feature")
     onSessionViewChange?.(false)
   }
+
+  const handleHookSessionSelect = useCallback((threadId: string): void => {
+    if (!detail || !threadId) return
+    setSelectedSessionState({ detailKey, threadId })
+    onActiveSessionChange?.(threadId)
+    setActiveDetailTab("session")
+    onSessionViewChange?.(true)
+  }, [detail, detailKey, onActiveSessionChange, onSessionViewChange])
 
   useEffect(() => {
     if (activeDetailTab !== "session") return
@@ -2364,10 +2411,14 @@ function FeatureDetailPage({
 
                   <section className="rounded-md border border-border bg-background">
                     <div className="border-b border-border px-3 py-3 text-sm font-semibold">Hook 事件</div>
-                    {selectedNode && selectedNode.hooks.length > 0 ? (
+                    {selectedNode && selectedNodeHooks.length > 0 ? (
                       <div className="max-h-64 overflow-y-auto">
-                        {selectedNode.hooks.map((hook, index) => (
-                          <HookLine key={`${hook.ts ?? "hook"}-${hook.hookId}-${index}`} hook={hook} />
+                        {selectedNodeHooks.map((hook, index) => (
+                          <HookLine
+                            key={`${hook.ts || "hook"}-${hook.eventId}-${index}`}
+                            hook={hook}
+                            onSelectSession={handleHookSessionSelect}
+                          />
                         ))}
                       </div>
                     ) : (
