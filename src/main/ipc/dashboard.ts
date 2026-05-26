@@ -11,6 +11,7 @@ import { getUserInfo } from "../storage"
 import * as fs from "fs"
 import { buildTraceTree } from "../agent/trace/tree-builder"
 import type { AgentTrace, TraceNode } from "../agent/trace/types"
+import { buildSkillEvalTraceExtension } from "../agent/skill-eval/documents"
 import { evaluateTraceSkills, type SkillEvalRecord } from "../agent/skill-eval/evaluator"
 import {
   evaluateTraceResults,
@@ -4397,7 +4398,7 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
       : [])
   ]
 
-  return {
+  const trace: AgentTrace = {
     traceId,
     threadId: `mock-thread-${index + 1}`,
     startedAt: startedAt.toISOString(),
@@ -4469,6 +4470,10 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
       workspacePath: "/Users/demo/projects/cmbCowork"
     }
   }
+  const skillEval = buildSkillEvalTraceExtension(trace, {
+    skillAuthorByRawName: { [skill]: "Mock Skill Author" }
+  })
+  return skillEval ? { ...trace, skillEval } : trace
 }
 
 function makeMockSkillRecentTraces(
@@ -4740,20 +4745,17 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   })
 
-  _ipcMain.handle(
-    "dashboard:queryAllUser",
-    async () => {
-      if (import.meta.env.DEV) {
-        return { success: true, data: makeMockAllUsers() }
-      }
-      try {
-        return { success: true, data: await queryAllUser() }
-      } catch (e) {
-        console.error("[Dashboard] queryAllUser error:", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
+  _ipcMain.handle("dashboard:queryAllUser", async () => {
+    if (import.meta.env.DEV) {
+      return { success: true, data: makeMockAllUsers() }
     }
-  )
+    try {
+      return { success: true, data: await queryAllUser() }
+    } catch (e) {
+      console.error("[Dashboard] queryAllUser error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
 
   _ipcMain.handle(
     "dashboard:productivity",

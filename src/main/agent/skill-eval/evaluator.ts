@@ -50,9 +50,9 @@ export interface SkillEvalRecord {
   outcomeWarnings: string[]
 }
 
-const PASS_THRESHOLD = 0.7
-const PROCESS_SCORE_WEIGHT = 0.4
-const OUTCOME_SCORE_WEIGHT = 0.6
+export const PASS_THRESHOLD = 0.7
+export const PROCESS_SCORE_WEIGHT = 0.4
+export const OUTCOME_SCORE_WEIGHT = 0.6
 const STEP_BUDGET = 12
 const MAX_CONSECUTIVE_SAME_CALL = 3
 const AVG_PROMPT_INPUT_TOKEN_BUDGET = 48_000
@@ -117,9 +117,7 @@ function getTerminalMessageNode(trace: AgentTrace): TraceNode | null {
     (node) =>
       node.type === "message" &&
       node.parentId === root?.id &&
-      (node.name === "Run Completed" ||
-        node.name === "Run Error" ||
-        node.name === "Run Cancelled")
+      (node.name === "Run Completed" || node.name === "Run Error" || node.name === "Run Cancelled")
   )
   if (terminalMessages.length === 0) return null
   return terminalMessages[terminalMessages.length - 1] ?? null
@@ -331,11 +329,7 @@ export function evaluateTraceSkills(trace: AgentTrace): SkillEvalRecord[] {
   const toolCalls =
     typeof trace.totalToolCalls === "number" ? trace.totalToolCalls : countToolNodes(trace)
   const tokenUsage = summarizeTokenUsage(trace)
-  const checks = buildChecks(
-    trace,
-    toolCalls,
-    tokenUsage.averagePromptInputTokens
-  )
+  const checks = buildChecks(trace, toolCalls, tokenUsage.averagePromptInputTokens)
   const outcomeChecks = buildOutcomeChecks(trace, toolResultErrors)
   const processScore = scoreChecks(checks)
   const outcomeScore = scoreChecks(outcomeChecks)

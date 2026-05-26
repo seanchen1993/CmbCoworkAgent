@@ -30,6 +30,7 @@ import {
 import { v4 as uuid } from "uuid"
 import type {
   AgentTrace,
+  TraceSkillEvalExtension,
   TraceStep,
   TraceToolCall,
   TraceModelCall,
@@ -50,11 +51,9 @@ import {
   ensureVersionedSkillIdentifier,
   parseSkillIdentifier
 } from "../../utils/skill-identifiers"
-import {
-  setAdoptionContext,
-  clearAdoptionContext
-} from "../../services/adoption-tracker"
+import { setAdoptionContext, clearAdoptionContext } from "../../services/adoption-tracker"
 import { sanitizeTraceForCloudUpload } from "./sanitizer"
+import { buildSkillEvalTraceExtension } from "../skill-eval/documents"
 
 // ─────────────────────────────────────────────────────────
 // Global reporter registry
@@ -147,16 +146,22 @@ function normalizeTrace(parsed: AgentTrace): AgentTrace {
   }
 }
 
-function deriveUpperOrgLevels(pathName?: string): Pick<AgentTrace, "upperOrgLv0" | "upperOrgLv1" | "upperOrgLv2" | "upperOrgLv3"> {
+function deriveUpperOrgLevels(
+  pathName?: string
+): Pick<AgentTrace, "upperOrgLv0" | "upperOrgLv1" | "upperOrgLv2" | "upperOrgLv3"> {
   const emptyLevels = {
     upperOrgLv0: "",
     upperOrgLv1: "",
     upperOrgLv2: "",
     upperOrgLv3: ""
   }
-  const parts = typeof pathName === "string"
-    ? pathName.split("/").map((part) => part.trim()).filter(Boolean)
-    : []
+  const parts =
+    typeof pathName === "string"
+      ? pathName
+          .split("/")
+          .map((part) => part.trim())
+          .filter(Boolean)
+      : []
   const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
   if (itDeptIndex < 0) return emptyLevels
 
@@ -185,6 +190,40 @@ function getAppVersionForTrace(): string {
   } catch {
     return "unknown"
   }
+}
+
+function getSkillAuthor(skill: {
+  metadata?: Record<string, string>
+  pluginName?: string
+}): string | undefined {
+  const metadataAuthor = skill.metadata?.author || skill.metadata?.owner
+  if (metadataAuthor) return metadataAuthor
+  return skill.pluginName
+}
+
+function buildSkillAuthorByRawName(
+  rawSkillNames: string[],
+  skills: Array<{
+    name: string
+    version: string
+    metadata?: Record<string, string>
+    pluginName?: string
+  }>
+): Record<string, string | undefined> {
+  const byName = new Map(skills.map((skill) => [skill.name, skill]))
+  const byVersionedName = new Map(
+    skills.map((skill) => [ensureVersionedSkillIdentifier(skill.name, skill.version), skill])
+  )
+  const result: Record<string, string | undefined> = {}
+
+  for (const rawSkillName of rawSkillNames) {
+    const parsed = parseSkillIdentifier(rawSkillName)
+    const skill = byVersionedName.get(rawSkillName) ?? byName.get(parsed.name)
+    const author = skill ? getSkillAuthor(skill) : undefined
+    if (author) result[rawSkillName] = author
+  }
+
+  return result
 }
 
 // ─────────────────────────────────────────────────────────
@@ -408,9 +447,10 @@ export class TraceCollector {
     status?: TraceNodeStatus
     metadata?: Record<string, unknown>
   }): string {
-    const parentId = params.parentId
-      ?? (params.toolCallId ? this.toolNodeByCallId.get(params.toolCallId) : undefined)
-      ?? this.rootNodeId
+    const parentId =
+      params.parentId ??
+      (params.toolCallId ? this.toolNodeByCallId.get(params.toolCallId) : undefined) ??
+      this.rootNodeId
     const id = `tool_result:${uuid()}`
     const now = params.startedAt ?? nowIsoLocal()
 
@@ -440,8 +480,9 @@ export class TraceCollector {
     output?: unknown
     metadata?: Record<string, unknown>
   }): void {
-    const targetId = params.nodeId
-      ?? (params.messageId ? this.llmNodeByMessageId.get(params.messageId) : undefined)
+    const targetId =
+      params.nodeId ??
+      (params.messageId ? this.llmNodeByMessageId.get(params.messageId) : undefined)
     if (!targetId) return
     const node = this.getNode(targetId)
     if (!node) return
@@ -467,9 +508,16 @@ export class TraceCollector {
       id,
       type: params.type,
       parentId: this.rootNodeId,
-      name: params.name
-        ?? (params.type === "error" ? "Run Error" : params.type === "cancel" ? "Run Cancelled" : "Run Completed"),
-      status: params.status ?? (params.type === "error" ? "error" : params.type === "cancel" ? "cancelled" : "success"),
+      name:
+        params.name ??
+        (params.type === "error"
+          ? "Run Error"
+          : params.type === "cancel"
+            ? "Run Cancelled"
+            : "Run Completed"),
+      status:
+        params.status ??
+        (params.type === "error" ? "error" : params.type === "cancel" ? "cancelled" : "success"),
       startedAt: params.startedAt ?? nowIsoLocal(),
       endedAt: params.endedAt ?? nowIsoLocal(),
       output: params.output,
@@ -504,6 +552,7 @@ export class TraceCollector {
 
     // Resolve skill versions and merge into "name-version" format
     let usedSkillsWithVersions = this.usedSkills
+    let skillAuthorByRawName: Record<string, string | undefined> = {}
     if (this.usedSkills.length > 0) {
       try {
         const allSkills = await listAllSkills()
@@ -517,22 +566,18 @@ export class TraceCollector {
                 const resolvedVersion =
                   parsed.version && parsed.version !== DEFAULT_SKILL_VERSION
                     ? parsed.version
-                    : listedVersion ?? parsed.version
-                return ensureVersionedSkillIdentifier(
-                  parsed.name,
-                  resolvedVersion
-                )
+                    : (listedVersion ?? parsed.version)
+                return ensureVersionedSkillIdentifier(parsed.name, resolvedVersion)
               })
               .filter(Boolean)
           )
         )
+        skillAuthorByRawName = buildSkillAuthorByRawName(usedSkillsWithVersions, allSkills)
       } catch (e) {
         console.warn("[Tracer] Failed to resolve skill versions:", e)
         usedSkillsWithVersions = Array.from(
           new Set(
-            this.usedSkills
-              .map((skill) => ensureVersionedSkillIdentifier(skill))
-              .filter(Boolean)
+            this.usedSkills.map((skill) => ensureVersionedSkillIdentifier(skill)).filter(Boolean)
           )
         )
       }
@@ -571,13 +616,20 @@ export class TraceCollector {
       usedSkills: usedSkillsWithVersions,
       ...(this.routingTrace ? { metadata: { routingTrace: this.routingTrace } } : {})
     }
+    let skillEval: TraceSkillEvalExtension | undefined
+    try {
+      skillEval = buildSkillEvalTraceExtension(trace, { skillAuthorByRawName })
+    } catch (e) {
+      console.warn("[Tracer] buildSkillEvalTraceExtension failed:", e)
+    }
+    const traceWithEval: AgentTrace = skillEval ? { ...trace, skillEval } : trace
 
-    writeTraceFile(trace)
+    writeTraceFile(traceWithEval)
 
     // Fire-and-forget: trace upload is a side-channel operation and must
     // never block the main agent flow. Errors are logged and swallowed.
     void Promise.resolve()
-      .then(() => _reporter.report(sanitizeTraceForCloudUpload(trace)))
+      .then(() => _reporter.report(sanitizeTraceForCloudUpload(traceWithEval)))
       .catch((e) => {
         console.warn("[Tracer] Reporter.report() threw:", e)
       })
@@ -590,10 +642,15 @@ export class TraceCollector {
       // ignore
     }
 
-    return trace
+    return traceWithEval
   }
 
-  private finalizeNodes(outcome: TraceOutcome, endedAt: string, resolvedUsedSkills: string[], errorMessage?: string): TraceNode[] {
+  private finalizeNodes(
+    outcome: TraceOutcome,
+    endedAt: string,
+    resolvedUsedSkills: string[],
+    errorMessage?: string
+  ): TraceNode[] {
     for (const node of this.nodes) {
       if (node.type === "llm" || node.type === "tool") {
         if (node.status === "running") {
@@ -632,7 +689,8 @@ export class TraceCollector {
 
     const root = this.getNode(this.rootNodeId)
     if (root) {
-      root.status = outcome === "error" ? "error" : outcome === "cancelled" ? "cancelled" : "success"
+      root.status =
+        outcome === "error" ? "error" : outcome === "cancelled" ? "cancelled" : "success"
       root.endedAt = endedAt
       root.output = {
         outcome,
@@ -698,7 +756,9 @@ export function readThreadTraces(threadId: string): AgentTrace[] {
         if (!line.trim()) continue
         try {
           traces.push(normalizeTrace(JSON.parse(line) as AgentTrace))
-        } catch { /* skip malformed lines */ }
+        } catch {
+          /* skip malformed lines */
+        }
       }
     }
     return traces.sort((a, b) => a.startedAt.localeCompare(b.startedAt))
@@ -763,7 +823,11 @@ function findTraceLocation(traceId: string): { threadId: string; filePath: strin
   return null
 }
 
-export function deleteTraceById(traceId: string): { success: boolean; threadId?: string; error?: string } {
+export function deleteTraceById(traceId: string): {
+  success: boolean
+  threadId?: string
+  error?: string
+} {
   const location = findTraceLocation(traceId)
   if (!location) return { success: true }
   try {
