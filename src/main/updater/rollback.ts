@@ -415,7 +415,14 @@ function cleanupBackupPaths(args: {
   if (includeAsarBackup) {
     removePathNow(asarBackup, false, "ASAR backup")
   }
+
+  // Try in-process first (fast path when no permission/lock issues). If anything
+  // remains, hand off to a detached bash script that retries with chmod/chattr
+  // fixups, logs every step, and waits for the running app to exit if needed.
   removePathNow(fullBackupDir, true, "full update backup dir")
+  if (existsSync(fullBackupDir)) {
+    scheduleLinuxBackupCleanup(appDir, asarBackup, fullBackupDir, includeAsarBackup)
+  }
 }
 
 function removePathNow(path: string, recursive: boolean, label: string): boolean {
@@ -841,6 +848,139 @@ function scheduleWindowsBackupCleanup(
     console.log("[Updater] Scheduled backup cleanup script:", ps1Path)
   } catch (e) {
     console.warn("[Updater] Failed to schedule backup cleanup:", e)
+  }
+}
+
+function generateCleanupBackupsSh(
+  appDir: string,
+  asarBackup: string,
+  fullBackupDir: string,
+  includeAsarBackup: boolean
+): string {
+  const exeBaseName = basename(getExePath())
+  const logPath = join(getUpdatesDir(), "cleanup-backups.log")
+
+  return `#!/bin/bash
+# Detached backup cleanup. Stays alive in background until the .bak is gone or
+# the deadline expires, so the user doesn't have to babysit a stuck cleanup.
+
+APP_DIR=${toBashString(appDir)}
+ASAR_BACKUP=${toBashString(includeAsarBackup ? asarBackup : "")}
+FULL_BACKUP_DIR=${toBashString(fullBackupDir)}
+PROC_NAME=${toBashString(exeBaseName)}
+LOG_FILE=${toBashString(logPath)}
+
+exec >> "$LOG_FILE" 2>&1
+
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+log() { echo "[$(ts)] $*"; }
+
+# Defence in depth: the parent already validates the path, but if anything
+# upstream is wrong we'd rather abort than rm -rf the wrong thing.
+EXPECTED="$APP_DIR.bak"
+if [ "$FULL_BACKUP_DIR" != "$EXPECTED" ]; then
+  log "Refusing unexpected backup path: $FULL_BACKUP_DIR (expected $EXPECTED)"
+  exit 1
+fi
+
+remove_path() {
+  local target="$1"
+  local label="$2"
+  if [ -z "$target" ]; then return 0; fi
+  if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    log "$label already absent: $target"
+    return 0
+  fi
+
+  # Restore write/exec on the whole tree so rm -rf doesn't trip on read-only
+  # dirs or files left by tar with restrictive modes.
+  chmod -R u+rwX "$target" 2>/dev/null || true
+  # Drop immutable flag if chattr is available (best-effort, no-op on most
+  # filesystems and silent on permission denial).
+  if command -v chattr >/dev/null 2>&1; then
+    chattr -R -i "$target" 2>/dev/null || true
+  fi
+
+  if rm -rf "$target"; then
+    log "Removed $label: $target"
+    return 0
+  fi
+  log "Initial rm failed for $label: $target"
+  return 1
+}
+
+diag() {
+  local target="$1"
+  log "Lock diagnostics for $target"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof +D "$target" 2>/dev/null | head -50 | while IFS= read -r line; do log "lsof: $line"; done
+  fi
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -vm "$target" 2>&1 | head -50 | while IFS= read -r line; do log "fuser: $line"; done
+  fi
+}
+
+log "Cleanup start. appDir=$APP_DIR fullBackupDir=$FULL_BACKUP_DIR asarBackup=$ASAR_BACKUP"
+
+if [ -n "$ASAR_BACKUP" ]; then
+  remove_path "$ASAR_BACKUP" "ASAR backup" || true
+fi
+
+if remove_path "$FULL_BACKUP_DIR" "full backup dir"; then
+  log "Cleanup finished successfully"
+  exit 0
+fi
+
+diag "$FULL_BACKUP_DIR"
+
+# Background retry loop. Deadline is 24h so a left-open file handle eventually
+# expires once the user closes the app; well past any AV scan.
+DEADLINE=$(( $(date +%s) + 86400 ))
+ROUND=0
+while [ -e "$FULL_BACKUP_DIR" ] && [ "$(date +%s)" -lt "$DEADLINE" ]; do
+  ROUND=$((ROUND + 1))
+  if pgrep -x "$PROC_NAME" > /dev/null 2>&1; then
+    APP_RUNNING=1
+  else
+    APP_RUNNING=0
+  fi
+  log "Background retry $ROUND; appRunning=$APP_RUNNING"
+
+  if [ $((ROUND % 12)) -eq 0 ]; then
+    diag "$FULL_BACKUP_DIR"
+  fi
+
+  if remove_path "$FULL_BACKUP_DIR" "full backup dir"; then
+    log "Cleanup finished successfully"
+    exit 0
+  fi
+  sleep 10
+done
+
+log "Cleanup finished but backup still exists: $FULL_BACKUP_DIR"
+exit 2
+`
+}
+
+function scheduleLinuxBackupCleanup(
+  appDir: string,
+  asarBackup: string,
+  fullBackupDir: string,
+  includeAsarBackup: boolean
+): void {
+  try {
+    const shContent = generateCleanupBackupsSh(
+      appDir,
+      asarBackup,
+      fullBackupDir,
+      includeAsarBackup
+    )
+    const shPath = join(getUpdatesDir(), "cleanup-backups.sh")
+    writeBashScript(shPath, shContent)
+    launchDetachedBashScript(shPath)
+    console.log("[Updater] Scheduled Linux backup cleanup script:", shPath)
+  } catch (e) {
+    console.warn("[Updater] Failed to schedule Linux backup cleanup:", e)
   }
 }
 
