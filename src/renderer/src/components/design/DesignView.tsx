@@ -323,6 +323,8 @@ function makeTabState(): TabState {
     drawToolMode: "draw",
     iframeScrollX: 0,
     iframeScrollY: 0,
+    iframeContentWidth: 0,
+    iframeContentHeight: 0,
     editModeAvailable: false,
     selectedElement: null,
     attachedImage: null,
@@ -1480,12 +1482,23 @@ const SCROLL_INJECT = `(function(){
   if(window.__st_active)return;
   window.__st_active=true;
   function report(){
-    window.parent.postMessage({type:'__iframe_scroll',x:window.scrollX,y:window.scrollY},'*');
+    var de=document.documentElement,body=document.body;
+    var w=Math.max(de?de.scrollWidth:0,body?body.scrollWidth:0,de?de.offsetWidth:0,body?body.offsetWidth:0,window.innerWidth||0);
+    var h=Math.max(de?de.scrollHeight:0,body?body.scrollHeight:0,de?de.offsetHeight:0,body?body.offsetHeight:0,window.innerHeight||0);
+    window.parent.postMessage({type:'__iframe_scroll',x:window.scrollX,y:window.scrollY,width:w,height:h},'*');
   }
   window.addEventListener('scroll',report,{passive:true});
+  window.addEventListener('resize',report);
+  if(typeof ResizeObserver!=='undefined'){
+    window.__st_ro=new ResizeObserver(report);
+    window.__st_ro.observe(document.documentElement);
+    if(document.body)window.__st_ro.observe(document.body);
+  }
   report();
   window.__st_cleanup=function(){
     window.removeEventListener('scroll',report);
+    window.removeEventListener('resize',report);
+    if(window.__st_ro){window.__st_ro.disconnect();delete window.__st_ro;}
     window.__st_active=false;delete window.__st_cleanup;
   };
 })();`
@@ -1963,6 +1976,26 @@ export function DesignView(): React.JSX.Element {
       updateTs(activeTabIdRef.current, {
         iframeScrollX: wrapperX + (iframeX ?? win?.scrollX ?? 0),
         iframeScrollY: wrapperY + (iframeY ?? win?.scrollY ?? 0)
+      })
+    },
+    [updateTs]
+  )
+
+  const updatePreviewContentSize = useCallback(
+    (width: number, height: number) => {
+      const nextWidth = Math.max(0, Math.ceil(width || 0))
+      const nextHeight = Math.max(0, Math.ceil(height || 0))
+      const state = tabStatesRef.current[activeTabIdRef.current]
+      if (
+        state &&
+        Math.abs((state.iframeContentWidth || 0) - nextWidth) < 1 &&
+        Math.abs((state.iframeContentHeight || 0) - nextHeight) < 1
+      ) {
+        return
+      }
+      updateTs(activeTabIdRef.current, {
+        iframeContentWidth: nextWidth,
+        iframeContentHeight: nextHeight
       })
     },
     [updateTs]
@@ -2827,7 +2860,15 @@ export function DesignView(): React.JSX.Element {
 
       // ── Iframe scroll position update ─────────────────────
       if (msg.type === "__iframe_scroll") {
-        const { x, y } = msg as { x: number; y: number }
+        const { x, y, width, height } = msg as {
+          x: number
+          y: number
+          width?: number
+          height?: number
+        }
+        if (typeof width === "number" || typeof height === "number") {
+          updatePreviewContentSize(width ?? 0, height ?? 0)
+        }
         updatePreviewScrollState(x, y)
         return
       }
@@ -2958,7 +2999,13 @@ export function DesignView(): React.JSX.Element {
     }
     window.addEventListener("message", handler)
     return () => window.removeEventListener("message", handler)
-  }, [scheduleArtifactSave, updatePreviewScrollState, updateTs, workspacePath])
+  }, [
+    scheduleArtifactSave,
+    updatePreviewContentSize,
+    updatePreviewScrollState,
+    updateTs,
+    workspacePath
+  ])
 
   // ── Generate Design ───────────────────────────────────────
 
@@ -5533,6 +5580,14 @@ ${noteLines || "无"}${variantNote}`
                             ? "#f59e0b"
                             : undefined
                     const iframeDoc = iframeRef.current?.contentDocument ?? null
+                    const visibleWidth = canvasContainerRef.current?.clientWidth || 800
+                    const visibleHeight = canvasContainerRef.current?.clientHeight || 600
+                    const scaledContentWidth =
+                      Math.max(visibleWidth / (zoom / 100), ts.iframeContentWidth || 0) *
+                      (zoom / 100)
+                    const scaledContentHeight =
+                      Math.max(visibleHeight / (zoom / 100), ts.iframeContentHeight || 0) *
+                      (zoom / 100)
                     const resolvedDrawStrokes: ResolvedDrawStroke[] = ts.drawStrokes.map(
                       (stroke) => {
                         const resolvedPoints = resolveAnchoredStrokePoints(iframeDoc, stroke)
@@ -5649,50 +5704,71 @@ ${noteLines || "无"}${variantNote}`
                             style={{ position: "absolute", inset: 0, overflow: "auto" }}
                             onScroll={() => updatePreviewScrollState()}
                           >
-                            <iframe
-                              ref={iframeRef}
-                              key={`${ts.activeVariationId ?? "all"}-${ts.reloadKey}`}
-                              srcDoc={displayHtml}
+                            <div
                               style={{
-                                display: "block",
-                                border: "none",
-                                transformOrigin: "top left",
-                                transform: `scale(${zoom / 100})`,
-                                width: `${10000 / zoom}%`,
-                                height: `${10000 / zoom}%`,
-                                // Comment + Edit modes need pointer events (scripts handle clicks via postMessage)
-                                pointerEvents:
-                                  activeMode === null ||
-                                  activeMode === "comment" ||
-                                  activeMode === "edit"
-                                    ? "auto"
-                                    : "none"
+                                position: "relative",
+                                width: scaledContentWidth,
+                                height: scaledContentHeight,
+                                minWidth: "100%",
+                                minHeight: "100%"
                               }}
-                              sandbox="allow-scripts allow-same-origin"
-                              title="Design Preview"
-                              onLoad={() => {
-                                // Block link/form navigation so clicks inside the preview
-                                // never navigate the iframe away from the design
-                                injectIntoIframe(iframeRef.current, NAV_BLOCK_INJECT)
-                                // Always inject scroll tracker so pins stay anchored to content
-                                injectIntoIframe(iframeRef.current, SCROLL_INJECT)
-                                // Reset scroll state — new iframe always starts at (0, 0)
-                                updateTs(activeTabId, {
-                                  iframeScrollX: 0,
-                                  iframeScrollY: 0,
-                                  selectedElement: null
-                                })
-                                if (previewScrollRef.current) {
-                                  previewScrollRef.current.scrollLeft = 0
-                                  previewScrollRef.current.scrollTop = 0
-                                }
-                                // Re-inject mode scripts after iframe reloads (variation switch, etc.)
-                                if (activeMode === "comment")
-                                  injectIntoIframe(iframeRef.current, COMMENT_INJECT)
-                                if (activeMode === "edit")
-                                  injectIntoIframe(iframeRef.current, EDIT_SELECT_INJECT)
-                              }}
-                            />
+                            >
+                              <iframe
+                                ref={iframeRef}
+                                key={`${ts.activeVariationId ?? "all"}-${ts.reloadKey}`}
+                                srcDoc={displayHtml}
+                                style={{
+                                  display: "block",
+                                  position: "absolute",
+                                  left: 0,
+                                  top: 0,
+                                  border: "none",
+                                  transformOrigin: "top left",
+                                  transform: `scale(${zoom / 100})`,
+                                  width: Math.max(
+                                    visibleWidth / (zoom / 100),
+                                    ts.iframeContentWidth || 0
+                                  ),
+                                  height: Math.max(
+                                    visibleHeight / (zoom / 100),
+                                    ts.iframeContentHeight || 0
+                                  ),
+                                  // Comment + Edit modes need pointer events (scripts handle clicks via postMessage)
+                                  pointerEvents:
+                                    activeMode === null ||
+                                    activeMode === "comment" ||
+                                    activeMode === "edit"
+                                      ? "auto"
+                                      : "none"
+                                }}
+                                sandbox="allow-scripts allow-same-origin"
+                                title="Design Preview"
+                                onLoad={() => {
+                                  // Block link/form navigation so clicks inside the preview
+                                  // never navigate the iframe away from the design
+                                  injectIntoIframe(iframeRef.current, NAV_BLOCK_INJECT)
+                                  // Always inject scroll tracker so pins stay anchored to content
+                                  injectIntoIframe(iframeRef.current, SCROLL_INJECT)
+                                  // Reset scroll state — new iframe always starts at (0, 0)
+                                  updateTs(activeTabId, {
+                                    iframeScrollX: 0,
+                                    iframeScrollY: 0,
+                                    iframeContentWidth: 0,
+                                    iframeContentHeight: 0,
+                                    selectedElement: null
+                                  })
+                                  if (previewScrollRef.current) {
+                                    previewScrollRef.current.scrollLeft = 0
+                                    previewScrollRef.current.scrollTop = 0
+                                  }
+                                  // Re-inject mode scripts after iframe reloads (variation switch, etc.)
+                                  if (activeMode === "comment")
+                                    injectIntoIframe(iframeRef.current, COMMENT_INJECT)
+                                  if (activeMode === "edit")
+                                    injectIntoIframe(iframeRef.current, EDIT_SELECT_INJECT)
+                                }}
+                              />
+                            </div>
                           </div>
                           {(activeMode === "draw" ||
                             ts.drawStrokes.length > 0 ||
@@ -5753,6 +5829,8 @@ ${noteLines || "无"}${variantNote}`
                                     index={i + 1}
                                     pinLeft={pinLeft}
                                     pinTop={pinTop}
+                                    viewportWidth={cw}
+                                    viewportHeight={ch}
                                     isActive={ts.activeCommentId === c.id}
                                     onToggle={() =>
                                       updateTs(activeTabId, {
@@ -5791,6 +5869,8 @@ ${noteLines || "无"}${variantNote}`
                                 <CommentDraftInput
                                   x={draftLeft}
                                   y={draftTop}
+                                  viewportWidth={cw}
+                                  viewportHeight={ch}
                                   elementDesc={ts.draftComment.elementDesc}
                                   onSubmit={(text) => {
                                     if (!text.trim()) {

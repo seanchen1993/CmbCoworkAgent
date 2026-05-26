@@ -300,6 +300,8 @@ export interface TabState {
   drawToolMode: DrawToolMode
   iframeScrollX: number
   iframeScrollY: number
+  iframeContentWidth: number
+  iframeContentHeight: number
   editModeAvailable: boolean
   selectedElement: { edId: string; tagName: string; styles: ElementStyles } | null
   attachedImage: { base64: string; mimeType: string; previewUrl: string } | null
