@@ -303,6 +303,8 @@ const EMPTY_SKILL_DETAIL: DashboardSkillDetail = {
 }
 
 const USER_LIST_PAGE_SIZE = 20
+const USER_LIST_EXPORT_PAGE_SIZE = 100
+const USER_LIST_EXPORT_MAX_PAGES = 100
 const USER_TRACE_PAGE_SIZE = 10
 const SKILL_TRACE_PAGE_SIZE = 10
 
@@ -326,6 +328,32 @@ function formatDateTime(iso?: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return iso
   return date.toLocaleString("zh-CN")
+}
+
+async function fetchAllActiveUsersForExport(range: TimeRange): Promise<DashboardUserListItem[]> {
+  const users: DashboardUserListItem[] = []
+  let afterKey: Record<string, string | number> | undefined
+
+  for (let page = 0; page < USER_LIST_EXPORT_MAX_PAGES; page++) {
+    const result = await window.api.dashboard.userList(range, {
+      pageSize: USER_LIST_EXPORT_PAGE_SIZE,
+      afterKey: afterKey ?? null,
+      keyword: null
+    })
+
+    if (!result.success) {
+      throw new Error(result.error ?? "获取活跃用户列表失败")
+    }
+
+    const data = result.data
+    if (!data) break
+    users.push(...data.items)
+
+    if (!data.nextAfterKey) break
+    afterKey = data.nextAfterKey
+  }
+
+  return users
 }
 
 function outcomeLabel(outcome: string): string {
@@ -1428,6 +1456,45 @@ export function DashboardView(): React.JSX.Element {
         }
       }
 
+      const activeUsers = await fetchAllActiveUsersForExport(range)
+      sheets.push({
+        name: "活跃用户列表",
+        header: [
+          "排名",
+          "SAP ID",
+          "YST ID",
+          "用户名",
+          "部门",
+          "一级部门",
+          "下级部门",
+          "调用次数",
+          "工具调用",
+          "输入Token",
+          "输出Token",
+          "总Token",
+          "平均耗时",
+          "最近活跃"
+        ],
+        rows: activeUsers.map((user, index) => [
+          index + 1,
+          user.sapId,
+          user.ystId || "",
+          user.userName || "",
+          user.upperOrgLv1 && user.upperOrgLv0
+            ? `${user.upperOrgLv1}/${user.upperOrgLv0}`
+            : user.orgName || "",
+          user.upperOrgLv1 || "",
+          user.upperOrgLv0 || "",
+          user.count,
+          user.totalToolCalls,
+          user.totalInputTokens,
+          user.totalOutputTokens,
+          user.totalTokens,
+          formatDuration(user.avgDurationMs),
+          formatDateTime(user.lastActiveAt)
+        ])
+      })
+
       if (sheets.length === 0) return
 
       const result = await window.api.dashboard.exportExcel(sheets)
@@ -1444,6 +1511,7 @@ export function DashboardView(): React.JSX.Element {
     modelStats,
     userStats,
     productivity,
+    range,
     selectedUpperOrgLv1,
     marketSkillMap,
     skillUploaderProfiles
