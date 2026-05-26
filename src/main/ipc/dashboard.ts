@@ -48,6 +48,24 @@ function getEsIndex(type: "trace" | "event"): string {
 
 let nodeIndex = 0
 
+function getErrorDetail(error: Error): string {
+  const cause = error.cause
+  if (!cause || typeof cause !== "object") return error.message
+
+  const causeRecord = cause as Record<string, unknown>
+  const causeMessage = typeof causeRecord.message === "string" ? causeRecord.message : ""
+  const causeCode = typeof causeRecord.code === "string" ? causeRecord.code : ""
+  const causeDetail = [causeCode, causeMessage].filter(Boolean).join(" ")
+
+  return causeDetail ? `${error.message}: ${causeDetail}` : error.message
+}
+
+function makeEsUnavailableError(nodes: string[], lastError: Error | null): Error {
+  const detail = lastError ? getErrorDetail(lastError) : "unknown error"
+  console.warn(`[Dashboard] All ${nodes.length} ES nodes failed. Last error:`, detail)
+  return new Error("请检查网络连接后重试")
+}
+
 async function esQuery(index: string, body: Record<string, unknown>): Promise<unknown> {
   const nodes = getEsNodes()
   if (nodes.length === 0) throw new Error("ES_NODES not configured")
@@ -81,11 +99,11 @@ async function esQuery(index: string, body: Record<string, unknown>): Promise<un
       return await resp.json()
     } catch (e) {
       lastError = e instanceof Error ? e : new Error(String(e))
-      console.warn(`[Dashboard] ES node ${nodes[idx]} failed:`, lastError.message)
+      console.warn(`[Dashboard] ES node ${nodes[idx]} failed:`, getErrorDetail(lastError))
     }
   }
 
-  throw lastError ?? new Error("All ES nodes failed")
+  throw makeEsUnavailableError(nodes, lastError)
 }
 
 // ─────────────────────────────────────────────────────────
