@@ -20,10 +20,19 @@ function assertEqual<T>(actual: T, expected: T, message: string): void {
   }
 }
 
-function routeFor(input: string, isLoading: boolean) {
+function routeFor(
+  input: string,
+  isLoading: boolean,
+  hasActiveGoal = false,
+  goalControlAllowedWhileLoading?: boolean,
+  historyLoading = false
+) {
   return resolveGoalControlSubmitRoute({
     isGoalControlCommand: isGoalSlashControlCommandInput(input),
-    isLoading
+    isLoading,
+    historyLoading,
+    hasActiveGoal,
+    goalControlAllowedWhileLoading
   })
 }
 
@@ -89,7 +98,7 @@ function testTerminatingGoalControlsClearPendingApprovalOnlyWhenRunTerminated():
 }
 
 function testLoadingGoalControlUsesSideChannelWithoutSubmitLock(): void {
-  const route = routeFor("/goal pause", true)
+  const route = routeFor("/goal pause", true, true)
 
   assertEqual(route.shouldUseGoalControlPlane, true, "loading /goal pause should use goalControl")
   assertEqual(
@@ -101,6 +110,56 @@ function testLoadingGoalControlUsesSideChannelWithoutSubmitLock(): void {
     route.shouldUseSubmitLock,
     false,
     "loading side-channel goal controls should remain available during an active stream"
+  )
+}
+
+function testLoadingGoalControlWithoutActiveGoalIsBlockedFromControlPlane(): void {
+  const route = routeFor("/goal pause", true, false)
+
+  assertEqual(
+    route.shouldUseGoalControlPlane,
+    false,
+    "loading /goal pause should not use goalControl unless the current run is an active goal"
+  )
+  assertEqual(
+    route.isSideChannelGoalControl,
+    false,
+    "ordinary loading should not be treated as the side-channel goal control path"
+  )
+  assertEqual(
+    route.shouldUseSubmitLock,
+    true,
+    "blocked ordinary-loading controls should keep the normal lock semantics"
+  )
+}
+
+function testNonAgentLoadingBlocksGoalControlEvenWithActiveGoalSnapshot(): void {
+  const route = routeFor("/goal pause", true, true, false)
+
+  assertEqual(
+    route.shouldUseGoalControlPlane,
+    false,
+    "non-agent loading should not use goalControl even if the goal snapshot still says active"
+  )
+  assertEqual(
+    route.isSideChannelGoalControl,
+    false,
+    "non-agent loading must not be treated as a side-channel goal run"
+  )
+}
+
+function testHistoryLoadingBlocksGoalControlPlane(): void {
+  const route = routeFor("/goal pause", false, true, undefined, true)
+
+  assertEqual(
+    route.shouldUseGoalControlPlane,
+    false,
+    "history loading should block goal controls from the panel and composer"
+  )
+  assertEqual(
+    route.isSideChannelGoalControl,
+    false,
+    "history loading must not be treated as a side-channel goal control path"
   )
 }
 
@@ -123,6 +182,9 @@ testIdleGoalStatusUsesControlPlaneAndKeepsPendingApproval()
 testBareGoalUsesControlPlaneAndKeepsPendingApproval()
 testTerminatingGoalControlsClearPendingApprovalOnlyWhenRunTerminated()
 testLoadingGoalControlUsesSideChannelWithoutSubmitLock()
+testLoadingGoalControlWithoutActiveGoalIsBlockedFromControlPlane()
+testNonAgentLoadingBlocksGoalControlEvenWithActiveGoalSnapshot()
+testHistoryLoadingBlocksGoalControlPlane()
 testGoalResumeStaysOnStreamSubmitPath()
 
 console.log("goal-control-submit.spec.ts passed")

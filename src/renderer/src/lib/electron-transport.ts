@@ -2,6 +2,7 @@ import type { UseStreamTransport } from "@langchain/langgraph-sdk/react"
 import type { ToolCall, ToolCallChunk } from "@langchain/core/messages"
 import type { StreamPayload, StreamEvent, IPCEvent, IPCStreamEvent } from "../../../types"
 import type { Subagent } from "../types"
+import { buildStableValuesMessageId } from "./stream-message-ids"
 
 /**
  * Usage metadata from LangChain model responses.
@@ -419,7 +420,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       case "error":
         events.push({
           event: "error",
-          data: { error: "STREAM_ERROR", message: event.error }
+          data: { error: event.error || "STREAM_ERROR", message: event.message ?? event.error }
         })
         break
 
@@ -651,7 +652,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           // Filter out HumanMessage
           return !className.includes("Human")
         })
-        .map((msg) => {
+        .map((msg, index) => {
           const kwargs = msg.kwargs || {}
           const classId = Array.isArray(msg.id) ? msg.id : []
           const className = classId[classId.length - 1] || ""
@@ -659,9 +660,19 @@ export class ElectronIPCTransport implements UseStreamTransport {
           // Determine message type from class name
           const type: "ai" | "tool" = className.includes("Tool") ? "tool" : "ai"
           const content = this.extractContent(kwargs.content)
+          const id = buildStableValuesMessageId({
+            explicitId: kwargs.id,
+            index,
+            type,
+            className,
+            content,
+            toolCallId: kwargs.tool_call_id,
+            name: kwargs.name,
+            toolCalls: kwargs.tool_calls
+          })
 
           return {
-            id: kwargs.id || crypto.randomUUID(),
+            id,
             type,
             content,
             // Include tool_calls for AI messages

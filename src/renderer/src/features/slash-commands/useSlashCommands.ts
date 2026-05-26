@@ -92,6 +92,7 @@ export function resolveGoalRuntimeComposerState(params: {
   isLoading: boolean
   historyLoading: boolean
   slashModeKind: PopoverMode["kind"]
+  hasActiveGoal?: boolean
   hasPendingTransportPayload?: boolean
   goalControlAllowedWhileLoading?: boolean
 }) {
@@ -100,6 +101,7 @@ export function resolveGoalRuntimeComposerState(params: {
     isLoading,
     historyLoading,
     slashModeKind,
+    hasActiveGoal = false,
     hasPendingTransportPayload = false,
     goalControlAllowedWhileLoading = true
   } = params
@@ -109,6 +111,7 @@ export function resolveGoalRuntimeComposerState(params: {
     hasPendingTransportPayload && isGoalSlashTransportSensitiveControlCommandInput(input)
   const canSubmitGoalCommandWhileLoading =
     isLoading &&
+    hasActiveGoal &&
     goalControlAllowedWhileLoading &&
     isGoalSlashControlCommandInput(input) &&
     !bareGoalWithPendingTransport &&

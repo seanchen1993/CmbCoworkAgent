@@ -63,12 +63,14 @@ function event(
   eventId: number,
   message: string,
   createdAt: string,
-  goalId: string | null = "goal-1"
+  goalId: string | null = "goal-1",
+  activeWindowId: string | null = "window-1"
 ): GoalEvent {
   return {
     event_id: eventId,
     thread_id: "thread-1",
     goal_id: goalId,
+    active_window_id: activeWindowId,
     message,
     created_at: createdAt
   }
@@ -140,6 +142,29 @@ function testCompleteGoalShowsEvaluatorReasonAndLedger(): void {
     "latest events should be filtered to the current goal and newest first"
   )
   assertEqual(model!.recentEventSummary, "Goal 已完成：done", "recent event summary should be cleaned")
+}
+
+function testPanelEventsStayWithinCurrentActiveWindow(): void {
+  const model = buildGoalPanelViewModel(
+    uiState(goal(), [
+      event(1, "Goal 已继续：当前窗口", "2026-05-22T10:00:01.000Z"),
+      event(2, "Goal 已暂停：旧窗口", "2026-05-22T10:00:02.000Z", "goal-1", "window-old"),
+      event(3, "Goal 已完成：legacy event", "2026-05-22T10:00:03.000Z", "goal-1", null),
+      event(4, "Goal 已暂停：其他 goal", "2026-05-22T10:00:04.000Z", "goal-2", "window-1")
+    ])
+  )
+
+  assert(model, "active goal should produce a panel model")
+  assertArrayEqual(
+    model!.latestEvents.map((item) => item.event_id),
+    [3, 1],
+    "panel should keep current-window and legacy events but hide old active windows"
+  )
+  assertEqual(
+    model!.recentEventSummary,
+    "Goal 已完成：legacy event",
+    "recent summary should ignore stale active-window events"
+  )
 }
 
 function testPausedGoalPrefersPausedReasonAndShowsBlockers(): void {
@@ -321,6 +346,7 @@ function testVerdictLabelsAreStable(): void {
 function run(): void {
   const tests = [
     testCompleteGoalShowsEvaluatorReasonAndLedger,
+    testPanelEventsStayWithinCurrentActiveWindow,
     testPausedGoalPrefersPausedReasonAndShowsBlockers,
     testPausedGoalLocalizesInternalReasons,
     testPausedGoalLocalizesLastReasonFallback,

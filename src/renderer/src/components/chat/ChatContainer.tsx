@@ -95,6 +95,10 @@ import { isInternalGoalPromptMessage } from "@/lib/goal-notice-messages"
 import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/lib/goal-transcript"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
 import {
+  mergeLiveStreamMessages,
+  type LiveStreamMessage as StreamMessage
+} from "@/lib/live-stream-messages"
+import {
   resolveGoalControlSubmitRoute,
   shouldClearPendingApprovalAfterGoalControl
 } from "@/lib/goal-control-submit"
@@ -359,10 +363,10 @@ function GoalStatusPanel({
               </div>
             </div>
 
-            <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4 text-sm">
+            <div className="flex-1 space-y-4 overflow-y-auto overflow-x-hidden px-5 py-4 text-sm break-words [overflow-wrap:anywhere]">
               <section
                 className={cn(
-                  "rounded-2xl border p-4 shadow-[0_1px_0_rgba(255,255,255,0.8)_inset]",
+                  "min-w-0 overflow-hidden rounded-2xl border p-4 shadow-[0_1px_0_rgba(255,255,255,0.8)_inset]",
                   goalVerdictTone(goal.lastVerdict)
                 )}
               >
@@ -370,7 +374,7 @@ function GoalStatusPanel({
                   <Sparkles className="size-4" />
                   Evaluator 最近判断
                 </div>
-                <div className="whitespace-pre-wrap text-base leading-7 text-foreground/90">
+                <div className="whitespace-pre-wrap break-words text-base leading-7 text-foreground/90 [overflow-wrap:anywhere]">
                   {evaluatorReason}
                 </div>
                 <div className="mt-3 rounded-xl bg-white/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
@@ -379,7 +383,7 @@ function GoalStatusPanel({
                 </div>
               </section>
 
-              <section className="rounded-2xl border border-black/[0.06] bg-white p-4">
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-white p-4">
                 <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                   <Flag className="size-4" />
                   目标与完成标准
@@ -389,14 +393,14 @@ function GoalStatusPanel({
                     <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                       当前目标
                     </div>
-                    <div className="whitespace-pre-wrap leading-6">{goal.objective}</div>
+                    <div className="whitespace-pre-wrap break-words leading-6 [overflow-wrap:anywhere]">{goal.objective}</div>
                   </div>
                   {goal.completionCondition !== goal.objective && (
                     <div className="border-t border-black/[0.06] pt-3">
                       <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                         完成条件
                       </div>
-                      <div className="whitespace-pre-wrap leading-6">
+                      <div className="whitespace-pre-wrap break-words leading-6 [overflow-wrap:anywhere]">
                         {goal.completionCondition}
                       </div>
                     </div>
@@ -407,7 +411,7 @@ function GoalStatusPanel({
                         <Notebook className="size-3.5" />
                         启动上下文
                       </div>
-                      <div className="whitespace-pre-wrap leading-6 text-foreground/80">
+                      <div className="whitespace-pre-wrap break-words leading-6 text-foreground/80 [overflow-wrap:anywhere]">
                         {contextText}
                       </div>
                     </div>
@@ -415,7 +419,7 @@ function GoalStatusPanel({
                 </div>
               </section>
 
-              <section className="rounded-2xl border border-black/[0.06] bg-white p-4">
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-white p-4">
                 <div className="mb-1 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                   <Layers className="size-4" />
                   进展与证据
@@ -439,11 +443,11 @@ function GoalStatusPanel({
                         </div>
                         <ol className="space-y-2">
                           {allProgressItems.map((item, index) => (
-                            <li key={`progress-${index}`} className="flex gap-2 leading-5">
+                            <li key={`progress-${index}`} className="flex min-w-0 gap-2 leading-5">
                               <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-[11px] font-semibold text-emerald-700">
                                 {index + 1}
                               </span>
-                              <span className="whitespace-pre-wrap text-foreground/85">{item}</span>
+                              <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">{item}</span>
                             </li>
                           ))}
                         </ol>
@@ -458,11 +462,11 @@ function GoalStatusPanel({
                         </div>
                         <ol className="space-y-2">
                           {allEvidenceItems.map((item, index) => (
-                            <li key={`evidence-${index}`} className="flex gap-2 leading-5">
+                            <li key={`evidence-${index}`} className="flex min-w-0 gap-2 leading-5">
                               <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-sky-50 text-[11px] font-semibold text-sky-700">
                                 {index + 1}
                               </span>
-                              <span className="whitespace-pre-wrap text-foreground/85">{item}</span>
+                              <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">{item}</span>
                             </li>
                           ))}
                         </ol>
@@ -477,11 +481,11 @@ function GoalStatusPanel({
                         </div>
                         <ol className="space-y-2">
                           {allBlockerItems.map((item, index) => (
-                            <li key={`blocker-${index}`} className="flex gap-2 leading-5">
+                            <li key={`blocker-${index}`} className="flex min-w-0 gap-2 leading-5">
                               <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-amber-50 text-[11px] font-semibold text-amber-700">
                                 {index + 1}
                               </span>
-                              <span className="whitespace-pre-wrap text-foreground/85">{item}</span>
+                              <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">{item}</span>
                             </li>
                           ))}
                         </ol>
@@ -491,7 +495,7 @@ function GoalStatusPanel({
                 )}
               </section>
 
-              <section className="rounded-2xl border border-black/[0.06] bg-white p-4">
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-white p-4">
                 <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                   <Clock className="size-4" />
                   最近事件
@@ -514,7 +518,7 @@ function GoalStatusPanel({
                           <div className="mb-1 text-[11px] text-muted-foreground">
                             {goalEventTimeLabel(event.created_at)}
                           </div>
-                          <div className="whitespace-pre-wrap text-xs leading-5 text-foreground/80">
+                          <div className="whitespace-pre-wrap break-words text-xs leading-5 text-foreground/80 [overflow-wrap:anywhere]">
                             {formatGoalEventMessage(event.message)}
                           </div>
                         </div>
@@ -958,15 +962,6 @@ interface AgentStreamValues {
   todos?: Array<{ id?: string; content?: string; status?: string }>
 }
 
-interface StreamMessage {
-  id?: string
-  type?: string
-  content?: string | unknown[]
-  tool_calls?: Message["tool_calls"]
-  tool_call_id?: string
-  name?: string
-}
-
 interface ChatContainerProps {
   threadId: string
   showGitChangeNotice?: boolean
@@ -1220,6 +1215,8 @@ export function ChatContainer({
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
   const streamMessageTimesRef = useRef<Record<string, { start_at: Date; end_at?: Date }>>({})
   const streamMessageBaselineIdsRef = useRef<Set<string>>(new Set())
+  const liveStreamMessagesRef = useRef<StreamMessage[]>([])
+  const [liveStreamMessages, setLiveStreamMessages] = useState<StreamMessage[]>([])
   const [messageTimes, setMessageTimes] = useState<MessageTimeMap>({})
   const threadMessageIdsRef = useRef<Set<string>>(new Set())
 
@@ -1890,6 +1887,8 @@ export function ChatContainer({
       // loading 期间遍历 streamData.messages 时就会把历史 assistant/tool 重新打时间戳，
       // 导致历史耗时被当前时间污染。
       streamMessageTimesRef.current = {}
+      liveStreamMessagesRef.current = []
+      setLiveStreamMessages([])
       streamMessageBaselineIdsRef.current = new Set(
         ((streamData.messages || []) as StreamMessage[])
           .map((msg) => msg.id)
@@ -1898,6 +1897,21 @@ export function ChatContainer({
     }
 
     if (isLoading) {
+      const incomingLiveMessages = ((streamData.messages || []) as StreamMessage[]).filter(
+        (msg): msg is StreamMessage & { id: string } =>
+          !!msg.id &&
+          !streamMessageBaselineIdsRef.current.has(msg.id) &&
+          !threadMessageIdsRef.current.has(msg.id)
+      )
+      if (incomingLiveMessages.length > 0) {
+        const mergedMessages = mergeLiveStreamMessages(
+          liveStreamMessagesRef.current,
+          incomingLiveMessages
+        )
+        liveStreamMessagesRef.current = mergedMessages
+        setLiveStreamMessages(mergedMessages)
+      }
+
       for (const rawMsg of streamData.messages) {
         const msg = rawMsg as StreamMessage
         // 只给本轮新增、且还未落入 threadMessages 的消息打 start_at。
@@ -1925,7 +1939,7 @@ export function ChatContainer({
       // 当前轮可能包含多条 assistant 消息和多条 tool 消息。这里不直接用全部 streamData.messages，
       // 而是只取 streamMessageTimesRef 中出现过的 id，保证每条要落库的消息都拥有本轮采集到的
       // start_at/end_at。
-      const currentTurnMessages = ((streamData.messages || []) as StreamMessage[]).filter(
+      const currentTurnMessages = liveStreamMessagesRef.current.filter(
         (msg): msg is StreamMessage & { id: string } =>
           !!msg.id && !!streamMessageTimesRef.current[msg.id]
       )
@@ -2005,13 +2019,15 @@ export function ChatContainer({
           })
           .catch((error) => console.warn("[ChatContainer] Failed to save message times:", error))
       }
+      liveStreamMessagesRef.current = []
+      setLiveStreamMessages([])
     }
     prevLoadingRef.current = isLoading
   }, [isLoading, streamData.messages, threadId, appendMessage])
 
   const displayMessages = useMemo(() => {
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
-    const streamingMsgs: Message[] = ((streamData.messages || []) as StreamMessage[])
+    const streamingMsgs: Message[] = liveStreamMessages
       .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
       .map((streamMsg) => {
         let role: Message["role"] = "assistant"
@@ -2084,7 +2100,7 @@ export function ChatContainer({
       return { ...msg, content: cleaned }
     })
     return cleanedMessages
-  }, [threadMessages, streamData.messages, messageTimes])
+  }, [threadMessages, liveStreamMessages, messageTimes])
 
   const assistantDurationsByMessageId = useMemo(() => {
     const durations = new Map<string, number>()
@@ -2331,6 +2347,9 @@ export function ChatContainer({
   })
   const slashPopoverKind = slash.mode.kind
   const hasPendingGoalTransportPayload = attachments.length > 0 || selectedSkill !== null
+  const hasActiveGoalRunning = goalUi.goal?.status === "active"
+  const goalControlAllowedWhileLoading =
+    streamData.isLoading && !scheduledTaskLoading && hasActiveGoalRunning
 
   const {
     inputDisabled,
@@ -2343,15 +2362,20 @@ export function ChatContainer({
     isLoading,
     historyLoading,
     slashModeKind: slashPopoverKind,
+    hasActiveGoal: hasActiveGoalRunning,
     hasPendingTransportPayload: hasPendingGoalTransportPayload,
-    goalControlAllowedWhileLoading: streamData.isLoading && !scheduledTaskLoading
+    goalControlAllowedWhileLoading
   })
   const inputPlaceholder = useMemo(() => {
     const goal = goalUi.goal
     if (isLoading) {
-      return streamData.isLoading && !scheduledTaskLoading
-        ? "运行中：可输入 /goal、/goal status、/goal pause、/goal clear"
-        : "任务运行中，可使用取消按钮停止当前任务"
+      if (streamData.isLoading && !scheduledTaskLoading && hasActiveGoalRunning) {
+        return "Goal 运行中：可输入 /goal status、/goal pause、/goal clear"
+      }
+      if (streamData.isLoading && !scheduledTaskLoading) {
+        return "任务运行中，可先编辑草稿，完成后再发送"
+      }
+      return "任务运行中，可使用取消按钮停止当前任务"
     }
     if (attachments.length > 0) return "输入消息或直接发送文件..."
     if (!goal) return "向 CMBDevClaw 提问，/ 输入命令；Shift + Enter 换行"
@@ -2362,7 +2386,15 @@ export function ChatContainer({
       return "补充说明，或点击继续 Goal"
     }
     return "输入新问题，或用 /goal <目标> 开始新的长期任务"
-  }, [attachments.length, goalUi.goal, isLoading, scheduledTaskLoading, streamData.isLoading])
+  }, [
+    attachments.length,
+    goalUi.goal,
+    hasActiveGoalRunning,
+    goalControlAllowedWhileLoading,
+    isLoading,
+    scheduledTaskLoading,
+    streamData.isLoading
+  ])
   // Refresh skill list whenever the popover opens so customize-panel
   // enable/disable changes reflect without an app restart.
   useEffect(() => {
@@ -2437,6 +2469,24 @@ export function ChatContainer({
     [appendMessage, threadId]
   )
 
+  const showGoalControlNotice = useCallback((rawMessage?: string): void => {
+    const message = formatGoalEventMessage(rawMessage ?? "").trim()
+    if (!message) return
+    if (message.startsWith("✓ Goal 已完成") || message.startsWith("Goal 已完成")) {
+      toast.success(message)
+      return
+    }
+    if (
+      message.startsWith("Goal 已暂停") ||
+      message.startsWith("Ⅱ Goal 已暂停") ||
+      message.startsWith("Goal 等待补充信息")
+    ) {
+      toast.warning(message)
+      return
+    }
+    toast.info(message)
+  }, [])
+
   const submitGoalResumeCommand = useCallback(async (): Promise<void> => {
     if (!stream || historyLoading || isLoading || scheduledTaskLoading) return
     if (!tryAcquireSubmitInFlightLock(submitInFlightRef, true, threadId)) return
@@ -2505,47 +2555,93 @@ export function ChatContainer({
 
   const applyGoalPanelCommand = useCallback(
     (command: string) => {
+      if (historyLoading) {
+        toast.warning("线程历史正在恢复，请稍后再操作 Goal。")
+        return
+      }
       if (command === "/goal resume") {
+        if (isLoading || scheduledTaskLoading) {
+          toast.warning("当前任务运行中，请等待完成后再继续 Goal。")
+          return
+        }
         void submitGoalResumeCommand()
         return
       }
+      if (isLoading && !goalControlAllowedWhileLoading) {
+        toast.warning("当前任务运行中，请等待完成后再操作 Goal。")
+        return
+      }
       void (async () => {
-        if (threadError) {
-          clearError()
+        const route = resolveGoalControlSubmitRoute({
+          isGoalControlCommand: true,
+          isLoading,
+          historyLoading,
+          hasActiveGoal: hasActiveGoalRunning,
+          goalControlAllowedWhileLoading
+        })
+        if (!route.shouldUseGoalControlPlane) {
+          toast.warning("当前任务运行中，请等待完成后再操作 Goal。")
+          return
         }
-        setInput("")
-        insertLog("send: " + command)
-        const result = await window.api.agent.goalControl(threadId, command)
-        if (command === "/goal" || command === "/goal status") {
-          setGoalDetailsOpen(true)
+        const shouldLockGoalControl = route.shouldUseSubmitLock
+        if (!tryAcquireSubmitInFlightLock(submitInFlightRef, shouldLockGoalControl, threadId)) {
+          return
         }
-        void refreshGoalUi({ includeEvents: true })
-        if (
-          pendingApproval &&
-          isGoalTerminatingControlCommandInput(command) &&
-          result.terminatedCurrentRun
-        ) {
-          const approvalAny = pendingApproval as unknown as Record<string, unknown>
-          if (approvalAny._orchestratorRequestId) {
-            window.api.sandbox.sendApprovalDecision({
-              requestId: approvalAny._orchestratorRequestId as string,
-              type: "reject",
-              tool_call_id: pendingApproval.tool_call?.id || ""
-            })
+        try {
+          if (threadError) {
+            clearError()
           }
-          setSaveToolMetadataLoading(false)
-          setPendingApproval(null)
+          insertLog("send: " + command)
+          const result = await window.api.agent.goalControl(threadId, command)
+          if (command === "/goal" || command === "/goal status") {
+            setGoalDetailsOpen(true)
+          }
+          if (!route.isSideChannelGoalControl) {
+            showGoalControlNotice(
+              (command === "/goal" || command === "/goal status") && result.notice?.goalId
+                ? "Goal 状态已刷新。"
+                : result.notice?.message
+            )
+          }
+          void refreshGoalUi({ includeEvents: true })
+          if (
+            pendingApproval &&
+            isGoalTerminatingControlCommandInput(command) &&
+            result.terminatedCurrentRun
+          ) {
+            const approvalAny = pendingApproval as unknown as Record<string, unknown>
+            if (approvalAny._orchestratorRequestId) {
+              window.api.sandbox.sendApprovalDecision({
+                requestId: approvalAny._orchestratorRequestId as string,
+                type: "reject",
+                tool_call_id: pendingApproval.tool_call?.id || ""
+              })
+            }
+            setSaveToolMetadataLoading(false)
+            setPendingApproval(null)
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Goal 控制命令执行失败。"
+          setError(message)
+        } finally {
+          releaseSubmitInFlightLock(submitInFlightRef, shouldLockGoalControl, threadId)
         }
       })()
     },
     [
       clearError,
+      hasActiveGoalRunning,
+      goalControlAllowedWhileLoading,
+      historyLoading,
+      isLoading,
       pendingApproval,
       refreshGoalUi,
       setSaveToolMetadataLoading,
-      setInput,
+      setError,
       setPendingApproval,
+      showGoalControlNotice,
       submitGoalResumeCommand,
+      scheduledTaskLoading,
       threadError,
       threadId
     ]
@@ -2583,7 +2679,10 @@ export function ChatContainer({
     const bypassGoalControlValidation = isGoalSlashControlCommandInput(trimmedInput)
     const goalControlRoute = resolveGoalControlSubmitRoute({
       isGoalControlCommand: bypassGoalControlValidation,
-      isLoading
+      isLoading,
+      historyLoading,
+      hasActiveGoal: hasActiveGoalRunning,
+      goalControlAllowedWhileLoading
     })
     const isSideChannelGoalControl = goalControlRoute.isSideChannelGoalControl
 
@@ -2600,6 +2699,13 @@ export function ChatContainer({
         }
         insertLog("send: " + trimmedInput)
         const goalControlResult = await window.api.agent.goalControl(threadId, trimmedInput)
+        if (!isSideChannelGoalControl) {
+          showGoalControlNotice(
+            shouldOpenGoalDetailsForStatus && goalControlResult.notice?.goalId
+              ? "Goal 状态已刷新。"
+              : goalControlResult.notice?.message
+          )
+        }
         void refreshGoalUi({ includeEvents: true })
         if (
           shouldClearPendingApprovalAfterGoalControl({

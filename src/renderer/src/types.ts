@@ -134,7 +134,7 @@ export type StreamEvent =
   | { type: "workspace"; files: FileInfo[]; path: string }
   | { type: "subagents"; subagents: Subagent[] }
   | { type: "done"; result: unknown }
-  | { type: "error"; error: string }
+  | { type: "error"; error: string; message?: string }
 
 export interface Message {
   id: string

@@ -301,7 +301,8 @@ function testRuntimeComposerStateAllowsGoalCommandsWhileLoading(): void {
     input: "  /goal pause  ",
     isLoading: true,
     historyLoading: false,
-    slashModeKind: "closed"
+    slashModeKind: "closed",
+    hasActiveGoal: true
   })
 
   assertEqual(state.inputDisabled, false, "goal commands should keep the textarea editable")
@@ -322,12 +323,35 @@ function testRuntimeComposerStateAllowsGoalCommandsWhileLoading(): void {
   )
 }
 
+function testRuntimeComposerStateBlocksGoalCommandsDuringOrdinaryLoading(): void {
+  const state = resolveGoalRuntimeComposerState({
+    input: "/goal status",
+    isLoading: true,
+    historyLoading: false,
+    slashModeKind: "closed",
+    hasActiveGoal: false
+  })
+
+  assertEqual(state.inputDisabled, false, "ordinary loading should still allow draft editing")
+  assertEqual(
+    state.canSubmitGoalCommandWhileLoading,
+    false,
+    "ordinary non-goal runs should not expose mid-run goal controls"
+  )
+  assertEqual(
+    state.showGoalSendButtonWhileLoading,
+    false,
+    "ordinary non-goal runs should not show the goal send button"
+  )
+}
+
 function testRuntimeComposerStateOnlyAllowsGoalControlCommandsWhileLoading(): void {
   const resumeState = resolveGoalRuntimeComposerState({
     input: "/goal resume",
     isLoading: true,
     historyLoading: false,
-    slashModeKind: "closed"
+    slashModeKind: "closed",
+    hasActiveGoal: true
   })
   assertEqual(
     resumeState.canSubmitGoalCommandWhileLoading,
@@ -352,7 +376,8 @@ function testRuntimeComposerStateOnlyAllowsGoalControlCommandsWhileLoading(): vo
     input: "/goal 检查 README",
     isLoading: true,
     historyLoading: false,
-    slashModeKind: "closed"
+    slashModeKind: "closed",
+    hasActiveGoal: true
   })
   assertEqual(
     setState.canSubmitGoalCommandWhileLoading,
@@ -365,6 +390,7 @@ function testRuntimeComposerStateOnlyAllowsGoalControlCommandsWhileLoading(): vo
     isLoading: true,
     historyLoading: false,
     slashModeKind: "closed",
+    hasActiveGoal: true,
     hasPendingTransportPayload: true
   })
   assertEqual(
@@ -378,6 +404,7 @@ function testRuntimeComposerStateOnlyAllowsGoalControlCommandsWhileLoading(): vo
     isLoading: true,
     historyLoading: false,
     slashModeKind: "closed",
+    hasActiveGoal: true,
     hasPendingTransportPayload: true
   })
   assertEqual(
@@ -393,6 +420,7 @@ function testRuntimeComposerStateBlocksGoalControlsForNonAgentLoading(): void {
     isLoading: true,
     historyLoading: false,
     slashModeKind: "closed",
+    hasActiveGoal: true,
     goalControlAllowedWhileLoading: false
   })
 
@@ -413,7 +441,8 @@ function testRuntimeComposerStateDisablesGoalSendWhilePopoverOpen(): void {
     input: "/go",
     isLoading: true,
     historyLoading: false,
-    slashModeKind: "slash"
+    slashModeKind: "slash",
+    hasActiveGoal: true
   })
 
   assertEqual(
@@ -433,7 +462,8 @@ function testRuntimeComposerStateAllowsBareGoalWhilePopoverOpen(): void {
     input: "/goal",
     isLoading: true,
     historyLoading: false,
-    slashModeKind: "slash"
+    slashModeKind: "slash",
+    hasActiveGoal: true
   })
 
   assertEqual(
@@ -453,7 +483,8 @@ function testRuntimeComposerStateKeepsHistoryLoadingLocked(): void {
     input: "/goal status",
     isLoading: true,
     historyLoading: true,
-    slashModeKind: "closed"
+    slashModeKind: "closed",
+    hasActiveGoal: true
   })
 
   assertEqual(state.inputDisabled, true, "history loading should still lock the textarea")
@@ -479,6 +510,7 @@ function main(): void {
     testGoalSlashControlCommandDetectionForValidationBypass,
     testRuntimeComposerStateBlocksPlainTextWhileLoading,
     testRuntimeComposerStateAllowsGoalCommandsWhileLoading,
+    testRuntimeComposerStateBlocksGoalCommandsDuringOrdinaryLoading,
     testRuntimeComposerStateOnlyAllowsGoalControlCommandsWhileLoading,
     testRuntimeComposerStateBlocksGoalControlsForNonAgentLoading,
     testRuntimeComposerStateDisablesGoalSendWhilePopoverOpen,

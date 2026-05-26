@@ -1,15 +1,24 @@
 export function resolveGoalControlSubmitRoute(params: {
   isGoalControlCommand: boolean
   isLoading: boolean
+  historyLoading?: boolean
+  hasActiveGoal?: boolean
+  goalControlAllowedWhileLoading?: boolean
 }): {
   isSideChannelGoalControl: boolean
   shouldUseGoalControlPlane: boolean
   shouldUseSubmitLock: boolean
 } {
-  const isSideChannelGoalControl = params.isLoading && params.isGoalControlCommand
+  const goalControlAllowedWhileLoading =
+    params.goalControlAllowedWhileLoading ?? Boolean(params.hasActiveGoal)
+  const canUseGoalControlPlane =
+    params.isGoalControlCommand &&
+    !params.historyLoading &&
+    (!params.isLoading || goalControlAllowedWhileLoading)
+  const isSideChannelGoalControl = params.isLoading && canUseGoalControlPlane
   return {
     isSideChannelGoalControl,
-    shouldUseGoalControlPlane: params.isGoalControlCommand,
+    shouldUseGoalControlPlane: canUseGoalControlPlane,
     shouldUseSubmitLock: !isSideChannelGoalControl
   }
 }

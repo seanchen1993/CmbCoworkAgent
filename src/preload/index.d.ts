@@ -165,7 +165,17 @@ interface CustomAPI {
     goalControl: (
       threadId: string,
       message: string
-    ) => Promise<{ handled: boolean; terminatedCurrentRun: boolean }>
+    ) => Promise<{
+      handled: boolean
+      terminatedCurrentRun: boolean
+      notice?: {
+        message: string
+        goalId: string | null
+        activeWindowId: string | null
+        eventId: number | null
+        createdAt: number
+      }
+    }>
     cancel: (threadId: string) => Promise<void>
   }
   threads: {
@@ -176,7 +186,7 @@ interface CustomAPI {
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>) => Promise<Thread>
     delete: (threadId: string) => Promise<void>
     getHistory: (threadId: string) => Promise<unknown[]>
-    getGoalEvents: (threadId: string, options?: { restore?: boolean }) => Promise<
+    getGoalEvents: (threadId: string, options?: { restore?: boolean; limit?: number }) => Promise<
       Array<{
         event_id: number
         thread_id: string

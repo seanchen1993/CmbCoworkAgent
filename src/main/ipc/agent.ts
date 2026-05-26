@@ -170,9 +170,50 @@ const goalStore = new SqlGoalStore()
 const goalManager = new GoalManager(goalStore)
 let restoredRuntimeGoalsReconciled = false
 
+type GoalMutationSignature = {
+  goalId: string
+  activeWindowId: string
+  status: ThreadGoal["status"]
+  updatedAt: number
+} | null
+
+function readGoalMutationSignature(threadId: string): GoalMutationSignature {
+  const goal = goalManager.get(threadId)
+  if (!goal) return null
+  return {
+    goalId: goal.goalId,
+    activeWindowId: goal.activeWindowId,
+    status: goal.status,
+    updatedAt: goal.updatedAt
+  }
+}
+
+function isGoalMutationSignatureCurrent(
+  threadId: string,
+  signature: GoalMutationSignature
+): boolean {
+  const current = readGoalMutationSignature(threadId)
+  if (!signature || !current) return signature === current
+  return (
+    current.goalId === signature.goalId &&
+    current.activeWindowId === signature.activeWindowId &&
+    current.status === signature.status &&
+    current.updatedAt === signature.updatedAt
+  )
+}
+
 type GoalControlResult = {
   handled: boolean
   terminatedCurrentRun: boolean
+  notice?: GoalNoticePayload
+}
+
+type GoalNoticePayload = {
+  message: string
+  goalId: string | null
+  activeWindowId: string | null
+  eventId: number | null
+  createdAt: number
 }
 
 function isRuntimeRestoredPausedGoal(threadId: string): boolean {
@@ -228,7 +269,9 @@ function abortActiveRun(threadId: string): void {
   if (!existingController) return
   console.log("[Agent] Aborting existing stream for thread:", threadId)
   existingController.abort()
-  activeRuns.delete(threadId)
+  // Keep activeRuns reserved until the old run's finally block drains. Releasing
+  // it here lets a new run start while the old LangGraph/tool cleanup is still
+  // unwinding, which can overlap auto-commit, ACL, trace, and hook finalizers.
 }
 
 function persistGoalUserMessage(
@@ -325,22 +368,25 @@ function emitGoalNotice(
   notice: string,
   goalId = goalManager.get(threadId)?.goalId ?? null,
   activeWindowId = goalManager.get(threadId)?.activeWindowId ?? null
-): void {
+): GoalNoticePayload {
   let eventId: number | null = null
   let createdAt = Date.now()
+  const message = notice.trim()
   try {
-    const event = addThreadGoalEvent(threadId, notice, goalId, createdAt, activeWindowId)
+    const event = addThreadGoalEvent(threadId, message, goalId, createdAt, activeWindowId)
     eventId = event.event_id
     createdAt = event.created_at
   } catch (error) {
     console.warn("[Goal] failed to persist goal notice:", error)
   }
+  const payload = { message, goalId, activeWindowId, eventId, createdAt }
   if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
     window.webContents.send(channel, {
       type: "custom",
-      data: { type: "goal_notice", message: notice, goalId, activeWindowId, eventId, createdAt }
+      data: { type: "goal_notice", ...payload }
     })
   }
+  return payload
 }
 
 function handleGoalNonStartingControlCommand(params: {
@@ -378,9 +424,9 @@ function handleGoalNonStartingControlCommand(params: {
       threadId,
       originalMessage ? sanitizeGoalSlashCommandForPersistence(originalMessage) : "/goal"
     )
-    emitGoalNotice(window, channel, threadId, goalManager.statusLine(threadId))
+    const notice = emitGoalNotice(window, channel, threadId, goalManager.statusLine(threadId))
     done()
-    return { handled: true, terminatedCurrentRun: false }
+    return { handled: true, terminatedCurrentRun: false, notice }
   }
 
   if (command.type === "invalid") {
@@ -388,35 +434,45 @@ function handleGoalNonStartingControlCommand(params: {
       threadId,
       originalMessage ? sanitizeGoalSlashCommandForPersistence(originalMessage) : "/goal"
     )
-    emitGoalNotice(window, channel, threadId, command.reason)
+    const notice = emitGoalNotice(window, channel, threadId, command.reason)
     done()
-    return { handled: true, terminatedCurrentRun: false }
+    return { handled: true, terminatedCurrentRun: false, notice }
   }
 
   if (command.type === "pause") {
     persistGoalUserMessage(threadId, "/goal pause")
     const previousGoal = goalManager.get(threadId)
     if (!previousGoal) {
-      emitGoalNotice(window, channel, threadId, "当前没有 active goal。")
+      const notice = emitGoalNotice(window, channel, threadId, "当前没有 active goal。")
       done()
-      return { handled: true, terminatedCurrentRun: false }
+      return { handled: true, terminatedCurrentRun: false, notice }
     }
     if (previousGoal.status === "complete") {
-      emitGoalNotice(window, channel, threadId, "Goal 已完成，不能暂停。清除请发送 /goal clear。")
+      const notice = emitGoalNotice(
+        window,
+        channel,
+        threadId,
+        "Goal 已完成，不能暂停。清除请发送 /goal clear。"
+      )
       done()
-      return { handled: true, terminatedCurrentRun: false }
+      return { handled: true, terminatedCurrentRun: false, notice }
     }
     if (previousGoal.status !== "active") {
-      emitGoalNotice(window, channel, threadId, "Goal 已经暂停。需要继续时发送 /goal resume。")
+      const notice = emitGoalNotice(
+        window,
+        channel,
+        threadId,
+        "Goal 已经暂停。需要继续时发送 /goal resume。"
+      )
       done()
-      return { handled: true, terminatedCurrentRun: false }
+      return { handled: true, terminatedCurrentRun: false, notice }
     }
 
     abortActiveRun(threadId)
     LocalSandbox.cancelBackgroundTasks(threadId)
     const goal = goalManager.pause(threadId, "user-paused")
     const pausedReason = displayGoalPausedReason(goal?.pausedReason) || "已手动暂停。"
-    emitGoalNotice(
+    const notice = emitGoalNotice(
       window,
       channel,
       threadId,
@@ -424,16 +480,16 @@ function handleGoalNonStartingControlCommand(params: {
       goal?.goalId ?? previousGoal.goalId
     )
     doneAfterTerminatingControl()
-    return { handled: true, terminatedCurrentRun: true }
+    return { handled: true, terminatedCurrentRun: true, notice }
   }
 
   if (command.type === "clear") {
     persistGoalUserMessage(threadId, "/goal clear")
     const existingGoal = goalManager.get(threadId)
     if (!existingGoal) {
-      emitGoalNotice(window, channel, threadId, "当前没有 active goal。")
+      const notice = emitGoalNotice(window, channel, threadId, "当前没有 active goal。")
       done()
-      return { handled: true, terminatedCurrentRun: false }
+      return { handled: true, terminatedCurrentRun: false, notice }
     }
 
     const terminatedCurrentRun = existingGoal.status === "active"
@@ -442,7 +498,7 @@ function handleGoalNonStartingControlCommand(params: {
       LocalSandbox.cancelBackgroundTasks(threadId)
     }
     goalManager.clear(threadId)
-    emitGoalNotice(
+    const notice = emitGoalNotice(
       window,
       channel,
       threadId,
@@ -455,7 +511,7 @@ function handleGoalNonStartingControlCommand(params: {
     } else {
       done()
     }
-    return { handled: true, terminatedCurrentRun }
+    return { handled: true, terminatedCurrentRun, notice }
   }
 
   return { handled: false, terminatedCurrentRun: false }
@@ -608,6 +664,17 @@ function startTurnStateRun(state: TurnState): string {
 
 function shouldDisposeTurnState(threadId: string, runToken: string): boolean {
   return turnStates.get(threadId)?.runToken === runToken
+}
+
+function shouldCleanupRunScopedResources(threadId: string, controller: AbortController): boolean {
+  const currentController = activeRuns.get(threadId)
+  return !currentController || currentController === controller
+}
+
+function revokeSandboxAclsForRun(threadId: string): void {
+  LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
+    console.warn("[Agent] ACL cleanup error:", err)
+  })
 }
 
 /**
@@ -1780,7 +1847,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         sendDoneForTerminatingControl: true
       })
       if (!result.handled) {
-        emitGoalNotice(window, channel, threadId, "该 /goal 命令需要在当前运行结束后发送。")
+        return {
+          ...result,
+          notice: emitGoalNotice(window, channel, threadId, "该 /goal 命令需要在当前运行结束后发送。")
+        }
       }
       return result
     }
@@ -1934,6 +2004,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             window.webContents.send(channel, { type: "done" })
             return
           }
+          const resumeGoalSignature = readGoalMutationSignature(threadId)
           const explicitSkillValidationError = await validateExplicitGoalSkillContext(
             currentGoal.context
           )
@@ -1945,12 +2016,41 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             window.webContents.send(channel, { type: "done" })
             return
           }
+          if (!isGoalMutationSignatureCurrent(threadId, resumeGoalSignature)) {
+            sendGoalNotice("Goal 状态已变化，请重新发送 /goal resume。")
+            window.webContents.send(channel, { type: "done" })
+            return
+          }
+          const latestGoal = goalManager.get(threadId)
+          if (
+            !latestGoal ||
+            !isGoalBoundaryStillCurrent(
+              latestGoal.goalId,
+              currentGoal.goalId,
+              latestGoal.activeWindowId,
+              currentGoal.activeWindowId
+            )
+          ) {
+            sendGoalNotice("Goal 状态已变化，请重新发送 /goal resume。")
+            window.webContents.send(channel, { type: "done" })
+            return
+          }
+          if (latestGoal.status === "complete") {
+            sendGoalNotice("Goal 已完成，不能 resume。清除请发送 /goal clear。")
+            window.webContents.send(channel, { type: "done" })
+            return
+          }
+          if (activeRuns.has(threadId)) {
+            sendGoalNotice("当前线程正在运行，稍后发送 /goal resume。")
+            window.webContents.send(channel, { type: "done" })
+            return
+          }
           if (!ensureGoalEvaluatorConfigured()) {
             return
           }
-          const resumeReason = currentGoal.lastReason?.trim() || "Goal resumed by user."
+          const resumeReason = latestGoal.lastReason?.trim() || "Goal resumed by user."
           const goal = goalManager.resume(threadId, {
-            resetActiveWindow: currentGoal.status === "active"
+            resetActiveWindow: latestGoal.status === "active"
           })
           if (!goal || goal.status !== "active") {
             sendGoalNotice(goal ? `Goal 当前状态：${goal.status}。` : "没有可继续的 goal。")
@@ -1988,6 +2088,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             window.webContents.send(channel, { type: "done" })
             return
           }
+          const setGoalSignature = readGoalMutationSignature(threadId)
           const explicitSkillValidationError = await validateExplicitGoalSkillContext(
             goalCommand.context
           )
@@ -1996,6 +2097,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               type: "error",
               error: explicitSkillValidationError
             })
+            window.webContents.send(channel, { type: "done" })
+            return
+          }
+          if (!isGoalMutationSignatureCurrent(threadId, setGoalSignature)) {
+            sendGoalNotice("Goal 状态已变化，请重新发送 /goal <目标>。")
+            window.webContents.send(channel, { type: "done" })
+            return
+          }
+          if (activeRuns.has(threadId)) {
+            sendGoalNotice(
+              "当前线程正在运行，稍后再设置新的 goal。暂停请发送 /goal pause，清除请发送 /goal clear。"
+            )
             window.webContents.send(channel, { type: "done" })
             return
           }
@@ -3516,21 +3629,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         if (onWindowClosed) {
           window.off("closed", onWindowClosed)
         }
+        const shouldCleanupRunResources = shouldCleanupRunScopedResources(threadId, abortController)
         if (activeRuns.get(threadId) === abortController) {
           activeRuns.delete(threadId)
         }
         if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
           disposeTurnRuntimeState(threadId, turnState)
         }
-        if (!preserveAutoCommitTrackingForInterrupt) {
+        if (!preserveAutoCommitTrackingForInterrupt && shouldCleanupRunResources) {
           discardAgentAutoCommitTracking(threadId)
         }
         // Clean up sandbox ACLs granted during this run (unelevated mode keeps them
         // across commands for performance, so we revoke them when the run ends).
-        // Uses threadId to only release this run's ref-counts, not other concurrent runs'.
-        LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
-          console.warn("[Agent] ACL cleanup error:", err)
-        })
+        if (shouldCleanupRunResources) {
+          revokeSandboxAclsForRun(threadId)
+        }
         // SessionEnd is NOT fired here — it belongs to thread lifecycle (delete / app quit),
         // not turn completion. See fireSessionEnd call in threads:delete handler.
       }
@@ -3583,11 +3696,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
 
     // Abort any existing stream before resuming
-    const existingController = activeRuns.get(threadId)
-    if (existingController) {
-      existingController.abort()
-      activeRuns.delete(threadId)
-    }
+    abortActiveRun(threadId)
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
@@ -3940,13 +4049,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       turnStateShouldDispose = true
     } finally {
       window.off("closed", onWindowClosed)
+      const shouldCleanupRunResources = shouldCleanupRunScopedResources(threadId, abortController)
       if (activeRuns.get(threadId) === abortController) {
         activeRuns.delete(threadId)
       }
       if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
         disposeTurnRuntimeState(threadId, turnState)
       }
-      discardAgentAutoCommitTracking(threadId)
+      if (shouldCleanupRunResources) {
+        discardAgentAutoCommitTracking(threadId)
+        revokeSandboxAclsForRun(threadId)
+      }
     }
   })
 
@@ -3991,11 +4104,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
 
     // Abort any existing stream before continuing
-    const existingController = activeRuns.get(threadId)
-    if (existingController) {
-      existingController.abort()
-      activeRuns.delete(threadId)
-    }
+    abortActiveRun(threadId)
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
@@ -4348,13 +4457,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       turnStateShouldDispose = true
     } finally {
       window.off("closed", onWindowClosed)
+      const shouldCleanupRunResources = shouldCleanupRunScopedResources(threadId, abortController)
       if (activeRuns.get(threadId) === abortController) {
         activeRuns.delete(threadId)
       }
       if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
         disposeTurnRuntimeState(threadId, turnState)
       }
-      discardAgentAutoCommitTracking(threadId)
+      if (shouldCleanupRunResources) {
+        discardAgentAutoCommitTracking(threadId)
+        revokeSandboxAclsForRun(threadId)
+      }
     }
   })
 
@@ -4378,7 +4491,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
     if (controller) {
       controller.abort()
-      activeRuns.delete(threadId)
       console.log(`[Agent] cancel: aborted controller for thread ${threadId}`)
     } else {
       console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)

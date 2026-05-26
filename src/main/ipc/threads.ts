@@ -221,15 +221,18 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   })
 
-  ipcMain.handle("threads:goalEvents", async (_event, threadId: string, options?: { restore?: boolean }) => {
-    const events = options?.restore
-      ? getThreadGoalEventsForRestore(threadId, { recentLimit: GOAL_UI_EVENT_LIMIT })
-      : getThreadGoalEvents(threadId)
-    return events.map((event) => ({
-      ...event,
-      created_at: new Date(event.created_at)
-    }))
-  })
+  ipcMain.handle(
+    "threads:goalEvents",
+    async (_event, threadId: string, options?: { restore?: boolean; limit?: number }) => {
+      const events = options?.restore
+        ? getThreadGoalEventsForRestore(threadId, { recentLimit: GOAL_UI_EVENT_LIMIT })
+        : getThreadGoalEvents(threadId, { limit: options?.limit ?? GOAL_UI_EVENT_LIMIT })
+      return events.map((event) => ({
+        ...event,
+        created_at: new Date(event.created_at)
+      }))
+    }
+  )
 
   ipcMain.handle(
     "threads:goalState",

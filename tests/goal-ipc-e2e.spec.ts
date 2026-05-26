@@ -53,7 +53,17 @@ interface WindowWithApi {
       goalControl: (
         threadId: string,
         message: string
-      ) => Promise<{ handled: boolean; terminatedCurrentRun: boolean }>
+      ) => Promise<{
+        handled: boolean
+        terminatedCurrentRun: boolean
+        notice?: {
+          message: string
+          goalId: string | null
+          activeWindowId: string | null
+          eventId: number | null
+          createdAt: number
+        }
+      }>
     }
     threads: {
       create: (metadata?: Record<string, unknown>) => Promise<Thread>
@@ -207,6 +217,10 @@ async function testGoalControlCommandsDoNotTouchCheckpoint(page: Page): Promise<
     }, threadId)
 
     assertEqual(result.statusResult.handled, true, "/goal status should be handled by goalControl")
+    assert(
+      result.statusResult.notice?.message.includes("当前没有 active goal") ?? false,
+      "idle /goal status should return the readable notice to renderer"
+    )
     assertEqual(
       result.statusResult.terminatedCurrentRun,
       false,
@@ -327,6 +341,14 @@ async function testGoalSetPreflightRejectsUnavailableEvaluator(page: Page): Prom
       ),
       "unavailable evaluator should emit GOAL_EVALUATOR_UNAVAILABLE before starting"
     )
+    assert(
+      result.invokeResult.events.some(
+        (event) =>
+          event.type === "error" &&
+          event.message?.includes("Goal evaluator model is not configured")
+      ),
+      "unavailable evaluator should include a readable configuration message"
+    )
     assertEqual(result.goal, null, "unavailable evaluator must not create a goal")
     assertEqual(result.historyCount, 0, "unavailable evaluator must not write checkpoint history")
     assert(
@@ -418,6 +440,14 @@ async function testGoalResumePreflightKeepsPausedGoal(
         (event) => event.type === "error" && event.error === "GOAL_EVALUATOR_UNAVAILABLE"
       ),
       "unavailable evaluator resume should emit GOAL_EVALUATOR_UNAVAILABLE"
+    )
+    assert(
+      result.invokeResult.events.some(
+        (event) =>
+          event.type === "error" &&
+          event.message?.includes("Goal evaluator model is not configured")
+      ),
+      "unavailable evaluator resume should include a readable configuration message"
     )
     assertEqual(result.before.status, "paused", "seeded goal should start paused")
     assertEqual(result.after.status, "paused", "unavailable evaluator must keep goal paused")

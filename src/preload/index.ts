@@ -156,10 +156,27 @@ const api = {
     goalControl: (
       threadId: string,
       message: string
-    ): Promise<{ handled: boolean; terminatedCurrentRun: boolean }> => {
+    ): Promise<{
+      handled: boolean
+      terminatedCurrentRun: boolean
+      notice?: {
+        message: string
+        goalId: string | null
+        activeWindowId: string | null
+        eventId: number | null
+        createdAt: number
+      }
+    }> => {
       return ipcRenderer.invoke("agent:goal-control", { threadId, message }) as Promise<{
         handled: boolean
         terminatedCurrentRun: boolean
+        notice?: {
+          message: string
+          goalId: string | null
+          activeWindowId: string | null
+          eventId: number | null
+          createdAt: number
+        }
       }>
     },
     cancel: (threadId: string): Promise<void> => {
@@ -190,7 +207,7 @@ const api = {
     },
     getGoalEvents: (
       threadId: string,
-      options?: { restore?: boolean }
+      options?: { restore?: boolean; limit?: number }
     ): Promise<
       Array<{
         event_id: number

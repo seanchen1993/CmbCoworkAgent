@@ -49,7 +49,11 @@ export function buildGoalPanelViewModel(goalUi: GoalUiState): GoalPanelViewModel
   if (!goal) return null
 
   const latestEvents = goalUi.events
-    .filter((event) => event.goal_id === goal.goalId)
+    .filter(
+      (event) =>
+        event.goal_id === goal.goalId &&
+        (!event.active_window_id || event.active_window_id === goal.activeWindowId)
+    )
     .slice(-6)
     .reverse()
   const goalContext = goal.context ?? {}
