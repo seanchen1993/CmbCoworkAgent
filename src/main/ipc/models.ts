@@ -2000,7 +2000,12 @@ import {
   MIN_MAX_OUTPUT_TOKENS,
   MAX_MAX_OUTPUT_TOKENS,
   DEFAULT_TEMPERATURE,
-  MAX_TEMPERATURE
+  MAX_TEMPERATURE,
+  DEFAULT_TOP_P,
+  MAX_TOP_P,
+  DEFAULT_TOP_K,
+  MIN_TOP_K,
+  MAX_TOP_K
 } from "../storage"
 import type { CustomModelConfig } from "../storage"
 
@@ -2110,7 +2115,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       minMaxOutputTokens: MIN_MAX_OUTPUT_TOKENS,
       maxMaxOutputTokens: MAX_MAX_OUTPUT_TOKENS,
       defaultTemperature: DEFAULT_TEMPERATURE,
-      maxTemperature: MAX_TEMPERATURE
+      maxTemperature: MAX_TEMPERATURE,
+      defaultTopP: DEFAULT_TOP_P,
+      maxTopP: MAX_TOP_P,
+      defaultTopK: DEFAULT_TOP_K,
+      minTopK: MIN_TOP_K,
+      maxTopK: MAX_TOP_K
     }
   })
 
