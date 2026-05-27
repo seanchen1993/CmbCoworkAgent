@@ -54,6 +54,11 @@ import {
 import { setAdoptionContext, clearAdoptionContext } from "../../services/adoption-tracker"
 import { sanitizeTraceForCloudUpload } from "./sanitizer"
 import { buildSkillEvalTraceExtension } from "../skill-eval/documents"
+import {
+  appendSkillEvalWindowTurn,
+  getSkillEvalWindowAssistantText,
+  getSkillEvalWindowContextByRawName
+} from "../skill-eval/window"
 
 // ─────────────────────────────────────────────────────────
 // Global reporter registry
@@ -618,7 +623,26 @@ export class TraceCollector {
     }
     let skillEval: TraceSkillEvalExtension | undefined
     try {
-      skillEval = buildSkillEvalTraceExtension(trace, { skillAuthorByRawName })
+      const windowTurn = appendSkillEvalWindowTurn({
+        traceId: trace.traceId,
+        threadId: trace.threadId,
+        startedAt: trace.startedAt,
+        endedAt: trace.endedAt,
+        usedSkills: usedSkillsWithVersions,
+        userMessage: trace.userMessage,
+        assistantText: getSkillEvalWindowAssistantText(trace),
+        outcome: trace.outcome
+      })
+      const evalRawSkillNames = windowTurn.evalSkillNames
+      const windowContextByRawName = getSkillEvalWindowContextByRawName(
+        trace.threadId,
+        evalRawSkillNames
+      )
+      skillEval = buildSkillEvalTraceExtension(trace, {
+        skillAuthorByRawName,
+        windowContextByRawName,
+        evalRawSkillNames
+      })
     } catch (e) {
       console.warn("[Tracer] buildSkillEvalTraceExtension failed:", e)
     }

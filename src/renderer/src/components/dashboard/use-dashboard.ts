@@ -279,6 +279,7 @@ export interface DashboardSkillEvalRun {
   skillName: string
   skillVersion?: string
   rawSkillName: string
+  evalSource?: "explicit" | "inherited_context"
   outcome: string
   processScore: number
   outcomeScore: number
@@ -1248,6 +1249,9 @@ function parseSkillEvalSummary(
         skillName: String(item.skillName ?? "unknown"),
         ...(item.skillVersion ? { skillVersion: String(item.skillVersion) } : {}),
         rawSkillName: String(item.rawSkillName ?? ""),
+        ...(item.evalSource === "explicit" || item.evalSource === "inherited_context"
+          ? { evalSource: item.evalSource }
+          : {}),
         outcome: String(item.outcome ?? "unknown"),
         processScore: numberValue(item.processScore),
         outcomeScore: numberValue(item.outcomeScore),

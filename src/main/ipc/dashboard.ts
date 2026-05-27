@@ -10,7 +10,7 @@ import { ipcMain, dialog, BrowserWindow } from "electron"
 import { getUserInfo } from "../storage"
 import * as fs from "fs"
 import { buildTraceTree } from "../agent/trace/tree-builder"
-import type { AgentTrace, TraceNode } from "../agent/trace/types"
+import type { AgentTrace, TraceNode, TraceSkillEvalRecord } from "../agent/trace/types"
 import { buildSkillEvalTraceExtension } from "../agent/skill-eval/documents"
 import { evaluateTraceSkills, type SkillEvalRecord } from "../agent/skill-eval/evaluator"
 import {
@@ -208,6 +208,7 @@ interface DashboardSkillEvalRun {
   skillName: string
   skillVersion?: string
   rawSkillName: string
+  evalSource?: "explicit" | "inherited_context"
   outcome: string
   processScore: number
   outcomeScore: number
@@ -397,7 +398,7 @@ interface EsSearchResponse {
 }
 
 interface SkillTraceEvaluation {
-  evalRecords: SkillEvalRecord[]
+  evalRecords: Array<SkillEvalRecord | TraceSkillEvalRecord>
   resultRecords: SkillResultEvalRecord[]
 }
 
@@ -926,6 +927,7 @@ function normalizeParsedTrace(
     nodes: Array.isArray(candidate.nodes) ? candidate.nodes : undefined,
     totalToolCalls: asNumber(candidate.totalToolCalls, asNumber(source.totalToolCalls)),
     outcome: safeOutcome,
+    skillEval: candidate.skillEval,
     usedSkills: Array.isArray(candidate.usedSkills)
       ? candidate.usedSkills
       : asStringArray(source.usedSkills)
@@ -943,7 +945,8 @@ const SKILL_TRACE_EVAL_CACHE_LIMIT = 5000
 const skillTraceEvalCache = new Map<string, SkillTraceEvaluation>()
 
 function getSkillTraceCacheKey(trace: AgentTrace): string {
-  return trace.traceId || ""
+  const mode = trace.skillEval?.records?.length ? "stored" : "runtime"
+  return trace.traceId ? trace.traceId + ":" + mode : ""
 }
 
 function evaluateSkillTrace(trace: AgentTrace): SkillTraceEvaluation {
@@ -955,10 +958,15 @@ function evaluateSkillTrace(trace: AgentTrace): SkillTraceEvaluation {
     return cached
   }
 
-  const evaluated = {
-    evalRecords: evaluateTraceSkills(trace),
-    resultRecords: evaluateTraceResults(trace)
-  }
+  const evaluated = trace.skillEval?.records?.length
+    ? {
+        evalRecords: trace.skillEval.records,
+        resultRecords: []
+      }
+    : {
+        evalRecords: evaluateTraceSkills(trace),
+        resultRecords: evaluateTraceResults(trace)
+      }
   if (key) {
     skillTraceEvalCache.set(key, evaluated)
     if (skillTraceEvalCache.size > SKILL_TRACE_EVAL_CACHE_LIMIT) {
@@ -2604,17 +2612,14 @@ function buildSkillEvalSummaryFromTraces({
     ? mergeSkillListWithEvaluatedStats(skillList, evaluatedSkills)
     : evaluatedSkills
 
-  const totalRuns = traces.reduce(
-    (sum, trace) => sum + (Array.isArray(trace.usedSkills) ? trace.usedSkills.length : 0),
-    0
-  )
+  const groupedRuns = [...grouped.values()].flat()
+  const totalRuns = groupedRuns.length
   const normalizedRecentPage = clampLimit(recentPage, 1, 10_000)
   const normalizedRecentPageSize = clampLimit(recentPageSize, 10, 100)
   const normalizedSkillPage = clampLimit(skillPage, 1, 10_000)
   const normalizedSkillPageSize = clampLimit(skillPageSize, 10, 100)
   const recentTotalPages = Math.max(1, Math.ceil(recentTotal / normalizedRecentPageSize))
   const effectiveRecentPage = Math.min(normalizedRecentPage, recentTotalPages)
-  const groupedRuns = [...grouped.values()].flat()
   const totals = groupedRuns.reduce(
     (acc, run) => {
       acc.passCount += run.pass ? 1 : 0
@@ -2694,7 +2699,12 @@ function buildSkillEvalRuns(
 ): DashboardSkillEvalRun[] {
   const runs: DashboardSkillEvalRun[] = []
   for (const trace of traces) {
-    if (!trace || !Array.isArray(trace.usedSkills) || trace.usedSkills.length === 0) continue
+    if (!trace) continue
+    const hasStoredEval =
+      Array.isArray(trace.skillEval?.records) && trace.skillEval.records.length > 0
+    if (!hasStoredEval && (!Array.isArray(trace.usedSkills) || trace.usedSkills.length === 0)) {
+      continue
+    }
     const { evalRecords, resultRecords } = evaluateSkillTrace(trace)
     const resultByKey = new Map(
       resultRecords.map((record) => [
@@ -2723,11 +2733,23 @@ function isSameSkillVersion(
   )
 }
 
+function isStoredSkillEvalRecord(
+  record: SkillEvalRecord | TraceSkillEvalRecord
+): record is TraceSkillEvalRecord {
+  return "resultStatus" in record
+}
+
 function skillEvalRecordToDashboardRun(
-  record: SkillEvalRecord,
+  record: SkillEvalRecord | TraceSkillEvalRecord,
   result: SkillResultEvalRecord | undefined,
   traceDetail: DashboardTraceDetail
 ): DashboardSkillEvalRun {
+  const stored = isStoredSkillEvalRecord(record) ? record : undefined
+  const processScore = stored ? stored.processScore / 100 : record.processScore
+  const outcomeScore = stored ? stored.outcomeScore / 100 : record.outcomeScore
+  const score = stored ? stored.score / 100 : record.score
+  const resultScore = stored ? (stored.resultScore ?? 0) / 100 : (result?.score ?? 0)
+
   return {
     traceId: record.traceId,
     threadId: record.threadId,
@@ -2737,14 +2759,15 @@ function skillEvalRecordToDashboardRun(
     skillName: record.skillName,
     ...(record.skillVersion ? { skillVersion: record.skillVersion } : {}),
     rawSkillName: record.rawSkillName,
+    ...(stored ? { evalSource: stored.evalSource } : {}),
     outcome: record.outcome,
-    processScore: record.processScore,
-    outcomeScore: record.outcomeScore,
-    score: record.score,
+    processScore,
+    outcomeScore,
+    score,
     outcomePass: record.outcomePass,
     pass: record.pass,
-    resultScore: result?.score ?? 0,
-    resultPass: result?.pass ?? false,
+    resultScore,
+    resultPass: stored ? Boolean(stored.resultPass) : (result?.pass ?? false),
     totalToolCalls: record.totalToolCalls,
     modelCallCount: record.modelCallCount,
     totalInputTokens: record.totalInputTokens,
@@ -2758,24 +2781,29 @@ function skillEvalRecordToDashboardRun(
     durationMs: record.durationMs,
     checks: record.checks ?? [],
     outcomeChecks: record.outcomeChecks ?? [],
-    resultChecks: result?.checks ?? [],
+    resultChecks: stored?.resultChecks ?? result?.checks ?? [],
     warnings: record.warnings ?? [],
     outcomeWarnings: record.outcomeWarnings ?? [],
-    resultWarnings: result?.warnings ?? [],
-    resultIssues: result?.issues ?? [],
-    resultArtifacts: result?.artifacts ?? [],
-    resultGenerated: Boolean(result),
+    resultWarnings: stored?.resultWarnings ?? result?.warnings ?? [],
+    resultIssues: stored?.resultIssues ?? result?.issues ?? [],
+    resultArtifacts: stored?.artifacts ?? result?.artifacts ?? [],
+    resultGenerated: stored ? stored.resultStatus === "evaluated" : Boolean(result),
     traceDetail,
     evidence: {
-      finalResponseLength: result?.evidence.finalResponseLength ?? 0,
-      changedFiles: result?.evidence.changedFiles.length ?? 0,
-      validationCommands: result?.evidence.validationCommands.length ?? 0,
-      artifactSignals: result?.evidence.artifactSignals.length ?? 0,
-      dangerousCommands: result?.evidence.dangerousCommands.length ?? 0,
-      subagentRuns: result?.evidence.subagentRuns ?? 0,
-      subagentResultLength: result?.evidence.subagentResultLength ?? 0,
-      subagentFailed: result?.evidence.subagentFailed ?? 0,
-      toolResultErrors: result?.evidence.toolResultErrors ?? 0
+      finalResponseLength:
+        stored?.evidence.finalResponseLength ?? result?.evidence.finalResponseLength ?? 0,
+      changedFiles: stored?.evidence.changedFiles ?? result?.evidence.changedFiles.length ?? 0,
+      validationCommands:
+        stored?.evidence.validationCommands ?? result?.evidence.validationCommands.length ?? 0,
+      artifactSignals:
+        stored?.evidence.artifactSignals ?? result?.evidence.artifactSignals.length ?? 0,
+      dangerousCommands:
+        stored?.evidence.dangerousCommands ?? result?.evidence.dangerousCommands.length ?? 0,
+      subagentRuns: stored?.evidence.subagentRuns ?? result?.evidence.subagentRuns ?? 0,
+      subagentResultLength:
+        stored?.evidence.subagentResultLength ?? result?.evidence.subagentResultLength ?? 0,
+      subagentFailed: stored?.evidence.subagentFailed ?? result?.evidence.subagentFailed ?? 0,
+      toolResultErrors: stored?.evidence.toolResultErrors ?? result?.evidence.toolResultErrors ?? 0
     }
   }
 }
@@ -4471,7 +4499,16 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
     }
   }
   const skillEval = buildSkillEvalTraceExtension(trace, {
-    skillAuthorByRawName: { [skill]: "Mock Skill Author" }
+    skillAuthorByRawName: { [skill]: "Mock Skill Author" },
+    windowContextByRawName: {
+      [skill]: {
+        contextTraceIds: [trace.traceId],
+        skillEvalTraceIds: [trace.traceId],
+        contextTraceCount: 1,
+        skillEvalTraceCount: 1
+      }
+    },
+    evalRawSkillNames: trace.usedSkills
   })
   return skillEval ? { ...trace, skillEval } : trace
 }

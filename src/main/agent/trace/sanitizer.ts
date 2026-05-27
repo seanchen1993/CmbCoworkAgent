@@ -11,6 +11,7 @@ import type {
 const SOFT_TRACE_BYTES = 64 * 1024
 const HARD_TRACE_BYTES = 96 * 1024
 const MAX_DEPTH = 8
+const MAX_SKILL_EVAL_CONTEXT_TRACE_IDS = 20
 
 const LIMITS = {
   userMessage: { max: 1024, head: 768, tail: 192 },
@@ -300,6 +301,10 @@ function sanitizeSkillEval(
     ...skillEval,
     records: skillEval.records.map((record, index) => ({
       ...record,
+      contextTraceIds: record.contextTraceIds.slice(0, MAX_SKILL_EVAL_CONTEXT_TRACE_IDS),
+      skillEvalTraceIds: record.skillEvalTraceIds.slice(0, MAX_SKILL_EVAL_CONTEXT_TRACE_IDS),
+      contextTraceCount: record.contextTraceIds.length,
+      skillEvalTraceCount: record.skillEvalTraceIds.length,
       userMessage: truncateString(
         record.userMessage ?? "",
         textLimit,

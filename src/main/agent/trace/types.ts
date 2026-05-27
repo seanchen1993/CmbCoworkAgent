@@ -175,6 +175,7 @@ export type TraceSkillEvalWarningTag =
 
 export type TraceSkillEvalCheckCategory = "process" | "outcome" | "result"
 export type TraceSkillEvalResultStatus = "evaluated" | "skipped" | "failed"
+export type TraceSkillEvalSource = "explicit" | "inherited_context"
 export type TraceSkillEvalArtifactType =
   | "response"
   | "file"
@@ -217,6 +218,12 @@ export interface TraceSkillEvalRecord {
   rawSkillName: string
   skillName: string
   skillVersion?: string
+  evalSource: TraceSkillEvalSource
+
+  contextTraceIds: string[]
+  skillEvalTraceIds: string[]
+  contextTraceCount: number
+  skillEvalTraceCount: number
 
   startedAt: string
   endedAt: string
@@ -227,6 +234,7 @@ export interface TraceSkillEvalRecord {
   sapId: string
   userName: string
   orgName: string
+  originOrgId: string
   upperOrgLv0: string
   upperOrgLv1: string
   upperOrgLv2: string
