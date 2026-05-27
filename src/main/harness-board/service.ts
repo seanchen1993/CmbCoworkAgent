@@ -159,13 +159,19 @@ function adapterPluginDir(project: HarnessProjectMetadata): string {
     throw new Error(`Unsupported harness adapter type: ${adapter.type}`)
   }
 
-  const plugin = getPlugins().find(
-    (item) => pluginHasBoardConfig(item) && pluginMatchesAdapterId(item, adapter.id)
-  )
+  const plugin = findAdapterPlugin(project)
   if (!plugin) {
     throw new Error(`Harness adapter plugin not found: ${adapter.id}`)
   }
   return plugin.path
+}
+
+function findAdapterPlugin(project: HarnessProjectMetadata): PluginMetadata | null {
+  const adapter = project["harness-adapter"]
+  if (adapter.type !== "plugin") return null
+  return getPlugins().find(
+    (item) => pluginHasBoardConfig(item) && pluginMatchesAdapterId(item, adapter.id)
+  ) ?? null
 }
 
 function toTrimmedOutput(value: unknown): string {
@@ -317,10 +323,13 @@ function parseInspectCommand(
   project: HarnessProjectMetadata,
   mode: HarnessInspectCommandName,
   cwd: string,
-  feature?: string
+  feature?: string,
+  projectCodes?: string[]
 ): { executable: string; args: string[] } {
-  const tokens = tokenizeInspectCommand(command.trim()).map((token) =>
-    replaceHarnessConfigPlaceholders(token, project, mode, cwd, feature)
+  const tokens = tokenizeInspectCommand(command.trim()).flatMap((token) =>
+    token === "${projectCodes...}" && projectCodes
+      ? projectCodes
+      : [replaceHarnessConfigPlaceholders(token, project, mode, cwd, feature)]
   )
   const [executable, ...args] = tokens
   if (!executable) {
@@ -462,9 +471,21 @@ function runInspectAdapter(
   mode: "project" | "run",
   feature?: string
 ): Record<string, unknown> {
-  const stdoutBuffer = runConfiguredHarnessCommand(project, mode, feature)
+  const invocation = buildConfiguredHarnessInvocation(project, mode, feature)
+  const cmdLine = [invocation.invocation.executable, ...invocation.invocation.args].join(" ")
+
+  if (mode === "project") {
+    console.log(`[HarnessBoard] [project_status] Running: ${cmdLine}`)
+  }
+
+  const stdoutBuffer = runHarnessInvocation(invocation)
 
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
+
+  if (mode === "project") {
+    console.log(`[HarnessBoard] [project_status] Result bytes: ${stdoutBuffer.length}`)
+  }
+
   if (!raw) {
     throw new Error("Inspect adapter returned empty output")
   }
@@ -1284,39 +1305,156 @@ export function archiveHarnessProject(projectId: string): HarnessProjectMetadata
 }
 
 export function getHarnessProjectDetail(projectId: string): HarnessProjectDetailViewModel {
-  const project = requireProject(projectId)
-  const fallbackWatchRefs = makeWatchRefs(project.projectCode)
+  return getHarnessProjectDetails([projectId])[projectId]
+}
 
-  if (!existsSync(projectDirectoryPath(project))) {
-    return makeProjectDetailViewModel(project, {
-      workflow: normalizeWorkflow(null),
-      runs: [],
-      watchRefs: fallbackWatchRefs,
-      projectState: { label: "项目目录不存在", uiKind: "warning" },
-      error: projectDirectoryMissingMessage(project)
-    })
+function runInspectAdapterBatch(
+  projects: HarnessProjectMetadata[],
+  mode: "project",
+  cwd: string
+): Record<string, unknown> {
+  const firstProject = projects[0]
+  const configuredCommand = readBoardConfigInspectCommand(cwd, mode)
+  if (!configuredCommand) {
+    const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
+    throw new Error(`插件未配置 inspectCommands.${process.platform}.${configKey}，请检查插件设置`)
+  }
+
+  const projectCodes = projects.map((p) => p.projectCode)
+  const { executable, args } = parseInspectCommand(
+    configuredCommand, firstProject, mode, cwd, undefined, projectCodes
+  )
+
+  const cmdLine = [executable, ...args].join(" ")
+  console.log(`[HarnessBoard] [project_status] Running ${projects.length} project(s): ${cmdLine}`)
+
+  const stdoutBuffer = runHarnessInvocation({
+    cwd,
+    invocation: {
+      executable,
+      args
+    }
+  })
+
+  const raw = decodeAdapterBuffer(stdoutBuffer).trim()
+  console.log(`[HarnessBoard] [project_status] Result bytes: ${stdoutBuffer.length}`)
+  if (!raw) {
+    throw new Error("Inspect adapter returned empty output")
   }
 
   try {
-    const snapshot = runInspectAdapter(project, "project")
-    const workflow = normalizeWorkflow(snapshot.workflow)
-    const runs = normalizeProjectRuns(snapshot, workflow)
-    return makeProjectDetailViewModel(project, {
-      workflow,
-      runs,
-      watchRefs: normalizeWatchRefs(project, snapshot.watchRefs, fallbackWatchRefs),
-      projectState: okStatus("inspected", "Inspect 已加载"),
-      error: null
-    })
+    const parsed = JSON.parse(raw) as unknown
+    if (!isObject(parsed)) {
+      throw new Error("top-level JSON is not an object")
+    }
+    return parsed
   } catch (error) {
-    return makeProjectDetailViewModel(project, {
-      workflow: normalizeWorkflow(null),
-      runs: [],
-      watchRefs: fallbackWatchRefs,
-      projectState: { label: "Inspect 读取失败", uiKind: "warning" },
-      error: formatProjectDetailError(project, error)
-    })
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`Inspect adapter returned invalid JSON: ${message}`)
   }
+}
+
+function makeProjectErrorDetail(
+  project: HarnessProjectMetadata,
+  label: string,
+  error: string
+): HarnessProjectDetailViewModel {
+  return makeProjectDetailViewModel(project, {
+    workflow: normalizeWorkflow(null),
+    runs: [],
+    watchRefs: makeWatchRefs(project.projectCode),
+    projectState: { label, uiKind: "warning" },
+    error
+  })
+}
+
+export function getHarnessProjectDetails(
+  projectIds: string[]
+): Record<string, HarnessProjectDetailViewModel> {
+  if (projectIds.length === 0) return {}
+
+  const projects = projectIds.map((id) => requireProject(id))
+  const result: Record<string, HarnessProjectDetailViewModel> = {}
+  const groups = new Map<string, {
+    cwd: string
+    projects: HarnessProjectMetadata[]
+  }>()
+
+  for (const project of projects) {
+    const plugin = findAdapterPlugin(project)
+    if (!plugin) {
+      const adapter = project["harness-adapter"]
+      result[project.projectId] = makeProjectErrorDetail(
+        project,
+        "插件不存在",
+        `项目绑定的插件不存在或不可用：${adapter.name || adapter.id}。请编辑项目并重新选择插件。`
+      )
+      continue
+    }
+
+    if (!existsSync(projectDirectoryPath(project))) {
+      result[project.projectId] = makeProjectErrorDetail(
+        project,
+        "项目目录不存在",
+        projectDirectoryMissingMessage(project)
+      )
+      continue
+    }
+
+    const key = `${plugin.path}\u0000${project.workspacePath}`
+    const existing = groups.get(key)
+    if (existing) {
+      existing.projects.push(project)
+    } else {
+      groups.set(key, {
+        cwd: plugin.path,
+        projects: [project]
+      })
+    }
+  }
+
+  for (const group of groups.values()) {
+    try {
+      const snapshot = runInspectAdapterBatch(group.projects, "project", group.cwd)
+      const workflow = normalizeWorkflow(snapshot.workflow)
+      if (!isObject(snapshot.projects)) {
+        throw new Error("Inspect adapter returned invalid batch JSON: projects is not an object")
+      }
+      const projectsDict = snapshot.projects as Record<string, unknown>
+
+      for (const project of group.projects) {
+        const projectData = projectsDict[project.projectCode]
+        if (!isObject(projectData)) {
+          result[project.projectId] = makeProjectErrorDetail(
+            project,
+            "Inspect 读取失败",
+            `读取项目状态失败：Inspect adapter 未返回项目 ${project.projectCode} 的状态`
+          )
+          continue
+        }
+
+        const fallbackWatchRefs = makeWatchRefs(project.projectCode)
+        const runs = normalizeProjectRuns(projectData, workflow)
+        result[project.projectId] = makeProjectDetailViewModel(project, {
+          workflow,
+          runs,
+          watchRefs: normalizeWatchRefs(project, projectData.watchRefs, fallbackWatchRefs),
+          projectState: okStatus("inspected", "Inspect 已加载"),
+          error: null
+        })
+      }
+    } catch (error) {
+      for (const project of group.projects) {
+        result[project.projectId] = makeProjectErrorDetail(
+          project,
+          "Inspect 读取失败",
+          formatProjectDetailError(project, error)
+        )
+      }
+    }
+  }
+
+  return result
 }
 
 export function getHarnessRunDetail(projectId: string, slug: string): HarnessRunDetailViewModel {

@@ -1243,6 +1243,10 @@ interface CustomAPI {
     ) => Promise<HarnessProjectMetadata>
     archiveProject: (projectId: string) => Promise<HarnessProjectMetadata>
     getProjectDetail: (projectId: string) => Promise<HarnessProjectDetailViewModel>
+    getProjectDetails: (
+      projectIds: string[],
+      options?: { watchRefs?: boolean }
+    ) => Promise<Record<string, HarnessProjectDetailViewModel>>
     getRunDetail: (projectId: string, slug: string) => Promise<HarnessRunDetailViewModel>
     getDialogTips: (projectId: string, slug: string) => Promise<string | null>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void

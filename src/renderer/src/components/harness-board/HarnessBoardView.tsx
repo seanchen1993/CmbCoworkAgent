@@ -581,8 +581,8 @@ function statusTone(status?: HarnessStatus): string {
   }
 }
 
-function StatusPill({ status }: { status: HarnessStatus }): React.JSX.Element {
-  return (
+function StatusPill({ status, tooltip }: { status: HarnessStatus; tooltip?: string | null }): React.JSX.Element {
+  const pill = (
     <span
       className={cn(
         "inline-flex h-6 max-w-full items-center rounded border px-2 text-[11px] font-medium",
@@ -592,6 +592,21 @@ function StatusPill({ status }: { status: HarnessStatus }): React.JSX.Element {
     >
       <span className="truncate">{status.label}</span>
     </span>
+  )
+
+  if (!tooltip) return pill
+
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          {pill}
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-80">
+          {tooltip}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }
 
@@ -1280,6 +1295,7 @@ function ProjectCard({
   const runs = detail?.runs ?? []
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
+  const detailError = detail?.error?.trim()
 
   return (
     <article
@@ -1320,28 +1336,36 @@ function ProjectCard({
           </div>
         </div>
 
-        <div className="mt-4 grid grid-cols-3 gap-3 border-t border-border pt-3">
-          <div className="min-w-0 text-xs text-muted-foreground">
-             特性数
-            <strong className="mt-1 block text-sm text-foreground">
-              {loading || !detail ? "-" : runs.length}
-            </strong>
-          </div>
-          <div className="min-w-0 text-xs text-muted-foreground">
-            进行中
-            <strong className="mt-1 block text-sm text-foreground">
-              {loading || !detail ? "-" : activeCount}
-            </strong>
-          </div>
-          <div className="min-w-0 text-xs text-muted-foreground">
-            工作区
-            <strong
-              className="mt-1 block truncate text-sm text-foreground"
-              title={project.workspacePath}
-            >
-              {getWorkspaceName(project.workspacePath)}
-            </strong>
-          </div>
+        <div className="mt-4 border-t border-border pt-3">
+          {detailError && detail?.projectState ? (
+            <div className="flex min-h-[44px] items-center">
+              <StatusPill status={detail.projectState} tooltip={detailError} />
+            </div>
+          ) : (
+            <div className="grid grid-cols-3 gap-3">
+              <div className="min-w-0 text-xs text-muted-foreground">
+                 特性数
+                <strong className="mt-1 block text-sm text-foreground">
+                  {loading || !detail ? "-" : runs.length}
+                </strong>
+              </div>
+              <div className="min-w-0 text-xs text-muted-foreground">
+                进行中
+                <strong className="mt-1 block text-sm text-foreground">
+                  {loading || !detail ? "-" : activeCount}
+                </strong>
+              </div>
+              <div className="min-w-0 text-xs text-muted-foreground">
+                工作区
+                <strong
+                  className="mt-1 block truncate text-sm text-foreground"
+                  title={project.workspacePath}
+                >
+                  {getWorkspaceName(project.workspacePath)}
+                </strong>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </article>
@@ -1973,7 +1997,7 @@ function ProjectDetailPage({
                 </div>
                 {detail?.projectState && (
                   <div className="mt-4">
-                    <StatusPill status={detail.projectState} />
+                    <StatusPill status={detail.projectState} tooltip={detail.error} />
                   </div>
                 )}
               </aside>
@@ -2689,10 +2713,15 @@ export function HarnessBoardView(): React.JSX.Element {
   const [sidebarThreadToDelete, setSidebarThreadToDelete] = useState<Thread | null>(null)
   const [creatingSidebarSessionKey, setCreatingSidebarSessionKey] = useState<string | null>(null)
   const creatingFeatureRef = useRef(false)
+  const projectsRef = useRef(projects)
+  const selectedProjectIdRef = useRef(selectedProjectId)
   const selectedFeatureRef = useRef(selectedFeature)
   const currentThreadIdRef = useRef(currentThreadId)
   const isViewingSessionRef = useRef(isViewingSession)
+  const projectDetailsRefreshInFlightRef = useRef(false)
   const prefetchedRunDetailRef = useRef<HarnessRunDetailViewModel | null>(null)
+  projectsRef.current = projects
+  selectedProjectIdRef.current = selectedProjectId
   selectedFeatureRef.current = selectedFeature
   currentThreadIdRef.current = currentThreadId
   isViewingSessionRef.current = isViewingSession
@@ -2755,8 +2784,10 @@ export function HarnessBoardView(): React.JSX.Element {
       ])
       setProjects(items)
       setAdapterRegistry(registry)
-      for (const item of items) {
-        void loadProjectDetail(item.projectId)
+      const allProjectIds = items.map((item) => item.projectId)
+      if (allProjectIds.length > 0) {
+        const details = await window.api.harnessBoard.getProjectDetails(allProjectIds)
+        setDetailsByProjectId((current) => ({ ...current, ...details }))
       }
       setSelectedProjectId((current) =>
         current && items.some((item) => item.projectId === current) ? current : null
@@ -2766,11 +2797,37 @@ export function HarnessBoardView(): React.JSX.Element {
     } finally {
       setLoadingProjects(false)
     }
-  }, [loadProjectDetail])
+  }, [])
 
   useEffect(() => {
     void loadProjects()
   }, [loadProjects])
+
+  const refreshProjectDetailsInBackground = useCallback(async () => {
+    if (selectedProjectIdRef.current || selectedFeatureRef.current) return
+    if (projectDetailsRefreshInFlightRef.current) return
+
+    const projectIds = projectsRef.current.map((project) => project.projectId)
+    if (projectIds.length === 0) return
+
+    projectDetailsRefreshInFlightRef.current = true
+    try {
+      const details = await window.api.harnessBoard.getProjectDetails(projectIds, { watchRefs: false })
+      setDetailsByProjectId((current) => ({ ...current, ...details }))
+    } catch {
+      // Background refresh should not replace stable on-screen state with a transient global error.
+    } finally {
+      projectDetailsRefreshInFlightRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void refreshProjectDetailsInBackground()
+    }, 5000)
+
+    return () => window.clearInterval(timer)
+  }, [refreshProjectDetailsInBackground])
 
   const selectedFeatureProjectDetail = selectedFeature
     ? detailsByProjectId[selectedFeature.projectId]

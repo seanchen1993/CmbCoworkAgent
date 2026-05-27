@@ -2024,6 +2024,11 @@ const api = {
       ipcRenderer.invoke("harnessBoard:archiveProject", projectId) as Promise<HarnessProjectMetadata>,
     getProjectDetail: (projectId: string): Promise<HarnessProjectDetailViewModel> =>
       ipcRenderer.invoke("harnessBoard:getProjectDetail", projectId) as Promise<HarnessProjectDetailViewModel>,
+    getProjectDetails: (
+      projectIds: string[],
+      options?: { watchRefs?: boolean }
+    ): Promise<Record<string, HarnessProjectDetailViewModel>> =>
+      ipcRenderer.invoke("harnessBoard:getProjectDetails", { projectIds, watchRefs: options?.watchRefs !== false }) as Promise<Record<string, HarnessProjectDetailViewModel>>,
     getRunDetail: (projectId: string, slug: string): Promise<HarnessRunDetailViewModel> =>
       ipcRenderer.invoke("harnessBoard:getRunDetail", { projectId, slug }) as Promise<HarnessRunDetailViewModel>,
     getDialogTips: (projectId: string, slug: string): Promise<string | null> =>

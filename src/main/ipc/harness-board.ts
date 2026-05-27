@@ -5,6 +5,7 @@ import {
   createHarnessProject,
   buildHarnessFeatureDialogTips,
   getHarnessProjectDetail,
+  getHarnessProjectDetails,
   getHarnessRunDetail,
   listHarnessAdapters,
   listHarnessProjects,
@@ -73,6 +74,24 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       const detail = getHarnessProjectDetail(projectId)
       startHarnessWatchRefs(`project:${projectId}`, detail.project.workspacePath, detail.watchRefs)
       return detail
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getProjectDetails",
+    async (
+      _event,
+      payload: string[] | { projectIds: string[]; watchRefs?: boolean }
+    ): Promise<Record<string, HarnessProjectDetailViewModel>> => {
+      const projectIds = Array.isArray(payload) ? payload : payload.projectIds
+      const shouldWatchRefs = Array.isArray(payload) ? true : payload.watchRefs !== false
+      const details = getHarnessProjectDetails(projectIds)
+      if (shouldWatchRefs) {
+        for (const [projectId, detail] of Object.entries(details)) {
+          startHarnessWatchRefs(`project:${projectId}`, detail.project.workspacePath, detail.watchRefs)
+        }
+      }
+      return details
     }
   )
 
