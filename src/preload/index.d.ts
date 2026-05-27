@@ -25,7 +25,9 @@ import type {
   PluginMetadata,
   PluginManifest,
   SkillHookMetadata,
-  AgentAutoCommitSettings
+  AgentAutoCommitSettings,
+  OpenIdeRequest,
+  PreferredIde
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -356,6 +358,14 @@ interface CustomAPI {
       maxOutputTokens?: number
       temperature?: number
     }) => Promise<{ success: boolean; error?: string; latencyMs?: number }>
+  }
+  ide: {
+    getPreferred: () => Promise<PreferredIde>
+    setPreferred: (preferredIde: PreferredIde) => Promise<PreferredIde>
+    open: (request: OpenIdeRequest) => Promise<{
+      editor: string
+      mode: "workspace+file+line" | "workspace+file" | "workspace"
+    }>
   }
   workspace: {
     get: (threadId?: string) => Promise<string | null>

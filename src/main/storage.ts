@@ -3198,6 +3198,42 @@ export function setGlobalRoutingMode(mode: "auto" | "pinned"): void {
   writeFileSync(ROUTING_SETTINGS_FILE, JSON.stringify({ mode }, null, 2), "utf-8")
 }
 
+// ─── Preferred IDE ──────────────────────────────────────────────────────────
+
+const IDE_SETTINGS_FILE = join(OPENWORK_DIR, "ide-settings.json")
+
+type PreferredIde = import("./types").PreferredIde
+
+function isSupportedIde(value: unknown): value is Exclude<PreferredIde, null> {
+  return value === "idea" || value === "vscode" || value === "webstorm"
+}
+
+function readIdeSettings(): { preferredIde: PreferredIde } {
+  if (!existsSync(IDE_SETTINGS_FILE)) return { preferredIde: null }
+  try {
+    const content = readFileSync(IDE_SETTINGS_FILE, "utf-8")
+    const parsed = JSON.parse(content) as unknown
+    if (parsed && typeof parsed === "object" && "preferredIde" in parsed) {
+      const preferredIde = (parsed as Record<string, unknown>).preferredIde
+      return { preferredIde: isSupportedIde(preferredIde) ? preferredIde : null }
+    }
+  } catch {
+    // ignore parse errors, fall back to default
+  }
+  return { preferredIde: null }
+}
+
+export function getPreferredIde(): PreferredIde {
+  return readIdeSettings().preferredIde
+}
+
+export function setPreferredIde(preferredIde: PreferredIde): PreferredIde {
+  getOpenworkDir()
+  const next = isSupportedIde(preferredIde) ? preferredIde : null
+  writeFileSync(IDE_SETTINGS_FILE, JSON.stringify({ preferredIde: next }, null, 2), "utf-8")
+  return next
+}
+
 /**
  * Get the best model config for a given tier.
  * Priority: exact tier match → fallback tier → configs[0]

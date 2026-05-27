@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, nativeImage, powerSaveBlocker } from "electron"
+import { app, BrowserWindow, ipcMain, nativeImage, powerSaveBlocker, shell } from "electron"
 
 // Fix Linux sandbox error: "The setuid sandbox is not running as root"
 // On Linux the chrome-sandbox binary often lacks setuid permissions in packaged apps.
@@ -6,9 +6,10 @@ if (process.platform === "linux") {
   app.commandLine.appendSwitch("no-sandbox")
 }
 
-import { existsSync } from "fs"
 import { join } from "path"
+import { existsSync } from "fs"
 import { writeMainLog, writeRendererLog } from "./logging"
+import { registerPathOpenersHandlers } from "./ipc/path-openers"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
@@ -481,6 +482,7 @@ if (!gotTheLock) {
     registerDashboardHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
+    registerPathOpenersHandlers(ipcMain)
     prewarmRecentSandboxWorkspaces()
     registerAutoCommitHandlers(ipcMain)
     registerPetHandlers(ipcMain)
@@ -512,36 +514,6 @@ if (!gotTheLock) {
 
     ipcMain.handle("get-version", async () => {
       return app.getVersion()
-    })
-
-    ipcMain.handle("open-folder", async (_, folderPath: string) => {
-      try {
-        await shell.openPath(folderPath)
-        return { success: true }
-      } catch (error) {
-        console.error("Failed to open folder:", error)
-        return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
-      }
-    })
-
-    ipcMain.handle("show-item-in-folder", async (_, filePath: string) => {
-      try {
-        shell.showItemInFolder(filePath)
-        return { success: true }
-      } catch (error) {
-        console.error("Failed to show item in folder:", error)
-        return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
-      }
-    })
-
-    ipcMain.handle("shell-show-item-in-folder", async (_, filePath: string) => {
-      try {
-        shell.showItemInFolder(filePath)
-        return { success: true }
-      } catch (error) {
-        console.error("Failed to show item in folder:", error)
-        return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
-      }
     })
 
     ipcMain.handle("open-login-window", async () => {

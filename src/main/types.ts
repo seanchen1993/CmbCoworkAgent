@@ -195,6 +195,17 @@ export interface GrepMatch {
   text: string
 }
 
+export type SupportedIde = "idea" | "vscode" | "webstorm"
+
+export type PreferredIde = SupportedIde | null
+
+export interface OpenIdeRequest {
+  ide: SupportedIde
+  workspacePath: string
+  filePath?: string
+  line?: number
+}
+
 // MCP Connector types
 export type McpConnectorKind = "remote" | "stdio"
 

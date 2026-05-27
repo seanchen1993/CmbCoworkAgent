@@ -19,6 +19,8 @@ import {
 import { cn } from "@/lib/utils"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
 import { Badge } from "@/components/ui/badge"
+import { IconPopoverButton } from "@/components/ui/icon-popover-button"
+import { OpenInIdeButton } from "@/components/ui/open-in-ide-button"
 import { toast } from "sonner"
 import { GitCommitDialog } from "./GitCommitDialog"
 import type { CommitType } from "./GitCommitDialog"
@@ -529,6 +531,17 @@ export function GitPanelView({
     }
   }, [threadId, refresh, showToast])
 
+  // The file row is a div with role="button", so we need to mirror native
+  // button keyboard behavior and toggle on Enter/Space.
+  const handleFileRowKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>, filePath: string): void => {
+      if (event.key !== "Enter" && event.key !== " ") return
+      event.preventDefault()
+      toggleFileExpanded(filePath)
+    },
+    [toggleFileExpanded]
+  )
+
   const loading = metaLoading || diffLoading
   const combinedError = error || metaState?.error || diffState?.error || null
   const hasPending = Boolean(diffState?.hasPendingDiff ?? metaState?.hasPendingDiff)
@@ -881,16 +894,18 @@ export function GitPanelView({
                   const isSelected = selectedFilePaths.has(file.path)
                   const statusMeta = getFileStatusMeta(file.status, file.path, file.previousPath)
                   const showMovePath = file.status === "renamed" && Boolean(file.previousPath)
+                  const revertHint = revertingFilePath === file.path ? "回退中..." : "回退（大模型改动的上一个版本）"
                   return (
                     <div
                       key={file.path}
+                      role="button"
+                      tabIndex={0}
+                      aria-expanded={isExpanded}
+                      onClick={() => toggleFileExpanded(file.path)}
+                      onKeyDown={(event) => handleFileRowKeyDown(event, file.path)}
                       className="rounded-md border border-border/70 p-2 bg-white"
                     >
-                      <button
-                        type="button"
-                        onClick={() => toggleFileExpanded(file.path)}
-                        className="w-full flex items-center justify-between gap-2 text-xs"
-                      >
+                      <div className="w-full flex items-center justify-between gap-2 text-xs">
                         <span className="flex items-center gap-1.5 min-w-0">
                           <input
                             type="checkbox"
@@ -934,57 +949,45 @@ export function GitPanelView({
                           </span>
                         </span>
                         <span className="flex items-center gap-2 shrink-0">
-                          <span
-                            role="button"
-                            tabIndex={0}
-                            title="打开文件夹"
+                          <OpenInIdeButton
+                            filePath={file.path}
+                            workspacePath={workspacePath}
+                            fileMissing={file.status === "deleted"}
+                            align="end"
+                            stopPropagation
+                            onOpenError={(message) => {
+                              showToast(message, "error")
+                            }}
+                          />
+                          <IconPopoverButton
+                            icon={<FolderOpen className="size-3" />}
+                            popoverContent="打开文件夹"
                             aria-label="打开文件夹"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              onOpenFileFolder?.(file.path)
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" || e.key === " ") {
-                                e.preventDefault()
-                                e.stopPropagation()
-                                onOpenFileFolder?.(file.path)
-                              }
-                            }}
-                            className="inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-background-interactive"
-                          >
-                            <FolderOpen className="size-3" />
-                          </span>
-                          <span
-                            role="button"
-                            tabIndex={0}
-                            title={revertingFilePath === file.path ? "回退中..." : "回退"}
-                            aria-label={revertingFilePath === file.path ? "回退中..." : "回退"}
-                            onClick={(e) => {
-                              e.stopPropagation()
+                            align="end"
+                            stopPropagation
+                            onClick={() => onOpenFileFolder?.(file.path)}
+                          />
+                          <IconPopoverButton
+                            icon={
+                              <Undo2
+                                className={cn(
+                                  "size-3",
+                                  revertingFilePath === file.path && "animate-spin"
+                                )}
+                              />
+                            }
+                            popoverContent={revertHint}
+                            disabled={Boolean(revertingFilePath && revertingFilePath !== file.path)}
+                            aria-label={revertHint}
+                            align="end"
+                            stopPropagation
+                            className={cn(revertingFilePath === file.path && "opacity-80")}
+                            onClick={() => {
                               if (!revertingFilePath) void handleRevertFile(file.path)
                             }}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" || e.key === " ") {
-                                e.preventDefault()
-                                e.stopPropagation()
-                                if (!revertingFilePath) void handleRevertFile(file.path)
-                              }
-                            }}
-                            className={cn(
-                              "inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-background-interactive",
-                              revertingFilePath && revertingFilePath !== file.path && "opacity-60",
-                              revertingFilePath === file.path && "opacity-80"
-                            )}
-                          >
-                            <Undo2
-                              className={cn(
-                                "size-3",
-                                revertingFilePath === file.path && "animate-spin"
-                              )}
-                            />
-                          </span>
+                          />
                         </span>
-                      </button>
+                      </div>
                       {isExpanded && (
                         <div className="mt-2">
                           {showMovePath && (

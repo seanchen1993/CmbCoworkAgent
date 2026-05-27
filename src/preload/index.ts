@@ -26,7 +26,9 @@ import type {
   SkillHookMetadata,
   ChatXConfig,
   HookLoggingConfig,
-  AgentAutoCommitSettings
+  AgentAutoCommitSettings,
+  OpenIdeRequest,
+  PreferredIde
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
@@ -373,6 +375,23 @@ const api = {
         success: boolean
         error?: string
         latencyMs?: number
+      }>
+    }
+  },
+  ide: {
+    getPreferred: (): Promise<PreferredIde> => {
+      return ipcRenderer.invoke("ide:getPreferred") as Promise<PreferredIde>
+    },
+    setPreferred: (preferredIde: PreferredIde): Promise<PreferredIde> => {
+      return ipcRenderer.invoke("ide:setPreferred", preferredIde) as Promise<PreferredIde>
+    },
+    open: (request: OpenIdeRequest): Promise<{
+      editor: string
+      mode: "workspace+file+line" | "workspace+file" | "workspace"
+    }> => {
+      return ipcRenderer.invoke("ide:open", request) as Promise<{
+        editor: string
+        mode: "workspace+file+line" | "workspace+file" | "workspace"
       }>
     }
   },
