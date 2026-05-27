@@ -128,6 +128,8 @@ interface DashboardTraceDetail {
   rawError?: string
 }
 
+type DashboardTraceViewMode = "thread" | "trace"
+
 interface DashboardCommitDetail {
   eventId: string
   eventTime: string
@@ -184,6 +186,7 @@ interface DashboardSkillDetail {
   tracePage: number
   tracePageSize: number
   totalTraces: number
+  traceViewMode?: DashboardTraceViewMode
 }
 
 interface DashboardUserListItem {
@@ -1145,17 +1148,19 @@ interface CustomAPI {
     skillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      limit?: number,
+      mode?: DashboardTraceViewMode
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      limit?: number,
+      mode?: DashboardTraceViewMode
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
-      options?: number | { page?: number; pageSize?: number; limit?: number }
+      options?: number | { page?: number; pageSize?: number; limit?: number; mode?: DashboardTraceViewMode; viewMode?: DashboardTraceViewMode }
     ) => Promise<{ success: boolean; data?: DashboardSkillDetail; error?: string }>
     commitDetails: (
       range: { from: string; to: string },

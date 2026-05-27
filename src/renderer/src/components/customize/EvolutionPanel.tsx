@@ -37,6 +37,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
+import { TraceConversation } from "@/components/trace/TraceConversation"
 import { hasUnreadCloudEvolutionUpdates, markCloudEvolutionUpdatesSeen } from "@/lib/evolution-notices"
 import { buildBundleUnifiedDiff, extractTextBundleFromZip } from "@/lib/skill-bundle-diff"
 import { trackCloudEvolutionCandidateAccepted } from "@/lib/cloud-evolution-events"
@@ -148,6 +149,10 @@ interface TraceDetail extends TraceEntry {
   errorMessage?: string
   steps: TraceStep[]
   nodes?: TraceNode[]
+  modelCalls?: Array<{
+    outputMessage?: { content?: unknown }
+    toolCalls?: Array<{ name?: string }>
+  }>
 }
 
 type Tab = "candidates" | "traces" | "review"
@@ -446,7 +451,16 @@ function TraceDetailView({ detail, onClose }: { detail: TraceDetail; onClose: ()
       <div className="flex-1 overflow-hidden">
         <ScrollArea className="h-full px-4 py-3">
           {root ? (
-            <TraceTreeNode node={root} childrenByParent={childrenByParent} depth={0} />
+            <div className="space-y-4">
+              <TraceConversation trace={detail} />
+              <div>
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <p className="text-xs font-semibold text-foreground">执行树</p>
+                  <p className="text-[10px] text-muted-foreground">工具、模型调用与原始 trace 结构</p>
+                </div>
+                <TraceTreeNode node={root} childrenByParent={childrenByParent} depth={0} />
+              </div>
+            </div>
           ) : (
             <div className="py-10 text-center text-sm text-muted-foreground">该 trace 暂无树结构数据</div>
           )}

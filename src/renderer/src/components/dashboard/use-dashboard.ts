@@ -9,6 +9,7 @@ import type { SkillAdoptionRankingItem } from "./skill-adoption-ranking"
 // ─────────────────────────────────────────────────────────
 
 export type Granularity = "day" | "week" | "month" | "custom"
+export type DashboardTraceViewMode = "thread" | "trace"
 
 export interface TimeRange {
   from: string
@@ -190,6 +191,7 @@ export interface DashboardSkillDetail {
   tracePage: number
   tracePageSize: number
   totalTraces: number
+  traceViewMode?: DashboardTraceViewMode
 }
 
 export interface DashboardUserListItem {

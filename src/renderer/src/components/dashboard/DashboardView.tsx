@@ -24,6 +24,7 @@ import {
   useDashboard,
   type DashboardCommitDetailsData,
   type DashboardSkillDetail,
+  type DashboardTraceViewMode,
   type DashboardUserDetail,
   type DashboardUserListData,
   type DashboardUserListItem,
@@ -674,7 +675,7 @@ function UserDetailPage({
               traces={data.traces}
               loading={loading}
               title={traceTitle}
-              subtitle={`共 ${formatNumber(totalTraces)} 条，选择记录查看完整执行树`}
+              subtitle={`共 ${formatNumber(totalTraces)} 条，选择记录查看对话还原与执行树`}
               headerRight={
                 <div className="flex items-center gap-2">
                   <Button
@@ -738,6 +739,7 @@ export function DashboardView(): React.JSX.Element {
   const [skillTracesLoading, setSkillTracesLoading] = useState(false)
   const [skillTracesError, setSkillTracesError] = useState<string | null>(null)
   const [skillTracePage, setSkillTracePage] = useState(1)
+  const [skillTraceViewMode, setSkillTraceViewMode] = useState<DashboardTraceViewMode>("thread")
   const [skillTraceExporting, setSkillTraceExporting] = useState(false)
   const [commitDialogOpen, setCommitDialogOpen] = useState(false)
   const [commitScopeLabel, setCommitScopeLabel] = useState("当前范围")
@@ -897,17 +899,19 @@ export function DashboardView(): React.JSX.Element {
   }, [])
 
   const handleSkillClick = useCallback(
-    async (skill: string, tracePage = 1) => {
+    async (skill: string, tracePage = 1, traceViewMode = skillTraceViewMode) => {
       setSelectedSkill(skill)
       setSkillDialogOpen(true)
       setSkillTracePage(tracePage)
+      setSkillTraceViewMode(traceViewMode)
       if (tracePage === 1) setSkillDetail(null)
       setSkillTracesError(null)
       setSkillTracesLoading(true)
       try {
         const result = await window.api.dashboard.skillDetail(skill, range, {
           page: tracePage,
-          pageSize: SKILL_TRACE_PAGE_SIZE
+          pageSize: SKILL_TRACE_PAGE_SIZE,
+          mode: traceViewMode
         })
         if (!result.success) throw new Error(result.error ?? "获取 Skill 详情失败")
         setSkillDetail(result.data ?? EMPTY_SKILL_DETAIL)
@@ -917,20 +921,28 @@ export function DashboardView(): React.JSX.Element {
         setSkillTracesLoading(false)
       }
     },
-    [range]
+    [range, skillTraceViewMode]
   )
 
   const handleSkillTracePrevious = useCallback(() => {
     if (!selectedSkill || skillTracePage <= 1) return
-    void handleSkillClick(selectedSkill, skillTracePage - 1)
-  }, [handleSkillClick, selectedSkill, skillTracePage])
+    void handleSkillClick(selectedSkill, skillTracePage - 1, skillTraceViewMode)
+  }, [handleSkillClick, selectedSkill, skillTracePage, skillTraceViewMode])
 
   const handleSkillTraceNext = useCallback(() => {
     if (!selectedSkill || !skillDetail) return
     const pageSize = skillDetail.tracePageSize || SKILL_TRACE_PAGE_SIZE
     if (skillTracePage * pageSize >= skillDetail.totalTraces) return
-    void handleSkillClick(selectedSkill, skillTracePage + 1)
-  }, [handleSkillClick, selectedSkill, skillDetail, skillTracePage])
+    void handleSkillClick(selectedSkill, skillTracePage + 1, skillTraceViewMode)
+  }, [handleSkillClick, selectedSkill, skillDetail, skillTracePage, skillTraceViewMode])
+
+  const handleSkillTraceViewModeChange = useCallback((mode: DashboardTraceViewMode) => {
+    if (!selectedSkill) {
+      setSkillTraceViewMode(mode)
+      return
+    }
+    void handleSkillClick(selectedSkill, 1, mode)
+  }, [handleSkillClick, selectedSkill])
 
   const handleSkillTraceExport = useCallback(async () => {
     if (!selectedSkill || !skillDetail || skillDetail.traces.length === 0) return
@@ -1519,6 +1531,8 @@ export function DashboardView(): React.JSX.Element {
         tracePage={skillTracePage}
         tracePageSize={skillDetail?.tracePageSize ?? SKILL_TRACE_PAGE_SIZE}
         totalTraces={skillDetail?.totalTraces ?? skillDetail?.traces.length}
+        traceViewMode={skillDetail?.traceViewMode ?? skillTraceViewMode}
+        onTraceViewModeChange={handleSkillTraceViewModeChange}
         onTracePrevious={handleSkillTracePrevious}
         onTraceNext={handleSkillTraceNext}
         onExportPage={handleSkillTraceExport}

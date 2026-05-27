@@ -1890,19 +1890,21 @@ const api = {
     skillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      limit?: number,
+      mode?: "thread" | "trace"
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit),
+      ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit, mode),
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      limit?: number,
+      mode?: "thread" | "trace"
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:marketSkillRecentTraces", skill, range, limit),
+      ipcRenderer.invoke("dashboard:marketSkillRecentTraces", skill, range, limit, mode),
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
-      options?: number | { page?: number; pageSize?: number; limit?: number }
+      options?: number | { page?: number; pageSize?: number; limit?: number; mode?: "thread" | "trace"; viewMode?: "thread" | "trace" }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillDetail", skill, range, options),
     commitDetails: (

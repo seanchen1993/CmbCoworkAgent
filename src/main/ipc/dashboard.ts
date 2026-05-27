@@ -174,6 +174,7 @@ interface DashboardSkillDetail {
   tracePage: number
   tracePageSize: number
   totalTraces: number
+  traceViewMode?: TraceViewMode
 }
 
 interface DashboardUserListItem {
@@ -249,10 +250,14 @@ interface UserDetailOptions {
   tracePageSize?: number
 }
 
+type TraceViewMode = "thread" | "trace"
+
 interface TracePageOptions {
   page?: number
   pageSize?: number
   limit?: number
+  mode?: TraceViewMode
+  viewMode?: TraceViewMode
 }
 
 interface DashboardTraceExportPayload {
@@ -528,6 +533,10 @@ function clampLimit(limit: number | undefined, fallback: number, max: number): n
   return Math.max(1, Math.min(max, Math.floor(Number(limit))))
 }
 
+function normalizeTraceViewMode(value: unknown): TraceViewMode {
+  return value === "trace" ? "trace" : "thread"
+}
+
 function normalizeCommitDetailsOptions(value?: number | CommitDetailsOptions): Required<CommitDetailsOptions> {
   if (typeof value === "number") {
     return {
@@ -596,6 +605,31 @@ function asNumber(value: unknown, fallback = 0): number {
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === "string")
+}
+
+function dashboardTraceSourceIncludes(): string[] {
+  return [
+    "_raw",
+    "traceId",
+    "threadId",
+    "startedAt",
+    "endedAt",
+    "durationMs",
+    "userMessage",
+    "sapId",
+    "ystId",
+    "userName",
+    "orgName",
+    "userIp",
+    "modelId",
+    "modelName",
+    "outcome",
+    "totalToolCalls",
+    "totalInputTokens",
+    "totalOutputTokens",
+    "totalTokens",
+    "usedSkills"
+  ]
 }
 
 function codeAdoptPushedAggs(): Record<string, unknown> {
@@ -1669,10 +1703,67 @@ async function fetchSkillRecentTraces(
   skill: string,
   range: TimeRange,
   limit = 10,
-  page = 1
-): Promise<{ traces: DashboardTraceDetail[]; total: number; page: number; pageSize: number }> {
-  const size = clampLimit(limit, 10, 50)
+  page = 1,
+  mode: TraceViewMode = "trace"
+): Promise<{ traces: DashboardTraceDetail[]; total: number; page: number; pageSize: number; mode: TraceViewMode }> {
+  const normalizedMode = normalizeTraceViewMode(mode)
+  const size = clampLimit(limit, 10, normalizedMode === "thread" ? 30 : 50)
   const currentPage = clampLimit(page, 1, 1000)
+  const filters = [
+    timeRangeFilter("startedAt", range),
+    buildSkillUsageWildcardFilter(skill)
+  ]
+  const sourceIncludes = dashboardTraceSourceIncludes()
+
+  if (normalizedMode === "thread") {
+    const maxThreadBuckets = 30
+    const requestedBuckets = Math.min(currentPage * size, maxThreadBuckets)
+    const fromBucket = (currentPage - 1) * size
+    const tracesPerThread = 5
+    const body = {
+      size: 0,
+      query: {
+        bool: { filter: filters }
+      },
+      aggs: {
+        total_threads: { cardinality: { field: "threadId" } },
+        by_thread: {
+          terms: {
+            field: "threadId",
+            size: requestedBuckets,
+            order: { latest_started_at: "desc" }
+          },
+          aggs: {
+            latest_started_at: { max: { field: "startedAt" } },
+            latest_traces: {
+              top_hits: {
+                size: tracesPerThread,
+                sort: [{ startedAt: { order: "desc" } }],
+                _source: { includes: sourceIncludes }
+              }
+            }
+          }
+        }
+      }
+    }
+    const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
+    const aggs = asRecord((raw as unknown as Record<string, unknown>).aggregations)
+    const buckets = asRecord(aggs.by_thread).buckets
+    const selectedBuckets = Array.isArray(buckets) ? buckets.slice(fromBucket, fromBucket + size) : []
+    const traces = selectedBuckets.flatMap((bucket) => {
+      const latestHits = asRecord(asRecord(bucket).latest_traces)
+      const rawHits = asRecord(latestHits.hits).hits
+      return Array.isArray(rawHits) ? rawHits.map((hit) => normalizeTraceDetail(hit as EsSearchHit)) : []
+    })
+    return {
+      traces,
+      total: Math.min(asNumber(asRecord(aggs.total_threads).value), maxThreadBuckets),
+      page: currentPage,
+      pageSize: size,
+      mode: normalizedMode
+    }
+  }
+
   const body = {
     track_total_hits: true,
     from: (currentPage - 1) * size,
@@ -1680,35 +1771,11 @@ async function fetchSkillRecentTraces(
     sort: [{ startedAt: { order: "desc" } }],
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("startedAt", range),
-          buildSkillUsageWildcardFilter(skill)
-        ]
+        filter: filters
       }
     },
     _source: {
-      includes: [
-        "_raw",
-        "traceId",
-        "threadId",
-        "startedAt",
-        "endedAt",
-        "durationMs",
-        "userMessage",
-        "sapId",
-        "ystId",
-        "userName",
-        "orgName",
-        "userIp",
-        "modelId",
-        "modelName",
-        "outcome",
-        "totalToolCalls",
-        "totalInputTokens",
-        "totalOutputTokens",
-        "totalTokens",
-        "usedSkills"
-      ]
+      includes: sourceIncludes
     }
   }
   const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
@@ -1716,7 +1783,8 @@ async function fetchSkillRecentTraces(
     traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
     total: getTotalHits(raw, raw.hits?.hits?.length ?? 0),
     page: currentPage,
-    pageSize: size
+    pageSize: size,
+    mode: normalizedMode
   }
 }
 
@@ -1782,18 +1850,24 @@ async function fetchSkillDetail(
   options?: number | TracePageOptions
 ): Promise<DashboardSkillDetail> {
   const pageOptions = typeof options === "number" ? { limit: options } : options
-  const tracePageSize = clampLimit(pageOptions?.pageSize ?? pageOptions?.limit, 10, 50)
+  const traceViewMode = normalizeTraceViewMode(pageOptions?.viewMode ?? pageOptions?.mode)
+  const tracePageSize = clampLimit(
+    pageOptions?.pageSize ?? pageOptions?.limit,
+    10,
+    traceViewMode === "thread" ? 30 : 50
+  )
   const tracePage = clampLimit(pageOptions?.page, 1, 1000)
   const [stats, tracePageData] = await Promise.all([
     fetchSkillCodeStats(skill, range),
-    fetchSkillRecentTraces(skill, range, tracePageSize, tracePage)
+    fetchSkillRecentTraces(skill, range, tracePageSize, tracePage, traceViewMode)
   ])
   return {
     stats,
     traces: tracePageData.traces,
     tracePage: tracePageData.page,
     tracePageSize: tracePageData.pageSize,
-    totalTraces: tracePageData.total
+    totalTraces: tracePageData.total,
+    traceViewMode: tracePageData.mode
   }
 }
 
@@ -2684,14 +2758,37 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
   const startedAt = new Date(to.getTime() - offsetMs)
   const endedAt = new Date(startedAt.getTime() + (index + 2) * 28_000)
   const traceId = `mock-trace-${skill}-${index + 1}`.replace(/\s+/g, "-")
+  const threadId =
+    index < 3
+      ? "mock-thread-skill-review-flow"
+      : index < 5
+        ? "mock-thread-market-publish-flow"
+        : `mock-thread-${index + 1}`
+  const threadMessages = [
+    `请使用 ${skill} 帮我审查这次 dashboard trace 展示改动。`,
+    "继续，把刚才提到的分页边界和空数据状态也一起看一下。",
+    "再确认一下 Thread 维度下多条 trace 的聊天还原是否清楚。",
+    `用 ${skill} 看下这个 Skill 发布到市场前还有没有说明遗漏。`,
+    "继续检查应用市场最近 trace 弹窗的展示口径。",
+    `请使用 ${skill} 帮我分析这次变更，并给出可执行建议。`
+  ]
+  const userMessage = threadMessages[index] ?? threadMessages[5]
+  const assistantSummary = [
+    `已完成 ${skill} 审查：主要建议是把 trace 详情先展示成对话，再保留执行树作为辅助信息。`,
+    "已补充检查分页边界：Thread 模式需要限制聚合上限，Trace 模式保留原分页更稳。",
+    "Thread 维度下的多 trace 展示是清楚的：左侧按会话折叠，右侧展示当前 trace 的问答。",
+    `已检查 ${skill} 市场发布说明，建议补充适用场景、输入要求和失败排查说明。`,
+    "最近 trace 弹窗建议默认 Thread 维度，并提供 Trace 维度切换，便于运营快速浏览。",
+    `已完成 ${skill} 分析，结论包含风险点、建议修改和验证方式。`
+  ][index] ?? `已完成 ${skill} 分析。`
 
   return {
     traceId,
-    threadId: `mock-thread-${index + 1}`,
+    threadId,
     startedAt: startedAt.toISOString(),
     endedAt: endedAt.toISOString(),
     durationMs: endedAt.getTime() - startedAt.getTime(),
-    userMessage: `请使用 ${skill} 帮我分析这次变更，并给出可执行建议。`,
+    userMessage,
     modelId: "custom:minmax2.7",
     modelName: "MiniMax-M2.7",
     userName: ["张三", "李四", "王五"][index] ?? "张三",
@@ -2715,7 +2812,7 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
       {
         index: 1,
         startedAt: new Date(startedAt.getTime() + 12_000).toISOString(),
-        assistantText: `已完成 ${skill} 分析，结论包含风险点、建议修改和验证方式。`,
+        assistantText: assistantSummary,
         toolCalls: [
           {
             name: "grep",
@@ -2731,11 +2828,11 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
         messageId: `mock-message-${index + 1}`,
         startedAt: startedAt.toISOString(),
         inputMessages: [
-          { role: "user", content: `请使用 ${skill} 帮我分析这次变更，并给出可执行建议。` }
+          { role: "user", content: userMessage }
         ],
         outputMessage: {
           role: "assistant",
-          content: `已完成 ${skill} 分析。`
+          content: assistantSummary
         },
         toolCalls: [],
         tokenUsage: {
@@ -2808,9 +2905,10 @@ function makeMockSkillDetail(
   options?: number | TracePageOptions
 ): DashboardSkillDetail {
   const pageOptions = typeof options === "number" ? { limit: options } : options
-  const tracePageSize = clampLimit(pageOptions?.pageSize ?? pageOptions?.limit, 10, 50)
+  const traceViewMode = normalizeTraceViewMode(pageOptions?.viewMode ?? pageOptions?.mode)
+  const tracePageSize = clampLimit(pageOptions?.pageSize ?? pageOptions?.limit, 10, traceViewMode === "thread" ? 30 : 50)
   const tracePage = clampLimit(pageOptions?.page, 1, 1000)
-  const totalTraces = 64
+  const totalTraces = traceViewMode === "thread" ? 30 : 64
   const startIndex = (tracePage - 1) * tracePageSize
   const baseTraces = makeMockSkillRecentTraces(skill, range, 10)
   const traces = Array.from(
@@ -2830,7 +2928,8 @@ function makeMockSkillDetail(
     traces,
     tracePage,
     tracePageSize,
-    totalTraces
+    totalTraces,
+    traceViewMode
   }
 }
 
@@ -3042,10 +3141,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:skillRecentTraces",
-    async (_, skill: string, range: TimeRange, limit?: number) => {
+    async (_, skill: string, range: TimeRange, limit?: number, mode?: TraceViewMode) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(skill, range, limit) }
       try {
-        return { success: true, data: (await fetchSkillRecentTraces(skill, range, limit)).traces }
+        return { success: true, data: (await fetchSkillRecentTraces(skill, range, limit, 1, normalizeTraceViewMode(mode))).traces }
       } catch (e) {
         console.error("[Dashboard] skillRecentTraces error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -3055,12 +3154,12 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:marketSkillRecentTraces",
-    async (_, skill: string, range: TimeRange, limit?: number) => {
+    async (_, skill: string, range: TimeRange, limit?: number, mode?: TraceViewMode) => {
       const trimmedSkill = skill?.trim?.() ?? ""
       if (!trimmedSkill) return { success: false, error: "skill is required" }
       if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(trimmedSkill, range, limit) }
       try {
-        return { success: true, data: (await fetchSkillRecentTraces(trimmedSkill, range, limit)).traces }
+        return { success: true, data: (await fetchSkillRecentTraces(trimmedSkill, range, limit, 1, normalizeTraceViewMode(mode))).traces }
       } catch (e) {
         console.error("[Dashboard] marketSkillRecentTraces error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }

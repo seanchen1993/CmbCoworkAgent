@@ -57,7 +57,7 @@ import {
 } from "./MarketUpdateBadge"
 import { isAutoOptimizedMarketItem, marketApi, MarketApiResponse, MarketItem, MarketItemType } from "../../api/market"
 import { getMarketMockResponse } from "./MarketMockData"
-import { getDefaultRange, parseTopUsersFromAgg, type DashboardTraceDetail } from "../dashboard/use-dashboard"
+import { getDefaultRange, parseTopUsersFromAgg, type DashboardTraceDetail, type DashboardTraceViewMode } from "../dashboard/use-dashboard"
 import { TraceExplorer } from "../dashboard/TraceHistoryDialog"
 import { toast } from "sonner"
 import {
@@ -571,6 +571,7 @@ export function MarketPanel(): React.JSX.Element {
   const [selectedSkillUsage, setSelectedSkillUsage] = useState<SkillUsageDetail | null>(null)
   const [skillUsageLoading, setSkillUsageLoading] = useState(false)
   const [selectedSkillTraces, setSelectedSkillTraces] = useState<DashboardTraceDetail[]>([])
+  const [skillTraceViewMode, setSkillTraceViewMode] = useState<DashboardTraceViewMode>("thread")
   const [skillTracesLoading, setSkillTracesLoading] = useState(false)
   const [skillTracesError, setSkillTracesError] = useState<string | null>(null)
   const [skillTraceDialogOpen, setSkillTraceDialogOpen] = useState(false)
@@ -700,7 +701,7 @@ export function MarketPanel(): React.JSX.Element {
     }
   }, [])
 
-  const loadSkillRecentTraces = useCallback(async (skillName: string) => {
+  const loadSkillRecentTraces = useCallback(async (skillName: string, viewMode = skillTraceViewMode) => {
     if (!skillName?.trim()) {
       setSelectedSkillTraces([])
       return
@@ -712,10 +713,10 @@ export function MarketPanel(): React.JSX.Element {
     }
 
     setSkillTracesLoading(true)
-    setSkillTracesError(null)
+      setSkillTracesError(null)
     try {
       const range = getSkillStatsRange()
-      const response = await window.api.dashboard.marketSkillRecentTraces(skillName, range, 10)
+      const response = await window.api.dashboard.marketSkillRecentTraces(skillName, range, 10, viewMode)
       if (!response.success || !response.data) {
         throw new Error(response.error || "获取 Skill Trace 失败")
       }
@@ -727,7 +728,7 @@ export function MarketPanel(): React.JSX.Element {
     } finally {
       setSkillTracesLoading(false)
     }
-  }, [])
+  }, [skillTraceViewMode])
 
   const loadDashboardPermission = useCallback(async () => {
     try {
@@ -1510,6 +1511,7 @@ export function MarketPanel(): React.JSX.Element {
 
     if (activeTab === "skill") {
       setSelectedSkillUsage(null)
+      setSkillTraceViewMode("thread")
       setSkillUsageLoading(false)
     } else {
       setSelectedSkillUsage(null)
@@ -1921,6 +1923,13 @@ export function MarketPanel(): React.JSX.Element {
         </Button>
       </div>
     )
+  }
+
+  const handleSkillTraceViewModeChange = (mode: DashboardTraceViewMode): void => {
+    setSkillTraceViewMode(mode)
+    if (selectedItem?.name) {
+      void loadSkillRecentTraces(selectedItem.name, mode)
+    }
   }
 
   return (
@@ -2591,6 +2600,9 @@ export function MarketPanel(): React.JSX.Element {
             loading={skillTracesLoading}
             error={skillTracesError}
             title="最近 10 条 Trace 记录（本月）"
+            subtitle="选择记录查看对话还原与执行树"
+            viewMode={skillTraceViewMode}
+            onViewModeChange={handleSkillTraceViewModeChange}
             emptyText="本月暂无该 Skill 的 trace 记录"
             showCodeStats={false}
             className="min-h-0 flex-1"
