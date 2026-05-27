@@ -1101,40 +1101,40 @@ function readHarnessFeatureMetadata(metadata: unknown): { projectId: string; slu
   return projectId && slug ? { projectId, slug } : null
 }
 
-export function buildHarnessFeatureCreatePrompt(metadata: unknown): string | null {
-  const feature = readHarnessFeatureMetadata(metadata)
-  if (!feature) return null
-
-  const project = requireProject(feature.projectId)
-  const cwd = adapterPluginDir(project)
-  const template = readBoardConfigPlatformText(cwd, "feature_create_prompt")
-  if (!template) return null
-
-  return replaceHarnessConfigPlaceholders(template, project, "createFeature", cwd, feature.slug).trim() || null
+export interface HarnessFeatureAgentContext {
+  createPrompt?: string
+  pluginDirPrompt?: string
+  pluginOutputDir?: string
+  systemId?: string
 }
 
-export function buildHarnessFeaturePluginDirPrompt(metadata: unknown): string | null {
+export function buildHarnessFeatureAgentContext(
+  metadata: unknown
+): HarnessFeatureAgentContext | null {
   const feature = readHarnessFeatureMetadata(metadata)
   if (!feature) return null
 
   const project = requireProject(feature.projectId)
   const cwd = adapterPluginDir(project)
-  const template = readBoardConfigPlatformText(cwd, "plugin_dir_prompt")
-  if (!template) return null
+  const createPrompt = readBoardConfigPlatformText(cwd, "feature_create_prompt")
+  const pluginDirPrompt = readBoardConfigPlatformText(cwd, "plugin_dir_prompt")
+  const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
+  const systemId = normalizeText(project.product.code).trim()
+  const render = (
+    template: string | null,
+    command: HarnessInspectCommandName
+  ): string | undefined =>
+    template
+      ? replaceHarnessConfigPlaceholders(template, project, command, cwd, feature.slug).trim() ||
+        undefined
+      : undefined
 
-  return replaceHarnessConfigPlaceholders(template, project, "run", cwd, feature.slug).trim() || null
-}
-
-export function buildHarnessFeaturePluginOutputDir(metadata: unknown): string | null {
-  const feature = readHarnessFeatureMetadata(metadata)
-  if (!feature) return null
-
-  const project = requireProject(feature.projectId)
-  const cwd = adapterPluginDir(project)
-  const template = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
-  if (!template) return null
-
-  return replaceHarnessConfigPlaceholders(template, project, "run", cwd, feature.slug).trim() || null
+  return {
+    createPrompt: render(createPrompt, "createFeature"),
+    pluginDirPrompt: render(pluginDirPrompt, "run"),
+    pluginOutputDir: render(pluginOutputDir, "run"),
+    systemId: systemId || undefined
+  }
 }
 
 export function buildHarnessFeatureDialogTips(projectId: string, slug: string): string | null {

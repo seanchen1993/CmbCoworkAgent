@@ -139,6 +139,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
   workspacePath,
   turnId,
   pluginOutputDir,
+  systemId,
   getStopContext,
   hookScope,
   skillUseTracker,
@@ -151,6 +152,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
   workspacePath?: string
   turnId?: string
   pluginOutputDir?: string
+  systemId?: string
   getStopContext: () => StopHookContext
   hookScope: HookScopeController
   skillUseTracker?: SkillUseTracker
@@ -173,6 +175,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
       },
       workspacePath,
       pluginOutputDir,
+      systemId,
       sessionId: threadId,
       turnId,
       skillName: skill.name,
@@ -212,6 +215,7 @@ export async function runCompletionHooksWithRevision({
   workspacePath,
   turnId,
   pluginOutputDir,
+  systemId,
   abortSignal,
   getStopContext,
   hookScope,
@@ -230,6 +234,7 @@ export async function runCompletionHooksWithRevision({
   workspacePath?: string
   turnId?: string
   pluginOutputDir?: string
+  systemId?: string
   abortSignal: AbortSignal
   getStopContext: () => StopHookContext
   hookScope: HookScopeController
@@ -254,6 +259,7 @@ export async function runCompletionHooksWithRevision({
           workspacePath,
           turnId,
           pluginOutputDir,
+          systemId,
           getStopContext,
           hookScope,
           skillUseTracker,
@@ -310,6 +316,7 @@ export async function runCompletionHooksWithRevision({
             {
               workspacePath,
               pluginOutputDir,
+              systemId,
               sessionId: threadId,
               turnId,
               stopContext: getStopContext()
@@ -321,6 +328,7 @@ export async function runCompletionHooksWithRevision({
           {
             workspacePath,
             pluginOutputDir,
+            systemId,
             sessionId: threadId,
             turnId,
             stopContext: getStopContext()

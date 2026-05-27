@@ -14,6 +14,7 @@ export interface SkillActivationOptions {
   toolResult?: string
   workspacePath?: string
   pluginOutputDir?: string
+  systemId?: string
   sessionId?: string
   turnId?: string
   hookScope?: HookScopeController
@@ -63,6 +64,7 @@ function buildSkillContext(options: SkillActivationOptions): HookContext {
     toolResult: options.toolResult,
     workspacePath: options.workspacePath,
     pluginOutputDir: options.pluginOutputDir,
+    systemId: options.systemId,
     sessionId: options.sessionId,
     turnId: options.turnId,
     skillName: options.skill.name,

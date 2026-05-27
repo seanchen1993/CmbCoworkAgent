@@ -183,6 +183,7 @@ export interface HookEnv {
   PLUGIN_OUTPUT_DIR?: string
   USER_PROMPT?: string // UserPromptSubmit event
   SESSION_ID?: string // threadId
+  SYSTEM_ID?: string
 }
 
 export interface HookUpsert {

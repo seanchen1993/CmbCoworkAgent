@@ -103,9 +103,7 @@ import {
 } from "../services/agent-auto-commit"
 import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
 import {
-  buildHarnessFeatureCreatePrompt,
-  buildHarnessFeaturePluginDirPrompt,
-  buildHarnessFeaturePluginOutputDir
+  buildHarnessFeatureAgentContext
 } from "../harness-board/service"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
@@ -130,18 +128,23 @@ const activeRuns = new Map<string, AbortController>()
 interface HarnessAgentContext {
   workingDirPromptAppendix?: string
   pluginOutputDir?: string
+  systemId?: string
 }
 
 function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgentContext {
   try {
+    const featureContext = buildHarnessFeatureAgentContext(metadata)
+    if (!featureContext) return {}
+
     const promptBlocks = [
-      buildHarnessFeatureCreatePrompt(metadata),
-      buildHarnessFeaturePluginDirPrompt(metadata)
+      featureContext.createPrompt,
+      featureContext.pluginDirPrompt
     ].filter((item): item is string => Boolean(item?.trim()))
 
     return {
       workingDirPromptAppendix: promptBlocks.length > 0 ? promptBlocks.join("\n") : undefined,
-      pluginOutputDir: buildHarnessFeaturePluginOutputDir(metadata) ?? undefined
+      pluginOutputDir: featureContext.pluginOutputDir,
+      systemId: featureContext.systemId
     }
   } catch (error) {
     console.warn("[HarnessBoard] Failed to build harness agent context:", error)
@@ -281,6 +284,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   payload: unknown
   workspacePath?: string
   pluginOutputDir?: string
+  systemId?: string
   threadId: string
   turnId?: string
   hookScope: HookScopeController
@@ -309,6 +313,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   const subagentStopContext: HookContext = {
     workspacePath: params.workspacePath,
     pluginOutputDir: params.pluginOutputDir,
+    systemId: params.systemId,
     sessionId: params.threadId,
     turnId: params.turnId,
     subagent: {
@@ -436,6 +441,7 @@ async function activateExplicitSkillFromMessage({
   message,
   workspacePath,
   pluginOutputDir,
+  systemId,
   sessionId,
   turnId,
   hookScope,
@@ -447,6 +453,7 @@ async function activateExplicitSkillFromMessage({
   message: string
   workspacePath: string
   pluginOutputDir?: string
+  systemId?: string
   sessionId: string
   turnId?: string
   hookScope: HookScopeController
@@ -493,6 +500,7 @@ async function activateExplicitSkillFromMessage({
     }),
     workspacePath,
     pluginOutputDir,
+    systemId,
     sessionId,
     turnId,
     hookScope,
@@ -1596,6 +1604,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         message,
         workspacePath,
         pluginOutputDir: harnessAgentContext.pluginOutputDir,
+        systemId: harnessAgentContext.systemId,
         sessionId: threadId,
         turnId: turnState.turnId,
         hookScope,
@@ -1634,7 +1643,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         hookScope,
         onHookSkippedFactory("SessionStart"),
         turnState.turnId,
-        harnessAgentContext.pluginOutputDir
+        harnessAgentContext.pluginOutputDir,
+        harnessAgentContext.systemId
       )
       sendActiveHookNotice(window, channel, workspacePath)
 
@@ -1646,7 +1656,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         workspacePath: workspacePath ?? undefined,
         sessionId: threadId,
         turnId: turnState.turnId,
-        pluginOutputDir: harnessAgentContext.pluginOutputDir
+        pluginOutputDir: harnessAgentContext.pluginOutputDir,
+        systemId: harnessAgentContext.systemId
       }
       const promptSubmitResult = await runHooksEnriched(
         resolveEnabledHooksForRun(
@@ -2003,6 +2014,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnId: turnState.turnId,
             hookScope,
             pluginOutputDir: harnessAgentContext.pluginOutputDir,
+            systemId: harnessAgentContext.systemId,
             firedToolCallIds: _subagentStopFired,
             onHookResult,
             onHookSkipped: onHookSkippedFactory("SubagentStop")
@@ -2261,6 +2273,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 turnId: turnState.turnId,
                 hookScope,
                 pluginOutputDir: harnessAgentContext.pluginOutputDir,
+                systemId: harnessAgentContext.systemId,
                 firedToolCallIds: _subagentStopFired,
                 onHookResult,
                 onHookSkipped: onHookSkippedFactory("SubagentStop")
@@ -2413,6 +2426,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           workspacePath: workspacePath ?? undefined,
           turnId: turnState.turnId,
           pluginOutputDir: harnessAgentContext.pluginOutputDir,
+          systemId: harnessAgentContext.systemId,
           abortSignal: abortController.signal,
           getStopContext: () =>
             stopContextCollector.snapshot({
@@ -2887,6 +2901,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               turnId: turnState.turnId,
               hookScope,
               pluginOutputDir: harnessAgentContext.pluginOutputDir,
+              systemId: harnessAgentContext.systemId,
               firedToolCallIds: resumeSubagentStopFired,
               onHookResult,
               onHookSkipped: onHookSkippedFactory("SubagentStop")
@@ -2950,6 +2965,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           workspacePath: workspacePath ?? undefined,
           turnId: turnState.turnId,
           pluginOutputDir: harnessAgentContext.pluginOutputDir,
+          systemId: harnessAgentContext.systemId,
           abortSignal: abortController.signal,
           getStopContext: () => stopContextCollector.snapshot(),
           runRevision: async (revisionPrompt) => {
@@ -3241,6 +3257,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 turnId: turnState.turnId,
                 hookScope,
                 pluginOutputDir: harnessAgentContext.pluginOutputDir,
+                systemId: harnessAgentContext.systemId,
                 firedToolCallIds: interruptSubagentStopFired,
                 onHookResult,
                 onHookSkipped: onHookSkippedFactory("SubagentStop")
@@ -3301,6 +3318,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath: workspacePath ?? undefined,
             turnId: turnState.turnId,
             pluginOutputDir: harnessAgentContext.pluginOutputDir,
+            systemId: harnessAgentContext.systemId,
             abortSignal: abortController.signal,
             getStopContext: () => stopContextCollector.snapshot(),
             runRevision: async (revisionPrompt) => {

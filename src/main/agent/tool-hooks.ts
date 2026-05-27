@@ -15,6 +15,7 @@ export interface ToolHookMiddlewareOptions {
   resolveHooksForContext: (event: HookEvent, context: HookContext) => HookConfig[]
   onHookResult?: HookResultCallback
   hookTurnId?: string
+  systemId?: string
   skipToolNames?: ReadonlySet<string>
 }
 
@@ -28,7 +29,8 @@ function buildHookContext(
     toolArgs,
     workspacePath: options.workspacePath,
     sessionId: options.threadId,
-    turnId: options.hookTurnId
+    turnId: options.hookTurnId,
+    systemId: options.systemId
   }
 }
 

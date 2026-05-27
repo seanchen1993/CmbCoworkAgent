@@ -32,6 +32,8 @@ export interface HookContext {
   workspacePath?: string
   /** Session / thread identifier — exposed to hooks as SESSION_ID and session_id in stdin JSON */
   sessionId?: string
+  /** Optional system identifier exposed to hook commands as SYSTEM_ID. */
+  systemId?: string
   /** Renderer user message id that owns this hook event, used only for log grouping. */
   turnId?: string
   /** Plugin that owns the capability currently being used, when known. */
@@ -154,6 +156,7 @@ function buildHookEnv(event: HookEvent, context: HookContext): Record<string, st
   }
   if (context.pluginOutputDir) env.PLUGIN_OUTPUT_DIR = context.pluginOutputDir
   if (context.sessionId) env.SESSION_ID = context.sessionId
+  if (context.systemId) env.SYSTEM_ID = context.systemId
   if (context.userPrompt) env.USER_PROMPT = context.userPrompt
   return env
 }
