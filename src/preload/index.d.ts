@@ -35,6 +35,7 @@ import type {
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
+import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -1237,6 +1238,22 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; branches: string[]; error?: string }>
     switchBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
     createBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
+  }
+  gitPanel: {
+    getCommitHistory: (threadId: string) => Promise<{
+      success: boolean
+      projectPath: string | null
+      records: GitCommitHistoryRecord[]
+      error?: string
+    }>
+    recordCommitHistory: (
+      threadId: string,
+      fullMessage: string
+    ) => Promise<{
+      success: boolean
+      record: GitCommitHistoryRecord | null
+      error?: string
+    }>
   }
 }
 

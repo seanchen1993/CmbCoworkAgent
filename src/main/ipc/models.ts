@@ -23,6 +23,7 @@ import { getTracesDir } from "../agent/trace/collector"
 import type { AgentTrace } from "../agent/trace/types"
 import { nowIsoLocal } from "../util/local-time"
 import { parseGitRemoteInfo } from "../utils/git-remote"
+import { registerGitPanelHandlers } from "./git-panel"
 
 const execFileAsync = promisify(execFile)
 
@@ -2225,6 +2226,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   ipcMain.on("app:version", (event) => {
     event.returnValue = app.getVersion()
   })
+
+  registerGitPanelHandlers(ipcMain)
 
   // Get workspace path for a thread (from thread metadata)
   ipcMain.handle("workspace:get", async (_event, threadId?: string) => {

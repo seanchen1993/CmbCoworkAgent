@@ -36,6 +36,7 @@ import type {
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
+import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 
 interface LspDownloadProgress {
   percent: number
@@ -1988,6 +1989,35 @@ const api = {
       ipcRenderer.on("update:error", wrapper)
       return () => ipcRenderer.removeListener("update:error", wrapper)
     }
+  },
+  gitPanel: {
+    getCommitHistory: (
+      threadId: string
+    ): Promise<{
+      success: boolean
+      projectPath: string | null
+      records: GitCommitHistoryRecord[]
+      error?: string
+    }> =>
+      ipcRenderer.invoke("git-panel:getCommitHistory", { threadId }) as Promise<{
+        success: boolean
+        projectPath: string | null
+        records: GitCommitHistoryRecord[]
+        error?: string
+      }>,
+    recordCommitHistory: (
+      threadId: string,
+      fullMessage: string
+    ): Promise<{
+      success: boolean
+      record: GitCommitHistoryRecord | null
+      error?: string
+    }> =>
+      ipcRenderer.invoke("git-panel:recordCommitHistory", { threadId, fullMessage }) as Promise<{
+        success: boolean
+        record: GitCommitHistoryRecord | null
+        error?: string
+      }>
   },
   git: {
     currentBranch: (

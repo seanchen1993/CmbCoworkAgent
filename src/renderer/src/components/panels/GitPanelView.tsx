@@ -25,8 +25,18 @@ import type { CommitType } from "./GitCommitDialog"
 import { GitPushDialog } from "./GitPushDialog"
 import { insertLog } from "../../../js/mmjUtils"
 import type { ThreadGitContext } from "@/lib/thread-context"
+import type { GitCommitHistoryRecord } from "../../../../shared/git-commit-history"
 
 const GIT_BRANCH_REFRESH_EVENT = "cmb:git-branch-switched"
+const COMMIT_TYPE_VALUES = new Set<string>([
+  "fix",
+  "feat",
+  "refactor",
+  "docs",
+  "style",
+  "test",
+  "chore"
+])
 
 type GitPanelMetaState = {
   success: boolean
@@ -160,6 +170,7 @@ export function GitPanelView({
   const [cardNumber, setCardNumber] = useState("")
   const [commitType, setCommitType] = useState<CommitType>("fix")
   const [commitMessage, setCommitMessage] = useState("")
+  const [commitHistory, setCommitHistory] = useState<GitCommitHistoryRecord[]>([])
   const [expandedFilePaths, setExpandedFilePaths] = useState<Set<string>>(new Set())
   const [selectedFilePaths, setSelectedFilePaths] = useState<Set<string>>(new Set())
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
@@ -180,6 +191,7 @@ export function GitPanelView({
     setDiffLoading(true)
     setError(null)
     setSubmitAction(null)
+    setCommitHistory([])
     setExpandedFilePaths(new Set())
     setSelectedFilePaths(new Set())
   }, [threadId, initialMetaState])
@@ -308,6 +320,34 @@ export function GitPanelView({
     })
   }, [diffState?.files])
 
+  const applyCommitHistoryRecord = useCallback((record: GitCommitHistoryRecord): void => {
+    setCardNumber(record.cardNumber)
+    if (COMMIT_TYPE_VALUES.has(record.commitType)) {
+      setCommitType(record.commitType as CommitType)
+    }
+    setCommitMessage(record.commitMessage)
+  }, [])
+
+  useEffect(() => {
+    if (submitAction !== "commit" || !threadId) return
+    let canceled = false
+    void window.api.gitPanel
+      .getCommitHistory(threadId)
+      .then((result) => {
+        if (canceled) return
+        const records = result.success ? result.records : []
+        setCommitHistory(records)
+      })
+      .catch((error) => {
+        if (canceled) return
+        console.warn("[GitPanel] failed to load commit history:", error)
+        setCommitHistory([])
+      })
+    return () => {
+      canceled = true
+    }
+  }, [submitAction, threadId])
+
   const toggleFileExpanded = useCallback((filePath: string): void => {
     setExpandedFilePaths((prev) => {
       const next = new Set(prev)
@@ -408,8 +448,15 @@ export function GitPanelView({
       setError(null)
       try {
         if (action === "commit") {
-          const result = await window.api.workspace.commitWorktree(threadId, finalMessage ?? "", selectedPaths)
+          const result = await window.api.workspace.commitWorktree(
+            threadId,
+            finalMessage ?? "",
+            selectedPaths
+          )
           if (!result.success) throw new Error(result.error || "提交失败")
+          void window.api.gitPanel.recordCommitHistory(threadId, finalMessage ?? "").catch((historyError) => {
+            console.warn("[GitPanel] failed to record commit history:", historyError)
+          })
           showToast("提交成功", "success")
           insertLog("commit成功")
         } else {
@@ -993,12 +1040,14 @@ export function GitPanelView({
         cardNumber={cardNumber}
         commitType={commitType}
         commitMessage={commitMessage}
+        commitHistory={commitHistory}
         onOpenChange={(open) => {
           if (!open) setSubmitAction(null)
         }}
         onCardNumberChange={setCardNumber}
         onCommitTypeChange={setCommitType}
         onCommitMessageChange={setCommitMessage}
+        onHistorySelect={applyCommitHistoryRecord}
         onSubmit={() => {
           void runSubmit("commit")
         }}
