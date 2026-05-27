@@ -269,6 +269,11 @@ const api = {
       maxMaxOutputTokens: number
       defaultTemperature: number
       maxTemperature: number
+      defaultTopP: number
+      maxTopP: number
+      defaultTopK: number
+      minTopK: number
+      maxTopK: number
     }> => {
       return ipcRenderer.invoke("models:getTokenLimits") as Promise<{
         defaultMaxTokens: number
@@ -279,6 +284,11 @@ const api = {
         maxMaxOutputTokens: number
         defaultTemperature: number
         maxTemperature: number
+        defaultTopP: number
+        maxTopP: number
+        defaultTopK: number
+        minTopK: number
+        maxTopK: number
       }>
     },
     getCustomConfigs: (): Promise<
@@ -291,6 +301,8 @@ const api = {
         maxTokens: number
         maxOutputTokens: number
         temperature: number
+        topP: number
+        topK: number
         interleavedThinking?: boolean
         tier?: "premium" | "economy"
       }>
@@ -305,6 +317,8 @@ const api = {
           maxTokens: number
           maxOutputTokens: number
           temperature: number
+          topP: number
+          topK: number
           interleavedThinking?: boolean
           tier?: "premium" | "economy"
         }>
@@ -321,6 +335,8 @@ const api = {
       maxTokens: number
       maxOutputTokens: number
       temperature: number
+      topP: number
+      topK: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     } | null> => {
@@ -333,6 +349,8 @@ const api = {
         maxTokens: number
         maxOutputTokens: number
         temperature: number
+        topP: number
+        topK: number
         interleavedThinking?: boolean
         tier?: "premium" | "economy"
       } | null>
@@ -346,6 +364,8 @@ const api = {
       maxTokens?: number
       maxOutputTokens?: number
       temperature?: number
+      topP?: number
+      topK?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }): Promise<void> => {
@@ -360,6 +380,8 @@ const api = {
       maxTokens?: number
       maxOutputTokens?: number
       temperature?: number
+      topP?: number
+      topK?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }): Promise<{ id: string }> => {
@@ -381,6 +403,8 @@ const api = {
       apiKey?: string
       maxOutputTokens?: number
       temperature?: number
+      topP?: number
+      topK?: number
     }): Promise<{ success: boolean; error?: string; latencyMs?: number }> => {
       return ipcRenderer.invoke("models:testConnection", params) as Promise<{
         success: boolean
@@ -797,6 +821,9 @@ const api = {
     select: (): Promise<{ canceled: boolean; filePaths: string[] }> => {
       return ipcRenderer.invoke("file:select")
     },
+    selectDirectory: (options?: { title?: string }): Promise<{ canceled: boolean; filePaths: string[] }> => {
+      return ipcRenderer.invoke("file:selectDirectory", options)
+    },
     supportedExtensions: (): Promise<string[]> => {
       return ipcRenderer.invoke("file:supportedExtensions")
     }
@@ -824,11 +851,41 @@ const api = {
     ): Promise<{ success: boolean; files?: string[]; error?: string }> => {
       return ipcRenderer.invoke("skills:listFiles", skillPath)
     },
+    readTextBundle: (
+      skillPath: string
+    ): Promise<{
+      success: boolean
+      files?: Array<{ path: string; content: string }>
+      skipped?: Array<{ path: string; reason: string }>
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("skills:readTextBundle", skillPath)
+    },
     getDisabled: (): Promise<string[]> => {
       return ipcRenderer.invoke("skills:getDisabled")
     },
     setDisabled: (skillNames: string[]): Promise<void> => {
       return ipcRenderer.invoke("skills:setDisabled", skillNames)
+    },
+    backupForCloudEvolution: (payload: {
+      skillPath: string
+      candidateId: string
+      skillName: string
+      sourceVersion?: string | null
+      targetVersion?: string | null
+    }): Promise<{ success: boolean; backupId?: string; backupPath?: string; error?: string }> => {
+      return ipcRenderer.invoke("skills:backupForCloudEvolution", payload)
+    },
+    restoreCloudEvolutionBackup: (
+      backupId: string
+    ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
+      return ipcRenderer.invoke("skills:restoreCloudEvolutionBackup", backupId)
+    },
+    exportCloudEvolutionBackup: (
+      backupId: string,
+      targetDir: string
+    ): Promise<{ success: boolean; exportedPath?: string; error?: string }> => {
+      return ipcRenderer.invoke("skills:exportCloudEvolutionBackup", { backupId, targetDir })
     },
     upload: (
       buffer: ArrayBuffer,
@@ -1103,9 +1160,7 @@ const api = {
   autoCommit: {
     getSettings: (): Promise<AgentAutoCommitSettings> =>
       ipcRenderer.invoke("autoCommit:getSettings") as Promise<AgentAutoCommitSettings>,
-    saveSettings: (
-      updates: Partial<AgentAutoCommitSettings>
-    ): Promise<AgentAutoCommitSettings> =>
+    saveSettings: (updates: Partial<AgentAutoCommitSettings>): Promise<AgentAutoCommitSettings> =>
       ipcRenderer.invoke("autoCommit:saveSettings", updates) as Promise<AgentAutoCommitSettings>
   },
   heartbeat: {
@@ -1769,9 +1824,7 @@ const api = {
     skills: {
       list: (): Promise<SkillHookMetadata[]> => ipcRenderer.invoke("hooks:skills:list")
     },
-    onChanged: (
-      callback: (data: { reason?: string; at: string }) => void
-    ): (() => void) => {
+    onChanged: (callback: (data: { reason?: string; at: string }) => void): (() => void) => {
       const handler = (_: unknown, data: { reason?: string; at: string }): void => {
         callback(data)
       }
@@ -1874,13 +1927,17 @@ const api = {
       ipcRenderer.invoke("dashboard:userStats", range, granularity, opts),
     userList: (
       range: { from: string; to: string },
-      options?: { pageSize?: number; afterKey?: Record<string, string | number> | null }
+      options?: {
+        pageSize?: number
+        afterKey?: Record<string, string | number> | null
+        keyword?: string | null
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userList", range, options),
     userDetail: (
       sapId: string,
       range: { from: string; to: string },
-      options?: { traceLimit?: number }
+      options?: { traceLimit?: number; tracePage?: number; tracePageSize?: number }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userDetail", sapId, range, options),
     skillUsageSummary: (
@@ -1927,14 +1984,23 @@ const api = {
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      options?: number | { page?: number; pageSize?: number; limit?: number }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:skillDetail", skill, range, limit),
+      ipcRenderer.invoke("dashboard:skillDetail", skill, range, options),
     commitDetails: (
       range: { from: string; to: string },
       options?: { page?: number; pageSize?: number; pushedOnly?: boolean }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:commitDetails", range, options),
+    exportSkillTraces: (payload: {
+      skill: string
+      range: { from: string; to: string }
+      page: number
+      pageSize: number
+      totalTraces: number
+      traces: unknown[]
+    }): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
+      ipcRenderer.invoke("dashboard:exportSkillTraces", payload),
     exportExcel: (
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>

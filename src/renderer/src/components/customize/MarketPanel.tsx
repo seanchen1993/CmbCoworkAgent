@@ -61,7 +61,13 @@ import {
   type UploaderProfile
 } from "./MarketUploaderProfile"
 import { marketInstalledSourceStorage } from "./market-installed-source-storage"
-import { marketApi, MarketApiResponse, MarketItem, MarketItemType } from "../../api/market"
+import {
+  isAutoOptimizedMarketItem,
+  marketApi,
+  MarketApiResponse,
+  MarketItem,
+  MarketItemType
+} from "../../api/market"
 import { USE_MARKET_MOCK_ON_ERROR } from "../../api/market-flags"
 import { getMarketMockResponse } from "./MarketMockData"
 import {
@@ -316,6 +322,12 @@ function MarketItemCard({
               <span className="inline-flex items-center gap-1 text-[11px] font-medium bg-[#fdf3e7] text-[#c4956a] border border-[#f5d9c4] px-2 py-0.5 rounded-full shrink-0">
                 <Star className="size-3 fill-[#c4956a]" />
                 精品
+              </span>
+            )}
+            {isAutoOptimizedMarketItem(item) && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-medium bg-[#eef5ff] text-[#3b68a8] border border-[#cdddf6] px-2 py-0.5 rounded-full shrink-0">
+                <Sparkles className="size-3" />
+                系统优化
               </span>
             )}
             {itemTag && (
@@ -2160,6 +2172,12 @@ export function MarketPanel(): React.JSX.Element {
                       <span className="inline-flex items-center gap-1 rounded-full bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-2.5 py-1">
                         <Star className="size-3 fill-[#c4956a]" />
                         精品
+                      </span>
+                    )}
+                    {isAutoOptimizedMarketItem(selectedItem) && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-[#eef5ff] border border-[#cdddf6] text-[#3b68a8] px-2.5 py-1">
+                        <Sparkles className="size-3" />
+                        系统优化
                       </span>
                     )}
                     {selectedUploaderFallback ? (

@@ -21,6 +21,8 @@ import {
   DEFAULT_MAX_TOKENS,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_TEMPERATURE,
+  DEFAULT_TOP_P,
+  DEFAULT_TOP_K,
   getEnabledPluginSkillSourceMetadata,
   getEnabledPluginSkillMiddlewareSources,
   getPlugins,
@@ -350,7 +352,9 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
   return createMiddleware({
     name: "gradedToolConcurrency",
     wrapToolCall: async (request, handler) => {
-      const toolCall = request.toolCall as { id?: string; name?: string; args?: unknown } | undefined
+      const toolCall = request.toolCall as
+        | { id?: string; name?: string; args?: unknown }
+        | undefined
       const tier = classifyToolConcurrency(toolCall)
       if (tier === "bypass") {
         return handler(request)
@@ -496,12 +500,7 @@ function createScopedMcpCapabilityService(
         pluginName: pluginId ? getPluginName(pluginId) : undefined
       }
       const preHooks = resolveHooksForContext("PreToolUse", hookContext)
-      const preResult = await runHooksEnriched(
-        preHooks,
-        "PreToolUse",
-        hookContext,
-        onHookResult
-      )
+      const preResult = await runHooksEnriched(preHooks, "PreToolUse", hookContext, onHookResult)
       if (preResult) {
         hookScope.activatePersistentHooks(preHooks)
       }
@@ -530,12 +529,7 @@ function createScopedMcpCapabilityService(
         toolResult: result.text
       }
       const postHooks = resolveHooksForContext("PostToolUse", postContext)
-      const postResult = await runHooksEnriched(
-        postHooks,
-        "PostToolUse",
-        postContext,
-        onHookResult
-      )
+      const postResult = await runHooksEnriched(postHooks, "PostToolUse", postContext, onHookResult)
       if (postResult) {
         hookScope.activatePersistentHooks(postHooks)
       }
@@ -798,14 +792,14 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
             ? effectiveArgs.task_id
             : input.task_id
         if (!taskId || typeof taskId !== "string") {
-          return 'Error: Invalid task id.'
+          return "Error: Invalid task id."
         }
         const block =
           typeof effectiveArgs.block === "boolean" ? effectiveArgs.block : input.block !== false
         const timeout =
           typeof effectiveArgs.timeout === "number" && Number.isFinite(effectiveArgs.timeout)
             ? Math.max(0, effectiveArgs.timeout)
-            : input.timeout ?? 30_000
+            : (input.timeout ?? 30_000)
 
         const readTaskOutputText = async (): Promise<string> => {
           // Non-blocking: return immediately
@@ -1000,8 +994,11 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
 
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const gradedToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
-  const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(`${toolConcurrencyQueueId}:subagent`)
+  const gradedToolConcurrencyMiddleware =
+    createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
+  const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(
+    `${toolConcurrencyQueueId}:subagent`
+  )
 
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
@@ -1477,6 +1474,8 @@ function getModelInstance(
     apiKey?: string
     maxOutputTokens?: number
     temperature?: number
+    topP?: number
+    topK?: number
     interleavedThinking?: boolean
   },
   retryHooks?: ModelRetryHooks,
@@ -1494,19 +1493,23 @@ function getModelInstance(
   console.log("[Runtime] Custom model:", resolvedModel, "baseUrl:", customConfig.baseUrl)
   const maxOutputTokens = customConfig.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
   const temperature = customConfig.temperature ?? DEFAULT_TEMPERATURE
+  const topP = customConfig.topP ?? DEFAULT_TOP_P
+  const topK = customConfig.topK ?? DEFAULT_TOP_K
 
   const baseFields = {
     model: resolvedModel,
     apiKey,
     maxTokens: maxOutputTokens,
     temperature,
+    topP,
     // SDK-level retry AND timeout disabled — unified retry + per-attempt
     // timeout live in retryingFetch below. Setting SDK timeout here would
     // create a shared AbortSignal that, once fired, permanently blocks all
     // subsequent retry attempts at the fetch layer.
     maxRetries: 0,
     modelKwargs: {
-      parallel_tool_calls: true
+      parallel_tool_calls: true,
+      ...(topK > 0 ? { top_k: topK } : {})
     },
     configuration: {
       baseURL: customConfig.baseUrl,
@@ -1654,10 +1657,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       join(app.getAppPath(), "resources"),
       join(app.getAppPath(), "..", "resources")
     ]
-    const matches = await Promise.all(candidates.map(async (candidate) => (
-      await pathExists(join(candidate, "bin")) ? candidate : null
-    )))
-    resourceBase = matches.find((candidate): candidate is string => Boolean(candidate)) ?? resolve(__dirname, "../../resources")
+    const matches = await Promise.all(
+      candidates.map(async (candidate) =>
+        (await pathExists(join(candidate, "bin"))) ? candidate : null
+      )
+    )
+    resourceBase =
+      matches.find((candidate): candidate is string => Boolean(candidate)) ??
+      resolve(__dirname, "../../resources")
   }
   const rgDir = join(resourceBase, "bin", process.platform)
   const rgBin = join(rgDir, process.platform === "win32" ? "rg.exe" : "rg")
@@ -1673,7 +1680,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // Codex Windows sandbox (unelevated): reuse rgDir which already points to resources/bin/win32
   const codexExePath = join(rgDir, "codex.exe")
   if (process.platform === "win32") await ensureCodexExe(codexExePath)
-  const codexExists = process.platform === "win32" && await pathExists(codexExePath)
+  const codexExists = process.platform === "win32" && (await pathExists(codexExePath))
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
   console.log(
     `[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`
@@ -1763,7 +1770,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
 
   approvalStore = getOrCreateApprovalStore(threadId)
 
-  const rawExecute = (command: string, sandboxMode?: string): Promise<import("deepagents").ExecuteResponse> => {
+  const rawExecute = (
+    command: string,
+    sandboxMode?: string
+  ): Promise<import("deepagents").ExecuteResponse> => {
     return backend.executeRaw(command, sandboxMode)
   }
 

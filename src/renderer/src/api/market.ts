@@ -63,6 +63,12 @@ export interface MarketItem {
   canDelete?: boolean
   ip?: string
   installed?: boolean // 新增已安装状态字段
+  auto_optimized?: boolean | string
+  evolution_source?: string
+  source_version?: string
+  target_version?: string
+  candidate_id?: string
+  published_at?: string
   installedVersion?: string
   updateAvailable?: boolean
   orgSkillId?: number
@@ -87,6 +93,14 @@ function getMockMarketResponse(type: MarketItemType, error?: unknown): MarketApi
     success: true,
     data: MOCK_MARKET_DATA[type]
   }
+}
+
+export function isAutoOptimizedMarketItem(item: MarketItem): boolean {
+  return (
+    item.auto_optimized === true ||
+    item.auto_optimized === "true" ||
+    item.evolution_source === "trace_evolver"
+  )
 }
 
 // Updated API endpoints to match exact specification

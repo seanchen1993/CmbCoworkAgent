@@ -24,8 +24,10 @@ export interface SkillProposalWindowContext {
 const MAX_USER_MESSAGE_CHARS = 500
 const MAX_ASSISTANT_TEXT_CHARS = 1200
 const MAX_ERROR_CHARS = 300
+const RECENT_SKILL_USAGE_LOOKBACK_TURNS = 5
 
 const proposalWindows = new Map<string, SkillProposalWindowTurn[]>()
+const recentSkillUsageTurns = new Map<string, SkillProposalWindowTurn[]>()
 
 function clip(text: string, maxChars: number): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text
@@ -120,9 +122,14 @@ export function appendSkillProposalWindowTurn(
   threadId: string,
   turn: SkillProposalWindowTurn
 ): void {
+  const clonedTurn = cloneTurn(turn)
   const next = proposalWindows.get(threadId) ?? []
-  next.push(cloneTurn(turn))
+  next.push(clonedTurn)
   proposalWindows.set(threadId, next)
+
+  const recent = recentSkillUsageTurns.get(threadId) ?? []
+  recent.push(clonedTurn)
+  recentSkillUsageTurns.set(threadId, recent.slice(-RECENT_SKILL_USAGE_LOOKBACK_TURNS))
 }
 
 export function snapshotSkillProposalWindow(threadId: string): SkillProposalWindowTurn[] {
@@ -131,6 +138,12 @@ export function snapshotSkillProposalWindow(threadId: string): SkillProposalWind
 
 export function resetSkillProposalWindow(threadId: string): void {
   proposalWindows.delete(threadId)
+}
+
+export function getRecentSkillUsageNames(threadId: string): string[] {
+  return Array.from(
+    new Set((recentSkillUsageTurns.get(threadId) ?? []).flatMap((turn) => turn.usedSkills))
+  )
 }
 
 export function buildSkillProposalWindowContext(

@@ -4504,8 +4504,9 @@ export function ChatContainer({
                   />
                 )}
               </div>
-              {/*  GitBranch */}
-              <GitBranchSwitcher workspacePath={workspacePath} />
+              <div className="flex min-w-0 items-center gap-2">
+                <GitBranchSwitcher workspacePath={workspacePath} />
+              </div>
             </div>
           </div>
         </form>
