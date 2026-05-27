@@ -85,6 +85,7 @@ const harnessProjectCreateSelectClassName =
 const harnessNamePattern = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
 const harnessNameRuleMessage = "仅支持中文、英文字母、数字、-、_"
 const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
+const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
 
 function cleanIpcError(error: unknown): string {
   if (!(error instanceof Error)) return String(error)
@@ -176,6 +177,7 @@ type ThreadWorkspaceStateMap = Record<
     workspacePath?: string | null
     scheduledTaskLoading?: boolean
     pendingApproval?: unknown
+    pendingUserInput?: unknown
   } | undefined
 >
 
@@ -2449,6 +2451,7 @@ function ProjectFeatureSidebar({
   allStreamLoadingStates,
   selectedFeature,
   isViewingSession,
+  unreadIds,
   exportingThreadId,
   editingThreadId,
   editingTitle,
@@ -2456,6 +2459,7 @@ function ProjectFeatureSidebar({
   onToggleAll,
   onCreateSession,
   onSelectSession,
+  onRunFinished,
   onDeleteSession,
   onExportSession,
   onStartEditing,
@@ -2472,6 +2476,7 @@ function ProjectFeatureSidebar({
   allStreamLoadingStates: Record<string, boolean>
   selectedFeature: SelectedFeature | null
   isViewingSession: boolean
+  unreadIds: Set<string>
   exportingThreadId: string | null
   editingThreadId: string | null
   editingTitle: string
@@ -2484,6 +2489,7 @@ function ProjectFeatureSidebar({
     sessions: HarnessSessionBinding[]
   ) => void
   onSelectSession: (projectId: string, slug: string, threadId: string) => void
+  onRunFinished: (threadId: string) => void
   onDeleteSession: (thread: Thread) => void
   onExportSession: (thread: Thread) => void
   onStartEditing: (thread: Thread) => void
@@ -2522,6 +2528,9 @@ function ProjectFeatureSidebar({
               group.section,
               !!selectedFeature
             )
+            const hasUnreadSession = group.sessions.some((session) =>
+              unreadIds.has(session.threadId)
+            )
 
             return (
               <div key={group.key} className="space-y-1">
@@ -2555,6 +2564,7 @@ function ProjectFeatureSidebar({
                       <span className="min-w-0 flex-1 truncate text-xs font-medium" title={group.title}>
                         {group.title}
                       </span>
+                      {hasUnreadSession && <span className="size-2 rounded-full bg-blue-500 shrink-0" />}
                     </div>
                   </div>
                   <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
@@ -2591,6 +2601,7 @@ function ProjectFeatureSidebar({
                         const isLoading = allStreamLoadingStates[thread.thread_id] ?? false
                         const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
                         const hasPendingApproval = Boolean(threadState?.pendingApproval)
+                        const hasPendingUserInput = Boolean(threadState?.pendingUserInput)
 
                         return (
                           <ThreadListItem
@@ -2602,11 +2613,12 @@ function ProjectFeatureSidebar({
                             isExporting={exportingThreadId === thread.thread_id}
                             isSelected={highlightThreadId === thread.thread_id}
                             isEditing={editingThreadId === thread.thread_id}
-                            isUnread={false}
+                            isUnread={unreadIds.has(thread.thread_id)}
+                            hasPendingUserInput={hasPendingUserInput}
                             editingTitle={editingTitle}
                             hoverTitle={`所属项目：${group.project.name} / ${group.title}`}
                             onSelect={() => onSelectSession(group.project.projectId, session.slug, thread.thread_id)}
-                            onRunFinished={() => {}}
+                            onRunFinished={() => onRunFinished(thread.thread_id)}
                             onDelete={() => onDeleteSession(thread)}
                             onExport={() => void onExportSession(thread)}
                             onStartEditing={() => onStartEditing(thread)}
@@ -2661,6 +2673,7 @@ export function HarnessBoardView(): React.JSX.Element {
   const [loadError, setLoadError] = useState<string | null>(null)
   const {
     threads,
+    currentThreadId,
     createThread,
     selectThread,
     updateThread,
@@ -2670,6 +2683,14 @@ export function HarnessBoardView(): React.JSX.Element {
   const allThreadStates = useAllThreadStates()
   const allStreamLoadingStates = useAllStreamLoadingStates()
   const [collapsedFeatureKeys, setCollapsedFeatureKeys] = useState<Set<string>>(new Set())
+  const [unreadIds, setUnreadIds] = useState<Set<string>>(() => {
+    try {
+      const arr = JSON.parse(localStorage.getItem(THREAD_UNREAD_STORAGE_KEY) || "[]")
+      return new Set(Array.isArray(arr) ? arr.filter((id): id is string => typeof id === "string") : [])
+    } catch {
+      return new Set()
+    }
+  })
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState("")
   const [exportingThreadId, setExportingThreadId] = useState<string | null>(null)
@@ -2677,8 +2698,43 @@ export function HarnessBoardView(): React.JSX.Element {
   const [creatingSidebarSessionKey, setCreatingSidebarSessionKey] = useState<string | null>(null)
   const creatingFeatureRef = useRef(false)
   const selectedFeatureRef = useRef(selectedFeature)
+  const currentThreadIdRef = useRef(currentThreadId)
+  const isViewingSessionRef = useRef(isViewingSession)
   const prefetchedRunDetailRef = useRef<HarnessRunDetailViewModel | null>(null)
   selectedFeatureRef.current = selectedFeature
+  currentThreadIdRef.current = currentThreadId
+  isViewingSessionRef.current = isViewingSession
+
+  const persistUnread = useCallback((ids: Set<string>) => {
+    localStorage.setItem(THREAD_UNREAD_STORAGE_KEY, JSON.stringify([...ids]))
+  }, [])
+
+  const handleRunFinished = useCallback(
+    (threadId: string) => {
+      if (threadId === currentThreadIdRef.current && isViewingSessionRef.current) return
+      setUnreadIds((current) => {
+        if (current.has(threadId)) return current
+        const next = new Set(current)
+        next.add(threadId)
+        persistUnread(next)
+        return next
+      })
+    },
+    [persistUnread]
+  )
+
+  const markRead = useCallback(
+    (threadId: string) => {
+      setUnreadIds((current) => {
+        if (!current.has(threadId)) return current
+        const next = new Set(current)
+        next.delete(threadId)
+        persistUnread(next)
+        return next
+      })
+    },
+    [persistUnread]
+  )
 
   const loadProjectDetail = useCallback(async (projectId: string) => {
     setLoadingDetailIds((current) => new Set(current).add(projectId))
@@ -3232,6 +3288,7 @@ export function HarnessBoardView(): React.JSX.Element {
       try {
         cleanupThread(sidebarThreadToDelete.thread_id)
         await deleteThread(sidebarThreadToDelete.thread_id)
+        markRead(sidebarThreadToDelete.thread_id)
         const feature = sidebarThreadToDelete.metadata?.harnessFeature as Record<string, unknown> | undefined
         const projectId = typeof feature?.projectId === "string" ? feature.projectId : null
         setSidebarThreadToDelete(null)
@@ -3255,6 +3312,7 @@ export function HarnessBoardView(): React.JSX.Element {
       cleanupThread,
       deleteThread,
       loadProjectDetail,
+      markRead,
       refreshSelectedRunDetail,
       selectedFeature,
       sidebarThreadToDelete
@@ -3363,6 +3421,7 @@ export function HarnessBoardView(): React.JSX.Element {
               allStreamLoadingStates={allStreamLoadingStates}
               selectedFeature={selectedFeature}
               isViewingSession={isViewingSession}
+              unreadIds={unreadIds}
               exportingThreadId={exportingThreadId}
               editingThreadId={editingThreadId}
               editingTitle={editingTitle}
@@ -3380,8 +3439,10 @@ export function HarnessBoardView(): React.JSX.Element {
               }}
               onSelectSession={(projectId, slug, threadId) => {
                 openFeatureDetail(projectId, slug, threadId)
+                markRead(threadId)
                 void selectThread(threadId, { preserveView: true })
               }}
+              onRunFinished={handleRunFinished}
               onDeleteSession={setSidebarThreadToDelete}
               onExportSession={(thread) => void handleExportSidebarThread(thread)}
               onStartEditing={(thread) => {
