@@ -45,6 +45,7 @@ import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "
 import { isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
+import { getRightPanelSkillPath } from "@/components/panels/skill-tree-path"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
@@ -2292,13 +2293,6 @@ type RightPanelSkillTreeNode = {
   label: string
   skill?: SkillMetadata
   children: RightPanelSkillTreeNode[]
-}
-
-function getRightPanelSkillPath(skill: SkillMetadata): string {
-  const id = skill.id?.startsWith("plugin:") ? skill.id.split("/").slice(1).join("/") : skill.id
-  return String(skill.relativePath || id || skill.name || "")
-    .replace(/\\/g, "/")
-    .replace(/^\/+|\/+$/g, "")
 }
 
 function buildRightPanelSkillTree(skills: SkillMetadata[]): RightPanelSkillTreeNode[] {
