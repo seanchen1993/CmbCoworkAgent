@@ -101,13 +101,9 @@ function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataU
     name: "",
     projectCode: "",
     description: "",
-    product: {
-      code: "",
-      name: ""
-    },
-    workspace: {
-      path: ""
-    }
+    systemId: "",
+    systemName: "",
+    workspacePath: ""
   }
 }
 
@@ -353,7 +349,7 @@ function createUnboundRunDetail(
       projectId: detail.project.projectId,
       name: detail.project.name,
       projectCode: detail.project.projectCode,
-      productCode: detail.project.productCode,
+      systemId: detail.project.systemId,
       workspacePath: detail.project.workspacePath
     },
     adapterSnapshot: {
@@ -444,9 +440,9 @@ function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boole
     form.name,
     form.projectCode,
     form.description,
-    form.product.code,
-    form.product.name,
-    form.workspace.path
+    form.systemId,
+    form.systemName,
+    form.workspacePath
   ].some((value) => !value.trim())
 }
 
@@ -470,13 +466,9 @@ function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectM
     name: project.name,
     projectCode: project.projectCode,
     description: project.description,
-    product: {
-      code: project.productCode,
-      name: project.productName
-    },
-    workspace: {
-      path: project.workspacePath
-    }
+    systemId: project.systemId,
+    systemName: project.systemName,
+    workspacePath: project.workspacePath
   }
 }
 
@@ -828,9 +820,9 @@ function ProjectFormDialog({
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 系统编号 *
                 <Input
-                  value={form.product.code}
+                  value={form.systemId}
                   onChange={(event) =>
-                    onChange({ ...form, product: { ...form.product, code: event.target.value } })
+                    onChange({ ...form, systemId: event.target.value })
                   }
                   placeholder="请输入"
                   className={harnessProjectCreateInputClassName}
@@ -839,9 +831,9 @@ function ProjectFormDialog({
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 系统名称 *
                 <Input
-                  value={form.product.name}
+                  value={form.systemName}
                   onChange={(event) =>
-                    onChange({ ...form, product: { ...form.product, name: event.target.value } })
+                    onChange({ ...form, systemName: event.target.value })
                   }
                   placeholder="请输入"
                   className={harnessProjectCreateInputClassName}
@@ -854,7 +846,7 @@ function ProjectFormDialog({
                 </div>
                 <div className="flex min-w-0 gap-2">
                   <Input
-                    value={form.workspace.path}
+                    value={form.workspacePath}
                     readOnly
                     placeholder="请选择 AUTOBIZDEVOPS 插件工作区路径"
                     className={harnessProjectCreateInputClassName}
@@ -1013,9 +1005,9 @@ function ProjectEditDialog({
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 系统编号 *
                 <Input
-                  value={form.product.code}
+                  value={form.systemId}
                   onChange={(event) =>
-                    onChange({ ...form, product: { ...form.product, code: event.target.value } })
+                    onChange({ ...form, systemId: event.target.value })
                   }
                   placeholder="请输入"
                   className={harnessProjectCreateInputClassName}
@@ -1024,9 +1016,9 @@ function ProjectEditDialog({
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 系统名称 *
                 <Input
-                  value={form.product.name}
+                  value={form.systemName}
                   onChange={(event) =>
-                    onChange({ ...form, product: { ...form.product, name: event.target.value } })
+                    onChange({ ...form, systemName: event.target.value })
                   }
                   placeholder="请输入"
                   className={harnessProjectCreateInputClassName}
@@ -1038,7 +1030,7 @@ function ProjectEditDialog({
                   <ProjectWorkspacePathTip />
                 </div>
                 <Input
-                  value={form.workspace.path}
+                  value={form.workspacePath}
                   readOnly
                   aria-readonly="true"
                   placeholder="请选择 AUTOBIZDEVOPS 插件工作区路径"
@@ -1948,14 +1940,14 @@ function ProjectDetailPage({
                   </div>
                   <div>
                     <dt className="text-xs text-muted-foreground">系统编号</dt>
-                    <dd className="mt-1 truncate font-medium" title={project.productCode}>
-                      {project.productCode}
+                    <dd className="mt-1 truncate font-medium" title={project.systemId}>
+                      {project.systemId}
                     </dd>
                   </div>
                   <div>
                     <dt className="text-xs text-muted-foreground">系统名称</dt>
-                    <dd className="mt-1 truncate font-medium" title={project.productName}>
-                      {project.productName}
+                    <dd className="mt-1 truncate font-medium" title={project.systemName}>
+                      {project.systemName}
                     </dd>
                   </div>
                   <div>
@@ -2895,8 +2887,8 @@ export function HarnessBoardView(): React.JSX.Element {
           project.name,
           project.description,
           project.projectCode,
-          project.productCode,
-          project.productName,
+          project.systemId,
+          project.systemName,
           project.harnessAdapter.name,
           ...(detail?.runs.map((run) => `${run.title} ${run.slug} ${run.summary.text}`) ?? [])
         ]
@@ -2906,13 +2898,13 @@ export function HarnessBoardView(): React.JSX.Element {
       }
 
       const targetMap = project.lifecycle.status === "archived" ? archivedMap : activeMap
-      const existing = targetMap.get(project.productCode)
+      const existing = targetMap.get(project.systemId)
       if (existing) {
         existing.projects.push(project)
       } else {
-        targetMap.set(project.productCode, {
-          systemCode: project.productCode,
-          systemName: project.productName,
+        targetMap.set(project.systemId, {
+          systemCode: project.systemId,
+          systemName: project.systemName,
           projects: [project]
         })
       }
@@ -2952,7 +2944,7 @@ export function HarnessBoardView(): React.JSX.Element {
   const handlePickWorkspace = async (): Promise<void> => {
     const workspacePath = await window.api.workspace.select()
     if (workspacePath) {
-      setForm((current) => ({ ...current, workspace: { path: workspacePath } }))
+      setForm((current) => ({ ...current, workspacePath }))
     }
   }
 

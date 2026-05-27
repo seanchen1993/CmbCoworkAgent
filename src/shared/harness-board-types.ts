@@ -33,16 +33,14 @@ export interface HarnessProjectMetadata {
   name: string
   description: string
   projectCode: string
-  product: {
-    code: string
-    name: string
-  }
-  workspace: {
-    path: string
-  }
+  systemId: string
+  systemName: string
+  workspacePath: string
   "harness-adapter": HarnessAdapterSnapshot
   lifecycle: {
     status: "active" | "archived"
+    createAt: string
+    updateAt?: string
   }
 }
 
@@ -52,13 +50,9 @@ export interface HarnessProjectCreateInput {
   name: string
   projectCode: string
   description: string
-  product: {
-    code: string
-    name: string
-  }
-  workspace: {
-    path: string
-  }
+  systemId: string
+  systemName: string
+  workspacePath: string
 }
 
 export interface HarnessFeatureCreateInput {
@@ -79,13 +73,9 @@ export interface HarnessProjectMetadataUpdateInput {
   name: string
   projectCode: string
   description: string
-  product: {
-    code: string
-    name: string
-  }
-  workspace: {
-    path: string
-  }
+  systemId: string
+  systemName: string
+  workspacePath: string
 }
 
 export interface HarnessProjectListItem {
@@ -93,8 +83,8 @@ export interface HarnessProjectListItem {
   name: string
   description: string
   projectCode: string
-  productCode: string
-  productName: string
+  systemId: string
+  systemName: string
   workspacePath: string
   harnessAdapter: {
     id: string
@@ -148,8 +138,8 @@ export interface HarnessProjectDetailViewModel {
     projectId: string
     name: string
     projectCode: string
-    productCode: string
-    productName: string
+    systemId: string
+    systemName: string
     workspacePath: string
   }
   adapterSnapshot: {
@@ -242,7 +232,7 @@ export interface HarnessRunDetailViewModel {
     projectId: string
     name: string
     projectCode: string
-    productCode: string
+    systemId: string
     workspacePath: string
   }
   adapterSnapshot: {

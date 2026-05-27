@@ -300,7 +300,7 @@ function replaceHarnessConfigPlaceholders(
   feature?: string
 ): string {
   const replacements: Record<string, string> = {
-    pluginWorkspace: project.workspace.path,
+    pluginWorkspace: project.workspacePath,
     project: project.projectCode,
     projectCode: project.projectCode,
     feature: feature ?? "",
@@ -359,7 +359,7 @@ function readBoardConfigInspectCommand(cwd: string, mode: HarnessInspectCommandN
 }
 
 function projectDirectoryPath(project: HarnessProjectMetadata): string {
-  const workspacePath = resolve(project.workspace.path)
+  const workspacePath = resolve(project.workspacePath)
   const projectPath = resolve(workspacePath, project.projectCode)
   if (projectPath === workspacePath || !isInsideDirectory(workspacePath, projectPath)) {
     throw new Error(`Project code resolves outside workspace: ${project.projectCode}`)
@@ -381,14 +381,14 @@ function resolveAdapterFilePath(project: HarnessProjectMetadata, value: unknown)
   const resolvedPath = isAbsolute(normalizedPath)
     ? resolve(normalizedPath)
     : normalizedPath === project.projectCode || normalizedPath.startsWith(`${project.projectCode}/`)
-      ? resolve(project.workspace.path, normalizedPath)
+      ? resolve(project.workspacePath, normalizedPath)
       : resolve(projectPath, normalizedPath)
 
   return isInsideDirectory(projectPath, resolvedPath) ? resolvedPath : null
 }
 
 function projectDirectoryMissingMessage(project: HarnessProjectMetadata): string {
-  return `请确认项目「${project.projectCode}」的工作区「${project.workspace.path}」下是否有对应特性。`
+  return `请确认项目「${project.projectCode}」的工作区「${project.workspacePath}」下是否有对应特性。`
 }
 
 function isProjectMissingError(message: string): boolean {
@@ -516,7 +516,7 @@ function normalizeAdapterPath(project: HarnessProjectMetadata, value: unknown): 
   if (!rawPath) return null
   const normalizedPath = rawPath.replace(/\\/g, "/")
   if (isAbsolute(normalizedPath)) {
-    const relativePath = relative(project.workspace.path, normalizedPath)
+    const relativePath = relative(project.workspacePath, normalizedPath)
     if (relativePath && !relativePath.startsWith("..") && !isAbsolute(relativePath)) {
       return relativePath.replace(/\\/g, "/")
     }
@@ -875,27 +875,23 @@ function normalizeRunNodes(
 function normalizeProject(value: unknown): HarnessProjectMetadata | null {
   if (!isObject(value)) return null
   if (typeof value.projectId !== "string" || typeof value.name !== "string") return null
-  const product = isObject(value.product) ? value.product : {}
-  const workspace = isObject(value.workspace) ? value.workspace : {}
   const harnessAdapter = isObject(value["harness-adapter"]) ? value["harness-adapter"] : null
   if (!harnessAdapter) return null
+  const oldWorkspace = isObject(value.workspace) ? value.workspace : {}
   const lifecycle = isObject(value.lifecycle) ? value.lifecycle : {}
   const adapterId = normalizeText(harnessAdapter.id)
   const adapterName = normalizeText(harnessAdapter.name)
   if (!adapterId || !adapterName || harnessAdapter.type !== "plugin") return null
+  const now = new Date().toISOString()
 
   return {
     projectId: value.projectId,
     name: value.name,
     description: normalizeText(value.description),
     projectCode: normalizeText(value.projectCode),
-    product: {
-      code: normalizeText(product.code),
-      name: normalizeText(product.name)
-    },
-    workspace: {
-      path: normalizeText(workspace.path)
-    },
+    systemId: normalizeText(value.systemId),
+    systemName: normalizeText(value.systemName),
+    workspacePath: normalizeText(value.workspacePath) || normalizeText(oldWorkspace.path),
     "harness-adapter": {
       id: adapterId,
       name: adapterName,
@@ -903,7 +899,9 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
       type: "plugin"
     },
     lifecycle: {
-      status: value.lifecycle && lifecycle.status === "archived" ? "archived" : "active"
+      status: value.lifecycle && lifecycle.status === "archived" ? "archived" : "active",
+      createAt: typeof lifecycle.createAt === "string" ? lifecycle.createAt : now,
+      updateAt: typeof lifecycle.updateAt === "string" ? lifecycle.updateAt : undefined
     }
   }
 }
@@ -939,9 +937,9 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     name: project.name,
     description: project.description,
     projectCode: project.projectCode,
-    productCode: project.product.code,
-    productName: project.product.name,
-    workspacePath: project.workspace.path,
+    systemId: project.systemId,
+    systemName: project.systemName,
+    workspacePath: project.workspacePath,
     harnessAdapter: {
       id: harnessAdapter.id,
       name: harnessAdapter.name,
@@ -968,12 +966,12 @@ function validateCreateInput(input: HarnessProjectCreateInput): void {
     input.name,
     input.projectCode,
     input.description,
-    input.product?.code,
-    input.product?.name,
-    input.workspace?.path
+    input.systemId,
+    input.systemName,
+    input.workspacePath
   ]
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
-    throw new Error("Project name, code, description, product and workspace are required")
+    throw new Error("Project name, code, description, system and workspace are required")
   }
   validateHarnessName(input.name, "项目名称")
   validateHarnessName(input.projectCode, "项目编号")
@@ -986,12 +984,12 @@ function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput):
     input.name,
     input.projectCode,
     input.description,
-    input.product?.code,
-    input.product?.name,
-    input.workspace?.path
+    input.systemId,
+    input.systemName,
+    input.workspacePath
   ]
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
-    throw new Error("Project name, code, description, product and workspace are required")
+    throw new Error("Project name, code, description, system and workspace are required")
   }
   validateHarnessName(input.name, "项目名称")
   validateHarnessName(input.projectCode, "项目编号")
@@ -1056,9 +1054,9 @@ function makeProjectDetailViewModel(
       projectId: project.projectId,
       name: project.name,
       projectCode: project.projectCode,
-      productCode: project.product.code,
-      productName: project.product.name,
-      workspacePath: project.workspace.path
+      systemId: project.systemId,
+      systemName: project.systemName,
+      workspacePath: project.workspacePath
     },
     adapterSnapshot: {
       schemaVersion: "harness.adapter.inspect.v1",
@@ -1119,7 +1117,7 @@ export function buildHarnessFeatureAgentContext(
   const createPrompt = readBoardConfigPlatformText(cwd, "feature_create_prompt")
   const pluginDirPrompt = readBoardConfigPlatformText(cwd, "plugin_dir_prompt")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
-  const systemId = normalizeText(project.product.code).trim()
+  const systemId = normalizeText(project.systemId).trim()
   const render = (
     template: string | null,
     command: HarnessInspectCommandName
@@ -1164,16 +1162,13 @@ export function createHarnessProject(input: HarnessProjectCreateInput): HarnessP
     name: input.name.trim(),
     description: input.description.trim(),
     projectCode: input.projectCode.trim(),
-    product: {
-      code: input.product.code.trim(),
-      name: input.product.name.trim()
-    },
-    workspace: {
-      path: input.workspace.path.trim()
-    },
+    systemId: input.systemId.trim(),
+    systemName: input.systemName.trim(),
+    workspacePath: input.workspacePath.trim(),
     "harness-adapter": harnessAdapter,
     lifecycle: {
-      status: "active"
+      status: "active",
+      createAt: new Date().toISOString()
     }
   }
 
@@ -1225,16 +1220,16 @@ export function updateHarnessProjectMetadata(
 
   validateProjectCodeUnique(input.projectCode, store, projectId)
   const existing = store.projects[index]
-  const existingWorkspacePath = existing.workspace.path.trim()
-  const requestedWorkspacePath = input.workspace.path.trim()
+  const existingWorkspacePath = existing.workspacePath.trim()
+  const requestedWorkspacePath = input.workspacePath.trim()
   if (requestedWorkspacePath !== existingWorkspacePath) {
     throw new Error("项目工作区路径不允许修改")
   }
   const newCode = input.projectCode.trim()
   const codeChanged = existing.projectCode !== newCode
   if (codeChanged) {
-    const oldPath = resolve(existing.workspace.path, existing.projectCode)
-    const newPath = resolve(existing.workspace.path, newCode)
+    const oldPath = resolve(existing.workspacePath, existing.projectCode)
+    const newPath = resolve(existing.workspacePath, newCode)
     if (existsSync(oldPath)) {
       if (existsSync(newPath)) {
         throw new Error(`重命名失败：目标目录已存在 ${newPath}`)
@@ -1251,16 +1246,13 @@ export function updateHarnessProjectMetadata(
     name: input.name.trim(),
     description: input.description.trim(),
     projectCode: input.projectCode.trim(),
-    product: {
-      code: input.product.code.trim(),
-      name: input.product.name.trim()
-    },
-    workspace: {
-      path: existing.workspace.path
-    },
+    systemId: input.systemId.trim(),
+    systemName: input.systemName.trim(),
+    workspacePath: existing.workspacePath,
     "harness-adapter": harnessAdapter,
     lifecycle: {
-      ...existing.lifecycle
+      ...existing.lifecycle,
+      updateAt: new Date().toISOString()
     }
   }
 
@@ -1281,7 +1273,8 @@ export function archiveHarnessProject(projectId: string): HarnessProjectMetadata
     ...existing,
     lifecycle: {
       ...existing.lifecycle,
-      status: "archived"
+      status: "archived",
+      updateAt: new Date().toISOString()
     }
   }
 
@@ -1343,8 +1336,8 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
       projectId: project.projectId,
       name: project.name,
       projectCode: project.projectCode,
-      productCode: project.product.code,
-      workspacePath: project.workspace.path
+      systemId: project.systemId,
+      workspacePath: project.workspacePath
     },
     adapterSnapshot: {
       schemaVersion: "harness.adapter.inspect.v1",
