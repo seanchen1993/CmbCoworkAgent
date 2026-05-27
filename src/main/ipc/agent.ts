@@ -28,7 +28,8 @@ import {
   getEnabledSkillHooks,
   getEnabledSkillsSources,
   getEnabledPluginSkillSourceMetadata,
-  getDisabledSkillDirs
+  getDisabledSkillDirs,
+  getHookLoggingConfig
 } from "../storage"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
@@ -55,6 +56,7 @@ import {
 import {
   appendSkillProposalWindowTurn,
   buildSkillProposalWindowContext,
+  getRecentSkillUsageNames,
   snapshotSkillProposalWindow,
   isSkillProposalWindowContext,
   type SkillProposalWindowContext
@@ -99,6 +101,7 @@ import {
   startAgentGitSnapshot,
   type AgentGitSnapshot
 } from "../services/agent-auto-commit"
+import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
 import { makeHookResultCallback, makeHookSkippedCallback } from "../hooks/result-callback"
@@ -306,10 +309,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
  * pre-interrupt fresh-state behaviour. `stopContextCollector` is intentionally
  * not pruned — it tracks turn-wide history regardless of skill scope.
  */
-function pruneTurnStateAtInterrupt(
-  state: TurnState,
-  allHooks: readonly HookConfig[]
-): void {
+function pruneTurnStateAtInterrupt(state: TurnState, allHooks: readonly HookConfig[]): void {
   const keepPluginIds = new Set<string>()
   const keepSkillPaths = new Set<string>()
   const keepSkillNames = new Set<string>()
@@ -343,7 +343,9 @@ function pruneTurnStateAtInterrupt(
         skillRoot?: string
       }
       const hookPluginId = normalizePluginId(scoped.pluginId)
-      const hookSkillPath = normalizePathKey(scoped.skillPath ?? scoped.skillRoot ?? hook.hookSourceRoot)
+      const hookSkillPath = normalizePathKey(
+        scoped.skillPath ?? scoped.skillRoot ?? hook.hookSourceRoot
+      )
       const hookSkillName = normalizeSkillName(scoped.skillName)
       return (
         (hookPluginId && state.hookScope.activePluginIds.has(hookPluginId)) ||
@@ -546,6 +548,7 @@ function sendActiveHookNotice(
   channel: string,
   workspacePath?: string
 ): void {
+  if (!getHookLoggingConfig().enabled) return
   const message = formatActiveHookNotice(getActiveHookSummary(workspacePath))
   if (!message) return
   sendHookNotice(window, channel, message)
@@ -621,7 +624,10 @@ async function beginAutoCommitTracking(
   return {
     snapshot,
     onFileMutation: workspacePath
-      ? (filePath: string) => recordAgentTouchedFile(threadId, workspacePath, filePath)
+      ? (filePath: string) => {
+          recordAgentTouchedFile(threadId, workspacePath, filePath)
+          scheduleAutoInstallGitHooksForPath(workspacePath, filePath)
+        }
       : undefined
   }
 }
@@ -983,7 +989,11 @@ async function judgeSkillWorthiness(
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
     maxTokens: config.maxOutputTokens,
-    temperature: config.temperature
+    temperature: config.temperature,
+    topP: config.topP,
+    modelKwargs: {
+      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+    }
   })
 
   const userPrompt = `## Conversation window since last skill-evolution reset (${context.turnCount} turns)
@@ -1073,6 +1083,10 @@ Based on this conversation, generate a reusable skill. Output JSON only.`
       configuration: { baseURL: config.baseUrl },
       maxTokens: config.maxOutputTokens,
       temperature: config.temperature,
+      topP: config.topP,
+      modelKwargs: {
+        ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+      },
       streaming: true
     })
 
@@ -1423,10 +1437,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         currentRunSkills.length > 0 ? recentCompletedTurns.slice(-1) : recentCompletedTurns
 
       return Array.from(
-        new Set([
-          ...currentRunSkills,
-          ...inheritedTurns.flatMap((turn) => turn.usedSkills)
-        ])
+        new Set([...currentRunSkills, ...inheritedTurns.flatMap((turn) => turn.usedSkills)])
       )
     }
 
@@ -1721,6 +1732,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath,
             modelId: candidateId,
             abortSignal: abortController.signal,
+            enableRequestUserInput: true,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
@@ -2051,7 +2063,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!Array.isArray(state.messages)) return
 
+          const currentMessageTexts = new Set(
+            [message, effectiveMessage].map(normalizeMessageText).filter(Boolean)
+          )
           let currentTurnStartIndex = -1
+          let latestUserMessageIndex = -1
           for (let i = state.messages.length - 1; i >= 0; i--) {
             const msg = state.messages[i]
             const kwargs = msg?.kwargs || {}
@@ -2059,15 +2075,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const className = classId[classId.length - 1] || ""
             const role = toRole(className, kwargs)
             if (role !== "user") continue
-            if (
-              normalizeMessageText(extractText(kwargs.content)) === normalizeMessageText(message)
-            ) {
+            if (latestUserMessageIndex < 0) latestUserMessageIndex = i
+            if (currentMessageTexts.has(normalizeMessageText(extractText(kwargs.content)))) {
               currentTurnStartIndex = i
               break
             }
           }
 
-          const valuesStartIndex = currentTurnStartIndex >= 0 ? currentTurnStartIndex + 1 : 0
+          const valuesStartIndex =
+            currentTurnStartIndex >= 0
+              ? currentTurnStartIndex + 1
+              : latestUserMessageIndex >= 0
+                ? latestUserMessageIndex + 1
+                : 0
 
           for (let i = valuesStartIndex; i < state.messages.length; i++) {
             const msg = state.messages[i]
@@ -2329,6 +2349,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath,
             modelId: nextCandidate,
             abortSignal: abortController.signal,
+            enableRequestUserInput: true,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
@@ -2420,6 +2441,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
         if (isOnlineSkillEvolutionEnabled()) {
           const proposalContext = appendTurnToProposalWindow("success")
+          const recentUsedSkills = getRecentSkillUsageNames(threadId)
+          const blockingUsedSkills = Array.from(
+            new Set([...proposalContext.usedSkills, ...recentUsedSkills])
+          )
 
           // Check if this turn crossed the skill-evolution threshold.
           const sessionToolCallCount = proposalContext.toolCallCount
@@ -2433,13 +2458,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 threshold,
                 mode,
                 usedSkills: proposalContext.usedSkills,
+                recentUsedSkills,
                 turnCount: proposalContext.turnCount,
                 errorCount: proposalContext.errorCount,
                 toolCallSummary: proposalContext.toolCallSummary
               })}`
             )
-            if (proposalContext.usedSkills.length > 0) {
-              const names = ` [${proposalContext.usedSkills.join(", ")}]`
+            if (blockingUsedSkills.length > 0) {
+              const names = ` [${blockingUsedSkills.join(", ")}]`
               console.log(
                 `[SkillEvolution][${threadId}] Threshold skip because used skills were detected${names}`
               )
@@ -2491,7 +2517,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 apiKey: config.apiKey,
                 configuration: { baseURL: config.baseUrl },
                 maxTokens: config.maxOutputTokens,
-                temperature: config.temperature
+                temperature: config.temperature,
+                topP: config.topP,
+                modelKwargs: {
+                  ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+                }
               }),
               conversation,
               memoryDir: memoryStore.getMemoryDir()
@@ -2704,6 +2734,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath,
             modelId: candidateId,
             abortSignal: abortController.signal,
+            enableRequestUserInput: true,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
@@ -2846,6 +2877,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath,
             modelId: nextCandidate,
             abortSignal: abortController.signal,
+            enableRequestUserInput: true,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
@@ -3054,6 +3086,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               workspacePath,
               modelId: candidateId,
               abortSignal: abortController.signal,
+              enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
@@ -3193,6 +3226,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               workspacePath,
               modelId: nextCandidate,
               abortSignal: abortController.signal,
+              enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),

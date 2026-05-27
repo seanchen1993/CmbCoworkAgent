@@ -31,7 +31,7 @@ const UserInfoPanel: React.FC = () => {
                 fetch(`https://archguardservice.paas.${import.meta.env.VITE_LOGIN_PT}.cn/cowork/login-info`, {
                     method: 'GET',
                     headers: {
-                        ystCode: userInfo.ystCode,
+                        ystCode: userInfo.ystCode || '',
                         ystRefreshToken: userInfo.ystRefreshToken || '',
                     }
                 }).then(async res => {

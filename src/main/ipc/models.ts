@@ -19,6 +19,7 @@ import { startWatching, stopWatching } from "../services/workspace-watcher"
 import { trackEvent } from "../services/event-reporter"
 import { captureStagedSnapshotsForCommit, measureForCommit } from "../services/adoption-tracker"
 import { scheduleMarkCodeAdoptionCommitsPushed } from "../services/code-adoption-push-updater"
+import { CMBDEVCLAW_INTERNAL_GIT_ENV } from "../services/git-hook-service"
 import { getTracesDir } from "../agent/trace/collector"
 import type { AgentTrace } from "../agent/trace/types"
 import { nowIsoLocal } from "../util/local-time"
@@ -982,7 +983,9 @@ function formatGitCommand(worktreePath: string, args: string[]): string {
 const GIT_BASE_ENV: NodeJS.ProcessEnv = {
   ...process.env,
   // 禁用 LFS smudge，避免与面板状态/差异无关的网络或大文件拉取开销。
-  GIT_LFS_SKIP_SMUDGE: "1"
+  GIT_LFS_SKIP_SMUDGE: "1",
+  // DevClaw 自己发起的 Git 操作已有采纳统计链路，hook 只采集外部 IDEA/bash 等入口。
+  [CMBDEVCLAW_INTERNAL_GIT_ENV]: "1"
 }
 
 function isGitLfsVersionHookError(error: unknown): boolean {

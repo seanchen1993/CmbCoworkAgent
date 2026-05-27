@@ -90,6 +90,10 @@ function getDefaultModel(): ChatOpenAI | null {
     configuration: { baseURL: config.baseUrl },
     maxTokens: config.maxOutputTokens,
     temperature: config.temperature,
+    topP: config.topP,
+    modelKwargs: {
+      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+    },
     streaming: true
   })
 }
@@ -100,7 +104,9 @@ function getDefaultModel(): ChatOpenAI | null {
  * skillId — so that multiple analysis runs on the same skill remain visible
  * until they are approved, rejected, or cleared.
  */
-function mergePendingCandidates(newCandidates: OptimizationRunResult["candidates"]): OptimizationRunResult["candidates"] {
+function mergePendingCandidates(
+  newCandidates: OptimizationRunResult["candidates"]
+): OptimizationRunResult["candidates"] {
   const existingPending = getCandidates().filter((c) => c.status === "pending")
   const incomingPending = newCandidates.filter((c) => c.status === "pending")
 
@@ -185,7 +191,10 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
           .filter((trace): trace is AgentTrace => !!trace)
 
         if (selectedTraces.length === 0) {
-          notifyRenderer("optimizer:streamEnd", { success: false, error: "未找到可分析的 trace，请重新选择后再试。" })
+          notifyRenderer("optimizer:streamEnd", {
+            success: false,
+            error: "未找到可分析的 trace，请重新选择后再试。"
+          })
           return {
             startedAt: new Date().toISOString(),
             endedAt: new Date().toISOString(),
@@ -350,7 +359,9 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         : readRecentTraces(opts?.limit ?? 20)
 
       return traces.map((trace) => {
-        const { totalInputTokens, totalOutputTokens, totalTokens } = summarizeTraceTokenUsage(trace.modelCalls)
+        const { totalInputTokens, totalOutputTokens, totalTokens } = summarizeTraceTokenUsage(
+          trace.modelCalls
+        )
         return {
           traceId: trace.traceId,
           threadId: trace.threadId,
@@ -398,9 +409,12 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
     return isOnlineSkillEvolutionEnabled()
   })
 
-  ipcMain.handle("optimizer:setOnlineSkillEvolutionEnabled", async (_event, enabled: boolean): Promise<void> => {
-    setOnlineSkillEvolutionEnabled(enabled)
-  })
+  ipcMain.handle(
+    "optimizer:setOnlineSkillEvolutionEnabled",
+    async (_event, enabled: boolean): Promise<void> => {
+      setOnlineSkillEvolutionEnabled(enabled)
+    }
+  )
 
   ipcMain.handle("optimizer:getAutoPropose", async (): Promise<boolean> => {
     return isSkillAutoProposeEnabled()
