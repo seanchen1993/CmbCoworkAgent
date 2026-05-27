@@ -30,18 +30,27 @@ export function mergeChatSkills(
       .filter(Boolean)
   )
 
-  // Deduplicate plugin skills by name: when `preferredPluginId` is given,
-  // the preferred plugin's skill wins over same-named skills from other
-  // plugins. Without a preference, the first encountered skill wins.
-  const seenPluginNames = new Set(enabledLocalNames)
+  // Without a preferred plugin (conversation mode), only filter out plugin
+  // skills whose names are already covered by enabled local skills. Plugins
+  // may have duplicate-named skills and both should appear in the popover.
+  if (!preferredPluginId) {
+    return [
+      ...localSkills,
+      ...pluginSkills.filter(
+        (pluginSkill) => !enabledLocalNames.has(normalizeSkillName(pluginSkill.name))
+      )
+    ]
+  }
+
+  // Harness mode: inter-plugin deduplication. The preferred plugin's skill
+  // wins over same-named skills from other plugins.
+  const seenNames = new Set(enabledLocalNames)
   const dedupedPlugins: SkillMetadata[] = []
 
   for (const skill of pluginSkills) {
     const name = normalizeSkillName(skill.name)
-    if (!name || seenPluginNames.has(name)) {
-      // Already covered by a local skill or a previously added plugin skill.
-      // Replace the existing entry when this one comes from the preferred plugin.
-      if (preferredPluginId && skill.pluginId === preferredPluginId && seenPluginNames.has(name)) {
+    if (!name || seenNames.has(name)) {
+      if (skill.pluginId === preferredPluginId) {
         const idx = dedupedPlugins.findIndex(
           (s) => normalizeSkillName(s.name) === name && s.pluginId !== preferredPluginId
         )
@@ -51,7 +60,7 @@ export function mergeChatSkills(
       }
       continue
     }
-    seenPluginNames.add(name)
+    seenNames.add(name)
     dedupedPlugins.push(skill)
   }
 
