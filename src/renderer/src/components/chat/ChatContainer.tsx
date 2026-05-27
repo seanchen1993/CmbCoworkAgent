@@ -1259,6 +1259,11 @@ export function ChatContainer({
   const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
   const [goodSkillsData, setGoodSkillsData] = useState<MarketItem[]>([])
 
+  // Stable ref so loadSkills can read the latest harness binding without
+  // invalidating its own identity (useCallback with empty deps).
+  const harnessFeatureBindingRef = useRef(harnessFeatureBinding)
+  harnessFeatureBindingRef.current = harnessFeatureBinding
+
   // Define loadSkills function at component level so it can be accessed everywhere
   const loadSkills = useCallback(async (): Promise<void> => {
     try {
@@ -1284,9 +1289,27 @@ export function ChatContainer({
       const availableSkills = loadedSkills.filter(
         (s) => s.source === "project" || s.source === "user"
       )
+
+      // In harness mode, resolve the project's bound plugin ID so that
+      // duplicate-named skills from other plugins are hidden in favour of
+      // the project's own plugin.
+      let preferredPluginId: string | null = null
+      const binding = harnessFeatureBindingRef.current
+      if (binding && typeof window.api.harnessBoard?.listProjects === "function") {
+        try {
+          const projects = await window.api.harnessBoard.listProjects()
+          const project = projects.find((p) => p.projectId === binding.projectId)
+          if (project) {
+            preferredPluginId = project.harnessAdapter.id
+          }
+        } catch {
+          // Non-critical: fall through without a preference.
+        }
+      }
+
       // Enabled built-in/custom names win over plugin names; disabled local
       // skills should not hide a plugin skill with the same name from slash.
-      const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet)
+      const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet, preferredPluginId)
       setSkills([...merged].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
     } catch (error) {
       console.error("[ChatContainer] Failed to load skills:", error)
@@ -2842,7 +2865,7 @@ export function ChatContainer({
 
   useEffect(() => {
     void loadSkills()
-  }, [loadSkills, pluginVersion])
+  }, [loadSkills, pluginVersion, harnessFeatureBinding?.projectId])
 
   // ── Skill creation human-confirmation listener ──────────
   useEffect(() => {

@@ -100,7 +100,7 @@ function normalizeText(value: unknown): string {
 }
 
 function pluginAdapterId(plugin: PluginMetadata): string {
-  return basename(plugin.path) || normalizeText(plugin.name) || plugin.id
+  return plugin.id
 }
 
 function pluginHasBoardConfig(plugin: PluginMetadata): boolean {
