@@ -31,7 +31,8 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
-import type { DashboardCodeStats, DashboardTraceDetail, DashboardTraceNode } from "./use-dashboard"
+import { TraceConversation, TraceThreadConversation, buildTraceConversation } from "@/components/trace/TraceConversation"
+import type { DashboardCodeStats, DashboardTraceDetail, DashboardTraceNode, DashboardTraceViewMode } from "./use-dashboard"
 
 const EMPTY_NODES: DashboardTraceNode[] = []
 
@@ -457,6 +458,7 @@ function TraceCard({
   selected: boolean
   onClick: () => void
 }): React.JSX.Element {
+  const conversation = buildTraceConversation(trace)
   return (
     <button
       type="button"
@@ -473,6 +475,11 @@ function TraceCard({
         <span className="truncate text-[10px] font-mono text-muted-foreground/60">{trace.traceId.slice(0, 10)}</span>
       </div>
       <p className="line-clamp-3 text-xs leading-5 text-foreground/80">{trace.userMessage || "无用户输入记录"}</p>
+      {conversation.assistantText && (
+        <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+          答：{conversation.assistantText}
+        </p>
+      )}
       <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground/60">
         <span>{formatTime(trace.startedAt)}</span>
         <span className="inline-flex items-center gap-0.5"><Timer className="size-3" />{fmtDuration(trace.durationMs)}</span>
@@ -490,6 +497,136 @@ function TraceCard({
   )
 }
 
+interface TraceThreadGroup {
+  threadId: string
+  traces: DashboardTraceDetail[]
+  latestStartedAt: string
+  successCount: number
+  errorCount: number
+  totalToolCalls: number
+  totalDurationMs: number
+  totalTokens: number
+}
+
+function buildTraceThreadGroups(traces: DashboardTraceDetail[]): TraceThreadGroup[] {
+  const grouped = new Map<string, DashboardTraceDetail[]>()
+  for (const trace of traces) {
+    const threadId = trace.threadId || "unknown-thread"
+    const list = grouped.get(threadId) ?? []
+    list.push(trace)
+    grouped.set(threadId, list)
+  }
+
+  return Array.from(grouped.entries())
+    .map(([threadId, threadTraces]) => {
+      const sorted = [...threadTraces].sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+      return {
+        threadId,
+        traces: sorted,
+        latestStartedAt: sorted[0]?.startedAt ?? "",
+        successCount: sorted.filter((trace) => trace.outcome === "success").length,
+        errorCount: sorted.filter((trace) => trace.outcome === "error").length,
+        totalToolCalls: sorted.reduce((sum, trace) => sum + trace.totalToolCalls, 0),
+        totalDurationMs: sorted.reduce((sum, trace) => sum + trace.durationMs, 0),
+        totalTokens: sorted.reduce((sum, trace) => sum + trace.totalTokens, 0)
+      }
+    })
+    .sort((a, b) => b.latestStartedAt.localeCompare(a.latestStartedAt))
+}
+
+function TraceThreadGroupCard({
+  group,
+  selectedTraceId,
+  onSelectTrace
+}: {
+  group: TraceThreadGroup
+  selectedTraceId: string | null
+  onSelectTrace: (traceId: string) => void
+}): React.JSX.Element {
+  const [open, setOpen] = useState(true)
+  const selectedInGroup = group.traces.some((trace) => trace.traceId === selectedTraceId)
+
+  return (
+    <div className={cn(
+      "overflow-hidden rounded-lg border bg-card",
+      selectedInGroup ? "border-primary/50" : "border-border"
+    )}>
+      <button
+        type="button"
+        className="flex w-full items-start gap-2 border-b border-border/70 bg-muted/10 px-3 py-2 text-left transition-colors hover:bg-muted/20"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="mt-0.5 shrink-0 text-muted-foreground">
+          {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-[11px] font-semibold text-foreground">
+              Thread {group.threadId.slice(0, 10)}
+            </span>
+            <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px]">
+              {group.traces.length} 条
+            </Badge>
+          </div>
+          <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground/60">
+            <span>{formatTime(group.latestStartedAt)}</span>
+            <span className="inline-flex items-center gap-0.5"><Wrench className="size-3" />{group.totalToolCalls}</span>
+            {group.totalTokens > 0 && (
+              <span className="inline-flex items-center gap-0.5"><Coins className="size-3" />{fmtTokens(group.totalTokens)}</span>
+            )}
+            <span className="text-emerald-600">成功 {group.successCount}</span>
+            {group.errorCount > 0 && <span className="text-red-500">错误 {group.errorCount}</span>}
+          </p>
+        </div>
+      </button>
+
+      {open && (
+        <div className="space-y-2 p-2">
+          {group.traces.map((trace) => (
+            <TraceCard
+              key={trace.traceId}
+              trace={trace}
+              selected={selectedTraceId === trace.traceId}
+              onClick={() => onSelectTrace(trace.traceId)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function TraceViewModeToggle({
+  value,
+  onChange
+}: {
+  value: DashboardTraceViewMode
+  onChange: (mode: DashboardTraceViewMode) => void
+}): React.JSX.Element {
+  return (
+    <div className="flex overflow-hidden rounded-md border border-border bg-background">
+      {([
+        ["thread", "Thread"],
+        ["trace", "Trace"]
+      ] as const).map(([mode, label]) => (
+        <button
+          key={mode}
+          type="button"
+          className={cn(
+            "h-7 px-2.5 text-[11px] font-medium transition-colors",
+            value === mode
+              ? "bg-primary text-primary-foreground"
+              : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+          )}
+          onClick={() => onChange(mode)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 export function TraceExplorer({
   traces,
   codeStats = null,
@@ -500,6 +637,10 @@ export function TraceExplorer({
   headerRight = null,
   emptyText = "当前时间范围内没有会话历史",
   showCodeStats = true,
+  viewMode,
+  defaultViewMode = "thread",
+  onViewModeChange,
+  showViewModeToggle = true,
   className
 }: {
   traces: DashboardTraceDetail[]
@@ -511,11 +652,37 @@ export function TraceExplorer({
   headerRight?: ReactNode
   emptyText?: string
   showCodeStats?: boolean
+  viewMode?: DashboardTraceViewMode
+  defaultViewMode?: DashboardTraceViewMode
+  onViewModeChange?: (mode: DashboardTraceViewMode) => void
+  showViewModeToggle?: boolean
   className?: string
 }): React.JSX.Element {
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null)
+  const [localViewMode, setLocalViewMode] = useState<DashboardTraceViewMode>(defaultViewMode)
+  const activeViewMode = viewMode ?? localViewMode
+  const handleViewModeChange = (mode: DashboardTraceViewMode): void => {
+    if (!viewMode) setLocalViewMode(mode)
+    onViewModeChange?.(mode)
+  }
 
   const selectedTrace = traces.find((trace) => trace.traceId === selectedTraceId) ?? traces[0] ?? null
+  const traceGroups = useMemo(() => buildTraceThreadGroups(traces), [traces])
+  const selectedThreadGroup = useMemo(() => {
+    if (!selectedTrace) return traceGroups[0] ?? null
+    return traceGroups.find((group) =>
+      group.traces.some((trace) => trace.traceId === selectedTrace.traceId)
+    ) ?? traceGroups[0] ?? null
+  }, [selectedTrace, traceGroups])
+  const metricMode = activeViewMode === "thread" && selectedThreadGroup ? "thread" : "trace"
+  const metricStartedAt =
+    metricMode === "thread" ? selectedThreadGroup?.latestStartedAt : selectedTrace?.startedAt
+  const metricToolCalls =
+    metricMode === "thread" ? selectedThreadGroup?.totalToolCalls ?? 0 : selectedTrace?.totalToolCalls ?? 0
+  const metricDurationMs =
+    metricMode === "thread" ? selectedThreadGroup?.totalDurationMs ?? 0 : selectedTrace?.durationMs ?? 0
+  const metricTokens =
+    metricMode === "thread" ? selectedThreadGroup?.totalTokens ?? 0 : selectedTrace?.totalTokens ?? 0
   const nodes = selectedTrace?.nodes ?? EMPTY_NODES
   const root = nodes.find((node) => node.parentId === null) ?? nodes[0]
   const childrenByParent = useMemo(() => {
@@ -555,7 +722,12 @@ export function TraceExplorer({
               <h3 className="text-xs font-semibold text-foreground">{title}</h3>
               <p className="text-[10px] text-muted-foreground">{subtitle}</p>
             </div>
-            {headerRight}
+            <div className="flex items-center gap-2">
+              {showViewModeToggle && (
+                <TraceViewModeToggle value={activeViewMode} onChange={handleViewModeChange} />
+              )}
+              {headerRight}
+            </div>
           </div>
           <div className="flex flex-1 items-center justify-center px-6 py-12 text-sm text-muted-foreground">
             {emptyText}
@@ -574,20 +746,34 @@ export function TraceExplorer({
             <h3 className="text-xs font-semibold text-foreground">{title}</h3>
             <p className="text-[10px] text-muted-foreground">{subtitle}</p>
           </div>
-          {headerRight}
+          <div className="flex items-center gap-2">
+            {showViewModeToggle && (
+              <TraceViewModeToggle value={activeViewMode} onChange={handleViewModeChange} />
+            )}
+            {headerRight}
+          </div>
         </div>
         <div className="grid min-h-0 flex-1 grid-cols-[320px_minmax(0,1fr)]">
           <div className="min-h-0 border-r border-border">
             <ScrollArea className="h-full">
               <div className="space-y-2 p-3">
-                {traces.map((trace) => (
-                  <TraceCard
-                    key={trace.traceId}
-                    trace={trace}
-                    selected={selectedTrace?.traceId === trace.traceId}
-                    onClick={() => setSelectedTraceId(trace.traceId)}
-                  />
-                ))}
+                {activeViewMode === "thread"
+                  ? traceGroups.map((group) => (
+                    <TraceThreadGroupCard
+                      key={group.threadId}
+                      group={group}
+                      selectedTraceId={selectedTrace?.traceId ?? null}
+                      onSelectTrace={setSelectedTraceId}
+                    />
+                  ))
+                  : traces.map((trace) => (
+                    <TraceCard
+                      key={trace.traceId}
+                      trace={trace}
+                      selected={selectedTrace?.traceId === trace.traceId}
+                      onClick={() => setSelectedTraceId(trace.traceId)}
+                    />
+                  ))}
               </div>
             </ScrollArea>
           </div>
@@ -598,29 +784,29 @@ export function TraceExplorer({
                 <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
                   <Clock className="size-3.5 text-muted-foreground" />
                   <div className="min-w-0">
-                    <p className="text-[10px] text-muted-foreground">时间</p>
-                    <p className="truncate text-[12px] font-semibold">{formatTime(selectedTrace.startedAt)}</p>
+                    <p className="text-[10px] text-muted-foreground">{metricMode === "thread" ? "最近时间" : "时间"}</p>
+                    <p className="truncate text-[12px] font-semibold">{formatTime(metricStartedAt ?? "")}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
                   <Hash className="size-3.5 text-muted-foreground" />
                   <div className="min-w-0">
                     <p className="text-[10px] text-muted-foreground">工具调用</p>
-                    <p className="truncate text-[12px] font-semibold">{selectedTrace.totalToolCalls}</p>
+                    <p className="truncate text-[12px] font-semibold">{metricToolCalls}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
                   <Timer className="size-3.5 text-muted-foreground" />
                   <div className="min-w-0">
-                    <p className="text-[10px] text-muted-foreground">耗时</p>
-                    <p className="truncate text-[12px] font-semibold">{fmtDuration(selectedTrace.durationMs)}</p>
+                    <p className="text-[10px] text-muted-foreground">{metricMode === "thread" ? "总耗时" : "耗时"}</p>
+                    <p className="truncate text-[12px] font-semibold">{fmtDuration(metricDurationMs)}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 px-4 py-2.5">
                   <Coins className="size-3.5 text-muted-foreground" />
                   <div className="min-w-0">
                     <p className="text-[10px] text-muted-foreground">Token</p>
-                    <p className="truncate text-[12px] font-semibold">{fmtTokens(selectedTrace.totalTokens)}</p>
+                    <p className="truncate text-[12px] font-semibold">{fmtTokens(metricTokens)}</p>
                   </div>
                 </div>
               </div>
@@ -634,11 +820,33 @@ export function TraceExplorer({
                   </div>
                 )}
                 {root ? (
-                  <TraceTreeNode node={root} childrenByParent={childrenByParent} depth={0} />
+                  <div className="space-y-4">
+                    {activeViewMode === "thread" && selectedThreadGroup ? (
+                      <TraceThreadConversation traces={selectedThreadGroup.traces} />
+                    ) : (
+                      <TraceConversation trace={selectedTrace} />
+                    )}
+                    <div>
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <p className="text-xs font-semibold text-foreground">执行树</p>
+                        <p className="text-[10px] text-muted-foreground">
+                          当前选中 trace 的工具、模型调用与原始结构
+                        </p>
+                      </div>
+                      <TraceTreeNode node={root} childrenByParent={childrenByParent} depth={0} />
+                    </div>
+                  </div>
                 ) : selectedTrace ? (
-                  <div className="rounded-md border border-border bg-card p-4">
-                    <p className="mb-2 text-xs font-semibold text-muted-foreground">Trace Summary</p>
-                    <JsonBlock value={selectedTrace} />
+                  <div className="space-y-4">
+                    {activeViewMode === "thread" && selectedThreadGroup ? (
+                      <TraceThreadConversation traces={selectedThreadGroup.traces} />
+                    ) : (
+                      <TraceConversation trace={selectedTrace} />
+                    )}
+                    <div className="rounded-md border border-border bg-card p-4">
+                      <p className="mb-2 text-xs font-semibold text-muted-foreground">Trace Summary</p>
+                      <JsonBlock value={selectedTrace} />
+                    </div>
                   </div>
                 ) : null}
               </div>
@@ -659,6 +867,8 @@ export function TraceHistoryDialog({
   tracePage = 1,
   tracePageSize = 10,
   totalTraces = traces.length,
+  traceViewMode = "thread",
+  onTraceViewModeChange,
   onTracePrevious,
   onTraceNext,
   onExportPage,
@@ -674,6 +884,8 @@ export function TraceHistoryDialog({
   tracePage?: number
   tracePageSize?: number
   totalTraces?: number
+  traceViewMode?: DashboardTraceViewMode
+  onTraceViewModeChange?: (mode: DashboardTraceViewMode) => void
   onTracePrevious?: () => void
   onTraceNext?: () => void
   onExportPage?: () => void
@@ -684,6 +896,8 @@ export function TraceHistoryDialog({
   const displayTotalTraces = Math.max(totalTraces, traces.length)
   const canPrevious = tracePage > 1 && !loading
   const canNext = tracePage * tracePageSize < displayTotalTraces && !loading
+  const totalLabel = traceViewMode === "thread" ? "个 Thread" : "条 Trace"
+  const titleLabel = traceViewMode === "thread" ? "Thread 记录" : "Trace 记录"
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -696,8 +910,10 @@ export function TraceHistoryDialog({
           codeStats={codeStats}
           loading={loading}
           error={error}
-          title={`Trace 记录（第 ${tracePage} 页）`}
-          subtitle={`共 ${displayTotalTraces.toLocaleString("zh-CN")} 条，选择记录查看完整执行树`}
+          title={`${titleLabel}（第 ${tracePage} 页）`}
+          subtitle={`共 ${displayTotalTraces.toLocaleString("zh-CN")} ${totalLabel}，选择记录查看对话还原与执行树`}
+          viewMode={traceViewMode}
+          onViewModeChange={onTraceViewModeChange}
           headerRight={
             <div className="flex items-center gap-2">
               <Button
