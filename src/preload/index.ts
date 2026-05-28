@@ -1859,6 +1859,7 @@ const api = {
         pageSize?: number
         afterKey?: Record<string, string | number> | null
         keyword?: string | null
+        upperOrgLv1?: string | null
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userList", range, options),
@@ -1919,7 +1920,7 @@ const api = {
       ipcRenderer.invoke("dashboard:skillDetail", skill, range, options),
     commitDetails: (
       range: { from: string; to: string },
-      options?: { page?: number; pageSize?: number; pushedOnly?: boolean }
+      options?: { page?: number; pageSize?: number; pushedOnly?: boolean; upperOrgLv1?: string | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:commitDetails", range, options),
     exportSkillTraces: (payload: {

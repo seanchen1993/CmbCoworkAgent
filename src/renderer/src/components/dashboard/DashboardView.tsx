@@ -362,9 +362,13 @@ function UserListPage({
   onNext,
   searchValue,
   searchKeyword,
+  departmentValue,
+  departmentFilter,
   onSearchValueChange,
+  onDepartmentValueChange,
   onSearch,
   onClearSearch,
+  onClearDepartment,
   onUserClick
 }: {
   data: DashboardUserListData | null
@@ -378,12 +382,17 @@ function UserListPage({
   onNext: () => void
   searchValue: string
   searchKeyword: string
+  departmentValue: string
+  departmentFilter: string
   onSearchValueChange: (value: string) => void
+  onDepartmentValueChange: (value: string) => void
   onSearch: () => void
   onClearSearch: () => void
+  onClearDepartment: () => void
   onUserClick: (user: DashboardUserListItem) => void
 }): React.JSX.Element {
   const hasSearchKeyword = searchKeyword.trim().length > 0
+  const hasDepartmentFilter = departmentFilter.trim().length > 0
 
   return (
     <div className="p-6">
@@ -429,12 +438,34 @@ function UserListPage({
               onSearch()
             }}
           >
+            <div className="relative w-full max-w-[220px]">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={departmentValue}
+                onChange={(event) => onDepartmentValueChange(event.target.value)}
+                aria-label="按 Lv1 或 Lv0 部门筛选"
+                placeholder="部门查询"
+                className="h-8 pl-8 pr-8 text-xs"
+              />
+              {departmentValue && (
+                <button
+                  type="button"
+                  onClick={onClearDepartment}
+                  className="absolute right-2 top-1/2 inline-flex size-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  aria-label="清空部门筛选"
+                  title="清空"
+                >
+                  <X className="size-3" />
+                </button>
+              )}
+            </div>
             <div className="relative w-full max-w-[280px]">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input
                 value={searchValue}
                 onChange={(event) => onSearchValueChange(event.target.value)}
                 aria-label="按用户名或 ystId 查询"
+                placeholder="用户查询"
                 className="h-8 pl-8 pr-8 text-xs"
               />
               {searchValue && (
@@ -530,6 +561,7 @@ function UserListPage({
                   <tr>
                     <td colSpan={6} className="px-3 py-10 text-center text-muted-foreground">
                       {hasSearchKeyword ? "未找到匹配用户" : "当前时间范围内暂无活跃用户"}
+                      {hasDepartmentFilter ? `（部门：${departmentFilter}）` : ""}
                     </td>
                   </tr>
                 )}
@@ -749,12 +781,16 @@ export function DashboardView(): React.JSX.Element {
   const [commitDetails, setCommitDetails] = useState<DashboardCommitDetailsData | null>(null)
   const [commitDetailsLoading, setCommitDetailsLoading] = useState(false)
   const [commitDetailsError, setCommitDetailsError] = useState<string | null>(null)
+  const [commitDepartmentValue, setCommitDepartmentValue] = useState("")
+  const [commitDepartmentFilter, setCommitDepartmentFilter] = useState("")
   const [subPage, setSubPage] = useState<DashboardSubPage>({ kind: "main" })
   const [userList, setUserList] = useState<DashboardUserListData | null>(null)
   const [userListLoading, setUserListLoading] = useState(false)
   const [userListError, setUserListError] = useState<string | null>(null)
   const [userListSearchValue, setUserListSearchValue] = useState("")
   const [userListSearchKeyword, setUserListSearchKeyword] = useState("")
+  const [userListDepartmentValue, setUserListDepartmentValue] = useState("")
+  const [userListDepartmentFilter, setUserListDepartmentFilter] = useState("")
   const userListScopeRef = useRef("")
   const [userListAfterKey, setUserListAfterKey] = useState<
     Record<string, string | number> | undefined
@@ -987,22 +1023,25 @@ export function DashboardView(): React.JSX.Element {
     async (
       afterKey?: Record<string, string | number>,
       backStack: Array<Record<string, string | number> | undefined> = [],
-      keyword = ""
+      keyword = "",
+      upperOrgLv1 = userListDepartmentFilter
     ) => {
       setUserListLoading(true)
       setUserListError(null)
       const normalizedKeyword = keyword.trim()
+      const normalizedDepartment = upperOrgLv1.trim()
       try {
         const result = await window.api.dashboard.userList(range, {
           pageSize: USER_LIST_PAGE_SIZE,
           afterKey: afterKey ?? null,
-          keyword: normalizedKeyword || null
+          keyword: normalizedKeyword || null,
+          upperOrgLv1: normalizedDepartment || null
         })
         if (!result.success) throw new Error(result.error ?? "获取用户列表失败")
         setUserList(
           result.data ?? { items: [], pageSize: USER_LIST_PAGE_SIZE, totalActiveUsers: 0 }
         )
-        userListScopeRef.current = `${range.from}|${range.to}|${normalizedKeyword}`
+        userListScopeRef.current = `${range.from}|${range.to}|${normalizedKeyword}|${normalizedDepartment}`
         setUserListAfterKey(afterKey)
         setUserListBackStack(backStack)
       } catch (e) {
@@ -1011,7 +1050,7 @@ export function DashboardView(): React.JSX.Element {
         setUserListLoading(false)
       }
     },
-    [range]
+    [range, userListDepartmentFilter]
   )
 
   const loadUserDetail = useCallback(
@@ -1039,6 +1078,8 @@ export function DashboardView(): React.JSX.Element {
     setUserList(null)
     setUserListSearchValue("")
     setUserListSearchKeyword("")
+    setUserListDepartmentValue("")
+    setUserListDepartmentFilter("")
     setUserListAfterKey(undefined)
     setUserListBackStack([])
   }, [])
@@ -1060,34 +1101,56 @@ export function DashboardView(): React.JSX.Element {
     void loadUserList(
       userList.nextAfterKey,
       [...userListBackStack, userListAfterKey],
-      userListSearchKeyword
+      userListSearchKeyword,
+      userListDepartmentFilter
     )
   }, [
     loadUserList,
     userList?.nextAfterKey,
     userListAfterKey,
     userListBackStack,
-    userListSearchKeyword
+    userListSearchKeyword,
+    userListDepartmentFilter
   ])
 
   const handleUserListPrevious = useCallback(() => {
     if (userListBackStack.length === 0) return
     const nextStack = userListBackStack.slice(0, -1)
     const previousAfterKey = userListBackStack[userListBackStack.length - 1]
-    void loadUserList(previousAfterKey, nextStack, userListSearchKeyword)
-  }, [loadUserList, userListBackStack, userListSearchKeyword])
+    void loadUserList(previousAfterKey, nextStack, userListSearchKeyword, userListDepartmentFilter)
+  }, [loadUserList, userListBackStack, userListSearchKeyword, userListDepartmentFilter])
 
   const handleUserListSearch = useCallback(() => {
     const keyword = userListSearchValue.trim()
+    const upperOrgLv1 = userListDepartmentValue.trim()
     setUserList(null)
     setUserListAfterKey(undefined)
     setUserListBackStack([])
-    if (keyword === userListSearchKeyword) {
-      void loadUserList(undefined, [], keyword)
+    if (keyword === userListSearchKeyword && upperOrgLv1 === userListDepartmentFilter) {
+      void loadUserList(undefined, [], keyword, upperOrgLv1)
       return
     }
     setUserListSearchKeyword(keyword)
-  }, [loadUserList, userListSearchKeyword, userListSearchValue])
+    setUserListDepartmentFilter(upperOrgLv1)
+  }, [
+    loadUserList,
+    userListDepartmentFilter,
+    userListDepartmentValue,
+    userListSearchKeyword,
+    userListSearchValue
+  ])
+
+  const handleUserListDepartmentClear = useCallback(() => {
+    setUserListDepartmentValue("")
+    setUserList(null)
+    setUserListAfterKey(undefined)
+    setUserListBackStack([])
+    if (!userListDepartmentFilter) {
+      void loadUserList(undefined, [], userListSearchKeyword, "")
+      return
+    }
+    setUserListDepartmentFilter("")
+  }, [loadUserList, userListDepartmentFilter, userListSearchKeyword])
 
   const handleUserListSearchClear = useCallback(() => {
     setUserListSearchValue("")
@@ -1125,9 +1188,9 @@ export function DashboardView(): React.JSX.Element {
 
   useEffect(() => {
     if (subPage.kind === "user-list") {
-      const currentScope = `${range.from}|${range.to}|${userListSearchKeyword}`
+      const currentScope = `${range.from}|${range.to}|${userListSearchKeyword}|${userListDepartmentFilter}`
       if (!userList || userListScopeRef.current !== currentScope) {
-        void loadUserList(undefined, [], userListSearchKeyword)
+        void loadUserList(undefined, [], userListSearchKeyword, userListDepartmentFilter)
       }
     } else if (subPageDetailSapId) {
       void loadUserDetail(subPageDetailSapId, userDetailTracePage)
@@ -1140,22 +1203,31 @@ export function DashboardView(): React.JSX.Element {
     loadUserDetail,
     userList,
     userListSearchKeyword,
+    userListDepartmentFilter,
     userDetailTracePage
   ])
 
   const loadCommitDetails = useCallback(
-    async (targetRange: TimeRange, scopeLabel: string, page = 1, pushedOnly = false) => {
+    async (
+      targetRange: TimeRange,
+      scopeLabel: string,
+      page = 1,
+      pushedOnly = false,
+      upperOrgLv1 = commitDepartmentFilter
+    ) => {
       setCommitScopeLabel(scopeLabel)
       setCommitDetailsRange(targetRange)
       setCommitDialogOpen(true)
       setCommitDetails(null)
       setCommitDetailsError(null)
       setCommitDetailsLoading(true)
+      const normalizedDepartment = upperOrgLv1.trim()
       try {
         const result = await window.api.dashboard.commitDetails(targetRange, {
           page,
           pageSize: 20,
-          pushedOnly
+          pushedOnly,
+          upperOrgLv1: normalizedDepartment || null
         })
         if (!result.success) throw new Error(result.error ?? "获取 Commit 明细失败")
         setCommitDetails(result.data ?? { total: 0, page, pageSize: 20, pushedOnly, items: [] })
@@ -1165,16 +1237,28 @@ export function DashboardView(): React.JSX.Element {
         setCommitDetailsLoading(false)
       }
     },
-    []
+    [commitDepartmentFilter]
   )
 
   const reloadCommitDetails = useCallback(
-    (page: number, pushedOnly: boolean) => {
+    (page: number, pushedOnly: boolean, upperOrgLv1 = commitDepartmentFilter) => {
       if (!commitDetailsRange) return
-      void loadCommitDetails(commitDetailsRange, commitScopeLabel, page, pushedOnly)
+      void loadCommitDetails(commitDetailsRange, commitScopeLabel, page, pushedOnly, upperOrgLv1)
     },
-    [commitDetailsRange, commitScopeLabel, loadCommitDetails]
+    [commitDepartmentFilter, commitDetailsRange, commitScopeLabel, loadCommitDetails]
   )
+
+  const handleCommitDepartmentSearch = useCallback(() => {
+    const upperOrgLv1 = commitDepartmentValue.trim()
+    setCommitDepartmentFilter(upperOrgLv1)
+    reloadCommitDetails(1, commitDetails?.pushedOnly ?? false, upperOrgLv1)
+  }, [commitDepartmentValue, commitDetails?.pushedOnly, reloadCommitDetails])
+
+  const handleCommitDepartmentClear = useCallback(() => {
+    setCommitDepartmentValue("")
+    setCommitDepartmentFilter("")
+    reloadCommitDetails(1, commitDetails?.pushedOnly ?? false, "")
+  }, [commitDetails?.pushedOnly, reloadCommitDetails])
 
   const handleCommitExternalOpen = useCallback((url: string) => {
     if (!url) return
@@ -1182,15 +1266,22 @@ export function DashboardView(): React.JSX.Element {
   }, [])
 
   const handleCommitTotalClick = useCallback(() => {
+    setCommitDepartmentValue("")
+    setCommitDepartmentFilter("")
     void loadCommitDetails(
       range,
-      `当前范围 · ${formatRangeLabel(range.from, range.to, granularity)}`
+      `当前范围 · ${formatRangeLabel(range.from, range.to, granularity)}`,
+      1,
+      false,
+      ""
     )
   }, [loadCommitDetails, range, granularity])
 
   const handleCommitBucketClick = useCallback(
     (bucket: { from: string; to: string; label: string }) => {
-      void loadCommitDetails({ from: bucket.from, to: bucket.to }, `时间桶 · ${bucket.label}`)
+      setCommitDepartmentValue("")
+      setCommitDepartmentFilter("")
+      void loadCommitDetails({ from: bucket.from, to: bucket.to }, `时间桶 · ${bucket.label}`, 1, false, "")
     },
     [loadCommitDetails]
   )
@@ -1460,15 +1551,24 @@ export function DashboardView(): React.JSX.Element {
             canGoNext={Boolean(userList?.nextAfterKey)}
             onBack={() => setSubPage({ kind: "main" })}
             onRefresh={() =>
-              loadUserList(userListAfterKey, userListBackStack, userListSearchKeyword)
+              loadUserList(
+                userListAfterKey,
+                userListBackStack,
+                userListSearchKeyword,
+                userListDepartmentFilter
+              )
             }
             onPrevious={handleUserListPrevious}
             onNext={handleUserListNext}
             searchValue={userListSearchValue}
             searchKeyword={userListSearchKeyword}
+            departmentValue={userListDepartmentValue}
+            departmentFilter={userListDepartmentFilter}
             onSearchValueChange={setUserListSearchValue}
+            onDepartmentValueChange={setUserListDepartmentValue}
             onSearch={handleUserListSearch}
             onClearSearch={handleUserListSearchClear}
+            onClearDepartment={handleUserListDepartmentClear}
             onUserClick={(user) => openUserDetail(user.sapId, "user-list")}
           />
         </ScrollArea>
@@ -1568,6 +1668,10 @@ export function DashboardView(): React.JSX.Element {
         error={commitDetailsError}
         onPageChange={(page) => reloadCommitDetails(page, commitDetails?.pushedOnly ?? false)}
         onPushedOnlyChange={(pushedOnly) => reloadCommitDetails(1, pushedOnly)}
+        departmentValue={commitDepartmentValue}
+        onDepartmentValueChange={setCommitDepartmentValue}
+        onDepartmentSearch={handleCommitDepartmentSearch}
+        onClearDepartment={handleCommitDepartmentClear}
         onOpenExternal={handleCommitExternalOpen}
       />
     </div>

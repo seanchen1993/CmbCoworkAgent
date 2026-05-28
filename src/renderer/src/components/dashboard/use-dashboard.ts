@@ -143,6 +143,8 @@ export interface DashboardCommitDetail {
   sapId?: string
   ystId?: string
   orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
   userIp?: string
   repoPath?: string
   repositoryName?: string

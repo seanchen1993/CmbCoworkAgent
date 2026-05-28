@@ -140,6 +140,8 @@ interface DashboardCommitDetail {
   sapId?: string
   ystId?: string
   orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
   userIp?: string
   repoPath?: string
   repositoryName?: string
@@ -163,6 +165,7 @@ interface DashboardCommitDetailsOptions {
   page?: number
   pageSize?: number
   pushedOnly?: boolean
+  upperOrgLv1?: string | null
 }
 
 interface DashboardCodeStats {
@@ -242,6 +245,7 @@ interface DashboardUserListOptions {
   pageSize?: number
   afterKey?: Record<string, string | number> | null
   keyword?: string | null
+  upperOrgLv1?: string | null
 }
 
 interface DashboardUserDetailOptions {

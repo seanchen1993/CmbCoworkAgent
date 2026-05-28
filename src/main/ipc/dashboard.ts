@@ -11,6 +11,7 @@ import * as fs from "fs"
 import AdmZip from "adm-zip"
 import { buildTraceTree } from "../agent/trace/tree-builder"
 import type { AgentTrace, TraceNode, TraceTriggerSource } from "../agent/trace/types"
+import { getUserInfo } from "../storage"
 import { getSkillIdentifierLookupTerms } from "../utils/skill-identifiers"
 import {
   effectiveGeneratedLinesSumAgg,
@@ -151,6 +152,8 @@ interface DashboardCommitDetail {
   sapId?: string
   ystId?: string
   orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
   userIp?: string
   repoPath?: string
   repositoryName?: string
@@ -245,6 +248,7 @@ interface UserListOptions {
   pageSize?: number
   afterKey?: Record<string, string | number> | null
   keyword?: string | null
+  upperOrgLv1?: string | null
 }
 
 interface UserDetailOptions {
@@ -278,6 +282,15 @@ interface CommitDetailsOptions {
   page?: number
   pageSize?: number
   pushedOnly?: boolean
+  upperOrgLv1?: string | null
+}
+
+interface DashboardAccessContext {
+  loggedIn: boolean
+  unrestricted: boolean
+  sapId: string
+  ystId: string
+  upperOrgLv1: string
 }
 
 const DISLIKE_TYPE_OPTIONS = [
@@ -288,6 +301,79 @@ const DISLIKE_TYPE_OPTIONS = [
   { id: "unsafe", label: "包含不安全内容" },
   { id: "other", label: "其他原因" }
 ] as const
+
+const DASHBOARD_UNRESTRICTED_IDS_ENV = "VITE_DASHBOARD_UNRESTRICTED_YST_IDS"
+
+function splitEnvIds(value: string | undefined): Set<string> {
+  return new Set(
+    String(value || "")
+      .split(/[,\n;\s]+/)
+      .map((id) => id.trim())
+      .filter(Boolean)
+  )
+}
+
+function deriveDashboardUpperOrgLv1(pathName?: string): string {
+  const parts = typeof pathName === "string"
+    ? pathName.split("/").map((part) => part.trim()).filter(Boolean)
+    : []
+  const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
+  if (itDeptIndex < 0) return ""
+
+  const lowerParts = parts.slice(itDeptIndex + 1)
+  const startsWithTeam = lowerParts[0]?.includes("团队") ?? false
+  return startsWithTeam ? lowerParts[1] ?? "" : lowerParts[2] ?? ""
+}
+
+function getDashboardUnrestrictedIds(): Set<string> {
+  return splitEnvIds(import.meta.env[DASHBOARD_UNRESTRICTED_IDS_ENV] as string | undefined)
+}
+
+function getDashboardAccessContext(): DashboardAccessContext {
+  if (import.meta.env.DEV) {
+    return {
+      loggedIn: true,
+      unrestricted: true,
+      sapId: "dev",
+      ystId: "dev",
+      upperOrgLv1: ""
+    }
+  }
+
+  const userInfo = getUserInfo()
+  const sapId = userInfo?.sapId?.trim() ?? ""
+  const ystId = userInfo?.ystId?.trim() ?? ""
+  const loggedIn = Boolean(sapId || ystId)
+  const unrestrictedIds = getDashboardUnrestrictedIds()
+
+  return {
+    loggedIn,
+    unrestricted: loggedIn && [ystId, sapId].some((id) => Boolean(id && unrestrictedIds.has(id))),
+    sapId,
+    ystId,
+    upperOrgLv1: deriveDashboardUpperOrgLv1(userInfo?.pathName)
+  }
+}
+
+function requireDashboardAccess(): DashboardAccessContext {
+  const access = getDashboardAccessContext()
+  if (!access.loggedIn) throw new Error("请先登录后再查看运营面板")
+  return access
+}
+
+function buildNoAccessFilter(): Record<string, unknown> {
+  return { term: { traceId: "__dashboard_no_access__" } }
+}
+
+function buildTraceAccessFilter(access: DashboardAccessContext): Record<string, unknown> | null {
+  if (access.unrestricted) return null
+  if (!access.upperOrgLv1) return buildNoAccessFilter()
+  return buildUpperOrgLv1Filter(access.upperOrgLv1)
+}
+
+function appendOptionalFilter(filters: Record<string, unknown>[], filter: Record<string, unknown> | null): void {
+  if (filter) filters.push(filter)
+}
 
 function getCalendarInterval(granularity: Granularity, from: string, to: string): string {
   if (granularity === "day") return "hour"
@@ -564,7 +650,8 @@ function normalizeCommitDetailsOptions(value?: number | CommitDetailsOptions): R
     return {
       page: 1,
       pageSize: clampLimit(value, 20, 500),
-      pushedOnly: false
+      pushedOnly: false,
+      upperOrgLv1: null
     }
   }
 
@@ -573,15 +660,17 @@ function normalizeCommitDetailsOptions(value?: number | CommitDetailsOptions): R
   return {
     page,
     pageSize,
-    pushedOnly: value?.pushedOnly === true
+    pushedOnly: value?.pushedOnly === true,
+    upperOrgLv1: normalizeUpperOrgLv1Option(value?.upperOrgLv1)
   }
 }
 
 function normalizeUserListOptions(value?: UserListOptions): Required<
-  Omit<UserListOptions, "afterKey" | "keyword">
+  Omit<UserListOptions, "afterKey" | "keyword" | "upperOrgLv1">
 > & {
   afterKey?: Record<string, string | number>
   keyword: string
+  upperOrgLv1: string | null
 } {
   const pageSize = clampLimit(value?.pageSize, 20, 100)
   const rawAfterKey = value?.afterKey
@@ -594,9 +683,11 @@ function normalizeUserListOptions(value?: UserListOptions): Required<
         )
       : undefined
   const keyword = typeof value?.keyword === "string" ? value.keyword.trim().slice(0, 100) : ""
+  const upperOrgLv1 = normalizeUpperOrgLv1Option(value?.upperOrgLv1)
   return {
     pageSize,
     keyword,
+    upperOrgLv1,
     ...(afterKey && Object.keys(afterKey).length > 0 ? { afterKey } : {})
   }
 }
@@ -839,6 +930,8 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
     sapId: asOptionalString(source.sapId),
     ystId: asOptionalString(source.ystId),
     orgName: asOptionalString(source.orgName),
+    upperOrgLv0: asOptionalString(source.upperOrgLv0),
+    upperOrgLv1: asOptionalString(source.upperOrgLv1),
     userIp: asOptionalString(source.userIp),
     repoPath: asOptionalString(properties.repoPath),
     repositoryName: asOptionalString(properties.repositoryName),
@@ -911,6 +1004,8 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
 // ─────────────────────────────────────────────────────────
 
 async function fetchOverview(range: TimeRange, granularity: Granularity): Promise<unknown> {
+  const access = requireDashboardAccess()
+  const traceAccessFilter = buildTraceAccessFilter(access)
   const interval = getCalendarInterval(granularity, range.from, range.to)
   const rankingTopSize = 20
   const rankingSearchSize = 1000
@@ -928,7 +1023,7 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
   ]
   const traceBody = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+    query: { bool: { filter: [timeRangeFilter("startedAt", range), ...(traceAccessFilter ? [traceAccessFilter] : [])] } },
     aggs: {
       total_calls:        { value_count: { field: "traceId" } },
       active_users:       { cardinality: { field: "sapId" } },
@@ -1089,10 +1184,12 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
 }
 
 async function fetchModelStats(range: TimeRange, granularity: Granularity): Promise<unknown> {
+  const access = requireDashboardAccess()
+  const traceAccessFilter = buildTraceAccessFilter(access)
   void granularity
   const body = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+    query: { bool: { filter: [timeRangeFilter("startedAt", range), ...(traceAccessFilter ? [traceAccessFilter] : [])] } },
     aggs: {
       by_model: {
         terms: { field: "modelName", size: 30 },
@@ -1114,6 +1211,22 @@ async function fetchModelStats(range: TimeRange, granularity: Granularity): Prom
 
 function buildUpperOrgLv1Filter(upperOrgLv1: string): Record<string, unknown> {
   return { term: { upperOrgLv1 } }
+}
+
+function buildOrgLevelMatchFilter(orgLevel: string): Record<string, unknown> {
+  const escaped = escapeWildcard(orgLevel)
+  const wildcardPattern = `*${escaped}*`
+  return {
+    bool: {
+      should: ["upperOrgLv1", "upperOrgLv0"].flatMap((field) => [
+        { term: { [field]: orgLevel } },
+        { term: { [`${field}.keyword`]: orgLevel } },
+        { wildcard: { [field]: wildcardPattern } },
+        { wildcard: { [`${field}.keyword`]: wildcardPattern } }
+      ]),
+      minimum_should_match: 1
+    }
+  }
 }
 
 function normalizeUpperOrgLv1Option(upperOrgLv1?: string | null): string | null {
@@ -1156,9 +1269,11 @@ function buildOrgDistributionAgg(
 }
 
 async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?: UserStatsOptions): Promise<unknown> {
+  const access = requireDashboardAccess()
   void granularity
   const selectedUpperOrgLv1 = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
-  const queryFilters = [timeRangeFilter("startedAt", range)]
+  const queryFilters = [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter()]
+  appendOptionalFilter(queryFilters, buildTraceAccessFilter(access))
   if (selectedUpperOrgLv1 !== null) {
     queryFilters.push(buildUpperOrgLv1Filter(selectedUpperOrgLv1))
   }
@@ -1252,12 +1367,21 @@ function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUser
 }
 
 async function fetchUserList(range: TimeRange, options?: UserListOptions): Promise<DashboardUserListData> {
-  const { pageSize, afterKey, keyword } = normalizeUserListOptions(options)
+  const access = requireDashboardAccess()
+  const { pageSize, afterKey, keyword, upperOrgLv1 } = normalizeUserListOptions(options)
   const offsetValue = Number(afterKey?.offset ?? 0)
   const offset = Number.isFinite(offsetValue) && offsetValue > 0 ? Math.floor(offsetValue) : 0
   const aggregationSize = Math.min(offset + pageSize, 10_000)
   const shardSize = Math.min(Math.max(aggregationSize * 3, 100), 50_000)
-  const filters = [timeRangeFilter("startedAt", range), buildNonEmptySapIdFilter()]
+  const filters = [
+    timeRangeFilter("startedAt", range),
+    buildChatTriggeredTraceFilter(),
+    buildNonEmptySapIdFilter()
+  ]
+  appendOptionalFilter(filters, buildTraceAccessFilter(access))
+  if (upperOrgLv1 !== null) {
+    filters.push(buildOrgLevelMatchFilter(upperOrgLv1))
+  }
   const searchFilter = buildUserListSearchFilter(keyword)
   if (searchFilter) filters.push(searchFilter)
 
@@ -1340,6 +1464,7 @@ async function fetchUserDetail(
   range: TimeRange,
   options?: UserDetailOptions
 ): Promise<DashboardUserDetail> {
+  const access = requireDashboardAccess()
   const normalizedSapId = sapId.trim()
   if (!normalizedSapId) throw new Error("sapId is required")
   const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
@@ -1353,6 +1478,7 @@ async function fetchUserDetail(
       bool: {
         filter: [
           timeRangeFilter("startedAt", range),
+          ...(buildTraceAccessFilter(access) ? [buildTraceAccessFilter(access)!] : []),
           { term: { sapId: normalizedSapId } }
         ]
       }
@@ -1377,28 +1503,7 @@ async function fetchUserDetail(
       by_outcome: { terms: { field: "outcome", size: 10 } }
     },
     _source: {
-      includes: [
-        "_raw",
-        "traceId",
-        "threadId",
-        "startedAt",
-        "endedAt",
-        "durationMs",
-        "userMessage",
-        "sapId",
-        "ystId",
-        "userName",
-        "orgName",
-        "userIp",
-        "modelId",
-        "modelName",
-        "outcome",
-        "totalToolCalls",
-        "totalInputTokens",
-        "totalOutputTokens",
-        "totalTokens",
-        "usedSkills"
-      ]
+      includes: dashboardTraceSourceIncludes()
     }
   }
 
@@ -1439,6 +1544,8 @@ async function fetchSkillUsageSummary(
   granularity: Granularity,
   skillNames?: string[]
 ): Promise<unknown> {
+  const access = requireDashboardAccess()
+  const traceAccessFilter = buildTraceAccessFilter(access)
   void granularity
   // 模式 A：前端传入技能名列表，使用 filters 精确按“技能维度”统计。
   // 这样可以直接得到每个技能的用户数，避免按版本桶二次合并带来的误差。
@@ -1449,7 +1556,7 @@ async function fetchSkillUsageSummary(
     )
     const body = {
       size: 0,
-      query: { bool: { filter: [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter()] } },
+      query: { bool: { filter: [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter(), ...(traceAccessFilter ? [traceAccessFilter] : [])] } },
       aggs: {
         by_skill: {
           filters: { filters },
@@ -1470,7 +1577,7 @@ async function fetchSkillUsageSummary(
   // 模式 B：兼容旧调用方，保留 terms 聚合结构。
   const body = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter()] } },
+    query: { bool: { filter: [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter(), ...(traceAccessFilter ? [traceAccessFilter] : [])] } },
     aggs: {
       by_skill: {
         terms: { field: "usedSkills", size: 1000 },
@@ -1488,6 +1595,8 @@ async function fetchSkillUserStats(
   granularity: Granularity,
   skillName: string
 ): Promise<unknown> {
+  const access = requireDashboardAccess()
+  const traceAccessFilter = buildTraceAccessFilter(access)
   void granularity
   const escapedSkillName = escapeWildcard(skillName)
   const wildcardPattern = `${escapedSkillName}**`
@@ -1499,6 +1608,7 @@ async function fetchSkillUserStats(
         must: [
           timeRangeFilter("startedAt", range),
           buildChatTriggeredTraceFilter(),
+          ...(traceAccessFilter ? [traceAccessFilter] : []),
           { exists: { field: "ystId" } },
           { bool: { must_not: { term: { ystId: "" } } } }
         ],
@@ -1523,7 +1633,13 @@ async function fetchSkillUserStats(
           filtered: {
             filter: {
               bool: {
-                must: [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter(), skillFilter, buildEmptyYstIdFilter()]
+                must: [
+                  timeRangeFilter("startedAt", range),
+                  buildChatTriggeredTraceFilter(),
+                  ...(traceAccessFilter ? [traceAccessFilter] : []),
+                  skillFilter,
+                  buildEmptyYstIdFilter()
+                ]
               }
             }
           }
@@ -1543,6 +1659,7 @@ async function fetchSkillUserStats(
 }
 
 async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
+  const access = requireDashboardAccess()
   const sanitizedSapIds = Array.from(
     new Set(
       sapIds
@@ -1575,6 +1692,7 @@ async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
     query: {
       bool: {
         filter: [
+          ...(buildTraceAccessFilter(access) ? [buildTraceAccessFilter(access)!] : []),
           {
             bool: {
               should: includeShouldFilters,
@@ -1610,15 +1728,17 @@ async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
 }
 
 async function fetchProductivity(range: TimeRange, granularity: Granularity): Promise<unknown> {
+  requireDashboardAccess()
   const interval = getCalendarInterval(granularity, range.from, range.to)
+  const filters = [
+    timeRangeFilter("eventTime", range),
+    { term: { "eventName": "git.commit.created" } }
+  ]
   const body = {
     size: 0,
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("eventTime", range),
-          { term: { "eventName": "git.commit.created" } }
-        ]
+        filter: filters
       }
     },
     aggs: {
@@ -1636,6 +1756,7 @@ async function fetchProductivity(range: TimeRange, granularity: Granularity): Pr
 }
 
 async function fetchFeedback(range: TimeRange, granularity: Granularity): Promise<unknown> {
+  requireDashboardAccess()
   const interval = getCalendarInterval(granularity, range.from, range.to)
   const dislikeTypeFilters = Object.fromEntries(
     DISLIKE_TYPE_OPTIONS.map((item) => [
@@ -1663,9 +1784,9 @@ async function fetchFeedback(range: TimeRange, granularity: Granularity): Promis
     size: 0,
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("eventTime", range),
-          {
+          filter: [
+            timeRangeFilter("eventTime", range),
+            {
             terms: {
               eventName: [
                 "message.feedback.like",
@@ -1749,6 +1870,7 @@ async function fetchSkillRecentTraces(
   mode: TraceViewMode = "trace",
   triggerScope: TraceTriggerScope = "active"
 ): Promise<{ traces: DashboardTraceDetail[]; total: number; page: number; pageSize: number; mode: TraceViewMode }> {
+  const access = requireDashboardAccess()
   const normalizedMode = normalizeTraceViewMode(mode)
   const normalizedTriggerScope = normalizeTraceTriggerScope(triggerScope)
   const size = clampLimit(limit, 10, normalizedMode === "thread" ? 30 : 50)
@@ -1757,6 +1879,7 @@ async function fetchSkillRecentTraces(
     timeRangeFilter("startedAt", range),
     buildSkillUsageWildcardFilter(skill)
   ]
+  appendOptionalFilter(filters, buildTraceAccessFilter(access))
   if (normalizedTriggerScope === "active") {
     filters.splice(1, 0, buildChatTriggeredTraceFilter())
   }
@@ -1836,6 +1959,7 @@ async function fetchSkillRecentTraces(
 }
 
 async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<DashboardCodeStats> {
+  requireDashboardAccess()
   const skillTerms = getSkillIdentifierLookupTerms(skill)
   const codeGenFilters: Record<string, unknown>[] = [
     { term: { eventName: "code_gen" } },
@@ -1924,13 +2048,17 @@ async function fetchCommitDetails(
   range: TimeRange,
   options?: number | CommitDetailsOptions
 ): Promise<{ total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }> {
-  const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
+  requireDashboardAccess()
+  const { page, pageSize, pushedOnly, upperOrgLv1 } = normalizeCommitDetailsOptions(options)
   const filters: Record<string, unknown>[] = [
     timeRangeFilter("eventTime", range),
     { term: { eventName: "git.commit.created" } }
   ]
   if (pushedOnly) {
     filters.push({ term: { "properties.pushed": true } })
+  }
+  if (upperOrgLv1 !== null) {
+    filters.push(buildOrgLevelMatchFilter(upperOrgLv1))
   }
   const body = {
     track_total_hits: true,
@@ -1952,6 +2080,8 @@ async function fetchCommitDetails(
         "sapId",
         "ystId",
         "orgName",
+        "upperOrgLv0",
+        "upperOrgLv1",
         "properties.repoPath",
         "properties.repositoryName",
         "properties.repositoryFullName",
@@ -2571,9 +2701,16 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
 }
 
 function makeMockUserList(_range: TimeRange, options?: UserListOptions): DashboardUserListData {
-  const { pageSize, afterKey, keyword } = normalizeUserListOptions(options)
+  const { pageSize, afterKey, keyword, upperOrgLv1 } = normalizeUserListOptions(options)
   const normalizedKeyword = keyword.toLowerCase()
+  const normalizedUpperOrgLv1 = upperOrgLv1?.toLowerCase() ?? null
   const allUsers = Array.from({ length: 64 }, (_, index) => makeMockDashboardUser(index)).filter((user) => {
+    if (
+      normalizedUpperOrgLv1 !== null &&
+      ![user.upperOrgLv1, user.upperOrgLv0].some((value) =>
+        String(value || "").toLowerCase().includes(normalizedUpperOrgLv1)
+      )
+    ) return false
     if (!normalizedKeyword) return true
     return [user.userName, user.ystId, user.sapId].some((value) =>
       String(value || "").toLowerCase().includes(normalizedKeyword)
@@ -3034,7 +3171,7 @@ function makeMockCommitDetails(
   range: TimeRange,
   options?: number | CommitDetailsOptions
 ): { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] } {
-  const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
+  const { page, pageSize, pushedOnly, upperOrgLv1 } = normalizeCommitDetailsOptions(options)
   const from = new Date(range.from)
   const to = new Date(range.to)
   const spanMs = Math.max(60_000, to.getTime() - from.getTime())
@@ -3050,6 +3187,8 @@ function makeMockCommitDetails(
       sapId: `100100${String(index + 1).padStart(2, "0")}`,
       ystId: `2743${String(50 + index).padStart(2, "0")}`,
       orgName: ["科技部", "零售一部", "风险管理部"][index % 3],
+      upperOrgLv1: ["信息研发部", "零售金融部", "风险平台部"][index % 3],
+      upperOrgLv0: index % 4 === 0 ? "" : ["架构工具组", "渠道研发组", "风控研发组"][index % 3],
       userIp: `10.0.0.${20 + index}`,
       repoPath: `/Users/demo/projects/${repoName}`,
       repositoryName: repoName,
@@ -3069,7 +3208,17 @@ function makeMockCommitDetails(
       skillCount: index % 2 === 0 ? 1 : 2
     }
   })
-  const filteredItems = pushedOnly ? allItems.filter((item) => item.pushed) : allItems
+  const filteredItems = allItems.filter((item) => {
+    if (pushedOnly && !item.pushed) return false
+    if (upperOrgLv1 !== null) {
+      const normalizedUpperOrgLv1 = upperOrgLv1.toLowerCase()
+      const orgMatched = [item.upperOrgLv1, item.upperOrgLv0].some((value) =>
+        String(value || "").toLowerCase().includes(normalizedUpperOrgLv1)
+      )
+      if (!orgMatched) return false
+    }
+    return true
+  })
   const start = (page - 1) * pageSize
   return {
     total: filteredItems.length,
@@ -3086,7 +3235,7 @@ function makeMockCommitDetails(
 
 export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle("dashboard:isAllowed", async () => {
-    return true
+    return getDashboardAccessContext().loggedIn
   })
 
   _ipcMain.handle(
