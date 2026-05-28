@@ -1702,7 +1702,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         })
       }
 
-      const humanMessage = new HumanMessage(effectiveMessage)
+      const humanMessage = userMessageId
+        ? new HumanMessage({ content: effectiveMessage, id: userMessageId })
+        : new HumanMessage(effectiveMessage)
       const streamConfig = {
         configurable: { thread_id: threadId },
         signal: abortController.signal,

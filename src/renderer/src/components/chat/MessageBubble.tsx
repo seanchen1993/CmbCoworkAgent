@@ -3,7 +3,7 @@ import { ToolCallRenderer } from "./ToolCallRenderer";
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { getToolLabel } from "@/lib/tool-labels"
 import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { ChevronDown, ChevronRight, Eye, Wrench, Copy, Check, PencilLine, ThumbsUp, ThumbsDown, Smile, Frown } from "lucide-react"
 import { toast } from "sonner"
 import {
@@ -15,9 +15,11 @@ import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 
 function formatResponseDuration(ms?: number): string | null {
   if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return null
-  if (ms < 1000) return `${Math.round(ms)}ms`
   const seconds = ms / 1000
-  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`
+  if (seconds < 60) {
+    const precision = seconds < 10 ? 1 : 0
+    return `${Number(seconds.toFixed(precision))}s`
+  }
   const minutes = Math.floor(seconds / 60)
   const remainingSeconds = Math.round(seconds % 60)
   return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`
@@ -152,6 +154,7 @@ interface MessageBubbleProps {
   threadId: string
   isLoading: boolean
   assistantDurationMs?: number
+    durationMap?: any
 }
 
 export function MessageBubble({
@@ -166,7 +169,7 @@ export function MessageBubble({
   onEditUserMessage,
   threadId,
   isLoading,
-  assistantDurationMs
+   durationMap
 }: MessageBubbleProps): React.JSX.Element | null {
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
@@ -180,6 +183,17 @@ export function MessageBubble({
 
   // 判断是否显示 MessageHead：如果当前不是用户消息，且是第一条非用户消息
   const shouldShowMessageHead = !isUser && (!previousMessage || previousMessage.role === "user")
+
+  const duration = useMemo(()=>{
+    console.log('haha start')
+    if (shouldShowMessageHead && durationMap?.length && previousMessage?.id){
+      console.log('haha ===:','当前threadid：',threadId, '上一个消息', previousMessage, 'durationMap:',durationMap)
+        const target = durationMap.find(it => it.thread_id === threadId && previousMessage.id === it.user_id)
+       console.log('haha target', target)
+       return target?.duration
+    }
+    return 0
+  },[durationMap, threadId, message, previousMessage, shouldShowMessageHead])
 
   // 切换工具调用详情的展开状态
   const toggleToolExpansion = (toolId: string, defaultExpanded = false) => {
@@ -413,7 +427,7 @@ export function MessageBubble({
             <circle cx="76" cy="34" r="2.5" fill="#00e5cc" />
           </svg>
           <span className="text-xs font-medium text-muted-foreground">CMBDevClaw</span>
-          <AssistantResponseDuration durationMs={assistantDurationMs} />
+          <AssistantResponseDuration durationMs={duration} />
         </div>
       )}
       <div className="flex-1 min-w-0 space-y-2 overflow-hidden pl-7">
