@@ -24,14 +24,13 @@ import {
   HookOnBlockConfig,
   HookType,
   PromptHookFallback,
-  HookUpsert
+  HookUpsert,
+  getTimeoutBounds
 } from "../hooks/types"
 
 const VALID_EVENTS = new Set<HookEvent>(SUPPORTED_HOOK_EVENTS)
 const VALID_TYPES = new Set<HookType>(["command", "prompt"])
 const VALID_FALLBACKS = new Set<PromptHookFallback>(["allow", "block"])
-const TIMEOUT_MIN = 1_000
-const TIMEOUT_MAX = 60_000
 
 function validateOnBlockConfig(onBlock: HookOnBlockConfig | undefined): void {
   if (onBlock === undefined) return
@@ -79,8 +78,17 @@ function validateHookConfig(config: HookUpsert): void {
 
   if (config.timeout !== undefined) {
     const t = config.timeout
-    if (!Number.isInteger(t) || t < TIMEOUT_MIN || t > TIMEOUT_MAX) {
-      throw new Error(`超时时间必须在 ${TIMEOUT_MIN}ms 到 ${TIMEOUT_MAX}ms 之间`)
+    // PR-13a: bounds depend on handler type + (future) async flag. The async
+    // field doesn't exist on HookUpsert yet (PR-15 adds it); read defensively
+    // so this code keeps working unchanged when that lands.
+    const isAsync = (config as { async?: boolean }).async === true
+    const bounds = getTimeoutBounds(config.type, isAsync)
+    if (!Number.isInteger(t) || t < bounds.min || t > bounds.max) {
+      throw new Error(
+        `超时时间必须在 ${bounds.min}ms 到 ${bounds.max}ms 之间（${config.type ?? "command"}${
+          isAsync ? "/async" : "/sync"
+        }）`
+      )
     }
   }
 

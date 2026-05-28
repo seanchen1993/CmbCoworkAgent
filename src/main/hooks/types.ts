@@ -208,6 +208,58 @@ export interface HookEnv {
   AGENT_ID?: string // subagent id when the hook fires inside a subagent run
 }
 
+// ── PR-13a: handler-type-aware timeout bounds ────────────────────────────────
+// Replaces the old hardcoded 1s–60s clip in ipc/hooks.ts. Different handler
+// types and sync/async modes have legitimately different upper bounds — HTTP
+// gateways and long-running background scans need more headroom than a sync
+// command. Centralised here so PR-14 (http) and PR-15 (async) just look up the
+// table when they add their type/flag instead of touching validation each time.
+export interface TimeoutBound {
+  /** Inclusive lower bound in milliseconds. */
+  min: number
+  /** Inclusive upper bound in milliseconds. */
+  max: number
+  /** Default applied when the user does not set a timeout. */
+  default: number
+}
+
+/**
+ * Per-handler bounds, separated by sync vs. async mode. Sync rows are the only
+ * configurations reachable today; async rows are reserved for PR-15 (async
+ * config field). Types added in later PRs (http, agent) extend this record
+ * alongside their schema change — keeping declarations in lock-step.
+ */
+export const HOOK_TIMEOUT_BOUNDS = {
+  command: {
+    sync: { min: 1_000, max: 60_000, default: 10_000 },
+    async: { min: 1_000, max: 300_000, default: 60_000 }
+  },
+  prompt: {
+    sync: { min: 1_000, max: 60_000, default: 10_000 },
+    async: { min: 1_000, max: 300_000, default: 60_000 }
+  }
+} satisfies Record<HookType, { sync: TimeoutBound; async: TimeoutBound }>
+
+/**
+ * Look up the bounds for a given hook type + async flag. Returns a permissive
+ * fallback for unknown / future types so an out-of-date validator never
+ * accidentally rejects a hook a newer code path produced. Validation callers
+ * still check `min ≤ timeout ≤ max`; the fallback's wide range means future
+ * types pass through until their own row is added.
+ */
+export function getTimeoutBounds(
+  type: HookType | string | undefined,
+  async: boolean | undefined
+): TimeoutBound {
+  const mode = async ? "async" : "sync"
+  const row = (HOOK_TIMEOUT_BOUNDS as Record<string, { sync: TimeoutBound; async: TimeoutBound }>)[
+    type ?? "command"
+  ]
+  if (row) return row[mode]
+  // Unknown type — permissive defaults consistent with the widest current row.
+  return { min: 1_000, max: 600_000, default: 10_000 }
+}
+
 export interface HookUpsert {
   event: HookEvent
   matcher?: string

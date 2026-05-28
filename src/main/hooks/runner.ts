@@ -4,13 +4,23 @@ import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import type { HookConfig, HookEvent, HookResult } from "./types"
+import { getTimeoutBounds } from "./types"
 import type { PluginHookMetadata, SkillHookMetadata } from "../types"
 import { joinHookText } from "./text"
 import { mergeUpdatedInput } from "./updated-input"
 import { getCustomModelConfigs, getHookLoggingConfig } from "../storage"
 import { persistHookResultRecord } from "./log-record"
 
-const DEFAULT_TIMEOUT = 10_000
+/**
+ * Resolve the effective timeout (ms) for a hook by consulting the handler-type
+ * and async-aware bounds table. Falls back to the hook's own `timeout` when set
+ * and within bounds; otherwise uses the type-specific default. Centralised so
+ * commandHook / promptHook / future http/agent hook paths all agree.
+ */
+function getEffectiveTimeout(hook: HookConfig): number {
+  const bounds = getTimeoutBounds(hook.type, (hook as { async?: boolean }).async === true)
+  return hook.timeout ?? bounds.default
+}
 const MAX_OUTPUT_BYTES = 1_000_000 // 1 MB per hook
 const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
@@ -349,7 +359,7 @@ function executeCommandHook(
       return
     }
 
-    const timeout = hook.timeout ?? DEFAULT_TIMEOUT
+    const timeout = getEffectiveTimeout(hook)
     const isWindows = process.platform === "win32"
     const cmd = isWindows ? command : "/bin/sh"
     const args = isWindows ? [] : ["-c", command]
@@ -589,7 +599,7 @@ async function executePromptHook(
     return fallbackResult("[PromptHook] No policy text configured")
   }
 
-  const timeout = hook.timeout ?? DEFAULT_TIMEOUT
+  const timeout = getEffectiveTimeout(hook)
   const model = getPromptHookModel(hook.modelId, timeout)
   if (!model) {
     return fallbackResult("[PromptHook] No model configured — cannot evaluate prompt hook")
