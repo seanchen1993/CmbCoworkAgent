@@ -36,6 +36,7 @@ import type {
   TraceNode,
   TraceNodeStatus,
   TraceOutcome,
+  TraceTriggerSource,
   ITraceReporter,
   RoutingTrace
 } from "./types"
@@ -143,7 +144,9 @@ function pruneOldTraces(threadId: string): void {
 function normalizeTrace(parsed: AgentTrace): AgentTrace {
   return {
     ...parsed,
-    usedSkills: Array.isArray(parsed.usedSkills) ? parsed.usedSkills : []
+    usedSkills: Array.isArray(parsed.usedSkills) ? parsed.usedSkills : [],
+    evolvedSkills: Array.isArray(parsed.evolvedSkills) ? parsed.evolvedSkills : [],
+    triggerSource: parsed.triggerSource ?? "chat"
   }
 }
 
@@ -199,9 +202,11 @@ export class TraceCollector {
   private modelId: string
   private modelName: string | undefined
   private routingTrace: RoutingTrace | undefined
+  private readonly triggerSource: TraceTriggerSource
 
   private steps: TraceStep[] = []
   private usedSkills: string[] = []
+  private evolvedSkills: string[] = []
   private modelCalls: TraceModelCall[] = []
   private nodes: TraceNode[] = []
   private nodeIndexById = new Map<string, number>()
@@ -215,11 +220,17 @@ export class TraceCollector {
   private currentStepStartedAt: string = nowIsoLocal()
   private currentToolCalls: TraceToolCall[] = []
 
-  constructor(threadId: string, userMessage: string, modelId: string) {
+  constructor(
+    threadId: string,
+    userMessage: string,
+    modelId: string,
+    options: { triggerSource?: TraceTriggerSource } = {}
+  ) {
     this.traceId = uuid()
     this.threadId = threadId
     this.userMessage = userMessage
     this.modelId = modelId
+    this.triggerSource = options.triggerSource ?? "chat"
     this.startedAt = nowIsoLocal()
     this.rootNodeId = `trace:${this.traceId}`
     this.pushNode({
@@ -233,7 +244,8 @@ export class TraceCollector {
       metadata: {
         traceId: this.traceId,
         threadId: this.threadId,
-        modelId: this.modelId
+        modelId: this.modelId,
+        triggerSource: this.triggerSource
       }
     })
     // Publish context to adoption tracker (side-effect only)
@@ -304,6 +316,15 @@ export class TraceCollector {
       })
     } catch {
       // ignore
+    }
+  }
+
+  /** Set which used skills came from cloud trace evolution. */
+  setEvolvedSkills(skills: string[]): void {
+    this.evolvedSkills = [...skills]
+    const root = this.getNode(this.rootNodeId)
+    if (root) {
+      root.metadata = { ...(root.metadata ?? {}), evolvedSkills: [...skills] }
     }
   }
 
@@ -502,15 +523,14 @@ export class TraceCollector {
     const durationMs = Date.now() - new Date(this.startedAt).getTime()
     const totalToolCalls = this.steps.reduce((sum, s) => sum + s.toolCalls.length, 0)
 
-    // Resolve skill versions and merge into "name-version" format
-    let usedSkillsWithVersions = this.usedSkills
-    if (this.usedSkills.length > 0) {
+    const resolveSkillVersions = async (skills: string[]): Promise<string[]> => {
+      if (skills.length === 0) return []
       try {
         const allSkills = await listAllSkills()
         const skillVersionMap = new Map(allSkills.map((s) => [s.name, s.version]))
-        usedSkillsWithVersions = Array.from(
+        return Array.from(
           new Set(
-            this.usedSkills
+            skills
               .map((skill) => {
                 const parsed = parseSkillIdentifier(skill)
                 const listedVersion = skillVersionMap.get(parsed.name)
@@ -528,15 +548,19 @@ export class TraceCollector {
         )
       } catch (e) {
         console.warn("[Tracer] Failed to resolve skill versions:", e)
-        usedSkillsWithVersions = Array.from(
+        return Array.from(
           new Set(
-            this.usedSkills
+            skills
               .map((skill) => ensureVersionedSkillIdentifier(skill))
               .filter(Boolean)
           )
         )
       }
     }
+
+    // Resolve skill versions and merge into "name-version" format
+    const usedSkillsWithVersions = await resolveSkillVersions(this.usedSkills)
+    const evolvedSkillsWithVersions = await resolveSkillVersions(this.evolvedSkills)
 
     const userInfo = getUserInfo()
     const upperOrgLevels = deriveUpperOrgLevels(userInfo?.pathName)
@@ -564,11 +588,19 @@ export class TraceCollector {
       appVersion: getAppVersionForTrace(),
       steps: this.steps,
       modelCalls: this.modelCalls,
-      nodes: this.finalizeNodes(outcome, endedAt, usedSkillsWithVersions, errorMessage),
+      nodes: this.finalizeNodes(
+        outcome,
+        endedAt,
+        usedSkillsWithVersions,
+        evolvedSkillsWithVersions,
+        errorMessage
+      ),
       totalToolCalls,
       outcome,
       ...(errorMessage ? { errorMessage } : {}),
       usedSkills: usedSkillsWithVersions,
+      evolvedSkills: evolvedSkillsWithVersions,
+      triggerSource: this.triggerSource,
       ...(this.routingTrace ? { metadata: { routingTrace: this.routingTrace } } : {})
     }
 
@@ -593,7 +625,13 @@ export class TraceCollector {
     return trace
   }
 
-  private finalizeNodes(outcome: TraceOutcome, endedAt: string, resolvedUsedSkills: string[], errorMessage?: string): TraceNode[] {
+  private finalizeNodes(
+    outcome: TraceOutcome,
+    endedAt: string,
+    resolvedUsedSkills: string[],
+    resolvedEvolvedSkills: string[],
+    errorMessage?: string
+  ): TraceNode[] {
     for (const node of this.nodes) {
       if (node.type === "llm" || node.type === "tool") {
         if (node.status === "running") {
@@ -642,7 +680,9 @@ export class TraceCollector {
       }
       root.metadata = {
         ...(root.metadata ?? {}),
-        usedSkills: [...resolvedUsedSkills]
+        usedSkills: [...resolvedUsedSkills],
+        evolvedSkills: [...resolvedEvolvedSkills],
+        triggerSource: this.triggerSource
       }
     }
 

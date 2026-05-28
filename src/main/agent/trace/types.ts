@@ -142,6 +142,8 @@ export interface RoutingTrace {
   layers: RoutingLayerRecord[]
 }
 
+export type TraceTriggerSource = RoutingTrace["taskSource"]
+
 /** How the agent's run ended. */
 export type TraceOutcome =
   | "success"   // Agent completed the task and said so
@@ -213,6 +215,10 @@ export interface AgentTrace {
   appVersion?: string
   /** Which skills were actually used during this run, format: "name-version" e.g. "scheduler-assistant-v1.0.0" */
   usedSkills: string[]
+  /** Used skills that were produced by the cloud trace evolver, same format as usedSkills. */
+  evolvedSkills: string[]
+  /** Source that triggered this trace. Missing values in older traces are treated as chat by dashboard queries. */
+  triggerSource: TraceTriggerSource
   /**
    * Optional free-form metadata.
    * Known keys:

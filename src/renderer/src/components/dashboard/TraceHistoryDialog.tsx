@@ -32,7 +32,13 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { TraceConversation, TraceThreadConversation, buildTraceConversation } from "@/components/trace/TraceConversation"
-import type { DashboardCodeStats, DashboardTraceDetail, DashboardTraceNode, DashboardTraceViewMode } from "./use-dashboard"
+import type {
+  DashboardCodeStats,
+  DashboardTraceDetail,
+  DashboardTraceNode,
+  DashboardTraceTriggerScope,
+  DashboardTraceViewMode
+} from "./use-dashboard"
 
 const EMPTY_NODES: DashboardTraceNode[] = []
 
@@ -627,6 +633,37 @@ function TraceViewModeToggle({
   )
 }
 
+function TraceTriggerScopeToggle({
+  value,
+  onChange
+}: {
+  value: DashboardTraceTriggerScope
+  onChange: (scope: DashboardTraceTriggerScope) => void
+}): React.JSX.Element {
+  return (
+    <div className="flex overflow-hidden rounded-md border border-border bg-background">
+      {([
+        ["active", "主动触发"],
+        ["all", "全部"]
+      ] as const).map(([scope, label]) => (
+        <button
+          key={scope}
+          type="button"
+          className={cn(
+            "h-7 px-2.5 text-[11px] font-medium transition-colors",
+            value === scope
+              ? "bg-primary text-primary-foreground"
+              : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+          )}
+          onClick={() => onChange(scope)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 export function TraceExplorer({
   traces,
   codeStats = null,
@@ -868,7 +905,9 @@ export function TraceHistoryDialog({
   tracePageSize = 10,
   totalTraces = traces.length,
   traceViewMode = "thread",
+  traceTriggerScope = "active",
   onTraceViewModeChange,
+  onTraceTriggerScopeChange,
   onTracePrevious,
   onTraceNext,
   onExportPage,
@@ -885,7 +924,9 @@ export function TraceHistoryDialog({
   tracePageSize?: number
   totalTraces?: number
   traceViewMode?: DashboardTraceViewMode
+  traceTriggerScope?: DashboardTraceTriggerScope
   onTraceViewModeChange?: (mode: DashboardTraceViewMode) => void
+  onTraceTriggerScopeChange?: (scope: DashboardTraceTriggerScope) => void
   onTracePrevious?: () => void
   onTraceNext?: () => void
   onExportPage?: () => void
@@ -916,6 +957,12 @@ export function TraceHistoryDialog({
           onViewModeChange={onTraceViewModeChange}
           headerRight={
             <div className="flex items-center gap-2">
+              {onTraceTriggerScopeChange && (
+                <TraceTriggerScopeToggle
+                  value={traceTriggerScope}
+                  onChange={onTraceTriggerScopeChange}
+                />
+              )}
               <Button
                 type="button"
                 variant="outline"

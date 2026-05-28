@@ -10,7 +10,7 @@ import { ipcMain, dialog, BrowserWindow } from "electron"
 import * as fs from "fs"
 import AdmZip from "adm-zip"
 import { buildTraceTree } from "../agent/trace/tree-builder"
-import type { AgentTrace, TraceNode } from "../agent/trace/types"
+import type { AgentTrace, TraceNode, TraceTriggerSource } from "../agent/trace/types"
 import { getSkillIdentifierLookupTerms } from "../utils/skill-identifiers"
 import {
   effectiveGeneratedLinesSumAgg,
@@ -137,6 +137,8 @@ interface DashboardTraceDetail {
   totalOutputTokens: number
   totalTokens: number
   usedSkills: string[]
+  evolvedSkills: string[]
+  triggerSource?: string
   nodes?: TraceNode[]
   rawAvailable: boolean
   rawError?: string
@@ -175,6 +177,7 @@ interface DashboardSkillDetail {
   tracePageSize: number
   totalTraces: number
   traceViewMode?: TraceViewMode
+  traceTriggerScope?: TraceTriggerScope
 }
 
 interface DashboardUserListItem {
@@ -251,6 +254,7 @@ interface UserDetailOptions {
 }
 
 type TraceViewMode = "thread" | "trace"
+type TraceTriggerScope = "active" | "all"
 
 interface TracePageOptions {
   page?: number
@@ -258,6 +262,7 @@ interface TracePageOptions {
   limit?: number
   mode?: TraceViewMode
   viewMode?: TraceViewMode
+  triggerScope?: TraceTriggerScope
 }
 
 interface DashboardTraceExportPayload {
@@ -511,6 +516,19 @@ function buildSkillUsageWildcardFilter(skillName: string): Record<string, unknow
   }
 }
 
+function buildChatTriggeredTraceFilter(): Record<string, unknown> {
+  return {
+    bool: {
+      should: [
+        { term: { triggerSource: "chat" } },
+        { term: { "triggerSource.keyword": "chat" } },
+        { bool: { must_not: { exists: { field: "triggerSource" } } } }
+      ],
+      minimum_should_match: 1
+    }
+  }
+}
+
 /**
  * 清洗技能名参数：
  * - 去重
@@ -535,6 +553,10 @@ function clampLimit(limit: number | undefined, fallback: number, max: number): n
 
 function normalizeTraceViewMode(value: unknown): TraceViewMode {
   return value === "trace" ? "trace" : "thread"
+}
+
+function normalizeTraceTriggerScope(value: unknown): TraceTriggerScope {
+  return value === "all" ? "all" : "active"
 }
 
 function normalizeCommitDetailsOptions(value?: number | CommitDetailsOptions): Required<CommitDetailsOptions> {
@@ -607,6 +629,17 @@ function asStringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string")
 }
 
+function normalizeTraceTriggerSource(value: unknown): TraceTriggerSource {
+  return (
+    value === "chat" ||
+    value === "heartbeat" ||
+    value === "scheduler_reminder" ||
+    value === "scheduler_action" ||
+    value === "memory_summarize" ||
+    value === "optimizer"
+  ) ? value : "chat"
+}
+
 function dashboardTraceSourceIncludes(): string[] {
   return [
     "_raw",
@@ -628,7 +661,9 @@ function dashboardTraceSourceIncludes(): string[] {
     "totalInputTokens",
     "totalOutputTokens",
     "totalTokens",
-    "usedSkills"
+    "usedSkills",
+    "evolvedSkills",
+    "triggerSource"
   ]
 }
 
@@ -702,7 +737,9 @@ function normalizeParsedTrace(trace: AgentTrace, source: Record<string, unknown>
     nodes: Array.isArray(candidate.nodes) ? candidate.nodes : undefined,
     totalToolCalls: asNumber(candidate.totalToolCalls, asNumber(source.totalToolCalls)),
     outcome: safeOutcome,
-    usedSkills: Array.isArray(candidate.usedSkills) ? candidate.usedSkills : asStringArray(source.usedSkills)
+    usedSkills: Array.isArray(candidate.usedSkills) ? candidate.usedSkills : asStringArray(source.usedSkills),
+    evolvedSkills: Array.isArray(candidate.evolvedSkills) ? candidate.evolvedSkills : asStringArray(source.evolvedSkills),
+    triggerSource: normalizeTraceTriggerSource(candidate.triggerSource || source.triggerSource)
   }
 }
 
@@ -754,6 +791,8 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       totalOutputTokens,
       totalTokens,
       usedSkills: Array.isArray(trace.usedSkills) ? trace.usedSkills : asStringArray(source.usedSkills),
+      evolvedSkills: Array.isArray(trace.evolvedSkills) ? trace.evolvedSkills : asStringArray(source.evolvedSkills),
+      triggerSource: normalizeTraceTriggerSource(trace.triggerSource || source.triggerSource),
       ...(nodes ? { nodes } : {}),
       rawAvailable: !rawError,
       ...(rawError ? { rawError } : {})
@@ -782,6 +821,8 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
     totalOutputTokens: fallbackOutputTokens,
     totalTokens: asNumber(source.totalTokens, fallbackInputTokens + fallbackOutputTokens),
     usedSkills: asStringArray(source.usedSkills),
+    evolvedSkills: asStringArray(source.evolvedSkills),
+    triggerSource: normalizeTraceTriggerSource(source.triggerSource),
     rawAvailable: false,
     rawError: parsed.error
   }
@@ -1408,7 +1449,7 @@ async function fetchSkillUsageSummary(
     )
     const body = {
       size: 0,
-      query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+      query: { bool: { filter: [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter()] } },
       aggs: {
         by_skill: {
           filters: { filters },
@@ -1429,7 +1470,7 @@ async function fetchSkillUsageSummary(
   // 模式 B：兼容旧调用方，保留 terms 聚合结构。
   const body = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+    query: { bool: { filter: [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter()] } },
     aggs: {
       by_skill: {
         terms: { field: "usedSkills", size: 1000 },
@@ -1457,6 +1498,7 @@ async function fetchSkillUserStats(
       bool: {
         must: [
           timeRangeFilter("startedAt", range),
+          buildChatTriggeredTraceFilter(),
           { exists: { field: "ystId" } },
           { bool: { must_not: { term: { ystId: "" } } } }
         ],
@@ -1481,7 +1523,7 @@ async function fetchSkillUserStats(
           filtered: {
             filter: {
               bool: {
-                must: [timeRangeFilter("startedAt", range), skillFilter, buildEmptyYstIdFilter()]
+                must: [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter(), skillFilter, buildEmptyYstIdFilter()]
               }
             }
           }
@@ -1704,15 +1746,20 @@ async function fetchSkillRecentTraces(
   range: TimeRange,
   limit = 10,
   page = 1,
-  mode: TraceViewMode = "trace"
+  mode: TraceViewMode = "trace",
+  triggerScope: TraceTriggerScope = "active"
 ): Promise<{ traces: DashboardTraceDetail[]; total: number; page: number; pageSize: number; mode: TraceViewMode }> {
   const normalizedMode = normalizeTraceViewMode(mode)
+  const normalizedTriggerScope = normalizeTraceTriggerScope(triggerScope)
   const size = clampLimit(limit, 10, normalizedMode === "thread" ? 30 : 50)
   const currentPage = clampLimit(page, 1, 1000)
   const filters = [
     timeRangeFilter("startedAt", range),
     buildSkillUsageWildcardFilter(skill)
   ]
+  if (normalizedTriggerScope === "active") {
+    filters.splice(1, 0, buildChatTriggeredTraceFilter())
+  }
   const sourceIncludes = dashboardTraceSourceIncludes()
 
   if (normalizedMode === "thread") {
@@ -1851,6 +1898,7 @@ async function fetchSkillDetail(
 ): Promise<DashboardSkillDetail> {
   const pageOptions = typeof options === "number" ? { limit: options } : options
   const traceViewMode = normalizeTraceViewMode(pageOptions?.viewMode ?? pageOptions?.mode)
+  const traceTriggerScope = normalizeTraceTriggerScope(pageOptions?.triggerScope)
   const tracePageSize = clampLimit(
     pageOptions?.pageSize ?? pageOptions?.limit,
     10,
@@ -1859,7 +1907,7 @@ async function fetchSkillDetail(
   const tracePage = clampLimit(pageOptions?.page, 1, 1000)
   const [stats, tracePageData] = await Promise.all([
     fetchSkillCodeStats(skill, range),
-    fetchSkillRecentTraces(skill, range, tracePageSize, tracePage, traceViewMode)
+    fetchSkillRecentTraces(skill, range, tracePageSize, tracePage, traceViewMode, traceTriggerScope)
   ])
   return {
     stats,
@@ -1867,7 +1915,8 @@ async function fetchSkillDetail(
     tracePage: tracePageData.page,
     tracePageSize: tracePageData.pageSize,
     totalTraces: tracePageData.total,
-    traceViewMode: tracePageData.mode
+    traceViewMode: tracePageData.mode,
+    traceTriggerScope
   }
 }
 
@@ -2891,6 +2940,8 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
     ...(index === 2 ? { errorMessage: "Mock trace 用于展示异常状态" } : {}),
     appVersion: "0.3.6",
     usedSkills: [skill],
+    evolvedSkills: index % 2 === 0 ? [skill] : [],
+    triggerSource: "chat",
     metadata: {
       workspacePath: "/Users/demo/projects/cmbCowork"
     }
@@ -2921,6 +2972,8 @@ function makeMockSkillRecentTraces(skill: string, range: TimeRange, limit = 10):
       totalOutputTokens: usage.totalOutputTokens,
       totalTokens: usage.totalTokens,
       usedSkills: trace.usedSkills,
+      evolvedSkills: trace.evolvedSkills,
+      triggerSource: trace.triggerSource,
       nodes: buildTraceTree(trace),
       rawAvailable: true
     }
@@ -3185,10 +3238,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:skillRecentTraces",
-    async (_, skill: string, range: TimeRange, limit?: number, mode?: TraceViewMode) => {
+    async (_, skill: string, range: TimeRange, limit?: number, mode?: TraceViewMode, triggerScope?: TraceTriggerScope) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(skill, range, limit) }
       try {
-        return { success: true, data: (await fetchSkillRecentTraces(skill, range, limit, 1, normalizeTraceViewMode(mode))).traces }
+        return { success: true, data: (await fetchSkillRecentTraces(skill, range, limit, 1, normalizeTraceViewMode(mode), normalizeTraceTriggerScope(triggerScope))).traces }
       } catch (e) {
         console.error("[Dashboard] skillRecentTraces error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -3198,12 +3251,12 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:marketSkillRecentTraces",
-    async (_, skill: string, range: TimeRange, limit?: number, mode?: TraceViewMode) => {
+    async (_, skill: string, range: TimeRange, limit?: number, mode?: TraceViewMode, triggerScope?: TraceTriggerScope) => {
       const trimmedSkill = skill?.trim?.() ?? ""
       if (!trimmedSkill) return { success: false, error: "skill is required" }
       if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(trimmedSkill, range, limit) }
       try {
-        return { success: true, data: (await fetchSkillRecentTraces(trimmedSkill, range, limit, 1, normalizeTraceViewMode(mode))).traces }
+        return { success: true, data: (await fetchSkillRecentTraces(trimmedSkill, range, limit, 1, normalizeTraceViewMode(mode), normalizeTraceTriggerScope(triggerScope))).traces }
       } catch (e) {
         console.error("[Dashboard] marketSkillRecentTraces error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }

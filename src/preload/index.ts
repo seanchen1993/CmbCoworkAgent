@@ -1577,6 +1577,8 @@ const api = {
         totalTokens: number
         outcome: string
         usedSkills: string[]
+        evolvedSkills: string[]
+        triggerSource?: string
       }>
     > =>
       ipcRenderer.invoke("optimizer:traces", opts) as Promise<
@@ -1592,6 +1594,8 @@ const api = {
           totalTokens: number
           outcome: string
           usedSkills: string[]
+          evolvedSkills: string[]
+          triggerSource?: string
         }>
       >,
     /** Listen for auto-triggered skill evolution (main process fires this after threshold) */
@@ -1618,6 +1622,8 @@ const api = {
       outcome: string
       errorMessage?: string
       usedSkills: string[]
+      evolvedSkills: string[]
+      triggerSource?: string
       nodes?: Array<{
         id: string
         type: "trace" | "llm" | "tool" | "tool_result" | "message" | "error" | "cancel"
@@ -1683,6 +1689,8 @@ const api = {
         outcome: string
         errorMessage?: string
         usedSkills: string[]
+        evolvedSkills: string[]
+        triggerSource?: string
         nodes?: Array<{
           id: string
           type: "trace" | "llm" | "tool" | "tool_result" | "message" | "error" | "cancel"
@@ -1891,20 +1899,22 @@ const api = {
       skill: string,
       range: { from: string; to: string },
       limit?: number,
-      mode?: "thread" | "trace"
+      mode?: "thread" | "trace",
+      triggerScope?: "active" | "all"
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit, mode),
+      ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit, mode, triggerScope),
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
       limit?: number,
-      mode?: "thread" | "trace"
+      mode?: "thread" | "trace",
+      triggerScope?: "active" | "all"
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:marketSkillRecentTraces", skill, range, limit, mode),
+      ipcRenderer.invoke("dashboard:marketSkillRecentTraces", skill, range, limit, mode, triggerScope),
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
-      options?: number | { page?: number; pageSize?: number; limit?: number; mode?: "thread" | "trace"; viewMode?: "thread" | "trace" }
+      options?: number | { page?: number; pageSize?: number; limit?: number; mode?: "thread" | "trace"; viewMode?: "thread" | "trace"; triggerScope?: "active" | "all" }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillDetail", skill, range, options),
     commitDetails: (

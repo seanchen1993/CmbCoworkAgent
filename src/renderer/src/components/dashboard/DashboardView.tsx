@@ -24,6 +24,7 @@ import {
   useDashboard,
   type DashboardCommitDetailsData,
   type DashboardSkillDetail,
+  type DashboardTraceTriggerScope,
   type DashboardTraceViewMode,
   type DashboardUserDetail,
   type DashboardUserListData,
@@ -740,6 +741,7 @@ export function DashboardView(): React.JSX.Element {
   const [skillTracesError, setSkillTracesError] = useState<string | null>(null)
   const [skillTracePage, setSkillTracePage] = useState(1)
   const [skillTraceViewMode, setSkillTraceViewMode] = useState<DashboardTraceViewMode>("thread")
+  const [skillTraceTriggerScope, setSkillTraceTriggerScope] = useState<DashboardTraceTriggerScope>("active")
   const [skillTraceExporting, setSkillTraceExporting] = useState(false)
   const [commitDialogOpen, setCommitDialogOpen] = useState(false)
   const [commitScopeLabel, setCommitScopeLabel] = useState("当前范围")
@@ -899,11 +901,17 @@ export function DashboardView(): React.JSX.Element {
   }, [])
 
   const handleSkillClick = useCallback(
-    async (skill: string, tracePage = 1, traceViewMode = skillTraceViewMode) => {
+    async (
+      skill: string,
+      tracePage = 1,
+      traceViewMode = skillTraceViewMode,
+      triggerScope = skillTraceTriggerScope
+    ) => {
       setSelectedSkill(skill)
       setSkillDialogOpen(true)
       setSkillTracePage(tracePage)
       setSkillTraceViewMode(traceViewMode)
+      setSkillTraceTriggerScope(triggerScope)
       if (tracePage === 1) setSkillDetail(null)
       setSkillTracesError(null)
       setSkillTracesLoading(true)
@@ -911,7 +919,8 @@ export function DashboardView(): React.JSX.Element {
         const result = await window.api.dashboard.skillDetail(skill, range, {
           page: tracePage,
           pageSize: SKILL_TRACE_PAGE_SIZE,
-          mode: traceViewMode
+          mode: traceViewMode,
+          triggerScope
         })
         if (!result.success) throw new Error(result.error ?? "获取 Skill 详情失败")
         setSkillDetail(result.data ?? EMPTY_SKILL_DETAIL)
@@ -921,28 +930,36 @@ export function DashboardView(): React.JSX.Element {
         setSkillTracesLoading(false)
       }
     },
-    [range, skillTraceViewMode]
+    [range, skillTraceViewMode, skillTraceTriggerScope]
   )
 
   const handleSkillTracePrevious = useCallback(() => {
     if (!selectedSkill || skillTracePage <= 1) return
-    void handleSkillClick(selectedSkill, skillTracePage - 1, skillTraceViewMode)
-  }, [handleSkillClick, selectedSkill, skillTracePage, skillTraceViewMode])
+    void handleSkillClick(selectedSkill, skillTracePage - 1, skillTraceViewMode, skillTraceTriggerScope)
+  }, [handleSkillClick, selectedSkill, skillTracePage, skillTraceViewMode, skillTraceTriggerScope])
 
   const handleSkillTraceNext = useCallback(() => {
     if (!selectedSkill || !skillDetail) return
     const pageSize = skillDetail.tracePageSize || SKILL_TRACE_PAGE_SIZE
     if (skillTracePage * pageSize >= skillDetail.totalTraces) return
-    void handleSkillClick(selectedSkill, skillTracePage + 1, skillTraceViewMode)
-  }, [handleSkillClick, selectedSkill, skillDetail, skillTracePage, skillTraceViewMode])
+    void handleSkillClick(selectedSkill, skillTracePage + 1, skillTraceViewMode, skillTraceTriggerScope)
+  }, [handleSkillClick, selectedSkill, skillDetail, skillTracePage, skillTraceViewMode, skillTraceTriggerScope])
 
   const handleSkillTraceViewModeChange = useCallback((mode: DashboardTraceViewMode) => {
     if (!selectedSkill) {
       setSkillTraceViewMode(mode)
       return
     }
-    void handleSkillClick(selectedSkill, 1, mode)
-  }, [handleSkillClick, selectedSkill])
+    void handleSkillClick(selectedSkill, 1, mode, skillTraceTriggerScope)
+  }, [handleSkillClick, selectedSkill, skillTraceTriggerScope])
+
+  const handleSkillTraceTriggerScopeChange = useCallback((scope: DashboardTraceTriggerScope) => {
+    if (!selectedSkill) {
+      setSkillTraceTriggerScope(scope)
+      return
+    }
+    void handleSkillClick(selectedSkill, 1, skillTraceViewMode, scope)
+  }, [handleSkillClick, selectedSkill, skillTraceViewMode])
 
   const handleSkillTraceExport = useCallback(async () => {
     if (!selectedSkill || !skillDetail || skillDetail.traces.length === 0) return
@@ -1532,7 +1549,9 @@ export function DashboardView(): React.JSX.Element {
         tracePageSize={skillDetail?.tracePageSize ?? SKILL_TRACE_PAGE_SIZE}
         totalTraces={skillDetail?.totalTraces ?? skillDetail?.traces.length}
         traceViewMode={skillDetail?.traceViewMode ?? skillTraceViewMode}
+        traceTriggerScope={skillDetail?.traceTriggerScope ?? skillTraceTriggerScope}
         onTraceViewModeChange={handleSkillTraceViewModeChange}
+        onTraceTriggerScopeChange={handleSkillTraceTriggerScopeChange}
         onTracePrevious={handleSkillTracePrevious}
         onTraceNext={handleSkillTraceNext}
         onExportPage={handleSkillTraceExport}
