@@ -2910,6 +2910,64 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
     "最近 trace 弹窗建议默认 Thread 维度，并提供 Trace 维度切换，便于运营快速浏览。",
     `已完成 ${skill} 分析，结论包含风险点、建议修改和验证方式。`
   ][index] ?? `已完成 ${skill} 分析。`
+  const repeatedReadFileToolCalls = [
+    "src/renderer/src/components/dashboard/TraceHistoryDialog.tsx",
+    "src/renderer/src/components/trace/TraceConversation.tsx",
+    "src/main/ipc/dashboard.ts",
+    "src/preload/index.ts",
+    "src/preload/index.d.ts",
+    "src/renderer/src/components/customize/MarketPanel.tsx"
+  ].map((path, toolIndex) => ({
+    name: "read_file",
+    args: { path },
+    result: `读取 ${path}，命中 ${80 + toolIndex * 17} 行内容`,
+    durationMs: 260 + toolIndex * 45
+  }))
+  const mixedToolCalls = [
+    {
+      name: "rg",
+      args: { pattern: "TraceConversation", path: "src/renderer/src" },
+      result: "匹配 4 个文件，共 9 处",
+      durationMs: 180
+    },
+    {
+      name: "read_file",
+      args: { path: "src/renderer/src/components/trace/TraceConversation.tsx" },
+      result: "读取到对话组件和工具卡片实现",
+      durationMs: 310
+    },
+    {
+      name: "edit_file",
+      args: { path: "src/renderer/src/components/trace/TraceConversation.tsx", summary: "调整工具调用卡片位置" },
+      result: "替换 2 个 JSX 块",
+      durationMs: 960
+    },
+    {
+      name: "execute",
+      args: { command: "npm run typecheck" },
+      result: "typecheck:web passed",
+      durationMs: 4200
+    }
+  ]
+  const toolCalls =
+    index === 0
+      ? repeatedReadFileToolCalls
+      : index === 1
+        ? mixedToolCalls
+        : [
+            {
+              name: "read_file",
+              args: { path: "src/example.ts" },
+              result: "读取到 120 行内容",
+              durationMs: 420
+            },
+            {
+              name: "grep",
+              args: { pattern: "TODO", path: "src" },
+              result: "匹配 3 处",
+              durationMs: 310
+            }
+          ]
 
   return {
     traceId,
@@ -2929,27 +2987,13 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
         index: 0,
         startedAt: startedAt.toISOString(),
         assistantText: `我会先定位和 ${skill} 相关的上下文，再整理问题和建议。`,
-        toolCalls: [
-          {
-            name: "read_file",
-            args: { path: "src/example.ts" },
-            result: "读取到 120 行内容",
-            durationMs: 420
-          }
-        ]
+        toolCalls: toolCalls.slice(0, Math.ceil(toolCalls.length / 2))
       },
       {
         index: 1,
         startedAt: new Date(startedAt.getTime() + 12_000).toISOString(),
         assistantText: assistantSummary,
-        toolCalls: [
-          {
-            name: "grep",
-            args: { pattern: "TODO", path: "src" },
-            result: "匹配 3 处",
-            durationMs: 310
-          }
-        ]
+        toolCalls: toolCalls.slice(Math.ceil(toolCalls.length / 2))
       }
     ],
     modelCalls: [
@@ -2971,7 +3015,7 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
         }
       }
     ],
-    totalToolCalls: 2,
+    totalToolCalls: toolCalls.length,
     outcome: index === 2 ? "error" : "success",
     ...(index === 2 ? { errorMessage: "Mock trace 用于展示异常状态" } : {}),
     appVersion: "0.3.6",
