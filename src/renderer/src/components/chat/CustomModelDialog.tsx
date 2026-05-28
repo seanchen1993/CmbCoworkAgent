@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react"
-import { Eye, EyeOff, Loader2, Plus, Trash2, Zap } from "lucide-react"
+import { Eye, EyeOff, Info, Loader2, Plus, Trash2, Zap } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 
 interface CustomModelDialogProps {
@@ -78,6 +79,35 @@ const FALLBACK_LIMITS: TokenLimits = {
   defaultTopK: 40,
   minTopK: 0,
   maxTopK: 1_000
+}
+
+function ParameterLabel({
+  children,
+  explanation
+}: {
+  children: string
+  explanation: string
+}): React.JSX.Element {
+  return (
+    <label className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground">
+      <span>{children}</span>
+      <TooltipProvider delayDuration={150}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span
+              className="inline-flex size-3.5 cursor-default items-center justify-center rounded-full text-muted-foreground/45 transition-colors hover:text-muted-foreground"
+              aria-label={`${children} 参数说明`}
+            >
+              <Info className="size-3.5" />
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="top" sideOffset={6} className="max-w-64 text-xs leading-relaxed">
+            {explanation}
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    </label>
+  )
 }
 
 function defaultInterleavedThinkingForModel(model: string): boolean {
@@ -677,9 +707,9 @@ export function CustomModelDialog({
 
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">
+                <ParameterLabel explanation="限制单次回复最多生成的 Token 数。数值越大越能输出长答案；超过模型或服务限制时请求可能失败。">
                   max_tokens（最大 Tokens）
-                </label>
+                </ParameterLabel>
                 <Input
                   className="h-8"
                   type="number"
@@ -701,7 +731,9 @@ export function CustomModelDialog({
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">Temperature</label>
+                <ParameterLabel explanation="控制回答的随机性。数值越低越稳定、可复现，适合代码和事实类任务；数值越高越发散，适合创意写作。">
+                  Temperature
+                </ParameterLabel>
                 <Input
                   className="h-8"
                   type="number"
@@ -724,7 +756,9 @@ export function CustomModelDialog({
 
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">top_p</label>
+                <ParameterLabel explanation="按累计概率筛选候选词。数值越低越保守，越高越开放；通常和 Temperature 二选一微调即可。">
+                  top_p
+                </ParameterLabel>
                 <Input
                   className="h-8"
                   type="number"
@@ -745,7 +779,9 @@ export function CustomModelDialog({
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">top_k</label>
+                <ParameterLabel explanation="每一步只从概率最高的 K 个候选词中采样。数值越小越稳定，越大越多样。">
+                  top_k
+                </ParameterLabel>
                 <Input
                   className="h-8"
                   type="number"
