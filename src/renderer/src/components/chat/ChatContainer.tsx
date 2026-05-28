@@ -1638,7 +1638,13 @@ export function ChatContainer({
           if (result.success && result.attachment) {
             // #12: skip empty files
             if (!result.attachment.content.trim()) {
-              setError(`文件 "${result.attachment.filename}" 内容为空`)
+              if (result.attachment.filename.includes('.doc')) {
+                setError(
+                  `文件 "${result.attachment.filename}" 内容为空，可尝试将文件用 WPS 另存为 docx 后添加`
+                )
+              } else {
+                setError(`文件 "${result.attachment.filename}" 内容为空`)
+              }
               continue
             }
             setAttachments((prev) => [...prev, result.attachment!])
