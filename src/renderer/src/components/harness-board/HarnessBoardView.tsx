@@ -2191,6 +2191,7 @@ function FeatureDetailPage({
   const handleBackToFeature = (): void => {
     setActiveDetailTab("feature")
     onSessionViewChange?.(false)
+    if (!unbound) onRefresh()
   }
 
   const handleHookSessionSelect = useCallback((threadId: string): void => {
@@ -2781,20 +2782,37 @@ export function HarnessBoardView(): React.JSX.Element {
     [persistUnread]
   )
 
-  const loadProjectDetail = useCallback(async (projectId: string) => {
-    setLoadingDetailIds((current) => new Set(current).add(projectId))
-    setLoadError(null)
+  const loadProjectDetail = useCallback(async (
+    projectId: string,
+    options: { showLoading?: boolean; reportError?: boolean } = {}
+  ) => {
+    const showLoading = options.showLoading !== false
+    const reportError = options.reportError ?? showLoading
+    if (showLoading) {
+      setLoadingDetailIds((current) => new Set(current).add(projectId))
+    }
+    if (reportError) {
+      setLoadError(null)
+    }
     try {
       const detail = await window.api.harnessBoard.getProjectDetail(projectId)
-      setDetailsByProjectId((current) => ({ ...current, [projectId]: detail }))
+      setDetailsByProjectId((current) =>
+        areHarnessValuesEqual(current[projectId], detail)
+          ? current
+          : { ...current, [projectId]: detail }
+      )
     } catch (error) {
-      setLoadError(cleanIpcError(error))
+      if (reportError) {
+        setLoadError(cleanIpcError(error))
+      }
     } finally {
-      setLoadingDetailIds((current) => {
-        const next = new Set(current)
-        next.delete(projectId)
-        return next
-      })
+      if (showLoading) {
+        setLoadingDetailIds((current) => {
+          const next = new Set(current)
+          next.delete(projectId)
+          return next
+        })
+      }
     }
   }, [])
 
@@ -2811,7 +2829,7 @@ export function HarnessBoardView(): React.JSX.Element {
       const allProjectIds = items.map((item) => item.projectId)
       if (allProjectIds.length > 0) {
         const details = await window.api.harnessBoard.getProjectDetails(allProjectIds)
-        setDetailsByProjectId((current) => ({ ...current, ...details }))
+        setDetailsByProjectId((current) => mergeProjectDetailsIfChanged(current, details))
       }
       setSelectedProjectId((current) =>
         current && items.some((item) => item.projectId === current) ? current : null
@@ -2837,7 +2855,7 @@ export function HarnessBoardView(): React.JSX.Element {
     projectDetailsRefreshInFlightRef.current = true
     try {
       const details = await window.api.harnessBoard.getProjectDetails(projectIds, { watchRefs: false })
-      setDetailsByProjectId((current) => ({ ...current, ...details }))
+      setDetailsByProjectId((current) => mergeProjectDetailsIfChanged(current, details))
     } catch {
       // Background refresh should not replace stable on-screen state with a transient global error.
     } finally {
@@ -2852,6 +2870,28 @@ export function HarnessBoardView(): React.JSX.Element {
 
     return () => window.clearInterval(timer)
   }, [refreshProjectDetailsInBackground])
+
+  const refreshSelectedProjectDetailInBackground = useCallback(async () => {
+    const projectId = selectedProjectIdRef.current
+    if (!projectId || selectedFeatureRef.current) return
+    if (selectedProjectRefreshInFlightRef.current) return
+
+    selectedProjectRefreshInFlightRef.current = true
+    try {
+      await loadProjectDetail(projectId, { showLoading: false, reportError: false })
+    } finally {
+      selectedProjectRefreshInFlightRef.current = false
+    }
+  }, [loadProjectDetail])
+
+  useEffect(() => {
+    if (!selectedProjectId || selectedFeature) return
+    const timer = window.setInterval(() => {
+      void refreshSelectedProjectDetailInBackground()
+    }, 5000)
+
+    return () => window.clearInterval(timer)
+  }, [refreshSelectedProjectDetailInBackground, selectedFeature, selectedProjectId])
 
   const selectedFeatureProjectDetail = selectedFeature
     ? detailsByProjectId[selectedFeature.projectId]
@@ -2912,7 +2952,7 @@ export function HarnessBoardView(): React.JSX.Element {
     return window.api.harnessBoard.onWatchRefsChanged((event) => {
       const projectMatch = event.scopeKey.match(/^project:(.+)$/)
       if (projectMatch) {
-        void loadProjectDetail(projectMatch[1])
+        void loadProjectDetail(projectMatch[1], { showLoading: false, reportError: false })
       }
       if (
         selectedFeature &&
@@ -2929,7 +2969,9 @@ export function HarnessBoardView(): React.JSX.Element {
               current.projectId === capturedProjectId &&
               current.slug === capturedSlug
             ) {
-              setRunDetail(detail)
+              setRunDetail((currentDetail) =>
+                areHarnessValuesEqual(currentDetail, detail) ? currentDetail : detail
+              )
             }
           })
       }
@@ -2942,7 +2984,9 @@ export function HarnessBoardView(): React.JSX.Element {
       selectedFeature.projectId,
       selectedFeature.slug
     )
-    setRunDetail(detail)
+    setRunDetail((currentDetail) =>
+      areHarnessValuesEqual(currentDetail, detail) ? currentDetail : detail
+    )
   }, [selectedFeature])
 
   const refreshSelectedFeatureSessionData = useCallback(async (): Promise<void> => {
