@@ -660,6 +660,7 @@ interface CustomAPI {
       options?: { includeNestedSkills?: boolean }
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (skillPath: string) => Promise<{ success: boolean; error?: string }>
+    onChanged: (callback: (payload: { reason?: string }) => void) => () => void
   }
   mcp: {
     list: () => Promise<McpConnectorConfig[]>
@@ -846,6 +847,22 @@ interface CustomAPI {
       pluginId: string,
       hookId: string,
       enabled: boolean
+    ) => Promise<{ success: boolean; error?: string }>
+    listFiles: (pluginId: string) => Promise<{
+      success: boolean
+      files?: Array<{ path: string; relativePath: string; editable: boolean }>
+      root?: string
+      pluginEditable?: boolean
+      error?: string
+    }>
+    readFile: (
+      pluginId: string,
+      filePath: string
+    ) => Promise<{ success: boolean; content?: string; editable?: boolean; error?: string }>
+    writeFile: (
+      pluginId: string,
+      filePath: string,
+      content: string
     ) => Promise<{ success: boolean; error?: string }>
   }
   chatx: {
