@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react"
+import { lazy, Suspense, useEffect, useRef } from "react"
 import { useCurrentThread } from "@/lib/thread-context"
 import { TabBar } from "./TabBar"
 import { ChatContainer } from "@/components/chat/ChatContainer"
@@ -21,7 +21,21 @@ export function TabbedPanel({
   onRequestOpenGitPanel,
   onThreadGitStatusChange
 }: TabbedPanelProps): React.JSX.Element {
-  const { activeTab, openFiles, setActiveTab } = useCurrentThread(threadId)
+  const { activeTab, openFiles, pendingApproval, setActiveTab } = useCurrentThread(threadId)
+  const lastAutoFocusedApprovalIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!pendingApproval) {
+      lastAutoFocusedApprovalIdRef.current = null
+      return
+    }
+    if (lastAutoFocusedApprovalIdRef.current === pendingApproval.id) return
+
+    lastAutoFocusedApprovalIdRef.current = pendingApproval.id
+    if (activeTab !== "agent") {
+      setActiveTab("agent")
+    }
+  }, [activeTab, pendingApproval, setActiveTab])
 
   // Determine what to render based on active tab
   const isAgentTab = activeTab === "agent"

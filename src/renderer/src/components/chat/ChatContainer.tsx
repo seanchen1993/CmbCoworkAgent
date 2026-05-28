@@ -87,17 +87,24 @@ import {
   useSlashCommands,
   type SlashCommandItem
 } from "@/features/slash-commands/useSlashCommands"
+import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
-import { isInternalGoalPromptMessage } from "@/lib/goal-notice-messages"
 import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/lib/goal-transcript"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
 import {
-  mergeLiveStreamMessages,
+  liveStreamMessageRole,
+  normalizeLiveStreamMessageContent,
+  stringifyMessageContentForReport,
   type LiveStreamMessage as StreamMessage
 } from "@/lib/live-stream-messages"
+import {
+  markChatReportUploadFailed,
+  markChatReportUploadSucceeded,
+  reserveChatReportMessageIds
+} from "@/lib/chat-report-upload-cache"
 import {
   resolveGoalControlSubmitRoute,
   shouldClearPendingApprovalAfterGoalControl
@@ -393,7 +400,9 @@ function GoalStatusPanel({
                     <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                       当前目标
                     </div>
-                    <div className="whitespace-pre-wrap break-words leading-6 [overflow-wrap:anywhere]">{goal.objective}</div>
+                    <div className="whitespace-pre-wrap break-words leading-6 [overflow-wrap:anywhere]">
+                      {goal.objective}
+                    </div>
                   </div>
                   {goal.completionCondition !== goal.objective && (
                     <div className="border-t border-black/[0.06] pt-3">
@@ -447,7 +456,9 @@ function GoalStatusPanel({
                               <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-[11px] font-semibold text-emerald-700">
                                 {index + 1}
                               </span>
-                              <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">{item}</span>
+                              <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
+                                {item}
+                              </span>
                             </li>
                           ))}
                         </ol>
@@ -466,7 +477,9 @@ function GoalStatusPanel({
                               <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-sky-50 text-[11px] font-semibold text-sky-700">
                                 {index + 1}
                               </span>
-                              <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">{item}</span>
+                              <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
+                                {item}
+                              </span>
                             </li>
                           ))}
                         </ol>
@@ -485,7 +498,9 @@ function GoalStatusPanel({
                               <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-amber-50 text-[11px] font-semibold text-amber-700">
                                 {index + 1}
                               </span>
-                              <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">{item}</span>
+                              <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
+                                {item}
+                              </span>
                             </li>
                           ))}
                         </ol>
@@ -1016,6 +1031,9 @@ const SUPPORTED_EXTS = new Set([".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"]
 const MAX_ATTACHMENTS = 3
 const MAX_TOTAL_CHARS = 24_000
 const GOOD_SKILLS_PREVIEW_LIMIT = 4
+const CHAT_REPORT_UPLOAD_DEBOUNCE_MS = 250
+const CHAT_REPORT_RETRY_DELAY_MS = 1_000
+const CHAT_REPORT_MAX_RETRY_ATTEMPTS = 3
 const escXml = (s: string): string =>
   s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 
@@ -1036,8 +1054,6 @@ const ROTATING_WORDS = [
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
-const INTERNAL_GOAL_MESSAGE_TIMES_THREAD_VALUE_KEY = "internalGoalMessageTimes"
-const INTERNAL_GOAL_MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "internalGoalMessageTimeOrder"
 
 // 单条消息的起止时间，统一存为 ISO 字符串，方便写入 thread_values 并在重启后恢复。
 //
@@ -1213,12 +1229,16 @@ export function ChatContainer({
   const wasLoadingRef = useRef(false)
   const loadingMessageCountRef = useRef(0)
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
-  const streamMessageTimesRef = useRef<Record<string, { start_at: Date; end_at?: Date }>>({})
-  const streamMessageBaselineIdsRef = useRef<Set<string>>(new Set())
-  const liveStreamMessagesRef = useRef<StreamMessage[]>([])
-  const [liveStreamMessages, setLiveStreamMessages] = useState<StreamMessage[]>([])
   const [messageTimes, setMessageTimes] = useState<MessageTimeMap>({})
-  const threadMessageIdsRef = useRef<Set<string>>(new Set())
+  const chatReportUploadTimersRef = useRef<Record<string, number>>({})
+  const chatReportRetryTimersRef = useRef<Record<string, number>>({})
+  const chatReportRetryQueuesRef = useRef<
+    Record<string, Array<{ messages: Message[]; attempt: number }>>
+  >({})
+  const chatReportHistoryRestoreThreadsRef = useRef<Set<string>>(new Set())
+  // Get the stream data via subscription - reactive updates without re-rendering provider
+  const streamData = useThreadStream(threadId)
+  const stream = streamData.stream
 
   useEffect(() => {
     const { ipcRenderer } = window.electron
@@ -1447,10 +1467,6 @@ export function ChatContainer({
     setDraftSkill: setSelectedSkill
   } = useCurrentThread(threadId)
 
-  useEffect(() => {
-    threadMessageIdsRef.current = new Set(threadMessages.map((message) => message.id))
-  }, [threadMessages])
-
   // Hook logs live in an external store so updates don't re-render the full provider tree
   const threadContext = useThreadContext()
   const hookLogs = useSyncExternalStore(
@@ -1458,9 +1474,6 @@ export function ChatContainer({
     useCallback(() => threadContext.getHookLogs(threadId), [threadContext, threadId])
   )
 
-  // Get the stream data via subscription - reactive updates without re-rendering provider
-  const streamData = useThreadStream(threadId)
-  const stream = streamData.stream
   const [savedToolNameInput, setSavedToolNameInput] = useState("")
   const [savedToolDescriptionInput, setSavedToolDescriptionInput] = useState("")
   const [saveToolMetadataLoading, setSaveToolMetadataLoading] = useState(false)
@@ -1688,25 +1701,68 @@ export function ChatContainer({
     return window.api.sandbox.onChanged(fetchYoloMode)
   }, []) // 移除queryRemoteSkills依赖，只在组件挂载时执行一次
 
-  const uploadLoChatData = useCallback(
-    async (msgs: Message[]) => {
+  const uploadLoChatDataForThread = useCallback(
+    async (targetThreadId: string, msgs: Message[], attempt = 0) => {
       const lastMsg = msgs[msgs.length - 1]
-      if (lastMsg) {
-        if (lastMsg.role !== "user") {
-          let lUidx = -1
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            if (msgs[i].role === "user") {
-              lUidx = i
-              break
-            }
-          }
-          if (lUidx !== -1) {
-            await uploadChatData(threadId, msgs.slice(lUidx) as ChatReportPayload[])
-          }
+      if (!lastMsg || lastMsg.role === "user") return
+
+      let lUidx = -1
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].role === "user") {
+          lUidx = i
+          break
         }
       }
+      if (lUidx === -1) return
+
+      const tailMessages = msgs.slice(lUidx)
+      const reservedIds = reserveChatReportMessageIds(
+        targetThreadId,
+        tailMessages.map((msg) => msg.id)
+      )
+      if (reservedIds.length === 0) return
+
+      const payload: ChatReportPayload[] = tailMessages.map((msg) => ({
+        role: msg.role,
+        content: stringifyMessageContentForReport(msg.content)
+      }))
+      try {
+        await uploadChatData(targetThreadId, payload)
+        markChatReportUploadSucceeded(targetThreadId, reservedIds)
+      } catch (error) {
+        markChatReportUploadFailed(targetThreadId, reservedIds)
+        if (attempt < CHAT_REPORT_MAX_RETRY_ATTEMPTS) {
+          const retryQueue = (chatReportRetryQueuesRef.current[targetThreadId] ??= [])
+          retryQueue.push({ messages: tailMessages, attempt: attempt + 1 })
+          if (!chatReportRetryTimersRef.current[targetThreadId]) {
+            const retryThreadId = targetThreadId
+            const retryDelayMs = Math.min(CHAT_REPORT_RETRY_DELAY_MS * 2 ** attempt, 30_000)
+            chatReportRetryTimersRef.current[retryThreadId] = window.setTimeout(() => {
+              delete chatReportRetryTimersRef.current[retryThreadId]
+              const retryItems = chatReportRetryQueuesRef.current[retryThreadId]?.splice(0) ?? []
+              for (const retryItem of retryItems) {
+                void uploadLoChatDataForThread(retryThreadId, retryItem.messages, retryItem.attempt)
+              }
+            }, retryDelayMs)
+          }
+        }
+        console.warn("[Upload] chat数据上报失败:", error)
+      }
     },
-    [threadId]
+    []
+  )
+
+  const scheduleChatReportUpload = useCallback(
+    (targetThreadId: string, msgs: Message[]) => {
+      const existingTimer = chatReportUploadTimersRef.current[targetThreadId]
+      if (existingTimer) window.clearTimeout(existingTimer)
+      const messagesForUpload = msgs.slice()
+      chatReportUploadTimersRef.current[targetThreadId] = window.setTimeout(() => {
+        delete chatReportUploadTimersRef.current[targetThreadId]
+        void uploadLoChatDataForThread(targetThreadId, messagesForUpload)
+      }, CHAT_REPORT_UPLOAD_DEBOUNCE_MS)
+    },
+    [uploadLoChatDataForThread]
   )
 
   // Check if NUX (first-run sandbox setup) is needed, then auto-start elevated setup.
@@ -1775,8 +1831,18 @@ export function ChatContainer({
   }, [isLoading, streamData.messages.length])
 
   useEffect(() => {
-    uploadLoChatData(threadMessages)
-  }, [threadMessages, uploadLoChatData])
+    if (historyLoading) {
+      chatReportHistoryRestoreThreadsRef.current.add(threadId)
+    }
+  }, [historyLoading, threadId])
+
+  useEffect(() => {
+    if (historyLoading) return
+    if (chatReportHistoryRestoreThreadsRef.current.delete(threadId)) return
+    if (!isLoading) {
+      scheduleChatReportUpload(threadId, threadMessages)
+    }
+  }, [historyLoading, isLoading, scheduleChatReportUpload, threadId, threadMessages])
 
   const handleApprovalDecision = useCallback(
     async (
@@ -1878,178 +1944,24 @@ export function ChatContainer({
     return () => clearTimeout(timer)
   }, [isLoading])
 
-  const prevLoadingRef = useRef(false)
-  useEffect(() => {
-    if (!prevLoadingRef.current && isLoading) {
-      // 本轮开始时记录已有 stream 消息，避免把历史回放消息当成本轮新消息计时。
-      //
-      // useStream 的 messages 里会同时包含历史消息和本轮新增消息。如果不先记 baseline，
-      // loading 期间遍历 streamData.messages 时就会把历史 assistant/tool 重新打时间戳，
-      // 导致历史耗时被当前时间污染。
-      streamMessageTimesRef.current = {}
-      liveStreamMessagesRef.current = []
-      setLiveStreamMessages([])
-      streamMessageBaselineIdsRef.current = new Set(
-        ((streamData.messages || []) as StreamMessage[])
-          .map((msg) => msg.id)
-          .filter((id): id is string => !!id)
-      )
-    }
-
-    if (isLoading) {
-      const incomingLiveMessages = ((streamData.messages || []) as StreamMessage[]).filter(
-        (msg): msg is StreamMessage & { id: string } =>
-          !!msg.id &&
-          !streamMessageBaselineIdsRef.current.has(msg.id) &&
-          !threadMessageIdsRef.current.has(msg.id)
-      )
-      if (incomingLiveMessages.length > 0) {
-        const mergedMessages = mergeLiveStreamMessages(
-          liveStreamMessagesRef.current,
-          incomingLiveMessages
-        )
-        liveStreamMessagesRef.current = mergedMessages
-        setLiveStreamMessages(mergedMessages)
-      }
-
-      for (const rawMsg of streamData.messages) {
-        const msg = rawMsg as StreamMessage
-        // 只给本轮新增、且还未落入 threadMessages 的消息打 start_at。
-        //
-        // threadMessages 是当前前端已经 append 到会话状态里的消息；如果消息已经存在，
-        // 说明它已经完成过一次采集或恢复，不能重复覆盖 start_at。
-        if (
-          msg.id &&
-          !streamMessageBaselineIdsRef.current.has(msg.id) &&
-          !threadMessageIdsRef.current.has(msg.id) &&
-          !streamMessageTimesRef.current[msg.id]
-        ) {
-          const startedAt = new Date()
-          streamMessageTimesRef.current[msg.id] = { start_at: startedAt, end_at: startedAt }
-        }
-      }
-    }
-
-    if (prevLoadingRef.current && !isLoading) {
-      const completedAt = new Date()
-      const nextMessageTimes: MessageTimeMap = {}
-      const nextInternalGoalMessageTimes: MessageTimeMap = {}
-      // 只处理本轮流式期间被记录过 start_at 的消息，避免重复 append 历史消息。
-      //
-      // 当前轮可能包含多条 assistant 消息和多条 tool 消息。这里不直接用全部 streamData.messages，
-      // 而是只取 streamMessageTimesRef 中出现过的 id，保证每条要落库的消息都拥有本轮采集到的
-      // start_at/end_at。
-      const currentTurnMessages = liveStreamMessagesRef.current.filter(
-        (msg): msg is StreamMessage & { id: string } =>
-          !!msg.id && !!streamMessageTimesRef.current[msg.id]
-      )
-
-      currentTurnMessages.forEach((streamMsg, index) => {
-        const trackedTime = streamMessageTimesRef.current[streamMsg.id]
-        const nextStreamMsg = currentTurnMessages[index + 1]
-        const nextStartAt = nextStreamMsg
-          ? streamMessageTimesRef.current[nextStreamMsg.id]?.start_at
-          : undefined
-
-        // 当前消息的 end_at 取下一条消息的 start_at；本轮最后一条消息取停止 loading 的时间。
-        //
-        // 这样每条消息时间段首尾相接：
-        // assistant.start_at -> tool.start_at -> assistant.start_at -> completedAt。
-        // 展示总耗时时，再从 user.start_at 减到“下一个 user 之前最后一条消息”的 end_at，
-        // 就能覆盖中间所有 assistant/tool 的耗时。
-        trackedTime.end_at = nextStartAt ?? completedAt
-
-        let role: Message["role"] = "assistant"
-        if (streamMsg.type === "human") role = "user"
-        else if (streamMsg.type === "tool")
-          role = "tool" // ✅ 修复: tool 不应映射为 assistant
-        else if (streamMsg.type === "ai") role = "assistant"
-
-        const storeMsg: Message = {
-          id: streamMsg.id,
-          role,
-          content: typeof streamMsg.content === "string" ? streamMsg.content : "",
-          tool_calls: streamMsg.tool_calls,
-          ...(role === "tool" &&
-            streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
-          ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
-          created_at: new Date(),
-          start_at: trackedTime.start_at,
-          end_at: trackedTime.end_at
-        }
-        if (isInternalGoalPromptMessage(storeMsg)) {
-          nextInternalGoalMessageTimes[streamMsg.id] = {
-            start_at: trackedTime.start_at.toISOString(),
-            end_at: trackedTime.end_at.toISOString()
-          }
-          return
-        }
-
-        nextMessageTimes[streamMsg.id] = {
-          start_at: trackedTime.start_at.toISOString(),
-          end_at: trackedTime.end_at.toISOString()
-        }
-        appendMessage(storeMsg)
-      })
-
-      if (
-        Object.keys(nextMessageTimes).length > 0 ||
-        Object.keys(nextInternalGoalMessageTimes).length > 0
-      ) {
-        setMessageTimes((prev) => ({ ...prev, ...nextMessageTimes }))
-        window.api.threads
-          .mergeThreadValues(threadId, {
-            // id map 用于当前会话和 id 稳定时的精确恢复。
-            //
-            // 例如用户还没有关闭 app，只是在同一个运行时切换线程或重新渲染，
-            // message id 仍然可靠，此时直接按 id 取 start_at/end_at。
-            [MESSAGE_TIMES_THREAD_VALUE_KEY]: nextMessageTimes,
-            // Internal goal prompts are hidden from the transcript, so they must not
-            // enter messageTimeOrder. Keep their exact checkpoint ids only for
-            // runtime-restore approval freshness checks.
-            [INTERNAL_GOAL_MESSAGE_TIMES_THREAD_VALUE_KEY]: nextInternalGoalMessageTimes,
-            [INTERNAL_GOAL_MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: messageTimeOrderEntries(
-              nextInternalGoalMessageTimes
-            ),
-            // 顺序数组用于 app 重启后，checkpoint 恢复出的 message id 不一致时兜底匹配。
-            //
-            // 它不是用来计算 duration 的新字段，只是保存每条消息时间的展示顺序；
-            // duration 仍由 user.start_at 和分组内最后一条消息 end_at 动态计算。
-            [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: messageTimeOrderEntries(nextMessageTimes)
-          })
-          .catch((error) => console.warn("[ChatContainer] Failed to save message times:", error))
-      }
-      liveStreamMessagesRef.current = []
-      setLiveStreamMessages([])
-    }
-    prevLoadingRef.current = isLoading
-  }, [isLoading, streamData.messages, threadId, appendMessage])
-
   const displayMessages = useMemo(() => {
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
-    const streamingMsgs: Message[] = liveStreamMessages
+    const streamingMsgs: Message[] = (streamData.liveMessages || [])
       .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
       .map((streamMsg) => {
-        let role: Message["role"] = "assistant"
-        if (streamMsg.type === "human") role = "user"
-        else if (streamMsg.type === "tool") role = "tool"
-        else if (streamMsg.type === "ai") role = "assistant"
+        const role = liveStreamMessageRole(streamMsg.type)
 
         return {
           id: streamMsg.id,
           role,
-          content: typeof streamMsg.content === "string" ? streamMsg.content : "",
+          content: normalizeLiveStreamMessageContent(streamMsg.content),
           tool_calls: streamMsg.tool_calls,
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
           ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
           created_at: new Date(),
-          ...(streamMessageTimesRef.current[streamMsg.id]?.start_at && {
-            start_at: streamMessageTimesRef.current[streamMsg.id].start_at
-          }),
-          ...(streamMessageTimesRef.current[streamMsg.id]?.end_at && {
-            end_at: streamMessageTimesRef.current[streamMsg.id].end_at
-          }),
+          ...(streamMsg.start_at && { start_at: streamMsg.start_at }),
+          ...(streamMsg.end_at && { end_at: streamMsg.end_at }),
           ...(toDate(messageTimes[streamMsg.id]?.start_at) && {
             start_at: toDate(messageTimes[streamMsg.id]?.start_at)
           }),
@@ -2100,7 +2012,7 @@ export function ChatContainer({
       return { ...msg, content: cleaned }
     })
     return cleanedMessages
-  }, [threadMessages, liveStreamMessages, messageTimes])
+  }, [threadMessages, streamData.liveMessages, messageTimes])
 
   const assistantDurationsByMessageId = useMemo(() => {
     const durations = new Map<string, number>()
@@ -2434,10 +2346,7 @@ export function ChatContainer({
   )
 
   const appendVisibleUserMessageWithTime = useCallback(
-    async (
-      content: string,
-      options: { persistTiming?: boolean } = {}
-    ): Promise<void> => {
+    async (content: string, options: { persistTiming?: boolean } = {}): Promise<void> => {
       const userStartAt = new Date()
       const userMessage: Message = {
         id: crypto.randomUUID(),
@@ -2870,15 +2779,28 @@ export function ChatContainer({
         })
       }
 
-      if (isFirstMessage && shouldAppendVisibleUserMessage && !isGoalSlashInput) {
+      const shouldGenerateTitleForGoalSet =
+        isGoalSlashInput &&
+        !isGoalSlashControlCommandInput(userText) &&
+        !isGoalSlashResumeCommandInput(userText)
+      const shouldGenerateTitleForFirstMessage =
+        isFirstMessage &&
+        shouldAppendVisibleUserMessage &&
+        (!isGoalSlashInput || shouldGenerateTitleForGoalSet)
+
+      if (shouldGenerateTitleForFirstMessage) {
         const currentThread = threads.find((t) => t.thread_id === threadId)
         const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
         if (hasDefaultTitle) {
           // skill-only sends have empty userText. Fall back to the skill name so
           // the sidebar shows something meaningful instead of the raw thread id.
+          const goalTitleSource = isGoalSlashInput
+            ? splitGoalTransportPayload(userText)
+                .commandText.replace(/^\/goal\b/i, "")
+                .trim()
+            : ""
           const titleSource =
-            (isGoalSlashInput ? userText.replace(/^\/goal\b/i, "").trim() : userText) ||
-            (skill ? `使用 ${skill.name}` : "")
+            (isGoalSlashInput ? goalTitleSource : userText) || (skill ? `使用 ${skill.name}` : "")
           if (titleSource) {
             generateTitleForFirstMessage(threadId, titleSource)
           }
@@ -3019,7 +2941,13 @@ export function ChatContainer({
       }
     } else {
       // Stop frontend stream and kill backend child processes in parallel
-      await Promise.all([stream?.stop(), window.api.agent.cancel(threadId)])
+      try {
+        await Promise.all([stream?.stop(), window.api.agent.cancel(threadId)])
+      } finally {
+        if (goalUi.goal) {
+          void refreshGoalUi({ includeEvents: true })
+        }
+      }
     }
   }
 

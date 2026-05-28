@@ -1090,6 +1090,12 @@ function serializeStreamData(data: unknown): unknown {
   return JSON.parse(JSON.stringify(data))
 }
 
+function extractSerializedValuesMessages(payload: unknown): unknown[] {
+  if (!payload || typeof payload !== "object") return []
+  const messages = (payload as { messages?: unknown }).messages
+  return Array.isArray(messages) ? messages : []
+}
+
 function hasCheckpointInterruptPayload(payload: unknown): boolean {
   if (!payload || typeof payload !== "object") return false
   const state = payload as { __interrupt__?: unknown }
@@ -1849,7 +1855,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (!result.handled) {
         return {
           ...result,
-          notice: emitGoalNotice(window, channel, threadId, "该 /goal 命令需要在当前运行结束后发送。")
+          notice: emitGoalNotice(
+            window,
+            channel,
+            threadId,
+            "该 /goal 命令需要在当前运行结束后发送。"
+          )
         }
       }
       return result
@@ -1898,6 +1909,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           data: { type: "goal_notice", message: notice, goalId, activeWindowId, eventId, createdAt }
         })
       }
+    }
+
+    let latestSerializedValuesMessagesForGoalFlush: unknown[] = []
+
+    const sendGoalSubturnComplete = (): void => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(channel, {
+          type: "custom",
+          data: {
+            type: "goal_subturn_complete",
+            messages: latestSerializedValuesMessagesForGoalFlush
+          }
+        })
+      }
+      latestSerializedValuesMessagesForGoalFlush = []
     }
 
     const cancelGoalBackgroundTasks = (): void => {
@@ -3131,21 +3157,31 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           source: AsyncIterable<unknown>
         ): Promise<void> => {
           throwIfInvokeAborted()
-          for await (const chunk of source) {
-            throwIfInvokeAborted()
+          latestSerializedValuesMessagesForGoalFlush = []
+          try {
+            for await (const chunk of source) {
+              throwIfInvokeAborted()
 
-            const [mode, data] = chunk as unknown as [string, unknown]
+              const [mode, data] = chunk as unknown as [string, unknown]
 
-            // Serialize first — live BaseMessage objects must be serialized before
-            // we can inspect the LangChain class path (msgChunk.id becomes the
-            // class array ["langchain_core","messages","AIMessageChunk"] only after
-            // toJSON() / JSON.stringify; on the live object, .id is the msg-id string).
-            const serialized = serializeStreamData(data)
-            // UI forwarding is the primary path. Most processing below is best-effort;
-            // SubagentStop hooks are awaited so `continue:false` can halt the parent turn.
-            forwardStreamChunk(mode, serialized)
-            await processChunkSideEffects(mode, serialized)
-            stopContextCollector.processStreamChunk(mode, serialized)
+              // Serialize first — live BaseMessage objects must be serialized before
+              // we can inspect the LangChain class path (msgChunk.id becomes the
+              // class array ["langchain_core","messages","AIMessageChunk"] only after
+              // toJSON() / JSON.stringify; on the live object, .id is the msg-id string).
+              const serialized = serializeStreamData(data)
+              if (mode === "values") {
+                latestSerializedValuesMessagesForGoalFlush =
+                  extractSerializedValuesMessages(serialized)
+              }
+              // UI forwarding is the primary path. Most processing below is best-effort;
+              // SubagentStop hooks are awaited so `continue:false` can halt the parent turn.
+              forwardStreamChunk(mode, serialized)
+              await processChunkSideEffects(mode, serialized)
+              stopContextCollector.processStreamChunk(mode, serialized)
+            }
+          } catch (error) {
+            latestSerializedValuesMessagesForGoalFlush = []
+            throw error
           }
           throwIfInvokeAborted()
         }
@@ -3326,6 +3362,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             ) {
               break
             }
+
+            sendGoalSubturnComplete()
 
             const goalEvaluationInput = {
               goal: activeGoal,

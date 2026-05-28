@@ -7,7 +7,7 @@ type StableToolCall = {
 type StableValuesMessageIdInput = {
   explicitId?: string
   index: number
-  type: "ai" | "tool"
+  type: "ai" | "tool" | "system" | "human"
   className?: string
   content?: string
   toolCallId?: string
@@ -34,6 +34,10 @@ function hashString(input: string): string {
   return (hash >>> 0).toString(16).padStart(8, "0")
 }
 
+function normalizeMessageClassName(className?: string): string | undefined {
+  return className?.replace(/Chunk$/, "")
+}
+
 export function buildStableValuesMessageId(input: StableValuesMessageIdInput): string {
   if (input.explicitId) return input.explicitId
 
@@ -49,13 +53,17 @@ export function buildStableValuesMessageId(input: StableValuesMessageIdInput): s
   const identity = {
     index: input.index,
     type: input.type,
-    className: input.className,
+    className: normalizeMessageClassName(input.className),
     toolCallId: input.toolCallId,
     name: input.name,
     // Do not include message content here. Values snapshots may report the
     // same logical message with more complete content later; the id must stay
     // stable so live merge updates that message instead of appending a copy.
-    toolCalls: toolCallIdentity
+    // AIMessage chunks may stream before the final `tool_calls` shape is
+    // available, while values snapshots include the completed message. Keep
+    // assistant fallback ids tied to the message slot, not the late-arriving
+    // tool call payload, so messages and values paths agree.
+    toolCalls: input.type === "ai" ? undefined : toolCallIdentity
   }
 
   return `values:${input.index}:${input.type}:${hashString(stableJson(identity))}`
