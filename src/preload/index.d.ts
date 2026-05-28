@@ -124,12 +124,15 @@ interface DashboardTraceDetail {
   totalOutputTokens: number
   totalTokens: number
   usedSkills: string[]
+  evolvedSkills: string[]
+  triggerSource?: string
   nodes?: DashboardTraceNode[]
   rawAvailable: boolean
   rawError?: string
 }
 
 type DashboardTraceViewMode = "thread" | "trace"
+type DashboardTraceTriggerScope = "active" | "all"
 
 interface DashboardCommitDetail {
   eventId: string
@@ -138,6 +141,8 @@ interface DashboardCommitDetail {
   sapId?: string
   ystId?: string
   orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
   userIp?: string
   repoPath?: string
   repositoryName?: string
@@ -161,6 +166,7 @@ interface DashboardCommitDetailsOptions {
   page?: number
   pageSize?: number
   pushedOnly?: boolean
+  upperOrgLv1?: string | null
 }
 
 interface DashboardCodeStats {
@@ -188,6 +194,7 @@ interface DashboardSkillDetail {
   tracePageSize: number
   totalTraces: number
   traceViewMode?: DashboardTraceViewMode
+  traceTriggerScope?: DashboardTraceTriggerScope
 }
 
 interface DashboardUserListItem {
@@ -239,6 +246,7 @@ interface DashboardUserListOptions {
   pageSize?: number
   afterKey?: Record<string, string | number> | null
   keyword?: string | null
+  upperOrgLv1?: string | null
 }
 
 interface DashboardAllUserItem {
@@ -994,6 +1002,8 @@ interface CustomAPI {
         totalTokens: number
         outcome: string
         usedSkills: string[]
+        evolvedSkills: string[]
+        triggerSource?: string
       }>
     >
     onAutoTriggered: (
@@ -1011,6 +1021,8 @@ interface CustomAPI {
       outcome: string
       errorMessage?: string
       usedSkills: string[]
+      evolvedSkills: string[]
+      triggerSource?: string
       nodes?: Array<{
         id: string
         type: "trace" | "llm" | "tool" | "tool_result" | "message" | "error" | "cancel"
@@ -1176,18 +1188,20 @@ interface CustomAPI {
       skill: string,
       range: { from: string; to: string },
       limit?: number,
-      mode?: DashboardTraceViewMode
+      mode?: DashboardTraceViewMode,
+      triggerScope?: DashboardTraceTriggerScope
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
       limit?: number,
-      mode?: DashboardTraceViewMode
+      mode?: DashboardTraceViewMode,
+      triggerScope?: DashboardTraceTriggerScope
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
-      options?: number | { page?: number; pageSize?: number; limit?: number; mode?: DashboardTraceViewMode; viewMode?: DashboardTraceViewMode }
+      options?: number | { page?: number; pageSize?: number; limit?: number; mode?: DashboardTraceViewMode; viewMode?: DashboardTraceViewMode; triggerScope?: DashboardTraceTriggerScope }
     ) => Promise<{ success: boolean; data?: DashboardSkillDetail; error?: string }>
     commitDetails: (
       range: { from: string; to: string },

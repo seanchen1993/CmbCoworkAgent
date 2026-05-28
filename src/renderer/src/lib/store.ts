@@ -348,10 +348,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Dashboard actions
   loadDashboardAllowed: async () => {
     const allowed = await window.api.dashboard.isAllowed().catch(() => false)
-    set({ dashboardAllowed: allowed })
+    const state = get()
+    set({
+      dashboardAllowed: allowed,
+      ...(allowed ? {} : {
+        showDashboardView: false,
+        mainView: state.mainView === "dashboard" ? "thread" as const : state.mainView
+      })
+    })
   },
 
   setShowDashboardView: (show: boolean) => {
+    if (show && get().dashboardAllowed !== true) return
     if (show) {
       const prev = get().previousThreadId || get().currentThreadId
       set({
@@ -476,6 +484,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     if (view === "dashboard") {
+      if (get().dashboardAllowed !== true) return
       const prev = get().previousThreadId || get().currentThreadId
       set({
         mainView: "dashboard",

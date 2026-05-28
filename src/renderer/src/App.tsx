@@ -80,6 +80,7 @@ function App(): React.JSX.Element {
     currentThreadId,
     loadThreads,
     loadDashboardAllowed,
+    dashboardAllowed,
     createThread,
     mainView,
     sidebarCollapsed,
@@ -126,7 +127,7 @@ function App(): React.JSX.Element {
               if (result.returnCode === 'SUC0000') {
                 const resBody = result.body
                 setBus(true)
-                window.api.models.upsertUserInfo({
+                await window.api.models.upsertUserInfo({
                     sapId: resBody.sapId,//8
                     ystId: resBody.ystId,//6
                     userName: resBody.userName,
@@ -139,6 +140,7 @@ function App(): React.JSX.Element {
                     ystIdToken:resBody.ystIdToken,
                     ystAccessToken: resBody.ystAccessToken
                 })
+                await loadDashboardAllowed()
               } else if (result.returnCode === 'BIZ9000'){
                 setBus(false)
               } else{
@@ -679,7 +681,7 @@ function App(): React.JSX.Element {
         ) : null}
 
         {/* Dashboard 面板 */}
-        {mainView === "dashboard" && (
+        {mainView === "dashboard" && dashboardAllowed === true && (
           <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
             {!sidebarCollapsed && (
               <>

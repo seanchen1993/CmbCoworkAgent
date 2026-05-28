@@ -10,6 +10,7 @@ import type { SkillAdoptionRankingItem } from "./skill-adoption-ranking"
 
 export type Granularity = "day" | "week" | "month" | "custom"
 export type DashboardTraceViewMode = "thread" | "trace"
+export type DashboardTraceTriggerScope = "active" | "all"
 
 export interface TimeRange {
   from: string
@@ -128,6 +129,8 @@ export interface DashboardTraceDetail {
   totalOutputTokens: number
   totalTokens: number
   usedSkills: string[]
+  evolvedSkills: string[]
+  triggerSource?: string
   nodes?: DashboardTraceNode[]
   rawAvailable: boolean
   rawError?: string
@@ -140,6 +143,8 @@ export interface DashboardCommitDetail {
   sapId?: string
   ystId?: string
   orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
   userIp?: string
   repoPath?: string
   repositoryName?: string
@@ -192,6 +197,7 @@ export interface DashboardSkillDetail {
   tracePageSize: number
   totalTraces: number
   traceViewMode?: DashboardTraceViewMode
+  traceTriggerScope?: DashboardTraceTriggerScope
 }
 
 export interface DashboardUserListItem {

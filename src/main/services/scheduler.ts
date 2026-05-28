@@ -134,7 +134,10 @@ async function executeTask(taskId: string): Promise<void> {
     ? `你是一个暖心的提醒助手。请用温暖、有趣的方式提醒用户：${task.prompt}\n要求：\n(1) 不要解释你是谁\n(2) 直接输出一条暖心的提醒消息\n(3) 可以加一句简短的鸡汤或关怀的话\n(4) 控制在2-3句话以内\n(5) 用emoji点缀`
     : task.prompt
 
-  const tracer = new TraceCollector(threadId, finalPrompt, task.modelId ?? "unknown")
+  const schedulerSource = task.taskType === "reminder" ? "scheduler_reminder" : "scheduler_action"
+  const tracer = new TraceCollector(threadId, finalPrompt, task.modelId ?? "unknown", {
+    triggerSource: schedulerSource
+  })
 
   try {
     const workspacePath = task.workDir
@@ -153,7 +156,6 @@ async function executeTask(taskId: string): Promise<void> {
     broadcastToChannel(channel, { type: "started" })
 
     const globalRoutingMode = getGlobalRoutingMode()
-    const schedulerSource = task.taskType === "reminder" ? "scheduler_reminder" : "scheduler_action"
     routingResult = await resolveModel({
       taskSource: schedulerSource,
       message: task.prompt,

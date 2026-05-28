@@ -352,6 +352,8 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         totalTokens: number
         outcome: string
         usedSkills: string[]
+        evolvedSkills: string[]
+        triggerSource: string
       }>
     > => {
       const traces = opts?.threadId
@@ -373,7 +375,9 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
           totalOutputTokens,
           totalTokens,
           outcome: trace.outcome,
-          usedSkills: trace.usedSkills
+          usedSkills: trace.usedSkills,
+          evolvedSkills: trace.evolvedSkills,
+          triggerSource: trace.triggerSource
         }
       })
     }

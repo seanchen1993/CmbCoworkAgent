@@ -86,6 +86,7 @@ async function testSkillUsageDetectorReadsSkillMetadataDirectly(): Promise<void>
         "name: elementui-page",
         "description: Element UI page generator",
         "version: v1.0.3",
+        "evolved-by: CMBDevClaw Trace Evolver",
         "---",
         "",
         "Use Element UI components."
@@ -104,6 +105,11 @@ async function testSkillUsageDetectorReadsSkillMetadataDirectly(): Promise<void>
       ["elementui-page-v1.0.3"],
       "direct slash command skill detection should preserve the SKILL.md version"
     )
+    assertArrayEqual(
+      detector.getUsedEvolvedSkillNames(),
+      ["elementui-page-v1.0.3"],
+      "direct slash command skill detection should report cloud-evolved skills"
+    )
     assert(!detector.onReadFilePath(skillMdPath), "duplicate skill reads should not add again")
 
     const directDetector = new SkillUsageDetector()
@@ -115,6 +121,11 @@ async function testSkillUsageDetectorReadsSkillMetadataDirectly(): Promise<void>
       directDetector.getUsedSkillNames(),
       ["elementui-page-v1.0.3"],
       "direct slash command skill detection should preserve the SKILL.md version"
+    )
+    assertArrayEqual(
+      directDetector.getUsedEvolvedSkillNames(),
+      ["elementui-page-v1.0.3"],
+      "child file reads should preserve cloud-evolved skill attribution"
     )
   } finally {
     await rm(rootDir, { recursive: true, force: true })
@@ -135,9 +146,12 @@ async function testTraceCollectorReportsVersionedSkills(): Promise<void> {
   setTraceReporter(reporter)
 
   try {
-    const tracer = new TraceCollector("thread-telemetry-unit", "请使用测试 Skill 生成代码", "model-a")
+    const tracer = new TraceCollector("thread-telemetry-unit", "请使用测试 Skill 生成代码", "model-a", {
+      triggerSource: "scheduler_action"
+    })
     tracer.setModelName("Model A")
     tracer.setUsedSkills(["unit-skill", "unit-skill-v1.0.0", "another-skill-2.3.4"])
+    tracer.setEvolvedSkills(["unit-skill"])
     tracer.beginStep()
     tracer.recordToolCall({
       name: "read_file",
@@ -160,10 +174,22 @@ async function testTraceCollectorReportsVersionedSkills(): Promise<void> {
       "trace should dedupe and normalize usedSkills before reporting"
     )
     assertArrayEqual(
+      trace.evolvedSkills,
+      ["unit-skill-v1.0.0"],
+      "trace should normalize evolvedSkills before reporting"
+    )
+    assert(trace.triggerSource === "scheduler_action", "trace should keep triggerSource")
+    assertArrayEqual(
       reportedTrace?.usedSkills ?? [],
       trace.usedSkills,
       "async trace reporter should receive normalized usedSkills"
     )
+    assertArrayEqual(
+      reportedTrace?.evolvedSkills ?? [],
+      trace.evolvedSkills,
+      "async trace reporter should receive normalized evolvedSkills"
+    )
+    assert(reportedTrace?.triggerSource === "scheduler_action", "async trace reporter should receive triggerSource")
 
     const file = join(tracesDir, trace.threadId, `${trace.traceId}.jsonl`)
     const persisted = JSON.parse((await readFile(file, "utf-8")).trim()) as AgentTrace
@@ -172,6 +198,12 @@ async function testTraceCollectorReportsVersionedSkills(): Promise<void> {
       trace.usedSkills,
       "persisted trace should contain normalized usedSkills"
     )
+    assertArrayEqual(
+      persisted.evolvedSkills,
+      trace.evolvedSkills,
+      "persisted trace should contain normalized evolvedSkills"
+    )
+    assert(persisted.triggerSource === "scheduler_action", "persisted trace should contain triggerSource")
   } finally {
     setTraceReporter({
       async report(trace) {

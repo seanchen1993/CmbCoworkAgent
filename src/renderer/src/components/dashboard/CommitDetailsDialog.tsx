@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, ExternalLink, GitCommit, Loader2 } from "lucide-react"
+import { ChevronLeft, ChevronRight, ExternalLink, GitCommit, Loader2, Search, X } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import type { DashboardCommitDetail, DashboardCommitDetailsData } from "./use-dashboard"
 
 function formatTime(iso: string): string {
@@ -22,6 +23,14 @@ function repoName(item: DashboardCommitDetail): string {
   const repoPath = item.repoPath
   const parts = repoPath.replace(/\\/g, "/").split("/").filter(Boolean)
   return parts[parts.length - 1] || repoPath
+}
+
+function orgLabel(item: DashboardCommitDetail): string {
+  const upperOrgLv1 = item.upperOrgLv1?.trim() ?? ""
+  const upperOrgLv0 = item.upperOrgLv0?.trim() ?? ""
+  if (upperOrgLv1 && upperOrgLv0) return `${upperOrgLv1}/${upperOrgLv0}`
+  if (upperOrgLv1) return upperOrgLv1
+  return item.orgName || "-"
 }
 
 function SkillChips({ skills }: { skills: string[] }): React.JSX.Element {
@@ -63,6 +72,7 @@ function CommitRow({
 }): React.JSX.Element {
   const externalUrl = item.pushed ? (item.commitUrl || item.repositoryWebUrl || "") : ""
   const displayRepo = repoName(item)
+  const displayOrg = orgLabel(item)
 
   return (
     <tr className="border-b border-border/60 last:border-b-0 hover:bg-muted/20">
@@ -74,7 +84,7 @@ function CommitRow({
         <div className="text-[10px] text-muted-foreground">{item.sapId || item.ystId || "-"}</div>
       </td>
       <td className="max-w-[120px] px-3 py-2 text-xs text-muted-foreground">
-        <span className="block truncate" title={item.orgName}>{item.orgName || "-"}</span>
+        <span className="block truncate" title={displayOrg}>{displayOrg}</span>
       </td>
       <td className="max-w-[180px] px-3 py-2 text-xs">
         {externalUrl ? (
@@ -130,11 +140,15 @@ function CommitDetailsToolbar({
   fromIndex,
   toIndex,
   pushedOnly,
+  departmentValue,
   loading,
   canPrev,
   canNext,
   onPageChange,
-  onPushedOnlyChange
+  onPushedOnlyChange,
+  onDepartmentValueChange,
+  onDepartmentSearch,
+  onClearDepartment
 }: {
   total: number
   page: number
@@ -143,11 +157,15 @@ function CommitDetailsToolbar({
   fromIndex: number
   toIndex: number
   pushedOnly: boolean
+  departmentValue: string
   loading: boolean
   canPrev: boolean
   canNext: boolean
   onPageChange: (page: number) => void
   onPushedOnlyChange: (pushedOnly: boolean) => void
+  onDepartmentValueChange: (value: string) => void
+  onDepartmentSearch: () => void
+  onClearDepartment: () => void
 }): React.JSX.Element {
   return (
     <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/10 px-5 py-2 text-xs text-muted-foreground">
@@ -158,6 +176,38 @@ function CommitDetailsToolbar({
         {loading ? <Loader2 className="size-3.5 animate-spin" /> : null}
       </div>
       <div className="flex items-center gap-3">
+        <form
+          className="flex items-center gap-2"
+          onSubmit={(event) => {
+            event.preventDefault()
+            onDepartmentSearch()
+          }}
+        >
+          <div className="relative w-[180px]">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={departmentValue}
+              onChange={(event) => onDepartmentValueChange(event.target.value)}
+              aria-label="按 Lv1 或 Lv0 部门筛选 Commit"
+              placeholder="部门查询"
+              className="h-7 pl-8 pr-7 text-xs"
+            />
+            {departmentValue ? (
+              <button
+                type="button"
+                onClick={onClearDepartment}
+                className="absolute right-2 top-1/2 inline-flex size-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                aria-label="清空部门筛选"
+                title="清空"
+              >
+                <X className="size-3" />
+              </button>
+            ) : null}
+          </div>
+          <Button type="submit" variant="outline" size="sm" className="h-7 px-2" disabled={loading}>
+            查询
+          </Button>
+        </form>
         <div className="flex h-7 items-center rounded-full bg-muted px-1 text-[11px] font-medium">
           {[
             { value: false, label: "全部" },
@@ -215,6 +265,10 @@ export function CommitDetailsDialog({
   error,
   onPageChange,
   onPushedOnlyChange,
+  departmentValue,
+  onDepartmentValueChange,
+  onDepartmentSearch,
+  onClearDepartment,
   onOpenExternal
 }: {
   open: boolean
@@ -225,6 +279,10 @@ export function CommitDetailsDialog({
   error: string | null
   onPageChange: (page: number) => void
   onPushedOnlyChange: (pushedOnly: boolean) => void
+  departmentValue: string
+  onDepartmentValueChange: (value: string) => void
+  onDepartmentSearch: () => void
+  onClearDepartment: () => void
   onOpenExternal: (url: string) => void
 }): React.JSX.Element {
   const items = data?.items ?? []
@@ -267,11 +325,15 @@ export function CommitDetailsDialog({
               fromIndex={fromIndex}
               toIndex={toIndex}
               pushedOnly={pushedOnly}
+              departmentValue={departmentValue}
               loading={loading}
               canPrev={canPrev}
               canNext={canNext}
               onPageChange={onPageChange}
               onPushedOnlyChange={onPushedOnlyChange}
+              onDepartmentValueChange={onDepartmentValueChange}
+              onDepartmentSearch={onDepartmentSearch}
+              onClearDepartment={onClearDepartment}
             />
             <div className="flex flex-1 items-center justify-center px-6 text-sm text-muted-foreground">
               {pushedOnly ? "该时间范围内没有已 Push 的 Commit 数据" : "该时间范围内没有 Commit 数据"}
@@ -287,11 +349,15 @@ export function CommitDetailsDialog({
               fromIndex={fromIndex}
               toIndex={toIndex}
               pushedOnly={pushedOnly}
+              departmentValue={departmentValue}
               loading={loading}
               canPrev={canPrev}
               canNext={canNext}
               onPageChange={onPageChange}
               onPushedOnlyChange={onPushedOnlyChange}
+              onDepartmentValueChange={onDepartmentValueChange}
+              onDepartmentSearch={onDepartmentSearch}
+              onClearDepartment={onClearDepartment}
             />
             <ScrollArea className="min-h-0 flex-1">
               <div className="overflow-x-auto">
