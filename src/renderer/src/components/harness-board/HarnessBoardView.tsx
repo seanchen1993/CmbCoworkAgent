@@ -436,13 +436,11 @@ async function getLatestSessionWorkspacePath(
 interface CreateHarnessSessionParams {
   projectId: string
   slug: string
-  titleSource: string
   sessions: HarnessSessionBinding[]
   threadsById: Map<string, Thread>
   threadStates: ThreadWorkspaceStateMap
   createThread: (
     config: {
-      title: string
       workspacePath: string | null
       harnessFeature: { projectId: string; slug: string; source: string }
     },
@@ -451,11 +449,10 @@ interface CreateHarnessSessionParams {
 }
 
 async function createHarnessSession(params: CreateHarnessSessionParams): Promise<Thread> {
-  const { projectId, slug, titleSource, sessions, threadsById, threadStates, createThread } = params
+  const { projectId, slug, sessions, threadsById, threadStates, createThread } = params
   const workspacePath = await getLatestSessionWorkspacePath(sessions, threadsById, threadStates)
   return createThread(
     {
-      title: `特性: ${titleSource}`,
       workspacePath,
       harnessFeature: { projectId, slug, source: HARNESS_SOURCE }
     },
@@ -2231,7 +2228,6 @@ function FeatureDetailPage({
       const thread = await createHarnessSession({
         projectId: detail.project.projectId,
         slug: detail.run.slug,
-        titleSource: detail.run.title,
         sessions: detail.sessions,
         threadsById,
         threadStates: allThreadStates,
@@ -2541,7 +2537,6 @@ function ProjectFeatureSidebar({
   onCreateSession: (
     project: HarnessProjectListItem,
     slug: string,
-    title: string,
     sessions: HarnessSessionBinding[]
   ) => void
   onSelectSession: (projectId: string, slug: string, threadId: string) => void
@@ -2587,6 +2582,7 @@ function ProjectFeatureSidebar({
             const hasUnreadSession = group.sessions.some((session) =>
               unreadIds.has(session.threadId)
             )
+            const projectArchived = group.project.lifecycle.status === "archived"
 
             return (
               <div key={group.key} className="space-y-1">
@@ -2620,6 +2616,14 @@ function ProjectFeatureSidebar({
                       <span className="min-w-0 flex-1 truncate text-xs font-medium" title={group.title}>
                         {group.title}
                       </span>
+                      {projectArchived && (
+                        <span
+                          className="shrink-0 rounded-sm border border-status-warning/30 bg-status-warning/15 px-2 py-0.5 text-[11px] font-medium leading-none text-status-warning"
+                          title={`所属项目「${group.project.name}」已归档`}
+                        >
+                          已归档
+                        </span>
+                      )}
                       {hasUnreadSession && <span className="size-2 rounded-full bg-blue-500 shrink-0" />}
                     </div>
                   </div>
@@ -2636,7 +2640,7 @@ function ProjectFeatureSidebar({
                         disabled={creatingSession}
                         onClick={(event) => {
                           event.stopPropagation()
-                          void onCreateSession(group.project, group.slug, group.title, group.sessions)
+                          void onCreateSession(group.project, group.slug, group.sessions)
                         }}
                       >
                         {creatingSession ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />}
@@ -3220,7 +3224,6 @@ export function HarnessBoardView(): React.JSX.Element {
       })
       const thread = await createThread(
         {
-          title: `特性: ${result.title || result.slug}`,
           workspacePath: null,
           harnessFeature: {
             projectId: result.projectId,
@@ -3456,7 +3459,6 @@ export function HarnessBoardView(): React.JSX.Element {
     async (
       project: HarnessProjectListItem,
       slug: string,
-      title: string,
       sessions: HarnessSessionBinding[]
     ): Promise<void> => {
       const key = `${project.projectId}:${slug}`
@@ -3466,7 +3468,6 @@ export function HarnessBoardView(): React.JSX.Element {
         const thread = await createHarnessSession({
           projectId: project.projectId,
           slug,
-          titleSource: title || slug,
           sessions,
           threadsById,
           threadStates: allThreadStates,
@@ -3567,8 +3568,8 @@ export function HarnessBoardView(): React.JSX.Element {
                 })
               }
               onToggleAll={toggleAllFeatureGroups}
-              onCreateSession={(project, slug, title, sessions) => {
-                void handleCreateSidebarSession(project, slug, title, sessions)
+              onCreateSession={(project, slug, sessions) => {
+                void handleCreateSidebarSession(project, slug, sessions)
               }}
               onSelectSession={(projectId, slug, threadId) => {
                 openFeatureDetail(projectId, slug, threadId)
