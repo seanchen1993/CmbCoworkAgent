@@ -2663,6 +2663,16 @@ export function ChatContainer({
     void loadSkills()
   }, [loadSkills, pluginVersion])
 
+  // Main broadcasts `skills:changed` after skill evolution writes, optimizer
+  // patches, and plugin SKILL.md edits via the file editor. Subscribe so the
+  // slash popover and welcome-tree get a fresh list without waiting for the
+  // user to re-open `/` (which already triggers a re-fetch on its own).
+  useEffect(() => {
+    return window.api.skills.onChanged(() => {
+      void loadSkills()
+    })
+  }, [loadSkills])
+
   // ── Skill creation human-confirmation listener ──────────
   useEffect(() => {
     console.log("[ChatContainer] Registering skill confirm listener")

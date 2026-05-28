@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ExternalLink,
+  FileEdit,
   FolderOpen,
   Plug,
   Plus,
@@ -31,6 +32,7 @@ import { useAppStore } from "@/lib/store"
 import type { PluginMetadata, PluginManifest } from "@/types"
 import { marketApi, type MarketItem } from "../../api/market"
 import { MarketPublishDialog, type MarketPublishTarget } from "./MarketPublishDialog"
+import { PluginFileEditorDialog } from "./PluginFileEditorDialog"
 import { readUploadedItemNamesFromStorage } from "./marketPublishStorage"
 import { toast } from "sonner"
 
@@ -368,6 +370,7 @@ export function PluginsPanel(): React.JSX.Element {
   const loggedPluginSelectionRef = useRef<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<PluginMetadata | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [fileEditorOpen, setFileEditorOpen] = useState(false)
 
   const shouldHidePluginDetails = useCallback(
     (plugin: PluginMetadata | null): boolean => {
@@ -916,6 +919,20 @@ export function PluginsPanel(): React.JSX.Element {
         isMarketPlugin={
           selectedPlugin ? Boolean(resolvePluginMarketInfo(selectedPlugin, marketPluginMap)) : false
         }
+        // Edit-files only when the plugin is editable per origin rules. Same
+        // predicate that gates publish, so market downloads stay read-only and
+        // detail-hidden.
+        onEditFiles={
+          selectedPlugin && !shouldHideSelectedPluginDetails
+            ? () => setFileEditorOpen(true)
+            : undefined
+        }
+      />
+
+      <PluginFileEditorDialog
+        plugin={selectedPlugin}
+        open={fileEditorOpen}
+        onOpenChange={setFileEditorOpen}
       />
 
       <UploadPluginDialog
@@ -975,6 +992,7 @@ export function PluginDetailPanel(props: {
   hideActions?: boolean
   hideComponentDetails?: boolean
   isMarketPlugin?: boolean
+  onEditFiles?: (plugin: PluginMetadata) => void
 }): React.JSX.Element {
   const {
     plugin,
@@ -986,7 +1004,8 @@ export function PluginDetailPanel(props: {
     publishLabel = "发布到市场",
     hideActions = false,
     hideComponentDetails = false,
-    isMarketPlugin = false
+    isMarketPlugin = false,
+    onEditFiles
   } = props
 
   if (!plugin) {
@@ -1112,6 +1131,17 @@ export function PluginDetailPanel(props: {
         </div>
         {!hideActions && (
           <div className="flex items-center gap-1.5 shrink-0">
+            {onEditFiles && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 text-xs"
+                onClick={() => onEditFiles(plugin)}
+              >
+                <FileEdit className="size-3" />
+                编辑文件
+              </Button>
+            )}
             {onPublish && (
               <Button
                 variant="outline"

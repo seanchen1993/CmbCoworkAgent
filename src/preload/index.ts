@@ -901,6 +901,26 @@ const api = {
     },
     delete: (skillPath: string): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("skills:delete", skillPath)
+    },
+    /**
+     * Subscribe to skill-set changes pushed by main (`skills:changed` event).
+     * Triggered after skill evolution / optimizer writes and plugin SKILL.md
+     * edits — anywhere a downstream surface (slash popover, right panel)
+     * needs to re-pull `skills.list()` + `skills.listPlugins()`.
+     *
+     * Returns an unsubscribe handle in the same shape as the rest of the
+     * preload's `onChanged` listeners.
+     */
+    onChanged: (callback: (payload: { reason?: string }) => void): (() => void) => {
+      const listener = (_event: unknown, payload: unknown): void => {
+        const reason =
+          payload && typeof payload === "object"
+            ? (payload as { reason?: unknown }).reason
+            : undefined
+        callback({ reason: typeof reason === "string" ? reason : undefined })
+      }
+      ipcRenderer.on("skills:changed", listener)
+      return () => ipcRenderer.removeListener("skills:changed", listener)
     }
   },
   mcp: {
@@ -1355,7 +1375,42 @@ const api = {
         pluginId,
         hookId,
         enabled
-      }) as Promise<{ success: boolean; error?: string }>
+      }) as Promise<{ success: boolean; error?: string }>,
+    listFiles: (
+      pluginId: string
+    ): Promise<{
+      success: boolean
+      files?: Array<{ path: string; relativePath: string; editable: boolean }>
+      root?: string
+      pluginEditable?: boolean
+      error?: string
+    }> =>
+      ipcRenderer.invoke("plugins:listFiles", pluginId) as Promise<{
+        success: boolean
+        files?: Array<{ path: string; relativePath: string; editable: boolean }>
+        root?: string
+        pluginEditable?: boolean
+        error?: string
+      }>,
+    readFile: (
+      pluginId: string,
+      filePath: string
+    ): Promise<{ success: boolean; content?: string; editable?: boolean; error?: string }> =>
+      ipcRenderer.invoke("plugins:read", { pluginId, filePath }) as Promise<{
+        success: boolean
+        content?: string
+        editable?: boolean
+        error?: string
+      }>,
+    writeFile: (
+      pluginId: string,
+      filePath: string,
+      content: string
+    ): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke("plugins:write", { pluginId, filePath, content }) as Promise<{
+        success: boolean
+        error?: string
+      }>
   },
   chatx: {
     getConfig: (): Promise<ChatXConfig> =>

@@ -251,7 +251,14 @@ export function RightPanel({
         console.error("[RightPanel] Failed to load skills:", e)
       }
     }
-    load()
+    void load()
+    // Re-pull whenever main signals a skill-set change (skill evolution,
+    // optimizer patches, plugin SKILL.md edits via the file editor). Without
+    // this the right panel only refreshes when pluginVersion bumps on
+    // install/enable actions and misses content-only edits entirely.
+    return window.api.skills.onChanged(() => {
+      void load()
+    })
   }, [])
 
   useEffect(() => {
