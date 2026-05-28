@@ -18,6 +18,14 @@ function SourceBadge({ source }: { source: SkillMetadata["source"] }): React.Rea
   return <span className="text-xs text-muted-foreground/60 shrink-0">{label}</span>
 }
 
+function PluginBadge(): React.ReactElement {
+  return (
+    <span className="shrink-0 rounded-sm border border-sky-200 bg-sky-50 px-1 py-px text-[9px] font-medium leading-3 text-sky-700 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-300">
+      Plugin
+    </span>
+  )
+}
+
 export function SlashCommandPopover({
   mode,
   selectedIdx,
@@ -54,6 +62,7 @@ export function SlashCommandPopover({
         <div className="py-1">
           {mode.skills.map((s, idx) => {
             const isSelected = idx === selectedIdx
+            const isPluginSkill = Boolean(s.pluginName || s.pluginId)
             return (
               <button
                 key={s.path}
@@ -73,6 +82,7 @@ export function SlashCommandPopover({
                 <span className="text-sm text-muted-foreground truncate flex-1">
                   {s.description}
                 </span>
+                {isPluginSkill && <PluginBadge />}
                 <SourceBadge source={s.source} />
               </button>
             )
