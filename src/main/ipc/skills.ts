@@ -1,8 +1,8 @@
 import AdmZip from "adm-zip"
-import { IpcMain } from "electron"
+import { IpcMain, shell } from "electron"
 import * as fs from "fs/promises"
 import * as path from "path"
-import { existsSync, mkdirSync, rmSync } from "fs"
+import { existsSync, mkdirSync } from "fs"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import {
@@ -614,7 +614,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
       }
       try {
         const cleanupDisabledSkills = prepareDisabledSkillsCleanupForSkillDir(skillDir)
-        rmSync(skillDir, { recursive: true })
+        await shell.trashItem(skillDir)
         cleanupDisabledSkills()
         invalidateEnabledSkillsCache()
         notifyHooksChanged("skill-deleted")

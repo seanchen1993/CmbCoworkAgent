@@ -966,3 +966,7 @@
     animation: none;
   }
 }
+
+button{
+  cursor: pointer;
+}

@@ -1,4 +1,4 @@
-import { GitCommit, Maximize2, Minimize2, Eye, EyeOff, Minus, Plus } from "lucide-react"
+import { GitCommit, Maximize2, Minimize2, Eye, Minus, Plus } from "lucide-react"
 import { memo, useEffect, useState } from "react"
 import { cn } from "@/lib/utils"
 
@@ -17,11 +17,11 @@ export interface DiffDisplayProps {
   diff?: string
   oldValue?: string
   newValue?: string
+  filePath?: string
 }
 
-export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps) => {
+export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDisplayProps) => {
   const [isFullscreen, setIsFullscreen] = useState(false)
-  const [renderMode, setRenderMode] = useState<"preview" | "full">("preview")
   const [diffViewerModule, setDiffViewerModule] = useState<DiffViewerModule | null>(null)
   const [diffViewerLoadError, setDiffViewerLoadError] = useState<string | null>(null)
 
@@ -88,6 +88,8 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
   }
 
   const { oldContent, newContent, totalLines, addedLines, removedLines } = parseGitDiff(diffToUse)
+  const sourceOldContent = oldValue ?? oldContent
+  const sourceNewContent = newValue ?? newContent
 
   const isLargeDiff = totalLines > 100
   const maxPreviewLines = 20
@@ -95,29 +97,26 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
   const getPreviewContent = (content: string, maxLines: number) => {
     const lines = content.split("\n")
     if (lines.length <= maxLines) return content
-    return (
-      lines.slice(0, maxLines).join("\n") +
-      "\n...(显示前 " +
-      maxLines +
-      " 行，共 " +
-      lines.length +
-      " 行)"
-    )
+    return lines.slice(0, maxLines).join("\n")
   }
 
-  const shouldUsePreview = isLargeDiff && renderMode === "preview"
+  const shouldUsePreview = isLargeDiff
   const displayOldContent = shouldUsePreview
-    ? getPreviewContent(oldContent, maxPreviewLines)
-    : oldContent
+    ? getPreviewContent(sourceOldContent, maxPreviewLines)
+    : sourceOldContent
   const displayNewContent = shouldUsePreview
-    ? getPreviewContent(newContent, maxPreviewLines)
-    : newContent
+    ? getPreviewContent(sourceNewContent, maxPreviewLines)
+    : sourceNewContent
 
   const DiffViewerComponent = diffViewerModule?.default
   const DiffMethod = diffViewerModule?.DiffMethod
 
-  const makeDiffViewer = (fullscreen: boolean) =>
-    !DiffViewerComponent || !DiffMethod ? (
+  const makeDiffViewer = (fullscreen: boolean) => {
+    const viewerUsesPreview = !fullscreen && shouldUsePreview
+    const viewerOldValue = fullscreen ? sourceOldContent : displayOldContent
+    const viewerNewValue = fullscreen ? sourceNewContent : displayNewContent
+
+    return !DiffViewerComponent || !DiffMethod ? (
       <div className="flex min-h-[120px] items-center justify-center px-4 py-6 text-xs text-muted-foreground">
         {diffViewerLoadError
           ? `Diff 组件加载失败：${diffViewerLoadError}`
@@ -125,8 +124,8 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
       </div>
     ) : (
       <DiffViewerComponent
-        oldValue={oldValue || displayOldContent}
-        newValue={newValue || displayNewContent}
+        oldValue={viewerOldValue}
+        newValue={viewerNewValue}
         splitView={fullscreen}
         hideLineNumbers={!fullscreen}
         renderGutter={
@@ -161,8 +160,8 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
             加载中…
           </div>
         )}
-        disableWordDiff={shouldUsePreview}
-        compareMethod={shouldUsePreview ? DiffMethod.LINES : DiffMethod.WORDS}
+        disableWordDiff={viewerUsesPreview}
+        compareMethod={viewerUsesPreview ? DiffMethod.LINES : DiffMethod.WORDS}
         styles={{
           variables: {
             light: {
@@ -228,6 +227,7 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
         }}
       />
     )
+  }
 
   return (
     <>
@@ -273,13 +273,19 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
         </div>
       </div>
 
-      {/* Large-file warning banner */}
-      {isLargeDiff && renderMode === "full" && (
-        <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-50 dark:bg-amber-950/60 border-b border-amber-200 dark:border-amber-800">
-          <div className="size-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
-          <span className="text-amber-700 dark:text-amber-300">
-            大文件渲染可能较慢，建议切换至全屏模式查看
+      {shouldUsePreview && (
+        <div className="flex items-center justify-between gap-2 border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-700 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+          <span>
+            当前仅展示前 {maxPreviewLines} 行，共 {totalLines} 行
           </span>
+          <button
+            type="button"
+            onClick={() => setIsFullscreen(true)}
+            className="inline-flex items-center gap-1 rounded border border-amber-300/80 bg-background px-2 py-1 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-100/60 dark:border-amber-700 dark:text-amber-200 dark:hover:bg-amber-900/50"
+          >
+            <Eye className="size-3" />
+            查看全部
+          </button>
         </div>
       )}
 
@@ -300,9 +306,15 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
           {/* Modal header */}
           <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/40 shrink-0">
             <div className="flex items-center gap-3">
-              <div className="flex items-center gap-2">
-                <GitCommit className="size-4 text-primary" />
-                <span className="text-sm font-semibold">Git Diff — 全屏视图</span>
+              <div className="min-w-0 flex items-center gap-2">
+                {filePath && (
+                  <div
+                    className="mt-1 max-w-[60vw] truncate font-mono text-sm font-semibold"
+                    title={filePath}
+                  >
+                    {filePath}
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-1.5">
                 {addedLines > 0 && (
@@ -321,28 +333,10 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
               </div>
             </div>
             <div className="flex items-center gap-2">
-              {isLargeDiff && (
-                <button
-                  onClick={() => setRenderMode(renderMode === "preview" ? "full" : "preview")}
-                  className="inline-flex items-center gap-1.5 cursor-pointer px-3 py-1.5 text-xs font-medium bg-background hover:bg-muted border border-border rounded transition-colors"
-                >
-                  {renderMode === "preview" ? (
-                    <>
-                      <Eye className="size-3" />
-                      展开全部代码
-                    </>
-                  ) : (
-                    <>
-                      <EyeOff className="size-3" />
-                      精简预览
-                    </>
-                  )}
-                </button>
-              )}
               <button
+                type="button"
                 onClick={() => {
                   setIsFullscreen(false)
-                  setRenderMode("preview")
                 }}
                 className="inline-flex items-center gap-1.5 cursor-pointer px-3 py-1.5 text-xs font-medium hover:bg-muted border border-border rounded transition-colors"
                 title="退出全屏"
