@@ -92,6 +92,17 @@ function validateHookConfig(config: HookUpsert): void {
     }
   }
 
+  // PR-13b — new optional fields
+  if (config.shell !== undefined && !["bash", "powershell", "sh"].includes(config.shell)) {
+    throw new Error("shell 必须为 bash / powershell / sh")
+  }
+  if (config.statusMessage !== undefined && typeof config.statusMessage !== "string") {
+    throw new Error("statusMessage 必须为字符串")
+  }
+  if (config.model !== undefined && typeof config.model !== "string") {
+    throw new Error("model 必须为字符串")
+  }
+
   validateOnBlockConfig(config.onBlock)
 
   if (

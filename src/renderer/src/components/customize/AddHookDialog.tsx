@@ -1410,7 +1410,10 @@ export function AddHookDialog(props: {
   const [command, setCommand] = useState(editHook?.command ?? "")
   // prompt fields
   const [prompt, setPrompt] = useState(editHook?.prompt ?? "")
-  const [modelId, setModelId] = useState(editHook?.modelId ?? "")
+  // PR-13b — CC-aligned `model` is the canonical field; legacy `modelId` is
+  // read for backward compat. UI state name stays `modelId` to avoid a noisy
+  // rename across the dialog.
+  const [modelId, setModelId] = useState(editHook?.model ?? editHook?.modelId ?? "")
   const [fallback, setFallback] = useState<PromptHookFallback>(editHook?.fallback ?? "allow")
   const [onBlockReason, setOnBlockReason] = useState(editHook?.onBlock?.reason ?? "")
   const [onBlockSystemMessage, setOnBlockSystemMessage] = useState(
@@ -1504,7 +1507,7 @@ export function AddHookDialog(props: {
       setMatcher(mm === CUSTOM_SENTINEL ? (h.matcher ?? "") : "")
       setCommand(h.command ?? "")
       setPrompt(h.prompt ?? "")
-      setModelId(h.modelId ?? "")
+      setModelId(h.model ?? h.modelId ?? "")
       setFallback(h.fallback ?? "allow")
       setOnBlockReason(h.onBlock?.reason ?? "")
       setOnBlockSystemMessage(h.onBlock?.systemMessage ?? "")
@@ -1581,7 +1584,8 @@ export function AddHookDialog(props: {
         config.command = command.trim()
       } else {
         config.prompt = prompt.trim()
-        if (modelId.trim()) config.modelId = modelId.trim()
+        // PR-13b — write CC-aligned `model`; do not also write legacy `modelId`.
+        if (modelId.trim()) config.model = modelId.trim()
         config.fallback = fallback
       }
 

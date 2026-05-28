@@ -981,8 +981,11 @@ function HookDetail(props: {
   const isPluginHook = hook.source === "plugin"
   const isSkillHook = hook.source === "skill"
   const { models } = useAppStore()
-  const modelName = hook.modelId
-    ? (models.find((m) => m.id === hook.modelId)?.name ?? hook.modelId)
+  // PR-13b — read CC-aligned `model` first, fall back to legacy `modelId` so
+  // existing hooks on disk keep showing their model name.
+  const hookModelRef = hook.model ?? hook.modelId
+  const modelName = hookModelRef
+    ? (models.find((m) => m.id === hookModelRef)?.name ?? hookModelRef)
     : null
   const commandHookDoc = getCommandHookEventDoc(hook.event)
   const readableContextDocs = getCommandHookReadableContextDocs(hook.event)

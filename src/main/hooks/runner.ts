@@ -4,7 +4,7 @@ import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import type { HookConfig, HookEvent, HookResult } from "./types"
-import { getTimeoutBounds } from "./types"
+import { getHookModelRef, getTimeoutBounds } from "./types"
 import type { PluginHookMetadata, SkillHookMetadata } from "../types"
 import { joinHookText } from "./text"
 import { mergeUpdatedInput } from "./updated-input"
@@ -361,12 +361,37 @@ function executeCommandHook(
 
     const timeout = getEffectiveTimeout(hook)
     const isWindows = process.platform === "win32"
-    const cmd = isWindows ? command : "/bin/sh"
-    const args = isWindows ? [] : ["-c", command]
+
+    // PR-13b — honour explicit hook.shell when set, else fall back to the
+    // legacy platform-based pick. When `hook.shell` names a non-default
+    // interpreter the runner relies on it being resolvable from PATH (e.g.
+    // Git Bash / WSL / pwsh installed). spawn will surface a missing-binary
+    // error through the existing error path; the hook surfaces as failed
+    // (non-blocking, since exit-2 semantics only apply to clean runs).
+    let cmd: string
+    let args: string[]
+    let useShell: boolean
+    if (hook.shell === "bash") {
+      cmd = "bash"
+      args = ["-c", command]
+      useShell = false
+    } else if (hook.shell === "powershell") {
+      cmd = "pwsh"
+      args = ["-NoProfile", "-NonInteractive", "-Command", command]
+      useShell = false
+    } else if (hook.shell === "sh") {
+      cmd = "sh"
+      args = ["-c", command]
+      useShell = false
+    } else {
+      cmd = isWindows ? command : "/bin/sh"
+      args = isWindows ? [] : ["-c", command]
+      useShell = isWindows
+    }
 
     const child = spawn(cmd, args, {
       env,
-      shell: isWindows ? true : false,
+      shell: useShell,
       stdio: ["pipe", "pipe", "pipe"],
       timeout,
       cwd
@@ -600,7 +625,7 @@ async function executePromptHook(
   }
 
   const timeout = getEffectiveTimeout(hook)
-  const model = getPromptHookModel(hook.modelId, timeout)
+  const model = getPromptHookModel(getHookModelRef(hook), timeout)
   if (!model) {
     return fallbackResult("[PromptHook] No model configured — cannot evaluate prompt hook")
   }

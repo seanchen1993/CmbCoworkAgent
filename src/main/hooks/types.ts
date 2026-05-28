@@ -60,6 +60,15 @@ export function isSupportedHookEvent(value: unknown): value is SupportedHookEven
  */
 export type HookType = "command" | "prompt"
 
+/**
+ * PR-13b — explicit shell selection for command hooks. Today the runner picks
+ * cmd.exe vs /bin/sh by `process.platform === "win32"`; this lets Windows users
+ * point at WSL/Git Bash for hooks that use POSIX-only syntax. Mirrors CC's
+ * `shell` field on BashCommandHookSchema. Caller must ensure the requested
+ * shell is on PATH.
+ */
+export type HookShell = "bash" | "powershell" | "sh"
+
 export type HookSourceType = "global" | "workspace" | "plugin" | "skill"
 
 /** What the LLM should do when a prompt-hook times out or returns invalid JSON */
@@ -95,11 +104,26 @@ export interface HookConfig {
   type?: HookType // Default: "command"
   // ── command hook ──────────────────────────────────────────────────────────
   command?: string // Shell command to run (required when type=="command")
+  /** PR-13b — explicit shell override (bash/powershell/sh). Undefined = legacy
+   *  per-platform autodetect (cmd on Windows, /bin/sh elsewhere). */
+  shell?: HookShell
   // ── prompt hook ───────────────────────────────────────────────────────────
   prompt?: string // Natural-language policy (required when type=="prompt")
-  modelId?: string // Which configured model to use; omit = use default model
+  /**
+   * Which configured model to use; omit = use default model.
+   *
+   * PR-13b — Claude Code uses field name `model` for the same purpose. The
+   * runtime reads `model ?? modelId` so CC-imported settings work unchanged,
+   * but new writes go to `model` only (legacy `modelId` field stays out of
+   * fresh records). See `getHookModelRef` helper.
+   */
+  modelId?: string
+  model?: string
   fallback?: PromptHookFallback // Behaviour on timeout / parse failure; default "allow"
   // ── shared ────────────────────────────────────────────────────────────────
+  /** PR-13b — custom status text shown in UI while the hook is running.
+   *  Mirrors CC's `statusMessage` field; pure display, no semantic effect. */
+  statusMessage?: string
   onBlock?: HookOnBlockConfig // static block-time remediation metadata
   /** Static override of the hook's outcome. Undefined = follow stdout. */
   forcedOutcome?: HookForcedOutcome
@@ -265,9 +289,14 @@ export interface HookUpsert {
   matcher?: string
   type?: HookType
   command?: string
+  shell?: HookShell
   prompt?: string
+  /** @deprecated PR-13b — write `model` instead. Reads still honour `modelId`
+   *  for backward compat. */
   modelId?: string
+  model?: string
   fallback?: PromptHookFallback
+  statusMessage?: string
   onBlock?: HookOnBlockConfig
   forcedOutcome?: HookForcedOutcome
   forcedReason?: string
@@ -275,4 +304,17 @@ export interface HookUpsert {
   persistAfterInterrupt?: boolean
   timeout?: number
   enabled?: boolean
+}
+
+/**
+ * PR-13b — single source of truth for "which model is this prompt/agent hook
+ * targeting". Prefers the CC-aligned `model` field; falls back to legacy
+ * `modelId`. Used at runtime and in storage round-trip; UI editors should
+ * write to `model` going forward.
+ */
+export function getHookModelRef(
+  cfg: { model?: string; modelId?: string } | undefined
+): string | undefined {
+  if (!cfg) return undefined
+  return cfg.model ?? cfg.modelId
 }

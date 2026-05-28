@@ -2303,6 +2303,11 @@ function parseClaudeHookTimeoutMs(raw: Record<string, unknown>): number | undefi
   return timeoutSeconds !== undefined ? Math.round(timeoutSeconds * 1000) : undefined
 }
 
+function parseHookShell(value: unknown): "bash" | "powershell" | "sh" | undefined {
+  if (value === "bash" || value === "powershell" || value === "sh") return value
+  return undefined
+}
+
 function parseHookOnBlock(raw: unknown): HookOnBlockConfig | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
 
@@ -2408,8 +2413,12 @@ function ccCommandToHookConfig(
   const timeout = parseClaudeHookTimeoutMs(h)
   const once = parseOptionalHookBoolean(h.once)
   const persistAfterInterrupt = parseOptionalHookBoolean(h.persistAfterInterrupt)
-  const modelId =
-    typeof h.modelId === "string" ? h.modelId : typeof h.model === "string" ? h.model : undefined
+  // PR-13b: CC writes `model`; legacy snapshots may still carry `modelId`.
+  // Canonicalise to `model` in the in-memory HookConfig.
+  const model =
+    typeof h.model === "string" ? h.model : typeof h.modelId === "string" ? h.modelId : undefined
+  const statusMessage = normalizeOptionalHookString(h.statusMessage)
+  const shell = parseHookShell(h.shell)
   const hookType =
     typeof h.type === "string" ? h.type : typeof h.prompt === "string" ? "prompt" : "command"
 
@@ -2421,6 +2430,8 @@ function ccCommandToHookConfig(
       matcher,
       type: "command",
       command: h.command,
+      shell,
+      statusMessage,
       onBlock: parseHookOnBlock(h.onBlock),
       forcedOutcome: parseForcedOutcome(h.forcedOutcome),
       forcedReason: normalizeOptionalHookString(h.forcedReason),
@@ -2440,9 +2451,9 @@ function ccCommandToHookConfig(
       matcher,
       type: "prompt",
       prompt: h.prompt,
-      // CC uses `model`, we use `modelId`; both are accepted.
-      modelId,
+      model,
       fallback: h.fallback === "block" ? "block" : "allow",
+      statusMessage,
       onBlock: parseHookOnBlock(h.onBlock),
       forcedOutcome: parseForcedOutcome(h.forcedOutcome),
       forcedReason: normalizeOptionalHookString(h.forcedReason),
@@ -2542,15 +2553,21 @@ export function getHooks(): HookConfig[] {
           matcher: typeof h.matcher === "string" ? h.matcher : undefined,
           type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
           command: typeof h.command === "string" ? h.command : undefined,
+          shell: parseHookShell(h.shell),
           prompt: typeof h.prompt === "string" ? h.prompt : undefined,
-          modelId:
-            typeof h.modelId === "string"
-              ? h.modelId
-              : typeof h.model === "string"
-                ? h.model
+          // PR-13b — prefer CC-aligned `model`, fall back to legacy `modelId`.
+          // Canonicalises to `model` in the in-memory HookConfig. Records that
+          // only carry `modelId` keep working; they migrate to `model` next
+          // time they round-trip through `upsertHook`.
+          model:
+            typeof h.model === "string"
+              ? h.model
+              : typeof h.modelId === "string"
+                ? h.modelId
                 : undefined,
           fallback:
             hookType === "prompt" ? (h.fallback === "block" ? "block" : "allow") : undefined,
+          statusMessage: normalizeOptionalHookString(h.statusMessage),
           onBlock: parseHookOnBlock(h.onBlock),
           forcedOutcome: parseForcedOutcome(h.forcedOutcome),
           forcedReason: normalizeOptionalHookString(h.forcedReason),
@@ -2635,14 +2652,16 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
             matcher: typeof h.matcher === "string" ? h.matcher : undefined,
             type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
             command: typeof h.command === "string" ? h.command : undefined,
+            shell: parseHookShell(h.shell),
             prompt: typeof h.prompt === "string" ? h.prompt : undefined,
-            modelId:
-              typeof h.modelId === "string"
-                ? h.modelId
-                : typeof h.model === "string"
-                  ? h.model
+            model:
+              typeof h.model === "string"
+                ? h.model
+                : typeof h.modelId === "string"
+                  ? h.modelId
                   : undefined,
             fallback: h.fallback === "block" ? "block" : "allow",
+            statusMessage: normalizeOptionalHookString(h.statusMessage),
             onBlock: parseHookOnBlock(h.onBlock),
             forcedOutcome: parseForcedOutcome(h.forcedOutcome),
             forcedReason: normalizeOptionalHookString(h.forcedReason),
@@ -2839,14 +2858,16 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
                 : undefined,
           type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
           command: typeof h.command === "string" ? h.command : undefined,
+          shell: parseHookShell(h.shell),
           prompt: typeof h.prompt === "string" ? h.prompt : undefined,
-          modelId:
-            typeof h.modelId === "string"
-              ? h.modelId
-              : typeof h.model === "string"
-                ? h.model
+          model:
+            typeof h.model === "string"
+              ? h.model
+              : typeof h.modelId === "string"
+                ? h.modelId
                 : undefined,
           fallback: h.fallback === "block" ? "block" : "allow",
+          statusMessage: normalizeOptionalHookString(h.statusMessage),
           onBlock: parseHookOnBlock(h.onBlock),
           forcedOutcome: parseForcedOutcome(h.forcedOutcome),
           forcedReason: normalizeOptionalHookString(h.forcedReason),
@@ -3142,14 +3163,16 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
               matcher: typeof raw.matcher === "string" ? raw.matcher : undefined,
               type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
               command: typeof raw.command === "string" ? raw.command : undefined,
+              shell: parseHookShell(raw.shell),
               prompt: typeof raw.prompt === "string" ? raw.prompt : undefined,
-              modelId:
-                typeof raw.modelId === "string"
-                  ? raw.modelId
-                  : typeof raw.model === "string"
-                    ? raw.model
+              model:
+                typeof raw.model === "string"
+                  ? raw.model
+                  : typeof raw.modelId === "string"
+                    ? raw.modelId
                     : undefined,
               fallback: raw.fallback === "block" ? "block" : "allow",
+              statusMessage: normalizeOptionalHookString(raw.statusMessage),
               onBlock: parseHookOnBlock(raw.onBlock),
               forcedOutcome: parseForcedOutcome(raw.forcedOutcome),
               forcedReason: normalizeOptionalHookString(raw.forcedReason),
@@ -3204,9 +3227,16 @@ export function upsertHook(config: HookUpsert & { id?: string }): string {
     matcher: config.matcher,
     type: hookType,
     command: hookType === "command" ? (config.command ?? "").trim() : undefined,
+    shell: hookType === "command" ? config.shell : undefined,
     prompt: hookType === "prompt" ? config.prompt?.trim() : undefined,
-    modelId: hookType === "prompt" ? config.modelId : undefined,
+    // PR-13b — write `model` only; keep `modelId` absent in new records. The
+    // upsert call coming from existing UI may carry either field; prefer the
+    // CC-aligned `model`. Loaded records that still have `modelId` are read by
+    // `getHookModelRef` at runtime and migrate to `model` next time they're
+    // re-saved through this path.
+    model: hookType === "prompt" ? (config.model ?? config.modelId) : undefined,
     fallback: hookType === "prompt" ? (config.fallback ?? "allow") : undefined,
+    statusMessage: normalizeOptionalHookString(config.statusMessage),
     onBlock: parseHookOnBlock(config.onBlock),
     forcedOutcome: parseForcedOutcome(config.forcedOutcome),
     forcedReason: normalizeOptionalHookString(config.forcedReason),
