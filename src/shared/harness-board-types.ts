@@ -17,6 +17,24 @@ export interface HarnessStatus {
 
 export type HarnessAdapterType = "plugin"
 
+export type HarnessBoardCompatibilityStatus =
+  | "compatible"
+  | "missing-plugin"
+  | "missing-board-config"
+  | "invalid-board-config"
+  | "invalid-api-version"
+  | "plugin-too-old"
+  | "app-too-old"
+
+export interface HarnessBoardCompatibility {
+  status: HarnessBoardCompatibilityStatus
+  compatible: boolean
+  appApiVersion: number
+  pluginApiVersion?: number
+  label: string
+  message?: string
+}
+
 export interface HarnessAdapterSnapshot {
   id: string
   name: string
@@ -26,6 +44,7 @@ export interface HarnessAdapterSnapshot {
 
 export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
   description: string
+  boardCompatibility: HarnessBoardCompatibility
 }
 
 export interface HarnessProjectMetadata {
@@ -91,6 +110,7 @@ export interface HarnessProjectListItem {
     name: string
     type: HarnessAdapterType
   }
+  boardCompatibility: HarnessBoardCompatibility
   lifecycle: {
     status: "active" | "archived"
   }

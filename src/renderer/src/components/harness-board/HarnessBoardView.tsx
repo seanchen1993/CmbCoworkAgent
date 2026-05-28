@@ -67,6 +67,7 @@ import type {
   HarnessRunNode,
   HarnessSessionBinding,
   HarnessAdapterRegistryItem,
+  HarnessBoardCompatibility,
   HarnessStatus,
   Thread
 } from "@/types"
@@ -763,6 +764,51 @@ function ProjectWorkspacePathTip(): React.JSX.Element {
   )
 }
 
+function boardCompatibilityStatus(compatibility: HarnessBoardCompatibility): HarnessStatus {
+  if (compatibility.compatible) {
+    return { label: compatibility.label || "兼容", uiKind: "ok" }
+  }
+  return {
+    label: compatibility.label || "协议不兼容",
+    uiKind: compatibility.status === "invalid-board-config" || compatibility.status === "invalid-api-version"
+      ? "error"
+      : "warning"
+  }
+}
+
+function boardCompatibilityMessage(compatibility?: HarnessBoardCompatibility | null): string | null {
+  if (!compatibility || compatibility.compatible) return null
+  return compatibility.message || "插件看板协议与当前 APP 不兼容。"
+}
+
+function findSelectedAdapter(
+  registry: HarnessAdapterRegistryItem[],
+  adapterId: string
+): HarnessAdapterRegistryItem | null {
+  if (!adapterId) return null
+  return registry.find((adapter) => adapter.id === adapterId) ?? null
+}
+
+function AdapterSelectItem({ adapter }: { adapter: HarnessAdapterRegistryItem }): React.JSX.Element {
+  const compatibilityMessage = boardCompatibilityMessage(adapter.boardCompatibility)
+  return (
+    <SelectItem
+      key={adapter.id}
+      value={adapter.id}
+      disabled={!adapter.boardCompatibility.compatible}
+    >
+      <span className="flex min-w-0 flex-col gap-0.5">
+        <span className="truncate">{adapter.name} · {adapter.version}</span>
+        {compatibilityMessage && (
+          <span className="truncate text-[11px] text-status-warning">
+            {compatibilityMessage}
+          </span>
+        )}
+      </span>
+    </SelectItem>
+  )
+}
+
 function ProjectFormDialog({
   open,
   creating,
@@ -786,6 +832,8 @@ function ProjectFormDialog({
 }): React.JSX.Element {
   const projectNameError = getHarnessNameError("项目名称", form.name)
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
+  const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
+  const selectedAdapterMessage = boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -809,12 +857,13 @@ function ProjectFormDialog({
                 </SelectTrigger>
                 <SelectContent className={harnessDialogSelectContentClassName}>
                   {registry.map((adapter) => (
-                    <SelectItem key={adapter.id} value={adapter.id}>
-                      {adapter.name} · {adapter.version}
-                    </SelectItem>
+                    <AdapterSelectItem key={adapter.id} adapter={adapter} />
                   ))}
                 </SelectContent>
               </Select>
+              {selectedAdapterMessage && (
+                <span className="text-status-warning">{selectedAdapterMessage}</span>
+              )}
             </label>
           </section>
 
@@ -922,7 +971,12 @@ function ProjectFormDialog({
           </Button>
           <Button
             onClick={onSubmit}
-            disabled={creating || metadataRequiredMissing(form) || metadataNameInvalid(form)}
+            disabled={
+              creating ||
+              metadataRequiredMissing(form) ||
+              metadataNameInvalid(form) ||
+              !selectedAdapter?.boardCompatibility.compatible
+            }
             className="gap-2"
           >
             {creating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
@@ -955,6 +1009,8 @@ function ProjectEditDialog({
 }): React.JSX.Element {
   const projectNameError = getHarnessNameError("项目名称", form.name)
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
+  const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
+  const selectedAdapterMessage = boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -970,7 +1026,7 @@ function ProjectEditDialog({
             <div className="mb-3 text-sm font-semibold">选择 Plugin </div>
             <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
               <Select
-                value={form.adapterId}
+                value={selectedAdapterMessage ? "" : form.adapterId}
                 onValueChange={(adapterId) => onChange({ ...form, adapterId, adapterType: "plugin" })}
               >
                 <SelectTrigger className={harnessProjectCreateSelectClassName}>
@@ -978,12 +1034,13 @@ function ProjectEditDialog({
                 </SelectTrigger>
                 <SelectContent className={harnessDialogSelectContentClassName}>
                   {registry.map((adapter) => (
-                    <SelectItem key={adapter.id} value={adapter.id}>
-                      {adapter.name} · {adapter.version}
-                    </SelectItem>
+                    <AdapterSelectItem key={adapter.id} adapter={adapter} />
                   ))}
                 </SelectContent>
               </Select>
+              {selectedAdapterMessage && (
+                <span className="text-status-warning">{selectedAdapterMessage}</span>
+              )}
             </label>
           </section>
 
@@ -1332,6 +1389,8 @@ function ProjectCard({
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
   const detailError = detail?.error?.trim()
+  const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
+  const pluginCompatibilityStatus = boardCompatibilityStatus(project.boardCompatibility)
 
   return (
     <article
@@ -1373,7 +1432,11 @@ function ProjectCard({
         </div>
 
         <div className="mt-4 border-t border-border pt-3">
-          {detailError && detail?.projectState ? (
+          {pluginCompatibilityMessage ? (
+            <div className="flex min-h-[44px] items-center">
+              <StatusPill status={pluginCompatibilityStatus} tooltip={pluginCompatibilityMessage} />
+            </div>
+          ) : detailError && detail?.projectState ? (
             <div className="flex min-h-[44px] items-center">
               <StatusPill status={detail.projectState} tooltip={detailError} />
             </div>
@@ -1930,6 +1993,7 @@ function ProjectDetailPage({
   const runs = detail?.runs ?? []
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
+  const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
@@ -1961,7 +2025,8 @@ function ProjectDetailPage({
                 size="sm"
                 className={cn("gap-2", harnessActionButtonClassName)}
                 onClick={() => onCreateFeature(project)}
-                disabled={creatingFeature}
+                disabled={creatingFeature || !!pluginCompatibilityMessage}
+                title={pluginCompatibilityMessage || undefined}
               >
                 <span aria-hidden="true" className={harnessActionOverlayClassName} />
                 <span className={harnessActionIconClassName}>
@@ -1989,6 +2054,11 @@ function ProjectDetailPage({
 
       <ScrollArea className="min-h-0 flex-1">
         <main className="mx-auto max-w-7xl space-y-5 p-6">
+          {pluginCompatibilityMessage && (
+            <div className="rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-3 text-sm text-status-warning">
+              {pluginCompatibilityMessage}
+            </div>
+          )}
           <section className="rounded-md border border-border bg-background">
             <div className="grid grid-cols-[minmax(260px,0.36fr)_minmax(0,1fr)] gap-0">
               <aside className="border-r border-border p-4">
@@ -3104,6 +3174,12 @@ export function HarnessBoardView(): React.JSX.Element {
       setFormError(nameError)
       return
     }
+    const selectedAdapter = findSelectedAdapter(adapterRegistry, form.adapterId)
+    const compatibilityMessage = boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
+    if (compatibilityMessage) {
+      setFormError(compatibilityMessage)
+      return
+    }
     setCreating(true)
     try {
       await window.api.harnessBoard.createProject(form)
@@ -3185,6 +3261,11 @@ export function HarnessBoardView(): React.JSX.Element {
   )
 
   const openFeatureCreateDialog = useCallback((project: HarnessProjectListItem): void => {
+    const compatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
+    if (compatibilityMessage) {
+      toast.warning(compatibilityMessage)
+      return
+    }
     setFeatureDialogProject(project)
     setFeatureName("")
     setFeatureError(null)

@@ -12,6 +12,7 @@ import type {
   HarnessAdapterType,
   HarnessArtifact,
   HarnessArtifactKind,
+  HarnessBoardCompatibility,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
   HarnessProjectCreateInput,
@@ -84,6 +85,9 @@ const HARNESS_UI_KINDS = new Set<HarnessStatus["uiKind"]>([
   "error"
 ])
 
+const APP_BOARD_API_VERSION = 1
+const BOARD_CONFIG_REL_PATH = join("board_core", "board_config.json")
+
 function emptyProjectStore(): HarnessProjectStoreFile {
   return {
     version: 1,
@@ -99,12 +103,98 @@ function normalizeText(value: unknown): string {
   return typeof value === "string" ? value : ""
 }
 
+function parsePositiveInteger(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) return value
+  if (typeof value === "string" && /^[1-9]\d*$/.test(value.trim())) {
+    return Number.parseInt(value.trim(), 10)
+  }
+  return null
+}
+
 function pluginAdapterId(plugin: PluginMetadata): string {
   return plugin.id
 }
 
 function pluginHasBoardConfig(plugin: PluginMetadata): boolean {
-  return existsSync(join(plugin.path, "board_core", "board_config.json"))
+  return existsSync(join(plugin.path, BOARD_CONFIG_REL_PATH))
+}
+
+function makeBoardCompatibility(
+  status: HarnessBoardCompatibility["status"],
+  label: string,
+  message?: string,
+  pluginApiVersion?: number
+): HarnessBoardCompatibility {
+  return {
+    status,
+    compatible: status === "compatible",
+    appApiVersion: APP_BOARD_API_VERSION,
+    ...(pluginApiVersion !== undefined ? { pluginApiVersion } : {}),
+    label,
+    ...(message ? { message } : {})
+  }
+}
+
+function evaluateBoardPluginCompatibility(
+  plugin: PluginMetadata | null,
+  pluginName: string
+): HarnessBoardCompatibility {
+  const displayName = plugin?.name || pluginName || "插件"
+  if (!plugin) {
+    return makeBoardCompatibility(
+      "missing-plugin",
+      "插件未安装",
+      `项目使用的插件未安装：${displayName}`
+    )
+  }
+
+  if (!pluginHasBoardConfig(plugin)) {
+    return makeBoardCompatibility(
+      "missing-board-config",
+      "插件与看板不兼容",
+      `插件「${displayName}」未提供看板能力，请安装兼容版本插件。`
+    )
+  }
+
+  let config: Record<string, unknown> | null
+  try {
+    config = readBoardConfig(plugin.path)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return makeBoardCompatibility(
+      "invalid-board-config",
+      "配置错误",
+      `插件「${displayName}」的 ${BOARD_CONFIG_REL_PATH} 配置错误：${message}`
+    )
+  }
+
+  const pluginApiVersion = parsePositiveInteger(config?.apiVersion)
+  if (pluginApiVersion === null) {
+    return makeBoardCompatibility(
+      "invalid-api-version",
+      "插件与客户端版本不兼容",
+      `插件「${displayName}」未声明 apiVersion，请将插件和客户端升级至最新版。`
+    )
+  }
+
+  if (pluginApiVersion < APP_BOARD_API_VERSION) {
+    return makeBoardCompatibility(
+      "plugin-too-old",
+      "插件版本过低",
+      `插件「${displayName}」的apiVersion: ${pluginApiVersion} 低于客户端支持的版本: ${APP_BOARD_API_VERSION}，请到应用市场升级插件。`,
+      pluginApiVersion
+    )
+  }
+  if (pluginApiVersion > APP_BOARD_API_VERSION) {
+    return makeBoardCompatibility(
+      "app-too-old",
+      "客户端版本过低",
+      `插件「${displayName}」的apiVersion: ${pluginApiVersion} 高于客户端支持的版本: ${APP_BOARD_API_VERSION}，请获取最新版客户端。`,
+      pluginApiVersion
+    )
+  }
+
+  return makeBoardCompatibility("compatible", "兼容", undefined, pluginApiVersion)
 }
 
 function pluginMatchesAdapterId(plugin: PluginMetadata, adapterId: string): boolean {
@@ -129,6 +219,13 @@ function findPluginForAdapterSnapshot(adapter: HarnessAdapterSnapshot): PluginMe
   return plugins.find((item) => pluginMatchesAdapterId(item, adapterId)) ?? null
 }
 
+function findPluginByAdapterName(adapter: HarnessAdapterSnapshot): PluginMetadata | null {
+  if (adapter.type !== "plugin") return null
+  const adapterName = normalizeText(adapter.name).trim()
+  if (!adapterName) return null
+  return getPlugins().find((item) => item.name === adapterName) ?? null
+}
+
 function pluginToHarnessAdapter(plugin: PluginMetadata): HarnessAdapterRegistryItem {
   const id = pluginAdapterId(plugin)
   return {
@@ -136,7 +233,8 @@ function pluginToHarnessAdapter(plugin: PluginMetadata): HarnessAdapterRegistryI
     name: normalizeText(plugin.name) || id,
     version: normalizeText(plugin.version),
     type: "plugin",
-    description: normalizeText(plugin.description)
+    description: normalizeText(plugin.description),
+    boardCompatibility: evaluateBoardPluginCompatibility(plugin, normalizeText(plugin.name) || id)
   }
 }
 
@@ -167,6 +265,10 @@ function resolveHarnessAdapter(adapterId: string, adapterType: HarnessAdapterTyp
   if (!plugin) {
     throw new Error("Selected plugin is not installed or does not provide board_core/board_config.json")
   }
+  const compatibility = evaluateBoardPluginCompatibility(plugin, plugin.name)
+  if (!compatibility.compatible) {
+    throw new Error(compatibility.message || "Selected plugin is not compatible with current APP")
+  }
   return pluginToHarnessAdapterSnapshot(plugin)
 }
 
@@ -185,15 +287,19 @@ function adapterPluginDir(project: HarnessProjectMetadata): string {
   }
 
   const plugin = findAdapterPlugin(project)
+  const compatibility = evaluateBoardPluginCompatibility(plugin, adapter.name || adapter.id)
+  if (!compatibility.compatible) {
+    throw new Error(compatibility.message || `Harness adapter plugin not compatible: ${adapter.name || adapter.id}`)
+  }
   if (!plugin) {
-    throw new Error(`Harness adapter plugin not found: ${adapter.id}`)
+    throw new Error(`Harness adapter plugin not found: ${adapter.name || adapter.id}`)
   }
   return plugin.path
 }
 
 function findAdapterPlugin(project: HarnessProjectMetadata): PluginMetadata | null {
   const adapter = project["harness-adapter"]
-  return findPluginForAdapterSnapshot(adapter)
+  return findPluginByAdapterName(adapter)
 }
 
 function toTrimmedOutput(value: unknown): string {
@@ -361,7 +467,7 @@ function parseInspectCommand(
 }
 
 function readBoardConfig(cwd: string): Record<string, unknown> | null {
-  const configPath = join(cwd, "board_core", "board_config.json")
+  const configPath = join(cwd, BOARD_CONFIG_REL_PATH)
   if (!existsSync(configPath)) return null
 
   let parsed: unknown
@@ -975,6 +1081,7 @@ function writeProjectStore(store: HarnessProjectStoreFile): void {
 
 function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
   const harnessAdapter = project["harness-adapter"]
+  const plugin = findAdapterPlugin(project)
   return {
     projectId: project.projectId,
     name: project.name,
@@ -988,6 +1095,7 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
       name: harnessAdapter.name,
       type: harnessAdapter.type
     },
+    boardCompatibility: evaluateBoardPluginCompatibility(plugin, harnessAdapter.name || harnessAdapter.id),
     lifecycle: {
       status: project.lifecycle.status
     }
@@ -1413,15 +1521,17 @@ export function getHarnessProjectDetails(
 
   for (const project of projects) {
     const plugin = findAdapterPlugin(project)
-    if (!plugin) {
-      const adapter = project["harness-adapter"]
+    const adapter = project["harness-adapter"]
+    const compatibility = evaluateBoardPluginCompatibility(plugin, adapter.name || adapter.id)
+    if (!compatibility.compatible) {
       result[project.projectId] = makeProjectErrorDetail(
         project,
-        "插件不存在",
-        `项目绑定的插件不存在或不可用：${adapter.name || adapter.id}。请编辑项目并重新选择插件。`
+        compatibility.label,
+        compatibility.message || "项目使用的插件与当前 APP 不兼容。"
       )
       continue
     }
+    if (!plugin) continue
 
     if (!existsSync(projectDirectoryPath(project))) {
       result[project.projectId] = makeProjectErrorDetail(
