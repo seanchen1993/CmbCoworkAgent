@@ -57,6 +57,23 @@ export interface HookContext {
     toolCalls?: string[]
     usedSkills?: string[]
   }
+  /**
+   * Absolute path to the on-disk conversation history for this session.
+   * Exposed to hooks as `transcript_path` in stdin JSON and `TRANSCRIPT_PATH` env.
+   * Mirrors Claude Code's hook input — lets hooks read prior turns for audit/analytics.
+   */
+  transcriptPath?: string
+  /**
+   * Active permission mode (e.g. "yolo", "approve"). Exposed as `permission_mode`
+   * in stdin JSON and `PERMISSION_MODE` env. Lets hooks adapt policy by mode.
+   */
+  permissionMode?: string
+  /**
+   * Subagent identifier — non-empty only when the hook fires from inside a
+   * subagent (e.g. PreToolUse from a task-tool worker). Mirrors CC's `agent_id`.
+   * Use this to distinguish parent-thread hooks from subagent-thread hooks.
+   */
+  agentId?: string
 }
 
 /**
@@ -153,6 +170,11 @@ function buildHookEnv(event: HookEvent, context: HookContext): Record<string, st
   }
   if (context.sessionId) env.SESSION_ID = context.sessionId
   if (context.userPrompt) env.USER_PROMPT = context.userPrompt
+  // PR-01: Claude Code-compatible env vars. Only set when context provides them
+  // — keeps zero-context invocations byte-identical with prior versions.
+  if (context.transcriptPath) env.TRANSCRIPT_PATH = context.transcriptPath
+  if (context.permissionMode) env.PERMISSION_MODE = context.permissionMode
+  if (context.agentId) env.AGENT_ID = context.agentId
   return env
 }
 
@@ -185,6 +207,11 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
     }
   }
   if (context.userPrompt) payload.prompt = context.userPrompt
+  // PR-01: Claude Code-compatible payload fields. Only emitted when present so
+  // existing hook scripts that don't expect them see the exact same JSON shape.
+  if (context.transcriptPath) payload.transcript_path = context.transcriptPath
+  if (context.permissionMode) payload.permission_mode = context.permissionMode
+  if (context.agentId) payload.agent_id = context.agentId
   if (context.skillName) payload.skill_name = context.skillName
   if (context.skillPath) payload.skill_path = context.skillPath
   if (context.skillRoot) payload.skill_root = context.skillRoot
@@ -513,6 +540,12 @@ function buildPromptHookUserMessage(
       ...(context.hookSourceRoot ? { hook_source_root: context.hookSourceRoot } : {}),
       ...(context.hookSourcePath ? { hook_source_path: context.hookSourcePath } : {}),
       cwd: getCommandCwd(context),
+      // PR-01: same CC-compatible fields used in command-hook payloads. The
+      // prompt-hook LLM also benefits from knowing transcript / mode / agent id
+      // when writing policy decisions.
+      ...(context.transcriptPath ? { transcript_path: context.transcriptPath } : {}),
+      ...(context.permissionMode ? { permission_mode: context.permissionMode } : {}),
+      ...(context.agentId ? { agent_id: context.agentId } : {}),
       ...(context.stopContext ? { stop_context: context.stopContext } : {}),
       workspace: context.workspacePath ?? ""
     },
@@ -697,6 +730,24 @@ function parseHookJsonOutput(result: HookResult): HookResult {
         ? nested.permissionDecisionReason
         : undefined)
 
+    // PR-02: Claude Code's SessionStart hook can return `initialUserMessage`
+    // to auto-inject a first prompt, and `watchPaths` to register paths with a
+    // file watcher. We parse both fields today even though the consumer side
+    // is wired in a later PR — emitting hooks can already use the CC shape
+    // and we won't need to touch the parser again.
+    const initialUserMessage =
+      typeof parsed.initialUserMessage === "string"
+        ? parsed.initialUserMessage
+        : nested && typeof nested.initialUserMessage === "string"
+          ? nested.initialUserMessage
+          : undefined
+
+    const watchPathsSource = parsed.watchPaths ?? nested?.watchPaths
+    const watchPaths =
+      Array.isArray(watchPathsSource) && watchPathsSource.every((p) => typeof p === "string")
+        ? (watchPathsSource as string[])
+        : undefined
+
     return {
       ...result,
       additionalContext,
@@ -708,7 +759,9 @@ function parseHookJsonOutput(result: HookResult): HookResult {
       continue: typeof parsed.continue === "boolean" ? parsed.continue : undefined,
       stopReason: typeof parsed.stopReason === "string" ? parsed.stopReason : undefined,
       decision: effectiveDecision,
-      reason: effectiveReason
+      reason: effectiveReason,
+      initialUserMessage,
+      watchPaths
     }
   } catch {
     // stdout is not JSON — treat as plain text (backwards compatible)

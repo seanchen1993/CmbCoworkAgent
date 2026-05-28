@@ -1741,7 +1741,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
         workspacePath,
         sessionId: threadId,
-        turnId: hookTurnId
+        turnId: hookTurnId,
+        // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
+        // Lets a Notification hook know whether the user is in YOLO mode (where
+        // approvals only fire for sandbox-escape) vs the default approve flow.
+        permissionMode: yoloMode ? "yolo" : "approve"
       }
       runHooks(
         resolveHooksForContext("Notification", notificationContext),

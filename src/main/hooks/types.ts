@@ -21,6 +21,18 @@ export type HookEvent =
   | "FileChanged"
 
 // Events currently emitted by the runtime and safe to configure in files / IPC.
+//
+// `PreCompact` / `PostCompact` are intentionally NOT here. A first attempt at
+// wiring them (a "sandwich" pair of beforeModel bridges around
+// createSummarizationMiddleware) was reverted because deepagents'
+// summarization actually runs in `wrapModelCall` and stores its summary in
+// `state._summarizationEvent.summaryMessage` rather than `state.messages` —
+// so a beforeModel-based Post bridge would never see it, and a beforeModel
+// Pre bridge cannot reuse the real trigger logic (effective messages, system
+// prompt, tools, tokenEstimationMultiplier, context-overflow fallback). Any
+// future implementation must wrap / co-locate with summarization's
+// wrapModelCall to observe `Command.update._summarizationEvent`. Until that
+// lands, the events remain declared in HookEvent but unsupported.
 export const SUPPORTED_HOOK_EVENTS = [
   "PreToolUse",
   "PostToolUse",
@@ -161,6 +173,14 @@ export interface HookResult {
    * Diagnostic-only; never gate behavior on this.
    */
   cwd?: string
+  // ── PR-02: parsed from hookSpecificOutput, not yet consumed ──────────────
+  // We parse these so SessionStart / future watcher hooks can emit CC-compatible
+  // JSON today; downstream consumers (auto-injecting first user message, wiring
+  // FileChanged watch paths) land in their own PRs without touching the parser.
+  /** SessionStart hook may return this — when wired, becomes the auto first prompt. */
+  initialUserMessage?: string
+  /** SessionStart / CwdChanged hook may return absolute paths to watch. */
+  watchPaths?: string[]
 }
 
 /** Environment variables passed to the hook command */
@@ -182,6 +202,10 @@ export interface HookEnv {
   CLAUDE_PROJECT_DIR?: string // Claude Code compatibility: alias for WORKSPACE_PATH
   USER_PROMPT?: string // UserPromptSubmit event
   SESSION_ID?: string // threadId
+  // ── Claude Code compatibility (PR-01) ─────────────────────────────────────
+  TRANSCRIPT_PATH?: string // absolute path to the on-disk conversation history
+  PERMISSION_MODE?: string // active permission mode (e.g. "yolo")
+  AGENT_ID?: string // subagent id when the hook fires inside a subagent run
 }
 
 export interface HookUpsert {

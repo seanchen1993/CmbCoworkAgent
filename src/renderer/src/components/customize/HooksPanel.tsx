@@ -66,7 +66,7 @@ const EVENT_BADGE: Record<
     label: "调用失败",
     className: "bg-red-500/15 text-red-600 dark:text-red-400",
     english: "PostToolUseFailure",
-    tip: "工具执行失败后触发"
+    tip: "工具执行失败后触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   UserPromptSubmit: {
     label: "提交",
@@ -96,7 +96,7 @@ const EVENT_BADGE: Record<
     label: "停止失败",
     className: "bg-orange-500/15 text-orange-600 dark:text-orange-400",
     english: "StopFailure",
-    tip: "Stop 钩子执行失败时触发"
+    tip: "Stop 钩子执行失败时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   Notification: {
     label: "通知",
@@ -108,7 +108,7 @@ const EVENT_BADGE: Record<
     label: "子开始",
     className: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
     english: "SubagentStart",
-    tip: "子 Agent 启动时触发"
+    tip: "子 Agent 启动时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   SubagentStop: {
     label: "子停止",
@@ -120,43 +120,43 @@ const EVENT_BADGE: Record<
     label: "压缩前",
     className: "bg-slate-500/15 text-slate-600 dark:text-slate-400",
     english: "PreCompact",
-    tip: "上下文压缩前触发"
+    tip: "上下文压缩前触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   PostCompact: {
     label: "压缩后",
     className: "bg-slate-500/15 text-slate-600 dark:text-slate-400",
     english: "PostCompact",
-    tip: "上下文压缩后触发"
+    tip: "上下文压缩后触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   PermissionRequest: {
     label: "权限申请",
     className: "bg-yellow-500/15 text-yellow-600 dark:text-yellow-400",
     english: "PermissionRequest",
-    tip: "Agent 申请执行权限时触发"
+    tip: "Agent 申请执行权限时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   PermissionDenied: {
     label: "权限拒绝",
     className: "bg-red-500/15 text-red-600 dark:text-red-400",
     english: "PermissionDenied",
-    tip: "权限申请被拒绝时触发"
+    tip: "权限申请被拒绝时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   Setup: {
     label: "初始化",
     className: "bg-sky-500/15 text-sky-600 dark:text-sky-400",
     english: "Setup",
-    tip: "Agent 运行时初始化阶段触发"
+    tip: "Agent 运行时初始化阶段触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   CwdChanged: {
     label: "目录变更",
     className: "bg-lime-500/15 text-lime-600 dark:text-lime-400",
     english: "CwdChanged",
-    tip: "工作目录变更时触发"
+    tip: "工作目录变更时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   FileChanged: {
     label: "文件变更",
     className: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
     english: "FileChanged",
-    tip: "工作区文件变更时触发"
+    tip: "工作区文件变更时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   }
 }
 

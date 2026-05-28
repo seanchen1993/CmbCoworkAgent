@@ -28,6 +28,8 @@
 
 **多钩子串行**：同一事件可以挂多个钩子，按数组顺序依次执行。Pre 系列任一阻断即整体阻断；Post 系列把各钩子的输出合并后回灌给 Agent。
 
+> **关于"暂未实现"事件**：`HookEvent` 联合类型保留了向 Claude Code 看齐的所有事件名（`PostToolUseFailure`、`StopFailure`、`SubagentStart`、`PreCompact`、`PostCompact`、`PermissionRequest`、`PermissionDenied`、`Setup`、`CwdChanged`、`FileChanged`），但只有上表的 10 个进入 `SUPPORTED_HOOK_EVENTS`。其余事件**在加载阶段就被丢弃**——`storage.ts` 在 flat / workspace / plugin / skill / Claude Code `settings.json` 导入这 5 条读取路径上都用 `isSupportedHookEvent` 过滤；IPC 创建接口也会拒绝。HooksPanel 的 `EVENT_BADGE` 仍为这些事件保留了徽章配置项（防御性兜底，避免某次新增运行时支持后忘记加 UI），tooltip 注明 `⚠️ [暂未实现]`；UI 创建对话框（AddHookDialog）不开放这些事件。**实际效果**：插件 `hooks.json` 或 CC `settings.json` 里写了 `PostToolUseFailure` 之类的 hook，加载时被静默丢弃，不会出现在任何面板里、也不会触发。
+
 ---
 
 ## 2. 配置文件结构
@@ -119,6 +121,9 @@
 | `hook_source_type`, `hook_source_root`, `hook_source_path` | 钩子来源已知时 |
 | `subagent` | **仅** SubagentStop |
 | `stop_context` | **仅** Stop / PostSkillUse —— 包含 `userMessage`、`assistantResponse`、`toolCalls[]`、`usedSkills[]` |
+| `transcript_path` | **Claude Code 兼容字段 — 解析/透传能力已就绪，当前无填充入口**。Runner 的 stdin JSON 与 env 都已支持透传，但没有任何调用方填值，所以脚本目前永远拿不到。后续 PR 在确认 deepagents filesystem backend 的会话历史文件命名约定后填充。 |
+| `permission_mode` | **仅 Notification 事件填充**。值为 `"yolo"`（YOLO 模式）或 `"approve"`（默认审批模式）。其他事件目前不写出该 key。 |
+| `agent_id` | **解析/透传能力已就绪，当前无填充入口**。等待 SubagentStart / 子 Agent 内部 hook 路径接通后填充（属于 PR-04 范围）。 |
 
 ### 3.2 环境变量（便利，**大字段会被丢弃**）
 
@@ -134,6 +139,9 @@
 | `PLUGIN_ID` / `_NAME` / `_ROOT` | 仅工具或钩子归属插件时存在。`PLUGIN_ID` 是 `~/.cmbcoworkagent/plugins.json` 里安装时分配的 **UUID**，不是目录名也不是 plugin.json 里的字段；`PLUGIN_NAME` 来自 plugin.json 的 `name` |
 | `SKILL_NAME` / `_PATH` / `_ROOT` | 仅 Pre/PostSkillUse |
 | `USER_PROMPT` | 仅 UserPromptSubmit |
+| `TRANSCRIPT_PATH` | **当前永远不下发**（透传能力已就绪，无填充入口；详见 §3.1 同名字段说明） |
+| `PERMISSION_MODE` | **仅 Notification 事件下发**（值：`yolo` / `approve`）|
+| `AGENT_ID` | **当前永远不下发**（透传能力已就绪，等子 Agent hook 路径接通后填充）|
 
 ⚠️ **铁律**：要可靠拿到完整工具入参/结果，**必须读 stdin JSON**——超过 4KB 时 env 里直接没有该 key。
 
@@ -181,6 +189,8 @@
 | `requiredSkill` | string | 阻断时要求加载某技能作整改指引 |
 | `suppressOutput` | boolean | PostToolUse：抑制工具原始结果进入上下文 |
 | `hookSpecificOutput.{additionalContext,updatedInput,permissionDecision,permissionDecisionReason}` | object | 兼容嵌套写法 |
+| `hookSpecificOutput.initialUserMessage` / 顶层 `initialUserMessage` | string | **解析已就位，消费侧待补**——SessionStart hook 可返回此字段，未来会自动作为首条用户消息注入（与 Claude Code 一致）|
+| `hookSpecificOutput.watchPaths` / 顶层 `watchPaths` | string[] | **解析已就位，消费侧待补**——SessionStart / 未来的 CwdChanged hook 用以注册文件 watcher（与 Claude Code 一致）|
 
 ### 4.3 决策优先级（必记）
 
@@ -217,6 +227,8 @@
 | Notification / SessionStart / SessionEnd | 日志 | （无效） | （无效） |
 
 > PostSkillUse 的非阻塞 stdout **不会**回灌——这是和 PostToolUse 最大的区别。要在 PostSkillUse 注入上下文，必须走 `decision=block` 路径。
+
+> **PreCompact / PostCompact 暂未实现**。第一版尝试用一对 `beforeModel` bridge 中间件包夹 `createSummarizationMiddleware`，但 deepagents 的 summarization 实际跑在 `wrapModelCall`，摘要写到 `state._summarizationEvent.summaryMessage` 而不是 `state.messages`——`beforeModel` 阶段根本看不到。同时 PreCompact 的预测也无法复用真实触发条件（effective messages、system prompt、tools、`tokenEstimationMultiplier`、context-overflow fallback）。下一次实现需要包裹/复用 summarization 自身的 `wrapModelCall` 返回值，检查 `Command.update._summarizationEvent` 触发，才能保证可靠。在此之前这两个事件在 UI 上保留徽章但运行时不触发。
 
 ---
 
