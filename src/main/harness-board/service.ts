@@ -111,9 +111,22 @@ function pluginMatchesAdapterId(plugin: PluginMetadata, adapterId: string): bool
   return (
     pluginAdapterId(plugin) === adapterId ||
     plugin.name === adapterId ||
-    plugin.id === adapterId ||
     basename(plugin.path) === adapterId
   )
+}
+
+function findPluginForAdapterSnapshot(adapter: HarnessAdapterSnapshot): PluginMetadata | null {
+  if (adapter.type !== "plugin") return null
+  const plugins = getPlugins().filter(pluginHasBoardConfig)
+  const adapterName = normalizeText(adapter.name).trim()
+  if (adapterName) {
+    const plugin = plugins.find((item) => item.name === adapterName)
+    if (plugin) return plugin
+  }
+
+  const adapterId = normalizeText(adapter.id).trim()
+  if (!adapterId) return null
+  return plugins.find((item) => pluginMatchesAdapterId(item, adapterId)) ?? null
 }
 
 function pluginToHarnessAdapter(plugin: PluginMetadata): HarnessAdapterRegistryItem {
@@ -124,6 +137,16 @@ function pluginToHarnessAdapter(plugin: PluginMetadata): HarnessAdapterRegistryI
     version: normalizeText(plugin.version),
     type: "plugin",
     description: normalizeText(plugin.description)
+  }
+}
+
+function pluginToHarnessAdapterSnapshot(plugin: PluginMetadata): HarnessAdapterSnapshot {
+  const adapter = pluginToHarnessAdapter(plugin)
+  return {
+    id: adapter.id,
+    name: adapter.name,
+    version: adapter.version,
+    type: adapter.type
   }
 }
 
@@ -144,13 +167,15 @@ function resolveHarnessAdapter(adapterId: string, adapterType: HarnessAdapterTyp
   if (!plugin) {
     throw new Error("Selected plugin is not installed or does not provide board_core/board_config.json")
   }
-  const adapter = pluginToHarnessAdapter(plugin)
-  return {
-    id: adapter.id,
-    name: adapter.name,
-    version: adapter.version,
-    type: adapter.type
+  return pluginToHarnessAdapterSnapshot(plugin)
+}
+
+function resolveHarnessAdapterSnapshot(adapter: HarnessAdapterSnapshot): HarnessAdapterSnapshot {
+  const plugin = findPluginForAdapterSnapshot(adapter)
+  if (!plugin) {
+    throw new Error("Selected plugin is not installed or does not provide board_core/board_config.json")
   }
+  return pluginToHarnessAdapterSnapshot(plugin)
 }
 
 function adapterPluginDir(project: HarnessProjectMetadata): string {
@@ -168,10 +193,7 @@ function adapterPluginDir(project: HarnessProjectMetadata): string {
 
 function findAdapterPlugin(project: HarnessProjectMetadata): PluginMetadata | null {
   const adapter = project["harness-adapter"]
-  if (adapter.type !== "plugin") return null
-  return getPlugins().find(
-    (item) => pluginHasBoardConfig(item) && pluginMatchesAdapterId(item, adapter.id)
-  ) ?? null
+  return findPluginForAdapterSnapshot(adapter)
 }
 
 function toTrimmedOutput(value: unknown): string {
@@ -1232,7 +1254,6 @@ export function updateHarnessProjectMetadata(
   input: HarnessProjectMetadataUpdateInput
 ): HarnessProjectMetadata {
   validateProjectMetadataInput(input)
-  const harnessAdapter = resolveHarnessAdapter(input.adapterId, input.adapterType)
   const store = readProjectStore()
   const index = store.projects.findIndex((item) => item.projectId === projectId)
   if (index === -1) {
@@ -1241,6 +1262,11 @@ export function updateHarnessProjectMetadata(
 
   validateProjectCodeUnique(input.projectCode, store, projectId)
   const existing = store.projects[index]
+  const existingAdapter = existing["harness-adapter"]
+  const harnessAdapter =
+    existingAdapter.type === input.adapterType && existingAdapter.id === input.adapterId.trim()
+      ? resolveHarnessAdapterSnapshot(existingAdapter)
+      : resolveHarnessAdapter(input.adapterId, input.adapterType)
   const existingWorkspacePath = existing.workspacePath.trim()
   const requestedWorkspacePath = input.workspacePath.trim()
   if (requestedWorkspacePath !== existingWorkspacePath) {

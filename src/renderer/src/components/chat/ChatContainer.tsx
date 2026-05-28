@@ -1290,17 +1290,17 @@ export function ChatContainer({
         (s) => s.source === "project" || s.source === "user"
       )
 
-      // In harness mode, resolve the project's bound plugin ID so that
+      // In harness mode, resolve the project's bound plugin name so that
       // duplicate-named skills from other plugins are hidden in favour of
       // the project's own plugin.
-      let preferredPluginId: string | null = null
+      let preferredPluginName: string | null = null
       const binding = harnessFeatureBindingRef.current
       if (binding && typeof window.api.harnessBoard?.listProjects === "function") {
         try {
           const projects = await window.api.harnessBoard.listProjects()
           const project = projects.find((p) => p.projectId === binding.projectId)
           if (project) {
-            preferredPluginId = project.harnessAdapter.id
+            preferredPluginName = project.harnessAdapter.name
           }
         } catch {
           // Non-critical: fall through without a preference.
@@ -1309,7 +1309,7 @@ export function ChatContainer({
 
       // Enabled built-in/custom names win over plugin names; disabled local
       // skills should not hide a plugin skill with the same name from slash.
-      const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet, preferredPluginId)
+      const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet, preferredPluginName)
       setSkills([...merged].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
     } catch (error) {
       console.error("[ChatContainer] Failed to load skills:", error)

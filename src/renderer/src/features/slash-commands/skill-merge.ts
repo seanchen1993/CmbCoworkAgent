@@ -5,6 +5,10 @@ function normalizeSkillName(value: string): string {
   return normalizeSkillId(value)
 }
 
+function normalizePluginName(value: string | undefined | null): string {
+  return normalizeSkillId(value)
+}
+
 /**
  * Merge built-in/custom skills with plugin skills for chat surfaces.
  *
@@ -13,7 +17,7 @@ function normalizeSkillName(value: string): string {
  * can disable/uninstall the standalone copy and still lose the plugin-provided
  * command from the slash popover.
  *
- * When `preferredPluginId` is set, duplicate-named skills across plugins are
+ * When `preferredPluginName` is set, duplicate-named skills across plugins are
  * deduplicated in favour of the preferred plugin. This is used in harness mode
  * to prioritise skills from the project's bound plugin.
  */
@@ -21,8 +25,9 @@ export function mergeChatSkills(
   localSkills: SkillMetadata[],
   pluginSkills: SkillMetadata[],
   disabledSkillIds: ReadonlySet<string>,
-  preferredPluginId?: string | null
+  preferredPluginName?: string | null
 ): SkillMetadata[] {
+  const preferredName = normalizePluginName(preferredPluginName)
   const enabledLocalNames = new Set(
     localSkills
       .filter((skill) => !isSkillDisabled(skill, disabledSkillIds))
@@ -33,7 +38,7 @@ export function mergeChatSkills(
   // Without a preferred plugin (conversation mode), only filter out plugin
   // skills whose names are already covered by enabled local skills. Plugins
   // may have duplicate-named skills and both should appear in the popover.
-  if (!preferredPluginId) {
+  if (!preferredName) {
     return [
       ...localSkills,
       ...pluginSkills.filter(
@@ -49,10 +54,13 @@ export function mergeChatSkills(
 
   for (const skill of pluginSkills) {
     const name = normalizeSkillName(skill.name)
+    const isPreferredPlugin = normalizePluginName(skill.pluginName) === preferredName
     if (!name || seenNames.has(name)) {
-      if (skill.pluginId === preferredPluginId) {
+      if (isPreferredPlugin) {
         const idx = dedupedPlugins.findIndex(
-          (s) => normalizeSkillName(s.name) === name && s.pluginId !== preferredPluginId
+          (s) =>
+            normalizeSkillName(s.name) === name &&
+            normalizePluginName(s.pluginName) !== preferredName
         )
         if (idx >= 0) {
           dedupedPlugins[idx] = skill

@@ -87,6 +87,29 @@ const harnessNameRuleMessage = "仅支持中文、英文字母、数字、-、_"
 const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
 const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
 
+function areHarnessValuesEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true
+  try {
+    return JSON.stringify(left) === JSON.stringify(right)
+  } catch {
+    return false
+  }
+}
+
+function mergeProjectDetailsIfChanged(
+  current: Record<string, HarnessProjectDetailViewModel>,
+  details: Record<string, HarnessProjectDetailViewModel>
+): Record<string, HarnessProjectDetailViewModel> {
+  let changed = false
+  const next = { ...current }
+  for (const [projectId, detail] of Object.entries(details)) {
+    if (areHarnessValuesEqual(current[projectId], detail)) continue
+    next[projectId] = detail
+    changed = true
+  }
+  return changed ? next : current
+}
+
 function cleanIpcError(error: unknown): string {
   if (!(error instanceof Error)) return String(error)
   return error.message
@@ -2719,6 +2742,7 @@ export function HarnessBoardView(): React.JSX.Element {
   const currentThreadIdRef = useRef(currentThreadId)
   const isViewingSessionRef = useRef(isViewingSession)
   const projectDetailsRefreshInFlightRef = useRef(false)
+  const selectedProjectRefreshInFlightRef = useRef(false)
   const prefetchedRunDetailRef = useRef<HarnessRunDetailViewModel | null>(null)
   projectsRef.current = projects
   selectedProjectIdRef.current = selectedProjectId
