@@ -82,10 +82,17 @@ const harnessProjectCreateInputClassName =
   "bg-background text-foreground placeholder:text-muted-foreground/45"
 const harnessProjectCreateSelectClassName =
   "bg-background text-foreground data-[placeholder]:text-muted-foreground/45"
+const harnessDialogContentClassName = "z-[60]"
+const harnessDialogSelectContentClassName = "z-[70]"
 const harnessNamePattern = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
 const harnessNameRuleMessage = "仅支持中文、英文字母、数字、-、_"
 const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
 const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
+
+const preventHarnessDialogOutsideClose: React.ComponentProps<typeof DialogContent>["onPointerDownOutside"] =
+  (event) => {
+    event.preventDefault()
+  }
 
 function areHarnessValuesEqual(left: unknown, right: unknown): boolean {
   if (left === right) return true
@@ -785,7 +792,10 @@ function ProjectFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl">
+      <DialogContent
+        className={cn(harnessDialogContentClassName, "max-w-3xl")}
+        onPointerDownOutside={preventHarnessDialogOutsideClose}
+      >
         <DialogHeader>
           <DialogTitle>新建项目</DialogTitle>
         </DialogHeader>
@@ -800,7 +810,7 @@ function ProjectFormDialog({
                 <SelectTrigger className={harnessProjectCreateSelectClassName}>
                   <SelectValue placeholder="请选择已安装的 AUTOBIZDEVOPS 插件" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className={harnessDialogSelectContentClassName}>
                   {registry.map((adapter) => (
                     <SelectItem key={adapter.id} value={adapter.id}>
                       {adapter.name} · {adapter.version}
@@ -951,7 +961,10 @@ function ProjectEditDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl">
+      <DialogContent
+        className={cn(harnessDialogContentClassName, "max-w-3xl")}
+        onPointerDownOutside={preventHarnessDialogOutsideClose}
+      >
         <DialogHeader>
           <DialogTitle>编辑项目</DialogTitle>
         </DialogHeader>
@@ -966,7 +979,7 @@ function ProjectEditDialog({
                 <SelectTrigger className={harnessProjectCreateSelectClassName}>
                   <SelectValue placeholder="请选择已安装的 AUTOBIZDEVOPS 插件" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className={harnessDialogSelectContentClassName}>
                   {registry.map((adapter) => (
                     <SelectItem key={adapter.id} value={adapter.id}>
                       {adapter.name} · {adapter.version}
@@ -1123,7 +1136,10 @@ function FeatureCreateDialog({
 
   return (
     <Dialog open={project !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent
+        className={cn(harnessDialogContentClassName, "max-w-md")}
+        onPointerDownOutside={preventHarnessDialogOutsideClose}
+      >
         <DialogHeader>
           <DialogTitle>创建特性</DialogTitle>
         </DialogHeader>
