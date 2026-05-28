@@ -10,7 +10,12 @@ import { ipcMain, dialog, BrowserWindow } from "electron"
 import { getUserInfo } from "../storage"
 import * as fs from "fs"
 import { buildTraceTree } from "../agent/trace/tree-builder"
-import type { AgentTrace, TraceNode, TraceSkillEvalRecord } from "../agent/trace/types"
+import type {
+  AgentTrace,
+  TraceNode,
+  TraceSkillEvalExtension,
+  TraceSkillEvalRecord
+} from "../agent/trace/types"
 import { buildSkillEvalTraceExtension } from "../agent/skill-eval/documents"
 import { evaluateTraceSkills, type SkillEvalRecord } from "../agent/skill-eval/evaluator"
 import {
@@ -400,6 +405,10 @@ interface EsSearchResponse {
 interface SkillTraceEvaluation {
   evalRecords: Array<SkillEvalRecord | TraceSkillEvalRecord>
   resultRecords: SkillResultEvalRecord[]
+}
+
+interface AgentTraceWithSkillEval extends AgentTrace {
+  skillEval?: TraceSkillEvalExtension
 }
 
 interface UserStatsOptions {
@@ -898,11 +907,11 @@ function parseRawTrace(raw: unknown): { trace?: AgentTrace; error?: string } {
 }
 
 function normalizeParsedTrace(
-  trace: AgentTrace,
+  trace: AgentTraceWithSkillEval,
   source: Record<string, unknown>,
   hit: EsSearchHit
-): AgentTrace {
-  const candidate = trace as Partial<AgentTrace>
+): AgentTraceWithSkillEval {
+  const candidate = trace as Partial<AgentTraceWithSkillEval>
   const startedAt = candidate.startedAt || asString(source.startedAt)
   const endedAt = candidate.endedAt || asString(source.endedAt, startedAt)
   const outcome = asString(candidate.outcome, asString(source.outcome, "unknown"))
@@ -944,12 +953,12 @@ function getTotalHits(raw: EsSearchResponse, fallback: number): number {
 const SKILL_TRACE_EVAL_CACHE_LIMIT = 5000
 const skillTraceEvalCache = new Map<string, SkillTraceEvaluation>()
 
-function getSkillTraceCacheKey(trace: AgentTrace): string {
+function getSkillTraceCacheKey(trace: AgentTraceWithSkillEval): string {
   const mode = trace.skillEval?.records?.length ? "stored" : "runtime"
   return trace.traceId ? trace.traceId + ":" + mode : ""
 }
 
-function evaluateSkillTrace(trace: AgentTrace): SkillTraceEvaluation {
+function evaluateSkillTrace(trace: AgentTraceWithSkillEval): SkillTraceEvaluation {
   const key = getSkillTraceCacheKey(trace)
   const cached = key ? skillTraceEvalCache.get(key) : undefined
   if (cached) {
@@ -2469,8 +2478,8 @@ function traceMatchesSkillSummary(
   })
 }
 
-function parseSkillEvalTraceHits(raw: EsSearchResponse): AgentTrace[] {
-  const traces: AgentTrace[] = []
+function parseSkillEvalTraceHits(raw: EsSearchResponse): AgentTraceWithSkillEval[] {
+  const traces: AgentTraceWithSkillEval[] = []
   for (const hit of raw.hits?.hits ?? []) {
     const source = hit._source ?? {}
     const parsed = parseRawTrace(source._raw)
@@ -2495,9 +2504,9 @@ function buildSkillEvalSummaryFromTraces({
   allowedSkillNames,
   skillList
 }: {
-  traces: AgentTrace[]
+  traces: AgentTraceWithSkillEval[]
   sampleRuns?: DashboardSkillEvalRun[]
-  recentTraces?: AgentTrace[]
+  recentTraces?: AgentTraceWithSkillEval[]
   totalTraceHits?: number
   sampledTraceCount?: number
   recentTotal?: number
@@ -2693,7 +2702,7 @@ function buildSkillEvalSummaryFromTraces({
 }
 
 function buildSkillEvalRuns(
-  traces: AgentTrace[],
+  traces: AgentTraceWithSkillEval[],
   skillFilter?: { skillName: string; skillVersion: string | undefined },
   allowedSkillNames?: Set<string>
 ): DashboardSkillEvalRun[] {
@@ -4381,7 +4390,11 @@ function makeMockFeedback(range: TimeRange, granularity: Granularity): unknown {
   }
 }
 
-function makeMockAgentTrace(skill: string, range: TimeRange, index: number): AgentTrace {
+function makeMockAgentTrace(
+  skill: string,
+  range: TimeRange,
+  index: number
+): AgentTraceWithSkillEval {
   const from = new Date(range.from)
   const to = new Date(range.to)
   const spanMs = Math.max(60_000, to.getTime() - from.getTime())
