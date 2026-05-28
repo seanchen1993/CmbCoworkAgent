@@ -1368,6 +1368,11 @@ function makeProjectErrorDetail(
   })
 }
 
+function projectAdapterLoadedStatus(project: HarnessProjectMetadata): HarnessStatus {
+  const adapterName = normalizeText(project["harness-adapter"].name) || "插件"
+  return okStatus("inspected", `${adapterName} 已加载`)
+}
+
 export function getHarnessProjectDetails(
   projectIds: string[]
 ): Record<string, HarnessProjectDetailViewModel> {
@@ -1439,7 +1444,7 @@ export function getHarnessProjectDetails(
           workflow,
           runs,
           watchRefs: normalizeWatchRefs(project, projectData.watchRefs, fallbackWatchRefs),
-          projectState: okStatus("inspected", "Inspect 已加载"),
+          projectState: projectAdapterLoadedStatus(project),
           error: null
         })
       }
