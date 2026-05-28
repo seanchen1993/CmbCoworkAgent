@@ -1,5 +1,7 @@
 import { ipcMain, BrowserWindow } from "electron"
+import { unlinkSync } from "fs"
 import { checkForUpdate, type UpdateCheckResult } from "./checker"
+import { isSameStagingPayload } from "./gray-release"
 import { downloadUpdate, type DownloadProgress } from "./downloader"
 import { installAsarUpdate, installFullUpdate } from "./installer"
 import { rollbackToPrevious, isRollbackAvailable } from "./rollback"
@@ -178,6 +180,43 @@ export function registerUpdaterHandlers(): void {
   ipcMain.handle("update:install", async () => {
     if (!lastCheckResult || !downloadedFilePath) {
       throw new Error("没有已下载的更新")
+    }
+
+    // Gray-release safety net: a staging download may have been pulled hours/days
+    // ago — operator could have paused the rollout, or the user may have switched
+    // 一事通 account on the same machine. Re-evaluate before we commit to install.
+    // Network failure here is NOT a reason to block install: the user may simply
+    // be offline. We only abort when the server clearly disagrees.
+    if (lastCheckResult.channel === "staging") {
+      const baseUrl = getUpdateServerUrl()
+      if (baseUrl) {
+        let recheck: UpdateCheckResult | null | undefined
+        try {
+          recheck = await checkForUpdate(baseUrl)
+        } catch (err) {
+          console.warn("[Updater] Staging re-validation network error, proceeding:", err)
+          recheck = undefined
+        }
+        if (recheck !== undefined) {
+          const expected = lastCheckResult
+          const stillValid = isSameStagingPayload(expected, recheck)
+          if (!stillValid) {
+            console.warn(
+              `[Updater] Staging re-validation failed: ` +
+                `expected v${expected.version} sha=${expected.downloadSha256.slice(0, 8)}, ` +
+                `got ${recheck ? `${recheck.channel} v${recheck.version} sha=${recheck.downloadSha256.slice(0, 8)} (${recheck.grayReason})` : "null"}`
+            )
+            try { unlinkSync(downloadedFilePath) } catch { /* file may already be gone */ }
+            downloadedFilePath = null
+            lastCheckResult = null
+            updateStatus = "idle"
+            lastDownloadProgress = null
+            lastErrorMessage = "灰度策略已变更，本次更新已撤回。下次启动将重新检查。"
+            broadcast("update:error", { message: lastErrorMessage })
+            throw new Error(lastErrorMessage)
+          }
+        }
+      }
     }
 
     notifyAlways("正在安装更新", `正在安装 v${lastCheckResult.version}，完成后应用将自动重启`)

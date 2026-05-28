@@ -9,6 +9,7 @@
 import { ipcMain, dialog, BrowserWindow } from "electron"
 import { getUserInfo } from "../storage"
 import * as fs from "fs"
+import AdmZip from "adm-zip"
 import { buildTraceTree } from "../agent/trace/tree-builder"
 import type {
   AgentTrace,
@@ -67,7 +68,7 @@ const ALLOWED_YST_IDS = new Set(
     .filter(Boolean)
 )
 
-function isDashboardAllowedForCurrentUser(): boolean {
+function isDashboardAllowed(): boolean {
   if (import.meta.env.DEV) return true
   const userInfo = getUserInfo()
   const ystId = userInfo?.ystId?.trim()
@@ -199,9 +200,9 @@ interface DashboardCommitDetail {
 interface DashboardSkillDetail {
   stats: DashboardCodeStats
   traces: DashboardTraceDetail[]
-  total: number
-  page: number
-  pageSize: number
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
 }
 
 interface DashboardSkillEvalRun {
@@ -380,6 +381,9 @@ interface DashboardUserDetail {
   byModel: Array<{ model: string; count: number }>
   byOutcome: Array<{ outcome: string; count: number }>
   traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
 }
 
 interface EsSearchHit {
@@ -418,10 +422,28 @@ interface UserStatsOptions {
 interface UserListOptions {
   pageSize?: number
   afterKey?: Record<string, string | number> | null
+  keyword?: string | null
 }
 
 interface UserDetailOptions {
   traceLimit?: number
+  tracePage?: number
+  tracePageSize?: number
+}
+
+interface TracePageOptions {
+  page?: number
+  pageSize?: number
+  limit?: number
+}
+
+interface DashboardTraceExportPayload {
+  skill: string
+  range: TimeRange
+  page: number
+  pageSize: number
+  totalTraces: number
+  traces: DashboardTraceDetail[]
 }
 
 interface CommitDetailsOptions {
@@ -430,10 +452,6 @@ interface CommitDetailsOptions {
   pushedOnly?: boolean
 }
 
-interface DashboardTracePageOptions {
-  page?: number
-  pageSize?: number
-}
 
 interface DashboardSkillEvalOptions {
   limit?: number
@@ -480,6 +498,136 @@ function escapeWildcard(value: string): string {
   return value.replace(/[\\*?]/g, "\\$&")
 }
 
+function safeExportFileName(value: string): string {
+  const cleaned = value
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/-+/g, "-")
+    .slice(0, 80)
+    .trim()
+
+  return cleaned || "skill-traces"
+}
+
+function escapeMarkdown(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/`/g, "\\`")
+}
+
+function stringifyExportValue(value: unknown): string {
+  if (value === undefined) return ""
+  if (typeof value === "string") return value
+
+  const seen = new WeakSet<object>()
+  try {
+    return JSON.stringify(
+      value,
+      (_key, item) => {
+        if (typeof item === "bigint") return item.toString()
+        if (typeof item === "function") return `[Function ${item.name || "anonymous"}]`
+        if (typeof item === "symbol") return item.toString()
+        if (item && typeof item === "object") {
+          if (seen.has(item)) return "[Circular]"
+          seen.add(item)
+        }
+        return item
+      },
+      2
+    )
+  } catch {
+    return String(value)
+  }
+}
+
+function formatTraceExportMarkdown(payload: DashboardTraceExportPayload, exportedAt: string): string {
+  const lines: string[] = [
+    `# Skill 会话历史 · ${escapeMarkdown(payload.skill || "-")}`,
+    "",
+    `- Skill: \`${escapeMarkdown(payload.skill || "-")}\``,
+    `- Range: ${payload.range.from} 至 ${payload.range.to}`,
+    `- Page: ${payload.page}`,
+    `- Page Size: ${payload.pageSize}`,
+    `- Total Traces: ${payload.totalTraces}`,
+    `- Exported: ${exportedAt}`,
+    ""
+  ]
+
+  for (const trace of payload.traces) {
+    lines.push(`## Trace ${escapeMarkdown(trace.traceId || "-")}`, "")
+    lines.push(`- Thread ID: \`${escapeMarkdown(trace.threadId || "-")}\``)
+    lines.push(`- Time: ${trace.startedAt || "-"}`)
+    lines.push(`- Outcome: ${trace.outcome || "-"}`)
+    lines.push(`- Duration: ${Math.round(trace.durationMs || 0)}ms`)
+    lines.push(`- Model: ${escapeMarkdown(trace.modelName || trace.modelId || "-")}`)
+    lines.push(`- Tool Calls: ${trace.totalToolCalls}`)
+    lines.push(`- Tokens: ${trace.totalTokens} (input ${trace.totalInputTokens}, output ${trace.totalOutputTokens})`)
+    if (trace.userName || trace.sapId || trace.ystId) {
+      lines.push(
+        `- User: ${escapeMarkdown(trace.userName || "-")} / ${escapeMarkdown(trace.sapId || "-")} / ${escapeMarkdown(trace.ystId || "-")}`
+      )
+    }
+    if (trace.usedSkills.length > 0) {
+      lines.push(`- Skills: ${trace.usedSkills.map((skill) => `\`${escapeMarkdown(skill)}\``).join(", ")}`)
+    }
+    lines.push("")
+
+    if (trace.userMessage.trim()) {
+      lines.push("### User Message", "", trace.userMessage.trim(), "")
+    }
+
+    if (trace.nodes && trace.nodes.length > 0) {
+      lines.push("### Trace Nodes", "")
+      for (const node of trace.nodes) {
+        lines.push(`#### ${escapeMarkdown(node.type)} · ${escapeMarkdown(node.name || node.id)}`, "")
+        const metadata = [
+          `id: \`${escapeMarkdown(node.id)}\``,
+          node.parentId ? `parent: \`${escapeMarkdown(node.parentId)}\`` : null,
+          node.status ? `status: \`${escapeMarkdown(node.status)}\`` : null,
+          `startedAt: ${node.startedAt}`,
+          node.endedAt ? `endedAt: ${node.endedAt}` : null
+        ].filter(Boolean)
+        lines.push(`_${metadata.join(", ")}_`, "")
+        if (node.input !== undefined) {
+          lines.push("INPUT", "", "```json", stringifyExportValue(node.input), "```", "")
+        }
+        if (node.output !== undefined) {
+          lines.push("OUTPUT", "", "```json", stringifyExportValue(node.output), "```", "")
+        }
+        if (node.metadata && Object.keys(node.metadata).length > 0) {
+          lines.push("METADATA", "", "```json", stringifyExportValue(node.metadata), "```", "")
+        }
+      }
+    } else {
+      lines.push("### Trace Summary", "", "```json", stringifyExportValue(trace), "```", "")
+    }
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`
+}
+
+function normalizeTraceExportPayload(value: unknown): DashboardTraceExportPayload {
+  const payload = asRecord(value)
+  const skill = asString(payload.skill).trim()
+  const range = asRecord(payload.range)
+  const traces = Array.isArray(payload.traces)
+    ? payload.traces.map((trace) => trace as DashboardTraceDetail)
+    : []
+  const page = typeof payload.page === "number" ? payload.page : undefined
+  const pageSize = typeof payload.pageSize === "number" ? payload.pageSize : undefined
+
+  return {
+    skill,
+    range: {
+      from: asString(range.from),
+      to: asString(range.to)
+    },
+    page: clampLimit(page, 1, 1000),
+    pageSize: clampLimit(pageSize, 10, 50),
+    totalTraces: asNumber(payload.totalTraces, traces.length),
+    traces
+  }
+}
+
 /**
  * 过滤“有有效 ystId 的记录”：
  * - 字段存在
@@ -513,6 +661,28 @@ function buildNonEmptySapIdFilter(): Record<string, unknown> {
     bool: {
       must: [{ exists: { field: "sapId" } }],
       must_not: [{ term: { sapId: "" } }]
+    }
+  }
+}
+
+function buildUserListSearchFilter(keyword: string): Record<string, unknown> | null {
+  const normalizedKeyword = keyword.trim()
+  if (!normalizedKeyword) return null
+
+  const escaped = escapeWildcard(normalizedKeyword)
+  const wildcardPattern = `*${escaped}*`
+  const fields = ["userName", "username", "ystId"]
+  const should = fields.flatMap((field) => [
+    { term: { [field]: normalizedKeyword } },
+    { term: { [`${field}.keyword`]: normalizedKeyword } },
+    { wildcard: { [field]: wildcardPattern } },
+    { wildcard: { [`${field}.keyword`]: wildcardPattern } }
+  ])
+
+  return {
+    bool: {
+      should,
+      minimum_should_match: 1
     }
   }
 }
@@ -560,14 +730,6 @@ function normalizeSkillQueryNames(skillNames?: string[]): string[] {
   ).slice(0, 1000)
 }
 
-function isDashboardAllowed(): boolean {
-  if (import.meta.env.DEV) return true
-  const userInfo = getUserInfo()
-  const ystId = userInfo?.ystId?.trim()
-  if (!ystId) return false
-  return ALLOWED_YST_IDS.has(ystId)
-}
-
 function clampLimit(limit: number | undefined, fallback: number, max: number): number {
   if (!Number.isFinite(limit)) return fallback
   return Math.max(1, Math.min(max, Math.floor(Number(limit))))
@@ -593,19 +755,19 @@ function normalizeCommitDetailsOptions(
   }
 }
 
-function normalizeTracePageOptions(value?: number | DashboardTracePageOptions): {
+function normalizeTracePageOptions(value?: number | TracePageOptions): {
   page: number
   pageSize: number
 } {
   if (typeof value === "number") {
     return {
       page: 1,
-      pageSize: clampLimit(value, 10, 100)
+      pageSize: clampLimit(value, 10, 50)
     }
   }
   return {
-    page: clampLimit(value?.page, 1, 10_000),
-    pageSize: clampLimit(value?.pageSize, 10, 100)
+    page: clampLimit(value?.page, 1, 1000),
+    pageSize: clampLimit(value?.pageSize ?? value?.limit, 10, 50)
   }
 }
 
@@ -766,9 +928,10 @@ function skillEvalFilterCacheKey(skillFilter: SkillEvalFilter | undefined): stri
 }
 
 function normalizeUserListOptions(value?: UserListOptions): Required<
-  Omit<UserListOptions, "afterKey">
+  Omit<UserListOptions, "afterKey" | "keyword">
 > & {
   afterKey?: Record<string, string | number>
+  keyword: string
 } {
   const pageSize = clampLimit(value?.pageSize, 20, 100)
   const rawAfterKey = value?.afterKey
@@ -780,8 +943,10 @@ function normalizeUserListOptions(value?: UserListOptions): Required<
           )
         )
       : undefined
+  const keyword = typeof value?.keyword === "string" ? value.keyword.trim().slice(0, 100) : ""
   return {
     pageSize,
+    keyword,
     ...(afterKey && Object.keys(afterKey).length > 0 ? { afterKey } : {})
   }
 }
@@ -1526,7 +1691,7 @@ function getLatestHitSource(
 function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUserListItem {
   const source = getLatestHitSource(bucket, "latest_user_info")
   const key = asRecord(bucket.key)
-  const sapId = asString(key.sap_id, asString(source.sapId))
+  const sapId = typeof bucket.key === "string" ? bucket.key : asString(key.sap_id, asString(source.sapId))
   const totalInputTokens = asNumber(asRecord(bucket.total_input_tokens).value)
   const totalOutputTokens = asNumber(asRecord(bucket.total_output_tokens).value)
   const totalTokens = asNumber(
@@ -1554,24 +1719,31 @@ async function fetchUserList(
   range: TimeRange,
   options?: UserListOptions
 ): Promise<DashboardUserListData> {
-  const { pageSize, afterKey } = normalizeUserListOptions(options)
-  const composite: Record<string, unknown> = {
-    size: pageSize,
-    sources: [{ sap_id: { terms: { field: "sapId" } } }]
-  }
-  if (afterKey) composite.after = afterKey
+  const { pageSize, afterKey, keyword } = normalizeUserListOptions(options)
+  const offsetValue = Number(afterKey?.offset ?? 0)
+  const offset = Number.isFinite(offsetValue) && offsetValue > 0 ? Math.floor(offsetValue) : 0
+  const aggregationSize = Math.min(offset + pageSize, 10_000)
+  const shardSize = Math.min(Math.max(aggregationSize * 3, 100), 50_000)
+  const filters = [timeRangeFilter("startedAt", range), buildNonEmptySapIdFilter()]
+  const searchFilter = buildUserListSearchFilter(keyword)
+  if (searchFilter) filters.push(searchFilter)
 
   const body = {
     size: 0,
     query: {
       bool: {
-        filter: [timeRangeFilter("startedAt", range), buildNonEmptySapIdFilter()]
+        filter: filters
       }
     },
     aggs: {
       total_active_users: { cardinality: { field: "sapId" } },
       users: {
-        composite,
+        terms: {
+          field: "sapId",
+          size: aggregationSize,
+          shard_size: shardSize,
+          order: { _count: "desc" }
+        },
         aggs: {
           latest_user_info: {
             top_hits: {
@@ -1603,17 +1775,18 @@ async function fetchUserList(
   const raw = asRecord(await esQuery(getEsIndex("trace"), body))
   const aggs = asRecord(raw.aggregations)
   const usersAgg = asRecord(aggs.users)
-  const buckets = Array.isArray(usersAgg.buckets) ? usersAgg.buckets : []
-  const nextAfterKey = asRecord(usersAgg.after_key)
+  const allBuckets = Array.isArray(usersAgg.buckets) ? usersAgg.buckets : []
+  const buckets = allBuckets.slice(offset, offset + pageSize)
+  const totalActiveUsers = asNumber(asRecord(aggs.total_active_users).value)
+  const nextOffset = offset + pageSize
+  const hasMoreBuckets = asNumber(usersAgg.sum_other_doc_count) > 0
   return {
     items: buckets
       .map((bucket) => normalizeUserListBucket(asRecord(bucket)))
       .filter((item) => item.sapId),
     pageSize,
-    ...(Object.keys(nextAfterKey).length > 0
-      ? { nextAfterKey: nextAfterKey as Record<string, string | number> }
-      : {}),
-    totalActiveUsers: asNumber(asRecord(aggs.total_active_users).value)
+    ...(hasMoreBuckets && nextOffset < 10_000 ? { nextAfterKey: { offset: nextOffset } } : {}),
+    totalActiveUsers
   }
 }
 
@@ -1638,10 +1811,12 @@ async function fetchUserDetail(
 ): Promise<DashboardUserDetail> {
   const normalizedSapId = sapId.trim()
   if (!normalizedSapId) throw new Error("sapId is required")
-  const traceLimit = clampLimit(options?.traceLimit, 10, 50)
+  const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
+  const tracePage = clampLimit(options?.tracePage, 1, 1000)
   const body = {
     track_total_hits: true,
-    size: traceLimit,
+    from: (tracePage - 1) * tracePageSize,
+    size: tracePageSize,
     sort: [{ startedAt: { order: "desc" } }],
     query: {
       bool: {
@@ -1703,6 +1878,7 @@ async function fetchUserDetail(
     asRecord(aggs.total_tokens).value,
     totalInputTokens + totalOutputTokens
   )
+  const totalTraces = getTotalHits(raw, raw.hits?.hits?.length ?? 0)
 
   return {
     sapId: asString(userInfo.sapId, normalizedSapId),
@@ -1711,7 +1887,7 @@ async function fetchUserDetail(
     orgName: asOptionalString(userInfo.orgName),
     upperOrgLv0: asOptionalString(userInfo.upperOrgLv0),
     upperOrgLv1: asOptionalString(userInfo.upperOrgLv1),
-    totalCalls: getTotalHits(raw, raw.hits?.hits?.length ?? 0),
+    totalCalls: totalTraces,
     avgDurationMs: asNumber(asRecord(aggs.avg_duration).value),
     totalToolCalls: asNumber(asRecord(aggs.total_tool_calls).value),
     totalInputTokens,
@@ -1729,7 +1905,10 @@ async function fetchUserDetail(
       asRecord(aggs.by_outcome).buckets,
       "outcome"
     ) as DashboardUserDetail["byOutcome"],
-    traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail)
+    traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
+    tracePage,
+    tracePageSize,
+    totalTraces
   }
 }
 
@@ -3161,8 +3340,8 @@ async function fetchFeedback(range: TimeRange, granularity: Granularity): Promis
 async function fetchSkillRecentTraces(
   skill: string,
   range: TimeRange,
-  options?: number | DashboardTracePageOptions
-): Promise<{ total: number; page: number; pageSize: number; traces: DashboardTraceDetail[] }> {
+  options?: number | TracePageOptions
+): Promise<{ traces: DashboardTraceDetail[]; total: number; page: number; pageSize: number }> {
   const { page, pageSize } = normalizeTracePageOptions(options)
   const body = {
     track_total_hits: true,
@@ -3201,10 +3380,10 @@ async function fetchSkillRecentTraces(
   }
   const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
   return {
+    traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
     total: getTotalHits(raw, raw.hits?.hits?.length ?? 0),
     page,
-    pageSize,
-    traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail)
+    pageSize
   }
 }
 
@@ -3264,13 +3443,19 @@ async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<Das
 async function fetchSkillDetail(
   skill: string,
   range: TimeRange,
-  options?: number | DashboardTracePageOptions
+  options?: number | TracePageOptions
 ): Promise<DashboardSkillDetail> {
-  const [stats, page] = await Promise.all([
+  const [stats, tracePageData] = await Promise.all([
     fetchSkillCodeStats(skill, range),
     fetchSkillRecentTraces(skill, range, options)
   ])
-  return { stats, traces: page.traces, total: page.total, page: page.page, pageSize: page.pageSize }
+  return {
+    stats,
+    traces: tracePageData.traces,
+    tracePage: tracePageData.page,
+    tracePageSize: tracePageData.pageSize,
+    totalTraces: tracePageData.total
+  }
 }
 
 async function fetchCommitDetails(
@@ -4176,19 +4361,27 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
 }
 
 function makeMockUserList(_range: TimeRange, options?: UserListOptions): DashboardUserListData {
-  const { pageSize, afterKey } = normalizeUserListOptions(options)
-  const allUsers = Array.from({ length: 64 }, (_, index) => makeMockDashboardUser(index))
+  const { pageSize, afterKey, keyword } = normalizeUserListOptions(options)
+  const normalizedKeyword = keyword.toLowerCase()
+  const allUsers = Array.from({ length: 64 }, (_, index) => makeMockDashboardUser(index)).filter((user) => {
+    if (!normalizedKeyword) return true
+    return [user.userName, user.ystId, user.sapId].some((value) =>
+      String(value || "").toLowerCase().includes(normalizedKeyword)
+    )
+  })
+  const afterOffset = Number(afterKey?.offset ?? 0)
   const afterSapId = typeof afterKey?.sap_id === "string" ? afterKey.sap_id : ""
-  const startIndex = afterSapId
+  const startIndex = Number.isFinite(afterOffset) && afterOffset > 0
+    ? Math.floor(afterOffset)
+    : afterSapId
     ? Math.max(0, allUsers.findIndex((item) => item.sapId === afterSapId) + 1)
     : 0
   const items = allUsers.slice(startIndex, startIndex + pageSize)
-  const nextItem = allUsers[startIndex + pageSize - 1]
   const hasNext = startIndex + pageSize < allUsers.length
   return {
     items,
     pageSize,
-    ...(hasNext && nextItem ? { nextAfterKey: { sap_id: nextItem.sapId } } : {}),
+    ...(hasNext ? { nextAfterKey: { offset: startIndex + pageSize } } : {}),
     totalActiveUsers: allUsers.length
   }
 }
@@ -4200,16 +4393,27 @@ function makeMockUserDetail(
 ): DashboardUserDetail {
   const index = Math.max(0, Number(sapId.slice(-3)) - 1)
   const user = makeMockDashboardUser(Number.isFinite(index) ? index : 0)
-  const traceLimit = clampLimit(options?.traceLimit, 10, 50)
-  const traces = makeMockSkillRecentTraces("代码审查", range, traceLimit).traces.map(
-    (trace, traceIndex) => ({
-      ...trace,
-      sapId,
-      ystId: user.ystId,
-      userName: user.userName,
-      orgName: user.orgName,
-      userIp: `10.0.1.${20 + traceIndex}`
-    })
+  const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
+  const tracePage = clampLimit(options?.tracePage, 1, 1000)
+  const totalTraces = user.count
+  const startIndex = (tracePage - 1) * tracePageSize
+  const baseTraces = makeMockSkillRecentTraces("代码审查", range, 10).traces
+  const traces = Array.from(
+    { length: Math.max(0, Math.min(tracePageSize, totalTraces - startIndex)) },
+    (_, traceIndex) => {
+      const trace = baseTraces[traceIndex % baseTraces.length]
+      const mockIndex = startIndex + traceIndex
+      return {
+        ...trace,
+        traceId: `${trace.traceId}-page-${tracePage}-${traceIndex}`,
+        sapId,
+        ystId: user.ystId,
+        userName: user.userName,
+        orgName: user.orgName,
+        userIp: `10.0.1.${20 + (mockIndex % 200)}`,
+        startedAt: new Date(new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000).toISOString()
+      }
+    }
   )
   return {
     sapId,
@@ -4239,7 +4443,10 @@ function makeMockUserDetail(
       { outcome: "error", count: Math.floor(user.count * 0.1) },
       { outcome: "cancelled", count: Math.max(0, user.count - Math.floor(user.count * 0.96)) }
     ],
-    traces
+    traces,
+    tracePage,
+    tracePageSize,
+    totalTraces
   }
 }
 
@@ -4529,7 +4736,7 @@ function makeMockAgentTrace(
 function makeMockSkillRecentTraces(
   skill: string,
   range: TimeRange,
-  options?: number | DashboardTracePageOptions
+  options?: number | TracePageOptions
 ): { total: number; page: number; pageSize: number; traces: DashboardTraceDetail[] } {
   const { page, pageSize } = normalizeTracePageOptions(options)
   const total = 46
@@ -4585,15 +4792,15 @@ function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
 function makeMockSkillDetail(
   skill: string,
   range: TimeRange,
-  options?: number | DashboardTracePageOptions
+  options?: number | TracePageOptions
 ): DashboardSkillDetail {
   const page = makeMockSkillRecentTraces(skill, range, options)
   return {
     stats: makeMockSkillCodeStats(skill),
     traces: page.traces,
-    total: page.total,
-    page: page.page,
-    pageSize: page.pageSize
+    tracePage: page.page,
+    tracePageSize: page.pageSize,
+    totalTraces: page.total
   }
 }
 
@@ -4660,9 +4867,8 @@ function makeMockCommitDetails(
 // ─────────────────────────────────────────────────────────
 
 export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
-  // Check if current user is allowed to see the dashboard
   _ipcMain.handle("dashboard:isAllowed", async () => {
-    return isDashboardAllowed()
+    return true
   })
 
   _ipcMain.handle("dashboard:overview", async (_, range: TimeRange, granularity: Granularity) => {
@@ -4698,21 +4904,23 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle("dashboard:userList", async (_, range: TimeRange, options?: UserListOptions) => {
-    if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
-    if (import.meta.env.DEV) return { success: true, data: makeMockUserList(range, options) }
-    try {
-      return { success: true, data: await fetchUserList(range, options) }
-    } catch (e) {
-      console.error("[Dashboard] userList error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
+  _ipcMain.handle(
+    "dashboard:userList",
+    async (_, range: TimeRange, options?: UserListOptions) => {
+      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
+      if (import.meta.env.DEV) return { success: true, data: makeMockUserList(range, options) }
+      try {
+        return { success: true, data: await fetchUserList(range, options) }
+      } catch (e) {
+        console.error("[Dashboard] userList error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
     }
-  })
+  )
 
   _ipcMain.handle(
     "dashboard:userDetail",
     async (_, sapId: string, range: TimeRange, options?: UserDetailOptions) => {
-      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
       const normalizedSapId = sapId?.trim?.() ?? ""
       if (!normalizedSapId) return { success: false, error: "sapId is required" }
       if (import.meta.env.DEV)
@@ -4761,9 +4969,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       const trimmedSkillName = skillName?.trim?.() ?? ""
       if (!trimmedSkillName) {
         return { success: false, error: "skillName is required" }
-      }
-      if (!isDashboardAllowedForCurrentUser()) {
-        return { success: false, error: "当前用户无权限查看 Skill 用户明细" }
       }
       if (import.meta.env.DEV) {
         return { success: true, data: makeMockSkillUserStats(range, trimmedSkillName) }
@@ -4832,7 +5037,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:skillRecentTraces",
-    async (_, skill: string, range: TimeRange, options?: number | DashboardTracePageOptions) => {
+    async (_, skill: string, range: TimeRange, options?: number | TracePageOptions) => {
       if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
       if (import.meta.env.DEV)
         return { success: true, data: makeMockSkillRecentTraces(skill, range, options) }
@@ -4847,7 +5052,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:marketSkillRecentTraces",
-    async (_, skill: string, range: TimeRange, options?: number | DashboardTracePageOptions) => {
+    async (_, skill: string, range: TimeRange, options?: number | TracePageOptions) => {
       const trimmedSkill = skill?.trim?.() ?? ""
       if (!trimmedSkill) return { success: false, error: "skill is required" }
       if (import.meta.env.DEV)
@@ -4863,7 +5068,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:skillDetail",
-    async (_, skill: string, range: TimeRange, options?: number | DashboardTracePageOptions) => {
+    async (_, skill: string, range: TimeRange, options?: number | TracePageOptions) => {
       if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
       if (import.meta.env.DEV)
         return { success: true, data: makeMockSkillDetail(skill, range, options) }
@@ -4879,7 +5084,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:commitDetails",
     async (_, range: TimeRange, options?: number | CommitDetailsOptions) => {
-      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
       if (import.meta.env.DEV) return { success: true, data: makeMockCommitDetails(range, options) }
       try {
         return { success: true, data: await fetchCommitDetails(range, options) }
@@ -4889,6 +5093,40 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       }
     }
   )
+
+  _ipcMain.handle("dashboard:exportSkillTraces", async (event, rawPayload: unknown) => {
+    try {
+      const payload = normalizeTraceExportPayload(rawPayload)
+      if (!payload.skill) return { success: false, error: "skill is required" }
+      if (payload.traces.length === 0) return { success: false, error: "暂无可导出的会话记录" }
+
+      const exportedAt = new Date().toISOString()
+      const date = exportedAt.slice(0, 10)
+      const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
+      const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+        title: "导出 Skill 会话历史",
+        defaultPath: `${safeExportFileName(payload.skill)}-traces-page-${payload.page}-${date}.zip`,
+        filters: [{ name: "Zip Archive", extensions: ["zip"] }]
+      })
+
+      if (result.canceled || !result.filePath) {
+        return { success: false, canceled: true }
+      }
+
+      const zip = new AdmZip()
+      zip.addFile("traces.md", Buffer.from(formatTraceExportMarkdown(payload, exportedAt), "utf-8"))
+      zip.addFile(
+        "traces.json",
+        Buffer.from(`${stringifyExportValue({ version: 1, exportedAt, ...payload })}\n`, "utf-8")
+      )
+      zip.writeZip(result.filePath)
+
+      return { success: true, filePath: result.filePath }
+    } catch (e) {
+      console.error("[Dashboard] exportSkillTraces error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
 
   _ipcMain.handle(
     "dashboard:exportExcel",

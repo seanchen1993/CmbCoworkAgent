@@ -3,7 +3,7 @@
  *
  * Operations overview and skill evaluation dashboard.
  */
-import { memo, useState, useCallback, useEffect, useMemo } from "react"
+import { memo, useState, useCallback, useEffect, useMemo, useRef } from "react"
 import {
   RefreshCw,
   Loader2,
@@ -13,6 +13,7 @@ import {
   ChevronRight,
   Download,
   Search,
+  X,
   User,
   Users
 } from "lucide-react"
@@ -315,12 +316,13 @@ const EMPTY_SKILL_DETAIL: DashboardSkillDetail = {
     adoptionRate: null
   },
   traces: [],
-  total: 0,
-  page: 1,
-  pageSize: 10
+  tracePage: 1,
+  tracePageSize: 10,
+  totalTraces: 0
 }
 
 const USER_LIST_PAGE_SIZE = 20
+const USER_TRACE_PAGE_SIZE = 10
 const SKILL_TRACE_PAGE_SIZE = 10
 
 type DashboardSubPage =
@@ -404,6 +406,11 @@ function UserListPage({
   onRefresh,
   onPrevious,
   onNext,
+  searchValue,
+  searchKeyword,
+  onSearchValueChange,
+  onSearch,
+  onClearSearch,
   onUserClick
 }: {
   data: DashboardUserListData | null
@@ -415,8 +422,15 @@ function UserListPage({
   onRefresh: () => void
   onPrevious: () => void
   onNext: () => void
+  searchValue: string
+  searchKeyword: string
+  onSearchValueChange: (value: string) => void
+  onSearch: () => void
+  onClearSearch: () => void
   onUserClick: (user: DashboardUserListItem) => void
 }): React.JSX.Element {
+  const hasSearchKeyword = searchKeyword.trim().length > 0
+
   return (
     <div className="p-6">
       <div className="mb-4 flex items-center justify-between gap-3">
@@ -449,13 +463,43 @@ function UserListPage({
       </div>
 
       <div className="rounded-xl border border-border bg-card">
-        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
           <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
             <Users className="size-4" />
             用户明细
           </div>
-          <div className="flex items-center gap-2">
+          <form
+            className="flex flex-1 items-center justify-end gap-2"
+            onSubmit={(event) => {
+              event.preventDefault()
+              onSearch()
+            }}
+          >
+            <div className="relative w-full max-w-[280px]">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={searchValue}
+                onChange={(event) => onSearchValueChange(event.target.value)}
+                aria-label="按用户名或 ystId 查询"
+                className="h-8 pl-8 pr-8 text-xs"
+              />
+              {searchValue && (
+                <button
+                  type="button"
+                  onClick={onClearSearch}
+                  className="absolute right-2 top-1/2 inline-flex size-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  aria-label="清空用户查询"
+                  title="清空"
+                >
+                  <X className="size-3" />
+                </button>
+              )}
+            </div>
+            <Button type="submit" variant="outline" size="sm" disabled={loading}>
+              查询
+            </Button>
             <Button
+              type="button"
               variant="outline"
               size="sm"
               onClick={onPrevious}
@@ -464,6 +508,7 @@ function UserListPage({
               上一页
             </Button>
             <Button
+              type="button"
               variant="outline"
               size="sm"
               className="gap-1"
@@ -473,7 +518,7 @@ function UserListPage({
               下一页
               <ChevronRight className="size-3.5" />
             </Button>
-          </div>
+          </form>
         </div>
 
         {loading && !data ? (
@@ -530,7 +575,7 @@ function UserListPage({
                 {(data?.items ?? []).length === 0 && (
                   <tr>
                     <td colSpan={6} className="px-3 py-10 text-center text-muted-foreground">
-                      当前时间范围内暂无活跃用户
+                      {hasSearchKeyword ? "未找到匹配用户" : "当前时间范围内暂无活跃用户"}
                     </td>
                   </tr>
                 )}
@@ -547,13 +592,25 @@ function UserDetailPage({
   data,
   loading,
   error,
-  onBack
+  tracePage,
+  onBack,
+  onTracePrevious,
+  onTraceNext
 }: {
   data: DashboardUserDetail | null
   loading: boolean
   error: string | null
+  tracePage: number
   onBack: () => void
+  onTracePrevious: () => void
+  onTraceNext: () => void
 }): React.JSX.Element {
+  const tracePageSize = data?.tracePageSize ?? USER_TRACE_PAGE_SIZE
+  const totalTraces = data?.totalTraces ?? data?.totalCalls ?? 0
+  const canTracePrevious = tracePage > 1 && !loading
+  const canTraceNext = Boolean(data) && tracePage * tracePageSize < totalTraces && !loading
+  const traceTitle = `Trace 记录（第 ${tracePage} 页）`
+
   return (
     <div className="p-6">
       <div className="mb-4 flex items-center gap-3">
@@ -663,7 +720,33 @@ function UserDetailPage({
           <div className="overflow-hidden rounded-xl border border-border bg-card">
             <TraceExplorer
               traces={data.traces}
-              title="最近 10 条 Trace 记录"
+              loading={loading}
+              title={traceTitle}
+              subtitle={`共 ${formatNumber(totalTraces)} 条，选择记录查看完整执行树`}
+              headerRight={
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={onTracePrevious}
+                    disabled={!canTracePrevious}
+                  >
+                    上一页
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="gap-1"
+                    onClick={onTraceNext}
+                    disabled={!canTraceNext}
+                  >
+                    下一页
+                    <ChevronRight className="size-3.5" />
+                  </Button>
+                </div>
+              }
               emptyText="当前时间范围内没有该用户的 trace"
               showCodeStats={false}
               className="h-[560px]"
@@ -1491,6 +1574,7 @@ export function DashboardView(): React.JSX.Element {
   const [skillTracePage, setSkillTracePage] = useState(1)
   const [skillTracesLoading, setSkillTracesLoading] = useState(false)
   const [skillTracesError, setSkillTracesError] = useState<string | null>(null)
+  const [skillTraceExporting, setSkillTraceExporting] = useState(false)
   const [skillEvalTraceRun, setSkillEvalTraceRun] = useState<DashboardSkillEvalRun | null>(null)
   const [skillEvalSelectedSkillKey, setSkillEvalSelectedSkillKey] = useState<
     string | null | undefined
@@ -1505,6 +1589,9 @@ export function DashboardView(): React.JSX.Element {
   const [userList, setUserList] = useState<DashboardUserListData | null>(null)
   const [userListLoading, setUserListLoading] = useState(false)
   const [userListError, setUserListError] = useState<string | null>(null)
+  const [userListSearchValue, setUserListSearchValue] = useState("")
+  const [userListSearchKeyword, setUserListSearchKeyword] = useState("")
+  const userListScopeRef = useRef("")
   const [userListAfterKey, setUserListAfterKey] = useState<
     Record<string, string | number> | undefined
   >()
@@ -1514,6 +1601,7 @@ export function DashboardView(): React.JSX.Element {
   const [userDetail, setUserDetail] = useState<DashboardUserDetail | null>(null)
   const [userDetailLoading, setUserDetailLoading] = useState(false)
   const [userDetailError, setUserDetailError] = useState<string | null>(null)
+  const [userDetailTracePage, setUserDetailTracePage] = useState(1)
   const [marketSkillKeys, setMarketSkillKeys] = useState<Set<string>>(new Set())
   const [pluginSkillKeys, setPluginSkillKeys] = useState<Set<string>>(new Set())
   const [marketSkillMap, setMarketSkillMap] = useState<Map<string, MarketItem>>(new Map())
@@ -1809,6 +1897,7 @@ export function DashboardView(): React.JSX.Element {
       setSelectedSkill(skill)
       setSkillDialogOpen(true)
       setSkillTracePage(page)
+      if (page === 1) setSkillDetail(null)
       setSkillTracesError(null)
       setSkillTracesLoading(true)
       try {
@@ -1829,7 +1918,6 @@ export function DashboardView(): React.JSX.Element {
 
   const handleSkillClick = useCallback(
     async (skill: string) => {
-      setSkillDetail(null)
       await loadSkillDetailPage(skill, 1)
     },
     [loadSkillDetailPage]
@@ -1961,22 +2049,60 @@ export function DashboardView(): React.JSX.Element {
     }
   }, [])
 
+  const handleSkillTracePrevious = useCallback(() => {
+    if (!selectedSkill || skillTracePage <= 1) return
+    void loadSkillDetailPage(selectedSkill, skillTracePage - 1)
+  }, [loadSkillDetailPage, selectedSkill, skillTracePage])
+
+  const handleSkillTraceNext = useCallback(() => {
+    if (!selectedSkill || !skillDetail) return
+    const pageSize = skillDetail.tracePageSize || SKILL_TRACE_PAGE_SIZE
+    if (skillTracePage * pageSize >= skillDetail.totalTraces) return
+    void loadSkillDetailPage(selectedSkill, skillTracePage + 1)
+  }, [loadSkillDetailPage, selectedSkill, skillDetail, skillTracePage])
+
+  const handleSkillTraceExport = useCallback(async () => {
+    if (!selectedSkill || !skillDetail || skillDetail.traces.length === 0) return
+    setSkillTraceExporting(true)
+    try {
+      const result = await window.api.dashboard.exportSkillTraces({
+        skill: selectedSkill,
+        range,
+        page: skillTracePage,
+        pageSize: skillDetail.tracePageSize || SKILL_TRACE_PAGE_SIZE,
+        totalTraces: skillDetail.totalTraces,
+        traces: skillDetail.traces
+      })
+      if (!result.success && !result.canceled) {
+        window.alert(result.error || "导出会话记录失败")
+      }
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "导出会话记录失败")
+    } finally {
+      setSkillTraceExporting(false)
+    }
+  }, [range, selectedSkill, skillDetail, skillTracePage])
+
   const loadUserList = useCallback(
     async (
       afterKey?: Record<string, string | number>,
-      backStack: Array<Record<string, string | number> | undefined> = []
+      backStack: Array<Record<string, string | number> | undefined> = [],
+      keyword = ""
     ) => {
       setUserListLoading(true)
       setUserListError(null)
+      const normalizedKeyword = keyword.trim()
       try {
         const result = await window.api.dashboard.userList(range, {
           pageSize: USER_LIST_PAGE_SIZE,
-          afterKey: afterKey ?? null
+          afterKey: afterKey ?? null,
+          keyword: normalizedKeyword || null
         })
         if (!result.success) throw new Error(result.error ?? "获取用户列表失败")
         setUserList(
           result.data ?? { items: [], pageSize: USER_LIST_PAGE_SIZE, totalActiveUsers: 0 }
         )
+        userListScopeRef.current = `${range.from}|${range.to}|${normalizedKeyword}`
         setUserListAfterKey(afterKey)
         setUserListBackStack(backStack)
       } catch (e) {
@@ -1989,11 +2115,14 @@ export function DashboardView(): React.JSX.Element {
   )
 
   const loadUserDetail = useCallback(
-    async (sapId: string) => {
+    async (sapId: string, tracePage = 1) => {
       setUserDetailLoading(true)
       setUserDetailError(null)
       try {
-        const result = await window.api.dashboard.userDetail(sapId, range, { traceLimit: 10 })
+        const result = await window.api.dashboard.userDetail(sapId, range, {
+          tracePage,
+          tracePageSize: USER_TRACE_PAGE_SIZE
+        })
         if (!result.success) throw new Error(result.error ?? "获取用户详情失败")
         setUserDetail(result.data ?? null)
       } catch (e) {
@@ -2008,6 +2137,10 @@ export function DashboardView(): React.JSX.Element {
   const openUserList = useCallback(() => {
     setSubPage({ kind: "user-list" })
     setUserList(null)
+    setUserListSearchValue("")
+    setUserListSearchKeyword("")
+    setUserListAfterKey(undefined)
+    setUserListBackStack([])
   }, [])
 
   const openUserDetail = useCallback(
@@ -2017,21 +2150,56 @@ export function DashboardView(): React.JSX.Element {
       const fallbackBackTo = subPage.kind === "user-list" ? "user-list" : "main"
       setSubPage({ kind: "user-detail", sapId: normalizedSapId, backTo: backTo ?? fallbackBackTo })
       setUserDetail(null)
+      setUserDetailTracePage(1)
     },
     [subPage.kind]
   )
 
-  const handleUserListNext = (): void => {
+  const handleUserListNext = useCallback(() => {
     if (!userList?.nextAfterKey) return
-    void loadUserList(userList.nextAfterKey, [...userListBackStack, userListAfterKey])
-  }
+    void loadUserList(
+      userList.nextAfterKey,
+      [...userListBackStack, userListAfterKey],
+      userListSearchKeyword
+    )
+  }, [
+    loadUserList,
+    userList?.nextAfterKey,
+    userListAfterKey,
+    userListBackStack,
+    userListSearchKeyword
+  ])
 
-  const handleUserListPrevious = (): void => {
+  const handleUserListPrevious = useCallback(() => {
     if (userListBackStack.length === 0) return
     const nextStack = userListBackStack.slice(0, -1)
     const previousAfterKey = userListBackStack[userListBackStack.length - 1]
-    void loadUserList(previousAfterKey, nextStack)
-  }
+    void loadUserList(previousAfterKey, nextStack, userListSearchKeyword)
+  }, [loadUserList, userListBackStack, userListSearchKeyword])
+
+  const handleUserListSearch = useCallback(() => {
+    const keyword = userListSearchValue.trim()
+    setUserList(null)
+    setUserListAfterKey(undefined)
+    setUserListBackStack([])
+    if (keyword === userListSearchKeyword) {
+      void loadUserList(undefined, [], keyword)
+      return
+    }
+    setUserListSearchKeyword(keyword)
+  }, [loadUserList, userListSearchKeyword, userListSearchValue])
+
+  const handleUserListSearchClear = useCallback(() => {
+    setUserListSearchValue("")
+    setUserList(null)
+    setUserListAfterKey(undefined)
+    setUserListBackStack([])
+    if (!userListSearchKeyword) {
+      void loadUserList(undefined, [], "")
+      return
+    }
+    setUserListSearchKeyword("")
+  }, [loadUserList, userListSearchKeyword])
 
   const handleUserDetailBack = useCallback(() => {
     if (subPage.kind === "user-detail" && subPage.backTo === "user-list") {
@@ -2041,18 +2209,39 @@ export function DashboardView(): React.JSX.Element {
     setSubPage({ kind: "main" })
   }, [subPage])
 
+  const handleUserTracePrevious = useCallback(() => {
+    setUserDetailTracePage((prev) => Math.max(1, prev - 1))
+  }, [])
+
+  const handleUserTraceNext = useCallback(() => {
+    if (!userDetail) return
+    setUserDetailTracePage((prev) => {
+      const pageSize = userDetail.tracePageSize || USER_TRACE_PAGE_SIZE
+      return prev * pageSize < userDetail.totalTraces ? prev + 1 : prev
+    })
+  }, [userDetail])
+
   const subPageDetailSapId = subPage.kind === "user-detail" ? subPage.sapId : null
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      if (subPage.kind === "user-list") {
-        void loadUserList(undefined, [])
-      } else if (subPageDetailSapId) {
-        void loadUserDetail(subPageDetailSapId)
+    if (subPage.kind === "user-list") {
+      const currentScope = `${range.from}|${range.to}|${userListSearchKeyword}`
+      if (!userList || userListScopeRef.current !== currentScope) {
+        void loadUserList(undefined, [], userListSearchKeyword)
       }
-    }, 0)
-    return () => window.clearTimeout(timer)
-  }, [range, subPage.kind, subPageDetailSapId, loadUserList, loadUserDetail])
+    } else if (subPageDetailSapId) {
+      void loadUserDetail(subPageDetailSapId, userDetailTracePage)
+    }
+  }, [
+    range,
+    subPage.kind,
+    subPageDetailSapId,
+    loadUserList,
+    loadUserDetail,
+    userList,
+    userListSearchKeyword,
+    userDetailTracePage
+  ])
 
   const loadCommitDetails = useCallback(
     async (targetRange: TimeRange, scopeLabel: string, page = 1, pushedOnly = false) => {
@@ -2374,9 +2563,16 @@ export function DashboardView(): React.JSX.Element {
             canGoPrevious={userListBackStack.length > 0}
             canGoNext={Boolean(userList?.nextAfterKey)}
             onBack={() => setSubPage({ kind: "main" })}
-            onRefresh={() => loadUserList(userListAfterKey, userListBackStack)}
+            onRefresh={() =>
+              loadUserList(userListAfterKey, userListBackStack, userListSearchKeyword)
+            }
             onPrevious={handleUserListPrevious}
             onNext={handleUserListNext}
+            searchValue={userListSearchValue}
+            searchKeyword={userListSearchKeyword}
+            onSearchValueChange={setUserListSearchValue}
+            onSearch={handleUserListSearch}
+            onClearSearch={handleUserListSearchClear}
             onUserClick={(user) => openUserDetail(user.sapId, "user-list")}
           />
         </ScrollArea>
@@ -2386,7 +2582,10 @@ export function DashboardView(): React.JSX.Element {
             data={userDetail}
             loading={userDetailLoading}
             error={userDetailError}
+            tracePage={userDetailTracePage}
             onBack={handleUserDetailBack}
+            onTracePrevious={handleUserTracePrevious}
+            onTraceNext={handleUserTraceNext}
           />
         </ScrollArea>
       ) : (
@@ -2465,13 +2664,20 @@ export function DashboardView(): React.JSX.Element {
       )}
       <TraceHistoryDialog
         open={skillDialogOpen}
-        onOpenChange={setSkillDialogOpen}
+        onOpenChange={(open) => {
+          setSkillDialogOpen(open)
+          if (!open) setSkillTracePage(1)
+        }}
         skill={selectedSkill}
         traces={skillDetail?.traces ?? []}
         codeStats={skillDetail?.stats ?? null}
-        total={skillDetail?.total ?? 0}
-        page={skillDetail?.page ?? skillTracePage}
-        pageSize={skillDetail?.pageSize ?? SKILL_TRACE_PAGE_SIZE}
+        tracePage={skillTracePage}
+        tracePageSize={skillDetail?.tracePageSize ?? SKILL_TRACE_PAGE_SIZE}
+        totalTraces={skillDetail?.totalTraces ?? skillDetail?.traces.length}
+        onTracePrevious={handleSkillTracePrevious}
+        onTraceNext={handleSkillTraceNext}
+        onExportPage={handleSkillTraceExport}
+        exporting={skillTraceExporting}
         loading={skillTracesLoading}
         error={skillTracesError}
         onPageChange={handleSkillTracePageChange}

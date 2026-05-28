@@ -1,0 +1,238 @@
+import type { AgentTrace } from "../trace/types"
+
+export interface SkillEvalWindowTurn {
+  traceId: string
+  threadId: string
+  startedAt: string
+  endedAt: string
+  usedSkills: string[]
+  userMessage?: string
+  assistantText?: string
+  outcome?: string
+}
+
+interface StoredSkillEvalWindowTurn extends SkillEvalWindowTurn {
+  skillContextNames: string[]
+  awaitingSkillNames: string[]
+}
+
+export interface SkillEvalWindowContext {
+  contextTraceIds: string[]
+  skillEvalTraceIds: string[]
+  contextTraceCount: number
+  skillEvalTraceCount: number
+}
+
+export interface SkillEvalWindowAppendResult {
+  usedSkills: string[]
+  contextSkillNames: string[]
+  evalSkillNames: string[]
+  inheritedContext: boolean
+}
+
+const MAX_WINDOW_TURNS = 12
+const MAX_CONTEXT_AGE_MS = 30 * 60 * 1000
+const MAX_THREADS_IN_WINDOW = 200
+const TOPIC_SWITCH_PATTERN =
+  /(换个话题|换一个|另一个问题|另外|不相关|先不|不用了|取消|算了|重新开始|新问题|顺便问|我想问|我现在想)/
+const NEW_TASK_PATTERN =
+  /(帮我|请帮我|查询|搜索|生成|写一个|改一下|解释一下|为什么|怎么|如何|能不能|可不可以)/
+const ANSWER_MARKER_PATTERN =
+  /(是的|不是|可以|不可以|对|不对|确认|按|用|选|选择|继续|上面|刚才|这个|那个|第[一二三四五六七八九十0-9]|补充|信息|范围|时间|日期|账号|路径|部门|版本|名称|数量|原因|需求|如下)/
+const STRUCTURED_ANSWER_PATTERN = /(\d{2,}|[，,].+[，,]|[。.]|[:：].{4,})/
+const USER_INPUT_REQUEST_PATTERN =
+  /(请|麻烦|需要|还需要|缺少|补充|提供|确认|选择|输入|说明|告知|发我|上传|填一下|给我).{0,24}(补充|提供|确认|选择|输入|说明|告知|信息|材料|参数|范围|时间|日期|账号|路径|名称|版本|文件|截图|内容)|(.{0,16}(是否|哪一个|哪个|哪些|什么|多少|几|何时|什么时候).{0,40}[?？])/
+const COMPLETION_PATTERN = /(已完成|处理完成|生成完成|执行完成|已经完成|结果如下|总结如下)/
+
+const skillEvalWindows = new Map<string, StoredSkillEvalWindowTurn[]>()
+
+function cloneTurn(turn: StoredSkillEvalWindowTurn): StoredSkillEvalWindowTurn {
+  return {
+    ...turn,
+    usedSkills: [...turn.usedSkills],
+    skillContextNames: [...turn.skillContextNames],
+    awaitingSkillNames: [...turn.awaitingSkillNames]
+  }
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.filter(Boolean)))
+}
+
+function normalizeText(value: string | undefined): string {
+  return (value ?? "").replace(/\s+/g, " ").trim()
+}
+
+function timestampMs(value: string): number {
+  const ms = new Date(value).getTime()
+  return Number.isNaN(ms) ? 0 : ms
+}
+
+function isWithinContextAge(turn: StoredSkillEvalWindowTurn, referenceMs: number): boolean {
+  if (referenceMs <= 0) return true
+  const endedMs = timestampMs(turn.endedAt || turn.startedAt)
+  if (endedMs <= 0) return true
+  return Math.abs(referenceMs - endedMs) <= MAX_CONTEXT_AGE_MS
+}
+
+function asksUserForMoreInput(text: string | undefined, outcome: string | undefined): boolean {
+  const normalized = normalizeText(text)
+  if (!normalized || outcome === "error" || outcome === "cancelled") return false
+  if (COMPLETION_PATTERN.test(normalized) && !USER_INPUT_REQUEST_PATTERN.test(normalized)) {
+    return false
+  }
+  return USER_INPUT_REQUEST_PATTERN.test(normalized)
+}
+
+function isLikelyAnswerToPendingQuestion(userMessage: string | undefined): boolean {
+  const normalized = normalizeText(userMessage)
+  if (!normalized) return false
+  if (TOPIC_SWITCH_PATTERN.test(normalized)) return false
+  const hasAnswerMarker = ANSWER_MARKER_PATTERN.test(normalized)
+  const asksQuestion = /[?？]/.test(normalized)
+  if (asksQuestion && !hasAnswerMarker) return false
+  if (NEW_TASK_PATTERN.test(normalized) && !hasAnswerMarker) return false
+  if (hasAnswerMarker) return true
+  if (
+    (userMessage?.includes("\n") || STRUCTURED_ANSWER_PATTERN.test(normalized)) &&
+    !asksQuestion
+  ) {
+    return true
+  }
+  return normalized.length <= 120 && !asksQuestion
+}
+
+function findPendingAnswerContext(
+  turns: StoredSkillEvalWindowTurn[],
+  referenceMs: number,
+  userMessage: string | undefined
+): string[] {
+  if (!isLikelyAnswerToPendingQuestion(userMessage)) return []
+
+  const lastTurn = turns[turns.length - 1]
+  if (!lastTurn || !isWithinContextAge(lastTurn, referenceMs)) return []
+  return lastTurn.awaitingSkillNames.length > 0 ? [...lastTurn.awaitingSkillNames] : []
+}
+
+function pruneWindow(
+  turns: StoredSkillEvalWindowTurn[],
+  referenceMs: number
+): StoredSkillEvalWindowTurn[] {
+  const recentTurns = turns.filter((turn) => isWithinContextAge(turn, referenceMs))
+  return recentTurns.slice(-MAX_WINDOW_TURNS).map(cloneTurn)
+}
+
+function rememberThreadWindow(threadId: string, turns: StoredSkillEvalWindowTurn[]): void {
+  if (skillEvalWindows.has(threadId)) skillEvalWindows.delete(threadId)
+  skillEvalWindows.set(threadId, turns)
+
+  while (skillEvalWindows.size > MAX_THREADS_IN_WINDOW) {
+    const oldestKey = skillEvalWindows.keys().next().value
+    if (!oldestKey) break
+    skillEvalWindows.delete(oldestKey)
+  }
+}
+
+export function getSkillEvalWindowAssistantText(trace: AgentTrace): string {
+  const stepText = trace.steps[trace.steps.length - 1]?.assistantText
+  if (typeof stepText === "string" && stepText.trim()) return stepText.trim()
+
+  const nodes = Array.isArray(trace.nodes) ? trace.nodes : []
+  const root = nodes.find((node) => node.type === "trace")
+  const terminalMessages = nodes.filter(
+    (node) =>
+      node.type === "message" &&
+      node.parentId === root?.id &&
+      (node.name === "Run Completed" || node.name === "Run Error" || node.name === "Run Cancelled")
+  )
+  const terminal = terminalMessages[terminalMessages.length - 1]
+  return typeof terminal?.output === "string" ? terminal.output.trim() : ""
+}
+
+export function appendSkillEvalWindowTurn(turn: SkillEvalWindowTurn): SkillEvalWindowAppendResult {
+  const existing = skillEvalWindows.get(turn.threadId) ?? []
+  const referenceMs = timestampMs(turn.endedAt || turn.startedAt)
+  const usedSkills = uniqueStrings(turn.usedSkills)
+  const inheritedSkillNames =
+    usedSkills.length > 0 ? [] : findPendingAnswerContext(existing, referenceMs, turn.userMessage)
+  const skillContextNames = usedSkills.length > 0 ? usedSkills : inheritedSkillNames
+  const awaitingSkillNames = asksUserForMoreInput(turn.assistantText, turn.outcome)
+    ? skillContextNames
+    : []
+  const nextTurn: StoredSkillEvalWindowTurn = {
+    ...turn,
+    usedSkills,
+    skillContextNames: uniqueStrings(skillContextNames),
+    awaitingSkillNames: uniqueStrings(awaitingSkillNames)
+  }
+
+  rememberThreadWindow(turn.threadId, pruneWindow([...existing, nextTurn], referenceMs))
+
+  return {
+    usedSkills,
+    contextSkillNames: [...nextTurn.skillContextNames],
+    evalSkillNames: [...nextTurn.skillContextNames],
+    inheritedContext: usedSkills.length === 0 && nextTurn.skillContextNames.length > 0
+  }
+}
+
+export function snapshotSkillEvalWindow(threadId: string): SkillEvalWindowTurn[] {
+  return (skillEvalWindows.get(threadId) ?? []).map((turn) => ({
+    traceId: turn.traceId,
+    threadId: turn.threadId,
+    startedAt: turn.startedAt,
+    endedAt: turn.endedAt,
+    usedSkills: [...turn.usedSkills],
+    userMessage: turn.userMessage,
+    assistantText: turn.assistantText,
+    outcome: turn.outcome
+  }))
+}
+
+export function resetSkillEvalWindow(threadId: string): void {
+  skillEvalWindows.delete(threadId)
+}
+
+function buildWindowContextForSkill(
+  turns: StoredSkillEvalWindowTurn[],
+  rawSkillName: string
+): SkillEvalWindowContext {
+  const contextTraceIds: string[] = []
+  const skillEvalTraceIds: string[] = []
+
+  for (let index = turns.length - 1; index >= 0; index--) {
+    const turn = turns[index]
+    const isContextTrace = turn.skillContextNames.includes(rawSkillName)
+    const isEvalTrace = turn.skillContextNames.includes(rawSkillName)
+
+    if (!isContextTrace && !isEvalTrace) {
+      if (contextTraceIds.length > 0 || skillEvalTraceIds.length > 0) break
+      continue
+    }
+
+    contextTraceIds.push(turn.traceId)
+    if (isEvalTrace) skillEvalTraceIds.push(turn.traceId)
+  }
+
+  const orderedContextTraceIds = uniqueStrings(contextTraceIds.reverse())
+  const orderedSkillEvalTraceIds = uniqueStrings(skillEvalTraceIds.reverse())
+
+  return {
+    contextTraceIds: orderedContextTraceIds,
+    skillEvalTraceIds: orderedSkillEvalTraceIds,
+    contextTraceCount: orderedContextTraceIds.length,
+    skillEvalTraceCount: orderedSkillEvalTraceIds.length
+  }
+}
+
+export function getSkillEvalWindowContextByRawName(
+  threadId: string,
+  rawSkillNames: string[]
+): Record<string, SkillEvalWindowContext> {
+  const turns = skillEvalWindows.get(threadId) ?? []
+  const result: Record<string, SkillEvalWindowContext> = {}
+  for (const rawSkillName of uniqueStrings(rawSkillNames)) {
+    result[rawSkillName] = buildWindowContextForSkill(turns, rawSkillName)
+  }
+  return result
+}

@@ -558,6 +558,47 @@ export interface ApprovalDecision {
   savedToolDescription?: string
 }
 
+// User input request tool
+export interface UserInputOption {
+  label: string
+  description: string
+}
+
+export interface UserInputQuestion {
+  header: string
+  id: string
+  question: string
+  options: UserInputOption[]
+}
+
+export interface UserInputRequest {
+  requestId: string
+  threadId: string
+  questions: UserInputQuestion[]
+  createdAt: string
+}
+
+export type UserInputAnswer =
+  | {
+      type: "option"
+      questionId: string
+      optionIndex: number
+      label: string
+      description: string
+    }
+  | {
+      type: "other"
+      questionId: string
+      text: string
+    }
+
+export interface UserInputResponse {
+  requestId: string
+  answers: Record<string, UserInputAnswer>
+  submittedAt?: string
+  ignored?: boolean
+}
+
 // ChatX types
 export interface ChatXRobotConfig {
   chatId: string

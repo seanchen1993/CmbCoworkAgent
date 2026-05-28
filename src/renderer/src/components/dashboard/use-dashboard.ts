@@ -187,9 +187,9 @@ export interface DashboardCodeStats {
 export interface DashboardSkillDetail {
   stats: DashboardCodeStats
   traces: DashboardTraceDetail[]
-  total: number
-  page: number
-  pageSize: number
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
 }
 
 export interface DashboardUserListItem {
@@ -232,6 +232,9 @@ export interface DashboardUserDetail {
   byModel: Array<{ model: string; count: number }>
   byOutcome: Array<{ outcome: string; count: number }>
   traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
 }
 
 export interface ProductivityData {
