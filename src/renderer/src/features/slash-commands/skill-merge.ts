@@ -18,15 +18,17 @@ export function mergeChatSkills(
   pluginSkills: SkillMetadata[],
   disabledSkillIds: ReadonlySet<string>
 ): SkillMetadata[] {
+  const enabledLocalSkills = localSkills.filter(
+    (skill) => !isSkillDisabled(skill, disabledSkillIds)
+  )
   const enabledLocalNames = new Set(
-    localSkills
-      .filter((skill) => !isSkillDisabled(skill, disabledSkillIds))
+    enabledLocalSkills
       .map((skill) => normalizeSkillName(skill.name))
       .filter(Boolean)
   )
 
   return [
-    ...localSkills,
+    ...enabledLocalSkills,
     ...pluginSkills.filter(
       (pluginSkill) => !enabledLocalNames.has(normalizeSkillName(pluginSkill.name))
     )
