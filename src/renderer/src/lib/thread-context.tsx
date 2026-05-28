@@ -51,10 +51,7 @@ import {
   resolveLiveStreamMessageEndAt,
   shouldSkipLiveStreamAccumulatorMessage
 } from "./live-stream-transcript"
-import {
-  disableChatReportUploadForThread,
-  markChatReportMessageIdsUploaded
-} from "./chat-report-upload-cache"
+import { disableChatReportUploadForThread } from "./chat-report-upload-cache"
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
@@ -933,7 +930,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         setThreadStates((prev) => {
           const cur = prev[threadId]
           if (!cur || !cur.modelRetry) return prev
-          return { ...prev, [threadId]: { ...cur, modelRetry: null } }
+          const next = { ...prev, [threadId]: { ...cur, modelRetry: null } }
+          threadStatesRef.current = next
+          return next
         })
       }
     },
@@ -1740,10 +1739,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           persistedMessageTimeOrder
         )
       )
-      markChatReportMessageIdsUploaded(
-        threadId,
-        checkpointTranscript.map((message) => message.id)
-      )
       try {
         const goalUi = await window.api.threads.getGoalState(threadId, { includeEvents: false })
         const restoredEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
@@ -1980,7 +1975,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       setThreadStates((prev) => {
         if (prev[threadId]) return prev
-        return { ...prev, [threadId]: { ...createDefaultThreadState(), historyLoading: true } }
+        const next = {
+          ...prev,
+          [threadId]: { ...createDefaultThreadState(), historyLoading: true }
+        }
+        threadStatesRef.current = next
+        return next
       })
 
       loadThreadHistory(threadId)
@@ -2071,6 +2071,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     setThreadStates((prev) => {
       const { [threadId]: _removed, ...rest } = prev
       void _removed // Explicitly mark as intentionally unused
+      threadStatesRef.current = rest
       return rest
     })
   }, [])

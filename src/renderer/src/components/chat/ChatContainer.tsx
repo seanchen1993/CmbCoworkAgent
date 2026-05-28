@@ -1235,7 +1235,6 @@ export function ChatContainer({
   const chatReportRetryQueuesRef = useRef<
     Record<string, Array<{ messages: Message[]; attempt: number }>>
   >({})
-  const chatReportHistoryRestoreThreadsRef = useRef<Set<string>>(new Set())
   // Get the stream data via subscription - reactive updates without re-rendering provider
   const streamData = useThreadStream(threadId)
   const stream = streamData.stream
@@ -1831,14 +1830,7 @@ export function ChatContainer({
   }, [isLoading, streamData.messages.length])
 
   useEffect(() => {
-    if (historyLoading) {
-      chatReportHistoryRestoreThreadsRef.current.add(threadId)
-    }
-  }, [historyLoading, threadId])
-
-  useEffect(() => {
     if (historyLoading) return
-    if (chatReportHistoryRestoreThreadsRef.current.delete(threadId)) return
     if (!isLoading) {
       scheduleChatReportUpload(threadId, threadMessages)
     }
