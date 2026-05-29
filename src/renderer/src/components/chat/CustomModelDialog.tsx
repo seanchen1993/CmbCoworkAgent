@@ -114,6 +114,18 @@ function defaultInterleavedThinkingForModel(model: string): boolean {
   return /minimax/i.test(model)
 }
 
+function defaultSamplingForModel(
+  model: string,
+  limits: TokenLimits
+): Pick<CustomConfig, "temperatureInput" | "topPInput" | "topKInput"> {
+  const isMinimaxModel = /minimax/i.test(model)
+  return {
+    temperatureInput: String(isMinimaxModel ? 1.0 : limits.defaultTemperature),
+    topPInput: String(limits.defaultTopP),
+    topKInput: String(limits.defaultTopK)
+  }
+}
+
 function parseMaxTokens(value: string): number | null {
   const trimmed = value.trim()
   if (!trimmed) return null
@@ -668,9 +680,18 @@ export function CustomModelDialog({
                   setConfig((c) => {
                     const currentDefault = defaultInterleavedThinkingForModel(c.model)
                     const nextDefault = defaultInterleavedThinkingForModel(nextModel)
+                    const currentSamplingDefault = defaultSamplingForModel(c.model, tokenLimits)
+                    const nextSamplingDefault = defaultSamplingForModel(nextModel, tokenLimits)
+                    const shouldUseNextSamplingDefault =
+                      !c.id &&
+                      c.temperatureInput === currentSamplingDefault.temperatureInput &&
+                      c.topPInput === currentSamplingDefault.topPInput &&
+                      c.topKInput === currentSamplingDefault.topKInput
+
                     return {
                       ...c,
                       model: nextModel,
+                      ...(shouldUseNextSamplingDefault ? nextSamplingDefault : {}),
                       interleavedThinking:
                         c.interleavedThinking === currentDefault
                           ? nextDefault
