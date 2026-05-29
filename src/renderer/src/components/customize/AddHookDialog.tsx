@@ -1716,6 +1716,12 @@ export function AddHookDialog(props: {
     matcherMode,
     matcher,
     command,
+    // PR-14 follow-up — http hook fields must be in the dep list, otherwise
+    // useCallback closes over the initial empty values and the submit path
+    // sees stale URL/headers/allowedEnvVars even when the user just typed.
+    httpUrl,
+    httpHeaders,
+    httpAllowedEnvVars,
     prompt,
     modelId,
     fallback,

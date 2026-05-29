@@ -1491,7 +1491,7 @@ export async function runHooks(
   // never be retried).
   if (event === "SessionEnd" || event === "Setup") {
     const TOTAL_TIMEOUT_MS = event === "Setup" ? 30_000 : 5_000
-    const tasks = matched.map(async (hook) => {
+    const tasks = matched.map(async (hook): Promise<HookResult> => {
       const hookContext = enrichContextFromHook(hook, context)
       try {
         const rawResult = await executeHook(
@@ -1511,8 +1511,19 @@ export async function runHooks(
         }
         return result
       } catch (err) {
+        // PR-11 follow-up — surface unexpected executor throws as a synthetic
+        // exitCode: 1 result. The Setup branch downstream treats anyFailed via
+        // `exitCode !== 0`; previously returning undefined here would let a
+        // throw look like a fulfilled-without-result success → setup-state
+        // marker would be written for a hook that never actually ran.
+        const errStr = err instanceof Error ? err.message : String(err)
         console.warn(`[Hooks] ${event} hook error:`, err)
-        return undefined
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: errStr,
+          blocked: false
+        }
       }
     })
     let timedOut = false
@@ -1538,11 +1549,20 @@ export async function runHooks(
       }
       // Any non-zero exit code from at least one Setup hook → treat the
       // whole run as failed so we don't persist init state.
+      //   - rejected:                    promise blew up (shouldn't happen
+      //                                  since the task wraps in try/catch,
+      //                                  but defensive)
+      //   - fulfilled, undefined value:  task returned without a result
+      //                                  (also shouldn't happen but err safe)
+      //   - fulfilled, exitCode !== 0:   includes null (signals JSON
+      //                                  continue:false / decision:block /
+      //                                  unusual paths — none of which we
+      //                                  want to treat as a green init run)
       const results = settled as Array<PromiseSettledResult<HookResult | undefined>>
       const anyFailed = results.some(
         (r) =>
           r.status === "rejected" ||
-          (r.status === "fulfilled" && r.value && r.value.exitCode !== 0)
+          (r.status === "fulfilled" && (r.value === undefined || r.value.exitCode !== 0))
       )
       if (anyFailed) {
         return {

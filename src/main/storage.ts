@@ -2648,7 +2648,11 @@ export function getHooks(): HookConfig[] {
                 ? h.modelId
                 : undefined,
           fallback:
-            hookType === "prompt" ? (h.fallback === "block" ? "block" : "allow") : undefined,
+            hookType === "prompt" || hookType === "http"
+              ? h.fallback === "block"
+                ? "block"
+                : "allow"
+              : undefined,
           statusMessage: normalizeOptionalHookString(h.statusMessage),
           onBlock: parseHookOnBlock(h.onBlock),
           forcedOutcome: parseForcedOutcome(h.forcedOutcome),
@@ -3344,7 +3348,11 @@ export function upsertHook(config: HookUpsert & { id?: string }): string {
     // `getHookModelRef` at runtime and migrate to `model` next time they're
     // re-saved through this path.
     model: hookType === "prompt" ? (config.model ?? config.modelId) : undefined,
-    fallback: hookType === "prompt" ? (config.fallback ?? "allow") : undefined,
+    // PR-14 follow-up — http hooks have the same fallback semantics as prompt
+    // (LLM/network failure → user-configured allow/block). Persist for both;
+    // command hooks ignore it (exit code 2 is the canonical block signal).
+    fallback:
+      hookType === "prompt" || hookType === "http" ? (config.fallback ?? "allow") : undefined,
     statusMessage: normalizeOptionalHookString(config.statusMessage),
     onBlock: parseHookOnBlock(config.onBlock),
     forcedOutcome: parseForcedOutcome(config.forcedOutcome),

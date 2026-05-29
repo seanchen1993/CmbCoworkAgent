@@ -169,6 +169,39 @@ assert(
   "P1-3d runHooks does not write the setup-state marker on its own"
 )
 
+// ─── P3 — Setup catch path returns exitCode:1 so a throwing hook is not
+//         mistakenly treated as success and the workspace marker is NOT
+//         written. We exercise this via a command that points at a binary
+//         that does not exist — spawn surfaces an error rejection on the
+//         executor, the task catch rewrites it to exitCode:1, and runHooks
+//         returns a blocking result.
+
+const throwingHook: HookConfig = {
+  id: "test-setup-throw",
+  event: "Setup",
+  type: "command",
+  // bogus binary that doesn't exist; surfaces as ENOENT inside the executor
+  command: process.platform === "win32"
+    ? "nosuch-cmbcowork-binary-9af3.exe"
+    : "/nope/nosuch-cmbcowork-binary-9af3",
+  enabled: true,
+  timeout: 5_000,
+  createdAt: "",
+  updatedAt: ""
+}
+const throwingResult = await runHooks([throwingHook], "Setup", {
+  workspacePath: tmpdir(),
+  sessionId: "test-thread",
+  setupTrigger: "init"
+})
+// The "ENOENT" path on Windows often surfaces as a regular non-zero exit
+// (cmd /c with a missing binary), so we don't insist on the rejection
+// branch — we just want a non-null, blocking result either way.
+assert(
+  throwingResult !== null && throwingResult.blocked === true,
+  "P3a Setup with a throwing/erroring hook returns a blocking result (marker write will be skipped)"
+)
+
 } // end main
 
 main().then(
