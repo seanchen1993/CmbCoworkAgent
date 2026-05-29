@@ -243,6 +243,7 @@ export interface DashboardUserDetail {
   tracePage: number
   tracePageSize: number
   totalTraces: number
+  traceTriggerScope?: DashboardTraceTriggerScope
 }
 
 export interface ProductivityData {

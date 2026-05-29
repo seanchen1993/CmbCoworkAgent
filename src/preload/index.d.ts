@@ -240,6 +240,7 @@ interface DashboardUserDetail {
   tracePage: number
   tracePageSize: number
   totalTraces: number
+  traceTriggerScope?: DashboardTraceTriggerScope
 }
 
 interface DashboardUserListOptions {
@@ -261,6 +262,7 @@ interface DashboardUserDetailOptions {
   traceLimit?: number
   tracePage?: number
   tracePageSize?: number
+  triggerScope?: DashboardTraceTriggerScope
 }
 
 interface CustomAPI {

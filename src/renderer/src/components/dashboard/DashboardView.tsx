@@ -37,7 +37,7 @@ import { ModelPanel } from "./panels/ModelPanel"
 import { UserPanel } from "./panels/UserPanel"
 import { ProductivityPanel } from "./panels/ProductivityPanel"
 import { FeedbackPanel } from "./panels/FeedbackPanel"
-import { TraceExplorer, TraceHistoryDialog } from "./TraceHistoryDialog"
+import { TraceExplorer, TraceHistoryDialog, TraceTriggerScopeToggle } from "./TraceHistoryDialog"
 import { CommitDetailsDialog } from "./CommitDetailsDialog"
 import { marketApi, type MarketItem } from "../../api/market"
 import {
@@ -612,17 +612,21 @@ function UserDetailPage({
   loading,
   error,
   tracePage,
+  traceTriggerScope,
   onBack,
   onTracePrevious,
-  onTraceNext
+  onTraceNext,
+  onTraceTriggerScopeChange
 }: {
   data: DashboardUserDetail | null
   loading: boolean
   error: string | null
   tracePage: number
+  traceTriggerScope: DashboardTraceTriggerScope
   onBack: () => void
   onTracePrevious: () => void
   onTraceNext: () => void
+  onTraceTriggerScopeChange: (scope: DashboardTraceTriggerScope) => void
 }): React.JSX.Element {
   const tracePageSize = data?.tracePageSize ?? USER_TRACE_PAGE_SIZE
   const totalTraces = data?.totalTraces ?? data?.totalCalls ?? 0
@@ -744,6 +748,10 @@ function UserDetailPage({
               subtitle={`共 ${formatNumber(totalTraces)} 条，选择记录查看对话还原与执行树`}
               headerRight={
                 <div className="flex items-center gap-2">
+                  <TraceTriggerScopeToggle
+                    value={traceTriggerScope}
+                    onChange={onTraceTriggerScopeChange}
+                  />
                   <Button
                     type="button"
                     variant="outline"
@@ -835,6 +843,8 @@ export function DashboardView(): React.JSX.Element {
   const [userDetailLoading, setUserDetailLoading] = useState(false)
   const [userDetailError, setUserDetailError] = useState<string | null>(null)
   const [userDetailTracePage, setUserDetailTracePage] = useState(1)
+  const [userDetailTraceTriggerScope, setUserDetailTraceTriggerScope] =
+    useState<DashboardTraceTriggerScope>("active")
   const [marketSkillKeys, setMarketSkillKeys] = useState<Set<string>>(new Set())
   const [pluginSkillKeys, setPluginSkillKeys] = useState<Set<string>>(new Set())
   const [marketSkillMap, setMarketSkillMap] = useState<Map<string, MarketItem>>(new Map())
@@ -1131,13 +1141,18 @@ export function DashboardView(): React.JSX.Element {
   )
 
   const loadUserDetail = useCallback(
-    async (sapId: string, tracePage = 1) => {
+    async (
+      sapId: string,
+      tracePage = 1,
+      triggerScope: DashboardTraceTriggerScope = "active"
+    ) => {
       setUserDetailLoading(true)
       setUserDetailError(null)
       try {
         const result = await window.api.dashboard.userDetail(sapId, range, {
           tracePage,
-          tracePageSize: USER_TRACE_PAGE_SIZE
+          tracePageSize: USER_TRACE_PAGE_SIZE,
+          triggerScope
         })
         if (!result.success) throw new Error(result.error ?? "获取用户详情失败")
         setUserDetail(result.data ?? null)
@@ -1169,6 +1184,7 @@ export function DashboardView(): React.JSX.Element {
       setSubPage({ kind: "user-detail", sapId: normalizedSapId, backTo: backTo ?? fallbackBackTo })
       setUserDetail(null)
       setUserDetailTracePage(1)
+      setUserDetailTraceTriggerScope("active")
     },
     [subPage.kind]
   )
@@ -1261,6 +1277,14 @@ export function DashboardView(): React.JSX.Element {
     })
   }, [userDetail])
 
+  const handleUserTraceTriggerScopeChange = useCallback(
+    (scope: DashboardTraceTriggerScope) => {
+      setUserDetailTraceTriggerScope(scope)
+      setUserDetailTracePage(1)
+    },
+    []
+  )
+
   const subPageDetailSapId = subPage.kind === "user-detail" ? subPage.sapId : null
 
   useEffect(() => {
@@ -1270,7 +1294,7 @@ export function DashboardView(): React.JSX.Element {
         void loadUserList(undefined, [], userListSearchKeyword, userListDepartmentFilter)
       }
     } else if (subPageDetailSapId) {
-      void loadUserDetail(subPageDetailSapId, userDetailTracePage)
+      void loadUserDetail(subPageDetailSapId, userDetailTracePage, userDetailTraceTriggerScope)
     }
   }, [
     range,
@@ -1281,7 +1305,8 @@ export function DashboardView(): React.JSX.Element {
     userList,
     userListSearchKeyword,
     userListDepartmentFilter,
-    userDetailTracePage
+    userDetailTracePage,
+    userDetailTraceTriggerScope
   ])
 
   const loadCommitDetails = useCallback(
@@ -1696,9 +1721,11 @@ export function DashboardView(): React.JSX.Element {
             loading={userDetailLoading}
             error={userDetailError}
             tracePage={userDetailTracePage}
+            traceTriggerScope={userDetail?.traceTriggerScope ?? userDetailTraceTriggerScope}
             onBack={handleUserDetailBack}
             onTracePrevious={handleUserTracePrevious}
             onTraceNext={handleUserTraceNext}
+            onTraceTriggerScopeChange={handleUserTraceTriggerScopeChange}
           />
         </ScrollArea>
       ) : (

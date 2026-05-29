@@ -234,6 +234,7 @@ interface DashboardUserDetail {
   tracePage: number
   tracePageSize: number
   totalTraces: number
+  traceTriggerScope?: TraceTriggerScope
 }
 
 interface EsSearchHit {
@@ -263,6 +264,7 @@ interface UserDetailOptions {
   traceLimit?: number
   tracePage?: number
   tracePageSize?: number
+  triggerScope?: TraceTriggerScope
 }
 
 type TraceViewMode = "thread" | "trace"
@@ -1477,6 +1479,7 @@ async function fetchUserDetail(
   if (!normalizedSapId) throw new Error("sapId is required")
   const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
   const tracePage = clampLimit(options?.tracePage, 1, 1000)
+  const triggerScope = normalizeTraceTriggerScope(options?.triggerScope)
   const body = {
     track_total_hits: true,
     from: (tracePage - 1) * tracePageSize,
@@ -1487,7 +1490,8 @@ async function fetchUserDetail(
         filter: [
           timeRangeFilter("startedAt", range),
           ...(buildTraceAccessFilter(access) ? [buildTraceAccessFilter(access)!] : []),
-          { term: { sapId: normalizedSapId } }
+          { term: { sapId: normalizedSapId } },
+          ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
         ]
       }
     },
@@ -1543,7 +1547,8 @@ async function fetchUserDetail(
     traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
     tracePage,
     tracePageSize,
-    totalTraces
+    totalTraces,
+    traceTriggerScope: triggerScope
   }
 }
 
@@ -2918,7 +2923,8 @@ function makeMockUserDetail(sapId: string, range: TimeRange, options?: UserDetai
     traces,
     tracePage,
     tracePageSize,
-    totalTraces
+    totalTraces,
+    traceTriggerScope: normalizeTraceTriggerScope(options?.triggerScope)
   }
 }
 

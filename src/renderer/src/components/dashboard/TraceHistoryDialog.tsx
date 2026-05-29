@@ -552,19 +552,32 @@ function TraceThreadGroupCard({
   const [open, setOpen] = useState(true)
   const selectedInGroup = group.traces.some((trace) => trace.traceId === selectedTraceId)
 
+  function handleSelectGroup(): void {
+    if (group.traces.length > 0) {
+      onSelectTrace(group.traces[0].traceId)
+    }
+  }
+
   return (
     <div className={cn(
       "overflow-hidden rounded-lg border bg-card",
       selectedInGroup ? "border-primary/50" : "border-border"
     )}>
-      <button
-        type="button"
-        className="flex w-full items-start gap-2 border-b border-border/70 bg-muted/10 px-3 py-2 text-left transition-colors hover:bg-muted/20"
-        onClick={() => setOpen((value) => !value)}
+      <div
+        role="button"
+        tabIndex={0}
+        className="flex w-full items-start gap-2 border-b border-border/70 bg-muted/10 px-3 py-2 text-left transition-colors hover:bg-muted/20 cursor-pointer"
+        onClick={handleSelectGroup}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") handleSelectGroup() }}
       >
-        <span className="mt-0.5 shrink-0 text-muted-foreground">
+        <button
+          type="button"
+          className="mt-0.5 shrink-0 text-muted-foreground hover:text-foreground"
+          onClick={(e) => { e.stopPropagation(); setOpen((v) => !v) }}
+          aria-label={open ? "折叠" : "展开"}
+        >
           {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
-        </span>
+        </button>
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
             <span className="truncate text-[11px] font-semibold text-foreground">
@@ -584,7 +597,7 @@ function TraceThreadGroupCard({
             {group.errorCount > 0 && <span className="text-red-500">错误 {group.errorCount}</span>}
           </p>
         </div>
-      </button>
+      </div>
 
       {open && (
         <div className="space-y-2 p-2">
@@ -633,7 +646,7 @@ function TraceViewModeToggle({
   )
 }
 
-function TraceTriggerScopeToggle({
+export function TraceTriggerScopeToggle({
   value,
   onChange
 }: {

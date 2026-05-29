@@ -1897,7 +1897,7 @@ const api = {
     userDetail: (
       sapId: string,
       range: { from: string; to: string },
-      options?: { traceLimit?: number; tracePage?: number; tracePageSize?: number }
+      options?: { traceLimit?: number; tracePage?: number; tracePageSize?: number; triggerScope?: "active" | "all" }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userDetail", sapId, range, options),
     skillUsageSummary: (
