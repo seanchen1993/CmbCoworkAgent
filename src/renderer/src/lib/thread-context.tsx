@@ -731,13 +731,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       if (incoming.length > 0) {
         const batchStartMs = Math.max(Date.now(), (accumulator.lastStartedAtMs ?? 0) + 1)
-        incoming.forEach((message, index) => {
+        // Only advance the clock for newly timed messages; repeated snapshots can include
+        // already-timed messages that are still waiting for the next flush.
+        let assignedCount = 0
+        incoming.forEach((message) => {
           if (!accumulator.messageTimes[message.id]) {
-            const startedAt = new Date(batchStartMs + index)
+            const startedAt = new Date(batchStartMs + assignedCount)
             accumulator.messageTimes[message.id] = { start_at: startedAt, end_at: startedAt }
+            assignedCount += 1
           }
         })
-        accumulator.lastStartedAtMs = batchStartMs + incoming.length - 1
+        if (assignedCount > 0) {
+          accumulator.lastStartedAtMs = batchStartMs + assignedCount - 1
+        }
         accumulator.messages = mergeLiveStreamMessages(accumulator.messages, incoming)
       }
 
