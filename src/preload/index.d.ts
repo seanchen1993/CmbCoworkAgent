@@ -160,6 +160,10 @@ interface DashboardCommitDetail {
   threadId?: string
   usedSkills: string[]
   skillCount: number
+  codeGeneratedLines: number
+  codeEffectiveGeneratedLines: number
+  codeAdoptedLines: number
+  codeAdoptionRate: number | null
 }
 
 interface DashboardCommitDetailsOptions {
@@ -1139,12 +1143,17 @@ interface CustomAPI {
     isAllowed: () => Promise<boolean>
     overview: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     modelStats: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    orgOptions: (
+      range: { from: string; to: string }
+    ) => Promise<{ success: boolean; data?: string[]; error?: string }>
     userStats: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -1180,11 +1189,13 @@ interface CustomAPI {
     }>
     productivity: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     feedback: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     skillRecentTraces: (
       skill: string,

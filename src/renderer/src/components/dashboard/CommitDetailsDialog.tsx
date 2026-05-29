@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, ExternalLink, GitCommit, Loader2, Search, X } from "lucide-react"
+import { ChevronLeft, ChevronRight, ExternalLink, GitCommit, Info, Loader2, Search, X } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -9,7 +9,23 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { DashboardCommitDetail, DashboardCommitDetailsData } from "./use-dashboard"
+
+function HeaderHint({ hint }: { hint: string }): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex shrink-0 cursor-help align-middle">
+            <Info className="size-3 text-muted-foreground/70" aria-label={hint} />
+          </span>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-64">{hint}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
 
 function formatTime(iso: string): string {
   const date = new Date(iso)
@@ -31,6 +47,15 @@ function orgLabel(item: DashboardCommitDetail): string {
   if (upperOrgLv1 && upperOrgLv0) return `${upperOrgLv1}/${upperOrgLv0}`
   if (upperOrgLv1) return upperOrgLv1
   return item.orgName || "-"
+}
+
+function formatPercent(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "-"
+  return `${(value * 100).toFixed(1)}%`
+}
+
+function formatLines(value: number): string {
+  return Number.isFinite(value) ? Math.round(value).toLocaleString() : "0"
 }
 
 function SkillChips({ skills }: { skills: string[] }): React.JSX.Element {
@@ -119,6 +144,14 @@ function CommitRow({
       </td>
       <td className="px-3 py-2">
         <SkillChips skills={item.usedSkills} />
+      </td>
+      <td className="whitespace-nowrap px-3 py-2 text-xs">
+        <div className="font-medium tabular-nums text-foreground">
+          {formatPercent(item.codeAdoptionRate)}
+        </div>
+        <div className="text-[10px] text-muted-foreground">
+          {formatLines(item.codeAdoptedLines)} / {formatLines(item.codeEffectiveGeneratedLines)} 行
+        </div>
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-xs">
         <span className="text-muted-foreground">{item.filesChanged} 文件</span>
@@ -361,7 +394,7 @@ export function CommitDetailsDialog({
             />
             <ScrollArea className="min-h-0 flex-1">
               <div className="overflow-x-auto">
-                <table className="min-w-[980px] w-full text-left">
+                <table className="min-w-[1060px] w-full text-left">
                   <thead className="sticky top-0 z-10 bg-background">
                     <tr className="border-b border-border text-[11px] text-muted-foreground">
                       <th className="whitespace-nowrap px-3 py-2 font-medium">时间</th>
@@ -371,7 +404,18 @@ export function CommitDetailsDialog({
                       <th className="whitespace-nowrap px-3 py-2 font-medium">分支</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">状态</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">关联 Skill</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">变更</th>
+                      <th className="whitespace-nowrap px-3 py-2 font-medium">
+                        <span className="inline-flex items-center gap-1">
+                          采纳率
+                          <HeaderHint hint="Agent 生成代码的采纳率" />
+                        </span>
+                      </th>
+                      <th className="whitespace-nowrap px-3 py-2 font-medium">
+                        <span className="inline-flex items-center gap-1">
+                          变更
+                          <HeaderHint hint="git 提交的变更行数" />
+                        </span>
+                      </th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">Thread</th>
                     </tr>
                   </thead>

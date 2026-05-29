@@ -232,6 +232,9 @@ function GeneratedLinesTooltip(): React.JSX.Element {
       <div className="text-muted-foreground">
         该指标表示原始生成量，包含后续被 agent 自己改写的中间稿。
       </div>
+      <div className="text-muted-foreground">
+        以下文件不纳入统计：非代码文件（如 Markdown、JSON、图片等）、锁文件（package-lock.json、pnpm-lock.yaml、yarn.lock）、压缩/构建产物（.min.js/.min.css、.map）、依赖与构建目录（node_modules、dist、build 等）。
+      </div>
     </div>
   )
 }
@@ -930,6 +933,7 @@ export function OverviewPanel({
           label="代码删除行数"
           value={formatNumber(data.codeDeletedLines)}
           color="bg-zinc-500"
+          tooltipContent={<GeneratedLinesTooltip />}
         />
         <StatCard
           icon={Gauge}

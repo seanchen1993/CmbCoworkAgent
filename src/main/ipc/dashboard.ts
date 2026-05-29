@@ -179,6 +179,18 @@ interface DashboardCommitDetail {
   threadId?: string
   usedSkills: string[]
   skillCount: number
+  codeGeneratedLines: number
+  codeEffectiveGeneratedLines: number
+  codeAdoptedLines: number
+  codeAdoptionRate: number | null
+}
+
+interface CommitAdoptionSummary {
+  usedSkills: string[]
+  generatedLines: number
+  effectiveGeneratedLines: number
+  adoptedLines: number
+  adoptionRate: number | null
 }
 
 interface DashboardSkillDetail {
@@ -249,9 +261,12 @@ interface EsSearchResponse {
   }
 }
 
-interface UserStatsOptions {
+interface OrgFilterOptions {
+  // 用户主动选择的 LV1 组织维度筛选（非权限过滤）。null/未传表示全部。
   upperOrgLv1?: string | null
 }
+
+type UserStatsOptions = OrgFilterOptions
 
 interface UserListOptions {
   pageSize?: number
@@ -958,7 +973,11 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
     triggeredBy: asOptionalString(properties.triggeredBy),
     threadId: asOptionalString(properties.threadId),
     usedSkills,
-    skillCount: asNumber(properties.skillCount, usedSkills.length)
+    skillCount: asNumber(properties.skillCount, usedSkills.length),
+    codeGeneratedLines: 0,
+    codeEffectiveGeneratedLines: 0,
+    codeAdoptedLines: 0,
+    codeAdoptionRate: null
   }
 }
 
@@ -966,7 +985,10 @@ function normalizeSkillList(skills: string[]): string[] {
   return Array.from(new Set(skills.map((skill) => skill.trim()).filter(Boolean)))
 }
 
-async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<string, string[]>> {
+async function fetchCommitAdoptionMap(
+  commitShas: string[],
+  range: TimeRange
+): Promise<Map<string, CommitAdoptionSummary>> {
   const normalizedCommitShas = normalizeSkillList(commitShas).slice(0, 100)
   if (normalizedCommitShas.length === 0) return new Map()
 
@@ -976,6 +998,10 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
       bool: {
         filter: [
           { term: { eventName: "code_adopt" } },
+          { exists: { field: "properties.adoptedLineCount" } },
+          { exists: { field: "properties.generatedLineCount" } },
+          { exists: { field: "properties.effectiveGeneratedLineCount" } },
+          timeRangeFilter("properties.generatedAt", range),
           { terms: { "properties.commitSha": normalizedCommitShas } }
         ]
       }
@@ -984,7 +1010,10 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
       by_commit: {
         terms: { field: "properties.commitSha", size: normalizedCommitShas.length },
         aggs: {
-          by_skill: { terms: { field: "properties.usedSkills", size: 50 } }
+          by_skill: { terms: { field: "properties.usedSkills", size: 50 } },
+          generated_lines: { sum: { field: "properties.generatedLineCount" } },
+          effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+          adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
         }
       }
     }
@@ -994,7 +1023,7 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
   const buckets = asRecord(asRecord(raw.aggregations).by_commit).buckets
   if (!Array.isArray(buckets)) return new Map()
 
-  const result = new Map<string, string[]>()
+  const result = new Map<string, CommitAdoptionSummary>()
   for (const bucket of buckets) {
     const record = asRecord(bucket)
     const commitSha = asString(record.key)
@@ -1004,7 +1033,16 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
     const skills = Array.isArray(skillBuckets)
       ? normalizeSkillList(skillBuckets.map((skillBucket) => asString(asRecord(skillBucket).key)))
       : []
-    if (skills.length > 0) result.set(commitSha, skills)
+    const generatedLines = asNumber(asRecord(record.generated_lines).value)
+    const effectiveGeneratedLines = asNumber(asRecord(record.effective_generated_lines).value)
+    const adoptedLines = asNumber(asRecord(record.adopted_lines).value)
+    result.set(commitSha, {
+      usedSkills: skills,
+      generatedLines,
+      effectiveGeneratedLines,
+      adoptedLines,
+      adoptionRate: effectiveGeneratedLines > 0 ? adoptedLines / effectiveGeneratedLines : null
+    })
   }
   return result
 }
@@ -1013,10 +1051,11 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
 // Dashboard data fetchers
 // ─────────────────────────────────────────────────────────
 
-async function fetchOverview(range: TimeRange, granularity: Granularity): Promise<unknown> {
+async function fetchOverview(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions): Promise<unknown> {
   requireDashboardAccess()
-  // 统计指标不做组织级数据权限过滤，所有登录用户均可查看全量统计。
-  const traceAccessFilter = null
+  // 统计指标不做组织级数据权限过滤；orgFilterClause 是用户主动选择的 LV1 组织维度筛选。
+  const orgFilter = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
+  const orgFilterClause = orgFilter !== null ? buildUpperOrgLv1Filter(orgFilter) : null
   const interval = getCalendarInterval(granularity, range.from, range.to)
   const rankingTopSize = 20
   const rankingSearchSize = 1000
@@ -1034,7 +1073,7 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
   ]
   const traceBody = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range), ...(traceAccessFilter ? [traceAccessFilter] : [])] } },
+    query: { bool: { filter: [timeRangeFilter("startedAt", range), ...(orgFilterClause ? [orgFilterClause] : [])] } },
     aggs: {
       total_calls:        { value_count: { field: "traceId" } },
       active_users:       { cardinality: { field: "sapId" } },
@@ -1077,14 +1116,16 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
   }
   const codeGenFilters: Record<string, unknown>[] = [
     { term: { eventName: "code_gen" } },
-    timeRangeFilter("eventTime", range)
+    timeRangeFilter("eventTime", range),
+    ...(orgFilterClause ? [orgFilterClause] : [])
   ]
   const codeAdoptFilters: Record<string, unknown>[] = [
     { term: { eventName: "code_adopt" } },
     { exists: { field: "properties.adoptedLineCount" } },
     { exists: { field: "properties.generatedLineCount" } },
     { exists: { field: "properties.effectiveGeneratedLineCount" } },
-    timeRangeFilter("properties.generatedAt", range)
+    timeRangeFilter("properties.generatedAt", range),
+    ...(orgFilterClause ? [orgFilterClause] : [])
   ]
   const codeAdoptPushedFilters: Record<string, unknown>[] = [
     ...codeAdoptFilters,
@@ -1194,14 +1235,15 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
   }
 }
 
-async function fetchModelStats(range: TimeRange, granularity: Granularity): Promise<unknown> {
+async function fetchModelStats(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions): Promise<unknown> {
   requireDashboardAccess()
-  // 统计指标不做组织级数据权限过滤。
-  const traceAccessFilter = null
+  // 统计指标不做组织级数据权限过滤；orgFilterClause 为用户主动选择的 LV1 组织维度筛选。
+  const orgFilter = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
+  const orgFilterClause = orgFilter !== null ? buildUpperOrgLv1Filter(orgFilter) : null
   void granularity
   const body = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range), ...(traceAccessFilter ? [traceAccessFilter] : [])] } },
+    query: { bool: { filter: [timeRangeFilter("startedAt", range), ...(orgFilterClause ? [orgFilterClause] : [])] } },
     aggs: {
       by_model: {
         terms: { field: "modelName", size: 30 },
@@ -1245,6 +1287,22 @@ function normalizeUpperOrgLv1Option(upperOrgLv1?: string | null): string | null 
   if (typeof upperOrgLv1 !== "string") return null
   const normalized = upperOrgLv1.trim()
   return normalized ? normalized : null
+}
+
+// 将单个或多个 LV1 组织值统一规整为去重、去空的数组。
+function normalizeUpperOrgLv1List(value?: string | string[] | null): string[] {
+  const raw = Array.isArray(value) ? value : value != null ? [value] : []
+  const cleaned = raw
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean)
+  return Array.from(new Set(cleaned))
+}
+
+// 多选 LV1 组织筛选 → terms 过滤；空数组返回 null（表示全部，不过滤）。
+function buildUpperOrgLv1ListFilter(list: string[]): Record<string, unknown> | null {
+  if (list.length === 0) return null
+  return { terms: { upperOrgLv1: list } }
 }
 
 function buildNonEmptyOrgLevelFilter(field: "upperOrgLv0" | "upperOrgLv1"): Record<string, unknown> {
@@ -1839,12 +1897,38 @@ async function queryAllUser(): Promise<DashboardAllUserItem[]> {
   return users
 }
 
-async function fetchProductivity(range: TimeRange, granularity: Granularity): Promise<unknown> {
+// 返回时间范围内出现过的 LV1 组织列表，用于运营面板顶部的全量组织筛选下拉。
+async function fetchOrgOptions(range: TimeRange): Promise<string[]> {
+  requireDashboardAccess()
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [timeRangeFilter("startedAt", range), buildNonEmptyOrgLevelFilter("upperOrgLv1")]
+      }
+    },
+    aggs: {
+      orgs: { terms: { field: "upperOrgLv1", size: 200 } }
+    }
+  }
+  const raw = await esQuery(getEsIndex("trace"), body)
+  const rawBuckets = asRecord(asRecord(asRecord(raw).aggregations).orgs).buckets
+  const orgs = (Array.isArray(rawBuckets) ? rawBuckets : [])
+    .map((bucket) => asString(asRecord(bucket).key).trim())
+    .filter(Boolean)
+  return Array.from(new Set(orgs)).sort((a, b) => a.localeCompare(b, "zh-CN"))
+}
+
+async function fetchProductivity(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions): Promise<unknown> {
   requireDashboardAccess()
   const interval = getCalendarInterval(granularity, range.from, range.to)
+  // orgFilterClause 为用户主动选择的 LV1 组织维度筛选。
+  const orgFilter = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
+  const orgFilterClause = orgFilter !== null ? buildUpperOrgLv1Filter(orgFilter) : null
   const filters = [
     timeRangeFilter("eventTime", range),
-    { term: { "eventName": "git.commit.created" } }
+    { term: { "eventName": "git.commit.created" } },
+    ...(orgFilterClause ? [orgFilterClause] : [])
   ]
   const body = {
     size: 0,
@@ -1867,7 +1951,8 @@ async function fetchProductivity(range: TimeRange, granularity: Granularity): Pr
   // 而非直接取 git commit 的 insertions / deletions。
   const codeGenFilters = [
     { term: { eventName: "code_gen" } },
-    timeRangeFilter("eventTime", range)
+    timeRangeFilter("eventTime", range),
+    ...(orgFilterClause ? [orgFilterClause] : [])
   ]
   const codeBody = {
     size: 0,
@@ -1894,9 +1979,12 @@ async function fetchProductivity(range: TimeRange, granularity: Granularity): Pr
   }
 }
 
-async function fetchFeedback(range: TimeRange, granularity: Granularity): Promise<unknown> {
+async function fetchFeedback(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions): Promise<unknown> {
   requireDashboardAccess()
   const interval = getCalendarInterval(granularity, range.from, range.to)
+  // orgFilterClause 为用户主动选择的 LV1 组织维度筛选。
+  const orgFilter = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
+  const orgFilterClause = orgFilter !== null ? buildUpperOrgLv1Filter(orgFilter) : null
   const dislikeTypeFilters = Object.fromEntries(
     DISLIKE_TYPE_OPTIONS.map((item) => [
       item.id,
@@ -1925,6 +2013,7 @@ async function fetchFeedback(range: TimeRange, granularity: Granularity): Promis
       bool: {
           filter: [
             timeRangeFilter("eventTime", range),
+            ...(orgFilterClause ? [orgFilterClause] : []),
             {
             terms: {
               eventName: [
@@ -2244,8 +2333,9 @@ async function fetchCommitDetails(
   const raw = await esQuery(getEsIndex("event"), body) as EsSearchResponse
   const hits = raw.hits?.hits ?? []
   const items = hits.map(normalizeCommitDetail)
-  const adoptedSkillMap = await fetchCommitAdoptedSkillMap(
-    items.map((item) => item.commitSha ?? "").filter(Boolean)
+  const adoptionMap = await fetchCommitAdoptionMap(
+    items.map((item) => item.commitSha ?? "").filter(Boolean),
+    range
   )
   return {
     total: getTotalHits(raw, hits.length),
@@ -2253,11 +2343,16 @@ async function fetchCommitDetails(
     pageSize,
     pushedOnly,
     items: items.map((item) => {
-      const adoptedSkills = item.commitSha ? adoptedSkillMap.get(item.commitSha) ?? [] : []
+      const adoption = item.commitSha ? adoptionMap.get(item.commitSha) : undefined
+      const adoptedSkills = adoption?.usedSkills ?? []
       return {
         ...item,
         usedSkills: adoptedSkills,
-        skillCount: adoptedSkills.length
+        skillCount: adoptedSkills.length,
+        codeGeneratedLines: adoption?.generatedLines ?? 0,
+        codeEffectiveGeneratedLines: adoption?.effectiveGeneratedLines ?? 0,
+        codeAdoptedLines: adoption?.adoptedLines ?? 0,
+        codeAdoptionRate: adoption?.adoptionRate ?? null
       }
     })
   }
@@ -2266,6 +2361,10 @@ async function fetchCommitDetails(
 // ─────────────────────────────────────────────────────────
 // Dev mock data
 // ─────────────────────────────────────────────────────────
+
+function makeMockOrgOptions(): string[] {
+  return ["测试 1 部", "开发二部", "平台三部"]
+}
 
 function makeMockOverview(range: TimeRange): unknown {
   const from = new Date(range.from)
@@ -3379,7 +3478,11 @@ function makeMockCommitDetails(
       triggeredBy: index % 4 === 0 ? "auto-push" : "manual",
       threadId: `mock-thread-${(index % 5) + 1}`,
       usedSkills: index % 2 === 0 ? ["代码审查-v1.0.0"] : ["需求分析-v1.0.0", "接口设计-v1.0.0"],
-      skillCount: index % 2 === 0 ? 1 : 2
+      skillCount: index % 2 === 0 ? 1 : 2,
+      codeGeneratedLines: 30 + index * 2,
+      codeEffectiveGeneratedLines: 24 + index,
+      codeAdoptedLines: 12 + (index % 18),
+      codeAdoptionRate: (12 + (index % 18)) / (24 + index)
     }
   })
   const filteredItems = allItems.filter((item) => {
@@ -3414,10 +3517,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:overview",
-    async (_, range: TimeRange, granularity: Granularity) => {
+    async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockOverview(range) }
       try {
-        return { success: true, data: await fetchOverview(range, granularity) }
+        return { success: true, data: await fetchOverview(range, granularity, opts) }
       } catch (e) {
         console.error("[Dashboard] overview error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -3427,12 +3530,25 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:modelStats",
-    async (_, range: TimeRange, granularity: Granularity) => {
+    async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockModelStats() }
       try {
-        return { success: true, data: await fetchModelStats(range, granularity) }
+        return { success: true, data: await fetchModelStats(range, granularity, opts) }
       } catch (e) {
         console.error("[Dashboard] modelStats error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:orgOptions",
+    async (_, range: TimeRange) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockOrgOptions() }
+      try {
+        return { success: true, data: await fetchOrgOptions(range) }
+      } catch (e) {
+        console.error("[Dashboard] orgOptions error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
@@ -3550,10 +3666,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:productivity",
-    async (_, range: TimeRange, granularity: Granularity) => {
+    async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockProductivity(range) }
       try {
-        return { success: true, data: await fetchProductivity(range, granularity) }
+        return { success: true, data: await fetchProductivity(range, granularity, opts) }
       } catch (e) {
         console.error("[Dashboard] productivity error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -3563,10 +3679,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:feedback",
-    async (_, range: TimeRange, granularity: Granularity) => {
+    async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockFeedback(range, granularity) }
       try {
-        return { success: true, data: await fetchFeedback(range, granularity) }
+        return { success: true, data: await fetchFeedback(range, granularity, opts) }
       } catch (e) {
         console.error("[Dashboard] feedback error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }

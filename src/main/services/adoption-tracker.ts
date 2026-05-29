@@ -63,7 +63,7 @@ const SWEEP_INTERVAL_MS = 5 * 60 * 1000 // shard rotation / retention / VACUUM c
 const SHARD_SIZE_LIMIT_BYTES = 10 * 1024 * 1024 // 10 MB per shard
 const SHARD_MAX_AGE_MS = 30 * 60 * 1000 // rotate every 30 min
 const DISK_HARD_CAP_BYTES = 100 * 1024 * 1024 // 100 MB
-const MAX_LINES_FOR_MEASURE = 3000 // skip giant files (applied symmetrically at gen + measure)
+const MAX_LINES_FOR_MEASURE = 20000 // skip giant files (applied symmetrically at gen + measure)
 const MAX_CONTEXT_ENTRIES = 32 // bound in-memory context size
 const STAGED_BLOB_MAX_BYTES = 8 * 1024 * 1024 // cap git show output per staged file
 

@@ -1870,14 +1870,20 @@ const api = {
     isAllowed: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAllowed"),
     overview: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:overview", range, granularity),
+      ipcRenderer.invoke("dashboard:overview", range, granularity, opts),
     modelStats: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:modelStats", range, granularity),
+      ipcRenderer.invoke("dashboard:modelStats", range, granularity, opts),
+    orgOptions: (
+      range: { from: string; to: string }
+    ): Promise<{ success: boolean; data?: string[]; error?: string }> =>
+      ipcRenderer.invoke("dashboard:orgOptions", range),
     userStats: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -1921,14 +1927,16 @@ const api = {
       ipcRenderer.invoke("dashboard:queryAllUser"),
     productivity: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:productivity", range, granularity),
+      ipcRenderer.invoke("dashboard:productivity", range, granularity, opts),
     feedback: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:feedback", range, granularity),
+      ipcRenderer.invoke("dashboard:feedback", range, granularity, opts),
     skillRecentTraces: (
       skill: string,
       range: { from: string; to: string },

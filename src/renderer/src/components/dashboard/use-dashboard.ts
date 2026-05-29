@@ -162,6 +162,10 @@ export interface DashboardCommitDetail {
   threadId?: string
   usedSkills: string[]
   skillCount: number
+  codeGeneratedLines: number
+  codeEffectiveGeneratedLines: number
+  codeAdoptedLines: number
+  codeAdoptionRate: number | null
 }
 
 export interface DashboardCommitDetailsData {
@@ -878,7 +882,6 @@ export function useDashboard() {
   const [range, setRange] = useState<TimeRange>(() => getDefaultRange("day"))
   const [selectedUpperOrgLv1, setSelectedUpperOrgLv1] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  const [userStatsLoading, setUserStatsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const [overview, setOverview] = useState<OverviewData | null>(null)
@@ -886,23 +889,25 @@ export function useDashboard() {
   const [userStats, setUserStats] = useState<UserStatsData | null>(null)
   const [productivity, setProductivity] = useState<ProductivityData | null>(null)
   const [feedback, setFeedback] = useState<FeedbackData | null>(null)
+  // 顶部全量组织（LV1）筛选可选项，随时间范围刷新。
+  const [orgOptions, setOrgOptions] = useState<string[]>([])
 
   const fetchIdRef = useRef(0)
-  const userStatsFetchIdRef = useRef(0)
+  const orgOptionsFetchIdRef = useRef(0)
 
   const fetchAll = useCallback(async (r: TimeRange, g: Granularity, orgLv1: string | null) => {
     const id = ++fetchIdRef.current
-    const userStatsId = ++userStatsFetchIdRef.current
     setLoading(true)
     setError(null)
 
+    const orgOpts = { upperOrgLv1: orgLv1 }
     try {
       const [ovRes, msRes, usRes, prRes, fbRes] = await Promise.all([
-        window.api.dashboard.overview(r, g),
-        window.api.dashboard.modelStats(r, g),
-        window.api.dashboard.userStats(r, g, { upperOrgLv1: orgLv1 }),
-        window.api.dashboard.productivity(r, g),
-        window.api.dashboard.feedback(r, g)
+        window.api.dashboard.overview(r, g, orgOpts),
+        window.api.dashboard.modelStats(r, g, orgOpts),
+        window.api.dashboard.userStats(r, g, orgOpts),
+        window.api.dashboard.productivity(r, g, orgOpts),
+        window.api.dashboard.feedback(r, g, orgOpts)
       ])
 
       // Stale check
@@ -917,9 +922,7 @@ export function useDashboard() {
       setOverview(parseOverview(ovRes.data, g))
       setModelStats(parseModelStats(msRes.data))
       setProductivity(parseProductivity(prRes.data, g, r))
-      if (userStatsId === userStatsFetchIdRef.current) {
-        setUserStats(parseUserStats(usRes.data, orgLv1))
-      }
+      setUserStats(parseUserStats(usRes.data, orgLv1))
       setFeedback(parseFeedback(fbRes.data, g))
     } catch (e) {
       if (id !== fetchIdRef.current) return
@@ -929,28 +932,24 @@ export function useDashboard() {
     }
   }, [])
 
-  const fetchUserStatsOnly = useCallback(async (r: TimeRange, g: Granularity, orgLv1: string | null) => {
-    const id = ++userStatsFetchIdRef.current
-    setUserStatsLoading(true)
-    setError(null)
-
-    try {
-      const result = await window.api.dashboard.userStats(r, g, { upperOrgLv1: orgLv1 })
-      if (id !== userStatsFetchIdRef.current) return
-      if (!result.success) throw new Error(result.error ?? "获取用户数据失败")
-      setUserStats(parseUserStats(result.data, orgLv1))
-    } catch (e) {
-      if (id !== userStatsFetchIdRef.current) return
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      if (id === userStatsFetchIdRef.current) setUserStatsLoading(false)
-    }
-  }, [])
-
-  // Auto-fetch on range/granularity change
+  // Auto-fetch on range / granularity / 全量组织筛选 change
   useEffect(() => {
     fetchAll(range, granularity, selectedUpperOrgLv1)
-  }, [range, granularity, fetchAll])
+  }, [range, granularity, selectedUpperOrgLv1, fetchAll])
+
+  // 组织（LV1）可选项随时间范围刷新（与全量筛选解耦，始终返回全部 LV1）。
+  useEffect(() => {
+    const id = ++orgOptionsFetchIdRef.current
+    void (async () => {
+      try {
+        const result = await window.api.dashboard.orgOptions(range)
+        if (id !== orgOptionsFetchIdRef.current) return
+        if (result.success) setOrgOptions(result.data ?? [])
+      } catch {
+        if (id === orgOptionsFetchIdRef.current) setOrgOptions([])
+      }
+    })()
+  }, [range])
 
   const changeGranularity = useCallback((g: Granularity) => {
     setGranularity(g)
@@ -981,24 +980,29 @@ export function useDashboard() {
     fetchAll(range, granularity, selectedUpperOrgLv1)
   }, [fetchAll, range, granularity, selectedUpperOrgLv1])
 
+  // 全量组织（LV1）筛选：设置后由 effect 重新拉取所有面板数据。
+  const setOrgFilter = useCallback((orgLv1: string | null) => {
+    const normalized = orgLv1 && orgLv1.trim() ? orgLv1.trim() : null
+    setSelectedUpperOrgLv1(normalized)
+  }, [])
+
+  // 用户分析面板内点击 LV1 柱状图下钻 == 选中该组织进行全量筛选。
   const drillDownUserOrg = useCallback((orgLv1: string) => {
     const normalizedOrgLv1 = orgLv1.trim()
     if (!normalizedOrgLv1) return
     setSelectedUpperOrgLv1(normalizedOrgLv1)
-    fetchUserStatsOnly(range, granularity, normalizedOrgLv1)
-  }, [fetchUserStatsOnly, range, granularity])
+  }, [])
 
   const resetUserOrgDrilldown = useCallback(() => {
     setSelectedUpperOrgLv1(null)
-    fetchUserStatsOnly(range, granularity, null)
-  }, [fetchUserStatsOnly, range, granularity])
+  }, [])
 
   return {
     granularity,
     range,
     selectedUpperOrgLv1,
+    orgOptions,
     loading,
-    userStatsLoading,
     error,
     overview,
     modelStats,
@@ -1010,6 +1014,7 @@ export function useDashboard() {
     setCustomRange,
     setRange,
     refresh,
+    setOrgFilter,
     drillDownUserOrg,
     resetUserOrgDrilldown
   }

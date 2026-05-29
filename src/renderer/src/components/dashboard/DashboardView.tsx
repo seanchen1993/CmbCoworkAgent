@@ -14,11 +14,19 @@ import {
   Search,
   X,
   User,
-  Users
+  Users,
+  Building2
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from "@/components/ui/select"
 import {
   formatTopUserOrgName,
   useDashboard,
@@ -260,6 +268,57 @@ function TimeControlBar({
         )}
         刷新
       </Button>
+    </div>
+  )
+}
+
+const ORG_FILTER_ALL = "__all__"
+
+function OrgFilterBar({
+  value,
+  options,
+  loading,
+  onChange
+}: {
+  value: string | null
+  options: string[]
+  loading: boolean
+  onChange: (orgLv1: string | null) => void
+}): React.JSX.Element {
+  return (
+    <div className="flex items-center gap-2 px-6 py-2.5 border-b border-border bg-background/60">
+      <Building2 className="size-3.5 text-muted-foreground" />
+      <span className="text-xs text-muted-foreground">组织（LV1）</span>
+      <Select
+        value={value ?? ORG_FILTER_ALL}
+        onValueChange={(next) => onChange(next === ORG_FILTER_ALL ? null : next)}
+        disabled={loading && options.length === 0}
+      >
+        <SelectTrigger className="h-7 w-[220px] text-xs">
+          <SelectValue placeholder="全部组织" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={ORG_FILTER_ALL} className="text-xs">
+            全部组织
+          </SelectItem>
+          {options.map((org) => (
+            <SelectItem key={org} value={org} className="text-xs">
+              {org}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {value && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 px-2 text-xs text-muted-foreground"
+          onClick={() => onChange(null)}
+        >
+          <X className="size-3.5" />
+          清除
+        </Button>
+      )}
     </div>
   )
 }
@@ -790,8 +849,8 @@ export function DashboardView(): React.JSX.Element {
     granularity,
     range,
     selectedUpperOrgLv1,
+    orgOptions,
     loading,
-    userStatsLoading,
     error,
     overview,
     modelStats,
@@ -802,6 +861,7 @@ export function DashboardView(): React.JSX.Element {
     navigate,
     setCustomRange,
     refresh,
+    setOrgFilter,
     drillDownUserOrg,
     resetUserOrgDrilldown
   } = useDashboard()
@@ -1585,8 +1645,8 @@ export function DashboardView(): React.JSX.Element {
           header: ["指标", "值"],
           rows: [
             ["Commit 总数", productivity.totalCommits],
-            ["新增行数", productivity.totalInsertions],
-            ["删除行数", productivity.totalDeletions],
+            ["新增行数(Agent生成)", productivity.totalInsertions],
+            ["删除行数(Agent生成)", productivity.totalDeletions],
             ["文件变更数", productivity.totalFilesChanged],
             ["活跃用户数", productivity.activeUsers],
             ["人均 Commit", Number(productivity.avgCommitsPerUser.toFixed(1))]
@@ -1676,6 +1736,15 @@ export function DashboardView(): React.JSX.Element {
         exporting={exporting}
       />
 
+      {subPage.kind === "main" && (
+        <OrgFilterBar
+          value={selectedUpperOrgLv1}
+          options={orgOptions}
+          loading={loading}
+          onChange={setOrgFilter}
+        />
+      )}
+
       {error && (
         <div className="mx-6 mt-4 flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/5 px-4 py-3 text-sm text-destructive">
           <AlertCircle className="size-4 shrink-0" />
@@ -1760,7 +1829,7 @@ export function DashboardView(): React.JSX.Element {
               <h2 className="text-sm font-semibold text-foreground mb-3">用户分析</h2>
               <UserPanel
                 data={userStats}
-                loading={loading || userStatsLoading}
+                loading={loading}
                 onDrillDownOrg={drillDownUserOrg}
                 onResetOrgDrilldown={resetUserOrgDrilldown}
                 onUserClick={(sapId) => openUserDetail(sapId, "main")}
