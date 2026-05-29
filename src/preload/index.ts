@@ -50,6 +50,11 @@ import type {
   HarnessAdapterRegistryItem,
   HarnessWatchRefChangedEvent
 } from "../shared/harness-board-types"
+import type {
+  FeatureGateCheckOptions,
+  FeatureGateCheckResult,
+  FeatureGateKey
+} from "../shared/feature-gates"
 
 interface LspDownloadProgress {
   percent: number
@@ -1906,6 +1911,12 @@ const api = {
   routing: {
     getMode: (): Promise<"auto" | "pinned"> => ipcRenderer.invoke("routing:getMode"),
     setMode: (mode: "auto" | "pinned"): Promise<void> => ipcRenderer.invoke("routing:setMode", mode)
+  },
+  featureGates: {
+    isEnabled: (
+      name: FeatureGateKey,
+      options?: FeatureGateCheckOptions
+    ): Promise<FeatureGateCheckResult> => ipcRenderer.invoke("featureGates:isEnabled", name, options)
   },
   dashboard: {
     isAllowed: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAllowed"),

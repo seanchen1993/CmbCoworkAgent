@@ -25,6 +25,7 @@ import type { ChatXRobotConfig } from "@/types"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { UpdateActionButton } from "@/components/update/UpdateActionButton"
 import {
   Dialog,
@@ -41,7 +42,9 @@ import {
   useThreadContext
 } from "@/lib/thread-context"
 import { cn, truncate } from "@/lib/utils"
+import { useFeatureGate } from "@/lib/feature-gates"
 import { isHarnessFeatureThread } from "@/lib/thread-classification"
+import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -380,6 +383,12 @@ export function ThreadSidebar(): React.JSX.Element {
   const [projectToDelete, setProjectToDelete] = useState<ThreadProject | null>(null)
   const activeSidebarTab: SidebarTab =
     showHarnessBoardView || mainView === "harness" ? "project" : "chat"
+  const {
+    enabled: projectModeEnabled,
+    loading: projectModeLoading,
+    refresh: refreshProjectModeGate
+  } = useFeatureGate(FEATURE_GATES.projectMode)
+  const projectModeForceRefreshRef = useRef<Promise<unknown> | null>(null)
 
   const handleSelectChatTab = useCallback(async (): Promise<void> => {
     if (mainView === "harness" || showHarnessBoardView) {
@@ -406,6 +415,27 @@ export function ThreadSidebar(): React.JSX.Element {
     setShowHarnessBoardView,
     showHarnessBoardView,
     threads
+  ])
+
+  const handleSelectProjectTab = useCallback(async (): Promise<void> => {
+    if (projectModeEnabled) {
+      setShowHarnessBoardView(true)
+      return
+    }
+
+    toast.info("敬请期待")
+    if (!projectModeForceRefreshRef.current) {
+      const refreshPromise = refreshProjectModeGate({ refresh: true }).finally(() => {
+        if (projectModeForceRefreshRef.current === refreshPromise) {
+          projectModeForceRefreshRef.current = null
+        }
+      })
+      projectModeForceRefreshRef.current = refreshPromise
+    }
+  }, [
+    projectModeEnabled,
+    refreshProjectModeGate,
+    setShowHarnessBoardView
   ])
 
   const persistUnread = useCallback((ids: Set<string>) => {
@@ -709,23 +739,36 @@ export function ThreadSidebar(): React.JSX.Element {
             <MessageSquare className="size-4 shrink-0" />
             <span className="min-w-0 truncate">对话模式</span>
           </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeSidebarTab === "project"}
-            className={cn(
-              "flex min-w-0 items-center justify-center gap-1.5 rounded-md px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-              activeSidebarTab === "project"
-                ? "border border-border/70 bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-            onClick={() => {
-              setShowHarnessBoardView(true)
-            }}
-          >
-            <Workflow className="size-4 shrink-0" />
-            <span className="min-w-0 truncate">项目模式</span>
-          </button>
+          <TooltipProvider delayDuration={120}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeSidebarTab === "project"}
+                  aria-disabled={!projectModeEnabled}
+                  className={cn(
+                    "flex min-w-0 items-center justify-center gap-1.5 rounded-md px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                    projectModeEnabled
+                      ? activeSidebarTab === "project"
+                        ? "border border-border/70 bg-background text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                      : "cursor-not-allowed text-muted-foreground/50 opacity-60 hover:text-muted-foreground/60",
+                    projectModeLoading && !projectModeEnabled && "opacity-55"
+                  )}
+                  onClick={() => void handleSelectProjectTab()}
+                >
+                  <Workflow className="size-4 shrink-0" />
+                  <span className="min-w-0 truncate">项目模式</span>
+                </button>
+              </TooltipTrigger>
+              {!projectModeEnabled && (
+                <TooltipContent side="bottom" sideOffset={6}>
+                  敬请期待
+                </TooltipContent>
+              )}
+            </Tooltip>
+          </TooltipProvider>
         </div>
 
         {activeSidebarTab === "chat" ? (

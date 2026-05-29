@@ -49,6 +49,11 @@ import type {
   HarnessAdapterRegistryItem,
   HarnessWatchRefChangedEvent
 } from "../shared/harness-board-types"
+import type {
+  FeatureGateCheckOptions,
+  FeatureGateCheckResult,
+  FeatureGateKey
+} from "../shared/feature-gates"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -1139,6 +1144,12 @@ interface CustomAPI {
   routing: {
     getMode: () => Promise<"auto" | "pinned">
     setMode: (mode: "auto" | "pinned") => Promise<void>
+  }
+  featureGates: {
+    isEnabled: (
+      name: FeatureGateKey,
+      options?: FeatureGateCheckOptions
+    ) => Promise<FeatureGateCheckResult>
   }
   dashboard: {
     isAllowed: () => Promise<boolean>
