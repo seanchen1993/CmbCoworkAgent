@@ -57,6 +57,7 @@ import {
   useCurrentThread,
   useThreadStream,
   useThreadContext,
+  type TurnTiming,
   type HookLogBucket,
   type HookLogEntry
 } from "@/lib/thread-context"
@@ -884,9 +885,7 @@ export function ChatContainer({
   const [nuxError, setNuxError] = useState<string | null>(null)
   const [nuxLoadingStep, setNuxLoadingStep] = useState(0)
 
-  const [durationMap, setDurationMap] = useState<
-    { duration: number; thread_id: string; user_id: string }[]
-  >([])
+  const [durationMap, setDurationMap] = useState<TurnTiming[]>([])
   const [durationNow, setDurationNow] = useState(0)
 
   const NUX_LOADING_STEPS: string[] = [
@@ -2251,7 +2250,8 @@ export function ChatContainer({
     const map = {
       duration: endTime - startTime,
       thread_id: threadId,
-      user_id: userMessage.id
+      user_id: userMessage.id,
+      sendTime: startTime
     }
     const nextDurationMap = [
       ...durationMap.filter((item) => !(item.thread_id === threadId && item.user_id === userMessage.id)),

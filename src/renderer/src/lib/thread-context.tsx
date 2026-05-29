@@ -140,6 +140,7 @@ export interface TurnTiming {
   duration: number
   thread_id: string
   user_id: string
+  sendTime?: number
 }
 
 interface SetTurnTimingsOptions {
@@ -155,7 +156,10 @@ const isTurnTiming = (value: unknown): value is TurnTiming => {
     typeof (value as { duration?: unknown }).duration === "number" &&
     Number.isFinite((value as { duration?: number }).duration) &&
     typeof (value as { thread_id?: unknown }).thread_id === "string" &&
-    typeof (value as { user_id?: unknown }).user_id === "string"
+    typeof (value as { user_id?: unknown }).user_id === "string" &&
+    ((value as { sendTime?: unknown }).sendTime === undefined ||
+      (typeof (value as { sendTime?: unknown }).sendTime === "number" &&
+        Number.isFinite((value as { sendTime?: number }).sendTime)))
   )
 }
 
