@@ -1517,10 +1517,15 @@ function SystemSection({
   )
 }
 
-function artifactCanOpenInFileManager(artifact: HarnessArtifact): boolean {
-  if (!artifact.path) return false
-  if (artifact.kind === "external" || artifact.kind === "virtual") return false
-  return artifact.status.uiKind === "done" || artifact.status.uiKind === "ok" || artifact.exists === true
+function artifactCanOpenInFileManager(
+  path: string | null,
+  kind: HarnessArtifactKind,
+  status: HarnessStatus,
+  exists?: boolean
+): boolean {
+  if (!path) return false
+  if (kind === "external" || kind === "virtual") return false
+  return status.uiKind === "done" || status.uiKind === "ok" || exists === true
 }
 
 function ArtifactLine({
@@ -1530,14 +1535,16 @@ function ArtifactLine({
   artifact: HarnessArtifact
   workspacePath: string
 }): React.JSX.Element {
-  const artifactPath = artifact.path ?? artifact.kind
+  const displayPaths: string[] = (() => {
+    if (artifact.paths && artifact.paths.length > 0) return artifact.paths
+    if (artifact.path) return [artifact.path]
+    return []
+  })()
   const artifactSummary = artifact.summary ?? "-"
-  const canOpenArtifact = artifactCanOpenInFileManager(artifact)
 
-  const openArtifactInFileManager = async (): Promise<void> => {
-    if (!artifact.path) return
+  const openArtifactInFileManager = async (targetPath: string): Promise<void> => {
     try {
-      const fullPath = resolveWorkspaceFilePath(artifact.path, workspacePath)
+      const fullPath = resolveWorkspaceFilePath(targetPath, workspacePath)
       const platform = await window.electron.ipcRenderer.invoke("get-platform")
       const normalizedPath = platform === "win32" ? fullPath.replace(/\//g, "\\") : fullPath
       const result = await window.electron.ipcRenderer.invoke("show-item-in-folder", normalizedPath)
@@ -1551,7 +1558,7 @@ function ArtifactLine({
   }
 
   return (
-    <div className="grid grid-cols-[18px_minmax(140px,1fr)_90px_minmax(160px,1.5fr)_28px] items-start gap-x-3 gap-y-2 border-t border-border px-3 py-3 text-sm">
+    <div className="grid grid-cols-[18px_minmax(140px,1fr)_90px_minmax(160px,1.5fr)] items-start gap-x-3 gap-y-2 border-t border-border px-3 py-3 text-sm">
       <FileText className="row-span-2 mt-0.5 size-4 text-muted-foreground" />
       <div className="min-w-0">
         <div className="truncate font-medium" title={artifact.label}>{artifact.label}</div>
@@ -1563,25 +1570,38 @@ function ArtifactLine({
           <div className="truncate" title={artifact.validation.message}>{artifact.validation.message}</div>
         )}
       </div>
-      {canOpenArtifact ? (
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          className="size-7"
-          title="在文件管理器中打开"
-          onClick={() => void openArtifactInFileManager()}
-        >
-          <FolderOpen className="size-3.5" />
-        </Button>
-      ) : (
-        <span aria-hidden="true" />
-      )}
-      <div
-        className="col-span-4 min-w-0 break-all rounded border border-border/70 bg-muted/30 px-2 py-1.5 font-mono text-[11px] leading-5 text-muted-foreground"
-        title={artifactPath}
-      >
-        {artifactPath}
+      <div className="col-span-3 min-w-0 rounded border border-border/70 bg-muted/30 px-2 py-1.5">
+        {displayPaths.length > 0 ? (
+          displayPaths.map((p) => {
+            const canOpen = artifactCanOpenInFileManager(p, artifact.kind, artifact.status, artifact.exists)
+            return (
+              <div key={p} className="flex items-center gap-1">
+                <span
+                  className="min-w-0 flex-1 break-all font-mono text-[11px] leading-5 text-muted-foreground"
+                  title={p}
+                >
+                  {p}
+                </span>
+                {canOpen && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="h-5 w-5 shrink-0"
+                    title="在文件管理器中打开"
+                    onClick={() => void openArtifactInFileManager(p)}
+                  >
+                    <FolderOpen className="size-3" />
+                  </Button>
+                )}
+              </div>
+            )
+          })
+        ) : (
+          <span className="break-all font-mono text-[11px] leading-5 text-muted-foreground">
+            {artifact.kind}
+          </span>
+        )}
       </div>
     </div>
   )

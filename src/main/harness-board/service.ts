@@ -866,6 +866,14 @@ function normalizeArtifact(
     path: normalizeAdapterPath(project, value.path),
     required: typeof value.required === "boolean" ? value.required : definition?.required ?? false,
     status: normalizeStatus(value.status),
+    ...(Array.isArray(value.paths)
+      ? (() => {
+          const paths = (value.paths as unknown[])
+            .map((p) => normalizeAdapterPath(project, p))
+            .filter((p): p is string => p !== null)
+          return paths.length > 0 ? { paths } : {}
+        })()
+      : {}),
     ...(typeof value.nonEmpty === "boolean" ? { nonEmpty: value.nonEmpty } : {}),
     ...(typeof value.size === "number" ? { size: value.size } : {}),
     ...(typeof value.summary === "string" ? { summary: value.summary } : {}),

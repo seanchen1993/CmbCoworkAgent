@@ -214,6 +214,7 @@ export interface HarnessArtifact {
   label: string
   kind: HarnessArtifactKind
   path: string | null
+  paths?: string[]
   required: boolean
   status: HarnessStatus
   exists?: boolean
