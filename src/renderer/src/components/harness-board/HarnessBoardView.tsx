@@ -756,7 +756,7 @@ function ProjectWorkspacePathTip(): React.JSX.Element {
             <Info className="size-3.5" />
           </button>
         </TooltipTrigger>
-        <TooltipContent side="top" className="max-w-72">
+        <TooltipContent side="top" className="z-[70] max-w-72">
           本项目的插件产物将统一在该路径管理。非代码仓库路径
         </TooltipContent>
       </Tooltip>
@@ -1074,7 +1074,7 @@ function ProjectEditDialog({
                           <Info className="size-3.5" />
                         </button>
                       </TooltipTrigger>
-                      <TooltipContent side="top" className="max-w-72">
+                      <TooltipContent side="top" className="z-[70] max-w-72">
                         请勿在技能会话运行期间修改项目编号，以免造成产物路径错误
                       </TooltipContent>
                     </Tooltip>
