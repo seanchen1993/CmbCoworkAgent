@@ -1679,21 +1679,35 @@ export function AddHookDialog(props: {
         timeout: Math.min(maxTimeout, Math.max(1000, parseInt(timeout, 10) || 10000)),
         enabled: editHook ? editHook.enabled : true
       }
+      // PR-16 follow-up — event-semantic passthroughs (`matcher` when its
+      // widget is hidden, and `if`) are valid ONLY when the user kept the
+      // same event. CC's matcher target and `if` permission-rule syntax both
+      // bind to event-specific fields (agent_type for SubagentStart, source
+      // for SessionStart, tool_name+tool_input for PreToolUse…), so carrying
+      // them across an event change silently misconfigures the hook. We gate
+      // on `event === editHook.event` and let the user re-enter values for
+      // the new event if they really meant that. On the create path
+      // `editHook` is undefined so the gate trivially permits a write — but
+      // the passthroughs themselves were reset to undefined in that branch,
+      // so nothing is forced.
+      const sameEventAsEdit = !editHook || event === editHook.event
+
       if (showMatcher) {
         const resolvedMatcher = matcherMode === CUSTOM_SENTINEL ? matcher.trim() : matcherMode
         if (resolvedMatcher && resolvedMatcher !== "*") config.matcher = resolvedMatcher
-      } else if (matcherPreserve && matcherPreserve !== "*") {
-        // PR-16 follow-up — preserve the original matcher for events whose
-        // matcher widget isn't surfaced yet (SubagentStart matcher:"agent_type",
-        // Notification matcher:"notification_type", etc). Otherwise an edit
-        // of an OMC-imported hook would silently widen its scope to match all.
+      } else if (sameEventAsEdit && matcherPreserve && matcherPreserve !== "*") {
+        // Preserve the original matcher only when widget is hidden AND event
+        // is unchanged — see comment above.
         config.matcher = matcherPreserve
       }
 
       // PR-13/14/15/16 follow-up — pass-through fields without UI widgets.
-      // Writing them unconditionally on edit guarantees a round-trip; on the
-      // create path these state values are undefined so nothing is forced.
-      if (passthroughIf && passthroughIf.trim()) config.if = passthroughIf.trim()
+      // `if` is event-bound so it follows the same gate as matcher above.
+      // `shell` / `statusMessage` / `async` are event-agnostic and safe to
+      // round-trip across event changes.
+      if (sameEventAsEdit && passthroughIf && passthroughIf.trim()) {
+        config.if = passthroughIf.trim()
+      }
       if (passthroughShell) config.shell = passthroughShell
       if (passthroughStatusMessage && passthroughStatusMessage.trim()) {
         config.statusMessage = passthroughStatusMessage.trim()

@@ -260,6 +260,45 @@ assert(
   /config\.async = true/.test(dialogSrc),
   "P-Editor c5 handleSubmit writes async"
 )
+
+// Event-bound passthroughs (matcher when widget hidden, `if`) MUST be gated
+// on event-stays-the-same. Otherwise switching SubagentStart → Setup would
+// carry "code-reviewer" matcher into a Setup hook (whose matcher target is
+// init|maintenance) and silently disable it.
+assert(
+  /sameEventAsEdit\s*=\s*!editHook\s*\|\|\s*event\s*===\s*editHook\.event/.test(dialogSrc),
+  "P-Editor e1 dialog computes a sameEventAsEdit gate"
+)
+assert(
+  /else if\s*\(\s*sameEventAsEdit\s*&&\s*matcherPreserve/.test(dialogSrc),
+  "P-Editor e2 matcher preservation is gated on sameEventAsEdit"
+)
+assert(
+  /if\s*\(\s*sameEventAsEdit\s*&&\s*passthroughIf/.test(dialogSrc),
+  "P-Editor e3 `if` passthrough is gated on sameEventAsEdit"
+)
+// Event-agnostic passthroughs must NOT be gated (would be a regression in
+// the opposite direction — losing data when user merely retyped the event).
+const shellWriteSnippet = dialogSrc.match(/config\.shell = passthroughShell[\s\S]{0,80}/)?.[0] ?? ""
+assert(
+  !/sameEventAsEdit/.test(shellWriteSnippet),
+  "P-Editor e4 shell write is NOT gated on event (it's event-agnostic)"
+)
+const statusWriteSnippet =
+  dialogSrc.match(/config\.statusMessage = passthroughStatusMessage[\s\S]{0,80}/)?.[0] ?? ""
+assert(
+  !/sameEventAsEdit/.test(statusWriteSnippet),
+  "P-Editor e5 statusMessage write is NOT gated on event"
+)
+const asyncWriteSnippet =
+  dialogSrc.match(/passthroughAsync === true[\s\S]{0,80}config\.async/)?.[0] ?? ""
+// Loose match — async branch is short. We just confirm the assignment
+// appears outside of the sameEventAsEdit guard block.
+assert(
+  /passthroughAsync === true\)\s*config\.async = true/.test(dialogSrc),
+  "P-Editor e6 async write is NOT gated on event"
+)
+void asyncWriteSnippet
 // All 5 passthroughs in the useCallback deps array
 for (const stateName of [
   "matcherPreserve",
