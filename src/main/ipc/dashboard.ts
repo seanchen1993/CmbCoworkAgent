@@ -1014,8 +1014,9 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
 // ─────────────────────────────────────────────────────────
 
 async function fetchOverview(range: TimeRange, granularity: Granularity): Promise<unknown> {
-  const access = requireDashboardAccess()
-  const traceAccessFilter = buildTraceAccessFilter(access)
+  requireDashboardAccess()
+  // 统计指标不做组织级数据权限过滤，所有登录用户均可查看全量统计。
+  const traceAccessFilter = null
   const interval = getCalendarInterval(granularity, range.from, range.to)
   const rankingTopSize = 20
   const rankingSearchSize = 1000
@@ -1194,8 +1195,9 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
 }
 
 async function fetchModelStats(range: TimeRange, granularity: Granularity): Promise<unknown> {
-  const access = requireDashboardAccess()
-  const traceAccessFilter = buildTraceAccessFilter(access)
+  requireDashboardAccess()
+  // 统计指标不做组织级数据权限过滤。
+  const traceAccessFilter = null
   void granularity
   const body = {
     size: 0,
@@ -1279,11 +1281,11 @@ function buildOrgDistributionAgg(
 }
 
 async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?: UserStatsOptions): Promise<unknown> {
-  const access = requireDashboardAccess()
+  requireDashboardAccess()
   void granularity
   const selectedUpperOrgLv1 = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
+  // 统计指标不做组织级数据权限过滤，仅保留用户主动选择的组织维度。
   const queryFilters = [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter()]
-  appendOptionalFilter(queryFilters, buildTraceAccessFilter(access))
   if (selectedUpperOrgLv1 !== null) {
     queryFilters.push(buildUpperOrgLv1Filter(selectedUpperOrgLv1))
   }
@@ -1377,18 +1379,18 @@ function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUser
 }
 
 async function fetchUserList(range: TimeRange, options?: UserListOptions): Promise<DashboardUserListData> {
-  const access = requireDashboardAccess()
+  requireDashboardAccess()
   const { pageSize, afterKey, keyword, upperOrgLv1 } = normalizeUserListOptions(options)
   const offsetValue = Number(afterKey?.offset ?? 0)
   const offset = Number.isFinite(offsetValue) && offsetValue > 0 ? Math.floor(offsetValue) : 0
   const aggregationSize = Math.min(offset + pageSize, 10_000)
   const shardSize = Math.min(Math.max(aggregationSize * 3, 100), 50_000)
+  // 用户列表属于统计/目录数据，不做组织级数据权限过滤，仅保留用户主动选择的组织维度。
   const filters = [
     timeRangeFilter("startedAt", range),
     buildChatTriggeredTraceFilter(),
     buildNonEmptySapIdFilter()
   ]
-  appendOptionalFilter(filters, buildTraceAccessFilter(access))
   if (upperOrgLv1 !== null) {
     filters.push(buildOrgLevelMatchFilter(upperOrgLv1))
   }
@@ -1480,6 +1482,9 @@ async function fetchUserDetail(
   const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
   const tracePage = clampLimit(options?.tracePage, 1, 1000)
   const triggerScope = normalizeTraceTriggerScope(options?.triggerScope)
+  // 统计指标（聚合）按该用户全量计算，不做组织级权限过滤；
+  // 组织级权限仅通过 post_filter 作用于返回的 trace 聊天明细命中，避免跨组织读取对话内容。
+  const traceAccessFilter = buildTraceAccessFilter(access)
   const body = {
     track_total_hits: true,
     from: (tracePage - 1) * tracePageSize,
@@ -1489,12 +1494,12 @@ async function fetchUserDetail(
       bool: {
         filter: [
           timeRangeFilter("startedAt", range),
-          ...(buildTraceAccessFilter(access) ? [buildTraceAccessFilter(access)!] : []),
           { term: { sapId: normalizedSapId } },
           ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
         ]
       }
     },
+    ...(traceAccessFilter ? { post_filter: traceAccessFilter } : {}),
     aggs: {
       latest_user_info: {
         top_hits: {
@@ -1505,6 +1510,7 @@ async function fetchUserDetail(
           }
         }
       },
+      total_calls: { value_count: { field: "traceId" } },
       avg_duration: { avg: { field: "durationMs" } },
       total_tool_calls: { sum: { field: "totalToolCalls" } },
       total_input_tokens: { sum: { field: "totalInputTokens" } },
@@ -1526,6 +1532,8 @@ async function fetchUserDetail(
   const totalInputTokens = asNumber(asRecord(aggs.total_input_tokens).value)
   const totalOutputTokens = asNumber(asRecord(aggs.total_output_tokens).value)
   const totalTokens = asNumber(asRecord(aggs.total_tokens).value, totalInputTokens + totalOutputTokens)
+  // 统计指标：调用次数取自聚合（全量）；trace 列表分页用 post_filter 后的命中总数。
+  const totalCalls = asNumber(asRecord(aggs.total_calls).value)
   const totalTraces = getTotalHits(raw, raw.hits?.hits?.length ?? 0)
 
   return {
@@ -1535,7 +1543,7 @@ async function fetchUserDetail(
     orgName: asOptionalString(userInfo.orgName),
     upperOrgLv0: asOptionalString(userInfo.upperOrgLv0),
     upperOrgLv1: asOptionalString(userInfo.upperOrgLv1),
-    totalCalls: totalTraces,
+    totalCalls,
     avgDurationMs: asNumber(asRecord(aggs.avg_duration).value),
     totalToolCalls: asNumber(asRecord(aggs.total_tool_calls).value),
     totalInputTokens,
@@ -1557,8 +1565,9 @@ async function fetchSkillUsageSummary(
   granularity: Granularity,
   skillNames?: string[]
 ): Promise<unknown> {
-  const access = requireDashboardAccess()
-  const traceAccessFilter = buildTraceAccessFilter(access)
+  requireDashboardAccess()
+  // 统计指标不做组织级数据权限过滤。
+  const traceAccessFilter = null
   void granularity
   // 模式 A：前端传入技能名列表，使用 filters 精确按“技能维度”统计。
   // 这样可以直接得到每个技能的用户数，避免按版本桶二次合并带来的误差。
@@ -1608,8 +1617,9 @@ async function fetchSkillUserStats(
   granularity: Granularity,
   skillName: string
 ): Promise<unknown> {
-  const access = requireDashboardAccess()
-  const traceAccessFilter = buildTraceAccessFilter(access)
+  requireDashboardAccess()
+  // 统计指标不做组织级数据权限过滤。
+  const traceAccessFilter = null
   void granularity
   const escapedSkillName = escapeWildcard(skillName)
   const wildcardPattern = `${escapedSkillName}**`
@@ -1681,7 +1691,7 @@ async function fetchSkillUserStats(
 }
 
 async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
-  const access = requireDashboardAccess()
+  requireDashboardAccess()
   const sanitizedSapIds = Array.from(
     new Set(
       sapIds
@@ -1709,12 +1719,12 @@ async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
     ]
   })
 
+  // 用户资料查询属于目录/统计数据，不做组织级数据权限过滤。
   const body = {
     size: 0,
     query: {
       bool: {
         filter: [
-          ...(buildTraceAccessFilter(access) ? [buildTraceAccessFilter(access)!] : []),
           {
             bool: {
               should: includeShouldFilters,
@@ -1847,14 +1857,41 @@ async function fetchProductivity(range: TimeRange, granularity: Granularity): Pr
       commit_trend: {
         date_histogram: { field: "eventTime", calendar_interval: interval, time_zone: "Asia/Shanghai" }
       },
-      total_insertions: { sum: { field: "properties.insertions" } },
-      total_deletions: { sum: { field: "properties.deletions" } },
       total_files_changed: { sum: { field: "properties.filesChanged" } },
       active_users: { cardinality: { field: "sapId" } },
       total_commits: { value_count: { field: "eventId" } }
     }
   }
-  return esQuery(getEsIndex("event"), body)
+
+  // 新增 / 删除行数改为统计 Agent 生成的代码量（code_gen 事件），
+  // 而非直接取 git commit 的 insertions / deletions。
+  const codeGenFilters = [
+    { term: { eventName: "code_gen" } },
+    timeRangeFilter("eventTime", range)
+  ]
+  const codeBody = {
+    size: 0,
+    query: { bool: { filter: codeGenFilters } },
+    aggs: {
+      code_generated_lines: { sum: { field: "properties.lineCount" } },
+      code_deleted_lines: { sum: { field: "properties.deletedLineCount" } }
+    }
+  }
+
+  const [commitRaw, codeRaw] = await Promise.all([
+    esQuery(getEsIndex("event"), body),
+    esQuery(getEsIndex("event"), codeBody)
+  ])
+  const commitRecord = asRecord(commitRaw)
+  const codeAggs = asRecord(asRecord(codeRaw).aggregations)
+  return {
+    ...commitRecord,
+    aggregations: {
+      ...asRecord(commitRecord.aggregations),
+      total_insertions: { value: asRecord(codeAggs.code_generated_lines).value ?? 0 },
+      total_deletions: { value: asRecord(codeAggs.code_deleted_lines).value ?? 0 }
+    }
+  }
 }
 
 async function fetchFeedback(range: TimeRange, granularity: Granularity): Promise<unknown> {
@@ -1981,6 +2018,7 @@ async function fetchSkillRecentTraces(
     timeRangeFilter("startedAt", range),
     buildSkillUsageWildcardFilter(skill)
   ]
+  // trace 聊天明细列表：按 lv1 组织做数据权限过滤。
   appendOptionalFilter(filters, buildTraceAccessFilter(access))
   if (normalizedTriggerScope === "active") {
     filters.splice(1, 0, buildChatTriggeredTraceFilter())
@@ -2952,8 +2990,9 @@ function makeMockProductivity(range: TimeRange): unknown {
   return {
     aggregations: {
       commit_trend: { buckets: trend },
-      total_insertions:   { value: 14820 },
-      total_deletions:    { value: 6430 },
+      // Agent 生成 / 删除的代码行数（来自 code_gen 事件），非 git commit 原始行数
+      total_insertions:   { value: 9240 },
+      total_deletions:    { value: 2180 },
       total_files_changed:{ value: 892 },
       total_commits:      { value: 187 },
       active_users:       { value: 24 }
