@@ -202,6 +202,50 @@ assert(
   "P3a Setup with a throwing/erroring hook returns a blocking result (marker write will be skipped)"
 )
 
+const asyncThrowingResult = await runHooks(
+  [{ ...throwingHook, id: "test-setup-async-throw", async: true }],
+  "Setup",
+  {
+    workspacePath: tmpdir(),
+    sessionId: "test-thread",
+    setupTrigger: "init"
+  }
+)
+assert(
+  asyncThrowingResult !== null &&
+    asyncThrowingResult.blocked === true &&
+    asyncThrowingResult.asyncStatus !== "pending",
+  "P3b Setup ignores async:true and waits for the real failing result"
+)
+
+const runnerSrc = _read(
+  join(import.meta.dirname ?? ".", "..", "src", "main", "hooks", "runner.ts"),
+  "utf-8"
+)
+assert(
+  /hook\.async === true && event !== "Setup"/.test(runnerSrc),
+  "P3c runner does not return async placeholder for Setup"
+)
+
+const sessionLifecycleSrc = _read(
+  join(import.meta.dirname ?? ".", "..", "src", "main", "hooks", "session-lifecycle.ts"),
+  "utf-8"
+)
+assert(
+  /export async function fireSessionStartOnce/.test(sessionLifecycleSrc) &&
+    /const result = await runHooks/.test(sessionLifecycleSrc),
+  "P3d fireSessionStartOnce awaits Setup before SessionStart"
+)
+
+const agentIpcSrc = _read(
+  join(import.meta.dirname ?? ".", "..", "src", "main", "ipc", "agent.ts"),
+  "utf-8"
+)
+assert(
+  /await fireSessionStartOnce\(/.test(agentIpcSrc),
+  "P3e agent invoke waits for fireSessionStartOnce"
+)
+
 // ─── P-Editor — AddHookDialog edit-save preserves PR-13/14/15/16 fields ────
 //
 // The dialog lives in renderer code that this Node-runner can't render. We

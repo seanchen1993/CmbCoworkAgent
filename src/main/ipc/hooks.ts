@@ -135,6 +135,9 @@ function validateHookConfig(config: HookUpsert): void {
   if (config.async !== undefined && typeof config.async !== "boolean") {
     throw new Error("async 必须为布尔值")
   }
+  if (config.event === "Setup" && config.async === true) {
+    throw new Error("Setup Hook 必须同步执行，不能启用 async")
+  }
   // PR-16
   if (config.if !== undefined && typeof config.if !== "string") {
     throw new Error("if 必须为字符串")

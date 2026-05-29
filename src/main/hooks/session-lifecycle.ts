@@ -27,14 +27,14 @@ export function hasActiveSessions(): boolean {
 }
 
 /** Fire SessionStart exactly once per threadId lifetime (within the main-process run). */
-export function fireSessionStartOnce(
+export async function fireSessionStartOnce(
   threadId: string,
   workspacePath?: string,
   onHookResult?: HookResultCallback,
   hookScope?: HookScopeController,
   onHookSkipped?: ScopeSkipCallback,
   turnId?: string
-): void {
+): Promise<void> {
   const existing = startedSessions.get(threadId)
   if (existing) {
     startedSessions.set(threadId, {
@@ -61,26 +61,27 @@ export function fireSessionStartOnce(
       turnId,
       setupTrigger: "init"
     }
-    runHooks(
-      resolveEnabledHooksForRun(workspacePath, "Setup", setupContext, hookScope, onHookSkipped),
-      "Setup",
-      setupContext,
-      onHookResult
-    )
-      .then((result) => {
-        // null == every Setup hook completed with a zero exit code.
-        // A non-null blocking result signals timeout or non-zero exit;
-        // skip the marker so the next session retries the chain.
-        if (result === null) {
-          markWorkspaceInitialised(workspacePath)
-        } else {
-          console.warn(
-            `[Hooks] Setup(init) skipped marker write — at least one hook failed:`,
-            result.stderr || result.stdout || "(no detail)"
-          )
-        }
-      })
-      .catch((e) => console.warn("[Hooks] Setup(init) hook error:", e))
+    try {
+      const result = await runHooks(
+        resolveEnabledHooksForRun(workspacePath, "Setup", setupContext, hookScope, onHookSkipped),
+        "Setup",
+        setupContext,
+        onHookResult
+      )
+      // null == every Setup hook completed with a zero exit code.
+      // A non-null blocking result signals timeout or non-zero exit;
+      // skip the marker so the next session retries the chain.
+      if (result === null) {
+        markWorkspaceInitialised(workspacePath)
+      } else {
+        console.warn(
+          `[Hooks] Setup(init) skipped marker write — at least one hook failed:`,
+          result.stderr || result.stdout || "(no detail)"
+        )
+      }
+    } catch (e) {
+      console.warn("[Hooks] Setup(init) hook error:", e)
+    }
   }
 
   const context: HookContext = {

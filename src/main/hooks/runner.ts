@@ -937,7 +937,10 @@ async function executeHook(
   // real executor in the background and forward the final result via the
   // global `onLateHookResult` callback (when registered). The placeholder
   // never carries a blocking decision; the late result is informational.
-  if (hook.async === true) {
+  // Setup owns workspace initialisation state, so its caller must observe the
+  // real exit code before writing setup-state or starting SessionStart. Even
+  // if a workspace/CC-imported config says async:true, run Setup synchronously.
+  if (hook.async === true && event !== "Setup") {
     void executeSyncHook(hook, env, context, event)
       .then((late) => {
         const finalLate: HookResult = {
