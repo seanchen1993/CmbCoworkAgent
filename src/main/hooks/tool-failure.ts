@@ -5,8 +5,11 @@
  *   (a) thrown JS error caught by `toolErrorMiddleware` (runtime.ts:953)
  *   (b) result object with `success: false` / `is_error: true` / non-empty
  *       `error` field
- *   (c) result object with non-zero `exitCode` (execute / playwright / etc.)
- *   (d) abort signal fired mid-execution
+ *   (c) result object with non-zero `exitCode` (playwright / etc.)
+ *   (d) plain-string result containing `[Command failed with exit code N]`
+ *       — deepagents' `execute` tool joins output with this marker rather
+ *       than returning an object (covered by the string branch below)
+ *   (e) abort signal fired mid-execution
  *
  * `detectToolFailure` recognises (b)/(c)/(d) shapes from a tool's return
  * value; the throw path is handled directly at the catch site. The
@@ -43,6 +46,33 @@ export function detectToolFailure(
   toolResult: unknown
 ): ToolFailureSignal | null {
   if (toolResult === null || toolResult === undefined) return null
+
+  // PR-12 follow-up — plain-string results. The execute tool (deepagents)
+  // and similar shell-style tools join the command's output with a tail
+  // line like `[Command failed with exit code 5]`. The original detector
+  // only handled object shapes, so every execute non-zero exit slipped past
+  // PostToolUseFailure. We pattern-match the standard "[Command (succeeded|
+  // failed) with exit code N]" marker — only "failed" (and any explicit
+  // non-zero code) triggers; bare "succeeded" returns null.
+  if (typeof toolResult === "string") {
+    const m = /\[Command (succeeded|failed) with exit code (-?\d+)\]/.exec(toolResult)
+    if (m) {
+      const status = m[1]
+      const code = parseInt(m[2], 10)
+      if (status === "failed" || code !== 0) {
+        const truncated = toolResult.length > 500 ? toolResult.slice(0, 500) + "…" : toolResult
+        return {
+          kind: "exit-nonzero",
+          message: truncated,
+          errorType: classifyApiError({ message: toolResult } as Error),
+          isInterrupt: false,
+          isTimeout: false
+        }
+      }
+    }
+    return null
+  }
+
   if (typeof toolResult !== "object") return null
   const r = toolResult as Record<string, unknown>
 

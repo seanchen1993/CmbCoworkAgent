@@ -1741,7 +1741,12 @@ export class LocalSandbox
       try {
         parsed = JSON.parse(context.toolResult)
       } catch {
-        return
+        // Not JSON — pass the raw string to detectToolFailure so it can
+        // pattern-match plain-text failure markers (the execute tool from
+        // deepagents returns "<output>\n[Command failed with exit code N]"
+        // rather than a structured object). Without this, every execute
+        // failure slipped past PostToolUseFailure entirely.
+        parsed = context.toolResult
       }
     }
     const signal = detectToolFailure(context.toolName ?? "", parsed)
@@ -4847,11 +4852,10 @@ export class LocalSandbox
         this.workingDir,
         this.windowsSandbox
       )
-      // PostToolUse hook
       const postResult = await this.runHooks("PostToolUse", {
         toolName: "execute",
         toolArgs: { command: effectiveCommand },
-        toolResult: result.output,
+        toolResult: LocalSandbox.formatExecuteResultForHook(result),
         workspacePath: this.workingDir,
         sessionId: this.runId
       })
@@ -4859,15 +4863,35 @@ export class LocalSandbox
     }
 
     const result = await this.executeRaw(effectiveCommand)
-    // PostToolUse hook
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "execute",
       toolArgs: { command: effectiveCommand },
-      toolResult: result.output,
+      toolResult: LocalSandbox.formatExecuteResultForHook(result),
       workspacePath: this.workingDir,
       sessionId: this.runId
     })
     return LocalSandbox.applyPostHookToExecResult(result, postResult)
+  }
+
+  /**
+   * Render an ExecuteResponse into the same `<output>\n[Command (succeeded|
+   * failed) with exit code N]` string deepagents shows the LLM. Two reasons
+   * we do this on the hook path:
+   *   1. PostToolUse hook commands receive the exit status via
+   *      `CLAUDE_TOOL_RESULT` — without the marker they were blind to
+   *      success/failure.
+   *   2. `detectToolFailure` (PR-12) pattern-matches the marker to fire
+   *      `PostToolUseFailure`. Passing just `result.output` slipped every
+   *      execute non-zero exit past it. Discovered by hook E2E.
+   */
+  private static formatExecuteResultForHook(result: ExecuteResponse): string {
+    const parts: string[] = [result.output]
+    if (result.exitCode !== null) {
+      const status = result.exitCode === 0 ? "succeeded" : "failed"
+      parts.push(`\n[Command ${status} with exit code ${result.exitCode}]`)
+    }
+    if (result.truncated) parts.push("\n[Output was truncated due to size limits]")
+    return parts.join("")
   }
 
   /**
