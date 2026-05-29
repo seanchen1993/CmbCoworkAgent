@@ -1550,6 +1550,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
 
     const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+    let stopHookFired = false
     // Per-event scope-skip factory: diagnostic mode only. The gate lives in
     // `buildHookSkippedRecord`, so constructing this factory is always cheap; the
     // hot path bails out when Hook diagnostic mode is off.
@@ -2476,7 +2477,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
           revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
           onHookResult,
-          onHookSkippedFactory
+          onHookSkippedFactory,
+          onStopHooksFired: () => {
+            stopHookFired = true
+          }
         })
 
         if (completionOutcome === "failed") {
@@ -2638,37 +2642,35 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (!isAbortError) {
         const errMsg = error instanceof Error ? error.message : "Unknown error"
         console.error("[Agent] Error:", error)
-        // PR-17 — fire-and-forget StopFailure. Mutually exclusive with the
-        // ordinary Stop hook chain: this catch block is the only path that
-        // signifies "turn ended because the model/runtime erred rather than
-        // because Stop hooks declared completion". Stop hooks themselves fire
-        // from completion-hooks during the normal happy path; reaching here
-        // means we skipped that and we want StopFailure as the observability
-        // surrogate. The two never co-fire from the same turn since this
-        // branch only runs when the success path threw.
-        const stopFailureErrorCode = classifyApiError(error)
-        const stopFailureContext: HookContext = {
-          workspacePath: sessionWorkspacePath,
-          sessionId: threadId,
-          turnId: turnState.turnId,
-          stopFailureError: stopFailureErrorCode,
-          toolResult: JSON.stringify({
-            error: errMsg,
-            error_type: stopFailureErrorCode
-          })
-        }
-        runHooks(
-          resolveEnabledHooksForRun(
-            sessionWorkspacePath,
+        // PR-17 — fire-and-forget StopFailure only when the turn failed before
+        // the normal Stop hook chain began. If Stop already fired and a later
+        // step (revision, auto-commit, persistence, notification) throws, do
+        // not also emit StopFailure for the same turn.
+        if (!stopHookFired) {
+          const stopFailureErrorCode = classifyApiError(error)
+          const stopFailureContext: HookContext = {
+            workspacePath: sessionWorkspacePath,
+            sessionId: threadId,
+            turnId: turnState.turnId,
+            stopFailureError: stopFailureErrorCode,
+            toolResult: JSON.stringify({
+              error: errMsg,
+              error_type: stopFailureErrorCode
+            })
+          }
+          runHooks(
+            resolveEnabledHooksForRun(
+              sessionWorkspacePath,
+              "StopFailure",
+              stopFailureContext,
+              hookScope,
+              onHookSkippedFactory("StopFailure")
+            ),
             "StopFailure",
             stopFailureContext,
-            hookScope,
-            onHookSkippedFactory("StopFailure")
-          ),
-          "StopFailure",
-          stopFailureContext,
-          onHookResult
-        ).catch((e: unknown) => console.warn("[Hooks] StopFailure hook error:", e))
+            onHookResult
+          ).catch((e: unknown) => console.warn("[Hooks] StopFailure hook error:", e))
+        }
         window.webContents.send(channel, {
           type: "error",
           error: errMsg

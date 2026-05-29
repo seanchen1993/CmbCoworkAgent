@@ -930,12 +930,13 @@ async function executeHook(
   hook: HookConfig,
   env: Record<string, string>,
   context: HookContext,
-  event: HookEvent
+  event: HookEvent,
+  onLateHookResult?: HookResultCallback
 ): Promise<HookResult> {
   // PR-15 — async config-layer fork: return a `pending` placeholder
   // synchronously so the calling event chain doesn't wait, then run the
-  // real executor in the background and forward the final result via the
-  // global `onLateHookResult` callback (when registered). The placeholder
+  // real executor in the background and forward the final result through the
+  // same per-run `onHookResult` callback used by synchronous hooks. The placeholder
   // never carries a blocking decision; the late result is informational.
   // Setup owns workspace initialisation state, so its caller must observe the
   // real exit code before writing setup-state or starting SessionStart. Even
@@ -944,22 +945,23 @@ async function executeHook(
     void executeSyncHook(hook, env, context, event)
       .then((late) => {
         const finalLate: HookResult = {
-          ...late,
+          ...applyForcedOutcome(late, hook),
           asyncStatus: "completed",
           lateCompletedAt: new Date().toISOString()
         }
-        lateResultListener?.(event, hook, finalLate)
+        recordHookResult(event, hook, finalLate, context, onLateHookResult)
       })
       .catch((err) => {
         const errStr = err instanceof Error ? err.message : String(err)
-        lateResultListener?.(event, hook, {
+        const finalLate: HookResult = {
           exitCode: null,
           stdout: "",
           stderr: errStr,
           blocked: false,
           asyncStatus: "timeout",
           lateCompletedAt: new Date().toISOString()
-        })
+        }
+        recordHookResult(event, hook, finalLate, context, onLateHookResult)
       })
     return {
       exitCode: 0,
@@ -1004,19 +1006,6 @@ async function executeSyncHook(
   if (diagnostic) finalized.cwd = getCommandCwd(context)
   return finalized
 }
-
-// PR-15 — module-level late-result listener. Set by the IPC/runtime layer to
-// forward async hook completions to the UI / log persistence path.
-let lateResultListener:
-  | ((event: HookEvent, hook: HookConfig, result: HookResult) => void)
-  | undefined
-
-export function setLateHookResultListener(
-  cb: ((event: HookEvent, hook: HookConfig, result: HookResult) => void) | undefined
-): void {
-  lateResultListener = cb
-}
-
 /**
  * Run all matching hooks for a given event.
  *
@@ -1211,7 +1200,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1287,7 +1276,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1329,7 +1318,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1395,7 +1384,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1462,7 +1451,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1530,7 +1519,8 @@ export async function runHooks(
           hook,
           buildHookEnv(event, hookContext),
           hookContext,
-          event
+          event,
+          onHookResult
         )
         const result = applyForcedOutcome(rawResult, hook)
         console.log(
@@ -1611,7 +1601,7 @@ export async function runHooks(
   // Notification / SessionStart: fire-and-forget
   for (const hook of matched) {
     const hookContext = enrichContextFromHook(hook, context)
-    executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)
+    executeHook(hook, buildHookEnv(event, hookContext), hookContext, event, onHookResult)
       .then((rawResult) => {
         const result = applyForcedOutcome(rawResult, hook)
         console.log(

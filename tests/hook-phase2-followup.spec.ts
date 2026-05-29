@@ -245,6 +245,62 @@ assert(
   /await fireSessionStartOnce\(/.test(agentIpcSrc),
   "P3e agent invoke waits for fireSessionStartOnce"
 )
+assert(
+  !/setLateHookResultListener/.test(runnerSrc),
+  "P3f runner no longer exposes dead global late-result listener"
+)
+
+const asyncLateResults: string[] = []
+const asyncHook: HookConfig = {
+  id: "test-async-late",
+  event: "PreToolUse",
+  type: "command",
+  command: process.platform === "win32" ? "ping -n 2 127.0.0.1 > nul" : "sleep 0.15",
+  enabled: true,
+  timeout: 5_000,
+  async: true,
+  createdAt: "",
+  updatedAt: ""
+}
+await runHooks(
+  [asyncHook],
+  "PreToolUse",
+  { toolName: "execute", toolArgs: { command: "echo ok" } },
+  (_event, _hook, result) => {
+    if (result.asyncStatus) asyncLateResults.push(result.asyncStatus)
+  }
+)
+const lateDeadline = Date.now() + 6_000
+while (!asyncLateResults.includes("completed") && Date.now() < lateDeadline) {
+  await new Promise((resolve) => setTimeout(resolve, 50))
+}
+assert(
+  asyncLateResults.includes("pending") && asyncLateResults.includes("completed"),
+  "P3g async hook emits both pending and late completed results through onHookResult"
+)
+
+const completionHooksSrc = _read(
+  join(
+    import.meta.dirname ?? ".",
+    "..",
+    "src",
+    "main",
+    "agent",
+    "skill-lifecycle",
+    "completion-hooks.ts"
+  ),
+  "utf-8"
+)
+assert(
+  /let stopHookFired = false/.test(agentIpcSrc) &&
+    /onStopHooksFired/.test(agentIpcSrc) &&
+    /if \(!stopHookFired\)/.test(agentIpcSrc),
+  "P3h StopFailure is gated when Stop hooks already fired"
+)
+assert(
+  /onStopHooksFired\?\.\(\)/.test(completionHooksSrc),
+  "P3i completion-hooks reports when Stop hook chain begins"
+)
 
 // ─── P-Editor — AddHookDialog edit-save preserves PR-13/14/15/16 fields ────
 //
