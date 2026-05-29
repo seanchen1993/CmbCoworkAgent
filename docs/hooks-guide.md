@@ -9,7 +9,7 @@
 - **钩子 = 在 Agent 工作流的关键节点插入的"拦截器"**。
 - 每个钩子绑定一个**事件**（如"工具执行前"），可选一个**匹配器**（如"只拦 execute 工具"）。
 - 命中后系统启动你的脚本（或调一次 LLM 评估你写的策略），按它的退出码与 stdout 决定：放行、阻断、改写输入、要求 Agent 修订、或直接终止本轮。
-- 钩子有四种作用域：**全局**（`~/.cmbcoworkagent/hooks.json`）、**工作区**（项目内）、**插件**、**技能**——后两种随插件/技能一起分发，只在它们活跃时生效。
+- 钩子有四种作用域：**全局**（`~/.cmbcoworkagent/hooks.json`）、**工作区**（`<workspace>/.cmbdevclaw/hooks/*.json`）、**插件**、**技能**——后两种随插件/技能一起分发，**只在对应插件/技能被本轮触达后才参与匹配**（详见 §7.8）。Setup / SessionStart 等"开轮前"事件的 hook 务必挂全局或工作区。
 
 ---
 
@@ -19,16 +19,24 @@
 |---|---|---|
 | `PreToolUse` | 工具执行**前** | 拦截危险调用 / 改写参数 |
 | `PostToolUse` | 工具执行**后** | 写后校验 / 注入上下文 / 要求 Agent 修订 |
+| `PostToolUseFailure` | 工具调用**失败**（throw / 非零退出 / explicit error / abort / timeout） | 失败告警 / 错误分类观测，**fire-and-forget 不阻断** |
 | `PreSkillUse` | 技能加载**前** | 技能准入控制 |
 | `PostSkillUse` | 本轮结束阶段，每个使用过的技能各触发一次 | 使用记录 / 收尾审计 |
 | `UserPromptSubmit` | 用户消息进入模型**前** | 拦截 / 改写用户输入 |
-| `Stop` | 本轮结束 | 最终验收，可要求修订 |
+| `Stop` | 本轮**正常**结束 | 最终验收，可要求修订；与 `StopFailure` 互斥 |
+| `StopFailure` | 本轮因 API 错误**异常**结束 | 失败告警；matcher 可按 6 种错误分类精确匹配；fire-and-forget |
+| `SubagentStart` | 父 Agent 发出 `task` tool call 的瞬间，子 Agent 尚未运行 | 子代理事前准备；与 `SubagentStop` 通过 `tool_call_id` 配对 |
 | `SubagentStop` | 子 Agent 结束 | 父轮的事后检查 |
-| `Notification` / `SessionStart` / `SessionEnd` | 通知 / 会话开始 / 会话结束 | 纯通知，不能阻断 |
+| `Setup` | 工作区首次会话开始前（matcher=`init`），或用户主动触发"重新初始化工作区"按钮时（matcher=`maintenance`） | 工作区级初始化 / 维护脚本，**per-workspace 去重**（标记文件 `.cmbdevclaw/setup-state.json`） |
+| `Notification` | 通知（目前唯一触发路径：审批弹窗） | matcher=`permission_prompt`，或工具名（向后兼容） |
+| `SessionStart` | 每个 thread 第一次提问前 | matcher=`startup`（当前仅此一种 source） |
+| `SessionEnd` | 会话结束 | matcher=`clear`（删 thread）或 `logout`（应用退出） |
 
 **多钩子串行**：同一事件可以挂多个钩子，按数组顺序依次执行。Pre 系列任一阻断即整体阻断；Post 系列把各钩子的输出合并后回灌给 Agent。
 
-> **关于"暂未实现"事件**：`HookEvent` 联合类型保留了向 Claude Code 看齐的所有事件名（`PostToolUseFailure`、`StopFailure`、`SubagentStart`、`PreCompact`、`PostCompact`、`PermissionRequest`、`PermissionDenied`、`Setup`、`CwdChanged`、`FileChanged`），但只有上表的 10 个进入 `SUPPORTED_HOOK_EVENTS`。其余事件**在加载阶段就被丢弃**——`storage.ts` 在 flat / workspace / plugin / skill / Claude Code `settings.json` 导入这 5 条读取路径上都用 `isSupportedHookEvent` 过滤；IPC 创建接口也会拒绝。HooksPanel 的 `EVENT_BADGE` 仍为这些事件保留了徽章配置项（防御性兜底，避免某次新增运行时支持后忘记加 UI），tooltip 注明 `⚠️ [暂未实现]`；UI 创建对话框（AddHookDialog）不开放这些事件。**实际效果**：插件 `hooks.json` 或 CC `settings.json` 里写了 `PostToolUseFailure` 之类的 hook，加载时被静默丢弃，不会出现在任何面板里、也不会触发。
+**Phase 2 新加 matcher 子句**：除了"工具名/技能名"，多个事件现在按特定字段匹配。详见 §2.1.1。
+
+> **关于"暂未实现"事件**：`HookEvent` 联合类型保留了向 Claude Code 看齐的所有事件名。**Phase 2（PR-11 ~ PR-17）落地的 `PostToolUseFailure` / `StopFailure` / `SubagentStart` / `Setup` 已经进入 `SUPPORTED_HOOK_EVENTS`，按上表生效**。仍未实现的有：`PreCompact` / `PostCompact` / `PermissionRequest` / `PermissionDenied` / `CwdChanged` / `FileChanged` —— `storage.ts` 在 flat / workspace / plugin / skill / Claude Code `settings.json` 导入这 5 条读取路径上用 `isSupportedHookEvent` 过滤掉；IPC 创建接口也会拒绝。HooksPanel 的 `EVENT_BADGE` 仍为这些事件保留了徽章配置项（防御性兜底，避免某次新增运行时支持后忘记加 UI），tooltip 注明 `⚠️ [暂未实现]`；AddHookDialog 不开放这些事件。**实际效果**：插件 `hooks.json` 或 CC `settings.json` 里写了 `PreCompact` 之类的 hook，加载时被静默丢弃，不会出现在任何面板里、也不会触发。
 
 ---
 
@@ -81,6 +89,44 @@
 | 拦所有读类技能 | `.*-reader` |
 
 > `.` **不算**正则触发字符——`foo.bar` 视为字面量。理由是工具名常含点（特别是 MCP 工具），避免误判。
+
+### 2.1.1 Phase 2 matchQuery — 每事件的匹配目标不同
+
+PR-16 之后，matcher 对照的不再只是"工具名/技能名"，而是按事件查询对应字段。如果该字段为空（事件无相关上下文），`"*"` 仍匹配，命名 matcher 永远不命中。
+
+| 事件 | matcher 对照字段 | 可选值（当前实现） |
+|---|---|---|
+| `PreToolUse` / `PostToolUse` / `PostToolUseFailure` | `tool_name` | 工具名 |
+| `PreSkillUse` / `PostSkillUse` | `skill_name` | 技能名 |
+| `SubagentStart` / `SubagentStop` | 子 Agent 的 `name` / `id`（subagent_type） | `general-purpose`、自定义 subagent 名等 |
+| `Setup` | `trigger` | `init` / `maintenance` |
+| `SessionStart` | `source` | `startup`（当前唯一值） |
+| `SessionEnd` | `reason` | `clear`（删 thread）/ `logout`（应用退出） |
+| `Notification` | `notification_type`，**未命中时回退到 `tool_name`**（PR-16 dual-matcher，保留 `matcher: "execute"` 这种 legacy 写法） | `permission_prompt`（当前唯一类型） |
+| `StopFailure` | `classifyApiError(error)` 输出（6 种枚举） | `authentication_failed` / `invalid_request` / `rate_limit` / `server_error` / `network_error` / `unknown` |
+
+### 2.1.2 `if` 子句 — matcher 之后的二次过滤
+
+PR-16 加入了 CC 的 `if` 字段，**当前实现一个子集**：
+
+- `"ToolName(*)"` — 匹配该工具的任意参数
+- `"ToolName(glob)"` — glob 匹配工具的主参数（`*` 是唯一元字符）
+  - `execute` 工具主参数 = `command`
+  - `read_file` / `write_file` / `edit_file` 主参数 = `file_path`
+  - 其他工具主参数 = `path`
+- 不识别的语法 → **总是匹配**（不阻断 hook，向前兼容 CC 未来扩展）
+
+例：`{ "matcher": "execute", "if": "execute(git *)" }` 只会在用户跑 `git ...` 命令时触发，普通 `echo foo` 不触发。
+
+### 2.1.3 其他 Phase 2 字段
+
+| 字段 | 说明 |
+|---|---|
+| `type: "http"` | POST 到 url，response body 与 command stdout 同一套 JSON 解析逻辑。无 SSRF 守卫，单机自负其责。`headers` 支持 `$VAR` / `${VAR}` 插值但**仅限 `allowedEnvVars` 白名单**中的变量，未授权变量替换为空串 |
+| `async: true` | runner 立即返回 `pending` 占位，executor 在后台跑；late 完成时通过 `onHookResult` 回调送给 UI + 日志。**`Setup` 事件拒绝该字段**（init 必须同步等待退出码决定是否写 marker） |
+| `shell` | `"bash"` / `"powershell"` / `"sh"`，覆盖按平台自动挑的默认（Windows=cmd，其它=sh）。需要对应 shell 在 PATH 上 |
+| `model` | type=prompt 时指定哪个模型，对齐 CC 字段名；老配置的 `modelId` 仍读，写入时迁移到 `model` |
+| `statusMessage` | UI 跑 hook 时显示的状态文字，纯展示 |
 
 ### 2.2 type=command vs type=prompt
 
@@ -616,6 +662,29 @@ process.stdin.on("end", () => {
 ```
 
 注意：插件目录里的 `hooks.json` 改完后必须在 UI 里**停用 → 再启用**该插件才生效。
+
+### 7.8 插件 / 技能 hook 的 scope 限制（不是 bug，是设计）
+
+插件和技能的 hook 不像全局 / 工作区那样"无条件 fire"，而是只在**对应的插件/技能被本轮触达之后**才参与匹配。这是 PR-09/10 hook-scope 系统的有意设计，避免一个安装着但未使用的插件 hook 在无关项目里产生副作用。
+
+具体规则：
+
+- **插件 hook**：`scope.activePluginIds` 里有该 `pluginId` 才参与匹配。`pluginId` 何时进入 active 集合？该插件提供的 MCP 工具被调用、或它提供的技能被读取的那一刻。
+- **技能 hook**：必须 `skillName` + `skillPath` 同时落在 `scope.activeSkillNames` / `activeSkillPaths` 里。技能何时 active？被 `read_file` 读完 SKILL.md 的瞬间。
+- **`persistAfterInterrupt: true`**：让 hook 在 active 后**常驻整轮**，即便后续没再用对应工具/技能也仍然参与匹配。仅救得了"中途断了"场景，**救不了"从一开始就需要 fire"的场景**。
+
+**实际效果**：把以下事件挂在插件/技能里时，需要清楚它们大概率**永远不会 fire**：
+
+| 事件 | 为什么不 fire | 想要的替代位置 |
+|---|---|---|
+| `Setup`（init / maintenance） | Setup 时 scope 为空（本轮才刚开始） | 全局 hooks.json 或工作区 `.cmbdevclaw/hooks/` |
+| `SessionStart` | 同上，先于任何工具/技能调用 | 全局 / 工作区 |
+| `Notification`（审批弹窗） | 通常审批早于任何 MCP 调用 | 全局 / 工作区 |
+| `UserPromptSubmit`（首轮第一条消息） | 第一条消息时 scope 还是空的；第二条之后只要 active 过就 OK | 全局 / 工作区 |
+
+**OK 的事件**（前提是该轮已经触达过对应插件/技能）：`PostToolUseFailure`、`PreToolUse` / `PostToolUse` 拦的是自己的工具、`SubagentStart` / `SubagentStop` 涉及该插件、`StopFailure` 已经触达过该插件、`Stop`、`SessionEnd`、`PreSkillUse` / `PostSkillUse` 该技能自身。
+
+诊断模式下 Hook 面板会显示被 scope 过滤掉的 hook + 原因（`plugin-not-active` / `skill-not-in-scope`），可以直接定位。
 
 ---
 
