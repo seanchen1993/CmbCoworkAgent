@@ -88,7 +88,7 @@ export interface HookContext {
   /**
    * PR-11 — Setup event trigger source. Emitted as `trigger` in stdin JSON.
    * `"init"` = workspace's first run on this machine (de-duped via
-   * `<workspacePath>/.cmbcoworkagent/setup-state.json`);
+   * `<workspacePath>/.cmbdevclaw/setup-state.json`);
    * `"maintenance"` = user-initiated re-run via the workspace UI.
    */
   setupTrigger?: "init" | "maintenance"

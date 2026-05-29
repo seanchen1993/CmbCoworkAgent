@@ -7,17 +7,22 @@
  * persist a tiny marker file in the workspace so init fires exactly once per
  * workspace per machine.
  *
- *   <workspacePath>/.cmbcoworkagent/setup-state.json
+ *   <workspacePath>/.cmbdevclaw/setup-state.json
  *
  * Schema: `{ "initialisedAt": "<ISO>" }`. The file's presence is the dedupe
  * signal; the timestamp is informational. The file is written **after** the
  * Setup hook returns so a crashed/blocked hook does not skip future retries.
+ *
+ * Co-located with workspace hooks under `<workspacePath>/.cmbdevclaw/` so the
+ * whole workspace-local state lives in one directory. The home-level config
+ * directory `~/.cmbcoworkagent/` (global hooks etc.) is intentionally a
+ * different name; this constant is only ever joined with a workspace path.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 
-const STATE_DIR = ".cmbcoworkagent"
+const STATE_DIR = ".cmbdevclaw"
 const STATE_FILE = "setup-state.json"
 
 interface SetupState {

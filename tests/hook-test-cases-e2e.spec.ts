@@ -419,7 +419,7 @@ async function main(): Promise<void> {
           log(`  trace after init: ${JSON.stringify(lines)}`)
           assert(lines.includes("SETUP-INIT"), "S4-2 Setup(init) fired on fresh workspace")
           assert(!lines.includes("SETUP-MAINTENANCE"), "S4-3 Setup(maintenance) did NOT fire from init path")
-          const marker = join(ws, ".cmbcoworkagent", "setup-state.json")
+          const marker = join(ws, ".cmbdevclaw", "setup-state.json")
           assert(existsSync(marker), "S4-4 setup-state.json marker written")
           const initMtime = existsSync(marker) ? statSync(marker).mtimeMs : 0
 

@@ -163,7 +163,7 @@ assert(
 // Side-effect check: setup-state file is NOT written by runHooks itself
 // (that's session-lifecycle's job; the unit boundary keeps the two paths
 // separate). The marker file only exists if the caller decided to write it.
-const stateFile = join(tmpdir(), ".cmbcoworkagent", "setup-state.json")
+const stateFile = join(tmpdir(), ".cmbdevclaw", "setup-state.json")
 assert(
   !existsSync(stateFile),
   "P1-3d runHooks does not write the setup-state marker on its own"

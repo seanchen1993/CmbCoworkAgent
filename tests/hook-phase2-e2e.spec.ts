@@ -318,7 +318,7 @@ async function main(): Promise<void> {
       `0-4 Setup(init) fired BEFORE SessionStart (got setup=${setupIdx}, start=${startIdx})`
     )
 
-    const markerPath = join(initWs, ".cmbcoworkagent", "setup-state.json")
+    const markerPath = join(initWs, ".cmbdevclaw", "setup-state.json")
     assert(existsSync(markerPath), "0-5 setup-state.json marker written after successful Setup")
     if (existsSync(markerPath)) {
       const marker = JSON.parse(readFileSync(markerPath, "utf-8"))

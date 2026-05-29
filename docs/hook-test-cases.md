@@ -38,12 +38,12 @@ node "C:\ai\CmbCoworkAgent\tests\support\append-line.cjs" "C:\tmp\hook-trace.log
 | 命令 | `node "C:\ai\CmbCoworkAgent\tests\support\append-line.cjs" "C:\tmp\hook-trace.log" SETUP-INIT` |
 
 **测试步骤**：
-1. 在某个**新文件夹**（没有 `.cmbcoworkagent/setup-state.json`）打开/创建 thread
+1. 在某个**新文件夹**（没有 `.cmbdevclaw/setup-state.json`）打开/创建 thread
 2. 给 agent 发任何提问，比如 `"你好"`
 3. 应观察到 `c:\tmp\hook-trace.log` 出现 `SETUP-INIT` 一行
 4. 再开一个新 thread 指向同 workspace → 不应再出现新行（per-workspace dedupe 生效）
 
-**预期失败行为验证**：把命令改成 `cmd /c exit 1`，删掉该 workspace 的 `.cmbcoworkagent/setup-state.json`，再起 thread → marker 不应被写出，下次再起还会重试。
+**预期失败行为验证**：把命令改成 `cmd /c exit 1`，删掉该 workspace 的 `.cmbdevclaw/setup-state.json`，再起 thread → marker 不应被写出，下次再起还会重试。
 
 ---
 
@@ -60,7 +60,7 @@ node "C:\ai\CmbCoworkAgent\tests\support\append-line.cjs" "C:\tmp\hook-trace.log
 1. chat 头部点工作区下拉（文件夹名旁）→ 弹层底部点"重新初始化工作区"
 2. toast 提示 `已触发工作区 Setup hooks（maintenance）`
 3. `c:\tmp\hook-trace.log` 出现 `SETUP-MAINTENANCE`
-4. `.cmbcoworkagent/setup-state.json` **mtime 不变**（maintenance 不写 marker）
+4. `.cmbdevclaw/setup-state.json` **mtime 不变**（maintenance 不写 marker）
 
 ---
 
