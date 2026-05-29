@@ -202,6 +202,79 @@ assert(
   "P3a Setup with a throwing/erroring hook returns a blocking result (marker write will be skipped)"
 )
 
+// ─── P-Editor — AddHookDialog edit-save preserves PR-13/14/15/16 fields ────
+//
+// The dialog lives in renderer code that this Node-runner can't render. We
+// assert the source contains the round-trip plumbing instead — coarse, but
+// a regression test that catches "someone removed the passthrough state" or
+// "submit forgot to write the field" without standing up React Testing
+// Library.
+
+const dialogSrc = _read(
+  join(
+    import.meta.dirname ?? ".",
+    "..",
+    "src",
+    "renderer",
+    "src",
+    "components",
+    "customize",
+    "AddHookDialog.tsx"
+  ),
+  "utf-8"
+)
+for (const stateName of [
+  "matcherPreserve",
+  "passthroughIf",
+  "passthroughShell",
+  "passthroughStatusMessage",
+  "passthroughAsync"
+]) {
+  assert(
+    new RegExp(`const \\[${stateName},`).test(dialogSrc),
+    `P-Editor a/${stateName} dialog declares a passthrough state`
+  )
+  assert(
+    new RegExp(`set${stateName.charAt(0).toUpperCase()}${stateName.slice(1)}\\(h\\.`).test(dialogSrc),
+    `P-Editor b/${stateName} populateFromHook loads it from editHook`
+  )
+}
+// Submit writes each field
+assert(
+  /config\.matcher = matcherPreserve/.test(dialogSrc),
+  "P-Editor c1 handleSubmit preserves matcher when widget is hidden"
+)
+assert(
+  /config\.if = passthroughIf/.test(dialogSrc),
+  "P-Editor c2 handleSubmit writes if"
+)
+assert(
+  /config\.shell = passthroughShell/.test(dialogSrc),
+  "P-Editor c3 handleSubmit writes shell"
+)
+assert(
+  /config\.statusMessage = passthroughStatusMessage/.test(dialogSrc),
+  "P-Editor c4 handleSubmit writes statusMessage"
+)
+assert(
+  /config\.async = true/.test(dialogSrc),
+  "P-Editor c5 handleSubmit writes async"
+)
+// All 5 passthroughs in the useCallback deps array
+for (const stateName of [
+  "matcherPreserve",
+  "passthroughIf",
+  "passthroughShell",
+  "passthroughStatusMessage",
+  "passthroughAsync"
+]) {
+  // Looking for a bare reference on its own line inside the deps array.
+  assert(
+    new RegExp(`^\\s*${stateName},?\\s*(//.*)?$`, "m").test(dialogSrc),
+    `P-Editor d/${stateName} listed in handleSubmit useCallback deps`
+  )
+}
+
 } // end main
 
 main().then(

@@ -1429,6 +1429,32 @@ export function AddHookDialog(props: {
       : CUSTOM_SENTINEL
   }
   const [matcherMode, setMatcherMode] = useState<string>(initMatcherMode(editHook))
+  // PR-13/14/15/16 follow-up — fields that the dialog persists without yet
+  // owning a dedicated UI widget. Round-tripping them through dialog state
+  // means: (a) editing a hook that originally carried these fields preserves
+  // them across save, and (b) when a future PR exposes a widget it can bind
+  // to the existing state vars without touching submit/load.
+  // Fields covered:
+  //   matcherPreserve  — `matcher` when the event hides the matcher field
+  //                      (today everything except Pre/Post Tool/Skill);
+  //                      OMC SubagentStart with matcher:"code-reviewer"
+  //                      was the canonical example that motivated this.
+  //   passthroughIf    — PR-16 `if` permission-rule clause.
+  //   passthroughShell — PR-13b `shell` override (only meaningful for
+  //                      hookType === "command").
+  //   passthroughStatusMessage — PR-13b custom spinner text.
+  //   passthroughAsync — PR-15 config-layer async flag.
+  const [matcherPreserve, setMatcherPreserve] = useState<string | undefined>(
+    editHook?.matcher
+  )
+  const [passthroughIf, setPassthroughIf] = useState<string | undefined>(editHook?.if)
+  const [passthroughShell, setPassthroughShell] = useState(editHook?.shell)
+  const [passthroughStatusMessage, setPassthroughStatusMessage] = useState<string | undefined>(
+    editHook?.statusMessage
+  )
+  const [passthroughAsync, setPassthroughAsync] = useState<boolean | undefined>(
+    editHook?.async
+  )
   // command fields
   const [command, setCommand] = useState(editHook?.command ?? "")
   // PR-14 — http hook fields. The headers / allowedEnvVars editors are simple
@@ -1542,6 +1568,14 @@ export function AddHookDialog(props: {
       const mm = initMatcherMode(h)
       setMatcherMode(mm)
       setMatcher(mm === CUSTOM_SENTINEL ? (h.matcher ?? "") : "")
+      // Pass-through preservation (no widget yet — see comment at the state
+      // declarations above). matcherPreserve always holds the original value
+      // so a no-widget event still round-trips the matcher across save.
+      setMatcherPreserve(h.matcher)
+      setPassthroughIf(h.if)
+      setPassthroughShell(h.shell)
+      setPassthroughStatusMessage(h.statusMessage)
+      setPassthroughAsync(h.async)
       setCommand(h.command ?? "")
       setHttpUrl(h.url ?? "")
       setHttpHeaders(
@@ -1569,6 +1603,13 @@ export function AddHookDialog(props: {
       setEvent("PreToolUse")
       setMatcherMode("*")
       setMatcher("")
+      // Pass-through preservation — reset to undefined on the create path so a
+      // fresh hook starts without any of these advanced fields set.
+      setMatcherPreserve(undefined)
+      setPassthroughIf(undefined)
+      setPassthroughShell(undefined)
+      setPassthroughStatusMessage(undefined)
+      setPassthroughAsync(undefined)
       setCommand("")
       setHttpUrl("")
       setHttpHeaders("")
@@ -1641,7 +1682,23 @@ export function AddHookDialog(props: {
       if (showMatcher) {
         const resolvedMatcher = matcherMode === CUSTOM_SENTINEL ? matcher.trim() : matcherMode
         if (resolvedMatcher && resolvedMatcher !== "*") config.matcher = resolvedMatcher
+      } else if (matcherPreserve && matcherPreserve !== "*") {
+        // PR-16 follow-up — preserve the original matcher for events whose
+        // matcher widget isn't surfaced yet (SubagentStart matcher:"agent_type",
+        // Notification matcher:"notification_type", etc). Otherwise an edit
+        // of an OMC-imported hook would silently widen its scope to match all.
+        config.matcher = matcherPreserve
       }
+
+      // PR-13/14/15/16 follow-up — pass-through fields without UI widgets.
+      // Writing them unconditionally on edit guarantees a round-trip; on the
+      // create path these state values are undefined so nothing is forced.
+      if (passthroughIf && passthroughIf.trim()) config.if = passthroughIf.trim()
+      if (passthroughShell) config.shell = passthroughShell
+      if (passthroughStatusMessage && passthroughStatusMessage.trim()) {
+        config.statusMessage = passthroughStatusMessage.trim()
+      }
+      if (passthroughAsync === true) config.async = true
 
       if (hookType === "command") {
         config.command = command.trim()
@@ -1715,6 +1772,16 @@ export function AddHookDialog(props: {
     event,
     matcherMode,
     matcher,
+    // PR-16 follow-up — preserve matcher across save when the widget is
+    // hidden for the chosen event type.
+    matcherPreserve,
+    // PR-13/14/15/16 follow-up — pass-through fields without widgets must be
+    // in the closure or edit-save would freeze on the initial editHook values
+    // and a Pass-2 edit (e.g. flipping enabled) wouldn't see updated state.
+    passthroughIf,
+    passthroughShell,
+    passthroughStatusMessage,
+    passthroughAsync,
     command,
     // PR-14 follow-up — http hook fields must be in the dep list, otherwise
     // useCallback closes over the initial empty values and the submit path
