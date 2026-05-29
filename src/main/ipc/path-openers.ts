@@ -1,8 +1,13 @@
 import type { IpcMain } from "electron"
 import { shell } from "electron"
-import { getPreferredIde, setPreferredIde } from "../storage"
-import type { OpenIdeRequest, PreferredIde } from "../types"
-import { openIde } from "../utils/open-in-ide"
+import { getIdeSettings, getPreferredIde, setPreferredIde } from "../storage"
+import type {
+  ConfigurePreferredIdeRequest,
+  ConfigurePreferredIdeResult,
+  OpenIdeRequest,
+  PreferredIde
+} from "../types"
+import { configurePreferredIde, openIde } from "../utils/open-in-ide"
 
 export function registerPathOpenersHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("open-folder", async (_, folderPath: string) => {
@@ -17,8 +22,18 @@ export function registerPathOpenersHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle("ide:getPreferred", async (): Promise<PreferredIde> => getPreferredIde())
 
-  ipcMain.handle("ide:setPreferred", async (_event, preferredIde: PreferredIde): Promise<PreferredIde> =>
-    setPreferredIde(preferredIde)
+  ipcMain.handle("ide:getSettings", async () => getIdeSettings())
+
+  ipcMain.handle(
+    "ide:setPreferred",
+    async (_event, preferredIde: PreferredIde): Promise<PreferredIde> =>
+      setPreferredIde(preferredIde)
+  )
+
+  ipcMain.handle(
+    "ide:configurePreferred",
+    async (_event, request: ConfigurePreferredIdeRequest): Promise<ConfigurePreferredIdeResult> =>
+      configurePreferredIde(request)
   )
 
   ipcMain.handle("ide:open", async (_event, request: OpenIdeRequest) => {

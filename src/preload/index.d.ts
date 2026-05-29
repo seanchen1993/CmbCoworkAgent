@@ -26,6 +26,9 @@ import type {
   PluginManifest,
   SkillHookMetadata,
   AgentAutoCommitSettings,
+  ConfigurePreferredIdeRequest,
+  ConfigurePreferredIdeResult,
+  IdeSettings,
   OpenIdeRequest,
   PreferredIde
 } from "../main/types"
@@ -298,18 +301,20 @@ interface CustomAPI {
       defaultTemperature: number
       maxTemperature: number
     }>
-    getCustomConfigs: () => Promise<Array<{
-      id: string
-      name: string
-      baseUrl: string
-      model: string
-      hasApiKey: boolean
-      maxTokens: number
-      maxOutputTokens: number
-      temperature: number
-      interleavedThinking?: boolean
-      tier?: "premium" | "economy"
-    }>>
+    getCustomConfigs: () => Promise<
+      Array<{
+        id: string
+        name: string
+        baseUrl: string
+        model: string
+        hasApiKey: boolean
+        maxTokens: number
+        maxOutputTokens: number
+        temperature: number
+        interleavedThinking?: boolean
+        tier?: "premium" | "economy"
+      }>
+    >
     getCustomConfig: (id?: string) => Promise<{
       id: string
       name: string
@@ -361,7 +366,11 @@ interface CustomAPI {
   }
   ide: {
     getPreferred: () => Promise<PreferredIde>
+    getSettings: () => Promise<IdeSettings>
     setPreferred: (preferredIde: PreferredIde) => Promise<PreferredIde>
+    configurePreferred: (
+      request: ConfigurePreferredIdeRequest
+    ) => Promise<ConfigurePreferredIdeResult>
     open: (request: OpenIdeRequest) => Promise<{
       editor: string
       mode: "workspace+file+line" | "workspace+file" | "workspace"
@@ -520,9 +529,7 @@ interface CustomAPI {
       success: boolean
       error?: string
     }>
-    pushWorktree: (
-      threadId: string
-    ) => Promise<{
+    pushWorktree: (threadId: string) => Promise<{
       success: boolean
       autoCommitted?: boolean
       error?: string
@@ -650,9 +657,7 @@ interface CustomAPI {
   }
   autoCommit: {
     getSettings: () => Promise<AgentAutoCommitSettings>
-    saveSettings: (
-      updates: Partial<AgentAutoCommitSettings>
-    ) => Promise<AgentAutoCommitSettings>
+    saveSettings: (updates: Partial<AgentAutoCommitSettings>) => Promise<AgentAutoCommitSettings>
   }
   lsp: {
     getConfig: () => Promise<LspConfig>
@@ -1153,7 +1158,13 @@ interface CustomAPI {
       options?: DashboardCommitDetailsOptions
     ) => Promise<{
       success: boolean
-      data?: { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }
+      data?: {
+        total: number
+        page: number
+        pageSize: number
+        pushedOnly: boolean
+        items: DashboardCommitDetail[]
+      }
       error?: string
     }>
     exportExcel: (

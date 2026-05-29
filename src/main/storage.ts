@@ -802,12 +802,16 @@ function assertValidMaxOutputTokens(value: unknown): number {
   }
 
   if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`maxOutputTokens 必须是数字，范围为 ${MIN_MAX_OUTPUT_TOKENS} 到 ${MAX_MAX_OUTPUT_TOKENS}`)
+    throw new Error(
+      `maxOutputTokens 必须是数字，范围为 ${MIN_MAX_OUTPUT_TOKENS} 到 ${MAX_MAX_OUTPUT_TOKENS}`
+    )
   }
 
   const parsed = Math.floor(value)
   if (parsed < MIN_MAX_OUTPUT_TOKENS || parsed > MAX_MAX_OUTPUT_TOKENS) {
-    throw new Error(`maxOutputTokens 超出范围，必须在 ${MIN_MAX_OUTPUT_TOKENS} 到 ${MAX_MAX_OUTPUT_TOKENS} 之间`)
+    throw new Error(
+      `maxOutputTokens 超出范围，必须在 ${MIN_MAX_OUTPUT_TOKENS} 到 ${MAX_MAX_OUTPUT_TOKENS} 之间`
+    )
   }
 
   return parsed
@@ -2083,8 +2087,7 @@ const SANDBOX_MODES = new Set<"none" | "unelevated" | "readonly" | "elevated">([
 type SandboxMode = "none" | "unelevated" | "readonly" | "elevated"
 
 function readSandboxSettings(): { mode: SandboxMode; yolo: boolean; nuxCompleted: boolean } {
-  if (!existsSync(SANDBOX_SETTINGS_FILE))
-    return { mode: "none", yolo: false, nuxCompleted: true }
+  if (!existsSync(SANDBOX_SETTINGS_FILE)) return { mode: "none", yolo: false, nuxCompleted: true }
   try {
     const parsed = JSON.parse(readFileSync(SANDBOX_SETTINGS_FILE, "utf-8"))
     return {
@@ -3202,25 +3205,60 @@ export function setGlobalRoutingMode(mode: "auto" | "pinned"): void {
 
 const IDE_SETTINGS_FILE = join(OPENWORK_DIR, "ide-settings.json")
 
+type IdeSettings = import("./types").IdeSettings
 type PreferredIde = import("./types").PreferredIde
+type SupportedIde = import("./types").SupportedIde
 
 function isSupportedIde(value: unknown): value is Exclude<PreferredIde, null> {
   return value === "idea" || value === "vscode" || value === "webstorm"
 }
 
-function readIdeSettings(): { preferredIde: PreferredIde } {
-  if (!existsSync(IDE_SETTINGS_FILE)) return { preferredIde: null }
+function normalizeExecutablePaths(value: unknown): Partial<Record<SupportedIde, string>> {
+  if (!value || typeof value !== "object") return {}
+  const normalized: Partial<Record<SupportedIde, string>> = {}
+
+  for (const [key, pathValue] of Object.entries(value as Record<string, unknown>)) {
+    if (!isSupportedIde(key) || typeof pathValue !== "string") continue
+    const trimmed = pathValue.trim()
+    if (trimmed) {
+      normalized[key] = trimmed
+    }
+  }
+
+  return normalized
+}
+
+function readIdeSettings(): IdeSettings {
+  if (!existsSync(IDE_SETTINGS_FILE)) return { preferredIde: null, executablePaths: {} }
   try {
     const content = readFileSync(IDE_SETTINGS_FILE, "utf-8")
     const parsed = JSON.parse(content) as unknown
-    if (parsed && typeof parsed === "object" && "preferredIde" in parsed) {
-      const preferredIde = (parsed as Record<string, unknown>).preferredIde
-      return { preferredIde: isSupportedIde(preferredIde) ? preferredIde : null }
+    if (parsed && typeof parsed === "object") {
+      const record = parsed as Record<string, unknown>
+      const preferredIde = record.preferredIde
+      return {
+        preferredIde: isSupportedIde(preferredIde) ? preferredIde : null,
+        executablePaths: normalizeExecutablePaths(record.executablePaths)
+      }
     }
   } catch {
     // ignore parse errors, fall back to default
   }
-  return { preferredIde: null }
+  return { preferredIde: null, executablePaths: {} }
+}
+
+function writeIdeSettings(settings: IdeSettings): IdeSettings {
+  getOpenworkDir()
+  const next: IdeSettings = {
+    preferredIde: isSupportedIde(settings.preferredIde) ? settings.preferredIde : null,
+    executablePaths: normalizeExecutablePaths(settings.executablePaths)
+  }
+  writeFileSync(IDE_SETTINGS_FILE, JSON.stringify(next, null, 2), "utf-8")
+  return next
+}
+
+export function getIdeSettings(): IdeSettings {
+  return readIdeSettings()
 }
 
 export function getPreferredIde(): PreferredIde {
@@ -3228,10 +3266,43 @@ export function getPreferredIde(): PreferredIde {
 }
 
 export function setPreferredIde(preferredIde: PreferredIde): PreferredIde {
-  getOpenworkDir()
-  const next = isSupportedIde(preferredIde) ? preferredIde : null
-  writeFileSync(IDE_SETTINGS_FILE, JSON.stringify({ preferredIde: next }, null, 2), "utf-8")
-  return next
+  return saveIdeSettings({ preferredIde }).preferredIde
+}
+
+export function saveIdeSettings(
+  partial: Partial<IdeSettings> & {
+    executablePaths?: Partial<Record<SupportedIde, string | null | undefined>>
+  }
+): IdeSettings {
+  const current = readIdeSettings()
+  const mergedExecutablePaths = { ...current.executablePaths }
+
+  if (partial.executablePaths) {
+    for (const [key, pathValue] of Object.entries(partial.executablePaths)) {
+      if (!isSupportedIde(key)) continue
+      const trimmed = typeof pathValue === "string" ? pathValue.trim() : ""
+      if (trimmed) {
+        mergedExecutablePaths[key] = trimmed
+      } else {
+        delete mergedExecutablePaths[key]
+      }
+    }
+  }
+
+  return writeIdeSettings({
+    preferredIde:
+      partial.preferredIde === undefined
+        ? current.preferredIde
+        : isSupportedIde(partial.preferredIde)
+          ? partial.preferredIde
+          : null,
+    executablePaths: mergedExecutablePaths
+  })
+}
+
+export function getConfiguredIdeExecutablePath(ide: SupportedIde): string | null {
+  const path = readIdeSettings().executablePaths[ide]
+  return typeof path === "string" && path.trim().length > 0 ? path.trim() : null
 }
 
 /**

@@ -199,6 +199,22 @@ export type SupportedIde = "idea" | "vscode" | "webstorm"
 
 export type PreferredIde = SupportedIde | null
 
+export interface IdeSettings {
+  preferredIde: PreferredIde
+  executablePaths: Partial<Record<SupportedIde, string>>
+}
+
+export interface ConfigurePreferredIdeRequest {
+  preferredIde: SupportedIde
+  executablePath?: string
+}
+
+export interface ConfigurePreferredIdeResult {
+  status: "configured" | "needs_executable_path"
+  settings: IdeSettings
+  message?: string
+}
+
 export interface OpenIdeRequest {
   ide: SupportedIde
   workspacePath: string

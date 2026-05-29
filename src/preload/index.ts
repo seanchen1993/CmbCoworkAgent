@@ -27,6 +27,9 @@ import type {
   ChatXConfig,
   HookLoggingConfig,
   AgentAutoCommitSettings,
+  ConfigurePreferredIdeRequest,
+  ConfigurePreferredIdeResult,
+  IdeSettings,
   OpenIdeRequest,
   PreferredIde
 } from "../main/types"
@@ -382,10 +385,23 @@ const api = {
     getPreferred: (): Promise<PreferredIde> => {
       return ipcRenderer.invoke("ide:getPreferred") as Promise<PreferredIde>
     },
+    getSettings: (): Promise<IdeSettings> => {
+      return ipcRenderer.invoke("ide:getSettings") as Promise<IdeSettings>
+    },
     setPreferred: (preferredIde: PreferredIde): Promise<PreferredIde> => {
       return ipcRenderer.invoke("ide:setPreferred", preferredIde) as Promise<PreferredIde>
     },
-    open: (request: OpenIdeRequest): Promise<{
+    configurePreferred: (
+      request: ConfigurePreferredIdeRequest
+    ): Promise<ConfigurePreferredIdeResult> => {
+      return ipcRenderer.invoke(
+        "ide:configurePreferred",
+        request
+      ) as Promise<ConfigurePreferredIdeResult>
+    },
+    open: (
+      request: OpenIdeRequest
+    ): Promise<{
       editor: string
       mode: "workspace+file+line" | "workspace+file" | "workspace"
     }> => {
@@ -670,7 +686,11 @@ const api = {
       message: string,
       filePaths?: string[]
     ): Promise<{ success: boolean; error?: string }> => {
-      return ipcRenderer.invoke("workspace:commitWorktree", { threadId, message, filePaths }) as Promise<{
+      return ipcRenderer.invoke("workspace:commitWorktree", {
+        threadId,
+        message,
+        filePaths
+      }) as Promise<{
         success: boolean
         error?: string
       }>
@@ -1109,9 +1129,7 @@ const api = {
   autoCommit: {
     getSettings: (): Promise<AgentAutoCommitSettings> =>
       ipcRenderer.invoke("autoCommit:getSettings") as Promise<AgentAutoCommitSettings>,
-    saveSettings: (
-      updates: Partial<AgentAutoCommitSettings>
-    ): Promise<AgentAutoCommitSettings> =>
+    saveSettings: (updates: Partial<AgentAutoCommitSettings>): Promise<AgentAutoCommitSettings> =>
       ipcRenderer.invoke("autoCommit:saveSettings", updates) as Promise<AgentAutoCommitSettings>
   },
   heartbeat: {
@@ -1740,9 +1758,7 @@ const api = {
     skills: {
       list: (): Promise<SkillHookMetadata[]> => ipcRenderer.invoke("hooks:skills:list")
     },
-    onChanged: (
-      callback: (data: { reason?: string; at: string }) => void
-    ): (() => void) => {
+    onChanged: (callback: (data: { reason?: string; at: string }) => void): (() => void) => {
       const handler = (_: unknown, data: { reason?: string; at: string }): void => {
         callback(data)
       }
