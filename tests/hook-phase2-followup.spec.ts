@@ -41,7 +41,7 @@ function assert(cond: unknown, msg: string): void {
 
 import { executeHttpHook } from "../src/main/hooks/http-runner.ts"
 import { createServer } from "node:http"
-import { runHooks } from "../src/main/hooks/runner.ts"
+import { runHooks, hookMatchesRunCriteria } from "../src/main/hooks/runner.ts"
 import type { HookConfig } from "../src/main/hooks/types.ts"
 import { readFileSync as _read } from "node:fs"
 
@@ -299,6 +299,131 @@ assert(
   "P-Editor e6 async write is NOT gated on event"
 )
 void asyncWriteSnippet
+
+// ─── P-Matcher — PR-16 per-event matchQuery actually reaches the runner ────
+//
+// hookMatchesRunCriteria is the same predicate runHooks's main loop uses,
+// so this is exactly what the runtime sees. Each event gets one
+// should-match + one shouldn't-match assertion.
+
+function makeHook(
+  partial: Pick<HookConfig, "event" | "matcher"> & { id: string }
+): HookConfig {
+  return {
+    enabled: true,
+    type: "command",
+    command: "echo ok",
+    timeout: 5_000,
+    createdAt: "",
+    updatedAt: "",
+    ...partial
+  } as HookConfig
+}
+
+// StopFailure → context.stopFailureError
+{
+  const ctx = { sessionId: "t", stopFailureError: "rate_limit" }
+  assert(
+    hookMatchesRunCriteria(
+      makeHook({ id: "m1", event: "StopFailure", matcher: "rate_limit" }),
+      "StopFailure",
+      ctx
+    ),
+    "P-Matcher StopFailure 'rate_limit' matches when stopFailureError='rate_limit'"
+  )
+  assert(
+    !hookMatchesRunCriteria(
+      makeHook({ id: "m2", event: "StopFailure", matcher: "server_error" }),
+      "StopFailure",
+      ctx
+    ),
+    "P-Matcher StopFailure 'server_error' does NOT match when error is 'rate_limit'"
+  )
+  // Wildcard still works
+  assert(
+    hookMatchesRunCriteria(
+      makeHook({ id: "m3", event: "StopFailure", matcher: "*" }),
+      "StopFailure",
+      ctx
+    ),
+    "P-Matcher StopFailure '*' matches any error"
+  )
+}
+
+// SessionStart → context.sessionStartSource
+{
+  const ctx = { sessionId: "t", sessionStartSource: "startup" as const }
+  assert(
+    hookMatchesRunCriteria(
+      makeHook({ id: "m4", event: "SessionStart", matcher: "startup" }),
+      "SessionStart",
+      ctx
+    ),
+    "P-Matcher SessionStart 'startup' matches when source='startup'"
+  )
+  assert(
+    !hookMatchesRunCriteria(
+      makeHook({ id: "m5", event: "SessionStart", matcher: "resume" }),
+      "SessionStart",
+      ctx
+    ),
+    "P-Matcher SessionStart 'resume' does NOT match when source='startup'"
+  )
+}
+
+// SessionEnd → context.sessionEndReason
+{
+  const ctx = { sessionId: "t", sessionEndReason: "logout" as const }
+  assert(
+    hookMatchesRunCriteria(
+      makeHook({ id: "m6", event: "SessionEnd", matcher: "logout" }),
+      "SessionEnd",
+      ctx
+    ),
+    "P-Matcher SessionEnd 'logout' matches when reason='logout'"
+  )
+  assert(
+    !hookMatchesRunCriteria(
+      makeHook({ id: "m7", event: "SessionEnd", matcher: "clear" }),
+      "SessionEnd",
+      ctx
+    ),
+    "P-Matcher SessionEnd 'clear' does NOT match when reason='logout'"
+  )
+}
+
+// Notification → context.notificationType (primary) + toolName fallback
+{
+  const ctx = {
+    sessionId: "t",
+    notificationType: "permission_prompt" as const,
+    toolName: "execute"
+  }
+  assert(
+    hookMatchesRunCriteria(
+      makeHook({ id: "m8", event: "Notification", matcher: "permission_prompt" }),
+      "Notification",
+      ctx
+    ),
+    "P-Matcher Notification 'permission_prompt' matches when notificationType='permission_prompt'"
+  )
+  assert(
+    hookMatchesRunCriteria(
+      makeHook({ id: "m9", event: "Notification", matcher: "execute" }),
+      "Notification",
+      ctx
+    ),
+    "P-Matcher Notification 'execute' still matches via toolName fallback (legacy compat)"
+  )
+  assert(
+    !hookMatchesRunCriteria(
+      makeHook({ id: "m10", event: "Notification", matcher: "write_file" }),
+      "Notification",
+      ctx
+    ),
+    "P-Matcher Notification unrelated matcher does NOT match"
+  )
+}
 // All 5 passthroughs in the useCallback deps array
 for (const stateName of [
   "matcherPreserve",

@@ -1810,7 +1810,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
         // Lets a Notification hook know whether the user is in YOLO mode (where
         // approvals only fire for sandbox-escape) vs the default approve flow.
-        permissionMode: yoloMode ? "yolo" : "approve"
+        permissionMode: yoloMode ? "yolo" : "approve",
+        // PR-16 follow-up — CC matcher target for Notification is
+        // `notification_type`. The approval queue is the only Notification
+        // fire path today, so the value is always "permission_prompt".
+        notificationType: "permission_prompt"
       }
       runHooks(
         resolveHooksForContext("Notification", notificationContext),

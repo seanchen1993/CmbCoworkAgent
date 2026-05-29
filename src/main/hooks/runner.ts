@@ -95,6 +95,22 @@ export interface HookContext {
   /** PR-17 — classifyApiError output for StopFailure / PostToolUseFailure
    *  matchers. Exposed as part of stdin JSON's `tool_input.error_type`. */
   stopFailureError?: string
+  /** PR-16 follow-up — CC SessionStart `source` matchQuery. Today this
+   *  project only ever fires SessionStart on thread first-run, so the value
+   *  is always "startup" (no resume/clear/compact concept yet). The field
+   *  exists so OMC `matcher: "startup"` configs survive a round trip and
+   *  the matcher subsystem evaluates against a real value rather than
+   *  defaulting to toolName. */
+  sessionStartSource?: "startup" | "resume" | "clear" | "compact"
+  /** PR-16 follow-up — CC SessionEnd `reason` matchQuery. Today filled by the
+   *  two SessionEnd entry points: thread delete → "clear", before-quit drain
+   *  → "logout". CC also has "prompt_input_exit" / "other" which this project
+   *  doesn't have analogues for yet. */
+  sessionEndReason?: "clear" | "logout" | "prompt_input_exit" | "other"
+  /** PR-16 follow-up — CC Notification `notification_type` matchQuery. Today
+   *  the only Notification fire path is the approval queue, so the value is
+   *  always "permission_prompt". */
+  notificationType?: "permission_prompt"
 }
 
 /**
@@ -165,8 +181,20 @@ function getMatcherTarget(event: HookEvent, context: HookContext): string | unde
       return context.subagent?.name ?? context.subagent?.id
     case "Setup":
       return context.setupTrigger
-    case "PostToolUseFailure":
+    case "SessionStart":
+      return context.sessionStartSource
+    case "SessionEnd":
+      return context.sessionEndReason
+    case "Notification":
+      return context.notificationType
     case "StopFailure":
+      // PR-16 follow-up — CC matcher target for StopFailure is `error`,
+      // mirrored by `stopFailureError` (classifyApiError output). The old
+      // toolName return was a copy-paste from PostToolUseFailure; with no
+      // toolName ever set on the StopFailure context, `matcher: "rate_limit"`
+      // style configs (the OMC use case) silently never fired.
+      return context.stopFailureError
+    case "PostToolUseFailure":
       return context.toolName
     default:
       return context.toolName
@@ -188,10 +216,11 @@ function matchesEventMatcher(
   const primary = getMatcherTarget(event, context)
   if (matchesName(matcher, primary)) return true
   if (event === "Notification") {
-    // legacy fallback path: today getMatcherTarget already returned toolName
-    // for Notification, so this branch is mainly future-proof. When a future
-    // PR adds `context.notificationType`, primary will be that string and
-    // this fallback keeps existing `matcher: "execute"` configs working.
+    // PR-16 dual-matcher fallback: with `notificationType` now filled,
+    // `primary` is "permission_prompt" — but historically users could
+    // configure `matcher: "execute"` to mean "Notification for execute-tool
+    // approvals". We preserve that legacy semantic by ALSO trying to match
+    // against the approval's toolName when the primary match misses.
     return matchesName(matcher, context.toolName)
   }
   return false

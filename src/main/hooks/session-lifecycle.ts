@@ -86,7 +86,11 @@ export function fireSessionStartOnce(
   const context: HookContext = {
     workspacePath,
     sessionId: threadId,
-    turnId
+    turnId,
+    // PR-16 follow-up — CC SessionStart matcher matches on `source`. This
+    // project doesn't yet distinguish resume / clear / compact paths from a
+    // fresh launch, so the value is hard-coded "startup" here.
+    sessionStartSource: "startup"
   }
   runHooks(
     resolveEnabledHooksForRun(workspacePath, "SessionStart", context, hookScope, onHookSkipped),
@@ -126,7 +130,11 @@ export function fireSetupMaintenance(
 export async function fireSessionEnd(
   threadId: string,
   workspacePath?: string,
-  onHookResult?: HookResultCallback
+  onHookResult?: HookResultCallback,
+  // PR-16 follow-up — CC matcher target for SessionEnd is `reason`. Default is
+  // "clear" (the thread:delete IPC path); the before-quit shutdown drain
+  // calls fireSessionEndAll which supplies "logout".
+  reason: "clear" | "logout" | "prompt_input_exit" | "other" = "clear"
 ): Promise<void> {
   const started = startedSessions.get(threadId)
   if (!started) return
@@ -134,7 +142,8 @@ export async function fireSessionEnd(
   const effectiveWorkspacePath = workspacePath ?? started.workspacePath
   const context: HookContext = {
     workspacePath: effectiveWorkspacePath,
-    sessionId: threadId
+    sessionId: threadId,
+    sessionEndReason: reason
   }
   await runHooks(
     resolveEnabledHooksForRun(effectiveWorkspacePath, "SessionEnd", context, started.hookScope),
@@ -163,7 +172,12 @@ export async function fireSessionEndAll(
   if (entries.length === 0) return
   const all = Promise.allSettled(
     entries.map(([id, session]) => {
-      const context: HookContext = { sessionId: id, workspacePath: session.workspacePath }
+      const context: HookContext = {
+        sessionId: id,
+        workspacePath: session.workspacePath,
+        // PR-16 follow-up — before-quit drain → CC `reason: "logout"`.
+        sessionEndReason: "logout"
+      }
       return runHooks(
         resolveEnabledHooksForRun(session.workspacePath, "SessionEnd", context, session.hookScope),
         "SessionEnd",
