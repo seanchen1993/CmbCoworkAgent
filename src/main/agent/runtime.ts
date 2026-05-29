@@ -543,6 +543,32 @@ function createScopedMcpCapabilityService(
         postResult,
         `MCP tool ${tool.toolId} was stopped by a PostToolUse hook`
       )
+      // PR-12 follow-up — MCP tools surface failure via `result.isError` rather
+      // than a throw or a `success: false` shape, so `detectToolFailure` (which
+      // looks at common ad-hoc shapes) doesn't see them. Translate isError →
+      // PostToolUseFailure here so OMC-style security/observability hooks see
+      // MCP failures on the same channel as the rest.
+      if (result.isError === true) {
+        const failureContext: HookContext = {
+          ...postContext,
+          toolResult: JSON.stringify({
+            error: result.text || `MCP tool ${tool.toolId} returned isError`,
+            error_type: "unknown",
+            failure_kind: "explicit-error",
+            is_interrupt: false,
+            is_timeout: false
+          })
+        }
+        const failureHooks = resolveHooksForContext("PostToolUseFailure", failureContext)
+        runHooksEnriched(
+          failureHooks,
+          "PostToolUseFailure",
+          failureContext,
+          onHookResult
+        ).catch((e) =>
+          console.warn("[Hooks] PostToolUseFailure(MCP isError) hook error:", e)
+        )
+      }
       const hookFeedback = formatPostHookFeedback(postResult)
       const isError =
         result.isError || postResult?.decision === "block" || postResult?.continue === false

@@ -45,12 +45,15 @@ export function fireSessionStartOnce(
   }
   startedSessions.set(threadId, { workspacePath, hookScope })
 
-  // PR-11 — Setup fires (per-workspace, fire-and-forget) *before* SessionStart
-  // when this is the workspace's first encounter on this machine. SessionStart
-  // remains per-thread; this gives a clean "repo init" extension point that
-  // doesn't re-fire for every new thread in the same workspace. The state
-  // marker is written after the Setup runHooks promise resolves so a crashed
-  // hook does not skip future retries.
+  // PR-11 — Setup fires (per-workspace) *before* SessionStart when this is
+  // the workspace's first encounter on this machine. SessionStart remains
+  // per-thread; this gives a clean "repo init" extension point that doesn't
+  // re-fire for every new thread in the same workspace.
+  //
+  // PR-11 follow-up — runHooks's "Setup" branch is now awaited and surfaces
+  // a synthetic blocking result when any hook timed out or returned non-zero
+  // exit. We only write the workspace setup-state marker when that returns
+  // null (success), so a failed init run will be retried on the next session.
   if (workspacePath && !hasWorkspaceBeenInitialised(workspacePath)) {
     const setupContext: HookContext = {
       workspacePath,
@@ -64,7 +67,19 @@ export function fireSessionStartOnce(
       setupContext,
       onHookResult
     )
-      .then(() => markWorkspaceInitialised(workspacePath))
+      .then((result) => {
+        // null == every Setup hook completed with a zero exit code.
+        // A non-null blocking result signals timeout or non-zero exit;
+        // skip the marker so the next session retries the chain.
+        if (result === null) {
+          markWorkspaceInitialised(workspacePath)
+        } else {
+          console.warn(
+            `[Hooks] Setup(init) skipped marker write — at least one hook failed:`,
+            result.stderr || result.stdout || "(no detail)"
+          )
+        }
+      })
       .catch((e) => console.warn("[Hooks] Setup(init) hook error:", e))
   }
 

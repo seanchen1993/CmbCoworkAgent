@@ -2511,7 +2511,37 @@ function ccCommandToHookConfig(
       updatedAt: meta.updatedAt
     }
   }
-  // agent / http: not supported in this runtime — skip silently
+  // PR-14 follow-up — also import CC settings of type:"http" so OMC/
+  // oh-my-claudecode bridge configs survive a round trip. We deliberately
+  // do NOT honour CC's `if` permission-rule beyond what our runner accepts
+  // (the runner's matcher is permissive on unknown syntax). Agent hook type
+  // remains unsupported.
+  if (hookType === "http") {
+    if (typeof h.url !== "string") return null
+    return {
+      id,
+      event,
+      matcher,
+      if: normalizeOptionalHookString(h.if),
+      type: "http",
+      url: h.url,
+      headers: parseHookHeaders(h.headers),
+      allowedEnvVars: parseHookStringArray(h.allowedEnvVars),
+      fallback: h.fallback === "block" ? "block" : "allow",
+      statusMessage,
+      onBlock: parseHookOnBlock(h.onBlock),
+      forcedOutcome: parseForcedOutcome(h.forcedOutcome),
+      forcedReason: normalizeOptionalHookString(h.forcedReason),
+      once,
+      persistAfterInterrupt,
+      timeout,
+      async: asyncFlag,
+      enabled,
+      createdAt: meta.createdAt,
+      updatedAt: meta.updatedAt
+    }
+  }
+  // agent: not supported in this runtime — skip silently
   return null
 }
 

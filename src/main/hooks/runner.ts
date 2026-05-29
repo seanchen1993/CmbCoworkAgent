@@ -1479,8 +1479,18 @@ export async function runHooks(
   // single slow hook can't block the "delete thread" UI or app shutdown.
   // Anything past the cap is allowed to keep running in the background; we
   // just stop blocking the caller.
-  if (event === "SessionEnd") {
-    const SESSION_END_TOTAL_TIMEOUT_MS = 5_000
+  // SessionEnd / Setup share "awaited drain": we want to return after every
+  // hook settled (so the caller can act on completion), but not let any one
+  // slow hook block the UI/app indefinitely.
+  //
+  // PR-11 follow-up — Setup MUST go through this awaited branch because
+  // session-lifecycle uses the resolution of runHooks to decide whether to
+  // write the workspace's setup-state marker. The original fire-and-forget
+  // path returned null synchronously, which caused the marker to be written
+  // before the hook actually completed (so a failed Setup script would
+  // never be retried).
+  if (event === "SessionEnd" || event === "Setup") {
+    const TOTAL_TIMEOUT_MS = event === "Setup" ? 30_000 : 5_000
     const tasks = matched.map(async (hook) => {
       const hookContext = enrichContextFromHook(hook, context)
       try {
@@ -1499,14 +1509,50 @@ export async function runHooks(
         if (result.stderr) {
           console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)
         }
+        return result
       } catch (err) {
         console.warn(`[Hooks] ${event} hook error:`, err)
+        return undefined
       }
     })
-    await Promise.race([
-      Promise.allSettled(tasks),
-      new Promise<void>((resolve) => setTimeout(resolve, SESSION_END_TOTAL_TIMEOUT_MS))
-    ])
+    let timedOut = false
+    const settled = await Promise.race<Array<PromiseSettledResult<HookResult | undefined>> | "timeout">(
+      [
+        Promise.allSettled(tasks),
+        new Promise<"timeout">((resolve) => setTimeout(() => {
+          timedOut = true
+          resolve("timeout")
+        }, TOTAL_TIMEOUT_MS))
+      ]
+    )
+    // For Setup we surface a synthetic blocking result on timeout so the
+    // caller (session-lifecycle) does NOT mark the workspace initialised.
+    if (event === "Setup") {
+      if (timedOut) {
+        return {
+          exitCode: null,
+          stdout: "",
+          stderr: `Setup hooks timed out after ${TOTAL_TIMEOUT_MS}ms`,
+          blocked: true
+        }
+      }
+      // Any non-zero exit code from at least one Setup hook → treat the
+      // whole run as failed so we don't persist init state.
+      const results = settled as Array<PromiseSettledResult<HookResult | undefined>>
+      const anyFailed = results.some(
+        (r) =>
+          r.status === "rejected" ||
+          (r.status === "fulfilled" && r.value && r.value.exitCode !== 0)
+      )
+      if (anyFailed) {
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: "at least one Setup hook returned non-zero exit",
+          blocked: true
+        }
+      }
+    }
     return null
   }
 

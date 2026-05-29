@@ -122,6 +122,12 @@ export async function executeHttpHook(
     reason: fallback === "block" ? reason : undefined
   })
 
+  // PR-14 follow-up — the AbortController must stay armed until both the
+  // headers AND the body finish, because `fetch` resolves as soon as headers
+  // arrive. A misbehaving server that sends 200 then stalls forever on body
+  // bytes would otherwise hang the calling turn for the whole event loop.
+  // We clear the timer in `finally`; `controller.abort()` interrupts the
+  // body reader (readBoundedBody honours response.body's signal hookup).
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeout)
 
@@ -132,7 +138,6 @@ export async function executeHttpHook(
       body: stdinPayload,
       signal: controller.signal
     })
-    clearTimeout(timer)
     const body = await readBoundedBody(response)
     if (response.status >= 200 && response.status < 300) {
       // Defer JSON parsing to parseHookJsonOutput (called by the dispatcher).
@@ -147,8 +152,14 @@ export async function executeHttpHook(
     }
     return fallbackResult(`[HttpHook] HTTP ${response.status}: ${body.slice(0, 200)}`)
   } catch (err) {
-    clearTimeout(timer)
     const msg = err instanceof Error ? err.message : String(err)
+    // Abort during body read surfaces as a generic AbortError; rephrase so
+    // the fallback log makes the timeout reason obvious.
+    if (controller.signal.aborted) {
+      return fallbackResult(`[HttpHook] request timed out after ${timeout}ms`)
+    }
     return fallbackResult(`[HttpHook] request failed: ${msg}`)
+  } finally {
+    clearTimeout(timer)
   }
 }
