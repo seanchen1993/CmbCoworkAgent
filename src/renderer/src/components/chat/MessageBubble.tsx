@@ -3,7 +3,7 @@ import { ToolCallRenderer } from "./ToolCallRenderer";
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { getToolLabel } from "@/lib/tool-labels"
 import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
-import { useMemo, useState } from "react"
+import React, { useMemo, useState } from "react"
 import { ChevronDown, ChevronRight, Eye, Wrench, Copy, Check, PencilLine, ThumbsUp, ThumbsDown, Smile, Frown } from "lucide-react"
 import { toast } from "sonner"
 import {
@@ -12,28 +12,8 @@ import {
 } from "./MessageFeedbackDialog"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import { DurationShow } from "./DurationShow"
 
-function formatResponseDuration(ms?: number): string | null {
-  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return null
-  const seconds = ms / 1000
-  if (seconds < 60) {
-    const precision = seconds < 10 ? 1 : 0
-    return `${Number(seconds.toFixed(precision))}s`
-  }
-  const minutes = Math.floor(seconds / 60)
-  const remainingSeconds = Math.round(seconds % 60)
-  return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`
-}
-
-function AssistantResponseDuration({
-  durationMs
-}: {
-  durationMs?: number
-}): React.JSX.Element | null {
-  const label = formatResponseDuration(durationMs)
-  if (!label) return null
-  return <span className="text-xs text-muted-foreground/70">耗时 {label}</span>
-}
 
 /**
  * Strip the trailing `<CMBDEVCLAW-SKILL-USE-V1>…</…>` block when present.
@@ -169,7 +149,7 @@ export function MessageBubble({
   onEditUserMessage,
   threadId,
   isLoading,
-   durationMap
+   durationMap,
 }: MessageBubbleProps): React.JSX.Element | null {
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
@@ -185,11 +165,8 @@ export function MessageBubble({
   const shouldShowMessageHead = !isUser && (!previousMessage || previousMessage.role === "user")
 
   const duration = useMemo(()=>{
-    console.log('haha start')
     if (shouldShowMessageHead && durationMap?.length && previousMessage?.id){
-      console.log('haha ===:','当前threadid：',threadId, '上一个消息', previousMessage, 'durationMap:',durationMap)
         const target = durationMap.find(it => it.thread_id === threadId && previousMessage.id === it.user_id)
-       console.log('haha target', target)
        return target?.duration
     }
     return 0
@@ -427,7 +404,7 @@ export function MessageBubble({
             <circle cx="76" cy="34" r="2.5" fill="#00e5cc" />
           </svg>
           <span className="text-xs font-medium text-muted-foreground">CMBDevClaw</span>
-          <AssistantResponseDuration durationMs={duration} />
+          <DurationShow durationMs={duration} text="耗时" />
         </div>
       )}
       <div className="flex-1 min-w-0 space-y-2 overflow-hidden pl-7">

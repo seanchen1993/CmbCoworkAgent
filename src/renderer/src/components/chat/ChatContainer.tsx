@@ -92,6 +92,7 @@ import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/ski
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
 import { groupWelcomeSkills } from "./skill-grouping"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
+import { DurationShow } from "./DurationShow"
 
 type WelcomeSkillCard = {
   skill: SkillMetadata
@@ -886,6 +887,7 @@ export function ChatContainer({
   const [durationMap, setDurationMap] = useState<
     { duration: number; thread_id: string; user_id: string }[]
   >([])
+  const [durationNow, setDurationNow] = useState(0)
 
   const NUX_LOADING_STEPS: string[] = [
     "正在准备沙箱环境...",
@@ -2087,17 +2089,7 @@ export function ChatContainer({
     [setInput, slashResetSelection, setSelectedSkill]
   )
 
-  useEffect(()=>{
-    console.log('haha displayMessages:',displayMessages)
-  },[displayMessages])
-
-
-  useEffect(()=>{
-    console.log('haha durationMap:', durationMap)
-  },[durationMap])
-
   useEffect(() => {
-    console.log(turnTimings, 'turnTimings/////')
     setDurationMap(turnTimings)
   }, [turnTimings])
 
@@ -2232,6 +2224,11 @@ export function ChatContainer({
     }
 
     const startTime = Date.now()
+    setDurationNow(0)
+    let timer = setInterval(()=>{
+      setDurationNow( t => t+1)
+    }, 1000)
+
     await stream.submit(
       {
         messages: [{ type: "human", content: fullMessage }]
@@ -2246,6 +2243,10 @@ export function ChatContainer({
         }
       }
     )
+
+    setDurationNow(0)
+    clearInterval(timer)
+
     const endTime = Date.now()
     const map = {
       duration: endTime - startTime,
@@ -3498,6 +3499,7 @@ export function ChatContainer({
                   >
                     {THINKING_MESSAGES[thinkingMessageIndex]}
                   </span>
+                  <DurationShow text={'已处理'} durationMs={durationNow*1000}/>
                 </div>
                 {todos.length > 0 && <ChatTodos todos={todos} />}
               </div>
