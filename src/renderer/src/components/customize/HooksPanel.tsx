@@ -620,21 +620,26 @@ export function HooksPanel(): React.JSX.Element {
 
   const filteredHooks = useMemo(() => {
     const q = debouncedQuery.trim().toLowerCase()
-    if (!q) return hooks
-    return hooks.filter((h) => {
-      const summary = hookSummary(h).toLowerCase()
-      return (
-        summary.includes(q) ||
-        h.event.toLowerCase().includes(q) ||
-        (h.matcher && h.matcher.toLowerCase().includes(q)) ||
-        (h.source === "plugin" && h.pluginName.toLowerCase().includes(q)) ||
-        (h.source === "skill" && h.skillName.toLowerCase().includes(q)) ||
-        getHookSourceLabel(h.source).includes(q) ||
-        getHookTypeLabel(h).toLowerCase().includes(q) ||
-        (h.type === "http" && "http".includes(q)) ||
-        (h.once === true && ("once".includes(q) || "一次性".includes(q)))
-      )
-    })
+    const matched = !q
+      ? hooks
+      : hooks.filter((h) => {
+          const summary = hookSummary(h).toLowerCase()
+          return (
+            summary.includes(q) ||
+            h.event.toLowerCase().includes(q) ||
+            (h.matcher && h.matcher.toLowerCase().includes(q)) ||
+            (h.source === "plugin" && h.pluginName.toLowerCase().includes(q)) ||
+            (h.source === "skill" && h.skillName.toLowerCase().includes(q)) ||
+            getHookSourceLabel(h.source).includes(q) ||
+            getHookTypeLabel(h).toLowerCase().includes(q) ||
+            (h.type === "http" && "http".includes(q)) ||
+            (h.once === true && ("once".includes(q) || "一次性".includes(q)))
+          )
+        })
+    // Enabled hooks float to the top. Stable within each group so the user's
+    // original ordering (typically by creation time / event grouping coming
+    // out of loadHooks) is preserved for hooks of the same enabled state.
+    return [...matched].sort((a, b) => Number(b.enabled) - Number(a.enabled))
   }, [hooks, debouncedQuery])
 
   const handleToggleEnabled = useCallback(
