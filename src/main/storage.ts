@@ -2308,6 +2308,35 @@ function parseHookShell(value: unknown): "bash" | "powershell" | "sh" | undefine
   return undefined
 }
 
+/** PR-14 — narrow an unknown JSON object to a HookType, defaulting to
+ *  "command". Only the persistable types pass; future-only types fall back to
+ *  command so an old binary can still read records written by a newer one
+ *  without crashing (graceful forward-compat in the dropped direction). */
+function parseHookType(value: unknown): "command" | "prompt" | "http" {
+  if (value === "prompt" || value === "http") return value
+  return "command"
+}
+
+/** PR-14 — headers map; tolerates absent / malformed input. */
+function parseHookHeaders(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const out: Record<string, string> = {}
+  let any = false
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof k === "string" && typeof v === "string") {
+      out[k] = v
+      any = true
+    }
+  }
+  return any ? out : undefined
+}
+
+function parseHookStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const out = value.filter((v): v is string => typeof v === "string")
+  return out.length > 0 ? out : undefined
+}
+
 function parseHookOnBlock(raw: unknown): HookOnBlockConfig | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
 
@@ -2419,6 +2448,19 @@ function ccCommandToHookConfig(
     typeof h.model === "string" ? h.model : typeof h.modelId === "string" ? h.modelId : undefined
   const statusMessage = normalizeOptionalHookString(h.statusMessage)
   const shell = parseHookShell(h.shell)
+  // PR-15: accept CC's `async: true` config-layer field.
+  const asyncFlag = h.async === true ? true : undefined
+  // PR-15: warn-and-drop fields we explicitly don't implement in phase 2.
+  if (h.asyncRewake === true) {
+    console.warn(
+      "[Hooks/CC import] `asyncRewake: true` field ignored (this runtime does not yet support reverse-injection); downgraded to plain async."
+    )
+  }
+  if (h.asyncTimeout !== undefined) {
+    console.warn(
+      "[Hooks/CC import] `asyncTimeout` field ignored (stdout async protocol not implemented in phase 2; uses hook timeout instead)."
+    )
+  }
   const hookType =
     typeof h.type === "string" ? h.type : typeof h.prompt === "string" ? "prompt" : "command"
 
@@ -2428,6 +2470,7 @@ function ccCommandToHookConfig(
       id,
       event,
       matcher,
+      if: normalizeOptionalHookString(h.if),
       type: "command",
       command: h.command,
       shell,
@@ -2438,6 +2481,7 @@ function ccCommandToHookConfig(
       once,
       persistAfterInterrupt,
       timeout,
+      async: asyncFlag,
       enabled,
       createdAt: meta.createdAt,
       updatedAt: meta.updatedAt
@@ -2449,6 +2493,7 @@ function ccCommandToHookConfig(
       id,
       event,
       matcher,
+      if: normalizeOptionalHookString(h.if),
       type: "prompt",
       prompt: h.prompt,
       model,
@@ -2460,6 +2505,7 @@ function ccCommandToHookConfig(
       once,
       persistAfterInterrupt,
       timeout,
+      async: asyncFlag,
       enabled,
       createdAt: meta.createdAt,
       updatedAt: meta.updatedAt
@@ -2542,18 +2588,24 @@ export function getHooks(): HookConfig[] {
       const h = item as Record<string, unknown>
       if (typeof h.id !== "string" || typeof h.event !== "string") return []
       if (!isSupportedHookEvent(h.event)) return []
-      const hookType = h.type ?? "command"
+      const hookType = parseHookType(h.type)
       if (hookType === "prompt" && typeof h.prompt !== "string") return []
       if (hookType === "command" && typeof h.command !== "string") return []
+      if (hookType === "http" && typeof h.url !== "string") return []
 
       return [
         {
           id: h.id,
           event: h.event as HookConfig["event"],
           matcher: typeof h.matcher === "string" ? h.matcher : undefined,
-          type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
+          if: normalizeOptionalHookString(h.if),
+          type: hookType,
           command: typeof h.command === "string" ? h.command : undefined,
           shell: parseHookShell(h.shell),
+          // PR-14 — http fields
+          url: typeof h.url === "string" ? h.url : undefined,
+          headers: parseHookHeaders(h.headers),
+          allowedEnvVars: parseHookStringArray(h.allowedEnvVars),
           prompt: typeof h.prompt === "string" ? h.prompt : undefined,
           // PR-13b — prefer CC-aligned `model`, fall back to legacy `modelId`.
           // Canonicalises to `model` in the in-memory HookConfig. Records that
@@ -2574,6 +2626,7 @@ export function getHooks(): HookConfig[] {
           once: parseOptionalHookBoolean(h.once),
           persistAfterInterrupt: parseOptionalHookBoolean(h.persistAfterInterrupt),
           timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
+          async: h.async === true ? true : undefined,
           enabled: h.enabled !== false,
           createdAt: typeof h.createdAt === "string" ? h.createdAt : now,
           updatedAt: typeof h.updatedAt === "string" ? h.updatedAt : now
@@ -2641,18 +2694,23 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
         if (typeof h.event !== "string") return []
         if (!isSupportedHookEvent(h.event)) return []
 
-        const hookType = h.type ?? "command"
+        const hookType = parseHookType(h.type)
         if (hookType === "prompt" && typeof h.prompt !== "string") return []
         if (hookType === "command" && typeof h.command !== "string") return []
+        if (hookType === "http" && typeof h.url !== "string") return []
 
         return [
           {
             id: buildPluginHookId(plugin.id, h.id, index),
             event: h.event as HookConfig["event"],
             matcher: typeof h.matcher === "string" ? h.matcher : undefined,
-            type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
+            if: normalizeOptionalHookString(h.if),
+            type: hookType,
             command: typeof h.command === "string" ? h.command : undefined,
             shell: parseHookShell(h.shell),
+            url: typeof h.url === "string" ? h.url : undefined,
+            headers: parseHookHeaders(h.headers),
+            allowedEnvVars: parseHookStringArray(h.allowedEnvVars),
             prompt: typeof h.prompt === "string" ? h.prompt : undefined,
             model:
               typeof h.model === "string"
@@ -2668,6 +2726,7 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
             once: parseOptionalHookBoolean(h.once),
             persistAfterInterrupt: parseOptionalHookBoolean(h.persistAfterInterrupt),
             timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
+            async: h.async === true ? true : undefined,
             enabled: h.enabled !== false,
             createdAt: plugin.createdAt,
             updatedAt: plugin.updatedAt
@@ -2843,9 +2902,10 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
       const h = raw as Record<string, unknown>
       if (typeof h.event !== "string") return []
       if (!isSupportedHookEvent(h.event)) return []
-      const hookType = h.type ?? "command"
+      const hookType = parseHookType(h.type)
       if (hookType === "prompt" && typeof h.prompt !== "string") return []
       if (hookType === "command" && typeof h.command !== "string") return []
+      if (hookType === "http" && typeof h.url !== "string") return []
       return [
         {
           id: buildSkillHookId(skillName, hooksRelPath, h.id, index),
@@ -2856,9 +2916,13 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
               : h.event === "PreSkillUse" || h.event === "PostSkillUse"
                 ? skillName
                 : undefined,
-          type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
+          if: normalizeOptionalHookString(h.if),
+          type: hookType,
           command: typeof h.command === "string" ? h.command : undefined,
           shell: parseHookShell(h.shell),
+          url: typeof h.url === "string" ? h.url : undefined,
+          headers: parseHookHeaders(h.headers),
+          allowedEnvVars: parseHookStringArray(h.allowedEnvVars),
           prompt: typeof h.prompt === "string" ? h.prompt : undefined,
           model:
             typeof h.model === "string"
@@ -2874,6 +2938,7 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
           once: parseOptionalHookBoolean(h.once),
           persistAfterInterrupt: parseOptionalHookBoolean(h.persistAfterInterrupt),
           timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
+          async: h.async === true ? true : undefined,
           enabled: h.enabled !== false,
           createdAt: now,
           updatedAt: now
@@ -3108,7 +3173,8 @@ export function getUntrustedWorkspaceCommandHooks(workspacePath: string): Untrus
 }
 
 function resolveWorkspaceHookType(raw: Record<string, unknown>): HookConfig["type"] | null {
-  if (raw.type === "prompt" || raw.type === "command") return raw.type
+  if (raw.type === "prompt" || raw.type === "command" || raw.type === "http") return raw.type
+  if (typeof raw.url === "string") return "http"
   if (typeof raw.prompt === "string") return "prompt"
   if (typeof raw.command === "string") return "command"
   return null
@@ -3154,6 +3220,7 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
         if (!hookType) continue
         if (hookType === "prompt" && typeof raw.prompt !== "string") continue
         if (hookType === "command" && typeof raw.command !== "string") continue
+        if (hookType === "http" && typeof raw.url !== "string") continue
         if (raw.enabled === false) continue
         result.push(
           withHookSource(
@@ -3161,9 +3228,13 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
               id: `ws:${baseName}`,
               event: raw.event as HookConfig["event"],
               matcher: typeof raw.matcher === "string" ? raw.matcher : undefined,
-              type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
+              if: normalizeOptionalHookString(raw.if),
+              type: hookType,
               command: typeof raw.command === "string" ? raw.command : undefined,
               shell: parseHookShell(raw.shell),
+              url: typeof raw.url === "string" ? raw.url : undefined,
+              headers: parseHookHeaders(raw.headers),
+              allowedEnvVars: parseHookStringArray(raw.allowedEnvVars),
               prompt: typeof raw.prompt === "string" ? raw.prompt : undefined,
               model:
                 typeof raw.model === "string"
@@ -3179,6 +3250,7 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
               once: parseOptionalHookBoolean(raw.once),
               persistAfterInterrupt: parseOptionalHookBoolean(raw.persistAfterInterrupt),
               timeout: parseNativeHookTimeout(raw.timeoutMs) ?? parseNativeHookTimeout(raw.timeout),
+              async: raw.async === true ? true : undefined,
               enabled: true,
               createdAt: now,
               updatedAt: now
@@ -3225,9 +3297,16 @@ export function upsertHook(config: HookUpsert & { id?: string }): string {
     id,
     event: config.event,
     matcher: config.matcher,
+    if: normalizeOptionalHookString(config.if),
     type: hookType,
     command: hookType === "command" ? (config.command ?? "").trim() : undefined,
     shell: hookType === "command" ? config.shell : undefined,
+    // PR-14 — http hook fields. Stored only when hookType === "http"; we
+    // intentionally drop them otherwise so a previously-saved http hook that
+    // later gets switched to command/prompt doesn't carry stale fields.
+    url: hookType === "http" ? config.url?.trim() : undefined,
+    headers: hookType === "http" ? config.headers : undefined,
+    allowedEnvVars: hookType === "http" ? config.allowedEnvVars : undefined,
     prompt: hookType === "prompt" ? config.prompt?.trim() : undefined,
     // PR-13b — write `model` only; keep `modelId` absent in new records. The
     // upsert call coming from existing UI may carry either field; prefer the
@@ -3243,6 +3322,7 @@ export function upsertHook(config: HookUpsert & { id?: string }): string {
     once: config.once,
     persistAfterInterrupt: config.persistAfterInterrupt,
     timeout: config.timeout,
+    async: config.async === true ? true : undefined,
     enabled: config.enabled ?? true,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now

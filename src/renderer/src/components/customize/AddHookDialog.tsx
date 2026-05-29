@@ -97,6 +97,29 @@ const HOOK_EVENTS: { value: HookEvent; label: string; description: string }[] = 
     value: "SubagentStop",
     label: "子 Agent 停止（SubagentStop）",
     description: "子 Agent 任务结束时触发，可用于记录或同步子任务结果"
+  },
+  {
+    value: "Setup",
+    label: "工作区初始化（Setup）",
+    description:
+      "每个 workspace 首次启动触发一次（init），用户在工作区设置里点 \"重新初始化\" 触发 maintenance。payload 含 trigger 与 workspace_path"
+  },
+  {
+    value: "SubagentStart",
+    label: "子 Agent 启动（SubagentStart）",
+    description:
+      "父 Agent 决定派发任务、子 Agent 即将开始时触发。payload 含 agent_id / agent_type / task_description"
+  },
+  {
+    value: "PostToolUseFailure",
+    label: "工具调用失败（PostToolUseFailure）",
+    description:
+      "工具抛异常、显式 error、非零 exitCode、abort、超时时触发。payload 含 error / error_type / failure_kind。仅观测"
+  },
+  {
+    value: "StopFailure",
+    label: "本轮失败结束（StopFailure）",
+    description: "本轮因 API 错误结束（与 Stop 互斥）。payload 含 error / error_type。仅观测"
   }
 ]
 

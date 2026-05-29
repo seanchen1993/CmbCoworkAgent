@@ -53,6 +53,11 @@ import { homedir } from "node:os"
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
+import {
+  detectToolFailure,
+  hasFailureFired,
+  markFailureFired
+} from "../hooks/tool-failure"
 import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
 import { mergeUpdatedInput } from "../hooks/updated-input"
 import type { HookScopeController } from "../hooks/scope"
@@ -1719,7 +1724,49 @@ export class LocalSandbox
     if (result) {
       this._hookScope?.activatePersistentHooks(hooks)
     }
+    // PR-12 — after PostToolUse, inspect the tool result for explicit failure
+    // shapes (success:false, is_error:true, error:"...", non-zero exitCode).
+    // Fires fire-and-forget PostToolUseFailure with dedupe via tool_use_id so
+    // a throw-path failure already caught by toolErrorMiddleware does not
+    // re-trigger here.
+    if (event === "PostToolUse" && context.toolResult) {
+      this.maybeFirePostToolUseFailureFromResult(hookContext)
+    }
     return result
+  }
+
+  private maybeFirePostToolUseFailureFromResult(context: HookContext): void {
+    let parsed: unknown = context.toolResult
+    if (typeof context.toolResult === "string") {
+      try {
+        parsed = JSON.parse(context.toolResult)
+      } catch {
+        return
+      }
+    }
+    const signal = detectToolFailure(context.toolName ?? "", parsed)
+    if (!signal) return
+    const toolCallId = (context.toolArgs?.tool_call_id ??
+      context.toolArgs?.tool_use_id ??
+      "") as string
+    if (typeof toolCallId === "string" && toolCallId && hasFailureFired(toolCallId)) return
+    if (typeof toolCallId === "string" && toolCallId) markFailureFired(toolCallId)
+
+    const failureContext: HookContext = {
+      ...context,
+      toolResult: JSON.stringify({
+        error: signal.message,
+        error_type: signal.errorType,
+        failure_kind: signal.kind,
+        is_interrupt: signal.isInterrupt,
+        is_timeout: signal.isTimeout,
+        tool_use_id: toolCallId
+      })
+    }
+    const hooks = this.resolveHooks("PostToolUseFailure", failureContext)
+    runHooksEnriched(hooks, "PostToolUseFailure", failureContext, this._onHookResult).catch(
+      (e) => console.warn("[Hooks] PostToolUseFailure(detect) hook error:", e)
+    )
   }
 
   private static mergeUpdatedInput<T extends Record<string, unknown>>(

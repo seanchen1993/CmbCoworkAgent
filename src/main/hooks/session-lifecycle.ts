@@ -5,6 +5,10 @@ import {
   type HookScopeController,
   type ScopeSkipCallback
 } from "./scope"
+import {
+  hasWorkspaceBeenInitialised,
+  markWorkspaceInitialised
+} from "../services/setup-state"
 
 // Map<threadId, workspacePath?>. Cleanup paths:
 //   - fireSessionEnd(threadId)  ← threads:delete handler removes the entry
@@ -40,6 +44,30 @@ export function fireSessionStartOnce(
     return
   }
   startedSessions.set(threadId, { workspacePath, hookScope })
+
+  // PR-11 — Setup fires (per-workspace, fire-and-forget) *before* SessionStart
+  // when this is the workspace's first encounter on this machine. SessionStart
+  // remains per-thread; this gives a clean "repo init" extension point that
+  // doesn't re-fire for every new thread in the same workspace. The state
+  // marker is written after the Setup runHooks promise resolves so a crashed
+  // hook does not skip future retries.
+  if (workspacePath && !hasWorkspaceBeenInitialised(workspacePath)) {
+    const setupContext: HookContext = {
+      workspacePath,
+      sessionId: threadId,
+      turnId,
+      setupTrigger: "init"
+    }
+    runHooks(
+      resolveEnabledHooksForRun(workspacePath, "Setup", setupContext, hookScope, onHookSkipped),
+      "Setup",
+      setupContext,
+      onHookResult
+    )
+      .then(() => markWorkspaceInitialised(workspacePath))
+      .catch((e) => console.warn("[Hooks] Setup(init) hook error:", e))
+  }
+
   const context: HookContext = {
     workspacePath,
     sessionId: threadId,
@@ -51,6 +79,32 @@ export function fireSessionStartOnce(
     context,
     onHookResult
   ).catch((e) => console.warn("[Hooks] SessionStart hook error:", e))
+}
+
+/**
+ * PR-11 — Fire Setup(maintenance) on user demand. Bypasses the per-workspace
+ * init marker so the user can deliberately re-run the maintenance hook chain
+ * without deleting state files. Fire-and-forget.
+ */
+export function fireSetupMaintenance(
+  workspacePath: string,
+  onHookResult?: HookResultCallback,
+  hookScope?: HookScopeController,
+  onHookSkipped?: ScopeSkipCallback
+): Promise<void> {
+  if (!workspacePath) return Promise.resolve()
+  const context: HookContext = {
+    workspacePath,
+    setupTrigger: "maintenance"
+  }
+  return runHooks(
+    resolveEnabledHooksForRun(workspacePath, "Setup", context, hookScope, onHookSkipped),
+    "Setup",
+    context,
+    onHookResult
+  )
+    .then(() => undefined)
+    .catch((e) => console.warn("[Hooks] Setup(maintenance) hook error:", e))
 }
 
 /** Fire SessionEnd for a thread if it previously fired SessionStart. No-op otherwise. */

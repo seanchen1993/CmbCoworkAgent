@@ -5,6 +5,7 @@ import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import type { HookConfig, HookEvent, HookResult } from "./types"
 import { getHookModelRef, getTimeoutBounds } from "./types"
+import { executeHttpHook } from "./http-runner"
 import type { PluginHookMetadata, SkillHookMetadata } from "../types"
 import { joinHookText } from "./text"
 import { mergeUpdatedInput } from "./updated-input"
@@ -84,6 +85,16 @@ export interface HookContext {
    * Use this to distinguish parent-thread hooks from subagent-thread hooks.
    */
   agentId?: string
+  /**
+   * PR-11 — Setup event trigger source. Emitted as `trigger` in stdin JSON.
+   * `"init"` = workspace's first run on this machine (de-duped via
+   * `<workspacePath>/.cmbcoworkagent/setup-state.json`);
+   * `"maintenance"` = user-initiated re-run via the workspace UI.
+   */
+  setupTrigger?: "init" | "maintenance"
+  /** PR-17 — classifyApiError output for StopFailure / PostToolUseFailure
+   *  matchers. Exposed as part of stdin JSON's `tool_input.error_type`. */
+  stopFailureError?: string
 }
 
 /**
@@ -135,8 +146,55 @@ function matchesName(matcher: string | undefined, name: string | undefined): boo
   return matcher.toLowerCase() === name.toLowerCase()
 }
 
+/**
+ * PR-16 — Per-event matcher target. For events that today fire with no
+ * meaningful `toolName` (SessionStart, SessionEnd, Stop, Subagent*, Setup,
+ * PostToolUseFailure, StopFailure) the matcher now interrogates a
+ * per-event-specific context slot instead. Sites where users could
+ * historically have configured a meaningful matcher (PreToolUse, PostToolUse,
+ * Pre/PostSkillUse, Notification) keep the old behaviour — the Notification
+ * dual-matcher fallback below preserves `matcher: "execute"` style configs.
+ */
 function getMatcherTarget(event: HookEvent, context: HookContext): string | undefined {
-  return event === "PreSkillUse" || event === "PostSkillUse" ? context.skillName : context.toolName
+  switch (event) {
+    case "PreSkillUse":
+    case "PostSkillUse":
+      return context.skillName
+    case "SubagentStart":
+    case "SubagentStop":
+      return context.subagent?.name ?? context.subagent?.id
+    case "Setup":
+      return context.setupTrigger
+    case "PostToolUseFailure":
+    case "StopFailure":
+      return context.toolName
+    default:
+      return context.toolName
+  }
+}
+
+/**
+ * PR-16 — Match a hook's `matcher` field against the event-specific target,
+ * with a Notification-only fallback that preserves the legacy semantic
+ * (`matcher: "execute"` historically matched Notification's tool_name). When
+ * no notification_type field exists yet we keep toolName matching.
+ */
+function matchesEventMatcher(
+  matcher: string | undefined,
+  event: HookEvent,
+  context: HookContext
+): boolean {
+  if (!matcher || matcher === "*") return true
+  const primary = getMatcherTarget(event, context)
+  if (matchesName(matcher, primary)) return true
+  if (event === "Notification") {
+    // legacy fallback path: today getMatcherTarget already returned toolName
+    // for Notification, so this branch is mainly future-proof. When a future
+    // PR adds `context.notificationType`, primary will be that string and
+    // this fallback keeps existing `matcher: "execute"` configs working.
+    return matchesName(matcher, context.toolName)
+  }
+  return false
 }
 
 /**
@@ -222,6 +280,11 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
   if (context.transcriptPath) payload.transcript_path = context.transcriptPath
   if (context.permissionMode) payload.permission_mode = context.permissionMode
   if (context.agentId) payload.agent_id = context.agentId
+  // PR-11 — Setup event payload (`trigger` + `workspace_path`).
+  if (context.setupTrigger) {
+    payload.trigger = context.setupTrigger
+    if (context.workspacePath) payload.workspace_path = context.workspacePath
+  }
   if (context.skillName) payload.skill_name = context.skillName
   if (context.skillPath) payload.skill_path = context.skillPath
   if (context.skillRoot) payload.skill_root = context.skillRoot
@@ -840,6 +903,49 @@ async function executeHook(
   context: HookContext,
   event: HookEvent
 ): Promise<HookResult> {
+  // PR-15 — async config-layer fork: return a `pending` placeholder
+  // synchronously so the calling event chain doesn't wait, then run the
+  // real executor in the background and forward the final result via the
+  // global `onLateHookResult` callback (when registered). The placeholder
+  // never carries a blocking decision; the late result is informational.
+  if (hook.async === true) {
+    void executeSyncHook(hook, env, context, event)
+      .then((late) => {
+        const finalLate: HookResult = {
+          ...late,
+          asyncStatus: "completed",
+          lateCompletedAt: new Date().toISOString()
+        }
+        lateResultListener?.(event, hook, finalLate)
+      })
+      .catch((err) => {
+        const errStr = err instanceof Error ? err.message : String(err)
+        lateResultListener?.(event, hook, {
+          exitCode: null,
+          stdout: "",
+          stderr: errStr,
+          blocked: false,
+          asyncStatus: "timeout",
+          lateCompletedAt: new Date().toISOString()
+        })
+      })
+    return {
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      blocked: false,
+      asyncStatus: "pending"
+    }
+  }
+  return executeSyncHook(hook, env, context, event)
+}
+
+async function executeSyncHook(
+  hook: HookConfig,
+  env: Record<string, string>,
+  context: HookContext,
+  event: HookEvent
+): Promise<HookResult> {
   const startedAt = Date.now()
   const diagnostic = getHookLoggingConfig().diagnostic
   const hookType = hook.type ?? "command"
@@ -851,6 +957,10 @@ async function executeHook(
       if (policy) stdinPayload = buildPromptHookUserMessage(event, policy, context)
     }
     result = await executePromptHook(hook, context, event)
+  } else if (hookType === "http") {
+    const builtPayload = buildHookStdinPayload(event, context)
+    if (diagnostic) stdinPayload = builtPayload
+    result = await executeHttpHook(hook, builtPayload, getEffectiveTimeout(hook))
   } else {
     const builtPayload = buildHookStdinPayload(event, context)
     if (diagnostic) stdinPayload = builtPayload
@@ -861,6 +971,18 @@ async function executeHook(
   if (stdinPayload !== undefined) finalized.stdinPayload = stdinPayload
   if (diagnostic) finalized.cwd = getCommandCwd(context)
   return finalized
+}
+
+// PR-15 — module-level late-result listener. Set by the IPC/runtime layer to
+// forward async hook completions to the UI / log persistence path.
+let lateResultListener:
+  | ((event: HookEvent, hook: HookConfig, result: HookResult) => void)
+  | undefined
+
+export function setLateHookResultListener(
+  cb: ((event: HookEvent, hook: HookConfig, result: HookResult) => void) | undefined
+): void {
+  lateResultListener = cb
 }
 
 /**
@@ -980,9 +1102,52 @@ export function hookMatchesRunCriteria(
   return (
     hook.enabled &&
     hook.event === event &&
-    matchesName(hook.matcher, getMatcherTarget(event, context)) &&
+    matchesEventMatcher(hook.matcher, event, context) &&
+    matchesIfCondition(hook.if, event, context) &&
     !shouldSkipOnceHook(hook, event, context)
   )
+}
+
+/**
+ * PR-16 — Lightweight evaluator for the CC `if` field. CC uses permission
+ * rule syntax (`"Bash(git *)"`) that requires the Bash tree-sitter parser; we
+ * implement a small subset that covers the most common cases without dragging
+ * the full parser in:
+ *
+ *   - `"ToolName(*)"` matches any args to that tool
+ *   - `"ToolName(pattern)"` matches when the tool's primary arg
+ *     (`command` for execute, `file_path` for read/write, `path` otherwise)
+ *     glob-matches the pattern (`*` is the only metachar)
+ *   - empty/undefined `if` always matches
+ *
+ * Future PRs can replace this with a fuller implementation; the contract
+ * (returns boolean) is stable.
+ */
+function matchesIfCondition(
+  ifClause: string | undefined,
+  _event: HookEvent,
+  context: HookContext
+): boolean {
+  if (!ifClause || !ifClause.trim()) return true
+  const m = /^([A-Za-z_][A-Za-z0-9_]*)\(([^)]*)\)$/.exec(ifClause.trim())
+  if (!m) return true // unrecognised syntax → permissive (don't block hook)
+  const wantTool = m[1].toLowerCase()
+  const argPattern = m[2].trim()
+  if (!context.toolName) return false
+  if (context.toolName.toLowerCase() !== wantTool) return false
+  if (!argPattern || argPattern === "*") return true
+  const primaryArg =
+    (typeof context.toolArgs?.command === "string" && context.toolArgs.command) ||
+    (typeof context.toolArgs?.file_path === "string" && context.toolArgs.file_path) ||
+    (typeof context.toolArgs?.path === "string" && context.toolArgs.path) ||
+    ""
+  if (!primaryArg) return false
+  const regexSrc = "^" + argPattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$"
+  try {
+    return new RegExp(regexSrc).test(primaryArg)
+  } catch {
+    return false
+  }
 }
 
 function recordHookResult(

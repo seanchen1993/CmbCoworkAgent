@@ -43,7 +43,20 @@ export const SUPPORTED_HOOK_EVENTS = [
   "UserPromptSubmit",
   "SessionStart",
   "SessionEnd",
-  "SubagentStop"
+  "SubagentStop",
+  // PR-11 — fires once per workspace at SessionStart, plus on user-initiated
+  // "maintenance" UI action. Per-workspace dedupe via setup-state.json.
+  "Setup",
+  // PR-12 — fires when a tool throws / returns explicit-error / non-zero exit
+  // code / abort / timeout. Fire-and-forget; classification helper sits next
+  // to failover.ts (the only existing error-classifying entrypoint).
+  "PostToolUseFailure",
+  // PR-13 — pair with SubagentStop; fires the moment the parent emits a
+  // task tool_call in an AIMessage, before the subagent runs.
+  "SubagentStart",
+  // PR-17 — turn ended on an API error rather than a clean Stop. Mutually
+  // exclusive with Stop; suppresses Stop fire path when set.
+  "StopFailure"
 ] as const satisfies readonly HookEvent[]
 
 export type SupportedHookEvent = (typeof SUPPORTED_HOOK_EVENTS)[number]
@@ -57,8 +70,11 @@ export function isSupportedHookEvent(value: unknown): value is SupportedHookEven
 /** Hook handler type.
  *  - "command": execute a shell command (original behaviour, default)
  *  - "prompt":  send a single-turn LLM request; the model decides allow/block
+ *  - "http":    PR-14 — POST the hook input JSON to a configured URL; the
+ *               response body is parsed the same way as a command hook's stdout.
+ *               No SSRF guard (§13.2 decision 1 — user takes responsibility).
  */
-export type HookType = "command" | "prompt"
+export type HookType = "command" | "prompt" | "http"
 
 /**
  * PR-13b — explicit shell selection for command hooks. Today the runner picks
@@ -101,12 +117,29 @@ export interface HookConfig {
   id: string
   event: HookEvent
   matcher?: string // Tool name or skill name match, e.g. "execute", "imagegen", "*"
+  /** PR-16 — Claude Code-style `if` clause (permission rule syntax) for per-hook
+   *  pre-filter that runs AFTER `matcher` lookup. Subset supported today:
+   *  `"ToolName(*)"` (any args) or `"ToolName(glob)"` (glob against primary arg).
+   *  Unrecognised syntax is treated as "always match" — never blocks hooks. */
+  if?: string
   type?: HookType // Default: "command"
   // ── command hook ──────────────────────────────────────────────────────────
   command?: string // Shell command to run (required when type=="command")
   /** PR-13b — explicit shell override (bash/powershell/sh). Undefined = legacy
    *  per-platform autodetect (cmd on Windows, /bin/sh elsewhere). */
   shell?: HookShell
+  // ── http hook (PR-14) ─────────────────────────────────────────────────────
+  /** Absolute http(s) URL to POST the hook input JSON to (required when
+   *  type=="http"). No SSRF guard — single-user desktop, user takes
+   *  responsibility for the URL (§13.2 decision 1). */
+  url?: string
+  /** Optional request headers. Values support $VAR / ${VAR} env-var
+   *  interpolation, but ONLY for variable names present in `allowedEnvVars`
+   *  — prevents settings.json hooks from silently leaking arbitrary env. */
+  headers?: Record<string, string>
+  /** Whitelist of env-var names that may be interpolated in `headers` values.
+   *  Variables not in this list are replaced with the empty string. */
+  allowedEnvVars?: string[]
   // ── prompt hook ───────────────────────────────────────────────────────────
   prompt?: string // Natural-language policy (required when type=="prompt")
   /**
@@ -144,6 +177,17 @@ export interface HookConfig {
    */
   persistAfterInterrupt?: boolean
   timeout?: number // Timeout in ms, default 10000
+  /**
+   * PR-15 — when true, the runner returns a placeholder result immediately and
+   * runs the underlying command/prompt/http in the background. The hook's
+   * decision / continue / updatedInput / blocked outputs are **discarded** —
+   * async hooks are fire-and-forget by design. Late completion is reported via
+   * the runner's `onLateHookResult` callback (UI surfaces a hourglass/check).
+   * CC's `asyncRewake` (reverse-injection on exit 2) is intentionally NOT
+   * implemented in phase 2; CC-imported configs with it are downgraded to
+   * plain `async: true` plus an import-time warning.
+   */
+  async?: boolean
   enabled: boolean
   createdAt: string
   updatedAt: string
@@ -205,6 +249,13 @@ export interface HookResult {
   initialUserMessage?: string
   /** SessionStart / CwdChanged hook may return absolute paths to watch. */
   watchPaths?: string[]
+  /** PR-15 — set when the runner returned this placeholder for an async hook
+   *  that's still running in the background. UI uses this to render the
+   *  hourglass indicator; never set on sync results. */
+  asyncStatus?: HookAsyncStatus
+  /** PR-15 — ISO timestamp; set on the late-result event when an async hook
+   *  finally completes. Diagnostic only. */
+  lateCompletedAt?: string
 }
 
 /** Environment variables passed to the hook command */
@@ -261,6 +312,12 @@ export const HOOK_TIMEOUT_BOUNDS = {
   prompt: {
     sync: { min: 1_000, max: 60_000, default: 10_000 },
     async: { min: 1_000, max: 300_000, default: 60_000 }
+  },
+  // PR-14 — sync HTTP gets a wider 5-minute ceiling (CC uses 10 minutes; we
+  // pick 5 to keep the UI spinner experience tolerable). Default 30s.
+  http: {
+    sync: { min: 1_000, max: 300_000, default: 30_000 },
+    async: { min: 1_000, max: 300_000, default: 60_000 }
   }
 } satisfies Record<HookType, { sync: TimeoutBound; async: TimeoutBound }>
 
@@ -287,9 +344,15 @@ export function getTimeoutBounds(
 export interface HookUpsert {
   event: HookEvent
   matcher?: string
+  /** PR-16 — see HookConfig.if. */
+  if?: string
   type?: HookType
   command?: string
   shell?: HookShell
+  // PR-14 — http hook fields
+  url?: string
+  headers?: Record<string, string>
+  allowedEnvVars?: string[]
   prompt?: string
   /** @deprecated PR-13b — write `model` instead. Reads still honour `modelId`
    *  for backward compat. */
@@ -303,8 +366,17 @@ export interface HookUpsert {
   once?: boolean
   persistAfterInterrupt?: boolean
   timeout?: number
+  /** PR-15 — see HookConfig.async. */
+  async?: boolean
   enabled?: boolean
 }
+
+/**
+ * PR-15 — diagnostic field on HookResult so the runner / UI can tell whether
+ * the result is a placeholder "I'm running in the background" reply or the
+ * real outcome. The full outcome arrives later via `onLateHookResult`.
+ */
+export type HookAsyncStatus = "pending" | "completed" | "timeout"
 
 /**
  * PR-13b — single source of truth for "which model is this prompt/agent hook

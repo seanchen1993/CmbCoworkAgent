@@ -72,8 +72,13 @@ import {
   type SkillProposal,
   type WorthinessResult
 } from "../agent/skill-evolution/skill-proposal-logic"
-import { isRetryableApiError, buildOrderedChain, type FailoverAttempt } from "../agent/failover"
-import { type HookContext, type HookResultCallback } from "../hooks/runner"
+import {
+  isRetryableApiError,
+  buildOrderedChain,
+  classifyApiError,
+  type FailoverAttempt
+} from "../agent/failover"
+import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
 import {
   createHookScope,
   normalizePathKey,
@@ -300,6 +305,62 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     params.onHookResult
   )
   throwIfHookHalt("SubagentStop", result, "SubagentStop hook stopped the turn")
+}
+
+/**
+ * PR-13 — Fire SubagentStart on each `task` tool_call seen in an AIMessage,
+ * with independent dedupe so streaming + values-snapshot duplicate AIMessages
+ * fire exactly once. Pair with SubagentStop via `tool_call_id`.
+ *
+ * AIMessages are emitted twice in many stream modes (chunk + final values), so
+ * we MUST NOT reuse the metrics-counting `_countedAiMsgIds` set — that one
+ * grows under different invariants and would not match per-tool-call dedupe.
+ */
+function maybeRunSubagentStartHooksFromToolCalls(params: {
+  toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }> | undefined
+  workspacePath?: string
+  threadId: string
+  turnId?: string
+  hookScope: HookScopeController
+  firedStartIds: Set<string>
+  onHookResult?: HookResultCallback
+  onHookSkipped?: ScopeSkipCallback
+}): void {
+  if (!params.toolCalls || params.toolCalls.length === 0) return
+  for (const tc of params.toolCalls) {
+    if (tc?.name !== "task") continue
+    const id = typeof tc.id === "string" ? tc.id : ""
+    if (!id || params.firedStartIds.has(id)) continue
+    params.firedStartIds.add(id)
+    const args = (tc.args ?? {}) as Record<string, unknown>
+    const subagentType = typeof args.subagent_type === "string" ? args.subagent_type : undefined
+    const taskDescription = typeof args.description === "string" ? args.description : undefined
+    const context: HookContext = {
+      workspacePath: params.workspacePath,
+      sessionId: params.threadId,
+      turnId: params.turnId,
+      subagent: { id, name: subagentType, status: "started" },
+      toolName: "task",
+      toolArgs: {
+        agent_id: id,
+        agent_type: subagentType,
+        tool_call_id: id,
+        task_description: taskDescription
+      }
+    }
+    runHooksEnriched(
+      resolveEnabledHooksForRun(
+        params.workspacePath,
+        "SubagentStart",
+        context,
+        params.hookScope,
+        params.onHookSkipped
+      ),
+      "SubagentStart",
+      context,
+      params.onHookResult
+    ).catch((e) => console.warn("[Hooks] SubagentStart hook error:", e))
+  }
 }
 
 /**
@@ -1841,6 +1902,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const _countedToolResultMsgIds = new Set<string>()
       // Track which subagent tool-call IDs we've already emitted SubagentStop for (dedupe)
       const _subagentStopFired = new Set<string>()
+      // PR-13 — independent dedupe for SubagentStart so duplicated AIMessage
+      // emissions (chunk + values snapshot) only fire the hook once.
+      const _subagentStartFired = new Set<string>()
       const _llmNodeByMessageId = new Map<string, string>()
       const _toolNodeByRef = new Map<string, string>()
       const MODEL_INPUT_WINDOW = 12
@@ -1986,6 +2050,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             | undefined
           const msgId = (kwargs.id as string) || ""
           if (!toolCalls || toolCalls.length === 0) return
+
+          // PR-13 — SubagentStart fires per `task` tool_call, deduped on
+          // `tc.id` independently of the metrics msg-id dedupe below (we want
+          // start hooks to see every distinct task call even when several
+          // task tool_calls share an AIMessage that previously counted).
+          maybeRunSubagentStartHooksFromToolCalls({
+            toolCalls,
+            workspacePath,
+            threadId,
+            turnId: turnState.turnId,
+            hookScope,
+            firedStartIds: _subagentStartFired,
+            onHookResult,
+            onHookSkipped: onHookSkippedFactory("SubagentStart")
+          })
+
           if (msgId && _countedAiMsgIds.has(msgId)) return
           if (msgId) _countedAiMsgIds.add(msgId)
 
@@ -2558,6 +2638,37 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (!isAbortError) {
         const errMsg = error instanceof Error ? error.message : "Unknown error"
         console.error("[Agent] Error:", error)
+        // PR-17 — fire-and-forget StopFailure. Mutually exclusive with the
+        // ordinary Stop hook chain: this catch block is the only path that
+        // signifies "turn ended because the model/runtime erred rather than
+        // because Stop hooks declared completion". Stop hooks themselves fire
+        // from completion-hooks during the normal happy path; reaching here
+        // means we skipped that and we want StopFailure as the observability
+        // surrogate. The two never co-fire from the same turn since this
+        // branch only runs when the success path threw.
+        const stopFailureErrorCode = classifyApiError(error)
+        const stopFailureContext: HookContext = {
+          workspacePath: sessionWorkspacePath,
+          sessionId: threadId,
+          turnId: turnState.turnId,
+          stopFailureError: stopFailureErrorCode,
+          toolResult: JSON.stringify({
+            error: errMsg,
+            error_type: stopFailureErrorCode
+          })
+        }
+        runHooks(
+          resolveEnabledHooksForRun(
+            sessionWorkspacePath,
+            "StopFailure",
+            stopFailureContext,
+            hookScope,
+            onHookSkippedFactory("StopFailure")
+          ),
+          "StopFailure",
+          stopFailureContext,
+          onHookResult
+        ).catch((e: unknown) => console.warn("[Hooks] StopFailure hook error:", e))
         window.webContents.send(channel, {
           type: "error",
           error: errMsg
