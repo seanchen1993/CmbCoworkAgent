@@ -461,9 +461,7 @@ if (!gotTheLock) {
       })
     }
 
-    //todo 测试使用本地上报地址
-    // Register cloud trace reporter against local upload service for debugging.
-    const traceBaseUrl = "http://localhost:8080"
+    const traceBaseUrl = import.meta.env.VITE_API_TRACE_BASE_URL as string | undefined
     if (traceBaseUrl) {
       setTraceReporter(new CloudTraceReporter(traceBaseUrl))
       console.log("[Main] CloudTraceReporter registered, uploading traces to:", traceBaseUrl)
