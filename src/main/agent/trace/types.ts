@@ -218,6 +218,8 @@ export interface TraceSkillEvalRecord {
   rawSkillName: string
   skillName: string
   skillVersion?: string
+  skillTaskId: string
+  skillTaskTraceIndex: number
   evalSource: TraceSkillEvalSource
 
   contextTraceIds: string[]

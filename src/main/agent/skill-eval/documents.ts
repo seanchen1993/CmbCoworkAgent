@@ -214,6 +214,9 @@ function buildRecord(
   const windowContext = options.windowContextByRawName?.[skillRecord.rawSkillName]
   const contextTraceIds = windowContext?.contextTraceIds ?? [skillRecord.traceId]
   const skillEvalTraceIds = windowContext?.skillEvalTraceIds ?? [skillRecord.traceId]
+  const skillTaskId =
+    windowContext?.skillTaskId ||
+    `${skillRecord.threadId}:${skillRecord.rawSkillName}:${skillRecord.traceId}`
 
   return {
     id: `${skillRecord.traceId}:${skillRecord.rawSkillName}`,
@@ -222,6 +225,8 @@ function buildRecord(
     rawSkillName: skillRecord.rawSkillName,
     skillName: skillRecord.skillName,
     ...(skillRecord.skillVersion ? { skillVersion: skillRecord.skillVersion } : {}),
+    skillTaskId,
+    skillTaskTraceIndex: windowContext?.skillTaskTraceIndex ?? 0,
     evalSource: evalSourceForRecord(trace, skillRecord.rawSkillName),
 
     contextTraceIds,

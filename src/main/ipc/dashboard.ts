@@ -207,6 +207,8 @@ interface DashboardSkillEvalRun {
   skillName: string
   skillVersion?: string
   rawSkillName: string
+  skillTaskId?: string
+  skillTaskTraceIndex?: number
   evalSource?: "explicit" | "inherited_context"
   outcome: string
   processScore: number
@@ -214,7 +216,7 @@ interface DashboardSkillEvalRun {
   score: number
   outcomePass: boolean
   pass: boolean
-  resultScore: number
+  resultScore?: number
   resultPass: boolean
   totalToolCalls: number
   modelCallCount: number
@@ -268,6 +270,7 @@ interface DashboardSkillEvalRun {
     artifactSignals: number
     dangerousCommands: number
     subagentRuns: number
+    subagentCompleted: number
     subagentResultLength: number
     subagentFailed: number
     toolResultErrors: number
@@ -278,6 +281,7 @@ interface DashboardSkillEvalSkillSummary {
   skillName: string
   skillVersion?: string
   runs: number
+  resultEvaluatedRuns: number
   passRate: number
   resultPassRate: number
   averageScore: number
@@ -311,6 +315,7 @@ interface DashboardSkillEvalSummary {
   skillPage: number
   skillPageSize: number
   totalRuns: number
+  resultEvaluatedRuns: number
   totalSkills: number
   passRate: number
   resultPassRate: number
@@ -1970,8 +1975,7 @@ async function fetchSkillEvalSummary(
     return {
       ...summary,
       totalTraceHits: skillList.totalTraceHits,
-      totalSkills: skillList.totalSkills,
-      skills: mergeSkillListWithEvaluatedStats(skillList.skills, summary.skills)
+      totalSkills: skillList.totalSkills
     }
   }
 
@@ -2026,8 +2030,7 @@ async function fetchSkillEvalSummary(
     ? {
         ...summary,
         totalTraceHits: skillList.totalTraceHits,
-        totalSkills: skillList.totalSkills,
-        skills: mergeSkillListWithEvaluatedStats(skillList.skills, summary.skills)
+        totalSkills: skillList.totalSkills
       }
     : summary
 }
@@ -2048,6 +2051,8 @@ function skillEvalRecordSourceIncludes(): string[] {
     "rawSkillName",
     "skillName",
     "skillVersion",
+    "skillTaskId",
+    "skillTaskTraceIndex",
     "evalSource",
     "contextTraceIds",
     "skillEvalTraceIds",
@@ -2192,6 +2197,11 @@ function parseSkillEvalRecordHit(hit: EsSearchHit): TraceSkillEvalRecord | null 
     rawSkillName: rawSkillName || (skillVersion ? skillName + "-" + skillVersion : skillName),
     skillName,
     ...(skillVersion ? { skillVersion } : {}),
+    skillTaskId: asString(
+      source.skillTaskId,
+      asString(source.threadId) + ":" + (rawSkillName || skillName) + ":" + traceId
+    ),
+    skillTaskTraceIndex: asNumber(source.skillTaskTraceIndex),
     evalSource: normalizeEvalSource(source.evalSource),
     contextTraceIds: asStringArray(source.contextTraceIds),
     skillEvalTraceIds: asStringArray(source.skillEvalTraceIds),
@@ -2644,6 +2654,7 @@ async function fetchSkillEvalRecordSkillList(
             }
           },
           pass_count: { sum: { field: "passNumeric" } },
+          result_evaluated_runs: { filter: keywordShouldFilter("resultStatus", "evaluated") },
           result_pass_count: { sum: { field: "resultPassNumeric" } },
           avg_score: { avg: { field: "score" } },
           avg_process_score: { avg: { field: "processScore" } },
@@ -2710,12 +2721,14 @@ function parseSkillEvalRecordSkillList(
       if (!matchesSkillSearch(skillName, skillSearch)) return null
       const passCount = metricValue(record, "pass_count")
       const resultPassCount = metricValue(record, "result_pass_count")
+      const resultEvaluatedRuns = bucketDocCount(record, "result_evaluated_runs")
       return {
         skillName,
         ...(skillVersion ? { skillVersion } : {}),
         runs,
+        resultEvaluatedRuns,
         passRate: averageValue(passCount, runs),
-        resultPassRate: averageValue(resultPassCount, runs),
+        resultPassRate: averageValue(resultPassCount, resultEvaluatedRuns),
         averageScore: averageStoredScoreMetric(record, "avg_score"),
         averageProcessScore: averageStoredScoreMetric(record, "avg_process_score"),
         averageOutcomeScore: averageStoredScoreMetric(record, "avg_outcome_score"),
@@ -2750,6 +2763,82 @@ function averageStoredScoreMetric(bucket: Record<string, unknown>, name: string)
   return averageValue(metricValue(bucket, name), 100)
 }
 
+function skillEvalTaskKey(run: DashboardSkillEvalRun): string {
+  return run.skillTaskId || [run.threadId, run.rawSkillName, run.traceId].join(":")
+}
+
+function aggregateSkillEvalTaskRuns(runs: DashboardSkillEvalRun[]): DashboardSkillEvalRun[] {
+  const byTask = new Map<string, DashboardSkillEvalRun[]>()
+  for (const run of runs) {
+    const key = skillEvalTaskKey(run)
+    const bucket = byTask.get(key) ?? []
+    bucket.push(run)
+    byTask.set(key, bucket)
+  }
+
+  return [...byTask.values()].map((taskRuns) => {
+    const sorted = [...taskRuns].sort(
+      (a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime()
+    )
+    const first = sorted[0]
+    const latest = sorted[sorted.length - 1]
+    const latestResult = [...sorted].reverse().find((run) => run.resultGenerated)
+    if (sorted.length === 1) return latest
+
+    const sum = (selector: (run: DashboardSkillEvalRun) => number): number =>
+      sorted.reduce((total, run) => total + selector(run), 0)
+    const any = (selector: (run: DashboardSkillEvalRun) => boolean): boolean =>
+      sorted.some((run) => selector(run))
+
+    return {
+      ...latest,
+      startedAt: first.startedAt,
+      endedAt: latest.endedAt,
+      traceId: latest.traceId,
+      userMessage: first.userMessage || latest.userMessage,
+      evalSource: any((run) => run.evalSource === "explicit") ? "explicit" : latest.evalSource,
+      skillTaskId: skillEvalTaskKey(latest),
+      skillTaskTraceIndex: sorted.length - 1,
+      pass: latest.pass,
+      outcomePass: latest.outcomePass,
+      resultPass: latestResult?.resultPass ?? latest.resultPass,
+      score: latest.score,
+      processScore: latest.processScore,
+      outcomeScore: latest.outcomeScore,
+      ...(latestResult?.resultScore !== undefined ? { resultScore: latestResult.resultScore } : {}),
+      totalToolCalls: sum((run) => run.totalToolCalls),
+      modelCallCount: sum((run) => run.modelCallCount),
+      totalInputTokens: sum((run) => run.totalInputTokens),
+      totalOutputTokens: sum((run) => run.totalOutputTokens),
+      promptInputTokens: sum((run) => run.promptInputTokens),
+      totalTokens: sum((run) => run.totalTokens),
+      cacheReadTokens: sum((run) => run.cacheReadTokens),
+      cacheCreationTokens: sum((run) => run.cacheCreationTokens),
+      peakInputTokens: Math.max(...sorted.map((run) => run.peakInputTokens)),
+      errorCount: sum((run) => run.errorCount),
+      durationMs: sum((run) => run.durationMs),
+      warnings: Array.from(new Set(sorted.flatMap((run) => run.warnings))),
+      outcomeWarnings: Array.from(new Set(sorted.flatMap((run) => run.outcomeWarnings))),
+      resultWarnings: Array.from(new Set(sorted.flatMap((run) => run.resultWarnings))),
+      resultIssues: Array.from(new Set(sorted.flatMap((run) => run.resultIssues))),
+      resultArtifacts: sorted.flatMap((run) => run.resultArtifacts),
+      resultGenerated: latestResult !== undefined,
+      evidence: {
+        finalResponseLength: latest.evidence.finalResponseLength,
+        changedFiles: sum((run) => run.evidence.changedFiles),
+        validationCommands: sum((run) => run.evidence.validationCommands),
+        artifactSignals: sum((run) => run.evidence.artifactSignals),
+        dangerousCommands: sum((run) => run.evidence.dangerousCommands),
+        subagentRuns: sum((run) => run.evidence.subagentRuns),
+        subagentCompleted: sum((run) => run.evidence.subagentCompleted),
+        subagentResultLength: sum((run) => run.evidence.subagentResultLength),
+        subagentFailed: sum((run) => run.evidence.subagentFailed),
+        toolResultErrors: sum((run) => run.evidence.toolResultErrors)
+      }
+    }
+  })
+}
+
 function buildSkillEvalSummaryFromRuns({
   sampleRuns,
   recentRuns,
@@ -2776,17 +2865,19 @@ function buildSkillEvalSummaryFromRuns({
   allowedSkillNames?: Set<string>
   skillList?: DashboardSkillEvalSkillSummary[]
 }): DashboardSkillEvalSummary {
-  const filteredSampleRuns = sampleRuns.filter((run) =>
-    hasAllowedSkillName(run.skillName, allowedSkillNames)
+  const filteredSampleRuns = aggregateSkillEvalTaskRuns(
+    sampleRuns.filter((run) => hasAllowedSkillName(run.skillName, allowedSkillNames))
   )
-  const grouped = new Map<string, DashboardSkillEvalRun[]>()
+  const grouped = skillList ? undefined : new Map<string, DashboardSkillEvalRun[]>()
   const evaluatedTraceIds = new Set<string>()
 
   for (const run of filteredSampleRuns) {
-    const key = skillVersionKey(run.skillName, run.skillVersion)
-    const bucket = grouped.get(key) ?? []
-    bucket.push(run)
-    grouped.set(key, bucket)
+    if (grouped) {
+      const key = skillVersionKey(run.skillName, run.skillVersion)
+      const bucket = grouped.get(key) ?? []
+      bucket.push(run)
+      grouped.set(key, bucket)
+    }
     if (run.traceId) evaluatedTraceIds.add(run.traceId)
   }
 
@@ -2794,10 +2885,7 @@ function buildSkillEvalSummaryFromRuns({
     .filter((run) => hasAllowedSkillName(run.skillName, allowedSkillNames))
     .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
 
-  const evaluatedSkills = summarizeSkillEvalRunBuckets(grouped)
-  const skills = skillList
-    ? mergeSkillListWithEvaluatedStats(skillList, evaluatedSkills)
-    : evaluatedSkills
+  const skills = skillList ?? summarizeSkillEvalRunBuckets(grouped ?? new Map())
   const totalRuns = filteredSampleRuns.length
   const normalizedRecentPage = clampLimit(recentPage, 1, 10_000)
   const normalizedRecentPageSize = clampLimit(recentPageSize, 10, 100)
@@ -2819,13 +2907,14 @@ function buildSkillEvalSummaryFromRuns({
     skillPage: normalizedSkillPage,
     skillPageSize: normalizedSkillPageSize,
     totalRuns,
+    resultEvaluatedRuns: totals.resultEvaluatedRuns,
     totalSkills: skills.length,
     passRate: averageValue(totals.passCount, totalRuns),
-    resultPassRate: averageValue(totals.resultPassCount, totalRuns),
+    resultPassRate: averageValue(totals.resultPassCount, totals.resultEvaluatedRuns),
     averageScore: averageValue(totals.score, totalRuns),
     averageProcessScore: averageValue(totals.processScore, totalRuns),
     averageOutcomeScore: averageValue(totals.outcomeScore, totalRuns),
-    averageResultScore: averageValue(totals.resultScore, totalRuns),
+    averageResultScore: averageValue(totals.resultScore, totals.resultEvaluatedRuns),
     averageToolCalls: averageValue(totals.toolCalls, totalRuns),
     averageModelCalls: averageValue(totals.modelCalls, totalRuns),
     totalInputTokens: totals.inputTokens,
@@ -2858,12 +2947,13 @@ function summarizeSkillEvalRunBuckets(
         skillName: latest.skillName,
         ...(latest.skillVersion ? { skillVersion: latest.skillVersion } : {}),
         runs: runs.length,
+        resultEvaluatedRuns: totals.resultEvaluatedRuns,
         passRate: averageValue(totals.passCount, runs.length),
-        resultPassRate: averageValue(totals.resultPassCount, runs.length),
+        resultPassRate: averageValue(totals.resultPassCount, totals.resultEvaluatedRuns),
         averageScore: averageValue(totals.score, runs.length),
         averageProcessScore: averageValue(totals.processScore, runs.length),
         averageOutcomeScore: averageValue(totals.outcomeScore, runs.length),
-        averageResultScore: averageValue(totals.resultScore, runs.length),
+        averageResultScore: averageValue(totals.resultScore, totals.resultEvaluatedRuns),
         averageToolCalls: averageValue(totals.toolCalls, runs.length),
         averageModelCalls: averageValue(totals.modelCalls, runs.length),
         averageInputTokens: averageValue(totals.inputTokens, runs.length),
@@ -2885,6 +2975,7 @@ function summarizeSkillEvalRunBuckets(
 function summarizeSkillEvalRunTotals(runs: DashboardSkillEvalRun[]): {
   passCount: number
   resultPassCount: number
+  resultEvaluatedRuns: number
   score: number
   processScore: number
   outcomeScore: number
@@ -2904,11 +2995,14 @@ function summarizeSkillEvalRunTotals(runs: DashboardSkillEvalRun[]): {
   return runs.reduce(
     (acc, run) => {
       acc.passCount += run.pass ? 1 : 0
-      acc.resultPassCount += run.resultPass ? 1 : 0
+      if (run.resultGenerated) {
+        acc.resultEvaluatedRuns += 1
+        acc.resultPassCount += run.resultPass ? 1 : 0
+        acc.resultScore += run.resultScore ?? 0
+      }
       acc.score += run.score
       acc.processScore += run.processScore
       acc.outcomeScore += run.outcomeScore
-      acc.resultScore += run.resultScore
       acc.toolCalls += run.totalToolCalls
       acc.modelCalls += run.modelCallCount
       acc.inputTokens += run.totalInputTokens
@@ -2930,6 +3024,7 @@ function summarizeSkillEvalRunTotals(runs: DashboardSkillEvalRun[]): {
     {
       passCount: 0,
       resultPassCount: 0,
+      resultEvaluatedRuns: 0,
       score: 0,
       processScore: 0,
       outcomeScore: 0,
@@ -2985,19 +3080,6 @@ function buildSkillEvalListOnlySummary({
   }
 }
 
-function mergeSkillListWithEvaluatedStats(
-  skillList: DashboardSkillEvalSkillSummary[],
-  evaluatedSkills: DashboardSkillEvalSkillSummary[]
-): DashboardSkillEvalSkillSummary[] {
-  if (skillList.length === 0) return evaluatedSkills
-  const evaluatedByKey = new Map(
-    evaluatedSkills.map((skill) => [skillVersionKey(skill.skillName, skill.skillVersion), skill])
-  )
-  return skillList.map(
-    (skill) => evaluatedByKey.get(skillVersionKey(skill.skillName, skill.skillVersion)) ?? skill
-  )
-}
-
 function isSameSkillVersion(
   record: { skillName: string; skillVersion?: string },
   filter: { skillName: string; skillVersion: string | undefined }
@@ -3013,7 +3095,7 @@ function skillEvalRecordToDashboardRun(
   const processScore = record.processScore / 100
   const outcomeScore = record.outcomeScore / 100
   const score = record.score / 100
-  const resultScore = (record.resultScore ?? 0) / 100
+  const resultScore = record.resultScore !== undefined ? record.resultScore / 100 : undefined
 
   return {
     traceId: record.traceId,
@@ -3024,6 +3106,8 @@ function skillEvalRecordToDashboardRun(
     skillName: record.skillName,
     ...(record.skillVersion ? { skillVersion: record.skillVersion } : {}),
     rawSkillName: record.rawSkillName,
+    skillTaskId: record.skillTaskId,
+    skillTaskTraceIndex: record.skillTaskTraceIndex,
     evalSource: record.evalSource,
     outcome: record.outcome,
     processScore,
@@ -3031,7 +3115,7 @@ function skillEvalRecordToDashboardRun(
     score,
     outcomePass: record.outcomePass,
     pass: record.pass,
-    resultScore,
+    ...(resultScore !== undefined ? { resultScore } : {}),
     resultPass: Boolean(record.resultPass),
     totalToolCalls: record.totalToolCalls,
     modelCallCount: record.modelCallCount,
@@ -3061,6 +3145,7 @@ function skillEvalRecordToDashboardRun(
       artifactSignals: record.evidence.artifactSignals ?? 0,
       dangerousCommands: record.evidence.dangerousCommands ?? 0,
       subagentRuns: record.evidence.subagentRuns ?? 0,
+      subagentCompleted: record.evidence.subagentCompleted ?? 0,
       subagentResultLength: record.evidence.subagentResultLength ?? 0,
       subagentFailed: record.evidence.subagentFailed ?? 0,
       toolResultErrors: record.evidence.toolResultErrors ?? 0
@@ -4329,8 +4414,7 @@ function makeMockSkillEvalSummary(
     ? {
         ...summary,
         totalTraceHits: skillList.totalTraceHits,
-        totalSkills: skillList.totalSkills,
-        skills: mergeSkillListWithEvaluatedStats(skillList.skills, summary.skills)
+        totalSkills: skillList.totalSkills
       }
     : summary
 }
@@ -4866,6 +4950,8 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
     skillAuthorByRawName: { [skill]: "Mock Skill Author" },
     windowContextByRawName: {
       [skill]: {
+        skillTaskId: [trace.threadId, skill, trace.traceId].join(":"),
+        skillTaskTraceIndex: 0,
         contextTraceIds: [trace.traceId],
         skillEvalTraceIds: [trace.traceId],
         contextTraceCount: 1,

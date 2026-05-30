@@ -3,7 +3,11 @@ import type { AgentTrace } from "../trace/types"
 import { getSkillEvalAssistantText } from "./assistant-text"
 import { evaluateTraceSkills, stableJsonStringify } from "./evaluator"
 import { evaluateTraceResults } from "./result-evaluator"
-import { appendSkillEvalWindowTurn, resetSkillEvalWindow } from "./window"
+import {
+  appendSkillEvalWindowTurn,
+  getSkillEvalWindowContextByRawName,
+  resetSkillEvalWindow
+} from "./window"
 
 function makeTrace(overrides: Partial<AgentTrace> = {}): AgentTrace {
   return {
@@ -177,6 +181,10 @@ describe("skill eval scoring", () => {
       outcome: "success"
     })
     expect(firstTurn.evalSkillNames).toEqual(["prd-to-frontend-v6.61.0"])
+    const firstContext = getSkillEvalWindowContextByRawName(threadId, ["prd-to-frontend-v6.61.0"])[
+      "prd-to-frontend-v6.61.0"
+    ]
+    expect(firstContext.skillTaskTraceIndex).toBe(0)
 
     const secondTurn = appendSkillEvalWindowTurn({
       traceId: "trace-b",
@@ -191,6 +199,12 @@ describe("skill eval scoring", () => {
 
     expect(secondTurn.inheritedContext).toBe(true)
     expect(secondTurn.evalSkillNames).toEqual(["prd-to-frontend-v6.61.0"])
+    const secondContext = getSkillEvalWindowContextByRawName(threadId, ["prd-to-frontend-v6.61.0"])[
+      "prd-to-frontend-v6.61.0"
+    ]
+    expect(secondContext.skillTaskId).toBe(firstContext.skillTaskId)
+    expect(secondContext.skillEvalTraceIds).toEqual(["trace-a", "trace-b"])
+    expect(secondContext.skillTaskTraceIndex).toBe(1)
     resetSkillEvalWindow(threadId)
   })
 

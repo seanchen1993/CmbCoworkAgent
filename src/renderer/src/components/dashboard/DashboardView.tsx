@@ -882,7 +882,7 @@ const SkillEvalSkillRow = memo(function SkillEvalSkillRow({
       <div
         className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}
       >
-        {formatNumber(skill.runs)}
+        {renderStatsValue(formatNumber(skill.runs))}
       </div>
       <div
         className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}
@@ -993,7 +993,7 @@ const SkillEvalRunRow = memo(function SkillEvalRunRow({
               variant={run.resultGenerated ? (run.resultPass ? "nominal" : "warning") : "outline"}
               className="normal-case tracking-normal"
             >
-              结果 {run.resultGenerated ? formatSkillEvalScore(run.resultScore) : "待生成"}
+              结果 {run.resultGenerated ? formatSkillEvalScore(run.resultScore ?? 0) : "待生成"}
             </Badge>
             <Badge variant="outline" className="normal-case tracking-normal">
               Token {formatSkillEvalTokens(run.totalTokens)}
@@ -1146,7 +1146,7 @@ const SkillEvalRunSummary = memo(function SkillEvalRunSummary({
               variant={run.resultGenerated ? (run.resultPass ? "nominal" : "warning") : "outline"}
               className="normal-case tracking-normal"
             >
-              结果 {run.resultGenerated ? formatSkillEvalScore(run.resultScore) : "待生成"}
+              结果 {run.resultGenerated ? formatSkillEvalScore(run.resultScore ?? 0) : "待生成"}
             </Badge>
             <Badge variant="outline" className="normal-case tracking-normal">
               Token {formatSkillEvalTokens(run.totalTokens)}

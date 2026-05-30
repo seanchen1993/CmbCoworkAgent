@@ -282,6 +282,8 @@ export interface DashboardSkillEvalRun {
   skillName: string
   skillVersion?: string
   rawSkillName: string
+  skillTaskId?: string
+  skillTaskTraceIndex?: number
   evalSource?: "explicit" | "inherited_context"
   outcome: string
   processScore: number
@@ -289,7 +291,7 @@ export interface DashboardSkillEvalRun {
   score: number
   outcomePass: boolean
   pass: boolean
-  resultScore: number
+  resultScore?: number
   resultPass: boolean
   totalToolCalls: number
   modelCallCount: number
@@ -343,6 +345,7 @@ export interface DashboardSkillEvalRun {
     artifactSignals: number
     dangerousCommands: number
     subagentRuns: number
+    subagentCompleted: number
     subagentResultLength: number
     subagentFailed: number
     toolResultErrors: number
@@ -355,6 +358,7 @@ export interface DashboardSkillEvalSkillSummary {
   statsPending?: boolean
   statsFailed?: boolean
   runs: number
+  resultEvaluatedRuns: number
   passRate: number
   resultPassRate: number
   averageScore: number
@@ -388,6 +392,7 @@ export interface DashboardSkillEvalSummary {
   skillPage: number
   skillPageSize: number
   totalRuns: number
+  resultEvaluatedRuns: number
   totalSkills: number
   passRate: number
   resultPassRate: number
@@ -455,6 +460,7 @@ function withSkillEvalDerivedTotals(summary: DashboardSkillEvalSummary): Dashboa
       ...summary,
       totalRuns: 0,
       passRate: 0,
+      resultEvaluatedRuns: 0,
       resultPassRate: 0,
       averageScore: 0,
       averageProcessScore: 0,
@@ -474,12 +480,19 @@ function withSkillEvalDerivedTotals(summary: DashboardSkillEvalSummary): Dashboa
       averageDurationMs: 0
     }
   }
-  const weighted = (selector: (skill: DashboardSkillEvalSkillSummary) => number): number =>
-    Number(
+  const weighted = (
+    selector: (skill: DashboardSkillEvalSkillSummary) => number,
+    denominatorSelector: (skill: DashboardSkillEvalSkillSummary) => number = (skill) => skill.runs
+  ): number => {
+    const denominator = loadedSkills.reduce((sum, skill) => sum + denominatorSelector(skill), 0)
+    if (denominator <= 0) return 0
+    return Number(
       (
-        loadedSkills.reduce((sum, skill) => sum + selector(skill) * skill.runs, 0) / totalRuns
+        loadedSkills.reduce((sum, skill) => sum + selector(skill) * denominatorSelector(skill), 0) /
+        denominator
       ).toFixed(4)
     )
+  }
   const totalInputTokens = loadedSkills.reduce(
     (sum, skill) => sum + skill.averageInputTokens * skill.runs,
     0
@@ -500,12 +513,19 @@ function withSkillEvalDerivedTotals(summary: DashboardSkillEvalSummary): Dashboa
   return {
     ...summary,
     totalRuns,
+    resultEvaluatedRuns: loadedSkills.reduce((sum, skill) => sum + skill.resultEvaluatedRuns, 0),
     passRate: weighted((skill) => skill.passRate),
-    resultPassRate: weighted((skill) => skill.resultPassRate),
+    resultPassRate: weighted(
+      (skill) => skill.resultPassRate,
+      (skill) => skill.resultEvaluatedRuns
+    ),
     averageScore: weighted((skill) => skill.averageScore),
     averageProcessScore: weighted((skill) => skill.averageProcessScore),
     averageOutcomeScore: weighted((skill) => skill.averageOutcomeScore),
-    averageResultScore: weighted((skill) => skill.averageResultScore),
+    averageResultScore: weighted(
+      (skill) => skill.averageResultScore,
+      (skill) => skill.resultEvaluatedRuns
+    ),
     averageToolCalls: weighted((skill) => skill.averageToolCalls),
     averageModelCalls: weighted((skill) => skill.averageModelCalls),
     totalInputTokens: Math.round(totalInputTokens),
@@ -1220,6 +1240,7 @@ function parseSkillEvalSummary(
         ...(item.statsPending === true ? { statsPending: true } : {}),
         ...(item.statsFailed === true ? { statsFailed: true } : {}),
         runs: numberValue(item.runs),
+        resultEvaluatedRuns: numberValue(item.resultEvaluatedRuns),
         passRate: numberValue(item.passRate),
         resultPassRate: numberValue(item.resultPassRate),
         averageScore: numberValue(item.averageScore),
@@ -1252,6 +1273,10 @@ function parseSkillEvalSummary(
         skillName: String(item.skillName ?? "unknown"),
         ...(item.skillVersion ? { skillVersion: String(item.skillVersion) } : {}),
         rawSkillName: String(item.rawSkillName ?? ""),
+        ...(item.skillTaskId ? { skillTaskId: String(item.skillTaskId) } : {}),
+        ...(item.skillTaskTraceIndex !== undefined
+          ? { skillTaskTraceIndex: numberValue(item.skillTaskTraceIndex) }
+          : {}),
         ...(item.evalSource === "explicit" || item.evalSource === "inherited_context"
           ? { evalSource: item.evalSource }
           : {}),
@@ -1261,7 +1286,7 @@ function parseSkillEvalSummary(
         score: numberValue(item.score),
         outcomePass: item.outcomePass === true,
         pass: item.pass === true,
-        resultScore: numberValue(item.resultScore),
+        ...(item.resultScore !== undefined ? { resultScore: numberValue(item.resultScore) } : {}),
         resultPass: item.resultPass === true,
         totalToolCalls: numberValue(item.totalToolCalls),
         modelCallCount: numberValue(item.modelCallCount),
@@ -1293,6 +1318,7 @@ function parseSkillEvalSummary(
           artifactSignals: numberValue(item.evidence?.artifactSignals),
           dangerousCommands: numberValue(item.evidence?.dangerousCommands),
           subagentRuns: numberValue(item.evidence?.subagentRuns),
+          subagentCompleted: numberValue(item.evidence?.subagentCompleted),
           subagentResultLength: numberValue(item.evidence?.subagentResultLength),
           subagentFailed: numberValue(item.evidence?.subagentFailed),
           toolResultErrors: numberValue(item.evidence?.toolResultErrors)
@@ -1354,6 +1380,7 @@ function parseSkillEvalSummary(
     skillPage,
     skillPageSize,
     totalRuns: numberValue(raw?.totalRuns),
+    resultEvaluatedRuns: numberValue(raw?.resultEvaluatedRuns),
     totalSkills,
     passRate: numberValue(raw?.passRate),
     resultPassRate: numberValue(raw?.resultPassRate),
@@ -1393,6 +1420,7 @@ function emptySkillEvalSummary(): DashboardSkillEvalSummary {
     skillPage: 1,
     skillPageSize: SKILL_EVAL_SKILL_PAGE_SIZE,
     totalRuns: 0,
+    resultEvaluatedRuns: 0,
     totalSkills: 0,
     passRate: 0,
     resultPassRate: 0,

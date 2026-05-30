@@ -15,9 +15,12 @@ export interface SkillEvalWindowTurn {
 interface StoredSkillEvalWindowTurn extends SkillEvalWindowTurn {
   skillContextNames: string[]
   awaitingSkillNames: string[]
+  skillTaskIdsByRawName: Record<string, string>
 }
 
 export interface SkillEvalWindowContext {
+  skillTaskId: string
+  skillTaskTraceIndex: number
   contextTraceIds: string[]
   skillEvalTraceIds: string[]
   contextTraceCount: number
@@ -52,12 +55,37 @@ function cloneTurn(turn: StoredSkillEvalWindowTurn): StoredSkillEvalWindowTurn {
     ...turn,
     usedSkills: [...turn.usedSkills],
     skillContextNames: [...turn.skillContextNames],
-    awaitingSkillNames: [...turn.awaitingSkillNames]
+    awaitingSkillNames: [...turn.awaitingSkillNames],
+    skillTaskIdsByRawName: { ...turn.skillTaskIdsByRawName }
   }
 }
 
 function uniqueStrings(values: string[]): string[] {
   return Array.from(new Set(values.filter(Boolean)))
+}
+
+function skillTaskKey(threadId: string, rawSkillName: string, traceId: string): string {
+  return [threadId, rawSkillName, traceId].map((part) => encodeURIComponent(part)).join(":")
+}
+
+function buildSkillTaskIds(
+  threadId: string,
+  traceId: string,
+  skillContextNames: string[],
+  inheritedSkillNames: string[],
+  existing: StoredSkillEvalWindowTurn[]
+): Record<string, string> {
+  const inherited = new Set(inheritedSkillNames)
+  const taskIds: Record<string, string> = {}
+  const lastTurn = existing[existing.length - 1]
+  for (const rawSkillName of uniqueStrings(skillContextNames)) {
+    const inheritedTaskId = lastTurn?.skillTaskIdsByRawName?.[rawSkillName]
+    taskIds[rawSkillName] =
+      inherited.has(rawSkillName) && inheritedTaskId
+        ? inheritedTaskId
+        : skillTaskKey(threadId, rawSkillName, traceId)
+  }
+  return taskIds
 }
 
 function normalizeText(value: string | undefined): string {
@@ -145,6 +173,13 @@ export function appendSkillEvalWindowTurn(turn: SkillEvalWindowTurn): SkillEvalW
   const inheritedSkillNames =
     usedSkills.length > 0 ? [] : findPendingAnswerContext(existing, referenceMs, turn.userMessage)
   const skillContextNames = usedSkills.length > 0 ? usedSkills : inheritedSkillNames
+  const skillTaskIdsByRawName = buildSkillTaskIds(
+    turn.threadId,
+    turn.traceId,
+    skillContextNames,
+    inheritedSkillNames,
+    existing
+  )
   const awaitingSkillNames = asksUserForMoreInput(turn.assistantText, turn.outcome)
     ? skillContextNames
     : []
@@ -152,7 +187,8 @@ export function appendSkillEvalWindowTurn(turn: SkillEvalWindowTurn): SkillEvalW
     ...turn,
     usedSkills,
     skillContextNames: uniqueStrings(skillContextNames),
-    awaitingSkillNames: uniqueStrings(awaitingSkillNames)
+    awaitingSkillNames: uniqueStrings(awaitingSkillNames),
+    skillTaskIdsByRawName
   }
 
   rememberThreadWindow(turn.threadId, pruneWindow([...existing, nextTurn], referenceMs))
@@ -188,25 +224,31 @@ function buildWindowContextForSkill(
 ): SkillEvalWindowContext {
   const contextTraceIds: string[] = []
   const skillEvalTraceIds: string[] = []
+  let skillTaskId = ""
 
   for (let index = turns.length - 1; index >= 0; index--) {
     const turn = turns[index]
-    const isContextTrace = turn.skillContextNames.includes(rawSkillName)
-    const isEvalTrace = turn.skillContextNames.includes(rawSkillName)
-
-    if (!isContextTrace && !isEvalTrace) {
+    const turnTaskId = turn.skillTaskIdsByRawName[rawSkillName]
+    if (!turnTaskId) {
       if (contextTraceIds.length > 0 || skillEvalTraceIds.length > 0) break
       continue
     }
+    if (!skillTaskId) skillTaskId = turnTaskId
+    if (turnTaskId !== skillTaskId) break
 
     contextTraceIds.push(turn.traceId)
-    if (isEvalTrace) skillEvalTraceIds.push(turn.traceId)
+    skillEvalTraceIds.push(turn.traceId)
   }
 
   const orderedContextTraceIds = uniqueStrings(contextTraceIds.reverse())
   const orderedSkillEvalTraceIds = uniqueStrings(skillEvalTraceIds.reverse())
+  const effectiveSkillTaskId =
+    skillTaskId ||
+    skillTaskKey(turns[0]?.threadId ?? "", rawSkillName, orderedSkillEvalTraceIds[0] ?? "")
 
   return {
+    skillTaskId: effectiveSkillTaskId,
+    skillTaskTraceIndex: Math.max(0, orderedSkillEvalTraceIds.length - 1),
     contextTraceIds: orderedContextTraceIds,
     skillEvalTraceIds: orderedSkillEvalTraceIds,
     contextTraceCount: orderedContextTraceIds.length,
