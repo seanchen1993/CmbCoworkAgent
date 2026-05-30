@@ -1,6 +1,7 @@
 import type { AgentTrace, TraceNode, TraceToolCall } from "../trace/types"
 import { PASS_THRESHOLD, scoreChecks, stableJsonStringify, type SkillEvalCheck } from "./evaluator"
 import { parseSkillNameVersionIdentifier } from "../../utils/skill-identifiers"
+import { getSkillEvalAssistantText } from "./assistant-text"
 
 export type SkillResultEvalStatus = "completed" | "failed"
 
@@ -159,24 +160,6 @@ function collectSubagentStats(trace: AgentTrace): {
   }
 }
 
-function getFinalAssistantText(trace: AgentTrace): string {
-  const steps = trace.steps ?? []
-  const stepText = steps[steps.length - 1]?.assistantText
-  if (typeof stepText === "string" && stepText.trim()) return stepText.trim()
-
-  const nodes = Array.isArray(trace.nodes) ? trace.nodes : []
-  const root = nodes.find((node) => node.type === "trace")
-  const terminalMessages = nodes.filter(
-    (node) =>
-      node.type === "message" &&
-      node.parentId === root?.id &&
-      (node.name === "Run Completed" || node.name === "Run Error" || node.name === "Run Cancelled")
-  )
-  const terminal = terminalMessages[terminalMessages.length - 1]
-  if (typeof terminal?.output === "string") return terminal.output.trim()
-  return ""
-}
-
 function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -290,7 +273,7 @@ function collectEvidence(trace: AgentTrace): SkillResultEvidence {
   }
 
   const evidence: SkillResultEvidence = {
-    finalResponseLength: getFinalAssistantText(trace).length,
+    finalResponseLength: getSkillEvalAssistantText(trace).length,
     changedFiles: [...changedFiles],
     validationCommands: [...new Set(validationCommands)],
     artifactSignals: [...new Set(artifactSignals)],

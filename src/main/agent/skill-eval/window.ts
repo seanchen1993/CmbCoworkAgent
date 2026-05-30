@@ -1,4 +1,5 @@
 import type { AgentTrace } from "../trace/types"
+import { getSkillEvalAssistantText } from "./assistant-text"
 
 export interface SkillEvalWindowTurn {
   traceId: string
@@ -134,19 +135,7 @@ function rememberThreadWindow(threadId: string, turns: StoredSkillEvalWindowTurn
 }
 
 export function getSkillEvalWindowAssistantText(trace: AgentTrace): string {
-  const stepText = trace.steps[trace.steps.length - 1]?.assistantText
-  if (typeof stepText === "string" && stepText.trim()) return stepText.trim()
-
-  const nodes = Array.isArray(trace.nodes) ? trace.nodes : []
-  const root = nodes.find((node) => node.type === "trace")
-  const terminalMessages = nodes.filter(
-    (node) =>
-      node.type === "message" &&
-      node.parentId === root?.id &&
-      (node.name === "Run Completed" || node.name === "Run Error" || node.name === "Run Cancelled")
-  )
-  const terminal = terminalMessages[terminalMessages.length - 1]
-  return typeof terminal?.output === "string" ? terminal.output.trim() : ""
+  return getSkillEvalAssistantText(trace)
 }
 
 export function appendSkillEvalWindowTurn(turn: SkillEvalWindowTurn): SkillEvalWindowAppendResult {

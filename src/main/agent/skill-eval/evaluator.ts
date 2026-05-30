@@ -1,5 +1,6 @@
 import type { AgentTrace, TraceNode } from "../trace/types"
 import { parseSkillNameVersionIdentifier } from "../../utils/skill-identifiers"
+import { getSkillEvalAssistantText, getSkillEvalTerminalMessageNode } from "./assistant-text"
 
 const DEFAULT_SKILL_EVAL_TOOL_BUDGET = 40
 
@@ -130,29 +131,6 @@ function countRepeatedToolCalls(trace: AgentTrace): number {
   return repeated
 }
 
-function getFinalAssistantText(trace: AgentTrace): string {
-  const steps = trace.steps ?? []
-  const stepText = steps[steps.length - 1]?.assistantText
-  if (typeof stepText === "string" && stepText.trim()) return stepText.trim()
-
-  const terminal = getTerminalMessageNode(trace)
-  if (typeof terminal?.output === "string") return terminal.output.trim()
-  return ""
-}
-
-function getTerminalMessageNode(trace: AgentTrace): TraceNode | null {
-  const nodes = Array.isArray(trace.nodes) ? trace.nodes : []
-  const root = nodes.find((node) => node.type === "trace")
-  const terminalMessages = nodes.filter(
-    (node) =>
-      node.type === "message" &&
-      node.parentId === root?.id &&
-      (node.name === "Run Completed" || node.name === "Run Error" || node.name === "Run Cancelled")
-  )
-  if (terminalMessages.length === 0) return null
-  return terminalMessages[terminalMessages.length - 1] ?? null
-}
-
 function outputLength(value: unknown): number {
   if (typeof value === "string") return value.trim().length
   if (value === null || value === undefined) return 0
@@ -214,8 +192,8 @@ function buildChecks(
 }
 
 function buildOutcomeChecks(trace: AgentTrace, toolResultErrors: number): SkillEvalCheck[] {
-  const finalAssistantText = getFinalAssistantText(trace)
-  const terminalNode = getTerminalMessageNode(trace)
+  const finalAssistantText = getSkillEvalAssistantText(trace)
+  const terminalNode = getSkillEvalTerminalMessageNode(trace)
   const terminalOutputLength = outputLength(terminalNode?.output)
   return [
     {
