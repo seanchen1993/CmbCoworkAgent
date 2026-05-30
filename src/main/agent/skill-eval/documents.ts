@@ -40,6 +40,7 @@ export interface BuildSkillEvalTraceExtensionOptions {
 
 const PROCESS_CHECK_WARNING_TAGS: Partial<Record<string, TraceSkillEvalWarningTag>> = {
   input_tokens_reasonable: "PROMPT_TOKEN_BUDGET_EXCEEDED",
+  peak_input_tokens_reasonable: "PROMPT_TOKEN_BUDGET_EXCEEDED",
   no_repeated_tool_calls: "REPEATED_TOOL_CALLS",
   step_budget_reasonable: "STEP_BUDGET_EXCEEDED",
   tool_budget_reasonable: "TOOL_BUDGET_EXCEEDED"

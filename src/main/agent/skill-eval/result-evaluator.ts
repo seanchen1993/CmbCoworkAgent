@@ -1,5 +1,5 @@
 import type { AgentTrace, TraceNode, TraceToolCall } from "../trace/types"
-import type { SkillEvalCheck } from "./evaluator"
+import { PASS_THRESHOLD, scoreChecks, stableJsonStringify, type SkillEvalCheck } from "./evaluator"
 import { parseSkillNameVersionIdentifier } from "../../utils/skill-identifiers"
 
 export type SkillResultEvalStatus = "completed" | "failed"
@@ -48,7 +48,6 @@ export interface SkillResultEvalRecord {
   evaluatedAt: string
 }
 
-const PASS_THRESHOLD = 0.7
 const MIN_FINAL_RESPONSE_CHARS = 20
 const VALIDATION_COMMAND_PATTERNS: RegExp[] = [
   /\bnpm\s+(?:run\s+)?(?:test|build|lint|typecheck)\b/,
@@ -108,12 +107,6 @@ type EvidenceToolCall = TraceToolCall & {
 
 function skillVersionKey(skillName: string, skillVersion?: string): string {
   return `${skillName}:${skillVersion ?? ""}`
-}
-
-function scoreChecks(checks: SkillEvalCheck[]): number {
-  const totalWeight = checks.reduce((sum, check) => sum + check.weight, 0) || 1
-  const earned = checks.reduce((sum, check) => sum + (check.ok ? check.weight : 0), 0)
-  return Number((earned / totalWeight).toFixed(4))
 }
 
 function nodeHasError(node: TraceNode): boolean {
@@ -177,9 +170,7 @@ function getFinalAssistantText(trace: AgentTrace): string {
     (node) =>
       node.type === "message" &&
       node.parentId === root?.id &&
-      (node.name === "Run Completed" ||
-        node.name === "Run Error" ||
-        node.name === "Run Cancelled")
+      (node.name === "Run Completed" || node.name === "Run Error" || node.name === "Run Cancelled")
   )
   const terminal = terminalMessages[terminalMessages.length - 1]
   if (typeof terminal?.output === "string") return terminal.output.trim()
@@ -188,13 +179,13 @@ function getFinalAssistantText(trace: AgentTrace): string {
 
 function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : {}
 }
 
 function toolCallKey(call: TraceToolCall): string {
   try {
-    return `${call.name}:${JSON.stringify(call.args ?? {})}`
+    return `${call.name}:${stableJsonStringify(call.args ?? {})}`
   } catch {
     return `${call.name}:unserializable`
   }
@@ -222,12 +213,14 @@ function getAllToolCalls(trace: AgentTrace): EvidenceToolCall[] {
   const primaryCalls = fromSteps.length > 0 ? fromSteps : fromModelCalls
   const fromNodes = (trace.nodes ?? [])
     .filter((node) => node.type === "tool" && node.name)
-    .map((node): EvidenceToolCall => ({
-      name: node.name || "unknown",
-      args: toRecord(node.input),
-      source: "node",
-      status: node.status
-    }))
+    .map(
+      (node): EvidenceToolCall => ({
+        name: node.name || "unknown",
+        args: toRecord(node.input),
+        source: "node",
+        status: node.status
+      })
+    )
   return dedupeToolCalls([...primaryCalls, ...fromNodes])
 }
 
@@ -270,16 +263,6 @@ function getPathSignal(call: TraceToolCall): string {
   )
 }
 
-function dedupeEvidence(evidence: SkillResultEvidence): SkillResultEvidence {
-  return {
-    ...evidence,
-    changedFiles: [...new Set(evidence.changedFiles)],
-    validationCommands: [...new Set(evidence.validationCommands)],
-    artifactSignals: [...new Set(evidence.artifactSignals)],
-    dangerousCommands: [...new Set(evidence.dangerousCommands)]
-  }
-}
-
 function collectEvidence(trace: AgentTrace): SkillResultEvidence {
   const toolCalls = getAllToolCalls(trace)
   const validationCommands: string[] = []
@@ -317,29 +300,26 @@ function collectEvidence(trace: AgentTrace): SkillResultEvidence {
     errorNodes: countErrorNodes(trace),
     modelCallCount: Array.isArray(trace.modelCalls) ? trace.modelCalls.length : 0,
     toolCallCount:
-      typeof trace.totalToolCalls === "number"
-        ? trace.totalToolCalls
-        : getAllToolCalls(trace).length
+      typeof trace.totalToolCalls === "number" ? trace.totalToolCalls : toolCalls.length
   }
 
-  return dedupeEvidence(evidence)
+  return evidence
 }
 
 function buildChecks(evidence: SkillResultEvidence): SkillEvalCheck[] {
   const hasArtifactSignal = evidence.changedFiles.length > 0 || evidence.artifactSignals.length > 0
   const hasSubstantiveResponse = evidence.finalResponseLength >= MIN_FINAL_RESPONSE_CHARS
-  const responseNeeded = !hasArtifactSignal
+  const validationNeeded = evidence.changedFiles.length > 0
 
   return [
     {
       name: "final_response_substantive",
       label: "最终响应有效",
-      ok: !responseNeeded || hasSubstantiveResponse,
+      ok: hasSubstantiveResponse,
       weight: 2,
       detail: {
         responseLength: evidence.finalResponseLength,
-        minWhenNoArtifact: MIN_FINAL_RESPONSE_CHARS,
-        responseNeeded
+        min: MIN_FINAL_RESPONSE_CHARS
       }
     },
     {
@@ -356,9 +336,12 @@ function buildChecks(evidence: SkillResultEvidence): SkillEvalCheck[] {
     {
       name: "has_validation_signal",
       label: "存在验证动作",
-      ok: evidence.validationCommands.length > 0,
+      ok: !validationNeeded || evidence.validationCommands.length > 0,
       weight: 2,
-      detail: { validationCommands: evidence.validationCommands.slice(0, 5) }
+      detail: {
+        validationNeeded,
+        validationCommands: evidence.validationCommands.slice(0, 5)
+      }
     },
     {
       name: "no_tool_result_errors",
@@ -416,7 +399,9 @@ function buildIssues(trace: AgentTrace, evidence: SkillResultEvidence): string[]
 
 function buildWarnings(evidence: SkillResultEvidence): string[] {
   const warnings: string[] = []
-  if (evidence.validationCommands.length === 0) warnings.push("没有检测到验证动作")
+  if (evidence.changedFiles.length > 0 && evidence.validationCommands.length === 0) {
+    warnings.push("没有检测到验证动作")
+  }
   if (evidence.changedFiles.length === 0 && evidence.artifactSignals.length === 0) {
     warnings.push("没有检测到明确文件或产物信号")
   }
@@ -453,14 +438,38 @@ export function evaluateTraceResults(trace: AgentTrace): SkillResultEvalRecord[]
       status: "completed",
       score,
       pass,
-      checks,
-      artifacts,
-      evidence,
-      issues,
-      warnings,
+      checks: cloneChecks(checks),
+      artifacts: cloneArtifacts(artifacts),
+      evidence: cloneEvidence(evidence),
+      issues: [...issues],
+      warnings: [...warnings],
       startedAt: trace.startedAt,
       endedAt: trace.endedAt,
       evaluatedAt
     }
   })
+}
+
+function cloneChecks(checks: SkillEvalCheck[]): SkillEvalCheck[] {
+  return checks.map((check) => ({
+    ...check,
+    ...(check.detail ? { detail: { ...check.detail } } : {})
+  }))
+}
+
+function cloneArtifacts(artifacts: SkillResultArtifact[]): SkillResultArtifact[] {
+  return artifacts.map((artifact) => ({
+    ...artifact,
+    ...(artifact.detail ? { detail: { ...artifact.detail } } : {})
+  }))
+}
+
+function cloneEvidence(evidence: SkillResultEvidence): SkillResultEvidence {
+  return {
+    ...evidence,
+    changedFiles: [...evidence.changedFiles],
+    validationCommands: [...evidence.validationCommands],
+    artifactSignals: [...evidence.artifactSignals],
+    dangerousCommands: [...evidence.dangerousCommands]
+  }
 }

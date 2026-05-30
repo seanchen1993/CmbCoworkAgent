@@ -56,6 +56,7 @@ export const OUTCOME_SCORE_WEIGHT = 0.6
 const STEP_BUDGET = 12
 const MAX_CONSECUTIVE_SAME_CALL = 3
 const AVG_PROMPT_INPUT_TOKEN_BUDGET = 48_000
+const PEAK_PROMPT_INPUT_TOKEN_BUDGET = 120_000
 
 function nodeHasError(node: TraceNode): boolean {
   return node.status === "error" || node.type === "error" || Boolean(node.metadata?.error)
@@ -80,8 +81,32 @@ function getStepCount(trace: AgentTrace): number {
   return Array.isArray(trace.steps) ? trace.steps.length : 0
 }
 
+function normalizeForStableJson(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (typeof value === "bigint") return value.toString()
+  if (!value || typeof value !== "object") return value
+  if (seen.has(value)) return "[Circular]"
+
+  seen.add(value)
+  if (Array.isArray(value)) return value.map((item) => normalizeForStableJson(item, seen))
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nestedValue]) => [key, normalizeForStableJson(nestedValue, seen)])
+  )
+}
+
+export function stableJsonStringify(value: unknown): string {
+  try {
+    const json = JSON.stringify(normalizeForStableJson(value))
+    return typeof json === "string" ? json : String(value)
+  } catch {
+    return String(value)
+  }
+}
+
 function getToolSignature(call: { name: string; args: Record<string, unknown> }): string {
-  return `${call.name}:${JSON.stringify(call.args ?? {})}`
+  return `${call.name}:${stableJsonStringify(call.args ?? {})}`
 }
 
 function countRepeatedToolCalls(trace: AgentTrace): number {
@@ -106,8 +131,13 @@ function countRepeatedToolCalls(trace: AgentTrace): number {
 }
 
 function getFinalAssistantText(trace: AgentTrace): string {
-  const text = trace.steps[trace.steps.length - 1]?.assistantText
-  return typeof text === "string" ? text.trim() : ""
+  const steps = trace.steps ?? []
+  const stepText = steps[steps.length - 1]?.assistantText
+  if (typeof stepText === "string" && stepText.trim()) return stepText.trim()
+
+  const terminal = getTerminalMessageNode(trace)
+  if (typeof terminal?.output === "string") return terminal.output.trim()
+  return ""
 }
 
 function getTerminalMessageNode(trace: AgentTrace): TraceNode | null {
@@ -132,7 +162,8 @@ function outputLength(value: unknown): number {
 function buildChecks(
   trace: AgentTrace,
   toolCalls: number,
-  averagePromptInputTokens: number
+  averagePromptInputTokens: number,
+  peakInputTokens: number
 ): SkillEvalCheck[] {
   const stepCount = getStepCount(trace)
   const repeatedToolCalls = countRepeatedToolCalls(trace)
@@ -168,6 +199,16 @@ function buildChecks(
         averagePromptInputTokens: Math.round(averagePromptInputTokens),
         max: AVG_PROMPT_INPUT_TOKEN_BUDGET
       }
+    },
+    {
+      name: "peak_input_tokens_reasonable",
+      label: "最高单次输入不过高",
+      ok: peakInputTokens <= PEAK_PROMPT_INPUT_TOKEN_BUDGET,
+      weight: 1,
+      detail: {
+        peakInputTokens: Math.round(peakInputTokens),
+        max: PEAK_PROMPT_INPUT_TOKEN_BUDGET
+      }
     }
   ]
 }
@@ -176,10 +217,6 @@ function buildOutcomeChecks(trace: AgentTrace, toolResultErrors: number): SkillE
   const finalAssistantText = getFinalAssistantText(trace)
   const terminalNode = getTerminalMessageNode(trace)
   const terminalOutputLength = outputLength(terminalNode?.output)
-  const terminalSuccess = Boolean(
-    terminalNode && terminalNode.status === "success" && terminalOutputLength > 0
-  )
-
   return [
     {
       name: "run_completed_successfully",
@@ -197,8 +234,8 @@ function buildOutcomeChecks(trace: AgentTrace, toolResultErrors: number): SkillE
     },
     {
       name: "terminal_message_success",
-      label: "终止消息成功",
-      ok: terminalSuccess,
+      label: "终止消息有内容",
+      ok: terminalOutputLength > 0,
       weight: 2,
       detail: {
         terminalNodeId: terminalNode?.id,
@@ -216,12 +253,14 @@ function buildOutcomeChecks(trace: AgentTrace, toolResultErrors: number): SkillE
   ]
 }
 
-function scoreChecks(checks: SkillEvalCheck[]): number {
+export function scoreChecks(checks: SkillEvalCheck[]): number {
   const totalWeight = checks.reduce((sum, check) => sum + check.weight, 0) || 1
   const earned = checks.reduce((sum, check) => sum + (check.ok ? check.weight : 0), 0)
   return Number((earned / totalWeight).toFixed(4))
 }
 
+// Overall skill score intentionally covers process + outcome only. Result quality
+// is evaluated separately as resultScore because not every trace has result evidence.
 function combineScores(processScore: number, outcomeScore: number): number {
   return Number(
     (processScore * PROCESS_SCORE_WEIGHT + outcomeScore * OUTCOME_SCORE_WEIGHT).toFixed(4)
@@ -247,19 +286,15 @@ function summarizeTokenUsage(trace: AgentTrace): {
       const usage = call.tokenUsage
       const input = usage?.inputTokens ?? 0
       const output = usage?.outputTokens ?? 0
-      const total = usage?.totalTokens ?? input + output
       const cacheRead = usage?.cacheReadTokens ?? 0
       const cacheCreation = usage?.cacheCreationTokens ?? 0
       const promptInput = input + cacheRead + cacheCreation
+      const total = input + output + cacheRead + cacheCreation
 
       acc.totalInputTokens += input
       acc.totalOutputTokens += output
       acc.promptInputTokens += promptInput
-      // Some providers include cache tokens in totalTokens, others do not. Keep
-      // provider-reported totals when present and only fall back to input+output.
       acc.totalTokens += total
-      if (usage?.totalTokens !== undefined) acc.reportedTotalCount += 1
-      else acc.fallbackTotalCount += 1
       acc.cacheReadTokens += cacheRead
       acc.cacheCreationTokens += cacheCreation
       acc.peakInputTokens = Math.max(acc.peakInputTokens, promptInput)
@@ -275,16 +310,9 @@ function summarizeTokenUsage(trace: AgentTrace): {
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
       peakInputTokens: 0,
-      maxContextTokens: 0,
-      reportedTotalCount: 0,
-      fallbackTotalCount: 0
+      maxContextTokens: 0
     }
   )
-  const totalTokensIncludesCache =
-    summary.reportedTotalCount > 0 && summary.fallbackTotalCount > 0
-      ? "mixed"
-      : summary.reportedTotalCount > 0
-
   return {
     modelCallCount: summary.modelCallCount,
     totalInputTokens: summary.totalInputTokens,
@@ -296,7 +324,7 @@ function summarizeTokenUsage(trace: AgentTrace): {
     peakInputTokens: summary.peakInputTokens,
     maxContextTokens: summary.maxContextTokens,
     averagePromptInputTokens: averageValue(summary.promptInputTokens, summary.modelCallCount),
-    totalTokensIncludesCache
+    totalTokensIncludesCache: true
   }
 }
 
@@ -329,7 +357,12 @@ export function evaluateTraceSkills(trace: AgentTrace): SkillEvalRecord[] {
   const toolCalls =
     typeof trace.totalToolCalls === "number" ? trace.totalToolCalls : countToolNodes(trace)
   const tokenUsage = summarizeTokenUsage(trace)
-  const checks = buildChecks(trace, toolCalls, tokenUsage.averagePromptInputTokens)
+  const checks = buildChecks(
+    trace,
+    toolCalls,
+    tokenUsage.averagePromptInputTokens,
+    tokenUsage.peakInputTokens
+  )
   const outcomeChecks = buildOutcomeChecks(trace, toolResultErrors)
   const processScore = scoreChecks(checks)
   const outcomeScore = scoreChecks(outcomeChecks)
@@ -365,10 +398,17 @@ export function evaluateTraceSkills(trace: AgentTrace): SkillEvalRecord[] {
       score,
       outcomePass,
       pass,
-      checks,
-      outcomeChecks,
-      warnings,
-      outcomeWarnings
+      checks: cloneChecks(checks),
+      outcomeChecks: cloneChecks(outcomeChecks),
+      warnings: [...warnings],
+      outcomeWarnings: [...outcomeWarnings]
     }
   })
+}
+
+function cloneChecks(checks: SkillEvalCheck[]): SkillEvalCheck[] {
+  return checks.map((check) => ({
+    ...check,
+    ...(check.detail ? { detail: { ...check.detail } } : {})
+  }))
 }
