@@ -424,6 +424,10 @@ function createUnboundRunDetail(
   }
 }
 
+function featureSessionKey(projectId: string, slug: string, threadId: string): string {
+  return `${projectId}\u0000${slug}\u0000${threadId}`
+}
+
 async function getLatestSessionWorkspacePath(
   sessions: HarnessSessionBinding[],
   threadsById: Map<string, Thread>,
@@ -2206,7 +2210,6 @@ function FeatureDetailPage({
   onBackToList,
   onBackToProject,
   onRefresh,
-  onSessionLinked,
   onActiveSessionChange,
   onSessionViewChange
 }: {
@@ -2221,7 +2224,6 @@ function FeatureDetailPage({
   onBackToList: () => void
   onBackToProject: () => void
   onRefresh: () => void
-  onSessionLinked: () => Promise<void>
   onActiveSessionChange?: (threadId: string) => void
   onSessionViewChange?: (viewing: boolean) => void
 }): React.JSX.Element {
@@ -2277,7 +2279,9 @@ function FeatureDetailPage({
     detailKey: string
     threadId: string | null
   }>({ detailKey: "", threadId: null })
-  const [activeDetailTab, setActiveDetailTab] = useState<"feature" | "session">("feature")
+  const [activeDetailTab, setActiveDetailTab] = useState<"feature" | "session">(() =>
+    isViewingSession && activeSessionThreadId ? "session" : "feature"
+  )
 
   useEffect(() => {
     if (!detail) {
@@ -2313,7 +2317,11 @@ function FeatureDetailPage({
   }, [activeSessionThreadId, detailKey, isViewingSession])
 
   const selectedSessionThreadId =
-    selectedSessionState.detailKey === detailKey ? selectedSessionState.threadId : null
+    detail && selectedSessionState.detailKey === detailKey
+      ? selectedSessionState.threadId
+      : isViewingSession
+        ? activeSessionThreadId ?? null
+        : null
 
   const handleBackToFeature = (): void => {
     setActiveDetailTab("feature")
@@ -2351,11 +2359,6 @@ function FeatureDetailPage({
       setSelectedSessionState({ detailKey, threadId: thread.thread_id })
       onActiveSessionChange?.(thread.thread_id)
       setActiveDetailTab("session")
-      try {
-        await onSessionLinked()
-      } catch {
-        // refresh failed but session already created — non-critical
-      }
     } catch (error) {
       toast.error(cleanIpcError(error))
     } finally {
@@ -2367,7 +2370,6 @@ function FeatureDetailPage({
     detail,
     detailKey,
     onActiveSessionChange,
-    onSessionLinked,
     sessionBusy,
     threadsById,
     unbound
@@ -2552,7 +2554,11 @@ function FeatureDetailPage({
         </div>
       </div>
 
-      {loading || !detail ? (
+      {activeDetailTab === "session" && selectedSessionThreadId ? (
+        <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col overflow-hidden p-6">
+          <FeatureConversationPanel threadId={selectedSessionThreadId} />
+        </div>
+      ) : loading || !detail ? (
         <div className="flex flex-1 items-center justify-center text-muted-foreground">
           <Loader2 className="mr-2 size-5 animate-spin" />
           读取特性详情
@@ -2882,6 +2888,7 @@ export function HarnessBoardView(): React.JSX.Element {
   const projectDetailsRefreshInFlightRef = useRef(false)
   const selectedProjectRefreshInFlightRef = useRef(false)
   const prefetchedRunDetailRef = useRef<HarnessRunDetailViewModel | null>(null)
+  const skipRunDetailLoadForSessionRef = useRef<string | null>(null)
   projectsRef.current = projects
   selectedProjectIdRef.current = selectedProjectId
   selectedFeatureRef.current = selectedFeature
@@ -3039,6 +3046,22 @@ export function HarnessBoardView(): React.JSX.Element {
       setRunDetail(null)
       return
     }
+    const activeSessionThreadId = selectedFeature.activeSessionThreadId
+    const skipRunDetailKey = activeSessionThreadId
+      ? featureSessionKey(selectedFeature.projectId, selectedFeature.slug, activeSessionThreadId)
+      : null
+    if (skipRunDetailKey && skipRunDetailLoadForSessionRef.current === skipRunDetailKey) {
+      skipRunDetailLoadForSessionRef.current = null
+      setRunDetail((currentDetail) =>
+        currentDetail &&
+        currentDetail.project.projectId === selectedFeature.projectId &&
+        currentDetail.run.slug === selectedFeature.slug
+          ? currentDetail
+          : null
+      )
+      setLoadingRun(false)
+      return
+    }
     if (
       selectedFeatureProjectDetail &&
       !selectedFeatureProjectDetail.runs.some((run) => run.slug === selectedFeature.slug)
@@ -3125,14 +3148,6 @@ export function HarnessBoardView(): React.JSX.Element {
       areHarnessValuesEqual(currentDetail, detail) ? currentDetail : detail
     )
   }, [selectedFeature])
-
-  const refreshSelectedFeatureSessionData = useCallback(async (): Promise<void> => {
-    if (!selectedFeature) return
-    await Promise.all([
-      refreshSelectedRunDetail(),
-      loadProjectDetail(selectedFeature.projectId)
-    ])
-  }, [loadProjectDetail, refreshSelectedRunDetail, selectedFeature])
 
   const { activeSystemGroups, archivedSystemGroups } = useMemo<{
     activeSystemGroups: SystemGroup[]
@@ -3384,19 +3399,33 @@ export function HarnessBoardView(): React.JSX.Element {
   )
   const runDetailWithSessions = useMemo(
     () => {
-      if (runDetail) return withDerivedRunSessions(runDetail, selectedFeatureSessions)
+      if (
+        runDetail &&
+        selectedFeature &&
+        runDetail.project.projectId === selectedFeature.projectId &&
+        runDetail.run.slug === selectedFeature.slug
+      ) {
+        return withDerivedRunSessions(runDetail, selectedFeatureSessions)
+      }
       if (!selectedFeature || !selectedFeatureProjectDetail) {
         return null
       }
       const featureExists = selectedFeatureProjectDetail.runs.some((run) => run.slug === selectedFeature.slug)
-      return featureExists
+      return featureExists && !(isViewingSession && selectedFeature.activeSessionThreadId)
         ? null
         : createUnboundRunDetail(selectedFeatureProjectDetail, selectedFeature.slug, selectedFeatureSessions)
     },
-    [runDetail, selectedFeature, selectedFeatureProjectDetail, selectedFeatureSessions]
+    [isViewingSession, runDetail, selectedFeature, selectedFeatureProjectDetail, selectedFeatureSessions]
   )
   const effectiveLoadingRun = loadingRun && !runDetailWithSessions
-  const showingUnboundRunDetail = runDetailWithSessions !== null && runDetail === null
+  const showingUnboundRunDetail =
+    runDetailWithSessions !== null &&
+    runDetail === null &&
+    !(
+      selectedFeature?.activeSessionThreadId &&
+      isViewingSession &&
+      selectedFeatureProjectDetail?.runs.some((run) => run.slug === selectedFeature.slug)
+    )
   const selectedProject =
     selectedProjectId ? projects.find((project) => project.projectId === selectedProjectId) ?? null : null
   const selectedProjectDetail = selectedProjectId ? detailsByProjectId[selectedProjectId] : undefined
@@ -3589,7 +3618,16 @@ export function HarnessBoardView(): React.JSX.Element {
           threadStates: allThreadStates,
           createThread
         })
-        openFeatureDetail(project.projectId, slug, thread.thread_id)
+        skipRunDetailLoadForSessionRef.current = featureSessionKey(
+          project.projectId,
+          slug,
+          thread.thread_id
+        )
+        setSelectedProjectId(project.projectId)
+        setSelectedFeature({ projectId: project.projectId, slug, activeSessionThreadId: thread.thread_id })
+        setIsViewingSession(true)
+        markRead(thread.thread_id)
+        await selectThread(thread.thread_id, { preserveView: true })
       } catch (error) {
         toast.error(cleanIpcError(error))
       } finally {
@@ -3600,7 +3638,8 @@ export function HarnessBoardView(): React.JSX.Element {
       allThreadStates,
       createThread,
       creatingSidebarSessionKey,
-      openFeatureDetail,
+      markRead,
+      selectThread,
       threadsById
     ]
   )
@@ -3726,13 +3765,12 @@ export function HarnessBoardView(): React.JSX.Element {
           unbound={showingUnboundRunDetail}
           activeSessionThreadId={selectedFeature.activeSessionThreadId}
           isViewingSession={isViewingSession}
-          fallbackProjectName={selectedFeatureProjectDetail?.project?.name}
-          fallbackFeatureTitle={fallbackFeatureSummary?.title}
-          fallbackFeatureSlug={fallbackFeatureSummary?.slug}
+          fallbackProjectName={selectedFeatureProjectDetail?.project?.name ?? selectedProject?.name}
+          fallbackFeatureTitle={fallbackFeatureSummary?.title ?? selectedFeature.slug}
+          fallbackFeatureSlug={fallbackFeatureSummary?.slug ?? selectedFeature.slug}
           onBackToList={handleBackToProjectList}
           onBackToProject={handleBackToProject}
           onRefresh={() => void refreshSelectedRunDetail()}
-          onSessionLinked={refreshSelectedFeatureSessionData}
           onActiveSessionChange={handleActiveSessionChange}
           onSessionViewChange={handleSessionViewChange}
         />
