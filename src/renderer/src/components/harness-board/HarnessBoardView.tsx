@@ -2322,11 +2322,14 @@ function FeatureDetailPage({
       : isViewingSession
         ? activeSessionThreadId ?? null
         : null
+  const activeSessionThreadIdForView =
+    activeDetailTab === "session" ? selectedSessionThreadId : null
+  const effectiveActiveDetailTab = activeSessionThreadIdForView ? "session" : "feature"
 
   const handleBackToFeature = (): void => {
     setActiveDetailTab("feature")
     onSessionViewChange?.(false)
-    if (!unbound) onRefresh()
+    onRefresh()
   }
 
   const handleHookSessionSelect = useCallback((threadId: string): void => {
@@ -2338,10 +2341,9 @@ function FeatureDetailPage({
   }, [detail, detailKey, onActiveSessionChange, onSessionViewChange])
 
   useEffect(() => {
-    if (activeDetailTab !== "session") return
-    if (!selectedSessionThreadId) return
-    void selectThread(selectedSessionThreadId, { preserveView: true })
-  }, [activeDetailTab, selectThread, selectedSessionThreadId])
+    if (!activeSessionThreadIdForView) return
+    void selectThread(activeSessionThreadIdForView, { preserveView: true })
+  }, [activeSessionThreadIdForView, selectThread])
 
   const handleCreateSession = useCallback(async (): Promise<void> => {
     if (!detail || sessionBusy || unbound) return
@@ -2491,14 +2493,14 @@ function FeatureDetailPage({
               }
               featureTitle={detail?.run.title ?? fallbackFeatureTitle ?? "特性详情"}
               sessionTitle={
-                activeDetailTab === "session" && selectedSessionThreadId
-                  ? threadsById.get(selectedSessionThreadId)?.title
+                activeSessionThreadIdForView
+                  ? threadsById.get(activeSessionThreadIdForView)?.title
                   : undefined
               }
-              onBack={activeDetailTab === "session" ? handleBackToFeature : onBackToProject}
+              onBack={effectiveActiveDetailTab === "session" ? handleBackToFeature : onBackToProject}
               onProjectList={onBackToList}
               onProject={onBackToProject}
-              onFeature={activeDetailTab === "session" ? handleBackToFeature : undefined}
+              onFeature={effectiveActiveDetailTab === "session" ? handleBackToFeature : undefined}
             />
             <div className="flex min-w-0 items-center gap-2">
               <Workflow className="size-4 shrink-0 text-status-info" />
@@ -2519,7 +2521,7 @@ function FeatureDetailPage({
                   : "加载中"}
             </div>
           </div>
-          {activeDetailTab === "feature" && (
+          {effectiveActiveDetailTab === "feature" && (
             <div className="flex shrink-0 items-center gap-2">
               <Button
                 type="button"
@@ -2554,9 +2556,9 @@ function FeatureDetailPage({
         </div>
       </div>
 
-      {activeDetailTab === "session" && selectedSessionThreadId ? (
+      {activeSessionThreadIdForView ? (
         <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col overflow-hidden p-6">
-          <FeatureConversationPanel threadId={selectedSessionThreadId} />
+          <FeatureConversationPanel threadId={activeSessionThreadIdForView} />
         </div>
       ) : loading || !detail ? (
         <div className="flex flex-1 items-center justify-center text-muted-foreground">
@@ -2565,51 +2567,47 @@ function FeatureDetailPage({
         </div>
       ) : (
         <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col overflow-hidden p-6">
-          {activeDetailTab === "feature" ? (
-            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-              <div className="grid grid-cols-[minmax(0,1fr)_340px] gap-5">
-                <div className="min-w-0 space-y-4">
-                  {renderStageNodeStrip()}
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            <div className="grid grid-cols-[minmax(0,1fr)_340px] gap-5">
+              <div className="min-w-0 space-y-4">
+                {renderStageNodeStrip()}
 
-                  {selectedNode ? (
-                    <StageArtifactPanel node={selectedNode} workspacePath={detail.project.workspacePath} />
-                  ) : (
-                    <section className="rounded-md border border-dashed border-border bg-background px-3 py-8 text-center text-sm text-muted-foreground">
-                      暂无阶段数据。
-                    </section>
-                  )}
-                </div>
-
-                <aside className="min-w-0 space-y-4">
-                  <FeatureWorkspaceChangesPanel sessions={detail.sessions} threadsById={threadsById} />
-
-                  <section className="rounded-md border border-border bg-background">
-                    <div className="flex min-w-0 items-center gap-2 border-b border-border px-3 py-3 text-sm font-semibold">
-                      <Workflow className="size-4 shrink-0 text-muted-foreground" />
-                      <span className="truncate">运行事件</span>
-                    </div>
-                    {selectedNode && selectedNodeHooks.length > 0 ? (
-                      <div className="max-h-64 overflow-y-auto">
-                        {selectedNodeHooks.map((hook, index) => (
-                          <HookLine
-                            key={`${hook.ts || "hook"}-${hook.eventId}-${index}`}
-                            hook={hook}
-                            onSelectSession={handleHookSessionSelect}
-                          />
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="px-3 py-6 text-sm text-muted-foreground">
-                        当前阶段暂无运行事件。
-                      </div>
-                    )}
+                {selectedNode ? (
+                  <StageArtifactPanel node={selectedNode} workspacePath={detail.project.workspacePath} />
+                ) : (
+                  <section className="rounded-md border border-dashed border-border bg-background px-3 py-8 text-center text-sm text-muted-foreground">
+                    暂无阶段数据。
                   </section>
-                </aside>
+                )}
               </div>
+
+              <aside className="min-w-0 space-y-4">
+                <FeatureWorkspaceChangesPanel sessions={detail.sessions} threadsById={threadsById} />
+
+                <section className="rounded-md border border-border bg-background">
+                  <div className="flex min-w-0 items-center gap-2 border-b border-border px-3 py-3 text-sm font-semibold">
+                    <Workflow className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="truncate">运行事件</span>
+                  </div>
+                  {selectedNode && selectedNodeHooks.length > 0 ? (
+                    <div className="max-h-64 overflow-y-auto">
+                      {selectedNodeHooks.map((hook, index) => (
+                        <HookLine
+                          key={`${hook.ts || "hook"}-${hook.eventId}-${index}`}
+                          hook={hook}
+                          onSelectSession={handleHookSessionSelect}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="px-3 py-6 text-sm text-muted-foreground">
+                      当前阶段暂无运行事件。
+                    </div>
+                  )}
+                </section>
+              </aside>
             </div>
-          ) : (
-            <FeatureConversationPanel threadId={selectedSessionThreadId} />
-          )}
+          </div>
         </div>
       )}
     </div>
@@ -2887,7 +2885,6 @@ export function HarnessBoardView(): React.JSX.Element {
   const isViewingSessionRef = useRef(isViewingSession)
   const projectDetailsRefreshInFlightRef = useRef(false)
   const selectedProjectRefreshInFlightRef = useRef(false)
-  const prefetchedRunDetailRef = useRef<HarnessRunDetailViewModel | null>(null)
   const skipRunDetailLoadForSessionRef = useRef<string | null>(null)
   projectsRef.current = projects
   selectedProjectIdRef.current = selectedProjectId
@@ -3043,6 +3040,7 @@ export function HarnessBoardView(): React.JSX.Element {
 
   useEffect(() => {
     if (!selectedFeature) {
+      skipRunDetailLoadForSessionRef.current = null
       setRunDetail(null)
       return
     }
@@ -3050,7 +3048,11 @@ export function HarnessBoardView(): React.JSX.Element {
     const skipRunDetailKey = activeSessionThreadId
       ? featureSessionKey(selectedFeature.projectId, selectedFeature.slug, activeSessionThreadId)
       : null
-    if (skipRunDetailKey && skipRunDetailLoadForSessionRef.current === skipRunDetailKey) {
+    const pendingSkipRunDetailKey = skipRunDetailLoadForSessionRef.current
+    if (pendingSkipRunDetailKey && pendingSkipRunDetailKey !== skipRunDetailKey) {
+      skipRunDetailLoadForSessionRef.current = null
+    }
+    if (skipRunDetailKey && pendingSkipRunDetailKey === skipRunDetailKey) {
       skipRunDetailLoadForSessionRef.current = null
       setRunDetail((currentDetail) =>
         currentDetail &&
@@ -3068,17 +3070,6 @@ export function HarnessBoardView(): React.JSX.Element {
     ) {
       setRunDetail(null)
       setLoadingRun(false)
-      return
-    }
-    const prefetched = prefetchedRunDetailRef.current
-    if (
-      prefetched &&
-      prefetched.project.projectId === selectedFeature.projectId &&
-      prefetched.run.slug === selectedFeature.slug
-    ) {
-      setRunDetail(prefetched)
-      setLoadingRun(false)
-      prefetchedRunDetailRef.current = null
       return
     }
     if (
@@ -3110,16 +3101,17 @@ export function HarnessBoardView(): React.JSX.Element {
 
   useEffect(() => {
     return window.api.harnessBoard.onWatchRefsChanged((event) => {
+      const currentFeature = selectedFeatureRef.current
       const projectMatch = event.scopeKey.match(/^project:(.+)$/)
       if (projectMatch) {
-        void loadProjectDetail(projectMatch[1], { showLoading: false, reportError: false })
+        if (!currentFeature) {
+          void loadProjectDetail(projectMatch[1], { showLoading: false, reportError: false })
+        }
+        return
       }
-      if (
-        selectedFeature &&
-        event.scopeKey === `run:${selectedFeature.projectId}:${selectedFeature.slug}`
-      ) {
-        const capturedProjectId = selectedFeature.projectId
-        const capturedSlug = selectedFeature.slug
+      if (currentFeature && event.scopeKey === `run:${currentFeature.projectId}:${currentFeature.slug}`) {
+        const capturedProjectId = currentFeature.projectId
+        const capturedSlug = currentFeature.slug
         void window.api.harnessBoard
           .getRunDetail(capturedProjectId, capturedSlug)
           .then((detail) => {
@@ -3136,7 +3128,7 @@ export function HarnessBoardView(): React.JSX.Element {
           })
       }
     })
-  }, [loadProjectDetail, selectedFeature])
+  }, [loadProjectDetail])
 
   const refreshSelectedRunDetail = useCallback(async (): Promise<void> => {
     if (!selectedFeature) return
@@ -3285,7 +3277,6 @@ export function HarnessBoardView(): React.JSX.Element {
         return next
       })
       await loadProjects()
-      void loadProjectDetail(projectId)
     } catch (error) {
       setEditError(cleanIpcError(error))
     } finally {
@@ -3366,7 +3357,6 @@ export function HarnessBoardView(): React.JSX.Element {
         feature
       })
 
-      prefetchedRunDetailRef.current = null
       setFeatureDialogProject(null)
       setFeatureName("")
       await loadProjectDetail(result.projectId)
@@ -3570,20 +3560,7 @@ export function HarnessBoardView(): React.JSX.Element {
         cleanupThread(sidebarThreadToDelete.thread_id)
         await deleteThread(sidebarThreadToDelete.thread_id)
         markRead(sidebarThreadToDelete.thread_id)
-        const feature = sidebarThreadToDelete.metadata?.harnessFeature as Record<string, unknown> | undefined
-        const projectId = typeof feature?.projectId === "string" ? feature.projectId : null
         setSidebarThreadToDelete(null)
-        if (projectId) {
-          await loadProjectDetail(projectId)
-        }
-        if (
-          selectedFeature &&
-          projectId === selectedFeature.projectId &&
-          typeof feature?.slug === "string" &&
-          feature.slug === selectedFeature.slug
-        ) {
-          await refreshSelectedRunDetail()
-        }
       } catch (error) {
         toast.error(cleanIpcError(error))
         setSidebarThreadToDelete(null)
@@ -3592,10 +3569,7 @@ export function HarnessBoardView(): React.JSX.Element {
     [
       cleanupThread,
       deleteThread,
-      loadProjectDetail,
       markRead,
-      refreshSelectedRunDetail,
-      selectedFeature,
       sidebarThreadToDelete
     ]
   )
@@ -3610,9 +3584,16 @@ export function HarnessBoardView(): React.JSX.Element {
       if (creatingSidebarSessionKey) return
       setCreatingSidebarSessionKey(key)
       try {
+        const matchingRunDetail =
+          runDetail &&
+          runDetail.project.projectId === project.projectId &&
+          runDetail.run.slug === slug
+            ? runDetail
+            : null
         const thread = await createHarnessSession({
           projectId: project.projectId,
           slug,
+          nextAction: matchingRunDetail ? getRunNextAction(matchingRunDetail) : undefined,
           sessions,
           threadsById,
           threadStates: allThreadStates,
@@ -3639,6 +3620,7 @@ export function HarnessBoardView(): React.JSX.Element {
       createThread,
       creatingSidebarSessionKey,
       markRead,
+      runDetail,
       selectThread,
       threadsById
     ]
