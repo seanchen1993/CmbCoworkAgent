@@ -201,17 +201,46 @@ export interface HarnessWorkflowStateDefinition {
   nextAction?: HarnessWorkflowNextAction
 }
 
+export type HarnessArtifactType =
+  | "file"
+  | "directory"
+  | "markdown"
+  | "text"
+  | "log"
+  | "yaml"
+  | "json"
+  | "report"
+  | "external"
+  | "virtual"
+  | "unknown"
+
+export type HarnessArtifactStatus =
+  | "generated"
+  | "missing"
+  | "partial"
+  | "invalid"
+  | "unknown"
+
+export interface HarnessWorkflowArtifactStatusDefinition {
+  artifactStatus: HarnessArtifactStatus
+  label: string
+}
+
+export interface HarnessWorkflowArtifactDefinition {
+  id: string
+  label: string
+  required: boolean
+  artifactType: HarnessArtifactType
+  artifactStatuses: HarnessWorkflowArtifactStatusDefinition[]
+}
+
 export interface HarnessWorkflowNodeDefinition {
   id: string
   label: string
   group?: string
   description?: string
   states?: HarnessWorkflowStateDefinition[]
-  artifactDefinitions?: Array<{
-    id: string
-    label: string
-    required: boolean
-  }>
+  artifactDefinitions?: HarnessWorkflowArtifactDefinition[]
   hookDefinitions?: Array<{
     id: string
     label: string
@@ -229,15 +258,14 @@ export interface HarnessWorkflow {
   nodes: HarnessWorkflowNodeDefinition[]
 }
 
-export type HarnessArtifactKind = "file" | "directory" | "report" | "log" | "external" | "virtual"
-
 export interface HarnessArtifact {
   id: string
   label: string
-  kind: HarnessArtifactKind
+  artifactType: HarnessArtifactType
   path: string | null
   paths?: string[]
   required: boolean
+  artifactStatus: HarnessArtifactStatus
   status: HarnessStatus
   exists?: boolean
   nonEmpty?: boolean

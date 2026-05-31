@@ -93,7 +93,8 @@ import type {
 } from "../../main/ipc/code-exec-tools"
 import type {
   HarnessArtifact,
-  HarnessArtifactKind,
+  HarnessArtifactStatus,
+  HarnessArtifactType,
   HarnessHookLogView,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
@@ -155,7 +156,8 @@ export type {
 
 export type {
   HarnessArtifact,
-  HarnessArtifactKind,
+  HarnessArtifactStatus,
+  HarnessArtifactType,
   HarnessHookLogView,
   HarnessNodeStatus,
   HarnessProjectCreateInput,

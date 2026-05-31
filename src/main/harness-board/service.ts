@@ -11,7 +11,8 @@ import type {
   HarnessAdapterSnapshot,
   HarnessAdapterType,
   HarnessArtifact,
-  HarnessArtifactKind,
+  HarnessArtifactStatus,
+  HarnessArtifactType,
   HarnessBoardCompatibility,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
@@ -27,6 +28,7 @@ import type {
   HarnessStatus,
   HarnessWatchRef,
   HarnessWorkflow,
+  HarnessWorkflowArtifactDefinition,
   HarnessWorkflowNextAction
 } from "../../shared/harness-board-types"
 
@@ -74,19 +76,6 @@ const CHARDET_SAMPLE_BYTES = 8_192
 const HARNESS_NAME_PATTERN = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
 const HARNESS_NAME_RULE_MESSAGE = "仅支持中文、英文字母、数字、-、_，不允许空格"
 
-const HARNESS_UI_KINDS = new Set<HarnessStatus["uiKind"]>([
-  "pending",
-  "active",
-  "done",
-  "blocked",
-  "warning",
-  "skipped",
-  "archived",
-  "unknown",
-  "ok",
-  "error"
-])
-
 const HARNESS_NODE_STATUSES = new Set<HarnessNodeStatus>([
   "not_started",
   "in_progress",
@@ -114,6 +103,44 @@ const NODE_STATUS_UI_KIND: Record<HarnessNodeStatus, HarnessStatus["uiKind"]> = 
   blocked: "blocked",
   skipped: "skipped",
   archived: "archived",
+  unknown: "unknown"
+}
+
+const HARNESS_ARTIFACT_TYPES = new Set<HarnessArtifactType>([
+  "file",
+  "directory",
+  "markdown",
+  "text",
+  "log",
+  "yaml",
+  "json",
+  "report",
+  "external",
+  "virtual",
+  "unknown"
+])
+
+const HARNESS_ARTIFACT_STATUSES = new Set<HarnessArtifactStatus>([
+  "generated",
+  "missing",
+  "partial",
+  "invalid",
+  "unknown"
+])
+
+const DEFAULT_ARTIFACT_STATUS_LABELS: Record<HarnessArtifactStatus, string> = {
+  generated: "已生成",
+  missing: "未生成",
+  partial: "部分生成",
+  invalid: "不可用",
+  unknown: "未知"
+}
+
+const ARTIFACT_STATUS_UI_KIND: Record<HarnessArtifactStatus, HarnessStatus["uiKind"]> = {
+  generated: "ok",
+  missing: "warning",
+  partial: "warning",
+  invalid: "error",
   unknown: "unknown"
 }
 
@@ -672,22 +699,9 @@ function runInspectAdapter(
   }
 }
 
-const UNKNOWN_STATUS: HarnessStatus = { label: "未知", uiKind: "unknown" }
 const UNKNOWN_NODE_STATUS: HarnessNodeStatus = "unknown"
-
-function normalizeStatus(value: unknown): HarnessStatus {
-  if (!isObject(value)) return UNKNOWN_STATUS
-
-  const label = normalizeText(value.label)
-  if (!label || !HARNESS_UI_KINDS.has(value.uiKind as HarnessStatus["uiKind"])) {
-    return UNKNOWN_STATUS
-  }
-
-  return {
-    label,
-    uiKind: value.uiKind as HarnessStatus["uiKind"]
-  }
-}
+const UNKNOWN_ARTIFACT_TYPE: HarnessArtifactType = "unknown"
+const UNKNOWN_ARTIFACT_STATUS: HarnessArtifactStatus = "unknown"
 
 function normalizeNodeStatus(value: unknown): HarnessNodeStatus {
   const nodeStatus = normalizeText(value)
@@ -703,17 +717,28 @@ function statusFromNodeStatus(nodeStatus: HarnessNodeStatus, label?: string): Ha
   }
 }
 
-function normalizeArtifactKind(value: unknown): HarnessArtifactKind {
-  const kind = normalizeText(value)
-  switch (kind) {
-    case "directory":
-    case "report":
-    case "log":
-    case "external":
-    case "virtual":
-      return kind
-    default:
-      return "file"
+function normalizeArtifactType(value: unknown): HarnessArtifactType {
+  const artifactType = normalizeText(value)
+  return HARNESS_ARTIFACT_TYPES.has(artifactType as HarnessArtifactType)
+    ? (artifactType as HarnessArtifactType)
+    : UNKNOWN_ARTIFACT_TYPE
+}
+
+function normalizeArtifactStatus(value: unknown): HarnessArtifactStatus {
+  const artifactStatus = normalizeText(value)
+  return HARNESS_ARTIFACT_STATUSES.has(artifactStatus as HarnessArtifactStatus)
+    ? (artifactStatus as HarnessArtifactStatus)
+    : UNKNOWN_ARTIFACT_STATUS
+}
+
+function statusFromArtifactStatus(
+  artifactStatus: HarnessArtifactStatus,
+  definition?: HarnessWorkflowArtifactDefinition
+): HarnessStatus {
+  const statusDefinition = definition?.artifactStatuses.find((item) => item.artifactStatus === artifactStatus)
+  return {
+    label: statusDefinition?.label.trim() || DEFAULT_ARTIFACT_STATUS_LABELS[artifactStatus],
+    uiKind: ARTIFACT_STATUS_UI_KIND[artifactStatus]
   }
 }
 
@@ -810,6 +835,47 @@ function normalizeWorkflowNextAction(value: unknown): HarnessWorkflowNextAction 
   return Object.keys(nextAction).length > 0 ? nextAction : undefined
 }
 
+function defaultArtifactStatuses(): HarnessWorkflowArtifactDefinition["artifactStatuses"] {
+  return [
+    { artifactStatus: "generated", label: DEFAULT_ARTIFACT_STATUS_LABELS.generated },
+    { artifactStatus: "missing", label: DEFAULT_ARTIFACT_STATUS_LABELS.missing },
+    { artifactStatus: "partial", label: DEFAULT_ARTIFACT_STATUS_LABELS.partial },
+    { artifactStatus: "invalid", label: DEFAULT_ARTIFACT_STATUS_LABELS.invalid },
+    { artifactStatus: "unknown", label: DEFAULT_ARTIFACT_STATUS_LABELS.unknown }
+  ]
+}
+
+function normalizeWorkflowArtifactStatusDefinition(
+  value: unknown
+): HarnessWorkflowArtifactDefinition["artifactStatuses"][number] | null {
+  if (!isObject(value)) return null
+  const artifactStatusValue = normalizeText(value.artifactStatus)
+  if (!HARNESS_ARTIFACT_STATUSES.has(artifactStatusValue as HarnessArtifactStatus)) return null
+  const artifactStatus = artifactStatusValue as HarnessArtifactStatus
+  return {
+    artifactStatus,
+    label: normalizeText(value.label).trim() || DEFAULT_ARTIFACT_STATUS_LABELS[artifactStatus]
+  }
+}
+
+function normalizeWorkflowArtifactDefinition(value: unknown): HarnessWorkflowArtifactDefinition | null {
+  if (!isObject(value)) return null
+  const artifactId = normalizeText(value.id)
+  if (!artifactId) return null
+  const artifactStatuses = Array.isArray(value.artifactStatuses)
+    ? value.artifactStatuses
+        .map((status) => normalizeWorkflowArtifactStatusDefinition(status))
+        .filter((status): status is NonNullable<typeof status> => status !== null)
+    : []
+  return {
+    id: artifactId,
+    label: normalizeText(value.label) || artifactId,
+    required: typeof value.required === "boolean" ? value.required : false,
+    artifactType: normalizeArtifactType(value.artifactType),
+    artifactStatuses: artifactStatuses.length > 0 ? artifactStatuses : defaultArtifactStatuses()
+  }
+}
+
 function normalizeWorkflowNodeDefinition(value: unknown): HarnessWorkflow["nodes"][number] | null {
   if (!isObject(value)) return null
   const id = normalizeText(value.id)
@@ -828,16 +894,7 @@ function normalizeWorkflowNodeDefinition(value: unknown): HarnessWorkflow["nodes
       : undefined,
     artifactDefinitions: Array.isArray(value.artifactDefinitions)
       ? value.artifactDefinitions
-          .map((artifact) => {
-            if (!isObject(artifact)) return null
-            const artifactId = normalizeText(artifact.id)
-            if (!artifactId) return null
-            return {
-              id: artifactId,
-              label: normalizeText(artifact.label) || artifactId,
-              required: typeof artifact.required === "boolean" ? artifact.required : false
-            }
-          })
+          .map((artifact) => normalizeWorkflowArtifactDefinition(artifact))
           .filter((artifact): artifact is NonNullable<typeof artifact> => artifact !== null)
       : undefined,
     hookDefinitions: Array.isArray(value.hookDefinitions)
@@ -883,19 +940,12 @@ function normalizeWorkflow(value: unknown): HarnessWorkflow {
   }
 }
 
-function workflowArtifactDefinitions(workflow: HarnessWorkflow): Map<string, Map<string, HarnessArtifact>> {
-  const byNode = new Map<string, Map<string, HarnessArtifact>>()
+function workflowArtifactDefinitions(workflow: HarnessWorkflow): Map<string, Map<string, HarnessWorkflowArtifactDefinition>> {
+  const byNode = new Map<string, Map<string, HarnessWorkflowArtifactDefinition>>()
   for (const node of workflow.nodes) {
-    const artifacts = new Map<string, HarnessArtifact>()
+    const artifacts = new Map<string, HarnessWorkflowArtifactDefinition>()
     for (const artifact of node.artifactDefinitions ?? []) {
-      artifacts.set(artifact.id, {
-        id: artifact.id,
-        label: artifact.label,
-        kind: "file",
-        path: null,
-        required: artifact.required,
-        status: UNKNOWN_STATUS
-      })
+      artifacts.set(artifact.id, artifact)
     }
     byNode.set(node.id, artifacts)
   }
@@ -916,42 +966,27 @@ function statusFromWorkflowNodeStatus(
 function normalizeArtifact(
   project: HarnessProjectMetadata,
   value: unknown,
-  definition?: HarnessArtifact
+  definition?: HarnessWorkflowArtifactDefinition
 ): HarnessArtifact | null {
   if (!isObject(value)) return null
   const id = normalizeText(value.id)
   if (!id) return null
+  const artifactStatus = normalizeArtifactStatus(value.artifactStatus)
+  const path = normalizeAdapterPath(project, value.path)
+  const paths = Array.isArray(value.paths)
+    ? (value.paths as unknown[])
+        .map((p) => normalizeAdapterPath(project, p))
+        .filter((p): p is string => p !== null)
+    : []
   return {
     id,
-    label: definition?.label || normalizeText(value.label) || id,
-    kind: normalizeArtifactKind(value.kind),
-    path: normalizeAdapterPath(project, value.path),
-    required: typeof value.required === "boolean" ? value.required : definition?.required ?? false,
-    status: normalizeStatus(value.status),
-    ...(Array.isArray(value.paths)
-      ? (() => {
-          const paths = (value.paths as unknown[])
-            .map((p) => normalizeAdapterPath(project, p))
-            .filter((p): p is string => p !== null)
-          return paths.length > 0 ? { paths } : {}
-        })()
-      : {}),
-    ...(typeof value.nonEmpty === "boolean" ? { nonEmpty: value.nonEmpty } : {}),
-    ...(typeof value.size === "number" ? { size: value.size } : {}),
-    ...(typeof value.summary === "string" ? { summary: value.summary } : {}),
-    ...(isObject(value.validation)
-      ? {
-          validation: {
-            status:
-              value.validation.status === "valid" ||
-              value.validation.status === "invalid" ||
-              value.validation.status === "unknown"
-                ? value.validation.status
-                : "unknown",
-            message: normalizeText(value.validation.message)
-          }
-        }
-      : {})
+    label: definition?.label || id,
+    artifactType: definition?.artifactType ?? UNKNOWN_ARTIFACT_TYPE,
+    path: paths.length > 0 ? null : path,
+    required: definition?.required ?? false,
+    artifactStatus,
+    status: statusFromArtifactStatus(artifactStatus, definition),
+    ...(Array.isArray(value.paths) ? { paths } : {})
   }
 }
 

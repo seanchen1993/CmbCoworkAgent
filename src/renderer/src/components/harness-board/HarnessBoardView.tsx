@@ -61,7 +61,7 @@ import {
 import { toast } from "sonner"
 import type {
   HarnessArtifact,
-  HarnessArtifactKind,
+  HarnessArtifactType,
   HarnessHookLogView,
   HarnessProjectCreateInput,
   HarnessProjectDetailViewModel,
@@ -1547,12 +1547,12 @@ function SystemSection({
 
 function artifactCanOpenInFileManager(
   path: string | null,
-  kind: HarnessArtifactKind,
+  artifactType: HarnessArtifactType,
   status: HarnessStatus,
   exists?: boolean
 ): boolean {
   if (!path) return false
-  if (kind === "external" || kind === "virtual") return false
+  if (artifactType === "external" || artifactType === "virtual") return false
   return status.uiKind === "done" || status.uiKind === "ok" || exists === true
 }
 
@@ -1601,7 +1601,7 @@ function ArtifactLine({
       <div className="col-span-3 min-w-0 rounded border border-border/70 bg-muted/30 px-2 py-1.5">
         {displayPaths.length > 0 ? (
           displayPaths.map((p) => {
-            const canOpen = artifactCanOpenInFileManager(p, artifact.kind, artifact.status, artifact.exists)
+            const canOpen = artifactCanOpenInFileManager(p, artifact.artifactType, artifact.status, artifact.exists)
             return (
               <div key={p} className="flex items-center gap-1">
                 <span
@@ -1627,7 +1627,7 @@ function ArtifactLine({
           })
         ) : (
           <span className="break-all font-mono text-[11px] leading-5 text-muted-foreground">
-            {artifact.kind}
+            {artifact.artifactType}
           </span>
         )}
       </div>
