@@ -15,6 +15,15 @@ export interface HarnessStatus {
   uiKind: HarnessUiKind
 }
 
+export type HarnessNodeStatus =
+  | "not_started"
+  | "in_progress"
+  | "done"
+  | "blocked"
+  | "skipped"
+  | "archived"
+  | "unknown"
+
 export type HarnessAdapterType = "plugin"
 
 export type HarnessBoardCompatibilityStatus =
@@ -151,6 +160,7 @@ export interface HarnessFeatureSummary {
    */
   overallStatus: HarnessStatus
   currentNodeId: string
+  currentNodeStatus: HarnessNodeStatus
   summary: {
     text: string
     updatedAt: string
@@ -185,8 +195,9 @@ export interface HarnessWorkflowNextAction {
   dialogTips?: string
 }
 
-export interface HarnessWorkflowStateDefinition extends HarnessStatus {
-  id: string
+export interface HarnessWorkflowStateDefinition {
+  nodeStatus: HarnessNodeStatus
+  label: string
   nextAction?: HarnessWorkflowNextAction
 }
 
@@ -254,7 +265,7 @@ export interface HarnessRunNode {
   id: string
   label: string
   group?: string
-  stateId?: string
+  nodeStatus: HarnessNodeStatus
   status: HarnessStatus
   artifacts: HarnessArtifact[]
   hooks: HarnessHookLogView[]

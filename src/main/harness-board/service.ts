@@ -15,6 +15,7 @@ import type {
   HarnessBoardCompatibility,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessNodeStatus,
   HarnessProjectCreateInput,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
@@ -85,6 +86,36 @@ const HARNESS_UI_KINDS = new Set<HarnessStatus["uiKind"]>([
   "ok",
   "error"
 ])
+
+const HARNESS_NODE_STATUSES = new Set<HarnessNodeStatus>([
+  "not_started",
+  "in_progress",
+  "done",
+  "blocked",
+  "skipped",
+  "archived",
+  "unknown"
+])
+
+const DEFAULT_NODE_STATUS_LABELS: Record<HarnessNodeStatus, string> = {
+  not_started: "未开始",
+  in_progress: "进行中",
+  done: "已完成",
+  blocked: "阻断",
+  skipped: "跳过",
+  archived: "已归档",
+  unknown: "未知"
+}
+
+const NODE_STATUS_UI_KIND: Record<HarnessNodeStatus, HarnessStatus["uiKind"]> = {
+  not_started: "pending",
+  in_progress: "active",
+  done: "done",
+  blocked: "blocked",
+  skipped: "skipped",
+  archived: "archived",
+  unknown: "unknown"
+}
 
 const APP_BOARD_API_VERSION = 1
 const BOARD_CONFIG_REL_PATH = join("board_core", "board_config.json")
@@ -642,6 +673,7 @@ function runInspectAdapter(
 }
 
 const UNKNOWN_STATUS: HarnessStatus = { label: "未知", uiKind: "unknown" }
+const UNKNOWN_NODE_STATUS: HarnessNodeStatus = "unknown"
 
 function normalizeStatus(value: unknown): HarnessStatus {
   if (!isObject(value)) return UNKNOWN_STATUS
@@ -654,6 +686,20 @@ function normalizeStatus(value: unknown): HarnessStatus {
   return {
     label,
     uiKind: value.uiKind as HarnessStatus["uiKind"]
+  }
+}
+
+function normalizeNodeStatus(value: unknown): HarnessNodeStatus {
+  const nodeStatus = normalizeText(value)
+  return HARNESS_NODE_STATUSES.has(nodeStatus as HarnessNodeStatus)
+    ? (nodeStatus as HarnessNodeStatus)
+    : UNKNOWN_NODE_STATUS
+}
+
+function statusFromNodeStatus(nodeStatus: HarnessNodeStatus, label?: string): HarnessStatus {
+  return {
+    label: label?.trim() || DEFAULT_NODE_STATUS_LABELS[nodeStatus],
+    uiKind: NODE_STATUS_UI_KIND[nodeStatus]
   }
 }
 
@@ -701,13 +747,14 @@ function normalizeProjectRun(value: unknown, workflow: HarnessWorkflow): Harness
   if (!slug) return null
 
   const currentNodeId = normalizeText(value.currentNodeId) || "unknown"
+  const currentNodeStatus = normalizeNodeStatus(value.currentNodeStatus)
   const currentNodeIndex = workflow.nodes.findIndex((node) => node.id === currentNodeId)
   const currentNodeDefinition = currentNodeIndex >= 0 ? workflow.nodes[currentNodeIndex] : undefined
   const isFinalNode = currentNodeIndex >= 0 && currentNodeIndex === workflow.nodes.length - 1
   // This is a feature-level summary status. Before the final node, the feature
   // is still considered active even when the current node's own state is done.
   const status = isFinalNode
-    ? statusFromWorkflowStateId(workflow, currentNodeDefinition, normalizeText(value.currentStateId))
+    ? statusFromWorkflowNodeStatus(workflow, currentNodeDefinition, currentNodeStatus)
     : { label: "进行中", uiKind: "active" as const }
   const currentNodeLabel = currentNodeDefinition?.label ?? currentNodeId
   const summaryText = currentNodeLabel ? `${currentNodeLabel} · ${status.label}` : status.label
@@ -720,6 +767,7 @@ function normalizeProjectRun(value: unknown, workflow: HarnessWorkflow): Harness
     location: status.uiKind === "archived" ? "archived" : "active",
     overallStatus: status,
     currentNodeId,
+    currentNodeStatus,
     summary: {
       text: summaryText,
       updatedAt: ""
@@ -738,14 +786,13 @@ function normalizeWorkflowStateDefinition(
   value: unknown
 ): NonNullable<HarnessWorkflow["nodes"][number]["states"]>[number] | null {
   if (!isObject(value)) return null
-  const id = normalizeText(value.id)
-  if (!id) return null
-  const status = normalizeStatus(value)
+  const nodeStatusValue = normalizeText(value.nodeStatus)
+  if (!HARNESS_NODE_STATUSES.has(nodeStatusValue as HarnessNodeStatus)) return null
+  const nodeStatus = nodeStatusValue as HarnessNodeStatus
   const nextAction = normalizeWorkflowNextAction(value.nextAction)
   return {
-    id,
-    label: status.label,
-    uiKind: status.uiKind,
+    nodeStatus,
+    label: normalizeText(value.label).trim() || DEFAULT_NODE_STATUS_LABELS[nodeStatus],
     ...(nextAction ? { nextAction } : {})
   }
 }
@@ -855,15 +902,15 @@ function workflowArtifactDefinitions(workflow: HarnessWorkflow): Map<string, Map
   return byNode
 }
 
-function statusFromWorkflowStateId(
+function statusFromWorkflowNodeStatus(
   workflow: HarnessWorkflow,
   nodeDefinition: HarnessWorkflow["nodes"][number] | undefined,
-  stateId: string
+  nodeStatus: HarnessNodeStatus
 ): HarnessStatus {
   const state =
-    nodeDefinition?.states?.find((item) => item.id === stateId) ??
-    workflow.states?.find((item) => item.id === stateId)
-  return state ? { label: state.label, uiKind: state.uiKind } : UNKNOWN_STATUS
+    nodeDefinition?.states?.find((item) => item.nodeStatus === nodeStatus) ??
+    workflow.states?.find((item) => item.nodeStatus === nodeStatus)
+  return statusFromNodeStatus(nodeStatus, state?.label)
 }
 
 function normalizeArtifact(
@@ -1021,13 +1068,13 @@ function normalizeRunNodes(
       const node = runNodesById.get(nodeDefinition.id)
       const id = nodeDefinition.id
       const definitions = artifactDefinitions.get(id)
-      const stateId = normalizeText(node?.stateId)
+      const nodeStatus = normalizeNodeStatus(node?.nodeStatus)
       return {
         id,
         label: nodeDefinition.label,
         ...(nodeDefinition.group ? { group: nodeDefinition.group } : {}),
-        ...(stateId ? { stateId } : {}),
-        status: statusFromWorkflowStateId(workflow, nodeDefinition, stateId),
+        nodeStatus,
+        status: statusFromWorkflowNodeStatus(workflow, nodeDefinition, nodeStatus),
         artifacts: Array.isArray(node?.artifacts)
           ? node.artifacts
               .map((artifact) => {

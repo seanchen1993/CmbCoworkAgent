@@ -225,12 +225,12 @@ function getRunNextAction(
 ): HarnessWorkflowNextAction | undefined {
   if (!detail) return undefined
   const currentNodeId = detail.run.currentNodeId
-  const stateId = detail.run.nodes.find((node) => node.id === currentNodeId)?.stateId
-  if (!currentNodeId || !stateId) return undefined
+  const nodeStatus = detail.run.nodes.find((node) => node.id === currentNodeId)?.nodeStatus
+  if (!currentNodeId || !nodeStatus) return undefined
   const workflowNode = detail.workflow.nodes.find((node) => node.id === currentNodeId)
   const state =
-    workflowNode?.states?.find((item) => item.id === stateId) ??
-    detail.workflow.states?.find((item) => item.id === stateId)
+    workflowNode?.states?.find((item) => item.nodeStatus === nodeStatus) ??
+    detail.workflow.states?.find((item) => item.nodeStatus === nodeStatus)
   return normalizeHarnessNextAction(state?.nextAction)
 }
 
