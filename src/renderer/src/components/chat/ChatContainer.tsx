@@ -53,6 +53,12 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { useAppStore } from "@/lib/store"
+import {
+  consumePendingHarnessNextAction,
+  getPendingHarnessNextAction,
+  getPendingHarnessNextActionVersion,
+  subscribePendingHarnessNextActions
+} from "@/lib/harness-next-action"
 import { cn } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
 import {
@@ -66,7 +72,14 @@ import { ModelSwitcher } from "./ModelSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
-import type { Message, SkillMetadata, Thread, ToolCallState, ToolCallStatus, UserInputResponse } from "@/types"
+import type {
+  Message,
+  SkillMetadata,
+  Thread,
+  ToolCallState,
+  ToolCallStatus,
+  UserInputResponse
+} from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator, type ChatScrollQuestion } from "./ChatScrollNavigator"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
@@ -1115,6 +1128,8 @@ export function ChatContainer({
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(new Set())
   const [skillsLoading, setSkillsLoading] = useState(true)
+  const [skillsHarnessProjectId, setSkillsHarnessProjectId] = useState<string | null>(null)
+  const [skillsLoadTargetProjectId, setSkillsLoadTargetProjectId] = useState<string | null>(null)
   const [showAllProgrammingSkills, setShowAllProgrammingSkills] = useState(false)
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
@@ -1230,11 +1245,38 @@ export function ChatContainer({
     [threadId, threads]
   )
   const harnessFeatureBinding = useMemo(() => getHarnessFeatureBinding(currentThread), [currentThread])
+  const pendingHarnessNextActionVersion = useSyncExternalStore(
+    subscribePendingHarnessNextActions,
+    getPendingHarnessNextActionVersion,
+    getPendingHarnessNextActionVersion
+  )
+  const pendingHarnessNextAction = useMemo(
+    () => getPendingHarnessNextAction(threadId),
+    [pendingHarnessNextActionVersion, threadId]
+  )
+  const [transientHarnessDialogTips, setTransientHarnessDialogTips] = useState<{
+    threadId: string
+    tips: string
+  } | null>(null)
+  const pendingHarnessDialogTips = pendingHarnessNextAction?.dialogTips?.trim() || null
+  const transientHarnessDialogTipsForThread =
+    transientHarnessDialogTips?.threadId === threadId ? transientHarnessDialogTips.tips : null
   const [harnessDialogTips, setHarnessDialogTips] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!threadId || !pendingHarnessDialogTips) return
+    setTransientHarnessDialogTips({ threadId, tips: pendingHarnessDialogTips })
+  }, [pendingHarnessDialogTips, threadId])
 
   useEffect(() => {
     if (!shouldShowHarnessDialogTips || !harnessFeatureBinding) {
       setHarnessDialogTips(null)
+      return
+    }
+
+    const nextActionDialogTips = pendingHarnessDialogTips ?? transientHarnessDialogTipsForThread?.trim()
+    if (nextActionDialogTips) {
+      setHarnessDialogTips(nextActionDialogTips)
       return
     }
 
@@ -1253,7 +1295,13 @@ export function ChatContainer({
     return () => {
       cancelled = true
     }
-  }, [harnessFeatureBinding?.projectId, harnessFeatureBinding?.slug, shouldShowHarnessDialogTips])
+  }, [
+    harnessFeatureBinding?.projectId,
+    harnessFeatureBinding?.slug,
+    pendingHarnessDialogTips,
+    transientHarnessDialogTipsForThread,
+    shouldShowHarnessDialogTips
+  ])
 
   const allSkillsRef = useRef<MarketItem[]>([])
   const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
@@ -1266,6 +1314,10 @@ export function ChatContainer({
 
   // Define loadSkills function at component level so it can be accessed everywhere
   const loadSkills = useCallback(async (): Promise<void> => {
+    setSkillsLoading(true)
+    const binding = harnessFeatureBindingRef.current
+    const targetProjectId = binding?.projectId ?? null
+    setSkillsLoadTargetProjectId(targetProjectId)
     try {
       const pluginSkillsPromise =
         typeof window.api.skills.listPlugins === "function"
@@ -1293,27 +1345,31 @@ export function ChatContainer({
       // In harness mode, resolve the project's bound plugin name so that
       // duplicate-named skills from other plugins are hidden in favour of
       // the project's own plugin.
-      let preferredPluginName: string | null = null
-      const binding = harnessFeatureBindingRef.current
+      let preferredPlugin: { id?: string; name?: string } | null = null
       if (binding && typeof window.api.harnessBoard?.listProjects === "function") {
         try {
           const projects = await window.api.harnessBoard.listProjects()
           const project = projects.find((p) => p.projectId === binding.projectId)
           if (project) {
-            preferredPluginName = project.harnessAdapter.name
+            preferredPlugin = {
+              id: project.harnessAdapter.id,
+              name: project.harnessAdapter.name
+            }
           }
         } catch {
           // Non-critical: fall through without a preference.
         }
       }
 
-      // Enabled built-in/custom names win over plugin names; disabled local
-      // skills should not hide a plugin skill with the same name from slash.
-      const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet, preferredPluginName)
+      // In harness mode the bound plugin's skills win over same-name skills,
+      // matching project-scoped slash command behaviour.
+      const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet, preferredPlugin)
       setSkills([...merged].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
+      setSkillsHarnessProjectId(targetProjectId)
     } catch (error) {
       console.error("[ChatContainer] Failed to load skills:", error)
       setSkills([])
+      setSkillsHarnessProjectId(null)
     } finally {
       setSkillsLoading(false)
     }
@@ -2537,6 +2593,53 @@ export function ChatContainer({
     () => skills.filter((skill) => !isLocalSkillDisabled(skill)),
     [skills, isLocalSkillDisabled]
   )
+
+  useEffect(() => {
+    const nextAction = pendingHarnessNextAction
+    const userMessage = nextAction?.userMessage?.trim() ?? ""
+    const slashSkill = nextAction?.slashSkill?.trim() ?? ""
+
+    if (!harnessFeatureBinding) return
+    if (!userMessage && !slashSkill) {
+      if (nextAction?.dialogTips) consumePendingHarnessNextAction(threadId)
+      return
+    }
+    if (historyLoading) return
+    if (threadMessages.length > 0 || input.trim() || selectedSkill) {
+      consumePendingHarnessNextAction(threadId)
+      return
+    }
+
+    let nextSkill: SkillMetadata | null = null
+    if (slashSkill) {
+      if (skillsLoading) return
+      if (skillsLoadTargetProjectId !== harnessFeatureBinding.projectId) return
+      if (skillsHarnessProjectId === harnessFeatureBinding.projectId) {
+        const normalizedSlashSkill = normalizeSkillId(slashSkill)
+        nextSkill =
+          enabledSkillsForSlash.find((skill) => normalizeSkillId(skill.name) === normalizedSlashSkill) ??
+          null
+      }
+    }
+
+    if (userMessage) setInput(userMessage)
+    if (nextSkill) setSelectedSkill(nextSkill)
+    consumePendingHarnessNextAction(threadId)
+  }, [
+    enabledSkillsForSlash,
+    harnessFeatureBinding,
+    historyLoading,
+    input,
+    pendingHarnessNextAction,
+    selectedSkill,
+    setInput,
+    setSelectedSkill,
+    skillsHarnessProjectId,
+    skillsLoadTargetProjectId,
+    skillsLoading,
+    threadId,
+    threadMessages.length
+  ])
 
   const slash = useSlashCommands({
     input,

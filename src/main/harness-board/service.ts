@@ -25,7 +25,8 @@ import type {
   HarnessFeatureSummary,
   HarnessStatus,
   HarnessWatchRef,
-  HarnessWorkflow
+  HarnessWorkflow,
+  HarnessWorkflowNextAction
 } from "../../shared/harness-board-types"
 
 interface HarnessProjectStoreFile {
@@ -741,11 +742,26 @@ function normalizeWorkflowStateDefinition(
   const id = normalizeText(value.id)
   if (!id) return null
   const status = normalizeStatus(value)
+  const nextAction = normalizeWorkflowNextAction(value.nextAction)
   return {
     id,
     label: status.label,
-    uiKind: status.uiKind
+    uiKind: status.uiKind,
+    ...(nextAction ? { nextAction } : {})
   }
+}
+
+function normalizeWorkflowNextAction(value: unknown): HarnessWorkflowNextAction | undefined {
+  if (!isObject(value)) return undefined
+  const slashSkill = normalizeText(value.slashSkill).trim()
+  const userMessage = normalizeText(value.userMessage).trim()
+  const dialogTips = normalizeText(value.dialogTips).trim()
+  const nextAction = {
+    ...(slashSkill ? { slashSkill } : {}),
+    ...(userMessage ? { userMessage } : {}),
+    ...(dialogTips ? { dialogTips } : {})
+  }
+  return Object.keys(nextAction).length > 0 ? nextAction : undefined
 }
 
 function normalizeWorkflowNodeDefinition(value: unknown): HarnessWorkflow["nodes"][number] | null {
@@ -1011,6 +1027,7 @@ function normalizeRunNodes(
         id,
         label: nodeDefinition.label,
         ...(nodeDefinition.group ? { group: nodeDefinition.group } : {}),
+        ...(stateId ? { stateId } : {}),
         status: statusFromWorkflowStateId(workflow, nodeDefinition, stateId),
         artifacts: Array.isArray(node?.artifacts)
           ? node.artifacts

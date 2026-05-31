@@ -93,6 +93,7 @@ import type {
 } from "../../main/ipc/code-exec-tools"
 import type {
   HarnessArtifact,
+  HarnessArtifactKind,
   HarnessHookLogView,
   HarnessProjectCreateInput,
   HarnessFeatureCreateInput,
@@ -109,6 +110,7 @@ import type {
   HarnessBoardCompatibility,
   HarnessStatus,
   HarnessWatchRefChangedEvent,
+  HarnessWorkflowNextAction,
   HarnessWorkflow
 } from "../../shared/harness-board-types"
 
@@ -152,6 +154,7 @@ export type {
 
 export type {
   HarnessArtifact,
+  HarnessArtifactKind,
   HarnessHookLogView,
   HarnessProjectCreateInput,
   HarnessFeatureCreateInput,
@@ -168,6 +171,7 @@ export type {
   HarnessBoardCompatibility,
   HarnessStatus,
   HarnessWatchRefChangedEvent,
+  HarnessWorkflowNextAction,
   HarnessWorkflow
 }
 

@@ -175,8 +175,15 @@ export interface HarnessProjectDetailViewModel {
   error: string | null
 }
 
+export interface HarnessWorkflowNextAction {
+  slashSkill?: string
+  userMessage?: string
+  dialogTips?: string
+}
+
 export interface HarnessWorkflowStateDefinition extends HarnessStatus {
   id: string
+  nextAction?: HarnessWorkflowNextAction
 }
 
 export interface HarnessWorkflowNodeDefinition {
@@ -243,6 +250,7 @@ export interface HarnessRunNode {
   id: string
   label: string
   group?: string
+  stateId?: string
   status: HarnessStatus
   artifacts: HarnessArtifact[]
   hooks: HarnessHookLogView[]

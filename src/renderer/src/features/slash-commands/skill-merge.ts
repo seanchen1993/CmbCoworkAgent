@@ -9,27 +9,57 @@ function normalizePluginName(value: string | undefined | null): string {
   return normalizeSkillId(value)
 }
 
+function normalizePluginId(value: string | undefined | null): string {
+  return normalizeSkillId(value)
+}
+
+type PreferredPlugin = string | { id?: string | null; name?: string | null }
+
+function isPreferredPluginSkill(skill: SkillMetadata, preferredPlugin?: PreferredPlugin | null): boolean {
+  if (!preferredPlugin) return false
+  if (typeof preferredPlugin === "string") {
+    return normalizePluginName(skill.pluginName) === normalizePluginName(preferredPlugin)
+  }
+  const preferredId = normalizePluginId(preferredPlugin.id)
+  const preferredName = normalizePluginName(preferredPlugin.name)
+  return Boolean(
+    (preferredId && normalizePluginId(skill.pluginId) === preferredId) ||
+      (preferredName && normalizePluginName(skill.pluginName) === preferredName)
+  )
+}
+
 /**
  * Merge built-in/custom skills with plugin skills for chat surfaces.
  *
- * Enabled first-party skills keep precedence over same-name plugin skills, but
- * disabled first-party skills must not shadow plugin skills. Otherwise a user
- * can disable/uninstall the standalone copy and still lose the plugin-provided
- * command from the slash popover.
+ * In ordinary chat, enabled first-party skills keep precedence over same-name
+ * plugin skills, but disabled first-party skills must not shadow plugin skills.
  *
- * When `preferredPluginName` is set, duplicate-named skills across plugins are
- * deduplicated in favour of the preferred plugin. This is used in harness mode
- * to prioritise skills from the project's bound plugin.
+ * When `preferredPlugin` is set, duplicate-named skills are deduplicated in
+ * favour of the preferred plugin. This is used in harness mode to prioritise
+ * skills from the project's bound plugin.
  */
 export function mergeChatSkills(
   localSkills: SkillMetadata[],
   pluginSkills: SkillMetadata[],
   disabledSkillIds: ReadonlySet<string>,
-  preferredPluginName?: string | null
+  preferredPlugin?: PreferredPlugin | null
 ): SkillMetadata[] {
-  const preferredName = normalizePluginName(preferredPluginName)
+  const hasPreferredPlugin = Boolean(
+    typeof preferredPlugin === "string"
+      ? normalizePluginName(preferredPlugin)
+      : normalizePluginId(preferredPlugin?.id) || normalizePluginName(preferredPlugin?.name)
+  )
+  const preferredPluginNames = new Set(
+    pluginSkills
+      .filter((skill) => isPreferredPluginSkill(skill, preferredPlugin))
+      .map((skill) => normalizeSkillName(skill.name))
+      .filter(Boolean)
+  )
+  const visibleLocalSkills = hasPreferredPlugin
+    ? localSkills.filter((skill) => !preferredPluginNames.has(normalizeSkillName(skill.name)))
+    : localSkills
   const enabledLocalNames = new Set(
-    localSkills
+    visibleLocalSkills
       .filter((skill) => !isSkillDisabled(skill, disabledSkillIds))
       .map((skill) => normalizeSkillName(skill.name))
       .filter(Boolean)
@@ -38,9 +68,9 @@ export function mergeChatSkills(
   // Without a preferred plugin (conversation mode), only filter out plugin
   // skills whose names are already covered by enabled local skills. Plugins
   // may have duplicate-named skills and both should appear in the popover.
-  if (!preferredName) {
+  if (!hasPreferredPlugin) {
     return [
-      ...localSkills,
+      ...visibleLocalSkills,
       ...pluginSkills.filter(
         (pluginSkill) => !enabledLocalNames.has(normalizeSkillName(pluginSkill.name))
       )
@@ -54,13 +84,13 @@ export function mergeChatSkills(
 
   for (const skill of pluginSkills) {
     const name = normalizeSkillName(skill.name)
-    const isPreferredPlugin = normalizePluginName(skill.pluginName) === preferredName
+    const isPreferredPlugin = isPreferredPluginSkill(skill, preferredPlugin)
     if (!name || seenNames.has(name)) {
       if (isPreferredPlugin) {
         const idx = dedupedPlugins.findIndex(
           (s) =>
             normalizeSkillName(s.name) === name &&
-            normalizePluginName(s.pluginName) !== preferredName
+            !isPreferredPluginSkill(s, preferredPlugin)
         )
         if (idx >= 0) {
           dedupedPlugins[idx] = skill
@@ -72,5 +102,5 @@ export function mergeChatSkills(
     dedupedPlugins.push(skill)
   }
 
-  return [...localSkills, ...dedupedPlugins]
+  return [...visibleLocalSkills, ...dedupedPlugins]
 }

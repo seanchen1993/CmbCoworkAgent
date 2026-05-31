@@ -47,6 +47,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TabbedPanel } from "@/components/tabs"
 import { ThreadListItem } from "@/components/sidebar/ThreadSidebar"
+import {
+  normalizeHarnessNextAction,
+  setPendingHarnessNextAction
+} from "@/lib/harness-next-action"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import {
@@ -57,6 +61,7 @@ import {
 import { toast } from "sonner"
 import type {
   HarnessArtifact,
+  HarnessArtifactKind,
   HarnessHookLogView,
   HarnessProjectCreateInput,
   HarnessProjectDetailViewModel,
@@ -69,6 +74,7 @@ import type {
   HarnessAdapterRegistryItem,
   HarnessBoardCompatibility,
   HarnessStatus,
+  HarnessWorkflowNextAction,
   Thread
 } from "@/types"
 import { HARNESS_SOURCE } from "../../../../shared/harness-board-types"
@@ -212,6 +218,20 @@ interface HarnessFeatureThreadMetadata {
   projectId: string
   slug: string
   source: string
+}
+
+function getRunNextAction(
+  detail: HarnessRunDetailViewModel | null | undefined
+): HarnessWorkflowNextAction | undefined {
+  if (!detail) return undefined
+  const currentNodeId = detail.run.currentNodeId
+  const stateId = detail.run.nodes.find((node) => node.id === currentNodeId)?.stateId
+  if (!currentNodeId || !stateId) return undefined
+  const workflowNode = detail.workflow.nodes.find((node) => node.id === currentNodeId)
+  const state =
+    workflowNode?.states?.find((item) => item.id === stateId) ??
+    detail.workflow.states?.find((item) => item.id === stateId)
+  return normalizeHarnessNextAction(state?.nextAction)
 }
 
 interface HarnessSessionIndex {
@@ -437,6 +457,7 @@ async function getLatestSessionWorkspacePath(
 interface CreateHarnessSessionParams {
   projectId: string
   slug: string
+  nextAction?: HarnessWorkflowNextAction
   sessions: HarnessSessionBinding[]
   threadsById: Map<string, Thread>
   threadStates: ThreadWorkspaceStateMap
@@ -450,15 +471,18 @@ interface CreateHarnessSessionParams {
 }
 
 async function createHarnessSession(params: CreateHarnessSessionParams): Promise<Thread> {
-  const { projectId, slug, sessions, threadsById, threadStates, createThread } = params
+  const { projectId, slug, nextAction, sessions, threadsById, threadStates, createThread } = params
   const workspacePath = await getLatestSessionWorkspacePath(sessions, threadsById, threadStates)
-  return createThread(
+  const normalizedNextAction = normalizeHarnessNextAction(nextAction)
+  const thread = await createThread(
     {
       workspacePath,
       harnessFeature: { projectId, slug, source: HARNESS_SOURCE }
     },
     { preserveView: true }
   )
+  if (normalizedNextAction) setPendingHarnessNextAction(thread.thread_id, normalizedNextAction)
+  return thread
 }
 
 function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boolean {
@@ -2318,6 +2342,7 @@ function FeatureDetailPage({
       const thread = await createHarnessSession({
         projectId: detail.project.projectId,
         slug: detail.run.slug,
+        nextAction: getRunNextAction(detail),
         sessions: detail.sessions,
         threadsById,
         threadStates: allThreadStates,
@@ -2492,36 +2517,38 @@ function FeatureDetailPage({
                   : "加载中"}
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="gap-2"
-              onClick={onRefresh}
-              disabled={loading || !detail || unbound}
-            >
-              {loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
-              刷新
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              className={cn("gap-2", harnessActionButtonClassName)}
-              onClick={() => void handleCreateSession()}
-              disabled={loading || !detail || unbound || sessionBusy !== null}
-            >
-              <span aria-hidden="true" className={harnessActionOverlayClassName} />
-              <span className={harnessActionIconClassName}>
-                {sessionBusy === "create" ? (
-                  <Loader2 className="size-2.5 animate-spin" />
-                ) : (
-                  <MessageSquarePlus className="size-2.5" />
-                )}
-              </span>
-              <span className="relative">{sessionBusy === "create" ? "创建中" : "新增会话"}</span>
-            </Button>
-          </div>
+          {activeDetailTab === "feature" && (
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="gap-2"
+                onClick={onRefresh}
+                disabled={loading || !detail || unbound}
+              >
+                {loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                刷新
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                className={cn("gap-2", harnessActionButtonClassName)}
+                onClick={() => void handleCreateSession()}
+                disabled={loading || !detail || unbound || sessionBusy !== null}
+              >
+                <span aria-hidden="true" className={harnessActionOverlayClassName} />
+                <span className={harnessActionIconClassName}>
+                  {sessionBusy === "create" ? (
+                    <Loader2 className="size-2.5 animate-spin" />
+                  ) : (
+                    <MessageSquarePlus className="size-2.5" />
+                  )}
+                </span>
+                <span className="relative">{sessionBusy === "create" ? "创建中" : "新增会话"}</span>
+              </Button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -3323,28 +3350,17 @@ export function HarnessBoardView(): React.JSX.Element {
         projectId: featureDialogProject.projectId,
         feature
       })
-      const thread = await createThread(
-        {
-          workspacePath: null,
-          harnessFeature: {
-            projectId: result.projectId,
-            slug: result.slug,
-            source: HARNESS_SOURCE
-          }
-        },
-        { preserveView: true }
-      )
 
+      prefetchedRunDetailRef.current = null
       setFeatureDialogProject(null)
       setFeatureName("")
       await loadProjectDetail(result.projectId)
       setSelectedProjectId(result.projectId)
       setSelectedFeature({
         projectId: result.projectId,
-        slug: result.slug,
-        activeSessionThreadId: thread.thread_id
+        slug: result.slug
       })
-      setIsViewingSession(true)
+      setIsViewingSession(false)
     } catch (error) {
       setFeatureError(cleanIpcError(error))
     } finally {
@@ -3352,7 +3368,6 @@ export function HarnessBoardView(): React.JSX.Element {
       setCreatingFeatureProjectId(null)
     }
   }, [
-    createThread,
     featureDialogProject,
     featureName,
     loadProjectDetail
@@ -3581,7 +3596,13 @@ export function HarnessBoardView(): React.JSX.Element {
         setCreatingSidebarSessionKey(null)
       }
     },
-    [allThreadStates, createThread, creatingSidebarSessionKey, openFeatureDetail, threadsById]
+    [
+      allThreadStates,
+      createThread,
+      creatingSidebarSessionKey,
+      openFeatureDetail,
+      threadsById
+    ]
   )
 
   const sidebarDeleteDialog = (
