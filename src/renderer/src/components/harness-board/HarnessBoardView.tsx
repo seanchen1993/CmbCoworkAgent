@@ -401,10 +401,10 @@ function createUnboundRunDetail(
       name: detail.project.name,
       projectCode: detail.project.projectCode,
       systemId: detail.project.systemId,
-      workspacePath: detail.project.workspacePath
+      workspacePath: detail.project.workspacePath,
+      projectRootPath: detail.project.projectRootPath
     },
     adapterSnapshot: {
-      schemaVersion: "harness.adapter.inspect.v1",
       mode: "run",
       mock: false
     },
@@ -2573,7 +2573,7 @@ function FeatureDetailPage({
                 {renderStageNodeStrip()}
 
                 {selectedNode ? (
-                  <StageArtifactPanel node={selectedNode} workspacePath={detail.project.workspacePath} />
+                  <StageArtifactPanel node={selectedNode} workspacePath={detail.project.projectRootPath} />
                 ) : (
                   <section className="rounded-md border border-dashed border-border bg-background px-3 py-8 text-center text-sm text-muted-foreground">
                     暂无阶段数据。

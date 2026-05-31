@@ -72,7 +72,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     "harnessBoard:getProjectDetail",
     async (_event, projectId: string): Promise<HarnessProjectDetailViewModel> => {
       const detail = getHarnessProjectDetail(projectId)
-      startHarnessWatchRefs(`project:${projectId}`, detail.project.workspacePath, detail.watchRefs)
+      startHarnessWatchRefs(`project:${projectId}`, detail.project.projectRootPath, detail.watchRefs)
       return detail
     }
   )
@@ -88,7 +88,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       const details = getHarnessProjectDetails(projectIds)
       if (shouldWatchRefs) {
         for (const [projectId, detail] of Object.entries(details)) {
-          startHarnessWatchRefs(`project:${projectId}`, detail.project.workspacePath, detail.watchRefs)
+          startHarnessWatchRefs(`project:${projectId}`, detail.project.projectRootPath, detail.watchRefs)
         }
       }
       return details
@@ -104,7 +104,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       const detail = getHarnessRunDetail(payload.projectId, payload.slug)
       startHarnessWatchRefs(
         `run:${payload.projectId}:${payload.slug}`,
-        detail.project.workspacePath,
+        detail.project.projectRootPath,
         detail.run.watchRefs
       )
       return detail

@@ -145,6 +145,10 @@ export interface HarnessFeatureSummary {
   slug: string
   title: string
   location: "active" | "archived" | string
+  /**
+   * Feature-level status derived for summary cards. It is not the display value
+   * of the current node state unless the workflow has reached its final node.
+   */
   overallStatus: HarnessStatus
   currentNodeId: string
   summary: {
@@ -161,9 +165,9 @@ export interface HarnessProjectDetailViewModel {
     systemId: string
     systemName: string
     workspacePath: string
+    projectRootPath: string
   }
   adapterSnapshot: {
-    schemaVersion: "harness.adapter.inspect.v1"
     mode: "project"
     mock: boolean
   }
@@ -263,9 +267,9 @@ export interface HarnessRunDetailViewModel {
     projectCode: string
     systemId: string
     workspacePath: string
+    projectRootPath: string
   }
   adapterSnapshot: {
-    schemaVersion: "harness.adapter.inspect.v1"
     mode: "run"
     mock: boolean
   }

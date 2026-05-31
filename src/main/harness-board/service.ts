@@ -511,6 +511,13 @@ function isInsideDirectory(basePath: string, targetPath: string): boolean {
 }
 
 function resolveAdapterFilePath(project: HarnessProjectMetadata, value: unknown): string | null {
+  return resolveProjectScopedPath(project, value)?.absolutePath ?? null
+}
+
+function resolveProjectScopedPath(
+  project: HarnessProjectMetadata,
+  value: unknown
+): { absolutePath: string; relativePath: string } | null {
   const rawPath = normalizeText(value).trim()
   if (!rawPath) return null
   const normalizedPath = rawPath.replace(/\\/g, "/")
@@ -518,11 +525,14 @@ function resolveAdapterFilePath(project: HarnessProjectMetadata, value: unknown)
   const projectPath = projectDirectoryPath(project)
   const resolvedPath = isAbsolute(normalizedPath)
     ? resolve(normalizedPath)
-    : normalizedPath === project.projectCode || normalizedPath.startsWith(`${project.projectCode}/`)
-      ? resolve(project.workspacePath, normalizedPath)
-      : resolve(projectPath, normalizedPath)
+    : resolve(projectPath, normalizedPath)
 
-  return isInsideDirectory(projectPath, resolvedPath) ? resolvedPath : null
+  if (!isInsideDirectory(projectPath, resolvedPath)) return null
+  const relativePath = relative(projectPath, resolvedPath).replace(/\\/g, "/")
+  return {
+    absolutePath: resolvedPath,
+    relativePath: relativePath || "."
+  }
 }
 
 function projectDirectoryMissingMessage(project: HarnessProjectMetadata): string {
@@ -662,20 +672,7 @@ function normalizeArtifactKind(value: unknown): HarnessArtifactKind {
 }
 
 function normalizeAdapterPath(project: HarnessProjectMetadata, value: unknown): string | null {
-  const rawPath = normalizeText(value).trim()
-  if (!rawPath) return null
-  const normalizedPath = rawPath.replace(/\\/g, "/")
-  if (isAbsolute(normalizedPath)) {
-    const relativePath = relative(project.workspacePath, normalizedPath)
-    if (relativePath && !relativePath.startsWith("..") && !isAbsolute(relativePath)) {
-      return relativePath.replace(/\\/g, "/")
-    }
-    return normalizedPath
-  }
-  if (normalizedPath === ".autobizdevops" || normalizedPath.startsWith(".autobizdevops/")) {
-    return `${project.projectCode}/${normalizedPath}`
-  }
-  return normalizedPath
+  return resolveProjectScopedPath(project, value)?.relativePath ?? null
 }
 
 function normalizeWatchRefs(
@@ -707,6 +704,8 @@ function normalizeProjectRun(value: unknown, workflow: HarnessWorkflow): Harness
   const currentNodeIndex = workflow.nodes.findIndex((node) => node.id === currentNodeId)
   const currentNodeDefinition = currentNodeIndex >= 0 ? workflow.nodes[currentNodeIndex] : undefined
   const isFinalNode = currentNodeIndex >= 0 && currentNodeIndex === workflow.nodes.length - 1
+  // This is a feature-level summary status. Before the final node, the feature
+  // is still considered active even when the current node's own state is done.
   const status = isFinalNode
     ? statusFromWorkflowStateId(workflow, currentNodeDefinition, normalizeText(value.currentStateId))
     : { label: "进行中", uiKind: "active" as const }
@@ -1202,8 +1201,8 @@ function okStatus(_id: string, label: string): HarnessStatus {
   return { label, uiKind: "ok" }
 }
 
-function makeWatchRefs(projectName: string, slug?: string): HarnessWatchRef[] {
-  const base = `${projectName}/.autobizdevops`
+function makeWatchRefs(slug?: string): HarnessWatchRef[] {
+  const base = ".autobizdevops"
   return slug
     ? [
         { path: `${base}/STATE.md`, purpose: "run-state" },
@@ -1232,10 +1231,10 @@ function makeProjectDetailViewModel(
       projectCode: project.projectCode,
       systemId: project.systemId,
       systemName: project.systemName,
-      workspacePath: project.workspacePath
+      workspacePath: project.workspacePath,
+      projectRootPath: projectDirectoryPath(project)
     },
     adapterSnapshot: {
-      schemaVersion: "harness.adapter.inspect.v1",
       mode: "project",
       mock: false
     },
@@ -1521,7 +1520,7 @@ function makeProjectErrorDetail(
   return makeProjectDetailViewModel(project, {
     workflow: normalizeWorkflow(null),
     runs: [],
-    watchRefs: makeWatchRefs(project.projectCode),
+    watchRefs: makeWatchRefs(),
     projectState: { label, uiKind: "warning" },
     error
   })
@@ -1599,7 +1598,7 @@ export function getHarnessProjectDetails(
           continue
         }
 
-        const fallbackWatchRefs = makeWatchRefs(project.projectCode)
+        const fallbackWatchRefs = makeWatchRefs()
         const runs = normalizeProjectRuns(projectData, workflow)
         result[project.projectId] = makeProjectDetailViewModel(project, {
           workflow,
@@ -1641,10 +1640,10 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
       name: project.name,
       projectCode: project.projectCode,
       systemId: project.systemId,
-      workspacePath: project.workspacePath
+      workspacePath: project.workspacePath,
+      projectRootPath: projectDirectoryPath(project)
     },
     adapterSnapshot: {
-      schemaVersion: "harness.adapter.inspect.v1",
       mode: "run",
       mock: false
     },
@@ -1658,7 +1657,7 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
         label: project["harness-adapter"].name
       },
       hookLogRefs,
-      watchRefs: normalizeWatchRefs(project, run.watchRefs, makeWatchRefs(project.projectCode, featureSlug)),
+      watchRefs: normalizeWatchRefs(project, run.watchRefs, makeWatchRefs(featureSlug)),
       currentNodeId,
       nodes: nodesWithHookLogs,
       unmatchedHooks
