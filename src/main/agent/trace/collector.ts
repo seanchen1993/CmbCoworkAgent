@@ -203,6 +203,7 @@ export class TraceCollector {
   private modelName: string | undefined
   private routingTrace: RoutingTrace | undefined
   private readonly triggerSource: TraceTriggerSource
+  private readonly harnessFeature: { projectId: string; slug: string } | undefined
 
   private steps: TraceStep[] = []
   private usedSkills: string[] = []
@@ -224,13 +225,17 @@ export class TraceCollector {
     threadId: string,
     userMessage: string,
     modelId: string,
-    options: { triggerSource?: TraceTriggerSource } = {}
+    options: {
+      triggerSource?: TraceTriggerSource
+      harnessFeature?: { projectId: string; slug: string }
+    } = {}
   ) {
     this.traceId = uuid()
     this.threadId = threadId
     this.userMessage = userMessage
     this.modelId = modelId
     this.triggerSource = options.triggerSource ?? "chat"
+    this.harnessFeature = options.harnessFeature
     this.startedAt = nowIsoLocal()
     this.rootNodeId = `trace:${this.traceId}`
     this.pushNode({
@@ -601,6 +606,12 @@ export class TraceCollector {
       usedSkills: usedSkillsWithVersions,
       evolvedSkills: evolvedSkillsWithVersions,
       triggerSource: this.triggerSource,
+      ...(this.harnessFeature
+        ? {
+            harnessProjectId: this.harnessFeature.projectId,
+            harnessFeatureSlug: this.harnessFeature.slug
+          }
+        : {}),
       ...(this.routingTrace ? { metadata: { routingTrace: this.routingTrace } } : {})
     }
 

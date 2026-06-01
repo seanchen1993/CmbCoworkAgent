@@ -103,7 +103,8 @@ import {
 } from "../services/agent-auto-commit"
 import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
 import {
-  buildHarnessFeatureAgentContext
+  buildHarnessFeatureAgentContext,
+  readHarnessFeatureMetadata
 } from "../harness-board/service"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
@@ -1460,9 +1461,23 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
     window.once("closed", onWindowClosed)
 
+    // Resolve the Harness Board feature binding (if any) so the trace can be
+    // tagged with its project/feature — links a feature to its conversation traces.
+    let harnessFeatureBinding: { projectId: string; slug: string } | undefined
+    try {
+      const bindingThread = getThread(threadId)
+      if (bindingThread?.metadata) {
+        harnessFeatureBinding =
+          readHarnessFeatureMetadata(JSON.parse(bindingThread.metadata)) ?? undefined
+      }
+    } catch {
+      // Non-project threads or unparsable metadata: leave the trace untagged.
+    }
+
     // Start trace collection for this invocation (modelId resolved later)
     const tracer = new TraceCollector(threadId, message, modelId ?? "unknown", {
-      triggerSource: "chat"
+      triggerSource: "chat",
+      ...(harnessFeatureBinding ? { harnessFeature: harnessFeatureBinding } : {})
     })
     const skillUsageDetector = new SkillUsageDetector()
     const toolCallCounter = new ToolCallCounter()
