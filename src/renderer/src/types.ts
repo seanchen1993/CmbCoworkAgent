@@ -301,4 +301,12 @@ export interface SkillMetadata {
 }
 
 
-export type { HookConfig, HookEvent, HookType, PromptHookFallback, HookUpsert } from "../../main/hooks/types"
+export type {
+  HookConfig,
+  HookEvent,
+  HookType,
+  PromptHookFallback,
+  HookUpsert,
+  HookInjectUserContext,
+  HookUserContextField
+} from "../../main/hooks/types"

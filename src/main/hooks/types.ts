@@ -113,6 +113,28 @@ export interface HookOnBlockConfig {
  */
 export type HookForcedOutcome = "always-revise" | "always-halt"
 
+export type HookUserContextField =
+  | "sap_id"
+  | "yst_id"
+  | "name"
+  | "origin_org_id"
+  | "org_name"
+  | "path_name"
+  | "origin_path_id"
+  | "yst_id_token"
+
+export interface HookInjectUserContextConfig {
+  /** Explicit opt-in. When omitted inside an object, presence of the object enables injection. */
+  enabled?: boolean
+  /**
+   * Fields to expose. Defaults to non-token identity fields.
+   * Token fields such as yst_id_token must be listed explicitly.
+   */
+  include?: HookUserContextField[]
+}
+
+export type HookInjectUserContext = boolean | HookInjectUserContextConfig
+
 export interface HookConfig {
   id: string
   event: HookEvent
@@ -176,6 +198,11 @@ export interface HookConfig {
    * are always in scope by definition).
    */
   persistAfterInterrupt?: boolean
+  /**
+   * Explicit opt-in for user identity in hook stdin/env. Defaults off.
+   * yst_id_token is only exposed in stdin payload and never as an env var.
+   */
+  injectUserContext?: HookInjectUserContext
   timeout?: number // Timeout in ms, default 10000
   /**
    * PR-15 — when true, the runner returns a placeholder result immediately and
@@ -367,6 +394,7 @@ export interface HookUpsert {
   forcedReason?: string
   once?: boolean
   persistAfterInterrupt?: boolean
+  injectUserContext?: HookInjectUserContext
   timeout?: number
   /** PR-15 — see HookConfig.async. */
   async?: boolean
