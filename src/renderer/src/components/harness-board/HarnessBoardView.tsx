@@ -1597,7 +1597,7 @@ function ArtifactLine({
     <div className="grid grid-cols-[18px_minmax(140px,1fr)_90px_minmax(160px,1.5fr)] items-start gap-x-3 gap-y-2 border-t border-border px-3 py-3 text-sm">
       <FileText className="row-span-2 mt-0.5 size-4 text-muted-foreground" />
       <div className="min-w-0">
-        <div className="truncate font-medium" title={artifact.label}>{artifact.label}</div>
+        <div className="truncate font-medium" title={artifact.artifactLabel}>{artifact.artifactLabel}</div>
       </div>
       <StatusPill status={artifact.status} />
       <div className="min-w-0 text-xs leading-5 text-muted-foreground">

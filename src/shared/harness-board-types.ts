@@ -161,6 +161,7 @@ export interface HarnessFeatureSummary {
   overallStatus: HarnessStatus
   currentNodeId: string
   currentNodeStatus: HarnessNodeStatus
+  currentNodeStatusLabel?: string
   summary: {
     text: string
     updatedAt: string
@@ -197,7 +198,6 @@ export interface HarnessWorkflowNextAction {
 
 export interface HarnessWorkflowStateDefinition {
   nodeStatus: HarnessNodeStatus
-  label: string
   nextAction?: HarnessWorkflowNextAction
 }
 
@@ -221,17 +221,10 @@ export type HarnessArtifactStatus =
   | "invalid"
   | "unknown"
 
-export interface HarnessWorkflowArtifactStatusDefinition {
-  artifactStatus: HarnessArtifactStatus
-  label: string
-}
-
 export interface HarnessWorkflowArtifactDefinition {
   id: string
-  label: string
   required: boolean
   artifactType: HarnessArtifactType
-  artifactStatuses: HarnessWorkflowArtifactStatusDefinition[]
 }
 
 export interface HarnessWorkflowNodeDefinition {
@@ -260,12 +253,13 @@ export interface HarnessWorkflow {
 
 export interface HarnessArtifact {
   id: string
-  label: string
+  artifactLabel: string
   artifactType: HarnessArtifactType
   path: string | null
   paths?: string[]
   required: boolean
   artifactStatus: HarnessArtifactStatus
+  artifactStatusLabel?: string
   status: HarnessStatus
   exists?: boolean
   nonEmpty?: boolean
@@ -301,6 +295,7 @@ export interface HarnessRunNode {
   label: string
   group?: string
   nodeStatus: HarnessNodeStatus
+  nodeStatusLabel?: string
   status: HarnessStatus
   artifacts: HarnessArtifact[]
   hooks: HarnessHookLogView[]

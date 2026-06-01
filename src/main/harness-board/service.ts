@@ -749,11 +749,10 @@ function normalizeEventStatus(value: unknown): HarnessEventStatus {
 
 function statusFromArtifactStatus(
   artifactStatus: HarnessArtifactStatus,
-  definition?: HarnessWorkflowArtifactDefinition
+  label?: string
 ): HarnessStatus {
-  const statusDefinition = definition?.artifactStatuses.find((item) => item.artifactStatus === artifactStatus)
   return {
-    label: statusDefinition?.label.trim() || DEFAULT_ARTIFACT_STATUS_LABELS[artifactStatus],
+    label: label?.trim() || DEFAULT_ARTIFACT_STATUS_LABELS[artifactStatus],
     uiKind: ARTIFACT_STATUS_UI_KIND[artifactStatus]
   }
 }
@@ -789,13 +788,14 @@ function normalizeProjectRun(value: unknown, workflow: HarnessWorkflow): Harness
 
   const currentNodeId = normalizeText(value.currentNodeId) || "unknown"
   const currentNodeStatus = normalizeNodeStatus(value.currentNodeStatus)
+  const currentNodeStatusLabel = normalizeText(value.currentNodeStatusLabel).trim()
   const currentNodeIndex = workflow.nodes.findIndex((node) => node.id === currentNodeId)
   const currentNodeDefinition = currentNodeIndex >= 0 ? workflow.nodes[currentNodeIndex] : undefined
   const isFinalNode = currentNodeIndex >= 0 && currentNodeIndex === workflow.nodes.length - 1
   // This is a feature-level summary status. Before the final node, the feature
   // is still considered active even when the current node's own state is done.
   const status = isFinalNode
-    ? statusFromWorkflowNodeStatus(workflow, currentNodeDefinition, currentNodeStatus)
+    ? statusFromNodeStatus(currentNodeStatus, currentNodeStatusLabel)
     : { label: "进行中", uiKind: "active" as const }
   const currentNodeLabel = currentNodeDefinition?.label ?? currentNodeId
   const summaryText = currentNodeLabel ? `${currentNodeLabel} · ${status.label}` : status.label
@@ -809,6 +809,7 @@ function normalizeProjectRun(value: unknown, workflow: HarnessWorkflow): Harness
     overallStatus: status,
     currentNodeId,
     currentNodeStatus,
+    ...(currentNodeStatusLabel ? { currentNodeStatusLabel } : {}),
     summary: {
       text: summaryText,
       updatedAt: ""
@@ -833,7 +834,6 @@ function normalizeWorkflowStateDefinition(
   const nextAction = normalizeWorkflowNextAction(value.nextAction)
   return {
     nodeStatus,
-    label: normalizeText(value.label).trim() || DEFAULT_NODE_STATUS_LABELS[nodeStatus],
     ...(nextAction ? { nextAction } : {})
   }
 }
@@ -851,44 +851,14 @@ function normalizeWorkflowNextAction(value: unknown): HarnessWorkflowNextAction 
   return Object.keys(nextAction).length > 0 ? nextAction : undefined
 }
 
-function defaultArtifactStatuses(): HarnessWorkflowArtifactDefinition["artifactStatuses"] {
-  return [
-    { artifactStatus: "generated", label: DEFAULT_ARTIFACT_STATUS_LABELS.generated },
-    { artifactStatus: "missing", label: DEFAULT_ARTIFACT_STATUS_LABELS.missing },
-    { artifactStatus: "partial", label: DEFAULT_ARTIFACT_STATUS_LABELS.partial },
-    { artifactStatus: "invalid", label: DEFAULT_ARTIFACT_STATUS_LABELS.invalid },
-    { artifactStatus: "unknown", label: DEFAULT_ARTIFACT_STATUS_LABELS.unknown }
-  ]
-}
-
-function normalizeWorkflowArtifactStatusDefinition(
-  value: unknown
-): HarnessWorkflowArtifactDefinition["artifactStatuses"][number] | null {
-  if (!isObject(value)) return null
-  const artifactStatusValue = normalizeText(value.artifactStatus)
-  if (!HARNESS_ARTIFACT_STATUSES.has(artifactStatusValue as HarnessArtifactStatus)) return null
-  const artifactStatus = artifactStatusValue as HarnessArtifactStatus
-  return {
-    artifactStatus,
-    label: normalizeText(value.label).trim() || DEFAULT_ARTIFACT_STATUS_LABELS[artifactStatus]
-  }
-}
-
 function normalizeWorkflowArtifactDefinition(value: unknown): HarnessWorkflowArtifactDefinition | null {
   if (!isObject(value)) return null
   const artifactId = normalizeText(value.id)
   if (!artifactId) return null
-  const artifactStatuses = Array.isArray(value.artifactStatuses)
-    ? value.artifactStatuses
-        .map((status) => normalizeWorkflowArtifactStatusDefinition(status))
-        .filter((status): status is NonNullable<typeof status> => status !== null)
-    : []
   return {
     id: artifactId,
-    label: normalizeText(value.label) || artifactId,
     required: typeof value.required === "boolean" ? value.required : false,
-    artifactType: normalizeArtifactType(value.artifactType),
-    artifactStatuses: artifactStatuses.length > 0 ? artifactStatuses : defaultArtifactStatuses()
+    artifactType: normalizeArtifactType(value.artifactType)
   }
 }
 
@@ -968,17 +938,6 @@ function workflowArtifactDefinitions(workflow: HarnessWorkflow): Map<string, Map
   return byNode
 }
 
-function statusFromWorkflowNodeStatus(
-  workflow: HarnessWorkflow,
-  nodeDefinition: HarnessWorkflow["nodes"][number] | undefined,
-  nodeStatus: HarnessNodeStatus
-): HarnessStatus {
-  const state =
-    nodeDefinition?.states?.find((item) => item.nodeStatus === nodeStatus) ??
-    workflow.states?.find((item) => item.nodeStatus === nodeStatus)
-  return statusFromNodeStatus(nodeStatus, state?.label)
-}
-
 function normalizeArtifact(
   project: HarnessProjectMetadata,
   value: unknown,
@@ -987,7 +946,9 @@ function normalizeArtifact(
   if (!isObject(value)) return null
   const id = normalizeText(value.id)
   if (!id) return null
+  const artifactLabel = normalizeText(value.artifactLabel).trim() || id
   const artifactStatus = normalizeArtifactStatus(value.artifactStatus)
+  const artifactStatusLabel = normalizeText(value.artifactStatusLabel).trim()
   const path = normalizeAdapterPath(project, value.path)
   const paths = Array.isArray(value.paths)
     ? (value.paths as unknown[])
@@ -996,12 +957,13 @@ function normalizeArtifact(
     : []
   return {
     id,
-    label: definition?.label || id,
+    artifactLabel,
     artifactType: definition?.artifactType ?? UNKNOWN_ARTIFACT_TYPE,
     path: paths.length > 0 ? null : path,
     required: definition?.required ?? false,
     artifactStatus,
-    status: statusFromArtifactStatus(artifactStatus, definition),
+    ...(artifactStatusLabel ? { artifactStatusLabel } : {}),
+    status: statusFromArtifactStatus(artifactStatus, artifactStatusLabel),
     ...(Array.isArray(value.paths) ? { paths } : {})
   }
 }
@@ -1131,12 +1093,14 @@ function normalizeRunNodes(
       const id = nodeDefinition.id
       const definitions = artifactDefinitions.get(id)
       const nodeStatus = normalizeNodeStatus(node?.nodeStatus)
+      const nodeStatusLabel = normalizeText(node?.nodeStatusLabel).trim()
       return {
         id,
         label: nodeDefinition.label,
         ...(nodeDefinition.group ? { group: nodeDefinition.group } : {}),
         nodeStatus,
-        status: statusFromWorkflowNodeStatus(workflow, nodeDefinition, nodeStatus),
+        ...(nodeStatusLabel ? { nodeStatusLabel } : {}),
+        status: statusFromNodeStatus(nodeStatus, nodeStatusLabel),
         artifacts: Array.isArray(node?.artifacts)
           ? node.artifacts
               .map((artifact) => {
