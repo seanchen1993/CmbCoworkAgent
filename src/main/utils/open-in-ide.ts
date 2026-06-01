@@ -276,6 +276,18 @@ function shouldUseShell(command: string): boolean {
   return process.platform === "win32" && /\.(cmd|bat)$/i.test(command)
 }
 
+function shouldTreatNonZeroExitAsSuccess(command: string): boolean {
+  if (process.platform !== "win32") return false
+
+  // JetBrains / VS Code GUI launchers on Windows can return a non-zero exit code
+  // even after they have already forwarded the open request to a running IDE.
+  // Once the process is spawned successfully, trust the spawn/error signal rather
+  // than the launcher exit code for these best-effort handoff executables.
+  return /(?:^|[\\/])(?:idea64|idea|webstorm64|webstorm|code|code - insiders)\.exe$/i.test(
+    command
+  )
+}
+
 function spawnDetached(launcher: IdeLauncher, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(launcher.command, [...(launcher.argsPrefix || []), ...args], {
@@ -304,7 +316,8 @@ function spawnDetached(launcher: IdeLauncher, args: string[]): Promise<void> {
 
     child.once("exit", (code) => {
       clearTimeout(timer)
-      if (code === 0 || code === null) {
+      if (code === 0 || code === null || shouldTreatNonZeroExitAsSuccess(launcher.command)) {
+        child.unref()
         settle(resolve)
         return
       }
