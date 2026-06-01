@@ -170,8 +170,13 @@ export function appendSkillEvalWindowTurn(turn: SkillEvalWindowTurn): SkillEvalW
   const existing = skillEvalWindows.get(turn.threadId) ?? []
   const referenceMs = timestampMs(turn.endedAt || turn.startedAt)
   const usedSkills = uniqueStrings(turn.usedSkills)
+  const pendingSkillNames = findPendingAnswerContext(existing, referenceMs, turn.userMessage)
+  const pendingSkillNameSet = new Set(pendingSkillNames)
+  // Explicit skill prompts can still be continuations when the marker is carried into a follow-up.
   const inheritedSkillNames =
-    usedSkills.length > 0 ? [] : findPendingAnswerContext(existing, referenceMs, turn.userMessage)
+    usedSkills.length > 0
+      ? usedSkills.filter((rawSkillName) => pendingSkillNameSet.has(rawSkillName))
+      : pendingSkillNames
   const skillContextNames = usedSkills.length > 0 ? usedSkills : inheritedSkillNames
   const skillTaskIdsByRawName = buildSkillTaskIds(
     turn.threadId,

@@ -208,6 +208,45 @@ describe("skill eval scoring", () => {
     resetSkillEvalWindow(threadId)
   })
 
+  it("reuses the pending skill task when an explicit follow-up carries the same skill", () => {
+    const threadId = "thread-window-explicit-continuation"
+    const rawSkillName = "prd-to-frontend-v1.0.0"
+    resetSkillEvalWindow(threadId)
+
+    appendSkillEvalWindowTurn({
+      traceId: "trace-a",
+      threadId,
+      startedAt: "2026-05-30T01:00:00.000Z",
+      endedAt: "2026-05-30T01:00:02.000Z",
+      usedSkills: [rawSkillName],
+      userMessage: "请生成页面",
+      assistantText: "我需要更多信息才能帮你生成页面。请提供需求文档。",
+      outcome: "success"
+    })
+    const firstContext = getSkillEvalWindowContextByRawName(threadId, [rawSkillName])[rawSkillName]
+    expect(firstContext.skillTaskTraceIndex).toBe(0)
+
+    const secondTurn = appendSkillEvalWindowTurn({
+      traceId: "trace-b",
+      threadId,
+      startedAt: "2026-05-30T01:00:03.000Z",
+      endedAt: "2026-05-30T01:00:04.000Z",
+      usedSkills: [rawSkillName],
+      userMessage:
+        '这个是需求文档\n\n<attachment filename="PRD.docx" path="C:\\\\Users\\\\demo\\\\Downloads\\\\PRD.docx" />',
+      assistantText: "已读取需求文档，开始生成页面。",
+      outcome: "success"
+    })
+
+    expect(secondTurn.inheritedContext).toBe(false)
+    expect(secondTurn.evalSkillNames).toEqual([rawSkillName])
+    const secondContext = getSkillEvalWindowContextByRawName(threadId, [rawSkillName])[rawSkillName]
+    expect(secondContext.skillTaskId).toBe(firstContext.skillTaskId)
+    expect(secondContext.skillEvalTraceIds).toEqual(["trace-a", "trace-b"])
+    expect(secondContext.skillTaskTraceIndex).toBe(1)
+    resetSkillEvalWindow(threadId)
+  })
+
   it("flags peak input tokens even when average input tokens are reasonable", () => {
     const [record] = evaluateTraceSkills(
       makeTrace({
