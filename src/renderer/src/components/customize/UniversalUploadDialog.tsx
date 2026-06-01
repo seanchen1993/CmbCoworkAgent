@@ -366,6 +366,8 @@ export function UniversalUploadDialog({
 
   const [jsonTemplateCopied, setJsonTemplateCopied] = useState(false)
   const [showJsonTemplate, setShowJsonTemplate] = useState(false)
+  const [pluginMcpTemplateCopied, setPluginMcpTemplateCopied] = useState(false)
+  const [showPluginMcpTemplate, setShowPluginMcpTemplate] = useState(false)
   const canSubmit =
     (isUpdate || !!file || !!generatedFile) &&
     !!name.trim() &&
@@ -420,6 +422,44 @@ export function UniversalUploadDialog({
       })
   }
 
+  const pluginMcpTemplate = `{
+  "search-service": {
+    "url": "https://example.com/mcp",
+    "transport": "streamable-http",
+    "headers": {
+      "X-App": "my-plugin"
+    },
+    "injectUserHeaders": true,
+    "priority": 50,
+    "scope": "plugin-active",
+    "fallback": {
+      "enabled": true,
+      "to": "global",
+      "match": "toolNameAndSchema",
+      "safeToRetry": true
+    }
+  },
+  "local-helper": {
+    "command": "node",
+    "args": ["./mcp-server.js"],
+    "env": {
+      "NODE_ENV": "production"
+    }
+  }
+}`
+
+  const handleCopyPluginMcpTemplate = () => {
+    navigator.clipboard
+      .writeText(pluginMcpTemplate)
+      .then(() => {
+        setPluginMcpTemplateCopied(true)
+        setTimeout(() => setPluginMcpTemplateCopied(false), 2000)
+      })
+      .catch(() => {
+        setError("复制插件 MCP 模板失败，请手动复制")
+      })
+  }
+
   return (
     <Dialog open={open} onOpenChange={handleDialogClose}>
       <DialogContent className="sm:max-w-lg">
@@ -442,6 +482,59 @@ export function UniversalUploadDialog({
                 下载插件模板
                 <ExternalLink className="size-3.5" />
               </a>
+            </div>
+          )}
+
+          {resourceType === "plugin" && (
+            <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground leading-relaxed space-y-2">
+              <p>
+                插件 MCP 使用根目录 <span className="font-mono">.mcp.json</span> 配置。remote MCP
+                默认注入当前用户 Header；可用{" "}
+                <span className="font-mono">injectUserHeaders: false</span> 关闭，用{" "}
+                <span className="font-mono">priority</span> / <span className="font-mono">scope</span>{" "}
+                控制调用优先级，用 <span className="font-mono">fallback</span>{" "}
+                声明失败后是否允许切到全局同名 MCP。Fallback 需要同时声明{" "}
+                <span className="font-mono">safeToRetry: true</span>，只适合查询类或幂等工具。
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={handleCopyPluginMcpTemplate}
+                  disabled={uploading}
+                >
+                  {pluginMcpTemplateCopied ? (
+                    <Check className="mr-1.5 h-3.5 w-3.5" />
+                  ) : (
+                    <Copy className="mr-1.5 h-3.5 w-3.5" />
+                  )}
+                  {pluginMcpTemplateCopied ? "已复制" : "复制 .mcp.json 示例"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => setShowPluginMcpTemplate(!showPluginMcpTemplate)}
+                  disabled={uploading}
+                >
+                  {showPluginMcpTemplate ? (
+                    <ChevronDown className="mr-1.5 h-3.5 w-3.5" />
+                  ) : (
+                    <ChevronRight className="mr-1.5 h-3.5 w-3.5" />
+                  )}
+                  {showPluginMcpTemplate ? "隐藏示例" : "查看示例"}
+                </Button>
+              </div>
+              {showPluginMcpTemplate && (
+                <div className="h-[180px] overflow-auto">
+                  <pre className="bg-background p-3 rounded border text-xs overflow-x-auto">
+                    <code>{pluginMcpTemplate}</code>
+                  </pre>
+                </div>
+              )}
             </div>
           )}
 

@@ -9,10 +9,13 @@ import {
 } from "../agent/runtime"
 import { getThread } from "../db"
 import { summarizeAndSave } from "../memory/summarizer"
+import { consolidateMemories, shouldRunDream, incrementDreamSessions } from "../memory/consolidate"
+import { scanMemoryFiles } from "../memory/manifest"
 import { getMemoryStore } from "../memory/store"
 import { ChatOpenAI } from "@langchain/openai"
 import {
   getCustomModelConfigs,
+  isDreamEnabled,
   isMemoryEnabled,
   getCustomSkillsDir,
   invalidateEnabledSkillsCache,
@@ -72,8 +75,13 @@ import {
   type SkillProposal,
   type WorthinessResult
 } from "../agent/skill-evolution/skill-proposal-logic"
-import { isRetryableApiError, buildOrderedChain, type FailoverAttempt } from "../agent/failover"
-import { type HookContext, type HookResultCallback } from "../hooks/runner"
+import {
+  isRetryableApiError,
+  buildOrderedChain,
+  classifyApiError,
+  type FailoverAttempt
+} from "../agent/failover"
+import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
 import {
   createHookScope,
   normalizePathKey,
@@ -329,6 +337,62 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     params.onHookResult
   )
   throwIfHookHalt("SubagentStop", result, "SubagentStop hook stopped the turn")
+}
+
+/**
+ * PR-13 — Fire SubagentStart on each `task` tool_call seen in an AIMessage,
+ * with independent dedupe so streaming + values-snapshot duplicate AIMessages
+ * fire exactly once. Pair with SubagentStop via `tool_call_id`.
+ *
+ * AIMessages are emitted twice in many stream modes (chunk + final values), so
+ * we MUST NOT reuse the metrics-counting `_countedAiMsgIds` set — that one
+ * grows under different invariants and would not match per-tool-call dedupe.
+ */
+function maybeRunSubagentStartHooksFromToolCalls(params: {
+  toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }> | undefined
+  workspacePath?: string
+  threadId: string
+  turnId?: string
+  hookScope: HookScopeController
+  firedStartIds: Set<string>
+  onHookResult?: HookResultCallback
+  onHookSkipped?: ScopeSkipCallback
+}): void {
+  if (!params.toolCalls || params.toolCalls.length === 0) return
+  for (const tc of params.toolCalls) {
+    if (tc?.name !== "task") continue
+    const id = typeof tc.id === "string" ? tc.id : ""
+    if (!id || params.firedStartIds.has(id)) continue
+    params.firedStartIds.add(id)
+    const args = (tc.args ?? {}) as Record<string, unknown>
+    const subagentType = typeof args.subagent_type === "string" ? args.subagent_type : undefined
+    const taskDescription = typeof args.description === "string" ? args.description : undefined
+    const context: HookContext = {
+      workspacePath: params.workspacePath,
+      sessionId: params.threadId,
+      turnId: params.turnId,
+      subagent: { id, name: subagentType, status: "started" },
+      toolName: "task",
+      toolArgs: {
+        agent_id: id,
+        agent_type: subagentType,
+        tool_call_id: id,
+        task_description: taskDescription
+      }
+    }
+    runHooksEnriched(
+      resolveEnabledHooksForRun(
+        params.workspacePath,
+        "SubagentStart",
+        context,
+        params.hookScope,
+        params.onHookSkipped
+      ),
+      "SubagentStart",
+      context,
+      params.onHookResult
+    ).catch((e) => console.warn("[Hooks] SubagentStart hook error:", e))
+  }
 }
 
 /**
@@ -1465,6 +1529,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const skillUsageDetector = new SkillUsageDetector()
     const toolCallCounter = new ToolCallCounter()
     let assistantText = ""
+    /** Paths written/edited by the agent during this turn (for memory-write detection) */
+    const fileWritePaths: string[] = []
     const recentCompletedTurns = snapshotSkillProposalWindow(threadId).slice(-2)
 
     const computeCodeGenAttributionSkills = (currentRunSkills: string[]): string[] => {
@@ -1524,6 +1590,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
 
     const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+    let stopHookFired = false
     // Per-event scope-skip factory: diagnostic mode only. The gate lives in
     // `buildHookSkippedRecord`, so constructing this factory is always cheap; the
     // hot path bails out when Hook diagnostic mode is off.
@@ -1631,7 +1698,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
       // thread is deleted (threads:delete) or the app is quitting.
-      fireSessionStartOnce(
+      await fireSessionStartOnce(
         threadId,
         sessionWorkspacePath,
         onHookResult,
@@ -1744,7 +1811,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         })
       }
 
-      const humanMessage = new HumanMessage(effectiveMessage)
+      const humanMessage = userMessageId
+        ? new HumanMessage({ content: effectiveMessage, id: userMessageId })
+        : new HumanMessage(effectiveMessage)
       const streamConfig = {
         configurable: { thread_id: threadId },
         signal: abortController.signal,
@@ -1884,6 +1953,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const _countedToolResultMsgIds = new Set<string>()
       // Track which subagent tool-call IDs we've already emitted SubagentStop for (dedupe)
       const _subagentStopFired = new Set<string>()
+      // PR-13 — independent dedupe for SubagentStart so duplicated AIMessage
+      // emissions (chunk + values snapshot) only fire the hook once.
+      const _subagentStartFired = new Set<string>()
       const _llmNodeByMessageId = new Map<string, string>()
       const _toolNodeByRef = new Map<string, string>()
       const MODEL_INPUT_WINDOW = 12
@@ -1893,6 +1965,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         s.length > MAX_TRACE_CONTENT ? `${s.slice(0, MAX_TRACE_CONTENT)}\n…(truncated)` : s
 
       const normalizeMessageText = (s: string): string => s.replace(/\r\n/g, "\n").trim()
+
+      const stableJson = (value: unknown): string => {
+        if (value === null || value === undefined) return String(value)
+        if (typeof value !== "object") return JSON.stringify(value)
+        if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`
+        const obj = value as Record<string, unknown>
+        return `{${Object.keys(obj)
+          .sort()
+          .map((key) => `${JSON.stringify(key)}:${stableJson(obj[key])}`)
+          .join(",")}}`
+      }
 
       // Providers may surface usage as top-level `usage_metadata` or under
       // `response_metadata.token_usage` / `response_metadata.usage`.
@@ -2031,6 +2114,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             | undefined
           const msgId = (kwargs.id as string) || ""
           if (!toolCalls || toolCalls.length === 0) return
+
+          // PR-13 — SubagentStart fires per `task` tool_call, deduped on
+          // `tc.id` independently of the metrics msg-id dedupe below (we want
+          // start hooks to see every distinct task call even when several
+          // task tool_calls share an AIMessage that previously counted).
+          maybeRunSubagentStartHooksFromToolCalls({
+            toolCalls,
+            workspacePath,
+            threadId,
+            turnId: turnState.turnId,
+            hookScope,
+            firedStartIds: _subagentStartFired,
+            onHookResult,
+            onHookSkipped: onHookSkippedFactory("SubagentStart")
+          })
+
           if (msgId && _countedAiMsgIds.has(msgId)) return
           if (msgId) _countedAiMsgIds.add(msgId)
 
@@ -2055,6 +2154,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 if (hit) {
                   syncUsedSkillsContext()
                 }
+              }
+            }
+
+            // Track file write/edit paths for memory-write detection
+            if (tcName === "write_file" || tcName === "edit_file") {
+              const writePath =
+                (typeof tc.args?.path === "string" && tc.args.path) ||
+                (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
+                ""
+              if (writePath) {
+                fileWritePaths.push(writePath.replace(/\\/g, "/"))
               }
             }
 
@@ -2143,9 +2253,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const className = classId[classId.length - 1] || ""
             const isAI = className.includes("AI") || kwargs.type === "ai"
             const isToolMessage = className.includes("Tool") || kwargs.type === "tool"
-            const aiMsgId = typeof kwargs.id === "string" ? kwargs.id : ""
-            if (isAI && aiMsgId && !_countedModelMsgIds.has(aiMsgId)) {
-              _countedModelMsgIds.add(aiMsgId)
+            const rawAiMsgId = typeof kwargs.id === "string" ? kwargs.id : ""
+            const aiMsgKey = rawAiMsgId || `values:${i}:${stableJson(tcs ?? [])}`
+            if (isAI && !_countedModelMsgIds.has(aiMsgKey)) {
+              _countedModelMsgIds.add(aiMsgKey)
 
               // Extract the real model name from API response metadata (e.g. "MiniMax-M2.7")
               // This takes precedence over the user-configured model name (config.model)
@@ -2178,14 +2289,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 : []
 
               const llmNodeId = tracer.beginLlmNode({
-                messageId: aiMsgId,
+                messageId: aiMsgKey,
                 startedAt: nowIsoLocal(),
                 input: inputSlice,
                 metadata: {
+                  ...(rawAiMsgId ? { providerMessageId: rawAiMsgId } : {}),
                   toolCallCount: outputToolCalls.length
                 }
               })
-              _llmNodeByMessageId.set(aiMsgId, llmNodeId)
+              _llmNodeByMessageId.set(aiMsgKey, llmNodeId)
 
               const usageForTrace = normalizeTokenUsage(getUsageMetadata(kwargs))
 
@@ -2195,7 +2307,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
 
               tracer.recordModelCall({
-                messageId: aiMsgId,
+                messageId: rawAiMsgId || aiMsgKey,
                 startedAt: nowIsoLocal(),
                 inputMessages: inputSlice,
                 outputMessage: {
@@ -2220,16 +2332,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               for (let tcIndex = 0; tcIndex < tcs.length; tcIndex++) {
                 const tc = tcs[tcIndex]
                 const tcId = typeof tc?.id === "string" ? tc.id : ""
-                const toolRef =
-                  tcId || `${aiMsgId || "ai_unknown"}:${tcIndex}:${JSON.stringify(tc?.args ?? {})}`
-                const counted = toolCallCounter.register(tc, aiMsgId, tcIndex)
+                const toolRef = tcId || `${aiMsgKey}:${tcIndex}:${JSON.stringify(tc?.args ?? {})}`
+                const counted = toolCallCounter.register(tc, aiMsgKey, tcIndex)
                 if (!_toolNodeByRef.has(toolRef)) {
-                  const parentId = aiMsgId ? _llmNodeByMessageId.get(aiMsgId) : undefined
+                  const parentId = _llmNodeByMessageId.get(aiMsgKey)
                   const toolNodeId = tracer.addToolNode({
                     name: tc?.name ?? "unknown",
                     input: tc?.args ?? {},
                     parentId,
-                    llmMessageId: aiMsgId || undefined,
+                    llmMessageId: aiMsgKey,
                     toolCallId: tcId || undefined,
                     metadata: { index: tcIndex }
                   })
@@ -2446,7 +2557,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
           revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
           onHookResult,
-          onHookSkippedFactory
+          onHookSkippedFactory,
+          onStopHooksFired: () => {
+            stopHookFired = true
+          }
         })
 
         if (completionOutcome === "failed") {
@@ -2544,38 +2658,87 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
         if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
           const memoryStore = await getMemoryStore()
-          const allConfigs = getCustomModelConfigs()
+          const memDir = memoryStore.getMemoryDir()
+          const memDirNormalized = memDir.replace(/\\/g, "/")
 
-          // Use routing to pick memory summarization model (economy in auto mode)
-          const memRoutingResult = await resolveModel({
-            taskSource: "memory_summarize",
-            threadId,
-            requestedModelId: modelId ?? undefined,
-            routingMode: getGlobalRoutingMode()
-          }).catch(() => null)
-          const memModelId = memRoutingResult?.resolvedModelId
-          const memCfgId =
-            memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
-          const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
+          // Check whether the main agent directly wrote/edited files inside
+          // the memory directory during this conversation. Detection is based
+          // on actual write_file / edit_file tool calls (tracked in
+          // fileWritePaths), not on path strings appearing in assistant text.
+          const agentAlreadyWroteMemory = fileWritePaths.some(
+            (p) => p.startsWith(memDirNormalized) || p.startsWith(memDir)
+          )
 
-          if (!config) {
-            console.warn("[Agent] No model config available — skipping memory summarization")
-          } else if (config?.apiKey) {
-            summarizeAndSave({
-              model: new ChatOpenAI({
-                model: config.model,
-                apiKey: config.apiKey,
-                configuration: { baseURL: config.baseUrl },
-                maxTokens: config.maxOutputTokens,
-                temperature: config.temperature,
-                topP: config.topP,
-                modelKwargs: {
-                  ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
-                }
-              }),
-              conversation,
-              memoryDir: memoryStore.getMemoryDir()
-            }).catch((e) => console.warn("[Agent] Memory summarize failed:", e))
+          // Helper: resolve a model suitable for memory tasks (reused below)
+          const resolveMemoryModel = async (): Promise<ChatOpenAI | null> => {
+            const allConfigs = getCustomModelConfigs()
+            const memRoutingResult = await resolveModel({
+              taskSource: "memory_summarize",
+              threadId,
+              requestedModelId: modelId ?? undefined,
+              routingMode: getGlobalRoutingMode()
+            }).catch(() => null)
+            const memModelId = memRoutingResult?.resolvedModelId
+            const memCfgId =
+              memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
+            const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
+            if (!config?.apiKey) {
+              console.warn("[Agent] No model config available — skipping memory tasks")
+              return null
+            }
+            return new ChatOpenAI({
+              model: config.model,
+              apiKey: config.apiKey,
+              configuration: { baseURL: config.baseUrl },
+              maxTokens: config.maxOutputTokens,
+              temperature: config.temperature,
+              topP: config.topP,
+              modelKwargs: {
+                ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+              }
+            })
+          }
+
+          // Helper: check & trigger Dream consolidation if conditions are met
+          const tryTriggerDream = (memoryModel: ChatOpenAI): void => {
+            try {
+              if (!isDreamEnabled()) {
+                console.log("[Agent] Dream auto-trigger disabled")
+                return
+              }
+              const factCount = scanMemoryFiles(memDir).length
+              if (shouldRunDream(memDir, factCount)) {
+                console.log("[Agent] Dream auto-trigger: conditions met, starting consolidation")
+                consolidateMemories({ model: memoryModel, memoryDir: memDir })
+                  .catch((e) => console.warn("[Agent] Dream consolidation failed:", e))
+              }
+            } catch (e) {
+              console.warn("[Agent] Dream check failed:", e instanceof Error ? e.message : e)
+            }
+          }
+
+          if (agentAlreadyWroteMemory) {
+            // The agent's direct writes are authoritative — skip background
+            // summarizer to avoid overwriting them. Still count the session
+            // and check whether Dream consolidation should run.
+            console.log("[Agent] Main agent wrote to memory during conversation — skipping summarizeAndSave")
+            incrementDreamSessions(memDir)
+            const memoryModel = await resolveMemoryModel()
+            if (memoryModel) {
+              tryTriggerDream(memoryModel)
+            }
+          } else {
+            const memoryModel = await resolveMemoryModel()
+            if (memoryModel) {
+              summarizeAndSave({
+                model: memoryModel,
+                conversation,
+                memoryDir: memDir
+              }).then(() => {
+                incrementDreamSessions(memDir)
+                tryTriggerDream(memoryModel)
+              }).catch((e) => console.warn("[Agent] Memory summarize failed:", e))
+            }
           }
         }
       }
@@ -2608,6 +2771,35 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (!isAbortError) {
         const errMsg = error instanceof Error ? error.message : "Unknown error"
         console.error("[Agent] Error:", error)
+        // PR-17 — fire-and-forget StopFailure only when the turn failed before
+        // the normal Stop hook chain began. If Stop already fired and a later
+        // step (revision, auto-commit, persistence, notification) throws, do
+        // not also emit StopFailure for the same turn.
+        if (!stopHookFired) {
+          const stopFailureErrorCode = classifyApiError(error)
+          const stopFailureContext: HookContext = {
+            workspacePath: sessionWorkspacePath,
+            sessionId: threadId,
+            turnId: turnState.turnId,
+            stopFailureError: stopFailureErrorCode,
+            toolResult: JSON.stringify({
+              error: errMsg,
+              error_type: stopFailureErrorCode
+            })
+          }
+          runHooks(
+            resolveEnabledHooksForRun(
+              sessionWorkspacePath,
+              "StopFailure",
+              stopFailureContext,
+              hookScope,
+              onHookSkippedFactory("StopFailure")
+            ),
+            "StopFailure",
+            stopFailureContext,
+            onHookResult
+          ).catch((e: unknown) => console.warn("[Hooks] StopFailure hook error:", e))
+        }
         window.webContents.send(channel, {
           type: "error",
           error: errMsg

@@ -205,8 +205,6 @@ export interface Message {
   // For tool messages - whether the tool call failed
   is_error?: boolean
   created_at: Date
-  start_at?: Date
-  end_at?: Date
 }
 
 export interface ContentBlock {

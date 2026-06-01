@@ -531,6 +531,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showHarnessBoardView: false,
         showCustomizeView: false,
         showClaudeCodeView: false,
+        showDashboardView: false,
         currentThreadId: null
       })
       return
@@ -542,7 +543,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         showCustomizeView: true,
         showKanbanView: false,
         showHarnessBoardView: false,
-        showClaudeCodeView: false
+        showClaudeCodeView: false,
+        showDashboardView: false
       })
       return
     }
@@ -554,7 +556,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         showKanbanView: false,
         showHarnessBoardView: false,
         showClaudeCodeView: false,
-        customizeInitialTab: "evolution"
+        customizeInitialTab: "evolution",
+        showDashboardView: false
       })
       return
     }
@@ -582,6 +585,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showCustomizeView: false,
         showKanbanView: false,
         showHarnessBoardView: false,
+        showDashboardView: false,
         previousThreadId: prev,
         currentThreadId: null
       })
@@ -611,6 +615,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       showKanbanView: false,
       showHarnessBoardView: false,
       showClaudeCodeView: false,
+      showDashboardView: false,
       currentThreadId: chatThreadId,
       previousThreadId: null
     })

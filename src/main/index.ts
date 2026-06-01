@@ -6,7 +6,7 @@ if (process.platform === "linux") {
   app.commandLine.appendSwitch("no-sandbox")
 }
 
-import { existsSync, statSync } from "fs"
+import { existsSync, rmSync, statSync } from "fs"
 import { join } from "path"
 import { writeMainLog, writeRendererLog } from "./logging"
 
@@ -151,6 +151,7 @@ import { registerMcpHandlers } from "./ipc/mcp"
 import { registerScheduledTaskHandlers } from "./ipc/scheduled-tasks"
 import { registerHeartbeatHandlers } from "./ipc/heartbeat"
 import { registerMemoryHandlers } from "./ipc/memory"
+import { registerTaskMmdHandlers } from "./ipc/task-mmd"
 import { registerGitHandlers } from "./ipc/git"
 import { registerPluginHandlers } from "./ipc/plugins"
 import { registerPluginFileHandlers } from "./ipc/plugin-files"
@@ -190,7 +191,7 @@ import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
 import { startFeatureGatePrefetch, stopFeatureGatePrefetch } from "./feature-gates"
-import { isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
+import { getOpenworkDir, isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
 import {
@@ -203,6 +204,25 @@ import {
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
 const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
+
+function cleanupLegacySkillEvalRecords(): void {
+  const roots = new Set(
+    [getOpenworkDir(), process.env.CMB_COWORK_AGENT_HOME?.trim()].filter(
+      (value): value is string => Boolean(value)
+    )
+  )
+
+  for (const root of roots) {
+    const legacyDir = join(root, "skill-evals")
+    if (!existsSync(legacyDir)) continue
+    try {
+      rmSync(legacyDir, { recursive: true, force: true })
+      console.log("[Main] Removed legacy SkillEval records:", legacyDir)
+    } catch (error) {
+      console.warn("[Main] Failed to remove legacy SkillEval records:", error)
+    }
+  }
+}
 
 // ── Keep Awake ──
 let keepAwakeBlockerId: number | null = null
@@ -465,7 +485,6 @@ if (!gotTheLock) {
       })
     }
 
-    // Register cloud trace reporter if trace base URL is configured
     const traceBaseUrl = import.meta.env.VITE_API_TRACE_BASE_URL as string | undefined
     if (traceBaseUrl) {
       setTraceReporter(new CloudTraceReporter(traceBaseUrl))
@@ -478,6 +497,7 @@ if (!gotTheLock) {
 
     // Initialize database
     await initializeDatabase()
+    cleanupLegacySkillEvalRecords()
 
     // Initialize adoption tracker (side-effect only; never blocks startup)
     try {
@@ -496,6 +516,7 @@ if (!gotTheLock) {
     registerScheduledTaskHandlers(ipcMain)
     registerHeartbeatHandlers(ipcMain)
     registerMemoryHandlers(ipcMain)
+    registerTaskMmdHandlers(ipcMain)
     registerGitHandlers()
     registerPluginHandlers(ipcMain)
     registerPluginFileHandlers(ipcMain)

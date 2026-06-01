@@ -21,8 +21,8 @@ import type {
   LspCallHierarchyOutgoingCall,
   LspStatus,
   PluginHookMetadata,
+  PluginDetail,
   PluginMetadata,
-  PluginManifest,
   SkillHookMetadata,
   ChatXConfig,
   HookLoggingConfig,
@@ -55,6 +55,11 @@ import type {
   FeatureGateCheckResult,
   FeatureGateKey
 } from "../shared/feature-gates"
+import type {
+  TaskMmdCompileModelInfo,
+  TaskMmdSettings,
+  TaskMmdSnapshot
+} from "../main/agent/task-mmd/types"
 
 interface LspDownloadProgress {
   percent: number
@@ -1159,19 +1164,39 @@ const api = {
     }
   },
   memory: {
-    listFiles: (): Promise<Array<{ name: string; size: number; modifiedAt: string }>> =>
-      ipcRenderer.invoke("memory:listFiles"),
+    listFiles: (): Promise<
+      Array<{
+        name: string
+        size: number
+        modifiedAt: string
+        type: "user" | "feedback" | "project" | "reference" | null
+        displayName: string | null
+        description: string | null
+        recallCount: number
+      }>
+    > => ipcRenderer.invoke("memory:listFiles"),
     readFile: (name: string): Promise<string> => ipcRenderer.invoke("memory:readFile", name),
     deleteFile: (name: string): Promise<void> => ipcRenderer.invoke("memory:deleteFile", name),
     getEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getEnabled"),
     setEnabled: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("memory:setEnabled", enabled),
+    getDreamEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getDreamEnabled"),
+    setDreamEnabled: (enabled: boolean): Promise<void> =>
+      ipcRenderer.invoke("memory:setDreamEnabled", enabled),
     getStats: (): Promise<{
       fileCount: number
       totalSize: number
       indexSize: number
       enabled: boolean
+      dreamEnabled: boolean
+      dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
     }> => ipcRenderer.invoke("memory:getStats"),
+    consolidate: (): Promise<{
+      archived: number
+      merged: number
+      created: number
+      skipped: number
+    }> => ipcRenderer.invoke("memory:consolidate"),
     onChanged: (callback: () => void): (() => void) => {
       const handler = (): void => {
         callback()
@@ -1179,6 +1204,29 @@ const api = {
       ipcRenderer.on("memory:changed", handler)
       return () => {
         ipcRenderer.removeListener("memory:changed", handler)
+      }
+    }
+  },
+  taskMmd: {
+    getSettings: (): Promise<TaskMmdSettings> =>
+      ipcRenderer.invoke("taskMmd:getSettings") as Promise<TaskMmdSettings>,
+    setSettings: (patch: Partial<TaskMmdSettings>): Promise<TaskMmdSettings> =>
+      ipcRenderer.invoke("taskMmd:setSettings", patch) as Promise<TaskMmdSettings>,
+    getSnapshot: (threadId: string): Promise<TaskMmdSnapshot> =>
+      ipcRenderer.invoke("taskMmd:getSnapshot", threadId) as Promise<TaskMmdSnapshot>,
+    clearThread: (threadId: string): Promise<void> =>
+      ipcRenderer.invoke("taskMmd:clearThread", threadId) as Promise<void>,
+    getDirectorySize: (threadId: string): Promise<number> =>
+      ipcRenderer.invoke("taskMmd:getDirectorySize", threadId) as Promise<number>,
+    getCompileModelInfo: (threadId: string): Promise<TaskMmdCompileModelInfo> =>
+      ipcRenderer.invoke("taskMmd:getCompileModelInfo", threadId) as Promise<TaskMmdCompileModelInfo>,
+    onChanged: (callback: (payload: { threadId?: string }) => void): (() => void) => {
+      const handler = (_: unknown, payload: { threadId?: string }): void => {
+        callback(payload ?? {})
+      }
+      ipcRenderer.on("taskMmd:changed", handler)
+      return () => {
+        ipcRenderer.removeListener("taskMmd:changed", handler)
       }
     }
   },
@@ -1358,29 +1406,8 @@ const api = {
       ipcRenderer.invoke("plugins:delete", id) as Promise<{ success: boolean; error?: string }>,
     setEnabled: (id: string, enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("plugins:setEnabled", { id, enabled }) as Promise<void>,
-    setOriginsBatch: (
-      updates: Array<{ id: string; origin: "market" | "local" }>
-    ): Promise<{ success: boolean; error?: string }> =>
-      ipcRenderer.invoke("plugins:setOriginsBatch", { updates }) as Promise<{
-        success: boolean
-        error?: string
-      }>,
-    getDetail: (
-      id: string
-    ): Promise<{
-      skills: string[]
-      mcpServers: string[]
-      hookCount: number
-      hooks: PluginHookMetadata[]
-      manifest: PluginManifest | null
-    }> =>
-      ipcRenderer.invoke("plugins:getDetail", id) as Promise<{
-        skills: string[]
-        mcpServers: string[]
-        hookCount: number
-        hooks: PluginHookMetadata[]
-        manifest: PluginManifest | null
-      }>,
+    getDetail: (id: string): Promise<PluginDetail> =>
+      ipcRenderer.invoke("plugins:getDetail", id) as Promise<PluginDetail>,
     listHooks: (): Promise<PluginHookMetadata[]> =>
       ipcRenderer.invoke("plugins:listHooks") as Promise<PluginHookMetadata[]>,
     setHookEnabled: (
@@ -1911,6 +1938,9 @@ const api = {
         ipcRenderer.invoke("hooks:workspace:trustAll", workspacePath),
       trustFile: (workspacePath: string, fileName: string, filePath: string): Promise<void> =>
         ipcRenderer.invoke("hooks:workspace:trustFile", { workspacePath, fileName, filePath }),
+      // PR-11 — fire Setup(maintenance) for the current workspace.
+      runSetupMaintenance: (workspacePath: string): Promise<void> =>
+        ipcRenderer.invoke("hooks:setup:maintenance", workspacePath),
       onChanged: (
         callback: (data: { threadId: string; workspacePath: string }) => void
       ): (() => void) => {
@@ -2019,6 +2049,25 @@ const api = {
       skillName: string
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillUserStats", range, granularity, skillName),
+    skillEvalSummary: (
+      range: { from: string; to: string },
+      options?: {
+        limit?: number
+        recentPage?: number
+        recentPageSize?: number
+        skillPage?: number
+        skillPageSize?: number
+        skillSearch?: string
+        skillName?: string
+        skillVersion?: string
+        skillNames?: string[]
+        defaultRecentToLatestSkill?: boolean
+        recentOnly?: boolean
+        listOnly?: boolean
+        statsOnly?: boolean
+      }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:skillEvalSummary", range, options),
     userProfiles: (
       sapIds: string[]
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -2038,15 +2087,15 @@ const api = {
     skillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      options?: number | { page?: number; pageSize?: number }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit),
+      ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, options),
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      options?: number | { page?: number; pageSize?: number }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:marketSkillRecentTraces", skill, range, limit),
+      ipcRenderer.invoke("dashboard:marketSkillRecentTraces", skill, range, options),
     skillDetail: (
       skill: string,
       range: { from: string; to: string },

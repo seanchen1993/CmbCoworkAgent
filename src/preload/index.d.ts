@@ -22,8 +22,8 @@ import type {
   ChatXConfig,
   HookLoggingConfig,
   PluginHookMetadata,
+  PluginDetail,
   PluginMetadata,
-  PluginManifest,
   SkillHookMetadata,
   AgentAutoCommitSettings,
   UserInputRequest,
@@ -54,6 +54,11 @@ import type {
   FeatureGateCheckResult,
   FeatureGateKey
 } from "../shared/feature-gates"
+import type {
+  TaskMmdCompileModelInfo,
+  TaskMmdSettings,
+  TaskMmdSnapshot
+} from "../main/agent/task-mmd/types"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -178,6 +183,22 @@ interface DashboardCommitDetailsOptions {
   page?: number
   pageSize?: number
   pushedOnly?: boolean
+}
+
+interface DashboardSkillEvalOptions {
+  limit?: number
+  recentPage?: number
+  recentPageSize?: number
+  skillPage?: number
+  skillPageSize?: number
+  skillSearch?: string
+  skillName?: string
+  skillVersion?: string
+  skillNames?: string[]
+  defaultRecentToLatestSkill?: boolean
+  recentOnly?: boolean
+  listOnly?: boolean
+  statsOnly?: boolean
 }
 
 interface DashboardCodeStats {
@@ -693,18 +714,47 @@ interface CustomAPI {
     }) => Promise<{ success: boolean; tools?: string[]; error?: string }>
   }
   memory: {
-    listFiles: () => Promise<Array<{ name: string; size: number; modifiedAt: string }>>
+    listFiles: () => Promise<
+      Array<{
+        name: string
+        size: number
+        modifiedAt: string
+        type: "user" | "feedback" | "project" | "reference" | null
+        displayName: string | null
+        description: string | null
+        recallCount: number
+      }>
+    >
     readFile: (name: string) => Promise<string>
     deleteFile: (name: string) => Promise<void>
     getEnabled: () => Promise<boolean>
     setEnabled: (enabled: boolean) => Promise<void>
+    getDreamEnabled: () => Promise<boolean>
+    setDreamEnabled: (enabled: boolean) => Promise<void>
     getStats: () => Promise<{
       fileCount: number
       totalSize: number
       indexSize: number
       enabled: boolean
+      dreamEnabled: boolean
+      dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
+    }>
+    consolidate: () => Promise<{
+      archived: number
+      merged: number
+      created: number
+      skipped: number
     }>
     onChanged: (callback: () => void) => () => void
+  }
+  taskMmd: {
+    getSettings: () => Promise<TaskMmdSettings>
+    setSettings: (patch: Partial<TaskMmdSettings>) => Promise<TaskMmdSettings>
+    getSnapshot: (threadId: string) => Promise<TaskMmdSnapshot>
+    clearThread: (threadId: string) => Promise<void>
+    getDirectorySize: (threadId: string) => Promise<number>
+    getCompileModelInfo: (threadId: string) => Promise<TaskMmdCompileModelInfo>
+    onChanged: (callback: (payload: { threadId?: string }) => void) => () => void
   }
   autoCommit: {
     getSettings: () => Promise<AgentAutoCommitSettings>
@@ -849,16 +899,7 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (id: string) => Promise<{ success: boolean; error?: string }>
     setEnabled: (id: string, enabled: boolean) => Promise<void>
-    setOriginsBatch: (
-      updates: Array<{ id: string; origin: "market" | "local" }>
-    ) => Promise<{ success: boolean; error?: string }>
-    getDetail: (id: string) => Promise<{
-      skills: string[]
-      mcpServers: string[]
-      hookCount: number
-      hooks: PluginHookMetadata[]
-      manifest: PluginManifest | null
-    }>
+    getDetail: (id: string) => Promise<PluginDetail>
     listHooks: () => Promise<PluginHookMetadata[]>
     setHookEnabled: (
       pluginId: string,
@@ -1133,6 +1174,7 @@ interface CustomAPI {
       ) => Promise<{ fileName: string; filePath: string; event: string; command: string }[]>
       trustAll: (workspacePath: string) => Promise<void>
       trustFile: (workspacePath: string, fileName: string, filePath: string) => Promise<void>
+      runSetupMaintenance: (workspacePath: string) => Promise<void>
       onChanged: (
         callback: (data: { threadId: string; workspacePath: string }) => void
       ) => () => void
@@ -1203,6 +1245,10 @@ interface CustomAPI {
       granularity: "day" | "week" | "month" | "custom",
       skillName: string
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    skillEvalSummary: (
+      range: { from: string; to: string },
+      options?: DashboardSkillEvalOptions
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     userProfiles: (
       sapIds: string[]
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
@@ -1222,13 +1268,21 @@ interface CustomAPI {
     skillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
-    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+      options?: number | { page?: number; pageSize?: number }
+    ) => Promise<{
+      success: boolean
+      data?: { total: number; page: number; pageSize: number; traces: DashboardTraceDetail[] }
+      error?: string
+    }>
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
-    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+      options?: number | { page?: number; pageSize?: number }
+    ) => Promise<{
+      success: boolean
+      data?: { total: number; page: number; pageSize: number; traces: DashboardTraceDetail[] }
+      error?: string
+    }>
     skillDetail: (
       skill: string,
       range: { from: string; to: string },

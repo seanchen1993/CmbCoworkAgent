@@ -1,9 +1,10 @@
 import type { Message, HITLRequest, ToolCallState, ToolCallStatus } from "@/types"
+import type { TurnTiming } from "@/lib/thread-context"
 import { ToolCallRenderer } from "./ToolCallRenderer";
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { getToolLabel } from "@/lib/tool-labels"
 import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
-import { useState } from "react"
+import React, { useEffect, useMemo, useState } from "react"
 import { ChevronDown, ChevronRight, Eye, Wrench, Copy, Check, PencilLine, ThumbsUp, ThumbsDown, Smile, Frown } from "lucide-react"
 import { toast } from "sonner"
 import {
@@ -12,26 +13,18 @@ import {
 } from "./MessageFeedbackDialog"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import { DurationShow } from "./DurationShow"
 
-function formatResponseDuration(ms?: number): string | null {
-  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return null
-  if (ms < 1000) return `${Math.round(ms)}ms`
-  const seconds = ms / 1000
-  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`
-  const minutes = Math.floor(seconds / 60)
-  const remainingSeconds = Math.round(seconds % 60)
-  return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`
+function formatSendTime(sendTime?: number): string | null {
+  if (typeof sendTime !== "number" || !Number.isFinite(sendTime)) return null
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(new Date(sendTime))
 }
 
-function AssistantResponseDuration({
-  durationMs
-}: {
-  durationMs?: number
-}): React.JSX.Element | null {
-  const label = formatResponseDuration(durationMs)
-  if (!label) return null
-  return <span className="text-xs text-muted-foreground/70">耗时 {label}</span>
-}
 
 /**
  * Strip the trailing `<CMBDEVCLAW-SKILL-USE-V1>…</…>` block when present.
@@ -152,6 +145,7 @@ interface MessageBubbleProps {
   threadId: string
   isLoading: boolean
   assistantDurationMs?: number
+  durationMap?: TurnTiming[]
 }
 
 export function MessageBubble({
@@ -166,7 +160,7 @@ export function MessageBubble({
   onEditUserMessage,
   threadId,
   isLoading,
-  assistantDurationMs
+  durationMap
 }: MessageBubbleProps): React.JSX.Element | null {
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
@@ -178,8 +172,31 @@ export function MessageBubble({
   const isUser = message.role === "user"
   const isTool = message.role === "tool"
 
+  useEffect(() => {
+    if(message.role !== 'user' && message.content.includes('改用编辑方式整体替换文件内容。')){
+      console.log(message, 'message///')
+    }
+  }, [message])
+
   // 判断是否显示 MessageHead：如果当前不是用户消息，且是第一条非用户消息
   const shouldShowMessageHead = !isUser && (!previousMessage || previousMessage.role === "user")
+
+  const duration = useMemo(() => {
+    if (shouldShowMessageHead && durationMap?.length && previousMessage?.id) {
+      const target = durationMap.find(
+        (it) => it.thread_id === threadId && previousMessage.id === it.user_id
+      )
+      return target?.duration
+    }
+    return 0
+  }, [durationMap, threadId, previousMessage, shouldShowMessageHead])
+
+  const userSendTimeLabel = useMemo(() => {
+    if (!isUser || !durationMap?.length) return null
+
+    const target = durationMap.find((it) => it.thread_id === threadId && it.user_id === message.id)
+    return formatSendTime(target?.sendTime)
+  }, [durationMap, isUser, message.id, threadId])
 
   // 切换工具调用详情的展开状态
   const toggleToolExpansion = (toolId: string, defaultExpanded = false) => {
@@ -357,7 +374,9 @@ export function MessageBubble({
             {content}
           </div>
           <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-            {/*<span className="text-[11px] text-muted-foreground">{createdAtLabel}</span>*/}
+            {userSendTimeLabel && (
+              <span className="px-1 text-xs text-muted-foreground/70">{userSendTimeLabel}</span>
+            )}
             <button
               type="button"
               onClick={handleCopyMessage}
@@ -413,12 +432,12 @@ export function MessageBubble({
             <circle cx="76" cy="34" r="2.5" fill="#00e5cc" />
           </svg>
           <span className="text-xs font-medium text-muted-foreground">CMBDevClaw</span>
-          <AssistantResponseDuration durationMs={assistantDurationMs} />
+          <DurationShow durationMs={duration} text="耗时" />
         </div>
       )}
-      <div className="flex-1 min-w-0 space-y-2 overflow-hidden pl-7">
+      <div className="flex-1 min-w-0 space-y-2 overflow-hidden">
         {content && <div className="rounded-lg px-3 overflow-hidden">{content}</div>}
-        {content && showAssistantMeta && !isLoading && (
+        {content && !hasToolCalls &&  showAssistantMeta && !isLoading && (
           <div className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100">
             {/*<span className="text-[11px] text-muted-foreground">{createdAtLabel}</span>*/}
             <button

@@ -1,0 +1,525 @@
+# 技能隔离机制调研与方案设计
+
+调研日期：2026-05-30
+
+## 1. 背景
+
+随着技能数量增加，系统会遇到两个问题：
+
+- 技能名称和职责相近，模型或用户不知道该选择哪个技能。
+- 全量技能同时进入可见范围后，容易造成上下文膨胀、误触发、权限边界不清。
+
+因此，“技能隔离”不应只理解为启用/禁用开关，而应拆成四层能力：
+
+- 来源隔离：技能从哪里来，是否可信，是否经过扫描。
+- 工作区隔离：某个工作区实际拥有并可运行哪些技能。
+- 选择隔离：本轮任务只暴露少量候选技能，而不是暴露全量技能。
+- 执行隔离：技能激活后，只能使用被允许的工具、配置、文件范围和网络能力。
+
+核心结论：建议采用 **全局技能池 + 工作区技能副本 + 本轮技能路由器 + 执行权限约束** 的组合方案。
+
+## 2. 主流方案调研
+
+### 2.1 Claude Skills：渐进披露
+
+Claude Skills 的核心思想是渐进披露：先只让模型看到技能名称和描述，命中后再加载完整 `SKILL.md` 和 supporting files。这样可以避免把所有技能正文塞进上下文。
+
+可借鉴点：
+
+- `description` 是技能触发的关键字段。
+- 技能正文和附属文件按需加载。
+- 技能可来自不同位置，例如项目、用户、组织、插件。
+
+局限：
+
+- 如果技能很多且描述相近，单靠模型读 description 仍会误选。
+- 需要额外的路由、排序、冲突处理机制。
+
+### 2.2 OpenAI Agents / Claude Subagents：专家隔离
+
+多 Agent / Subagent / Handoff 的思路是把复杂职责交给独立专家。专家有自己的上下文、prompt 和工具范围。
+
+可借鉴点：
+
+- 适合复杂任务、高风险任务、长上下文任务。
+- 可以把不同技能族隔离到不同专家 Agent。
+
+局限：
+
+- 成本和延迟更高。
+- 对普通技能选择问题来说偏重。
+- 不适合一上来作为默认隔离方式。
+
+### 2.3 LlamaIndex / LangChain / Semantic Kernel：候选工具路由
+
+这些框架普遍支持根据任务动态选择工具或函数。尤其当工具很多时，常见做法是先检索候选，再让模型在少量候选中选择。
+
+可借鉴点：
+
+- 工具/技能先建轻量索引。
+- 每轮任务只召回 Top-K 候选。
+- 动态暴露工具，而不是静态暴露全部工具。
+
+局限：
+
+- 只解决“选哪个”的问题，不直接解决执行权限边界。
+- 还需要结合 sandbox、hook、审批、审计。
+
+### 2.4 MCP：协议层工具描述
+
+MCP 统一了工具暴露方式，工具具备 `name`、`description`、`inputSchema` 等元数据，也支持 tool annotations。
+
+可借鉴点：
+
+- 元数据结构化。
+- 工具能力可以被客户端统一发现和治理。
+
+局限：
+
+- annotations 多是提示，不是强安全边界。
+- 真正的权限控制仍应在客户端 runtime 中执行。
+
+## 3. CoPaw 的技能隔离机制
+
+CoPaw 的隔离重点是 **管理侧隔离 + 运行时有效技能解析**。
+
+### 3.1 两层目录结构
+
+CoPaw 把技能分为两层：
+
+```text
+$QWENPAW_WORKING_DIR/
+  skill_pool/
+    skill.json
+    pdf/
+      SKILL.md
+    docx/
+      SKILL.md
+
+  workspaces/
+    default/
+      skill.json
+      skills/
+        pdf/
+          SKILL.md
+```
+
+- `skill_pool/` 是共享技能池，负责存放内置技能、市场技能、可复用技能。
+- `workspaces/{agent_id}/skills/` 是某个工作区真正运行的技能副本。
+
+关键点：**技能池里的技能不会被 Agent 直接运行。** 要使用池中的技能，必须复制/广播到某个工作区。
+
+### 3.2 工作区 manifest
+
+每个工作区有自己的 `skill.json`，记录该工作区内技能的状态：
+
+- `enabled`
+- `channels`
+- `source`
+- `config`
+- `tags`
+- `requirements`
+- `metadata`
+
+这意味着同一个技能可以被复制到多个工作区，但每个工作区可以有不同启用状态、频道范围和配置。
+
+### 3.3 运行时有效技能解析
+
+CoPaw 运行时只解析当前工作区和当前频道的有效技能：
+
+```text
+全量技能池
+  -> 当前工作区 skills/
+    -> enabled = true
+      -> channels 匹配当前 channel
+        -> 本轮 Agent 可用技能
+```
+
+因此，池子可以很大，但某个 Agent 实际可见技能集可以很小。
+
+### 3.4 导入和广播
+
+CoPaw 支持多种路径：
+
+- 导入到技能池，然后从技能池广播到一个或多个工作区。
+- 通过 `--agent-id` 直接安装到某个工作区。
+- 创建 Agent 时根据模板或 `--skill` 初始化一组技能。
+- 管理端将池中技能批量下发到多个工作区。
+
+下发到工作区时，CoPaw 会复制技能目录，并在工作区 manifest 中写入 `enabled: true` 和默认 channel。
+
+### 3.5 安全和冲突控制
+
+CoPaw 还有几层保护：
+
+- ZIP 导入时防路径穿越和 symlink。
+- 技能名不能包含路径分隔符、空名、`.`、`..`、NUL。
+- 启用技能前重新安全扫描。
+- 同名冲突不静默覆盖，而是返回冲突和建议新名字。
+- 删除技能前通常要求先禁用。
+- 技能 config 只对当前 workspace/channel 的 effective skills 注入环境变量。
+
+### 3.6 CoPaw 机制的价值和不足
+
+价值：
+
+- 解决了“全局技能很多，但每个 Agent 只使用一部分”的问题。
+- 工作区之间的技能配置互不影响。
+- 对导入、启用、冲突、安全扫描有基础治理。
+
+不足：
+
+- 主要解决工作区隔离和启用隔离。
+- 对“本轮该用哪个相似技能”没有专门的 Top-K 路由仲裁。
+- 没有看到每个技能独立工具权限的强 enforcement。
+
+## 4. 我们建议借鉴后的完整流程
+
+建议整体流程如下：
+
+```mermaid
+flowchart TD
+  A["技能来源: 内置 / 市场 / ZIP / URL / 组织平台 / 插件"] --> B["导入全局技能池"]
+  B --> C["解析 SKILL.md 元数据"]
+  C --> D["安全扫描 / 路径校验 / 冲突检测"]
+  D --> E["写入 skill_pool manifest"]
+
+  E --> F["选择目标工作区或技能集"]
+  F --> G["复制到 workspace/skills/"]
+  G --> H["写入 workspace skill.json"]
+  H --> I["工作区内启用 / 禁用 / 配置 / 限定 scope"]
+
+  I --> J["用户发起任务"]
+  J --> K["按 workspace + enabled + channel + scope 过滤"]
+  K --> L["Skill Router 召回 Top-K 候选"]
+  L --> M{"置信度是否足够"}
+  M -->|高| N["加载选中技能 SKILL.md"]
+  M -->|歧义| O["让用户选择候选技能"]
+  O --> N
+  M -->|低| P["不使用技能"]
+  N --> Q["执行 allowed tools / env / hook / sandbox 约束"]
+  Q --> R["记录使用结果和误选反馈"]
+```
+
+## 5. 工作区技能设置设计
+
+### 5.1 数据结构
+
+建议每个工作区维护：
+
+```text
+workspaces/{workspace_id}/
+  skill.json
+  skills/
+    frontend-review/
+      SKILL.md
+    company-policy-search/
+      SKILL.md
+```
+
+`skill.json` 示例：
+
+```json
+{
+  "schema_version": "workspace-skill-manifest.v1",
+  "version": 12,
+  "skills": {
+    "frontend-review": {
+      "enabled": true,
+      "source": "pool",
+      "version": "1.2.0",
+      "channels": ["all"],
+      "scope": ["coding", "review"],
+      "tags": ["frontend", "review"],
+      "config": {},
+      "routing": {
+        "priority": 50,
+        "exclusive_group": "code-review",
+        "risk_level": "low"
+      },
+      "requirements": {
+        "require_bins": [],
+        "require_envs": []
+      }
+    }
+  }
+}
+```
+
+### 5.2 设置入口
+
+建议提供四种工作区技能设置入口。
+
+#### 创建工作区时选择模板
+
+创建工作区时选择模板：
+
+- 编码工作区：代码阅读、测试、代码审查、浏览器调试。
+- 文档工作区：PDF、DOCX、PPTX、XLSX。
+- 企业知识工作区：制度检索、流程规划、审批助手。
+- 空白工作区：不预装技能。
+
+模板底层就是一组初始技能 ID。
+
+#### 从技能池添加
+
+当前工作区设置页提供“从技能池添加”。
+
+流程：
+
+```text
+选择技能
+  -> preflight 检查冲突和依赖
+  -> 复制到 workspace/skills/
+  -> 写 workspace skill.json
+  -> 默认 enabled=true
+  -> 触发 Agent reload
+```
+
+#### 技能集一键安装
+
+定义技能集：
+
+- Office 套件：`pdf`、`docx`、`pptx`、`xlsx`
+- 前端开发套件：`frontend-review`、`browser-test`、`component-generator`
+- 企业流程套件：`policy-search`、`process-planner`
+
+用户可以对工作区一键安装技能集，降低逐个选择成本。
+
+#### 管理员广播
+
+管理员可在全局技能池中选择某个技能，广播到多个工作区。
+
+广播前应做 preflight：
+
+- 哪些工作区已存在同名技能。
+- 哪些工作区版本较旧。
+- 哪些工作区缺依赖。
+- 哪些工作区需要覆盖确认。
+
+### 5.3 工作区技能页
+
+工作区技能页建议分为：
+
+- 已启用
+- 已安装但禁用
+- 可从技能池添加
+- 有更新
+- 有风险或缺依赖
+
+每个技能支持：
+
+- 启用 / 禁用
+- 限制 channel
+- 限制 scope
+- 配置环境变量
+- 查看 `SKILL.md`
+- 更新到池中最新版本
+- 从工作区移除
+- 同步回技能池
+
+### 5.4 默认策略
+
+建议默认策略：
+
+- 新工作区不自动继承全量技能池。
+- 新工作区必须通过模板、技能集、用户显式选择或管理员广播获得技能。
+- 从技能池添加到工作区后默认启用。
+- 手动放进工作区目录的技能默认禁用，需要用户确认启用。
+- 高风险技能即使下发也默认 disabled，启用前需要确认。
+- 从工作区移除技能只删除工作区副本，不删除全局技能池。
+
+## 6. Skill Router 设计
+
+CoPaw 的工作区隔离可以控制“哪些技能可能可用”，但还不能充分解决“本轮到底该用哪个技能”。
+
+因此建议新增 Skill Router。
+
+### 6.1 输入
+
+Router 输入：
+
+- 用户消息
+- 当前工作区 ID
+- 当前 channel
+- 当前任务模式
+- 附件和文件类型
+- 当前工作区 enabled skills
+- 技能轻量元数据
+
+### 6.2 技能轻量元数据
+
+建议扩展 `SKILL.md` frontmatter：
+
+```yaml
+---
+name: frontend-review
+description: Review frontend React/TypeScript changes for regressions and UX issues.
+version: 1.2.0
+tags: [frontend, react, review]
+category: coding/review
+trigger_examples:
+  - review my frontend changes
+  - check this React component
+negative_triggers:
+  - do not use for backend-only API review
+exclusive_group: code-review
+risk_level: low
+allowed-tools: read_file grep glob execute
+---
+```
+
+### 6.3 选择流程
+
+```text
+1. 显式选择优先：slash command / skill chip / path marker。
+2. 硬过滤：workspace、enabled、channel、scope、依赖、risk。
+3. 检索召回：BM25 / embedding / 规则召回 Top-K。
+4. 重排序：小模型或主模型在 Top-K 内选择。
+5. 仲裁：
+   - 高置信：自动激活。
+   - Top-2 接近：让用户选择。
+   - 低置信：不使用技能。
+   - 高风险：确认后激活。
+6. 渐进加载：只读取最终选中的 `SKILL.md`。
+```
+
+### 6.4 输出
+
+Router 输出建议结构：
+
+```json
+{
+  "selected_skill_id": "pool:frontend-review@1.2.0",
+  "confidence": 0.86,
+  "reason": "User asked for frontend code review and mentioned React component.",
+  "alternatives": [
+    {
+      "skill_id": "pool:general-code-review@1.0.0",
+      "reason": "Also related, but less specific."
+    }
+  ],
+  "needs_user_choice": false
+}
+```
+
+## 7. 执行隔离设计
+
+技能被选中后，应启用执行边界，而不只是 prompt 提醒。
+
+建议至少支持：
+
+- `allowed-tools`：技能允许使用哪些工具。
+- `denied-tools`：技能禁止使用哪些工具。
+- `env`：只注入当前技能需要的配置。
+- `filesystem scope`：限制技能访问路径。
+- `network policy`：限制联网能力。
+- `PreSkillUse / PostSkillUse hook`：技能激活前后进行校验、审计、补充上下文。
+
+其中 `allowed-tools` 必须接到 runtime/tool middleware 中强制执行。仅写在 `SKILL.md` 里让模型遵守是不够的。
+
+## 8. 与当前工程的结合点
+
+当前工程已经具备一些基础能力：
+
+- 已有内置和自定义技能加载。
+- 已有插件技能加载。
+- 已有 slash 技能显式选择协议。
+- 已有技能生命周期 hook，例如 `PreSkillUse`、`PostSkillUse`。
+- 已解析 `allowed-tools` 元数据。
+- 已有禁用技能列表。
+
+建议新增或改造：
+
+- 新增全局 `skill_pool/`。
+- 新增 workspace 级 `skill.json` 和 `skills/` 副本。
+- 新增技能池到 workspace 的复制/广播 API。
+- 新增 Skill Router。
+- 将 `allowed-tools` 从元数据展示升级为 runtime enforcement。
+- 将禁用状态从全局逐步扩展为 workspace 级状态。
+- 记录技能选择、手动改选、误选、成功率。
+
+## 9. 分阶段落地计划
+
+### P0：元数据和清单
+
+- 定义技能池 manifest。
+- 定义 workspace skill manifest。
+- 扩展 `SKILL.md` frontmatter。
+- 建立技能 ID 和 namespace 规范。
+
+### P1：技能池和工作区副本
+
+- 导入技能先进入技能池。
+- 工作区可以从技能池添加技能。
+- 工作区只运行自己的技能副本。
+- 支持启用、禁用、移除、更新。
+
+### P2：工作区模板和技能集
+
+- 创建工作区时选择模板。
+- 支持技能集一键安装。
+- 支持管理员批量广播。
+
+### P3：Skill Router
+
+- 为技能元数据建立索引。
+- 本轮任务召回 Top-K。
+- 支持自动选择、用户选择、不使用技能三种结果。
+- 记录选择日志。
+
+### P4：执行权限隔离
+
+- `allowed-tools` 强制生效。
+- 按技能注入 env/config。
+- 支持文件系统和网络范围限制。
+- 高风险技能需要确认。
+
+### P5：质量闭环
+
+- 统计每个技能使用率、成功率、手动改选率。
+- 自动发现相似/冲突技能。
+- 提示优化 description、trigger_examples、negative_triggers。
+
+## 10. 风险与注意事项
+
+- 不要让新工作区默认继承全量技能池，否则隔离失效。
+- 不要只依赖技能描述让模型自动选择，相似技能仍会误触发。
+- 不要把 `allowed-tools` 只作为 prompt 文本，必须 runtime 强制执行。
+- 技能复制到 workspace 后要明确版本关系，否则后续更新和回滚会混乱。
+- 管理员广播必须先做 preflight，避免批量覆盖用户自定义技能。
+- 手动放入 workspace 的技能应默认禁用，避免绕过导入扫描。
+
+## 11. 推荐结论
+
+建议采用以下最终形态：
+
+```text
+全局技能池
+  负责收集、扫描、版本、冲突治理、发布。
+
+工作区技能集
+  负责定义当前工作区实际可用的技能副本、启用状态、配置和范围。
+
+技能路由器
+  负责本轮任务从工作区有效技能中选择 Top-K 或最终技能。
+
+执行隔离层
+  负责工具、环境变量、文件系统、网络、hook 和审批边界。
+
+反馈闭环
+  负责记录误选、改选、成功率，并反向优化技能元数据。
+```
+
+一句话总结：**借鉴 CoPaw 的“技能池和工作区副本隔离”，再叠加我们自己的“本轮技能路由器”和“执行权限强约束”。**
+
+## 12. 参考资料
+
+- Claude Skills documentation: https://code.claude.com/docs/en/skills
+- Claude Subagents documentation: https://code.claude.com/docs/en/sub-agents
+- OpenAI Agents SDK Handoffs: https://openai.github.io/openai-agents-js/guides/handoffs/
+- LlamaIndex Router Query Engine: https://docs.llamaindex.ai/en/stable/examples/query_engine/RetrieverRouterQueryEngine/
+- LangChain Agents: https://docs.langchain.com/oss/python/langchain/agents
+- Semantic Kernel Function Choice: https://learn.microsoft.com/en-us/semantic-kernel/concepts/ai-services/chat-completion/function-calling/function-choice-behaviors
+- MCP Tools specification: https://modelcontextprotocol.io/specification/2025-06-18/server/tools
+- CoPaw reference project: `C:\ai\CoPaw`
