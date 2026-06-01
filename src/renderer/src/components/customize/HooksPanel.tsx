@@ -66,7 +66,7 @@ const EVENT_BADGE: Record<
     label: "调用失败",
     className: "bg-red-500/15 text-red-600 dark:text-red-400",
     english: "PostToolUseFailure",
-    tip: "工具执行失败后触发"
+    tip: "工具抛异常、返回显式 error、非零 exitCode、abort 或超时时触发；仅观测，不阻断当前流程"
   },
   UserPromptSubmit: {
     label: "提交",
@@ -96,7 +96,7 @@ const EVENT_BADGE: Record<
     label: "停止失败",
     className: "bg-orange-500/15 text-orange-600 dark:text-orange-400",
     english: "StopFailure",
-    tip: "Stop 钩子执行失败时触发"
+    tip: "本轮因 API 或运行时错误失败结束时触发，与 Stop 互斥，可用于记录或告警"
   },
   Notification: {
     label: "通知",
@@ -108,7 +108,7 @@ const EVENT_BADGE: Record<
     label: "子开始",
     className: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
     english: "SubagentStart",
-    tip: "子 Agent 启动时触发"
+    tip: "父 Agent 派发子任务、子 Agent 即将启动时触发，可按子 Agent 名称匹配"
   },
   SubagentStop: {
     label: "子停止",
@@ -120,43 +120,43 @@ const EVENT_BADGE: Record<
     label: "压缩前",
     className: "bg-slate-500/15 text-slate-600 dark:text-slate-400",
     english: "PreCompact",
-    tip: "上下文压缩前触发"
+    tip: "上下文压缩前触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   PostCompact: {
     label: "压缩后",
     className: "bg-slate-500/15 text-slate-600 dark:text-slate-400",
     english: "PostCompact",
-    tip: "上下文压缩后触发"
+    tip: "上下文压缩后触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   PermissionRequest: {
     label: "权限申请",
     className: "bg-yellow-500/15 text-yellow-600 dark:text-yellow-400",
     english: "PermissionRequest",
-    tip: "Agent 申请执行权限时触发"
+    tip: "Agent 申请执行权限时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   PermissionDenied: {
     label: "权限拒绝",
     className: "bg-red-500/15 text-red-600 dark:text-red-400",
     english: "PermissionDenied",
-    tip: "权限申请被拒绝时触发"
+    tip: "权限申请被拒绝时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   Setup: {
     label: "初始化",
     className: "bg-sky-500/15 text-sky-600 dark:text-sky-400",
     english: "Setup",
-    tip: "Agent 运行时初始化阶段触发"
+    tip: "每个 workspace 首次启动时触发；工作区设置里的重新初始化会触发 maintenance"
   },
   CwdChanged: {
     label: "目录变更",
     className: "bg-lime-500/15 text-lime-600 dark:text-lime-400",
     english: "CwdChanged",
-    tip: "工作目录变更时触发"
+    tip: "工作目录变更时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   FileChanged: {
     label: "文件变更",
     className: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
     english: "FileChanged",
-    tip: "工作区文件变更时触发"
+    tip: "工作区文件变更时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   }
 }
 
@@ -168,9 +168,13 @@ const GUIDE_EVENT_ORDER: HookEvent[] = [
   "UserPromptSubmit",
   "SessionStart",
   "SessionEnd",
+  "Setup",
+  "SubagentStart",
+  "SubagentStop",
+  "PostToolUseFailure",
   "Stop",
-  "Notification",
-  "SubagentStop"
+  "StopFailure",
+  "Notification"
 ]
 
 const COMMON_COMMAND_RESULT_FIELDS: Array<{ key: string; description: string }> = [
@@ -433,7 +437,36 @@ const WORKSPACE_HOOK_CC_EXAMPLE = `{
 /** Human-readable summary shown in the list item */
 function hookSummary(hook: DisplayHook): string {
   if (hook.type === "prompt") return hook.prompt ?? ""
+  if (hook.type === "http") return hook.url ?? ""
   return hook.command ?? ""
+}
+
+function hookTitle(hook: DisplayHook): string {
+  const summary = hookSummary(hook)
+  if (!summary) return "未配置"
+  if (hook.type === "prompt") {
+    return summary.slice(0, 60) + (summary.length > 60 ? "…" : "")
+  }
+  return summary
+}
+
+function getHookTypeLabel(hook: Pick<HookConfig, "type">): string {
+  if (hook.type === "prompt") return "自然语言策略"
+  if (hook.type === "http") return "HTTP 请求"
+  return "Shell 命令"
+}
+
+function getHookTypeBadgeClass(hook: Pick<HookConfig, "type">): string {
+  if (hook.type === "prompt") return "bg-violet-500/15 text-violet-600 dark:text-violet-400"
+  if (hook.type === "http") return "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400"
+  return "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400"
+}
+
+function getHookTimeoutDisplay(hook: DisplayHook): string {
+  if (hook.timeout !== undefined) return `${hook.timeout}ms`
+  if (hook.async === true) return "60000ms"
+  if (hook.type === "http") return "30000ms"
+  return "10000ms"
 }
 
 const HOOK_SOURCE_BADGE_CLASS: Record<DisplayHook["source"], string> = {
@@ -453,9 +486,12 @@ function getHookSourceDetailLabel(source: DisplayHook["source"]): string {
 }
 
 const FIRE_AND_FORGET_EVENTS = new Set<HookEvent>([
+  "PostToolUseFailure",
   "SessionStart",
   "SessionEnd",
   "Notification",
+  "SubagentStart",
+  "StopFailure",
   "SubagentStop"
 ])
 
@@ -509,7 +545,7 @@ function getForcedOutcomeDescription(hook: DisplayHook): string {
       ? "无视脚本 stdout，强制按 continue=false 处理。"
       : "无视脚本 stdout，强制按 decision=block 处理。"
   if (FIRE_AND_FORGET_EVENTS.has(hook.event)) {
-    return `${base}该事件是异步 fire-and-forget，只更新执行记录和回调语义，不会阻断主流程。`
+    return `${base}该事件只更新执行记录和回调语义，不会把判决反馈给主流程。`
   }
   return base
 }
@@ -593,20 +629,26 @@ export function HooksPanel(): React.JSX.Element {
 
   const filteredHooks = useMemo(() => {
     const q = debouncedQuery.trim().toLowerCase()
-    if (!q) return hooks
-    return hooks.filter((h) => {
-      const summary = hookSummary(h).toLowerCase()
-      return (
-        summary.includes(q) ||
-        h.event.toLowerCase().includes(q) ||
-        (h.matcher && h.matcher.toLowerCase().includes(q)) ||
-        (h.source === "plugin" && h.pluginName.toLowerCase().includes(q)) ||
-        (h.source === "skill" && h.skillName.toLowerCase().includes(q)) ||
-        getHookSourceLabel(h.source).includes(q) ||
-        (h.type === "prompt" ? "自然语言策略" : "命令").includes(q) ||
-        (h.once === true && ("once".includes(q) || "一次性".includes(q)))
-      )
-    })
+    const matched = !q
+      ? hooks
+      : hooks.filter((h) => {
+          const summary = hookSummary(h).toLowerCase()
+          return (
+            summary.includes(q) ||
+            h.event.toLowerCase().includes(q) ||
+            (h.matcher && h.matcher.toLowerCase().includes(q)) ||
+            (h.source === "plugin" && h.pluginName.toLowerCase().includes(q)) ||
+            (h.source === "skill" && h.skillName.toLowerCase().includes(q)) ||
+            getHookSourceLabel(h.source).includes(q) ||
+            getHookTypeLabel(h).toLowerCase().includes(q) ||
+            (h.type === "http" && "http".includes(q)) ||
+            (h.once === true && ("once".includes(q) || "一次性".includes(q)))
+          )
+        })
+    // Enabled hooks float to the top. Stable within each group so the user's
+    // original ordering (typically by creation time / event grouping coming
+    // out of loadHooks) is preserved for hooks of the same enabled state.
+    return [...matched].sort((a, b) => Number(b.enabled) - Number(a.enabled))
   }, [hooks, debouncedQuery])
 
   const handleToggleEnabled = useCallback(
@@ -704,6 +746,7 @@ export function HooksPanel(): React.JSX.Element {
               filteredHooks.map((hook) => {
                 const badge = EVENT_BADGE[hook.event]
                 const isPrompt = hook.type === "prompt"
+                const isHttp = hook.type === "http"
                 const isPluginHook = hook.source === "plugin"
                 const summary = hookSummary(hook)
                 const matcherInfo = getMatcherInfo(hook)
@@ -760,10 +803,12 @@ export function HooksPanel(): React.JSX.Element {
                       <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                         {isPrompt ? (
                           <BrainCircuit className="size-3 shrink-0 text-violet-500" />
+                        ) : isHttp ? (
+                          <Webhook className="size-3 shrink-0 text-cyan-500" />
                         ) : (
                           <Terminal className="size-3 shrink-0" />
                         )}
-                        <span className="shrink-0">{isPrompt ? "自然语言策略" : "Shell 命令"}</span>
+                        <span className="shrink-0">{getHookTypeLabel(hook)}</span>
                         <span className="rounded-full border border-border/50 px-1.5 py-0.5">
                           {matcherInfo.label}
                         </span>
@@ -986,12 +1031,16 @@ function HookDetail(props: {
   const { hook, onToggleEnabled, onDelete, onShowGuide, onEdit } = props
   const badge = EVENT_BADGE[hook.event]
   const isPrompt = hook.type === "prompt"
+  const isHttp = hook.type === "http"
   const isGlobalHook = hook.source === "global"
   const isPluginHook = hook.source === "plugin"
   const isSkillHook = hook.source === "skill"
   const { models } = useAppStore()
-  const modelName = hook.modelId
-    ? (models.find((m) => m.id === hook.modelId)?.name ?? hook.modelId)
+  // PR-13b — read CC-aligned `model` first, fall back to legacy `modelId` so
+  // existing hooks on disk keep showing their model name.
+  const hookModelRef = hook.model ?? hook.modelId
+  const modelName = hookModelRef
+    ? (models.find((m) => m.id === hookModelRef)?.name ?? hookModelRef)
     : null
   const commandHookDoc = getCommandHookEventDoc(hook.event)
   const readableContextDocs = getCommandHookReadableContextDocs(hook.event)
@@ -1011,13 +1060,18 @@ function HookDetail(props: {
           <div className="flex items-center gap-2">
             {isPrompt ? (
               <BrainCircuit className="size-4 text-violet-500 shrink-0" />
+            ) : isHttp ? (
+              <Webhook className="size-4 text-cyan-500 shrink-0" />
             ) : (
               <Terminal className="size-4 text-muted-foreground shrink-0" />
             )}
-            <h3 className={cn("text-base font-bold truncate", isPrompt ? "italic" : "font-mono")}>
-              {isPrompt
-                ? (hook.prompt ?? "").slice(0, 60) + ((hook.prompt?.length ?? 0) > 60 ? "…" : "")
-                : (hook.command ?? "")}
+            <h3
+              className={cn(
+                "text-base font-bold truncate",
+                isPrompt ? "italic" : "font-mono"
+              )}
+            >
+              {hookTitle(hook)}
             </h3>
           </div>
           <div className="flex items-center gap-2">
@@ -1042,12 +1096,10 @@ function HookDetail(props: {
             <span
               className={cn(
                 "text-[10px] font-medium px-1.5 py-0.5 rounded-full",
-                isPrompt
-                  ? "bg-violet-500/15 text-violet-600 dark:text-violet-400"
-                  : "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400"
+                getHookTypeBadgeClass(hook)
               )}
             >
-              {isPrompt ? "自然语言策略" : "Shell 命令"}
+              {getHookTypeLabel(hook)}
             </span>
             <span
               className={cn(
@@ -1126,6 +1178,8 @@ function HookDetail(props: {
             subtext={
               isPrompt
                 ? "自然语言策略不启动本地命令；此目录仅用于说明来源"
+                : isHttp
+                  ? "HTTP Hook 不启动本地命令；此目录仅用于说明来源"
                 : "相对路径命令会基于这里解析"
             }
           />
@@ -1134,7 +1188,7 @@ function HookDetail(props: {
 
         <div className="grid gap-3 md:grid-cols-5">
           <DetailCard label="状态" value={hook.enabled ? "已启用" : "已禁用"} />
-          <DetailCard label="超时" value={`${hook.timeout ?? 10000}ms`} />
+          <DetailCard label="超时" value={getHookTimeoutDisplay(hook)} />
           <DetailCard
             label="一次性"
             value={hook.once ? "成功后跳过" : "每次匹配执行"}
@@ -1168,6 +1222,31 @@ function HookDetail(props: {
             <DetailRow
               label="超时回退"
               value={hook.fallback === "block" ? "严格（默认阻断）" : "宽松（默认放行）"}
+            />
+          </>
+        ) : isHttp ? (
+          <>
+            <DetailRow label="URL" value={hook.url ?? ""} mono />
+            <DetailRow label="方法" value="POST JSON" />
+            <DetailRow
+              label="超时回退"
+              value={hook.fallback === "block" ? "严格（默认阻断）" : "宽松（默认放行）"}
+            />
+            {hook.headers && Object.keys(hook.headers).length > 0 && (
+              <DetailRow
+                label="Headers"
+                value={Object.entries(hook.headers)
+                  .map(([name, value]) => `${name}: ${value}`)
+                  .join("\n")}
+                mono
+              />
+            )}
+            {hook.allowedEnvVars && hook.allowedEnvVars.length > 0 && (
+              <DetailRow label="允许变量" value={hook.allowedEnvVars.join("\n")} mono />
+            )}
+            <DetailRow
+              label="输入协议"
+              value="把 Hook stdin JSON 作为请求体发送到 URL；响应体可返回纯文本或 JSON，JSON 字段会按 Hook 返回协议解析。"
             />
           </>
         ) : (

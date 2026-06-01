@@ -16,6 +16,7 @@ import type { UntrustedWorkspaceHook } from "../storage"
 import type { HookLoggingConfig, SkillHookMetadata } from "../types"
 import { notifyHookLoggingChanged, notifyHooksChanged } from "../hooks/notifications"
 import { clearOnceStateForHook } from "../hooks/runner"
+import { fireSetupMaintenance } from "../hooks/session-lifecycle"
 import {
   isSupportedHookEvent,
   SUPPORTED_HOOK_EVENTS,
@@ -24,11 +25,12 @@ import {
   HookOnBlockConfig,
   HookType,
   PromptHookFallback,
-  HookUpsert
+  HookUpsert,
+  getTimeoutBounds
 } from "../hooks/types"
 
 const VALID_EVENTS = new Set<HookEvent>(SUPPORTED_HOOK_EVENTS)
-const VALID_TYPES = new Set<HookType>(["command", "prompt"])
+const VALID_TYPES = new Set<HookType>(["command", "prompt", "http"])
 const VALID_FALLBACKS = new Set<PromptHookFallback>(["allow", "block"])
 const VALID_USER_CONTEXT_FIELDS = new Set([
   "sap_id",
@@ -40,8 +42,6 @@ const VALID_USER_CONTEXT_FIELDS = new Set([
   "origin_path_id",
   "yst_id_token"
 ])
-const TIMEOUT_MIN = 1_000
-const TIMEOUT_MAX = 60_000
 
 function validateOnBlockConfig(onBlock: HookOnBlockConfig | undefined): void {
   if (onBlock === undefined) return
@@ -70,12 +70,40 @@ function validateHookConfig(config: HookUpsert): void {
 
   const hookType = config.type ?? "command"
   if (!VALID_TYPES.has(hookType)) {
-    throw new Error("无效的 Hook 类型，必须为 command 或 prompt")
+    throw new Error("无效的 Hook 类型，必须为 command / prompt / http")
   }
 
   if (hookType === "command") {
     if (!config.command || typeof config.command !== "string" || !config.command.trim()) {
       throw new Error("命令不能为空")
+    }
+  } else if (hookType === "http") {
+    // PR-14 — URL is required and must look like http(s); no SSRF guard
+    // (§13.2 decision 1). Headers / allowedEnvVars are shape-checked but the
+    // content-level interpolation happens at runtime, not here.
+    if (!config.url || typeof config.url !== "string" || !/^https?:\/\//i.test(config.url.trim())) {
+      throw new Error("HTTP Hook 的 url 必须是 http(s):// 开头的字符串")
+    }
+    if (config.headers !== undefined) {
+      if (typeof config.headers !== "object" || Array.isArray(config.headers)) {
+        throw new Error("headers 必须为字符串到字符串的对象")
+      }
+      for (const [k, v] of Object.entries(config.headers)) {
+        if (typeof k !== "string" || typeof v !== "string") {
+          throw new Error("headers 必须为字符串到字符串的对象")
+        }
+      }
+    }
+    if (config.allowedEnvVars !== undefined) {
+      if (!Array.isArray(config.allowedEnvVars)) {
+        throw new Error("allowedEnvVars 必须为字符串数组")
+      }
+      for (const v of config.allowedEnvVars) {
+        if (typeof v !== "string") throw new Error("allowedEnvVars 必须为字符串数组")
+      }
+    }
+    if (config.fallback !== undefined && !VALID_FALLBACKS.has(config.fallback)) {
+      throw new Error("fallback 必须为 allow 或 block")
     }
   } else {
     // prompt hook
@@ -89,9 +117,40 @@ function validateHookConfig(config: HookUpsert): void {
 
   if (config.timeout !== undefined) {
     const t = config.timeout
-    if (!Number.isInteger(t) || t < TIMEOUT_MIN || t > TIMEOUT_MAX) {
-      throw new Error(`超时时间必须在 ${TIMEOUT_MIN}ms 到 ${TIMEOUT_MAX}ms 之间`)
+    // PR-13a: bounds depend on handler type + (future) async flag. The async
+    // field doesn't exist on HookUpsert yet (PR-15 adds it); read defensively
+    // so this code keeps working unchanged when that lands.
+    const isAsync = (config as { async?: boolean }).async === true
+    const bounds = getTimeoutBounds(config.type, isAsync)
+    if (!Number.isInteger(t) || t < bounds.min || t > bounds.max) {
+      throw new Error(
+        `超时时间必须在 ${bounds.min}ms 到 ${bounds.max}ms 之间（${config.type ?? "command"}${
+          isAsync ? "/async" : "/sync"
+        }）`
+      )
     }
+  }
+
+  // PR-13b — new optional fields
+  if (config.shell !== undefined && !["bash", "powershell", "sh"].includes(config.shell)) {
+    throw new Error("shell 必须为 bash / powershell / sh")
+  }
+  if (config.statusMessage !== undefined && typeof config.statusMessage !== "string") {
+    throw new Error("statusMessage 必须为字符串")
+  }
+  if (config.model !== undefined && typeof config.model !== "string") {
+    throw new Error("model 必须为字符串")
+  }
+  // PR-15
+  if (config.async !== undefined && typeof config.async !== "boolean") {
+    throw new Error("async 必须为布尔值")
+  }
+  if (config.event === "Setup" && config.async === true) {
+    throw new Error("Setup Hook 必须同步执行，不能启用 async")
+  }
+  // PR-16
+  if (config.if !== undefined && typeof config.if !== "string") {
+    throw new Error("if 必须为字符串")
   }
 
   validateOnBlockConfig(config.onBlock)
@@ -256,6 +315,17 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
     ): Promise<void> => {
       if (!workspacePath || !fileName || !filePath) return
       trustWorkspaceHookFile(workspacePath, fileName, filePath)
+    }
+  )
+
+  // PR-11 — User-initiated Setup maintenance re-run (bypasses the
+  // per-workspace init dedupe). UI exposes a "重新初始化工作区" button that
+  // invokes this; the actual hook chain is owned by session-lifecycle.
+  ipcMain.handle(
+    "hooks:setup:maintenance",
+    async (_event, workspacePath: string): Promise<void> => {
+      if (!workspacePath) return
+      await fireSetupMaintenance(workspacePath)
     }
   )
 }

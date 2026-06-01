@@ -1818,6 +1818,9 @@ const api = {
         ipcRenderer.invoke("hooks:workspace:trustAll", workspacePath),
       trustFile: (workspacePath: string, fileName: string, filePath: string): Promise<void> =>
         ipcRenderer.invoke("hooks:workspace:trustFile", { workspacePath, fileName, filePath }),
+      // PR-11 — fire Setup(maintenance) for the current workspace.
+      runSetupMaintenance: (workspacePath: string): Promise<void> =>
+        ipcRenderer.invoke("hooks:setup:maintenance", workspacePath),
       onChanged: (
         callback: (data: { threadId: string; workspacePath: string }) => void
       ): (() => void) => {
