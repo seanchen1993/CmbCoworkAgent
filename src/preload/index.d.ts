@@ -676,16 +676,36 @@ interface CustomAPI {
     }) => Promise<{ success: boolean; tools?: string[]; error?: string }>
   }
   memory: {
-    listFiles: () => Promise<Array<{ name: string; size: number; modifiedAt: string }>>
+    listFiles: () => Promise<
+      Array<{
+        name: string
+        size: number
+        modifiedAt: string
+        type: "user" | "feedback" | "project" | "reference" | null
+        displayName: string | null
+        description: string | null
+        recallCount: number
+      }>
+    >
     readFile: (name: string) => Promise<string>
     deleteFile: (name: string) => Promise<void>
     getEnabled: () => Promise<boolean>
     setEnabled: (enabled: boolean) => Promise<void>
+    getDreamEnabled: () => Promise<boolean>
+    setDreamEnabled: (enabled: boolean) => Promise<void>
     getStats: () => Promise<{
       fileCount: number
       totalSize: number
       indexSize: number
       enabled: boolean
+      dreamEnabled: boolean
+      dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
+    }>
+    consolidate: () => Promise<{
+      archived: number
+      merged: number
+      created: number
+      skipped: number
     }>
     onChanged: (callback: () => void) => () => void
   }

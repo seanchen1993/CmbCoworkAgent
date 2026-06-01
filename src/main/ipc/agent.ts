@@ -9,10 +9,13 @@ import {
 } from "../agent/runtime"
 import { getThread } from "../db"
 import { summarizeAndSave } from "../memory/summarizer"
+import { consolidateMemories, shouldRunDream, incrementDreamSessions } from "../memory/consolidate"
+import { scanMemoryFiles } from "../memory/manifest"
 import { getMemoryStore } from "../memory/store"
 import { ChatOpenAI } from "@langchain/openai"
 import {
   getCustomModelConfigs,
+  isDreamEnabled,
   isMemoryEnabled,
   getCustomSkillsDir,
   invalidateEnabledSkillsCache,
@@ -1491,6 +1494,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const skillUsageDetector = new SkillUsageDetector()
     const toolCallCounter = new ToolCallCounter()
     let assistantText = ""
+    /** Paths written/edited by the agent during this turn (for memory-write detection) */
+    const fileWritePaths: string[] = []
     const recentCompletedTurns = snapshotSkillProposalWindow(threadId).slice(-2)
 
     const computeCodeGenAttributionSkills = (currentRunSkills: string[]): string[] => {
@@ -2094,6 +2099,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
             }
 
+            // Track file write/edit paths for memory-write detection
+            if (tcName === "write_file" || tcName === "edit_file") {
+              const writePath =
+                (typeof tc.args?.path === "string" && tc.args.path) ||
+                (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
+                ""
+              if (writePath) {
+                fileWritePaths.push(writePath.replace(/\\/g, "/"))
+              }
+            }
+
             if (counted) {
               const turnCount = toolCallCounter.getCount()
               console.log(`[Agent] Turn tool call #${turnCount} (${tcName}) in thread ${threadId}`)
@@ -2578,38 +2594,87 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
         if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
           const memoryStore = await getMemoryStore()
-          const allConfigs = getCustomModelConfigs()
+          const memDir = memoryStore.getMemoryDir()
+          const memDirNormalized = memDir.replace(/\\/g, "/")
 
-          // Use routing to pick memory summarization model (economy in auto mode)
-          const memRoutingResult = await resolveModel({
-            taskSource: "memory_summarize",
-            threadId,
-            requestedModelId: modelId ?? undefined,
-            routingMode: getGlobalRoutingMode()
-          }).catch(() => null)
-          const memModelId = memRoutingResult?.resolvedModelId
-          const memCfgId =
-            memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
-          const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
+          // Check whether the main agent directly wrote/edited files inside
+          // the memory directory during this conversation. Detection is based
+          // on actual write_file / edit_file tool calls (tracked in
+          // fileWritePaths), not on path strings appearing in assistant text.
+          const agentAlreadyWroteMemory = fileWritePaths.some(
+            (p) => p.startsWith(memDirNormalized) || p.startsWith(memDir)
+          )
 
-          if (!config) {
-            console.warn("[Agent] No model config available — skipping memory summarization")
-          } else if (config?.apiKey) {
-            summarizeAndSave({
-              model: new ChatOpenAI({
-                model: config.model,
-                apiKey: config.apiKey,
-                configuration: { baseURL: config.baseUrl },
-                maxTokens: config.maxOutputTokens,
-                temperature: config.temperature,
-                topP: config.topP,
-                modelKwargs: {
-                  ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
-                }
-              }),
-              conversation,
-              memoryDir: memoryStore.getMemoryDir()
-            }).catch((e) => console.warn("[Agent] Memory summarize failed:", e))
+          // Helper: resolve a model suitable for memory tasks (reused below)
+          const resolveMemoryModel = async (): Promise<ChatOpenAI | null> => {
+            const allConfigs = getCustomModelConfigs()
+            const memRoutingResult = await resolveModel({
+              taskSource: "memory_summarize",
+              threadId,
+              requestedModelId: modelId ?? undefined,
+              routingMode: getGlobalRoutingMode()
+            }).catch(() => null)
+            const memModelId = memRoutingResult?.resolvedModelId
+            const memCfgId =
+              memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
+            const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
+            if (!config?.apiKey) {
+              console.warn("[Agent] No model config available — skipping memory tasks")
+              return null
+            }
+            return new ChatOpenAI({
+              model: config.model,
+              apiKey: config.apiKey,
+              configuration: { baseURL: config.baseUrl },
+              maxTokens: config.maxOutputTokens,
+              temperature: config.temperature,
+              topP: config.topP,
+              modelKwargs: {
+                ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+              }
+            })
+          }
+
+          // Helper: check & trigger Dream consolidation if conditions are met
+          const tryTriggerDream = (memoryModel: ChatOpenAI): void => {
+            try {
+              if (!isDreamEnabled()) {
+                console.log("[Agent] Dream auto-trigger disabled")
+                return
+              }
+              const factCount = scanMemoryFiles(memDir).length
+              if (shouldRunDream(memDir, factCount)) {
+                console.log("[Agent] Dream auto-trigger: conditions met, starting consolidation")
+                consolidateMemories({ model: memoryModel, memoryDir: memDir })
+                  .catch((e) => console.warn("[Agent] Dream consolidation failed:", e))
+              }
+            } catch (e) {
+              console.warn("[Agent] Dream check failed:", e instanceof Error ? e.message : e)
+            }
+          }
+
+          if (agentAlreadyWroteMemory) {
+            // The agent's direct writes are authoritative — skip background
+            // summarizer to avoid overwriting them. Still count the session
+            // and check whether Dream consolidation should run.
+            console.log("[Agent] Main agent wrote to memory during conversation — skipping summarizeAndSave")
+            incrementDreamSessions(memDir)
+            const memoryModel = await resolveMemoryModel()
+            if (memoryModel) {
+              tryTriggerDream(memoryModel)
+            }
+          } else {
+            const memoryModel = await resolveMemoryModel()
+            if (memoryModel) {
+              summarizeAndSave({
+                model: memoryModel,
+                conversation,
+                memoryDir: memDir
+              }).then(() => {
+                incrementDreamSessions(memDir)
+                tryTriggerDream(memoryModel)
+              }).catch((e) => console.warn("[Agent] Memory summarize failed:", e))
+            }
           }
         }
       }

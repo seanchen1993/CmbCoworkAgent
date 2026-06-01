@@ -1142,19 +1142,39 @@ const api = {
     }
   },
   memory: {
-    listFiles: (): Promise<Array<{ name: string; size: number; modifiedAt: string }>> =>
-      ipcRenderer.invoke("memory:listFiles"),
+    listFiles: (): Promise<
+      Array<{
+        name: string
+        size: number
+        modifiedAt: string
+        type: "user" | "feedback" | "project" | "reference" | null
+        displayName: string | null
+        description: string | null
+        recallCount: number
+      }>
+    > => ipcRenderer.invoke("memory:listFiles"),
     readFile: (name: string): Promise<string> => ipcRenderer.invoke("memory:readFile", name),
     deleteFile: (name: string): Promise<void> => ipcRenderer.invoke("memory:deleteFile", name),
     getEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getEnabled"),
     setEnabled: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("memory:setEnabled", enabled),
+    getDreamEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getDreamEnabled"),
+    setDreamEnabled: (enabled: boolean): Promise<void> =>
+      ipcRenderer.invoke("memory:setDreamEnabled", enabled),
     getStats: (): Promise<{
       fileCount: number
       totalSize: number
       indexSize: number
       enabled: boolean
+      dreamEnabled: boolean
+      dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
     }> => ipcRenderer.invoke("memory:getStats"),
+    consolidate: (): Promise<{
+      archived: number
+      merged: number
+      created: number
+      skipped: number
+    }> => ipcRenderer.invoke("memory:consolidate"),
     onChanged: (callback: () => void): (() => void) => {
       const handler = (): void => {
         callback()
