@@ -880,7 +880,8 @@ function parseFeedback(raw: any, granularity: Granularity): FeedbackData {
 export function useDashboard() {
   const [granularity, setGranularity] = useState<Granularity>("day")
   const [range, setRange] = useState<TimeRange>(() => getDefaultRange("day"))
-  const [selectedUpperOrgLv1, setSelectedUpperOrgLv1] = useState<string | null>(null)
+  // 顶部「室筛选」支持多选 LV1 组织；空数组表示全部。
+  const [selectedOrgLv1List, setSelectedOrgLv1List] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -895,12 +896,12 @@ export function useDashboard() {
   const fetchIdRef = useRef(0)
   const orgOptionsFetchIdRef = useRef(0)
 
-  const fetchAll = useCallback(async (r: TimeRange, g: Granularity, orgLv1: string | null) => {
+  const fetchAll = useCallback(async (r: TimeRange, g: Granularity, orgList: string[]) => {
     const id = ++fetchIdRef.current
     setLoading(true)
     setError(null)
 
-    const orgOpts = { upperOrgLv1: orgLv1 }
+    const orgOpts = { upperOrgLv1: orgList }
     try {
       const [ovRes, msRes, usRes, prRes, fbRes] = await Promise.all([
         window.api.dashboard.overview(r, g, orgOpts),
@@ -922,7 +923,8 @@ export function useDashboard() {
       setOverview(parseOverview(ovRes.data, g))
       setModelStats(parseModelStats(msRes.data))
       setProductivity(parseProductivity(prRes.data, g, r))
-      setUserStats(parseUserStats(usRes.data, orgLv1))
+      // 仅选中单个组织时 userStats 进入 LV0 下钻视图，否则按 LV1 展示。
+      setUserStats(parseUserStats(usRes.data, orgList.length === 1 ? orgList[0] : null))
       setFeedback(parseFeedback(fbRes.data, g))
     } catch (e) {
       if (id !== fetchIdRef.current) return
@@ -932,10 +934,10 @@ export function useDashboard() {
     }
   }, [])
 
-  // Auto-fetch on range / granularity / 全量组织筛选 change
+  // Auto-fetch on range / granularity / 室筛选 change
   useEffect(() => {
-    fetchAll(range, granularity, selectedUpperOrgLv1)
-  }, [range, granularity, selectedUpperOrgLv1, fetchAll])
+    fetchAll(range, granularity, selectedOrgLv1List)
+  }, [range, granularity, selectedOrgLv1List, fetchAll])
 
   // 组织（LV1）可选项随时间范围刷新（与全量筛选解耦，始终返回全部 LV1）。
   useEffect(() => {
@@ -977,30 +979,32 @@ export function useDashboard() {
       setRange(nextRange)
       return
     }
-    fetchAll(range, granularity, selectedUpperOrgLv1)
-  }, [fetchAll, range, granularity, selectedUpperOrgLv1])
+    fetchAll(range, granularity, selectedOrgLv1List)
+  }, [fetchAll, range, granularity, selectedOrgLv1List])
 
-  // 全量组织（LV1）筛选：设置后由 effect 重新拉取所有面板数据。
-  const setOrgFilter = useCallback((orgLv1: string | null) => {
-    const normalized = orgLv1 && orgLv1.trim() ? orgLv1.trim() : null
-    setSelectedUpperOrgLv1(normalized)
+  // 室筛选（多选 LV1）：设置后由 effect 重新拉取所有面板数据。
+  const setOrgFilter = useCallback((orgList: string[]) => {
+    const normalized = Array.from(
+      new Set(orgList.map((item) => item.trim()).filter(Boolean))
+    )
+    setSelectedOrgLv1List(normalized)
   }, [])
 
-  // 用户分析面板内点击 LV1 柱状图下钻 == 选中该组织进行全量筛选。
+  // 用户分析面板内点击 LV1 柱状图下钻 == 将室筛选切换为该单一组织。
   const drillDownUserOrg = useCallback((orgLv1: string) => {
     const normalizedOrgLv1 = orgLv1.trim()
     if (!normalizedOrgLv1) return
-    setSelectedUpperOrgLv1(normalizedOrgLv1)
+    setSelectedOrgLv1List([normalizedOrgLv1])
   }, [])
 
   const resetUserOrgDrilldown = useCallback(() => {
-    setSelectedUpperOrgLv1(null)
+    setSelectedOrgLv1List([])
   }, [])
 
   return {
     granularity,
     range,
-    selectedUpperOrgLv1,
+    selectedOrgLv1List,
     orgOptions,
     loading,
     error,

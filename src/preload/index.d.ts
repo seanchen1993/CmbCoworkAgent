@@ -1144,12 +1144,12 @@ interface CustomAPI {
     overview: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | null }
+      opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     modelStats: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | null }
+      opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     orgOptions: (
       range: { from: string; to: string }
@@ -1157,7 +1157,7 @@ interface CustomAPI {
     userStats: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | null }
+      opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     userList: (
       range: { from: string; to: string },
@@ -1190,12 +1190,12 @@ interface CustomAPI {
     productivity: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | null }
+      opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     feedback: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | null }
+      opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     skillRecentTraces: (
       skill: string,

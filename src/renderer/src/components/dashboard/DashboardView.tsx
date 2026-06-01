@@ -10,6 +10,8 @@ import {
   AlertCircle,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  Check,
   Download,
   Search,
   X,
@@ -20,13 +22,8 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from "@/components/ui/select"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { cn } from "@/lib/utils"
 import {
   formatTopUserOrgName,
   useDashboard,
@@ -272,48 +269,99 @@ function TimeControlBar({
   )
 }
 
-const ORG_FILTER_ALL = "__all__"
-
 function OrgFilterBar({
   value,
   options,
   loading,
   onChange
 }: {
-  value: string | null
+  value: string[]
   options: string[]
   loading: boolean
-  onChange: (orgLv1: string | null) => void
+  onChange: (orgList: string[]) => void
 }): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const selectedSet = new Set(value)
+
+  const toggleOrg = (org: string): void => {
+    if (selectedSet.has(org)) {
+      onChange(value.filter((item) => item !== org))
+    } else {
+      onChange([...value, org])
+    }
+  }
+
+  const triggerLabel =
+    value.length === 0
+      ? "全部"
+      : value.length === 1
+        ? value[0]
+        : `已选 ${value.length} 个室`
+
   return (
     <div className="flex items-center gap-2 px-6 py-2.5 border-b border-border bg-background/60">
       <Building2 className="size-3.5 text-muted-foreground" />
-      <span className="text-xs text-muted-foreground">组织（LV1）</span>
-      <Select
-        value={value ?? ORG_FILTER_ALL}
-        onValueChange={(next) => onChange(next === ORG_FILTER_ALL ? null : next)}
-        disabled={loading && options.length === 0}
-      >
-        <SelectTrigger className="h-7 w-[220px] text-xs">
-          <SelectValue placeholder="全部组织" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value={ORG_FILTER_ALL} className="text-xs">
-            全部组织
-          </SelectItem>
-          {options.map((org) => (
-            <SelectItem key={org} value={org} className="text-xs">
-              {org}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      {value && (
+      <span className="text-xs text-muted-foreground">室筛选</span>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 w-[240px] justify-between gap-1 text-xs font-normal"
+            disabled={loading && options.length === 0}
+          >
+            <span className={cn("truncate", value.length === 0 && "text-muted-foreground")}>
+              {triggerLabel}
+            </span>
+            <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-[240px] p-1">
+          <button
+            type="button"
+            className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 text-xs hover:bg-muted/60"
+            onClick={() => onChange([])}
+          >
+            <span className={value.length === 0 ? "font-medium text-foreground" : "text-muted-foreground"}>
+              全部
+            </span>
+            {value.length === 0 && <Check className="size-3.5 text-primary" />}
+          </button>
+          <div className="my-1 h-px bg-border" />
+          <ScrollArea className="max-h-64">
+            <div className="pr-1">
+              {options.length === 0 ? (
+                <div className="px-2 py-3 text-center text-[11px] text-muted-foreground">
+                  暂无可选室
+                </div>
+              ) : (
+                options.map((org) => {
+                  const checked = selectedSet.has(org)
+                  return (
+                    <button
+                      key={org}
+                      type="button"
+                      className="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-muted/60"
+                      onClick={() => toggleOrg(org)}
+                    >
+                      <span className={cn("truncate", checked && "font-medium text-foreground")}>
+                        {org}
+                      </span>
+                      {checked && <Check className="size-3.5 shrink-0 text-primary" />}
+                    </button>
+                  )
+                })
+              )}
+            </div>
+          </ScrollArea>
+        </PopoverContent>
+      </Popover>
+      {value.length > 0 && (
         <Button
           variant="ghost"
           size="sm"
           className="h-7 px-2 text-xs text-muted-foreground"
-          onClick={() => onChange(null)}
+          onClick={() => onChange([])}
         >
           <X className="size-3.5" />
           清除
@@ -848,7 +896,7 @@ export function DashboardView(): React.JSX.Element {
   const {
     granularity,
     range,
-    selectedUpperOrgLv1,
+    selectedOrgLv1List,
     orgOptions,
     loading,
     error,
@@ -1620,11 +1668,9 @@ export function DashboardView(): React.JSX.Element {
           })
         }
         if (userStats.byOrg.length > 0) {
+          const drilledOrg = selectedOrgLv1List.length === 1 ? selectedOrgLv1List[0] : null
           sheets.push({
-            name:
-              selectedUpperOrgLv1 === null
-                ? "一级部门分布"
-                : `${selectedUpperOrgLv1 || "未知"}下级部门分布`,
+            name: drilledOrg ? `${drilledOrg}下级部门分布` : "一级部门分布",
             header: ["部门", "调用次数"],
             rows: userStats.byOrg.map((o) => [o.org, o.count])
           })
@@ -1717,7 +1763,7 @@ export function DashboardView(): React.JSX.Element {
     userStats,
     productivity,
     range,
-    selectedUpperOrgLv1,
+    selectedOrgLv1List,
     marketSkillMap,
     skillUploaderProfiles
   ])
@@ -1738,7 +1784,7 @@ export function DashboardView(): React.JSX.Element {
 
       {subPage.kind === "main" && (
         <OrgFilterBar
-          value={selectedUpperOrgLv1}
+          value={selectedOrgLv1List}
           options={orgOptions}
           loading={loading}
           onChange={setOrgFilter}

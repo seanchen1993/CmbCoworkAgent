@@ -262,8 +262,8 @@ interface EsSearchResponse {
 }
 
 interface OrgFilterOptions {
-  // 用户主动选择的 LV1 组织维度筛选（非权限过滤）。null/未传表示全部。
-  upperOrgLv1?: string | null
+  // 用户主动选择的 LV1 组织维度筛选（非权限过滤）。支持多选；空/未传表示全部。
+  upperOrgLv1?: string | string[] | null
 }
 
 type UserStatsOptions = OrgFilterOptions
@@ -1054,8 +1054,7 @@ async function fetchCommitAdoptionMap(
 async function fetchOverview(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions): Promise<unknown> {
   requireDashboardAccess()
   // 统计指标不做组织级数据权限过滤；orgFilterClause 是用户主动选择的 LV1 组织维度筛选。
-  const orgFilter = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
-  const orgFilterClause = orgFilter !== null ? buildUpperOrgLv1Filter(orgFilter) : null
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
   const interval = getCalendarInterval(granularity, range.from, range.to)
   const rankingTopSize = 20
   const rankingSearchSize = 1000
@@ -1238,8 +1237,7 @@ async function fetchOverview(range: TimeRange, granularity: Granularity, opts?: 
 async function fetchModelStats(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions): Promise<unknown> {
   requireDashboardAccess()
   // 统计指标不做组织级数据权限过滤；orgFilterClause 为用户主动选择的 LV1 组织维度筛选。
-  const orgFilter = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
-  const orgFilterClause = orgFilter !== null ? buildUpperOrgLv1Filter(orgFilter) : null
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
   void granularity
   const body = {
     size: 0,
@@ -1315,10 +1313,11 @@ function buildNonEmptyOrgLevelFilter(field: "upperOrgLv0" | "upperOrgLv1"): Reco
 }
 
 function buildOrgDistributionAgg(
-  selectedUpperOrgLv1: string | null,
+  selectedOrgs: string[],
   metric: "pv" | "uv"
 ): Record<string, unknown> {
-  const field = selectedUpperOrgLv1 !== null ? "upperOrgLv0" : "upperOrgLv1"
+  // 仅选中单个 LV1 时下钻到 LV0 分布，否则按 LV1 分组（多选时限定在所选集合内）。
+  const field = selectedOrgs.length === 1 ? "upperOrgLv0" : "upperOrgLv1"
   const terms: Record<string, unknown> = { field, size: 30, missing: "" }
   const aggs = metric === "uv" ? { unique_users: { cardinality: { field: "sapId" } } } : undefined
 
@@ -1328,8 +1327,9 @@ function buildOrgDistributionAgg(
 
   const items = aggs ? { terms, aggs } : { terms }
   const filters = [buildNonEmptyOrgLevelFilter(field)]
-  if (selectedUpperOrgLv1 !== null) {
-    filters.push(buildUpperOrgLv1Filter(selectedUpperOrgLv1))
+  const listFilter = buildUpperOrgLv1ListFilter(selectedOrgs)
+  if (listFilter) {
+    filters.push(listFilter)
   }
 
   return {
@@ -1341,11 +1341,12 @@ function buildOrgDistributionAgg(
 async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?: UserStatsOptions): Promise<unknown> {
   requireDashboardAccess()
   void granularity
-  const selectedUpperOrgLv1 = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
-  // 统计指标不做组织级数据权限过滤，仅保留用户主动选择的组织维度。
+  const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
+  // 统计指标不做组织级数据权限过滤，仅保留用户主动选择的组织（LV1）多选维度。
   const queryFilters = [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter()]
-  if (selectedUpperOrgLv1 !== null) {
-    queryFilters.push(buildUpperOrgLv1Filter(selectedUpperOrgLv1))
+  const orgFilterClause = buildUpperOrgLv1ListFilter(selectedOrgs)
+  if (orgFilterClause) {
+    queryFilters.push(orgFilterClause)
   }
 
   const body = {
@@ -1366,9 +1367,9 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?:
           }
         }
       },
-      by_org: buildOrgDistributionAgg(selectedUpperOrgLv1, "pv"),
-      by_org_pv: buildOrgDistributionAgg(selectedUpperOrgLv1, "pv"),
-      by_org_uv: buildOrgDistributionAgg(selectedUpperOrgLv1, "uv"),
+      by_org: buildOrgDistributionAgg(selectedOrgs, "pv"),
+      by_org_pv: buildOrgDistributionAgg(selectedOrgs, "pv"),
+      by_org_uv: buildOrgDistributionAgg(selectedOrgs, "uv"),
       by_version: {
         terms: { field: "appVersion", size: 20 },
         aggs: {
@@ -1923,8 +1924,7 @@ async function fetchProductivity(range: TimeRange, granularity: Granularity, opt
   requireDashboardAccess()
   const interval = getCalendarInterval(granularity, range.from, range.to)
   // orgFilterClause 为用户主动选择的 LV1 组织维度筛选。
-  const orgFilter = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
-  const orgFilterClause = orgFilter !== null ? buildUpperOrgLv1Filter(orgFilter) : null
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
   const filters = [
     timeRangeFilter("eventTime", range),
     { term: { "eventName": "git.commit.created" } },
@@ -1983,8 +1983,7 @@ async function fetchFeedback(range: TimeRange, granularity: Granularity, opts?: 
   requireDashboardAccess()
   const interval = getCalendarInterval(granularity, range.from, range.to)
   // orgFilterClause 为用户主动选择的 LV1 组织维度筛选。
-  const orgFilter = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
-  const orgFilterClause = orgFilter !== null ? buildUpperOrgLv1Filter(orgFilter) : null
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
   const dislikeTypeFilters = Object.fromEntries(
     DISLIKE_TYPE_OPTIONS.map((item) => [
       item.id,
@@ -2714,7 +2713,8 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
   const to = new Date(range.to)
   const diffMs = to.getTime() - from.getTime()
   const diffDays = diffMs / (1000 * 60 * 60 * 24)
-  const selectedUpperOrgLv1 = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
+  const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
+  const selectedUpperOrgLv1 = selectedOrgs.length === 1 ? selectedOrgs[0] : null
 
   const trendBuckets: Date[] = []
   if (diffDays <= 1) {
