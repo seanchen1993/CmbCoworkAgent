@@ -1850,45 +1850,6 @@ export function setPluginEnabled(id: string, enabled: boolean): void {
   writePlugins(next)
 }
 
-/**
- * Backfill origin for plugins installed before the field existed.
- *
- * Used by the renderer's one-shot legacy migration. Writes plugins.json once
- * for the whole batch — for a user with N legacy plugins this avoids N IPC
- * round-trips and N file writes through the mutex.
- *
- * - No-op for unknown ids or when the stored origin already matches.
- * - Does NOT touch `updatedAt`: origin is a back-fill of latent metadata, not
- *   a user-visible change; bumping the timestamp would corrupt any UI sorted
- *   by updatedAt the first time a session backfills many legacy plugins.
- * - Callers must hold `pluginMutex`.
- */
-export function setPluginOriginsBatch(
-  updates: ReadonlyArray<{ id: string; origin: "market" | "local" }>
-): void {
-  // INVARIANT: caller must already hold `pluginMutex`. Same reasoning as
-  // setPluginOrigin — reads + writes plugins.json without taking the lock.
-  // The only current call site is the `plugins:setOriginsBatch` IPC handler.
-  // No `updates.length === 0` early return: the IPC handler already filters
-  // and short-circuits on empty input.
-  const byId = new Map<string, "market" | "local">()
-  for (const u of updates) {
-    if (u && typeof u.id === "string" && (u.origin === "market" || u.origin === "local")) {
-      byId.set(u.id, u.origin)
-    }
-  }
-  if (byId.size === 0) return
-  const items = getPlugins()
-  let changed = false
-  const next = items.map((i) => {
-    const desired = byId.get(i.id)
-    if (!desired || i.origin === desired) return i
-    changed = true
-    return { ...i, origin: desired }
-  })
-  if (changed) writePlugins(next)
-}
-
 export function getEnabledPluginSkillsSources(): string[] {
   if (_pluginSkillsCache) return _pluginSkillsCache
   _pluginSkillsCache = getEnabledPluginSkillSourceMetadata().map((source) => source.sourceDir)

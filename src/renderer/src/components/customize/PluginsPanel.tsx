@@ -38,7 +38,6 @@ type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks
 type PluginMcpServerDetail = Awaited<ReturnType<typeof window.api.plugins.getDetail>>["mcpServerDetails"][number]
 const PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL =
   import.meta.env.VITE_PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL?.trim()
-const LOCAL_UPLOADED_PLUGIN_NAMES_KEY = "plugins_panel_uploaded_plugin_names"
 
 interface PluginDetail {
   skills: string[]
@@ -89,41 +88,6 @@ function buildPluginConsoleInfo(
     skills: detail?.skills ?? [],
     mcps: detail?.mcpServers ?? [],
     hooks: detail?.hooks.map((hook) => hook.id) ?? []
-  }
-}
-
-function readLocalUploadedPluginNamesFromStorage(): Set<string> {
-  try {
-    const raw = localStorage.getItem(LOCAL_UPLOADED_PLUGIN_NAMES_KEY)
-    const parsed: string[] = raw ? JSON.parse(raw) : []
-    if (!Array.isArray(parsed)) return new Set()
-    return new Set(parsed.map(normalizePluginNameKey).filter(Boolean))
-  } catch (error) {
-    console.warn("[PluginsPanel] Failed to read local uploaded plugin names:", error)
-    return new Set()
-  }
-}
-
-function markLocalUploadedPluginNameInStorage(pluginName: string): void {
-  try {
-    const key = normalizePluginNameKey(pluginName)
-    if (!key) return
-    const next = readLocalUploadedPluginNamesFromStorage()
-    next.add(key)
-    localStorage.setItem(LOCAL_UPLOADED_PLUGIN_NAMES_KEY, JSON.stringify([...next]))
-  } catch (error) {
-    console.warn("[PluginsPanel] Failed to mark local uploaded plugin name:", error)
-  }
-}
-
-function removeLocalUploadedPluginNameFromStorage(pluginName: string): void {
-  try {
-    const key = normalizePluginNameKey(pluginName)
-    if (!key) return
-    const next = [...readLocalUploadedPluginNamesFromStorage()].filter((item) => item !== key)
-    localStorage.setItem(LOCAL_UPLOADED_PLUGIN_NAMES_KEY, JSON.stringify(next))
-  } catch (error) {
-    console.warn("[PluginsPanel] Failed to remove local uploaded plugin name:", error)
   }
 }
 
@@ -292,6 +256,13 @@ function UploadPluginDialog(props: {
             </a>
           </div>
         )}
+        <div className="mt-4 rounded-md border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+          当前本地上传 Plugin 仅支持英文插件名。请确保 .zip 文件名、插件根目录名以及{" "}
+          <span className="font-mono">plugin.json</span> /{" "}
+          <span className="font-mono">.codex-plugin/plugin.json</span> 中的{" "}
+          <span className="font-mono">name</span>{" "}
+          使用英文、数字、短横线或下划线；中文名可能导致安装失败。
+        </div>
         <div
           className={cn(
             "mt-4 border-2 border-dashed rounded-lg p-8 text-center transition-colors cursor-pointer",
@@ -351,18 +322,13 @@ export function PluginsPanel(): React.JSX.Element {
   const [publishTarget, setPublishTarget] = useState<MarketPublishTarget | null>(null)
   const [publishMode, setPublishMode] = useState<"upload" | "update">("upload")
   const [marketPluginMap, setMarketPluginMap] = useState<Record<string, MarketItem>>({})
-  // marketPluginsLoaded becomes true once the load attempt finishes, regardless
-  // of outcome — so the UI doesn't sit in the "loading" defensive-hide state
-  // forever when the market endpoint is unreachable. marketPluginsLoadFailed
-  // tells the legacy fallback to default to "not market" (show details) in
-  // that case, so offline users still see their local plugins' internals.
+  // marketPluginsLoaded flips to true once the market list fetch settles
+  // (success or failure). It only gates the diagnostic console log below so
+  // market metadata is included when available; detail loading does not depend
+  // on it.
   const [marketPluginsLoaded, setMarketPluginsLoaded] = useState(false)
-  const [marketPluginsLoadFailed, setMarketPluginsLoadFailed] = useState(false)
   const [uploadedPluginNames, setUploadedPluginNames] = useState<Set<string>>(() =>
     readUploadedItemNamesFromStorage("plugin")
-  )
-  const [localUploadedPluginNames, setLocalUploadedPluginNames] = useState<Set<string>>(() =>
-    readLocalUploadedPluginNamesFromStorage()
   )
   const [searchQuery, setSearchQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
@@ -370,50 +336,6 @@ export function PluginsPanel(): React.JSX.Element {
   const loggedPluginSelectionRef = useRef<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<PluginMetadata | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
-
-  const shouldHidePluginDetails = useCallback(
-    (plugin: PluginMetadata | null): boolean => {
-      if (!plugin) return false
-      const key = normalizePluginNameKey(plugin.name)
-      if (!key) return false
-      // Self-published always wins, regardless of origin: even if the plugin
-      // also lives in the market, the author should see their own internals.
-      // This check is intentionally above the origin check.
-      if (uploadedPluginNames.has(key)) return false
-      // origin is the source of truth for plugins installed after this field
-      // was introduced. Pre-existing plugins have origin === undefined and
-      // fall through to the legacy name-match fallback below; a one-time
-      // migration backfills them once the market list is available.
-      if (plugin.origin === "market") return true
-      if (plugin.origin === "local") return false
-      // Legacy fallback (plugin.origin === undefined). Reached only on the
-      // first session after upgrade, before the migration runs. Once the
-      // migration writes a concrete origin to disk this branch is dead for
-      // that plugin.
-      //
-      // Note: localUploadedPluginNames is only consulted *here* — it has no
-      // effect once origin is set, because every new local-install path
-      // already writes origin: "local" directly. Treat it purely as a
-      // pre-origin breadcrumb for plugins that were dragged in before this
-      // mechanism existed.
-      if (localUploadedPluginNames.has(key)) return false
-      if (!marketPluginsLoaded) return true // still loading — defensive hide
-      // Loaded-but-failed: we have no reliable signal of market membership.
-      // Default to "not market" (show details) so offline users don't see all
-      // their legacy plugins' internals disappear. The one-time migration
-      // also skips this state, so plugins stay in the legacy path until a
-      // future session sees a successful market load.
-      if (marketPluginsLoadFailed) return false
-      return Boolean(marketPluginMap[key])
-    },
-    [
-      localUploadedPluginNames,
-      marketPluginMap,
-      marketPluginsLoadFailed,
-      marketPluginsLoaded,
-      uploadedPluginNames
-    ]
-  )
 
   // Clean up debounce timer on unmount
   useEffect(() => {
@@ -435,7 +357,6 @@ export function PluginsPanel(): React.JSX.Element {
       const res = await marketApi.getPlugins()
       if (!res.success || !res.data) {
         setMarketPluginsLoaded(true)
-        setMarketPluginsLoadFailed(true)
         return
       }
       const next: Record<string, MarketItem> = {}
@@ -445,58 +366,36 @@ export function PluginsPanel(): React.JSX.Element {
       }
       setMarketPluginMap(next)
       setMarketPluginsLoaded(true)
-      setMarketPluginsLoadFailed(false)
     } catch (e) {
       console.warn("[PluginsPanel] Failed to load market plugins:", e)
       setMarketPluginsLoaded(true)
-      setMarketPluginsLoadFailed(true)
     }
   }, [])
 
   // After install/update, refresh the selected plugin's detail if it was affected
-  const handleInstallSuccess = useCallback(
-    (pluginName?: string) => {
-      if (pluginName) {
-        markLocalUploadedPluginNameInStorage(pluginName)
-        setLocalUploadedPluginNames(readLocalUploadedPluginNamesFromStorage())
-      }
-      window.api.plugins
-        .list()
-        .then((list) => {
-          setPlugins(list)
-          bumpPluginVersion()
-          if (selectedPlugin) {
-            const updated = list.find(
-              (p) => p.id === selectedPlugin.id || p.name === selectedPlugin.name
-            )
-            if (updated) {
-              setSelectedPlugin(updated)
-              if (shouldHidePluginDetails(updated)) {
-                setDetail(null)
-              } else {
-                window.api.plugins
-                  .getDetail(updated.id)
-                  .then(setDetail)
-                  .catch(() => {
-                    setDetail({
-                      skills: [],
-                      mcpServers: [],
-                      mcpServerDetails: [],
-                      hookCount: 0,
-                      hooks: [],
-                      manifest: null
-                    })
-                  })
-              }
-            }
+  const handleInstallSuccess = useCallback(() => {
+    window.api.plugins
+      .list()
+      .then((list) => {
+        setPlugins(list)
+        bumpPluginVersion()
+        if (selectedPlugin) {
+          const updated = list.find(
+            (p) => p.id === selectedPlugin.id || p.name === selectedPlugin.name
+          )
+          if (updated) {
+            setSelectedPlugin(updated)
+            window.api.plugins
+              .getDetail(updated.id)
+              .then(setDetail)
+              .catch(() => {
+                setDetail(getEmptyPluginDetail())
+              })
           }
-        })
-        .catch(console.error)
-    },
-    [bumpPluginVersion, selectedPlugin, shouldHidePluginDetails]
-  )
-
-  const shouldHideSelectedPluginDetails = shouldHidePluginDetails(selectedPlugin)
+        }
+      })
+      .catch(console.error)
+  }, [bumpPluginVersion, selectedPlugin])
 
   useEffect(() => {
     refreshPlugins()
@@ -509,140 +408,31 @@ export function PluginsPanel(): React.JSX.Element {
     return () => clearTimeout(timer)
   }, [loadMarketPlugins])
 
-  // One-time backfill for plugins installed before `origin` existed: any plugin
-  // whose name matches a current market entry is marked "market"; the rest are
-  // marked "local". Without this, the legacy fallback would keep relying on the
-  // flaky name-vs-market-list match every render.
-  //
-  // Two carve-outs that must NOT get flipped to "market":
-  //   - self-published (uploadedPluginNames): even if also in the market, the
-  //     author should see their own internals.
-  //   - locally uploaded (localUploadedPluginNames): the user explicitly
-  //     dragged the zip in. A name collision with a market entry is not
-  //     evidence the install came from the market.
-  // Both are written as explicit "local" so the legacy fallback path stops
-  // engaging on the next render.
-  //
-  // Writes are batched into a single IPC + a single plugins.json write — for
-  // users with many old plugins this avoids N round-trips through the mutex.
-  //
-  // Lifecycle:
-  //   - done ref is set only after a successful batch commit, so a failed
-  //     attempt (network blip, IPC error) can be retried on the next render.
-  //   - in-flight ref guards against the effect re-firing while the async
-  //     write is still pending (refreshPlugins → plugins state change →
-  //     effect re-runs).
-  //   - Migration is skipped while the market list is still loading or
-  //     failed to load: running against an empty map would mislabel every
-  //     market-sourced plugin as "local".
-  //   - Single-shot per session: once a batch succeeds, done ref latches and
-  //     the effect never re-runs. If the market list at migration time was
-  //     incomplete (server-side pagination, partial cache, transient
-  //     filtering) any legacy plugin missed by that snapshot stays pinned to
-  //     "local" until something else re-tags it (e.g. a re-install). Accepted
-  //     trade-off vs. unbounded retry pressure on the market endpoint.
-  const originMigrationDoneRef = useRef(false)
-  const originMigrationInFlightRef = useRef(false)
-  useEffect(() => {
-    if (originMigrationDoneRef.current || originMigrationInFlightRef.current) return
-    if (!marketPluginsLoaded || marketPluginsLoadFailed) return
-    if (plugins.length === 0) return
-    const candidates = plugins.filter((p) => p.origin !== "market" && p.origin !== "local")
-    if (candidates.length === 0) return
-
-    const updates: Array<{ id: string; origin: "market" | "local" }> = []
-    for (const plugin of candidates) {
-      const key = normalizePluginNameKey(plugin.name)
-      if (!key) continue
-      let nextOrigin: "market" | "local"
-      if (uploadedPluginNames.has(key) || localUploadedPluginNames.has(key)) {
-        nextOrigin = "local"
-      } else {
-        nextOrigin = marketPluginMap[key] ? "market" : "local"
-      }
-      updates.push({ id: plugin.id, origin: nextOrigin })
+  const loadDetail = useCallback(async (plugin: PluginMetadata) => {
+    setSelectedPlugin(plugin)
+    setDetail(null)
+    try {
+      const d = await window.api.plugins.getDetail(plugin.id)
+      setDetail(d)
+    } catch {
+      setDetail(getEmptyPluginDetail())
     }
-    if (updates.length === 0) return
-
-    originMigrationInFlightRef.current = true
-    void (async () => {
-      try {
-        const res = await window.api.plugins.setOriginsBatch(updates)
-        if (res?.success) {
-          originMigrationDoneRef.current = true
-          refreshPlugins()
-        }
-      } catch (e) {
-        console.warn("[PluginsPanel] Failed to backfill plugin origin:", e)
-      } finally {
-        originMigrationInFlightRef.current = false
-      }
-    })()
-  }, [
-    localUploadedPluginNames,
-    marketPluginMap,
-    marketPluginsLoadFailed,
-    marketPluginsLoaded,
-    plugins,
-    refreshPlugins,
-    uploadedPluginNames
-  ])
-
-  const loadDetail = useCallback(
-    async (plugin: PluginMetadata) => {
-      setSelectedPlugin(plugin)
-      setDetail(null)
-      if (shouldHidePluginDetails(plugin)) {
-        return
-      }
-      try {
-        const d = await window.api.plugins.getDetail(plugin.id)
-        setDetail(d)
-      } catch {
-        const emptyDetail = getEmptyPluginDetail()
-        setDetail(emptyDetail)
-      }
-    },
-    [shouldHidePluginDetails]
-  )
+  }, [])
 
   useEffect(() => {
-    if (!marketPluginsLoaded || !selectedPlugin || detail || shouldHideSelectedPluginDetails) return
+    if (!selectedPlugin || detail) return
     void loadDetail(selectedPlugin)
-  }, [detail, loadDetail, marketPluginsLoaded, selectedPlugin, shouldHideSelectedPluginDetails])
+  }, [detail, loadDetail, selectedPlugin])
 
+  // Diagnostic console log for the selected plugin. Gated on marketPluginsLoaded
+  // so the logged market metadata is populated when the list is available.
   useEffect(() => {
-    if (!marketPluginsLoaded || !selectedPlugin) return
-    const shouldHideUiDetail = shouldHidePluginDetails(selectedPlugin)
-    if (!shouldHideUiDetail && !detail) return
+    if (!marketPluginsLoaded || !selectedPlugin || !detail) return
     if (loggedPluginSelectionRef.current === selectedPlugin.id) return
-
-    let cancelled = false
-    const plugin = selectedPlugin
     const marketInfo = resolvePluginMarketInfo(selectedPlugin, marketPluginMap)
-
-    const logPluginInfo = async () => {
-      let consoleDetail = detail
-      if (shouldHideUiDetail) {
-        try {
-          consoleDetail = await window.api.plugins.getDetail(plugin.id)
-        } catch (error) {
-          console.warn("[PluginsPanel] Failed to load plugin detail for console:", error)
-          consoleDetail = getEmptyPluginDetail()
-        }
-      }
-
-      if (cancelled || loggedPluginSelectionRef.current === plugin.id) return
-      console.log(buildPluginConsoleInfo(plugin, consoleDetail, marketInfo))
-      loggedPluginSelectionRef.current = plugin.id
-    }
-
-    void logPluginInfo()
-
-    return () => {
-      cancelled = true
-    }
-  }, [detail, marketPluginMap, marketPluginsLoaded, selectedPlugin, shouldHidePluginDetails])
+    console.log(buildPluginConsoleInfo(selectedPlugin, detail, marketInfo))
+    loggedPluginSelectionRef.current = selectedPlugin.id
+  }, [detail, marketPluginMap, marketPluginsLoaded, selectedPlugin])
 
   const handleSelectPlugin = useCallback(
     (plugin: PluginMetadata) => {
@@ -698,8 +488,6 @@ export function PluginsPanel(): React.JSX.Element {
     try {
       const res = await window.api.plugins.delete(plugin.id)
       if (res.success) {
-        removeLocalUploadedPluginNameFromStorage(plugin.name)
-        setLocalUploadedPluginNames(readLocalUploadedPluginNamesFromStorage())
         if (selectedPlugin?.id === plugin.id) {
           setSelectedPlugin(null)
           setDetail(null)
@@ -903,11 +691,7 @@ export function PluginsPanel(): React.JSX.Element {
         onToggleEnabled={handleToggleEnabled}
         onToggleHookEnabled={handleToggleHookEnabled}
         onDelete={handleDeleteRequest}
-        onPublish={
-          selectedPlugin && !shouldHideSelectedPluginDetails
-            ? () => openPublishDialog(selectedPlugin)
-            : undefined
-        }
+        onPublish={selectedPlugin ? () => openPublishDialog(selectedPlugin) : undefined}
         publishLabel={
           selectedPlugin &&
           uploadedPluginNames.has(selectedPlugin.name.trim().toLowerCase()) &&
@@ -915,7 +699,6 @@ export function PluginsPanel(): React.JSX.Element {
             ? "更新到市场"
             : "发布到市场"
         }
-        hideComponentDetails={shouldHideSelectedPluginDetails}
         isMarketPlugin={
           selectedPlugin ? Boolean(resolvePluginMarketInfo(selectedPlugin, marketPluginMap)) : false
         }
@@ -976,7 +759,6 @@ export function PluginDetailPanel(props: {
   onPublish?: (plugin: PluginMetadata) => void
   publishLabel?: string
   hideActions?: boolean
-  hideComponentDetails?: boolean
   isMarketPlugin?: boolean
 }): React.JSX.Element {
   const {
@@ -988,7 +770,6 @@ export function PluginDetailPanel(props: {
     onPublish,
     publishLabel = "发布到市场",
     hideActions = false,
-    hideComponentDetails = false,
     isMarketPlugin = false
   } = props
 
@@ -1247,13 +1028,7 @@ export function PluginDetailPanel(props: {
             </div>
           </div>
 
-          {hideComponentDetails && (
-            <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-3 text-xs text-muted-foreground leading-relaxed">
-              从市场安装的 Plugin 仅展示组件数量，具体 Hooks、Skills、MCP 配置详情已隐藏。
-            </div>
-          )}
-
-          {!hideComponentDetails && detail && detail.hooks.length > 0 && (
+          {detail && detail.hooks.length > 0 && (
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-3">
                 <h3 className="text-sm font-medium">Hooks</h3>
@@ -1327,7 +1102,7 @@ export function PluginDetailPanel(props: {
           )}
 
           {/* Skills list */}
-          {!hideComponentDetails && detail && detail.skills.length > 0 && (
+          {detail && detail.skills.length > 0 && (
             <div className="space-y-2">
               <h3 className="text-sm font-medium">Skills</h3>
               <div className="space-y-1">
@@ -1345,7 +1120,7 @@ export function PluginDetailPanel(props: {
           )}
 
           {/* MCP Servers list */}
-          {!hideComponentDetails && detail && detail.mcpServers.length > 0 && (
+          {detail && detail.mcpServers.length > 0 && (
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-3">
                 <h3 className="text-sm font-medium">MCP Servers</h3>
@@ -1414,18 +1189,14 @@ export function PluginDetailPanel(props: {
           )}
 
           {/* Loading state */}
-          {!hideComponentDetails && !detail && (
-            <p className="text-xs text-muted-foreground">加载中...</p>
-          )}
+          {!detail && <p className="text-xs text-muted-foreground">加载中...</p>}
 
           {/* Plugin path */}
-          {!hideComponentDetails && (
-            <div className="pt-2 border-t border-border">
-              <p className="text-[10px] text-muted-foreground/60 break-all">
-                {plugin.path.replace(/\\/g, "/")}
-              </p>
-            </div>
-          )}
+          <div className="pt-2 border-t border-border">
+            <p className="text-[10px] text-muted-foreground/60 break-all">
+              {plugin.path.replace(/\\/g, "/")}
+            </p>
+          </div>
         </div>
       </ScrollArea>
     </div>

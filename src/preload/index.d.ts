@@ -831,9 +831,6 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (id: string) => Promise<{ success: boolean; error?: string }>
     setEnabled: (id: string, enabled: boolean) => Promise<void>
-    setOriginsBatch: (
-      updates: Array<{ id: string; origin: "market" | "local" }>
-    ) => Promise<{ success: boolean; error?: string }>
     getDetail: (id: string) => Promise<PluginDetail>
     listHooks: () => Promise<PluginHookMetadata[]>
     setHookEnabled: (
