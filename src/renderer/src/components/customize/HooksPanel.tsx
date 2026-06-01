@@ -8,7 +8,8 @@ import {
   Webhook,
   Terminal,
   BrainCircuit,
-  FolderOpen
+  FolderOpen,
+  ChevronDown
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -432,6 +433,29 @@ const WORKSPACE_HOOK_CC_EXAMPLE = `{
       ]
     }
   ]
+}`
+
+const HTTP_HOOK_FLAT_EXAMPLE = `{
+  "event": "PreToolUse",
+  "matcher": "execute",
+  "type": "http",
+  "url": "https://policy.internal.example/hooks/check",
+  "headers": {
+    "Authorization": "Bearer \${POLICY_TOKEN}",
+    "X-Source": "cmbcoworkagent"
+  },
+  "allowedEnvVars": ["POLICY_TOKEN"],
+  "fallback": "allow",
+  "timeout": 30000,
+  "enabled": true
+}`
+
+// Shape of the JSON your endpoint may return (2xx). Same protocol as a command
+// hook's stdout: omit fields to pass through, or return a decision to act.
+const HTTP_HOOK_RESPONSE_EXAMPLE = `{
+  "decision": "block",
+  "reason": "该命令命中高风险策略，请改用只读方案",
+  "systemMessage": "已被策略服务拦截"
 }`
 
 /** Human-readable summary shown in the list item */
@@ -1246,8 +1270,63 @@ function HookDetail(props: {
             )}
             <DetailRow
               label="输入协议"
-              value="把 Hook stdin JSON 作为请求体发送到 URL；响应体可返回纯文本或 JSON，JSON 字段会按 Hook 返回协议解析。"
+              value="把 Hook stdin JSON 作为请求体 POST 到 URL（Content-Type: application/json）；响应体可返回纯文本或 JSON，JSON 字段会按 Hook 返回协议解析。"
             />
+            <details className="group/httpref rounded-md border border-border/50 bg-muted/20">
+              <summary className="flex cursor-pointer list-none items-start justify-between gap-3 px-3 py-2.5 [&::-webkit-details-marker]:hidden">
+                <div>
+                  <p className="text-sm font-medium text-foreground">请求体参考</p>
+                  <p className="text-xs text-muted-foreground">
+                    展开查看作为 POST body 发送的 stdin JSON 字段与响应约定。
+                  </p>
+                </div>
+                <ChevronDown className="mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform duration-200 group-open/httpref:rotate-180" />
+              </summary>
+              <div className="space-y-3 border-t border-border/40 p-3">
+                <div className="rounded-md border border-amber-300/50 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+                  HTTP Hook 不接收环境变量，下列字段全部位于请求体 JSON 中（与同事件的 command Hook
+                  字段一致）。
+                </div>
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-foreground/90">请求体 stdin 顶层字段</p>
+                  {readableContextDocs.stdinFields.map((field) => (
+                    <div
+                      key={field.key}
+                      className="rounded-md border border-border/40 bg-background px-3 py-2"
+                    >
+                      <p className="font-mono text-[11px] text-foreground/85">{field.key}</p>
+                      <p className="text-sm text-muted-foreground">{field.description}</p>
+                      {field.note && <p className="mt-1 text-xs text-foreground/75">{field.note}</p>}
+                    </div>
+                  ))}
+                </div>
+                {readableContextDocs.extraObjects.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium text-foreground/90">事件专属对象</p>
+                    {readableContextDocs.extraObjects.map((doc) => (
+                      <div
+                        key={doc.key}
+                        className="rounded-md border border-border/40 bg-background px-3 py-2 space-y-1.5"
+                      >
+                        <span className="inline-flex rounded-full border border-border/50 bg-muted/20 px-2 py-0.5 font-mono text-[10px] text-foreground/80">
+                          {doc.key}
+                        </span>
+                        <p className="text-sm text-muted-foreground">{doc.description}</p>
+                        {doc.note && <p className="text-xs text-foreground/75">{doc.note}</p>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="rounded-md border border-border/40 bg-background px-3 py-2 text-sm text-muted-foreground">
+                  <p className="font-medium text-foreground/90">响应约定</p>
+                  <p className="mt-1">
+                    2xx + JSON → 按 decision / reason / continue / updatedInput 决策；2xx + 纯文本 →
+                    普通输出；非 2xx / 网络错误 / 超时 → 按 fallback（
+                    {hook.fallback === "block" ? "当前：阻断" : "当前：放行"}）。响应体上限 1MB。
+                  </p>
+                </div>
+              </div>
+            </details>
           </>
         ) : (
           <>
@@ -1256,19 +1335,15 @@ function HookDetail(props: {
               label="输入协议"
               value="脚本通过 stdin JSON + 环境变量接收上下文；stdout 可返回纯文本或 JSON，stderr 用于调试日志。"
             />
-            <details className="rounded-md border border-border/50 bg-muted/20">
-              <summary className="cursor-pointer list-none px-3 py-2.5 [&::-webkit-details-marker]:hidden">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-medium text-foreground">脚本输入参考</p>
-                    <p className="text-xs text-muted-foreground">
-                      展开查看 stdin、环境变量和 tool_input 字段。
-                    </p>
-                  </div>
-                  <span className="shrink-0 rounded-full border border-border/50 bg-background px-2 py-0.5 text-[10px] text-muted-foreground">
-                    展开
-                  </span>
+            <details className="group/cmdref rounded-md border border-border/50 bg-muted/20">
+              <summary className="flex cursor-pointer list-none items-start justify-between gap-3 px-3 py-2.5 [&::-webkit-details-marker]:hidden">
+                <div>
+                  <p className="text-sm font-medium text-foreground">脚本输入参考</p>
+                  <p className="text-xs text-muted-foreground">
+                    展开查看 stdin、环境变量和 tool_input 字段。
+                  </p>
                 </div>
+                <ChevronDown className="mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform duration-200 group-open/cmdref:rotate-180" />
               </summary>
               <div className="space-y-4 border-t border-border/40 p-3">
                 <div className="space-y-2 rounded-md border border-border/50 bg-muted/30 px-3 py-2">
@@ -1508,6 +1583,8 @@ function formatTime(iso: string): string {
 
 /* ── Empty state ─────────────────────────────────────────────────── */
 
+// Top-level guide block. A visible chevron + an open-state background shift make
+// it obvious the row is expandable and whether it is currently open.
 function GuideSection(props: {
   title: string
   summary: string
@@ -1515,38 +1592,55 @@ function GuideSection(props: {
 }): React.JSX.Element {
   const { title, summary, children } = props
   return (
-    <details className="rounded-lg border border-border/60 bg-background">
-      <summary className="cursor-pointer list-none p-4 [&::-webkit-details-marker]:hidden">
-        <div className="flex items-start justify-between gap-3">
-          <div className="space-y-1">
-            <h4 className="text-sm font-semibold text-foreground">{title}</h4>
-            <p className="text-sm text-muted-foreground">{summary}</p>
-          </div>
-          <span className="shrink-0 rounded-full border border-border/50 bg-muted/30 px-2 py-0.5 text-[10px] text-muted-foreground">
-            点击展开
-          </span>
+    <details className="group/section overflow-hidden rounded-lg border border-border/60 bg-background open:border-primary/30 open:shadow-sm">
+      <summary className="flex cursor-pointer list-none items-start justify-between gap-3 p-4 group-open/section:bg-muted/20 [&::-webkit-details-marker]:hidden">
+        <div className="space-y-1">
+          <h4 className="text-sm font-semibold text-foreground">{title}</h4>
+          <p className="text-sm text-muted-foreground">{summary}</p>
         </div>
+        <ChevronDown className="mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform duration-200 group-open/section:rotate-180" />
       </summary>
-      <div className="border-t border-border/50 p-4">{children}</div>
+      <div className="border-t border-border/50 bg-muted/10 p-4">{children}</div>
     </details>
   )
 }
 
+// Nested expander. `nested` (level 3+) drops the full card for a left accent bar
+// so a sub-sub-section reads clearly as a child of its parent, not a sibling of
+// the top-level GuideSubSection.
 function GuideSubSection(props: {
   title: string
   summary: string
+  nested?: boolean
   children: React.ReactNode
 }): React.JSX.Element {
-  const { title, summary, children } = props
+  const { title, summary, nested, children } = props
   return (
-    <details className="rounded-md border border-border/40 bg-muted/20">
-      <summary className="cursor-pointer list-none px-3 py-2.5 [&::-webkit-details-marker]:hidden">
+    <details
+      className={cn(
+        "group/sub overflow-hidden",
+        nested
+          ? "rounded-r-md border-l-2 border-l-primary/40 bg-background/60"
+          : "rounded-md border border-border/40 bg-muted/20 open:bg-muted/30"
+      )}
+    >
+      <summary className="flex cursor-pointer list-none items-start justify-between gap-3 px-3 py-2.5 [&::-webkit-details-marker]:hidden">
         <div className="space-y-1">
-          <p className="text-sm font-medium text-foreground">{title}</p>
+          <p className={cn("text-sm font-medium", nested ? "text-foreground/90" : "text-foreground")}>
+            {title}
+          </p>
           <p className="text-sm text-muted-foreground">{summary}</p>
         </div>
+        <ChevronDown className="mt-0.5 size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-open/sub:rotate-180" />
       </summary>
-      <div className="border-t border-border/40 px-3 py-3">{children}</div>
+      <div
+        className={cn(
+          "px-3 py-3",
+          nested ? "border-t border-border/30" : "border-t border-border/40"
+        )}
+      >
+        {children}
+      </div>
     </details>
   )
 }
@@ -1573,7 +1667,7 @@ function HooksGuide(): React.JSX.Element {
           <p className="text-sm text-muted-foreground">
             Hook 在 Agent
             执行的关键节点触发，可以拦截工具调用、校验输出、注入上下文，或推送通知。支持 Shell
-            脚本和自然语言策略两种形式，来源分为全局、插件、技能和工作区四类。
+            脚本、自然语言策略和 HTTP 请求三种形式，来源分为全局、插件、技能和工作区四类。
           </p>
         </div>
       </div>
@@ -1607,6 +1701,45 @@ function HooksGuide(): React.JSX.Element {
                 判决为阻断时，也可以配合
                 <code className="mx-1 font-mono text-foreground/85">onBlock.requiredSkill</code>让
                 Agent 直接知道应该调用哪个整改技能。
+              </p>
+            </div>
+          </GuideSubSection>
+
+          <GuideSubSection
+            title="HTTP 请求 Hook"
+            summary="把事件 payload POST 到一个 URL，由远端服务判决；适合把策略集中在外部系统。"
+          >
+            <div className="space-y-2 text-sm text-muted-foreground">
+              <p>
+                与 command Hook 共用同一份输入：runner 把 stdin JSON 作为请求体 POST 到
+                <code className="mx-1 font-mono text-foreground/85">url</code>
+                （固定带
+                <code className="mx-1 font-mono text-foreground/85">Content-Type: application/json</code>
+                ）。注意 HTTP Hook **不会**收到环境变量，所有上下文都在 JSON 请求体里。
+              </p>
+              <p>
+                响应体与 command 的 stdout 走同一套解析：2xx 返回纯文本则当作普通输出，返回 JSON
+                则按
+                <code className="mx-1 font-mono text-foreground/85">decision</code>/
+                <code className="mx-1 font-mono text-foreground/85">reason</code>
+                等字段决策。非 2xx、网络错误或超时则走
+                <code className="mx-1 font-mono text-foreground/85">fallback</code>
+                （默认放行，可设
+                <code className="mx-1 font-mono text-foreground/85">"block"</code>
+                ）。
+              </p>
+              <p>
+                <code className="mx-1 font-mono text-foreground/85">headers</code>
+                里可用
+                <code className="mx-1 font-mono text-foreground/85">$VAR</code>/
+                <code className="mx-1 font-mono text-foreground/85">{`\${VAR}`}</code>
+                引用环境变量，但**仅限**列入
+                <code className="mx-1 font-mono text-foreground/85">allowedEnvVars</code>
+                白名单的变量，未授权的引用会被替换成空串。默认超时 30s（异步上限 5 分钟），响应体上限
+                1MB。
+              </p>
+              <p className="text-xs text-foreground/75">
+                ⚠️ HTTP Hook 不做 SSRF 防护，URL 与出网风险由配置者自负；不要把它指向不可信地址。
               </p>
             </div>
           </GuideSubSection>
@@ -1984,6 +2117,65 @@ function HooksGuide(): React.JSX.Element {
       </GuideSection>
 
       <GuideSection
+        title="HTTP 请求 Hook 怎么配"
+        summary="POST 事件 payload 到一个 URL，由远端服务判决；请求体、响应协议和最小示例都在这里。"
+      >
+        <div className="space-y-3">
+          <GuideSubSection
+            title="请求与响应协议"
+            summary="请求体 = 事件 stdin JSON；响应体与 command stdout 同一套解析。"
+          >
+            <div className="space-y-2 text-sm text-muted-foreground">
+              <p>
+                runner 用 POST 把事件 stdin JSON 作为请求体发送，固定附带
+                <code className="mx-1 font-mono text-foreground/85">Content-Type: application/json</code>
+                。<strong className="text-foreground/85">HTTP Hook 不接收任何环境变量</strong>
+                ，需要的上下文（tool_name、tool_input、user_context 等）都在请求体里，字段与对应事件的
+                command Hook 完全一致。
+              </p>
+              <p>
+                2xx 响应：返回纯文本则当普通输出，返回 JSON 则按 Hook 返回协议解析
+                （decision / reason / continue / updatedInput 等）。非 2xx、网络错误或超时：按
+                <code className="mx-1 font-mono text-foreground/85">fallback</code>
+                处理（<code className="font-mono text-foreground/85">"allow"</code> 放行，
+                <code className="font-mono text-foreground/85">"block"</code> 阻断）。响应体上限 1MB。
+              </p>
+              <p>
+                <code className="mx-1 font-mono text-foreground/85">headers</code>
+                值支持
+                <code className="mx-1 font-mono text-foreground/85">$VAR</code>/
+                <code className="mx-1 font-mono text-foreground/85">{`\${VAR}`}</code>
+                插值，但只有列入
+                <code className="mx-1 font-mono text-foreground/85">allowedEnvVars</code>
+                的变量才会被替换，其余替换为空串，避免误把宿主环境变量泄露到外部 URL。
+              </p>
+              <p className="text-xs text-foreground/75">
+                ⚠️ 无 SSRF 防护：URL 与出网由配置者自负，请勿指向不可信地址。
+              </p>
+            </div>
+          </GuideSubSection>
+
+          <GuideSubSection
+            title="最小示例：HTTP Hook 配置"
+            summary="把 execute 调用 POST 给内部策略服务判决；token 通过白名单变量注入 header。"
+          >
+            <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
+              <code>{HTTP_HOOK_FLAT_EXAMPLE}</code>
+            </pre>
+          </GuideSubSection>
+
+          <GuideSubSection
+            title="最小示例：服务端返回（2xx body）"
+            summary="返回 JSON 即按字段决策；什么都不返回或返回 2xx 空体则视为放行。"
+          >
+            <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
+              <code>{HTTP_HOOK_RESPONSE_EXAMPLE}</code>
+            </pre>
+          </GuideSubSection>
+        </div>
+      </GuideSection>
+
+      <GuideSection
         title="按事件查看输入 / 输出协议"
         summary={`当前选中事件：${badge.label}（${badge.english}）。先切事件，再按层展开 stdin / env / 返回字段 / 示例。`}
       >
@@ -2059,6 +2251,7 @@ function HooksGuide(): React.JSX.Element {
           >
             <div className="space-y-3">
               <GuideSubSection
+                nested
                 title={`stdin 顶层字段（${readableContextDocs.stdinFields.length}）`}
                 summary="这些字段会直接出现在传给脚本的 stdin JSON 顶层。"
               >
@@ -2079,6 +2272,7 @@ function HooksGuide(): React.JSX.Element {
               </GuideSubSection>
 
               <GuideSubSection
+                nested
                 title={`环境变量（${readableContextDocs.envFields.length}）`}
                 summary="这些字段是便捷读取方式，但大 payload 仍以 stdin JSON 为准。"
               >
@@ -2100,6 +2294,7 @@ function HooksGuide(): React.JSX.Element {
 
               {readableContextDocs.extraObjects.length > 0 && (
                 <GuideSubSection
+                  nested
                   title={`事件专属对象（${readableContextDocs.extraObjects.length}）`}
                   summary="例如 tool_response、stop_context、subagent 这类只在部分事件出现的结构。"
                 >
@@ -2151,6 +2346,7 @@ function HooksGuide(): React.JSX.Element {
                 ))}
               </div>
               <GuideSubSection
+                nested
                 title="常见 JSON 返回字段"
                 summary="阻断、改写输入、提示用户、挂整改技能这些字段的用途说明。"
               >
