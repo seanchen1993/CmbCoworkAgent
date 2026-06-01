@@ -41,7 +41,6 @@ import { OverviewPanel } from "./panels/OverviewPanel"
 import { ModelPanel } from "./panels/ModelPanel"
 import { UserPanel } from "./panels/UserPanel"
 import { ProductivityPanel } from "./panels/ProductivityPanel"
-import { FeedbackPanel } from "./panels/FeedbackPanel"
 import { TraceExplorer, TraceHistoryDialog, TraceTriggerScopeToggle } from "./TraceHistoryDialog"
 import { CommitDetailsDialog } from "./CommitDetailsDialog"
 import { marketApi, type MarketItem } from "../../api/market"
@@ -904,7 +903,6 @@ export function DashboardView(): React.JSX.Element {
     modelStats,
     userStats,
     productivity,
-    feedback,
     changeGranularity,
     navigate,
     setCustomRange,
@@ -1888,11 +1886,7 @@ export function DashboardView(): React.JSX.Element {
               <ModelPanel data={modelStats} loading={loading} />
             </section>
 
-            {/* Feedback */}
-            <section>
-              <h2 className="text-sm font-semibold text-foreground mb-3">点赞 / 点踩反馈</h2>
-              <FeedbackPanel data={feedback} loading={loading} />
-            </section>
+            {/* 点赞 / 点踩反馈：按需求暂时下线 */}
           </div>
         </ScrollArea>
       )}
