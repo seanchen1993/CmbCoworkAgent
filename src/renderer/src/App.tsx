@@ -15,6 +15,9 @@ import { RightPanel } from "@/components/panels/RightPanel"
 const KanbanView = lazy(() =>
   import("@/components/kanban").then((m) => ({ default: m.KanbanView }))
 )
+const HarnessBoardView = lazy(() =>
+  import("@/components/harness-board/HarnessBoardView").then((m) => ({ default: m.HarnessBoardView }))
+)
 const ClaudeCodePanel = lazy(() =>
   import("@/components/customize/ClaudeCodePanel").then((m) => ({ default: m.ClaudeCodePanel }))
 )
@@ -98,6 +101,7 @@ function App(): React.JSX.Element {
   const [previewFullscreen, setPreviewFullscreen] = useState(false)
   const [pendingGitDiffByThread, setPendingGitDiffByThread] = useState<Record<string, boolean>>({})
   const [isGitWorkspaceByThread, setIsGitWorkspaceByThread] = useState<Record<string, boolean>>({})
+
   const [zoomLevel, setZoomLevel] = useState(1)
   const [bus, setBus] = useState(true)
   // Delay loading ClaudeCodePanel code until user opens it once.
@@ -617,7 +621,7 @@ function App(): React.JSX.Element {
               </Suspense>
             </main>
           </div>
-        ) : mainView !== "claudecode" && mainView !== "dashboard" ? (
+        ) : mainView !== "claudecode" && mainView !== "dashboard" && mainView !== "harness" ? (
           <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
             {/* Left Sidebar */}
             {!sidebarCollapsed && (
@@ -692,6 +696,25 @@ function App(): React.JSX.Element {
             <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
               <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
                 <DashboardView />
+              </Suspense>
+            </main>
+          </div>
+        )}
+
+        {/* Harness Board 面板 */}
+        {mainView === "harness" && (
+          <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
+            {!sidebarCollapsed && (
+              <>
+                <div style={{ width: leftWidth }} className="shrink-0">
+                  <ThreadSidebar />
+                </div>
+                <ResizeHandle onDrag={handleLeftResize} />
+              </>
+            )}
+            <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
+              <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
+                <HarnessBoardView />
               </Suspense>
             </main>
           </div>

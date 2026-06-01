@@ -281,6 +281,10 @@ export interface LocalSandboxOptions {
   skillHookKeys?: Set<string>
   /** Records skills activated this turn so PostSkillUse can run at turn completion. */
   skillUseTracker?: SkillUseTracker
+  /** Optional plugin output directory exposed to hook commands as PLUGIN_OUTPUT_DIR. */
+  pluginOutputDir?: string
+  /** Optional system identifier exposed to child processes and hooks as SYSTEM_ID. */
+  systemId?: string
 }
 
 interface ExecuteRawOptions {
@@ -343,6 +347,8 @@ export class LocalSandbox
   private readonly env: Record<string, string>
   private readonly workingDir: string
   private readonly windowsSandbox: WindowsSandboxMode
+  private readonly pluginOutputDir?: string
+  private readonly systemId?: string
   private readonly codexExePath: string
   private readonly getHooks: () => HookConfig[]
   private readonly resolveHooks: LocalSandboxHookResolver
@@ -1510,6 +1516,9 @@ export class LocalSandbox
     this.timeout = options.timeout ?? 60_000 // 1 minute default
     this.maxOutputBytes = options.maxOutputBytes ?? 100_000 // ~100KB default
     const baseEnv = options.env ?? ({ ...process.env } as Record<string, string>)
+    baseEnv.SESSION_ID = this.runId
+    const systemId = options.systemId?.trim()
+    if (systemId) baseEnv.SYSTEM_ID = systemId
     // Ensure UTF-8 locale for spawned shells (Git Bash via pipe defaults to
     // Windows console code page, e.g. GBK, producing garbled CJK output)
     if (process.platform === "win32") {
@@ -1519,6 +1528,8 @@ export class LocalSandbox
     this.env = baseEnv
     this.workingDir = options.rootDir ?? process.cwd()
     this.windowsSandbox = options.windowsSandbox ?? "none"
+    this.pluginOutputDir = options.pluginOutputDir
+    this.systemId = systemId || undefined
     this.codexExePath = options.codexExePath ?? "codex"
     const h = options.hooks
     this.getHooks = typeof h === "function" ? h : () => h ?? []
@@ -1713,7 +1724,15 @@ export class LocalSandbox
   }
 
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
-    const hookContext: HookContext = { ...context, turnId: context.turnId ?? this._hookTurnId }
+    const hookContext: HookContext = {
+      ...context,
+      ...(this.pluginOutputDir && !context.pluginOutputDir
+        ? { pluginOutputDir: this.pluginOutputDir }
+        : {}),
+      ...(this.systemId && !context.systemId ? { systemId: this.systemId } : {}),
+      turnId: context.turnId ?? this._hookTurnId
+    }
+
     const hooks = this.resolveHooks(event, hookContext)
     const result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
     if (result) {

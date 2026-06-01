@@ -6,13 +6,31 @@ if (process.platform === "linux") {
   app.commandLine.appendSwitch("no-sandbox")
 }
 
-import { existsSync } from "fs"
+import { existsSync, statSync } from "fs"
 import { join } from "path"
 import { writeMainLog, writeRendererLog } from "./logging"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
 let mainLogForwardingEnabled = false
+
+async function showPathInFileManager(filePath: string): Promise<{ success: boolean; error?: string }> {
+  if (typeof filePath !== "string" || !filePath.trim()) {
+    return { success: false, error: "Invalid path" }
+  }
+
+  if (!existsSync(filePath)) {
+    return { success: false, error: `Path does not exist: ${filePath}` }
+  }
+
+  if (statSync(filePath).isDirectory()) {
+    const error = await shell.openPath(filePath)
+    return error ? { success: false, error } : { success: true }
+  }
+
+  shell.showItemInFolder(filePath)
+  return { success: true }
+}
 
 function getConsoleLevelName(level: number): string {
   switch (level) {
@@ -145,8 +163,11 @@ import { registerTerminalHandlers, disposeAllTerminals } from "./ipc/terminal"
 import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
 import { registerDashboardHandlers } from "./ipc/dashboard"
+import { registerFeatureGateHandlers } from "./ipc/feature-gates"
+import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
+import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
@@ -168,6 +189,7 @@ import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
+import { startFeatureGatePrefetch, stopFeatureGatePrefetch } from "./feature-gates"
 import { isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
@@ -487,6 +509,8 @@ if (!gotTheLock) {
     registerCodeExecToolsHandlers(ipcMain)
     registerRoutingHandlers(ipcMain)
     registerDashboardHandlers(ipcMain)
+    registerFeatureGateHandlers(ipcMain)
+    registerHarnessBoardHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
     prewarmRecentSandboxWorkspaces()
@@ -535,8 +559,7 @@ if (!gotTheLock) {
 
     ipcMain.handle("show-item-in-folder", async (_, filePath: string) => {
       try {
-        shell.showItemInFolder(filePath)
-        return { success: true }
+        return await showPathInFileManager(filePath)
       } catch (error) {
         console.error("Failed to show item in folder:", error)
         return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
@@ -545,8 +568,7 @@ if (!gotTheLock) {
 
     ipcMain.handle("shell-show-item-in-folder", async (_, filePath: string) => {
       try {
-        shell.showItemInFolder(filePath)
-        return { success: true }
+        return await showPathInFileManager(filePath)
       } catch (error) {
         console.error("Failed to show item in folder:", error)
         return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
@@ -614,6 +636,7 @@ if (!gotTheLock) {
     startChatX()
     startHookConfigWatcher()
     startUpdateChecker()
+    startFeatureGatePrefetch(3000)
     markFullBackupCleanupReady(selfCheckResult)
 
     // ── Keep Awake ──
@@ -687,9 +710,11 @@ if (!gotTheLock) {
     stopScheduler()
     stopHeartbeat()
     stopChatX()
+    stopAllHarnessWatchRefs()
     stopHookConfigWatcher()
     stopRegisteredGitHookEventSync()
     stopUpdateChecker()
+    stopFeatureGatePrefetch()
     try {
       shutdownAdoptionTracker()
     } catch (err) {

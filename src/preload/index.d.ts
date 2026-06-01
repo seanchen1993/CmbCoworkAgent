@@ -37,6 +37,23 @@ import type {
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
+import type {
+  HarnessProjectCreateInput,
+  HarnessFeatureCreateInput,
+  HarnessFeatureCreateResult,
+  HarnessProjectDetailViewModel,
+  HarnessProjectListItem,
+  HarnessProjectMetadata,
+  HarnessProjectMetadataUpdateInput,
+  HarnessRunDetailViewModel,
+  HarnessAdapterRegistryItem,
+  HarnessWatchRefChangedEvent
+} from "../shared/harness-board-types"
+import type {
+  FeatureGateCheckOptions,
+  FeatureGateCheckResult,
+  FeatureGateKey
+} from "../shared/feature-gates"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -1145,6 +1162,12 @@ interface CustomAPI {
     getMode: () => Promise<"auto" | "pinned">
     setMode: (mode: "auto" | "pinned") => Promise<void>
   }
+  featureGates: {
+    isEnabled: (
+      name: FeatureGateKey,
+      options?: FeatureGateCheckOptions
+    ) => Promise<FeatureGateCheckResult>
+  }
   dashboard: {
     isAllowed: () => Promise<boolean>
     overview: (
@@ -1236,6 +1259,25 @@ interface CustomAPI {
     exportExcel: (
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
+  }
+  harnessBoard: {
+    registry: () => Promise<HarnessAdapterRegistryItem[]>
+    listProjects: () => Promise<HarnessProjectListItem[]>
+    createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
+    createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
+    updateProject: (
+      projectId: string,
+      input: HarnessProjectMetadataUpdateInput
+    ) => Promise<HarnessProjectMetadata>
+    archiveProject: (projectId: string) => Promise<HarnessProjectMetadata>
+    getProjectDetail: (projectId: string) => Promise<HarnessProjectDetailViewModel>
+    getProjectDetails: (
+      projectIds: string[],
+      options?: { watchRefs?: boolean }
+    ) => Promise<Record<string, HarnessProjectDetailViewModel>>
+    getRunDetail: (projectId: string, slug: string) => Promise<HarnessRunDetailViewModel>
+    getDialogTips: (projectId: string, slug: string) => Promise<string | null>
+    onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
   }
   update: {
     check: () => Promise<

@@ -91,6 +91,31 @@ import type {
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../../main/ipc/code-exec-tools"
+import type {
+  HarnessArtifact,
+  HarnessArtifactStatus,
+  HarnessArtifactType,
+  HarnessEventStatus,
+  HarnessHookLogView,
+  HarnessNodeStatus,
+  HarnessProjectCreateInput,
+  HarnessFeatureCreateInput,
+  HarnessFeatureCreateResult,
+  HarnessProjectDetailViewModel,
+  HarnessProjectListItem,
+  HarnessProjectMetadata,
+  HarnessProjectMetadataUpdateInput,
+  HarnessRunDetailViewModel,
+  HarnessRunNode,
+  HarnessFeatureSummary,
+  HarnessSessionBinding,
+  HarnessAdapterRegistryItem,
+  HarnessBoardCompatibility,
+  HarnessStatus,
+  HarnessWatchRefChangedEvent,
+  HarnessWorkflowNextAction,
+  HarnessWorkflow
+} from "../../shared/harness-board-types"
 
 export type {
   McpConnectorAdvanced,
@@ -128,6 +153,32 @@ export type {
   ManagedSavedCodeExecTool,
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
+}
+
+export type {
+  HarnessArtifact,
+  HarnessArtifactStatus,
+  HarnessArtifactType,
+  HarnessEventStatus,
+  HarnessHookLogView,
+  HarnessNodeStatus,
+  HarnessProjectCreateInput,
+  HarnessFeatureCreateInput,
+  HarnessFeatureCreateResult,
+  HarnessProjectDetailViewModel,
+  HarnessProjectListItem,
+  HarnessProjectMetadata,
+  HarnessProjectMetadataUpdateInput,
+  HarnessRunDetailViewModel,
+  HarnessRunNode,
+  HarnessFeatureSummary,
+  HarnessSessionBinding,
+  HarnessAdapterRegistryItem,
+  HarnessBoardCompatibility,
+  HarnessStatus,
+  HarnessWatchRefChangedEvent,
+  HarnessWorkflowNextAction,
+  HarnessWorkflow
 }
 
 export type StreamEvent =

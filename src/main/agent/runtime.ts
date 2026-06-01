@@ -453,7 +453,13 @@ function createScopedMcpCapabilityService(
     context: HookContext
   ) => ReturnType<typeof resolveEnabledHooksForRun>,
   onHookResult: HookResultCallback | undefined,
-  baseContext: { workspacePath: string; threadId: string; turnId?: string }
+  baseContext: {
+    workspacePath: string
+    threadId: string
+    turnId?: string
+    pluginOutputDir?: string
+    systemId?: string
+  }
 ): McpCapabilityService {
   const getPluginName = (pluginId: string): string | undefined => {
     try {
@@ -495,6 +501,8 @@ function createScopedMcpCapabilityService(
         workspacePath: baseContext.workspacePath,
         sessionId: baseContext.threadId,
         turnId: baseContext.turnId,
+        pluginOutputDir: baseContext.pluginOutputDir,
+        systemId: baseContext.systemId,
         pluginId,
         pluginName: pluginId ? getPluginName(pluginId) : undefined
       }
@@ -1118,7 +1126,8 @@ function formatLocalISO(date: Date, timeZone: string): string {
 
 function getSystemPrompt(
   workspacePath: string,
-  windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"
+  windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated",
+  workingDirPromptAppendix?: string
 ): string {
   const isWindows = process.platform === "win32"
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
@@ -1204,8 +1213,11 @@ ${shellGuidance}
         : ""
 
   const memorySection = isMemoryEnabled() ? MEMORY_SYSTEM_PROMPT : ""
+  const workingDirAppendix = workingDirPromptAppendix?.trim()
+    ? `${workingDirPromptAppendix.trim()}\n`
+    : ""
   return (
-    workingDirSection + backgroundExecSection + sandboxSection + BASE_SYSTEM_PROMPT + memorySection
+    workingDirSection + workingDirAppendix + backgroundExecSection + sandboxSection + BASE_SYSTEM_PROMPT + memorySection
   )
 }
 
@@ -1534,6 +1546,12 @@ export interface CreateAgentRuntimeOptions {
   workspacePath: string
   /** Extra content appended to the system prompt (e.g. HEARTBEAT.md context) */
   extraSystemPrompt?: string
+  /** Extra content appended immediately after the working directory section. */
+  workingDirPromptAppendix?: string
+  /** Optional plugin output directory exposed to hook commands as PLUGIN_OUTPUT_DIR. */
+  pluginOutputDir?: string
+  /** Optional system identifier exposed to child processes and hooks as SYSTEM_ID. */
+  systemId?: string
   /** Skip the manage_scheduler tool (used by scheduled task / heartbeat execution to prevent recursive scheduling) */
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
@@ -1575,6 +1593,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     workspacePath,
     modelId,
     extraSystemPrompt,
+    workingDirPromptAppendix,
+    pluginOutputDir,
+    systemId,
     retryHooks,
     maxRetryAttempts,
     enableAgentsPrompt = true,
@@ -1689,6 +1710,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     hookScope,
     onHookResult,
     hookTurnId,
+    pluginOutputDir,
+    systemId,
     onFileMutation,
     abortSignal: options.abortSignal,
     runId: threadId,
@@ -1741,7 +1764,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
         workspacePath,
         sessionId: threadId,
-        turnId: hookTurnId
+        turnId: hookTurnId,
+        pluginOutputDir,
+        systemId
       }
       runHooks(
         resolveHooksForContext("Notification", notificationContext),
@@ -1767,7 +1792,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, yoloMode)
   backend.setOrchestrator(orchestrator)
 
-  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox)
+  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, workingDirPromptAppendix)
   let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
     prompt: null,
     projectRoot: workspacePath,
@@ -1882,7 +1907,7 @@ The workspace root is: ${workspacePath}`
     hookScope,
     resolveHooksForContext,
     onHookResult,
-    { workspacePath, threadId, turnId: hookTurnId }
+    { workspacePath, threadId, pluginOutputDir, systemId, turnId: hookTurnId }
   )
   const codeExecEnabled = isCodeExecEnabled()
   const allMcpTools = await capabilityService.listTools()
@@ -2022,6 +2047,7 @@ The workspace root is: ${workspacePath}`
     resolveHooksForContext,
     onHookResult,
     hookTurnId,
+    systemId,
     skipToolNames: toolHookExclusions
   })
 
