@@ -1,7 +1,7 @@
 import { UserInfoConfig } from "../../main/storage"
 
 interface MmjTracker {
-  setConfig?: (config: Record<string, string>) => void
+  setConfig?: (config: Record<string, unknown>) => void
   updateUserInfo?: (config: Record<string, string | null>) => void
   updateMMJDomClick?: (payload: { id: string; text: string }) => void
   sendLogToMMJ?: (text: string) => void
@@ -65,7 +65,10 @@ export function initMMJ(): void {
         userId: ip || "游客",
         positionId: localStorage.getItem("version") || "",
         openWs: "true",
-        errorCode:'MMJ0001'
+        errorCode:'MMJ0001',
+        wsErrorCodeMap: [
+          {url:'', errorCode:'MMJ0001'}
+        ]
       })
 
       updateMMJUserInfo()

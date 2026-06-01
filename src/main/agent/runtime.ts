@@ -21,6 +21,8 @@ import {
   DEFAULT_MAX_TOKENS,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_TEMPERATURE,
+  DEFAULT_TOP_P,
+  DEFAULT_TOP_K,
   getEnabledPluginSkillSourceMetadata,
   getEnabledPluginSkillMiddlewareSources,
   getPlugins,
@@ -76,6 +78,7 @@ import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import { getThread } from "../db/index"
 import { createPlaywrightTool } from "./tools/playwright-tool"
+import { createRequestUserInputTool } from "./tools/user-input-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
 import { createTaskMmdMiddleware } from "./task-mmd/middleware"
@@ -350,7 +353,9 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
   return createMiddleware({
     name: "gradedToolConcurrency",
     wrapToolCall: async (request, handler) => {
-      const toolCall = request.toolCall as { id?: string; name?: string; args?: unknown } | undefined
+      const toolCall = request.toolCall as
+        | { id?: string; name?: string; args?: unknown }
+        | undefined
       const tier = classifyToolConcurrency(toolCall)
       if (tier === "bypass") {
         return handler(request)
@@ -495,12 +500,7 @@ function createScopedMcpCapabilityService(
         pluginName: pluginId ? getPluginName(pluginId) : undefined
       }
       const preHooks = resolveHooksForContext("PreToolUse", hookContext)
-      const preResult = await runHooksEnriched(
-        preHooks,
-        "PreToolUse",
-        hookContext,
-        onHookResult
-      )
+      const preResult = await runHooksEnriched(preHooks, "PreToolUse", hookContext, onHookResult)
       if (preResult) {
         hookScope.activatePersistentHooks(preHooks)
       }
@@ -529,12 +529,7 @@ function createScopedMcpCapabilityService(
         toolResult: result.text
       }
       const postHooks = resolveHooksForContext("PostToolUse", postContext)
-      const postResult = await runHooksEnriched(
-        postHooks,
-        "PostToolUse",
-        postContext,
-        onHookResult
-      )
+      const postResult = await runHooksEnriched(postHooks, "PostToolUse", postContext, onHookResult)
       if (postResult) {
         hookScope.activatePersistentHooks(postHooks)
       }
@@ -798,14 +793,14 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
             ? effectiveArgs.task_id
             : input.task_id
         if (!taskId || typeof taskId !== "string") {
-          return 'Error: Invalid task id.'
+          return "Error: Invalid task id."
         }
         const block =
           typeof effectiveArgs.block === "boolean" ? effectiveArgs.block : input.block !== false
         const timeout =
           typeof effectiveArgs.timeout === "number" && Number.isFinite(effectiveArgs.timeout)
             ? Math.max(0, effectiveArgs.timeout)
-            : input.timeout ?? 30_000
+            : (input.timeout ?? 30_000)
 
         const readTaskOutputText = async (): Promise<string> => {
           // Non-blocking: return immediately
@@ -1000,8 +995,11 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
 
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const gradedToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
-  const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(`${toolConcurrencyQueueId}:subagent`)
+  const gradedToolConcurrencyMiddleware =
+    createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
+  const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(
+    `${toolConcurrencyQueueId}:subagent`
+  )
 
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
@@ -1475,6 +1473,8 @@ function getModelInstance(
     apiKey?: string
     maxOutputTokens?: number
     temperature?: number
+    topP?: number
+    topK?: number
     interleavedThinking?: boolean
   },
   retryHooks?: ModelRetryHooks,
@@ -1492,19 +1492,23 @@ function getModelInstance(
   console.log("[Runtime] Custom model:", resolvedModel, "baseUrl:", customConfig.baseUrl)
   const maxOutputTokens = customConfig.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
   const temperature = customConfig.temperature ?? DEFAULT_TEMPERATURE
+  const topP = customConfig.topP ?? DEFAULT_TOP_P
+  const topK = customConfig.topK ?? DEFAULT_TOP_K
 
   const baseFields = {
     model: resolvedModel,
     apiKey,
     maxTokens: maxOutputTokens,
     temperature,
+    topP,
     // SDK-level retry AND timeout disabled — unified retry + per-attempt
     // timeout live in retryingFetch below. Setting SDK timeout here would
     // create a shared AbortSignal that, once fired, permanently blocks all
     // subsequent retry attempts at the fetch layer.
     maxRetries: 0,
     modelKwargs: {
-      parallel_tool_calls: true
+      parallel_tool_calls: true,
+      ...(topK > 0 ? { top_k: topK } : {})
     },
     configuration: {
       baseURL: customConfig.baseUrl,
@@ -1538,6 +1542,8 @@ export interface CreateAgentRuntimeOptions {
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
   noSkillEvolutionTool?: boolean
+  /** Enable the interactive user-input tool. Only foreground, user-invoked runs should set this. */
+  enableRequestUserInput?: boolean
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
   /** AbortSignal — when signalled, any running child process is killed immediately. */
@@ -1644,10 +1650,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       join(app.getAppPath(), "resources"),
       join(app.getAppPath(), "..", "resources")
     ]
-    const matches = await Promise.all(candidates.map(async (candidate) => (
-      await pathExists(join(candidate, "bin")) ? candidate : null
-    )))
-    resourceBase = matches.find((candidate): candidate is string => Boolean(candidate)) ?? resolve(__dirname, "../../resources")
+    const matches = await Promise.all(
+      candidates.map(async (candidate) =>
+        (await pathExists(join(candidate, "bin"))) ? candidate : null
+      )
+    )
+    resourceBase =
+      matches.find((candidate): candidate is string => Boolean(candidate)) ??
+      resolve(__dirname, "../../resources")
   }
   const rgDir = join(resourceBase, "bin", process.platform)
   const rgBin = join(rgDir, process.platform === "win32" ? "rg.exe" : "rg")
@@ -1663,7 +1673,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // Codex Windows sandbox (unelevated): reuse rgDir which already points to resources/bin/win32
   const codexExePath = join(rgDir, "codex.exe")
   if (process.platform === "win32") await ensureCodexExe(codexExePath)
-  const codexExists = process.platform === "win32" && await pathExists(codexExePath)
+  const codexExists = process.platform === "win32" && (await pathExists(codexExePath))
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
   console.log(
     `[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`
@@ -1751,7 +1761,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
 
   approvalStore = getOrCreateApprovalStore(threadId)
 
-  const rawExecute = (command: string, sandboxMode?: string): Promise<import("deepagents").ExecuteResponse> => {
+  const rawExecute = (
+    command: string,
+    sandboxMode?: string
+  ): Promise<import("deepagents").ExecuteResponse> => {
     return backend.executeRaw(command, sandboxMode)
   }
 
@@ -1823,6 +1836,7 @@ ${subagentShellGuidance}
 - grep: search for literal text within files (NOT regex). Do NOT use "|", ".*" or other regex syntax — call grep once per term instead.
 - Browser strategy: for browser tasks, first follow any matching enabled skill; only if no relevant skill is available, use browser_playwright.
 - browser_playwright: built-in browser automation and page interaction tool powered by project-local Playwright (fallback when no matching browser skill exists).
+- request_user_input: Only use in Plan mode, or when explicitly requested by the user or an active Skill/Plugin. Otherwise do not call this tool.
 The workspace root is: ${workspacePath}`
 
   const skillLifecycleRootSources = await getEnabledSkillsSources()
@@ -1903,6 +1917,14 @@ The workspace root is: ${workspacePath}`
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const extraTools: any[] = []
+  if (options.enableRequestUserInput) {
+    extraTools.push(
+      createRequestUserInputTool({
+        threadId: options.threadId,
+        abortSignal: options.abortSignal
+      })
+    )
+  }
   if (!options.noSchedulerTool) {
     let chatxRobotChatId: string | null = null
     if (options.threadId) {
