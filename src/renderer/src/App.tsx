@@ -29,7 +29,16 @@ import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { useAppStore } from "@/lib/store"
 import { ThreadProvider } from "@/lib/thread-context"
 import { initMMJ } from "../js/mmjUtils"
-import { Toaster } from "sonner"
+import { toast, Toaster } from "sonner"
+import { evolutionApi } from "@/api/evolution"
+import {
+  cloudEvolutionUpdateSignature,
+  getCloudEvolutionPromptSignature,
+  hasUnreadCloudEvolutionUpdates,
+  markCloudEvolutionUpdatesSeen,
+  pendingCloudEvolutionUpdates,
+  setCloudEvolutionPromptSignature
+} from "@/lib/evolution-notices"
 interface UserInfoConfig {
   sapId: '',//8
   ystId: '',//6
@@ -77,7 +86,10 @@ function App(): React.JSX.Element {
     toggleSidebar,
     rightPanelCollapsed,
     toggleRightPanel,
-    setPendingEvolution
+    setPendingEvolution,
+    setShowCustomizeView,
+    setEvolutionTab,
+    setCloudEvolutionUpdates
   } = useAppStore()
   const [isLoading, setIsLoading] = useState(true)
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT)
@@ -336,6 +348,55 @@ function App(): React.JSX.Element {
     }
     init()
   }, [loadThreads, createThread])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const checkOptimizedSkillUpdates = async (): Promise<void> => {
+      try {
+        const installedSkills = await window.api.skills.list()
+        const updates = await evolutionApi.listAvailableUpdates(installedSkills)
+        if (cancelled) return
+
+        setCloudEvolutionUpdates(updates)
+        setPendingEvolution(hasUnreadCloudEvolutionUpdates(updates))
+
+        const pendingUpdates = pendingCloudEvolutionUpdates(updates)
+        if (pendingUpdates.length === 0) return
+
+        const signature = cloudEvolutionUpdateSignature(pendingUpdates)
+        if (!signature || signature === getCloudEvolutionPromptSignature()) return
+        setCloudEvolutionPromptSignature(signature)
+
+        const updateItem = pendingUpdates[0]
+        const message =
+          pendingUpdates.length === 1
+            ? `「${updateItem.skill_name}」有云端自进化版本可用`
+            : `有 ${pendingUpdates.length} 个云端自进化版本可用`
+        toast.info(message, {
+          duration: 8000,
+          action: {
+            label: "查看候选",
+            onClick: () => {
+              markCloudEvolutionUpdatesSeen(pendingUpdates)
+              setPendingEvolution(false)
+              setEvolutionTab("candidates")
+              setShowCustomizeView(true, "evolution")
+            }
+          }
+        })
+      } catch (error) {
+        console.warn("[SkillUpdatePrompt] failed to check optimized skill updates:", error)
+      }
+    }
+
+    void checkOptimizedSkillUpdates()
+    const timer = window.setInterval(() => void checkOptimizedSkillUpdates(), 30 * 60 * 1000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [setCloudEvolutionUpdates, setEvolutionTab, setPendingEvolution, setShowCustomizeView])
 
   // Listen for skill-evolution threshold events — set badge on Evolution tab
   useEffect(() => {

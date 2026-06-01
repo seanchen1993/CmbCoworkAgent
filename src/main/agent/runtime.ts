@@ -21,6 +21,8 @@ import {
   DEFAULT_MAX_TOKENS,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_TEMPERATURE,
+  DEFAULT_TOP_P,
+  DEFAULT_TOP_K,
   getEnabledPluginSkillSourceMetadata,
   getEnabledPluginSkillMiddlewareSources,
   getPlugins,
@@ -76,6 +78,7 @@ import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import { getThread } from "../db/index"
 import { createPlaywrightTool } from "./tools/playwright-tool"
+import { createRequestUserInputTool } from "./tools/user-input-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
 import { createToolHookMiddleware } from "./tool-hooks"
@@ -92,6 +95,12 @@ import type { HookContext } from "../hooks/runner"
 import type { HookEvent, HookResult } from "../hooks/types"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
+import {
+  hasFailureFired,
+  markFailureFired,
+  toolFailureSignalFromThrow,
+  type ToolFailureSignal
+} from "../hooks/tool-failure"
 import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
   createHookScope,
@@ -349,7 +358,9 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
   return createMiddleware({
     name: "gradedToolConcurrency",
     wrapToolCall: async (request, handler) => {
-      const toolCall = request.toolCall as { id?: string; name?: string; args?: unknown } | undefined
+      const toolCall = request.toolCall as
+        | { id?: string; name?: string; args?: unknown }
+        | undefined
       const tier = classifyToolConcurrency(toolCall)
       if (tier === "bypass") {
         return handler(request)
@@ -494,12 +505,7 @@ function createScopedMcpCapabilityService(
         pluginName: pluginId ? getPluginName(pluginId) : undefined
       }
       const preHooks = resolveHooksForContext("PreToolUse", hookContext)
-      const preResult = await runHooksEnriched(
-        preHooks,
-        "PreToolUse",
-        hookContext,
-        onHookResult
-      )
+      const preResult = await runHooksEnriched(preHooks, "PreToolUse", hookContext, onHookResult)
       if (preResult) {
         hookScope.activatePersistentHooks(preHooks)
       }
@@ -528,12 +534,7 @@ function createScopedMcpCapabilityService(
         toolResult: result.text
       }
       const postHooks = resolveHooksForContext("PostToolUse", postContext)
-      const postResult = await runHooksEnriched(
-        postHooks,
-        "PostToolUse",
-        postContext,
-        onHookResult
-      )
+      const postResult = await runHooksEnriched(postHooks, "PostToolUse", postContext, onHookResult)
       if (postResult) {
         hookScope.activatePersistentHooks(postHooks)
       }
@@ -542,6 +543,32 @@ function createScopedMcpCapabilityService(
         postResult,
         `MCP tool ${tool.toolId} was stopped by a PostToolUse hook`
       )
+      // PR-12 follow-up — MCP tools surface failure via `result.isError` rather
+      // than a throw or a `success: false` shape, so `detectToolFailure` (which
+      // looks at common ad-hoc shapes) doesn't see them. Translate isError →
+      // PostToolUseFailure here so OMC-style security/observability hooks see
+      // MCP failures on the same channel as the rest.
+      if (result.isError === true) {
+        const failureContext: HookContext = {
+          ...postContext,
+          toolResult: JSON.stringify({
+            error: result.text || `MCP tool ${tool.toolId} returned isError`,
+            error_type: "unknown",
+            failure_kind: "explicit-error",
+            is_interrupt: false,
+            is_timeout: false
+          })
+        }
+        const failureHooks = resolveHooksForContext("PostToolUseFailure", failureContext)
+        runHooksEnriched(
+          failureHooks,
+          "PostToolUseFailure",
+          failureContext,
+          onHookResult
+        ).catch((e) =>
+          console.warn("[Hooks] PostToolUseFailure(MCP isError) hook error:", e)
+        )
+      }
       const hookFeedback = formatPostHookFeedback(postResult)
       const isError =
         result.isError || postResult?.decision === "block" || postResult?.continue === false
@@ -658,7 +685,21 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     summarizationTruncateArgsSettings,
     subagentExtraSystemPrompt,
     toolConcurrencyQueueId = "default",
-    toolHookMiddleware
+    toolHookMiddleware,
+    // PR-12 — optional callback fired-and-forgotten by toolErrorMiddleware
+    // when a tool throws. Closed-over context (threadId / workspace /
+    // hookScope / onHookResult) lives at the createAgentRuntime layer; this
+    // adapter keeps createDeepAgent oblivious to that wiring.
+    onToolFailureSignal
+  }: {
+    onToolFailureSignal?: (input: {
+      toolName: string | undefined
+      toolCallId: string | undefined
+      toolArgs: unknown
+      signal: ToolFailureSignal
+    }) => void
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    [k: string]: any
   } = params
 
   // --- systemPrompt handling (identical to original) ---
@@ -796,14 +837,14 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
             ? effectiveArgs.task_id
             : input.task_id
         if (!taskId || typeof taskId !== "string") {
-          return 'Error: Invalid task id.'
+          return "Error: Invalid task id."
         }
         const block =
           typeof effectiveArgs.block === "boolean" ? effectiveArgs.block : input.block !== false
         const timeout =
           typeof effectiveArgs.timeout === "number" && Number.isFinite(effectiveArgs.timeout)
             ? Math.max(0, effectiveArgs.timeout)
-            : input.timeout ?? 30_000
+            : (input.timeout ?? 30_000)
 
         const readTaskOutputText = async (): Promise<string> => {
           // Non-blocking: return immediately
@@ -964,7 +1005,26 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         const toolName = request.toolCall?.name
         const toolCallId = request.toolCall?.id
 
-        if ((request.runtime as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
+        const aborted =
+          (request.runtime as { signal?: AbortSignal } | undefined)?.signal?.aborted === true
+
+        // PR-12 — fire PostToolUseFailure fire-and-forget. Even when the abort
+        // path rethrows below, we still want hook scripts to observe the
+        // failure so security/observability hooks fire on the same signal as
+        // CC. Dedupe by tool_call_id so a downstream `detectToolFailure`
+        // check on a recovered ToolMessage doesn't re-fire.
+        if (onToolFailureSignal && toolCallId && !hasFailureFired(toolCallId)) {
+          const signal = toolFailureSignalFromThrow(error, { aborted })
+          markFailureFired(toolCallId)
+          onToolFailureSignal({
+            toolName,
+            toolCallId,
+            toolArgs: request.toolCall?.args,
+            signal
+          })
+        }
+
+        if (aborted) {
           throw error
         }
 
@@ -998,8 +1058,11 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
 
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const gradedToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
-  const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(`${toolConcurrencyQueueId}:subagent`)
+  const gradedToolConcurrencyMiddleware =
+    createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
+  const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(
+    `${toolConcurrencyQueueId}:subagent`
+  )
 
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
@@ -1471,6 +1534,8 @@ function getModelInstance(
     apiKey?: string
     maxOutputTokens?: number
     temperature?: number
+    topP?: number
+    topK?: number
     interleavedThinking?: boolean
   },
   retryHooks?: ModelRetryHooks,
@@ -1488,19 +1553,23 @@ function getModelInstance(
   console.log("[Runtime] Custom model:", resolvedModel, "baseUrl:", customConfig.baseUrl)
   const maxOutputTokens = customConfig.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
   const temperature = customConfig.temperature ?? DEFAULT_TEMPERATURE
+  const topP = customConfig.topP ?? DEFAULT_TOP_P
+  const topK = customConfig.topK ?? DEFAULT_TOP_K
 
   const baseFields = {
     model: resolvedModel,
     apiKey,
     maxTokens: maxOutputTokens,
     temperature,
+    topP,
     // SDK-level retry AND timeout disabled — unified retry + per-attempt
     // timeout live in retryingFetch below. Setting SDK timeout here would
     // create a shared AbortSignal that, once fired, permanently blocks all
     // subsequent retry attempts at the fetch layer.
     maxRetries: 0,
     modelKwargs: {
-      parallel_tool_calls: true
+      parallel_tool_calls: true,
+      ...(topK > 0 ? { top_k: topK } : {})
     },
     configuration: {
       baseURL: customConfig.baseUrl,
@@ -1534,6 +1603,8 @@ export interface CreateAgentRuntimeOptions {
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
   noSkillEvolutionTool?: boolean
+  /** Enable the interactive user-input tool. Only foreground, user-invoked runs should set this. */
+  enableRequestUserInput?: boolean
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
   /** AbortSignal — when signalled, any running child process is killed immediately. */
@@ -1640,10 +1711,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       join(app.getAppPath(), "resources"),
       join(app.getAppPath(), "..", "resources")
     ]
-    const matches = await Promise.all(candidates.map(async (candidate) => (
-      await pathExists(join(candidate, "bin")) ? candidate : null
-    )))
-    resourceBase = matches.find((candidate): candidate is string => Boolean(candidate)) ?? resolve(__dirname, "../../resources")
+    const matches = await Promise.all(
+      candidates.map(async (candidate) =>
+        (await pathExists(join(candidate, "bin"))) ? candidate : null
+      )
+    )
+    resourceBase =
+      matches.find((candidate): candidate is string => Boolean(candidate)) ??
+      resolve(__dirname, "../../resources")
   }
   const rgDir = join(resourceBase, "bin", process.platform)
   const rgBin = join(rgDir, process.platform === "win32" ? "rg.exe" : "rg")
@@ -1659,7 +1734,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // Codex Windows sandbox (unelevated): reuse rgDir which already points to resources/bin/win32
   const codexExePath = join(rgDir, "codex.exe")
   if (process.platform === "win32") await ensureCodexExe(codexExePath)
-  const codexExists = process.platform === "win32" && await pathExists(codexExePath)
+  const codexExists = process.platform === "win32" && (await pathExists(codexExePath))
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
   console.log(
     `[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`
@@ -1731,7 +1806,15 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
         workspacePath,
         sessionId: threadId,
-        turnId: hookTurnId
+        turnId: hookTurnId,
+        // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
+        // Lets a Notification hook know whether the user is in YOLO mode (where
+        // approvals only fire for sandbox-escape) vs the default approve flow.
+        permissionMode: yoloMode ? "yolo" : "approve",
+        // PR-16 follow-up — CC matcher target for Notification is
+        // `notification_type`. The approval queue is the only Notification
+        // fire path today, so the value is always "permission_prompt".
+        notificationType: "permission_prompt"
       }
       runHooks(
         resolveHooksForContext("Notification", notificationContext),
@@ -1747,7 +1830,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
 
   approvalStore = getOrCreateApprovalStore(threadId)
 
-  const rawExecute = (command: string, sandboxMode?: string): Promise<import("deepagents").ExecuteResponse> => {
+  const rawExecute = (
+    command: string,
+    sandboxMode?: string
+  ): Promise<import("deepagents").ExecuteResponse> => {
     return backend.executeRaw(command, sandboxMode)
   }
 
@@ -1819,6 +1905,7 @@ ${subagentShellGuidance}
 - grep: search for literal text within files (NOT regex). Do NOT use "|", ".*" or other regex syntax — call grep once per term instead.
 - Browser strategy: for browser tasks, first follow any matching enabled skill; only if no relevant skill is available, use browser_playwright.
 - browser_playwright: built-in browser automation and page interaction tool powered by project-local Playwright (fallback when no matching browser skill exists).
+- request_user_input: Only use in Plan mode, or when explicitly requested by the user or an active Skill/Plugin. Otherwise do not call this tool.
 The workspace root is: ${workspacePath}`
 
   const skillLifecycleRootSources = await getEnabledSkillsSources()
@@ -1899,6 +1986,14 @@ The workspace root is: ${workspacePath}`
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const extraTools: any[] = []
+  if (options.enableRequestUserInput) {
+    extraTools.push(
+      createRequestUserInputTool({
+        threadId: options.threadId,
+        abortSignal: options.abortSignal
+      })
+    )
+  }
   if (!options.noSchedulerTool) {
     let chatxRobotChatId: string | null = null
     if (options.threadId) {
@@ -2092,7 +2187,41 @@ The workspace root is: ${workspacePath}`
       maxLength: 2000
     },
     toolConcurrencyQueueId: options.threadId ?? workspacePath,
-    toolHookMiddleware
+    toolHookMiddleware,
+    // PR-12 — closure captures threadId / workspacePath / hookScope so
+    // createDeepAgent's middleware can fire-and-forget the PostToolUseFailure
+    // hook chain without knowing per-thread context.
+    onToolFailureSignal: (input: {
+      toolName: string | undefined
+      toolCallId: string | undefined
+      toolArgs: unknown
+      signal: ToolFailureSignal
+    }): void => {
+      const context: HookContext = {
+        workspacePath,
+        sessionId: threadId,
+        turnId: hookTurnId,
+        toolName: input.toolName,
+        toolArgs:
+          input.toolArgs && typeof input.toolArgs === "object" && !Array.isArray(input.toolArgs)
+            ? (input.toolArgs as Record<string, unknown>)
+            : undefined,
+        toolResult: JSON.stringify({
+          error: input.signal.message,
+          error_type: input.signal.errorType,
+          failure_kind: input.signal.kind,
+          is_interrupt: input.signal.isInterrupt,
+          is_timeout: input.signal.isTimeout,
+          tool_use_id: input.toolCallId
+        })
+      }
+      runHooks(
+        resolveHooksForContext("PostToolUseFailure", context),
+        "PostToolUseFailure",
+        context,
+        onHookResult
+      ).catch((e) => console.warn("[Hooks] PostToolUseFailure hook error:", e))
+    }
   })
 
   console.log(

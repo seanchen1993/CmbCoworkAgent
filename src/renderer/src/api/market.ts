@@ -48,6 +48,7 @@ export interface MarketItem {
   description: string
   filename: string
   created_at: string
+  updated_at?: string
   category?: string // Add category field
   tag?: string
   featured?: string // eg:官方推荐；精品；热门；个人；
@@ -62,6 +63,12 @@ export interface MarketItem {
   canDelete?: boolean
   ip?: string
   installed?: boolean // 新增已安装状态字段
+  auto_optimized?: boolean | string
+  evolution_source?: string
+  source_version?: string
+  target_version?: string
+  candidate_id?: string
+  published_at?: string
   installedVersion?: string
   updateAvailable?: boolean
   orgSkillId?: number
@@ -86,6 +93,14 @@ function getMockMarketResponse(type: MarketItemType, error?: unknown): MarketApi
     success: true,
     data: MOCK_MARKET_DATA[type]
   }
+}
+
+export function isAutoOptimizedMarketItem(item: MarketItem): boolean {
+  return (
+    item.auto_optimized === true ||
+    item.auto_optimized === "true" ||
+    item.evolution_source === "trace_evolver"
+  )
 }
 
 // Updated API endpoints to match exact specification
@@ -408,16 +423,21 @@ export const marketApi = {
     }
   },
 
-  async getOrgSkills(pageNum = 1, pageSize = 10): Promise<MarketApiResponse> {
+  async getOrgSkills(
+    pageNum = 1,
+    pageSize = 10,
+    labelIds: string[] = [],
+    keyword = ""
+  ): Promise<MarketApiResponse> {
     console.log("Fetching organization skills from API...")
     try {
-      return await orgSkillMarketApi.getOrgSkills(pageNum, pageSize)
+      return await orgSkillMarketApi.getOrgSkills(pageNum, pageSize, labelIds, keyword)
     } catch (error) {
       console.error("Error fetching organization skills:", error)
       if (USE_MARKET_MOCK_ON_ERROR) {
         const reason = error instanceof Error ? error.message : String(error ?? "unknown error")
         console.warn(`[marketApi] orgSkill request failed, fallback to mock data. reason=${reason}`)
-        return getMockOrgSkillMarketResponse(pageNum, pageSize)
+        return getMockOrgSkillMarketResponse(pageNum, pageSize, labelIds, keyword)
       }
       return {
         success: false,

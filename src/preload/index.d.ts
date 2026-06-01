@@ -25,7 +25,9 @@ import type {
   PluginMetadata,
   PluginManifest,
   SkillHookMetadata,
-  AgentAutoCommitSettings
+  AgentAutoCommitSettings,
+  UserInputRequest,
+  UserInputResponse
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -182,6 +184,9 @@ interface DashboardCodeStats {
 interface DashboardSkillDetail {
   stats: DashboardCodeStats
   traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
 }
 
 interface DashboardUserListItem {
@@ -224,11 +229,15 @@ interface DashboardUserDetail {
   byModel: Array<{ model: string; count: number }>
   byOutcome: Array<{ outcome: string; count: number }>
   traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
 }
 
 interface DashboardUserListOptions {
   pageSize?: number
   afterKey?: Record<string, string | number> | null
+  keyword?: string | null
 }
 
 interface DashboardAllUserItem {
@@ -241,6 +250,8 @@ interface DashboardAllUserItem {
 
 interface DashboardUserDetailOptions {
   traceLimit?: number
+  tracePage?: number
+  tracePageSize?: number
 }
 
 interface CustomAPI {
@@ -294,19 +305,28 @@ interface CustomAPI {
       maxMaxOutputTokens: number
       defaultTemperature: number
       maxTemperature: number
+      defaultTopP: number
+      maxTopP: number
+      defaultTopK: number
+      minTopK: number
+      maxTopK: number
     }>
-    getCustomConfigs: () => Promise<Array<{
-      id: string
-      name: string
-      baseUrl: string
-      model: string
-      hasApiKey: boolean
-      maxTokens: number
-      maxOutputTokens: number
-      temperature: number
-      interleavedThinking?: boolean
-      tier?: "premium" | "economy"
-    }>>
+    getCustomConfigs: () => Promise<
+      Array<{
+        id: string
+        name: string
+        baseUrl: string
+        model: string
+        hasApiKey: boolean
+        maxTokens: number
+        maxOutputTokens: number
+        temperature: number
+        topP: number
+        topK: number
+        interleavedThinking?: boolean
+        tier?: "premium" | "economy"
+      }>
+    >
     getCustomConfig: (id?: string) => Promise<{
       id: string
       name: string
@@ -316,6 +336,8 @@ interface CustomAPI {
       maxTokens: number
       maxOutputTokens: number
       temperature: number
+      topP: number
+      topK: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     } | null>
@@ -328,6 +350,8 @@ interface CustomAPI {
       maxTokens?: number
       maxOutputTokens?: number
       temperature?: number
+      topP?: number
+      topK?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }) => Promise<void>
@@ -341,6 +365,8 @@ interface CustomAPI {
       maxTokens?: number
       maxOutputTokens?: number
       temperature?: number
+      topP?: number
+      topK?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }) => Promise<{ id: string }>
@@ -354,6 +380,8 @@ interface CustomAPI {
       apiKey?: string
       maxOutputTokens?: number
       temperature?: number
+      topP?: number
+      topK?: number
     }) => Promise<{ success: boolean; error?: string; latencyMs?: number }>
   }
   workspace: {
@@ -575,6 +603,7 @@ interface CustomAPI {
     }>
     getFilePath: (file: File) => string
     select: () => Promise<{ canceled: boolean; filePaths: string[] }>
+    selectDirectory: (options?: { title?: string }) => Promise<{ canceled: boolean; filePaths: string[] }>
     supportedExtensions: () => Promise<string[]>
   }
   skills: {
@@ -588,8 +617,30 @@ interface CustomAPI {
     listFiles: (
       skillPath: string
     ) => Promise<{ success: boolean; files?: string[]; error?: string }>
+    readTextBundle: (
+      skillPath: string
+    ) => Promise<{
+      success: boolean
+      files?: Array<{ path: string; content: string }>
+      skipped?: Array<{ path: string; reason: string }>
+      error?: string
+    }>
     getDisabled: () => Promise<string[]>
     setDisabled: (skillNames: string[]) => Promise<void>
+    backupForCloudEvolution: (payload: {
+      skillPath: string
+      candidateId: string
+      skillName: string
+      sourceVersion?: string | null
+      targetVersion?: string | null
+    }) => Promise<{ success: boolean; backupId?: string; backupPath?: string; error?: string }>
+    restoreCloudEvolutionBackup: (
+      backupId: string
+    ) => Promise<{ success: boolean; skillName?: string; error?: string }>
+    exportCloudEvolutionBackup: (
+      backupId: string,
+      targetDir: string
+    ) => Promise<{ success: boolean; exportedPath?: string; error?: string }>
     upload: (
       buffer: ArrayBuffer,
       fileName: string,
@@ -609,6 +660,7 @@ interface CustomAPI {
       options?: { includeNestedSkills?: boolean }
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (skillPath: string) => Promise<{ success: boolean; error?: string }>
+    onChanged: (callback: (payload: { reason?: string }) => void) => () => void
   }
   mcp: {
     list: () => Promise<McpConnectorConfig[]>
@@ -659,9 +711,7 @@ interface CustomAPI {
   }
   autoCommit: {
     getSettings: () => Promise<AgentAutoCommitSettings>
-    saveSettings: (
-      updates: Partial<AgentAutoCommitSettings>
-    ) => Promise<AgentAutoCommitSettings>
+    saveSettings: (updates: Partial<AgentAutoCommitSettings>) => Promise<AgentAutoCommitSettings>
   }
   lsp: {
     getConfig: () => Promise<LspConfig>
@@ -818,6 +868,22 @@ interface CustomAPI {
       hookId: string,
       enabled: boolean
     ) => Promise<{ success: boolean; error?: string }>
+    listFiles: (pluginId: string) => Promise<{
+      success: boolean
+      files?: Array<{ path: string; relativePath: string; editable: boolean }>
+      root?: string
+      pluginEditable?: boolean
+      error?: string
+    }>
+    readFile: (
+      pluginId: string,
+      filePath: string
+    ) => Promise<{ success: boolean; content?: string; editable?: boolean; error?: string }>
+    writeFile: (
+      pluginId: string,
+      filePath: string,
+      content: string
+    ) => Promise<{ success: boolean; error?: string }>
   }
   chatx: {
     getConfig: () => Promise<ChatXConfig>
@@ -849,6 +915,14 @@ interface CustomAPI {
       callback: (data: { requestId: string }) => void
     ) => () => void
     onChanged: (callback: () => void) => () => void
+  }
+  userInput: {
+    sendResponse: (response: UserInputResponse) => void
+    onRequest: (threadId: string, callback: (request: UserInputRequest) => void) => () => void
+    onCancel: (
+      threadId: string,
+      callback: (data: { requestId: string; reason?: string }) => void
+    ) => () => void
   }
   skillEvolution: {
     /** Phase 1 — intent banner: "Want to save this as a skill?" */
@@ -1062,6 +1136,7 @@ interface CustomAPI {
       ) => Promise<{ fileName: string; filePath: string; event: string; command: string }[]>
       trustAll: (workspacePath: string) => Promise<void>
       trustFile: (workspacePath: string, fileName: string, filePath: string) => Promise<void>
+      runSetupMaintenance: (workspacePath: string) => Promise<void>
       onChanged: (
         callback: (data: { threadId: string; workspacePath: string }) => void
       ) => () => void
@@ -1155,16 +1230,30 @@ interface CustomAPI {
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      options?: number | { page?: number; pageSize?: number; limit?: number }
     ) => Promise<{ success: boolean; data?: DashboardSkillDetail; error?: string }>
     commitDetails: (
       range: { from: string; to: string },
       options?: DashboardCommitDetailsOptions
     ) => Promise<{
       success: boolean
-      data?: { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }
+      data?: {
+        total: number
+        page: number
+        pageSize: number
+        pushedOnly: boolean
+        items: DashboardCommitDetail[]
+      }
       error?: string
     }>
+    exportSkillTraces: (payload: {
+      skill: string
+      range: { from: string; to: string }
+      page: number
+      pageSize: number
+      totalTraces: number
+      traces: DashboardTraceDetail[]
+    }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     exportExcel: (
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>

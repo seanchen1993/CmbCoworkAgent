@@ -31,7 +31,8 @@ import {
   getEnabledSkillHooks,
   getEnabledSkillsSources,
   getEnabledPluginSkillSourceMetadata,
-  getDisabledSkillDirs
+  getDisabledSkillDirs,
+  getHookLoggingConfig
 } from "../storage"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
@@ -58,6 +59,7 @@ import {
 import {
   appendSkillProposalWindowTurn,
   buildSkillProposalWindowContext,
+  getRecentSkillUsageNames,
   snapshotSkillProposalWindow,
   isSkillProposalWindowContext,
   type SkillProposalWindowContext
@@ -73,8 +75,13 @@ import {
   type SkillProposal,
   type WorthinessResult
 } from "../agent/skill-evolution/skill-proposal-logic"
-import { isRetryableApiError, buildOrderedChain, type FailoverAttempt } from "../agent/failover"
-import { type HookContext, type HookResultCallback } from "../hooks/runner"
+import {
+  isRetryableApiError,
+  buildOrderedChain,
+  classifyApiError,
+  type FailoverAttempt
+} from "../agent/failover"
+import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
 import {
   createHookScope,
   normalizePathKey,
@@ -102,6 +109,7 @@ import {
   startAgentGitSnapshot,
   type AgentGitSnapshot
 } from "../services/agent-auto-commit"
+import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
 import { makeHookResultCallback, makeHookSkippedCallback } from "../hooks/result-callback"
@@ -303,16 +311,69 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
 }
 
 /**
+ * PR-13 — Fire SubagentStart on each `task` tool_call seen in an AIMessage,
+ * with independent dedupe so streaming + values-snapshot duplicate AIMessages
+ * fire exactly once. Pair with SubagentStop via `tool_call_id`.
+ *
+ * AIMessages are emitted twice in many stream modes (chunk + final values), so
+ * we MUST NOT reuse the metrics-counting `_countedAiMsgIds` set — that one
+ * grows under different invariants and would not match per-tool-call dedupe.
+ */
+function maybeRunSubagentStartHooksFromToolCalls(params: {
+  toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }> | undefined
+  workspacePath?: string
+  threadId: string
+  turnId?: string
+  hookScope: HookScopeController
+  firedStartIds: Set<string>
+  onHookResult?: HookResultCallback
+  onHookSkipped?: ScopeSkipCallback
+}): void {
+  if (!params.toolCalls || params.toolCalls.length === 0) return
+  for (const tc of params.toolCalls) {
+    if (tc?.name !== "task") continue
+    const id = typeof tc.id === "string" ? tc.id : ""
+    if (!id || params.firedStartIds.has(id)) continue
+    params.firedStartIds.add(id)
+    const args = (tc.args ?? {}) as Record<string, unknown>
+    const subagentType = typeof args.subagent_type === "string" ? args.subagent_type : undefined
+    const taskDescription = typeof args.description === "string" ? args.description : undefined
+    const context: HookContext = {
+      workspacePath: params.workspacePath,
+      sessionId: params.threadId,
+      turnId: params.turnId,
+      subagent: { id, name: subagentType, status: "started" },
+      toolName: "task",
+      toolArgs: {
+        agent_id: id,
+        agent_type: subagentType,
+        tool_call_id: id,
+        task_description: taskDescription
+      }
+    }
+    runHooksEnriched(
+      resolveEnabledHooksForRun(
+        params.workspacePath,
+        "SubagentStart",
+        context,
+        params.hookScope,
+        params.onHookSkipped
+      ),
+      "SubagentStart",
+      context,
+      params.onHookResult
+    ).catch((e) => console.warn("[Hooks] SubagentStart hook error:", e))
+  }
+}
+
+/**
  * At a HITL interrupt boundary (resume / interrupt entry), drop activations
  * for skills / plugins that have no `persistAfterInterrupt: true` hook.
  * Anything kept stays scoped for the next stream; anything pruned reverts to
  * pre-interrupt fresh-state behaviour. `stopContextCollector` is intentionally
  * not pruned — it tracks turn-wide history regardless of skill scope.
  */
-function pruneTurnStateAtInterrupt(
-  state: TurnState,
-  allHooks: readonly HookConfig[]
-): void {
+function pruneTurnStateAtInterrupt(state: TurnState, allHooks: readonly HookConfig[]): void {
   const keepPluginIds = new Set<string>()
   const keepSkillPaths = new Set<string>()
   const keepSkillNames = new Set<string>()
@@ -346,7 +407,9 @@ function pruneTurnStateAtInterrupt(
         skillRoot?: string
       }
       const hookPluginId = normalizePluginId(scoped.pluginId)
-      const hookSkillPath = normalizePathKey(scoped.skillPath ?? scoped.skillRoot ?? hook.hookSourceRoot)
+      const hookSkillPath = normalizePathKey(
+        scoped.skillPath ?? scoped.skillRoot ?? hook.hookSourceRoot
+      )
       const hookSkillName = normalizeSkillName(scoped.skillName)
       return (
         (hookPluginId && state.hookScope.activePluginIds.has(hookPluginId)) ||
@@ -549,6 +612,7 @@ function sendActiveHookNotice(
   channel: string,
   workspacePath?: string
 ): void {
+  if (!getHookLoggingConfig().enabled) return
   const message = formatActiveHookNotice(getActiveHookSummary(workspacePath))
   if (!message) return
   sendHookNotice(window, channel, message)
@@ -624,7 +688,10 @@ async function beginAutoCommitTracking(
   return {
     snapshot,
     onFileMutation: workspacePath
-      ? (filePath: string) => recordAgentTouchedFile(threadId, workspacePath, filePath)
+      ? (filePath: string) => {
+          recordAgentTouchedFile(threadId, workspacePath, filePath)
+          scheduleAutoInstallGitHooksForPath(workspacePath, filePath)
+        }
       : undefined
   }
 }
@@ -986,7 +1053,11 @@ async function judgeSkillWorthiness(
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
     maxTokens: config.maxOutputTokens,
-    temperature: config.temperature
+    temperature: config.temperature,
+    topP: config.topP,
+    modelKwargs: {
+      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+    }
   })
 
   const userPrompt = `## Conversation window since last skill-evolution reset (${context.turnCount} turns)
@@ -1076,6 +1147,10 @@ Based on this conversation, generate a reusable skill. Output JSON only.`
       configuration: { baseURL: config.baseUrl },
       maxTokens: config.maxOutputTokens,
       temperature: config.temperature,
+      topP: config.topP,
+      modelKwargs: {
+        ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+      },
       streaming: true
     })
 
@@ -1428,10 +1503,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         currentRunSkills.length > 0 ? recentCompletedTurns.slice(-1) : recentCompletedTurns
 
       return Array.from(
-        new Set([
-          ...currentRunSkills,
-          ...inheritedTurns.flatMap((turn) => turn.usedSkills)
-        ])
+        new Set([...currentRunSkills, ...inheritedTurns.flatMap((turn) => turn.usedSkills)])
       )
     }
 
@@ -1483,6 +1555,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
 
     const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+    let stopHookFired = false
     // Per-event scope-skip factory: diagnostic mode only. The gate lives in
     // `buildHookSkippedRecord`, so constructing this factory is always cheap; the
     // hot path bails out when Hook diagnostic mode is off.
@@ -1587,7 +1660,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
       // thread is deleted (threads:delete) or the app is quitting.
-      fireSessionStartOnce(
+      await fireSessionStartOnce(
         threadId,
         sessionWorkspacePath,
         onHookResult,
@@ -1726,6 +1799,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath,
             modelId: candidateId,
             abortSignal: abortController.signal,
+            enableRequestUserInput: true,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
@@ -1834,6 +1908,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const _countedToolResultMsgIds = new Set<string>()
       // Track which subagent tool-call IDs we've already emitted SubagentStop for (dedupe)
       const _subagentStopFired = new Set<string>()
+      // PR-13 — independent dedupe for SubagentStart so duplicated AIMessage
+      // emissions (chunk + values snapshot) only fire the hook once.
+      const _subagentStartFired = new Set<string>()
       const _llmNodeByMessageId = new Map<string, string>()
       const _toolNodeByRef = new Map<string, string>()
       const MODEL_INPUT_WINDOW = 12
@@ -1979,6 +2056,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             | undefined
           const msgId = (kwargs.id as string) || ""
           if (!toolCalls || toolCalls.length === 0) return
+
+          // PR-13 — SubagentStart fires per `task` tool_call, deduped on
+          // `tc.id` independently of the metrics msg-id dedupe below (we want
+          // start hooks to see every distinct task call even when several
+          // task tool_calls share an AIMessage that previously counted).
+          maybeRunSubagentStartHooksFromToolCalls({
+            toolCalls,
+            workspacePath,
+            threadId,
+            turnId: turnState.turnId,
+            hookScope,
+            firedStartIds: _subagentStartFired,
+            onHookResult,
+            onHookSkipped: onHookSkippedFactory("SubagentStart")
+          })
+
           if (msgId && _countedAiMsgIds.has(msgId)) return
           if (msgId) _countedAiMsgIds.add(msgId)
 
@@ -2067,7 +2160,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!Array.isArray(state.messages)) return
 
+          const currentMessageTexts = new Set(
+            [message, effectiveMessage].map(normalizeMessageText).filter(Boolean)
+          )
           let currentTurnStartIndex = -1
+          let latestUserMessageIndex = -1
           for (let i = state.messages.length - 1; i >= 0; i--) {
             const msg = state.messages[i]
             const kwargs = msg?.kwargs || {}
@@ -2075,15 +2172,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const className = classId[classId.length - 1] || ""
             const role = toRole(className, kwargs)
             if (role !== "user") continue
-            if (
-              normalizeMessageText(extractText(kwargs.content)) === normalizeMessageText(message)
-            ) {
+            if (latestUserMessageIndex < 0) latestUserMessageIndex = i
+            if (currentMessageTexts.has(normalizeMessageText(extractText(kwargs.content)))) {
               currentTurnStartIndex = i
               break
             }
           }
 
-          const valuesStartIndex = currentTurnStartIndex >= 0 ? currentTurnStartIndex + 1 : 0
+          const valuesStartIndex =
+            currentTurnStartIndex >= 0
+              ? currentTurnStartIndex + 1
+              : latestUserMessageIndex >= 0
+                ? latestUserMessageIndex + 1
+                : 0
 
           for (let i = valuesStartIndex; i < state.messages.length; i++) {
             const msg = state.messages[i]
@@ -2345,6 +2446,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath,
             modelId: nextCandidate,
             abortSignal: abortController.signal,
+            enableRequestUserInput: true,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
@@ -2391,7 +2493,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
           revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
           onHookResult,
-          onHookSkippedFactory
+          onHookSkippedFactory,
+          onStopHooksFired: () => {
+            stopHookFired = true
+          }
         })
 
         if (completionOutcome === "failed") {
@@ -2436,6 +2541,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
         if (isOnlineSkillEvolutionEnabled()) {
           const proposalContext = appendTurnToProposalWindow("success")
+          const recentUsedSkills = getRecentSkillUsageNames(threadId)
+          const blockingUsedSkills = Array.from(
+            new Set([...proposalContext.usedSkills, ...recentUsedSkills])
+          )
 
           // Check if this turn crossed the skill-evolution threshold.
           const sessionToolCallCount = proposalContext.toolCallCount
@@ -2449,13 +2558,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 threshold,
                 mode,
                 usedSkills: proposalContext.usedSkills,
+                recentUsedSkills,
                 turnCount: proposalContext.turnCount,
                 errorCount: proposalContext.errorCount,
                 toolCallSummary: proposalContext.toolCallSummary
               })}`
             )
-            if (proposalContext.usedSkills.length > 0) {
-              const names = ` [${proposalContext.usedSkills.join(", ")}]`
+            if (blockingUsedSkills.length > 0) {
+              const names = ` [${blockingUsedSkills.join(", ")}]`
               console.log(
                 `[SkillEvolution][${threadId}] Threshold skip because used skills were detected${names}`
               )
@@ -2505,7 +2615,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               routingMode: getGlobalRoutingMode()
             }).catch(() => null)
             const memModelId = memRoutingResult?.resolvedModelId
-            const memCfgId = memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
+            const memCfgId =
+              memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
             const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
             if (!config?.apiKey) {
               console.warn("[Agent] No model config available — skipping memory tasks")
@@ -2516,7 +2627,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               apiKey: config.apiKey,
               configuration: { baseURL: config.baseUrl },
               maxTokens: config.maxOutputTokens,
-              temperature: config.temperature
+              temperature: config.temperature,
+              topP: config.topP,
+              modelKwargs: {
+                ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+              }
             })
           }
 
@@ -2592,6 +2707,35 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (!isAbortError) {
         const errMsg = error instanceof Error ? error.message : "Unknown error"
         console.error("[Agent] Error:", error)
+        // PR-17 — fire-and-forget StopFailure only when the turn failed before
+        // the normal Stop hook chain began. If Stop already fired and a later
+        // step (revision, auto-commit, persistence, notification) throws, do
+        // not also emit StopFailure for the same turn.
+        if (!stopHookFired) {
+          const stopFailureErrorCode = classifyApiError(error)
+          const stopFailureContext: HookContext = {
+            workspacePath: sessionWorkspacePath,
+            sessionId: threadId,
+            turnId: turnState.turnId,
+            stopFailureError: stopFailureErrorCode,
+            toolResult: JSON.stringify({
+              error: errMsg,
+              error_type: stopFailureErrorCode
+            })
+          }
+          runHooks(
+            resolveEnabledHooksForRun(
+              sessionWorkspacePath,
+              "StopFailure",
+              stopFailureContext,
+              hookScope,
+              onHookSkippedFactory("StopFailure")
+            ),
+            "StopFailure",
+            stopFailureContext,
+            onHookResult
+          ).catch((e: unknown) => console.warn("[Hooks] StopFailure hook error:", e))
+        }
         window.webContents.send(channel, {
           type: "error",
           error: errMsg
@@ -2768,6 +2912,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath,
             modelId: candidateId,
             abortSignal: abortController.signal,
+            enableRequestUserInput: true,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
@@ -2910,6 +3055,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath,
             modelId: nextCandidate,
             abortSignal: abortController.signal,
+            enableRequestUserInput: true,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
@@ -3118,6 +3264,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               workspacePath,
               modelId: candidateId,
               abortSignal: abortController.signal,
+              enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
@@ -3257,6 +3404,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               workspacePath,
               modelId: nextCandidate,
               abortSignal: abortController.signal,
+              enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),

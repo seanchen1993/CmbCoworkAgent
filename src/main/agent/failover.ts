@@ -1,5 +1,66 @@
 import { getCustomModelConfigs } from "../storage"
 
+// ─── PR-12 / PR-17 — minimal API error classifier ────────────────────────────
+// Reuses the status-code + message-pattern primitives already powering
+// isRetryableApiError to emit a small enum that PostToolUseFailure and
+// StopFailure can put in their hook payloads. Project dialect: lacks CC's
+// `billing_error` / `max_output_tokens` (no reliable signal source in this
+// runtime) and adds `network_error` (desktop network failures are common).
+
+export type ApiErrorCode =
+  | "authentication_failed"
+  | "invalid_request"
+  | "rate_limit"
+  | "server_error"
+  | "network_error"
+  | "unknown"
+
+const RATE_LIMIT_MESSAGE_TOKENS = ["rate limit"]
+const SERVER_MESSAGE_TOKENS = [
+  "internal server error",
+  "bad gateway",
+  "service unavailable",
+  "gateway timeout"
+]
+const NETWORK_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "EPIPE",
+  "EAI_AGAIN"
+])
+const NETWORK_MESSAGE_TOKENS = [
+  "fetch failed",
+  "socket hang up",
+  "network error",
+  "timeout"
+]
+
+/**
+ * Map an arbitrary error value to one of six coarse buckets. Order matters:
+ * status code > rate-limit text > server text > network code/text > unknown.
+ */
+export function classifyApiError(error: unknown): ApiErrorCode {
+  if (!error) return "unknown"
+
+  const status = getStatusCode(error)
+  if (status === 401 || status === 403) return "authentication_failed"
+  if (status === 400) return "invalid_request"
+  if (status === 429) return "rate_limit"
+  if (typeof status === "number" && status >= 500 && status < 600) return "server_error"
+
+  const code = (error as { code?: unknown }).code
+  if (typeof code === "string" && NETWORK_CODES.has(code)) return "network_error"
+
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase()
+  if (RATE_LIMIT_MESSAGE_TOKENS.some((t) => msg.includes(t))) return "rate_limit"
+  if (SERVER_MESSAGE_TOKENS.some((t) => msg.includes(t))) return "server_error"
+  if (NETWORK_MESSAGE_TOKENS.some((t) => msg.includes(t))) return "network_error"
+
+  return "unknown"
+}
+
 // ─── Error classification ────────────────────────────────────────────────────
 
 // Status codes that are NOT retryable — switching model won't help
