@@ -5,6 +5,8 @@ import {
 } from "../storage"
 import { hookMatchesRunCriteria, type HookContext } from "./runner"
 import type { HookConfig, HookEvent } from "./types"
+export { normalizePathKey } from "./path-key"
+import { normalizePathKey } from "./path-key"
 
 export interface HookScopeSnapshot {
   activePluginIds: string[]
@@ -56,11 +58,6 @@ export function normalizePluginId(pluginId: string | undefined | null): string {
   return pluginId?.trim().toLowerCase() ?? ""
 }
 
-export function normalizePathKey(path: string | undefined | null): string {
-  const normalized = path?.trim().replace(/\\/g, "/").replace(/\/+$/, "") ?? ""
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized
-}
-
 function addNormalizedPathAlias(target: Set<string>, normalizedPath: string): void {
   if (!normalizedPath) return
   target.add(normalizedPath)
@@ -72,6 +69,17 @@ function addPathAliases(target: Set<string>, path: string | undefined | null): v
   const normalized = normalizePathKey(path)
   if (!normalized) return
   addNormalizedPathAlias(target, normalized)
+}
+
+function addActiveSkillPath(target: Set<string>, normalizedPath: string): void {
+  if (!normalizedPath) return
+  target.add(normalizedPath)
+  // macOS temp paths commonly round-trip through /var/folders/.../T while some
+  // call sites compare pre-normalized lower-case keys. Keep this as an alias
+  // rather than making all POSIX skill paths case-insensitive.
+  if (process.platform === "darwin" && normalizedPath.startsWith("/var/folders/")) {
+    target.add(normalizedPath.toLowerCase())
+  }
 }
 
 function pathSetIntersects(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
@@ -126,7 +134,7 @@ export function createHookScope(): HookScopeController {
       const normalizedPluginId = normalizePluginId(pluginId)
       if (normalizedPluginId) activePluginIds.add(normalizedPluginId)
       const normalizedPath = normalizePathKey(skillPath)
-      if (normalizedPath) activeSkillPaths.add(normalizedPath)
+      addActiveSkillPath(activeSkillPaths, normalizedPath)
     },
     activatePersistentHooks(hooks) {
       for (const hook of hooks) {

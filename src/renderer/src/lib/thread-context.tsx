@@ -12,7 +12,7 @@ import {
 
 /* eslint-disable react-refresh/only-export-components */
 import { useStream } from "@langchain/langgraph-sdk/react"
-import { ElectronIPCTransport } from "./electron-transport"
+import { ElectronIPCTransport, type StreamFallbackIndexBaselines } from "./electron-transport"
 import { isCoordinatorModeMetadata, isExplicitNormalModeMetadata } from "./coordinator-mode-helpers"
 import {
   coordinatorWorkersEqual,
@@ -32,21 +32,122 @@ import type {
   ToolCallState,
   SkillMetadata,
   AgentAutoCommitResult,
-  UserInputRequest
+  UserInputRequest,
+  GoalUiState,
+  GoalEvent
 } from "@/types"
 import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
 import { formatAutoCommitText } from "../../../shared/auto-commit-format"
+import {
+  isInternalGoalPromptMessage,
+  shouldSuppressCheckpointApprovalRestore,
+  type GoalNoticeEvent
+} from "./goal-notice-messages"
+import {
+  buildRestoredCheckpointTranscript,
+  formatGoalEventMessage,
+  goalNoticeEventsToGoalUiEvents,
+  isVisibleCheckpointTranscriptMessage
+} from "./goal-transcript"
+import { mergeGoalUiEvents } from "./goal-ui-events"
+import {
+  restoreRawCheckpointMessageTime,
+  restoreVisibleCheckpointMessageTimes
+} from "./checkpoint-message-times"
+import { mergeLiveStreamMessages, type LiveStreamMessage } from "./live-stream-messages"
+import { buildStableValuesMessageId } from "./stream-message-ids"
+import {
+  liveStreamMessageToStoreMessage,
+  resolveLiveStreamMessageEndAt,
+  shouldSkipLiveStreamAccumulatorMessage
+} from "./live-stream-transcript"
+import { disableChatReportUploadForThread } from "./chat-report-upload-cache"
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
+const INTERNAL_GOAL_MESSAGE_TIMES_THREAD_VALUE_KEY = "internalGoalMessageTimes"
+const INTERNAL_GOAL_MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "internalGoalMessageTimeOrder"
 
 type MessageTimeMap = Record<string, { start_at?: string; end_at?: string }>
 type MessageTimeEntry = MessageTimeMap[string] & { id: string }
+type LiveMessageTimeMap = Record<string, { start_at: Date; end_at?: Date }>
+
+type LiveStreamAccumulator = {
+  active: boolean
+  baselineIds: Set<string>
+  messages: LiveStreamMessage[]
+  messageTimes: LiveMessageTimeMap
+  lastStartedAtMs?: number
+  pendingGoalSubturnMessages: LiveStreamMessage[][]
+}
+
+type StreamUpdateOptions = {
+  ignoreHistoryLoading?: boolean
+  preserveExistingBaseline?: boolean
+  finalizeCachedSnapshot?: boolean
+}
+
+type StableFallbackType = "ai" | "tool" | "system" | "human"
 
 const isMessageTimeMap = (value: unknown): value is MessageTimeMap => {
   return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+function stableFallbackTypeForMessage(message: Message): StableFallbackType {
+  if (message.role === "tool") return "tool"
+  if (message.role === "system") return "system"
+  if (message.role === "user") return "human"
+  return "ai"
+}
+
+function stableClassNameForFallbackType(type: StableFallbackType): string {
+  if (type === "tool") return "ToolMessage"
+  if (type === "system") return "SystemMessage"
+  if (type === "human") return "HumanMessage"
+  return "AIMessage"
+}
+
+function isSyntheticCheckpointMessageId(messageId: string): boolean {
+  return /^msg-\d+$/.test(messageId)
+}
+
+function hasMessageId(message: { id?: string | null }): message is { id: string } {
+  return typeof message.id === "string" && message.id.length > 0
+}
+
+function fallbackIndexBaselinesFromMessages(messages: Message[]): StreamFallbackIndexBaselines {
+  const baselines: StreamFallbackIndexBaselines = { ai: 0, tool: 0, system: 0, human: 0 }
+  for (const message of messages) {
+    if (message.role === "user") {
+      if (isInternalGoalPromptMessage(message)) baselines.human += 1
+      continue
+    }
+    if (message.role === "tool") {
+      baselines.tool += 1
+      continue
+    }
+    if (message.role === "system") {
+      baselines.system += 1
+      continue
+    }
+    baselines.ai += 1
+  }
+  return baselines
+}
+
+function mergeFallbackIndexBaselines(
+  left: StreamFallbackIndexBaselines | undefined,
+  right: StreamFallbackIndexBaselines
+): StreamFallbackIndexBaselines {
+  if (!left) return right
+  return {
+    ai: Math.max(left.ai, right.ai),
+    tool: Math.max(left.tool, right.tool),
+    system: Math.max(left.system, right.system),
+    human: Math.max(left.human, right.human)
+  }
 }
 
 const isMessageTimeEntryArray = (value: unknown): value is MessageTimeEntry[] => {
@@ -64,16 +165,77 @@ const getMessageTimeMap = (threadValues?: Record<string, unknown>): MessageTimeM
   return isMessageTimeMap(value) ? value : {}
 }
 
+const getInternalGoalMessageTimeMap = (threadValues?: Record<string, unknown>): MessageTimeMap => {
+  const value = threadValues?.[INTERNAL_GOAL_MESSAGE_TIMES_THREAD_VALUE_KEY]
+  return isMessageTimeMap(value) ? value : {}
+}
+
+const getInternalGoalMessageTimeOrder = (
+  threadValues?: Record<string, unknown>
+): MessageTimeEntry[] => {
+  const value = threadValues?.[INTERNAL_GOAL_MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]
+  if (isMessageTimeEntryArray(value)) return value
+  return Object.entries(getInternalGoalMessageTimeMap(threadValues)).map(([id, time]) => ({
+    id,
+    ...time
+  }))
+}
+
 const getMessageTimeOrder = (threadValues?: Record<string, unknown>): MessageTimeEntry[] => {
   const value = threadValues?.[MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]
   if (isMessageTimeEntryArray(value)) return value
   return Object.entries(getMessageTimeMap(threadValues)).map(([id, time]) => ({ id, ...time }))
 }
 
+const messageTimeOrderEntries = (updates: MessageTimeMap): MessageTimeEntry[] => {
+  return Object.entries(updates).map(([id, time]) => ({ id, ...time }))
+}
+
 const toDate = (value: string | undefined): Date | undefined => {
   if (!value) return undefined
   const parsed = new Date(value)
   return Number.isFinite(parsed.getTime()) ? parsed : undefined
+}
+
+const latestDate = (dates: Array<Date | undefined>): Date | undefined => {
+  return dates.reduce<Date | undefined>((latest, date) => {
+    if (!date) return latest
+    if (!latest || date > latest) return date
+    return latest
+  }, undefined)
+}
+
+const getLatestTrustedCheckpointMessageAt = (
+  visibleMessages: Message[],
+  persistedMessageTimes: MessageTimeMap,
+  persistedMessageTimeOrder: MessageTimeEntry[],
+  persistedInternalGoalMessageTimes: MessageTimeMap,
+  persistedInternalGoalMessageTimeOrder: MessageTimeEntry[],
+  rawMessages: Message[] = visibleMessages
+): Date | undefined => {
+  const idTimes = rawMessages.flatMap((message) => [
+    toDate(persistedMessageTimes[message.id]?.start_at),
+    toDate(persistedInternalGoalMessageTimes[message.id]?.start_at)
+  ])
+  const rawInternalGoalMessages = rawMessages.filter(isInternalGoalPromptMessage)
+  const latestInternalGoalOrderTime = latestDate(
+    rawInternalGoalMessages.map((_, index) =>
+      toDate(persistedInternalGoalMessageTimeOrder[index]?.start_at)
+    )
+  )
+  const latestExactOrInternalGoalTime = latestDate([
+    latestDate(idTimes),
+    latestInternalGoalOrderTime
+  ])
+  if (latestExactOrInternalGoalTime) return latestExactOrInternalGoalTime
+
+  // Match restoreVisibleCheckpointMessageTimes(): if checkpoint message ids changed across
+  // serialization, use the post-normalization visible-message index as the only
+  // trusted fallback. Never use the synthetic "now" fallback for approval restore
+  // gating, or old checkpoints would look newer than a runtime-restore pause.
+  return latestDate(
+    visibleMessages.map((_, index) => toDate(persistedMessageTimeOrder[index]?.start_at))
+  )
 }
 
 // Open file tab type
@@ -219,6 +381,7 @@ const getTurnTimings = (threadValues?: Record<string, unknown>): TurnTiming[] =>
 export interface ThreadState {
   messages: Message[]
   turnTimings: TurnTiming[]
+  goalUi: GoalUiState
   todos: Todo[]
   workspaceFiles: FileInfo[]
   workspacePath: string | null
@@ -287,6 +450,7 @@ type StreamInstance = ReturnType<typeof useStream<DeepAgent>>
 // Stream data that we want to be reactive
 interface StreamData {
   messages: StreamInstance["messages"]
+  liveMessages: LiveStreamMessage[]
   isLoading: boolean
   stream: StreamInstance | null
 }
@@ -296,6 +460,8 @@ export interface ThreadActions {
   appendMessage: (message: Message) => void
   setMessages: (messages: Message[]) => void
   setTurnTimings: (turnTimings: TurnTiming[], options?: SetTurnTimingsOptions) => void
+  setGoalUi: (goalUi: GoalUiState) => void
+  refreshGoalUi: (options?: { includeEvents?: boolean }) => Promise<void>
   setTodos: (todos: Todo[]) => void
   setWorkspaceFiles: (files: FileInfo[] | ((prev: FileInfo[]) => FileInfo[])) => void
   setWorkspacePath: (path: string | null) => void
@@ -347,6 +513,7 @@ interface ThreadContextValue {
 const createDefaultThreadState = (): ThreadState => ({
   messages: [],
   turnTimings: [],
+  goalUi: { goal: null, events: [], lastUpdated: null },
   todos: [],
   workspaceFiles: [],
   workspacePath: null,
@@ -464,6 +631,7 @@ function getGitContextFromMetadata(metadata: Record<string, unknown>): ThreadGit
 
 const defaultStreamData: StreamData = {
   messages: [],
+  liveMessages: [],
   isLoading: false,
   stream: null
 }
@@ -701,6 +869,10 @@ interface CustomEventData {
   maxRetries?: number
   reason?: string
   message?: string
+  goalId?: string | null
+  activeWindowId?: string | null
+  eventId?: number | null
+  createdAt?: Date | string | number
   delayMs?: number
   // hook_executed fields
   kind?: "executed" | "skipped"
@@ -731,22 +903,29 @@ interface CustomEventData {
   skipReason?: string
   timestamp?: string
   turnId?: string
+  messages?: LiveStreamMessage[]
   result?: AgentAutoCommitResult
 }
 
 // Component that holds a stream and notifies subscribers
 function ThreadStreamHolder({
   threadId,
+  fallbackIndexBaselines,
   onStreamUpdate,
   onCustomEvent,
   onError
 }: {
   threadId: string
+  fallbackIndexBaselines: StreamFallbackIndexBaselines
   onStreamUpdate: (data: StreamData) => void
   onCustomEvent: (data: CustomEventData) => void
   onError: (error: Error) => void
 }): null {
   const transport = useMemo(() => new ElectronIPCTransport(), [])
+
+  useEffect(() => {
+    transport.setFallbackIndexBaselines(fallbackIndexBaselines)
+  }, [fallbackIndexBaselines, transport])
 
   // Use refs to avoid stale closures
   const onCustomEventRef = useRef(onCustomEvent)
@@ -793,6 +972,7 @@ function ThreadStreamHolder({
 
       onStreamUpdateRef.current({
         messages: stream.messages,
+        liveMessages: [],
         isLoading: stream.isLoading,
         stream
       })
@@ -803,6 +983,7 @@ function ThreadStreamHolder({
   useEffect(() => {
     onStreamUpdateRef.current({
       messages: stream.messages,
+      liveMessages: [],
       isLoading: stream.isLoading,
       stream
     })
@@ -819,11 +1000,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const initializedThreadsRef = useRef<Set<string>>(new Set())
   const previousCurrentThreadIdRef = useRef<string | null>(null)
   const actionsCache = useRef<Record<string, ThreadActions>>({})
+  const threadStatesRef = useRef<Record<string, ThreadState>>({})
 
   // Stream data store (not React state - we use subscriptions)
   const streamDataRef = useRef<Record<string, StreamData>>({})
   const streamSubscribersRef = useRef<Record<string, Set<() => void>>>({})
-  const threadStatesRef = useRef<Record<string, ThreadState>>({})
   const previousLoadingStatesRef = useRef<Record<string, boolean>>({})
   const coordinatorNotificationTimersRef = useRef<Record<string, number>>({})
   const coordinatorNotificationAttemptsRef = useRef<Record<string, number>>({})
@@ -832,6 +1013,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const coordinatorNotificationSuppressTimersRef = useRef<Record<string, number>>({})
   const environmentCoordinatorThreadIdsRef = useRef<Set<string>>(new Set())
   const allStreamSubscribersRef = useRef<Set<() => void>>(new Set())
+  const liveStreamAccumulatorsRef = useRef<Record<string, LiveStreamAccumulator>>({})
+  const checkpointFallbackIndexBaselinesRef = useRef<Record<string, StreamFallbackIndexBaselines>>(
+    {}
+  )
 
   // Hook logs store (not React state — avoids re-rendering chat on every hook fire).
   //
@@ -1013,10 +1198,321 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     allStreamSubscribersRef.current.forEach((callback) => callback())
   }, [])
 
+  const getCurrentThreadMessageIds = useCallback((threadId: string): Set<string> => {
+    return new Set((threadStatesRef.current[threadId]?.messages ?? []).map((message) => message.id))
+  }, [])
+
+  const getOrCreateLiveStreamAccumulator = useCallback(
+    (threadId: string): LiveStreamAccumulator => {
+      const existing = liveStreamAccumulatorsRef.current[threadId]
+      if (existing) return existing
+
+      const created: LiveStreamAccumulator = {
+        active: false,
+        baselineIds: getCurrentThreadMessageIds(threadId),
+        messages: [],
+        messageTimes: {},
+        lastStartedAtMs: undefined,
+        pendingGoalSubturnMessages: []
+      }
+      liveStreamAccumulatorsRef.current[threadId] = created
+      return created
+    },
+    [getCurrentThreadMessageIds]
+  )
+
+  const seedLiveStreamBaselineFromMessages = useCallback(
+    (threadId: string, messages: Array<{ id?: string }> | undefined): void => {
+      if (!messages || messages.length === 0) return
+      const accumulator = getOrCreateLiveStreamAccumulator(threadId)
+      for (const message of messages) {
+        if (message.id) accumulator.baselineIds.add(message.id)
+      }
+    },
+    [getOrCreateLiveStreamAccumulator]
+  )
+
+  const seedLiveStreamBaselineFromCheckpoint = useCallback(
+    (threadId: string, rawCheckpointMessages: Message[]): void => {
+      if (rawCheckpointMessages.length === 0) return
+
+      const accumulator = getOrCreateLiveStreamAccumulator(threadId)
+      checkpointFallbackIndexBaselinesRef.current[threadId] = mergeFallbackIndexBaselines(
+        checkpointFallbackIndexBaselinesRef.current[threadId],
+        fallbackIndexBaselinesFromMessages(rawCheckpointMessages)
+      )
+      const fallbackIndexes: Record<StableFallbackType, number> = {
+        ai: 0,
+        tool: 0,
+        system: 0,
+        human: 0
+      }
+
+      for (const checkpointMessage of rawCheckpointMessages) {
+        accumulator.baselineIds.add(checkpointMessage.id)
+
+        // Ordinary user messages are filtered from values snapshots because the
+        // local UI already owns those bubbles. Other checkpoint messages can
+        // reappear in a cached values snapshot with transport fallback ids.
+        if (checkpointMessage.role === "user" && !isInternalGoalPromptMessage(checkpointMessage)) {
+          continue
+        }
+
+        const fallbackType = stableFallbackTypeForMessage(checkpointMessage)
+        const fallbackIndex = fallbackIndexes[fallbackType]++
+        if (!isSyntheticCheckpointMessageId(checkpointMessage.id)) continue
+
+        accumulator.baselineIds.add(
+          buildStableValuesMessageId({
+            index: fallbackIndex,
+            type: fallbackType,
+            className: stableClassNameForFallbackType(fallbackType),
+            content:
+              typeof checkpointMessage.content === "string" ? checkpointMessage.content : undefined,
+            toolCallId: checkpointMessage.tool_call_id,
+            name: checkpointMessage.name,
+            toolCalls: checkpointMessage.tool_calls
+          })
+        )
+      }
+    },
+    [getOrCreateLiveStreamAccumulator]
+  )
+
+  const liveMessagesWithTimes = useCallback(
+    (accumulator: LiveStreamAccumulator): LiveStreamMessage[] =>
+      accumulator.messages.map((message) => ({
+        ...message,
+        ...(message.id && accumulator.messageTimes[message.id]?.start_at
+          ? { start_at: accumulator.messageTimes[message.id].start_at }
+          : {}),
+        ...(message.id && accumulator.messageTimes[message.id]?.end_at
+          ? { end_at: accumulator.messageTimes[message.id].end_at }
+          : {})
+      })),
+    []
+  )
+
+  const accumulateLiveStreamMessages = useCallback(
+    (
+      threadId: string,
+      rawMessages: StreamData["messages"] | LiveStreamMessage[]
+    ): LiveStreamMessage[] => {
+      const accumulator = getOrCreateLiveStreamAccumulator(threadId)
+      const existingMessageIds = getCurrentThreadMessageIds(threadId)
+      const incoming: Array<LiveStreamMessage & { id: string }> = []
+      for (const message of (rawMessages || []) as LiveStreamMessage[]) {
+        const messageId = message.id
+        if (
+          !messageId ||
+          accumulator.baselineIds.has(messageId) ||
+          existingMessageIds.has(messageId)
+        ) {
+          continue
+        }
+
+        const messageWithId = message as LiveStreamMessage & { id: string }
+        if (shouldSkipLiveStreamAccumulatorMessage(messageWithId)) {
+          accumulator.baselineIds.add(messageId)
+          continue
+        }
+
+        incoming.push(messageWithId)
+      }
+
+      if (incoming.length > 0) {
+        const batchStartMs = Math.max(Date.now(), (accumulator.lastStartedAtMs ?? 0) + 1)
+        // Only advance the clock for newly timed messages; repeated snapshots can include
+        // already-timed messages that are still waiting for the next flush.
+        let assignedCount = 0
+        incoming.forEach((message) => {
+          if (!accumulator.messageTimes[message.id]) {
+            const startedAt = new Date(batchStartMs + assignedCount)
+            accumulator.messageTimes[message.id] = { start_at: startedAt, end_at: startedAt }
+            assignedCount += 1
+          }
+        })
+        if (assignedCount > 0) {
+          accumulator.lastStartedAtMs = batchStartMs + assignedCount - 1
+        }
+        accumulator.messages = mergeLiveStreamMessages(accumulator.messages, incoming)
+      }
+
+      return liveMessagesWithTimes(accumulator)
+    },
+    [getCurrentThreadMessageIds, getOrCreateLiveStreamAccumulator, liveMessagesWithTimes]
+  )
+
+  const flushLiveStreamAccumulator = useCallback(
+    (threadId: string, options: { keepActive?: boolean } = {}): LiveStreamMessage[] => {
+      const accumulator = liveStreamAccumulatorsRef.current[threadId]
+      if (!accumulator) return []
+
+      const completedAt = new Date()
+      const existingMessageIds = getCurrentThreadMessageIds(threadId)
+      const currentTurnMessages = accumulator.messages.filter(
+        (message): message is LiveStreamMessage & { id: string } =>
+          !!message.id &&
+          !!accumulator.messageTimes[message.id] &&
+          !existingMessageIds.has(message.id)
+      )
+      const nextMessageTimes: MessageTimeMap = {}
+      const nextInternalGoalMessageTimes: MessageTimeMap = {}
+      const messagesToAppend: Message[] = []
+      const retainedVisibleLiveMessages: LiveStreamMessage[] = []
+
+      currentTurnMessages.forEach((streamMessage, index) => {
+        const trackedTime = accumulator.messageTimes[streamMessage.id]
+        const nextStreamMessage = currentTurnMessages[index + 1]
+        trackedTime.end_at = resolveLiveStreamMessageEndAt(
+          trackedTime.start_at,
+          nextStreamMessage ? accumulator.messageTimes[nextStreamMessage.id]?.start_at : undefined,
+          completedAt
+        )
+
+        const storeMessage = liveStreamMessageToStoreMessage(streamMessage, trackedTime)
+
+        accumulator.baselineIds.add(streamMessage.id)
+
+        if (isInternalGoalPromptMessage(storeMessage)) {
+          nextInternalGoalMessageTimes[streamMessage.id] = {
+            start_at: trackedTime.start_at.toISOString(),
+            end_at: trackedTime.end_at.toISOString()
+          }
+          return
+        }
+        if (!isVisibleCheckpointTranscriptMessage(storeMessage)) return
+
+        nextMessageTimes[streamMessage.id] = {
+          start_at: trackedTime.start_at.toISOString(),
+          end_at: trackedTime.end_at.toISOString()
+        }
+        messagesToAppend.push(storeMessage)
+        retainedVisibleLiveMessages.push({
+          ...streamMessage,
+          start_at: trackedTime.start_at,
+          end_at: trackedTime.end_at
+        })
+      })
+
+      if (messagesToAppend.length > 0) {
+        setThreadStates((prev) => {
+          const currentState = prev[threadId] || createDefaultThreadState()
+          const currentIds = new Set(currentState.messages.map((message) => message.id))
+          const newMessages = messagesToAppend.filter((message) => !currentIds.has(message.id))
+          if (newMessages.length === 0) return prev
+          const next = {
+            ...prev,
+            [threadId]: {
+              ...currentState,
+              messages: [...currentState.messages, ...newMessages]
+            }
+          }
+          threadStatesRef.current = next
+          return next
+        })
+      }
+
+      if (
+        Object.keys(nextMessageTimes).length > 0 ||
+        Object.keys(nextInternalGoalMessageTimes).length > 0
+      ) {
+        window.api.threads
+          .mergeThreadValues(threadId, {
+            [MESSAGE_TIMES_THREAD_VALUE_KEY]: nextMessageTimes,
+            [INTERNAL_GOAL_MESSAGE_TIMES_THREAD_VALUE_KEY]: nextInternalGoalMessageTimes,
+            [INTERNAL_GOAL_MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: messageTimeOrderEntries(
+              nextInternalGoalMessageTimes
+            ),
+            [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: messageTimeOrderEntries(nextMessageTimes)
+          })
+          .catch((error) => console.warn("[ThreadContext] Failed to save message times:", error))
+      }
+
+      if (options.keepActive) {
+        accumulator.active = true
+        accumulator.messages = []
+        accumulator.messageTimes = {}
+      } else {
+        delete liveStreamAccumulatorsRef.current[threadId]
+      }
+
+      const currentStreamData = streamDataRef.current[threadId]
+      if (currentStreamData) {
+        const retainedLiveMessages = mergeLiveStreamMessages(
+          currentStreamData.liveMessages ?? [],
+          retainedVisibleLiveMessages
+        )
+        // Keep just-flushed visible messages in the live layer until React commits
+        // the threadMessages update. ChatContainer filters live messages by id, so
+        // they disappear naturally after the persisted transcript catches up.
+        streamDataRef.current[threadId] = {
+          ...currentStreamData,
+          liveMessages: retainedLiveMessages
+        }
+        notifyStreamSubscribers(threadId)
+      }
+
+      return streamDataRef.current[threadId]?.liveMessages ?? retainedVisibleLiveMessages
+    },
+    [getCurrentThreadMessageIds, notifyStreamSubscribers]
+  )
+
+  const flushGoalSubturnComplete = useCallback(
+    (threadId: string, messages: LiveStreamMessage[]) => {
+      if (messages.length > 0) {
+        accumulateLiveStreamMessages(threadId, messages)
+      }
+      flushLiveStreamAccumulator(threadId, { keepActive: true })
+    },
+    [accumulateLiveStreamMessages, flushLiveStreamAccumulator]
+  )
+
   // Handle stream updates from ThreadStreamHolder
   const handleStreamUpdate = useCallback(
-    (threadId: string, data: StreamData) => {
-      streamDataRef.current[threadId] = data
+    (threadId: string, data: StreamData, options: StreamUpdateOptions = {}) => {
+      const accumulator = getOrCreateLiveStreamAccumulator(threadId)
+      if (!options.ignoreHistoryLoading && threadStatesRef.current[threadId]?.historyLoading) {
+        streamDataRef.current[threadId] = { ...data, liveMessages: [] }
+        notifyStreamSubscribers(threadId)
+        setLoadingStates((prev) => {
+          if (prev[threadId] === data.isLoading) return prev
+          return { ...prev, [threadId]: data.isLoading }
+        })
+        return
+      }
+
+      if (!accumulator.active && (data.isLoading || options.finalizeCachedSnapshot)) {
+        accumulator.active = true
+        if (!options.preserveExistingBaseline) {
+          const nextBaselineIds = getCurrentThreadMessageIds(threadId)
+          for (const baselineId of accumulator.baselineIds) {
+            nextBaselineIds.add(baselineId)
+          }
+          accumulator.baselineIds = nextBaselineIds
+          seedLiveStreamBaselineFromMessages(threadId, streamDataRef.current[threadId]?.messages)
+        }
+        accumulator.messages = []
+        accumulator.messageTimes = {}
+      }
+
+      let liveMessages = accumulator.active
+        ? accumulateLiveStreamMessages(threadId, data.messages)
+        : []
+
+      const currentMessageIds = getCurrentThreadMessageIds(threadId)
+      const retainedLiveMessages = (streamDataRef.current[threadId]?.liveMessages ?? []).filter(
+        (message) => hasMessageId(message) && !currentMessageIds.has(message.id)
+      )
+      if (retainedLiveMessages.length > 0) {
+        liveMessages = mergeLiveStreamMessages(retainedLiveMessages, liveMessages)
+      }
+
+      if (accumulator.active && (!data.isLoading || options.finalizeCachedSnapshot)) {
+        liveMessages = flushLiveStreamAccumulator(threadId)
+      }
+
+      streamDataRef.current[threadId] = { ...data, liveMessages }
       notifyStreamSubscribers(threadId)
       // Update loading states for kanban view
       setLoadingStates((prev) => {
@@ -1031,11 +1527,20 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         setThreadStates((prev) => {
           const cur = prev[threadId]
           if (!cur || !cur.modelRetry) return prev
-          return { ...prev, [threadId]: { ...cur, modelRetry: null } }
+          const next = { ...prev, [threadId]: { ...cur, modelRetry: null } }
+          threadStatesRef.current = next
+          return next
         })
       }
     },
-    [notifyStreamSubscribers]
+    [
+      accumulateLiveStreamMessages,
+      flushLiveStreamAccumulator,
+      getCurrentThreadMessageIds,
+      getOrCreateLiveStreamAccumulator,
+      notifyStreamSubscribers,
+      seedLiveStreamBaselineFromMessages
+    ]
   )
 
   // Subscribe to stream updates for a thread
@@ -1125,10 +1630,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         if (updateKeys.length === 0) return prev
         const hasChanged = updateKeys.some((key) => !Object.is(currentState[key], updates[key]))
         if (!hasChanged) return prev
-        return {
+        const next = {
           ...prev,
           [threadId]: { ...currentState, ...updates }
         }
+        threadStatesRef.current = next
+        return next
       })
     },
     []
@@ -1352,6 +1859,25 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     [updateThreadState]
   )
 
+  const refreshGoalUi = useCallback(
+    async (threadId: string, options: { includeEvents?: boolean } = {}): Promise<void> => {
+      try {
+        const includeEvents = options.includeEvents !== false
+        const goalUi = await window.api.threads.getGoalState(threadId, { includeEvents })
+        updateThreadState(threadId, (state) => ({
+          goalUi: {
+            goal: goalUi.goal,
+            events: includeEvents ? goalUi.events : state.goalUi.events,
+            lastUpdated: new Date()
+          }
+        }))
+      } catch (error) {
+        console.warn("[ThreadContext] Failed to refresh goal UI state:", error)
+      }
+    },
+    [updateThreadState]
+  )
+
   // Parse error messages into user-friendly format
   const parseErrorMessage = useCallback((error: Error | string): string => {
     const raw = typeof error === "string" ? error : error.message
@@ -1435,7 +1961,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             )
             updateThreadState(threadId, (state) => ({
               ...buildPendingApprovalState(
-                enqueuePendingApproval(state.pendingApprovals, data.request!)
+                enqueuePendingApproval(state.pendingApprovals, {
+                  ...data.request!,
+                  allowRuntimeRestoredCheckpointResume:
+                    data.request!.allowRuntimeRestoredCheckpointResume ?? true
+                })
               ),
               toolCallStates: upsertToolCallStateFromRequest(
                 state.toolCallStates,
@@ -1584,9 +2114,62 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         case "model_retry_clear":
           updateThreadState(threadId, () => ({ modelRetry: null }))
           break
+        case "goal_subturn_complete":
+          {
+            const messages = Array.isArray(data.messages) ? data.messages : []
+            if (threadStatesRef.current[threadId]?.historyLoading) {
+              getOrCreateLiveStreamAccumulator(threadId).pendingGoalSubturnMessages.push(messages)
+              break
+            }
+            flushGoalSubturnComplete(threadId, messages)
+          }
+          break
         case "hook_notice":
           if (typeof data.message === "string" && data.message.trim()) {
             toast.info(data.message)
+          }
+          break
+        case "goal_notice":
+          if (typeof data.message === "string" && data.message.trim()) {
+            const message = formatGoalEventMessage(data.message)
+            if (message.startsWith("✓ Goal 已完成") || message.startsWith("Goal 已完成")) {
+              toast.success(message)
+            } else if (
+              message.startsWith("Goal 已暂停") ||
+              message.startsWith("Ⅱ Goal 已暂停") ||
+              message.startsWith("Goal 等待补充信息")
+            ) {
+              toast.warning(message)
+            } else if (message.startsWith("Goal 已清除")) {
+              toast.info(message)
+            }
+            const liveEvent =
+              typeof data.eventId === "number"
+                ? ({
+                    event_id: data.eventId,
+                    thread_id: threadId,
+                    goal_id: typeof data.goalId === "string" ? data.goalId : null,
+                    active_window_id:
+                      typeof data.activeWindowId === "string" ? data.activeWindowId : null,
+                    message: data.message,
+                    created_at:
+                      typeof data.createdAt === "number" ||
+                      typeof data.createdAt === "string" ||
+                      data.createdAt instanceof Date
+                        ? data.createdAt
+                        : new Date()
+                  } satisfies GoalEvent)
+                : null
+            if (liveEvent) {
+              updateThreadState(threadId, (state) => ({
+                goalUi: {
+                  goal: state.goalUi.goal,
+                  events: mergeGoalUiEvents(state.goalUi.events, [liveEvent]),
+                  lastUpdated: new Date()
+                }
+              }))
+            }
+            void refreshGoalUi(threadId, { includeEvents: !liveEvent })
           }
           break
         case "hook_blocked": {
@@ -1763,7 +2346,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           break
       }
     },
-    [notifyHookLogSubscribers, scheduleCoordinatorNotificationTurn, updateThreadState]
+    [
+      flushGoalSubturnComplete,
+      getOrCreateLiveStreamAccumulator,
+      notifyHookLogSubscribers,
+      refreshGoalUi,
+      scheduleCoordinatorNotificationTurn,
+      updateThreadState
+    ]
   )
 
   const getThreadActions = useCallback(
@@ -1864,6 +2454,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               console.warn("[ThreadContext] Failed to persist turn timings:", error)
             })
         },
+        setGoalUi: (goalUi: GoalUiState) => {
+          updateThreadState(threadId, () => ({ goalUi }))
+        },
+        refreshGoalUi: (options = {}) => refreshGoalUi(threadId, options),
         setTodos: (todos: Todo[]) => {
           updateThreadState(threadId, () => ({ todos }))
         },
@@ -1990,14 +2584,21 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       actionsCache.current[threadId] = actions
       return actions
     },
-    [updateThreadState, openHookLogBucket]
+    [notifyHookLogSubscribers, openHookLogBucket, refreshGoalUi, updateThreadState]
   )
 
   const loadThreadHistory = useCallback(
     async (threadId: string) => {
       const actions = getThreadActions(threadId)
       let persistedMessageTimes: MessageTimeMap = {}
+      let persistedInternalGoalMessageTimes: MessageTimeMap = {}
+      let persistedInternalGoalMessageTimeOrder: MessageTimeEntry[] = []
       let persistedMessageTimeOrder: MessageTimeEntry[] = []
+      let rawRestoredMessages: Message[] = []
+      let restoredMessages: Message[] = []
+      let restoredGoalEvents: GoalNoticeEvent[] = []
+      let skipCheckpointPendingApproval = false
+      let latestTrustedCheckpointMessageAt: Date | undefined
       updateThreadState(threadId, () => ({ historyLoading: true }))
 
       // Load workspace path and thread metadata
@@ -2005,6 +2606,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         const thread = await window.api.threads.get(threadId)
         if (thread) {
           persistedMessageTimes = getMessageTimeMap(thread.thread_values)
+          persistedInternalGoalMessageTimes = getInternalGoalMessageTimeMap(thread.thread_values)
+          persistedInternalGoalMessageTimeOrder = getInternalGoalMessageTimeOrder(
+            thread.thread_values
+          )
           persistedMessageTimeOrder = getMessageTimeOrder(thread.thread_values)
           const metadata = thread.metadata || {}
           actions.setTurnTimings(getTurnTimings(thread.thread_values), { persist: false })
@@ -2085,6 +2690,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         console.error("[ThreadContext] Failed to load thread details:", error)
       }
 
+      try {
+        restoredGoalEvents = await window.api.threads.getGoalEvents(threadId, { restore: true })
+      } catch (error) {
+        console.error("[ThreadContext] Failed to load goal events:", error)
+      }
+
       // Load thread history from checkpoints
       try {
         const history = await window.api.threads.getHistory(threadId)
@@ -2093,7 +2704,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             checkpoint?: {
               channel_values?: {
                 messages?: Array<{
-                  id?: string
+                  id?: string | string[]
                   _getType?: () => string
                   type?: string
                   content?: string | unknown[]
@@ -2132,7 +2743,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const channelValues = latestCheckpoint.checkpoint?.channel_values
 
           if (channelValues?.messages && Array.isArray(channelValues.messages)) {
-            const messages: Message[] = channelValues.messages.flatMap((msg, index) => {
+            let internalGoalPromptIndex = 0
+            rawRestoredMessages = channelValues.messages.flatMap((msg, index): Message | [] => {
               const additionalKwargs = msg.additional_kwargs ?? msg.kwargs?.additional_kwargs
               if (additionalKwargs?.cmb_internal_coordinator_notification === true) {
                 return []
@@ -2145,12 +2757,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 else if (type === "ai") role = "assistant"
                 else if (type === "system") role = "system"
                 else if (type === "tool") role = "tool"
-              } else {
-                const type = msg.type ?? msg.kwargs?.type
-                if (type === "human") role = "user"
-                else if (type === "ai") role = "assistant"
-                else if (type === "system") role = "system"
-                else if (type === "tool") role = "tool"
+              } else if (Array.isArray(msg.id)) {
+                const constructorName = msg.id[msg.id.length - 1]
+                if (constructorName === "HumanMessage") role = "user"
+                else if (constructorName === "SystemMessage") role = "system"
+                else if (constructorName === "ToolMessage") role = "tool"
+                else if (constructorName === "AIMessage" || constructorName === "AIMessageChunk")
+                  role = "assistant"
+              } else if (msg.type) {
+                if (msg.type === "human") role = "user"
+                else if (msg.type === "ai") role = "assistant"
+                else if (msg.type === "system") role = "system"
+                else if (msg.type === "tool") role = "tool"
               }
 
               let content: Message["content"] = ""
@@ -2170,15 +2788,28 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               const messageId =
                 msg.kwargs?.id ?? (typeof msg.id === "string" ? msg.id : `msg-${index}`)
               const fallbackTime = new Date()
-              // 优先按 id 恢复；如果重启后 checkpoint 中的 id 变化，则按消息顺序兜底恢复。
-              //
-              // 这里不直接用 created_at 作为历史耗时依据，因为 created_at 的原有逻辑不能改；
-              // checkpoint 重新加载时 created_at 可能是当前时间。start_at/end_at 才是本功能
-              // 专门用于跨重启恢复耗时的时间字段。
-              const persistedTime =
-                persistedMessageTimes[messageId] ?? persistedMessageTimeOrder[index]
-              const startAt = toDate(persistedTime?.start_at) ?? fallbackTime
-              const endAt = toDate(persistedTime?.end_at) ?? startAt
+              // Visible messages only use id-based restore here. Their order fallback
+              // is applied after hidden internal goal prompts are replaced/filtered and
+              // restored /goal user bubbles are inserted, otherwise messageTimeOrder
+              // indexes can shift across the final transcript.
+              // Internal goal prompts have a separate order list because they are hidden
+              // from the checkpoint transcript but still anchor restored /goal user bubbles.
+              const isInternalGoalPrompt =
+                role === "user" &&
+                typeof content === "string" &&
+                isInternalGoalPromptMessage({ role, content })
+              const currentInternalGoalPromptIndex = isInternalGoalPrompt
+                ? internalGoalPromptIndex++
+                : -1
+              const { startAt, endAt } = restoreRawCheckpointMessageTime({
+                messageId,
+                fallbackTime,
+                isInternalGoalPrompt,
+                internalGoalPromptIndex: currentInternalGoalPromptIndex,
+                persistedMessageTimes,
+                persistedInternalGoalMessageTimes,
+                persistedInternalGoalMessageTimeOrder
+              })
 
               return {
                 id: messageId,
@@ -2187,12 +2818,24 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 tool_calls: toolCalls as Message["tool_calls"],
                 ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
                 ...(role === "tool" && toolName && { name: toolName }),
-                created_at: new Date(),
+                created_at: startAt,
                 start_at: startAt,
                 end_at: endAt
               }
             })
-            actions.setMessages(messages)
+
+            const visibleRestoredMessages = rawRestoredMessages.filter(
+              isVisibleCheckpointTranscriptMessage
+            )
+            latestTrustedCheckpointMessageAt = getLatestTrustedCheckpointMessageAt(
+              visibleRestoredMessages,
+              persistedMessageTimes,
+              persistedMessageTimeOrder,
+              persistedInternalGoalMessageTimes,
+              persistedInternalGoalMessageTimeOrder,
+              rawRestoredMessages
+            )
+            restoredMessages = visibleRestoredMessages
           }
 
           if (channelValues?.todos && Array.isArray(channelValues.todos)) {
@@ -2205,8 +2848,17 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
 
           // Restore interrupt state if present
+          skipCheckpointPendingApproval = shouldSuppressCheckpointApprovalRestore(
+            restoredGoalEvents,
+            latestTrustedCheckpointMessageAt
+          )
           const interruptData = channelValues?.__interrupt__
-          if (interruptData && Array.isArray(interruptData) && interruptData.length > 0) {
+          if (
+            !skipCheckpointPendingApproval &&
+            interruptData &&
+            Array.isArray(interruptData) &&
+            interruptData.length > 0
+          ) {
             const interruptValue = interruptData[0]?.value
             const actionRequests = interruptValue?.actionRequests
             const reviewConfigs = interruptValue?.reviewConfigs
@@ -2221,7 +2873,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   name: req.action,
                   args: req.args
                 },
-                allowed_decisions: ["approve", "reject", "edit"]
+                allowed_decisions: ["approve", "reject", "edit"],
+                allowRuntimeRestoredCheckpointResume: false
               }
               actions.setPendingApproval(hitlRequest)
             } else if (reviewConfigs && reviewConfigs.length > 0) {
@@ -2234,7 +2887,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   name: config.toolName,
                   args: config.toolArgs
                 },
-                allowed_decisions: ["approve", "reject", "edit"]
+                allowed_decisions: ["approve", "reject", "edit"],
+                allowRuntimeRestoredCheckpointResume: false
               }
               actions.setPendingApproval(hitlRequest)
             }
@@ -2244,9 +2898,69 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         console.error("[ThreadContext] Failed to load thread history:", error)
       }
 
+      const checkpointTranscript = buildRestoredCheckpointTranscript(
+        rawRestoredMessages,
+        restoredMessages,
+        goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
+      )
+      actions.setMessages(
+        restoreVisibleCheckpointMessageTimes(
+          checkpointTranscript,
+          persistedMessageTimes,
+          persistedMessageTimeOrder
+        )
+      )
+      try {
+        const goalUi = await window.api.threads.getGoalState(threadId, { includeEvents: false })
+        const restoredEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
+        updateThreadState(threadId, (state) => ({
+          goalUi: {
+            goal: goalUi.goal,
+            events: mergeGoalUiEvents(restoredEvents, state.goalUi.events),
+            lastUpdated: new Date()
+          }
+        }))
+      } catch (error) {
+        console.warn("[ThreadContext] Failed to load goal UI state:", error)
+        const restoredEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
+        updateThreadState(threadId, (state) => ({
+          goalUi: {
+            goal: state.goalUi.goal,
+            events: mergeGoalUiEvents(restoredEvents, state.goalUi.events),
+            lastUpdated: new Date()
+          }
+        }))
+      }
+
+      seedLiveStreamBaselineFromCheckpoint(threadId, rawRestoredMessages)
       updateThreadState(threadId, () => ({ historyLoading: false }))
+
+      const pendingGoalSubturnMessages =
+        liveStreamAccumulatorsRef.current[threadId]?.pendingGoalSubturnMessages.splice(0) ?? []
+      for (const pendingMessages of pendingGoalSubturnMessages) {
+        flushGoalSubturnComplete(threadId, pendingMessages)
+      }
+
+      const currentStreamData = streamDataRef.current[threadId]
+      if (
+        currentStreamData &&
+        (currentStreamData.isLoading || currentStreamData.messages.length > 0)
+      ) {
+        handleStreamUpdate(threadId, currentStreamData, {
+          ignoreHistoryLoading: true,
+          preserveExistingBaseline: true,
+          finalizeCachedSnapshot: !currentStreamData.isLoading
+        })
+      }
     },
-    [getThreadActions, loadWorkspaceFilesInBackground, updateThreadState]
+    [
+      flushGoalSubturnComplete,
+      getThreadActions,
+      handleStreamUpdate,
+      loadWorkspaceFilesInBackground,
+      seedLiveStreamBaselineFromCheckpoint,
+      updateThreadState
+    ]
   )
 
   // Track passive scheduler/heartbeat stream listeners per thread
@@ -2477,7 +3191,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       setThreadStates((prev) => {
         if (prev[threadId]) return prev
-        return { ...prev, [threadId]: { ...createDefaultThreadState(), historyLoading: true } }
+        const next = {
+          ...prev,
+          [threadId]: { ...createDefaultThreadState(), historyLoading: true }
+        }
+        threadStatesRef.current = next
+        return next
       })
 
       loadThreadHistory(threadId)
@@ -2692,6 +3411,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     delete streamDataRef.current[threadId]
     delete streamSubscribersRef.current[threadId]
     delete hookLogBucketsRef.current[threadId]
+    delete liveStreamAccumulatorsRef.current[threadId]
+    delete checkpointFallbackIndexBaselinesRef.current[threadId]
+    disableChatReportUploadForThread(threadId)
     delete hookLogsSubscribersRef.current[threadId]
     setActiveThreadIds((prev) => {
       const next = new Set(prev)
@@ -2701,6 +3423,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     setThreadStates((prev) => {
       const { [threadId]: _removed, ...rest } = prev
       void _removed // Explicitly mark as intentionally unused
+      threadStatesRef.current = rest
       return rest
     })
   }, [])
@@ -2743,6 +3466,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         <ThreadStreamHolder
           key={threadId}
           threadId={threadId}
+          fallbackIndexBaselines={mergeFallbackIndexBaselines(
+            checkpointFallbackIndexBaselinesRef.current[threadId],
+            fallbackIndexBaselinesFromMessages(threadStates[threadId]?.messages ?? [])
+          )}
           onStreamUpdate={(data) => handleStreamUpdate(threadId, data)}
           onCustomEvent={(data) => handleCustomEvent(threadId, data)}
           onError={(error) => handleError(threadId, error)}

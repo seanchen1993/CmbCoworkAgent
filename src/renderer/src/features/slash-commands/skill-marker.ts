@@ -104,9 +104,12 @@ export function formatSkillUseBlock(skill: {
  *
  * Tail-anchored on purpose: the block is always at the end of the model-facing
  * payload, and `lastIndexOf` survives even if the user's own prose happens to
- * contain the literal tag (they'd see their own text render, plus a chip for
- * the tail block — cosmetic-only, no execution impact because main-side does
- * nothing special with this string).
+ * contain the literal tag before the real transport block.
+ *
+ * This is protocol data, not just cosmetic UI metadata: main-side code also
+ * reads a valid tail block to activate the explicitly selected skill. User
+ * prose that ends with a complete, valid block is therefore still ambiguous
+ * until the composer sends skills out-of-band instead of as text.
  *
  * Returns null if no matching block exists, or if the block has no valid <name>.
  */

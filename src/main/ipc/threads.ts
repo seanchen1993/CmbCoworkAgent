@@ -6,8 +6,11 @@ import { v4 as uuid } from "uuid"
 import {
   getAllThreads,
   getThread,
+  getThreadGoalEvents,
+  getThreadGoalEventsForRestore,
   createThread as dbCreateThread,
   updateThread as dbUpdateThread,
+  mergeThreadValues as dbMergeThreadValues,
   deleteThread as dbDeleteThread
 } from "../db"
 import {
@@ -26,7 +29,10 @@ import { generateTitle } from "../services/title-generator"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import { disposeAgentThreadState } from "./agent"
-import type { Thread, ThreadUpdateParams } from "../types"
+import type { Thread, ThreadUpdateParams, ThreadValuesMergeParams } from "../types"
+import { SqlGoalStore } from "../agent/goals/goal-store"
+import type { ThreadGoal } from "../agent/goals/types"
+import { GOAL_UI_EVENT_LIMIT } from "../../shared/goal-events"
 
 type ExportMessageRole = "user" | "assistant" | "system" | "tool"
 
@@ -231,7 +237,10 @@ function sanitizeAttachmentContent(content: string): {
 function safeFileName(value: string): string {
   const cleaned = value
     .trim()
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+    .replace(/[<>:"/\\|?*]/g, "-")
+    .split("")
+    .map((char) => (char.charCodeAt(0) < 32 ? "-" : char))
+    .join("")
     .replace(/\s+/g, " ")
     .replace(/-+/g, "-")
     .slice(0, 80)
@@ -407,6 +416,20 @@ function buildExportMessages(messages: CheckpointMessage[] | undefined): ExportM
   })
 }
 
+function serializeGoal(goal: ThreadGoal | null): ThreadGoal | null {
+  return goal
+    ? {
+        ...goal,
+        ledger: {
+          progress: [...goal.ledger.progress],
+          evidence: [...goal.ledger.evidence],
+          blockers: [...goal.ledger.blockers]
+        },
+        context: { ...goal.context }
+      }
+    : null
+}
+
 export function registerThreadHandlers(ipcMain: IpcMain): void {
   // List all threads
   ipcMain.handle("threads:list", async () => {
@@ -417,7 +440,6 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       updated_at: new Date(row.updated_at),
       metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
       status: row.status as Thread["status"],
-      thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
       title: row.title
     }))
   })
@@ -512,6 +534,24 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       title: row.title
     }
   })
+
+  ipcMain.handle(
+    "threads:mergeThreadValues",
+    async (_event, { threadId, patch }: ThreadValuesMergeParams) => {
+      const row = dbMergeThreadValues(threadId, patch)
+      if (!row) throw new Error("Thread not found")
+
+      return {
+        thread_id: row.thread_id,
+        created_at: new Date(row.created_at),
+        updated_at: new Date(row.updated_at),
+        metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+        status: row.status as Thread["status"],
+        thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
+        title: row.title
+      }
+    }
+  )
 
   // Delete a thread
   ipcMain.handle("threads:delete", async (event, threadId: string) => {
@@ -690,6 +730,36 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   })
+
+  ipcMain.handle(
+    "threads:goalEvents",
+    async (_event, threadId: string, options?: { restore?: boolean; limit?: number }) => {
+      const events = options?.restore
+        ? getThreadGoalEventsForRestore(threadId, { recentLimit: GOAL_UI_EVENT_LIMIT })
+        : getThreadGoalEvents(threadId, { limit: options?.limit ?? GOAL_UI_EVENT_LIMIT })
+      return events.map((event) => ({
+        ...event,
+        created_at: new Date(event.created_at)
+      }))
+    }
+  )
+
+  ipcMain.handle(
+    "threads:goalState",
+    async (_event, threadId: string, options?: { includeEvents?: boolean }) => {
+      const goalStore = new SqlGoalStore()
+      const includeEvents = options?.includeEvents !== false
+      return {
+        goal: serializeGoal(goalStore.get(threadId)),
+        events: includeEvents
+          ? getThreadGoalEvents(threadId, { limit: GOAL_UI_EVENT_LIMIT }).map((event) => ({
+              ...event,
+              created_at: new Date(event.created_at)
+            }))
+          : []
+      }
+    }
+  )
 
   // Generate a title from a message
   ipcMain.handle("threads:generateTitle", async (_event, message: string) => {

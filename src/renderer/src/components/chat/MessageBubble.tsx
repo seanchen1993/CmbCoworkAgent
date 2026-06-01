@@ -16,9 +16,14 @@ import {
   ThumbsUp,
   ThumbsDown,
   Smile,
-  Frown
+  Frown,
+  Info,
+  Flag,
+  PlayCircle
 } from "lucide-react"
 import { toast } from "sonner"
+import { cn } from "@/lib/utils"
+import { stripLegacyGoalTransportSummary } from "@/lib/goal-transport-summary"
 import { MessageFeedbackDialog, type DislikeFeedbackPayload } from "./MessageFeedbackDialog"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
@@ -28,6 +33,7 @@ import {
 } from "@/lib/coordinator-worker-tool-args"
 import { getWorkerToolResultKey, getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import { DurationShow } from "./DurationShow"
+import { isGoalClearAlias } from "../../../../shared/goal-slash"
 
 function formatSendTime(sendTime?: number): string | null {
   if (typeof sendTime !== "number" || !Number.isFinite(sendTime)) return null
@@ -48,6 +54,79 @@ function formatSendTime(sendTime?: number): string | null {
 function stripSkillUseBlock(s: string): string {
   const parsed = parseSkillUseBlock(s)
   return parsed ? parsed.rest : s
+}
+
+function parseUserVisibleSkillContent(content: string): {
+  visibleText: string
+  skillName: string | null
+} {
+  const skillParsed = parseSkillUseBlock(content)
+  if (skillParsed) {
+    return { visibleText: skillParsed.rest, skillName: skillParsed.skillName }
+  }
+  const legacy = stripLegacyGoalTransportSummary(content)
+  return { visibleText: legacy.text, skillName: legacy.skillName }
+}
+
+function parseGoalUserSetMessage(text: string): {
+  objective: string
+  attachments: string | null
+  skillName: string | null
+} | null {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  if (lines.length === 0) return null
+
+  const firstLine = lines[0]
+  const match = firstLine.match(/^\/goal\b\s*(.*)$/i)
+  if (!match) return null
+
+  const rest = (match[1] ?? "").trim()
+  if (!rest) return null
+
+  const normalizedRest = rest.toLowerCase()
+  if (
+    ["status", "pause", "resume"].includes(normalizedRest) ||
+    isGoalClearAlias(normalizedRest)
+  )
+    return null
+
+  let attachments: string | null = null
+  let skillName: string | null = null
+  const objectiveLines: string[] = [rest]
+
+  for (const line of lines.slice(1)) {
+    const attachmentMatch = line.match(/^启动附件[：:]\s*(.+)$/)
+    if (attachmentMatch) {
+      attachments = attachmentMatch[1]?.trim() || null
+      continue
+    }
+    const skillMatch = line.match(/^显式技能[：:]\s*(.+)$/)
+    if (skillMatch) {
+      skillName = skillMatch[1]?.trim() || null
+      continue
+    }
+    objectiveLines.push(line)
+  }
+
+  const objective = objectiveLines.join("\n").trim()
+  return objective ? { objective, attachments, skillName } : null
+}
+
+function parseGoalUserControlMessage(text: string): {
+  label: string
+  description: string
+  tone: "resume"
+} | null {
+  const normalized = text.trim().replace(/\s+/g, " ").toLowerCase()
+  if (normalized !== "/goal resume") return null
+  return {
+    label: "继续 Goal",
+    description: "从上次暂停处继续推进目标",
+    tone: "resume"
+  }
 }
 
 function extractMessagePlainText(
@@ -166,6 +245,301 @@ function getToolStatusMeta(status: ToolCallStatus): { label: string; className: 
   }
 }
 
+function getSystemNoticePresentation(text: string): {
+  icon: React.JSX.Element
+  text: string
+  tone: "success" | "warning" | "info"
+} {
+  const cleanText = text.replace(/^●\s*/, "")
+  const isGoalNotice =
+    cleanText.startsWith("Goal ") ||
+    cleanText.startsWith("继续 Goal") ||
+    cleanText.startsWith("当前没有 active goal") ||
+    cleanText.startsWith("没有可继续的 goal") ||
+    cleanText.startsWith("请写明 goal 目标") ||
+    cleanText.startsWith("附件和显式技能不会用于 /goal 控制命令") ||
+    cleanText.startsWith("该 /goal 命令") ||
+    cleanText.startsWith("当前线程正在运行") ||
+    cleanText.startsWith("你发送了新消息，active goal 已暂停")
+
+  if (cleanText.startsWith("✓ Goal 已完成")) {
+    return {
+      icon: <Check className="size-4" />,
+      text: cleanText.replace(/^✓\s*/, ""),
+      tone: "success"
+    }
+  }
+
+  if (
+    cleanText.startsWith("Goal 已暂停") ||
+    cleanText.startsWith("Ⅱ Goal 已暂停") ||
+    cleanText.startsWith("Goal 等待补充信息") ||
+    cleanText.startsWith("你发送了新消息，active goal 已暂停")
+  ) {
+    return {
+      icon: <Flag className="size-4" />,
+      text: cleanText.replace(/^Ⅱ\s*/, ""),
+      tone: "warning"
+    }
+  }
+
+  if (isGoalNotice) {
+    return {
+      icon: <Flag className="size-4" />,
+      text: cleanText.replace(/^Ⅱ\s*/, ""),
+      tone: "info"
+    }
+  }
+
+  return {
+    icon: <Info className="size-4" />,
+    text: cleanText,
+    tone: "info"
+  }
+}
+
+function parseGoalNoticeText(text: string): {
+  title: string
+  meta?: string
+  rows: Array<{ label?: string; text: string }>
+  actions: string[]
+} | null {
+  const cleanText = text.replace(/^●\s*/, "").replace(/^Ⅱ\s*/, "").trim()
+  const lines = cleanText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  if (lines.length === 0) return null
+
+  const first = lines[0]
+  if (
+    !first.startsWith("Goal ") &&
+    !first.startsWith("继续 Goal") &&
+    !first.startsWith("当前没有 active goal") &&
+    !first.startsWith("没有可继续的 goal") &&
+    !first.startsWith("请写明 goal 目标") &&
+    !first.startsWith("附件和显式技能不会用于 /goal 控制命令") &&
+    !first.startsWith("该 /goal 命令") &&
+    !first.startsWith("当前线程正在运行") &&
+    !first.startsWith("你发送了新消息，active goal 已暂停")
+  ) {
+    return null
+  }
+
+  const rows: Array<{ label?: string; text: string }> = []
+  const actions: string[] = []
+
+  const pushActionText = (text: string): void => {
+    const normalized = text.replace(/[。.\s]+$/g, "")
+    for (const part of normalized.split(/[，,、；;·]/)) {
+      const trimmed = part.trim().replace(/^(可用|需要继续时发送|稍后发送|补充信息后请发送|用)\s*/, "")
+      if (trimmed.includes("/goal")) actions.push(trimmed)
+    }
+  }
+
+  const pushCommandSentence = (sentence: string): boolean => {
+    const commandIndex = sentence.indexOf("/goal")
+    if (commandIndex < 0) return false
+    const prefix = sentence
+      .slice(0, commandIndex)
+      .replace(/[，,；;\s]+$/g, "")
+      .trim()
+    const command = sentence.slice(commandIndex).replace(/[。.\s]+$/g, "").trim()
+    if (prefix && !/^(用|可用|需要继续时发送|稍后发送|补充信息后请发送)$/.test(prefix)) {
+      rows.push({ text: prefix })
+    }
+    if (command) actions.push(command)
+    return true
+  }
+
+  const pushActionLine = (line: string): boolean => {
+    if (!line.includes("/goal")) return false
+    pushActionText(line)
+    return true
+  }
+
+  const splitSentences = (body: string): string[] =>
+    body
+      .split(/(?<=[。.!！?？])\s*/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+
+  const pushBodySentences = (body: string): void => {
+    for (const sentence of splitSentences(body)) {
+      if (pushCommandSentence(sentence)) continue
+      rows.push({ text: sentence.replace(/[。.\s]+$/g, "").trim() })
+    }
+  }
+
+  const setMatch = first.match(/^Goal 已设置(?:（([^）]+)）)?[。.]?\s*(.*)$/)
+  if (setMatch) {
+    const body = setMatch[2]?.trim() || ""
+    const actionIndex = body.indexOf("可用")
+    const description =
+      actionIndex >= 0 ? body.slice(0, actionIndex).replace(/[；;，,\s]+$/g, "").trim() : body
+    const actionText = actionIndex >= 0 ? body.slice(actionIndex) : ""
+    if (description) rows.push({ text: description })
+    if (actionText) pushActionText(actionText)
+    return { title: "Goal 已设置", meta: setMatch[1], rows, actions }
+  }
+
+  const noActiveMatch = first.match(/^当前没有 active goal[。.]?\s*(.*)$/)
+  if (noActiveMatch) {
+    const body = noActiveMatch[1]?.trim()
+    if (body) pushBodySentences(body)
+    return { title: "当前没有 active goal", rows, actions }
+  }
+
+  if (first === "没有可继续的 goal。" || first === "没有可继续的 goal") {
+    return { title: "没有可继续的 goal", rows, actions }
+  }
+
+  const invalidGoalMatch = first.match(/^(请写明 goal 目标\/完成条件)[，,。.]?\s*(.*)$/)
+  if (invalidGoalMatch) {
+    const body = invalidGoalMatch[2]?.trim()
+    if (body) pushBodySentences(body)
+    return { title: "请写明 Goal 目标", rows, actions }
+  }
+
+  const transportControlMatch = first.match(
+    /^(附件和显式技能不会用于 \/goal 控制命令)[，,。.]?\s*(.*)$/
+  )
+  if (transportControlMatch) {
+    const body = transportControlMatch[2]?.trim()
+    if (body) pushBodySentences(body)
+    return { title: "Goal 控制命令未发送上下文", rows, actions }
+  }
+
+  const unavailableGoalMatch = first.match(/^该 \/goal 命令需要在当前运行结束后发送[。.]?$/)
+  if (unavailableGoalMatch) {
+    rows.push({ text: "当前运行结束后再发送该命令" })
+    return { title: "Goal 命令暂不可用", rows, actions }
+  }
+
+  const preemptedGoalMatch = first.match(/^你发送了新消息，active goal 已暂停[。.]?\s*(.*)$/)
+  if (preemptedGoalMatch) {
+    const body = preemptedGoalMatch[1]?.trim()
+    if (body) pushBodySentences(body)
+    return { title: "active goal 已暂停", rows, actions }
+  }
+
+  const goalBusyMatch = first.match(/^(Goal 正在进行中)[，,]\s*(.*)$/)
+  if (goalBusyMatch) {
+    const body = goalBusyMatch[2]?.trim()
+    if (body) rows.push({ text: body.replace(/[。.\s]+$/g, "") })
+    return { title: goalBusyMatch[1], rows, actions }
+  }
+
+  const completeMatch = first.match(/^✓?\s*(Goal 已完成)(?:\s*\(([^)]+)\))?[：:]\s*(.*)$/)
+  if (completeMatch) {
+    const reason = completeMatch[3]?.trim()
+    if (reason) rows.push({ text: reason })
+    return { title: completeMatch[1], meta: completeMatch[2], rows, actions }
+  }
+
+  const goalAlreadyMatch = first.match(/^(Goal (?:已完成|已经暂停))(?:[，,。.]?\s*)(.*)$/)
+  if (goalAlreadyMatch && !goalAlreadyMatch[2]?.startsWith("：")) {
+    const body = goalAlreadyMatch[2]?.trim()
+    if (body) pushBodySentences(body)
+    return { title: goalAlreadyMatch[1], rows, actions }
+  }
+
+  const threadBusyMatch = first.match(/^当前线程正在运行[，,]\s*(.*)$/)
+  if (threadBusyMatch) {
+    const body = threadBusyMatch[1]?.trim()
+    if (body) pushBodySentences(body)
+    return { title: "当前线程正在运行", rows, actions }
+  }
+
+  const singleLineMatch = first.match(/^(Goal (?:等待补充信息|已暂停|已继续|当前状态|已清除))[：:]\s*(.*)$/)
+  if (singleLineMatch) {
+    const title = singleLineMatch[1]
+    let body = singleLineMatch[2]?.trim() || ""
+    const waitSplit = body.split("。补充信息后")
+    if (waitSplit.length > 1) {
+      body = waitSplit[0].trim()
+      actions.push("/goal resume", "/goal clear")
+    }
+    if (body) rows.push({ text: body })
+    return { title, rows, actions }
+  }
+
+  if (first.startsWith("Goal 已清除")) {
+    const body = first.replace(/^Goal 已清除[。:：，,\s]*/, "").trim()
+    if (body) rows.push({ text: body })
+    return { title: "Goal 已清除", rows, actions }
+  }
+
+  const continueMatch = first.match(/^(继续 Goal)(?:\s*\(([^)]+)\))?[：:]\s*(.*)$/)
+  if (continueMatch) {
+    const body = continueMatch[3]?.trim()
+    if (body) rows.push({ text: body })
+    return { title: continueMatch[1], meta: continueMatch[2], rows, actions }
+  }
+
+  const title = first
+  let meta: string | undefined
+  for (const line of lines.slice(1)) {
+    if (!meta && /^\d+s\s*·/.test(line)) {
+      meta = line
+      continue
+    }
+    if (pushActionLine(line)) continue
+    const labeled = line.match(/^(目标|完成条件|最近评估|暂停原因)[：:]\s*(.*)$/)
+    if (labeled) {
+      rows.push({ label: labeled[1], text: labeled[2].trim() })
+    } else {
+      rows.push({ text: line })
+    }
+  }
+  return { title, meta, rows, actions }
+}
+
+function GoalNoticeBody({ text }: { text: string }): React.JSX.Element {
+  const parsed = parseGoalNoticeText(text)
+  if (!parsed) {
+    return <StreamingMarkdown isStreaming={false}>{text}</StreamingMarkdown>
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <div className="text-[15px] font-semibold leading-6 text-foreground">{parsed.title}</div>
+        {parsed.meta && (
+          <div className="rounded-full bg-foreground/5 px-2 py-0.5 text-xs leading-5 text-muted-foreground">
+            {parsed.meta}
+          </div>
+        )}
+      </div>
+      {parsed.rows.length > 0 && (
+        <div className="space-y-2">
+          {parsed.rows.map((row, index) => (
+            <div key={index} className="grid gap-1 text-[14px] leading-6 sm:grid-cols-[4.5rem_minmax(0,1fr)]">
+              {row.label ? (
+                <>
+                  <span className="text-muted-foreground">{row.label}</span>
+                  <span className="min-w-0 text-foreground/90">{row.text}</span>
+                </>
+              ) : (
+                <span className="min-w-0 text-foreground/90 sm:col-span-2">{row.text}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {parsed.actions.length > 0 && (
+        <div className="flex flex-wrap gap-2 pt-1">
+          {parsed.actions.map((action) => (
+            <span
+              key={action}
+              className="rounded-md border border-border/70 bg-background/60 px-2 py-1 font-mono text-xs leading-4 text-muted-foreground"
+            >
+              {action}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 interface ToolResultInfo {
   content: string | unknown
   is_error?: boolean
@@ -183,6 +557,7 @@ interface MessageBubbleProps {
     decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
   ) => void
   onEditUserMessage?: (message: Message) => void
+  onSetGoalFromMessage?: (text: string) => void
   threadId: string
   isLoading: boolean
   assistantDurationMs?: number
@@ -199,6 +574,7 @@ export function MessageBubble({
   pendingApproval,
   onApprovalDecision,
   onEditUserMessage,
+  onSetGoalFromMessage,
   threadId,
   isLoading,
   durationMap
@@ -212,6 +588,7 @@ export function MessageBubble({
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
   const isUser = message.role === "user"
   const isTool = message.role === "tool"
+  const isSystem = message.role === "system"
 
   useEffect(() => {
     if (
@@ -224,7 +601,10 @@ export function MessageBubble({
   }, [message])
 
   // 判断是否显示 MessageHead：如果当前不是用户消息，且是第一条非用户消息
-  const shouldShowMessageHead = !isUser && (!previousMessage || previousMessage.role === "user")
+  const shouldShowMessageHead =
+    !isUser &&
+    !isSystem &&
+    (!previousMessage || previousMessage.role === "user" || previousMessage.role === "system")
 
   const duration = useMemo(() => {
     if (shouldShowMessageHead && durationMap?.length && previousMessage?.id) {
@@ -274,7 +654,82 @@ export function MessageBubble({
     return null
   }
 
+  if (isSystem) {
+    const text = extractMessagePlainText(message.content).trim()
+    if (!text) return null
+    const notice = getSystemNoticePresentation(text)
+    return (
+      <div className="my-3 flex justify-center">
+        <div className={`liquid-glass-notice liquid-glass-notice--${notice.tone}`}>
+          <div className="relative z-[1] flex items-start gap-3">
+            <span className="liquid-glass-notice__icon" aria-hidden="true">
+              {notice.icon}
+            </span>
+            <div className="liquid-glass-notice__body min-w-0 text-[15px] leading-7 [&_p]:my-0 [&_strong]:font-semibold">
+              <GoalNoticeBody text={notice.text} />
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Only strip the skill-use tail from OUR user messages; assistant text that
+  // happens to quote the tag (e.g. while discussing the protocol) copies verbatim.
+  const plainTextForCopy = extractMessagePlainText(message.content, { stripSkillUse: isUser })
+  const goalUserSetMessage = isUser ? parseGoalUserSetMessage(plainTextForCopy) : null
+  const goalUserControlMessage = isUser ? parseGoalUserControlMessage(plainTextForCopy) : null
+
+  const renderGoalUserSetContent = (goalMessage: NonNullable<typeof goalUserSetMessage>): React.ReactNode => (
+    <div className="space-y-2 text-left">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-[#5f6b66]">
+        <span className="flex size-6 items-center justify-center rounded-full bg-white shadow-sm ring-1 ring-black/[0.05]">
+          <Flag className="size-3.5 text-sky-600" />
+        </span>
+        <span>设为 Goal</span>
+      </div>
+      <div className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95 break-all">
+        {goalMessage.objective}
+      </div>
+      {(goalMessage.attachments || goalMessage.skillName) && (
+        <div className="flex flex-wrap gap-1.5 pt-0.5">
+          {goalMessage.attachments && (
+            <span className="rounded-full border border-black/[0.05] bg-[#f7f7f5]/85 px-2 py-0.5 text-[11px] text-muted-foreground">
+              附件：{goalMessage.attachments}
+            </span>
+          )}
+          {goalMessage.skillName && (
+            <span className="rounded-full border border-black/[0.05] bg-[#f7f7f5]/85 px-2 py-0.5 text-[11px] text-muted-foreground">
+              技能：{goalMessage.skillName}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  )
+
+  const renderGoalUserControlContent = (
+    goalMessage: NonNullable<typeof goalUserControlMessage>
+  ): React.ReactNode => (
+    <div className="flex items-center gap-2 text-left">
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-white text-sky-700 shadow-[0_6px_18px_rgba(24,24,27,0.10)] ring-1 ring-black/[0.05]">
+        <PlayCircle className="size-4" />
+      </span>
+      <span className="min-w-0">
+        <span className="block text-sm font-semibold text-[#35433f]">{goalMessage.label}</span>
+        <span className="block text-xs text-muted-foreground">{goalMessage.description}</span>
+      </span>
+    </div>
+  )
+
   const renderContent = (): React.ReactNode => {
+    if (goalUserSetMessage) {
+      return renderGoalUserSetContent(goalUserSetMessage)
+    }
+    if (goalUserControlMessage) {
+      return renderGoalUserControlContent(goalUserControlMessage)
+    }
+
     if (typeof message.content === "string") {
       // Empty content (after potentially stripping the trailing skill-use block below)
       if (!message.content.trim()) {
@@ -286,11 +741,10 @@ export function MessageBubble({
         // Parse the trailing `<CMBDEVCLAW-SKILL-USE-V1>` block: chip at the top,
         // rest of the message as plain text. Handles skill-only sends (no text)
         // by still rendering the chip with an empty tail.
-        const skillParsed = parseSkillUseBlock(message.content)
-        const visibleText = skillParsed ? skillParsed.rest : message.content
+        const { visibleText, skillName } = parseUserVisibleSkillContent(message.content)
         return (
           <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]">
-            {skillParsed && <SkillChip label={skillParsed.skillName} compact className="mr-2" />}
+            {skillName && <SkillChip label={skillName} compact className="mr-2" />}
             {visibleText}
           </div>
         )
@@ -304,16 +758,13 @@ export function MessageBubble({
         if (block.type === "text" && block.text) {
           // Use streaming markdown for assistant text blocks
           if (isUser) {
-            const skillParsed = parseSkillUseBlock(block.text)
-            const visibleText = skillParsed ? skillParsed.rest : block.text
+            const { visibleText, skillName } = parseUserVisibleSkillContent(block.text)
             return (
               <div
                 key={index}
                 className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]"
               >
-                {skillParsed && (
-                  <SkillChip label={skillParsed.skillName} compact className="mr-2" />
-                )}
+                {skillName && <SkillChip label={skillName} compact className="mr-2" />}
                 {visibleText}
               </div>
             )
@@ -334,9 +785,8 @@ export function MessageBubble({
   const content = renderContent()
   const displayToolCalls = message.tool_calls?.map(normalizeToolCallForDisplay)
   const hasToolCalls = displayToolCalls && displayToolCalls.length > 0
-  // Only strip the skill-use tail from OUR user messages; assistant text that
-  // happens to quote the tag (e.g. while discussing the protocol) copies verbatim.
-  const plainTextForCopy = extractMessagePlainText(message.content, { stripSkillUse: isUser })
+  const canSetGoalFromMessage =
+    isUser && Boolean(onSetGoalFromMessage) && !plainTextForCopy.trim().startsWith("/goal")
 
   const handleCopyMessage = async (): Promise<void> => {
     if (!plainTextForCopy.trim()) {
@@ -418,7 +868,14 @@ export function MessageBubble({
     return (
       <div className="group flex justify-end overflow-hidden py-4">
         <div className="flex min-w-0 max-w-[80%] flex-col items-end gap-1">
-          <div className="min-w-0 max-w-full overflow-hidden rounded-lg bg-primary/10 p-3">
+          <div
+            className={cn(
+              "min-w-0 max-w-full overflow-hidden rounded-lg p-3",
+              goalUserSetMessage || goalUserControlMessage
+                ? "border border-black/[0.07] bg-white/86 shadow-[0_14px_42px_rgba(24,24,27,0.10),0_1px_0_rgba(255,255,255,0.88)_inset]"
+                : "bg-primary/10"
+            )}
+          >
             {content}
           </div>
           <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
@@ -447,6 +904,18 @@ export function MessageBubble({
             >
               <PencilLine className="size-3" />
             </button>
+            {canSetGoalFromMessage && (
+              <button
+                type="button"
+                onClick={() => onSetGoalFromMessage?.(plainTextForCopy)}
+                className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                title="设为 Goal"
+                aria-label="设为 Goal"
+              >
+                <Flag className="size-3" />
+                <span className="text-[11px]">设为目标</span>
+              </button>
+            )}
           </div>
         </div>
       </div>

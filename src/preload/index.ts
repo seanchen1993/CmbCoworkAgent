@@ -238,6 +238,32 @@ const api = {
         ipcRenderer.removeListener(channel, handler)
       }
     },
+    goalControl: (
+      threadId: string,
+      message: string
+    ): Promise<{
+      handled: boolean
+      terminatedCurrentRun: boolean
+      notice?: {
+        message: string
+        goalId: string | null
+        activeWindowId: string | null
+        eventId: number | null
+        createdAt: number
+      }
+    }> => {
+      return ipcRenderer.invoke("agent:goal-control", { threadId, message }) as Promise<{
+        handled: boolean
+        terminatedCurrentRun: boolean
+        notice?: {
+          message: string
+          goalId: string | null
+          activeWindowId: string | null
+          eventId: number | null
+          createdAt: number
+        }
+      }>
+    },
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }): Promise<void> => {
       return ipcRenderer.invoke("agent:cancel", { threadId, ...options })
     },
@@ -316,6 +342,9 @@ const api = {
     update: (threadId: string, updates: Partial<Thread>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:update", { threadId, updates })
     },
+    mergeThreadValues: (threadId: string, patch: Record<string, unknown>): Promise<Thread> => {
+      return ipcRenderer.invoke("threads:mergeThreadValues", { threadId, patch })
+    },
     delete: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("threads:delete", threadId)
     },
@@ -329,6 +358,104 @@ const api = {
     },
     getLatestCheckpoint: (threadId: string): Promise<unknown | null> => {
       return ipcRenderer.invoke("threads:latest-checkpoint", threadId)
+    },
+    getGoalEvents: (
+      threadId: string,
+      options?: { restore?: boolean; limit?: number }
+    ): Promise<
+      Array<{
+        event_id: number
+        thread_id: string
+        goal_id: string | null
+        active_window_id: string | null
+        message: string
+        created_at: Date | string | number
+      }>
+    > => {
+      return ipcRenderer.invoke("threads:goalEvents", threadId, options) as Promise<
+        Array<{
+          event_id: number
+          thread_id: string
+          goal_id: string | null
+          active_window_id: string | null
+          message: string
+          created_at: Date | string | number
+        }>
+      >
+    },
+    getGoalState: (
+      threadId: string,
+      options?: { includeEvents?: boolean }
+    ): Promise<{
+      goal: {
+        threadId: string
+        goalId: string
+        activeWindowId: string
+        objective: string
+        completionCondition: string
+        context: {
+          explicitSkill?: { name: string; path: string }
+          transportSummary?: string
+        }
+        status: "active" | "paused" | "complete"
+        turnsUsed: number
+        maxTurns: number
+        lastVerdict: string | null
+        lastReason: string | null
+        pausedReason: string | null
+        consecutiveParseFailures: number
+        ledger: {
+          progress: string[]
+          evidence: string[]
+          blockers: string[]
+        }
+        createdAt: number
+        updatedAt: number
+      } | null
+      events: Array<{
+        event_id: number
+        thread_id: string
+        goal_id: string | null
+        active_window_id: string | null
+        message: string
+        created_at: Date | string | number
+      }>
+    }> => {
+      return ipcRenderer.invoke("threads:goalState", threadId, options) as Promise<{
+        goal: {
+          threadId: string
+          goalId: string
+          activeWindowId: string
+          objective: string
+          completionCondition: string
+          context: {
+            explicitSkill?: { name: string; path: string }
+            transportSummary?: string
+          }
+          status: "active" | "paused" | "complete"
+          turnsUsed: number
+          maxTurns: number
+          lastVerdict: string | null
+          lastReason: string | null
+          pausedReason: string | null
+          consecutiveParseFailures: number
+          ledger: {
+            progress: string[]
+            evidence: string[]
+            blockers: string[]
+          }
+          createdAt: number
+          updatedAt: number
+        } | null
+        events: Array<{
+          event_id: number
+          thread_id: string
+          goal_id: string | null
+          active_window_id: string | null
+          message: string
+          created_at: Date | string | number
+        }>
+      }>
     },
     generateTitle: (message: string): Promise<string> => {
       return ipcRenderer.invoke("threads:generateTitle", message)
@@ -355,6 +482,12 @@ const api = {
     },
     setDefault: (modelId: string): Promise<void> => {
       return ipcRenderer.invoke("models:setDefault", modelId)
+    },
+    getGoalSettings: (): Promise<{ evaluatorModelId?: string }> => {
+      return ipcRenderer.invoke("models:getGoalSettings") as Promise<{ evaluatorModelId?: string }>
+    },
+    setGoalSettings: (settings: { evaluatorModelId?: string }): Promise<void> => {
+      return ipcRenderer.invoke("models:setGoalSettings", settings) as Promise<void>
     },
     getTokenLimits: (): Promise<{
       defaultMaxTokens: number

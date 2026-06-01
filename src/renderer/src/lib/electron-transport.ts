@@ -8,6 +8,15 @@ import {
   isCoordinatorWorkerToolName,
   normalizeCoordinatorWorkerToolArgsForDisplay
 } from "./coordinator-worker-tool-args"
+import { buildStableValuesMessageId } from "./stream-message-ids"
+import { isInternalGoalPromptMessage } from "./goal-notice-messages"
+
+export type StreamFallbackIndexBaselines = {
+  ai: number
+  tool: number
+  system: number
+  human: number
+}
 
 /**
  * Usage metadata from LangChain model responses.
@@ -62,7 +71,7 @@ function createTokenUsageEvent(usageMetadata: UsageMetadata): StreamEvent | null
  * LangChain uses a special serialization format:
  * { lc: 1, type: "constructor", id: ["langchain_core", "messages", "AIMessageChunk"], kwargs: { ... } }
  */
-interface SerializedMessageChunk {
+export interface SerializedMessageChunk {
   /** LangChain serialization marker */
   lc?: number
   type?: string
@@ -92,6 +101,15 @@ interface SerializedMessageChunk {
   }
 }
 
+export type TransformedValuesMessage = {
+  id: string
+  type: "ai" | "tool" | "system" | "human"
+  content: string
+  tool_calls?: ToolCall[]
+  tool_call_id?: string
+  name?: string
+}
+
 /**
  * Metadata accompanying streamed messages from LangGraph.
  * These fields are not exported from the SDK as they are internal runtime metadata.
@@ -101,6 +119,86 @@ interface MessageMetadata {
   langgraph_checkpoint_ns?: string
   checkpoint_ns?: string
   name?: string
+}
+
+function getSerializedMessageClassName(msg: SerializedMessageChunk): string {
+  const classId = Array.isArray(msg.id) ? msg.id : []
+  return classId[classId.length - 1] || ""
+}
+
+function extractSerializedContent(
+  content: string | Array<{ type: string; text?: string }> | undefined
+): string {
+  if (typeof content === "string") {
+    return content
+  }
+  if (Array.isArray(content)) {
+    return content
+      .filter((block): block is { type: "text"; text: string } => block.type === "text")
+      .map((block) => block.text)
+      .join("")
+  }
+  return ""
+}
+
+export function transformSerializedValuesMessages(
+  messages: SerializedMessageChunk[] | undefined
+): TransformedValuesMessage[] {
+  const transformed: TransformedValuesMessage[] = []
+  const fallbackIndexes: Record<"ai" | "tool" | "system" | "human", number> = {
+    ai: 0,
+    tool: 0,
+    system: 0,
+    human: 0
+  }
+
+  for (const msg of messages ?? []) {
+    const className = getSerializedMessageClassName(msg)
+    if (className.includes("Human")) {
+      // Local user bubbles are appended before stream submit. Internal goal
+      // prompts are hidden, but still need timing for transcript restore anchors.
+      if (
+        !isInternalGoalPromptMessage({
+          role: "user",
+          content: extractSerializedContent(msg.kwargs?.content)
+        })
+      ) {
+        continue
+      }
+    }
+
+    const kwargs = msg.kwargs || {}
+    const type: "ai" | "tool" | "system" | "human" = className.includes("Tool")
+      ? "tool"
+      : className.includes("System")
+        ? "system"
+        : className.includes("Human")
+          ? "human"
+          : "ai"
+    const content = extractSerializedContent(kwargs.content)
+    const fallbackIndex = fallbackIndexes[type]++
+    const id = buildStableValuesMessageId({
+      explicitId: kwargs.id,
+      index: fallbackIndex,
+      type,
+      className,
+      content,
+      toolCallId: kwargs.tool_call_id,
+      name: kwargs.name,
+      toolCalls: kwargs.tool_calls
+    })
+
+    transformed.push({
+      id,
+      type,
+      content,
+      ...(type === "ai" && kwargs.tool_calls && { tool_calls: kwargs.tool_calls }),
+      ...(type === "tool" && kwargs.tool_call_id && { tool_call_id: kwargs.tool_call_id }),
+      ...(type === "tool" && kwargs.name && { name: kwargs.name })
+    })
+  }
+
+  return transformed
 }
 
 // Accumulated tool call data (for streaming tool calls)
@@ -165,6 +263,16 @@ function getWorkerSnapshotFallbackIndex(
 export class ElectronIPCTransport implements UseStreamTransport {
   // Track current message ID for grouping tokens across chunks
   private currentMessageId: string | null = null
+  private currentMessageIndex: number | null = null
+  private nextAssistantMessageIndex = 0
+  private nextToolMessageIndex = 0
+  private nextSystemMessageIndex = 0
+  private fallbackIndexBaselines: StreamFallbackIndexBaselines = {
+    ai: 0,
+    tool: 0,
+    system: 0,
+    human: 0
+  }
 
   private workerCurrentMessageIds: Map<string, string> = new Map()
 
@@ -207,9 +315,16 @@ export class ElectronIPCTransport implements UseStreamTransport {
   // the chat card does not get stuck showing an early `{}` placeholder.
   private completedToolCallsByMessageId: Map<string, Map<string, CompletedToolCall>> = new Map()
 
+  setFallbackIndexBaselines(baselines: StreamFallbackIndexBaselines): void {
+    this.fallbackIndexBaselines = baselines
+    this.applyFallbackIndexBaselines()
+  }
+
   async stream(payload: StreamPayload): Promise<AsyncGenerator<StreamEvent>> {
     // Reset state for new stream
     this.currentMessageId = null
+    this.currentMessageIndex = null
+    this.applyFallbackIndexBaselines()
     this.workerCurrentMessageIds.clear()
     this.workerAssistantTextByMessageId.clear()
     this.workerLiveMessageSequenceByThread.clear()
@@ -572,7 +687,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
                       "approve",
                       "reject",
                       "edit"
-                    ]
+                    ],
+                    allowRuntimeRestoredCheckpointResume: true
                   }
                 }
               })
@@ -586,7 +702,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 request: {
                   id: interrupt.id || crypto.randomUUID(),
                   tool_call: interrupt.tool_call,
-                  allowed_decisions: ["approve", "reject", "edit"]
+                  allowed_decisions: ["approve", "reject", "edit"],
+                  allowRuntimeRestoredCheckpointResume: true
                 }
               }
             })
@@ -596,17 +713,34 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
 
       // Custom events (e.g. routing_result) sent directly from main process
-      case "custom":
+      case "custom": {
+        const data = event.data
+        if (data?.type === "goal_subturn_complete" && Array.isArray(data.messages)) {
+          this.resetCurrentAssistantMessage()
+          const messages = transformSerializedValuesMessages(
+            data.messages as SerializedMessageChunk[]
+          )
+          this.advanceFallbackIndexesFromValuesMessages(messages)
+          events.push({
+            event: "custom",
+            data: {
+              ...data,
+              messages
+            }
+          })
+          break
+        }
         events.push({
           event: "custom",
-          data: event.data
+          data
         })
         break
+      }
 
       case "error":
         events.push({
           event: "error",
-          data: { error: "STREAM_ERROR", message: event.error }
+          data: { error: event.error || "STREAM_ERROR", message: event.message ?? event.error }
         })
         break
 
@@ -694,6 +828,58 @@ export class ElectronIPCTransport implements UseStreamTransport {
     return converted
   }
 
+  private nextMessageFallbackIndex(type: "ai" | "tool" | "system"): number {
+    if (type === "tool") {
+      const index = this.nextToolMessageIndex
+      this.nextToolMessageIndex += 1
+      return index
+    }
+    if (type === "system") {
+      const index = this.nextSystemMessageIndex
+      this.nextSystemMessageIndex += 1
+      return index
+    }
+    const index = this.nextAssistantMessageIndex
+    this.nextAssistantMessageIndex += 1
+    return index
+  }
+
+  private applyFallbackIndexBaselines(): void {
+    this.nextAssistantMessageIndex = Math.max(
+      this.nextAssistantMessageIndex,
+      this.fallbackIndexBaselines.ai
+    )
+    this.nextToolMessageIndex = Math.max(
+      this.nextToolMessageIndex,
+      this.fallbackIndexBaselines.tool
+    )
+    this.nextSystemMessageIndex = Math.max(
+      this.nextSystemMessageIndex,
+      this.fallbackIndexBaselines.system
+    )
+  }
+
+  private advanceFallbackIndexesFromValuesMessages(messages: TransformedValuesMessage[]): void {
+    let aiCount = 0
+    let toolCount = 0
+    let systemCount = 0
+
+    for (const message of messages) {
+      if (message.type === "ai") aiCount += 1
+      else if (message.type === "tool") toolCount += 1
+      else if (message.type === "system") systemCount += 1
+    }
+
+    this.nextAssistantMessageIndex = Math.max(this.nextAssistantMessageIndex, aiCount)
+    this.nextToolMessageIndex = Math.max(this.nextToolMessageIndex, toolCount)
+    this.nextSystemMessageIndex = Math.max(this.nextSystemMessageIndex, systemCount)
+  }
+
+  private resetCurrentAssistantMessage(): void {
+    this.currentMessageId = null
+    this.currentMessageIndex = null
+  }
+
   /**
    * Process raw LangGraph stream events (mode + data tuples)
    */
@@ -725,6 +911,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
       // Check if this is a ToolMessage (class name contains 'ToolMessage')
       const isToolMessage = className.includes("ToolMessage") && !!kwargs.tool_call_id
+      const isSystemMessage = className.includes("SystemMessage")
 
       // Check if this is an AI message (class name contains 'AI')
       const isAIMessage = className.includes("AI") || className.includes("AIMessageChunk")
@@ -757,8 +944,19 @@ export class ElectronIPCTransport implements UseStreamTransport {
         } else {
           // Main agent message
           const content = this.extractContent(kwargs.content)
-          const msgId = kwargs.id || this.currentMessageId || crypto.randomUUID()
+          const messageIndex = this.currentMessageIndex ?? this.nextMessageFallbackIndex("ai")
+          const msgId =
+            kwargs.id ||
+            this.currentMessageId ||
+            buildStableValuesMessageId({
+              index: messageIndex,
+              type: "ai",
+              className,
+              content,
+              toolCalls: kwargs.tool_calls
+          })
           this.currentMessageId = msgId
+          this.currentMessageIndex = messageIndex
           const visibleToolCalls = this.hydrateToolCallsWithAccumulatedArgs(
             this.filterVisibleMainToolCalls(kwargs.tool_calls, isCoordinatorMode)
           )
@@ -867,6 +1065,36 @@ export class ElectronIPCTransport implements UseStreamTransport {
         }
       }
 
+      if (isSystemMessage && !isFromSubagent) {
+        this.resetCurrentAssistantMessage()
+        const content = this.extractContent(kwargs.content)
+        const messageIndex = this.nextMessageFallbackIndex("system")
+        const msgId =
+          kwargs.id ||
+          buildStableValuesMessageId({
+            index: messageIndex,
+            type: "system",
+            className,
+            content
+          })
+
+        events.push({
+          event: "messages",
+          data: [
+            {
+              id: msgId,
+              type: "system",
+              content
+            },
+            {
+              langgraph_node: metadata?.langgraph_node || "agent",
+              langgraph_checkpoint_ns: metadata?.langgraph_checkpoint_ns,
+              checkpoint_ns: metadata?.checkpoint_ns
+            }
+          ]
+        })
+      }
+
       // Handle ToolMessage
       if (isToolMessage && kwargs.tool_call_id) {
         if (isCoordinatorMode && this.quietCoordinatorToolCallIds.has(kwargs.tool_call_id)) {
@@ -888,14 +1116,18 @@ export class ElectronIPCTransport implements UseStreamTransport {
           )
         } else {
           // Main agent tool message
+          this.resetCurrentAssistantMessage()
           const content = this.extractContent(kwargs.content)
+          const messageIndex = this.nextMessageFallbackIndex("tool")
           const msgId =
             kwargs.id ||
-            this.createStableFallbackMessageId({
+            buildStableValuesMessageId({
+              index: messageIndex,
               type: "tool",
+              className,
               content,
               toolCallId: kwargs.tool_call_id,
-              toolName: kwargs.name
+              name: kwargs.name
             })
 
           this.rememberEmittedMessage(msgId)
@@ -1004,32 +1236,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
         }
       }
 
+      const transformedMessages = transformSerializedValuesMessages(state.messages)
+
       // Only emit values event if we have actual data to update
       // Don't emit messages: undefined as it would clear the UI
       const valuesData: Record<string, unknown> = {}
       if (!isCoordinatorMode) {
-        const transformedMessages = state.messages
-          ?.filter((msg) => !this.isSerializedHumanMessage(msg))
-          .map((msg) => {
-            const kwargs = msg.kwargs || {}
-            const className = this.getSerializedMessageClassName(msg)
-            const type: "ai" | "tool" =
-              className.includes("Tool") || kwargs.type === "tool" ? "tool" : "ai"
-
-            return {
-              id: kwargs.id || crypto.randomUUID(),
-              type,
-              content: this.extractContent(kwargs.content),
-              ...(type === "ai" && kwargs.tool_calls && { tool_calls: kwargs.tool_calls }),
-              ...(type === "tool" && kwargs.tool_call_id
-                ? { tool_call_id: kwargs.tool_call_id }
-                : {}),
-              ...(type === "tool" && kwargs.name ? { name: kwargs.name } : {})
-            }
-          })
-
-        if (transformedMessages && transformedMessages.length > 0) {
+        if (transformedMessages.length > 0) {
           valuesData.messages = transformedMessages
+          this.advanceFallbackIndexesFromValuesMessages(transformedMessages)
         }
       }
       if (state.todos !== undefined) {
@@ -1111,7 +1326,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 },
                 allowed_decisions: reviewConfig?.allowedDecisions || ["approve", "reject", "edit"],
                 pendingCount: actionRequests.length,
-                pendingToolCallIds
+                pendingToolCallIds,
+                allowRuntimeRestoredCheckpointResume: true
               }
             }
           })
@@ -1694,16 +1910,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
   private extractContent(
     content: string | Array<{ type: string; text?: string }> | undefined
   ): string {
-    if (typeof content === "string") {
-      return content
-    }
-    if (Array.isArray(content)) {
-      return content
-        .filter((block): block is { type: "text"; text: string } => block.type === "text")
-        .map((block) => block.text)
-        .join("")
-    }
-    return ""
+    return extractSerializedContent(content)
   }
 
   private hasToolArgs(args: unknown): boolean {

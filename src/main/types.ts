@@ -28,7 +28,13 @@ export interface AgentInvokeParams {
 
 export interface AgentResumeParams {
   threadId: string
-  command: { resume?: { decision?: string; pendingCount?: number } }
+  command: {
+    resume?: {
+      decision?: string
+      pendingCount?: number
+      allowRuntimeRestoredCheckpointResume?: boolean
+    }
+  }
   modelId?: string
   agentMode?: "normal" | "coordinator"
 }
@@ -47,6 +53,11 @@ export interface AgentCancelParams {
 export interface ThreadUpdateParams {
   threadId: string
   updates: Partial<Thread>
+}
+
+export interface ThreadValuesMergeParams {
+  threadId: string
+  patch: Record<string, unknown>
 }
 
 // Workspace IPC
@@ -132,7 +143,7 @@ export type StreamEvent =
   | { type: "subagents"; subagents: Subagent[] }
   | { type: "custom"; data: Record<string, unknown> }
   | { type: "done"; result: unknown }
-  | { type: "error"; error: string }
+  | { type: "error"; error: string; message?: string }
 
 export interface Message {
   id: string
@@ -170,6 +181,7 @@ export interface HITLRequest {
   allowed_decisions: HITLDecision["type"][]
   pendingCount?: number
   pendingToolCallIds?: string[]
+  allowRuntimeRestoredCheckpointResume?: boolean
 }
 
 export interface HITLDecision {
@@ -177,6 +189,7 @@ export interface HITLDecision {
   tool_call_id: string
   edited_args?: Record<string, unknown>
   feedback?: string
+  allowRuntimeRestoredCheckpointResume?: boolean
 }
 
 // Todo types (from deepagentsjs)

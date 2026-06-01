@@ -2036,7 +2036,9 @@ import {
   getCustomModelPublicConfigById,
   getCustomModelPublicConfigs,
   getCustomModelConfigById,
+  getGoalSettings,
   setCustomModelConfig,
+  setGoalSettings,
   upsertCustomModelConfig,
   deleteCustomModelConfig,
   upsertUserInfoConfig,
@@ -2152,6 +2154,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       ...provider,
       hasAnyModelApiKey
     }))
+  })
+
+  ipcMain.handle("models:getGoalSettings", async () => {
+    return getGoalSettings()
+  })
+
+  ipcMain.handle("models:setGoalSettings", async (_event, settings: { evaluatorModelId?: string }) => {
+    setGoalSettings(settings)
   })
 
   ipcMain.handle("models:getTokenLimits", async () => {

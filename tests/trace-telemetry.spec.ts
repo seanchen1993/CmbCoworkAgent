@@ -10,6 +10,7 @@ import { tmpdir } from "os"
 import { join } from "path"
 import { SkillUsageDetector } from "../src/main/agent/skill-evolution/usage-detector.ts"
 import { TraceCollector, setTraceReporter } from "../src/main/agent/trace/collector.ts"
+import { buildTraceTree } from "../src/main/agent/trace/tree-builder.ts"
 import type { AgentTrace, ITraceReporter } from "../src/main/agent/trace/types.ts"
 
 function assert(condition: unknown, message: string): void {
@@ -376,6 +377,96 @@ async function testTraceCollectorSanitizesLargeFields(): Promise<void> {
   }
 }
 
+async function testTraceCollectorPreservesUnknownOutcomeNodes(): Promise<void> {
+  const tracesDir = await mkdtemp(join(tmpdir(), "trace-unknown-"))
+  const previousTracesDir = process.env.CMB_COWORK_TRACES_DIR
+
+  process.env.CMB_COWORK_TRACES_DIR = tracesDir
+  setTraceReporter({
+    async report(trace) {
+      void trace
+    }
+  })
+
+  try {
+    const tracer = new TraceCollector("thread-unknown-unit", "Goal paused for user input", "model-unknown")
+    const llmNodeId = tracer.beginLlmNode({ name: "LLM Call", input: [] })
+    const toolNodeId = tracer.addToolNode({
+      name: "read_file",
+      parentId: llmNodeId,
+      input: { path: "README.md" }
+    })
+
+    const reason = "Goal paused: needs user input"
+    const trace = await tracer.finish("unknown", reason)
+    const nodes = trace.nodes ?? []
+    const root = nodes.find((node) => node.type === "trace")
+    const llmNode = nodes.find((node) => node.id === llmNodeId)
+    const toolNode = nodes.find((node) => node.id === toolNodeId)
+    const terminal = nodes.find(
+      (node) => node.type === "message" && node.status === "unknown" && node.output === reason
+    )
+
+    assert(trace.outcome === "unknown", "trace outcome should stay unknown")
+    assert(root?.status === "unknown", "root node should use unknown status")
+    assert(llmNode?.status === "unknown", "unfinished LLM node should use unknown status")
+    assert(toolNode?.status === "unknown", "unfinished tool node should use unknown status")
+    assert(terminal !== undefined, "unknown trace should include an unknown terminal node")
+    assert(terminal?.name === "Run Ended", "unknown terminal should not say completed")
+
+    const file = join(tracesDir, trace.threadId, `${trace.traceId}.jsonl`)
+    const persisted = JSON.parse((await readFile(file, "utf-8")).trim()) as AgentTrace
+    const persistedRoot = persisted.nodes?.find((node) => node.type === "trace")
+    const persistedTerminal = persisted.nodes?.find(
+      (node) => node.type === "message" && node.status === "unknown" && node.output === reason
+    )
+    assert(persisted.outcome === "unknown", "persisted trace outcome should stay unknown")
+    assert(persistedRoot?.status === "unknown", "persisted root node should use unknown status")
+    assert(persistedTerminal !== undefined, "persisted trace should keep unknown terminal node")
+    assert(persistedTerminal?.name === "Run Ended", "persisted unknown terminal should not say completed")
+  } finally {
+    restoreTraceEnv(previousTracesDir)
+    await rm(tracesDir, { recursive: true, force: true })
+  }
+}
+
+function testTraceTreeBuilderPreservesUnknownOutcome(): void {
+  const startedAt = "2026-05-23T12:00:00.000+08:00"
+  const endedAt = "2026-05-23T12:00:05.000+08:00"
+  const trace: AgentTrace = {
+    traceId: "trace-unknown-builder",
+    threadId: "thread-unknown-builder",
+    startedAt,
+    endedAt,
+    durationMs: 5000,
+    userMessage: "Continue the active goal",
+    modelId: "model-unknown",
+    steps: [
+      {
+        index: 0,
+        startedAt,
+        assistantText: "Need more information before continuing.",
+        toolCalls: []
+      }
+    ],
+    totalToolCalls: 0,
+    outcome: "unknown",
+    errorMessage: "Goal paused: needs user input",
+    usedSkills: []
+  }
+
+  const nodes = buildTraceTree(trace)
+  const root = nodes.find((node) => node.type === "trace")
+  const llmNode = nodes.find((node) => node.type === "llm")
+  const terminal = nodes.find((node) => node.id === `legacy:unknown:${trace.traceId}`)
+
+  assert(root?.status === "unknown", "legacy root node should use unknown status")
+  assert(llmNode?.status === "unknown", "legacy final LLM node should use unknown status")
+  assert(terminal?.status === "unknown", "legacy terminal node should use unknown status")
+  assert(terminal?.name === "Run Ended", "legacy unknown terminal should not say completed")
+  assert(terminal?.output === trace.errorMessage, "legacy unknown terminal should preserve reason")
+}
+
 async function run(): Promise<void> {
   testSkillUsageDetectorNormalizesVersions()
   console.log("PASS Skill usage detector version normalization")
@@ -385,6 +476,10 @@ async function run(): Promise<void> {
   console.log("PASS trace collector telemetry usedSkills normalization")
   await testTraceCollectorSanitizesLargeFields()
   console.log("PASS trace collector trace field sanitization")
+  await testTraceCollectorPreservesUnknownOutcomeNodes()
+  console.log("PASS trace collector unknown outcome node status")
+  testTraceTreeBuilderPreservesUnknownOutcome()
+  console.log("PASS trace tree builder unknown outcome status")
 }
 
 run().catch((error: Error) => {

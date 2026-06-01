@@ -38,7 +38,12 @@ import {
   FilePenLine,
   Plus,
   Loader2,
-  CornerDownLeft
+  CornerDownLeft,
+  Flag,
+  CheckCircle2,
+  PauseCircle,
+  PlayCircle,
+  Trash2
 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -80,6 +85,7 @@ import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
 import type {
+  GoalUiState,
   Message,
   SkillMetadata,
   Thread,
@@ -103,12 +109,44 @@ import {
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
-import { useSlashCommands } from "@/features/slash-commands/useSlashCommands"
+import {
+  isBareGoalSlashCommandInput,
+  isGoalSlashControlCommandInput,
+  isGoalSlashResumeCommandInput,
+  isGoalSlashTransportSensitiveControlCommandInput,
+  isGoalTerminatingControlCommandInput,
+  resolveGoalRuntimeComposerState,
+  useSlashCommands,
+  type SlashCommandItem
+} from "@/features/slash-commands/useSlashCommands"
+import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { mergeChatSkills } from "@/features/slash-commands/skill-merge"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
+import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/lib/goal-transcript"
+import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
+import {
+  liveStreamMessageRole,
+  normalizeLiveStreamMessageContent,
+  stringifyMessageContentForReport,
+  type LiveStreamMessage as StreamMessage
+} from "@/lib/live-stream-messages"
+import {
+  markChatReportUploadFailed,
+  markChatReportUploadSucceeded,
+  reserveChatReportMessageIds
+} from "@/lib/chat-report-upload-cache"
+import {
+  resolveGoalControlSubmitRoute,
+  shouldClearPendingApprovalAfterGoalControl
+} from "@/lib/goal-control-submit"
+import {
+  releaseSubmitInFlightLock,
+  shouldUseSubmitInFlightLock,
+  tryAcquireSubmitInFlightLock
+} from "@/lib/submit-in-flight-lock"
 import { groupWelcomeSkills } from "./skill-grouping"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import { DurationShow } from "./DurationShow"
@@ -139,6 +177,456 @@ function getWelcomeSkillTreePath(skill: SkillMetadata): string {
   return String(skill.relativePath || id || skill.name || "")
     .replace(/\\/g, "/")
     .replace(/^\/+|\/+$/g, "")
+}
+
+function formatGoalDuration(createdAt: number, updatedAt: number, active: boolean): string {
+  const end = active ? Date.now() : updatedAt
+  const seconds = Math.max(0, Math.round((end - createdAt) / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  return rest > 0 ? `${minutes}m ${rest}s` : `${minutes}m`
+}
+
+function goalStatusView(status: "active" | "paused" | "complete"): {
+  label: string
+  icon: React.JSX.Element
+  className: string
+} {
+  if (status === "complete") {
+    return {
+      label: "已完成",
+      icon: <CheckCircle2 className="size-4 text-emerald-600" />,
+      className: "text-[#23483c]"
+    }
+  }
+  if (status === "paused") {
+    return {
+      label: "已暂停",
+      icon: <PauseCircle className="size-4 text-amber-600" />,
+      className: "text-[#51453a]"
+    }
+  }
+  return {
+    label: "进行中",
+    icon: <Flag className="size-4 text-sky-600" />,
+    className: "text-[#2f3f4a]"
+  }
+}
+
+function goalEventTimeLabel(value: Date | string | number): string {
+  const date = value instanceof Date ? value : new Date(value)
+  return Number.isFinite(date.getTime()) ? date.toLocaleTimeString() : ""
+}
+
+function GoalStatusPanel({
+  goalUi,
+  open,
+  onOpenChange,
+  onCommand,
+  onEditGoal
+}: {
+  goalUi: GoalUiState
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onCommand: (command: string) => void
+  onEditGoal: () => void
+}): React.JSX.Element | null {
+  const goal = goalUi.goal
+  if (!goal) return null
+
+  const status = goalStatusView(goal.status)
+  const panel = buildGoalPanelViewModel(goalUi)
+  if (!panel) return null
+  const {
+    latestEvents,
+    canPause,
+    canResume,
+    progressPercent,
+    contextText,
+    progressItems: allProgressItems,
+    evidenceItems: allEvidenceItems,
+    blockerItems: allBlockerItems,
+    hasLedgerDetails,
+    verdictLabel,
+    evaluatorReason,
+    recentEventSummary
+  } = panel
+  const duration = formatGoalDuration(goal.createdAt, goal.updatedAt, goal.status === "active")
+
+  return (
+    <TooltipProvider delayDuration={180}>
+      <div className="relative mx-auto mb-2 max-w-3xl">
+        <div
+          className={cn(
+            "flex items-center gap-3 rounded-2xl border border-black/[0.07] bg-white/82 px-3 py-2 shadow-[0_14px_42px_rgba(24,24,27,0.09),0_1px_0_rgba(255,255,255,0.88)_inset] backdrop-blur-2xl",
+            status.className
+          )}
+        >
+          <button
+            type="button"
+            className="flex min-w-0 flex-1 items-center gap-3 text-left"
+            onClick={() => onOpenChange(!open)}
+          >
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-white shadow-[0_6px_18px_rgba(24,24,27,0.10)] ring-1 ring-black/[0.06]">
+              {status.icon}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="flex flex-wrap items-center gap-2">
+                <span className="shrink-0 text-sm font-semibold">Goal {status.label}</span>
+                <span className="shrink-0 rounded-full border border-black/[0.05] bg-[#f7f7f5]/85 px-2 py-0.5 text-[11px] text-muted-foreground">
+                  {duration} · {goal.turnsUsed}/{goal.maxTurns} 轮
+                </span>
+              </span>
+              <span className="mt-0.5 block truncate text-xs opacity-80">{goal.objective}</span>
+            </span>
+          </button>
+
+          <div className="flex shrink-0 items-center gap-1">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                  onClick={onEditGoal}
+                  aria-label="编辑 Goal"
+                >
+                  <FilePenLine className="size-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>编辑目标</TooltipContent>
+            </Tooltip>
+            {canPause && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                    onClick={() => onCommand("/goal pause")}
+                    aria-label="暂停 Goal"
+                  >
+                    <PauseCircle className="size-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>暂停</TooltipContent>
+              </Tooltip>
+            )}
+            {canResume && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                    onClick={() => onCommand("/goal resume")}
+                    aria-label="继续 Goal"
+                  >
+                    <PlayCircle className="size-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>继续</TooltipContent>
+              </Tooltip>
+            )}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                  onClick={() => onOpenChange(!open)}
+                  aria-label="查看 Goal 详情"
+                >
+                  <Info className="size-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>详情</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                  onClick={() => onCommand("/goal clear")}
+                  aria-label="清除 Goal"
+                >
+                  <Trash2 className="size-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>清除</TooltipContent>
+            </Tooltip>
+          </div>
+        </div>
+
+        {open && (
+          <div className="fixed bottom-24 right-5 top-16 z-40 flex w-[min(480px,calc(100vw-40px))] flex-col overflow-hidden rounded-3xl border border-black/[0.08] bg-[#fbfaf8] shadow-[0_24px_80px_rgba(24,24,27,0.18)]">
+            <div className="border-b border-black/[0.06] bg-white px-5 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="flex size-10 items-center justify-center rounded-full bg-[#f7f7f5] shadow-sm ring-1 ring-black/[0.06]">
+                      {status.icon}
+                    </span>
+                    <div className="text-lg font-semibold text-foreground">Goal {status.label}</div>
+                    <div className="rounded-full border border-black/[0.06] bg-[#f6f5f2] px-2 py-0.5 text-xs text-muted-foreground">
+                      {duration} · {goal.turnsUsed}/{goal.maxTurns} 轮
+                    </div>
+                    <div
+                      className={cn(
+                        "rounded-full border px-2 py-0.5 text-xs font-medium",
+                        goalVerdictTone(goal.lastVerdict)
+                      )}
+                    >
+                      最近判断：{verdictLabel}
+                    </div>
+                  </div>
+                  <div className="mt-3 line-clamp-2 text-sm leading-6 text-foreground/80">
+                    {goal.objective}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="flex size-8 shrink-0 items-center justify-center rounded-full bg-[#f6f5f2] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  onClick={() => onOpenChange(false)}
+                  aria-label="关闭 Goal 详情"
+                >
+                  <X className="size-4" />
+                </button>
+              </div>
+              <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-[#eeece8]">
+                <div
+                  className={cn(
+                    "h-full rounded-full",
+                    goal.status === "complete"
+                      ? "bg-emerald-500"
+                      : goal.status === "paused"
+                        ? "bg-amber-500"
+                        : "bg-sky-500"
+                  )}
+                  style={{ width: `${Math.max(4, progressPercent)}%` }}
+                />
+              </div>
+            </div>
+
+            <div className="flex-1 space-y-4 overflow-y-auto overflow-x-hidden px-5 py-4 text-sm break-words [overflow-wrap:anywhere]">
+              <section
+                className={cn(
+                  "min-w-0 overflow-hidden rounded-2xl border p-4 shadow-[0_1px_0_rgba(255,255,255,0.8)_inset]",
+                  goalVerdictTone(goal.lastVerdict)
+                )}
+              >
+                <div className="mb-2 flex items-center gap-2 text-xs font-semibold">
+                  <Sparkles className="size-4" />
+                  Evaluator 最近判断
+                </div>
+                <div className="whitespace-pre-wrap break-words text-base leading-7 text-foreground/90 [overflow-wrap:anywhere]">
+                  {evaluatorReason}
+                </div>
+                <div className="mt-3 rounded-xl bg-white/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                  这里展示的是 evaluator 根据最近一轮 assistant 回复、工具结果和持久化 ledger
+                  做出的判断。它解释为什么 Goal 会继续、暂停或完成。
+                </div>
+              </section>
+
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-white p-4">
+                <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+                  <Flag className="size-4" />
+                  目标与完成标准
+                </div>
+                <div className="space-y-3">
+                  <div>
+                    <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                      当前目标
+                    </div>
+                    <div className="whitespace-pre-wrap break-words leading-6 [overflow-wrap:anywhere]">
+                      {goal.objective}
+                    </div>
+                  </div>
+                  {goal.completionCondition !== goal.objective && (
+                    <div className="border-t border-black/[0.06] pt-3">
+                      <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                        完成条件
+                      </div>
+                      <div className="whitespace-pre-wrap break-words leading-6 [overflow-wrap:anywhere]">
+                        {goal.completionCondition}
+                      </div>
+                    </div>
+                  )}
+                  {contextText && (
+                    <div className="border-t border-black/[0.06] pt-3">
+                      <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                        <Notebook className="size-3.5" />
+                        启动上下文
+                      </div>
+                      <div className="whitespace-pre-wrap break-words leading-6 text-foreground/80 [overflow-wrap:anywhere]">
+                        {contextText}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-white p-4">
+                <div className="mb-1 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+                  <Layers className="size-4" />
+                  进展与证据
+                </div>
+                <div className="mb-3 text-xs leading-5 text-muted-foreground">
+                  以下条目来自 evaluator 返回的 ledger_patch，是它从对话、工具结果和 assistant
+                  验证摘要里提炼出的判断依据。
+                </div>
+
+                {!hasLedgerDetails ? (
+                  <div className="rounded-xl border border-dashed border-black/[0.10] bg-[#fbfaf8] px-3 py-4 text-center text-xs text-muted-foreground">
+                    暂无 ledger 条目。下一轮评估后会在这里记录进展、证据或阻塞。
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {allProgressItems.length > 0 && (
+                      <div>
+                        <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-foreground/80">
+                          <CheckCircle2 className="size-3.5 text-emerald-600" />
+                          已确认进展
+                        </div>
+                        <ol className="space-y-2">
+                          {allProgressItems.map((item, index) => (
+                            <li key={`progress-${index}`} className="flex min-w-0 gap-2 leading-5">
+                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-[11px] font-semibold text-emerald-700">
+                                {index + 1}
+                              </span>
+                              <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
+                                {item}
+                              </span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
+
+                    {allEvidenceItems.length > 0 && (
+                      <div className="border-t border-black/[0.06] pt-4">
+                        <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-foreground/80">
+                          <Database className="size-3.5 text-sky-600" />
+                          证据
+                        </div>
+                        <ol className="space-y-2">
+                          {allEvidenceItems.map((item, index) => (
+                            <li key={`evidence-${index}`} className="flex min-w-0 gap-2 leading-5">
+                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-sky-50 text-[11px] font-semibold text-sky-700">
+                                {index + 1}
+                              </span>
+                              <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
+                                {item}
+                              </span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
+
+                    {allBlockerItems.length > 0 && (
+                      <div className="border-t border-black/[0.06] pt-4">
+                        <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-foreground/80">
+                          <CircleAlert className="size-3.5 text-amber-600" />
+                          未解决问题
+                        </div>
+                        <ol className="space-y-2">
+                          {allBlockerItems.map((item, index) => (
+                            <li key={`blocker-${index}`} className="flex min-w-0 gap-2 leading-5">
+                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-amber-50 text-[11px] font-semibold text-amber-700">
+                                {index + 1}
+                              </span>
+                              <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
+                                {item}
+                              </span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </section>
+
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-white p-4">
+                <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+                  <Clock className="size-4" />
+                  最近事件
+                </div>
+                <div className="mb-3 rounded-xl bg-[#fbfaf8] px-3 py-2 text-xs leading-5 text-muted-foreground">
+                  最近一条：{recentEventSummary}
+                </div>
+                <details>
+                  <summary className="cursor-pointer list-none rounded-lg border border-black/[0.06] px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/40">
+                    展开事件历史（{latestEvents.length}）
+                  </summary>
+                  {latestEvents.length === 0 ? (
+                    <div className="mt-3 rounded-lg bg-[#fbfaf8] px-3 py-2 text-xs text-muted-foreground">
+                      暂无事件
+                    </div>
+                  ) : (
+                    <div className="mt-3 space-y-3">
+                      {latestEvents.map((event) => (
+                        <div key={event.event_id} className="border-l-2 border-black/[0.10] pl-3">
+                          <div className="mb-1 text-[11px] text-muted-foreground">
+                            {goalEventTimeLabel(event.created_at)}
+                          </div>
+                          <div className="whitespace-pre-wrap break-words text-xs leading-5 text-foreground/80 [overflow-wrap:anywhere]">
+                            {formatGoalEventMessage(event.message)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </details>
+              </section>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 border-t border-black/[0.06] bg-white px-5 py-3">
+              <button
+                type="button"
+                className="rounded-xl px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted"
+                onClick={() => onCommand("/goal")}
+              >
+                刷新状态
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="rounded-xl border border-black/[0.08] px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
+                  onClick={onEditGoal}
+                >
+                  编辑
+                </button>
+                {canPause && (
+                  <button
+                    type="button"
+                    className="rounded-xl bg-foreground px-3 py-2 text-sm font-medium text-background transition-colors hover:bg-foreground/85"
+                    onClick={() => onCommand("/goal pause")}
+                  >
+                    暂停
+                  </button>
+                )}
+                {canResume && (
+                  <button
+                    type="button"
+                    className="rounded-xl bg-foreground px-3 py-2 text-sm font-medium text-background transition-colors hover:bg-foreground/85"
+                    onClick={() => onCommand("/goal resume")}
+                  >
+                    继续
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="rounded-xl border border-black/[0.08] px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
+                  onClick={() => onCommand("/goal clear")}
+                >
+                  清除
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </TooltipProvider>
+  )
 }
 
 function buildWelcomeSkillTree(cards: WelcomeSkillCard[]): WelcomeSkillTreeNode[] {
@@ -674,16 +1162,6 @@ interface AgentStreamValues {
   todos?: Array<{ id?: string; content?: string; status?: string }>
 }
 
-interface StreamMessage {
-  id?: string
-  type?: string
-  content?: string | unknown[]
-  tool_calls?: Message["tool_calls"]
-  tool_call_id?: string
-  name?: string
-  is_error?: boolean
-}
-
 export type ChatSurface = "default" | "harness-project" | "harness-feature-session"
 
 interface ChatSurfaceConfig {
@@ -802,6 +1280,9 @@ const SUPPORTED_EXTS = new Set([".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"]
 const MAX_ATTACHMENTS = 3
 const MAX_TOTAL_CHARS = 24_000
 const GOOD_SKILLS_PREVIEW_LIMIT = 4
+const CHAT_REPORT_UPLOAD_DEBOUNCE_MS = 250
+const CHAT_REPORT_RETRY_DELAY_MS = 1_000
+const CHAT_REPORT_MAX_RETRY_ATTEMPTS = 3
 const escXml = (s: string): string =>
   s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 
@@ -875,6 +1356,18 @@ const mergeMessageTimeOrder = (
   }
 
   return nextOrder
+}
+
+// messageTimes 用 id 做精确匹配；messageTimeOrder 用顺序做兜底，解决重启后 checkpoint
+// 重新生成 message id 时，历史耗时无法按 id 命中的问题。
+//
+// 保存两份结构的原因：
+// - messageTimes: 当前会话里 id 稳定，按 id 查找最快也最准确。
+// - messageTimeOrder: app 重启后历史消息来自 LangGraph checkpoint，某些消息 id 可能变化；
+//   此时仍可用“消息展示顺序”和“时间写入顺序”对齐，恢复 start_at/end_at。
+//
+const messageTimeOrderEntries = (updates: MessageTimeMap): MessageTimeEntry[] => {
+  return Object.entries(updates).map(([id, time]) => ({ id, ...time }))
 }
 
 const toDate = (value: Date | string | undefined): Date | undefined => {
@@ -1111,6 +1604,7 @@ export function ChatContainer({
   const requestedUserQuestionIndexRef = useRef<number | null>(null)
   const requestedUserQuestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isComposingRef = useRef(false)
+  const submitInFlightRef = useRef<Set<string>>(new Set())
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(new Set())
   const [skillsLoading, setSkillsLoading] = useState(true)
@@ -1122,6 +1616,7 @@ export function ChatContainer({
   const [activeUserQuestionIndex, setActiveUserQuestionIndex] = useState(-1)
   const [userInputDialogLayout, setUserInputDialogLayout] =
     useState<UserInputRequestDialogLayout | null>(null)
+  const [goalDetailsOpen, setGoalDetailsOpen] = useState(false)
   // Skill creation human-confirmation state
   const [skillConfirmRequest, setSkillConfirmRequest] = useState<SkillConfirmRequest | null>(null)
   // Skill intent banner state ("Want to save as a skill?")
@@ -1172,6 +1667,14 @@ export function ChatContainer({
   const streamMessageCapturePreparedRef = useRef(false)
   const [messageTimes, setMessageTimes] = useState<MessageTimeMap>({})
   const threadMessageIdsRef = useRef<Set<string>>(new Set())
+  const chatReportUploadTimersRef = useRef<Record<string, number>>({})
+  const chatReportRetryTimersRef = useRef<Record<string, number>>({})
+  const chatReportRetryQueuesRef = useRef<
+    Record<string, Array<{ messages: Message[]; attempt: number }>>
+  >({})
+  // Get the stream data via subscription - reactive updates without re-rendering provider
+  const streamData = useThreadStream(threadId)
+  const stream = streamData.stream
 
   useEffect(() => {
     const { ipcRenderer } = window.electron
@@ -1525,6 +2028,7 @@ export function ChatContainer({
     messages: threadMessages,
     toolCallStates,
     pendingApprovals,
+    goalUi,
     pendingApproval,
     approvalQueue,
     pendingUserInput,
@@ -1546,9 +2050,11 @@ export function ChatContainer({
     setTodos,
     clearPendingApprovals,
     removePendingApproval,
+    setPendingApproval,
     setPendingUserInput,
     setTurnTimings,
     appendMessage,
+    refreshGoalUi,
     setError,
     clearError,
     clearHookInterruption,
@@ -1564,6 +2070,10 @@ export function ChatContainer({
     useCallback((cb) => threadContext.subscribeToHookLogs(threadId, cb), [threadContext, threadId]),
     useCallback(() => threadContext.getHookLogBuckets(threadId), [threadContext, threadId])
   )
+
+  useEffect(() => {
+    threadMessageIdsRef.current = new Set(threadMessages.map((message) => message.id))
+  }, [threadMessages])
   const hookLogBucketByTurnId = useMemo(() => {
     const map = new Map<string, HookLogBucket>()
     for (const bucket of hookLogBuckets) map.set(bucket.turnId, bucket)
@@ -1596,9 +2106,6 @@ export function ChatContainer({
     ? (hookLogBucketByTurnId.get(openHookLogBucketId) ?? null)
     : null
 
-  // Get the stream data via subscription - reactive updates without re-rendering provider
-  const streamData = useThreadStream(threadId)
-  const stream = streamData.stream
   const canChangeAgentMode = threadMessages.length === 0
   const [savedToolNameInput, setSavedToolNameInput] = useState("")
   const [savedToolDescriptionInput, setSavedToolDescriptionInput] = useState("")
@@ -1609,6 +2116,12 @@ export function ChatContainer({
   const queuedApprovalCount = Math.max(0, pendingApprovals.length - 1)
   const showSaveToolMetadataLoading =
     saveToolMetadataLoading && saveToolMetadataLoadingThreadId === threadId
+
+  useEffect(() => {
+    if (!goalUi.goal) {
+      setGoalDetailsOpen(false)
+    }
+  }, [goalUi.goal])
 
   useEffect(() => {
     const approval = pendingApproval as unknown as Record<string, unknown> | null
@@ -1698,7 +2211,6 @@ export function ChatContainer({
     },
     [agentMode, threadId, threadMessages, updateThread]
   )
-  const inputDisabled = isLoading || historyLoading
   const userInputScrollPadding = pendingUserInput
     ? Math.ceil((userInputDialogLayout?.height ?? 320) + 24)
     : undefined
@@ -1918,25 +2430,68 @@ export function ChatContainer({
     return window.api.sandbox.onChanged(fetchYoloMode)
   }, []) // 移除queryRemoteSkills依赖，只在组件挂载时执行一次
 
-  const uploadLoChatData = useCallback(
-    async (msgs: Message[]) => {
+  const uploadLoChatDataForThread = useCallback(
+    async (targetThreadId: string, msgs: Message[], attempt = 0) => {
       const lastMsg = msgs[msgs.length - 1]
-      if (lastMsg) {
-        if (lastMsg.role !== "user") {
-          let lUidx = -1
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            if (msgs[i].role === "user") {
-              lUidx = i
-              break
-            }
-          }
-          if (lUidx !== -1) {
-            await uploadChatData(threadId, msgs.slice(lUidx) as ChatReportPayload[])
-          }
+      if (!lastMsg || lastMsg.role === "user") return
+
+      let lUidx = -1
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].role === "user") {
+          lUidx = i
+          break
         }
       }
+      if (lUidx === -1) return
+
+      const tailMessages = msgs.slice(lUidx)
+      const reservedIds = reserveChatReportMessageIds(
+        targetThreadId,
+        tailMessages.map((msg) => msg.id)
+      )
+      if (reservedIds.length === 0) return
+
+      const payload: ChatReportPayload[] = tailMessages.map((msg) => ({
+        role: msg.role,
+        content: stringifyMessageContentForReport(msg.content)
+      }))
+      try {
+        await uploadChatData(targetThreadId, payload)
+        markChatReportUploadSucceeded(targetThreadId, reservedIds)
+      } catch (error) {
+        markChatReportUploadFailed(targetThreadId, reservedIds)
+        if (attempt < CHAT_REPORT_MAX_RETRY_ATTEMPTS) {
+          const retryQueue = (chatReportRetryQueuesRef.current[targetThreadId] ??= [])
+          retryQueue.push({ messages: tailMessages, attempt: attempt + 1 })
+          if (!chatReportRetryTimersRef.current[targetThreadId]) {
+            const retryThreadId = targetThreadId
+            const retryDelayMs = Math.min(CHAT_REPORT_RETRY_DELAY_MS * 2 ** attempt, 30_000)
+            chatReportRetryTimersRef.current[retryThreadId] = window.setTimeout(() => {
+              delete chatReportRetryTimersRef.current[retryThreadId]
+              const retryItems = chatReportRetryQueuesRef.current[retryThreadId]?.splice(0) ?? []
+              for (const retryItem of retryItems) {
+                void uploadLoChatDataForThread(retryThreadId, retryItem.messages, retryItem.attempt)
+              }
+            }, retryDelayMs)
+          }
+        }
+        console.warn("[Upload] chat数据上报失败:", error)
+      }
     },
-    [threadId]
+    []
+  )
+
+  const scheduleChatReportUpload = useCallback(
+    (targetThreadId: string, msgs: Message[]) => {
+      const existingTimer = chatReportUploadTimersRef.current[targetThreadId]
+      if (existingTimer) window.clearTimeout(existingTimer)
+      const messagesForUpload = msgs.slice()
+      chatReportUploadTimersRef.current[targetThreadId] = window.setTimeout(() => {
+        delete chatReportUploadTimersRef.current[targetThreadId]
+        void uploadLoChatDataForThread(targetThreadId, messagesForUpload)
+      }, CHAT_REPORT_UPLOAD_DEBOUNCE_MS)
+    },
+    [uploadLoChatDataForThread]
   )
 
   // Check if sandbox NUX is needed. The main process currently defaults sandbox mode to
@@ -2004,8 +2559,11 @@ export function ChatContainer({
   }, [isLoading, streamData.messages.length])
 
   useEffect(() => {
-    uploadLoChatData(threadMessages)
-  }, [threadMessages, uploadLoChatData])
+    if (historyLoading) return
+    if (!isLoading) {
+      scheduleChatReportUpload(threadId, threadMessages)
+    }
+  }, [historyLoading, isLoading, scheduleChatReportUpload, threadId, threadMessages])
 
   const handleApprovalDecision = useCallback(
     async (
@@ -2078,7 +2636,12 @@ export function ChatContainer({
           decision === "approve_session" || decision === "approve_permanent" ? "approve" : decision
         await stream.submit(null, {
           command: {
-            resume: { decision: legacyDecision, pendingCount: pendingApproval.pendingCount }
+            resume: {
+              decision: legacyDecision,
+              pendingCount: pendingApproval.pendingCount,
+              allowRuntimeRestoredCheckpointResume:
+                pendingApproval.allowRuntimeRestoredCheckpointResume === true
+            }
           },
           config: {
             configurable: { thread_id: threadId, model_id: currentModel, agent_mode: agentMode }
@@ -2268,19 +2831,16 @@ export function ChatContainer({
 
   const displayMessages = useMemo(() => {
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
-    const streamingMsgs: Message[] = ((streamData.messages || []) as StreamMessage[])
+    const streamingMsgs: Message[] = (streamData.liveMessages || [])
       .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
       .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
       .map((streamMsg) => {
-        let role: Message["role"] = "assistant"
-        if (streamMsg.type === "human") role = "user"
-        else if (streamMsg.type === "tool") role = "tool"
-        else if (streamMsg.type === "ai") role = "assistant"
+        const role = liveStreamMessageRole(streamMsg.type)
 
         return {
           id: streamMsg.id,
           role,
-          content: typeof streamMsg.content === "string" ? streamMsg.content : "",
+          content: normalizeLiveStreamMessageContent(streamMsg.content),
           tool_calls: streamMsg.tool_calls,
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
@@ -2288,12 +2848,8 @@ export function ChatContainer({
           ...(role === "tool" &&
             streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
           created_at: new Date(),
-          ...(streamMessageTimesRef.current[streamMsg.id]?.start_at && {
-            start_at: streamMessageTimesRef.current[streamMsg.id].start_at
-          }),
-          ...(streamMessageTimesRef.current[streamMsg.id]?.end_at && {
-            end_at: streamMessageTimesRef.current[streamMsg.id].end_at
-          }),
+          ...(streamMsg.start_at && { start_at: streamMsg.start_at }),
+          ...(streamMsg.end_at && { end_at: streamMsg.end_at }),
           ...(toDate(messageTimes[streamMsg.id]?.start_at) && {
             start_at: toDate(messageTimes[streamMsg.id]?.start_at)
           }),
@@ -2304,16 +2860,18 @@ export function ChatContainer({
       })
 
     // Clean up attachment XML tags in user messages for display
-    const allMessages = [...threadMessages, ...streamingMsgs].map((msg) => {
-      const storedTime = messageTimes[msg.id]
-      const startAt = toDate(storedTime?.start_at) ?? msg.start_at ?? msg.created_at
-      const endAt = toDate(storedTime?.end_at) ?? msg.end_at ?? startAt
-      return {
-        ...msg,
-        start_at: startAt,
-        end_at: endAt
-      }
-    })
+    const allMessages = [...threadMessages, ...streamingMsgs]
+      .filter(isVisibleCheckpointTranscriptMessage)
+      .map((msg) => {
+        const storedTime = messageTimes[msg.id]
+        const startAt = toDate(storedTime?.start_at) ?? msg.start_at ?? msg.created_at
+        const endAt = toDate(storedTime?.end_at) ?? msg.end_at ?? startAt
+        return {
+          ...msg,
+          start_at: startAt,
+          end_at: endAt
+        }
+      })
     const cleanedMessages = sortMessagesForDisplay(allMessages).map((msg) => {
       if (
         msg.role !== "user" ||
@@ -2342,7 +2900,7 @@ export function ChatContainer({
       return { ...msg, content: cleaned }
     })
     return filterCoordinatorNoiseMessages(cleanedMessages)
-  }, [threadMessages, streamData.messages, messageTimes])
+  }, [threadMessages, streamData.liveMessages, messageTimes])
 
   const userMessageIds = useMemo(
     () => displayMessages.filter((message) => message.role === "user").map((message) => message.id),
@@ -2726,12 +3284,60 @@ export function ChatContainer({
     skills: enabledSkillsForSlash,
     skillSelected: selectedSkill !== null
   })
+  const slashPopoverKind = slash.mode.kind
+  const hasPendingGoalTransportPayload = attachments.length > 0 || selectedSkill !== null
+  const hasActiveGoalRunning = goalUi.goal?.status === "active"
+  const goalControlAllowedWhileLoading =
+    streamData.isLoading && !scheduledTaskLoading && hasActiveGoalRunning
 
+  const {
+    inputDisabled,
+    composerControlsDisabled,
+    canSubmitGoalCommandWhileLoading,
+    allowSubmitWhileLoading,
+    goalSendButtonDisabledWhileLoading
+  } = resolveGoalRuntimeComposerState({
+    input,
+    isLoading,
+    historyLoading,
+    slashModeKind: slashPopoverKind,
+    hasActiveGoal: hasActiveGoalRunning,
+    hasPendingTransportPayload: hasPendingGoalTransportPayload,
+    goalControlAllowedWhileLoading
+  })
+  const inputPlaceholder = useMemo(() => {
+    const goal = goalUi.goal
+    if (isLoading) {
+      if (streamData.isLoading && !scheduledTaskLoading && hasActiveGoalRunning) {
+        return "Goal 运行中：可输入 /goal status、/goal pause、/goal clear"
+      }
+      if (streamData.isLoading && !scheduledTaskLoading) {
+        return "任务运行中，可先编辑草稿，完成后再发送"
+      }
+      return "任务运行中，可使用取消按钮停止当前任务"
+    }
+    if (attachments.length > 0) return "输入消息或直接发送文件..."
+    if (!goal) return "向 CMBDevClaw 提问，/ 输入命令；Shift + Enter 换行"
+    if (goal.status === "active") {
+      return "输入新消息会暂停当前 Goal；查看详情用 /goal status"
+    }
+    if (goal.status === "paused") {
+      return "补充说明，或点击继续 Goal"
+    }
+    return "输入新问题，或用 /goal <目标> 开始新的长期任务"
+  }, [
+    attachments.length,
+    goalUi.goal,
+    hasActiveGoalRunning,
+    goalControlAllowedWhileLoading,
+    isLoading,
+    scheduledTaskLoading,
+    streamData.isLoading
+  ])
   // Refresh skill list whenever the popover opens so customize-panel
   // enable/disable changes reflect without an app restart.
-  const slashPopoverKind = slash.mode.kind
   useEffect(() => {
-    if (slashPopoverKind === "skill") {
+    if (slashPopoverKind === "slash") {
       void loadSkills()
     }
   }, [slashPopoverKind, loadSkills])
@@ -2754,210 +3360,572 @@ export function ChatContainer({
     setDurationMap(turnTimings)
   }, [turnTimings])
 
+  const applySlashCommand = useCallback(
+    (command: SlashCommandItem) => {
+      const nextInput = command.insertText
+      setInput(nextInput)
+      slashResetSelection()
+      requestAnimationFrame(() => {
+        const textarea = inputRef.current
+        if (!textarea) return
+        textarea.focus()
+        const cursor = nextInput.length
+        textarea.setSelectionRange(cursor, cursor)
+      })
+    },
+    [setInput, slashResetSelection]
+  )
+
+  const appendVisibleUserMessageWithTime = useCallback(
+    async (content: string, options: { persistTiming?: boolean } = {}): Promise<Message> => {
+      const userStartAt = new Date()
+      const userMessage: Message = {
+        id: crypto.randomUUID(),
+        role: "user",
+        content,
+        created_at: new Date(),
+        start_at: userStartAt,
+        end_at: userStartAt
+      }
+      appendMessage(userMessage)
+      if (options.persistTiming === false) return userMessage
+
+      const userMessageTime: MessageTimeMap = {
+        [userMessage.id]: {
+          start_at: userStartAt.toISOString(),
+          end_at: userStartAt.toISOString()
+        }
+      }
+      setMessageTimes((prev) => ({ ...prev, ...userMessageTime }))
+      try {
+        await window.api.threads.mergeThreadValues(threadId, {
+          [MESSAGE_TIMES_THREAD_VALUE_KEY]: userMessageTime,
+          [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: messageTimeOrderEntries(userMessageTime)
+        })
+      } catch (error) {
+        console.warn("[ChatContainer] Failed to save user message time:", error)
+      }
+      return userMessage
+    },
+    [appendMessage, threadId]
+  )
+
+  const showGoalControlNotice = useCallback((rawMessage?: string): void => {
+    const message = formatGoalEventMessage(rawMessage ?? "").trim()
+    if (!message) return
+    if (message.startsWith("✓ Goal 已完成") || message.startsWith("Goal 已完成")) {
+      toast.success(message)
+      return
+    }
+    if (
+      message.startsWith("Goal 已暂停") ||
+      message.startsWith("Ⅱ Goal 已暂停") ||
+      message.startsWith("Goal 等待补充信息")
+    ) {
+      toast.warning(message)
+      return
+    }
+    toast.info(message)
+  }, [])
+
+  const submitGoalResumeCommand = useCallback(async (): Promise<void> => {
+    if (!stream || historyLoading || isLoading || scheduledTaskLoading) return
+    if (!tryAcquireSubmitInFlightLock(submitInFlightRef, true, threadId)) return
+    try {
+      const pendingApprovalRecord = pendingApproval as unknown as Record<string, unknown> | null
+      if (pendingApproval && !pendingApprovalRecord?._orchestratorRequestId) {
+        setError("当前有待审批操作，请先处理审批卡片，再发送 /goal resume。")
+        return
+      }
+      if (threadError) {
+        clearError()
+      }
+      if (!currentModel) {
+        setError("请先在下方选择模型后再继续 goal。")
+        return
+      }
+      const selectedModel = models.find((m) => m.id === currentModel)
+      if (!selectedModel) {
+        setError("当前线程模型不存在，请重新选择模型。")
+        return
+      }
+      if (!selectedModel.available) {
+        setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+        return
+      }
+      if (!workspacePath) {
+        setError("请先选择一个工作区文件夹再继续 goal。")
+        return
+      }
+      setInput("")
+      setAttachments([])
+      setSelectedSkill(null)
+      insertLog("send: /goal resume")
+      await appendVisibleUserMessageWithTime("/goal resume", { persistTiming: false })
+      await stream.submit(
+        {
+          messages: [{ type: "human", content: "/goal resume" }]
+        },
+        {
+          config: {
+            configurable: { thread_id: threadId, model_id: currentModel }
+          }
+        }
+      )
+    } finally {
+      releaseSubmitInFlightLock(submitInFlightRef, true, threadId)
+    }
+  }, [
+    clearError,
+    currentModel,
+    historyLoading,
+    isLoading,
+    models,
+    pendingApproval,
+    scheduledTaskLoading,
+    setError,
+    setAttachments,
+    setInput,
+    setSelectedSkill,
+    appendVisibleUserMessageWithTime,
+    stream,
+    threadError,
+    threadId,
+    workspacePath
+  ])
+
+  const applyGoalPanelCommand = useCallback(
+    (command: string) => {
+      if (historyLoading) {
+        toast.warning("线程历史正在恢复，请稍后再操作 Goal。")
+        return
+      }
+      if (command === "/goal resume") {
+        if (isLoading || scheduledTaskLoading) {
+          toast.warning("当前任务运行中，请等待完成后再继续 Goal。")
+          return
+        }
+        void submitGoalResumeCommand()
+        return
+      }
+      if (isLoading && !goalControlAllowedWhileLoading) {
+        toast.warning("当前任务运行中，请等待完成后再操作 Goal。")
+        return
+      }
+      void (async () => {
+        const route = resolveGoalControlSubmitRoute({
+          isGoalControlCommand: true,
+          isLoading,
+          historyLoading,
+          hasActiveGoal: hasActiveGoalRunning,
+          goalControlAllowedWhileLoading
+        })
+        if (!route.shouldUseGoalControlPlane) {
+          toast.warning("当前任务运行中，请等待完成后再操作 Goal。")
+          return
+        }
+        const shouldLockGoalControl = route.shouldUseSubmitLock
+        if (!tryAcquireSubmitInFlightLock(submitInFlightRef, shouldLockGoalControl, threadId)) {
+          return
+        }
+        try {
+          if (threadError) {
+            clearError()
+          }
+          insertLog("send: " + command)
+          const result = await window.api.agent.goalControl(threadId, command)
+          if (command === "/goal" || command === "/goal status") {
+            setGoalDetailsOpen(true)
+          }
+          if (!route.isSideChannelGoalControl) {
+            showGoalControlNotice(
+              (command === "/goal" || command === "/goal status") && result.notice?.goalId
+                ? "Goal 状态已刷新。"
+                : result.notice?.message
+            )
+          }
+          void refreshGoalUi({ includeEvents: true })
+          if (
+            pendingApproval &&
+            isGoalTerminatingControlCommandInput(command) &&
+            result.terminatedCurrentRun
+          ) {
+            const approvalAny = pendingApproval as unknown as Record<string, unknown>
+            if (approvalAny._orchestratorRequestId) {
+              window.api.sandbox.sendApprovalDecision({
+                requestId: approvalAny._orchestratorRequestId as string,
+                type: "reject",
+                tool_call_id: pendingApproval.tool_call?.id || ""
+              })
+            }
+            setSaveToolMetadataLoading(false)
+            setPendingApproval(null)
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Goal 控制命令执行失败。"
+          setError(message)
+        } finally {
+          releaseSubmitInFlightLock(submitInFlightRef, shouldLockGoalControl, threadId)
+        }
+      })()
+    },
+    [
+      clearError,
+      hasActiveGoalRunning,
+      goalControlAllowedWhileLoading,
+      historyLoading,
+      isLoading,
+      pendingApproval,
+      refreshGoalUi,
+      setSaveToolMetadataLoading,
+      setError,
+      setPendingApproval,
+      showGoalControlNotice,
+      submitGoalResumeCommand,
+      scheduledTaskLoading,
+      threadError,
+      threadId
+    ]
+  )
+
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault()
+    const trimmedInput = input.trim()
+    const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
+    const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
     // popover is open — the send button is disabled, and handleKeyDown's
     // popover branch returns before reaching handleSubmit. Kept here so any
     // future invoker (hotkey, programmatic call) can't accidentally ship the
     // literal "/xxx" text as a message.
-    if (slash.mode.kind === "skill") return
-    if ((!input.trim() && attachments.length === 0 && !selectedSkill) || inputDisabled || !stream)
-      return
-
-    if (!currentModel) {
-      setError("请先在下方选择模型后再发送消息。")
-      return
-    }
-
-    const selectedModel = models.find((m) => m.id === currentModel)
-    if (!selectedModel) {
-      setError("当前线程模型不存在，请重新选择模型。")
-      return
-    }
-
-    if (!selectedModel.available) {
-      setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
-      return
-    }
-
-    if (!workspacePath) {
-      setError("请先选择一个工作区文件夹再发送消息。")
-      return
-    }
-
-    if (threadError) {
-      clearError()
-    }
-
-    if (pendingApproval || approvalQueue.length > 0) {
-      // P0 fix: notify main process to reject the pending approval instead of silently dropping it.
-      // Otherwise the orchestrator's Promise hangs until the 5-minute timeout.
-      for (const approval of [pendingApproval, ...approvalQueue].filter(Boolean)) {
-        const approvalAny = approval as unknown as Record<string, unknown>
-        if (approvalAny._orchestratorRequestId) {
-          window.api.sandbox.sendApprovalDecision({
-            requestId: approvalAny._orchestratorRequestId as string,
-            type: "reject",
-            tool_call_id: approval?.tool_call?.id || ""
-          })
-        }
-      }
-      if (pendingApproval) {
-        setToolCallState(pendingApproval.tool_call?.id || "", { status: "rejected" })
-      }
-      clearPendingApprovals()
-    }
-
-    // Snapshot the skill selection before we clear it — synchronous path, no
-    // async gap, so no token/stillOurs needed.
-    const skill = selectedSkill
-    const rawMessage = input.trim()
-    const currentAttachments = attachments.length > 0 ? [...attachments] : undefined
-    // If user only uploaded files without text, add a default prompt.
-    // skill-only sends (text empty, no attachments) still fall into this branch
-    // because the default prompt requires attachments — for skill-only we let
-    // userText stay empty and rely on the trailing skill-use block as the signal.
-    // When a skill is active we also skip the default prompt: the skill's own
-    // instruction will tell the model what to do with the attachment, and a
-    // generic "请分析以下文件内容" would compete with it.
-    const userText = rawMessage || (currentAttachments && !skill ? "请分析以下文件内容。" : "")
-    setInput("")
-    setAttachments([])
-    if (skill) setSelectedSkill(null)
-    insertLog("send: " + (userText || (skill ? `[skill-only: ${skill.name}]` : "")))
-
-    const isFirstMessage = threadMessages.length === 0
-
-    // Build the full message with attachments as XML tags (sent to model)
-    let fullMessage = userText
-    if (currentAttachments && currentAttachments.length > 0) {
-      const attachmentTexts = currentAttachments.map((att) => {
-        const truncAttr = att.truncated ? ' truncated="true"' : ""
-        const pathAttr = att.filePath ? ` path="${escXml(att.filePath)}"` : ""
-        const safeContent = att.content.replace(/<\/attachment>/gi, "< /attachment>")
-        return `\n\n<attachment filename="${escXml(att.filename)}"${pathAttr} type="${att.mimeType}" size="${att.size}"${truncAttr}>\n${safeContent}\n</attachment>`
-      })
-      fullMessage = userText + attachmentTexts.join("")
-    }
-
-    // Append the skill-use block at the very end. The model is told to `read`
-    // the SKILL.md on its own — we don't inline the body. Hooks/routing/memory
-    // see this block verbatim; they don't need to know it's a slash command.
-    // join(\n\n) on filtered parts avoids leading blank lines when the user
-    // sends a skill with no text or attachments (skill-only invocation).
-    const skillBlock = skill
-      ? formatSkillUseBlock({
-          name: skill.name,
-          path: skill.path,
-          description: skill.description,
-          metadata: skill.metadata,
-          allowedTools: skill.allowedTools
-        })
-      : ""
-    fullMessage = [fullMessage, skillBlock].filter(Boolean).join("\n\n")
-
-    // displayContent is what the user sees in their bubble while this run is
-    // in-memory. It carries the trailing skill block so MessageBubble's
-    // tail-anchored parser can render the chip and strip it back out.
-    //
-    // Note: the *checkpointed* version of this message is `fullMessage` (the
-    // full payload sent to the model, including <attachment>…</attachment>
-    // bodies), not displayContent. After a thread reload, MessageBubble
-    // therefore renders chip + raw attachment XML instead of chip + 📎 names.
-    // That replay-vs-live divergence is a pre-existing limitation of the
-    // attachment pipeline and is not introduced by the slash-command code.
-    let displayContent: string = userText
-    if (currentAttachments && currentAttachments.length > 0) {
-      const fileNames = currentAttachments.map((a) => `📎 ${a.filename}`).join("\n")
-      displayContent = `${fileNames}\n\n${userText}`
-    }
-    displayContent = [displayContent, skillBlock].filter(Boolean).join("\n\n")
+    if (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) return
     if (
-      /\[\[CMB_COORDINATOR_(?:WORKER_NOTIFICATION|INTERNAL_(?:CONTEXT|NOTIFICATION)_(?:START|END))\]\]/.test(
-        displayContent
+      (!trimmedInput && attachments.length === 0 && !selectedSkill) ||
+      historyLoading ||
+      (isLoading && !allowSubmitWhileLoading) ||
+      !stream
+    )
+      return
+
+    const goalControlWithPendingTransport =
+      hasPendingGoalTransportPayload &&
+      isGoalSlashTransportSensitiveControlCommandInput(trimmedInput)
+    if (goalControlWithPendingTransport) {
+      setError(
+        "附件和显式技能不会用于 /goal 控制命令。请先移除附件/技能，或改成 /goal <目标/完成条件>。"
       )
-    ) {
-      displayContent = `用户输入的普通文本：\n\n${displayContent}`
+      return
     }
-    const coordinatorPrefixed = /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(fullMessage)
-    let submitAgentMode: ChatAgentMode = coordinatorPrefixed ? "coordinator" : agentMode
-    if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
-      submitAgentMode = await loadResolvedAgentMode().catch((error) => {
-        console.warn("[ChatContainer] Failed to resolve submit agent mode:", error)
-        return agentMode
-      })
-      agentModeHydratedRef.current = true
-      if (submitAgentMode !== agentMode) {
-        setAgentMode(submitAgentMode)
+
+    const bypassGoalControlValidation = isGoalSlashControlCommandInput(trimmedInput)
+    const goalControlRoute = resolveGoalControlSubmitRoute({
+      isGoalControlCommand: bypassGoalControlValidation,
+      isLoading,
+      historyLoading,
+      hasActiveGoal: hasActiveGoalRunning,
+      goalControlAllowedWhileLoading
+    })
+    const isSideChannelGoalControl = goalControlRoute.isSideChannelGoalControl
+
+    if (goalControlRoute.shouldUseGoalControlPlane) {
+      const shouldLockGoalControl = goalControlRoute.shouldUseSubmitLock
+      if (!tryAcquireSubmitInFlightLock(submitInFlightRef, shouldLockGoalControl, threadId)) return
+      try {
+        if (threadError) {
+          clearError()
+        }
+        setInput("")
+        if (shouldOpenGoalDetailsForStatus) {
+          setGoalDetailsOpen(true)
+        }
+        insertLog("send: " + trimmedInput)
+        const goalControlResult = await window.api.agent.goalControl(threadId, trimmedInput)
+        if (!isSideChannelGoalControl) {
+          showGoalControlNotice(
+            shouldOpenGoalDetailsForStatus && goalControlResult.notice?.goalId
+              ? "Goal 状态已刷新。"
+              : goalControlResult.notice?.message
+          )
+        }
+        void refreshGoalUi({ includeEvents: true })
+        if (
+          shouldClearPendingApprovalAfterGoalControl({
+            hasPendingApproval: Boolean(pendingApproval),
+            isTerminatingControlCommand: isGoalTerminatingControlCommandInput(trimmedInput),
+            terminatedCurrentRun: goalControlResult.terminatedCurrentRun
+          })
+        ) {
+          const approval = pendingApproval
+          if (!approval) return
+          const approvalAny = approval as unknown as Record<string, unknown>
+          if (approvalAny._orchestratorRequestId) {
+            window.api.sandbox.sendApprovalDecision({
+              requestId: approvalAny._orchestratorRequestId as string,
+              type: "reject",
+              tool_call_id: approval.tool_call?.id || ""
+            })
+          }
+          setSaveToolMetadataLoading(false)
+          setPendingApproval(null)
+        }
+      } finally {
+        releaseSubmitInFlightLock(submitInFlightRef, shouldLockGoalControl, threadId)
       }
-    }
-    if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
-      agentModeHydratedRef.current = true
-      setAgentMode("coordinator")
+      return
     }
 
-    const userMessage: Message = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: displayContent,
-      created_at: new Date()
-    }
-    appendMessage(userMessage)
+    const shouldLockSubmit = shouldUseSubmitInFlightLock({ isSideChannelGoalControl })
+    if (!tryAcquireSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)) return
 
-    if (isFirstMessage) {
-      const currentThread = threads.find((t) => t.thread_id === threadId)
-      const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
-      if (hasDefaultTitle) {
-        // skill-only sends have empty userText. Fall back to the skill name so
-        // the sidebar shows something meaningful instead of the raw thread id.
-        const titleSource = userText || (skill ? `使用 ${skill.name}` : "")
-        if (titleSource) {
-          generateTitleForFirstMessage(threadId, titleSource)
+    try {
+      const pendingApprovalRecord = pendingApproval as unknown as Record<string, unknown> | null
+      if (
+        pendingApproval &&
+        !pendingApprovalRecord?._orchestratorRequestId &&
+        isGoalSlashResumeCommandInput(trimmedInput)
+      ) {
+        setError("当前有待审批操作，请先处理审批卡片，再发送 /goal resume。")
+        return
+      }
+
+      if (!bypassGoalControlValidation) {
+        if (!currentModel) {
+          setError("请先在下方选择模型后再发送消息。")
+          return
+        }
+
+        const selectedModel = models.find((m) => m.id === currentModel)
+        if (!selectedModel) {
+          setError("当前线程模型不存在，请重新选择模型。")
+          return
+        }
+
+        if (!selectedModel.available) {
+          setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+          return
+        }
+
+        if (!workspacePath) {
+          setError("请先选择一个工作区文件夹再发送消息。")
+          return
         }
       }
-    }
 
-    const startTime = Date.now()
-    setDurationNow(0)
-    let timer = setInterval(() => {
-      setDurationNow((t) => t + 1)
-    }, 1000)
+      if (threadError) {
+        clearError()
+      }
 
-    await stream.submit(
-      {
-        messages: [{ type: "human", content: fullMessage }]
-      },
-      {
-        config: {
-          configurable: {
-            thread_id: threadId,
-            model_id: currentModel,
-            agent_mode: submitAgentMode,
-            hook_turn_id: userMessage.id
+      if (pendingApproval || approvalQueue.length > 0) {
+        // P0 fix: notify main process to reject the pending approval instead of silently dropping it.
+        // Otherwise the orchestrator's Promise hangs until the 5-minute timeout.
+        for (const approval of [pendingApproval, ...approvalQueue].filter(Boolean)) {
+          const approvalAny = approval as unknown as Record<string, unknown>
+          if (approvalAny._orchestratorRequestId) {
+            window.api.sandbox.sendApprovalDecision({
+              requestId: approvalAny._orchestratorRequestId as string,
+              type: "reject",
+              tool_call_id: approval?.tool_call?.id || ""
+            })
+          }
+        }
+        if (pendingApproval) {
+          setToolCallState(pendingApproval.tool_call?.id || "", { status: "rejected" })
+        }
+        clearPendingApprovals()
+      }
+
+      // Snapshot the skill selection before we clear it — synchronous path, no
+      // async gap, so no token/stillOurs needed.
+      const skill = selectedSkill
+      const rawMessage = trimmedInput
+      const currentAttachments = attachments.length > 0 ? [...attachments] : undefined
+      // If user only uploaded files without text, add a default prompt.
+      // skill-only sends (text empty, no attachments) still fall into this branch
+      // because the default prompt requires attachments — for skill-only we let
+      // userText stay empty and rely on the trailing skill-use block as the signal.
+      // When a skill is active we also skip the default prompt: the skill's own
+      // instruction will tell the model what to do with the attachment, and a
+      // generic "请分析以下文件内容" would compete with it.
+      const userText = rawMessage || (currentAttachments && !skill ? "请分析以下文件内容。" : "")
+      setInput("")
+      setAttachments([])
+      if (skill) setSelectedSkill(null)
+      if (shouldOpenGoalDetailsForStatus) {
+        setGoalDetailsOpen(true)
+      }
+      insertLog("send: " + (userText || (skill ? `[skill-only: ${skill.name}]` : "")))
+
+      const isFirstMessage = threadMessages.length === 0
+      // Keep real user intent visible in the transcript. Goal status/pause/clear
+      // are side-channel controls, but `/goal <objective>` and `/goal resume`
+      // are user turns and should appear immediately in live UI.
+      const shouldAppendVisibleUserMessage = !bypassGoalControlValidation
+
+      // Build the full message with attachments as XML tags (sent to model)
+      let fullMessage = userText
+      if (currentAttachments && currentAttachments.length > 0) {
+        const attachmentTexts = currentAttachments.map((att) => {
+          const truncAttr = att.truncated ? ' truncated="true"' : ""
+          const pathAttr = att.filePath ? ` path="${escXml(att.filePath)}"` : ""
+          const safeContent = att.content.replace(/<\/attachment>/gi, "< /attachment>")
+          return `\n\n<attachment filename="${escXml(att.filename)}"${pathAttr} type="${att.mimeType}" size="${att.size}"${truncAttr}>\n${safeContent}\n</attachment>`
+        })
+        fullMessage = userText + attachmentTexts.join("")
+      }
+
+      // Append the skill-use block at the very end. The model is told to `read`
+      // the SKILL.md on its own — we don't inline the body. Hooks/routing/memory
+      // see this block verbatim; they don't need to know it's a slash command.
+      // join(\n\n) on filtered parts avoids leading blank lines when the user
+      // sends a skill with no text or attachments (skill-only invocation).
+      const skillBlock = skill
+        ? formatSkillUseBlock({
+            name: skill.name,
+            path: skill.path,
+            description: skill.description,
+            metadata: skill.metadata,
+            allowedTools: skill.allowedTools
+          })
+        : ""
+      fullMessage = [fullMessage, skillBlock].filter(Boolean).join("\n\n")
+
+      // displayContent is what the user sees in their bubble while this run is
+      // in-memory. It carries the trailing skill block so MessageBubble's
+      // tail-anchored parser can render the chip and strip it back out.
+      //
+      // Note: the *checkpointed* version of this message is `fullMessage` (the
+      // full payload sent to the model, including <attachment>…</attachment>
+      // bodies), not displayContent. After a thread reload, MessageBubble
+      // therefore renders chip + raw attachment XML instead of chip + 📎 names.
+      // That replay-vs-live divergence is a pre-existing limitation of the
+      // attachment pipeline and is not introduced by the slash-command code.
+      let displayContent: string = userText
+      if (currentAttachments && currentAttachments.length > 0) {
+        const fileNames = currentAttachments.map((a) => `📎 ${a.filename}`).join("\n")
+        displayContent = `${fileNames}\n\n${userText}`
+      }
+      displayContent = [displayContent, skillBlock].filter(Boolean).join("\n\n")
+      if (
+        /\[\[CMB_COORDINATOR_(?:WORKER_NOTIFICATION|INTERNAL_(?:CONTEXT|NOTIFICATION)_(?:START|END))\]\]/.test(
+          displayContent
+        )
+      ) {
+        displayContent = `用户输入的普通文本：\n\n${displayContent}`
+      }
+
+      const coordinatorPrefixed = /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(
+        fullMessage
+      )
+      let submitAgentMode: ChatAgentMode = coordinatorPrefixed ? "coordinator" : agentMode
+      if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
+        submitAgentMode = await loadResolvedAgentMode().catch((error) => {
+          console.warn("[ChatContainer] Failed to resolve submit agent mode:", error)
+          return agentMode
+        })
+        agentModeHydratedRef.current = true
+        if (submitAgentMode !== agentMode) {
+          setAgentMode(submitAgentMode)
+        }
+      }
+      if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
+        agentModeHydratedRef.current = true
+        setAgentMode("coordinator")
+      }
+
+      // 用户消息本身不消耗 assistant 响应时间，start_at/end_at 都取发送时刻。
+      //
+      // 但 user.start_at 是本轮耗时计算的起点：展示 CMBDevClaw 后面的 duration 时，会找到
+      // 当前 user 后面的第一条 assistant，再减到下一个 user 之前最后一条消息的 end_at。
+      // 所以 user 也必须持久化 start_at/end_at，否则重启后无法还原该轮起点。
+      let visibleUserMessage: Message | null = null
+      if (shouldAppendVisibleUserMessage) {
+        // 用户消息也需要持久化起止时间，后续 duration 用 user.start_at 作为起点。
+        //
+        // 这里先立即写入 thread_values，是为了尽量保证即使 assistant 回复还没结束，
+        // 当前 user 的起点也已经保存下来；assistant/tool 的结束时间会在 loading 结束后补齐。
+        //
+        // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。user message 在前端先 append，
+        // checkpoint 恢复时 id 可能不一定完全一致；因此仍需要顺序数组作为兜底。
+        visibleUserMessage = await appendVisibleUserMessageWithTime(displayContent, {
+          persistTiming: !isGoalSlashInput
+        })
+      }
+
+      const shouldGenerateTitleForGoalSet =
+        isGoalSlashInput &&
+        !isGoalSlashControlCommandInput(userText) &&
+        !isGoalSlashResumeCommandInput(userText)
+      const shouldGenerateTitleForFirstMessage =
+        isFirstMessage &&
+        shouldAppendVisibleUserMessage &&
+        (!isGoalSlashInput || shouldGenerateTitleForGoalSet)
+
+      if (shouldGenerateTitleForFirstMessage) {
+        const currentThread = threads.find((t) => t.thread_id === threadId)
+        const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
+        if (hasDefaultTitle) {
+          // skill-only sends have empty userText. Fall back to the skill name so
+          // the sidebar shows something meaningful instead of the raw thread id.
+          const goalTitleSource = isGoalSlashInput
+            ? splitGoalTransportPayload(userText)
+                .commandText.replace(/^\/goal\b/i, "")
+                .trim()
+            : ""
+          const titleSource =
+            (isGoalSlashInput ? goalTitleSource : userText) || (skill ? `使用 ${skill.name}` : "")
+          if (titleSource) {
+            generateTitleForFirstMessage(threadId, titleSource)
           }
         }
       }
-    )
 
-    setDurationNow(0)
-    clearInterval(timer)
+      const startTime = Date.now()
+      setDurationNow(0)
+      const timer = setInterval(() => {
+        setDurationNow((t) => t + 1)
+      }, 1000)
 
-    const endTime = Date.now()
-    const map = {
-      duration: endTime - startTime,
-      thread_id: threadId,
-      user_id: userMessage.id,
-      sendTime: startTime
+      try {
+        await stream.submit(
+        {
+          messages: [{ type: "human", content: fullMessage }]
+        },
+        {
+          config: {
+            configurable: {
+              thread_id: threadId,
+              model_id: currentModel,
+              agent_mode: submitAgentMode,
+              ...(visibleUserMessage?.id ? { hook_turn_id: visibleUserMessage.id } : {})
+            }
+          }
+        }
+      )
+      } finally {
+        setDurationNow(0)
+        clearInterval(timer)
+      }
+
+      if (visibleUserMessage) {
+        const endTime = Date.now()
+        const map = {
+          duration: endTime - startTime,
+          thread_id: threadId,
+          user_id: visibleUserMessage.id,
+          sendTime: startTime
+        }
+        const nextDurationMap = [
+          ...durationMap.filter(
+            (item) => !(item.thread_id === threadId && item.user_id === visibleUserMessage.id)
+          ),
+          map
+        ]
+        setDurationMap(nextDurationMap)
+        setTurnTimings(nextDurationMap)
+      }
+    } finally {
+      releaseSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)
     }
-    const nextDurationMap = [
-      ...durationMap.filter(
-        (item) => !(item.thread_id === threadId && item.user_id === userMessage.id)
-      ),
-      map
-    ]
-    setDurationMap(nextDurationMap)
-    setTurnTimings(nextDurationMap)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
@@ -2965,8 +3933,14 @@ export function ChatContainer({
     const isComposing = e.nativeEvent.isComposing || isComposingRef.current
     if (isComposing) return
 
-    // Skill popover nav takes over keys while open.
-    if (slash.mode.kind === "skill") {
+    // Slash popover nav takes over keys while open.
+    if (slash.mode.kind === "slash") {
+      if (e.key === "Enter" && !e.shiftKey && isBareGoalSlashCommandInput(input)) {
+        e.preventDefault()
+        const form = (e.currentTarget as HTMLTextAreaElement).form
+        form?.requestSubmit()
+        return
+      }
       if (e.key === "ArrowDown") {
         e.preventDefault()
         slash.moveSelection(1)
@@ -2983,7 +3957,15 @@ export function ChatContainer({
         return
       }
       if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
-        const s = slash.mode.skills[slash.selectedIdx]
+        const command = slash.mode.commands[slash.selectedIdx]
+        if (command) {
+          e.preventDefault()
+          applySlashCommand(command)
+          return
+        }
+
+        const skillIdx = slash.selectedIdx - slash.mode.commands.length
+        const s = slash.mode.skills[skillIdx]
         if (s) {
           e.preventDefault()
           applySkillSelection(s)
@@ -3068,7 +4050,13 @@ export function ChatContainer({
       // foreground turn only. Durable background workers are stopped explicitly
       // via the separate background-worker stop control.
       threadContext.suppressCoordinatorNotificationAutoRun(threadId)
-      await Promise.all([stream?.stop(), window.api.agent.cancel(threadId)])
+      try {
+        await Promise.all([stream?.stop(), window.api.agent.cancel(threadId)])
+      } finally {
+        if (goalUi.goal) {
+          void refreshGoalUi({ includeEvents: true })
+        }
+      }
     }
   }
 
@@ -3727,6 +4715,41 @@ export function ChatContainer({
     },
     [extractMessageText, setInput, skills, setSelectedSkill]
   )
+
+  const handleSetGoalFromMessage = useCallback(
+    (text: string): void => {
+      const body = text.trim()
+      if (!body) {
+        toast.error("这条消息没有可设置为 Goal 的内容")
+        return
+      }
+      const nextInput = /^\/goal(?:\s|$)/i.test(body) ? body : `/goal ${body}`
+      setInput(nextInput)
+      requestAnimationFrame(() => {
+        const textarea = inputRef.current
+        if (!textarea) return
+        textarea.focus()
+        textarea.setSelectionRange(nextInput.length, nextInput.length)
+      })
+      toast.success("已填入 Goal 草稿，确认后发送")
+    },
+    [setInput]
+  )
+
+  const handleEditGoal = useCallback((): void => {
+    const objective = goalUi.goal?.objective?.trim()
+    if (!objective) return
+    const nextInput = `/goal ${objective}`
+    setInput(nextInput)
+    setGoalDetailsOpen(false)
+    requestAnimationFrame(() => {
+      const textarea = inputRef.current
+      if (!textarea) return
+      textarea.focus()
+      textarea.setSelectionRange(nextInput.length, nextInput.length)
+    })
+    toast.success("已填入当前 Goal，可编辑后重新设置")
+  }, [goalUi.goal?.objective, setInput])
   // Inlined as JSX (not components) to avoid React remounting on every parent render —
   // declaring a component inside the parent creates a new function reference each render,
   // which causes children to lose focus/animation state.
@@ -4160,6 +5183,7 @@ export function ChatContainer({
                     pendingApproval={pendingApproval}
                     onApprovalDecision={handleApprovalDecision}
                     onEditUserMessage={handleEditUserMessage}
+                    onSetGoalFromMessage={handleSetGoalFromMessage}
                     threadId={threadId}
                     isLoading={isLoading}
                   />
@@ -4534,8 +5558,30 @@ export function ChatContainer({
             })()}
         </div>
       )}
+      {goalUi.goal && (
+        <div
+          className={cn(
+            "px-4 pb-1",
+            userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
+          )}
+        >
+          <GoalStatusPanel
+            goalUi={goalUi}
+            open={goalDetailsOpen}
+            onOpenChange={setGoalDetailsOpen}
+            onCommand={applyGoalPanelCommand}
+            onEditGoal={handleEditGoal}
+          />
+        </div>
+      )}
       {/* Input */}
-      <div className={cn("p-4", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
+      <div
+        className={cn(
+          "px-4 pb-4",
+          goalUi.goal ? "pt-1" : "pt-4",
+          userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
+        )}
+      >
         {showGitChangeNotice && (
           <div className="max-w-3xl mx-auto mb-2 flex items-center justify-between gap-3 rounded-xl border border-status-warning/40 bg-status-warning/10 px-3 py-2">
             <div className="min-w-0 flex items-center gap-2 text-[12px] text-foreground">
@@ -4557,6 +5603,7 @@ export function ChatContainer({
             mode={slash.mode}
             selectedIdx={slash.selectedIdx}
             onHoverIdx={slash.setSelectedIdx}
+            onSelectCommand={applySlashCommand}
             onSelectSkill={applySkillSelection}
             skillsLoading={skillsLoading}
           />
@@ -4651,11 +5698,7 @@ export function ChatContainer({
                     isComposingRef.current = false
                   }}
                   onKeyDown={handleKeyDown}
-                  placeholder={
-                    attachments.length > 0
-                      ? "输入消息或直接发送文件..."
-                      : "向 CMBDevClaw 提问，/ 输入命令；Shift + Enter 换行"
-                  }
+                  placeholder={inputPlaceholder}
                   disabled={inputDisabled}
                   className={cn(
                     "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
@@ -4672,7 +5715,7 @@ export function ChatContainer({
                     <button
                       type="button"
                       disabled={
-                        inputDisabled ||
+                        composerControlsDisabled ||
                         attachmentLoading ||
                         attachments.length >= MAX_ATTACHMENTS ||
                         totalAttachmentChars >= MAX_TOTAL_CHARS
@@ -4718,15 +5761,27 @@ export function ChatContainer({
                       </Tooltip>
                     </TooltipProvider>
                     {isLoading ? (
-                      <button
-                        type="button"
-                        onClick={handleCancel}
-                        aria-label="停止生成"
-                        title="停止生成"
-                        className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
-                      >
-                        <Square className="size-3 fill-current" />
-                      </button>
+                      <>
+                        {canSubmitGoalCommandWhileLoading && (
+                          <button
+                            type="submit"
+                            disabled={goalSendButtonDisabledWhileLoading}
+                            aria-label="发送 goal 命令"
+                            className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <Send className="size-3.5" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handleCancel}
+                          aria-label="停止生成"
+                          title="停止生成"
+                          className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+                        >
+                          <Square className="size-3 fill-current" />
+                        </button>
+                      </>
                     ) : (
                       <>
                         {hasRunningCoordinatorWorker && (
@@ -4745,7 +5800,7 @@ export function ChatContainer({
                           disabled={
                             inputDisabled ||
                             (!input.trim() && attachments.length === 0 && !selectedSkill) ||
-                            slash.mode.kind === "skill"
+                            (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(input))
                           }
                           className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                         >

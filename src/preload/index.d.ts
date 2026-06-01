@@ -336,6 +336,20 @@ interface CustomAPI {
       decision: HITLDecision,
       onEvent?: (event: StreamEvent) => void
     ) => () => void
+    goalControl: (
+      threadId: string,
+      message: string
+    ) => Promise<{
+      handled: boolean
+      terminatedCurrentRun: boolean
+      notice?: {
+        message: string
+        goalId: string | null
+        activeWindowId: string | null
+        eventId: number | null
+        createdAt: number
+      }
+    }>
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }) => Promise<void>
     getCoordinatorWorkers: (
       threadId: string,
@@ -368,12 +382,61 @@ interface CustomAPI {
     get: (threadId: string) => Promise<Thread | null>
     create: (metadata?: Record<string, unknown>) => Promise<Thread>
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
+    mergeThreadValues: (threadId: string, patch: Record<string, unknown>) => Promise<Thread>
     delete: (threadId: string) => Promise<void>
     exportSession: (
       threadId: string
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     getHistory: (threadId: string) => Promise<unknown[]>
     getLatestCheckpoint: (threadId: string) => Promise<unknown | null>
+    getGoalEvents: (threadId: string, options?: { restore?: boolean; limit?: number }) => Promise<
+      Array<{
+        event_id: number
+        thread_id: string
+        goal_id: string | null
+        active_window_id: string | null
+        message: string
+        created_at: Date | string | number
+      }>
+    >
+    getGoalState: (
+      threadId: string,
+      options?: { includeEvents?: boolean }
+    ) => Promise<{
+      goal: {
+        threadId: string
+        goalId: string
+        activeWindowId: string
+        objective: string
+        completionCondition: string
+        context: {
+          explicitSkill?: { name: string; path: string }
+          transportSummary?: string
+        }
+        status: "active" | "paused" | "complete"
+        turnsUsed: number
+        maxTurns: number
+        lastVerdict: string | null
+        lastReason: string | null
+        pausedReason: string | null
+        consecutiveParseFailures: number
+        ledger: {
+          progress: string[]
+          evidence: string[]
+          blockers: string[]
+        }
+        createdAt: number
+        updatedAt: number
+      } | null
+      events: Array<{
+        event_id: number
+        thread_id: string
+        goal_id: string | null
+        active_window_id: string | null
+        message: string
+        created_at: Date | string | number
+      }>
+    }>
     generateTitle: (message: string) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void
   }
@@ -382,6 +445,8 @@ interface CustomAPI {
     listProviders: () => Promise<Provider[]>
     getDefault: () => Promise<string>
     setDefault: (modelId: string) => Promise<void>
+    getGoalSettings: () => Promise<{ evaluatorModelId?: string }>
+    setGoalSettings: (settings: { evaluatorModelId?: string }) => Promise<void>
     getTokenLimits: () => Promise<{
       defaultMaxTokens: number
       minMaxTokens: number

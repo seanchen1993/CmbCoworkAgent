@@ -62,6 +62,7 @@ export interface IPCDoneEvent {
 export interface IPCErrorEvent {
   type: "error"
   error: string
+  message?: string
 }
 
 export interface IPCCustomEvent {

@@ -14,7 +14,10 @@ import {
   formatSkillUseBlock,
   parseSkillUseBlock as parseRenderer
 } from "../src/renderer/src/features/slash-commands/skill-marker.ts"
-import { parseSkillUseBlock as parseMain } from "../src/main/agent/skill-lifecycle/marker.ts"
+import {
+  formatSkillUseBlock as formatMainSkillUseBlock,
+  parseSkillUseBlock as parseMain
+} from "../src/main/agent/skill-lifecycle/marker.ts"
 
 function assert(cond: unknown, msg: string): void {
   if (!cond) throw new Error(msg)
@@ -59,6 +62,25 @@ async function testRoundTripWithXmlSpecialChars(): Promise<void> {
       parsed!.skillPath === skill.path,
       `${label}: path should round-trip through XML escaping, got ${parsed!.skillPath}`
     )
+  }
+}
+
+async function testMainFormatterRoundTrip(): Promise<void> {
+  const skill = {
+    name: "skill-creator",
+    path: "/Users/me/.cmbcoworkagent/skills/skill-creator/SKILL.md"
+  }
+  const block = formatMainSkillUseBlock(skill)
+  const message = `继续 goal\n\n${block}`
+
+  for (const [label, parsed] of [
+    ["renderer", parseRenderer(message)],
+    ["main", parseMain(message)]
+  ] as const) {
+    assert(parsed !== null, `${label} should parse main-generated skill block`)
+    assert(parsed!.skillName === skill.name, `${label}: main-generated skill name should parse`)
+    assert(parsed!.skillPath === skill.path, `${label}: main-generated skill path should parse`)
+    assert(parsed!.rest === "继续 goal", `${label}: main-generated block should preserve rest`)
   }
 }
 
@@ -137,6 +159,8 @@ async function run(): Promise<void> {
   console.log("PASS M1 round-trip simple skill")
   await testRoundTripWithXmlSpecialChars()
   console.log("PASS M2 round-trip XML special characters in name/path")
+  await testMainFormatterRoundTrip()
+  console.log("PASS M2b main formatter round-trip")
   await testTrailingProseRefusesParse()
   console.log("PASS M3 trailing prose after close tag refuses to parse")
   await testTrailingWhitespaceIsTolerated()

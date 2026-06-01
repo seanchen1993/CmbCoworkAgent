@@ -718,6 +718,7 @@ exit 0
       "当前事件可在消息进入模型前拦截、重写用户输入，或注入隐藏整改上下文；命中红线时可以直接终止本轮。",
     outputNotes: [
       "`updatedInput.message` / `updatedInput.prompt` 可重写送入模型的内容。",
+      "注意：对 goals 的内部 runtime prompt（如自动续跑 / continuation），系统不会采纳 `updatedInput` 的完整 rewrite；仍会采纳 block、additionalContext 和 systemMessage，但不会允许覆盖目标脚手架。",
       "`decision=block` 或 `exit=2` 可直接阻止本轮提问继续执行。",
       "返回 `continue=false` + `stopReason` 可直接终止本轮（优先级高于 `decision=block`）。"
     ],
