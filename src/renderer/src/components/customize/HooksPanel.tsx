@@ -1710,6 +1710,35 @@ function HooksGuide(): React.JSX.Element {
             summary="把事件 payload POST 到一个 URL，由远端服务判决；适合把策略集中在外部系统。"
           >
             <div className="space-y-2 text-sm text-muted-foreground">
+              <div className="rounded-md border border-border/40 bg-background px-3 py-2 space-y-2">
+                <p className="text-foreground/90">
+                  一句话：<strong className="text-foreground">command = 本地脚本判，HTTP = 甩给一个接口判</strong>
+                  。两者触发时机、决策能力完全一样，只是判决逻辑从本机脚本换成了远端服务。
+                </p>
+                <p>典型用途：</p>
+                <ul className="list-disc space-y-1 pl-5">
+                  <li>
+                    <strong className="text-foreground/85">策略集中管控</strong>
+                    ：多人 / 多机共用同一套规则，只在服务端改一次就全员生效，本地无需装脚本或依赖。
+                  </li>
+                  <li>
+                    <strong className="text-foreground/85">判决要查后端数据</strong>
+                    ：如剩余额度 / 权限、是否生产敏感表、是否处于变更冻结期——这些本机脚本看不到。
+                  </li>
+                  <li>
+                    <strong className="text-foreground/85">审计上报</strong>
+                    ：PostToolUse 把每次调用 POST 到日志 / 审计服务集中落库（可以不返回任何决策）。
+                  </li>
+                  <li>
+                    <strong className="text-foreground/85">复用现成风控服务</strong>
+                    ：直接调用公司已有的内容审核 / DLP / 合规接口，不必重写逻辑。
+                  </li>
+                </ul>
+                <p className="text-xs text-foreground/75">
+                  何时别用：判断仅靠本机即可完成（看文件、匹配命令字符串），或单机自用没有服务端——用
+                  command / prompt 更快，省掉一次网络往返。
+                </p>
+              </div>
               <p>
                 与 command Hook 共用同一份输入：runner 把 stdin JSON 作为请求体 POST 到
                 <code className="mx-1 font-mono text-foreground/85">url</code>

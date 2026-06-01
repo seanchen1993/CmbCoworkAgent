@@ -129,6 +129,24 @@ PR-16 加入了 CC 的 `if` 字段，**当前实现一个子集**：
 | `model` | type=prompt 时指定哪个模型，对齐 CC 字段名；老配置的 `modelId` 仍读，写入时迁移到 `model` |
 | `statusMessage` | UI 跑 hook 时显示的状态文字，纯展示 |
 
+### 2.1.4 HTTP Hook 有什么用（什么时候用 type=http）
+
+一句话：**command = 本地脚本判，HTTP = 把这次事件甩给一个接口判**。两者触发时机、决策能力（放行 / 阻断 / 改写 / 终止）完全一样，区别只是判决逻辑从本机脚本换成了远端服务——runner 把事件 stdin JSON POST 到 `url`，看接口返回的 JSON 决定。
+
+典型用途：
+
+- **策略集中管控**：多人 / 多机共用一套规则。用 command 要在每台机器各放一份脚本，改一次全员同步；改成 HTTP 后规则只在服务端改一次就全员生效，本地连 Python / 依赖都不用装。
+- **判决要查后端数据**：本机脚本只能看到本次调用参数。像"用户今天还有没有额度 / 权限""这条 SQL 是不是生产敏感表""当前是否变更冻结期"这类必须问后端的判断，天然适合 HTTP。
+- **审计 / 留痕上报**：PostToolUse 挂个 HTTP Hook，把每次工具调用 POST 到日志 / 审计服务集中落库、出报表、触发告警——可以完全不返回决策，纯上报。
+- **复用现成风控服务**：公司已有内容审核 / DLP / 合规校验接口时，直接让 Hook 调它，不必重写一遍逻辑。
+
+什么时候**别用**：
+
+- 判断仅靠本机就能完成（看文件、匹配命令字符串）→ 用 command 更快，本地毫秒级，HTTP 要一次网络往返。
+- 单机自用、没有服务端 → command / prompt 就够了。
+
+最小示例见 §7.9。
+
 ### 2.2 type=command vs type=prompt
 
 | 维度 | command | prompt |
@@ -783,6 +801,57 @@ process.stdin.on("end", () => {
 **OK 的事件**（前提是该轮已经触达过对应插件/技能）：`PostToolUseFailure`、`PreToolUse` / `PostToolUse` 拦的是自己的工具、`SubagentStart` / `SubagentStop` 涉及该插件、`StopFailure` 已经触达过该插件、`Stop`、`SessionEnd`、`PreSkillUse` / `PostSkillUse` 该技能自身。
 
 诊断模式下 Hook 面板会显示被 scope 过滤掉的 hook + 原因（`plugin-not-active` / `skill-not-in-scope`），可以直接定位。
+
+### 7.9 HTTP Hook：把判决甩给远端服务（type=http，PreToolUse）
+
+适用场景见 §2.1.4。下面是一条把 `execute` 调用交给内部策略服务判决的 HTTP Hook。
+
+Hook 配置（`hooks.json` 条目）：
+
+```jsonc
+{
+  "id": "policy-gate",
+  "event": "PreToolUse",
+  "matcher": "execute",
+  "type": "http",
+  "url": "https://policy.内网.example/hooks/check",
+  "headers": {
+    "Authorization": "Bearer ${POLICY_TOKEN}",
+    "X-Source": "cmbcoworkagent"
+  },
+  "allowedEnvVars": ["POLICY_TOKEN"],
+  "fallback": "allow",
+  "timeout": 30000,
+  "enabled": true
+}
+```
+
+要点：
+
+- 请求体 = 该事件的 stdin JSON（含 `tool_name`、`tool_input` 等，字段同对应事件的 command Hook），固定带 `Content-Type: application/json`。**HTTP Hook 不下发任何环境变量**，上下文全在请求体里。
+- `headers` 里的 `${POLICY_TOKEN}` 只有在 `allowedEnvVars` 白名单里才会被宿主环境变量替换，否则替换为空串（防止误把环境变量泄露到外部 URL）。
+- 响应：2xx + JSON 按 `decision` / `reason` / `continue` / `updatedInput` 决策；2xx + 纯文本当普通输出；非 2xx / 网络错误 / 超时则走 `fallback`（这里是放行，可设 `"block"`）。响应体上限 1MB，默认超时 30s（`async: true` 时上限 5 分钟）。
+- ⚠️ 无 SSRF 守卫，URL 与出网风险自负，别指向不可信地址。
+
+服务端最小实现（Python / Flask，仅示意）：
+
+```python
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+@app.post("/hooks/check")
+def check():
+    payload = request.get_json(silent=True) or {}
+    cmd = (payload.get("tool_input") or {}).get("command", "")
+    # 这里可以查权限、查额度、查变更冻结期……
+    if "rm -rf /" in cmd:
+        return jsonify(decision="block", reason="命中高危策略，请改用只读方案",
+                       systemMessage="已被策略服务拦截")
+    return jsonify({})   # 空 2xx = 放行
+```
+
+返回空对象 / 2xx 空体即视为放行；只有返回带 `decision: "block"` 之类的字段时才会拦截或改写。
 
 ---
 
