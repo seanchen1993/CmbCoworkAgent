@@ -138,6 +138,8 @@ export async function runPostSkillUseHooksForActivatedSkills({
   threadId,
   workspacePath,
   turnId,
+  pluginOutputDir,
+  systemId,
   getStopContext,
   hookScope,
   skillUseTracker,
@@ -149,6 +151,8 @@ export async function runPostSkillUseHooksForActivatedSkills({
   threadId: string
   workspacePath?: string
   turnId?: string
+  pluginOutputDir?: string
+  systemId?: string
   getStopContext: () => StopHookContext
   hookScope: HookScopeController
   skillUseTracker?: SkillUseTracker
@@ -170,6 +174,8 @@ export async function runPostSkillUseHooksForActivatedSkills({
         skillPath: skill.path
       },
       workspacePath,
+      pluginOutputDir,
+      systemId,
       sessionId: threadId,
       turnId,
       skillName: skill.name,
@@ -208,6 +214,8 @@ export async function runCompletionHooksWithRevision({
   threadId,
   workspacePath,
   turnId,
+  pluginOutputDir,
+  systemId,
   abortSignal,
   getStopContext,
   hookScope,
@@ -225,6 +233,8 @@ export async function runCompletionHooksWithRevision({
   threadId: string
   workspacePath?: string
   turnId?: string
+  pluginOutputDir?: string
+  systemId?: string
   abortSignal: AbortSignal
   getStopContext: () => StopHookContext
   hookScope: HookScopeController
@@ -248,6 +258,8 @@ export async function runCompletionHooksWithRevision({
           threadId,
           workspacePath,
           turnId,
+          pluginOutputDir,
+          systemId,
           getStopContext,
           hookScope,
           skillUseTracker,
@@ -303,6 +315,8 @@ export async function runCompletionHooksWithRevision({
             "Stop",
             {
               workspacePath,
+              pluginOutputDir,
+              systemId,
               sessionId: threadId,
               turnId,
               stopContext: getStopContext()
@@ -313,6 +327,8 @@ export async function runCompletionHooksWithRevision({
           "Stop",
           {
             workspacePath,
+            pluginOutputDir,
+            systemId,
             sessionId: threadId,
             turnId,
             stopContext: getStopContext()

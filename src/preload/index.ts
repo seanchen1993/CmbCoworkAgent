@@ -26,7 +26,9 @@ import type {
   SkillHookMetadata,
   ChatXConfig,
   HookLoggingConfig,
-  AgentAutoCommitSettings
+  AgentAutoCommitSettings,
+  UserInputRequest,
+  UserInputResponse
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
@@ -36,6 +38,23 @@ import type {
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
+import type {
+  HarnessProjectCreateInput,
+  HarnessFeatureCreateInput,
+  HarnessFeatureCreateResult,
+  HarnessProjectDetailViewModel,
+  HarnessProjectListItem,
+  HarnessProjectMetadata,
+  HarnessProjectMetadataUpdateInput,
+  HarnessRunDetailViewModel,
+  HarnessAdapterRegistryItem,
+  HarnessWatchRefChangedEvent
+} from "../shared/harness-board-types"
+import type {
+  FeatureGateCheckOptions,
+  FeatureGateCheckResult,
+  FeatureGateKey
+} from "../shared/feature-gates"
 
 interface LspDownloadProgress {
   percent: number
@@ -1439,6 +1458,41 @@ const api = {
       }
     }
   },
+  userInput: {
+    sendResponse: (response: UserInputResponse): void => {
+      ipcRenderer.send("userInput:response", response)
+    },
+    onRequest: (
+      threadId: string,
+      callback: (request: UserInputRequest) => void
+    ): (() => void) => {
+      const channel = `userInput:request:${threadId}`
+      const handler = (_: unknown, request: UserInputRequest): void => {
+        ipcRenderer.send("userInput:ack", {
+          requestId: request.requestId,
+          threadId: request.threadId
+        })
+        callback(request)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
+    onCancel: (
+      threadId: string,
+      callback: (data: { requestId: string; reason?: string }) => void
+    ): (() => void) => {
+      const channel = `userInput:cancel:${threadId}`
+      const handler = (_: unknown, data: { requestId: string; reason?: string }): void => {
+        callback(data)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    }
+  },
   optimizer: {
     /** Run the offline optimization loop — returns candidates for review */
     run: (opts?: {
@@ -1866,6 +1920,12 @@ const api = {
     getMode: (): Promise<"auto" | "pinned"> => ipcRenderer.invoke("routing:getMode"),
     setMode: (mode: "auto" | "pinned"): Promise<void> => ipcRenderer.invoke("routing:setMode", mode)
   },
+  featureGates: {
+    isEnabled: (
+      name: FeatureGateKey,
+      options?: FeatureGateCheckOptions
+    ): Promise<FeatureGateCheckResult> => ipcRenderer.invoke("featureGates:isEnabled", name, options)
+  },
   dashboard: {
     isAllowed: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAllowed"),
     overview: (
@@ -1977,6 +2037,39 @@ const api = {
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportExcel", sheets)
+  },
+  harnessBoard: {
+    registry: (): Promise<HarnessAdapterRegistryItem[]> =>
+      ipcRenderer.invoke("harnessBoard:registry") as Promise<HarnessAdapterRegistryItem[]>,
+    listProjects: (): Promise<HarnessProjectListItem[]> =>
+      ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
+    createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>
+      ipcRenderer.invoke("harnessBoard:createProject", input) as Promise<HarnessProjectMetadata>,
+    createFeature: (input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> =>
+      ipcRenderer.invoke("harnessBoard:createFeature", input) as Promise<HarnessFeatureCreateResult>,
+    updateProject: (
+      projectId: string,
+      input: HarnessProjectMetadataUpdateInput
+    ): Promise<HarnessProjectMetadata> =>
+      ipcRenderer.invoke("harnessBoard:updateProject", { projectId, input }) as Promise<HarnessProjectMetadata>,
+    archiveProject: (projectId: string): Promise<HarnessProjectMetadata> =>
+      ipcRenderer.invoke("harnessBoard:archiveProject", projectId) as Promise<HarnessProjectMetadata>,
+    getProjectDetail: (projectId: string): Promise<HarnessProjectDetailViewModel> =>
+      ipcRenderer.invoke("harnessBoard:getProjectDetail", projectId) as Promise<HarnessProjectDetailViewModel>,
+    getProjectDetails: (
+      projectIds: string[],
+      options?: { watchRefs?: boolean }
+    ): Promise<Record<string, HarnessProjectDetailViewModel>> =>
+      ipcRenderer.invoke("harnessBoard:getProjectDetails", { projectIds, watchRefs: options?.watchRefs !== false }) as Promise<Record<string, HarnessProjectDetailViewModel>>,
+    getRunDetail: (projectId: string, slug: string): Promise<HarnessRunDetailViewModel> =>
+      ipcRenderer.invoke("harnessBoard:getRunDetail", { projectId, slug }) as Promise<HarnessRunDetailViewModel>,
+    getDialogTips: (projectId: string, slug: string): Promise<string | null> =>
+      ipcRenderer.invoke("harnessBoard:getDialogTips", { projectId, slug }) as Promise<string | null>,
+    onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void): (() => void) => {
+      const handler = (_event: unknown, payload: HarnessWatchRefChangedEvent): void => callback(payload)
+      ipcRenderer.on("harnessBoard:watchRefsChanged", handler)
+      return () => ipcRenderer.removeListener("harnessBoard:watchRefsChanged", handler)
+    }
   },
   update: {
     check: (): Promise<

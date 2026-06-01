@@ -6,6 +6,8 @@ import React, {
   useState,
   useSyncExternalStore
 } from "react"
+import ReactMarkdown, { type Components } from "react-markdown"
+import remarkBreaks from "remark-breaks"
 import {
   Send,
   Square,
@@ -51,6 +53,12 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { useAppStore } from "@/lib/store"
+import {
+  consumePendingHarnessNextAction,
+  getPendingHarnessNextAction,
+  getPendingHarnessNextActionVersion,
+  subscribePendingHarnessNextActions
+} from "@/lib/harness-next-action"
 import { cn } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
 import {
@@ -64,11 +72,22 @@ import { ModelSwitcher } from "./ModelSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
-import type { Message, SkillMetadata, ToolCallState, ToolCallStatus } from "@/types"
+import type {
+  Message,
+  SkillMetadata,
+  Thread,
+  ToolCallState,
+  ToolCallStatus,
+  UserInputResponse
+} from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator, type ChatScrollQuestion } from "./ChatScrollNavigator"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
+import {
+  UserInputRequestDialog,
+  type UserInputRequestDialogLayout
+} from "./UserInputRequestDialog"
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
 import {
@@ -656,9 +675,37 @@ interface StreamMessage {
   is_error?: boolean
 }
 
+export type ChatSurface = "default" | "harness-project" | "harness-feature-session"
+
+interface ChatSurfaceConfig {
+  showWelcomeHeadline: boolean
+  showWelcomeSkillTabs: boolean
+  showHarnessDialogTips: boolean
+}
+
+const CHAT_SURFACE_CONFIG: Record<ChatSurface, ChatSurfaceConfig> = {
+  default: {
+    showWelcomeHeadline: true,
+    showWelcomeSkillTabs: true,
+    showHarnessDialogTips: false
+  },
+  "harness-project": {
+    showWelcomeHeadline: false,
+    showWelcomeSkillTabs: true,
+    showHarnessDialogTips: true
+  },
+  "harness-feature-session": {
+    showWelcomeHeadline: false,
+    showWelcomeSkillTabs: false,
+    showHarnessDialogTips: false
+  }
+}
+
 interface ChatContainerProps {
   threadId: string
   showGitChangeNotice?: boolean
+  surface?: ChatSurface
+  hideWelcomeSkillTabs?: boolean
   onOpenGitPanel?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
 }
@@ -853,6 +900,26 @@ const toTime = (value: Date | string | undefined): number | null => {
   return date ? date.getTime() : null
 }
 
+const getMessageDisplayTime = (message: Message): number | null => {
+  return toTime(message.start_at) ?? toTime(message.created_at) ?? toTime(message.end_at)
+}
+
+const sortMessagesForDisplay = (messages: Message[]): Message[] => {
+  return messages
+    .map((message, index) => ({
+      message,
+      index,
+      time: getMessageDisplayTime(message)
+    }))
+    .sort((a, b) => {
+      if (a.time !== null && b.time !== null && a.time !== b.time) {
+        return a.time - b.time
+      }
+      return a.index - b.index
+    })
+    .map((entry) => entry.message)
+}
+
 const getMessageText = (content: Message["content"]): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -922,15 +989,138 @@ function RotatingHeadline() {
   )
 }
 
+interface HarnessFeatureBinding {
+  projectId: string
+  slug: string
+}
+
+function getHarnessFeatureBinding(thread: Thread | null | undefined): HarnessFeatureBinding | null {
+  const harnessFeature = thread?.metadata?.harnessFeature
+  if (!harnessFeature || typeof harnessFeature !== "object") {
+    return null
+  }
+
+  const metadata = harnessFeature as Record<string, unknown>
+  const projectId = typeof metadata.projectId === "string" ? metadata.projectId.trim() : ""
+  const slug = typeof metadata.slug === "string" ? metadata.slug.trim() : ""
+  return projectId && slug ? { projectId, slug } : null
+}
+
+function getSafeHttpUrl(href: unknown): string | null {
+  if (typeof href !== "string") return null
+  try {
+    const url = new URL(href)
+    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null
+  } catch {
+    return null
+  }
+}
+
+const dialogTipsMarkdownComponents: Components = {
+  p({ children }) {
+    return <p className="my-1 leading-6 first:mt-0 last:mb-0">{children}</p>
+  },
+  ul({ children }) {
+    return <ul className="my-1 ml-4 list-disc space-y-1 leading-6">{children}</ul>
+  },
+  ol({ children }) {
+    return <ol className="my-1 ml-4 list-decimal space-y-1 leading-6">{children}</ol>
+  },
+  li({ children }) {
+    return <li className="pl-1">{children}</li>
+  },
+  a({ href, children }) {
+    const safeHref = getSafeHttpUrl(href)
+    if (!safeHref) return <span>{children}</span>
+    return (
+      <a
+        href={safeHref}
+        className="font-medium text-primary underline underline-offset-4"
+        onClick={(event) => {
+          event.preventDefault()
+          void window.electron.openExternal(safeHref)
+        }}
+      >
+        {children}
+      </a>
+    )
+  },
+  code({ children }) {
+    return (
+      <code className="rounded border border-border/70 bg-background/80 px-1 py-0.5 font-mono text-[0.92em] text-foreground">
+        {children}
+      </code>
+    )
+  },
+  pre() {
+    return null
+  },
+  img() {
+    return null
+  },
+  table() {
+    return null
+  },
+  h1({ children }) {
+    return <p className="my-1 font-semibold leading-6 text-foreground">{children}</p>
+  },
+  h2({ children }) {
+    return <p className="my-1 font-semibold leading-6 text-foreground">{children}</p>
+  },
+  h3({ children }) {
+    return <p className="my-1 font-semibold leading-6 text-foreground">{children}</p>
+  }
+}
+
+class DialogTipsErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false }
+
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true }
+  }
+
+  render(): React.ReactNode {
+    return this.state.hasError ? null : this.props.children
+  }
+}
+
+function DialogTipsMarkdown({ content }: { content: string }): React.JSX.Element | null {
+  const trimmed = content.trim()
+  if (!trimmed) return null
+
+  return (
+    <DialogTipsErrorBoundary key={trimmed}>
+      <div className="mb-6 max-w-3xl rounded-md border border-border/70 bg-muted/30 px-4 py-3 text-sm text-muted-foreground shadow-sm">
+        <ReactMarkdown
+          remarkPlugins={[remarkBreaks]}
+          components={dialogTipsMarkdownComponents}
+        >
+          {trimmed}
+        </ReactMarkdown>
+      </div>
+    </DialogTipsErrorBoundary>
+  )
+}
+
 export function ChatContainer({
   threadId,
   showGitChangeNotice = false,
+  surface = "default",
+  hideWelcomeSkillTabs = false,
   onOpenGitPanel,
   onThreadGitStatusChange
 }: ChatContainerProps): React.JSX.Element {
+  const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
+  const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
+  const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
+  const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const userMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
+  const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isAtBottomRef = useRef(true)
   const requestedUserQuestionIndexRef = useRef<number | null>(null)
   const requestedUserQuestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -938,10 +1128,14 @@ export function ChatContainer({
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(new Set())
   const [skillsLoading, setSkillsLoading] = useState(true)
+  const [skillsHarnessProjectId, setSkillsHarnessProjectId] = useState<string | null>(null)
+  const [skillsLoadTargetProjectId, setSkillsLoadTargetProjectId] = useState<string | null>(null)
   const [showAllProgrammingSkills, setShowAllProgrammingSkills] = useState(false)
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
   const [activeUserQuestionIndex, setActiveUserQuestionIndex] = useState(-1)
+  const [userInputDialogLayout, setUserInputDialogLayout] =
+    useState<UserInputRequestDialogLayout | null>(null)
   // Skill creation human-confirmation state
   const [skillConfirmRequest, setSkillConfirmRequest] = useState<SkillConfirmRequest | null>(null)
   // Skill intent banner state ("Want to save as a skill?")
@@ -979,6 +1173,7 @@ export function ChatContainer({
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
   const streamMessageTimesRef = useRef<Record<string, { start_at: Date; end_at?: Date }>>({})
   const streamMessageBaselineIdsRef = useRef<Set<string>>(new Set())
+  const streamMessageCapturePreparedRef = useRef(false)
   const [messageTimes, setMessageTimes] = useState<MessageTimeMap>({})
   const threadMessageIdsRef = useRef<Set<string>>(new Set())
 
@@ -1045,13 +1240,84 @@ export function ChatContainer({
     rightPanelCollapsed,
     pluginVersion
   } = useAppStore()
+  const currentThread = useMemo(
+    () => threads.find((thread) => thread.thread_id === threadId) ?? null,
+    [threadId, threads]
+  )
+  const harnessFeatureBinding = useMemo(() => getHarnessFeatureBinding(currentThread), [currentThread])
+  const pendingHarnessNextActionVersion = useSyncExternalStore(
+    subscribePendingHarnessNextActions,
+    getPendingHarnessNextActionVersion,
+    getPendingHarnessNextActionVersion
+  )
+  const pendingHarnessNextAction = useMemo(
+    () => getPendingHarnessNextAction(threadId),
+    [pendingHarnessNextActionVersion, threadId]
+  )
+  const [transientHarnessDialogTips, setTransientHarnessDialogTips] = useState<{
+    threadId: string
+    tips: string
+  } | null>(null)
+  const pendingHarnessDialogTips = pendingHarnessNextAction?.dialogTips?.trim() || null
+  const transientHarnessDialogTipsForThread =
+    transientHarnessDialogTips?.threadId === threadId ? transientHarnessDialogTips.tips : null
+  const [harnessDialogTips, setHarnessDialogTips] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!threadId || !pendingHarnessDialogTips) return
+    setTransientHarnessDialogTips({ threadId, tips: pendingHarnessDialogTips })
+  }, [pendingHarnessDialogTips, threadId])
+
+  useEffect(() => {
+    if (!shouldShowHarnessDialogTips || !harnessFeatureBinding) {
+      setHarnessDialogTips(null)
+      return
+    }
+
+    const nextActionDialogTips = pendingHarnessDialogTips ?? transientHarnessDialogTipsForThread?.trim()
+    if (nextActionDialogTips) {
+      setHarnessDialogTips(nextActionDialogTips)
+      return
+    }
+
+    let cancelled = false
+    setHarnessDialogTips(null)
+    window.api.harnessBoard
+      .getDialogTips(harnessFeatureBinding.projectId, harnessFeatureBinding.slug)
+      .then((tips) => {
+        if (!cancelled) setHarnessDialogTips(tips?.trim() || null)
+      })
+      .catch((error) => {
+        console.warn("[ChatContainer] Failed to load harness dialog tips:", error)
+        if (!cancelled) setHarnessDialogTips(null)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    harnessFeatureBinding?.projectId,
+    harnessFeatureBinding?.slug,
+    pendingHarnessDialogTips,
+    transientHarnessDialogTipsForThread,
+    shouldShowHarnessDialogTips
+  ])
 
   const allSkillsRef = useRef<MarketItem[]>([])
   const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
   const [goodSkillsData, setGoodSkillsData] = useState<MarketItem[]>([])
 
+  // Stable ref so loadSkills can read the latest harness binding without
+  // invalidating its own identity (useCallback with empty deps).
+  const harnessFeatureBindingRef = useRef(harnessFeatureBinding)
+  harnessFeatureBindingRef.current = harnessFeatureBinding
+
   // Define loadSkills function at component level so it can be accessed everywhere
   const loadSkills = useCallback(async (): Promise<void> => {
+    setSkillsLoading(true)
+    const binding = harnessFeatureBindingRef.current
+    const targetProjectId = binding?.projectId ?? null
+    setSkillsLoadTargetProjectId(targetProjectId)
     try {
       const pluginSkillsPromise =
         typeof window.api.skills.listPlugins === "function"
@@ -1075,13 +1341,35 @@ export function ChatContainer({
       const availableSkills = loadedSkills.filter(
         (s) => s.source === "project" || s.source === "user"
       )
-      // Enabled built-in/custom names win over plugin names; disabled local
-      // skills should not hide a plugin skill with the same name from slash.
-      const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet)
+
+      // In harness mode, resolve the project's bound plugin name so that
+      // duplicate-named skills from other plugins are hidden in favour of
+      // the project's own plugin.
+      let preferredPlugin: { id?: string; name?: string } | null = null
+      if (binding && typeof window.api.harnessBoard?.listProjects === "function") {
+        try {
+          const projects = await window.api.harnessBoard.listProjects()
+          const project = projects.find((p) => p.projectId === binding.projectId)
+          if (project) {
+            preferredPlugin = {
+              id: project.harnessAdapter.id,
+              name: project.harnessAdapter.name
+            }
+          }
+        } catch {
+          // Non-critical: fall through without a preference.
+        }
+      }
+
+      // In harness mode the bound plugin's skills win over same-name skills,
+      // matching project-scoped slash command behaviour.
+      const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet, preferredPlugin)
       setSkills([...merged].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
+      setSkillsHarnessProjectId(targetProjectId)
     } catch (error) {
       console.error("[ChatContainer] Failed to load skills:", error)
       setSkills([])
+      setSkillsHarnessProjectId(null)
     } finally {
       setSkillsLoading(false)
     }
@@ -1187,6 +1475,7 @@ export function ChatContainer({
     toolCallStates,
     pendingApprovals,
     pendingApproval,
+    pendingUserInput,
     todos,
     error: threadError,
     hookInterruption,
@@ -1202,6 +1491,7 @@ export function ChatContainer({
     setToolCallState,
     setTodos,
     removePendingApproval,
+    setPendingUserInput,
     appendMessage,
     setError,
     clearError,
@@ -1294,6 +1584,43 @@ export function ChatContainer({
   }, [pendingApproval])
   const isLoading = streamData.isLoading || scheduledTaskLoading
   const inputDisabled = isLoading || historyLoading
+  const userInputScrollPadding = pendingUserInput
+    ? Math.ceil((userInputDialogLayout?.height ?? 320) + 24)
+    : undefined
+
+  const handleUserInputDialogLayoutChange = useCallback(
+    (layout: UserInputRequestDialogLayout | null): void => {
+      setUserInputDialogLayout((prev) => {
+        if (!layout) return prev === null ? prev : null
+
+        const next = {
+          height: Math.ceil(layout.height),
+          top: Math.round(layout.top),
+          bottom: Math.round(layout.bottom)
+        }
+        if (
+          prev &&
+          prev.height === next.height &&
+          prev.top === next.top &&
+          prev.bottom === next.bottom
+        ) {
+          return prev
+        }
+        return next
+      })
+    },
+    []
+  )
+
+  const prepareStreamMessageCapture = useCallback((): void => {
+    streamMessageTimesRef.current = {}
+    streamMessageBaselineIdsRef.current = new Set(
+      ((streamData.messages || []) as StreamMessage[])
+        .map((msg) => msg.id)
+        .filter((id): id is string => !!id)
+    )
+    streamMessageCapturePreparedRef.current = true
+  }, [streamData.messages])
 
   useEffect(() => {
     let cancelled = false
@@ -1367,7 +1694,13 @@ export function ChatContainer({
           if (result.success && result.attachment) {
             // #12: skip empty files
             if (!result.attachment.content.trim()) {
-              setError(`文件 "${result.attachment.filename}" 内容为空`)
+              if (result.attachment.filename.includes('.doc')) {
+                setError(
+                  `文件 "${result.attachment.filename}" 内容为空，可尝试将文件用 WPS 另存为 docx 后添加`
+                )
+              } else {
+                setError(`文件 "${result.attachment.filename}" 内容为空`)
+              }
               continue
             }
             setAttachments((prev) => [...prev, result.attachment!])
@@ -1648,6 +1981,7 @@ export function ChatContainer({
       try {
         const legacyDecision =
           decision === "approve_session" || decision === "approve_permanent" ? "approve" : decision
+        prepareStreamMessageCapture()
         await stream.submit(null, {
           command: {
             resume: { decision: legacyDecision, pendingCount: pendingApproval.pendingCount }
@@ -1665,9 +1999,19 @@ export function ChatContainer({
       removePendingApproval,
       savedToolDescriptionInput,
       savedToolNameInput,
+      prepareStreamMessageCapture,
       stream,
       threadId
     ]
+  )
+
+  const handleUserInputSubmit = useCallback(
+    (response: UserInputResponse): void => {
+      window.api.userInput.sendResponse(response)
+      setPendingUserInput(null)
+      setUserInputDialogLayout(null)
+    },
+    [setPendingUserInput]
   )
 
   const agentValues = stream?.values as AgentStreamValues | undefined
@@ -1702,17 +2046,16 @@ export function ChatContainer({
   const prevLoadingRef = useRef(false)
   useEffect(() => {
     if (!prevLoadingRef.current && isLoading) {
-      // 本轮开始时记录已有 stream 消息，避免把历史回放消息当成本轮新消息计时。
+      // 本轮开始前应由 stream.submit 调用方采样 baseline。这里仅做兜底：
+      // 如果运行不是从 ChatContainer 的 submit 路径启动，就退回到已落库消息集合。
       //
-      // useStream 的 messages 里会同时包含历史消息和本轮新增消息。如果不先记 baseline，
-      // loading 期间遍历 streamData.messages 时就会把历史 assistant/tool 重新打时间戳，
-      // 导致历史耗时被当前时间污染。
-      streamMessageTimesRef.current = {}
-      streamMessageBaselineIdsRef.current = new Set(
-        ((streamData.messages || []) as StreamMessage[])
-          .map((msg) => msg.id)
-          .filter((id): id is string => !!id)
-      )
+      // 不能在 loading 已经变成 true 后再用当前 streamData.messages 采样；
+      // 第一条本轮 assistant/tool-call 可能已经到达，会被误判为历史消息而漏落库。
+      if (!streamMessageCapturePreparedRef.current) {
+        streamMessageTimesRef.current = {}
+        streamMessageBaselineIdsRef.current = new Set(threadMessageIdsRef.current)
+      }
+      streamMessageCapturePreparedRef.current = false
     }
 
     if (isLoading) {
@@ -1872,7 +2215,7 @@ export function ChatContainer({
         end_at: endAt
       }
     })
-    return allMessages.map((msg) => {
+    return sortMessagesForDisplay(allMessages).map((msg) => {
       if (
         msg.role !== "user" ||
         typeof msg.content !== "string" ||
@@ -1927,6 +2270,14 @@ export function ChatContainer({
     [displayMessages]
   )
 
+  const lastContentMessageId = useMemo(() => {
+    for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
+      const message = displayMessages[index]
+      if (message.role !== "tool") return message.id
+    }
+    return null
+  }, [displayMessages])
+
   const userQuestions = useMemo<ChatScrollQuestion[]>(
     () =>
       displayMessages
@@ -1938,14 +2289,20 @@ export function ChatContainer({
     [displayMessages]
   )
 
-  const setUserMessageRef = useCallback(
-    (messageId: string) =>
+  const setMessageRef = useCallback(
+    (messageId: string, role: Message["role"]) =>
       (node: HTMLDivElement | null): void => {
-        if (node) {
+        if (node && role === "user") {
           userMessageRefs.current.set(messageId, node)
+        } else {
+          userMessageRefs.current.delete(messageId)
+        }
+
+        if (node && role !== "tool") {
+          contentMessageRefs.current.set(messageId, node)
           return
         }
-        userMessageRefs.current.delete(messageId)
+        contentMessageRefs.current.delete(messageId)
       },
     []
   )
@@ -2171,6 +2528,39 @@ export function ChatContainer({
     }
   }, [pendingApproval, getViewport])
 
+  useEffect(() => {
+    if (!pendingUserInput || !userInputDialogLayout) return
+    const viewport = getViewport()
+    if (!viewport) return
+
+    const frame = requestAnimationFrame(() => {
+      const targetElement = lastContentMessageId
+        ? contentMessageRefs.current.get(lastContentMessageId)
+        : null
+      const viewportRect = viewport.getBoundingClientRect()
+      const targetBottom = Math.max(viewportRect.top + 24, userInputDialogLayout.top - 12)
+
+      if (targetElement) {
+        const targetRect = targetElement.getBoundingClientRect()
+        const scrollDelta = targetRect.bottom - targetBottom
+        if (Math.abs(scrollDelta) > 1) {
+          viewport.scrollTop = Math.max(0, viewport.scrollTop + scrollDelta)
+        }
+      } else {
+        viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+      }
+      isAtBottomRef.current = false
+    })
+
+    return () => cancelAnimationFrame(frame)
+  }, [
+    getViewport,
+    lastContentMessageId,
+    pendingUserInput,
+    userInputDialogLayout?.height,
+    userInputDialogLayout?.top
+  ])
+
   // Always scroll to bottom when switching threads
   useEffect(() => {
     const viewport = getViewport()
@@ -2203,6 +2593,53 @@ export function ChatContainer({
     () => skills.filter((skill) => !isLocalSkillDisabled(skill)),
     [skills, isLocalSkillDisabled]
   )
+
+  useEffect(() => {
+    const nextAction = pendingHarnessNextAction
+    const userMessage = nextAction?.userMessage?.trim() ?? ""
+    const slashSkill = nextAction?.slashSkill?.trim() ?? ""
+
+    if (!harnessFeatureBinding) return
+    if (!userMessage && !slashSkill) {
+      if (nextAction?.dialogTips) consumePendingHarnessNextAction(threadId)
+      return
+    }
+    if (historyLoading) return
+    if (threadMessages.length > 0 || input.trim() || selectedSkill) {
+      consumePendingHarnessNextAction(threadId)
+      return
+    }
+
+    let nextSkill: SkillMetadata | null = null
+    if (slashSkill) {
+      if (skillsLoading) return
+      if (skillsLoadTargetProjectId !== harnessFeatureBinding.projectId) return
+      if (skillsHarnessProjectId === harnessFeatureBinding.projectId) {
+        const normalizedSlashSkill = normalizeSkillId(slashSkill)
+        nextSkill =
+          enabledSkillsForSlash.find((skill) => normalizeSkillId(skill.name) === normalizedSlashSkill) ??
+          null
+      }
+    }
+
+    if (userMessage) setInput(userMessage)
+    if (nextSkill) setSelectedSkill(nextSkill)
+    consumePendingHarnessNextAction(threadId)
+  }, [
+    enabledSkillsForSlash,
+    harnessFeatureBinding,
+    historyLoading,
+    input,
+    pendingHarnessNextAction,
+    selectedSkill,
+    setInput,
+    setSelectedSkill,
+    skillsHarnessProjectId,
+    skillsLoadTargetProjectId,
+    skillsLoading,
+    threadId,
+    threadMessages.length
+  ])
 
   const slash = useSlashCommands({
     input,
@@ -2409,6 +2846,7 @@ export function ChatContainer({
       }
     }
 
+    prepareStreamMessageCapture()
     await stream.submit(
       {
         messages: [{ type: "human", content: fullMessage }]
@@ -2536,7 +2974,7 @@ export function ChatContainer({
 
   useEffect(() => {
     void loadSkills()
-  }, [loadSkills, pluginVersion])
+  }, [loadSkills, pluginVersion, harnessFeatureBinding?.projectId])
 
   // ── Skill creation human-confirmation listener ──────────
   useEffect(() => {
@@ -3307,7 +3745,15 @@ export function ChatContainer({
       {nuxDialog}
 
       <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
-        <div className={cn("p-4", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
+        <div
+          className={cn(
+            "p-4",
+            userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
+          )}
+          style={
+            userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined
+          }
+        >
           <div className="max-w-3xl mx-auto space-y-4">
             {historyLoading && displayMessages.length === 0 && (
               <div
@@ -3328,7 +3774,11 @@ export function ChatContainer({
             )}
             {displayMessages.length === 0 && !isLoading && !historyLoading && (
               <div className="pt-6 pb-8">
-                <RotatingHeadline />
+                {shouldShowHarnessDialogTips && harnessDialogTips ? (
+                  <DialogTipsMarkdown content={harnessDialogTips} />
+                ) : !shouldShowWelcomeHeadline || harnessFeatureBinding ? null : (
+                  <RotatingHeadline />
+                )}
                 {skillsLoading ? (
                   <div className="text-sm text-muted-foreground text-center py-10">
                     正在加载技能列表...
@@ -3378,23 +3828,24 @@ export function ChatContainer({
                         )}
                       </div>
                     )}
-                    <Tabs defaultValue="skills-by-category" className="space-y-3">
-                      <TabsList className="grid h-9 w-full grid-cols-3">
-                        <TabsTrigger value="skills-by-category" className="text-xs">
-                          场景技能
-                        </TabsTrigger>
-                        <TabsTrigger value="installed-skills" className="text-xs gap-1.5">
-                          我安装的技能
-                          {customSkillUpdateCount > 0 && (
-                            <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-teal-100 px-1 text-[10px] font-semibold leading-none text-teal-700 dark:bg-teal-900/40 dark:text-teal-200">
-                              {customSkillUpdateCount}
-                            </span>
-                          )}
-                        </TabsTrigger>
-                        <TabsTrigger value="help" className="text-xs">
-                          帮助
-                        </TabsTrigger>
-                      </TabsList>
+                    {shouldShowWelcomeSkillTabs && (
+                      <Tabs defaultValue="skills-by-category" className="space-y-3">
+                        <TabsList className="grid h-9 w-full grid-cols-3">
+                          <TabsTrigger value="skills-by-category" className="text-xs">
+                            场景技能
+                          </TabsTrigger>
+                          <TabsTrigger value="installed-skills" className="text-xs gap-1.5">
+                            我安装的技能
+                            {customSkillUpdateCount > 0 && (
+                              <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-teal-100 px-1 text-[10px] font-semibold leading-none text-teal-700 dark:bg-teal-900/40 dark:text-teal-200">
+                                {customSkillUpdateCount}
+                              </span>
+                            )}
+                          </TabsTrigger>
+                          <TabsTrigger value="help" className="text-xs">
+                            帮助
+                          </TabsTrigger>
+                        </TabsList>
 
                       <TabsContent value="skills-by-category" className="mt-0">
                         {/* 市场技能：内部使用 getAllSkills 取数并按分类展示 */}
@@ -3408,149 +3859,150 @@ export function ChatContainer({
                         />
                       </TabsContent>
 
-                      <TabsContent value="installed-skills" className="mt-0 space-y-3">
-                        {enabledCustomSkillGroups.length > 0 ? (
-                          <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
-                            <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium text-emerald-800 dark:text-emerald-200">
-                              <span>已启用技能</span>
-                              <Badge
-                                variant="outline"
-                                className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
-                              >
-                                {enabledCustomSkills.length}
-                              </Badge>
-                            </div>
-                            <div className="space-y-3">
-                              {enabledCustomSkillGroups.map((group) => (
-                                <div key={group.category} className="space-y-2">
-                                  <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                                    {group.category}
-                                  </div>
-                                  <WelcomeSkillTree
-                                    cards={group.cards}
-                                    onUseSkill={handleUseSkillPrompt}
-                                    getSkillShowLabel={getSkillShowLabel}
-                                  />
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
-                          >
-                            <div className="flex items-center gap-2 min-w-0">
-                              <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
-                                <CircleAlert className={"size-4"} />
-                              </div>
-                              <div className="min-w-0 flex-1">
-                                <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
-                                  暂无
-                                </div>
-                              </div>
-                            </div>
-                          </button>
-                        )}
-
-                        {enabledCustomSkills.length > 8 && (
-                          <button
-                            type="button"
-                            onClick={() => setShowAllCustomSkills((prev) => !prev)}
-                            className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
-                          >
-                            {showAllCustomSkills ? (
-                              <>
-                                <ChevronUp className="size-3.5" />
-                                <span>收起</span>
-                              </>
-                            ) : (
-                              <>
-                                <ChevronDown className="size-3.5" />
-                                <span>展开更多（+{enabledCustomSkills.length - 8}）</span>
-                              </>
-                            )}
-                          </button>
-                        )}
-
-                        {disabledLocalSkills.length > 0 && (
-                          <details className="rounded-lg border border-border/70 bg-muted/20 px-2 py-2">
-                            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
-                              <span>已禁用技能</span>
-                              <Badge
-                                variant="outline"
-                                className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
-                              >
-                                {disabledLocalSkills.length}
-                              </Badge>
-                            </summary>
-                            <div className="mt-2 space-y-2">
-                              {disabledCustomSkillGroups.map((group) => (
-                                <div key={group.category} className="space-y-2">
-                                  <div className="text-xs text-muted-foreground/80 font-medium tracking-wider">
-                                    {group.category}
-                                  </div>
-                                  <WelcomeSkillTree
-                                    cards={group.cards}
-                                    disabled
-                                    onUseSkill={handleUseSkillPrompt}
-                                    getSkillShowLabel={getSkillShowLabel}
-                                  />
-                                </div>
-                              ))}
-                            </div>
-                          </details>
-                        )}
-                      </TabsContent>
-
-                      <TabsContent value="help" className="mt-0 space-y-2">
-                        {helpSceneSkillCards.length > 0 && (
-                          <div className="space-y-2">
-                            <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                              通用场景
-                            </div>
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                              {helpSceneSkillCards.map(({ skill, label, icon }) => (
-                                <button
-                                  key={label + skill.path}
-                                  type="button"
-                                  onClick={() => handleUseSkillPrompt(skill)}
-                                  className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                        <TabsContent value="installed-skills" className="mt-0 space-y-3">
+                          {enabledCustomSkillGroups.length > 0 ? (
+                            <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
+                              <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium text-emerald-800 dark:text-emerald-200">
+                                <span>已启用技能</span>
+                                <Badge
+                                  variant="outline"
+                                  className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
                                 >
-                                  <div className="flex items-center gap-3">
-                                    <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                                      {icon}
-                                    </div>
-                                    <div className="text-xs text-foreground leading-5">{label}</div>
-                                  </div>
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                        <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                          帮助
-                        </div>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                          <button
-                            onClick={async () => {
-                              const instructionUrl = import.meta.env.VITE_INTRUCTION_URL
-                              handleCopyToClipboard(instructionUrl)
-                            }}
-                            type="button"
-                            className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
-                          >
-                            <div className="flex items-center gap-3">
-                              <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                                <Notebook size={14} />
+                                  {enabledCustomSkills.length}
+                                </Badge>
                               </div>
-                              <div className="text-xs text-foreground leading-5">操作说明文档</div>
+                              <div className="space-y-3">
+                                {enabledCustomSkillGroups.map((group) => (
+                                  <div key={group.category} className="space-y-2">
+                                    <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                                      {group.category}
+                                    </div>
+                                    <WelcomeSkillTree
+                                      cards={group.cards}
+                                      onUseSkill={handleUseSkillPrompt}
+                                      getSkillShowLabel={getSkillShowLabel}
+                                    />
+                                  </div>
+                                ))}
+                              </div>
                             </div>
-                          </button>
-                          {/*<UpdateActionButton />*/}
-                        </div>
-                      </TabsContent>
-                    </Tabs>
+                          ) : (
+                            <button
+                              type="button"
+                              className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
+                                  <CircleAlert className={"size-4"} />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
+                                    暂无
+                                  </div>
+                                </div>
+                              </div>
+                            </button>
+                          )}
+
+                          {enabledCustomSkills.length > 8 && (
+                            <button
+                              type="button"
+                              onClick={() => setShowAllCustomSkills((prev) => !prev)}
+                              className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
+                            >
+                              {showAllCustomSkills ? (
+                                <>
+                                  <ChevronUp className="size-3.5" />
+                                  <span>收起</span>
+                                </>
+                              ) : (
+                                <>
+                                  <ChevronDown className="size-3.5" />
+                                  <span>展开更多（+{enabledCustomSkills.length - 8}）</span>
+                                </>
+                              )}
+                            </button>
+                          )}
+
+                          {disabledLocalSkills.length > 0 && (
+                            <details className="rounded-lg border border-border/70 bg-muted/20 px-2 py-2">
+                              <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
+                                <span>已禁用技能</span>
+                                <Badge
+                                  variant="outline"
+                                  className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
+                                >
+                                  {disabledLocalSkills.length}
+                                </Badge>
+                              </summary>
+                              <div className="mt-2 space-y-2">
+                                {disabledCustomSkillGroups.map((group) => (
+                                  <div key={group.category} className="space-y-2">
+                                    <div className="text-xs text-muted-foreground/80 font-medium tracking-wider">
+                                      {group.category}
+                                    </div>
+                                    <WelcomeSkillTree
+                                      cards={group.cards}
+                                      disabled
+                                      onUseSkill={handleUseSkillPrompt}
+                                      getSkillShowLabel={getSkillShowLabel}
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                            </details>
+                          )}
+                        </TabsContent>
+
+                        <TabsContent value="help" className="mt-0 space-y-2">
+                          {helpSceneSkillCards.length > 0 && (
+                            <div className="space-y-2">
+                              <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                                通用场景
+                              </div>
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                {helpSceneSkillCards.map(({ skill, label, icon }) => (
+                                  <button
+                                    key={label + skill.path}
+                                    type="button"
+                                    onClick={() => handleUseSkillPrompt(skill)}
+                                    className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                                  >
+                                    <div className="flex items-center gap-3">
+                                      <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
+                                        {icon}
+                                      </div>
+                                      <div className="text-xs text-foreground leading-5">{label}</div>
+                                    </div>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                            帮助
+                          </div>
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                            <button
+                              onClick={async () => {
+                                const instructionUrl = import.meta.env.VITE_INTRUCTION_URL
+                                handleCopyToClipboard(instructionUrl)
+                              }}
+                              type="button"
+                              className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                            >
+                              <div className="flex items-center gap-3">
+                                <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
+                                  <Notebook size={14} />
+                                </div>
+                                <div className="text-xs text-foreground leading-5">操作说明文档</div>
+                              </div>
+                            </button>
+                            {/*<UpdateActionButton />*/}
+                          </div>
+                        </TabsContent>
+                      </Tabs>
+                    )}
                   </div>
                 )}
               </div>
@@ -3575,7 +4027,7 @@ export function ChatContainer({
               return (
                 <div
                   key={message.id}
-                  ref={message.role === "user" ? setUserMessageRef(message.id) : undefined}
+                  ref={setMessageRef(message.id, message.role)}
                   data-message-role={message.role}
                 >
                   <MessageBubble
@@ -3987,7 +4439,11 @@ export function ChatContainer({
                 ref={dropZoneRef}
                 className={cn(
                   "relative flex-1 min-w-0 flex flex-col rounded-3xl border border-border  transition-colors duration-300",
-                  glowVisible ? "bg-white/80" : "bg-white",
+                  pendingUserInput
+                    ? "border-primary/25 bg-background"
+                    : glowVisible
+                      ? "bg-white/80"
+                      : "bg-white",
                   dragOver && "border-primary"
                 )}
                 onDrop={handleDrop}
@@ -4000,7 +4456,7 @@ export function ChatContainer({
                     <SkillChip label={selectedSkill.name} onRemove={() => setSelectedSkill(null)} />
                   </div>
                 )}
-                {glowVisible && (
+                {glowVisible && !pendingUserInput && (
                   <div
                     className={cn("siri-bg-glow rounded-xl", !isLoading && "siri-bg-glow-out")}
                     onAnimationEnd={(e) => {
@@ -4151,6 +4607,11 @@ export function ChatContainer({
                     )}
                   </div>
                 </div>
+                <UserInputRequestDialog
+                  request={pendingUserInput}
+                  onSubmit={handleUserInputSubmit}
+                  onLayoutChange={handleUserInputDialogLayoutChange}
+                />
               </div>
             </div>
             {/*chat container bottom panel — moved inside input box above */}
