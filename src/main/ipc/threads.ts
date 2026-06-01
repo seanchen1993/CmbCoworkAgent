@@ -16,15 +16,12 @@ import {
   closeWorkerCheckpointersForThread
 } from "../agent/runtime"
 import { forgetCoordinatorThreadState } from "./agent"
-import {
-  deleteThreadCheckpoint,
-  deleteThreadWorkerCheckpoints,
-  getOpenworkDir
-} from "../storage"
+import { deleteThreadCheckpoint, deleteThreadWorkerCheckpoints, getOpenworkDir } from "../storage"
 import {
   coordinatorWorkerManager,
   deleteCoordinatorWorkerArtifacts
 } from "../agent/coordinator-worker-manager"
+import { deleteTaskMmdThread } from "../agent/task-mmd/storage"
 import { generateTitle } from "../services/title-generator"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
@@ -150,8 +147,8 @@ async function assertCanPersistExplicitNormalMode(
     .map((worker) => `${worker.worker_id}: ${worker.description}`)
     .join("; ")
   throw new Error(
-    "仍有协同 worker 在运行或结果待处理，请先在协同模式处理完成后再切回普通模式。"
-      + (workerList ? `相关 worker：${workerList}` : "请先切回协同模式处理这些结果。")
+    "仍有协同 worker 在运行或结果待处理，请先在协同模式处理完成后再切回普通模式。" +
+      (workerList ? `相关 worker：${workerList}` : "请先切回协同模式处理这些结果。")
   )
 }
 
@@ -486,8 +483,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
     if (updates.metadata !== undefined) {
       const currentThread = getThread(threadId)
-      const currentMetadata =
-        currentThread?.metadata ? (JSON.parse(currentThread.metadata) as Record<string, unknown>) : {}
+      const currentMetadata = currentThread?.metadata
+        ? (JSON.parse(currentThread.metadata) as Record<string, unknown>)
+        : {}
       await assertCanPersistExplicitNormalMode(
         threadId,
         currentMetadata,
@@ -526,7 +524,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     if (existingThread?.metadata) {
       try {
         const metadata = JSON.parse(existingThread.metadata) as Record<string, unknown>
-        workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+        workspacePath =
+          typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
       } catch {
         workspacePath = undefined
       }
@@ -587,6 +586,13 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       console.log("[Threads] Deleted checkpoint file", { deletedWorkerCheckpoints })
     } catch (e) {
       console.warn("[Threads] Failed to delete checkpoint file:", e)
+    }
+
+    try {
+      deleteTaskMmdThread(threadId)
+      console.log("[Threads] Deleted task-mmd files")
+    } catch (e) {
+      console.warn("[Threads] Failed to delete task-mmd files:", e)
     }
   })
 

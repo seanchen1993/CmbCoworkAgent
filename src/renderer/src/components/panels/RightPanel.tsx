@@ -50,6 +50,7 @@ import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "
 import { isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
+import { getRightPanelSkillPath } from "@/components/panels/skill-tree-path"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
@@ -261,7 +262,14 @@ export function RightPanel({
         console.error("[RightPanel] Failed to load skills:", e)
       }
     }
-    load()
+    void load()
+    // Re-pull whenever main signals a skill-set change (skill evolution,
+    // optimizer patches, plugin SKILL.md edits via the file editor). Without
+    // this the right panel only refreshes when pluginVersion bumps on
+    // install/enable actions and misses content-only edits entirely.
+    return window.api.skills.onChanged(() => {
+      void load()
+    })
   }, [])
 
   useEffect(() => {
@@ -2924,13 +2932,6 @@ type RightPanelSkillTreeNode = {
   label: string
   skill?: SkillMetadata
   children: RightPanelSkillTreeNode[]
-}
-
-function getRightPanelSkillPath(skill: SkillMetadata): string {
-  const id = skill.id?.startsWith("plugin:") ? skill.id.split("/").slice(1).join("/") : skill.id
-  return String(skill.relativePath || id || skill.name || "")
-    .replace(/\\/g, "/")
-    .replace(/^\/+|\/+$/g, "")
 }
 
 function buildRightPanelSkillTree(skills: SkillMetadata[]): RightPanelSkillTreeNode[] {

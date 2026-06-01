@@ -56,6 +56,77 @@ export interface StagingDecision {
   bucketKey?: string
 }
 
+export interface UserTargetingConfig {
+  whitelistUsers?: string[]
+  blacklistUsers?: string[]
+  whitelistOrgs?: string[]
+  whitelistPaths?: string[]
+  rolloutPercent: number
+  rolloutSeed?: string
+  includeAnonymous?: boolean
+}
+
+/**
+ * Pure user-targeting matcher shared by updater staging and independent
+ * feature gates. It intentionally knows nothing about update versions.
+ */
+export function matchUserTargeting(
+  userInfo: UserInfoConfig | null,
+  config: UserTargetingConfig
+): StagingDecision {
+  const ystId = userInfo?.ystId?.trim() ?? ""
+  const sapId = userInfo?.sapId?.trim() ?? ""
+  // Bucket key has fixed priority (ystId > sapId) so the same user maps to the
+  // same bucket forever, regardless of which ID ops chose to put in the list.
+  const userKey = ystId || sapId
+  if (!userKey) {
+    return {
+      hit: config.includeAnonymous === true,
+      reason: config.includeAnonymous ? "anonymous-included" : "anonymous-excluded"
+    }
+  }
+
+  // Name matching, however, accepts EITHER id — ops should be able to ship a
+  // blacklist of sapIds without it silently no-op'ing on users that also have a
+  // ystId. Empty strings are filtered so a missing id can never accidentally
+  // match an entry that itself is "".
+  const idsForMatch = [ystId, sapId].filter((v) => v.length > 0)
+  const matchesAny = (list: string[] | undefined): boolean =>
+    !!list && list.some((entry) => idsForMatch.includes(entry))
+
+  if (matchesAny(config.blacklistUsers)) {
+    return { hit: false, reason: "blacklisted", bucketKey: userKey }
+  }
+
+  if (matchesAny(config.whitelistUsers)) {
+    return { hit: true, reason: "whitelist-user", bucketKey: userKey }
+  }
+
+  const orgId = userInfo?.originOrgId?.trim()
+  if (orgId && config.whitelistOrgs?.includes(orgId)) {
+    return { hit: true, reason: "whitelist-org", bucketKey: userKey }
+  }
+
+  const pathName = userInfo?.pathName?.trim()
+  if (pathName && config.whitelistPaths?.some((p) => isPathPrefixMatch(pathName, p))) {
+    return { hit: true, reason: "whitelist-path", bucketKey: userKey }
+  }
+
+  const pctRaw = config.rolloutPercent
+  const pct = typeof pctRaw === "number" ? Math.max(0, Math.min(100, Math.floor(pctRaw))) : 0
+  if (pct <= 0) return { hit: false, reason: "rollout-0", bucketKey: userKey }
+  if (pct >= 100) return { hit: true, reason: "rollout-100", bucketKey: userKey }
+
+  const seed = config.rolloutSeed ?? ""
+  const hash = createHash("sha1").update(`${userKey}|${seed}`).digest()
+  const bucket = hash.readUInt32BE(0) % 100
+  return {
+    hit: bucket < pct,
+    reason: `bucket=${bucket}/${pct}`,
+    bucketKey: userKey
+  }
+}
+
 /**
  * Decide whether the current client should receive the staging (gray) update.
  *
@@ -91,57 +162,15 @@ export function evaluateStaging(input: StagingDecisionInput): StagingDecision {
     return { hit: false, reason: "staging-not-newer" }
   }
 
-  const ystId = userInfo?.ystId?.trim() ?? ""
-  const sapId = userInfo?.sapId?.trim() ?? ""
-  // Bucket key has fixed priority (ystId > sapId) so the same user maps to the
-  // same bucket forever, regardless of which ID ops chose to put in the list.
-  const userKey = ystId || sapId
-  if (!userKey) {
-    return {
-      hit: staging.includeAnonymous === true,
-      reason: staging.includeAnonymous ? "anonymous-included" : "anonymous-excluded"
-    }
-  }
-
-  // Name matching, however, accepts EITHER id — ops should be able to ship a
-  // blacklist of sapIds without it silently no-op'ing on users that also have a
-  // ystId. Empty strings are filtered so a missing id can never accidentally
-  // match an entry that itself is "".
-  const idsForMatch = [ystId, sapId].filter((v) => v.length > 0)
-  const matchesAny = (list: string[] | undefined): boolean =>
-    !!list && list.some((entry) => idsForMatch.includes(entry))
-
-  if (matchesAny(staging.blacklistUsers)) {
-    return { hit: false, reason: "blacklisted", bucketKey: userKey }
-  }
-
-  if (matchesAny(staging.whitelistUsers)) {
-    return { hit: true, reason: "whitelist-user", bucketKey: userKey }
-  }
-
-  const orgId = userInfo?.originOrgId?.trim()
-  if (orgId && staging.whitelistOrgs?.includes(orgId)) {
-    return { hit: true, reason: "whitelist-org", bucketKey: userKey }
-  }
-
-  const pathName = userInfo?.pathName?.trim()
-  if (pathName && staging.whitelistPaths?.some((p) => isPathPrefixMatch(pathName, p))) {
-    return { hit: true, reason: "whitelist-path", bucketKey: userKey }
-  }
-
-  const pctRaw = staging.rolloutPercent
-  const pct = typeof pctRaw === "number" ? Math.max(0, Math.min(100, Math.floor(pctRaw))) : 0
-  if (pct <= 0) return { hit: false, reason: "rollout-0", bucketKey: userKey }
-  if (pct >= 100) return { hit: true, reason: "rollout-100", bucketKey: userKey }
-
-  const seed = staging.rolloutSeed || staging.version
-  const hash = createHash("sha1").update(`${userKey}|${seed}`).digest()
-  const bucket = hash.readUInt32BE(0) % 100
-  return {
-    hit: bucket < pct,
-    reason: `bucket=${bucket}/${pct}`,
-    bucketKey: userKey
-  }
+  return matchUserTargeting(userInfo, {
+    blacklistUsers: staging.blacklistUsers,
+    whitelistUsers: staging.whitelistUsers,
+    whitelistOrgs: staging.whitelistOrgs,
+    whitelistPaths: staging.whitelistPaths,
+    rolloutPercent: staging.rolloutPercent,
+    rolloutSeed: staging.rolloutSeed || staging.version,
+    includeAnonymous: staging.includeAnonymous
+  })
 }
 
 /**

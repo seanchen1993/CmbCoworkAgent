@@ -10,10 +10,13 @@ import {
 } from "../agent/runtime"
 import { getThread, updateThread } from "../db"
 import { summarizeAndSave } from "../memory/summarizer"
+import { consolidateMemories, shouldRunDream, incrementDreamSessions } from "../memory/consolidate"
+import { scanMemoryFiles } from "../memory/manifest"
 import { getMemoryStore } from "../memory/store"
 import { ChatOpenAI } from "@langchain/openai"
 import {
   getCustomModelConfigs,
+  isDreamEnabled,
   isMemoryEnabled,
   getCustomSkillsDir,
   invalidateEnabledSkillsCache,
@@ -87,8 +90,13 @@ import {
   coordinatorWorkerManager,
   type CoordinatorWorkerSnapshot
 } from "../agent/coordinator-worker-manager"
-import { isRetryableApiError, buildOrderedChain, type FailoverAttempt } from "../agent/failover"
-import { type HookContext, type HookResultCallback } from "../hooks/runner"
+import {
+  isRetryableApiError,
+  buildOrderedChain,
+  classifyApiError,
+  type FailoverAttempt
+} from "../agent/failover"
+import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
 import {
   createHookScope,
   normalizePathKey,
@@ -117,6 +125,7 @@ import {
   type AgentGitSnapshot
 } from "../services/agent-auto-commit"
 import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
+import { buildHarnessFeatureAgentContext } from "../harness-board/service"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
 import { makeHookResultCallback, makeHookSkippedCallback } from "../hooks/result-callback"
@@ -242,6 +251,28 @@ async function waitForReplacedRunToSettle(threadId: string): Promise<"settled" |
 
 async function withActiveRunReplacementLock<T>(threadId: string, fn: () => Promise<T>): Promise<T> {
   return activeRunReplacementLocks.withKey(threadId, fn)
+}
+
+interface HarnessAgentContext {
+  workingDirPromptAppendix?: string
+  pluginOutputDir?: string
+  systemId?: string
+}
+
+function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgentContext {
+  try {
+    const featureContext = buildHarnessFeatureAgentContext(metadata)
+    if (!featureContext) return {}
+
+    return {
+      workingDirPromptAppendix: featureContext.systemPromptInject,
+      pluginOutputDir: featureContext.pluginOutputDir,
+      systemId: featureContext.systemId
+    }
+  } catch (error) {
+    console.warn("[HarnessBoard] Failed to build harness agent context:", error)
+    return {}
+  }
 }
 
 function sendHookHalt(window: BrowserWindow, channel: string, error: HookHaltError): void {
@@ -375,6 +406,8 @@ function getAllEnabledHooksForInterrupt(workspacePath: string | undefined): Hook
 async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   payload: unknown
   workspacePath?: string
+  pluginOutputDir?: string
+  systemId?: string
   threadId: string
   turnId?: string
   hookScope: HookScopeController
@@ -402,6 +435,8 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     kwargs.status === "error" || kwargs.is_error === true || additionalKwargs?.is_error === true
   const subagentStopContext: HookContext = {
     workspacePath: params.workspacePath,
+    pluginOutputDir: params.pluginOutputDir,
+    systemId: params.systemId,
     sessionId: params.threadId,
     turnId: params.turnId,
     subagent: {
@@ -422,6 +457,62 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     params.onHookResult
   )
   throwIfHookHalt("SubagentStop", result, "SubagentStop hook stopped the turn")
+}
+
+/**
+ * PR-13 — Fire SubagentStart on each `task` tool_call seen in an AIMessage,
+ * with independent dedupe so streaming + values-snapshot duplicate AIMessages
+ * fire exactly once. Pair with SubagentStop via `tool_call_id`.
+ *
+ * AIMessages are emitted twice in many stream modes (chunk + final values), so
+ * we MUST NOT reuse the metrics-counting `_countedAiMsgIds` set — that one
+ * grows under different invariants and would not match per-tool-call dedupe.
+ */
+function maybeRunSubagentStartHooksFromToolCalls(params: {
+  toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }> | undefined
+  workspacePath?: string
+  threadId: string
+  turnId?: string
+  hookScope: HookScopeController
+  firedStartIds: Set<string>
+  onHookResult?: HookResultCallback
+  onHookSkipped?: ScopeSkipCallback
+}): void {
+  if (!params.toolCalls || params.toolCalls.length === 0) return
+  for (const tc of params.toolCalls) {
+    if (tc?.name !== "task") continue
+    const id = typeof tc.id === "string" ? tc.id : ""
+    if (!id || params.firedStartIds.has(id)) continue
+    params.firedStartIds.add(id)
+    const args = (tc.args ?? {}) as Record<string, unknown>
+    const subagentType = typeof args.subagent_type === "string" ? args.subagent_type : undefined
+    const taskDescription = typeof args.description === "string" ? args.description : undefined
+    const context: HookContext = {
+      workspacePath: params.workspacePath,
+      sessionId: params.threadId,
+      turnId: params.turnId,
+      subagent: { id, name: subagentType, status: "started" },
+      toolName: "task",
+      toolArgs: {
+        agent_id: id,
+        agent_type: subagentType,
+        tool_call_id: id,
+        task_description: taskDescription
+      }
+    }
+    runHooksEnriched(
+      resolveEnabledHooksForRun(
+        params.workspacePath,
+        "SubagentStart",
+        context,
+        params.hookScope,
+        params.onHookSkipped
+      ),
+      "SubagentStart",
+      context,
+      params.onHookResult
+    ).catch((e) => console.warn("[Hooks] SubagentStart hook error:", e))
+  }
 }
 
 /**
@@ -528,6 +619,8 @@ async function buildSkillLifecycleRegistryForHooks(): Promise<SkillLifecycleRegi
 async function activateExplicitSkillFromMessage({
   message,
   workspacePath,
+  pluginOutputDir,
+  systemId,
   sessionId,
   turnId,
   hookScope,
@@ -538,6 +631,8 @@ async function activateExplicitSkillFromMessage({
 }: {
   message: string
   workspacePath: string
+  pluginOutputDir?: string
+  systemId?: string
   sessionId: string
   turnId?: string
   hookScope: HookScopeController
@@ -583,6 +678,8 @@ async function activateExplicitSkillFromMessage({
       skillPath: skill.path
     }),
     workspacePath,
+    pluginOutputDir,
+    systemId,
     sessionId,
     turnId,
     hookScope,
@@ -2686,6 +2783,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const skillUsageDetector = new SkillUsageDetector()
       const toolCallCounter = new ToolCallCounter()
       let assistantText = ""
+      const fileWritePaths: string[] = []
       const recentCompletedTurns = snapshotSkillProposalWindow(threadId).slice(-2)
       let drainedCoordinatorNotifications: CoordinatorTurnNotification[] = []
       let coordinatorNotificationsConsumed = false
@@ -2831,6 +2929,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+      let stopHookFired = false
       const onHookSkippedFactory = (event: HookEvent): ScopeSkipCallback =>
         makeHookSkippedCallback(window, channel, event, turnState.turnId)
 
@@ -2891,6 +2990,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
         const workspacePath = metadata.workspacePath as string | undefined
         sessionWorkspacePath = workspacePath ?? undefined
+        const harnessAgentContext = getHarnessAgentContext(metadata)
 
         if (!workspacePath) {
           safeSendToWindow(window, channel, {
@@ -2925,13 +3025,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
         // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
         // thread is deleted (threads:delete) or the app is quitting.
-        fireSessionStartOnce(
+        await fireSessionStartOnce(
           threadId,
           sessionWorkspacePath,
           onHookResult,
           hookScope,
           onHookSkippedFactory("SessionStart"),
-          turnState.turnId
+          turnState.turnId,
+          harnessAgentContext.pluginOutputDir,
+          harnessAgentContext.systemId
         )
         sendActiveHookNotice(window, channel, workspacePath)
 
@@ -2939,6 +3041,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const explicitSkillActivation = await activateExplicitSkillFromMessage({
             message,
             workspacePath,
+            pluginOutputDir: harnessAgentContext.pluginOutputDir,
+            systemId: harnessAgentContext.systemId,
             sessionId: threadId,
             turnId: turnState.turnId,
             hookScope,
@@ -2972,7 +3076,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             userPrompt: message,
             workspacePath: workspacePath ?? undefined,
             sessionId: threadId,
-            turnId: turnState.turnId
+            turnId: turnState.turnId,
+            pluginOutputDir: harnessAgentContext.pluginOutputDir,
+            systemId: harnessAgentContext.systemId
           }
           const promptSubmitResult = await runHooksEnriched(
             resolveEnabledHooksForRun(
@@ -3335,18 +3441,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           })
         }
 
-        const userHumanMessage =
-          isCoordinatorNotificationTurn
-            ? undefined
-            : effectiveMessage === message
-              ? new HumanMessage(effectiveMessage)
-              : new HumanMessage({
-                  content: effectiveMessage,
-                  additional_kwargs: {
-                    [COORDINATOR_AUGMENTED_USER_MESSAGE_KEY]: true,
-                    [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: message
-                  }
-                })
+        const userHumanMessage = isCoordinatorNotificationTurn
+          ? undefined
+          : effectiveMessage === message
+            ? new HumanMessage(effectiveMessage)
+            : new HumanMessage({
+                content: effectiveMessage,
+                additional_kwargs: {
+                  [COORDINATOR_AUGMENTED_USER_MESSAGE_KEY]: true,
+                  [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: message
+                }
+              })
 
         const humanMessages = [
           coordinatorNotificationHumanMessage
@@ -3405,6 +3510,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               hookScope,
               skillHookKeys,
               skillUseTracker,
+              ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
@@ -3514,6 +3620,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const _countedToolResultMsgIds = new Set<string>()
         // Track which subagent tool-call IDs we've already emitted SubagentStop for (dedupe)
         const _subagentStopFired = new Set<string>()
+        const _subagentStartFired = new Set<string>()
         const _llmNodeByMessageId = new Map<string, string>()
         const _toolNodeByRef = new Map<string, string>()
         const MODEL_INPUT_WINDOW = 12
@@ -3523,6 +3630,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           s.length > MAX_TRACE_CONTENT ? `${s.slice(0, MAX_TRACE_CONTENT)}\n…(truncated)` : s
 
         const normalizeMessageText = (s: string): string => s.replace(/\r\n/g, "\n").trim()
+
+        const stableJson = (value: unknown): string => {
+          if (value === null || value === undefined) return String(value)
+          if (typeof value !== "object") return JSON.stringify(value)
+          if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`
+          const obj = value as Record<string, unknown>
+          return `{${Object.keys(obj)
+            .sort()
+            .map((key) => `${JSON.stringify(key)}:${stableJson(obj[key])}`)
+            .join(",")}}`
+        }
 
         // Providers may surface usage as top-level `usage_metadata` or under
         // `response_metadata.token_usage` / `response_metadata.usage`.
@@ -3655,6 +3773,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 threadId,
                 turnId: turnState.turnId,
                 hookScope,
+                pluginOutputDir: harnessAgentContext.pluginOutputDir,
+                systemId: harnessAgentContext.systemId,
                 firedToolCallIds: _subagentStopFired,
                 onHookResult,
                 onHookSkipped: onHookSkippedFactory("SubagentStop")
@@ -3677,6 +3797,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               | undefined
             const msgId = (kwargs.id as string) || ""
             if (!toolCalls || toolCalls.length === 0) return
+            maybeRunSubagentStartHooksFromToolCalls({
+              toolCalls,
+              workspacePath,
+              threadId,
+              turnId: turnState.turnId,
+              hookScope,
+              firedStartIds: _subagentStartFired,
+              onHookResult,
+              onHookSkipped: onHookSkippedFactory("SubagentStart")
+            })
             if (msgId && _countedAiMsgIds.has(msgId)) return
             if (msgId) _countedAiMsgIds.add(msgId)
 
@@ -3700,6 +3830,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   if (hit) {
                     syncUsedSkillsContext()
                   }
+                }
+              }
+
+              if (tcName === "write_file" || tcName === "edit_file") {
+                const writePath =
+                  (typeof tc.args?.path === "string" && tc.args.path) ||
+                  (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
+                  ""
+                if (writePath) {
+                  fileWritePaths.push(writePath.replace(/\\/g, "/"))
                 }
               }
 
@@ -3754,7 +3894,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
             if (!Array.isArray(state.messages)) return
 
+            const currentMessageTexts = new Set(
+              [message, effectiveMessage].map(normalizeMessageText).filter(Boolean)
+            )
             let currentTurnStartIndex = -1
+            let latestUserMessageIndex = -1
             for (let i = state.messages.length - 1; i >= 0; i--) {
               const msg = state.messages[i]
               const kwargs = msg?.kwargs || {}
@@ -3762,16 +3906,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               const className = classId[classId.length - 1] || ""
               const role = toRole(className, kwargs)
               if (role !== "user") continue
-              if (
-                normalizeMessageText(extractText(kwargs.content)) ===
-                normalizeMessageText(effectiveMessage)
-              ) {
+              if (latestUserMessageIndex < 0) latestUserMessageIndex = i
+              if (currentMessageTexts.has(normalizeMessageText(extractText(kwargs.content)))) {
                 currentTurnStartIndex = i
                 break
               }
             }
 
-            const valuesStartIndex = currentTurnStartIndex >= 0 ? currentTurnStartIndex + 1 : 0
+            const valuesStartIndex =
+              currentTurnStartIndex >= 0
+                ? currentTurnStartIndex + 1
+                : latestUserMessageIndex >= 0
+                  ? latestUserMessageIndex + 1
+                  : 0
 
             for (let i = valuesStartIndex; i < state.messages.length; i++) {
               const msg = state.messages[i]
@@ -3782,9 +3929,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               const className = classId[classId.length - 1] || ""
               const isAI = className.includes("AI") || kwargs.type === "ai"
               const isToolMessage = className.includes("Tool") || kwargs.type === "tool"
-              const aiMsgId = typeof kwargs.id === "string" ? kwargs.id : ""
-              if (isAI && aiMsgId && !_countedModelMsgIds.has(aiMsgId)) {
-                _countedModelMsgIds.add(aiMsgId)
+              const rawAiMsgId = typeof kwargs.id === "string" ? kwargs.id : ""
+              const aiMsgKey = rawAiMsgId || `values:${i}:${stableJson(tcs ?? [])}`
+              if (isAI && !_countedModelMsgIds.has(aiMsgKey)) {
+                _countedModelMsgIds.add(aiMsgKey)
 
                 // Extract the real model name from API response metadata (e.g. "MiniMax-M2.7")
                 // This takes precedence over the user-configured model name (config.model)
@@ -3817,14 +3965,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   : []
 
                 const llmNodeId = tracer.beginLlmNode({
-                  messageId: aiMsgId,
+                  messageId: aiMsgKey,
                   startedAt: nowIsoLocal(),
                   input: inputSlice,
                   metadata: {
+                    ...(rawAiMsgId ? { providerMessageId: rawAiMsgId } : {}),
                     toolCallCount: outputToolCalls.length
                   }
                 })
-                _llmNodeByMessageId.set(aiMsgId, llmNodeId)
+                _llmNodeByMessageId.set(aiMsgKey, llmNodeId)
 
                 const usageForTrace = normalizeTokenUsage(getUsageMetadata(kwargs))
 
@@ -3837,7 +3986,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 }
 
                 tracer.recordModelCall({
-                  messageId: aiMsgId,
+                  messageId: rawAiMsgId || aiMsgKey,
                   startedAt: nowIsoLocal(),
                   inputMessages: inputSlice,
                   outputMessage: {
@@ -3862,17 +4011,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 for (let tcIndex = 0; tcIndex < tcs.length; tcIndex++) {
                   const tc = tcs[tcIndex]
                   const tcId = typeof tc?.id === "string" ? tc.id : ""
-                  const toolRef =
-                    tcId ||
-                    `${aiMsgId || "ai_unknown"}:${tcIndex}:${JSON.stringify(tc?.args ?? {})}`
-                  const counted = toolCallCounter.register(tc, aiMsgId, tcIndex)
+                  const toolRef = tcId || `${aiMsgKey}:${tcIndex}:${JSON.stringify(tc?.args ?? {})}`
+                  const counted = toolCallCounter.register(tc, aiMsgKey, tcIndex)
                   if (!_toolNodeByRef.has(toolRef)) {
-                    const parentId = aiMsgId ? _llmNodeByMessageId.get(aiMsgId) : undefined
+                    const parentId = _llmNodeByMessageId.get(aiMsgKey)
                     const toolNodeId = tracer.addToolNode({
                       name: tc?.name ?? "unknown",
                       input: tc?.args ?? {},
                       parentId,
-                      llmMessageId: aiMsgId || undefined,
+                      llmMessageId: aiMsgKey,
                       toolCallId: tcId || undefined,
                       metadata: { index: tcIndex }
                     })
@@ -4055,6 +4202,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               hookScope,
               skillHookKeys,
               skillUseTracker,
+              ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
@@ -4070,6 +4218,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             threadId,
             workspacePath: workspacePath ?? undefined,
             turnId: turnState.turnId,
+            pluginOutputDir: harnessAgentContext.pluginOutputDir,
+            systemId: harnessAgentContext.systemId,
             abortSignal: abortController.signal,
             getStopContext: () =>
               stopContextCollector.snapshot({
@@ -4094,7 +4244,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
             revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
             onHookResult,
-            onHookSkippedFactory
+            onHookSkippedFactory,
+            onStopHooksFired: () => {
+              stopHookFired = true
+            }
           })
 
           if (completionOutcome === "failed") {
@@ -4198,32 +4351,82 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
             const memoryStore = await getMemoryStore()
-            const allConfigs = getCustomModelConfigs()
+            const memDir = memoryStore.getMemoryDir()
+            const memDirNormalized = memDir.replace(/\\/g, "/")
+            const agentAlreadyWroteMemory = fileWritePaths.some(
+              (p) => p.startsWith(memDirNormalized) || p.startsWith(memDir)
+            )
 
-            // Use routing to pick memory summarization model (economy in auto mode)
-            const memRoutingResult = await resolveModel({
-              taskSource: "memory_summarize",
-              threadId,
-              requestedModelId: modelId ?? undefined,
-              routingMode: getGlobalRoutingMode()
-            }).catch(() => null)
-            const memModelId = memRoutingResult?.resolvedModelId
-            const memCfgId =
-              memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
-            const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
+            const resolveMemoryModel = async (): Promise<ChatOpenAI | null> => {
+              const allConfigs = getCustomModelConfigs()
+              const memRoutingResult = await resolveModel({
+                taskSource: "memory_summarize",
+                threadId,
+                requestedModelId: modelId ?? undefined,
+                routingMode: getGlobalRoutingMode()
+              }).catch(() => null)
+              const memModelId = memRoutingResult?.resolvedModelId
+              const memCfgId =
+                memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
+              const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
+              if (!config?.apiKey) {
+                console.warn("[Agent] No model config available — skipping memory tasks")
+                return null
+              }
+              return new ChatOpenAI({
+                model: config.model,
+                apiKey: config.apiKey,
+                configuration: { baseURL: config.baseUrl },
+                maxTokens: config.maxOutputTokens,
+                temperature: config.temperature,
+                topP: config.topP,
+                modelKwargs: {
+                  ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+                }
+              })
+            }
 
-            if (!config) {
-              console.warn("[Agent] No model config available — skipping memory summarization")
-            } else if (config?.apiKey) {
-              summarizeAndSave({
-                model: new ChatOpenAI({
-                  model: config.model,
-                  apiKey: config.apiKey,
-                  configuration: { baseURL: config.baseUrl }
-                }),
-                conversation,
-                memoryDir: memoryStore.getMemoryDir()
-              }).catch((e) => console.warn("[Agent] Memory summarize failed:", e))
+            const tryTriggerDream = (memoryModel: ChatOpenAI): void => {
+              try {
+                if (!isDreamEnabled()) {
+                  console.log("[Agent] Dream auto-trigger disabled")
+                  return
+                }
+                const factCount = scanMemoryFiles(memDir).length
+                if (shouldRunDream(memDir, factCount)) {
+                  console.log("[Agent] Dream auto-trigger: conditions met, starting consolidation")
+                  consolidateMemories({ model: memoryModel, memoryDir: memDir }).catch((e) =>
+                    console.warn("[Agent] Dream consolidation failed:", e)
+                  )
+                }
+              } catch (e) {
+                console.warn("[Agent] Dream check failed:", e instanceof Error ? e.message : e)
+              }
+            }
+
+            if (agentAlreadyWroteMemory) {
+              console.log(
+                "[Agent] Main agent wrote to memory during conversation — skipping summarizeAndSave"
+              )
+              incrementDreamSessions(memDir)
+              const memoryModel = await resolveMemoryModel()
+              if (memoryModel) {
+                tryTriggerDream(memoryModel)
+              }
+            } else {
+              const memoryModel = await resolveMemoryModel()
+              if (memoryModel) {
+                summarizeAndSave({
+                  model: memoryModel,
+                  conversation,
+                  memoryDir: memDir
+                })
+                  .then(() => {
+                    incrementDreamSessions(memDir)
+                    tryTriggerDream(memoryModel)
+                  })
+                  .catch((e) => console.warn("[Agent] Memory summarize failed:", e))
+              }
             }
           }
         }
@@ -4259,6 +4462,31 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const errMsg = error instanceof Error ? error.message : "Unknown error"
           clearCoordinatorNotificationSelectedSkillsOnExit = true
           console.error("[Agent] Error:", error)
+          if (!stopHookFired) {
+            const stopFailureErrorCode = classifyApiError(error)
+            const stopFailureContext: HookContext = {
+              workspacePath: sessionWorkspacePath,
+              sessionId: threadId,
+              turnId: turnState.turnId,
+              stopFailureError: stopFailureErrorCode,
+              toolResult: JSON.stringify({
+                error: errMsg,
+                error_type: stopFailureErrorCode
+              })
+            }
+            runHooks(
+              resolveEnabledHooksForRun(
+                sessionWorkspacePath,
+                "StopFailure",
+                stopFailureContext,
+                hookScope,
+                onHookSkippedFactory("StopFailure")
+              ),
+              "StopFailure",
+              stopFailureContext,
+              onHookResult
+            ).catch((e: unknown) => console.warn("[Hooks] StopFailure hook error:", e))
+          }
           safeSendToWindow(window, channel, {
             type: "error",
             error: errMsg
@@ -4366,6 +4594,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const thread = getThread(threadId)
       const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
       const workspacePath = metadata.workspacePath as string | undefined
+      const harnessAgentContext = getHarnessAgentContext(metadata)
       const resumeCoordinatorRequest = resolveCoordinatorModeRequest("", metadata)
       const resumeForcedByEnvironment = resumeCoordinatorRequest.source === "environment"
       const resumeAgentMode: AgentMode = resumeForcedByEnvironment
@@ -4435,7 +4664,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       })
       const { abortController, resumeRunSettledPromise, resolveResumeRunSettled } =
         resumeReplacement
-      let resumeCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(
+      const resumeCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(
         threadId,
         metadata
       )
@@ -4734,6 +4963,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               hookScope,
               skillHookKeys,
               skillUseTracker,
+              ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
@@ -4838,6 +5068,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 threadId,
                 turnId: turnState.turnId,
                 hookScope,
+                pluginOutputDir: harnessAgentContext.pluginOutputDir,
+                systemId: harnessAgentContext.systemId,
                 firedToolCallIds: resumeSubagentStopFired,
                 onHookResult,
                 onHookSkipped: onHookSkippedFactory("SubagentStop")
@@ -4887,6 +5119,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               hookScope,
               skillHookKeys,
               skillUseTracker,
+              ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
@@ -4901,119 +5134,121 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         }
 
-      if (!abortController.signal.aborted) {
-        const completionOutcome = await runCompletionHooksWithRevision({
-          threadId,
-          workspacePath: workspacePath ?? undefined,
-          turnId: turnState.turnId,
-          abortSignal: abortController.signal,
-          getStopContext: () => stopContextCollector.snapshot(),
-          runRevision: async (revisionPrompt) => {
-            if (!resumeAgentRuntime)
-              throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
-            const revisionStream = await resumeAgentRuntime.stream(
-              { messages: [new HumanMessage(revisionPrompt)] },
-              resumeStreamConfig
-            )
-            await consumeResumeStream(revisionStream)
-          },
-          sendNotice: sendHookNotice,
-          sendError: sendStreamError,
-          hookScope,
-          skillUseTracker,
-          maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
-          revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
-          onHookResult,
-          onHookSkippedFactory
-        })
+        if (!abortController.signal.aborted) {
+          const completionOutcome = await runCompletionHooksWithRevision({
+            threadId,
+            workspacePath: workspacePath ?? undefined,
+            turnId: turnState.turnId,
+            pluginOutputDir: harnessAgentContext.pluginOutputDir,
+            systemId: harnessAgentContext.systemId,
+            abortSignal: abortController.signal,
+            getStopContext: () => stopContextCollector.snapshot(),
+            runRevision: async (revisionPrompt) => {
+              if (!resumeAgentRuntime)
+                throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+              const revisionStream = await resumeAgentRuntime.stream(
+                { messages: [new HumanMessage(revisionPrompt)] },
+                resumeStreamConfig
+              )
+              await consumeResumeStream(revisionStream)
+            },
+            sendNotice: sendHookNotice,
+            sendError: sendStreamError,
+            hookScope,
+            skillUseTracker,
+            maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
+            revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
+            onHookResult,
+            onHookSkippedFactory
+          })
 
-        if (completionOutcome === "failed") {
+          if (completionOutcome === "failed") {
+            clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+            turnStateShouldDispose = true
+            return
+          }
+          // "halted" falls through to the done path so the renderer stops loading.
+
           clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+          await settleResumeDrainedCoordinatorNotifications("restore")
+          await finalizeAutoCommit({
+            threadId,
+            workspacePath,
+            userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
+            snapshot: autoCommit.snapshot,
+            window,
+            channel
+          })
+          turnStateShouldDispose = true
+          safeSendToWindow(window, channel, { type: "done" })
+        }
+      } catch (error) {
+        if (isHookHaltError(error)) {
+          clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+          console.warn("[Agent] Resume hook halted turn:", error.reason)
+          sendHookHalt(window, channel, error)
           turnStateShouldDispose = true
           return
         }
-        // "halted" falls through to the done path so the renderer stops loading.
+        const isAbortError =
+          error instanceof Error &&
+          (error.name === "AbortError" ||
+            error.message.includes("aborted") ||
+            error.message.includes("Controller is already closed"))
 
-        clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
-        await settleResumeDrainedCoordinatorNotifications("restore")
-        await finalizeAutoCommit({
-          threadId,
-          workspacePath,
-          userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
-          snapshot: autoCommit.snapshot,
-          window,
-          channel
-        })
-        turnStateShouldDispose = true
-        safeSendToWindow(window, channel, { type: "done" })
-      }
-    } catch (error) {
-      if (isHookHaltError(error)) {
-        clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
-        console.warn("[Agent] Resume hook halted turn:", error.reason)
-        sendHookHalt(window, channel, error)
-        turnStateShouldDispose = true
-        return
-      }
-      const isAbortError =
-        error instanceof Error &&
-        (error.name === "AbortError" ||
-          error.message.includes("aborted") ||
-          error.message.includes("Controller is already closed"))
-
-      if (!isAbortError) {
-        clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
-        console.error("[Agent] Resume error:", error)
-        safeSendToWindow(window, channel, {
-          type: "error",
-          error: error instanceof Error ? error.message : "Unknown error"
-        })
-      }
-      turnStateShouldDispose = true
-    } finally {
-      window.removeListener("closed", onWindowClosed)
-      await settleResumeDrainedCoordinatorNotifications("restore")
-      if (clearResumeCoordinatorNotificationSelectedSkillsOnExit) {
-        const nextResumeCoordinatorNotificationSelectedSkills =
-          omitCoordinatorNotificationSelectedSkills(
-            resumeCoordinatorNotificationSelectedSkills,
-            trackedResumeCoordinatorNotificationIds
-          )
-        if (
-          !coordinatorNotificationSelectedSkillsEqual(
-            resumeCoordinatorNotificationSelectedSkills,
-            nextResumeCoordinatorNotificationSelectedSkills
-          )
-        ) {
-          resumeCoordinatorNotificationSelectedSkills =
-            nextResumeCoordinatorNotificationSelectedSkills ?? {}
-          setCoordinatorNotificationSelectedSkillsState(
-            threadId,
-            metadata,
-            nextResumeCoordinatorNotificationSelectedSkills
-          )
-          updateThread(threadId, { metadata: JSON.stringify(metadata) })
+        if (!isAbortError) {
+          clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+          console.error("[Agent] Resume error:", error)
+          safeSendToWindow(window, channel, {
+            type: "error",
+            error: error instanceof Error ? error.message : "Unknown error"
+          })
         }
+        turnStateShouldDispose = true
+      } finally {
+        window.removeListener("closed", onWindowClosed)
+        await settleResumeDrainedCoordinatorNotifications("restore")
+        if (clearResumeCoordinatorNotificationSelectedSkillsOnExit) {
+          const nextResumeCoordinatorNotificationSelectedSkills =
+            omitCoordinatorNotificationSelectedSkills(
+              resumeCoordinatorNotificationSelectedSkills,
+              trackedResumeCoordinatorNotificationIds
+            )
+          if (
+            !coordinatorNotificationSelectedSkillsEqual(
+              resumeCoordinatorNotificationSelectedSkills,
+              nextResumeCoordinatorNotificationSelectedSkills
+            )
+          ) {
+            resumeCoordinatorNotificationSelectedSkills =
+              nextResumeCoordinatorNotificationSelectedSkills ?? {}
+            setCoordinatorNotificationSelectedSkillsState(
+              threadId,
+              metadata,
+              nextResumeCoordinatorNotificationSelectedSkills
+            )
+            updateThread(threadId, { metadata: JSON.stringify(metadata) })
+          }
+        }
+        const currentController = activeRuns.get(threadId)
+        const replacedByNewRun = Boolean(currentController && currentController !== abortController)
+        if (currentController === abortController) {
+          activeRuns.delete(threadId)
+        }
+        if (!replacedByNewRun) {
+          LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
+            console.warn("[Agent] ACL cleanup error:", err)
+          })
+        }
+        if (activeRunSettled.get(threadId) === resumeRunSettledPromise) {
+          activeRunSettled.delete(threadId)
+        }
+        resolveResumeRunSettled()
+        if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
+          disposeTurnRuntimeState(turnState)
+        }
+        discardAgentAutoCommitTracking(threadId)
       }
-      const currentController = activeRuns.get(threadId)
-      const replacedByNewRun = Boolean(currentController && currentController !== abortController)
-      if (currentController === abortController) {
-        activeRuns.delete(threadId)
-      }
-      if (!replacedByNewRun) {
-        LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
-          console.warn("[Agent] ACL cleanup error:", err)
-        })
-      }
-      if (activeRunSettled.get(threadId) === resumeRunSettledPromise) {
-        activeRunSettled.delete(threadId)
-      }
-      resolveResumeRunSettled()
-      if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
-        disposeTurnRuntimeState(turnState)
-      }
-      discardAgentAutoCommitTracking(threadId)
-    }
     }
   )
 
@@ -5035,6 +5270,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
     const workspacePath = metadata.workspacePath as string | undefined
     const modelId = metadata.model as string | undefined
+    const harnessAgentContext = getHarnessAgentContext(metadata)
     const interruptCoordinatorRequest = resolveCoordinatorModeRequest("", metadata)
     const interruptAgentMode: AgentMode =
       interruptCoordinatorRequest.source === "environment"
@@ -5072,7 +5308,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     })
     const { abortController, interruptRunSettledPromise, resolveInterruptRunSettled } =
       interruptReplacement
-    let interruptCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(
+    const interruptCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(
       threadId,
       metadata
     )
@@ -5360,6 +5596,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               hookScope,
               skillHookKeys,
               skillUseTracker,
+              ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
@@ -5461,6 +5698,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 threadId,
                 turnId: turnState.turnId,
                 hookScope,
+                pluginOutputDir: harnessAgentContext.pluginOutputDir,
+                systemId: harnessAgentContext.systemId,
                 firedToolCallIds: interruptSubagentStopFired,
                 onHookResult,
                 onHookSkipped: onHookSkippedFactory("SubagentStop")
@@ -5510,6 +5749,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               hookScope,
               skillHookKeys,
               skillUseTracker,
+              ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
@@ -5526,6 +5766,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             threadId,
             workspacePath: workspacePath ?? undefined,
             turnId: turnState.turnId,
+            pluginOutputDir: harnessAgentContext.pluginOutputDir,
+            systemId: harnessAgentContext.systemId,
             abortSignal: abortController.signal,
             getStopContext: () => stopContextCollector.snapshot(),
             runRevision: async (revisionPrompt) => {

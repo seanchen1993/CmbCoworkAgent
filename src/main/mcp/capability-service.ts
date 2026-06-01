@@ -8,10 +8,12 @@ import { buildAliasMaps, buildCapabilityAliases, type McpCapabilitySeed } from "
 import { resolveMcpConnectorKind } from "./connector-kind"
 import type {
   McpCapabilityAliasMaps,
+  McpFallbackPolicy,
   McpCapabilityService,
   McpCapabilityTool,
   McpInvocationResult
 } from "./capability-types"
+import { resolveMcpHeaders } from "./headers"
 import { normalizeMcpInvocationResult } from "./result-utils"
 import { SchemaCache } from "./schema-cache"
 import { recordSuccessfulToolExample } from "./tool-example-store"
@@ -21,6 +23,10 @@ interface CapabilitySource {
   providerKey: string
   providerDisplayName: string
   visibility: "eager" | "lazy"
+  priority: number
+  scope: "global" | "plugin-active" | "plugin-installed"
+  pluginId?: string
+  fallback?: McpFallbackPolicy
   serverConfig: Record<string, unknown>
 }
 
@@ -34,6 +40,7 @@ interface CapabilityCache {
 function toPluginSources(): CapabilitySource[] {
   const plugins = getPlugins().filter((plugin) => plugin.enabled && plugin.mcpServerCount > 0)
   const sources: CapabilitySource[] = []
+  const userInfo = getUserInfo()
 
   for (const plugin of plugins) {
     const configPath = join(plugin.path, ".mcp.json")
@@ -46,7 +53,11 @@ function toPluginSources(): CapabilitySource[] {
         providerKey: `plugin:${plugin.id}/${serverName}`,
         providerDisplayName: serverName,
         visibility: "eager",
-        serverConfig: buildPluginServerConfig(serverConfig)
+        priority: serverConfig.priority ?? 50,
+        scope: serverConfig.scope ?? "plugin-active",
+        pluginId: plugin.id,
+        fallback: normalizeFallbackPolicy(serverConfig.fallback),
+        serverConfig: buildPluginServerConfig(serverConfig, userInfo)
       })
     }
   }
@@ -54,7 +65,20 @@ function toPluginSources(): CapabilitySource[] {
   return sources
 }
 
-function buildPluginServerConfig(config: PluginMcpServerConfig): Record<string, unknown> {
+function normalizeFallbackPolicy(policy: PluginMcpServerConfig["fallback"]): McpFallbackPolicy | undefined {
+  if (!policy?.enabled || policy.safeToRetry !== true) return undefined
+  return {
+    enabled: true,
+    to: policy.to ?? "global",
+    match: policy.match ?? "toolNameAndSchema",
+    safeToRetry: true
+  }
+}
+
+function buildPluginServerConfig(
+  config: PluginMcpServerConfig,
+  userInfo: ReturnType<typeof getUserInfo>
+): Record<string, unknown> {
   if (config.command) {
     return buildMcpServerConfig({
       kind: "stdio",
@@ -69,7 +93,11 @@ function buildPluginServerConfig(config: PluginMcpServerConfig): Record<string, 
       kind: "remote",
       url: config.url,
       advanced: {
-        headers: config.headers,
+        headers: resolveMcpHeaders({
+          headers: config.headers,
+          userInfo,
+          injectUserHeaders: config.injectUserHeaders
+        }),
         transport: config.transport
       }
     })
@@ -89,6 +117,8 @@ function toConnectorSources(): CapabilitySource[] {
       providerKey: connector.id,
       providerDisplayName: connector.name || connector.id,
       visibility: connector.lazyLoad ? "lazy" : "eager",
+      priority: 100,
+      scope: "global" as const,
       serverConfig: isStdio
         ? buildMcpServerConfig({
             kind: "stdio",
@@ -101,12 +131,10 @@ function toConnectorSources(): CapabilitySource[] {
             url: connector.url,
             advanced: {
               ...connector.advanced,
-              headers: {
-                ...connector.advanced?.headers,
-                yst_id_token: userInfo?.ystIdToken || "",
-                sap_id: userInfo?.sapId || "",
-                name: encodeURIComponent(userInfo?.userName || "")
-              }
+              headers: resolveMcpHeaders({
+                headers: connector.advanced?.headers,
+                userInfo
+              })
             }
           })
     }
@@ -122,6 +150,10 @@ function buildFingerprint(sources: CapabilitySource[]): string {
         providerKey: source.providerKey,
         providerDisplayName: source.providerDisplayName,
         visibility: source.visibility,
+        priority: source.priority,
+        scope: source.scope,
+        pluginId: source.pluginId,
+        fallback: source.fallback,
         serverConfig: source.serverConfig
       }))
   )
@@ -184,6 +216,14 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
   async listTools(): Promise<McpCapabilityTool[]> {
     await this.ensureInitialized()
     return [...(this.cache?.tools ?? [])]
+  }
+
+  async getSnapshot(): Promise<{ fingerprint: string; tools: McpCapabilityTool[] }> {
+    await this.ensureInitialized()
+    return {
+      fingerprint: this.cache?.fingerprint ?? "",
+      tools: [...(this.cache?.tools ?? [])]
+    }
   }
 
   async getTool(idOrAlias: string): Promise<McpCapabilityTool | null> {
@@ -343,7 +383,12 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
               rawTool.outputSchema && typeof rawTool.outputSchema === "object"
                 ? this.schemaCache.get(rawTool.outputSchema as Record<string, unknown>)
                 : undefined,
-            visibility: source.visibility
+            visibility: source.visibility,
+            sourceKind: source.kind,
+            scope: source.scope,
+            priority: source.priority,
+            pluginId: source.pluginId,
+            fallback: source.fallback
           })
         }
       }

@@ -6,13 +6,31 @@ if (process.platform === "linux") {
   app.commandLine.appendSwitch("no-sandbox")
 }
 
-import { existsSync } from "fs"
+import { existsSync, rmSync, statSync } from "fs"
 import { join } from "path"
 import { writeMainLog, writeRendererLog } from "./logging"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
 let mainLogForwardingEnabled = false
+
+async function showPathInFileManager(filePath: string): Promise<{ success: boolean; error?: string }> {
+  if (typeof filePath !== "string" || !filePath.trim()) {
+    return { success: false, error: "Invalid path" }
+  }
+
+  if (!existsSync(filePath)) {
+    return { success: false, error: `Path does not exist: ${filePath}` }
+  }
+
+  if (statSync(filePath).isDirectory()) {
+    const error = await shell.openPath(filePath)
+    return error ? { success: false, error } : { success: true }
+  }
+
+  shell.showItemInFolder(filePath)
+  return { success: true }
+}
 
 function getConsoleLevelName(level: number): string {
   switch (level) {
@@ -133,8 +151,10 @@ import { registerMcpHandlers } from "./ipc/mcp"
 import { registerScheduledTaskHandlers } from "./ipc/scheduled-tasks"
 import { registerHeartbeatHandlers } from "./ipc/heartbeat"
 import { registerMemoryHandlers } from "./ipc/memory"
+import { registerTaskMmdHandlers } from "./ipc/task-mmd"
 import { registerGitHandlers } from "./ipc/git"
 import { registerPluginHandlers } from "./ipc/plugins"
+import { registerPluginFileHandlers } from "./ipc/plugin-files"
 import { registerSandboxHandlers } from "./ipc/sandbox"
 import { registerOptimizerHandlers } from "./ipc/optimizer"
 import { registerChatXHandlers } from "./ipc/chatx"
@@ -144,8 +164,11 @@ import { registerTerminalHandlers, disposeAllTerminals } from "./ipc/terminal"
 import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
 import { registerDashboardHandlers } from "./ipc/dashboard"
+import { registerFeatureGateHandlers } from "./ipc/feature-gates"
+import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
+import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
@@ -167,7 +190,8 @@ import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
-import { isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
+import { startFeatureGatePrefetch, stopFeatureGatePrefetch } from "./feature-gates"
+import { getOpenworkDir, isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
 import {
@@ -180,6 +204,25 @@ import {
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
 const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
+
+function cleanupLegacySkillEvalRecords(): void {
+  const roots = new Set(
+    [getOpenworkDir(), process.env.CMB_COWORK_AGENT_HOME?.trim()].filter(
+      (value): value is string => Boolean(value)
+    )
+  )
+
+  for (const root of roots) {
+    const legacyDir = join(root, "skill-evals")
+    if (!existsSync(legacyDir)) continue
+    try {
+      rmSync(legacyDir, { recursive: true, force: true })
+      console.log("[Main] Removed legacy SkillEval records:", legacyDir)
+    } catch (error) {
+      console.warn("[Main] Failed to remove legacy SkillEval records:", error)
+    }
+  }
+}
 
 // ── Keep Awake ──
 let keepAwakeBlockerId: number | null = null
@@ -442,7 +485,6 @@ if (!gotTheLock) {
       })
     }
 
-    // Register cloud trace reporter if trace base URL is configured
     const traceBaseUrl = import.meta.env.VITE_API_TRACE_BASE_URL as string | undefined
     if (traceBaseUrl) {
       setTraceReporter(new CloudTraceReporter(traceBaseUrl))
@@ -455,6 +497,7 @@ if (!gotTheLock) {
 
     // Initialize database
     await initializeDatabase()
+    cleanupLegacySkillEvalRecords()
 
     // Initialize adoption tracker (side-effect only; never blocks startup)
     try {
@@ -473,8 +516,10 @@ if (!gotTheLock) {
     registerScheduledTaskHandlers(ipcMain)
     registerHeartbeatHandlers(ipcMain)
     registerMemoryHandlers(ipcMain)
+    registerTaskMmdHandlers(ipcMain)
     registerGitHandlers()
     registerPluginHandlers(ipcMain)
+    registerPluginFileHandlers(ipcMain)
     registerSandboxHandlers(ipcMain)
     registerOptimizerHandlers(ipcMain)
     registerChatXHandlers(ipcMain)
@@ -485,6 +530,8 @@ if (!gotTheLock) {
     registerCodeExecToolsHandlers(ipcMain)
     registerRoutingHandlers(ipcMain)
     registerDashboardHandlers(ipcMain)
+    registerFeatureGateHandlers(ipcMain)
+    registerHarnessBoardHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
     prewarmRecentSandboxWorkspaces()
@@ -533,8 +580,7 @@ if (!gotTheLock) {
 
     ipcMain.handle("show-item-in-folder", async (_, filePath: string) => {
       try {
-        shell.showItemInFolder(filePath)
-        return { success: true }
+        return await showPathInFileManager(filePath)
       } catch (error) {
         console.error("Failed to show item in folder:", error)
         return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
@@ -543,8 +589,7 @@ if (!gotTheLock) {
 
     ipcMain.handle("shell-show-item-in-folder", async (_, filePath: string) => {
       try {
-        shell.showItemInFolder(filePath)
-        return { success: true }
+        return await showPathInFileManager(filePath)
       } catch (error) {
         console.error("Failed to show item in folder:", error)
         return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
@@ -612,6 +657,7 @@ if (!gotTheLock) {
     startChatX()
     startHookConfigWatcher()
     startUpdateChecker()
+    startFeatureGatePrefetch(3000)
     markFullBackupCleanupReady(selfCheckResult)
 
     // ── Keep Awake ──
@@ -685,9 +731,11 @@ if (!gotTheLock) {
     stopScheduler()
     stopHeartbeat()
     stopChatX()
+    stopAllHarnessWatchRefs()
     stopHookConfigWatcher()
     stopRegisteredGitHookEventSync()
     stopUpdateChecker()
+    stopFeatureGatePrefetch()
     try {
       shutdownAdoptionTracker()
     } catch (err) {

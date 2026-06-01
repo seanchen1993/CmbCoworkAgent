@@ -1,6 +1,7 @@
 import { create } from "zustand"
 import type { EvolutionCandidate } from "@/api/evolution"
 import type { Thread, ModelConfig, Provider, Message } from "@/types"
+import { findFirstChatThread, isHarnessFeatureThread } from "./thread-classification"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
 const MAX_WORKER_SIGNATURE_CHARS = 512
@@ -105,7 +106,10 @@ function isSameWorkerAssistantText(a: Message, b: Message): boolean {
   return first.includes(second) || second.includes(first)
 }
 
-function findSameWorkerAssistantTextIndex(messages: Message[], message: Message): number | undefined {
+function findSameWorkerAssistantTextIndex(
+  messages: Message[],
+  message: Message
+): number | undefined {
   const index = messages.findIndex((item) => isSameWorkerAssistantText(item, message))
   return index >= 0 ? index : undefined
 }
@@ -142,7 +146,10 @@ function resolveWorkerFocusContent(
   existingMessage: Message,
   incomingMessage: Message
 ): Message["content"] {
-  if (isWorkerNonSnapshotMessageId(existingMessage.id) && existingMessage.id === incomingMessage.id) {
+  if (
+    isWorkerNonSnapshotMessageId(existingMessage.id) &&
+    existingMessage.id === incomingMessage.id
+  ) {
     return incomingMessage.content ?? existingMessage.content ?? ""
   }
 
@@ -170,6 +177,28 @@ function preferIncomingContent(
 }
 
 type EvolutionTab = "candidates" | "traces" | "review"
+type MainView =
+  | "thread"
+  | "customize"
+  | "evolution"
+  | "kanban"
+  | "harness"
+  | "claudecode"
+  | "dashboard"
+
+interface ThreadNavigationOptions {
+  preserveView?: boolean
+}
+
+function resolveChatThreadId(threads: Thread[], preferredThreadId?: string | null): string | null {
+  const preferredThread = preferredThreadId
+    ? threads.find((thread) => thread.thread_id === preferredThreadId)
+    : null
+  if (preferredThread && !isHarnessFeatureThread(preferredThread)) {
+    return preferredThread.thread_id
+  }
+  return findFirstChatThread(threads)?.thread_id ?? null
+}
 
 interface EvolutionRunProgress {
   runId: string
@@ -192,7 +221,7 @@ export interface WorkerFocusView {
 
 interface AppState {
   // Main content view routing
-  mainView: "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard"
+  mainView: MainView
 
   // Threads
   threads: Thread[]
@@ -225,6 +254,9 @@ interface AppState {
   showKanbanView: boolean
   showSubagentsInKanban: boolean
 
+  // Harness board view state
+  showHarnessBoardView: boolean
+
   // Claude Code view state
   showClaudeCodeView: boolean
   previousThreadId: string | null // 切换到 Claude Code 前保存的线程 ID
@@ -247,8 +279,11 @@ interface AppState {
 
   // Thread actions
   loadThreads: () => Promise<void>
-  createThread: (metadata?: Record<string, unknown>) => Promise<Thread>
-  selectThread: (threadId: string) => Promise<void>
+  createThread: (
+    metadata?: Record<string, unknown>,
+    options?: ThreadNavigationOptions
+  ) => Promise<Thread>
+  selectThread: (threadId: string, options?: ThreadNavigationOptions) => Promise<void>
   deleteThread: (threadId: string) => Promise<void>
   updateThread: (threadId: string, updates: Partial<Thread>) => Promise<void>
   generateTitleForFirstMessage: (threadId: string, content: string) => Promise<void>
@@ -273,16 +308,17 @@ interface AppState {
   setShowKanbanView: (show: boolean) => void
   setShowSubagentsInKanban: (show: boolean) => void
 
+  // Harness board actions
+  setShowHarnessBoardView: (show: boolean) => void
+
   // Customize actions
   setShowCustomizeView: (show: boolean, tab?: string) => void
   setMarketInitialSkillCategory: (category: string | null) => void
   setMarketInitialSkillSearchQuery: (query: string | null) => void
   setMarketInitialSkillDetailName: (name: string | null) => void
+  setMainView: (view: MainView) => void
   setMarketInitialSkillFilters: (filters: string[] | null) => void
   setMarketInitialTab: (tab: string | null) => void
-  setMainView: (
-    view: "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard"
-  ) => void
 
   // Plugin state sync — increment to trigger RightPanel refresh
   pluginVersion: number
@@ -365,6 +401,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   mainView: "thread",
   showKanbanView: false,
   showSubagentsInKanban: true,
+  showHarnessBoardView: false,
   showClaudeCodeView: false,
   showDashboardView: false,
   dashboardAllowed: null,
@@ -392,44 +429,58 @@ export const useAppStore = create<AppState>((set, get) => ({
     const threads = await window.api.threads.list()
     set({ threads })
 
-    // Select first thread if none selected
-    if (!get().currentThreadId && threads.length > 0) {
-      await get().selectThread(threads[0].thread_id)
+    // Select the first chat thread if none selected. Harness feature threads
+    // are rendered inside project mode and should not become the default chat.
+    if (!get().currentThreadId) {
+      const firstChatThread = findFirstChatThread(threads)
+      if (firstChatThread) {
+        await get().selectThread(firstChatThread.thread_id)
+      }
     }
   },
 
-  createThread: async (metadata?: Record<string, unknown>) => {
+  createThread: async (metadata?: Record<string, unknown>, options?: ThreadNavigationOptions) => {
     const thread = await window.api.threads.create(metadata)
     set((state) => ({
       threads: [thread, ...state.threads],
       currentThreadId: thread.thread_id,
-      showKanbanView: false,
-      showCustomizeView: false,
-      showClaudeCodeView: false,
-      showDashboardView: false,
-      previousThreadId: null,
-      mainView: "thread",
-      workerFocusView: null,
-      workerFocusMessagesThreadId: null,
-      workerFocusMessages: []
+      ...(options?.preserveView
+        ? {}
+        : {
+            showKanbanView: false,
+            showHarnessBoardView: false,
+            showCustomizeView: false,
+            showClaudeCodeView: false,
+            showDashboardView: false,
+            previousThreadId: null,
+            mainView: "thread" as const,
+            workerFocusView: null,
+            workerFocusMessagesThreadId: null,
+            workerFocusMessages: []
+          })
       // skillGenerationByThread is NOT reset here: new threads start with no entry
       // in the map, so the card is naturally absent without discarding other threads' state.
     }))
     return thread
   },
 
-  selectThread: async (threadId: string) => {
+  selectThread: async (threadId: string, options?: ThreadNavigationOptions) => {
     set({
       currentThreadId: threadId,
-      showKanbanView: false,
-      showCustomizeView: false,
-      showClaudeCodeView: false,
-      showDashboardView: false,
-      previousThreadId: null,
-      mainView: "thread",
-      workerFocusView: null,
-      workerFocusMessagesThreadId: null,
-      workerFocusMessages: []
+      ...(options?.preserveView
+        ? {}
+        : {
+            showKanbanView: false,
+            showHarnessBoardView: false,
+            showCustomizeView: false,
+            showClaudeCodeView: false,
+            showDashboardView: false,
+            previousThreadId: null,
+            mainView: "thread" as const,
+            workerFocusView: null,
+            workerFocusMessagesThreadId: null,
+            workerFocusMessages: []
+          })
       // skillGenerationByThread is NOT cleared here: each thread retains its own card
       // state so switching back to a thread shows the card exactly as it was left.
     })
@@ -445,7 +496,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         const threads = state.threads.filter((t) => t.thread_id !== threadId)
         const wasCurrentThread = state.currentThreadId === threadId
         const newCurrentId = wasCurrentThread
-          ? threads[0]?.thread_id || null
+          ? state.mainView === "harness"
+            ? null
+            : findFirstChatThread(threads)?.thread_id || null
           : state.currentThreadId
 
         return {
@@ -646,6 +699,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         showClaudeCodeView: true,
         showKanbanView: false,
+        showHarnessBoardView: false,
         showCustomizeView: false,
         showDashboardView: false,
         mainView: "claudecode",
@@ -657,10 +711,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     } else {
       const restored = get().previousThreadId
+      const currentThreadId = resolveChatThreadId(get().threads, restored)
       set({
         showClaudeCodeView: false,
         mainView: "thread",
-        currentThreadId: restored,
+        currentThreadId,
         previousThreadId: null
       })
     }
@@ -679,6 +734,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showDashboardView: true,
         showClaudeCodeView: false,
         showKanbanView: false,
+        showHarnessBoardView: false,
         showCustomizeView: false,
         mainView: "dashboard",
         previousThreadId: prev,
@@ -689,10 +745,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     } else {
       const restored = get().previousThreadId
+      const currentThreadId = resolveChatThreadId(get().threads, restored)
       set({
         showDashboardView: false,
         mainView: "thread",
-        ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
+        currentThreadId,
+        previousThreadId: null
       })
     }
   },
@@ -704,6 +762,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const prev = get().previousThreadId || get().currentThreadId
       set({
         showKanbanView: true,
+        showHarnessBoardView: false,
         showCustomizeView: false,
         showClaudeCodeView: false,
         showDashboardView: false,
@@ -716,10 +775,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     } else {
       const restored = get().previousThreadId
+      const currentThreadId = resolveChatThreadId(get().threads, restored)
       set({
         showKanbanView: false,
         mainView: "thread",
-        ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
+        currentThreadId,
+        previousThreadId: null
       })
     }
   },
@@ -728,11 +789,38 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ showSubagentsInKanban: show })
   },
 
+  // Harness board actions
+  setShowHarnessBoardView: (show: boolean) => {
+    if (show) {
+      const prev = get().previousThreadId || get().currentThreadId
+      set({
+        showHarnessBoardView: true,
+        showKanbanView: false,
+        showCustomizeView: false,
+        showClaudeCodeView: false,
+        showDashboardView: false,
+        mainView: "harness",
+        currentThreadId: null,
+        previousThreadId: prev
+      })
+    } else {
+      const restored = get().previousThreadId
+      const chatThreadId = resolveChatThreadId(get().threads, restored)
+      set({
+        showHarnessBoardView: false,
+        mainView: "thread",
+        currentThreadId: chatThreadId,
+        previousThreadId: null
+      })
+    }
+  },
+
   setShowCustomizeView: (show: boolean, tab?: string) => {
     if (show) {
       set({
         showCustomizeView: true,
         showKanbanView: false,
+        showHarnessBoardView: false,
         showClaudeCodeView: false,
         showDashboardView: false,
         customizeInitialTab: tab ?? null,
@@ -743,11 +831,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     } else {
       const restored = get().previousThreadId
+      const currentThreadId = resolveChatThreadId(get().threads, restored)
       set({
         showCustomizeView: false,
         customizeInitialTab: null,
         mainView: "thread",
-        ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
+        currentThreadId,
+        previousThreadId: null
       })
     }
   },
@@ -777,8 +867,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         mainView: "kanban",
         showKanbanView: true,
+        showHarnessBoardView: false,
         showCustomizeView: false,
         showClaudeCodeView: false,
+        showDashboardView: false,
         currentThreadId: null,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
@@ -792,7 +884,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         mainView: "customize",
         showCustomizeView: true,
         showKanbanView: false,
+        showHarnessBoardView: false,
         showClaudeCodeView: false,
+        showDashboardView: false,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
         workerFocusMessages: []
@@ -805,8 +899,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         mainView: "customize",
         showCustomizeView: true,
         showKanbanView: false,
+        showHarnessBoardView: false,
         showClaudeCodeView: false,
         customizeInitialTab: "evolution",
+        showDashboardView: false,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
         workerFocusMessages: []
@@ -821,6 +917,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showDashboardView: true,
         showCustomizeView: false,
         showKanbanView: false,
+        showHarnessBoardView: false,
         showClaudeCodeView: false,
         previousThreadId: prev,
         currentThreadId: null,
@@ -838,6 +935,23 @@ export const useAppStore = create<AppState>((set, get) => ({
         showClaudeCodeView: true,
         showCustomizeView: false,
         showKanbanView: false,
+        showHarnessBoardView: false,
+        showDashboardView: false,
+        previousThreadId: prev,
+        currentThreadId: null
+      })
+      return
+    }
+
+    if (view === "harness") {
+      const prev = get().previousThreadId || get().currentThreadId
+      set({
+        mainView: "harness",
+        showHarnessBoardView: true,
+        showCustomizeView: false,
+        showKanbanView: false,
+        showClaudeCodeView: false,
+        showDashboardView: false,
         previousThreadId: prev,
         currentThreadId: null,
         workerFocusView: null,
@@ -848,12 +962,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     const restored = get().previousThreadId
+    const chatThreadId = resolveChatThreadId(get().threads, restored)
     set({
       mainView: "thread",
       showCustomizeView: false,
       showKanbanView: false,
+      showHarnessBoardView: false,
       showClaudeCodeView: false,
-      ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
+      showDashboardView: false,
+      currentThreadId: chatThreadId,
+      previousThreadId: null
     })
   },
 

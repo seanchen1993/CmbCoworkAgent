@@ -2,8 +2,8 @@
 
 export interface FileAttachment {
   filename: string
-  filePath: string    // full path for display
-  content: string     // extracted text content
+  filePath: string // full path for display
+  content: string // extracted text content
   mimeType: string
   size: number
   truncated: boolean
@@ -78,7 +78,7 @@ import type {
   LspStatus,
   UserInputRequest,
   UserInputResponse,
-  UserInputAnswer,
+  UserInputAnswer
 } from "../../main/types"
 import type {
   AgentAutoCommitMessageStrategy,
@@ -91,6 +91,31 @@ import type {
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../../main/ipc/code-exec-tools"
+import type {
+  HarnessArtifact,
+  HarnessArtifactStatus,
+  HarnessArtifactType,
+  HarnessEventStatus,
+  HarnessHookLogView,
+  HarnessNodeStatus,
+  HarnessProjectCreateInput,
+  HarnessFeatureCreateInput,
+  HarnessFeatureCreateResult,
+  HarnessProjectDetailViewModel,
+  HarnessProjectListItem,
+  HarnessProjectMetadata,
+  HarnessProjectMetadataUpdateInput,
+  HarnessRunDetailViewModel,
+  HarnessRunNode,
+  HarnessFeatureSummary,
+  HarnessSessionBinding,
+  HarnessAdapterRegistryItem,
+  HarnessBoardCompatibility,
+  HarnessStatus,
+  HarnessWatchRefChangedEvent,
+  HarnessWorkflowNextAction,
+  HarnessWorkflow
+} from "../../shared/harness-board-types"
 
 export type {
   McpConnectorAdvanced,
@@ -124,10 +149,32 @@ export type {
   AgentAutoCommitResult
 }
 
+export type { ManagedSavedCodeExecTool, SavedCodeExecPreviewResult, SavedCodeExecToolUpdatePayload }
+
 export type {
-  ManagedSavedCodeExecTool,
-  SavedCodeExecPreviewResult,
-  SavedCodeExecToolUpdatePayload
+  HarnessArtifact,
+  HarnessArtifactStatus,
+  HarnessArtifactType,
+  HarnessEventStatus,
+  HarnessHookLogView,
+  HarnessNodeStatus,
+  HarnessProjectCreateInput,
+  HarnessFeatureCreateInput,
+  HarnessFeatureCreateResult,
+  HarnessProjectDetailViewModel,
+  HarnessProjectListItem,
+  HarnessProjectMetadata,
+  HarnessProjectMetadataUpdateInput,
+  HarnessRunDetailViewModel,
+  HarnessRunNode,
+  HarnessFeatureSummary,
+  HarnessSessionBinding,
+  HarnessAdapterRegistryItem,
+  HarnessBoardCompatibility,
+  HarnessStatus,
+  HarnessWatchRefChangedEvent,
+  HarnessWorkflowNextAction,
+  HarnessWorkflow
 }
 
 export type StreamEvent =
@@ -253,5 +300,10 @@ export interface SkillMetadata {
   allowedTools?: string[]
 }
 
-
-export type { HookConfig, HookEvent, HookType, PromptHookFallback, HookUpsert } from "../../main/hooks/types"
+export type {
+  HookConfig,
+  HookEvent,
+  HookType,
+  PromptHookFallback,
+  HookUpsert
+} from "../../main/hooks/types"

@@ -138,6 +138,8 @@ export async function runPostSkillUseHooksForActivatedSkills({
   threadId,
   workspacePath,
   turnId,
+  pluginOutputDir,
+  systemId,
   getStopContext,
   hookScope,
   skillUseTracker,
@@ -149,6 +151,8 @@ export async function runPostSkillUseHooksForActivatedSkills({
   threadId: string
   workspacePath?: string
   turnId?: string
+  pluginOutputDir?: string
+  systemId?: string
   getStopContext: () => StopHookContext
   hookScope: HookScopeController
   skillUseTracker?: SkillUseTracker
@@ -170,6 +174,8 @@ export async function runPostSkillUseHooksForActivatedSkills({
         skillPath: skill.path
       },
       workspacePath,
+      pluginOutputDir,
+      systemId,
       sessionId: threadId,
       turnId,
       skillName: skill.name,
@@ -208,6 +214,8 @@ export async function runCompletionHooksWithRevision({
   threadId,
   workspacePath,
   turnId,
+  pluginOutputDir,
+  systemId,
   abortSignal,
   getStopContext,
   hookScope,
@@ -220,11 +228,14 @@ export async function runCompletionHooksWithRevision({
   maxRevisionAttempts,
   revisionPromptPrefix,
   runPostSkillUseHooks,
-  runStopHooks
+  runStopHooks,
+  onStopHooksFired
 }: {
   threadId: string
   workspacePath?: string
   turnId?: string
+  pluginOutputDir?: string
+  systemId?: string
   abortSignal: AbortSignal
   getStopContext: () => StopHookContext
   hookScope: HookScopeController
@@ -238,6 +249,7 @@ export async function runCompletionHooksWithRevision({
   revisionPromptPrefix: string
   runPostSkillUseHooks?: () => Promise<HookResult | null>
   runStopHooks?: () => Promise<HookResult | null>
+  onStopHooksFired?: () => void
 }): Promise<CompletionHookOutcome> {
   let postSkillRevisionCount = 0
   let stopRevisionCount = 0
@@ -248,6 +260,8 @@ export async function runCompletionHooksWithRevision({
           threadId,
           workspacePath,
           turnId,
+          pluginOutputDir,
+          systemId,
           getStopContext,
           hookScope,
           skillUseTracker,
@@ -295,6 +309,7 @@ export async function runCompletionHooksWithRevision({
       continue
     }
 
+    onStopHooksFired?.()
     const stopResult = await (runStopHooks
       ? runStopHooks()
       : runHooksEnriched(
@@ -303,6 +318,8 @@ export async function runCompletionHooksWithRevision({
             "Stop",
             {
               workspacePath,
+              pluginOutputDir,
+              systemId,
               sessionId: threadId,
               turnId,
               stopContext: getStopContext()
@@ -313,6 +330,8 @@ export async function runCompletionHooksWithRevision({
           "Stop",
           {
             workspacePath,
+            pluginOutputDir,
+            systemId,
             sessionId: threadId,
             turnId,
             stopContext: getStopContext()

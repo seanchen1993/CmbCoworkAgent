@@ -6,6 +6,7 @@ import {
   Bot,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Clock,
   Code2,
@@ -664,7 +665,8 @@ export function TraceHistoryDialog({
   onExportPage,
   exporting = false,
   loading,
-  error
+  error,
+  onPageChange
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -680,16 +682,27 @@ export function TraceHistoryDialog({
   exporting?: boolean
   loading: boolean
   error: string | null
+  onPageChange?: (page: number) => void
 }): React.JSX.Element {
   const displayTotalTraces = Math.max(totalTraces, traces.length)
+  const totalPages = Math.max(1, Math.ceil(displayTotalTraces / Math.max(1, tracePageSize)))
   const canPrevious = tracePage > 1 && !loading
-  const canNext = tracePage * tracePageSize < displayTotalTraces && !loading
+  const canNext = tracePage < totalPages && !loading
+  const handlePrevious = onTracePrevious ?? (() => onPageChange?.(tracePage - 1))
+  const handleNext = onTraceNext ?? (() => onPageChange?.(tracePage + 1))
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[80vh] max-w-[1080px] grid-rows-none flex-col gap-0 p-0">
         <DialogHeader className="border-b border-border px-5 py-4">
-          <DialogTitle className="text-base">Skill 会话历史 · {skill ?? "-"}</DialogTitle>
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <DialogTitle className="truncate text-base">Skill 会话历史 · {skill ?? "-"}</DialogTitle>
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                共 {displayTotalTraces.toLocaleString("zh-CN")} 条 · 第 {tracePage} / {totalPages} 页
+              </p>
+            </div>
+          </div>
         </DialogHeader>
         <TraceExplorer
           traces={traces}
@@ -711,13 +724,8 @@ export function TraceHistoryDialog({
                 {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
                 导出本页
               </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={onTracePrevious}
-                disabled={!canPrevious}
-              >
+              <Button type="button" variant="outline" size="sm" onClick={handlePrevious} disabled={!canPrevious}>
+                <ChevronLeft className="size-3.5" />
                 上一页
               </Button>
               <Button
@@ -725,7 +733,7 @@ export function TraceHistoryDialog({
                 variant="outline"
                 size="sm"
                 className="gap-1"
-                onClick={onTraceNext}
+                onClick={handleNext}
                 disabled={!canNext}
               >
                 下一页

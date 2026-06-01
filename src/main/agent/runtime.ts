@@ -83,6 +83,7 @@ import { createPlaywrightTool } from "./tools/playwright-tool"
 import { createRequestUserInputTool } from "./tools/user-input-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
+import { createTaskMmdMiddleware } from "./task-mmd/middleware"
 import { createToolHookMiddleware } from "./tool-hooks"
 import { listSavedCodeExecTools } from "../code-exec/saved-tool-store"
 import {
@@ -96,6 +97,12 @@ import { runHooks, type HookContext } from "../hooks/runner"
 import type { HookEvent } from "../hooks/types"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
+import {
+  hasFailureFired,
+  markFailureFired,
+  toolFailureSignalFromThrow,
+  type ToolFailureSignal
+} from "../hooks/tool-failure"
 import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
   createHookScope,
@@ -109,7 +116,12 @@ import { ToolOrchestrator } from "./tool-orchestrator"
 import { classifyCommandConcurrency } from "./exec-policy"
 import { SkillUsageDetector } from "./skill-evolution/usage-detector"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
-import type { McpCapabilityService, McpCapabilityTool } from "../mcp/capability-types"
+import type {
+  McpCapabilityService,
+  McpCapabilityTool,
+  McpInvocationResult
+} from "../mcp/capability-types"
+import { buildAliasMaps, buildScopedToolAliases } from "../mcp/aliasing"
 import {
   closeGlobalMcpCapabilityService,
   getGlobalMcpCapabilityService
@@ -214,6 +226,7 @@ export const pendingApprovals = new Map<
   {
     resolve: (decision: ApprovalDecision) => void
     request: ApprovalRequest
+    threadId: string
     targetWebContentsIds: number[]
   }
 >()
@@ -499,7 +512,44 @@ function createEagerMcpTools(
   return tools.map((tool) => createEagerMcpTool(capabilityService, tool))
 }
 
-function createScopedMcpCapabilityService(
+export function isRetryableMcpTransportError(error: unknown): boolean {
+  const record = error && typeof error === "object" ? (error as Record<string, unknown>) : undefined
+  const code = typeof record?.code === "string" ? record.code.toUpperCase() : ""
+  if (
+    [
+      "ECONNRESET",
+      "ECONNREFUSED",
+      "ECONNABORTED",
+      "ENOTFOUND",
+      "EAI_AGAIN",
+      "ETIMEDOUT",
+      "EPIPE"
+    ].includes(code)
+  ) {
+    return true
+  }
+
+  const status =
+    typeof record?.status === "number"
+      ? record.status
+      : typeof record?.statusCode === "number"
+        ? record.statusCode
+        : undefined
+  if (status === 502 || status === 503 || status === 504) return true
+
+  const message = error instanceof Error ? error.message : ""
+  return (
+    /\b(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EPIPE)\b/i.test(
+      message
+    ) ||
+    /\b(?:502|503|504)\b/.test(message) ||
+    /\b(?:timeout|timed?\s+out)\b/i.test(message) ||
+    /\b(?:terminated|disconnected)\b/i.test(message) ||
+    /\bservice\s+unavailable\b/i.test(message)
+  )
+}
+
+export function createScopedMcpCapabilityService(
   service: McpCapabilityService,
   hookScope: HookScopeController,
   resolveHooksForContext: (
@@ -507,8 +557,150 @@ function createScopedMcpCapabilityService(
     context: HookContext
   ) => ReturnType<typeof resolveEnabledHooksForRun>,
   onHookResult: HookResultCallback | undefined,
-  baseContext: { workspacePath: string; threadId: string; turnId?: string }
+  baseContext: {
+    workspacePath: string
+    threadId: string
+    turnId?: string
+    pluginOutputDir?: string
+    systemId?: string
+  }
 ): McpCapabilityService {
+  const getEffectivePriority = (tool: McpCapabilityTool): number => {
+    return tool.priority ?? (tool.sourceKind === "connector" ? 100 : 50)
+  }
+
+  let scopedSnapshotCache: {
+    key: string
+    tools: McpCapabilityTool[]
+    maps: ReturnType<typeof buildAliasMaps>
+  } | null = null
+  let baseSnapshotCache: { fingerprint: string; tools: McpCapabilityTool[] } | null = null
+
+  const getActivePluginKey = (): string => {
+    return [...hookScope.activePluginIds].sort().join("\u001f")
+  }
+
+  const getBaseToolSnapshot = async (): Promise<{
+    fingerprint: string
+    tools: McpCapabilityTool[]
+  }> => {
+    if (baseSnapshotCache) {
+      return { fingerprint: baseSnapshotCache.fingerprint, tools: [...baseSnapshotCache.tools] }
+    }
+
+    let snapshot: { fingerprint: string; tools: McpCapabilityTool[] }
+    if (service.getSnapshot) {
+      snapshot = await service.getSnapshot()
+    } else {
+      const tools = await service.listTools()
+      snapshot = {
+        fingerprint: tools
+          .map((tool) => tool.capabilityId)
+          .sort()
+          .join("\u001f"),
+        tools
+      }
+    }
+    baseSnapshotCache = { fingerprint: snapshot.fingerprint, tools: [...snapshot.tools] }
+    return { fingerprint: snapshot.fingerprint, tools: [...snapshot.tools] }
+  }
+
+  const getScopedToolSnapshot = async (): Promise<{
+    tools: McpCapabilityTool[]
+    maps: ReturnType<typeof buildAliasMaps>
+  }> => {
+    const baseSnapshot = await getBaseToolSnapshot()
+    const cacheKey = `${baseSnapshot.fingerprint}\u001e${getActivePluginKey()}`
+    if (scopedSnapshotCache?.key === cacheKey) {
+      return { tools: [...scopedSnapshotCache.tools], maps: scopedSnapshotCache.maps }
+    }
+
+    const tools = baseSnapshot.tools.map((tool) => {
+      const pluginId = extractPluginIdFromProviderKey(tool.providerKey)
+      const isInactiveScopedPlugin =
+        tool.scope === "plugin-active" &&
+        pluginId &&
+        !hookScope.activePluginIds.has(pluginId.toLowerCase())
+      return isInactiveScopedPlugin ? { ...tool, visibility: "lazy" as const } : tool
+    })
+    const scopedTools = buildScopedToolAliases(tools, getEffectivePriority)
+    const maps = buildAliasMaps(scopedTools)
+    scopedSnapshotCache = { key: cacheKey, tools: scopedTools, maps }
+    return { tools: [...scopedTools], maps }
+  }
+
+  const resolveScopedTool = async (idOrAlias: string): Promise<McpCapabilityTool | null> => {
+    const { maps } = await getScopedToolSnapshot()
+    return (
+      maps.capabilityById.get(idOrAlias) ??
+      maps.toolIds.get(idOrAlias) ??
+      maps.canonicalToolIds.get(idOrAlias) ??
+      service.getTool(idOrAlias)
+    )
+  }
+
+  const stableSchemaStringify = (value: unknown): string => {
+    if (!value || typeof value !== "object") return JSON.stringify(value)
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => stableSchemaStringify(item)).join(",")}]`
+    }
+    const record = value as Record<string, unknown>
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableSchemaStringify(record[key])}`)
+      .join(",")}}`
+  }
+
+  const schemasCompatible = (
+    left: Record<string, unknown> | undefined,
+    right: Record<string, unknown> | undefined,
+    strict: boolean
+  ): boolean => {
+    if (!strict) return true
+    return stableSchemaStringify(left ?? {}) === stableSchemaStringify(right ?? {})
+  }
+
+  const findFallbackTool = (
+    tool: McpCapabilityTool,
+    tools: McpCapabilityTool[]
+  ): McpCapabilityTool | null => {
+    if (
+      !tool.fallback?.enabled ||
+      tool.fallback.safeToRetry !== true ||
+      tool.fallback.to !== "global"
+    ) {
+      return null
+    }
+    const strict = (tool.fallback.match ?? "toolNameAndSchema") === "toolNameAndSchema"
+    return (
+      tools.find(
+        (candidate) =>
+          candidate.sourceKind === "connector" &&
+          candidate.toolName === tool.toolName &&
+          schemasCompatible(tool.inputSchema, candidate.inputSchema, strict)
+      ) ?? null
+    )
+  }
+
+  const shouldFallbackMcpError = isRetryableMcpTransportError
+
+  const appendFallbackNotice = (
+    result: McpInvocationResult,
+    fromTool: McpCapabilityTool,
+    fallbackTool: McpCapabilityTool
+  ) => {
+    const notice = `[MCP fallback] ${fromTool.toolId} failed; used ${fallbackTool.toolId}.`
+    return {
+      ...result,
+      capabilityId: fromTool.capabilityId,
+      fallbackCapabilityId: fallbackTool.capabilityId,
+      text: result.text ? `${result.text}\n\n${notice}` : notice,
+      contentBlocks: result.contentBlocks
+        ? [...result.contentBlocks, { type: "text", text: notice }]
+        : result.contentBlocks
+    }
+  }
+
   const getPluginName = (pluginId: string): string | undefined => {
     try {
       return getPlugins().find((plugin) => plugin.id === pluginId)?.name
@@ -536,10 +728,23 @@ function createScopedMcpCapabilityService(
   }
 
   return {
-    listTools: () => service.listTools(),
-    getTool: (idOrAlias) => service.getTool(idOrAlias),
+    listTools: async () => (await getScopedToolSnapshot()).tools,
+    getSnapshot: async () => {
+      const baseSnapshot = await getBaseToolSnapshot()
+      const scopedSnapshot = await getScopedToolSnapshot()
+      return {
+        fingerprint: `${baseSnapshot.fingerprint}\u001e${getActivePluginKey()}`,
+        tools: scopedSnapshot.tools
+      }
+    },
+    getTool: resolveScopedTool,
     invoke: async (idOrAlias, args) => {
-      const tool = await service.getTool(idOrAlias)
+      const snapshot = await getScopedToolSnapshot()
+      const tool =
+        snapshot.maps.capabilityById.get(idOrAlias) ??
+        snapshot.maps.toolIds.get(idOrAlias) ??
+        snapshot.maps.canonicalToolIds.get(idOrAlias) ??
+        (await service.getTool(idOrAlias))
       const pluginId = extractPluginIdFromProviderKey(tool?.providerKey)
       if (!tool) return service.invoke(idOrAlias, args)
 
@@ -549,6 +754,8 @@ function createScopedMcpCapabilityService(
         workspacePath: baseContext.workspacePath,
         sessionId: baseContext.threadId,
         turnId: baseContext.turnId,
+        pluginOutputDir: baseContext.pluginOutputDir,
+        systemId: baseContext.systemId,
         pluginId,
         pluginName: pluginId ? getPluginName(pluginId) : undefined
       }
@@ -575,7 +782,20 @@ function createScopedMcpCapabilityService(
       const effectiveArgs = mergeUpdatedInput(args, preResult?.updatedInput)
 
       if (pluginId) hookScope.activatePlugin(pluginId)
-      const result = await service.invoke(idOrAlias, effectiveArgs)
+      let result: McpInvocationResult
+      try {
+        result = await service.invoke(tool.capabilityId, effectiveArgs)
+      } catch (error) {
+        const fallbackTool = shouldFallbackMcpError(error)
+          ? findFallbackTool(tool, snapshot.tools)
+          : null
+        if (!fallbackTool) throw error
+        result = appendFallbackNotice(
+          await service.invoke(fallbackTool.capabilityId, effectiveArgs),
+          tool,
+          fallbackTool
+        )
+      }
       const postContext: HookContext = {
         ...hookContext,
         toolArgs: effectiveArgs,
@@ -591,6 +811,27 @@ function createScopedMcpCapabilityService(
         postResult,
         `MCP tool ${tool.toolId} was stopped by a PostToolUse hook`
       )
+      // PR-12 follow-up — MCP tools surface failure via `result.isError` rather
+      // than a throw or a `success: false` shape, so `detectToolFailure` (which
+      // looks at common ad-hoc shapes) doesn't see them. Translate isError →
+      // PostToolUseFailure here so OMC-style security/observability hooks see
+      // MCP failures on the same channel as the rest.
+      if (result.isError === true) {
+        const failureContext: HookContext = {
+          ...postContext,
+          toolResult: JSON.stringify({
+            error: result.text || `MCP tool ${tool.toolId} returned isError`,
+            error_type: "unknown",
+            failure_kind: "explicit-error",
+            is_interrupt: false,
+            is_timeout: false
+          })
+        }
+        const failureHooks = resolveHooksForContext("PostToolUseFailure", failureContext)
+        runHooksEnriched(failureHooks, "PostToolUseFailure", failureContext, onHookResult).catch(
+          (e) => console.warn("[Hooks] PostToolUseFailure(MCP isError) hook error:", e)
+        )
+      }
       const hookFeedback = formatPostHookFeedback(postResult)
       const isError =
         result.isError || postResult?.decision === "block" || postResult?.continue === false
@@ -604,8 +845,16 @@ function createScopedMcpCapabilityService(
             : result.contentBlocks
       }
     },
-    invalidate: (reason) => service.invalidate(reason),
-    close: () => service.close()
+    invalidate: async (reason) => {
+      scopedSnapshotCache = null
+      baseSnapshotCache = null
+      await service.invalidate(reason)
+    },
+    close: async () => {
+      scopedSnapshotCache = null
+      baseSnapshotCache = null
+      await service.close()
+    }
   }
 }
 
@@ -714,7 +963,22 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     mainSubagentsEnabled = true,
     filesystemAccess,
     toolConcurrencyQueueId = "default",
-    toolHookMiddleware
+    toolHookMiddleware,
+    threadId,
+    // PR-12 — optional callback fired-and-forgotten by toolErrorMiddleware
+    // when a tool throws. Closed-over context (threadId / workspace /
+    // hookScope / onHookResult) lives at the createAgentRuntime layer; this
+    // adapter keeps createDeepAgent oblivious to that wiring.
+    onToolFailureSignal
+  }: {
+    onToolFailureSignal?: (input: {
+      toolName: string | undefined
+      toolCallId: string | undefined
+      toolArgs: unknown
+      signal: ToolFailureSignal
+    }) => void
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    [k: string]: any
   } = params
 
   // --- systemPrompt handling (identical to original) ---
@@ -808,7 +1072,9 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
       const customExecute = lcTool(
         async (input: { command: string; run_in_background?: boolean }): Promise<string> => {
           if (input.run_in_background) {
-            const taskId = await (filesystemBackend as LocalSandbox).executeBackground(input.command)
+            const taskId = await (filesystemBackend as LocalSandbox).executeBackground(
+              input.command
+            )
             return `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
           }
           // Delegate to original execute handler for foreground execution
@@ -1014,7 +1280,26 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         const toolName = request.toolCall?.name
         const toolCallId = request.toolCall?.id
 
-        if ((request.runtime as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
+        const aborted =
+          (request.runtime as { signal?: AbortSignal } | undefined)?.signal?.aborted === true
+
+        // PR-12 — fire PostToolUseFailure fire-and-forget. Even when the abort
+        // path rethrows below, we still want hook scripts to observe the
+        // failure so security/observability hooks fire on the same signal as
+        // CC. Dedupe by tool_call_id so a downstream `detectToolFailure`
+        // check on a recovered ToolMessage doesn't re-fire.
+        if (onToolFailureSignal && toolCallId && !hasFailureFired(toolCallId)) {
+          const signal = toolFailureSignalFromThrow(error, { aborted })
+          markFailureFired(toolCallId)
+          onToolFailureSignal({
+            toolName,
+            toolCallId,
+            toolArgs: request.toolCall?.args,
+            signal
+          })
+        }
+
+        if (aborted) {
           throw error
         }
 
@@ -1057,6 +1342,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
     createFsMiddleware(),
+    ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "subagent" })] : []),
     createSkillHookContextMiddleware(filesystemBackend),
     subagentToolConcurrencyMiddleware,
     ...(toolHookMiddleware ? [toolHookMiddleware] : []),
@@ -1089,6 +1375,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     middleware: [
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
       ...(mainFilesystemEnabled ? [createFsMiddleware()] : []),
+      ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "main" })] : []),
       createSkillHookContextMiddleware(filesystemBackend),
       gradedToolConcurrencyMiddleware,
       ...(toolHookMiddleware ? [toolHookMiddleware] : []),
@@ -1192,7 +1479,8 @@ function getRuntimeTimeContext(date: Date = new Date()): {
 
 function getSystemPrompt(
   workspacePath: string,
-  windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"
+  windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated",
+  workingDirPromptAppendix?: string
 ): string {
   const isWindows = process.platform === "win32"
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
@@ -1278,8 +1566,16 @@ ${shellGuidance}
         : ""
 
   const memorySection = isMemoryEnabled() ? MEMORY_SYSTEM_PROMPT : ""
+  const workingDirAppendix = workingDirPromptAppendix?.trim()
+    ? `${workingDirPromptAppendix.trim()}\n`
+    : ""
   return (
-    workingDirSection + backgroundExecSection + sandboxSection + BASE_SYSTEM_PROMPT + memorySection
+    workingDirSection +
+    workingDirAppendix +
+    backgroundExecSection +
+    sandboxSection +
+    BASE_SYSTEM_PROMPT +
+    memorySection
   )
 }
 
@@ -1824,6 +2120,12 @@ export interface CreateAgentRuntimeOptions {
   workspacePath: string
   /** Extra content appended to the system prompt (e.g. HEARTBEAT.md context) */
   extraSystemPrompt?: string
+  /** Extra content appended immediately after the working directory section. */
+  workingDirPromptAppendix?: string
+  /** Optional plugin output directory exposed to hook commands as PLUGIN_OUTPUT_DIR. */
+  pluginOutputDir?: string
+  /** Optional system identifier exposed to child processes and hooks as SYSTEM_ID. */
+  systemId?: string
   /** Skip the manage_scheduler tool (used by scheduled task / heartbeat execution to prevent recursive scheduling) */
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
@@ -1896,6 +2198,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     modelId,
     extraSystemPrompt,
     coordinatorTurnPrompt,
+    workingDirPromptAppendix,
+    pluginOutputDir,
+    systemId,
     retryHooks,
     maxRetryAttempts,
     coordinatorWorkerTurnPlanning,
@@ -2018,6 +2323,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     hookScope,
     onHookResult,
     hookTurnId,
+    pluginOutputDir,
+    systemId,
     onFileMutation,
     abortSignal: options.abortSignal,
     runId: threadId,
@@ -2027,64 +2334,76 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
 
   // ── Wire up the approval orchestrator ──
   const yoloMode = getYoloMode()
-  let approvalStore: ApprovalStore | undefined
-  let requestApproval: ((req: ApprovalRequest) => Promise<ApprovalDecision>) | undefined
   // Keep approval IPC available even in YOLO mode. YOLO skips the initial shell/file
   // approval, but escaping the sandbox after a sandbox denial still needs explicit
   // one-shot user approval, matching Codex's retry-without-sandbox flow.
-  const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
-  requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
+  // Approval requests are a human safety gate: they should not auto-reject just
+  // because the user stepped away. They are resolved by an explicit user
+  // decision, or by the run abort signal when the user stops/cancels the turn.
+  const APPROVAL_TIMEOUT_MS: number | null = null
+  const requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
     // IPC fires immediately; the renderer owns the queue (pendingApprovals[]).
     // Multiple concurrent tool calls each register their own resolver here —
     // the renderer shows them one at a time, but the events are not serialized
     // back-end side. This matches how Codex surfaces ExecApprovalRequest events.
     return new Promise<ApprovalDecision>((resolve) => {
       let settled = false
-      const resolveOnce = (decision: ApprovalDecision): void => {
-        if (settled) return
-        settled = true
-        clearTimeout(timeoutId)
-        options.abortSignal?.removeEventListener("abort", onApprovalAbort)
-        pendingApprovals.delete(req.id)
-        resolve(decision)
-      }
+      let timeoutId: ReturnType<typeof setTimeout> | undefined
       const rejectDecision = (): ApprovalDecision => ({
         type: "reject",
         tool_call_id: req.tool_call?.id ?? req.id
       })
-      const onApprovalAbort = (): void => {
-        if (!pendingApprovals.has(req.id)) return
-        console.log(`[Orchestrator] approval request cancelled: reqId=${req.id}`)
-        for (const win of BrowserWindow.getAllWindows()) {
-          win.webContents.send(`approval:timeout:${approvalThreadId}`, { requestId: req.id })
-        }
-        resolveOnce(rejectDecision())
+      const cleanup = (): void => {
+        if (timeoutId) clearTimeout(timeoutId)
+        options.abortSignal?.removeEventListener("abort", onAbort)
       }
-      const timeoutId = setTimeout(() => {
+      const resolveOnce = (decision: ApprovalDecision): void => {
+        if (settled) return
+        settled = true
+        cleanup()
+        pendingApprovals.delete(req.id)
+        resolve(decision)
+      }
+      const rejectPending = (reason: "timeout" | "abort"): void => {
         if (pendingApprovals.has(req.id)) {
-          pendingApprovals.delete(req.id)
-          console.warn(
-            `[Orchestrator] approval request timed out after ${APPROVAL_TIMEOUT_MS / 1000}s: reqId=${req.id}`
-          )
+          console.warn(`[Orchestrator] approval request ${reason}: reqId=${req.id}`)
+          const channel =
+            reason === "timeout"
+              ? `approval:timeout:${approvalThreadId}`
+              : `approval:cancel:${approvalThreadId}`
           for (const win of BrowserWindow.getAllWindows()) {
-            win.webContents.send(`approval:timeout:${approvalThreadId}`, { requestId: req.id })
+            win.webContents.send(channel, { requestId: req.id, reason })
           }
           resolveOnce(rejectDecision())
         }
-      }, APPROVAL_TIMEOUT_MS)
+      }
+
+      const onAbort = (): void => {
+        rejectPending("abort")
+      }
 
       if (options.abortSignal?.aborted) {
-        resolveOnce(rejectDecision())
+        resolve({ type: "reject", tool_call_id: req.tool_call?.id ?? req.id })
         return
       }
-      options.abortSignal?.addEventListener("abort", onApprovalAbort, { once: true })
+
+      if (APPROVAL_TIMEOUT_MS !== null) {
+        timeoutId = setTimeout(() => rejectPending("timeout"), APPROVAL_TIMEOUT_MS)
+      }
+
       pendingApprovals.set(req.id, {
         resolve: (decision: ApprovalDecision) => {
           resolveOnce(decision)
         },
         request: req,
+        threadId: approvalThreadId,
         targetWebContentsIds: BrowserWindow.getAllWindows().map((w) => w.webContents.id)
       })
+      options.abortSignal?.addEventListener("abort", onAbort, { once: true })
+      if (options.abortSignal?.aborted) {
+        onAbort()
+        return
+      }
       console.log(
         `[Orchestrator] sending approval request on channel: approval:request:${approvalThreadId}, reqId=${req.id}, runtimeThreadId=${threadId}, command=${req.command}`
       )
@@ -2095,7 +2414,17 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
         workspacePath,
         sessionId: approvalThreadId,
-        turnId: hookTurnId
+        turnId: hookTurnId,
+        pluginOutputDir,
+        systemId,
+        // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
+        // Lets a Notification hook know whether the user is in YOLO mode (where
+        // approvals only fire for sandbox-escape) vs the default approve flow.
+        permissionMode: yoloMode ? "yolo" : "approve",
+        // PR-16 follow-up — CC matcher target for Notification is
+        // `notification_type`. The approval queue is the only Notification
+        // fire path today, so the value is always "permission_prompt".
+        notificationType: "permission_prompt"
       }
       runHooks(
         resolveHooksForContext("Notification", notificationContext),
@@ -2109,7 +2438,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     })
   }
 
-  approvalStore = getOrCreateApprovalStore(approvalThreadId)
+  const approvalStore = getOrCreateApprovalStore(approvalThreadId)
 
   const rawExecute = (
     command: string,
@@ -2121,7 +2450,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, yoloMode)
   backend.setOrchestrator(orchestrator)
 
-  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox)
+  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, workingDirPromptAppendix)
   let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
     prompt: null,
     projectRoot: workspacePath,
@@ -2240,7 +2569,7 @@ The workspace root is: ${workspacePath}`
     hookScope,
     resolveHooksForContext,
     onHookResult,
-    { workspacePath, threadId, turnId: hookTurnId }
+    { workspacePath, threadId, pluginOutputDir, systemId, turnId: hookTurnId }
   )
   const isConstrainedCoordinatorWorker =
     Boolean(options.filesystemAccess) &&
@@ -2415,6 +2744,7 @@ The workspace root is: ${workspacePath}`
     resolveHooksForContext,
     onHookResult,
     hookTurnId,
+    systemId,
     skipToolNames: toolHookExclusions
   })
 
@@ -3095,8 +3425,43 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       keep: { type: "tokens", value: keepTokens },
       maxLength: 2000
     },
+    threadId: options.threadId,
     toolConcurrencyQueueId: options.threadId ?? workspacePath,
-    toolHookMiddleware
+    toolHookMiddleware,
+    // PR-12 — closure captures threadId / workspacePath / hookScope so
+    // createDeepAgent's middleware can fire-and-forget the PostToolUseFailure
+    // hook chain without knowing per-thread context.
+    onToolFailureSignal: (input: {
+      toolName: string | undefined
+      toolCallId: string | undefined
+      toolArgs: unknown
+      signal: ToolFailureSignal
+    }): void => {
+      const context: HookContext = {
+        workspacePath,
+        sessionId: threadId,
+        turnId: hookTurnId,
+        toolName: input.toolName,
+        toolArgs:
+          input.toolArgs && typeof input.toolArgs === "object" && !Array.isArray(input.toolArgs)
+            ? (input.toolArgs as Record<string, unknown>)
+            : undefined,
+        toolResult: JSON.stringify({
+          error: input.signal.message,
+          error_type: input.signal.errorType,
+          failure_kind: input.signal.kind,
+          is_interrupt: input.signal.isInterrupt,
+          is_timeout: input.signal.isTimeout,
+          tool_use_id: input.toolCallId
+        })
+      }
+      runHooks(
+        resolveHooksForContext("PostToolUseFailure", context),
+        "PostToolUseFailure",
+        context,
+        onHookResult
+      ).catch((e) => console.warn("[Hooks] PostToolUseFailure hook error:", e))
+    }
   })
 
   console.log("[Runtime] Agent created with skills parameter:", mainSkillSources)

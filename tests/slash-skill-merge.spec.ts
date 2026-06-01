@@ -42,8 +42,8 @@ function run(): void {
     new Set(["same-name"])
   )
   assert(
-    names(withDisabledLocal).join(",") === "local:same-name,plugin:same-name",
-    `disabled local skill should not shadow same-name plugin skill: ${names(withDisabledLocal)}`
+    names(withDisabledLocal).join(",") === "plugin:same-name",
+    `disabled local skill should be hidden while same-name plugin remains: ${names(withDisabledLocal)}`
   )
 
   const withEnabledLocal = mergeChatSkills([enabledSameName], [pluginSameName], new Set())
@@ -52,7 +52,14 @@ function run(): void {
     `enabled local skill should keep precedence over same-name plugin skill: ${names(withEnabledLocal)}`
   )
 
-  console.log("PASS slash skill merge does not let disabled local skills shadow plugin skills")
+  const disabledUnique = skill({ id: "unique-local", name: "unique-local", source: "project" })
+  const withUniqueDisabledLocal = mergeChatSkills([disabledUnique], [], new Set(["unique-local"]))
+  assert(
+    withUniqueDisabledLocal.length === 0,
+    `disabled local skill should not enter slash skills: ${names(withUniqueDisabledLocal)}`
+  )
+
+  console.log("PASS slash skill merge hides disabled local skills without shadowing plugin skills")
 }
 
 run()

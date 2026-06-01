@@ -7,8 +7,8 @@ import {
   AlertCircle,
   Briefcase,
   LayoutDashboard,
+  Workflow,
   Cpu,
-  Terminal,
   BarChart3,
   ChevronDown,
   ChevronRight,
@@ -16,13 +16,16 @@ import {
   Maximize2,
   Minimize2,
   FolderPlus,
-  Download
+  Download,
+  MessageSquare,
+  Terminal
 } from "lucide-react"
 import { toast } from "sonner"
 import type { ChatXRobotConfig } from "@/types"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { UpdateActionButton } from "@/components/update/UpdateActionButton"
 import {
   Dialog,
@@ -39,6 +42,9 @@ import {
   useThreadContext
 } from "@/lib/thread-context"
 import { cn, truncate } from "@/lib/utils"
+import { useFeatureGate } from "@/lib/feature-gates"
+import { isHarnessFeatureThread } from "@/lib/thread-classification"
+import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -50,6 +56,7 @@ import type { Thread } from "@/types"
 
 const NO_WORKSPACE_PROJECT_KEY = "__no_workspace__"
 const COLLAPSED_PROJECTS_STORAGE_KEY = "threads:collapsedProjects"
+type SidebarTab = "chat" | "project"
 
 interface ThreadProject {
   key: string
@@ -126,7 +133,7 @@ function ThreadStatusIcon({
   return null
 }
 
-function ThreadListItem({
+export function ThreadListItem({
   thread,
   isLoading,
   hasPendingApproval,
@@ -144,7 +151,8 @@ function ThreadListItem({
   onSaveTitle,
   onCancelEditing,
   onEditingTitleChange,
-  isExporting
+  isExporting,
+  hoverTitle
 }: {
   thread: Thread
   isLoading: boolean
@@ -164,6 +172,7 @@ function ThreadListItem({
   onSaveTitle: () => void
   onCancelEditing: () => void
   onEditingTitleChange: (value: string) => void
+  hoverTitle?: string
 }): React.JSX.Element {
   const isRunning = isLoading || scheduledTaskLoading
   const wasRunningRef = useRef(false)
@@ -226,7 +235,7 @@ function ThreadListItem({
             ) : (
               <div
                 className="flex min-w-0 items-center text-sm"
-                title={thread.title || thread.thread_id}
+                title={hoverTitle ?? thread.title ?? thread.thread_id}
               >
                 {thread.title?.startsWith("[定时]") ? (
                   <>
@@ -316,6 +325,7 @@ export function ThreadSidebar(): React.JSX.Element {
     deleteThread,
     updateThread,
     mainView,
+    previousThreadId,
     pendingEvolution,
     showCustomizeView,
     setShowCustomizeView,
@@ -323,6 +333,8 @@ export function ThreadSidebar(): React.JSX.Element {
     setShowKanbanView,
     showClaudeCodeView,
     setShowClaudeCodeView,
+    showHarnessBoardView,
+    setShowHarnessBoardView,
     showDashboardView,
     setShowDashboardView,
     dashboardAllowed
@@ -369,6 +381,62 @@ export function ThreadSidebar(): React.JSX.Element {
   const [threadToDelete, setThreadToDelete] = useState<Thread | null>(null)
   const [exportingThreadId, setExportingThreadId] = useState<string | null>(null)
   const [projectToDelete, setProjectToDelete] = useState<ThreadProject | null>(null)
+  const activeSidebarTab: SidebarTab =
+    showHarnessBoardView || mainView === "harness" ? "project" : "chat"
+  const {
+    enabled: projectModeEnabled,
+    loading: projectModeLoading,
+    refresh: refreshProjectModeGate
+  } = useFeatureGate(FEATURE_GATES.projectMode)
+  const projectModeForceRefreshRef = useRef<Promise<unknown> | null>(null)
+
+  const handleSelectChatTab = useCallback(async (): Promise<void> => {
+    if (mainView === "harness" || showHarnessBoardView) {
+      const previousThread = previousThreadId
+        ? threads.find((thread) => thread.thread_id === previousThreadId)
+        : null
+      if (previousThread && !isHarnessFeatureThread(previousThread)) {
+        setShowHarnessBoardView(false)
+        return
+      }
+
+      const firstThread = threads.find((thread) => !isHarnessFeatureThread(thread))
+      if (firstThread) {
+        await selectThread(firstThread.thread_id)
+        return
+      }
+
+      setShowHarnessBoardView(false)
+    }
+  }, [
+    mainView,
+    previousThreadId,
+    selectThread,
+    setShowHarnessBoardView,
+    showHarnessBoardView,
+    threads
+  ])
+
+  const handleSelectProjectTab = useCallback(async (): Promise<void> => {
+    if (projectModeEnabled) {
+      setShowHarnessBoardView(true)
+      return
+    }
+
+    toast.info("敬请期待")
+    if (!projectModeForceRefreshRef.current) {
+      const refreshPromise = refreshProjectModeGate({ refresh: true }).finally(() => {
+        if (projectModeForceRefreshRef.current === refreshPromise) {
+          projectModeForceRefreshRef.current = null
+        }
+      })
+      projectModeForceRefreshRef.current = refreshPromise
+    }
+  }, [
+    projectModeEnabled,
+    refreshProjectModeGate,
+    setShowHarnessBoardView
+  ])
 
   const persistUnread = useCallback((ids: Set<string>) => {
     localStorage.setItem("threads:unreadIds", JSON.stringify([...ids]))
@@ -413,7 +481,7 @@ export function ThreadSidebar(): React.JSX.Element {
   const threadProjects = useMemo<ThreadProject[]>(() => {
     const projectMap = new Map<string, ThreadProject>()
 
-    for (const thread of threads) {
+    for (const thread of threads.filter((item) => !isHarnessFeatureThread(item))) {
       const path = getThreadWorkspacePath(thread, allThreadStates[thread.thread_id]?.workspacePath)
       const key = path || NO_WORKSPACE_PROJECT_KEY
       const existing = projectMap.get(key)
@@ -656,108 +724,174 @@ export function ThreadSidebar(): React.JSX.Element {
         className="p-2 space-y-1.5"
         style={{ paddingTop: "calc(8px + var(--sidebar-safe-padding, 0px))" }}
       >
-        <Button
-          variant="ghost"
-          size="sm"
-          className="w-full justify-start gap-2 text-sm font-semibold"
-          onClick={handleNewThread}
+        <div
+          role="tablist"
+          aria-label="侧边栏模式"
+          className="mb-2 grid h-10 grid-cols-2 rounded-lg bg-muted/70 p-1"
         >
-          <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-            <Plus className="size-3" />
-          </div>
-          <span className="text-muted-foreground">新任务</span>
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          className={cn(
-            "w-full justify-start gap-2 text-sm font-semibold",
-            mainView === "customize" && "bg-muted"
-          )}
-          onClick={() => setShowCustomizeView(true, pendingEvolution ? "evolution" : undefined)}
-        >
-          <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-            <Briefcase className="size-3" />
-          </div>
-          <span className="flex-1 text-left text-muted-foreground">自定义</span>
-          {pendingEvolution && <span className="size-2 rounded-full bg-orange-500 shrink-0" />}
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          className={cn(
-            "w-full justify-start gap-2 text-sm font-semibold",
-            showKanbanView && "bg-muted"
-          )}
-          onClick={() => setShowKanbanView(!showKanbanView)}
-        >
-          <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-            <LayoutDashboard className="size-3" />
-          </div>
-          <span className="text-muted-foreground">看板视图</span>
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          className={cn(
-            "w-full justify-start gap-2 text-sm font-semibold",
-            showClaudeCodeView && "bg-muted"
-          )}
-          onClick={() => setShowClaudeCodeView(!showClaudeCodeView)}
-        >
-          <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-            <Terminal className="size-3" />
-          </div>
-          <span className="text-muted-foreground">Code</span>
-        </Button>
-        {dashboardAllowed && (
-          <Button
-            variant="ghost"
-            size="sm"
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeSidebarTab === "chat"}
             className={cn(
-              "w-full justify-start gap-2 text-sm font-semibold",
-              showDashboardView && "bg-muted"
+              "flex min-w-0 items-center justify-center gap-1.5 rounded-md px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              activeSidebarTab === "chat"
+                ? "border border-border/70 bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
             )}
-            onClick={() => setShowDashboardView(!showDashboardView)}
+            onClick={() => void handleSelectChatTab()}
           >
-            <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-              <BarChart3 className="size-3" />
-            </div>
-            <span className="text-muted-foreground">运营面板</span>
-          </Button>
-        )}
-        {robots.length > 0 && (
-          <div className="relative" ref={robotPickerRef}>
+            <MessageSquare className="size-4 shrink-0" />
+            <span className="min-w-0 truncate">对话模式</span>
+          </button>
+          <TooltipProvider delayDuration={120}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeSidebarTab === "project"}
+                  aria-disabled={!projectModeEnabled}
+                  className={cn(
+                    "flex min-w-0 items-center justify-center gap-1.5 rounded-md px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                    projectModeEnabled
+                      ? activeSidebarTab === "project"
+                        ? "border border-border/70 bg-background text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                      : "cursor-not-allowed text-muted-foreground/50 opacity-60 hover:text-muted-foreground/60",
+                    projectModeLoading && !projectModeEnabled && "opacity-55"
+                  )}
+                  onClick={() => void handleSelectProjectTab()}
+                >
+                  <Workflow className="size-4 shrink-0" />
+                  <span className="min-w-0 truncate">项目模式</span>
+                </button>
+              </TooltipTrigger>
+              {!projectModeEnabled && (
+                <TooltipContent side="bottom" sideOffset={6}>
+                  敬请期待
+                </TooltipContent>
+              )}
+            </Tooltip>
+          </TooltipProvider>
+        </div>
+
+        {activeSidebarTab === "chat" ? (
+          <>
             <Button
               variant="ghost"
               size="sm"
               className="w-full justify-start gap-2 text-sm font-semibold"
-              onClick={() => setShowRobotPicker(!showRobotPicker)}
+              onClick={handleNewThread}
             >
               <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-                <Cpu className="size-3" />
+                <Plus className="size-3" />
               </div>
-              <span className="text-muted-foreground">机器人</span>
+              <span className="text-muted-foreground">新任务</span>
             </Button>
-            {showRobotPicker && (
-              <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-md border border-border bg-popover p-1 shadow-md">
-                {robots.map((robot, i) => (
-                  <button
-                    key={i}
-                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-muted transition-colors"
-                    onClick={() => handleNewRobotThread(robot)}
-                  >
-                    <Cpu className="size-3 shrink-0 text-blue-400" />
-                    <span className="truncate">{robot.chatId || `机器人 ${i + 1}`}</span>
-                  </button>
-                ))}
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                "w-full justify-start gap-2 text-sm font-semibold",
+                mainView === "customize" && "bg-muted"
+              )}
+              onClick={() => {
+                setShowCustomizeView(true, pendingEvolution ? "evolution" : undefined)
+              }}
+            >
+              <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+                <Briefcase className="size-3" />
+              </div>
+              <span className="flex-1 text-left text-muted-foreground">自定义</span>
+              {pendingEvolution && <span className="size-2 rounded-full bg-orange-500 shrink-0" />}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                "w-full justify-start gap-2 text-sm font-semibold",
+                showKanbanView && "bg-muted"
+              )}
+              onClick={() => {
+                setShowKanbanView(!showKanbanView)
+              }}
+            >
+              <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+                <LayoutDashboard className="size-3" />
+              </div>
+              <span className="text-muted-foreground">看板视图</span>
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                "w-full justify-start gap-2 text-sm font-semibold",
+                showClaudeCodeView && "bg-muted"
+              )}
+              onClick={() => setShowClaudeCodeView(!showClaudeCodeView)}
+            >
+              <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+                <Terminal className="size-3" />
+              </div>
+              <span className="text-muted-foreground">Code</span>
+            </Button>
+            {dashboardAllowed && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className={cn(
+                  "w-full justify-start gap-2 text-sm font-semibold",
+                  showDashboardView && "bg-muted"
+                )}
+                onClick={() => {
+                  setShowDashboardView(!showDashboardView)
+                }}
+              >
+                <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+                  <BarChart3 className="size-3" />
+                </div>
+                <span className="text-muted-foreground">运营面板</span>
+              </Button>
+            )}
+            {robots.length > 0 && (
+              <div className="relative" ref={robotPickerRef}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="w-full justify-start gap-2 text-sm font-semibold"
+                  onClick={() => setShowRobotPicker(!showRobotPicker)}
+                >
+                  <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+                    <Cpu className="size-3" />
+                  </div>
+                  <span className="text-muted-foreground">机器人</span>
+                </Button>
+                {showRobotPicker && (
+                  <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-md border border-border bg-popover p-1 shadow-md">
+                    {robots.map((robot, i) => (
+                      <button
+                        key={i}
+                        className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-muted transition-colors"
+                        onClick={() => handleNewRobotThread(robot)}
+                      >
+                        <Cpu className="size-3 shrink-0 text-blue-400" />
+                        <span className="truncate">{robot.chatId || `机器人 ${i + 1}`}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
-          </div>
-        )}
+          </>
+        ) : null}
       </div>
 
-      <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
+      {activeSidebarTab === "project" ? (
+        <div id="harness-sidebar-portal" className="flex min-h-0 flex-1 flex-col" />
+      ) : activeSidebarTab === "chat" ? (
+        <>
+          <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
         <span className="min-w-0 flex-1 truncate">工作区 {threadProjects.length}</span>
         <Button
           variant="ghost"
@@ -951,11 +1085,15 @@ export function ThreadSidebar(): React.JSX.Element {
             )
           })}
 
-          {threads.length === 0 && (
+          {threadProjects.length === 0 && (
             <div className="px-3 py-8 text-center text-sm text-muted-foreground">暂无任务</div>
           )}
         </div>
-      </ScrollArea>
+          </ScrollArea>
+        </>
+      ) : (
+        <div className="min-h-0 flex-1" />
+      )}
 
       <div className="px-3 py-2.5 flex items-center justify-center gap-1.5 select-none">
         <svg className="size-5 shrink-0" viewBox="0 0 120 120" fill="none">

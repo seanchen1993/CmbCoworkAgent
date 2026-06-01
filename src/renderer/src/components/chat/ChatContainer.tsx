@@ -6,6 +6,8 @@ import React, {
   useState,
   useSyncExternalStore
 } from "react"
+import ReactMarkdown, { type Components } from "react-markdown"
+import remarkBreaks from "remark-breaks"
 import {
   Send,
   Square,
@@ -51,12 +53,19 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { useAppStore } from "@/lib/store"
+import {
+  consumePendingHarnessNextAction,
+  getPendingHarnessNextAction,
+  getPendingHarnessNextActionVersion,
+  subscribePendingHarnessNextActions
+} from "@/lib/harness-next-action"
 import { cn } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
 import {
   useCurrentThread,
   useThreadStream,
   useThreadContext,
+  type TurnTiming,
   type HookLogBucket,
   type HookLogEntry
 } from "@/lib/thread-context"
@@ -70,15 +79,19 @@ import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
-import type { Message, SkillMetadata, ToolCallState, ToolCallStatus, UserInputResponse } from "@/types"
+import type {
+  Message,
+  SkillMetadata,
+  Thread,
+  ToolCallState,
+  ToolCallStatus,
+  UserInputResponse
+} from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator, type ChatScrollQuestion } from "./ChatScrollNavigator"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
-import {
-  UserInputRequestDialog,
-  type UserInputRequestDialogLayout
-} from "./UserInputRequestDialog"
+import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
 import {
@@ -98,6 +111,7 @@ import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/ski
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
 import { groupWelcomeSkills } from "./skill-grouping"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
+import { DurationShow } from "./DurationShow"
 
 type WelcomeSkillCard = {
   skill: SkillMetadata
@@ -531,8 +545,12 @@ function HookLogEntryRow({ log }: { log: HookLogEntry }): React.JSX.Element {
           {log.additionalContext && (
             <LogBlock label="additionalContext" text={log.additionalContext} tone="blue" />
           )}
-          {log.systemMessage && <LogBlock label="systemMessage" text={log.systemMessage} tone="blue" />}
-          {log.stdinPayload && <LogBlock label="stdin (诊断)" text={log.stdinPayload} tone="neutral" />}
+          {log.systemMessage && (
+            <LogBlock label="systemMessage" text={log.systemMessage} tone="blue" />
+          )}
+          {log.stdinPayload && (
+            <LogBlock label="stdin (诊断)" text={log.stdinPayload} tone="neutral" />
+          )}
           {log.command && <LogBlock label="command" text={log.command} tone="neutral" />}
           {log.cwd && <LogBlock label="cwd" text={log.cwd} tone="neutral" />}
           {log.hookSourcePath && (
@@ -666,9 +684,37 @@ interface StreamMessage {
   is_error?: boolean
 }
 
+export type ChatSurface = "default" | "harness-project" | "harness-feature-session"
+
+interface ChatSurfaceConfig {
+  showWelcomeHeadline: boolean
+  showWelcomeSkillTabs: boolean
+  showHarnessDialogTips: boolean
+}
+
+const CHAT_SURFACE_CONFIG: Record<ChatSurface, ChatSurfaceConfig> = {
+  default: {
+    showWelcomeHeadline: true,
+    showWelcomeSkillTabs: true,
+    showHarnessDialogTips: false
+  },
+  "harness-project": {
+    showWelcomeHeadline: false,
+    showWelcomeSkillTabs: true,
+    showHarnessDialogTips: true
+  },
+  "harness-feature-session": {
+    showWelcomeHeadline: false,
+    showWelcomeSkillTabs: false,
+    showHarnessDialogTips: false
+  }
+}
+
 interface ChatContainerProps {
   threadId: string
   showGitChangeNotice?: boolean
+  surface?: ChatSurface
+  hideWelcomeSkillTabs?: boolean
   onOpenGitPanel?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
 }
@@ -777,13 +823,6 @@ const ROTATING_WORDS = [
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
 
-// 单条消息的起止时间，统一存为 ISO 字符串，方便写入 thread_values 并在重启后恢复。
-//
-// 这里刻意不保存 duration 字段：
-// 1. duration 是展示层派生值，后续计算规则变化时不需要迁移历史数据。
-// 2. 每条消息都有 start_at/end_at 后，可以按“一个 user 到下一个 user 之前最后一条消息”
-//    的规则实时计算该轮 assistant 总耗时。
-// 3. tool、assistant 多段回复都会自然落在同一个 user 分组内，不需要额外字段标记轮次。
 type MessageTimeValue = {
   start_at?: string
   end_at?: string
@@ -814,22 +853,9 @@ const getMessageTimeMap = (threadValues?: Record<string, unknown>): MessageTimeM
 const getMessageTimeOrder = (threadValues?: Record<string, unknown>): MessageTimeEntry[] => {
   const value = threadValues?.[MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]
   if (isMessageTimeEntryArray(value)) return value
-  // 兼容旧数据：早期只保存了 messageTimes map，没有保存顺序数组。
-  // JS 对普通对象会保留字符串 key 的插入顺序；虽然这不如显式数组可靠，但对旧数据可以
-  // 最大程度恢复出当时写入的消息顺序，避免老会话重启后完全看不到耗时。
   return Object.entries(getMessageTimeMap(threadValues)).map(([id, time]) => ({ id, ...time }))
 }
 
-// messageTimes 用 id 做精确匹配；messageTimeOrder 用顺序做兜底，解决重启后 checkpoint
-// 重新生成 message id 时，历史耗时无法按 id 命中的问题。
-//
-// 保存两份结构的原因：
-// - messageTimes: 当前会话里 id 稳定，按 id 查找最快也最准确。
-// - messageTimeOrder: app 重启后历史消息来自 LangGraph checkpoint，某些消息 id 可能变化；
-//   此时仍可用“消息展示顺序”和“时间写入顺序”对齐，恢复 start_at/end_at。
-//
-// merge 时不重排已有数组，只更新同 id 的时间并把新 id 追加到末尾，保证顺序数组能持续
-// 表达整条会话的消息时间线。
 const mergeMessageTimeOrder = (
   existingOrder: MessageTimeEntry[],
   updates: MessageTimeMap
@@ -952,12 +978,131 @@ function RotatingHeadline() {
   )
 }
 
+interface HarnessFeatureBinding {
+  projectId: string
+  slug: string
+}
+
+function getHarnessFeatureBinding(thread: Thread | null | undefined): HarnessFeatureBinding | null {
+  const harnessFeature = thread?.metadata?.harnessFeature
+  if (!harnessFeature || typeof harnessFeature !== "object") {
+    return null
+  }
+
+  const metadata = harnessFeature as Record<string, unknown>
+  const projectId = typeof metadata.projectId === "string" ? metadata.projectId.trim() : ""
+  const slug = typeof metadata.slug === "string" ? metadata.slug.trim() : ""
+  return projectId && slug ? { projectId, slug } : null
+}
+
+function getSafeHttpUrl(href: unknown): string | null {
+  if (typeof href !== "string") return null
+  try {
+    const url = new URL(href)
+    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null
+  } catch {
+    return null
+  }
+}
+
+const dialogTipsMarkdownComponents: Components = {
+  p({ children }) {
+    return <p className="my-1 leading-6 first:mt-0 last:mb-0">{children}</p>
+  },
+  ul({ children }) {
+    return <ul className="my-1 ml-4 list-disc space-y-1 leading-6">{children}</ul>
+  },
+  ol({ children }) {
+    return <ol className="my-1 ml-4 list-decimal space-y-1 leading-6">{children}</ol>
+  },
+  li({ children }) {
+    return <li className="pl-1">{children}</li>
+  },
+  a({ href, children }) {
+    const safeHref = getSafeHttpUrl(href)
+    if (!safeHref) return <span>{children}</span>
+    return (
+      <a
+        href={safeHref}
+        className="font-medium text-primary underline underline-offset-4"
+        onClick={(event) => {
+          event.preventDefault()
+          void window.electron.openExternal(safeHref)
+        }}
+      >
+        {children}
+      </a>
+    )
+  },
+  code({ children }) {
+    return (
+      <code className="rounded border border-border/70 bg-background/80 px-1 py-0.5 font-mono text-[0.92em] text-foreground">
+        {children}
+      </code>
+    )
+  },
+  pre() {
+    return null
+  },
+  img() {
+    return null
+  },
+  table() {
+    return null
+  },
+  h1({ children }) {
+    return <p className="my-1 font-semibold leading-6 text-foreground">{children}</p>
+  },
+  h2({ children }) {
+    return <p className="my-1 font-semibold leading-6 text-foreground">{children}</p>
+  },
+  h3({ children }) {
+    return <p className="my-1 font-semibold leading-6 text-foreground">{children}</p>
+  }
+}
+
+class DialogTipsErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false }
+
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true }
+  }
+
+  render(): React.ReactNode {
+    return this.state.hasError ? null : this.props.children
+  }
+}
+
+function DialogTipsMarkdown({ content }: { content: string }): React.JSX.Element | null {
+  const trimmed = content.trim()
+  if (!trimmed) return null
+
+  return (
+    <DialogTipsErrorBoundary key={trimmed}>
+      <div className="mb-6 max-w-3xl rounded-md border border-border/70 bg-muted/30 px-4 py-3 text-sm text-muted-foreground shadow-sm">
+        <ReactMarkdown remarkPlugins={[remarkBreaks]} components={dialogTipsMarkdownComponents}>
+          {trimmed}
+        </ReactMarkdown>
+      </div>
+    </DialogTipsErrorBoundary>
+  )
+}
+
 export function ChatContainer({
   threadId,
   showGitChangeNotice = false,
+  surface = "default",
+  hideWelcomeSkillTabs = false,
   onOpenGitPanel,
   onThreadGitStatusChange
 }: ChatContainerProps): React.JSX.Element {
+  const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
+  const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
+  const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
+  const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const userMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -969,6 +1114,8 @@ export function ChatContainer({
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(new Set())
   const [skillsLoading, setSkillsLoading] = useState(true)
+  const [skillsHarnessProjectId, setSkillsHarnessProjectId] = useState<string | null>(null)
+  const [skillsLoadTargetProjectId, setSkillsLoadTargetProjectId] = useState<string | null>(null)
   const [showAllProgrammingSkills, setShowAllProgrammingSkills] = useState(false)
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
@@ -997,6 +1144,9 @@ export function ChatContainer({
   const [nuxLoading, setNuxLoading] = useState(false)
   const [nuxError, setNuxError] = useState<string | null>(null)
   const [nuxLoadingStep, setNuxLoadingStep] = useState(0)
+
+  const [durationMap, setDurationMap] = useState<TurnTiming[]>([])
+  const [durationNow, setDurationNow] = useState(0)
 
   const NUX_LOADING_STEPS: string[] = [
     "正在准备沙箱环境...",
@@ -1087,6 +1237,72 @@ export function ChatContainer({
     rightPanelCollapsed,
     pluginVersion
   } = useAppStore()
+  const currentThread = useMemo(
+    () => threads.find((thread) => thread.thread_id === threadId) ?? null,
+    [threadId, threads]
+  )
+  const harnessFeatureBinding = useMemo(
+    () => getHarnessFeatureBinding(currentThread),
+    [currentThread]
+  )
+  const pendingHarnessNextActionVersion = useSyncExternalStore(
+    subscribePendingHarnessNextActions,
+    getPendingHarnessNextActionVersion,
+    getPendingHarnessNextActionVersion
+  )
+  const pendingHarnessNextAction = useMemo(
+    () => getPendingHarnessNextAction(threadId),
+    [pendingHarnessNextActionVersion, threadId]
+  )
+  const [transientHarnessDialogTips, setTransientHarnessDialogTips] = useState<{
+    threadId: string
+    tips: string
+  } | null>(null)
+  const pendingHarnessDialogTips = pendingHarnessNextAction?.dialogTips?.trim() || null
+  const transientHarnessDialogTipsForThread =
+    transientHarnessDialogTips?.threadId === threadId ? transientHarnessDialogTips.tips : null
+  const [harnessDialogTips, setHarnessDialogTips] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!threadId || !pendingHarnessDialogTips) return
+    setTransientHarnessDialogTips({ threadId, tips: pendingHarnessDialogTips })
+  }, [pendingHarnessDialogTips, threadId])
+
+  useEffect(() => {
+    if (!shouldShowHarnessDialogTips || !harnessFeatureBinding) {
+      setHarnessDialogTips(null)
+      return
+    }
+
+    const nextActionDialogTips =
+      pendingHarnessDialogTips ?? transientHarnessDialogTipsForThread?.trim()
+    if (nextActionDialogTips) {
+      setHarnessDialogTips(nextActionDialogTips)
+      return
+    }
+
+    let cancelled = false
+    setHarnessDialogTips(null)
+    window.api.harnessBoard
+      .getDialogTips(harnessFeatureBinding.projectId, harnessFeatureBinding.slug)
+      .then((tips) => {
+        if (!cancelled) setHarnessDialogTips(tips?.trim() || null)
+      })
+      .catch((error) => {
+        console.warn("[ChatContainer] Failed to load harness dialog tips:", error)
+        if (!cancelled) setHarnessDialogTips(null)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    harnessFeatureBinding?.projectId,
+    harnessFeatureBinding?.slug,
+    pendingHarnessDialogTips,
+    transientHarnessDialogTipsForThread,
+    shouldShowHarnessDialogTips
+  ])
 
   const resolveAgentMode = useCallback(
     async (metadata: Record<string, unknown>): Promise<ChatAgentMode> => {
@@ -1142,8 +1358,17 @@ export function ChatContainer({
   const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
   const [goodSkillsData, setGoodSkillsData] = useState<MarketItem[]>([])
 
+  // Stable ref so loadSkills can read the latest harness binding without
+  // invalidating its own identity (useCallback with empty deps).
+  const harnessFeatureBindingRef = useRef(harnessFeatureBinding)
+  harnessFeatureBindingRef.current = harnessFeatureBinding
+
   // Define loadSkills function at component level so it can be accessed everywhere
   const loadSkills = useCallback(async (): Promise<void> => {
+    setSkillsLoading(true)
+    const binding = harnessFeatureBindingRef.current
+    const targetProjectId = binding?.projectId ?? null
+    setSkillsLoadTargetProjectId(targetProjectId)
     try {
       const pluginSkillsPromise =
         typeof window.api.skills.listPlugins === "function"
@@ -1167,13 +1392,35 @@ export function ChatContainer({
       const availableSkills = loadedSkills.filter(
         (s) => s.source === "project" || s.source === "user"
       )
-      // Enabled built-in/custom names win over plugin names; disabled local
-      // skills should not hide a plugin skill with the same name from slash.
-      const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet)
+
+      // In harness mode, resolve the project's bound plugin name so that
+      // duplicate-named skills from other plugins are hidden in favour of
+      // the project's own plugin.
+      let preferredPlugin: { id?: string; name?: string } | null = null
+      if (binding && typeof window.api.harnessBoard?.listProjects === "function") {
+        try {
+          const projects = await window.api.harnessBoard.listProjects()
+          const project = projects.find((p) => p.projectId === binding.projectId)
+          if (project) {
+            preferredPlugin = {
+              id: project.harnessAdapter.id,
+              name: project.harnessAdapter.name
+            }
+          }
+        } catch {
+          // Non-critical: fall through without a preference.
+        }
+      }
+
+      // In harness mode the bound plugin's skills win over same-name skills,
+      // matching project-scoped slash command behaviour.
+      const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet, preferredPlugin)
       setSkills([...merged].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
+      setSkillsHarnessProjectId(targetProjectId)
     } catch (error) {
       console.error("[ChatContainer] Failed to load skills:", error)
       setSkills([])
+      setSkillsHarnessProjectId(null)
     } finally {
       setSkillsLoading(false)
     }
@@ -1282,6 +1529,7 @@ export function ChatContainer({
     approvalQueue,
     pendingUserInput,
     todos,
+    turnTimings,
     error: threadError,
     hookInterruption,
     workspacePath,
@@ -1299,6 +1547,7 @@ export function ChatContainer({
     clearPendingApprovals,
     removePendingApproval,
     setPendingUserInput,
+    setTurnTimings,
     appendMessage,
     setError,
     clearError,
@@ -1306,10 +1555,6 @@ export function ChatContainer({
     setDraftInput: setInput,
     setDraftSkill: setSelectedSkill
   } = useCurrentThread(threadId)
-
-  useEffect(() => {
-    threadMessageIdsRef.current = new Set(threadMessages.map((message) => message.id))
-  }, [threadMessages])
 
   // Hook logs live in an external store so updates don't re-render the full provider tree.
   // Per-turn buckets are keyed by the user message id that opened the turn,
@@ -1358,9 +1603,9 @@ export function ChatContainer({
   const [savedToolNameInput, setSavedToolNameInput] = useState("")
   const [savedToolDescriptionInput, setSavedToolDescriptionInput] = useState("")
   const [saveToolMetadataLoading, setSaveToolMetadataLoading] = useState(false)
-  const [saveToolMetadataLoadingThreadId, setSaveToolMetadataLoadingThreadId] = useState<string | null>(
-    null
-  )
+  const [saveToolMetadataLoadingThreadId, setSaveToolMetadataLoadingThreadId] = useState<
+    string | null
+  >(null)
   const queuedApprovalCount = Math.max(0, pendingApprovals.length - 1)
   const showSaveToolMetadataLoading =
     saveToolMetadataLoading && saveToolMetadataLoadingThreadId === threadId
@@ -1482,30 +1727,6 @@ export function ChatContainer({
     []
   )
 
-  const prepareStreamMessageCapture = useCallback((): void => {
-    streamMessageTimesRef.current = {}
-    streamMessageBaselineIdsRef.current = new Set(
-      ((streamData.messages || []) as StreamMessage[])
-        .map((msg) => msg.id)
-        .filter((id): id is string => !!id)
-    )
-    streamMessageCapturePreparedRef.current = true
-  }, [streamData.messages])
-
-  useEffect(() => {
-    let cancelled = false
-    setMessageTimes({})
-    window.api.threads
-      .get(threadId)
-      .then((thread) => {
-        if (!cancelled) setMessageTimes(getMessageTimeMap(thread?.thread_values))
-      })
-      .catch((error) => console.warn("[ChatContainer] Failed to load message times:", error))
-    return () => {
-      cancelled = true
-    }
-  }, [threadId])
-
   // ── File attachments state ──
   const [attachments, setAttachments] = useState<FileAttachment[]>([])
   const [attachmentLoading, setAttachmentLoading] = useState(false)
@@ -1564,7 +1785,13 @@ export function ChatContainer({
           if (result.success && result.attachment) {
             // #12: skip empty files
             if (!result.attachment.content.trim()) {
-              setError(`文件 "${result.attachment.filename}" 内容为空`)
+              if (result.attachment.filename.includes(".doc")) {
+                setError(
+                  `文件 "${result.attachment.filename}" 内容为空，可尝试将文件用 WPS 另存为 docx 后添加`
+                )
+              } else {
+                setError(`文件 "${result.attachment.filename}" 内容为空`)
+              }
               continue
             }
             setAttachments((prev) => [...prev, result.attachment!])
@@ -1849,7 +2076,6 @@ export function ChatContainer({
       try {
         const legacyDecision =
           decision === "approve_session" || decision === "approve_permanent" ? "approve" : decision
-        prepareStreamMessageCapture()
         await stream.submit(null, {
           command: {
             resume: { decision: legacyDecision, pendingCount: pendingApproval.pendingCount }
@@ -1870,7 +2096,6 @@ export function ChatContainer({
       removePendingApproval,
       savedToolDescriptionInput,
       savedToolNameInput,
-      prepareStreamMessageCapture,
       stream,
       threadId
     ]
@@ -1981,8 +2206,7 @@ export function ChatContainer({
 
         let role: Message["role"] = "assistant"
         if (streamMsg.type === "human") role = "user"
-        else if (streamMsg.type === "tool")
-          role = "tool" // ✅ 修复: tool 不应映射为 assistant
+        else if (streamMsg.type === "tool") role = "tool"
         else if (streamMsg.type === "ai") role = "assistant"
 
         nextMessageTimes[streamMsg.id] = {
@@ -2119,27 +2343,6 @@ export function ChatContainer({
     })
     return filterCoordinatorNoiseMessages(cleanedMessages)
   }, [threadMessages, streamData.messages, messageTimes])
-
-  const assistantDurationsByMessageId = useMemo(() => {
-    const durations = new Map<string, number>()
-    for (let index = 0; index < displayMessages.length; index++) {
-      const currentUser = displayMessages[index]
-      if (currentUser.role !== "user") continue
-
-      const group = displayMessages.slice(index + 1)
-      const nextUserIndex = group.findIndex((message) => message.role === "user")
-      const responseMessages = nextUserIndex >= 0 ? group.slice(0, nextUserIndex) : group
-      const firstAssistant = responseMessages.find((message) => message.role === "assistant")
-      const lastMessageWithEnd = [...responseMessages].reverse().find((message) => message.end_at)
-
-      if (!firstAssistant || !lastMessageWithEnd) continue
-      const startedAt = toTime(currentUser.start_at)
-      const endedAt = toTime(lastMessageWithEnd.end_at)
-      if (startedAt === null || endedAt === null || endedAt <= startedAt) continue
-      durations.set(firstAssistant.id, endedAt - startedAt)
-    }
-    return durations
-  }, [displayMessages])
 
   const userMessageIds = useMemo(
     () => displayMessages.filter((message) => message.role === "user").map((message) => message.id),
@@ -2470,6 +2673,54 @@ export function ChatContainer({
     [skills, isLocalSkillDisabled]
   )
 
+  useEffect(() => {
+    const nextAction = pendingHarnessNextAction
+    const userMessage = nextAction?.userMessage?.trim() ?? ""
+    const slashSkill = nextAction?.slashSkill?.trim() ?? ""
+
+    if (!harnessFeatureBinding) return
+    if (!userMessage && !slashSkill) {
+      if (nextAction?.dialogTips) consumePendingHarnessNextAction(threadId)
+      return
+    }
+    if (historyLoading) return
+    if (threadMessages.length > 0 || input.trim() || selectedSkill) {
+      consumePendingHarnessNextAction(threadId)
+      return
+    }
+
+    let nextSkill: SkillMetadata | null = null
+    if (slashSkill) {
+      if (skillsLoading) return
+      if (skillsLoadTargetProjectId !== harnessFeatureBinding.projectId) return
+      if (skillsHarnessProjectId === harnessFeatureBinding.projectId) {
+        const normalizedSlashSkill = normalizeSkillId(slashSkill)
+        nextSkill =
+          enabledSkillsForSlash.find(
+            (skill) => normalizeSkillId(skill.name) === normalizedSlashSkill
+          ) ?? null
+      }
+    }
+
+    if (userMessage) setInput(userMessage)
+    if (nextSkill) setSelectedSkill(nextSkill)
+    consumePendingHarnessNextAction(threadId)
+  }, [
+    enabledSkillsForSlash,
+    harnessFeatureBinding,
+    historyLoading,
+    input,
+    pendingHarnessNextAction,
+    selectedSkill,
+    setInput,
+    setSelectedSkill,
+    skillsHarnessProjectId,
+    skillsLoadTargetProjectId,
+    skillsLoading,
+    threadId,
+    threadMessages.length
+  ])
+
   const slash = useSlashCommands({
     input,
     skills: enabledSkillsForSlash,
@@ -2498,6 +2749,10 @@ export function ChatContainer({
     },
     [setInput, slashResetSelection, setSelectedSkill]
   )
+
+  useEffect(() => {
+    setDurationMap(turnTimings)
+  }, [turnTimings])
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault()
@@ -2642,60 +2897,13 @@ export function ChatContainer({
       setAgentMode("coordinator")
     }
 
-    // 用户消息本身不消耗 assistant 响应时间，start_at/end_at 都取发送时刻。
-    //
-    // 但 user.start_at 是本轮耗时计算的起点：展示 CMBDevClaw 后面的 duration 时，会找到
-    // 当前 user 后面的第一条 assistant，再减到下一个 user 之前最后一条消息的 end_at。
-    // 所以 user 也必须持久化 start_at/end_at，否则重启后无法还原该轮起点。
-    const userStartAt = new Date()
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: "user",
       content: displayContent,
-      created_at: new Date(),
-      start_at: userStartAt,
-      end_at: userStartAt
+      created_at: new Date()
     }
     appendMessage(userMessage)
-    // 用户消息也需要持久化起止时间，后续 duration 用 user.start_at 作为起点。
-    //
-    // 这里先立即写入 thread_values，是为了尽量保证即使 assistant 回复还没结束，
-    // 当前 user 的起点也已经保存下来；assistant/tool 的结束时间会在 loading 结束后补齐。
-    const userMessageTime: MessageTimeMap = {
-      [userMessage.id]: {
-        start_at: userStartAt.toISOString(),
-        end_at: userStartAt.toISOString()
-      }
-    }
-    setMessageTimes((prev) => ({ ...prev, ...userMessageTime }))
-    try {
-      const thread = await window.api.threads.get(threadId)
-      if (thread) {
-        await window.api.threads.update(threadId, {
-          thread_values: {
-            ...(thread.thread_values ?? {}),
-            // 保留 id map，优先支持按 message id 精确恢复。
-            //
-            // user message 在前端先 append，checkpoint 恢复时 id 可能不一定完全一致；
-            // 因此仍需要下面的顺序数组作为兜底。
-            [MESSAGE_TIMES_THREAD_VALUE_KEY]: {
-              ...getMessageTimeMap(thread.thread_values),
-              ...userMessageTime
-            },
-            // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。
-            //
-            // 这条 user 时间会成为顺序数组中的一个节点，后续 assistant/tool 时间会继续 append，
-            // 最终形成完整的 user -> assistant/tool... 时间线。
-            [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
-              getMessageTimeOrder(thread.thread_values),
-              userMessageTime
-            )
-          }
-        })
-      }
-    } catch (error) {
-      console.warn("[ChatContainer] Failed to save user message time:", error)
-    }
 
     if (isFirstMessage) {
       const currentThread = threads.find((t) => t.thread_id === threadId)
@@ -2710,7 +2918,12 @@ export function ChatContainer({
       }
     }
 
-    prepareStreamMessageCapture()
+    const startTime = Date.now()
+    setDurationNow(0)
+    let timer = setInterval(() => {
+      setDurationNow((t) => t + 1)
+    }, 1000)
+
     await stream.submit(
       {
         messages: [{ type: "human", content: fullMessage }]
@@ -2726,6 +2939,25 @@ export function ChatContainer({
         }
       }
     )
+
+    setDurationNow(0)
+    clearInterval(timer)
+
+    const endTime = Date.now()
+    const map = {
+      duration: endTime - startTime,
+      thread_id: threadId,
+      user_id: userMessage.id,
+      sendTime: startTime
+    }
+    const nextDurationMap = [
+      ...durationMap.filter(
+        (item) => !(item.thread_id === threadId && item.user_id === userMessage.id)
+      ),
+      map
+    ]
+    setDurationMap(nextDurationMap)
+    setTurnTimings(nextDurationMap)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
@@ -2850,7 +3082,17 @@ export function ChatContainer({
 
   useEffect(() => {
     void loadSkills()
-  }, [loadSkills, pluginVersion])
+  }, [loadSkills, pluginVersion, harnessFeatureBinding?.projectId])
+
+  // Main broadcasts `skills:changed` after skill evolution writes, optimizer
+  // patches, and plugin SKILL.md edits via the file editor. Subscribe so the
+  // slash popover and welcome-tree get a fresh list without waiting for the
+  // user to re-open `/` (which already triggers a re-fetch on its own).
+  useEffect(() => {
+    return window.api.skills.onChanged(() => {
+      void loadSkills()
+    })
+  }, [loadSkills])
 
   // ── Skill creation human-confirmation listener ──────────
   useEffect(() => {
@@ -3622,10 +3864,7 @@ export function ChatContainer({
 
       <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
         <div
-          className={cn(
-            "p-4",
-            userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
-          )}
+          className={cn("p-4", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}
           style={
             userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined
           }
@@ -3650,7 +3889,11 @@ export function ChatContainer({
             )}
             {displayMessages.length === 0 && !isLoading && !historyLoading && (
               <div className="pt-6 pb-8">
-                <RotatingHeadline />
+                {shouldShowHarnessDialogTips && harnessDialogTips ? (
+                  <DialogTipsMarkdown content={harnessDialogTips} />
+                ) : !shouldShowWelcomeHeadline || harnessFeatureBinding ? null : (
+                  <RotatingHeadline />
+                )}
                 {skillsLoading ? (
                   <div className="text-sm text-muted-foreground text-center py-10">
                     正在加载技能列表...
@@ -3700,179 +3943,185 @@ export function ChatContainer({
                         )}
                       </div>
                     )}
-                    <Tabs defaultValue="skills-by-category" className="space-y-3">
-                      <TabsList className="grid h-9 w-full grid-cols-3">
-                        <TabsTrigger value="skills-by-category" className="text-xs">
-                          场景技能
-                        </TabsTrigger>
-                        <TabsTrigger value="installed-skills" className="text-xs gap-1.5">
-                          我安装的技能
-                          {customSkillUpdateCount > 0 && (
-                            <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-teal-100 px-1 text-[10px] font-semibold leading-none text-teal-700 dark:bg-teal-900/40 dark:text-teal-200">
-                              {customSkillUpdateCount}
-                            </span>
-                          )}
-                        </TabsTrigger>
-                        <TabsTrigger value="help" className="text-xs">
-                          帮助
-                        </TabsTrigger>
-                      </TabsList>
-
-                      <TabsContent value="skills-by-category" className="mt-0">
-                        {/* 市场技能：内部使用 getAllSkills 取数并按分类展示 */}
-                        <SkillsByCategorySection
-                          skills={enabledSkillsForSlash}
-                          previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
-                          onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
-                          onOpenOrganizationSkillMarket={handleOpenOrganizationSkillMarket}
-                          onOpenMarketBySkill={handleOpenMarketBySkill}
-                          onUseSkillPrompt={handleUseSkillPrompt}
-                        />
-                      </TabsContent>
-
-                      <TabsContent value="installed-skills" className="mt-0 space-y-3">
-                        {enabledCustomSkillGroups.length > 0 ? (
-                          <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
-                            <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium text-emerald-800 dark:text-emerald-200">
-                              <span>已启用技能</span>
-                              <Badge
-                                variant="outline"
-                                className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
-                              >
-                                {enabledCustomSkills.length}
-                              </Badge>
-                            </div>
-                            <div className="space-y-3">
-                              {enabledCustomSkillGroups.map((group) => (
-                                <div key={group.category} className="space-y-2">
-                                  <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                                    {group.category}
-                                  </div>
-                                  <WelcomeSkillTree
-                                    cards={group.cards}
-                                    onUseSkill={handleUseSkillPrompt}
-                                    getSkillShowLabel={getSkillShowLabel}
-                                  />
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
-                          >
-                            <div className="flex items-center gap-2 min-w-0">
-                              <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
-                                <CircleAlert className={"size-4"} />
-                              </div>
-                              <div className="min-w-0 flex-1">
-                                <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
-                                  暂无
-                                </div>
-                              </div>
-                            </div>
-                          </button>
-                        )}
-
-                        {enabledCustomSkills.length > 8 && (
-                          <button
-                            type="button"
-                            onClick={() => setShowAllCustomSkills((prev) => !prev)}
-                            className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
-                          >
-                            {showAllCustomSkills ? (
-                              <>
-                                <ChevronUp className="size-3.5" />
-                                <span>收起</span>
-                              </>
-                            ) : (
-                              <>
-                                <ChevronDown className="size-3.5" />
-                                <span>展开更多（+{enabledCustomSkills.length - 8}）</span>
-                              </>
+                    {shouldShowWelcomeSkillTabs && (
+                      <Tabs defaultValue="skills-by-category" className="space-y-3">
+                        <TabsList className="grid h-9 w-full grid-cols-3">
+                          <TabsTrigger value="skills-by-category" className="text-xs">
+                            场景技能
+                          </TabsTrigger>
+                          <TabsTrigger value="installed-skills" className="text-xs gap-1.5">
+                            我安装的技能
+                            {customSkillUpdateCount > 0 && (
+                              <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-teal-100 px-1 text-[10px] font-semibold leading-none text-teal-700 dark:bg-teal-900/40 dark:text-teal-200">
+                                {customSkillUpdateCount}
+                              </span>
                             )}
-                          </button>
-                        )}
+                          </TabsTrigger>
+                          <TabsTrigger value="help" className="text-xs">
+                            帮助
+                          </TabsTrigger>
+                        </TabsList>
 
-                        {disabledLocalSkills.length > 0 && (
-                          <details className="rounded-lg border border-border/70 bg-muted/20 px-2 py-2">
-                            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
-                              <span>已禁用技能</span>
-                              <Badge
-                                variant="outline"
-                                className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
-                              >
-                                {disabledLocalSkills.length}
-                              </Badge>
-                            </summary>
-                            <div className="mt-2 space-y-2">
-                              {disabledCustomSkillGroups.map((group) => (
-                                <div key={group.category} className="space-y-2">
-                                  <div className="text-xs text-muted-foreground/80 font-medium tracking-wider">
-                                    {group.category}
-                                  </div>
-                                  <WelcomeSkillTree
-                                    cards={group.cards}
-                                    disabled
-                                    onUseSkill={handleUseSkillPrompt}
-                                    getSkillShowLabel={getSkillShowLabel}
-                                  />
-                                </div>
-                              ))}
-                            </div>
-                          </details>
-                        )}
-                      </TabsContent>
+                        <TabsContent value="skills-by-category" className="mt-0">
+                          {/* 市场技能：内部使用 getAllSkills 取数并按分类展示 */}
+                          <SkillsByCategorySection
+                            skills={enabledSkillsForSlash}
+                            previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
+                            onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
+                            onOpenOrganizationSkillMarket={handleOpenOrganizationSkillMarket}
+                            onOpenMarketBySkill={handleOpenMarketBySkill}
+                            onUseSkillPrompt={handleUseSkillPrompt}
+                          />
+                        </TabsContent>
 
-                      <TabsContent value="help" className="mt-0 space-y-2">
-                        {helpSceneSkillCards.length > 0 && (
-                          <div className="space-y-2">
-                            <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                              通用场景
-                            </div>
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                              {helpSceneSkillCards.map(({ skill, label, icon }) => (
-                                <button
-                                  key={label + skill.path}
-                                  type="button"
-                                  onClick={() => handleUseSkillPrompt(skill)}
-                                  className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                        <TabsContent value="installed-skills" className="mt-0 space-y-3">
+                          {enabledCustomSkillGroups.length > 0 ? (
+                            <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
+                              <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium text-emerald-800 dark:text-emerald-200">
+                                <span>已启用技能</span>
+                                <Badge
+                                  variant="outline"
+                                  className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
                                 >
-                                  <div className="flex items-center gap-3">
-                                    <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                                      {icon}
-                                    </div>
-                                    <div className="text-xs text-foreground leading-5">{label}</div>
-                                  </div>
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                        <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                          帮助
-                        </div>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                          <button
-                            onClick={async () => {
-                              const instructionUrl = import.meta.env.VITE_INTRUCTION_URL
-                              handleCopyToClipboard(instructionUrl)
-                            }}
-                            type="button"
-                            className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
-                          >
-                            <div className="flex items-center gap-3">
-                              <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                                <Notebook size={14} />
+                                  {enabledCustomSkills.length}
+                                </Badge>
                               </div>
-                              <div className="text-xs text-foreground leading-5">操作说明文档</div>
+                              <div className="space-y-3">
+                                {enabledCustomSkillGroups.map((group) => (
+                                  <div key={group.category} className="space-y-2">
+                                    <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                                      {group.category}
+                                    </div>
+                                    <WelcomeSkillTree
+                                      cards={group.cards}
+                                      onUseSkill={handleUseSkillPrompt}
+                                      getSkillShowLabel={getSkillShowLabel}
+                                    />
+                                  </div>
+                                ))}
+                              </div>
                             </div>
-                          </button>
-                          {/*<UpdateActionButton />*/}
-                        </div>
-                      </TabsContent>
-                    </Tabs>
+                          ) : (
+                            <button
+                              type="button"
+                              className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
+                                  <CircleAlert className={"size-4"} />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
+                                    暂无
+                                  </div>
+                                </div>
+                              </div>
+                            </button>
+                          )}
+
+                          {enabledCustomSkills.length > 8 && (
+                            <button
+                              type="button"
+                              onClick={() => setShowAllCustomSkills((prev) => !prev)}
+                              className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
+                            >
+                              {showAllCustomSkills ? (
+                                <>
+                                  <ChevronUp className="size-3.5" />
+                                  <span>收起</span>
+                                </>
+                              ) : (
+                                <>
+                                  <ChevronDown className="size-3.5" />
+                                  <span>展开更多（+{enabledCustomSkills.length - 8}）</span>
+                                </>
+                              )}
+                            </button>
+                          )}
+
+                          {disabledLocalSkills.length > 0 && (
+                            <details className="rounded-lg border border-border/70 bg-muted/20 px-2 py-2">
+                              <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
+                                <span>已禁用技能</span>
+                                <Badge
+                                  variant="outline"
+                                  className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
+                                >
+                                  {disabledLocalSkills.length}
+                                </Badge>
+                              </summary>
+                              <div className="mt-2 space-y-2">
+                                {disabledCustomSkillGroups.map((group) => (
+                                  <div key={group.category} className="space-y-2">
+                                    <div className="text-xs text-muted-foreground/80 font-medium tracking-wider">
+                                      {group.category}
+                                    </div>
+                                    <WelcomeSkillTree
+                                      cards={group.cards}
+                                      disabled
+                                      onUseSkill={handleUseSkillPrompt}
+                                      getSkillShowLabel={getSkillShowLabel}
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                            </details>
+                          )}
+                        </TabsContent>
+
+                        <TabsContent value="help" className="mt-0 space-y-2">
+                          {helpSceneSkillCards.length > 0 && (
+                            <div className="space-y-2">
+                              <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                                通用场景
+                              </div>
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                {helpSceneSkillCards.map(({ skill, label, icon }) => (
+                                  <button
+                                    key={label + skill.path}
+                                    type="button"
+                                    onClick={() => handleUseSkillPrompt(skill)}
+                                    className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                                  >
+                                    <div className="flex items-center gap-3">
+                                      <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
+                                        {icon}
+                                      </div>
+                                      <div className="text-xs text-foreground leading-5">
+                                        {label}
+                                      </div>
+                                    </div>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                            帮助
+                          </div>
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                            <button
+                              onClick={async () => {
+                                const instructionUrl = import.meta.env.VITE_INTRUCTION_URL
+                                handleCopyToClipboard(instructionUrl)
+                              }}
+                              type="button"
+                              className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                            >
+                              <div className="flex items-center gap-3">
+                                <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
+                                  <Notebook size={14} />
+                                </div>
+                                <div className="text-xs text-foreground leading-5">
+                                  操作说明文档
+                                </div>
+                              </div>
+                            </button>
+                            {/*<UpdateActionButton />*/}
+                          </div>
+                        </TabsContent>
+                      </Tabs>
+                    )}
                   </div>
                 )}
               </div>
@@ -3901,6 +4150,7 @@ export function ChatContainer({
                   data-message-role={message.role}
                 >
                   <MessageBubble
+                    durationMap={durationMap}
                     message={message}
                     previousMessage={previousMessage}
                     isStreaming={isLastMessage && isLoading}
@@ -3912,7 +4162,6 @@ export function ChatContainer({
                     onEditUserMessage={handleEditUserMessage}
                     threadId={threadId}
                     isLoading={isLoading}
-                    assistantDurationMs={assistantDurationsByMessageId.get(message.id)}
                   />
                   {hookLogBucketForTurn && hookLogBucketForTurn.entries.length > 0 && (
                     <div className="mt-1 ml-12">
@@ -3977,6 +4226,7 @@ export function ChatContainer({
                   >
                     {THINKING_MESSAGES[thinkingMessageIndex]}
                   </span>
+                  <DurationShow text={"已处理"} durationMs={durationNow * 1000} />
                 </div>
                 {todos.length > 0 && <ChatTodos todos={todos} />}
               </div>
@@ -4050,8 +4300,15 @@ export function ChatContainer({
       {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
       {(showSaveToolMetadataLoading ||
         (pendingApproval &&
-          Boolean((pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId))) && (
-        <div className={cn("px-4 pb-2", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
+          Boolean(
+            (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId
+          ))) && (
+        <div
+          className={cn(
+            "px-4 pb-2",
+            userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
+          )}
+        >
           {showSaveToolMetadataLoading && (
             <div className="max-w-3xl mx-auto mb-2 flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-700 shadow-sm dark:text-emerald-300">
               <Loader2 className="size-3.5 animate-spin" />
@@ -4059,7 +4316,9 @@ export function ChatContainer({
             </div>
           )}
           {pendingApproval &&
-            Boolean((pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId) &&
+            Boolean(
+              (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId
+            ) &&
             (() => {
               const approval = pendingApproval as unknown as Record<string, unknown>
               const operation = approval.operation
@@ -4138,9 +4397,7 @@ export function ChatContainer({
                             <div className="mb-1 text-[11px] font-medium text-muted-foreground">
                               工具名称
                             </div>
-                            <div className="font-mono break-all">
-                              {savedToolNameInput || "-"}
-                            </div>
+                            <div className="font-mono break-all">{savedToolNameInput || "-"}</div>
                           </div>
                           <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
                             <div className="mb-1 text-[11px] font-medium text-muted-foreground">

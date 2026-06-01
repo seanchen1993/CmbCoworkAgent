@@ -427,12 +427,17 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    'const hasRunningWorker = state.coordinatorWorkers.some((worker) => worker.status === "running")',
+    "const hasRunningWorker = state.coordinatorWorkers.some(",
     "thread context tracks unresolved coordinator threads by running workers or pending terminal notifications"
   )
   assertIncludes(
     threadContext,
-    "worker.notification_acknowledged === false\n            && worker.suppress_notification_auto_run !== true",
+    'worker.status === "running"',
+    "thread context treats running coordinator workers as unresolved work"
+  )
+  assertIncludes(
+    threadContext,
+    "worker.notification_acknowledged === false &&\n            worker.suppress_notification_auto_run !== true",
     "thread context only treats unsuppressed terminal notifications as unresolved auto-run work"
   )
   assertIncludes(
@@ -848,7 +853,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "let resumeCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(",
+    "const resumeCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(",
     "agent resume inherits selected skill from the active coordinator run or persisted thread metadata"
   )
   assertIncludes(
@@ -918,7 +923,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "let interruptCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(",
+    "const interruptCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(",
     "agent interrupt inherits selected skill from the active coordinator run or persisted thread metadata"
   )
   assertIncludes(
@@ -1122,7 +1127,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "normalizeMessageText(effectiveMessage)",
+    "[message, effectiveMessage].map(normalizeMessageText)",
     "agent IPC matches values-mode current turn against the effective checkpoint message"
   )
   assertOccurrenceCount(
@@ -1770,7 +1775,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    'options.abortSignal?.addEventListener("abort", onApprovalAbort',
+    'options.abortSignal?.addEventListener("abort", onAbort',
     "runtime rejects pending approvals when the owning run is aborted"
   )
   assertIncludes(

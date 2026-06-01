@@ -22,8 +22,8 @@ import type {
   ChatXConfig,
   HookLoggingConfig,
   PluginHookMetadata,
+  PluginDetail,
   PluginMetadata,
-  PluginManifest,
   SkillHookMetadata,
   AgentAutoCommitSettings,
   UserInputRequest,
@@ -38,6 +38,28 @@ import type {
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
 import type { CoordinatorWorkerSnapshot } from "../main/agent/coordinator-worker-manager"
+import type {
+  HarnessProjectCreateInput,
+  HarnessFeatureCreateInput,
+  HarnessFeatureCreateResult,
+  HarnessProjectDetailViewModel,
+  HarnessProjectListItem,
+  HarnessProjectMetadata,
+  HarnessProjectMetadataUpdateInput,
+  HarnessRunDetailViewModel,
+  HarnessAdapterRegistryItem,
+  HarnessWatchRefChangedEvent
+} from "../shared/harness-board-types"
+import type {
+  FeatureGateCheckOptions,
+  FeatureGateCheckResult,
+  FeatureGateKey
+} from "../shared/feature-gates"
+import type {
+  TaskMmdCompileModelInfo,
+  TaskMmdSettings,
+  TaskMmdSnapshot
+} from "../main/agent/task-mmd/types"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -162,6 +184,22 @@ interface DashboardCommitDetailsOptions {
   page?: number
   pageSize?: number
   pushedOnly?: boolean
+}
+
+interface DashboardSkillEvalOptions {
+  limit?: number
+  recentPage?: number
+  recentPageSize?: number
+  skillPage?: number
+  skillPageSize?: number
+  skillSearch?: string
+  skillName?: string
+  skillVersion?: string
+  skillNames?: string[]
+  defaultRecentToLatestSkill?: boolean
+  recentOnly?: boolean
+  listOnly?: boolean
+  statsOnly?: boolean
 }
 
 interface DashboardCodeStats {
@@ -568,9 +606,7 @@ interface CustomAPI {
       success: boolean
       error?: string
     }>
-    pushWorktree: (
-      threadId: string
-    ) => Promise<{
+    pushWorktree: (threadId: string) => Promise<{
       success: boolean
       autoCommitted?: boolean
       error?: string
@@ -634,7 +670,9 @@ interface CustomAPI {
     }>
     getFilePath: (file: File) => string
     select: () => Promise<{ canceled: boolean; filePaths: string[] }>
-    selectDirectory: (options?: { title?: string }) => Promise<{ canceled: boolean; filePaths: string[] }>
+    selectDirectory: (options?: {
+      title?: string
+    }) => Promise<{ canceled: boolean; filePaths: string[] }>
     supportedExtensions: () => Promise<string[]>
   }
   skills: {
@@ -648,9 +686,7 @@ interface CustomAPI {
     listFiles: (
       skillPath: string
     ) => Promise<{ success: boolean; files?: string[]; error?: string }>
-    readTextBundle: (
-      skillPath: string
-    ) => Promise<{
+    readTextBundle: (skillPath: string) => Promise<{
       success: boolean
       files?: Array<{ path: string; content: string }>
       skipped?: Array<{ path: string; reason: string }>
@@ -691,6 +727,7 @@ interface CustomAPI {
       options?: { includeNestedSkills?: boolean }
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (skillPath: string) => Promise<{ success: boolean; error?: string }>
+    onChanged: (callback: (payload: { reason?: string }) => void) => () => void
   }
   mcp: {
     list: () => Promise<McpConnectorConfig[]>
@@ -706,18 +743,47 @@ interface CustomAPI {
     }) => Promise<{ success: boolean; tools?: string[]; error?: string }>
   }
   memory: {
-    listFiles: () => Promise<Array<{ name: string; size: number; modifiedAt: string }>>
+    listFiles: () => Promise<
+      Array<{
+        name: string
+        size: number
+        modifiedAt: string
+        type: "user" | "feedback" | "project" | "reference" | null
+        displayName: string | null
+        description: string | null
+        recallCount: number
+      }>
+    >
     readFile: (name: string) => Promise<string>
     deleteFile: (name: string) => Promise<void>
     getEnabled: () => Promise<boolean>
     setEnabled: (enabled: boolean) => Promise<void>
+    getDreamEnabled: () => Promise<boolean>
+    setDreamEnabled: (enabled: boolean) => Promise<void>
     getStats: () => Promise<{
       fileCount: number
       totalSize: number
       indexSize: number
       enabled: boolean
+      dreamEnabled: boolean
+      dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
+    }>
+    consolidate: () => Promise<{
+      archived: number
+      merged: number
+      created: number
+      skipped: number
     }>
     onChanged: (callback: () => void) => () => void
+  }
+  taskMmd: {
+    getSettings: () => Promise<TaskMmdSettings>
+    setSettings: (patch: Partial<TaskMmdSettings>) => Promise<TaskMmdSettings>
+    getSnapshot: (threadId: string) => Promise<TaskMmdSnapshot>
+    clearThread: (threadId: string) => Promise<void>
+    getDirectorySize: (threadId: string) => Promise<number>
+    getCompileModelInfo: (threadId: string) => Promise<TaskMmdCompileModelInfo>
+    onChanged: (callback: (payload: { threadId?: string }) => void) => () => void
   }
   autoCommit: {
     getSettings: () => Promise<AgentAutoCommitSettings>
@@ -862,21 +928,28 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (id: string) => Promise<{ success: boolean; error?: string }>
     setEnabled: (id: string, enabled: boolean) => Promise<void>
-    setOriginsBatch: (
-      updates: Array<{ id: string; origin: "market" | "local" }>
-    ) => Promise<{ success: boolean; error?: string }>
-    getDetail: (id: string) => Promise<{
-      skills: string[]
-      mcpServers: string[]
-      hookCount: number
-      hooks: PluginHookMetadata[]
-      manifest: PluginManifest | null
-    }>
+    getDetail: (id: string) => Promise<PluginDetail>
     listHooks: () => Promise<PluginHookMetadata[]>
     setHookEnabled: (
       pluginId: string,
       hookId: string,
       enabled: boolean
+    ) => Promise<{ success: boolean; error?: string }>
+    listFiles: (pluginId: string) => Promise<{
+      success: boolean
+      files?: Array<{ path: string; relativePath: string; editable: boolean }>
+      root?: string
+      pluginEditable?: boolean
+      error?: string
+    }>
+    readFile: (
+      pluginId: string,
+      filePath: string
+    ) => Promise<{ success: boolean; content?: string; editable?: boolean; error?: string }>
+    writeFile: (
+      pluginId: string,
+      filePath: string,
+      content: string
     ) => Promise<{ success: boolean; error?: string }>
   }
   chatx: {
@@ -892,6 +965,7 @@ interface CustomAPI {
     runElevatedSetup: (workspacePaths?: string[]) => Promise<{ success: boolean; error?: string }>
     getYoloMode: () => Promise<boolean>
     setYoloMode: (yolo: boolean) => Promise<void>
+    getPendingApprovals: (threadId: string) => Promise<unknown[]>
     isNuxNeeded: () => Promise<boolean>
     completeNux: (mode: "elevated" | "unelevated" | "none") => Promise<void>
     getApprovalRules: () => Promise<Array<{ pattern: string; decision: string }>>
@@ -907,6 +981,10 @@ interface CustomAPI {
     onApprovalTimeout: (
       threadId: string,
       callback: (data: { requestId: string }) => void
+    ) => () => void
+    onApprovalCancel: (
+      threadId: string,
+      callback: (data: { requestId: string; reason?: string }) => void
     ) => () => void
     onChanged: (callback: () => void) => () => void
   }
@@ -1130,6 +1208,7 @@ interface CustomAPI {
       ) => Promise<{ fileName: string; filePath: string; event: string; command: string }[]>
       trustAll: (workspacePath: string) => Promise<void>
       trustFile: (workspacePath: string, fileName: string, filePath: string) => Promise<void>
+      runSetupMaintenance: (workspacePath: string) => Promise<void>
       onChanged: (
         callback: (data: { threadId: string; workspacePath: string }) => void
       ) => () => void
@@ -1158,6 +1237,12 @@ interface CustomAPI {
   routing: {
     getMode: () => Promise<"auto" | "pinned">
     setMode: (mode: "auto" | "pinned") => Promise<void>
+  }
+  featureGates: {
+    isEnabled: (
+      name: FeatureGateKey,
+      options?: FeatureGateCheckOptions
+    ) => Promise<FeatureGateCheckResult>
   }
   dashboard: {
     isAllowed: () => Promise<boolean>
@@ -1194,6 +1279,10 @@ interface CustomAPI {
       granularity: "day" | "week" | "month" | "custom",
       skillName: string
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    skillEvalSummary: (
+      range: { from: string; to: string },
+      options?: DashboardSkillEvalOptions
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     userProfiles: (
       sapIds: string[]
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
@@ -1213,13 +1302,21 @@ interface CustomAPI {
     skillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
-    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+      options?: number | { page?: number; pageSize?: number }
+    ) => Promise<{
+      success: boolean
+      data?: { total: number; page: number; pageSize: number; traces: DashboardTraceDetail[] }
+      error?: string
+    }>
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
-    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+      options?: number | { page?: number; pageSize?: number }
+    ) => Promise<{
+      success: boolean
+      data?: { total: number; page: number; pageSize: number; traces: DashboardTraceDetail[] }
+      error?: string
+    }>
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
@@ -1250,6 +1347,25 @@ interface CustomAPI {
     exportExcel: (
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
+  }
+  harnessBoard: {
+    registry: () => Promise<HarnessAdapterRegistryItem[]>
+    listProjects: () => Promise<HarnessProjectListItem[]>
+    createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
+    createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
+    updateProject: (
+      projectId: string,
+      input: HarnessProjectMetadataUpdateInput
+    ) => Promise<HarnessProjectMetadata>
+    archiveProject: (projectId: string) => Promise<HarnessProjectMetadata>
+    getProjectDetail: (projectId: string) => Promise<HarnessProjectDetailViewModel>
+    getProjectDetails: (
+      projectIds: string[],
+      options?: { watchRefs?: boolean }
+    ) => Promise<Record<string, HarnessProjectDetailViewModel>>
+    getRunDetail: (projectId: string, slug: string) => Promise<HarnessRunDetailViewModel>
+    getDialogTips: (projectId: string, slug: string) => Promise<string | null>
+    onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
   }
   update: {
     check: () => Promise<

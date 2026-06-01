@@ -10,6 +10,7 @@ import {
   GitCommit,
   HeartPulse,
   Loader2,
+  Network,
   Plug,
   Puzzle,
   Sparkles,
@@ -35,6 +36,9 @@ const ScheduledPanel = lazy(() =>
 )
 const MemoryPanel = lazy(() =>
   import("./MemoryPanel").then((m) => ({ default: m.MemoryPanel }))
+)
+const TaskMmdPanel = lazy(() =>
+  import("./TaskMmdPanel").then((m) => ({ default: m.TaskMmdPanel }))
 )
 const HeartbeatPanel = lazy(() =>
   import("./HeartbeatPanel").then((m) => ({ default: m.HeartbeatPanel }))
@@ -78,6 +82,7 @@ type CustomizeTab =
   | "scheduled"
   | "heartbeat"
   | "memory"
+  | "taskMmd"
   | "market"
   | "sandbox"
   | "evolution"
@@ -124,6 +129,7 @@ const MENU_GROUPS: MenuGroup[] = [
     items: [
       { tab: "heartbeat", label: "心跳监控", icon: HeartPulse },
       { tab: "memory", label: "记忆管理", icon: Brain },
+      { tab: "taskMmd", label: "任务画布", icon: Network, beta: true },
       { tab: "lsp", label: "Java LSP", icon: Code2, beta: true },
       { tab: "evolution", label: "自优化", icon: GitBranch, beta: true },
       { tab: "chatx", label: "机器人管理", icon: Cpu },
@@ -171,6 +177,7 @@ export function CustomizeView(): React.JSX.Element {
     customizeInitialTab,
     pendingEvolution,
     currentThreadId,
+    threads,
   } = useAppStore()
   const [activeTab, setActiveTab] = useState<CustomizeTab>(
     (customizeInitialTab as CustomizeTab) || "skills"
@@ -182,8 +189,13 @@ export function CustomizeView(): React.JSX.Element {
   })
 
   useEffect(() => {
-    if (customizeInitialTab) {
-      setActiveTab(customizeInitialTab as CustomizeTab)
+    if (!customizeInitialTab) return
+    let cancelled = false
+    queueMicrotask(() => {
+      if (!cancelled) setActiveTab(customizeInitialTab as CustomizeTab)
+    })
+    return () => {
+      cancelled = true
     }
   }, [customizeInitialTab])
 
@@ -285,6 +297,8 @@ export function CustomizeView(): React.JSX.Element {
           <HeartbeatPanel />
         ) : activeTab === "memory" ? (
           <MemoryPanel />
+        ) : activeTab === "taskMmd" ? (
+          <TaskMmdPanel currentThreadId={currentThreadId} threads={threads} />
         ) : activeTab === "market" ? (
           <MarketPanel />
         ) : activeTab === "evolution" ? (

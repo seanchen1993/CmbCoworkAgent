@@ -180,12 +180,17 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    'const hasRunningWorker = state.coordinatorWorkers.some((worker) => worker.status === "running")',
+    "const hasRunningWorker = state.coordinatorWorkers.some(",
     "thread context polls unresolved coordinator threads, not just strictly running workers"
   )
   assertIncludes(
     threadContext,
-    "worker.notification_acknowledged === false\n            && worker.suppress_notification_auto_run !== true",
+    'worker.status === "running"',
+    "thread context treats running coordinator workers as unresolved work"
+  )
+  assertIncludes(
+    threadContext,
+    "worker.notification_acknowledged === false &&\n            worker.suppress_notification_auto_run !== true",
     "thread context treats only unsuppressed unacknowledged terminal coordinator notifications as unresolved from running workers"
   )
   assertIncludes(
