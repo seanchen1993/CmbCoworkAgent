@@ -38,6 +38,11 @@ import type {
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
+import type {
+  TaskMmdCompileModelInfo,
+  TaskMmdSettings,
+  TaskMmdSnapshot
+} from "../main/agent/task-mmd/types"
 
 interface LspDownloadProgress {
   percent: number
@@ -1182,6 +1187,29 @@ const api = {
       ipcRenderer.on("memory:changed", handler)
       return () => {
         ipcRenderer.removeListener("memory:changed", handler)
+      }
+    }
+  },
+  taskMmd: {
+    getSettings: (): Promise<TaskMmdSettings> =>
+      ipcRenderer.invoke("taskMmd:getSettings") as Promise<TaskMmdSettings>,
+    setSettings: (patch: Partial<TaskMmdSettings>): Promise<TaskMmdSettings> =>
+      ipcRenderer.invoke("taskMmd:setSettings", patch) as Promise<TaskMmdSettings>,
+    getSnapshot: (threadId: string): Promise<TaskMmdSnapshot> =>
+      ipcRenderer.invoke("taskMmd:getSnapshot", threadId) as Promise<TaskMmdSnapshot>,
+    clearThread: (threadId: string): Promise<void> =>
+      ipcRenderer.invoke("taskMmd:clearThread", threadId) as Promise<void>,
+    getDirectorySize: (threadId: string): Promise<number> =>
+      ipcRenderer.invoke("taskMmd:getDirectorySize", threadId) as Promise<number>,
+    getCompileModelInfo: (threadId: string): Promise<TaskMmdCompileModelInfo> =>
+      ipcRenderer.invoke("taskMmd:getCompileModelInfo", threadId) as Promise<TaskMmdCompileModelInfo>,
+    onChanged: (callback: (payload: { threadId?: string }) => void): (() => void) => {
+      const handler = (_: unknown, payload: { threadId?: string }): void => {
+        callback(payload ?? {})
+      }
+      ipcRenderer.on("taskMmd:changed", handler)
+      return () => {
+        ipcRenderer.removeListener("taskMmd:changed", handler)
       }
     }
   },

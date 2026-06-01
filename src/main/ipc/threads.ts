@@ -12,6 +12,7 @@ import {
 } from "../db"
 import { getCheckpointer, closeCheckpointer } from "../agent/runtime"
 import { deleteThreadCheckpoint, getOpenworkDir } from "../storage"
+import { deleteTaskMmdThread } from "../agent/task-mmd/storage"
 import { generateTitle } from "../services/title-generator"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
@@ -474,6 +475,13 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       console.log("[Threads] Deleted checkpoint file")
     } catch (e) {
       console.warn("[Threads] Failed to delete checkpoint file:", e)
+    }
+
+    try {
+      deleteTaskMmdThread(threadId)
+      console.log("[Threads] Deleted task-mmd files")
+    } catch (e) {
+      console.warn("[Threads] Failed to delete task-mmd files:", e)
     }
   })
 

@@ -123,7 +123,14 @@ export interface RoutingTrace {
   /** First 100 chars of the user message used for routing classification */
   messageSnippet: string
   /** Task source that triggered this routing call */
-  taskSource: "chat" | "heartbeat" | "scheduler_reminder" | "scheduler_action" | "memory_summarize" | "optimizer"
+  taskSource:
+    | "chat"
+    | "heartbeat"
+    | "scheduler_reminder"
+    | "scheduler_action"
+    | "memory_summarize"
+    | "task_mmd"
+    | "optimizer"
   /** Whether this was a resume or interrupt continuation (undefined for fresh invocations) */
   continuation?: "resume" | "interrupt"
   /** Global routing mode at invocation time */
