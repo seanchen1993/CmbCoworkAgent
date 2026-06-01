@@ -297,7 +297,7 @@ function buildChecks(evidence: SkillResultEvidence): SkillEvalCheck[] {
   return [
     {
       name: "final_response_substantive",
-      label: "最终响应有效",
+      label: "响应内容足够",
       ok: hasSubstantiveResponse,
       weight: 2,
       detail: {
@@ -307,7 +307,7 @@ function buildChecks(evidence: SkillResultEvidence): SkillEvalCheck[] {
     },
     {
       name: "has_output_signal",
-      label: "存在产出信号",
+      label: "存在响应或产出信号",
       ok: hasArtifactSignal || hasSubstantiveResponse,
       weight: 3,
       detail: {
@@ -318,7 +318,7 @@ function buildChecks(evidence: SkillResultEvidence): SkillEvalCheck[] {
     },
     {
       name: "has_validation_signal",
-      label: "存在验证动作",
+      label: "验证要求满足",
       ok: !validationNeeded || evidence.validationCommands.length > 0,
       weight: 2,
       detail: {
@@ -386,7 +386,7 @@ function buildWarnings(evidence: SkillResultEvidence): string[] {
     warnings.push("没有检测到验证动作")
   }
   if (evidence.changedFiles.length === 0 && evidence.artifactSignals.length === 0) {
-    warnings.push("没有检测到明确文件或产物信号")
+    warnings.push("没有检测到文件或工具产物信号")
   }
   if (evidence.subagentFailed > 0) {
     warnings.push(`检测到 ${evidence.subagentFailed} 个子 agent 失败`)
