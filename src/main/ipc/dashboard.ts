@@ -5264,7 +5264,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:skillEvalSummary",
     async (_, range: TimeRange, options?: DashboardSkillEvalOptions) => {
-      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
       if (import.meta.env.DEV)
         return { success: true, data: makeMockSkillEvalSummary(range, options) }
       try {
