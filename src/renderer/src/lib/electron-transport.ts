@@ -121,6 +121,10 @@ interface MessageMetadata {
   name?: string
 }
 
+function createToolMessageFallbackId(toolCallId: string, toolName?: string): string {
+  return `tool-${toolCallId}-${toolName || "result"}`
+}
+
 function getSerializedMessageClassName(msg: SerializedMessageChunk): string {
   const classId = Array.isArray(msg.id) ? msg.id : []
   return classId[classId.length - 1] || ""
@@ -177,16 +181,19 @@ export function transformSerializedValuesMessages(
           : "ai"
     const content = extractSerializedContent(kwargs.content)
     const fallbackIndex = fallbackIndexes[type]++
-    const id = buildStableValuesMessageId({
-      explicitId: kwargs.id,
-      index: fallbackIndex,
-      type,
-      className,
-      content,
-      toolCallId: kwargs.tool_call_id,
-      name: kwargs.name,
-      toolCalls: kwargs.tool_calls
-    })
+    const id =
+      kwargs.id ||
+      (type === "tool" && kwargs.tool_call_id
+        ? createToolMessageFallbackId(kwargs.tool_call_id, kwargs.name)
+        : buildStableValuesMessageId({
+            index: fallbackIndex,
+            type,
+            className,
+            content,
+            toolCallId: kwargs.tool_call_id,
+            name: kwargs.name,
+            toolCalls: kwargs.tool_calls
+          }))
 
     transformed.push({
       id,
@@ -954,7 +961,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
               className,
               content,
               toolCalls: kwargs.tool_calls
-          })
+            })
           this.currentMessageId = msgId
           this.currentMessageIndex = messageIndex
           const visibleToolCalls = this.hydrateToolCallsWithAccumulatedArgs(
@@ -1118,16 +1125,13 @@ export class ElectronIPCTransport implements UseStreamTransport {
           // Main agent tool message
           this.resetCurrentAssistantMessage()
           const content = this.extractContent(kwargs.content)
-          const messageIndex = this.nextMessageFallbackIndex("tool")
           const msgId =
             kwargs.id ||
-            buildStableValuesMessageId({
-              index: messageIndex,
+            this.createStableFallbackMessageId({
               type: "tool",
-              className,
               content,
               toolCallId: kwargs.tool_call_id,
-              name: kwargs.name
+              toolName: kwargs.name
             })
 
           this.rememberEmittedMessage(msgId)
@@ -1357,9 +1361,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const events: StreamEvent[] = []
     const kwargs = input.kwargs || {}
     const isHumanMessage =
-      input.className.includes("HumanMessage") ||
-      kwargs.type === "human" ||
-      kwargs.type === "user"
+      input.className.includes("HumanMessage") || kwargs.type === "human" || kwargs.type === "user"
     const isToolMessage = input.className.includes("ToolMessage") && !!kwargs.tool_call_id
     const isAIMessage = input.className.includes("AI") || input.className.includes("AIMessageChunk")
 
@@ -1569,7 +1571,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     toolCalls?: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>
   }): string {
     if (input.type === "tool" && input.toolCallId) {
-      return `tool-${input.toolCallId}-${input.toolName || "result"}`
+      return createToolMessageFallbackId(input.toolCallId, input.toolName)
     }
 
     const toolCallKey = input.toolCalls
