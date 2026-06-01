@@ -39,10 +39,17 @@ import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import { TraceConversation } from "@/components/trace/TraceConversation"
 import { hasUnreadCloudEvolutionUpdates, markCloudEvolutionUpdatesSeen } from "@/lib/evolution-notices"
-import { buildBundleUnifiedDiff, extractTextBundleFromZip } from "@/lib/skill-bundle-diff"
+import {
+  buildBundleUnifiedDiff,
+  createMergedTextBundleZip,
+  createTextBundleZip,
+  extractTextBundleFromZip,
+  type TextBundleFile
+} from "@/lib/skill-bundle-diff"
 import { trackCloudEvolutionCandidateAccepted } from "@/lib/cloud-evolution-events"
 import type { SkillMetadata } from "@/types"
 import { SkillEvolutionReviewPanel } from "./SkillEvolutionReviewPanel"
+import { SkillBundleMergeEditor } from "./SkillBundleMergeEditor"
 
 interface SkillCandidate {
   candidateId: string
@@ -736,12 +743,13 @@ function CandidateCard({
   onDelete
 }: {
   candidate: SkillCandidate
-  onApprove: (id: string) => Promise<void>
+  onApprove: (id: string, proposedContent?: string) => Promise<void>
   onReject: (id: string) => Promise<void>
   onDelete: (id: string) => void
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [editorOpen, setEditorOpen] = useState(false)
   const [oldContent, setOldContent] = useState<string | null>(null)
   const [oldContentStatus, setOldContentStatus] = useState<"idle" | "loading" | "ready" | "failed">("idle")
   // Use a ref to track load state inside the effect without adding it to the dependency array,
@@ -793,6 +801,42 @@ function CandidateCard({
     setLoading(true)
     await onApprove(candidate.candidateId)
     setLoading(false)
+  }
+
+  const openEditedEditor = async (): Promise<void> => {
+    if (candidate.action === "patch" && oldContentStatus !== "ready") {
+      setLoading(true)
+      setOldContentStatus("loading")
+      try {
+        const skills = await window.api.skills.list()
+        const matched = skills.find((s) => s.name === candidate.skillId)
+        if (!matched) throw new Error(`Skill not found: ${candidate.skillId}`)
+        const result = await window.api.skills.read(matched.path)
+        if (!result.success || typeof result.content !== "string") {
+          throw new Error(result.error ?? "Failed to read skill content")
+        }
+        setOldContent(result.content)
+        setOldContentStatus("ready")
+      } catch (error) {
+        setOldContentStatus("failed")
+        toast.error(error instanceof Error ? error.message : "读取旧版 Skill 失败")
+      } finally {
+        setLoading(false)
+      }
+    }
+    setEditorOpen(true)
+  }
+
+  const approveEdited = async (files: TextBundleFile[]): Promise<void> => {
+    const skillFile = files.find((file) => file.path === "SKILL.md")
+    if (!skillFile) throw new Error("编辑内容缺少 SKILL.md")
+    setLoading(true)
+    try {
+      await onApprove(candidate.candidateId, skillFile.content)
+      setEditorOpen(false)
+    } finally {
+      setLoading(false)
+    }
   }
 
   const reject = async (): Promise<void> => {
@@ -867,6 +911,18 @@ function CandidateCard({
               >
                 {loading ? <Loader2 className="size-3 animate-spin" /> : <CheckCircle2 className="size-3 mr-1" />}
                 采纳
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={loading}
+                className="h-7 px-2.5 text-xs"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  void openEditedEditor()
+                }}
+              >
+                编辑后采纳
               </Button>
               <Button
                 size="sm"
@@ -946,6 +1002,17 @@ function CandidateCard({
           </div>
         </div>
       )}
+      <SkillBundleMergeEditor
+        open={editorOpen}
+        title={`编辑优化候选：${candidate.name}`}
+        description="编辑最终写入本地的 SKILL.md。"
+        baseFiles={oldContent ? [{ path: "SKILL.md", content: oldContent }] : []}
+        initialFiles={[{ path: "SKILL.md", content: candidate.proposedContent }]}
+        confirmLabel="采纳编辑版"
+        saving={loading}
+        onOpenChange={setEditorOpen}
+        onConfirm={approveEdited}
+      />
     </div>
   )
 }
@@ -960,7 +1027,7 @@ function CloudEvolutionUpdateCard({
   installing
 }: {
   candidate: EvolutionCandidate
-  onInstall: (candidate: EvolutionCandidate) => Promise<void>
+  onInstall: (candidate: EvolutionCandidate, editedFiles?: TextBundleFile[], originalZipBuffer?: ArrayBuffer) => Promise<void>
   onRollback: (candidate: EvolutionCandidate) => Promise<void>
   onExportBackup: (candidate: EvolutionCandidate) => Promise<void>
   onIgnore: (candidateId: string) => void
@@ -971,6 +1038,11 @@ function CloudEvolutionUpdateCard({
   const [diff, setDiff] = useState("")
   const [diffSource, setDiffSource] = useState<"local" | "backend" | "error" | null>(null)
   const [diffLoading, setDiffLoading] = useState(false)
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [editorLoading, setEditorLoading] = useState(false)
+  const [editorBaseFiles, setEditorBaseFiles] = useState<TextBundleFile[]>([])
+  const [editorInitialFiles, setEditorInitialFiles] = useState<TextBundleFile[]>([])
+  const [editorOriginalZipBuffer, setEditorOriginalZipBuffer] = useState<ArrayBuffer | null>(null)
 
   useEffect(() => {
     setDiff("")
@@ -1025,6 +1097,35 @@ function CloudEvolutionUpdateCard({
   }, [candidate.candidate_id, candidate.skill_name, diffSource, expanded])
   const toggleExpanded = (): void => setExpanded((v) => !v)
   const adopted = candidate.local_adoption_status === "adopted"
+
+  const openEditor = async (): Promise<void> => {
+    setEditorLoading(true)
+    try {
+      const installedSkills = await window.api.skills.list()
+      const existing = installedSkills.find((skill: SkillMetadata) => skill.name === candidate.skill_name)
+      if (!existing) throw new Error(`本地未安装同名 Skill：${candidate.skill_name}`)
+      const localBundle = await window.api.skills.readTextBundle(existing.path)
+      if (!localBundle.success || !localBundle.files) {
+        throw new Error(localBundle.error || "读取本地 Skill 文件失败")
+      }
+      const remoteBundle = await evolutionApi.downloadCandidateBundle(candidate.candidate_id)
+      const remoteBuffer = await remoteBundle.blob.arrayBuffer()
+      const remoteFiles = await extractTextBundleFromZip(remoteBuffer)
+      setEditorBaseFiles(localBundle.files)
+      setEditorInitialFiles(remoteFiles)
+      setEditorOriginalZipBuffer(remoteBuffer)
+      setEditorOpen(true)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载候选编辑器失败")
+    } finally {
+      setEditorLoading(false)
+    }
+  }
+
+  const installEdited = async (files: TextBundleFile[]): Promise<void> => {
+    await onInstall(candidate, files, editorOriginalZipBuffer ?? undefined)
+    setEditorOpen(false)
+  }
 
   return (
     <div className={cn(
@@ -1128,6 +1229,21 @@ function CloudEvolutionUpdateCard({
               已采纳
             </Button>
           )}
+          {!adopted && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={installing || editorLoading}
+              className="h-7 px-2.5 text-xs"
+              onClick={(event) => {
+                event.stopPropagation()
+                void openEditor()
+              }}
+            >
+              {editorLoading ? <Loader2 className="size-3 animate-spin" /> : null}
+              编辑安装
+            </Button>
+          )}
           {adopted && (
             <Button
               size="sm"
@@ -1217,6 +1333,17 @@ function CloudEvolutionUpdateCard({
           </div>
         </div>
       )}
+      <SkillBundleMergeEditor
+        open={editorOpen}
+        title={`编辑云端自进化版本：${candidate.skill_name}`}
+        description="编辑最终安装到本地的文件内容。"
+        baseFiles={editorBaseFiles}
+        initialFiles={editorInitialFiles}
+        confirmLabel="安装编辑版"
+        saving={installing}
+        onOpenChange={setEditorOpen}
+        onConfirm={installEdited}
+      />
     </div>
   )
 }
@@ -1481,12 +1608,14 @@ export function EvolutionPanel(): React.JSX.Element {
     }
   }, [])
 
-  const handleApprove = useCallback(async (candidateId: string) => {
-    const result = await window.api.optimizer.approve(candidateId)
+  const handleApprove = useCallback(async (candidateId: string, proposedContent?: string) => {
+    const result = await window.api.optimizer.approve(candidateId, proposedContent)
     if (result.success) {
       setCandidates((prev) => prev.map((candidate) => (
         candidate.candidateId === candidateId ? { ...candidate, status: "approved" } : candidate
       )))
+    } else if (result.error) {
+      toast.error(result.error)
     }
   }, [])
 
@@ -1519,7 +1648,11 @@ export function EvolutionPanel(): React.JSX.Element {
     removeCloudUpdate(candidateId)
   }, [removeCloudUpdate])
 
-  const handleInstallCloudUpdate = useCallback(async (candidate: EvolutionCandidate) => {
+  const handleInstallCloudUpdate = useCallback(async (
+    candidate: EvolutionCandidate,
+    editedFiles?: TextBundleFile[],
+    originalZipBuffer?: ArrayBuffer
+  ) => {
     setInstallingCloudCandidateId(candidate.candidate_id)
     trackCloudEvolutionCandidateAccepted(candidate, candidate.source_version ?? null)
     let backupId: string | undefined
@@ -1530,8 +1663,13 @@ export function EvolutionPanel(): React.JSX.Element {
         throw new Error(`本地未安装同名 Skill：${candidate.skill_name}`)
       }
 
-      const bundle = await evolutionApi.downloadCandidateBundle(candidate.candidate_id)
-      const buffer = await bundle.blob.arrayBuffer()
+      const bundle = editedFiles
+        ? originalZipBuffer
+          ? await createMergedTextBundleZip(originalZipBuffer, editedFiles, `${candidate.skill_name}-${candidate.target_version || "edited"}.zip`)
+          : await createTextBundleZip(editedFiles, `${candidate.skill_name}-${candidate.target_version || "edited"}.zip`)
+        : await evolutionApi.downloadCandidateBundle(candidate.candidate_id)
+      const buffer = "blob" in bundle ? await bundle.blob.arrayBuffer() : bundle.buffer
+      const filename = bundle.filename
       const backupResult = await window.api.skills.backupForCloudEvolution({
         skillPath: existing.path,
         candidateId: candidate.candidate_id,
@@ -1549,7 +1687,7 @@ export function EvolutionPanel(): React.JSX.Element {
         throw new Error(deleteResult.error || `删除旧版 Skill 失败：${candidate.skill_name}`)
       }
 
-      const uploadResult = await window.api.skills.upload(buffer, bundle.filename)
+      const uploadResult = await window.api.skills.upload(buffer, filename)
       if (!uploadResult.success) {
         await window.api.skills.restoreCloudEvolutionBackup(backupId).catch(console.warn)
         throw new Error(uploadResult.error || `安装云端自进化 Skill 失败：${candidate.skill_name}`)

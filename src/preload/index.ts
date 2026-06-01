@@ -1613,9 +1613,10 @@ const api = {
       >,
     /** Approve a candidate — writes the skill to disk */
     approve: (
-      candidateId: string
+      candidateId: string,
+      proposedContent?: string
     ): Promise<{ success: boolean; skillId?: string; error?: string }> =>
-      ipcRenderer.invoke("optimizer:approve", { candidateId }) as Promise<{
+      ipcRenderer.invoke("optimizer:approve", { candidateId, proposedContent }) as Promise<{
         success: boolean
         skillId?: string
         error?: string
