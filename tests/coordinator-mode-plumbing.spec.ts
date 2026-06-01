@@ -1127,8 +1127,18 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "[message, effectiveMessage].map(normalizeMessageText)",
-    "agent IPC matches values-mode current turn against the effective checkpoint message"
+    "const turnPromptCandidates = [",
+    "agent IPC builds a candidate set for values-mode current-turn checkpoint matching"
+  )
+  assertIncludes(
+    agentIpc,
+    "currentTurnUserMessageForEvidence",
+    "agent IPC matches values-mode current turn against goal continuation checkpoint messages"
+  )
+  assertIncludes(
+    agentIpc,
+    "extractRawText(kwargs.content)",
+    "agent IPC compares raw checkpoint message text before trace truncation"
   )
   assertOccurrenceCount(
     agentIpc,

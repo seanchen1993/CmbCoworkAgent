@@ -167,6 +167,7 @@ import { evaluateGoalWithRuntimeRetry } from "../agent/goals/evaluator-runtime"
 import { GoalEvidenceBuffer } from "../agent/goals/evidence"
 import {
   RUNTIME_RESTORED_ACTIVE_GOAL_REASON,
+  type GoalContext,
   type GoalJudgeDecision,
   type ThreadGoal
 } from "../agent/goals/types"
@@ -190,6 +191,7 @@ import type {
 const MIN_CHARS_FOR_MEMORY = 200
 const MAX_STOP_HOOK_REVISIONS = 2
 const MAX_STOP_CONTEXT_TEXT_CHARS = 40_000
+const MAX_POST_RUN_ASSISTANT_TEXT_CHARS = 60_000
 const MAX_PERSISTED_GOAL_ATTACHMENT_NAMES = 5
 const MAX_PERSISTED_GOAL_ATTACHMENT_SUMMARY_CHARS = 260
 const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
@@ -199,6 +201,38 @@ const activeRuns = new Map<string, AbortController>()
 const goalStore = new SqlGoalStore()
 const goalManager = new GoalManager(goalStore)
 let restoredRuntimeGoalsReconciled = false
+
+type GoalMutationSignature = {
+  goalId: string
+  activeWindowId: string
+  status: ThreadGoal["status"]
+  updatedAt: number
+} | null
+
+function readGoalMutationSignature(threadId: string): GoalMutationSignature {
+  const goal = goalManager.get(threadId)
+  if (!goal) return null
+  return {
+    goalId: goal.goalId,
+    activeWindowId: goal.activeWindowId,
+    status: goal.status,
+    updatedAt: goal.updatedAt
+  }
+}
+
+function isGoalMutationSignatureCurrent(
+  threadId: string,
+  signature: GoalMutationSignature
+): boolean {
+  const current = readGoalMutationSignature(threadId)
+  if (!signature || !current) return signature === current
+  return (
+    current.goalId === signature.goalId &&
+    current.activeWindowId === signature.activeWindowId &&
+    current.status === signature.status &&
+    current.updatedAt === signature.updatedAt
+  )
+}
 const activeRunSettled = new Map<string, Promise<void>>()
 const activeRunReplacementLocks = new AsyncKeyedLock()
 const activeCoordinatorTurnPrompts = new Map<string, string | undefined>()
@@ -492,7 +526,10 @@ function appendGoalExplicitSkillContext(prompt: string, goal: { context?: unknow
   return parseSkillUseBlock(prompt) ? prompt : [prompt.trimEnd(), block].join("\n\n")
 }
 
-function buildGoalRoutingMessage(goal: { objective: string; context: { transportSummary?: string; explicitSkill?: { name?: string } } }): string {
+function buildGoalRoutingMessage(goal: {
+  objective: string
+  context: { transportSummary?: string; explicitSkill?: { name?: string } }
+}): string {
   const contextLines: string[] = []
   const transportSummary = goal.context.transportSummary?.trim()
   if (transportSummary) {
@@ -741,6 +778,7 @@ function createTurnState(initialUserMessage?: string, turnId?: string): TurnStat
 }
 
 function resetTurnStateForNewInvoke(
+  threadId: string,
   state: TurnState,
   initialUserMessage?: string,
   turnId?: string
@@ -752,6 +790,8 @@ function resetTurnStateForNewInvoke(
   state.skillHookKeys = new Set<string>()
   state.stopContextCollector = new StopHookContextCollector(initialUserMessage)
   state.turnId = turnId
+  delete state.autoCommitSnapshot
+  clearAdoptionContext(threadId)
 }
 
 function getOrCreateTurnState(
@@ -1169,6 +1209,24 @@ async function activateExplicitSkillFromMessage({
     blocked: result.blocked,
     reason: result.reason
   }
+}
+
+async function validateExplicitGoalSkillContext(
+  context: GoalContext | undefined
+): Promise<string | null> {
+  const explicitSkill = context?.explicitSkill
+  if (!explicitSkill) return null
+
+  const registry = await buildSkillLifecycleRegistryForHooks()
+  const skill = registry?.resolveExplicit({
+    skillName: explicitSkill.name,
+    skillPath: explicitSkill.path
+  })
+
+  if (!skill || isDisabledSkillMatch(skill)) {
+    return `显式选择的技能不存在或已禁用：${explicitSkill.name}`
+  }
+  return null
 }
 
 interface ActiveHookSummary {
@@ -2211,6 +2269,15 @@ function trimStopContextText(text: string): string {
   const trimmed = text.trim()
   if (trimmed.length <= MAX_STOP_CONTEXT_TEXT_CHARS) return trimmed
   return `${trimmed.slice(0, MAX_STOP_CONTEXT_TEXT_CHARS)}\n...(truncated)`
+}
+
+function trimPostRunAssistantText(text: string): string {
+  const trimmed = text.trim()
+  if (trimmed.length <= MAX_POST_RUN_ASSISTANT_TEXT_CHARS) return trimmed
+  return [
+    "(earlier assistant output truncated for post-run summary)",
+    trimmed.slice(-MAX_POST_RUN_ASSISTANT_TEXT_CHARS)
+  ].join("\n")
 }
 
 function extractStopContextText(raw: unknown): string {
@@ -3296,7 +3363,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 return
               }
               if (activeRuns.has(threadId)) {
-                emitGoalNotice(window, channel, threadId, "当前线程正在运行，稍后发送 /goal resume。")
+                emitGoalNotice(
+                  window,
+                  channel,
+                  threadId,
+                  "当前线程正在运行，稍后发送 /goal resume。"
+                )
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -3309,11 +3381,72 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
+              const resumeGoalSignature = readGoalMutationSignature(threadId)
+              const explicitSkillValidationError = await validateExplicitGoalSkillContext(
+                currentGoal.context
+              )
+              if (explicitSkillValidationError) {
+                safeSendToWindow(window, channel, {
+                  type: "error",
+                  error: explicitSkillValidationError
+                })
+                safeSendToWindow(window, channel, { type: "done" })
+                return
+              }
+              if (!isGoalMutationSignatureCurrent(threadId, resumeGoalSignature)) {
+                emitGoalNotice(
+                  window,
+                  channel,
+                  threadId,
+                  "Goal 状态已变化，请重新发送 /goal resume。"
+                )
+                safeSendToWindow(window, channel, { type: "done" })
+                return
+              }
+              const latestGoal = goalManager.get(threadId)
+              if (
+                !latestGoal ||
+                !isGoalBoundaryStillCurrent(
+                  latestGoal.goalId,
+                  currentGoal.goalId,
+                  latestGoal.activeWindowId,
+                  currentGoal.activeWindowId
+                )
+              ) {
+                emitGoalNotice(
+                  window,
+                  channel,
+                  threadId,
+                  "Goal 状态已变化，请重新发送 /goal resume。"
+                )
+                safeSendToWindow(window, channel, { type: "done" })
+                return
+              }
+              if (latestGoal.status === "complete") {
+                emitGoalNotice(
+                  window,
+                  channel,
+                  threadId,
+                  "Goal 已完成，不能 resume。清除请发送 /goal clear。"
+                )
+                safeSendToWindow(window, channel, { type: "done" })
+                return
+              }
+              if (activeRuns.has(threadId)) {
+                emitGoalNotice(
+                  window,
+                  channel,
+                  threadId,
+                  "当前线程正在运行，稍后发送 /goal resume。"
+                )
+                safeSendToWindow(window, channel, { type: "done" })
+                return
+              }
               if (!ensureGoalEvaluatorConfigured()) return
 
-              const resumeReason = currentGoal.lastReason?.trim() || "Goal resumed by user."
+              const resumeReason = latestGoal.lastReason?.trim() || "Goal resumed by user."
               const goal = goalManager.resume(threadId, {
-                resetActiveWindow: currentGoal.status === "active"
+                resetActiveWindow: latestGoal.status === "active"
               })
               if (!goal || goal.status !== "active") {
                 emitGoalNotice(
@@ -3362,6 +3495,38 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   error: "WORKSPACE_REQUIRED",
                   message: "Please select a workspace folder before starting a goal."
                 })
+                safeSendToWindow(window, channel, { type: "done" })
+                return
+              }
+              const setGoalSignature = readGoalMutationSignature(threadId)
+              const explicitSkillValidationError = await validateExplicitGoalSkillContext(
+                goalCommand.context
+              )
+              if (explicitSkillValidationError) {
+                safeSendToWindow(window, channel, {
+                  type: "error",
+                  error: explicitSkillValidationError
+                })
+                safeSendToWindow(window, channel, { type: "done" })
+                return
+              }
+              if (!isGoalMutationSignatureCurrent(threadId, setGoalSignature)) {
+                emitGoalNotice(
+                  window,
+                  channel,
+                  threadId,
+                  "Goal 状态已变化，请重新发送 /goal <目标>。"
+                )
+                safeSendToWindow(window, channel, { type: "done" })
+                return
+              }
+              if (activeRuns.has(threadId)) {
+                emitGoalNotice(
+                  window,
+                  channel,
+                  threadId,
+                  "当前线程正在运行，稍后再设置新的 goal。暂停请发送 /goal pause，清除请发送 /goal clear。"
+                )
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -3459,6 +3624,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         userMessageId
       )
       resetTurnStateForNewInvoke(
+        threadId,
         turnState,
         isTrustedCoordinatorNotificationInvoke ? undefined : message,
         userMessageId
@@ -3739,6 +3905,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       let highWaterInputTokens = 0
       // Actual model used after failover — hoisted for catch/finally routing feedback
       let usedModelId: string | undefined
+      let invokeFinalOutcome: "success" | "unknown" = "success"
+      let invokeFinalReason: string | undefined
+      const markInvokeIncomplete = (reason: string): void => {
+        invokeFinalOutcome = "unknown"
+        invokeFinalReason = reason
+      }
       let metadata: Record<string, unknown> = {}
       let coordinatorNotificationSelectedSkills: Record<
         string,
@@ -3763,6 +3935,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const harnessAgentContext = getHarnessAgentContext(metadata)
 
         if (!workspacePath) {
+          pauseActiveGoalForRuntimeStop("WORKSPACE_REQUIRED")
           safeSendToWindow(window, channel, {
             type: "error",
             error: "WORKSPACE_REQUIRED",
@@ -3783,6 +3956,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         isCoordinatorNotificationTurn =
           isTrustedCoordinatorNotificationRequest &&
           coordinatorWorkerManager.hasNotifications(threadId)
+        let explicitSkillHookContextForGoalContinuation: string | undefined
 
         if (isTrustedCoordinatorNotificationRequest && !isCoordinatorNotificationTurn) {
           console.log("[CoordinatorMode] ignoring stale internal worker notification turn", {
@@ -3828,11 +4002,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           })
           if (explicitSkillActivation?.blocked) {
             const reason = explicitSkillActivation.reason || "显式选择的技能被 Hook 拦截"
+            pauseActiveGoalForRuntimeStop(reason)
             safeSendToWindow(window, channel, { type: "error", error: reason })
             await tracer.finish("error", reason)
             turnStateShouldDispose = true
             return
           }
+          explicitSkillHookContextForGoalContinuation = explicitSkillActivation?.hookContext
           if (explicitSkillActivation?.skill) {
             skillUsageDetector.onSkillsMetadata([
               {
@@ -3873,6 +4049,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             onHookResult
           )
           if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
+            pauseActiveGoalForRuntimeStop("UserPromptSubmit hook stopped the turn.")
             sendHookBlocked("UserPromptSubmit", promptSubmitResult, "消息被 Hook 策略拦截")
             await tracer.finish("cancelled", "UserPromptSubmit hook stopped the turn")
             return
@@ -4060,6 +4237,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
 
         const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)
+        turnState.autoCommitSnapshot = autoCommit.snapshot
 
         let coordinatorSelectedSkill: CoordinatorSelectedSkill | undefined
         let coordinatorExplicitSelectedSkill: CoordinatorSelectedSkill | undefined
@@ -4259,6 +4437,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             : undefined,
           userHumanMessage
         ].filter((message): message is HumanMessage => message !== undefined)
+        let currentTurnUserMessageForEvidence =
+          coordinatorNotificationHumanMessage ?? effectiveMessage
         const streamConfig = {
           configurable: { thread_id: threadId },
           signal: abortController.signal,
@@ -4471,22 +4651,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           activeCoordinatorNotificationSelectedSkills.delete(threadId)
         }
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const extractText = (raw: any): string => {
-          if (typeof raw === "string") return trimContent(raw)
+        const extractRawText = (raw: unknown): string => {
+          if (typeof raw === "string") return raw
           if (!Array.isArray(raw)) return ""
           const text = raw
             .map((b) => {
               if (typeof b === "string") return b
               if (!b || typeof b !== "object") return ""
-              if (typeof b.text === "string") return b.text
-              if (typeof b.content === "string") return b.content
+              const record = b as { text?: unknown; content?: unknown }
+              if (typeof record.text === "string") return record.text
+              if (typeof record.content === "string") return record.content
+              if (Array.isArray(record.content)) return extractRawText(record.content)
               return ""
             })
             .filter(Boolean)
             .join("\n")
-          return trimContent(text)
+          return text
         }
+        const extractText = (raw: unknown): string => trimContent(extractRawText(raw))
 
         const toRole = (
           className: string,
@@ -4703,9 +4885,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
             if (!Array.isArray(state.messages)) return
 
-            const currentMessageTexts = new Set(
-              [message, effectiveMessage].map(normalizeMessageText).filter(Boolean)
-            )
+            const turnPromptCandidates = [
+              currentTurnUserMessageForEvidence,
+              modelInputMessage,
+              effectiveMessage,
+              message,
+              rootUserPrompt,
+              coordinatorNotificationHumanMessage
+            ]
+              .filter((candidate): candidate is string => typeof candidate === "string")
+              .map(normalizeMessageText)
+              .filter(Boolean)
+            const currentMessageTexts = new Set(turnPromptCandidates)
             let currentTurnStartIndex = -1
             let latestUserMessageIndex = -1
             for (let i = state.messages.length - 1; i >= 0; i--) {
@@ -4716,7 +4907,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               const role = toRole(className, kwargs)
               if (role !== "user") continue
               if (latestUserMessageIndex < 0) latestUserMessageIndex = i
-              if (currentMessageTexts.has(normalizeMessageText(extractText(kwargs.content)))) {
+              if (currentMessageTexts.has(normalizeMessageText(extractRawText(kwargs.content)))) {
                 currentTurnStartIndex = i
                 break
               }
@@ -4823,8 +5014,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   if (tcId) _toolNameByCallId.set(tcId, tc?.name ?? "unknown")
                   goalEvidenceBuffer.rememberToolCall(tcId, tc?.args)
                   const toolRef =
-                    tcId ||
-                    `${aiMsgKey}:${tcIndex}:args:${stableToolArgsDigest(tc?.args ?? {})}`
+                    tcId || `${aiMsgKey}:${tcIndex}:args:${stableToolArgsDigest(tc?.args ?? {})}`
                   const counted = toolCallCounter.register(tc, aiMsgKey, tcIndex)
                   if (!_toolNodeByRef.has(toolRef)) {
                     const parentId = _llmNodeByMessageId.get(aiMsgKey)
@@ -5204,6 +5394,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               return
             }
             if (completionOutcome === "halted") {
+              markInvokeIncomplete("Stop hook halted the turn.")
               pauseActiveGoalForRuntimeStop("Stop hook halted the turn.")
               break
             }
@@ -5267,6 +5458,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (!outcome.shouldContinue || !outcome.continuationPrompt) {
               sendGoalNotice(outcome.notice)
               if (outcome.goal.status !== "complete") {
+                markInvokeIncomplete(outcome.notice)
                 cancelGoalBackgroundTasks()
               }
               break
@@ -5307,6 +5499,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
             continuationPrompt = buildGoalContinuationPromptFromHookContexts(continuationPrompt, {
               updatedInput: promptSubmitResult?.updatedInput,
+              explicitSkillHookContext: explicitSkillHookContextForGoalContinuation,
               promptSubmitAdditionalContext: promptSubmitResult?.additionalContext
             })
             if (promptSubmitResult?.systemMessage) {
@@ -5321,6 +5514,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               latestGoal
             )
             modelInputMessage = goalContinuationInput
+            currentTurnUserMessageForEvidence = goalContinuationInput
             currentTurnAssistantStart = assistantText.length
             currentTurnToolCallStart = toolCallCounter.getCount()
             currentTurnEvidenceStart = goalEvidenceBuffer.getCount()
@@ -5335,18 +5529,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           clearCoordinatorNotificationSelectedSkillsOnExit = true
           await settleDrainedCoordinatorNotifications("ack")
-          await finalizeAutoCommit({
-            threadId,
-            workspacePath,
-            userPrompt: isCoordinatorNotificationTurn ? "coordinator notification turn" : message,
-            snapshot: autoCommit.snapshot,
-            window,
-            channel
-          })
+          if (invokeFinalOutcome === "success") {
+            await finalizeAutoCommit({
+              threadId,
+              workspacePath,
+              userPrompt: isCoordinatorNotificationTurn
+                ? "coordinator notification turn"
+                : rootUserPrompt,
+              snapshot: autoCommit.snapshot,
+              window,
+              channel
+            })
+          }
           turnStateShouldDispose = true
           safeSendToWindow(window, channel, { type: "done" })
-          notifyIfBackground("✅ 任务完成", lastFinalText || assistantText.trim() || "对话已完成")
-          if (!isCoordinatorNotificationTurn) {
+          const postRunAssistantText = trimPostRunAssistantText(assistantText)
+          if (invokeFinalOutcome === "success") {
+            notifyIfBackground("✅ 任务完成", lastFinalText || postRunAssistantText || "对话已完成")
+          }
+          if (invokeFinalOutcome === "success" && !isCoordinatorNotificationTurn) {
             showPetCompletedTaskNotice(
               threadId,
               getCompletedTaskTitle(thread?.title ?? undefined, message)
@@ -5355,21 +5556,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           // Finish trace
           syncUsedSkillsContext()
-          await tracer.finish("success")
+          await tracer.finish(invokeFinalOutcome, invokeFinalReason)
 
           // Write routing feedback so next turn can use sticky/force logic
-          if (invokeRoutingResult) {
+          if (invokeRoutingResult && invokeFinalOutcome === "success") {
             rememberRoutingFeedback(threadId, {
               resolvedTier: invokeRoutingResult.resolvedTier,
               resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
-              outcome: "success",
+              outcome: invokeFinalOutcome,
               toolCallCount: toolCallCounter.getCount(),
               toolErrorCount,
               lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
             })
           }
 
-          if (!isCoordinatorNotificationTurn && isOnlineSkillEvolutionEnabled()) {
+          if (
+            invokeFinalOutcome === "success" &&
+            !isCoordinatorNotificationTurn &&
+            isOnlineSkillEvolutionEnabled()
+          ) {
             const proposalContext = appendTurnToProposalWindow("success")
             const recentUsedSkills = getRecentSkillUsageNames(threadId)
             const blockingUsedSkills = Array.from(
@@ -5408,19 +5613,26 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 )
               }
             }
-          } else if (!isCoordinatorNotificationTurn) {
+          } else if (invokeFinalOutcome === "success" && !isCoordinatorNotificationTurn) {
             resetSkillEvolutionSession(threadId)
           }
 
           // If this is a ChatX-linked thread, also send reply via HTTP (only final answer, no tool reasoning)
-          const chatxReply = lastFinalText || stripThink(assistantText).trim()
-          if (!isCoordinatorNotificationTurn && metadata.chatxRobotChatId && chatxReply) {
+          const chatxReply = lastFinalText || stripThink(postRunAssistantText).trim()
+          if (
+            invokeFinalOutcome === "success" &&
+            !isCoordinatorNotificationTurn &&
+            metadata.chatxRobotChatId &&
+            chatxReply
+          ) {
             trySendChatXReply(metadata.chatxRobotChatId as string, chatxReply)
           }
 
           const conversation =
-            !isCoordinatorNotificationTurn && assistantText.trim()
-              ? `User: ${message}\n\nAssistant: ${assistantText}`
+            invokeFinalOutcome === "success" &&
+            !isCoordinatorNotificationTurn &&
+            postRunAssistantText
+              ? `User: ${rootUserPrompt}\n\nAssistant: ${postRunAssistantText}`
               : ""
 
           if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
@@ -5509,6 +5721,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         if (isHookHaltError(error)) {
           clearCoordinatorNotificationSelectedSkillsOnExit = true
           console.warn("[Agent] Hook halted turn:", error.reason)
+          pauseActiveGoalForRuntimeStop(error.reason)
           sendHookHalt(window, channel, error)
           syncUsedSkillsContext()
           tracer.finish("cancelled", error.reason).catch(() => {})
@@ -5535,6 +5748,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         if (!isAbortError) {
           const errMsg = error instanceof Error ? error.message : "Unknown error"
           clearCoordinatorNotificationSelectedSkillsOnExit = true
+          pauseActiveGoalForRuntimeStop(`Agent run failed: ${errMsg}`)
           console.error("[Agent] Error:", error)
           if (!stopHookFired) {
             const stopFailureErrorCode = classifyApiError(error)
@@ -5585,6 +5799,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
           turnStateShouldDispose = true
         } else {
+          pauseActiveGoalForRuntimeStop("Agent run was aborted.")
           syncUsedSkillsContext()
           tracer.finish("cancelled").catch(() => {})
           if (invokeRoutingResult) {
@@ -5750,7 +5965,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       ensureTurnId(turnState, threadId, "resume")
       const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
       let turnStateShouldDispose = false
-      const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)
+      const boundaryGoal = goalManager.getActive(threadId)
+      const boundaryGoalId = boundaryGoal?.goalId ?? null
+      const boundaryGoalActiveWindowId = boundaryGoal?.activeWindowId ?? null
+      const autoCommit = await beginAutoCommitTracking(threadId, workspacePath, {
+        reuseSnapshot: turnState.autoCommitSnapshot !== undefined,
+        snapshot: turnState.autoCommitSnapshot
+      })
+      turnState.autoCommitSnapshot = autoCommit.snapshot
       const resumeCoordinatorExplicitSelectedSkill =
         getActiveOrPersistedCoordinatorExplicitSelectedSkill(threadId, metadata)
       let resumeCoordinatorTurnPrompt = getActiveOrPersistedCoordinatorTurnPrompt(
@@ -6240,10 +6462,31 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (completionOutcome === "failed") {
             clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+            pauseActiveGoalAfterBoundary(
+              threadId,
+              window,
+              channel,
+              "恢复处理被 Stop hook 阻止。需要继续时发送 /goal resume。",
+              boundaryGoalId,
+              boundaryGoalActiveWindowId
+            )
             turnStateShouldDispose = true
             return
           }
-          // "halted" falls through to the done path so the renderer stops loading.
+          if (completionOutcome === "halted") {
+            pauseActiveGoalAfterBoundary(
+              threadId,
+              window,
+              channel,
+              "恢复处理被 Stop hook 停止。需要继续时发送 /goal resume。",
+              boundaryGoalId,
+              boundaryGoalActiveWindowId
+            )
+            clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+            turnStateShouldDispose = true
+            safeSendToWindow(window, channel, { type: "done" })
+            return
+          }
 
           clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
           await settleResumeDrainedCoordinatorNotifications("restore")
@@ -6255,6 +6498,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             window,
             channel
           })
+          pauseActiveGoalAfterBoundary(
+            threadId,
+            window,
+            channel,
+            "恢复处理已结束。需要继续 goal 时发送 /goal resume。",
+            boundaryGoalId,
+            boundaryGoalActiveWindowId
+          )
           turnStateShouldDispose = true
           safeSendToWindow(window, channel, { type: "done" })
         }
@@ -6262,6 +6513,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         if (isHookHaltError(error)) {
           clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
           console.warn("[Agent] Resume hook halted turn:", error.reason)
+          pauseActiveGoalAfterBoundary(
+            threadId,
+            window,
+            channel,
+            error.reason,
+            boundaryGoalId,
+            boundaryGoalActiveWindowId
+          )
           sendHookHalt(window, channel, error)
           turnStateShouldDispose = true
           return
@@ -6275,6 +6534,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         if (!isAbortError) {
           clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
           console.error("[Agent] Resume error:", error)
+          pauseActiveGoalAfterBoundary(
+            threadId,
+            window,
+            channel,
+            `恢复处理失败：${error instanceof Error ? error.message : "Unknown error"}`,
+            boundaryGoalId,
+            boundaryGoalActiveWindowId
+          )
           safeSendToWindow(window, channel, {
             type: "error",
             error: error instanceof Error ? error.message : "Unknown error"
@@ -6406,7 +6673,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     ensureTurnId(turnState, threadId, "interrupt")
     const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
     let turnStateShouldDispose = false
-    const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)
+    const autoCommit = await beginAutoCommitTracking(threadId, workspacePath, {
+      reuseSnapshot: turnState.autoCommitSnapshot !== undefined,
+      snapshot: turnState.autoCommitSnapshot
+    })
+    turnState.autoCommitSnapshot = autoCommit.snapshot
     const interruptCoordinatorExplicitSelectedSkill =
       getActiveOrPersistedCoordinatorExplicitSelectedSkill(threadId, metadata)
     let interruptCoordinatorTurnPrompt = getActiveOrPersistedCoordinatorTurnPrompt(
@@ -6881,10 +7152,31 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (completionOutcome === "failed") {
             clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
+            pauseActiveGoalAfterBoundary(
+              threadId,
+              window,
+              channel,
+              "中断恢复被 Stop hook 阻止。需要继续时发送 /goal resume。",
+              boundaryGoalId,
+              boundaryGoalActiveWindowId
+            )
             turnStateShouldDispose = true
             return
           }
-          // "halted" falls through to the done path so the renderer stops loading.
+          if (completionOutcome === "halted") {
+            pauseActiveGoalAfterBoundary(
+              threadId,
+              window,
+              channel,
+              "中断处理被 Stop hook 停止。需要继续时发送 /goal resume。",
+              boundaryGoalId,
+              boundaryGoalActiveWindowId
+            )
+            clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
+            turnStateShouldDispose = true
+            safeSendToWindow(window, channel, { type: "done" })
+            return
+          }
 
           clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
           await settleInterruptDrainedCoordinatorNotifications("restore")
@@ -6896,6 +7188,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             window,
             channel
           })
+          pauseActiveGoalAfterBoundary(
+            threadId,
+            window,
+            channel,
+            "中断处理已结束。需要继续 goal 时发送 /goal resume。",
+            boundaryGoalId,
+            boundaryGoalActiveWindowId
+          )
           turnStateShouldDispose = true
           safeSendToWindow(window, channel, { type: "done" })
         }
@@ -6903,6 +7203,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // For reject, we need to send a Command with reject decision
         // For now, just send done - the agent will see no resumption happened
         clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
+        pauseActiveGoalAfterBoundary(
+          threadId,
+          window,
+          channel,
+          "中断请求已拒绝。需要继续 goal 时发送 /goal resume。",
+          boundaryGoalId,
+          boundaryGoalActiveWindowId
+        )
         safeSendToWindow(window, channel, { type: "done" })
         turnStateShouldDispose = true
       }
@@ -6931,6 +7239,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (!isAbortError) {
         clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
         console.error("[Agent] Interrupt error:", error)
+        pauseActiveGoalAfterBoundary(
+          threadId,
+          window,
+          channel,
+          `中断处理失败：${error instanceof Error ? error.message : "Unknown error"}`,
+          boundaryGoalId,
+          boundaryGoalActiveWindowId
+        )
         safeSendToWindow(window, channel, {
           type: "error",
           error: error instanceof Error ? error.message : "Unknown error"
