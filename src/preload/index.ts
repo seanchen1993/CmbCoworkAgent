@@ -1483,6 +1483,8 @@ const api = {
       ipcRenderer.invoke("sandbox:getYoloMode") as Promise<boolean>,
     setYoloMode: (yolo: boolean): Promise<void> =>
       ipcRenderer.invoke("sandbox:setYoloMode", yolo) as Promise<void>,
+    getPendingApprovals: (threadId: string): Promise<unknown[]> =>
+      ipcRenderer.invoke("sandbox:getPendingApprovals", threadId) as Promise<unknown[]>,
     // NUX (first-run sandbox setup)
     isNuxNeeded: (): Promise<boolean> =>
       ipcRenderer.invoke("sandbox:isNuxNeeded") as Promise<boolean>,
@@ -1523,6 +1525,20 @@ const api = {
     ): (() => void) => {
       const channel = `approval:timeout:${threadId}`
       const handler = (_: unknown, data: { requestId: string }): void => {
+        callback(data)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
+    // Listen for approval cancel notifications from main → renderer
+    onApprovalCancel: (
+      threadId: string,
+      callback: (data: { requestId: string; reason?: string }) => void
+    ): (() => void) => {
+      const channel = `approval:cancel:${threadId}`
+      const handler = (_: unknown, data: { requestId: string; reason?: string }): void => {
         callback(data)
       }
       ipcRenderer.on(channel, handler)

@@ -15,7 +15,7 @@ import {
   setSandboxNuxCompleted
 } from "../storage"
 import { pendingApprovals } from "../agent/runtime"
-import type { ApprovalDecision } from "../types"
+import type { ApprovalDecision, ApprovalRequest } from "../types"
 
 const CODEX_HOME = join(homedir(), ".codex")
 const SETUP_MARKER_PATH = join(CODEX_HOME, ".sandbox", "setup_marker.json")
@@ -650,6 +650,13 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
     if (typeof yolo !== "boolean") throw new Error(`Invalid yolo value: ${yolo}`)
     setYoloMode(yolo)
     notifyChanged()
+  })
+
+  ipcMain.handle("sandbox:getPendingApprovals", async (_event, threadId: string): Promise<ApprovalRequest[]> => {
+    if (typeof threadId !== "string" || !threadId.trim()) return []
+    return Array.from(pendingApprovals.values())
+      .filter((pending) => pending.threadId === threadId)
+      .map((pending) => pending.request)
   })
 
   ipcMain.handle("sandbox:checkElevatedSetup", async (): Promise<{ setupComplete: boolean }> => {

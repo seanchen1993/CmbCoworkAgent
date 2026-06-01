@@ -8,6 +8,8 @@ const sandboxSource = readFileSync(new URL("../src/main/ipc/sandbox.ts", import.
 const execPolicySource = readFileSync(new URL("../src/main/agent/exec-policy.ts", import.meta.url), "utf8")
 const windowsSafeCommandsSource = readFileSync(new URL("../src/main/agent/windows-safe-commands.ts", import.meta.url), "utf8")
 const runtimeSource = readFileSync(new URL("../src/main/agent/runtime.ts", import.meta.url), "utf8")
+const preloadSource = readFileSync(new URL("../src/preload/index.ts", import.meta.url), "utf8")
+const threadContextSource = readFileSync(new URL("../src/renderer/src/lib/thread-context.tsx", import.meta.url), "utf8")
 const codeExecRunnerSource = readFileSync(new URL("../src/main/code-exec/runner.ts", import.meta.url), "utf8")
 const toolOrchestratorSource = readFileSync(new URL("../src/main/agent/tool-orchestrator.ts", import.meta.url), "utf8")
 
@@ -832,6 +834,85 @@ test("runtime mounts the orchestrator even in YOLO mode so sandbox escape can st
     runtimeApprovalSection,
     /new ToolOrchestrator\(approvalStore, rawExecute, requestApproval, yoloMode\)[\s\S]*backend\.setOrchestrator\(orchestrator\)/,
     "runtime should always mount ToolOrchestrator and pass yoloMode into it"
+  )
+})
+
+test("approval requests do not auto-timeout and are cleaned up on run abort", () => {
+  const runtimeApprovalSection = sectionBetween(
+    runtimeSource,
+    "  // ── Wire up the approval orchestrator ──",
+    "  let systemPrompt = getSystemPrompt"
+  )
+
+  assert.match(
+    runtimeApprovalSection,
+    /const APPROVAL_TIMEOUT_MS: number \| null = null/,
+    "command approval should default to no automatic timeout"
+  )
+  assert.doesNotMatch(
+    runtimeApprovalSection,
+    /5 \* 60 \* 1000|approval request timed out after/,
+    "approval requests should not auto-reject after a fixed timeout"
+  )
+  assert.match(
+    runtimeApprovalSection,
+    /options\.abortSignal\?\.addEventListener\("abort", onAbort, \{ once: true \}\)/,
+    "approval requests should subscribe to the run abort signal"
+  )
+  assert.match(
+    runtimeApprovalSection,
+    /pendingApprovals\.delete\(req\.id\)[\s\S]*`approval:cancel:\$\{threadId\}`[\s\S]*resolve\(\{ type: "reject"/,
+    "aborted runs should remove the pending approval, notify the renderer, and unblock the orchestrator"
+  )
+})
+
+test("pending command approvals can be restored after renderer reload", () => {
+  const approvalListenerSection = sectionBetween(
+    threadContextSource,
+    "      const cancelledApprovalRequestIds = new Set<string>()",
+    "      const cleanupUserInput = window.api.userInput.onRequest"
+  )
+  const cancelListenerIndex = approvalListenerSection.indexOf("const cleanupCancel = window.api.sandbox.onApprovalCancel")
+  const restoreSnapshotIndex = approvalListenerSection.indexOf("getPendingApprovals(threadId)")
+
+  assert.match(
+    runtimeSource,
+    /pendingApprovals = new Map<[\s\S]*threadId: string[\s\S]*targetWebContentsIds/,
+    "pending approvals should retain their owning thread id"
+  )
+  assert.match(
+    sandboxSource,
+    /"sandbox:getPendingApprovals"[\s\S]*filter\(\(pending\) => pending\.threadId === threadId\)[\s\S]*map\(\(pending\) => pending\.request\)/,
+    "sandbox IPC should expose current pending approvals scoped to the thread"
+  )
+  assert.match(
+    preloadSource,
+    /getPendingApprovals: \(threadId: string\)[\s\S]*"sandbox:getPendingApprovals"/,
+    "preload should expose pending approval restoration to the renderer"
+  )
+  assert.match(
+    threadContextSource,
+    /getPendingApprovals\(threadId\)[\s\S]*normalizeApprovalPayload\(request\)[\s\S]*enqueuePendingApproval/,
+    "thread context should restore pending approval cards when listeners are registered"
+  )
+  assert.match(
+    threadContextSource,
+    /onApprovalCancel\(threadId[\s\S]*removePendingApproval\(state\.pendingApprovals, data\.requestId\)[\s\S]*status: "interrupted"/,
+    "thread context should clear approval cards when the backend cancels them"
+  )
+  assert.ok(
+    cancelListenerIndex !== -1 && restoreSnapshotIndex !== -1 && cancelListenerIndex < restoreSnapshotIndex,
+    "cancel listeners should be registered before pending approval snapshot restoration"
+  )
+  assert.match(
+    approvalListenerSection,
+    /cancelledApprovalRequestIds\.add\(data\.requestId\)[\s\S]*getPendingApprovals\(threadId\)[\s\S]*filter\(\(request\) => !cancelledApprovalRequestIds\.has\(getPendingApprovalId\(request\)\)\)/,
+    "snapshot restoration should filter approvals cancelled while the snapshot request was in flight"
+  )
+  assert.match(
+    approvalListenerSection,
+    /getPendingApprovals\(threadId\)[\s\S]*if \(!initializedThreadsRef\.current\.has\(threadId\)\) return/,
+    "late pending approval snapshots should not recreate cleaned-up thread state"
   )
 })
 

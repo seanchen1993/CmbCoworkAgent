@@ -57,7 +57,7 @@ test("subagents use their own concurrency gate to avoid parent task deadlock", (
 
   assert.match(
     runtimeSource,
-    /const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware\(`\$\{toolConcurrencyQueueId\}:subagent`\)/,
+    /const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware\(\s*`\$\{toolConcurrencyQueueId\}:subagent`\s*\)/,
     "subagents should have a separate queue id from the parent agent"
   )
   assert.match(
