@@ -146,11 +146,16 @@ import { registerRoutingHandlers } from "./ipc/routing"
 import { registerDashboardHandlers } from "./ipc/dashboard"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
+import { registerUserInputHandlers } from "./ipc/user-input"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
 import { initializeAdoptionTracker, shutdownAdoptionTracker } from "./services/adoption-tracker"
+import {
+  startRegisteredGitHookEventSync,
+  stopRegisteredGitHookEventSync
+} from "./services/git-hook-service"
 import { getAllThreads, initializeDatabase, flush } from "./db"
 import { startScheduler, stopScheduler } from "./services/scheduler"
 import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
@@ -457,6 +462,7 @@ if (!gotTheLock) {
     } catch (err) {
       console.warn("[Main] AdoptionTracker init failed (disabled):", err)
     }
+    startRegisteredGitHookEventSync()
 
     // Register IPC handlers
     registerAgentHandlers(ipcMain)
@@ -484,6 +490,7 @@ if (!gotTheLock) {
     prewarmRecentSandboxWorkspaces()
     registerAutoCommitHandlers(ipcMain)
     registerPetHandlers(ipcMain)
+    registerUserInputHandlers(ipcMain)
 
     ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
       mainLogForwardingEnabled = Boolean(enabled)
@@ -679,6 +686,7 @@ if (!gotTheLock) {
     stopHeartbeat()
     stopChatX()
     stopHookConfigWatcher()
+    stopRegisteredGitHookEventSync()
     stopUpdateChecker()
     try {
       shutdownAdoptionTracker()
