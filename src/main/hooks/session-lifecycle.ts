@@ -18,6 +18,9 @@ interface StartedSession {
   workspacePath?: string
   pluginOutputDir?: string
   systemId?: string
+  pluginWorkspace?: string
+  featureId?: string
+  projectCode?: string
   hookScope?: HookScopeController
 }
 
@@ -37,7 +40,8 @@ export async function fireSessionStartOnce(
   onHookSkipped?: ScopeSkipCallback,
   turnId?: string,
   pluginOutputDir?: string,
-  systemId?: string
+  systemId?: string,
+  harnessContext?: Pick<HookContext, "pluginWorkspace" | "featureId" | "projectCode">
 ): Promise<void> {
   const existing = startedSessions.get(threadId)
   if (existing) {
@@ -45,11 +49,22 @@ export async function fireSessionStartOnce(
       workspacePath: workspacePath ?? existing.workspacePath,
       pluginOutputDir: pluginOutputDir ?? existing.pluginOutputDir,
       systemId: systemId ?? existing.systemId,
+      pluginWorkspace: harnessContext?.pluginWorkspace ?? existing.pluginWorkspace,
+      featureId: harnessContext?.featureId ?? existing.featureId,
+      projectCode: harnessContext?.projectCode ?? existing.projectCode,
       hookScope: hookScope ?? existing.hookScope
     })
     return
   }
-  startedSessions.set(threadId, { workspacePath, pluginOutputDir, systemId, hookScope })
+  startedSessions.set(threadId, {
+    workspacePath,
+    pluginOutputDir,
+    systemId,
+    pluginWorkspace: harnessContext?.pluginWorkspace,
+    featureId: harnessContext?.featureId,
+    projectCode: harnessContext?.projectCode,
+    hookScope
+  })
 
   // PR-11 — Setup fires (per-workspace) *before* SessionStart when this is
   // the workspace's first encounter on this machine. SessionStart remains
@@ -67,6 +82,7 @@ export async function fireSessionStartOnce(
       turnId,
       pluginOutputDir,
       systemId,
+      ...harnessContext,
       setupTrigger: "init"
     }
     try {
@@ -98,6 +114,7 @@ export async function fireSessionStartOnce(
     turnId,
     pluginOutputDir,
     systemId,
+    ...harnessContext,
     // PR-16 follow-up — CC SessionStart matcher matches on `source`. This
     // project doesn't yet distinguish resume / clear / compact paths from a
     // fresh launch, so the value is hard-coded "startup" here.
@@ -157,6 +174,9 @@ export async function fireSessionEnd(
     workspacePath: effectiveWorkspacePath,
     pluginOutputDir: effectivePluginOutputDir,
     systemId: started.systemId,
+    pluginWorkspace: started.pluginWorkspace,
+    featureId: started.featureId,
+    projectCode: started.projectCode,
     sessionId: threadId,
     sessionEndReason: reason
   }
@@ -192,6 +212,9 @@ export async function fireSessionEndAll(
         workspacePath: session.workspacePath,
         pluginOutputDir: session.pluginOutputDir,
         systemId: session.systemId,
+        pluginWorkspace: session.pluginWorkspace,
+        featureId: session.featureId,
+        projectCode: session.projectCode,
         // PR-16 follow-up — before-quit drain → CC `reason: "logout"`.
         sessionEndReason: "logout"
       }

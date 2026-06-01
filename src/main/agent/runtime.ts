@@ -563,6 +563,9 @@ export function createScopedMcpCapabilityService(
     turnId?: string
     pluginOutputDir?: string
     systemId?: string
+    pluginWorkspace?: string
+    featureId?: string
+    projectCode?: string
   }
 ): McpCapabilityService {
   const getEffectivePriority = (tool: McpCapabilityTool): number => {
@@ -756,6 +759,9 @@ export function createScopedMcpCapabilityService(
         turnId: baseContext.turnId,
         pluginOutputDir: baseContext.pluginOutputDir,
         systemId: baseContext.systemId,
+        pluginWorkspace: baseContext.pluginWorkspace,
+        featureId: baseContext.featureId,
+        projectCode: baseContext.projectCode,
         pluginId,
         pluginName: pluginId ? getPluginName(pluginId) : undefined
       }
@@ -2441,6 +2447,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         turnId: hookTurnId,
         pluginOutputDir,
         systemId,
+        pluginWorkspace,
+        featureId,
+        projectCode,
         // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
         // Lets a Notification hook know whether the user is in YOLO mode (where
         // approvals only fire for sandbox-escape) vs the default approve flow.
@@ -2593,7 +2602,16 @@ The workspace root is: ${workspacePath}`
     hookScope,
     resolveHooksForContext,
     onHookResult,
-    { workspacePath, threadId, pluginOutputDir, systemId, turnId: hookTurnId }
+    {
+      workspacePath,
+      threadId,
+      pluginOutputDir,
+      systemId,
+      pluginWorkspace,
+      featureId,
+      projectCode,
+      turnId: hookTurnId
+    }
   )
   const isConstrainedCoordinatorWorker =
     Boolean(options.filesystemAccess) &&
@@ -2769,6 +2787,9 @@ The workspace root is: ${workspacePath}`
     onHookResult,
     hookTurnId,
     systemId,
+    pluginWorkspace,
+    featureId,
+    projectCode,
     skipToolNames: toolHookExclusions
   })
 
