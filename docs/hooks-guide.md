@@ -54,6 +54,7 @@
   },
   "once": false,                    // 是否本会话只触发一次
   "persistAfterInterrupt": false,   // 仅技能/插件钩子：触发后是否常驻整个会话
+  "injectUserContext": false,       // 可选：注入当前用户身份，默认关闭，见 3.5
   "timeout": 10000,                 // 超时毫秒，默认 10000
   "enabled": true,                  // 是否启用
   "createdAt": "2026-05-20T00:00:00.000Z",
@@ -119,6 +120,7 @@
 | `hook_source_type`, `hook_source_root`, `hook_source_path` | 钩子来源已知时 |
 | `subagent` | **仅** SubagentStop |
 | `stop_context` | **仅** Stop / PostSkillUse —— 包含 `userMessage`、`assistantResponse`、`toolCalls[]`、`usedSkills[]` |
+| `user_context` | **仅当**该钩子开启了 `injectUserContext` 时出现，见 [3.5](#35-注入当前用户身份-injectusercontext) |
 
 ### 3.2 环境变量（便利，**大字段会被丢弃**）
 
@@ -134,6 +136,7 @@
 | `PLUGIN_ID` / `_NAME` / `_ROOT` | 仅工具或钩子归属插件时存在。`PLUGIN_ID` 是 `~/.cmbcoworkagent/plugins.json` 里安装时分配的 **UUID**，不是目录名也不是 plugin.json 里的字段；`PLUGIN_NAME` 来自 plugin.json 的 `name` |
 | `SKILL_NAME` / `_PATH` / `_ROOT` | 仅 Pre/PostSkillUse |
 | `USER_PROMPT` | 仅 UserPromptSubmit |
+| `HOOK_USER_*` | **仅当**该钩子开启了 `injectUserContext` 时出现（如 `HOOK_USER_SAP_ID`）；**token 字段永远不进 env**，见 [3.5](#35-注入当前用户身份-injectusercontext) |
 
 ⚠️ **铁律**：要可靠拿到完整工具入参/结果，**必须读 stdin JSON**——超过 4KB 时 env 里直接没有该 key。
 
@@ -152,6 +155,101 @@
 2. **被拦截的工具/技能由插件提供**——全局或工作区钩子拦这种工具时，`PLUGIN_*` 指向被拦截工具所属的插件
 
 **反例**：全局钩子拦 `read_file` / `execute` 这种内置工具时，`PLUGIN_*` 全部为空——这是符合预期的行为，不是 bug。
+
+### 3.5 注入当前用户身份（injectUserContext）
+
+默认**关闭**。需要钩子拿到当前登录用户身份时，在钩子配置里**显式开启**。开启后用户信息来自本地 `~/.cmbcoworkagent/userinfo-models.json`。
+
+**两种写法**：
+
+```jsonc
+// 写法 A：布尔简写 —— 注入一组默认的“非 token”身份字段
+"injectUserContext": true
+
+// 写法 B：对象形式 —— 精确指定字段；token 字段必须在 include 里显式列出
+"injectUserContext": {
+  "enabled": true,                                  // 省略时，对象存在即视为开启；填 false 可关闭
+  "include": ["sap_id", "name", "yst_id_token"]     // 只注入这几个字段
+}
+```
+
+**可选字段**（写在 `include` 里）：
+
+| 字段 | 含义 | 默认是否注入 |
+|---|---|---|
+| `sap_id` | SAP 工号 | ✅ |
+| `yst_id` | 用户 ID | ✅ |
+| `name` | 用户名 | ✅ |
+| `origin_org_id` | 机构 ID | ✅ |
+| `org_name` | 机构名 | ✅ |
+| `path_name` | 组织路径名 | ✅ |
+| `origin_path_id` | 组织路径 ID | ❌ 需在 `include` 显式声明 |
+| `yst_id_token` | 用户身份 **token**（凭据） | ❌ 需在 `include` 显式声明 |
+
+> `injectUserContext: true` **不含** token；要 token 必须用对象形式把 `yst_id_token` 写进 `include`。
+
+**注入到哪里**：
+
+- **command 钩子**：
+  - stdin JSON 多出一个 `user_context` 对象，键名同上表（如 `payload.user_context.sap_id`）。
+  - 同时下发 `HOOK_USER_<字段大写>` 环境变量（如 `HOOK_USER_SAP_ID`、`HOOK_USER_NAME`）。
+- **prompt 钩子**：身份字段并入喂给判决 LLM 的 payload 的 `user_context`，**但 token 字段永远不注入**（避免把凭据发给模型）。
+
+**安全约束（务必记住）**：
+
+1. **token 只进 stdin，永不进 env**——`HOOK_USER_YST_ID_TOKEN` 这样的环境变量**不存在**。脚本要用 token 必须读 stdin 的 `user_context.yst_id_token`。
+2. **prompt 钩子拿不到 token**——无论 `include` 怎么写。
+3. **诊断日志自动脱敏**——开启 Hook 诊断模式时，落盘 jsonl 与 UI 里 token 一律显示为 `[redacted]`，凭据不会写进日志。判定规则：字段名含 `token`（大小写不敏感）即视为凭据，env 排除与日志脱敏共用这一规则。
+4. 字段缺失（本地 `userinfo-models.json` 没有该值）时，对应键**不会出现**在 `user_context` / env 里，脚本要做空值判断。
+
+**示例：command 钩子用 token 调接口（Python，PreToolUse）**
+
+钩子配置：
+
+```jsonc
+{
+  "id": "call-api-with-token",
+  "event": "PreToolUse",
+  "matcher": "execute",
+  "type": "command",
+  "command": "python3 \"C:\\Users\\<你的用户名>\\.cmbcoworkagent\\hooks\\check.py\"",
+  "injectUserContext": { "enabled": true, "include": ["sap_id", "yst_id_token"] },
+  "timeout": 10000,
+  "enabled": true
+}
+```
+
+脚本：
+
+```python
+import json, sys, urllib.request
+
+p = json.load(sys.stdin)
+uc = p.get("user_context") or {}
+token = uc.get("yst_id_token")          # token 只在 stdin，不在 env
+sap_id = uc.get("sap_id")
+
+if not token:
+    print("[hook] 无 token，放行", file=sys.stderr)
+    sys.exit(0)
+
+req = urllib.request.Request(
+    "https://your-api/policy/check",
+    headers={"Authorization": f"Bearer {token}"},
+)
+try:
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        allowed = json.load(resp).get("allowed", True)
+except Exception as e:
+    print(f"[hook] 接口异常，放行：{e}", file=sys.stderr)
+    sys.exit(0)                          # 自身报错不阻断业务
+
+if not allowed:
+    json.dump({"decision": "block", "reason": f"用户 {sap_id} 无此操作权限"}, sys.stdout)
+sys.exit(0)
+```
+
+> UI 里也能配：勾选「注入当前用户信息」开启；command 钩子下会出现「同时注入 `yst_id_token`」复选框。通过 JSON 写的自定义 `include`，在 UI 编辑时会被保留，不会被重置回默认字段集。
 
 ---
 
@@ -648,5 +746,6 @@ process.stdin.on("end", () => {
 - 钩子脚本以**当前用户身份**执行，等同于任意本地命令——不要从不可信来源粘贴。
 - 全局 `hooks.json` 由 UI 写入；插件 / 技能 / 工作区 hooks 在首次加载时会经过一次信任确认（记录在 `~/.cmbcoworkagent/trusted-workspace-hooks.json`）。
 - prompt 类型钩子会把工具参数（含潜在敏感数据）发给指定 LLM——不要把生产 API key 写到会被钩子捕获的工具入参里。
+- `injectUserContext` 默认关闭；只在确有需要时开启，且 `yst_id_token`（凭据）只对信任的 command 钩子按需放开。token 只进 stdin、不进 env，诊断日志自动脱敏，但脚本本身仍能拿到明文——确保脚本来源可信、不会把 token 转储到不安全位置。详见 [3.5](#35-注入当前用户身份-injectusercontext)。
 - 高风险动作建议同时挂 PreToolUse（阻断）+ PostToolUse（审计）两层，前者防止发生、后者留证据。
 - `forcedOutcome: "always-halt"` 是最稳的"红线开关"——脚本可能被改、被绕，但 forcedOutcome 在配置层强制生效，适合关键合规场景。

@@ -25,6 +25,8 @@ import type {
   HookType,
   PromptHookFallback,
   HookUpsert,
+  HookInjectUserContext,
+  HookUserContextField,
   SkillMetadata
 } from "@/types"
 
@@ -46,6 +48,29 @@ export const COMMON_TOOLS: { value: string; label: string; description: string }
   { value: "custom", label: "自定义…", description: "手动输入工具名称或正则表达式" }
 ]
 const CUSTOM_SENTINEL = "custom"
+const HOOK_USER_CONTEXT_DEFAULT_FIELDS = [
+  "sap_id",
+  "yst_id",
+  "name",
+  "origin_org_id",
+  "org_name",
+  "path_name"
+] as const
+const YST_ID_TOKEN_FIELD: HookUserContextField = "yst_id_token"
+
+// The two checkboxes below can only express "default fields (+token)". A hook
+// authored in JSON may carry a narrower/custom `include` list; capture it here
+// so editing through this dialog preserves the original field selection instead
+// of silently widening it back to the defaults.
+function extractCustomUserContextInclude(
+  injectUserContext: HookInjectUserContext | undefined
+): HookUserContextField[] | null {
+  return injectUserContext &&
+    typeof injectUserContext === "object" &&
+    Array.isArray(injectUserContext.include)
+    ? injectUserContext.include
+    : null
+}
 
 const HOOK_EVENTS: { value: HookEvent; label: string; description: string }[] = [
   {
@@ -1430,6 +1455,17 @@ export function AddHookDialog(props: {
   const [persistAfterInterrupt, setPersistAfterInterrupt] = useState(
     editHook?.persistAfterInterrupt === true
   )
+  const [injectUserContext, setInjectUserContext] = useState(
+    Boolean(editHook?.injectUserContext)
+  )
+  // Original custom `include` from a JSON-authored hook, preserved across edits.
+  const [injectUserContextInclude, setInjectUserContextInclude] = useState<
+    HookUserContextField[] | null
+  >(extractCustomUserContextInclude(editHook?.injectUserContext))
+  const [injectUserToken, setInjectUserToken] = useState(
+    typeof editHook?.injectUserContext === "object" &&
+      editHook.injectUserContext.include?.includes("yst_id_token") === true
+  )
   const [commandExampleKind, setCommandExampleKind] = useState<CommandExampleKind>("python")
   // shared
   const [timeout, setTimeout_] = useState(String(editHook?.timeout ?? 10000))
@@ -1514,6 +1550,12 @@ export function AddHookDialog(props: {
       setForcedReason(h.forcedReason ?? "")
       setOnce(h.once === true)
       setPersistAfterInterrupt(h.persistAfterInterrupt === true)
+      setInjectUserContext(Boolean(h.injectUserContext))
+      setInjectUserContextInclude(extractCustomUserContextInclude(h.injectUserContext))
+      setInjectUserToken(
+        typeof h.injectUserContext === "object" &&
+          h.injectUserContext.include?.includes("yst_id_token") === true
+      )
       setTimeout_(String(h.timeout ?? 10000))
     } else {
       setHookType("command")
@@ -1532,6 +1574,9 @@ export function AddHookDialog(props: {
       setForcedReason("")
       setOnce(false)
       setPersistAfterInterrupt(false)
+      setInjectUserContext(false)
+      setInjectUserContextInclude(null)
+      setInjectUserToken(false)
       setTimeout_("10000")
     }
     setError(null)
@@ -1607,6 +1652,28 @@ export function AddHookDialog(props: {
       }
       if (once) config.once = true
       if (persistAfterInterrupt) config.persistAfterInterrupt = true
+      if (injectUserContext) {
+        if (injectUserContextInclude) {
+          // Preserve the JSON-authored custom field list; only the token field
+          // is toggled here (and only for command hooks — prompt hooks never
+          // receive tokens at runtime, so their include is kept verbatim).
+          let include = injectUserContextInclude
+          if (hookType === "command") {
+            const base = include.filter((field) => field !== YST_ID_TOKEN_FIELD)
+            include = injectUserToken ? [...base, YST_ID_TOKEN_FIELD] : base
+          }
+          config.injectUserContext =
+            include.length > 0 ? { enabled: true, include } : true
+        } else {
+          config.injectUserContext =
+            hookType === "command" && injectUserToken
+              ? {
+                  enabled: true,
+                  include: [...HOOK_USER_CONTEXT_DEFAULT_FIELDS, YST_ID_TOKEN_FIELD]
+                }
+              : true
+        }
+      }
 
       if (editHook) {
         await window.api.hooks.update({ ...config, id: editHook.id })
@@ -1638,6 +1705,9 @@ export function AddHookDialog(props: {
     forcedReason,
     once,
     persistAfterInterrupt,
+    injectUserContext,
+    injectUserContextInclude,
+    injectUserToken,
     editHook,
     onSuccess,
     handleOpenChange,
@@ -2194,6 +2264,62 @@ export function AddHookDialog(props: {
                     仅对插件和技能 Hook 生效。开启后，只要本会话里触发过该 Hook 所属的插件或技能，
                     这条 Hook 后续轮次也会继续命中；同一技能下未开启的兄弟 Hook 不会被一起保留。
                   </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-md border border-border/60 bg-muted/20 p-3">
+              <div className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  id="hook-inject-user-context"
+                  checked={injectUserContext}
+                  onChange={(e) => {
+                    setInjectUserContext(e.target.checked)
+                    if (!e.target.checked) setInjectUserToken(false)
+                  }}
+                  className="mt-0.5 size-4"
+                />
+                <div className="space-y-2">
+                  <label htmlFor="hook-inject-user-context" className="text-sm font-medium">
+                    注入当前用户信息
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    开启后，Hook 可从 stdin 的
+                    <code className="mx-1 font-mono text-foreground/85">user_context</code>
+                    读取 sap_id、yst_id、name、机构等字段；command Hook 同时会收到
+                    <code className="mx-1 font-mono text-foreground/85">HOOK_USER_*</code>
+                    环境变量。
+                  </p>
+                  {injectUserContext && injectUserContextInclude && (
+                    <p className="text-xs text-muted-foreground">
+                      该 Hook 使用 JSON 里自定义的字段列表（
+                      <code className="mx-1 font-mono text-foreground/85">
+                        {injectUserContextInclude.join("、")}
+                      </code>
+                      ），在此编辑会保留该范围，仅可切换是否含 token。
+                    </p>
+                  )}
+                  {hookType === "command" && injectUserContext && (
+                    <label className="flex items-start gap-2 rounded-md border border-amber-300/50 bg-amber-50 px-2 py-2 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+                      <input
+                        type="checkbox"
+                        checked={injectUserToken}
+                        onChange={(e) => setInjectUserToken(e.target.checked)}
+                        className="mt-0.5 size-3.5"
+                      />
+                      <span>
+                        同时注入
+                        <code className="mx-1 font-mono">yst_id_token</code>
+                        。token 只进入 stdin，不会写入环境变量；诊断日志会脱敏。
+                      </span>
+                    </label>
+                  )}
+                  {hookType === "prompt" && injectUserContext && (
+                    <p className="text-xs text-muted-foreground">
+                      自然语言策略 Hook 不会注入 token 字段，避免把凭据发送给判决模型。
+                    </p>
+                  )}
                 </div>
               </div>
             </div>

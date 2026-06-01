@@ -3,11 +3,11 @@ import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
-import type { HookConfig, HookEvent, HookResult } from "./types"
+import type { HookConfig, HookEvent, HookResult, HookUserContextField } from "./types"
 import type { PluginHookMetadata, SkillHookMetadata } from "../types"
 import { joinHookText } from "./text"
 import { mergeUpdatedInput } from "./updated-input"
-import { getCustomModelConfigs, getHookLoggingConfig } from "../storage"
+import { getCustomModelConfigs, getHookLoggingConfig, getUserInfo } from "../storage"
 import { persistHookResultRecord } from "./log-record"
 
 const DEFAULT_TIMEOUT = 10_000
@@ -16,6 +16,21 @@ const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
 const MAX_HOOK_ENV_JSON_CHARS = 4_096
 const ONCE_HOOK_KEY_SEPARATOR = "\u0000"
+const DEFAULT_USER_CONTEXT_FIELDS = [
+  "sap_id",
+  "yst_id",
+  "name",
+  "origin_org_id",
+  "org_name",
+  "path_name"
+] as const
+// Token-bearing fields are never written to env vars and are redacted in
+// diagnostic logs. Match by name with the same `/token/i` rule the log
+// redactor uses (log-record.ts) so adding a future *_token field can't
+// accidentally leak through the env path while being redacted in logs.
+function isTokenUserContextField(field: string): boolean {
+  return /token/i.test(field)
+}
 // `once` fired-state, partitioned by sessionId so we can drop a session's
 // entries when a thread ends (or when a hook is mutated). Aligns conceptually
 // with CC's session-scoped session-hooks Map, except we track fired state
@@ -124,7 +139,67 @@ function setBestEffortJsonEnv(
   env[key] = value
 }
 
-function buildHookEnv(event: HookEvent, context: HookContext): Record<string, string> {
+function getHookUserContextFields(hook: HookConfig): HookUserContextField[] {
+  const config = hook.injectUserContext
+  if (!config) return []
+  if (config === true) return [...DEFAULT_USER_CONTEXT_FIELDS]
+  if (config.enabled === false) return []
+  return config.include && config.include.length > 0
+    ? config.include
+    : [...DEFAULT_USER_CONTEXT_FIELDS]
+}
+
+function buildHookUserContext(
+  hook: HookConfig,
+  options: { includeTokens?: boolean } = {}
+): Record<string, string> | undefined {
+  const fields = getHookUserContextFields(hook)
+  if (fields.length === 0) return undefined
+
+  let userInfo: ReturnType<typeof getUserInfo> = null
+  try {
+    userInfo = getUserInfo()
+  } catch {
+    userInfo = null
+  }
+  const values: Record<HookUserContextField, string | undefined> = {
+    sap_id: userInfo?.sapId,
+    yst_id: userInfo?.ystId,
+    name: userInfo?.userName,
+    origin_org_id: userInfo?.originOrgId,
+    org_name: userInfo?.orgName,
+    path_name: userInfo?.pathName,
+    origin_path_id: userInfo?.originPathId,
+    yst_id_token: userInfo?.ystIdToken
+  }
+  const userContext: Record<string, string> = {}
+  for (const field of fields) {
+    if (options.includeTokens === false && isTokenUserContextField(field)) continue
+    const value = values[field]
+    if (typeof value === "string" && value.length > 0) {
+      userContext[field] = value
+    }
+  }
+  return Object.keys(userContext).length > 0 ? userContext : undefined
+}
+
+function userContextEnvName(field: string): string {
+  return `HOOK_USER_${field.toUpperCase()}`
+}
+
+function addHookUserContextEnv(env: Record<string, string>, hook: HookConfig): void {
+  const userContext = buildHookUserContext(hook, { includeTokens: false })
+  if (!userContext) return
+  for (const [field, value] of Object.entries(userContext)) {
+    env[userContextEnvName(field)] = value
+  }
+}
+
+function buildHookEnv(
+  event: HookEvent,
+  context: HookContext,
+  hook: HookConfig
+): Record<string, string> {
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     HOOK_EVENT: event
@@ -153,6 +228,7 @@ function buildHookEnv(event: HookEvent, context: HookContext): Record<string, st
   }
   if (context.sessionId) env.SESSION_ID = context.sessionId
   if (context.userPrompt) env.USER_PROMPT = context.userPrompt
+  addHookUserContextEnv(env, hook)
   return env
 }
 
@@ -160,12 +236,14 @@ function buildHookEnv(event: HookEvent, context: HookContext): Record<string, st
  * Build the structured JSON payload written to the hook's stdin (Claude Code protocol).
  * Keys mirror Claude Code's documented hook input schema so existing community hooks work.
  */
-function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
+function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: HookConfig): string {
   const payload: Record<string, unknown> = {
     hook_event_name: event,
     session_id: context.sessionId ?? "",
     cwd: getCommandCwd(context)
   }
+  const userContext = buildHookUserContext(hook)
+  if (userContext) payload.user_context = userContext
   if (context.hookSourceType) payload.hook_source_type = context.hookSourceType
   if (context.hookSourceRoot) payload.hook_source_root = context.hookSourceRoot
   if (context.hookSourcePath) payload.hook_source_path = context.hookSourcePath
@@ -495,12 +573,15 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
 function buildPromptHookUserMessage(
   event: HookEvent,
   policy: string,
-  context: HookContext
+  context: HookContext,
+  hook: HookConfig
 ): string {
+  const userContext = buildHookUserContext(hook, { includeTokens: false })
   return JSON.stringify(
     {
       hook_event_name: event,
       policy,
+      ...(userContext ? { user_context: userContext } : {}),
       ...(context.userPrompt ? { prompt: context.userPrompt } : {}),
       tool_name: context.toolName ?? "(unknown)",
       tool_args: context.toolArgs ?? {},
@@ -562,7 +643,7 @@ async function executePromptHook(
     return fallbackResult("[PromptHook] No model configured — cannot evaluate prompt hook")
   }
 
-  const userMsg = buildPromptHookUserMessage(event, policy, context)
+  const userMsg = buildPromptHookUserMessage(event, policy, context, hook)
 
   let timeoutId: ReturnType<typeof setTimeout> | undefined
   try {
@@ -760,11 +841,11 @@ async function executeHook(
   if (hookType === "prompt") {
     if (diagnostic) {
       const policy = hook.prompt?.trim()
-      if (policy) stdinPayload = buildPromptHookUserMessage(event, policy, context)
+      if (policy) stdinPayload = buildPromptHookUserMessage(event, policy, context, hook)
     }
     result = await executePromptHook(hook, context, event)
   } else {
-    const builtPayload = buildHookStdinPayload(event, context)
+    const builtPayload = buildHookStdinPayload(event, context, hook)
     if (diagnostic) stdinPayload = builtPayload
     result = await executeCommandHook(hook, env, builtPayload, getCommandCwd(context))
   }
@@ -926,7 +1007,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event),
         hook
       )
       console.log(
@@ -1002,7 +1083,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event),
         hook
       )
       console.log(
@@ -1044,7 +1125,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event),
         hook
       )
       console.log(
@@ -1110,7 +1191,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event),
         hook
       )
       console.log(
@@ -1177,7 +1258,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event),
         hook
       )
       console.log(
@@ -1233,7 +1314,7 @@ export async function runHooks(
       try {
         const rawResult = await executeHook(
           hook,
-          buildHookEnv(event, hookContext),
+          buildHookEnv(event, hookContext, hook),
           hookContext,
           event
         )
@@ -1260,7 +1341,7 @@ export async function runHooks(
   // Notification / SessionStart: fire-and-forget
   for (const hook of matched) {
     const hookContext = enrichContextFromHook(hook, context)
-    executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)
+    executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event)
       .then((rawResult) => {
         const result = applyForcedOutcome(rawResult, hook)
         console.log(

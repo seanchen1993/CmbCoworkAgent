@@ -14,6 +14,8 @@ import {
 import {
   isSupportedHookEvent,
   type HookConfig,
+  type HookInjectUserContext,
+  type HookUserContextField,
   type HookOnBlockConfig,
   type HookSourceType,
   type HookUpsert
@@ -2274,6 +2276,33 @@ function parseOptionalHookBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined
 }
 
+const HOOK_USER_CONTEXT_FIELDS = new Set<HookUserContextField>([
+  "sap_id",
+  "yst_id",
+  "name",
+  "origin_org_id",
+  "org_name",
+  "path_name",
+  "origin_path_id",
+  "yst_id_token"
+])
+
+function parseHookInjectUserContext(raw: unknown): HookInjectUserContext | undefined {
+  if (typeof raw === "boolean") return raw
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
+
+  const record = raw as Record<string, unknown>
+  const include = Array.isArray(record.include)
+    ? record.include.filter((item): item is HookUserContextField =>
+        typeof item === "string" && HOOK_USER_CONTEXT_FIELDS.has(item as HookUserContextField)
+      )
+    : undefined
+  return {
+    enabled: typeof record.enabled === "boolean" ? record.enabled : true,
+    ...(include && include.length > 0 ? { include } : {})
+  }
+}
+
 function parseNativeHookTimeout(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined
 }
@@ -2409,6 +2438,7 @@ function ccCommandToHookConfig(
       forcedReason: normalizeOptionalHookString(h.forcedReason),
       once,
       persistAfterInterrupt,
+      injectUserContext: parseHookInjectUserContext(h.injectUserContext),
       timeout,
       enabled,
       createdAt: meta.createdAt,
@@ -2431,6 +2461,7 @@ function ccCommandToHookConfig(
       forcedReason: normalizeOptionalHookString(h.forcedReason),
       once,
       persistAfterInterrupt,
+      injectUserContext: parseHookInjectUserContext(h.injectUserContext),
       timeout,
       enabled,
       createdAt: meta.createdAt,
@@ -2539,6 +2570,7 @@ export function getHooks(): HookConfig[] {
           forcedReason: normalizeOptionalHookString(h.forcedReason),
           once: parseOptionalHookBoolean(h.once),
           persistAfterInterrupt: parseOptionalHookBoolean(h.persistAfterInterrupt),
+          injectUserContext: parseHookInjectUserContext(h.injectUserContext),
           timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
           enabled: h.enabled !== false,
           createdAt: typeof h.createdAt === "string" ? h.createdAt : now,
@@ -2631,6 +2663,7 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
             forcedReason: normalizeOptionalHookString(h.forcedReason),
             once: parseOptionalHookBoolean(h.once),
             persistAfterInterrupt: parseOptionalHookBoolean(h.persistAfterInterrupt),
+            injectUserContext: parseHookInjectUserContext(h.injectUserContext),
             timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
             enabled: h.enabled !== false,
             createdAt: plugin.createdAt,
@@ -2835,6 +2868,7 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
           forcedReason: normalizeOptionalHookString(h.forcedReason),
           once: parseOptionalHookBoolean(h.once),
           persistAfterInterrupt: parseOptionalHookBoolean(h.persistAfterInterrupt),
+          injectUserContext: parseHookInjectUserContext(h.injectUserContext),
           timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
           enabled: h.enabled !== false,
           createdAt: now,
@@ -3138,6 +3172,7 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
               forcedReason: normalizeOptionalHookString(raw.forcedReason),
               once: parseOptionalHookBoolean(raw.once),
               persistAfterInterrupt: parseOptionalHookBoolean(raw.persistAfterInterrupt),
+              injectUserContext: parseHookInjectUserContext(raw.injectUserContext),
               timeout: parseNativeHookTimeout(raw.timeoutMs) ?? parseNativeHookTimeout(raw.timeout),
               enabled: true,
               createdAt: now,
@@ -3195,6 +3230,7 @@ export function upsertHook(config: HookUpsert & { id?: string }): string {
     forcedReason: normalizeOptionalHookString(config.forcedReason),
     once: config.once,
     persistAfterInterrupt: config.persistAfterInterrupt,
+    injectUserContext: parseHookInjectUserContext(config.injectUserContext),
     timeout: config.timeout,
     enabled: config.enabled ?? true,
     createdAt: existing?.createdAt ?? now,

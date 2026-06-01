@@ -30,6 +30,16 @@ import {
 const VALID_EVENTS = new Set<HookEvent>(SUPPORTED_HOOK_EVENTS)
 const VALID_TYPES = new Set<HookType>(["command", "prompt"])
 const VALID_FALLBACKS = new Set<PromptHookFallback>(["allow", "block"])
+const VALID_USER_CONTEXT_FIELDS = new Set([
+  "sap_id",
+  "yst_id",
+  "name",
+  "origin_org_id",
+  "org_name",
+  "path_name",
+  "origin_path_id",
+  "yst_id_token"
+])
 const TIMEOUT_MIN = 1_000
 const TIMEOUT_MAX = 60_000
 
@@ -98,6 +108,33 @@ function validateHookConfig(config: HookUpsert): void {
   }
   if (config.persistAfterInterrupt !== undefined && typeof config.persistAfterInterrupt !== "boolean") {
     throw new Error("persistAfterInterrupt 必须为布尔值")
+  }
+  if (config.injectUserContext !== undefined) {
+    if (typeof config.injectUserContext !== "boolean") {
+      if (
+        !config.injectUserContext ||
+        typeof config.injectUserContext !== "object" ||
+        Array.isArray(config.injectUserContext)
+      ) {
+        throw new Error("injectUserContext 必须为布尔值或对象")
+      }
+      if (
+        config.injectUserContext.enabled !== undefined &&
+        typeof config.injectUserContext.enabled !== "boolean"
+      ) {
+        throw new Error("injectUserContext.enabled 必须为布尔值")
+      }
+      if (config.injectUserContext.include !== undefined) {
+        if (!Array.isArray(config.injectUserContext.include)) {
+          throw new Error("injectUserContext.include 必须为数组")
+        }
+        for (const field of config.injectUserContext.include) {
+          if (!VALID_USER_CONTEXT_FIELDS.has(field)) {
+            throw new Error(`injectUserContext.include 包含不支持的字段: ${field}`)
+          }
+        }
+      }
+    }
   }
 }
 

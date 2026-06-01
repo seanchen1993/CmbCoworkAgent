@@ -239,6 +239,11 @@ const HOOK_CONFIG_EXTENSION_FIELDS: Array<{ key: string; description: string }> 
       "CMB 扩展字段。仅对插件 / 技能 Hook 的作用域有意义；设为 true 后，只要本会话里触发过该 Hook 所属的插件或技能，这条 Hook 后续轮次也会继续命中。持久化按 Hook 身份计算，不会让同技能下未开启的兄弟 Hook 一起生效。"
   },
   {
+    key: "injectUserContext",
+    description:
+      "默认关闭。需要 Hook 读取当前用户信息时显式开启；true 只注入 sap_id、yst_id、name、机构等非 token 字段。若需要 yst_id_token，必须使用对象形式 include 显式声明。token 只进入 stdin 的 user_context，不会写入环境变量，诊断日志会脱敏。"
+  },
+  {
     key: "timeout",
     description:
       "超时时间。扁平数组 / 单对象格式按毫秒解释；Claude Code hooks settings 格式按秒解释。"
@@ -282,6 +287,10 @@ const SKILL_HOOK_FLAT_EXAMPLE = `[
     "timeout": 10000,
     "once": true,
     "persistAfterInterrupt": true,
+    "injectUserContext": {
+      "enabled": true,
+      "include": ["sap_id", "name", "yst_id_token"]
+    },
     "onBlock": {
       "reason": "高风险写入，请先按整改流程处理",
       "requiredSkill": "my-skill-name"
