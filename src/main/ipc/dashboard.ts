@@ -715,6 +715,8 @@ function buildVersionPrefix(skillName: string): string {
 
 const SKILL_EVAL_STATS_PAGE_SIZE = 500
 const SKILL_EVAL_STATS_TRACE_LIMIT = 2000
+const SKILL_EVAL_RECENT_TASK_SCAN_MULTIPLIER = 12
+const SKILL_EVAL_RECENT_TASK_SCAN_LIMIT = 2000
 const SKILL_EVAL_STAT_CACHE_TTL_MS = 60_000
 const SKILL_EVAL_STAT_CACHE_LIMIT = 30
 const SKILL_EVAL_STATS_QUERY_TIMEOUT_MS = 45_000
@@ -2406,25 +2408,47 @@ async function fetchSkillEvalRecordPage(
   size: number,
   includeTraceDetails: boolean
 ): Promise<SkillEvalRecordPageResult> {
+  const scanSize = Math.min(
+    SKILL_EVAL_RECENT_TASK_SCAN_LIMIT,
+    Math.max(size, (from + size) * SKILL_EVAL_RECENT_TASK_SCAN_MULTIPLIER)
+  )
   const body = {
     track_total_hits: true,
-    from,
-    size,
+    from: 0,
+    size: scanSize,
     sort: [{ startedAt: { order: "desc" } }, { id: { order: "desc", unmapped_type: "keyword" } }],
     query: skillEvalRecordQuery(range, skillFilter),
-    _source: { includes: skillEvalRecordSourceIncludes() }
+    _source: { includes: skillEvalRecordSourceIncludes() },
+    aggs: {
+      task_count: {
+        cardinality: { field: "skillTaskId", precision_threshold: 40000 }
+      }
+    }
   }
   const raw = (await esQuery(getEsIndex("skillEval"), body, {
     timeoutMs: SKILL_EVAL_STATS_QUERY_TIMEOUT_MS
   })) as EsSearchResponse
   const records = parseSkillEvalRecordHits(raw)
+  const scannedTaskRuns = aggregateSkillEvalTaskRuns(
+    skillEvalStoredRecordsToDashboardRuns(records, undefined, skillFilter)
+  ).sort(compareSkillEvalRunsByStartedAtDesc)
+  const pageTaskRuns = scannedTaskRuns.slice(from, from + size)
+  const pageTaskKeys = new Set(pageTaskRuns.map(skillEvalTaskKey))
+  const pageRecords = records.filter((record) => pageTaskKeys.has(skillEvalRecordTaskKey(record)))
   const traceDetails = includeTraceDetails
-    ? await fetchTraceDetailsForSkillEvalRecords(records)
+    ? await fetchTraceDetailsForSkillEvalRecords(pageRecords)
     : undefined
+  const pageRuns = aggregateSkillEvalTaskRuns(
+    skillEvalStoredRecordsToDashboardRuns(pageRecords, traceDetails, skillFilter)
+  )
+    .sort(compareSkillEvalRunsByStartedAtDesc)
+    .slice(0, size)
+  const taskCount = asNumber(asRecord(asRecord(raw.aggregations).task_count).value)
+
   return {
-    records,
-    runs: skillEvalStoredRecordsToDashboardRuns(records, traceDetails, skillFilter),
-    totalRecordHits: getTotalHits(raw, records.length)
+    records: pageRecords,
+    runs: pageRuns,
+    totalRecordHits: Math.max(taskCount, scannedTaskRuns.length)
   }
 }
 
@@ -2804,8 +2828,22 @@ function averageStoredScoreMetric(bucket: Record<string, unknown>, name: string)
   return averageValue(metricValue(bucket, name), 100)
 }
 
+function skillEvalRecordTaskKey(record: TraceSkillEvalRecord): string {
+  return record.skillTaskId || [record.threadId, record.rawSkillName, record.traceId].join(":")
+}
+
 function skillEvalTaskKey(run: DashboardSkillEvalRun): string {
   return run.skillTaskId || [run.threadId, run.rawSkillName, run.traceId].join(":")
+}
+
+function compareSkillEvalRunsByStartedAtDesc(
+  left: DashboardSkillEvalRun,
+  right: DashboardSkillEvalRun
+): number {
+  return (
+    new Date(right.startedAt).getTime() - new Date(left.startedAt).getTime() ||
+    right.traceId.localeCompare(left.traceId)
+  )
 }
 
 function aggregateSkillEvalTaskRuns(runs: DashboardSkillEvalRun[]): DashboardSkillEvalRun[] {
@@ -2922,9 +2960,10 @@ function buildSkillEvalSummaryFromRuns({
     if (run.traceId) evaluatedTraceIds.add(run.traceId)
   }
 
-  const sortedRecentRuns = (recentRuns ?? filteredSampleRuns)
+  const recentSourceRuns = recentRuns ? aggregateSkillEvalTaskRuns(recentRuns) : filteredSampleRuns
+  const sortedRecentRuns = recentSourceRuns
     .filter((run) => hasAllowedSkillName(run.skillName, allowedSkillNames))
-    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
+    .sort(compareSkillEvalRunsByStartedAtDesc)
 
   const skills = skillList ?? summarizeSkillEvalRunBuckets(grouped ?? new Map())
   const totalRuns = filteredSampleRuns.length
