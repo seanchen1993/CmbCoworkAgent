@@ -1690,6 +1690,11 @@ function normalizeUpperOrgLv1Option(upperOrgLv1?: string | null): string | null 
   return normalized ? normalized : null
 }
 
+// 「未归类」哨兵：代表 upperOrgLv1 为空或缺失的记录（前后端约定一致）。
+const DASHBOARD_UNCLASSIFIED_ORG = "__unclassified__"
+// fetchOrgOptions 内部用来给「字段缺失」的文档归桶的临时 key（不外泄）。
+const DASHBOARD_ORG_MISSING_BUCKET = "__org_missing__"
+
 // 将单个或多个 LV1 组织值统一规整为去重、去空的数组。
 function normalizeUpperOrgLv1List(value?: string | string[] | null): string[] {
   const raw = Array.isArray(value) ? value : value != null ? [value] : []
@@ -1700,10 +1705,31 @@ function normalizeUpperOrgLv1List(value?: string | string[] | null): string[] {
   return Array.from(new Set(cleaned))
 }
 
+// upperOrgLv1 为空或缺失的匹配子句（「未归类」）。
+function buildUnclassifiedOrgClause(): Record<string, unknown> {
+  return {
+    bool: {
+      should: [
+        { bool: { must_not: { exists: { field: "upperOrgLv1" } } } },
+        { term: { upperOrgLv1: "" } }
+      ],
+      minimum_should_match: 1
+    }
+  }
+}
+
 // 多选 LV1 组织筛选 → terms 过滤；空数组返回 null（表示全部，不过滤）。
+// 列表含「未归类」哨兵时，额外 OR 上「空/缺失 upperOrgLv1」的匹配。
 function buildUpperOrgLv1ListFilter(list: string[]): Record<string, unknown> | null {
   if (list.length === 0) return null
-  return { terms: { upperOrgLv1: list } }
+  const includeUnclassified = list.includes(DASHBOARD_UNCLASSIFIED_ORG)
+  const realOrgs = list.filter((value) => value !== DASHBOARD_UNCLASSIFIED_ORG)
+  const clauses: Record<string, unknown>[] = []
+  if (realOrgs.length > 0) clauses.push({ terms: { upperOrgLv1: realOrgs } })
+  if (includeUnclassified) clauses.push(buildUnclassifiedOrgClause())
+  if (clauses.length === 0) return null
+  if (clauses.length === 1) return clauses[0]
+  return { bool: { should: clauses, minimum_should_match: 1 } }
 }
 
 function buildNonEmptyOrgLevelFilter(
@@ -3742,19 +3768,34 @@ async function fetchOrgOptions(range: TimeRange): Promise<string[]> {
     size: 0,
     query: {
       bool: {
-        filter: [timeRangeFilter("startedAt", range), buildNonEmptyOrgLevelFilter("upperOrgLv1")]
+        filter: [timeRangeFilter("startedAt", range)]
       }
     },
     aggs: {
-      orgs: { terms: { field: "upperOrgLv1", size: 200 } }
+      // missing 把「字段缺失」的文档归到 DASHBOARD_ORG_MISSING_BUCKET；空串("")会单独成桶。
+      orgs: { terms: { field: "upperOrgLv1", size: 500, missing: DASHBOARD_ORG_MISSING_BUCKET } }
     }
   }
   const raw = await esQuery(getEsIndex("trace"), body)
   const rawBuckets = asRecord(asRecord(asRecord(raw).aggregations).orgs).buckets
-  const orgs = (Array.isArray(rawBuckets) ? rawBuckets : [])
-    .map((bucket) => asString(asRecord(bucket).key).trim())
-    .filter(Boolean)
-  return Array.from(new Set(orgs)).sort((a, b) => a.localeCompare(b, "zh-CN"))
+  const buckets = Array.isArray(rawBuckets) ? rawBuckets : []
+  const orgs: string[] = []
+  let hasUnclassified = false
+  for (const bucket of buckets) {
+    const record = asRecord(bucket)
+    const key = asString(record.key).trim()
+    const docCount = asNumber(record.doc_count)
+    if (!key || key === DASHBOARD_ORG_MISSING_BUCKET) {
+      // 空串 或 字段缺失 → 计入「未归类」
+      if (docCount > 0) hasUnclassified = true
+      continue
+    }
+    orgs.push(key)
+  }
+  const sorted = Array.from(new Set(orgs)).sort((a, b) => a.localeCompare(b, "zh-CN"))
+  // 「未归类」固定排在最后，方便区分。
+  if (hasUnclassified) sorted.push(DASHBOARD_UNCLASSIFIED_ORG)
+  return sorted
 }
 
 async function fetchProductivity(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions): Promise<unknown> {
@@ -4209,7 +4250,7 @@ async function fetchCommitDetails(
 // ─────────────────────────────────────────────────────────
 
 function makeMockOrgOptions(): string[] {
-  return ["测试 1 部", "开发二部", "平台三部"]
+  return ["测试 1 部", "开发二部", "平台三部", DASHBOARD_UNCLASSIFIED_ORG]
 }
 
 function makeMockOverview(range: TimeRange): unknown {
