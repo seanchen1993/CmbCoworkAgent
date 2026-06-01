@@ -12,6 +12,8 @@ import {
 // As long as both call sites stay wired, this Map is bounded by live thread count.
 interface StartedSession {
   workspacePath?: string
+  pluginOutputDir?: string
+  systemId?: string
   hookScope?: HookScopeController
 }
 
@@ -29,21 +31,27 @@ export function fireSessionStartOnce(
   onHookResult?: HookResultCallback,
   hookScope?: HookScopeController,
   onHookSkipped?: ScopeSkipCallback,
-  turnId?: string
+  turnId?: string,
+  pluginOutputDir?: string,
+  systemId?: string
 ): void {
   const existing = startedSessions.get(threadId)
   if (existing) {
     startedSessions.set(threadId, {
       workspacePath: workspacePath ?? existing.workspacePath,
+      pluginOutputDir: pluginOutputDir ?? existing.pluginOutputDir,
+      systemId: systemId ?? existing.systemId,
       hookScope: hookScope ?? existing.hookScope
     })
     return
   }
-  startedSessions.set(threadId, { workspacePath, hookScope })
+  startedSessions.set(threadId, { workspacePath, pluginOutputDir, systemId, hookScope })
   const context: HookContext = {
     workspacePath,
     sessionId: threadId,
-    turnId
+    turnId,
+    pluginOutputDir,
+    systemId
   }
   runHooks(
     resolveEnabledHooksForRun(workspacePath, "SessionStart", context, hookScope, onHookSkipped),
@@ -57,14 +65,18 @@ export function fireSessionStartOnce(
 export async function fireSessionEnd(
   threadId: string,
   workspacePath?: string,
-  onHookResult?: HookResultCallback
+  onHookResult?: HookResultCallback,
+  pluginOutputDir?: string
 ): Promise<void> {
   const started = startedSessions.get(threadId)
   if (!started) return
   startedSessions.delete(threadId)
   const effectiveWorkspacePath = workspacePath ?? started.workspacePath
+  const effectivePluginOutputDir = pluginOutputDir ?? started.pluginOutputDir
   const context: HookContext = {
     workspacePath: effectiveWorkspacePath,
+    pluginOutputDir: effectivePluginOutputDir,
+    systemId: started.systemId,
     sessionId: threadId
   }
   await runHooks(
@@ -94,7 +106,12 @@ export async function fireSessionEndAll(
   if (entries.length === 0) return
   const all = Promise.allSettled(
     entries.map(([id, session]) => {
-      const context: HookContext = { sessionId: id, workspacePath: session.workspacePath }
+      const context: HookContext = {
+        sessionId: id,
+        workspacePath: session.workspacePath,
+        pluginOutputDir: session.pluginOutputDir,
+        systemId: session.systemId
+      }
       return runHooks(
         resolveEnabledHooksForRun(session.workspacePath, "SessionEnd", context, session.hookScope),
         "SessionEnd",

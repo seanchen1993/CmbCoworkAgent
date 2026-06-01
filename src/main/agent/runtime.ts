@@ -78,6 +78,7 @@ import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import { getThread } from "../db/index"
 import { createPlaywrightTool } from "./tools/playwright-tool"
+import { createRequestUserInputTool } from "./tools/user-input-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
 import { createToolHookMiddleware } from "./tool-hooks"
@@ -452,7 +453,13 @@ function createScopedMcpCapabilityService(
     context: HookContext
   ) => ReturnType<typeof resolveEnabledHooksForRun>,
   onHookResult: HookResultCallback | undefined,
-  baseContext: { workspacePath: string; threadId: string; turnId?: string }
+  baseContext: {
+    workspacePath: string
+    threadId: string
+    turnId?: string
+    pluginOutputDir?: string
+    systemId?: string
+  }
 ): McpCapabilityService {
   const getPluginName = (pluginId: string): string | undefined => {
     try {
@@ -494,6 +501,8 @@ function createScopedMcpCapabilityService(
         workspacePath: baseContext.workspacePath,
         sessionId: baseContext.threadId,
         turnId: baseContext.turnId,
+        pluginOutputDir: baseContext.pluginOutputDir,
+        systemId: baseContext.systemId,
         pluginId,
         pluginName: pluginId ? getPluginName(pluginId) : undefined
       }
@@ -1117,7 +1126,8 @@ function formatLocalISO(date: Date, timeZone: string): string {
 
 function getSystemPrompt(
   workspacePath: string,
-  windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"
+  windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated",
+  workingDirPromptAppendix?: string
 ): string {
   const isWindows = process.platform === "win32"
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
@@ -1203,8 +1213,11 @@ ${shellGuidance}
         : ""
 
   const memorySection = isMemoryEnabled() ? MEMORY_SYSTEM_PROMPT : ""
+  const workingDirAppendix = workingDirPromptAppendix?.trim()
+    ? `${workingDirPromptAppendix.trim()}\n`
+    : ""
   return (
-    workingDirSection + backgroundExecSection + sandboxSection + BASE_SYSTEM_PROMPT + memorySection
+    workingDirSection + workingDirAppendix + backgroundExecSection + sandboxSection + BASE_SYSTEM_PROMPT + memorySection
   )
 }
 
@@ -1533,10 +1546,18 @@ export interface CreateAgentRuntimeOptions {
   workspacePath: string
   /** Extra content appended to the system prompt (e.g. HEARTBEAT.md context) */
   extraSystemPrompt?: string
+  /** Extra content appended immediately after the working directory section. */
+  workingDirPromptAppendix?: string
+  /** Optional plugin output directory exposed to hook commands as PLUGIN_OUTPUT_DIR. */
+  pluginOutputDir?: string
+  /** Optional system identifier exposed to child processes and hooks as SYSTEM_ID. */
+  systemId?: string
   /** Skip the manage_scheduler tool (used by scheduled task / heartbeat execution to prevent recursive scheduling) */
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
   noSkillEvolutionTool?: boolean
+  /** Enable the interactive user-input tool. Only foreground, user-invoked runs should set this. */
+  enableRequestUserInput?: boolean
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
   /** AbortSignal — when signalled, any running child process is killed immediately. */
@@ -1572,6 +1593,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     workspacePath,
     modelId,
     extraSystemPrompt,
+    workingDirPromptAppendix,
+    pluginOutputDir,
+    systemId,
     retryHooks,
     maxRetryAttempts,
     enableAgentsPrompt = true,
@@ -1686,6 +1710,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     hookScope,
     onHookResult,
     hookTurnId,
+    pluginOutputDir,
+    systemId,
     onFileMutation,
     abortSignal: options.abortSignal,
     runId: threadId,
@@ -1738,7 +1764,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
         workspacePath,
         sessionId: threadId,
-        turnId: hookTurnId
+        turnId: hookTurnId,
+        pluginOutputDir,
+        systemId
       }
       runHooks(
         resolveHooksForContext("Notification", notificationContext),
@@ -1764,7 +1792,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, yoloMode)
   backend.setOrchestrator(orchestrator)
 
-  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox)
+  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, workingDirPromptAppendix)
   let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
     prompt: null,
     projectRoot: workspacePath,
@@ -1829,6 +1857,7 @@ ${subagentShellGuidance}
 - grep: search for literal text within files (NOT regex). Do NOT use "|", ".*" or other regex syntax — call grep once per term instead.
 - Browser strategy: for browser tasks, first follow any matching enabled skill; only if no relevant skill is available, use browser_playwright.
 - browser_playwright: built-in browser automation and page interaction tool powered by project-local Playwright (fallback when no matching browser skill exists).
+- request_user_input: Only use in Plan mode, or when explicitly requested by the user or an active Skill/Plugin. Otherwise do not call this tool.
 The workspace root is: ${workspacePath}`
 
   const skillLifecycleRootSources = await getEnabledSkillsSources()
@@ -1878,7 +1907,7 @@ The workspace root is: ${workspacePath}`
     hookScope,
     resolveHooksForContext,
     onHookResult,
-    { workspacePath, threadId, turnId: hookTurnId }
+    { workspacePath, threadId, pluginOutputDir, systemId, turnId: hookTurnId }
   )
   const codeExecEnabled = isCodeExecEnabled()
   const allMcpTools = await capabilityService.listTools()
@@ -1909,6 +1938,14 @@ The workspace root is: ${workspacePath}`
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const extraTools: any[] = []
+  if (options.enableRequestUserInput) {
+    extraTools.push(
+      createRequestUserInputTool({
+        threadId: options.threadId,
+        abortSignal: options.abortSignal
+      })
+    )
+  }
   if (!options.noSchedulerTool) {
     let chatxRobotChatId: string | null = null
     if (options.threadId) {
@@ -2010,6 +2047,7 @@ The workspace root is: ${workspacePath}`
     resolveHooksForContext,
     onHookResult,
     hookTurnId,
+    systemId,
     skipToolNames: toolHookExclusions
   })
 

@@ -12,6 +12,17 @@ interface UpdateActionButtonProps {
   hideWhenCurrent?: boolean
 }
 
+// Module-level so multiple UpdateActionButton instances coordinate: each downloaded
+// version pops the dialog at most once per app session, regardless of how many
+// instances are mounted.
+const autoOpenedVersions = new Set<string>()
+
+function consumeAutoOpenForVersion(version: string | null | undefined): boolean {
+  if (!version || autoOpenedVersions.has(version)) return false
+  autoOpenedVersions.add(version)
+  return true
+}
+
 export function UpdateActionButton({
   variant = "card",
   className,
@@ -38,7 +49,29 @@ export function UpdateActionButton({
 
   useEffect(() => {
     const updateApi = window.api.update
-    scheduleUpdateStatusSync()
+
+    // Initial sync covers in-session races only: the update:downloaded IPC may
+    // fire before this component mounts and registers its listener (e.g. the
+    // sidebar was collapsed at the time, or the component remounted after a
+    // route change). It does NOT cover restart-with-pending-download — main
+    // process updater state (updateStatus / lastCheckResult / downloadedFilePath
+    // in src/main/updater/index.ts) is in-memory and resets to idle on every
+    // launch. Restoring a previous-session download would require persisting
+    // the downloaded file path + sha + version on the main side and re-checking
+    // the file on startup before broadcasting update:downloaded.
+    void window.api.update
+      .getStatus()
+      .then((s) => {
+        setStatus(s.status as UpdateStatus)
+        setVersion(s.update?.version ?? null)
+        if (s.status === "downloaded" && consumeAutoOpenForVersion(s.update?.version)) {
+          setDialogOpen(true)
+        }
+      })
+      .catch(() => {
+        setStatus("idle")
+        setVersion(null)
+      })
 
     const removeAvailable = updateApi.onAvailable((info) => {
       setStatus("available")
@@ -47,6 +80,9 @@ export function UpdateActionButton({
     const removeDownloaded = updateApi.onDownloaded((info) => {
       setStatus("downloaded")
       setVersion(info.version)
+      if (consumeAutoOpenForVersion(info.version)) {
+        setDialogOpen(true)
+      }
     })
     const removeError = updateApi.onError(() => {
       scheduleUpdateStatusSync()
@@ -66,7 +102,6 @@ export function UpdateActionButton({
   }, [dialogOpen, scheduleUpdateStatusSync])
 
   const hasUpdate = Boolean(version) && status !== "idle"
-  // const hasUpdate = true
 
   if (hideWhenCurrent && !hasUpdate) return null
 
