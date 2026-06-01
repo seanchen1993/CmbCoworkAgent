@@ -16,6 +16,9 @@ export interface ToolHookMiddlewareOptions {
   onHookResult?: HookResultCallback
   hookTurnId?: string
   systemId?: string
+  pluginWorkspace?: string
+  featureId?: string
+  projectCode?: string
   skipToolNames?: ReadonlySet<string>
 }
 
@@ -30,7 +33,10 @@ function buildHookContext(
     workspacePath: options.workspacePath,
     sessionId: options.threadId,
     turnId: options.hookTurnId,
-    systemId: options.systemId
+    systemId: options.systemId,
+    pluginWorkspace: options.pluginWorkspace,
+    featureId: options.featureId,
+    projectCode: options.projectCode
   }
 }
 

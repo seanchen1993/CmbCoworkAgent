@@ -361,6 +361,9 @@ export class LocalSandbox
   private readonly windowsSandbox: WindowsSandboxMode
   private readonly pluginOutputDir?: string
   private readonly systemId?: string
+  private readonly pluginWorkspace?: string
+  private readonly featureId?: string
+  private readonly projectCode?: string
   private readonly codexExePath: string
   private readonly getHooks: () => HookConfig[]
   private readonly resolveHooks: LocalSandboxHookResolver
@@ -1554,6 +1557,9 @@ export class LocalSandbox
     this.windowsSandbox = options.windowsSandbox ?? "none"
     this.pluginOutputDir = options.pluginOutputDir
     this.systemId = systemId || undefined
+    this.pluginWorkspace = pluginWorkspace || undefined
+    this.featureId = featureId || undefined
+    this.projectCode = projectCode || undefined
     this.codexExePath = options.codexExePath ?? "codex"
     const h = options.hooks
     this.getHooks = typeof h === "function" ? h : () => h ?? []
@@ -1754,6 +1760,11 @@ export class LocalSandbox
         ? { pluginOutputDir: this.pluginOutputDir }
         : {}),
       ...(this.systemId && !context.systemId ? { systemId: this.systemId } : {}),
+      ...(this.pluginWorkspace && !context.pluginWorkspace
+        ? { pluginWorkspace: this.pluginWorkspace }
+        : {}),
+      ...(this.featureId && !context.featureId ? { featureId: this.featureId } : {}),
+      ...(this.projectCode && !context.projectCode ? { projectCode: this.projectCode } : {}),
       turnId: context.turnId ?? this._hookTurnId
     }
 

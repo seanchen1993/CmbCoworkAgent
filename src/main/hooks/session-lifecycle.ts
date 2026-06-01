@@ -14,6 +14,9 @@ interface StartedSession {
   workspacePath?: string
   pluginOutputDir?: string
   systemId?: string
+  pluginWorkspace?: string
+  featureId?: string
+  projectCode?: string
   hookScope?: HookScopeController
 }
 
@@ -33,7 +36,8 @@ export function fireSessionStartOnce(
   onHookSkipped?: ScopeSkipCallback,
   turnId?: string,
   pluginOutputDir?: string,
-  systemId?: string
+  systemId?: string,
+  harnessContext?: Pick<HookContext, "pluginWorkspace" | "featureId" | "projectCode">
 ): void {
   const existing = startedSessions.get(threadId)
   if (existing) {
@@ -41,17 +45,29 @@ export function fireSessionStartOnce(
       workspacePath: workspacePath ?? existing.workspacePath,
       pluginOutputDir: pluginOutputDir ?? existing.pluginOutputDir,
       systemId: systemId ?? existing.systemId,
+      pluginWorkspace: harnessContext?.pluginWorkspace ?? existing.pluginWorkspace,
+      featureId: harnessContext?.featureId ?? existing.featureId,
+      projectCode: harnessContext?.projectCode ?? existing.projectCode,
       hookScope: hookScope ?? existing.hookScope
     })
     return
   }
-  startedSessions.set(threadId, { workspacePath, pluginOutputDir, systemId, hookScope })
+  startedSessions.set(threadId, {
+    workspacePath,
+    pluginOutputDir,
+    systemId,
+    pluginWorkspace: harnessContext?.pluginWorkspace,
+    featureId: harnessContext?.featureId,
+    projectCode: harnessContext?.projectCode,
+    hookScope
+  })
   const context: HookContext = {
     workspacePath,
     sessionId: threadId,
     turnId,
     pluginOutputDir,
-    systemId
+    systemId,
+    ...harnessContext
   }
   runHooks(
     resolveEnabledHooksForRun(workspacePath, "SessionStart", context, hookScope, onHookSkipped),
@@ -77,6 +93,9 @@ export async function fireSessionEnd(
     workspacePath: effectiveWorkspacePath,
     pluginOutputDir: effectivePluginOutputDir,
     systemId: started.systemId,
+    pluginWorkspace: started.pluginWorkspace,
+    featureId: started.featureId,
+    projectCode: started.projectCode,
     sessionId: threadId
   }
   await runHooks(
@@ -110,7 +129,10 @@ export async function fireSessionEndAll(
         sessionId: id,
         workspacePath: session.workspacePath,
         pluginOutputDir: session.pluginOutputDir,
-        systemId: session.systemId
+        systemId: session.systemId,
+        pluginWorkspace: session.pluginWorkspace,
+        featureId: session.featureId,
+        projectCode: session.projectCode
       }
       return runHooks(
         resolveEnabledHooksForRun(session.workspacePath, "SessionEnd", context, session.hookScope),

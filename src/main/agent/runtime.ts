@@ -459,6 +459,9 @@ function createScopedMcpCapabilityService(
     turnId?: string
     pluginOutputDir?: string
     systemId?: string
+    pluginWorkspace?: string
+    featureId?: string
+    projectCode?: string
   }
 ): McpCapabilityService {
   const getPluginName = (pluginId: string): string | undefined => {
@@ -503,6 +506,9 @@ function createScopedMcpCapabilityService(
         turnId: baseContext.turnId,
         pluginOutputDir: baseContext.pluginOutputDir,
         systemId: baseContext.systemId,
+        pluginWorkspace: baseContext.pluginWorkspace,
+        featureId: baseContext.featureId,
+        projectCode: baseContext.projectCode,
         pluginId,
         pluginName: pluginId ? getPluginName(pluginId) : undefined
       }
@@ -1790,7 +1796,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         sessionId: threadId,
         turnId: hookTurnId,
         pluginOutputDir,
-        systemId
+        systemId,
+        pluginWorkspace,
+        featureId,
+        projectCode
       }
       runHooks(
         resolveHooksForContext("Notification", notificationContext),
@@ -1931,7 +1940,16 @@ The workspace root is: ${workspacePath}`
     hookScope,
     resolveHooksForContext,
     onHookResult,
-    { workspacePath, threadId, pluginOutputDir, systemId, turnId: hookTurnId }
+    {
+      workspacePath,
+      threadId,
+      pluginOutputDir,
+      systemId,
+      pluginWorkspace,
+      featureId,
+      projectCode,
+      turnId: hookTurnId
+    }
   )
   const codeExecEnabled = isCodeExecEnabled()
   const allMcpTools = await capabilityService.listTools()
@@ -2072,6 +2090,9 @@ The workspace root is: ${workspacePath}`
     onHookResult,
     hookTurnId,
     systemId,
+    pluginWorkspace,
+    featureId,
+    projectCode,
     skipToolNames: toolHookExclusions
   })
 
