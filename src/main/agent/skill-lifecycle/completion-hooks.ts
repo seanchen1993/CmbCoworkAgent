@@ -140,6 +140,9 @@ export async function runPostSkillUseHooksForActivatedSkills({
   turnId,
   pluginOutputDir,
   systemId,
+  pluginWorkspace,
+  featureId,
+  projectCode,
   getStopContext,
   hookScope,
   skillUseTracker,
@@ -153,6 +156,9 @@ export async function runPostSkillUseHooksForActivatedSkills({
   turnId?: string
   pluginOutputDir?: string
   systemId?: string
+  pluginWorkspace?: string
+  featureId?: string
+  projectCode?: string
   getStopContext: () => StopHookContext
   hookScope: HookScopeController
   skillUseTracker?: SkillUseTracker
@@ -176,6 +182,9 @@ export async function runPostSkillUseHooksForActivatedSkills({
       workspacePath,
       pluginOutputDir,
       systemId,
+      pluginWorkspace,
+      featureId,
+      projectCode,
       sessionId: threadId,
       turnId,
       skillName: skill.name,
@@ -216,6 +225,9 @@ export async function runCompletionHooksWithRevision({
   turnId,
   pluginOutputDir,
   systemId,
+  pluginWorkspace,
+  featureId,
+  projectCode,
   abortSignal,
   getStopContext,
   hookScope,
@@ -236,6 +248,9 @@ export async function runCompletionHooksWithRevision({
   turnId?: string
   pluginOutputDir?: string
   systemId?: string
+  pluginWorkspace?: string
+  featureId?: string
+  projectCode?: string
   abortSignal: AbortSignal
   getStopContext: () => StopHookContext
   hookScope: HookScopeController
@@ -262,6 +277,9 @@ export async function runCompletionHooksWithRevision({
           turnId,
           pluginOutputDir,
           systemId,
+          pluginWorkspace,
+          featureId,
+          projectCode,
           getStopContext,
           hookScope,
           skillUseTracker,
@@ -320,6 +338,9 @@ export async function runCompletionHooksWithRevision({
               workspacePath,
               pluginOutputDir,
               systemId,
+              pluginWorkspace,
+              featureId,
+              projectCode,
               sessionId: threadId,
               turnId,
               stopContext: getStopContext()
@@ -332,6 +353,9 @@ export async function runCompletionHooksWithRevision({
             workspacePath,
             pluginOutputDir,
             systemId,
+            pluginWorkspace,
+            featureId,
+            projectCode,
             sessionId: threadId,
             turnId,
             stopContext: getStopContext()

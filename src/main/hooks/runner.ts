@@ -86,6 +86,12 @@ export interface HookContext {
     usedSkills?: string[]
   }
   pluginOutputDir?: string
+  /** Harness plugin workspace exposed to hooks as PLUGIN_WORKSPACE. */
+  pluginWorkspace?: string
+  /** Harness feature identifier exposed to hooks as FEATURE_ID. */
+  featureId?: string
+  /** Harness project code exposed to hooks as PROJECT_CODE. */
+  projectCode?: string
   /**
    * Absolute path to the on-disk conversation history for this session.
    * Exposed to hooks as `transcript_path` in stdin JSON and `TRANSCRIPT_PATH` env.
@@ -344,6 +350,9 @@ function buildHookEnv(
     env.CLAUDE_PROJECT_DIR = context.workspacePath
   }
   if (context.pluginOutputDir) env.PLUGIN_OUTPUT_DIR = context.pluginOutputDir
+  if (context.pluginWorkspace) env.PLUGIN_WORKSPACE = context.pluginWorkspace
+  if (context.featureId) env.FEATURE_ID = context.featureId
+  if (context.projectCode) env.PROJECT_CODE = context.projectCode
   if (context.sessionId) env.SESSION_ID = context.sessionId
   if (context.systemId) env.SYSTEM_ID = context.systemId
   if (context.userPrompt) env.USER_PROMPT = context.userPrompt
@@ -376,6 +385,9 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   if (context.pluginId) payload.plugin_id = context.pluginId
   if (context.pluginName) payload.plugin_name = context.pluginName
   if (context.pluginRoot) payload.plugin_root = context.pluginRoot
+  if (context.pluginWorkspace) payload.plugin_workspace = context.pluginWorkspace
+  if (context.featureId) payload.feature_id = context.featureId
+  if (context.projectCode) payload.project_code = context.projectCode
   if (context.toolResult !== undefined) {
     // Upstream passes JSON.stringify(result); parse it back so hooks see a real object
     // (matches Claude Code spec where tool_response is the structured response).

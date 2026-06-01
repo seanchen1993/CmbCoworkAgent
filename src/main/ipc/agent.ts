@@ -146,6 +146,16 @@ interface HarnessAgentContext {
   projectCode?: string
 }
 
+function getHarnessHookContext(
+  context: HarnessAgentContext
+): Pick<HookContext, "pluginWorkspace" | "featureId" | "projectCode"> {
+  return {
+    pluginWorkspace: context.pluginWorkspace,
+    featureId: context.featureId,
+    projectCode: context.projectCode
+  }
+}
+
 function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgentContext {
   try {
     const featureContext = buildHarnessFeatureAgentContext(metadata)
@@ -301,6 +311,9 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   workspacePath?: string
   pluginOutputDir?: string
   systemId?: string
+  pluginWorkspace?: string
+  featureId?: string
+  projectCode?: string
   threadId: string
   turnId?: string
   hookScope: HookScopeController
@@ -330,6 +343,9 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     workspacePath: params.workspacePath,
     pluginOutputDir: params.pluginOutputDir,
     systemId: params.systemId,
+    pluginWorkspace: params.pluginWorkspace,
+    featureId: params.featureId,
+    projectCode: params.projectCode,
     sessionId: params.threadId,
     turnId: params.turnId,
     subagent: {
@@ -514,6 +530,9 @@ async function activateExplicitSkillFromMessage({
   workspacePath,
   pluginOutputDir,
   systemId,
+  pluginWorkspace,
+  featureId,
+  projectCode,
   sessionId,
   turnId,
   hookScope,
@@ -526,6 +545,9 @@ async function activateExplicitSkillFromMessage({
   workspacePath: string
   pluginOutputDir?: string
   systemId?: string
+  pluginWorkspace?: string
+  featureId?: string
+  projectCode?: string
   sessionId: string
   turnId?: string
   hookScope: HookScopeController
@@ -573,6 +595,9 @@ async function activateExplicitSkillFromMessage({
     workspacePath,
     pluginOutputDir,
     systemId,
+    pluginWorkspace,
+    featureId,
+    projectCode,
     sessionId,
     turnId,
     hookScope,
@@ -1697,6 +1722,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         workspacePath,
         pluginOutputDir: harnessAgentContext.pluginOutputDir,
         systemId: harnessAgentContext.systemId,
+        ...getHarnessHookContext(harnessAgentContext),
         sessionId: threadId,
         turnId: turnState.turnId,
         hookScope,
@@ -1736,7 +1762,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         onHookSkippedFactory("SessionStart"),
         turnState.turnId,
         harnessAgentContext.pluginOutputDir,
-        harnessAgentContext.systemId
+        harnessAgentContext.systemId,
+        getHarnessHookContext(harnessAgentContext)
       )
       sendActiveHookNotice(window, channel, workspacePath)
 
@@ -1749,7 +1776,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         sessionId: threadId,
         turnId: turnState.turnId,
         pluginOutputDir: harnessAgentContext.pluginOutputDir,
-        systemId: harnessAgentContext.systemId
+        systemId: harnessAgentContext.systemId,
+        ...getHarnessHookContext(harnessAgentContext)
       }
       const promptSubmitResult = await runHooksEnriched(
         resolveEnabledHooksForRun(
@@ -2123,6 +2151,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             hookScope,
             pluginOutputDir: harnessAgentContext.pluginOutputDir,
             systemId: harnessAgentContext.systemId,
+            ...getHarnessHookContext(harnessAgentContext),
             firedToolCallIds: _subagentStopFired,
             onHookResult,
             onHookSkipped: onHookSkippedFactory("SubagentStop")
@@ -2410,6 +2439,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 hookScope,
                 pluginOutputDir: harnessAgentContext.pluginOutputDir,
                 systemId: harnessAgentContext.systemId,
+                ...getHarnessHookContext(harnessAgentContext),
                 firedToolCallIds: _subagentStopFired,
                 onHookResult,
                 onHookSkipped: onHookSkippedFactory("SubagentStop")
@@ -2563,6 +2593,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnId: turnState.turnId,
           pluginOutputDir: harnessAgentContext.pluginOutputDir,
           systemId: harnessAgentContext.systemId,
+          ...getHarnessHookContext(harnessAgentContext),
           abortSignal: abortController.signal,
           getStopContext: () =>
             stopContextCollector.snapshot({
@@ -3119,6 +3150,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               hookScope,
               pluginOutputDir: harnessAgentContext.pluginOutputDir,
               systemId: harnessAgentContext.systemId,
+              ...getHarnessHookContext(harnessAgentContext),
               firedToolCallIds: resumeSubagentStopFired,
               onHookResult,
               onHookSkipped: onHookSkippedFactory("SubagentStop")
@@ -3183,6 +3215,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnId: turnState.turnId,
           pluginOutputDir: harnessAgentContext.pluginOutputDir,
           systemId: harnessAgentContext.systemId,
+          ...getHarnessHookContext(harnessAgentContext),
           abortSignal: abortController.signal,
           getStopContext: () => stopContextCollector.snapshot(),
           runRevision: async (revisionPrompt) => {
@@ -3475,6 +3508,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 hookScope,
                 pluginOutputDir: harnessAgentContext.pluginOutputDir,
                 systemId: harnessAgentContext.systemId,
+                ...getHarnessHookContext(harnessAgentContext),
                 firedToolCallIds: interruptSubagentStopFired,
                 onHookResult,
                 onHookSkipped: onHookSkippedFactory("SubagentStop")
@@ -3536,6 +3570,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnId: turnState.turnId,
             pluginOutputDir: harnessAgentContext.pluginOutputDir,
             systemId: harnessAgentContext.systemId,
+            ...getHarnessHookContext(harnessAgentContext),
             abortSignal: abortController.signal,
             getStopContext: () => stopContextCollector.snapshot(),
             runRevision: async (revisionPrompt) => {
