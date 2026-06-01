@@ -1079,11 +1079,15 @@ const api = {
     getEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getEnabled"),
     setEnabled: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("memory:setEnabled", enabled),
+    getDreamEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getDreamEnabled"),
+    setDreamEnabled: (enabled: boolean): Promise<void> =>
+      ipcRenderer.invoke("memory:setDreamEnabled", enabled),
     getStats: (): Promise<{
       fileCount: number
       totalSize: number
       indexSize: number
       enabled: boolean
+      dreamEnabled: boolean
       dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
     }> => ipcRenderer.invoke("memory:getStats"),
     consolidate: (): Promise<{

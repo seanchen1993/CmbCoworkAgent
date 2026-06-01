@@ -2,7 +2,13 @@ import { IpcMain } from "electron"
 import { existsSync, readdirSync, readFileSync, unlinkSync, statSync } from "fs"
 import { join, basename } from "path"
 import { homedir } from "os"
-import { isMemoryEnabled, setMemoryEnabled, getCustomModelConfigs } from "../storage"
+import {
+  isDreamEnabled,
+  isMemoryEnabled,
+  setDreamEnabled,
+  setMemoryEnabled,
+  getCustomModelConfigs
+} from "../storage"
 import { getMemoryStore } from "../memory/store"
 import { removeEntryFromManifest, parseFrontmatter, type MemoryType } from "../memory/manifest"
 import { notifyMemoryChanged } from "../memory/events"
@@ -53,6 +59,7 @@ export interface MemoryStats {
   totalSize: number
   indexSize: number
   enabled: boolean
+  dreamEnabled: boolean
   dreamState: DreamStateInfo
 }
 
@@ -162,11 +169,23 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
     notifyMemoryChanged()
   })
 
+  ipcMain.handle("memory:getDreamEnabled", async (): Promise<boolean> => {
+    return isDreamEnabled()
+  })
+
+  ipcMain.handle("memory:setDreamEnabled", async (_, enabled: boolean): Promise<void> => {
+    setDreamEnabled(enabled)
+    notifyMemoryChanged()
+  })
+
   /**
    * Manual Dream trigger — consolidates memories immediately, returns a result summary.
    * The frontend can call this from a "Consolidate memories" button in MemoryPanel.
    */
   ipcMain.handle("memory:consolidate", async (): Promise<ConsolidateResult> => {
+    if (!isMemoryEnabled() || !isDreamEnabled()) {
+      return { archived: 0, merged: 0, created: 0, skipped: 0 }
+    }
     const allConfigs = getCustomModelConfigs()
     const config = allConfigs[0]
     if (!config?.apiKey) {
@@ -203,6 +222,7 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
       totalSize,
       indexSize,
       enabled: isMemoryEnabled(),
+      dreamEnabled: isDreamEnabled(),
       dreamState: readDreamStateInfo(MEMORY_DIR)
     }
   })

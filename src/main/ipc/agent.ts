@@ -15,6 +15,7 @@ import { getMemoryStore } from "../memory/store"
 import { ChatOpenAI } from "@langchain/openai"
 import {
   getCustomModelConfigs,
+  isDreamEnabled,
   isMemoryEnabled,
   getCustomSkillsDir,
   invalidateEnabledSkillsCache,
@@ -2522,6 +2523,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // Helper: check & trigger Dream consolidation if conditions are met
           const tryTriggerDream = (memoryModel: ChatOpenAI): void => {
             try {
+              if (!isDreamEnabled()) {
+                console.log("[Agent] Dream auto-trigger disabled")
+                return
+              }
               const factCount = scanMemoryFiles(memDir).length
               if (shouldRunDream(memDir, factCount)) {
                 console.log("[Agent] Dream auto-trigger: conditions met, starting consolidation")

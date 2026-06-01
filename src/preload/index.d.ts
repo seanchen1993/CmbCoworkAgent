@@ -639,11 +639,14 @@ interface CustomAPI {
     deleteFile: (name: string) => Promise<void>
     getEnabled: () => Promise<boolean>
     setEnabled: (enabled: boolean) => Promise<void>
+    getDreamEnabled: () => Promise<boolean>
+    setDreamEnabled: (enabled: boolean) => Promise<void>
     getStats: () => Promise<{
       fileCount: number
       totalSize: number
       indexSize: number
       enabled: boolean
+      dreamEnabled: boolean
       dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
     }>
     consolidate: () => Promise<{

@@ -48,6 +48,7 @@ interface MemoryStats {
   totalSize: number
   indexSize: number
   enabled: boolean
+  dreamEnabled: boolean
   dreamState: DreamStateInfo
 }
 
@@ -164,6 +165,7 @@ export function MemoryPanel(): React.JSX.Element {
   const [fileContent, setFileContent] = useState("")
   const [stats, setStats] = useState<MemoryStats | null>(null)
   const [enabled, setEnabled] = useState(true)
+  const [dreamEnabled, setDreamEnabled] = useState(true)
   const [dreamRunning, setDreamRunning] = useState(false)
   const [dreamResult, setDreamResult] = useState<DreamResult | null>(null)
   const mountedRef = useRef(true)
@@ -186,6 +188,7 @@ export function MemoryPanel(): React.JSX.Element {
       setFiles(fileList)
       setStats(memStats)
       setEnabled(memStats.enabled)
+      setDreamEnabled(memStats.dreamEnabled)
       setSelectedFile((prev) => {
         if (!prev) return null
         return fileList.find((f) => f.name === prev.name) ?? null
@@ -225,14 +228,34 @@ export function MemoryPanel(): React.JSX.Element {
     try {
       const next = !enabled
       await window.api.memory.setEnabled(next)
-      if (mountedRef.current) setEnabled(next)
+      if (mountedRef.current) {
+        setEnabled(next)
+        if (!next) setDreamEnabled(false)
+        setStats((prev) =>
+          prev ? { ...prev, enabled: next, dreamEnabled: next ? prev.dreamEnabled : false } : prev
+        )
+      }
     } catch (e) {
       console.error(e)
     }
   }, [enabled])
 
+  const handleToggleDreamEnabled = useCallback(async () => {
+    if (!enabled) return
+    try {
+      const next = !dreamEnabled
+      await window.api.memory.setDreamEnabled(next)
+      if (mountedRef.current) {
+        setDreamEnabled(next)
+        setStats((prev) => (prev ? { ...prev, dreamEnabled: next } : prev))
+      }
+    } catch (e) {
+      console.error(e)
+    }
+  }, [enabled, dreamEnabled])
+
   const handleDream = useCallback(async () => {
-    if (dreamRunning) return
+    if (dreamRunning || !enabled || !dreamEnabled) return
     setDreamRunning(true)
     setDreamResult(null)
     try {
@@ -246,7 +269,7 @@ export function MemoryPanel(): React.JSX.Element {
     } finally {
       if (mountedRef.current) setDreamRunning(false)
     }
-  }, [dreamRunning, loadData])
+  }, [dreamRunning, enabled, dreamEnabled, loadData])
 
   const handleDelete = useCallback(
     async (file: MemoryFile) => {
@@ -279,17 +302,33 @@ export function MemoryPanel(): React.JSX.Element {
                 )}
                 onClick={handleToggleEnabled}
               >
-                {enabled ? "已启用" : "已禁用"}
+                记忆 {enabled ? "已启用" : "已禁用"}
+              </button>
+              <button
+                className={cn(
+                  "text-xs px-2 py-0.5 rounded-full border transition-colors",
+                  enabled && dreamEnabled
+                    ? "bg-purple-500/10 border-purple-500/30 text-purple-500"
+                    : "bg-muted border-border text-muted-foreground",
+                  !enabled && "cursor-not-allowed"
+                )}
+                onClick={handleToggleDreamEnabled}
+                disabled={!enabled}
+                title={
+                  enabled ? "控制自动 Dream 整合与手动 Dream 按钮" : "开启记忆后才能启用 Dream"
+                }
+              >
+                Dream {enabled && dreamEnabled ? "已启用" : "已禁用"}
               </button>
               <button
                 className={cn(
                   "flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border transition-colors",
-                  dreamRunning
+                  dreamRunning || !enabled || !dreamEnabled
                     ? "bg-muted border-border text-muted-foreground cursor-not-allowed"
                     : "bg-purple-500/10 border-purple-500/30 text-purple-500 hover:bg-purple-500/20"
                 )}
                 onClick={handleDream}
-                disabled={dreamRunning}
+                disabled={dreamRunning || !enabled || !dreamEnabled}
                 title="对记忆进行 Dream 整合：合并重复条目、提炼模式、归档过期内容"
               >
                 {dreamRunning ? (
@@ -320,7 +359,11 @@ export function MemoryPanel(): React.JSX.Element {
 
           <div className="flex items-center gap-1.5 px-2 py-1.5 rounded-md bg-muted/50 text-xs text-muted-foreground">
             <Info className="size-3.5 shrink-0" />
-            <span>记忆系统会自动总结对话并在后续会话中回忆</span>
+            <span>
+              {enabled
+                ? "记忆系统会自动总结对话并在后续会话中回忆"
+                : "记忆系统已关闭，不会总结、检索或注入记忆"}
+            </span>
           </div>
           {stats && (
             <div className="flex items-center gap-3 px-2 text-[10px] text-muted-foreground">
@@ -328,7 +371,8 @@ export function MemoryPanel(): React.JSX.Element {
               <span>{formatSize(stats.totalSize)}</span>
               <span>索引 {formatSize(stats.indexSize)}</span>
               <span className="ml-auto">
-                整合: {formatDreamAge(stats.dreamState.lastRunAt)}
+                Dream {stats.dreamEnabled ? "开启" : "关闭"} · 整合:{" "}
+                {formatDreamAge(stats.dreamState.lastRunAt)}
                 {stats.dreamState.sessionsSinceLastRun > 0 &&
                   ` · ${stats.dreamState.sessionsSinceLastRun} 次对话`}
               </span>

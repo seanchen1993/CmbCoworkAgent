@@ -288,19 +288,49 @@ export function setSkillEvolutionThreshold(value: number): void {
 
 const MEMORY_SETTINGS_FILE = join(OPENWORK_DIR, "memory-settings.json")
 
-export function isMemoryEnabled(): boolean {
-  if (!existsSync(MEMORY_SETTINGS_FILE)) return true
+interface MemorySettings {
+  enabled?: boolean
+  dreamEnabled?: boolean
+}
+
+function readMemorySettings(): MemorySettings {
+  if (!existsSync(MEMORY_SETTINGS_FILE)) return {}
   try {
-    const parsed = JSON.parse(readFileSync(MEMORY_SETTINGS_FILE, "utf-8"))
-    return parsed.enabled !== false
+    return JSON.parse(readFileSync(MEMORY_SETTINGS_FILE, "utf-8")) as MemorySettings
   } catch {
-    return true
+    return {}
   }
 }
 
-export function setMemoryEnabled(enabled: boolean): void {
+function writeMemorySettings(settings: MemorySettings): void {
   getOpenworkDir()
-  writeFileSync(MEMORY_SETTINGS_FILE, JSON.stringify({ enabled }, null, 2))
+  writeFileSync(MEMORY_SETTINGS_FILE, JSON.stringify(settings, null, 2))
+}
+
+export function isMemoryEnabled(): boolean {
+  return readMemorySettings().enabled !== false
+}
+
+export function setMemoryEnabled(enabled: boolean): void {
+  const current = readMemorySettings()
+  writeMemorySettings({
+    enabled,
+    dreamEnabled: enabled ? current.dreamEnabled !== false : false
+  })
+}
+
+export function isDreamEnabled(): boolean {
+  const current = readMemorySettings()
+  return current.enabled !== false && current.dreamEnabled !== false
+}
+
+export function setDreamEnabled(enabled: boolean): void {
+  const current = readMemorySettings()
+  const memoryEnabled = current.enabled !== false
+  writeMemorySettings({
+    enabled: memoryEnabled,
+    dreamEnabled: memoryEnabled && enabled
+  })
 }
 
 // ── Agent auto-commit settings ───────────────────────────────────────────────
