@@ -100,6 +100,12 @@ function traceEvolverBaseUrl(): string {
   return isLocalDebugEndpointEnabled() ? TRACE_EVOLVER_LOCAL_DEBUG_URL : TRACE_EVOLVER_CONFIGURED_BASE_URL
 }
 
+function traceEvolverNoCacheUrl(path: string): string {
+  const url = new URL(`${traceEvolverBaseUrl()}${path}`)
+  url.searchParams.set("_", Date.now().toString())
+  return url.toString()
+}
+
 function shouldUseDevMock(error: unknown): boolean {
   return USE_DEV_MOCK && !isLocalDebugEndpointEnabled() && isNetworkError(error)
 }
@@ -358,6 +364,10 @@ function filterAvailableUpdates(
       if (!installed) return false
       return compareEvolutionVersions(candidate.target_version, installed.version) > 0
     })
+    .map((candidate) => {
+      const record = adopted.get(candidate.candidate_id)
+      return record ? withAdoptionRecord(candidate, record) : candidate
+    })
 
   const latestBySkill = new Map<string, EvolutionCandidate>()
   for (const candidate of available) {
@@ -369,7 +379,17 @@ function filterAvailableUpdates(
 
   for (const record of adopted.values()) {
     if (ignored.has(record.candidate_id)) continue
-    latestBySkill.set(record.skill_name, candidateFromAdoptionRecord(record))
+    const current = latestBySkill.get(record.skill_name)
+    if (!current) {
+      latestBySkill.set(record.skill_name, candidateFromAdoptionRecord(record))
+      continue
+    }
+    if (
+      current.candidate_id === record.candidate_id &&
+      compareEvolutionVersions(record.target_version, current.target_version) >= 0
+    ) {
+      latestBySkill.set(record.skill_name, candidateFromAdoptionRecord(record))
+    }
   }
 
   return [...latestBySkill.values()].sort((a, b) => {
@@ -460,8 +480,10 @@ function candidateFromAdoptionRecord(record: EvolutionAdoptionRecord): Evolution
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${traceEvolverBaseUrl()}${path}`, {
     ...init,
+    cache: init?.cache ?? "no-store",
     headers: {
       "Content-Type": "application/json",
+      "Cache-Control": "no-cache",
       ...(init?.headers || {})
     }
   })
@@ -555,7 +577,10 @@ export const evolutionApi = {
 
   async getDiff(candidateId: string): Promise<string> {
     try {
-      const response = await fetch(`${traceEvolverBaseUrl()}/evolution/candidates/${encodeURIComponent(candidateId)}/diff`)
+      const response = await fetch(
+        traceEvolverNoCacheUrl(`/evolution/candidates/${encodeURIComponent(candidateId)}/diff`),
+        { cache: "no-store", headers: { "Cache-Control": "no-cache" } }
+      )
       if (!response.ok) {
         throw new Error(`Failed to load diff: ${response.status}`)
       }
@@ -568,7 +593,10 @@ export const evolutionApi = {
 
   async downloadCandidateBundle(candidateId: string): Promise<{ blob: Blob; filename: string }> {
     try {
-      const response = await fetch(`${traceEvolverBaseUrl()}/evolution/candidates/${encodeURIComponent(candidateId)}/bundle.zip`)
+      const response = await fetch(
+        traceEvolverNoCacheUrl(`/evolution/candidates/${encodeURIComponent(candidateId)}/bundle.zip`),
+        { cache: "no-store", headers: { "Cache-Control": "no-cache" } }
+      )
       if (!response.ok) {
         throw new Error(`Failed to download candidate bundle: ${response.status}`)
       }
@@ -584,7 +612,10 @@ export const evolutionApi = {
 
   async downloadCandidateBaseBundle(candidateId: string): Promise<{ blob: Blob; filename: string }> {
     try {
-      const response = await fetch(`${traceEvolverBaseUrl()}/evolution/candidates/${encodeURIComponent(candidateId)}/base-bundle.zip`)
+      const response = await fetch(
+        traceEvolverNoCacheUrl(`/evolution/candidates/${encodeURIComponent(candidateId)}/base-bundle.zip`),
+        { cache: "no-store", headers: { "Cache-Control": "no-cache" } }
+      )
       if (!response.ok) {
         throw new Error(`Failed to download candidate base bundle: ${response.status}`)
       }

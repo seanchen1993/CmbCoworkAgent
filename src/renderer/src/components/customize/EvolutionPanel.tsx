@@ -43,7 +43,6 @@ import {
   buildBundleUnifiedDiff,
   createMergedTextBundleZip,
   createTextBundleZip,
-  ensureSkillEvolverMarker,
   extractTextBundleFromZip,
   type TextBundleFile
 } from "@/lib/skill-bundle-diff"
@@ -1006,9 +1005,9 @@ function CandidateCard({
       <SkillBundleMergeEditor
         open={editorOpen}
         title={`编辑优化候选：${candidate.name}`}
-        description="编辑最终写入本地的 SKILL.md，保存时会自动写入自进化标识。"
+        description="编辑最终写入本地的 SKILL.md。"
         baseFiles={oldContent ? [{ path: "SKILL.md", content: oldContent }] : []}
-        initialFiles={[{ path: "SKILL.md", content: ensureSkillEvolverMarker(candidate.proposedContent) }]}
+        initialFiles={[{ path: "SKILL.md", content: candidate.proposedContent }]}
         confirmLabel="采纳编辑版"
         saving={loading}
         onOpenChange={setEditorOpen}
@@ -1337,7 +1336,7 @@ function CloudEvolutionUpdateCard({
       <SkillBundleMergeEditor
         open={editorOpen}
         title={`编辑云端自进化版本：${candidate.skill_name}`}
-        description="编辑最终安装到本地的文件内容，保存时会自动写入自进化标识。"
+        description="编辑最终安装到本地的文件内容。"
         baseFiles={editorBaseFiles}
         initialFiles={editorInitialFiles}
         confirmLabel="安装编辑版"
