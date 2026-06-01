@@ -277,6 +277,13 @@ export interface HarnessArtifact {
   }
 }
 
+export type HarnessEventStatus =
+  | "success"
+  | "blocked"
+  | "skipped"
+  | "error"
+  | "unknown"
+
 export interface HarnessHookLogView {
   ts: string
   source: string
@@ -284,7 +291,7 @@ export interface HarnessHookLogView {
   pluginId: string
   featureId: string
   eventId: string
-  resultCode: "done" | "blocked" | "skipped" | "error" | string
+  eventStatus: HarnessEventStatus
   message: string
   nodeId: string
 }

@@ -62,6 +62,7 @@ import { toast } from "sonner"
 import type {
   HarnessArtifact,
   HarnessArtifactType,
+  HarnessEventStatus,
   HarnessHookLogView,
   HarnessProjectCreateInput,
   HarnessProjectDetailViewModel,
@@ -1649,7 +1650,7 @@ function HookLine({
   hook: HarnessHookLogView
   onSelectSession?: (threadId: string) => void
 }): React.JSX.Element {
-  const status = hookResultStatus(hook.resultCode)
+  const status = eventStatusDisplay(hook.eventStatus)
   const canSelectSession = Boolean(hook.sessionId && onSelectSession)
   const metaItems = [hook.ts].filter((item): item is string => Boolean(item))
 
@@ -1674,8 +1675,8 @@ function HookLine({
         <div className="flex min-w-0 items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="truncate font-medium" title={hook.eventId}>{hook.eventId}</div>
-            <div className="mt-1 truncate text-xs text-muted-foreground" title={hook.resultCode}>
-              {hook.resultCode}
+            <div className="mt-1 truncate text-xs text-muted-foreground" title={hook.eventStatus}>
+              {hook.eventStatus}
             </div>
           </div>
           <StatusPill status={status} />
@@ -1695,9 +1696,9 @@ function HookLine({
   )
 }
 
-function hookResultStatus(resultCode: string): HarnessStatus {
-  switch (resultCode) {
-    case "done":
+function eventStatusDisplay(eventStatus: HarnessEventStatus): HarnessStatus {
+  switch (eventStatus) {
+    case "success":
       return { label: "通过", uiKind: "ok" }
     case "blocked":
       return { label: "阻断", uiKind: "blocked" }
@@ -1706,7 +1707,7 @@ function hookResultStatus(resultCode: string): HarnessStatus {
     case "error":
       return { label: "异常", uiKind: "blocked" }
     default:
-      return { label: resultCode || "未知", uiKind: "unknown" }
+      return { label: "未知", uiKind: "unknown" }
   }
 }
 

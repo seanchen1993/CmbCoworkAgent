@@ -14,6 +14,7 @@ import type {
   HarnessArtifactStatus,
   HarnessArtifactType,
   HarnessBoardCompatibility,
+  HarnessEventStatus,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
   HarnessNodeStatus,
@@ -125,6 +126,14 @@ const HARNESS_ARTIFACT_STATUSES = new Set<HarnessArtifactStatus>([
   "missing",
   "partial",
   "invalid",
+  "unknown"
+])
+
+const HARNESS_EVENT_STATUSES = new Set<HarnessEventStatus>([
+  "success",
+  "blocked",
+  "skipped",
+  "error",
   "unknown"
 ])
 
@@ -731,6 +740,13 @@ function normalizeArtifactStatus(value: unknown): HarnessArtifactStatus {
     : UNKNOWN_ARTIFACT_STATUS
 }
 
+function normalizeEventStatus(value: unknown): HarnessEventStatus {
+  const eventStatus = normalizeText(value)
+  return HARNESS_EVENT_STATUSES.has(eventStatus as HarnessEventStatus)
+    ? (eventStatus as HarnessEventStatus)
+    : "unknown"
+}
+
 function statusFromArtifactStatus(
   artifactStatus: HarnessArtifactStatus,
   definition?: HarnessWorkflowArtifactDefinition
@@ -1001,10 +1017,21 @@ function normalizeHook(value: unknown): HarnessRunNode["hooks"][number] | null {
     pluginId: normalizeText(value.pluginId),
     featureId: normalizeText(value.featureId),
     eventId,
-    resultCode: normalizeText(value.resultCode),
+    eventStatus: normalizeEventStatus(value.eventStatus),
     message: normalizeText(value.message),
     nodeId: normalizeText(value.nodeId)
   }
+}
+
+function hookTimestampValue(hook: HarnessRunNode["hooks"][number]): number {
+  const normalized = hook.ts.trim().replace(" ", "T")
+  const value = Date.parse(normalized)
+  return Number.isFinite(value) ? value : 0
+}
+
+function compareHooksByLatestFirst(a: HarnessHookLogEntry, b: HarnessHookLogEntry): number {
+  const diff = hookTimestampValue(b.hook) - hookTimestampValue(a.hook)
+  return diff !== 0 ? diff : b.hook.ts.localeCompare(a.hook.ts)
 }
 
 function normalizeHookLogRefs(
@@ -1057,7 +1084,7 @@ function readHookLogRefs(
     }
   }
 
-  return entries
+  return entries.sort(compareHooksByLatestFirst)
 }
 
 function applyHookLogEntries(
