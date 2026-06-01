@@ -159,6 +159,17 @@ function OpenInIdeButton({
 
   const canOpen = !fileMissing && (Boolean(workspacePath) || isAbsolutePath(filePath))
   const hint = fileMissing ? "删除的文件无法打开" : opening ? "正在打开..." : "在本地 IDE 打开"
+  const popoverContent =
+    fileMissing || opening ? (
+      hint
+    ) : (
+      <div className="space-y-1">
+        <div>在本地 IDE 打开</div>
+        <div className="text-muted-foreground">
+          如果当前 IDE 尚未打开，首次唤起可能稍慢，请耐心等待。
+        </div>
+      </div>
+    )
 
   React.useEffect(() => {
     if (preferredIde) {
@@ -284,7 +295,8 @@ function OpenInIdeButton({
             <SquareArrowOutUpRight className="size-3" />
           )
         }
-        popoverContent={hint}
+        popoverContent={popoverContent}
+        popoverClassName="max-w-64"
         disabled={!canOpen || opening || loading}
         aria-label={hint}
         align={align}
