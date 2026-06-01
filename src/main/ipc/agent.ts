@@ -1923,6 +1923,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       const normalizeMessageText = (s: string): string => s.replace(/\r\n/g, "\n").trim()
 
+      const stableJson = (value: unknown): string => {
+        if (value === null || value === undefined) return String(value)
+        if (typeof value !== "object") return JSON.stringify(value)
+        if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`
+        const obj = value as Record<string, unknown>
+        return `{${Object.keys(obj)
+          .sort()
+          .map((key) => `${JSON.stringify(key)}:${stableJson(obj[key])}`)
+          .join(",")}}`
+      }
+
       // Providers may surface usage as top-level `usage_metadata` or under
       // `response_metadata.token_usage` / `response_metadata.usage`.
       // Normalize all variants so trace capture and UI stay aligned.
@@ -2197,9 +2208,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const className = classId[classId.length - 1] || ""
             const isAI = className.includes("AI") || kwargs.type === "ai"
             const isToolMessage = className.includes("Tool") || kwargs.type === "tool"
-            const aiMsgId = typeof kwargs.id === "string" ? kwargs.id : ""
-            if (isAI && aiMsgId && !_countedModelMsgIds.has(aiMsgId)) {
-              _countedModelMsgIds.add(aiMsgId)
+            const rawAiMsgId = typeof kwargs.id === "string" ? kwargs.id : ""
+            const aiMsgKey = rawAiMsgId || `values:${i}:${stableJson(tcs ?? [])}`
+            if (isAI && !_countedModelMsgIds.has(aiMsgKey)) {
+              _countedModelMsgIds.add(aiMsgKey)
 
               // Extract the real model name from API response metadata (e.g. "MiniMax-M2.7")
               // This takes precedence over the user-configured model name (config.model)
@@ -2232,14 +2244,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 : []
 
               const llmNodeId = tracer.beginLlmNode({
-                messageId: aiMsgId,
+                messageId: aiMsgKey,
                 startedAt: nowIsoLocal(),
                 input: inputSlice,
                 metadata: {
+                  ...(rawAiMsgId ? { providerMessageId: rawAiMsgId } : {}),
                   toolCallCount: outputToolCalls.length
                 }
               })
-              _llmNodeByMessageId.set(aiMsgId, llmNodeId)
+              _llmNodeByMessageId.set(aiMsgKey, llmNodeId)
 
               const usageForTrace = normalizeTokenUsage(getUsageMetadata(kwargs))
 
@@ -2249,7 +2262,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
 
               tracer.recordModelCall({
-                messageId: aiMsgId,
+                messageId: rawAiMsgId || aiMsgKey,
                 startedAt: nowIsoLocal(),
                 inputMessages: inputSlice,
                 outputMessage: {
@@ -2274,16 +2287,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               for (let tcIndex = 0; tcIndex < tcs.length; tcIndex++) {
                 const tc = tcs[tcIndex]
                 const tcId = typeof tc?.id === "string" ? tc.id : ""
-                const toolRef =
-                  tcId || `${aiMsgId || "ai_unknown"}:${tcIndex}:${JSON.stringify(tc?.args ?? {})}`
-                const counted = toolCallCounter.register(tc, aiMsgId, tcIndex)
+                const toolRef = tcId || `${aiMsgKey}:${tcIndex}:${JSON.stringify(tc?.args ?? {})}`
+                const counted = toolCallCounter.register(tc, aiMsgKey, tcIndex)
                 if (!_toolNodeByRef.has(toolRef)) {
-                  const parentId = aiMsgId ? _llmNodeByMessageId.get(aiMsgId) : undefined
+                  const parentId = _llmNodeByMessageId.get(aiMsgKey)
                   const toolNodeId = tracer.addToolNode({
                     name: tc?.name ?? "unknown",
                     input: tc?.args ?? {},
                     parentId,
-                    llmMessageId: aiMsgId || undefined,
+                    llmMessageId: aiMsgKey,
                     toolCallId: tcId || undefined,
                     metadata: { index: tcIndex }
                   })

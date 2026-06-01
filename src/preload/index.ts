@@ -2026,6 +2026,25 @@ const api = {
       skillName: string
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillUserStats", range, granularity, skillName),
+    skillEvalSummary: (
+      range: { from: string; to: string },
+      options?: {
+        limit?: number
+        recentPage?: number
+        recentPageSize?: number
+        skillPage?: number
+        skillPageSize?: number
+        skillSearch?: string
+        skillName?: string
+        skillVersion?: string
+        skillNames?: string[]
+        defaultRecentToLatestSkill?: boolean
+        recentOnly?: boolean
+        listOnly?: boolean
+        statsOnly?: boolean
+      }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:skillEvalSummary", range, options),
     userProfiles: (
       sapIds: string[]
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -2045,15 +2064,15 @@ const api = {
     skillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      options?: number | { page?: number; pageSize?: number }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit),
+      ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, options),
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      options?: number | { page?: number; pageSize?: number }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:marketSkillRecentTraces", skill, range, limit),
+      ipcRenderer.invoke("dashboard:marketSkillRecentTraces", skill, range, options),
     skillDetail: (
       skill: string,
       range: { from: string; to: string },

@@ -3,6 +3,7 @@ import type { EvolutionCandidate } from "@/api/evolution"
 import type { Thread, ModelConfig, Provider } from "@/types"
 
 type EvolutionTab = "candidates" | "traces" | "review"
+type MainView = "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard"
 
 interface EvolutionRunProgress {
   runId: string
@@ -16,7 +17,7 @@ interface EvolutionRunProgress {
 
 interface AppState {
   // Main content view routing
-  mainView: "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard"
+  mainView: MainView
 
   // Threads
   threads: Thread[]
@@ -95,9 +96,7 @@ interface AppState {
   setMarketInitialSkillDetailName: (name: string | null) => void
   setMarketInitialSkillFilters: (filters: string[] | null) => void
   setMarketInitialTab: (tab: string | null) => void
-  setMainView: (
-    view: "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard"
-  ) => void
+  setMainView: (view: MainView) => void
 
   // Plugin state sync — increment to trigger RightPanel refresh
   pluginVersion: number
@@ -449,6 +448,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showKanbanView: true,
         showCustomizeView: false,
         showClaudeCodeView: false,
+        showDashboardView: false,
         currentThreadId: null
       })
       return
@@ -459,7 +459,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         mainView: "customize",
         showCustomizeView: true,
         showKanbanView: false,
-        showClaudeCodeView: false
+        showClaudeCodeView: false,
+        showDashboardView: false
       })
       return
     }
@@ -470,7 +471,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         showCustomizeView: true,
         showKanbanView: false,
         showClaudeCodeView: false,
-        customizeInitialTab: "evolution"
+        customizeInitialTab: "evolution",
+        showDashboardView: false
       })
       return
     }
@@ -496,6 +498,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showClaudeCodeView: true,
         showCustomizeView: false,
         showKanbanView: false,
+        showDashboardView: false,
         previousThreadId: prev,
         currentThreadId: null
       })
@@ -508,6 +511,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       showCustomizeView: false,
       showKanbanView: false,
       showClaudeCodeView: false,
+      showDashboardView: false,
       ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
     })
   },
