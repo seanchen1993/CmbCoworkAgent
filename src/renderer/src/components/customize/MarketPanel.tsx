@@ -528,6 +528,7 @@ type SkillPreviewKind = "text" | "html" | "image" | "pdf"
 interface PluginDetailData {
   skills: string[]
   mcpServers: string[]
+  mcpServerDetails: Awaited<ReturnType<typeof window.api.plugins.getDetail>>["mcpServerDetails"]
   hookCount: number
   hooks: Array<Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]>
   manifest: PluginManifest | null
@@ -1494,6 +1495,7 @@ export function MarketPanel(): React.JSX.Element {
         setPluginDetailData({
           skills: [],
           mcpServers: [],
+          mcpServerDetails: [],
           hookCount: 0,
           hooks: [],
           manifest: {

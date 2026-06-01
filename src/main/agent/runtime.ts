@@ -114,7 +114,12 @@ import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
 import { classifyCommandConcurrency } from "./exec-policy"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
-import type { McpCapabilityService, McpCapabilityTool } from "../mcp/capability-types"
+import type {
+  McpCapabilityService,
+  McpCapabilityTool,
+  McpInvocationResult
+} from "../mcp/capability-types"
+import { buildAliasMaps, buildScopedToolAliases } from "../mcp/aliasing"
 import {
   closeGlobalMcpCapabilityService,
   getGlobalMcpCapabilityService
@@ -452,7 +457,45 @@ function createEagerMcpTools(
   return tools.map((tool) => createEagerMcpTool(capabilityService, tool))
 }
 
-function createScopedMcpCapabilityService(
+export function isRetryableMcpTransportError(error: unknown): boolean {
+  const record =
+    error && typeof error === "object" ? (error as Record<string, unknown>) : undefined
+  const code = typeof record?.code === "string" ? record.code.toUpperCase() : ""
+  if (
+    [
+      "ECONNRESET",
+      "ECONNREFUSED",
+      "ECONNABORTED",
+      "ENOTFOUND",
+      "EAI_AGAIN",
+      "ETIMEDOUT",
+      "EPIPE"
+    ].includes(code)
+  ) {
+    return true
+  }
+
+  const status =
+    typeof record?.status === "number"
+      ? record.status
+      : typeof record?.statusCode === "number"
+        ? record.statusCode
+        : undefined
+  if (status === 502 || status === 503 || status === 504) return true
+
+  const message = error instanceof Error ? error.message : ""
+  return (
+    /\b(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EPIPE)\b/i.test(
+      message
+    ) ||
+    /\b(?:502|503|504)\b/.test(message) ||
+    /\b(?:timeout|timed?\s+out)\b/i.test(message) ||
+    /\b(?:terminated|disconnected)\b/i.test(message) ||
+    /\bservice\s+unavailable\b/i.test(message)
+  )
+}
+
+export function createScopedMcpCapabilityService(
   service: McpCapabilityService,
   hookScope: HookScopeController,
   resolveHooksForContext: (
@@ -462,6 +505,137 @@ function createScopedMcpCapabilityService(
   onHookResult: HookResultCallback | undefined,
   baseContext: { workspacePath: string; threadId: string; turnId?: string }
 ): McpCapabilityService {
+  const getEffectivePriority = (tool: McpCapabilityTool): number => {
+    return tool.priority ?? (tool.sourceKind === "connector" ? 100 : 50)
+  }
+
+  let scopedSnapshotCache:
+    | {
+        key: string
+        tools: McpCapabilityTool[]
+        maps: ReturnType<typeof buildAliasMaps>
+      }
+    | null = null
+  let baseSnapshotCache: { fingerprint: string; tools: McpCapabilityTool[] } | null = null
+
+  const getActivePluginKey = (): string => {
+    return [...hookScope.activePluginIds].sort().join("\u001f")
+  }
+
+  const getBaseToolSnapshot = async (): Promise<{
+    fingerprint: string
+    tools: McpCapabilityTool[]
+  }> => {
+    if (baseSnapshotCache) {
+      return { fingerprint: baseSnapshotCache.fingerprint, tools: [...baseSnapshotCache.tools] }
+    }
+
+    let snapshot: { fingerprint: string; tools: McpCapabilityTool[] }
+    if (service.getSnapshot) {
+      snapshot = await service.getSnapshot()
+    } else {
+      const tools = await service.listTools()
+      snapshot = {
+        fingerprint: tools.map((tool) => tool.capabilityId).sort().join("\u001f"),
+        tools
+      }
+    }
+    baseSnapshotCache = { fingerprint: snapshot.fingerprint, tools: [...snapshot.tools] }
+    return { fingerprint: snapshot.fingerprint, tools: [...snapshot.tools] }
+  }
+
+  const getScopedToolSnapshot = async (): Promise<{
+    tools: McpCapabilityTool[]
+    maps: ReturnType<typeof buildAliasMaps>
+  }> => {
+    const baseSnapshot = await getBaseToolSnapshot()
+    const cacheKey = `${baseSnapshot.fingerprint}\u001e${getActivePluginKey()}`
+    if (scopedSnapshotCache?.key === cacheKey) {
+      return { tools: [...scopedSnapshotCache.tools], maps: scopedSnapshotCache.maps }
+    }
+
+    const tools = baseSnapshot.tools.map((tool) => {
+      const pluginId = extractPluginIdFromProviderKey(tool.providerKey)
+      const isInactiveScopedPlugin =
+        tool.scope === "plugin-active" &&
+        pluginId &&
+        !hookScope.activePluginIds.has(pluginId.toLowerCase())
+      return isInactiveScopedPlugin ? { ...tool, visibility: "lazy" as const } : tool
+    })
+    const scopedTools = buildScopedToolAliases(tools, getEffectivePriority)
+    const maps = buildAliasMaps(scopedTools)
+    scopedSnapshotCache = { key: cacheKey, tools: scopedTools, maps }
+    return { tools: [...scopedTools], maps }
+  }
+
+  const resolveScopedTool = async (idOrAlias: string): Promise<McpCapabilityTool | null> => {
+    const { maps } = await getScopedToolSnapshot()
+    return (
+      maps.capabilityById.get(idOrAlias) ??
+      maps.toolIds.get(idOrAlias) ??
+      maps.canonicalToolIds.get(idOrAlias) ??
+      service.getTool(idOrAlias)
+    )
+  }
+
+  const stableSchemaStringify = (value: unknown): string => {
+    if (!value || typeof value !== "object") return JSON.stringify(value)
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => stableSchemaStringify(item)).join(",")}]`
+    }
+    const record = value as Record<string, unknown>
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableSchemaStringify(record[key])}`)
+      .join(",")}}`
+  }
+
+  const schemasCompatible = (
+    left: Record<string, unknown> | undefined,
+    right: Record<string, unknown> | undefined,
+    strict: boolean
+  ): boolean => {
+    if (!strict) return true
+    return stableSchemaStringify(left ?? {}) === stableSchemaStringify(right ?? {})
+  }
+
+  const findFallbackTool = (
+    tool: McpCapabilityTool,
+    tools: McpCapabilityTool[]
+  ): McpCapabilityTool | null => {
+    if (!tool.fallback?.enabled || tool.fallback.safeToRetry !== true || tool.fallback.to !== "global") {
+      return null
+    }
+    const strict = (tool.fallback.match ?? "toolNameAndSchema") === "toolNameAndSchema"
+    return (
+      tools.find(
+        (candidate) =>
+          candidate.sourceKind === "connector" &&
+          candidate.toolName === tool.toolName &&
+          schemasCompatible(tool.inputSchema, candidate.inputSchema, strict)
+      ) ?? null
+    )
+  }
+
+  const shouldFallbackMcpError = isRetryableMcpTransportError
+
+  const appendFallbackNotice = (
+    result: McpInvocationResult,
+    fromTool: McpCapabilityTool,
+    fallbackTool: McpCapabilityTool
+  ) => {
+    const notice = `[MCP fallback] ${fromTool.toolId} failed; used ${fallbackTool.toolId}.`
+    return {
+      ...result,
+      capabilityId: fromTool.capabilityId,
+      fallbackCapabilityId: fallbackTool.capabilityId,
+      text: result.text ? `${result.text}\n\n${notice}` : notice,
+      contentBlocks: result.contentBlocks
+        ? [...result.contentBlocks, { type: "text", text: notice }]
+        : result.contentBlocks
+    }
+  }
+
   const getPluginName = (pluginId: string): string | undefined => {
     try {
       return getPlugins().find((plugin) => plugin.id === pluginId)?.name
@@ -489,10 +663,23 @@ function createScopedMcpCapabilityService(
   }
 
   return {
-    listTools: () => service.listTools(),
-    getTool: (idOrAlias) => service.getTool(idOrAlias),
+    listTools: async () => (await getScopedToolSnapshot()).tools,
+    getSnapshot: async () => {
+      const baseSnapshot = await getBaseToolSnapshot()
+      const scopedSnapshot = await getScopedToolSnapshot()
+      return {
+        fingerprint: `${baseSnapshot.fingerprint}\u001e${getActivePluginKey()}`,
+        tools: scopedSnapshot.tools
+      }
+    },
+    getTool: resolveScopedTool,
     invoke: async (idOrAlias, args) => {
-      const tool = await service.getTool(idOrAlias)
+      const snapshot = await getScopedToolSnapshot()
+      const tool =
+        snapshot.maps.capabilityById.get(idOrAlias) ??
+        snapshot.maps.toolIds.get(idOrAlias) ??
+        snapshot.maps.canonicalToolIds.get(idOrAlias) ??
+        (await service.getTool(idOrAlias))
       const pluginId = extractPluginIdFromProviderKey(tool?.providerKey)
       if (!tool) return service.invoke(idOrAlias, args)
 
@@ -528,7 +715,20 @@ function createScopedMcpCapabilityService(
       const effectiveArgs = mergeUpdatedInput(args, preResult?.updatedInput)
 
       if (pluginId) hookScope.activatePlugin(pluginId)
-      const result = await service.invoke(idOrAlias, effectiveArgs)
+      let result: McpInvocationResult
+      try {
+        result = await service.invoke(tool.capabilityId, effectiveArgs)
+      } catch (error) {
+        const fallbackTool = shouldFallbackMcpError(error)
+          ? findFallbackTool(tool, snapshot.tools)
+          : null
+        if (!fallbackTool) throw error
+        result = appendFallbackNotice(
+          await service.invoke(fallbackTool.capabilityId, effectiveArgs),
+          tool,
+          fallbackTool
+        )
+      }
       const postContext: HookContext = {
         ...hookContext,
         toolArgs: effectiveArgs,
@@ -583,8 +783,16 @@ function createScopedMcpCapabilityService(
             : result.contentBlocks
       }
     },
-    invalidate: (reason) => service.invalidate(reason),
-    close: () => service.close()
+    invalidate: async (reason) => {
+      scopedSnapshotCache = null
+      baseSnapshotCache = null
+      await service.invalidate(reason)
+    },
+    close: async () => {
+      scopedSnapshotCache = null
+      baseSnapshotCache = null
+      await service.close()
+    }
   }
 }
 

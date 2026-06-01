@@ -386,6 +386,41 @@ export interface PluginMcpServerConfig {
   url?: string
   transport?: "sse" | "streamable-http"
   headers?: Record<string, string>
+  /** Remote plugin MCP defaults to injecting yst_id_token / sap_id / name. Set false to opt out. */
+  injectUserHeaders?: boolean
+  /** Base priority, clamped to 0..100. Defaults to 50; global MCP connectors default to 100. */
+  priority?: number
+  /** plugin-active keeps the plugin MCP lazy until its plugin or skill is used. */
+  scope?: "plugin-active" | "plugin-installed"
+  /** Optional fallback to a compatible global MCP. Requires safeToRetry=true to avoid duplicate writes. */
+  fallback?: {
+    enabled?: boolean
+    to?: "global"
+    match?: "toolNameAndSchema" | "toolName"
+    safeToRetry?: boolean
+  }
+}
+
+export interface PluginMcpServerDetail {
+  name: string
+  kind: "remote" | "stdio"
+  transport?: "sse" | "streamable-http"
+  injectUserHeaders: boolean
+  priority: number
+  scope: "plugin-active" | "plugin-installed"
+  fallbackEnabled: boolean
+  fallbackTo?: "global"
+  fallbackMatch?: "toolNameAndSchema" | "toolName"
+  fallbackSafeToRetry: boolean
+}
+
+export interface PluginDetail {
+  skills: string[]
+  mcpServers: string[]
+  mcpServerDetails: PluginMcpServerDetail[]
+  hookCount: number
+  hooks: PluginHookMetadata[]
+  manifest: PluginManifest | null
 }
 
 // LSP types

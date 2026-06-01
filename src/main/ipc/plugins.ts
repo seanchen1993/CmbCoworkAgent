@@ -12,7 +12,6 @@ import {
   upsertPlugin,
   deletePlugin as deletePluginStorage,
   setPluginEnabled,
-  setPluginOriginsBatch,
   setPluginHookEnabled,
   invalidateEnabledSkillsCache,
   parseMcpJsonFile
@@ -20,8 +19,10 @@ import {
 import { copyDirRecursive, createAsyncMutex } from "../utils/fs"
 import type {
   PluginHookMetadata,
+  PluginDetail,
   PluginManifest,
   PluginMetadata,
+  PluginMcpServerDetail,
   PluginMcpServerConfig
 } from "../types"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
@@ -39,6 +40,7 @@ interface ParsedPlugin {
   manifest: PluginManifest | null
   skillDirs: string[]
   mcpConfigs: Record<string, PluginMcpServerConfig>
+  mcpServerDetails: PluginMcpServerDetail[]
   hookCount: number
   hookPath: string
   name: string
@@ -107,6 +109,21 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
   // Read .mcp.json
   const mcpJsonPath = path.join(dirPath, ".mcp.json")
   mcpConfigs = parseMcpJsonFile(mcpJsonPath) ?? {}
+  const mcpServerDetails: PluginMcpServerDetail[] = Object.entries(mcpConfigs).map(
+    ([serverName, config]) => ({
+      name: serverName,
+      kind: config.url ? "remote" : "stdio",
+      transport: config.transport,
+      injectUserHeaders: config.command ? false : config.injectUserHeaders !== false,
+      priority: config.priority ?? 50,
+      scope: config.scope ?? "plugin-active",
+      fallbackEnabled: Boolean(config.fallback?.enabled && config.fallback.safeToRetry === true),
+      fallbackTo: config.fallback?.to ?? (config.fallback?.enabled ? "global" : undefined),
+      fallbackMatch:
+        config.fallback?.match ?? (config.fallback?.enabled ? "toolNameAndSchema" : undefined),
+      fallbackSafeToRetry: config.fallback?.safeToRetry === true
+    })
+  )
 
   // Count hooks — supports our flat array and CC formats
   let hookCount = 0
@@ -142,7 +159,7 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
     }
   }
 
-  return { manifest, skillDirs, mcpConfigs, hookCount, hookPath, name }
+  return { manifest, skillDirs, mcpConfigs, mcpServerDetails, hookCount, hookPath, name }
 }
 
 function formatAuthor(author: PluginManifest["author"]): string {
@@ -575,53 +592,28 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle(
-    "plugins:setOriginsBatch",
-    async (
-      _event,
-      payload: { updates: Array<{ id: string; origin: "market" | "local" }> }
-    ): Promise<{ success: boolean; error?: string }> => {
-      const raw = Array.isArray(payload?.updates) ? payload.updates : []
-      const sanitized = raw.filter(
-        (u): u is { id: string; origin: "market" | "local" } =>
-          !!u &&
-          typeof u.id === "string" &&
-          u.id.length > 0 &&
-          (u.origin === "market" || u.origin === "local")
-      )
-      if (sanitized.length === 0) return { success: true }
-      await pluginMutex.acquire()
-      try {
-        setPluginOriginsBatch(sanitized)
-        return { success: true }
-      } catch (e) {
-        return { success: false, error: e instanceof Error ? e.message : "设置失败" }
-      } finally {
-        pluginMutex.release()
-      }
-    }
-  )
-
-  ipcMain.handle(
     "plugins:getDetail",
     async (
       _event,
       id: string
-    ): Promise<{
-      skills: string[]
-      mcpServers: string[]
-      hookCount: number
-      hooks: PluginHookMetadata[]
-      manifest: PluginManifest | null
-    }> => {
+    ): Promise<PluginDetail> => {
       const plugins = getPlugins()
       const plugin = plugins.find((p) => p.id === id)
       if (!plugin || !existsSync(plugin.path)) {
-        return { skills: [], mcpServers: [], hookCount: 0, hooks: [], manifest: null }
+        return {
+          skills: [],
+          mcpServers: [],
+          mcpServerDetails: [],
+          hookCount: 0,
+          hooks: [],
+          manifest: null
+        }
       }
       const parsed = await parsePluginDir(plugin.path)
       return {
         skills: parsed.skillDirs,
         mcpServers: Object.keys(parsed.mcpConfigs),
+        mcpServerDetails: parsed.mcpServerDetails,
         hookCount: parsed.hookCount,
         hooks: getPluginHooks(plugin.id),
         manifest: parsed.manifest
