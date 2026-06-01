@@ -268,6 +268,10 @@ function TimeControlBar({
   )
 }
 
+// 「未归类」哨兵，需与后端 DASHBOARD_UNCLASSIFIED_ORG 保持一致。
+const ORG_UNCLASSIFIED = "__unclassified__"
+const orgOptionLabel = (org: string): string => (org === ORG_UNCLASSIFIED ? "（未归类）" : org)
+
 function OrgFilterBar({
   value,
   options,
@@ -294,7 +298,7 @@ function OrgFilterBar({
     value.length === 0
       ? "全部"
       : value.length === 1
-        ? value[0]
+        ? orgOptionLabel(value[0])
         : `已选 ${value.length} 个室`
 
   return (
@@ -327,32 +331,30 @@ function OrgFilterBar({
             {value.length === 0 && <Check className="size-3.5 text-primary" />}
           </button>
           <div className="my-1 h-px bg-border" />
-          <ScrollArea className="max-h-64">
-            <div className="pr-1">
-              {options.length === 0 ? (
-                <div className="px-2 py-3 text-center text-[11px] text-muted-foreground">
-                  暂无可选室
-                </div>
-              ) : (
-                options.map((org) => {
-                  const checked = selectedSet.has(org)
-                  return (
-                    <button
-                      key={org}
-                      type="button"
-                      className="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-muted/60"
-                      onClick={() => toggleOrg(org)}
-                    >
-                      <span className={cn("truncate", checked && "font-medium text-foreground")}>
-                        {org}
-                      </span>
-                      {checked && <Check className="size-3.5 shrink-0 text-primary" />}
-                    </button>
-                  )
-                })
-              )}
-            </div>
-          </ScrollArea>
+          <div className="max-h-64 overflow-y-auto pr-1">
+            {options.length === 0 ? (
+              <div className="px-2 py-3 text-center text-[11px] text-muted-foreground">
+                暂无可选室
+              </div>
+            ) : (
+              options.map((org) => {
+                const checked = selectedSet.has(org)
+                return (
+                  <button
+                    key={org}
+                    type="button"
+                    className="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-muted/60"
+                    onClick={() => toggleOrg(org)}
+                  >
+                    <span className={cn("truncate", checked && "font-medium text-foreground")}>
+                      {orgOptionLabel(org)}
+                    </span>
+                    {checked && <Check className="size-3.5 shrink-0 text-primary" />}
+                  </button>
+                )
+              })
+            )}
+          </div>
         </PopoverContent>
       </Popover>
       {value.length > 0 && (
