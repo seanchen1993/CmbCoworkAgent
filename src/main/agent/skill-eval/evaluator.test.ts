@@ -208,6 +208,44 @@ describe("skill eval scoring", () => {
     resetSkillEvalWindow(threadId)
   })
 
+  it("inherits a failed skill task when the user continues after an error", () => {
+    const threadId = "thread-window-error-continuation"
+    const rawSkillName = "prd-to-frontend-v1.0.0"
+    resetSkillEvalWindow(threadId)
+
+    appendSkillEvalWindowTurn({
+      traceId: "trace-error",
+      threadId,
+      startedAt: "2026-05-30T01:00:00.000Z",
+      endedAt: "2026-05-30T01:00:02.000Z",
+      usedSkills: [rawSkillName],
+      userMessage: "请生成页面",
+      assistantText: "模型调用失败",
+      outcome: "error"
+    })
+    const firstContext = getSkillEvalWindowContextByRawName(threadId, [rawSkillName])[rawSkillName]
+    expect(firstContext.skillTaskTraceIndex).toBe(0)
+
+    const secondTurn = appendSkillEvalWindowTurn({
+      traceId: "trace-continue",
+      threadId,
+      startedAt: "2026-05-30T01:00:03.000Z",
+      endedAt: "2026-05-30T01:00:04.000Z",
+      usedSkills: [],
+      userMessage: "继续",
+      assistantText: "继续处理页面生成任务。",
+      outcome: "success"
+    })
+
+    expect(secondTurn.inheritedContext).toBe(true)
+    expect(secondTurn.evalSkillNames).toEqual([rawSkillName])
+    const secondContext = getSkillEvalWindowContextByRawName(threadId, [rawSkillName])[rawSkillName]
+    expect(secondContext.skillTaskId).toBe(firstContext.skillTaskId)
+    expect(secondContext.skillEvalTraceIds).toEqual(["trace-error", "trace-continue"])
+    expect(secondContext.skillTaskTraceIndex).toBe(1)
+    resetSkillEvalWindow(threadId)
+  })
+
   it("reuses the pending skill task when an explicit follow-up carries the same skill", () => {
     const threadId = "thread-window-explicit-continuation"
     const rawSkillName = "prd-to-frontend-v1.0.0"

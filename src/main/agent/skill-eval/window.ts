@@ -113,6 +113,16 @@ function asksUserForMoreInput(text: string | undefined, outcome: string | undefi
   return USER_INPUT_REQUEST_PATTERN.test(normalized)
 }
 
+function shouldKeepSkillContextOpen(
+  text: string | undefined,
+  outcome: string | undefined,
+  skillContextNames: string[]
+): boolean {
+  if (skillContextNames.length === 0) return false
+  if (outcome === "error" || outcome === "cancelled") return true
+  return asksUserForMoreInput(text, outcome)
+}
+
 function isLikelyAnswerToPendingQuestion(userMessage: string | undefined): boolean {
   const normalized = normalizeText(userMessage)
   if (!normalized) return false
@@ -185,7 +195,11 @@ export function appendSkillEvalWindowTurn(turn: SkillEvalWindowTurn): SkillEvalW
     inheritedSkillNames,
     existing
   )
-  const awaitingSkillNames = asksUserForMoreInput(turn.assistantText, turn.outcome)
+  const awaitingSkillNames = shouldKeepSkillContextOpen(
+    turn.assistantText,
+    turn.outcome,
+    skillContextNames
+  )
     ? skillContextNames
     : []
   const nextTurn: StoredSkillEvalWindowTurn = {
