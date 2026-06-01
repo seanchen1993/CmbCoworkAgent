@@ -1339,7 +1339,7 @@ function initializeHarnessProject(project: HarnessProjectMetadata): void {
   }
 }
 
-function readHarnessFeatureMetadata(metadata: unknown): { projectId: string; slug: string } | null {
+export function readHarnessFeatureMetadata(metadata: unknown): { projectId: string; slug: string } | null {
   if (!isObject(metadata) || !isObject(metadata.harnessFeature)) return null
   const projectId = normalizeText(metadata.harnessFeature.projectId).trim()
   const slug = normalizeText(metadata.harnessFeature.slug).trim()

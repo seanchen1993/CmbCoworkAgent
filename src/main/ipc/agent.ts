@@ -111,7 +111,8 @@ import {
 } from "../services/agent-auto-commit"
 import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
 import {
-  buildHarnessFeatureAgentContext
+  buildHarnessFeatureAgentContext,
+  readHarnessFeatureMetadata
 } from "../harness-board/service"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
@@ -1536,8 +1537,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
     window.once("closed", onWindowClosed)
 
+    // Resolve the Harness Board feature binding (if any) so the trace can be
+    // tagged with its project/feature — links a feature to its conversation traces.
+    let harnessFeatureBinding: { projectId: string; slug: string } | undefined
+    try {
+      const bindingThread = getThread(threadId)
+      if (bindingThread?.metadata) {
+        harnessFeatureBinding =
+          readHarnessFeatureMetadata(JSON.parse(bindingThread.metadata)) ?? undefined
+      }
+    } catch {
+      // Non-project threads or unparsable metadata: leave the trace untagged.
+    }
+
     // Start trace collection for this invocation (modelId resolved later)
-    const tracer = new TraceCollector(threadId, message, modelId ?? "unknown")
+    const tracer = new TraceCollector(threadId, message, modelId ?? "unknown", {
+      triggerSource: "chat",
+      ...(harnessFeatureBinding ? { harnessFeature: harnessFeatureBinding } : {})
+    })
     const skillUsageDetector = new SkillUsageDetector()
     const toolCallCounter = new ToolCallCounter()
     let assistantText = ""
@@ -1557,6 +1574,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const syncUsedSkillsContext = (): void => {
       const currentRunSkills = skillUsageDetector.getUsedSkillNames()
       tracer.setUsedSkills(currentRunSkills)
+      tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
       setAdoptionContext(threadId, {
         usedSkills: computeCodeGenAttributionSkills(currentRunSkills)
       })
@@ -1705,7 +1723,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         ])
         skillUsageDetector.onReadFilePath(explicitSkillActivation.skill.path)
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+        syncUsedSkillsContext()
       }
 
       // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
@@ -2600,7 +2618,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         )
 
         // Finish trace
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+        syncUsedSkillsContext()
         await tracer.finish("success")
 
         // Write routing feedback so next turn can use sticky/force logic
@@ -2758,7 +2776,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (isHookHaltError(error)) {
         console.warn("[Agent] Hook halted turn:", error.reason)
         sendHookHalt(window, channel, error)
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+        syncUsedSkillsContext()
         tracer.finish("cancelled", error.reason).catch(() => {})
         if (invokeRoutingResult) {
           rememberRoutingFeedback(threadId, {
@@ -2822,7 +2840,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         } else {
           resetSkillEvolutionSession(threadId)
         }
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+        syncUsedSkillsContext()
         tracer.finish("error", errMsg).catch(() => {})
         if (invokeRoutingResult) {
           rememberRoutingFeedback(threadId, {
@@ -2836,7 +2854,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         turnStateShouldDispose = true
       } else {
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+        syncUsedSkillsContext()
         tracer.finish("cancelled").catch(() => {})
         if (invokeRoutingResult) {
           rememberRoutingFeedback(threadId, {

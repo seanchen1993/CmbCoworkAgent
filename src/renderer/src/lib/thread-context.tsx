@@ -1189,27 +1189,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               outputTokens: data.usage.outputTokens,
               totalTokens: data.usage.totalTokens
             })
-            updateThreadState(threadId, (prev) => {
-              // Keep the higher of previous or new input tokens
-              // This ensures we don't lose accumulated context during tool calls
+            updateThreadState(threadId, () => {
               const newInputTokens = data.usage!.inputTokens || 0
-              const prevInputTokens = prev.tokenUsage?.inputTokens || 0
 
-              // Always update if new value is higher, or if this is first update
-              if (newInputTokens >= prevInputTokens || !prev.tokenUsage) {
-                return {
-                  tokenUsage: {
-                    inputTokens: newInputTokens,
-                    outputTokens: data.usage!.outputTokens || 0,
-                    totalTokens: data.usage!.totalTokens || 0,
-                    cacheReadTokens: data.usage!.cacheReadTokens,
-                    cacheCreationTokens: data.usage!.cacheCreationTokens,
-                    lastUpdated: new Date()
-                  }
+              return {
+                tokenUsage: {
+                  inputTokens: newInputTokens,
+                  outputTokens: data.usage!.outputTokens || 0,
+                  totalTokens: data.usage!.totalTokens || 0,
+                  cacheReadTokens: data.usage!.cacheReadTokens,
+                  cacheCreationTokens: data.usage!.cacheCreationTokens,
+                  lastUpdated: new Date()
                 }
               }
-              // Keep existing token usage if new value is lower
-              return {}
             })
           }
           break

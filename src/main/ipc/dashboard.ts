@@ -11,7 +11,12 @@ import { getUserInfo } from "../storage"
 import * as fs from "fs"
 import AdmZip from "adm-zip"
 import { buildTraceTree } from "../agent/trace/tree-builder"
-import type { AgentTrace, TraceNode, TraceSkillEvalRecord } from "../agent/trace/types"
+import type {
+  AgentTrace,
+  TraceNode,
+  TraceSkillEvalRecord,
+  TraceTriggerSource
+} from "../agent/trace/types"
 import { buildSkillEvalTraceExtension } from "../agent/skill-eval/documents"
 import {
   getSkillIdentifierLookupTerms,
@@ -75,6 +80,24 @@ function isDashboardAllowed(): boolean {
 
 let nodeIndex = 0
 
+function getErrorDetail(error: Error): string {
+  const cause = error.cause
+  if (!cause || typeof cause !== "object") return error.message
+
+  const causeRecord = cause as Record<string, unknown>
+  const causeMessage = typeof causeRecord.message === "string" ? causeRecord.message : ""
+  const causeCode = typeof causeRecord.code === "string" ? causeRecord.code : ""
+  const causeDetail = [causeCode, causeMessage].filter(Boolean).join(" ")
+
+  return causeDetail ? `${error.message}: ${causeDetail}` : error.message
+}
+
+function makeEsUnavailableError(nodes: string[], lastError: Error | null): Error {
+  const detail = lastError ? getErrorDetail(lastError) : "unknown error"
+  console.warn(`[Dashboard] All ${nodes.length} ES nodes failed. Last error:`, detail)
+  return new Error("请检查网络连接后重试")
+}
+
 async function esQuery(
   index: string,
   body: Record<string, unknown>,
@@ -113,11 +136,11 @@ async function esQuery(
       return await resp.json()
     } catch (e) {
       lastError = e instanceof Error ? e : new Error(String(e))
-      console.warn(`[Dashboard] ES node ${nodes[idx]} failed:`, lastError.message)
+      console.warn(`[Dashboard] ES node ${nodes[idx]} failed:`, getErrorDetail(lastError))
     }
   }
 
-  throw lastError ?? new Error("All ES nodes failed")
+  throw makeEsUnavailableError(nodes, lastError)
 }
 
 // ─────────────────────────────────────────────────────────
@@ -159,6 +182,8 @@ interface DashboardTraceDetail {
   totalOutputTokens: number
   totalTokens: number
   usedSkills: string[]
+  evolvedSkills: string[]
+  triggerSource?: string
   nodes?: TraceNode[]
   rawAvailable: boolean
   rawError?: string
@@ -171,6 +196,8 @@ interface DashboardCommitDetail {
   sapId?: string
   ystId?: string
   orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
   userIp?: string
   repoPath?: string
   repositoryName?: string
@@ -188,6 +215,18 @@ interface DashboardCommitDetail {
   threadId?: string
   usedSkills: string[]
   skillCount: number
+  codeGeneratedLines: number
+  codeEffectiveGeneratedLines: number
+  codeAdoptedLines: number
+  codeAdoptionRate: number | null
+}
+
+interface CommitAdoptionSummary {
+  usedSkills: string[]
+  generatedLines: number
+  effectiveGeneratedLines: number
+  adoptedLines: number
+  adoptionRate: number | null
 }
 
 interface DashboardSkillDetail {
@@ -196,6 +235,8 @@ interface DashboardSkillDetail {
   tracePage: number
   tracePageSize: number
   totalTraces: number
+  traceViewMode?: TraceViewMode
+  traceTriggerScope?: TraceTriggerScope
 }
 
 interface DashboardSkillEvalRun {
@@ -387,6 +428,7 @@ interface DashboardUserDetail {
   tracePage: number
   tracePageSize: number
   totalTraces: number
+  traceTriggerScope?: TraceTriggerScope
 }
 
 interface EsSearchHit {
@@ -409,26 +451,37 @@ interface EsSearchResponse {
   aggregations?: Record<string, EsAggregation | undefined>
 }
 
-interface UserStatsOptions {
-  upperOrgLv1?: string | null
+interface OrgFilterOptions {
+  // 用户主动选择的 LV1 组织维度筛选（非权限过滤）。支持多选；空/未传表示全部。
+  upperOrgLv1?: string | string[] | null
 }
+
+type UserStatsOptions = OrgFilterOptions
 
 interface UserListOptions {
   pageSize?: number
   afterKey?: Record<string, string | number> | null
   keyword?: string | null
+  upperOrgLv1?: string | null
 }
 
 interface UserDetailOptions {
   traceLimit?: number
   tracePage?: number
   tracePageSize?: number
+  triggerScope?: TraceTriggerScope
 }
+
+type TraceViewMode = "thread" | "trace"
+type TraceTriggerScope = "active" | "all"
 
 interface TracePageOptions {
   page?: number
   pageSize?: number
   limit?: number
+  mode?: TraceViewMode
+  viewMode?: TraceViewMode
+  triggerScope?: TraceTriggerScope
 }
 
 interface DashboardTraceExportPayload {
@@ -444,6 +497,15 @@ interface CommitDetailsOptions {
   page?: number
   pageSize?: number
   pushedOnly?: boolean
+  upperOrgLv1?: string | null
+}
+
+interface DashboardAccessContext {
+  loggedIn: boolean
+  unrestricted: boolean
+  sapId: string
+  ystId: string
+  upperOrgLv1: string
 }
 
 interface DashboardSkillEvalOptions {
@@ -470,6 +532,79 @@ const DISLIKE_TYPE_OPTIONS = [
   { id: "unsafe", label: "包含不安全内容" },
   { id: "other", label: "其他原因" }
 ] as const
+
+const DASHBOARD_UNRESTRICTED_IDS_ENV = "VITE_DASHBOARD_UNRESTRICTED_YST_IDS"
+
+function splitEnvIds(value: string | undefined): Set<string> {
+  return new Set(
+    String(value || "")
+      .split(/[,\n;\s]+/)
+      .map((id) => id.trim())
+      .filter(Boolean)
+  )
+}
+
+function deriveDashboardUpperOrgLv1(pathName?: string): string {
+  const parts = typeof pathName === "string"
+    ? pathName.split("/").map((part) => part.trim()).filter(Boolean)
+    : []
+  const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
+  if (itDeptIndex < 0) return ""
+
+  const lowerParts = parts.slice(itDeptIndex + 1)
+  const startsWithTeam = lowerParts[0]?.includes("团队") ?? false
+  return startsWithTeam ? lowerParts[1] ?? "" : lowerParts[2] ?? ""
+}
+
+function getDashboardUnrestrictedIds(): Set<string> {
+  return splitEnvIds(import.meta.env[DASHBOARD_UNRESTRICTED_IDS_ENV] as string | undefined)
+}
+
+function getDashboardAccessContext(): DashboardAccessContext {
+  if (import.meta.env.DEV) {
+    return {
+      loggedIn: true,
+      unrestricted: true,
+      sapId: "dev",
+      ystId: "dev",
+      upperOrgLv1: ""
+    }
+  }
+
+  const userInfo = getUserInfo()
+  const sapId = userInfo?.sapId?.trim() ?? ""
+  const ystId = userInfo?.ystId?.trim() ?? ""
+  const loggedIn = Boolean(sapId || ystId)
+  const unrestrictedIds = getDashboardUnrestrictedIds()
+
+  return {
+    loggedIn,
+    unrestricted: loggedIn && [ystId, sapId].some((id) => Boolean(id && unrestrictedIds.has(id))),
+    sapId,
+    ystId,
+    upperOrgLv1: deriveDashboardUpperOrgLv1(userInfo?.pathName)
+  }
+}
+
+function requireDashboardAccess(): DashboardAccessContext {
+  const access = getDashboardAccessContext()
+  if (!access.loggedIn) throw new Error("请先登录后再查看运营面板")
+  return access
+}
+
+function buildNoAccessFilter(): Record<string, unknown> {
+  return { term: { traceId: "__dashboard_no_access__" } }
+}
+
+function buildTraceAccessFilter(access: DashboardAccessContext): Record<string, unknown> | null {
+  if (access.unrestricted) return null
+  if (!access.upperOrgLv1) return buildNoAccessFilter()
+  return buildUpperOrgLv1Filter(access.upperOrgLv1)
+}
+
+function appendOptionalFilter(filters: Record<string, unknown>[], filter: Record<string, unknown> | null): void {
+  if (filter) filters.push(filter)
+}
 
 function getCalendarInterval(granularity: Granularity, from: string, to: string): string {
   if (granularity === "day") return "hour"
@@ -721,6 +856,19 @@ const SKILL_EVAL_STAT_CACHE_TTL_MS = 60_000
 const SKILL_EVAL_STAT_CACHE_LIMIT = 30
 const SKILL_EVAL_STATS_QUERY_TIMEOUT_MS = 45_000
 
+function buildChatTriggeredTraceFilter(): Record<string, unknown> {
+  return {
+    bool: {
+      should: [
+        { term: { triggerSource: "chat" } },
+        { term: { "triggerSource.keyword": "chat" } },
+        { bool: { must_not: { exists: { field: "triggerSource" } } } }
+      ],
+      minimum_should_match: 1
+    }
+  }
+}
+
 /**
  * 清洗技能名参数：
  * - 去重
@@ -741,6 +889,14 @@ function clampLimit(limit: number | undefined, fallback: number, max: number): n
   return Math.max(1, Math.min(max, Math.floor(Number(limit))))
 }
 
+function normalizeTraceViewMode(value: unknown): TraceViewMode {
+  return value === "trace" ? "trace" : "thread"
+}
+
+function normalizeTraceTriggerScope(value: unknown): TraceTriggerScope {
+  return value === "all" ? "all" : "active"
+}
+
 function normalizeCommitDetailsOptions(
   value?: number | CommitDetailsOptions
 ): Required<CommitDetailsOptions> {
@@ -748,7 +904,8 @@ function normalizeCommitDetailsOptions(
     return {
       page: 1,
       pageSize: clampLimit(value, 20, 500),
-      pushedOnly: false
+      pushedOnly: false,
+      upperOrgLv1: null
     }
   }
 
@@ -757,23 +914,8 @@ function normalizeCommitDetailsOptions(
   return {
     page,
     pageSize,
-    pushedOnly: value?.pushedOnly === true
-  }
-}
-
-function normalizeTracePageOptions(value?: number | TracePageOptions): {
-  page: number
-  pageSize: number
-} {
-  if (typeof value === "number") {
-    return {
-      page: 1,
-      pageSize: clampLimit(value, 10, 50)
-    }
-  }
-  return {
-    page: clampLimit(value?.page, 1, 1000),
-    pageSize: clampLimit(value?.pageSize ?? value?.limit, 10, 50)
+    pushedOnly: value?.pushedOnly === true,
+    upperOrgLv1: normalizeUpperOrgLv1Option(value?.upperOrgLv1)
   }
 }
 
@@ -857,10 +999,11 @@ function skillEvalFilterCacheKey(skillFilter: SkillEvalFilter | undefined): stri
 }
 
 function normalizeUserListOptions(value?: UserListOptions): Required<
-  Omit<UserListOptions, "afterKey" | "keyword">
+  Omit<UserListOptions, "afterKey" | "keyword" | "upperOrgLv1">
 > & {
   afterKey?: Record<string, string | number>
   keyword: string
+  upperOrgLv1: string | null
 } {
   const pageSize = clampLimit(value?.pageSize, 20, 100)
   const rawAfterKey = value?.afterKey
@@ -873,9 +1016,11 @@ function normalizeUserListOptions(value?: UserListOptions): Required<
         )
       : undefined
   const keyword = typeof value?.keyword === "string" ? value.keyword.trim().slice(0, 100) : ""
+  const upperOrgLv1 = normalizeUpperOrgLv1Option(value?.upperOrgLv1)
   return {
     pageSize,
     keyword,
+    upperOrgLv1,
     ...(afterKey && Object.keys(afterKey).length > 0 ? { afterKey } : {})
   }
 }
@@ -937,6 +1082,44 @@ function matchesSkillSearch(skillName: string, skillSearch: string): boolean {
 function averageValue(total: number, count: number): number {
   if (count === 0) return 0
   return Number((total / count).toFixed(4))
+}
+
+function normalizeTraceTriggerSource(value: unknown): TraceTriggerSource {
+  return (
+    value === "chat" ||
+    value === "heartbeat" ||
+    value === "scheduler_reminder" ||
+    value === "scheduler_action" ||
+    value === "memory_summarize" ||
+    value === "optimizer"
+  ) ? value : "chat"
+}
+
+function dashboardTraceSourceIncludes(): string[] {
+  return [
+    "_raw",
+    "traceId",
+    "threadId",
+    "startedAt",
+    "endedAt",
+    "durationMs",
+    "userMessage",
+    "sapId",
+    "ystId",
+    "userName",
+    "orgName",
+    "userIp",
+    "modelId",
+    "modelName",
+    "outcome",
+    "totalToolCalls",
+    "totalInputTokens",
+    "totalOutputTokens",
+    "totalTokens",
+    "usedSkills",
+    "evolvedSkills",
+    "triggerSource"
+  ]
 }
 
 function codeAdoptPushedAggs(): Record<string, unknown> {
@@ -1016,7 +1199,11 @@ function normalizeParsedTrace(
     skillEval: candidate.skillEval,
     usedSkills: Array.isArray(candidate.usedSkills)
       ? candidate.usedSkills
-      : asStringArray(source.usedSkills)
+      : asStringArray(source.usedSkills),
+    evolvedSkills: Array.isArray(candidate.evolvedSkills)
+      ? candidate.evolvedSkills
+      : asStringArray(source.evolvedSkills),
+    triggerSource: normalizeTraceTriggerSource(candidate.triggerSource || source.triggerSource)
   }
 }
 
@@ -1074,6 +1261,10 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       usedSkills: Array.isArray(trace.usedSkills)
         ? trace.usedSkills
         : asStringArray(source.usedSkills),
+      evolvedSkills: Array.isArray(trace.evolvedSkills)
+        ? trace.evolvedSkills
+        : asStringArray(source.evolvedSkills),
+      triggerSource: normalizeTraceTriggerSource(trace.triggerSource || source.triggerSource),
       ...(nodes ? { nodes } : {}),
       rawAvailable: !rawError,
       ...(rawError ? { rawError } : {})
@@ -1102,6 +1293,8 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
     totalOutputTokens: fallbackOutputTokens,
     totalTokens: asNumber(source.totalTokens, fallbackInputTokens + fallbackOutputTokens),
     usedSkills: asStringArray(source.usedSkills),
+    evolvedSkills: asStringArray(source.evolvedSkills),
+    triggerSource: normalizeTraceTriggerSource(source.triggerSource),
     rawAvailable: false,
     rawError: parsed.error
   }
@@ -1132,6 +1325,8 @@ function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
     totalOutputTokens: usage.totalOutputTokens,
     totalTokens: usage.totalTokens || usage.totalInputTokens + usage.totalOutputTokens,
     usedSkills: Array.isArray(trace.usedSkills) ? trace.usedSkills : [],
+    evolvedSkills: Array.isArray(trace.evolvedSkills) ? trace.evolvedSkills : [],
+    triggerSource: normalizeTraceTriggerSource(trace.triggerSource),
     ...(nodes ? { nodes } : {}),
     rawAvailable: !rawError,
     ...(rawError ? { rawError } : {})
@@ -1149,6 +1344,8 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
     sapId: asOptionalString(source.sapId),
     ystId: asOptionalString(source.ystId),
     orgName: asOptionalString(source.orgName),
+    upperOrgLv0: asOptionalString(source.upperOrgLv0),
+    upperOrgLv1: asOptionalString(source.upperOrgLv1),
     userIp: asOptionalString(source.userIp),
     repoPath: asOptionalString(properties.repoPath),
     repositoryName: asOptionalString(properties.repositoryName),
@@ -1165,7 +1362,11 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
     triggeredBy: asOptionalString(properties.triggeredBy),
     threadId: asOptionalString(properties.threadId),
     usedSkills,
-    skillCount: asNumber(properties.skillCount, usedSkills.length)
+    skillCount: asNumber(properties.skillCount, usedSkills.length),
+    codeGeneratedLines: 0,
+    codeEffectiveGeneratedLines: 0,
+    codeAdoptedLines: 0,
+    codeAdoptionRate: null
   }
 }
 
@@ -1173,7 +1374,10 @@ function normalizeSkillList(skills: string[]): string[] {
   return Array.from(new Set(skills.map((skill) => skill.trim()).filter(Boolean)))
 }
 
-async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<string, string[]>> {
+async function fetchCommitAdoptionMap(
+  commitShas: string[],
+  range: TimeRange
+): Promise<Map<string, CommitAdoptionSummary>> {
   const normalizedCommitShas = normalizeSkillList(commitShas).slice(0, 100)
   if (normalizedCommitShas.length === 0) return new Map()
 
@@ -1183,6 +1387,10 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
       bool: {
         filter: [
           { term: { eventName: "code_adopt" } },
+          { exists: { field: "properties.adoptedLineCount" } },
+          { exists: { field: "properties.generatedLineCount" } },
+          { exists: { field: "properties.effectiveGeneratedLineCount" } },
+          timeRangeFilter("properties.generatedAt", range),
           { terms: { "properties.commitSha": normalizedCommitShas } }
         ]
       }
@@ -1191,7 +1399,10 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
       by_commit: {
         terms: { field: "properties.commitSha", size: normalizedCommitShas.length },
         aggs: {
-          by_skill: { terms: { field: "properties.usedSkills", size: 50 } }
+          by_skill: { terms: { field: "properties.usedSkills", size: 50 } },
+          generated_lines: { sum: { field: "properties.generatedLineCount" } },
+          effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+          adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
         }
       }
     }
@@ -1201,7 +1412,7 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
   const buckets = asRecord(asRecord(raw.aggregations).by_commit).buckets
   if (!Array.isArray(buckets)) return new Map()
 
-  const result = new Map<string, string[]>()
+  const result = new Map<string, CommitAdoptionSummary>()
   for (const bucket of buckets) {
     const record = asRecord(bucket)
     const commitSha = asString(record.key)
@@ -1211,7 +1422,16 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
     const skills = Array.isArray(skillBuckets)
       ? normalizeSkillList(skillBuckets.map((skillBucket) => asString(asRecord(skillBucket).key)))
       : []
-    if (skills.length > 0) result.set(commitSha, skills)
+    const generatedLines = asNumber(asRecord(record.generated_lines).value)
+    const effectiveGeneratedLines = asNumber(asRecord(record.effective_generated_lines).value)
+    const adoptedLines = asNumber(asRecord(record.adopted_lines).value)
+    result.set(commitSha, {
+      usedSkills: skills,
+      generatedLines,
+      effectiveGeneratedLines,
+      adoptedLines,
+      adoptionRate: effectiveGeneratedLines > 0 ? adoptedLines / effectiveGeneratedLines : null
+    })
   }
   return result
 }
@@ -1220,7 +1440,10 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
 // Dashboard data fetchers
 // ─────────────────────────────────────────────────────────
 
-async function fetchOverview(range: TimeRange, granularity: Granularity): Promise<unknown> {
+async function fetchOverview(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions): Promise<unknown> {
+  requireDashboardAccess()
+  // 统计指标不做组织级数据权限过滤；orgFilterClause 是用户主动选择的 LV1 组织维度筛选。
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
   const interval = getCalendarInterval(granularity, range.from, range.to)
   const rankingTopSize = 20
   const rankingSearchSize = 1000
@@ -1249,7 +1472,7 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
   ]
   const traceBody = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+    query: { bool: { filter: [timeRangeFilter("startedAt", range), ...(orgFilterClause ? [orgFilterClause] : [])] } },
     aggs: {
       total_calls: { value_count: { field: "traceId" } },
       active_users: { cardinality: { field: "sapId" } },
@@ -1296,14 +1519,16 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
   }
   const codeGenFilters: Record<string, unknown>[] = [
     { term: { eventName: "code_gen" } },
-    timeRangeFilter("eventTime", range)
+    timeRangeFilter("eventTime", range),
+    ...(orgFilterClause ? [orgFilterClause] : [])
   ]
   const codeAdoptFilters: Record<string, unknown>[] = [
     { term: { eventName: "code_adopt" } },
     { exists: { field: "properties.adoptedLineCount" } },
     { exists: { field: "properties.generatedLineCount" } },
     { exists: { field: "properties.effectiveGeneratedLineCount" } },
-    timeRangeFilter("properties.generatedAt", range)
+    timeRangeFilter("properties.generatedAt", range),
+    ...(orgFilterClause ? [orgFilterClause] : [])
   ]
   const codeAdoptPushedFilters: Record<string, unknown>[] = [
     ...codeAdoptFilters,
@@ -1412,11 +1637,14 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
   }
 }
 
-async function fetchModelStats(range: TimeRange, granularity: Granularity): Promise<unknown> {
+async function fetchModelStats(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions): Promise<unknown> {
+  requireDashboardAccess()
+  // 统计指标不做组织级数据权限过滤；orgFilterClause 为用户主动选择的 LV1 组织维度筛选。
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
   void granularity
   const body = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+    query: { bool: { filter: [timeRangeFilter("startedAt", range), ...(orgFilterClause ? [orgFilterClause] : [])] } },
     aggs: {
       by_model: {
         terms: { field: "modelName", size: 30 },
@@ -1440,10 +1668,42 @@ function buildUpperOrgLv1Filter(upperOrgLv1: string): Record<string, unknown> {
   return { term: { upperOrgLv1 } }
 }
 
+function buildOrgLevelMatchFilter(orgLevel: string): Record<string, unknown> {
+  const escaped = escapeWildcard(orgLevel)
+  const wildcardPattern = `*${escaped}*`
+  return {
+    bool: {
+      should: ["upperOrgLv1", "upperOrgLv0"].flatMap((field) => [
+        { term: { [field]: orgLevel } },
+        { term: { [`${field}.keyword`]: orgLevel } },
+        { wildcard: { [field]: wildcardPattern } },
+        { wildcard: { [`${field}.keyword`]: wildcardPattern } }
+      ]),
+      minimum_should_match: 1
+    }
+  }
+}
+
 function normalizeUpperOrgLv1Option(upperOrgLv1?: string | null): string | null {
   if (typeof upperOrgLv1 !== "string") return null
   const normalized = upperOrgLv1.trim()
   return normalized ? normalized : null
+}
+
+// 将单个或多个 LV1 组织值统一规整为去重、去空的数组。
+function normalizeUpperOrgLv1List(value?: string | string[] | null): string[] {
+  const raw = Array.isArray(value) ? value : value != null ? [value] : []
+  const cleaned = raw
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean)
+  return Array.from(new Set(cleaned))
+}
+
+// 多选 LV1 组织筛选 → terms 过滤；空数组返回 null（表示全部，不过滤）。
+function buildUpperOrgLv1ListFilter(list: string[]): Record<string, unknown> | null {
+  if (list.length === 0) return null
+  return { terms: { upperOrgLv1: list } }
 }
 
 function buildNonEmptyOrgLevelFilter(
@@ -1458,10 +1718,11 @@ function buildNonEmptyOrgLevelFilter(
 }
 
 function buildOrgDistributionAgg(
-  selectedUpperOrgLv1: string | null,
+  selectedOrgs: string[],
   metric: "pv" | "uv"
 ): Record<string, unknown> {
-  const field = selectedUpperOrgLv1 !== null ? "upperOrgLv0" : "upperOrgLv1"
+  // 仅选中单个 LV1 时下钻到 LV0 分布，否则按 LV1 分组（多选时限定在所选集合内）。
+  const field = selectedOrgs.length === 1 ? "upperOrgLv0" : "upperOrgLv1"
   const terms: Record<string, unknown> = { field, size: 30, missing: "" }
   const aggs = metric === "uv" ? { unique_users: { cardinality: { field: "sapId" } } } : undefined
 
@@ -1471,8 +1732,9 @@ function buildOrgDistributionAgg(
 
   const items = aggs ? { terms, aggs } : { terms }
   const filters = [buildNonEmptyOrgLevelFilter(field)]
-  if (selectedUpperOrgLv1 !== null) {
-    filters.push(buildUpperOrgLv1Filter(selectedUpperOrgLv1))
+  const listFilter = buildUpperOrgLv1ListFilter(selectedOrgs)
+  if (listFilter) {
+    filters.push(listFilter)
   }
 
   return {
@@ -1486,11 +1748,14 @@ async function fetchUserStats(
   granularity: Granularity,
   opts?: UserStatsOptions
 ): Promise<unknown> {
+  requireDashboardAccess()
   void granularity
-  const selectedUpperOrgLv1 = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
-  const queryFilters = [timeRangeFilter("startedAt", range)]
-  if (selectedUpperOrgLv1 !== null) {
-    queryFilters.push(buildUpperOrgLv1Filter(selectedUpperOrgLv1))
+  const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
+  // 统计指标不做组织级数据权限过滤，仅保留用户主动选择的组织（LV1）多选维度。
+  const queryFilters = [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter()]
+  const orgFilterClause = buildUpperOrgLv1ListFilter(selectedOrgs)
+  if (orgFilterClause) {
+    queryFilters.push(orgFilterClause)
   }
 
   const body = {
@@ -1518,9 +1783,9 @@ async function fetchUserStats(
           }
         }
       },
-      by_org: buildOrgDistributionAgg(selectedUpperOrgLv1, "pv"),
-      by_org_pv: buildOrgDistributionAgg(selectedUpperOrgLv1, "pv"),
-      by_org_uv: buildOrgDistributionAgg(selectedUpperOrgLv1, "uv"),
+      by_org: buildOrgDistributionAgg(selectedOrgs, "pv"),
+      by_org_pv: buildOrgDistributionAgg(selectedOrgs, "pv"),
+      by_org_uv: buildOrgDistributionAgg(selectedOrgs, "uv"),
       by_version: {
         terms: { field: "appVersion", size: 20 },
         aggs: {
@@ -1596,12 +1861,21 @@ async function fetchUserList(
   range: TimeRange,
   options?: UserListOptions
 ): Promise<DashboardUserListData> {
-  const { pageSize, afterKey, keyword } = normalizeUserListOptions(options)
+  requireDashboardAccess()
+  const { pageSize, afterKey, keyword, upperOrgLv1 } = normalizeUserListOptions(options)
   const offsetValue = Number(afterKey?.offset ?? 0)
   const offset = Number.isFinite(offsetValue) && offsetValue > 0 ? Math.floor(offsetValue) : 0
   const aggregationSize = Math.min(offset + pageSize, 10_000)
   const shardSize = Math.min(Math.max(aggregationSize * 3, 100), 50_000)
-  const filters = [timeRangeFilter("startedAt", range), buildNonEmptySapIdFilter()]
+  // 用户列表属于统计/目录数据，不做组织级数据权限过滤，仅保留用户主动选择的组织维度。
+  const filters = [
+    timeRangeFilter("startedAt", range),
+    buildChatTriggeredTraceFilter(),
+    buildNonEmptySapIdFilter()
+  ]
+  if (upperOrgLv1 !== null) {
+    filters.push(buildOrgLevelMatchFilter(upperOrgLv1))
+  }
   const searchFilter = buildUserListSearchFilter(keyword)
   if (searchFilter) filters.push(searchFilter)
 
@@ -1686,10 +1960,15 @@ async function fetchUserDetail(
   range: TimeRange,
   options?: UserDetailOptions
 ): Promise<DashboardUserDetail> {
+  const access = requireDashboardAccess()
   const normalizedSapId = sapId.trim()
   if (!normalizedSapId) throw new Error("sapId is required")
   const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
   const tracePage = clampLimit(options?.tracePage, 1, 1000)
+  const triggerScope = normalizeTraceTriggerScope(options?.triggerScope)
+  // 统计指标（聚合）按该用户全量计算，不做组织级权限过滤；
+  // 组织级权限仅通过 post_filter 作用于返回的 trace 聊天明细命中，避免跨组织读取对话内容。
+  const traceAccessFilter = buildTraceAccessFilter(access)
   const body = {
     track_total_hits: true,
     from: (tracePage - 1) * tracePageSize,
@@ -1697,9 +1976,14 @@ async function fetchUserDetail(
     sort: [{ startedAt: { order: "desc" } }],
     query: {
       bool: {
-        filter: [timeRangeFilter("startedAt", range), { term: { sapId: normalizedSapId } }]
+        filter: [
+          timeRangeFilter("startedAt", range),
+          { term: { sapId: normalizedSapId } },
+          ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
+        ]
       }
     },
+    ...(traceAccessFilter ? { post_filter: traceAccessFilter } : {}),
     aggs: {
       latest_user_info: {
         top_hits: {
@@ -1710,6 +1994,7 @@ async function fetchUserDetail(
           }
         }
       },
+      total_calls: { value_count: { field: "traceId" } },
       avg_duration: { avg: { field: "durationMs" } },
       total_tool_calls: { sum: { field: "totalToolCalls" } },
       total_input_tokens: { sum: { field: "totalInputTokens" } },
@@ -1720,28 +2005,7 @@ async function fetchUserDetail(
       by_outcome: { terms: { field: "outcome", size: 10 } }
     },
     _source: {
-      includes: [
-        "_raw",
-        "traceId",
-        "threadId",
-        "startedAt",
-        "endedAt",
-        "durationMs",
-        "userMessage",
-        "sapId",
-        "ystId",
-        "userName",
-        "orgName",
-        "userIp",
-        "modelId",
-        "modelName",
-        "outcome",
-        "totalToolCalls",
-        "totalInputTokens",
-        "totalOutputTokens",
-        "totalTokens",
-        "usedSkills"
-      ]
+      includes: dashboardTraceSourceIncludes()
     }
   }
 
@@ -1755,6 +2019,8 @@ async function fetchUserDetail(
     asRecord(aggs.total_tokens).value,
     totalInputTokens + totalOutputTokens
   )
+  // 统计指标：调用次数取自聚合（全量）；trace 列表分页用 post_filter 后的命中总数。
+  const totalCalls = asNumber(asRecord(aggs.total_calls).value)
   const totalTraces = getTotalHits(raw, raw.hits?.hits?.length ?? 0)
 
   return {
@@ -1764,7 +2030,7 @@ async function fetchUserDetail(
     orgName: asOptionalString(userInfo.orgName),
     upperOrgLv0: asOptionalString(userInfo.upperOrgLv0),
     upperOrgLv1: asOptionalString(userInfo.upperOrgLv1),
-    totalCalls: totalTraces,
+    totalCalls,
     avgDurationMs: asNumber(asRecord(aggs.avg_duration).value),
     totalToolCalls: asNumber(asRecord(aggs.total_tool_calls).value),
     totalInputTokens,
@@ -1785,7 +2051,8 @@ async function fetchUserDetail(
     traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
     tracePage,
     tracePageSize,
-    totalTraces
+    totalTraces,
+    traceTriggerScope: triggerScope
   }
 }
 
@@ -1794,6 +2061,9 @@ async function fetchSkillUsageSummary(
   granularity: Granularity,
   skillNames?: string[]
 ): Promise<unknown> {
+  requireDashboardAccess()
+  // 统计指标不做组织级数据权限过滤。
+  const traceAccessFilter = null
   void granularity
   // 模式 A：前端传入技能名列表，使用 filters 精确按“技能维度”统计。
   // 这样可以直接得到每个技能的用户数，避免按版本桶二次合并带来的误差。
@@ -1804,7 +2074,7 @@ async function fetchSkillUsageSummary(
     )
     const body = {
       size: 0,
-      query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+      query: { bool: { filter: [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter(), ...(traceAccessFilter ? [traceAccessFilter] : [])] } },
       aggs: {
         by_skill: {
           filters: { filters },
@@ -1825,7 +2095,7 @@ async function fetchSkillUsageSummary(
   // 模式 B：兼容旧调用方，保留 terms 聚合结构。
   const body = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+    query: { bool: { filter: [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter(), ...(traceAccessFilter ? [traceAccessFilter] : [])] } },
     aggs: {
       by_skill: {
         terms: { field: "usedSkills", size: 1000 },
@@ -2676,6 +2946,8 @@ function fallbackTraceDetailFromSkillEvalRecord(
     totalOutputTokens: record.totalOutputTokens,
     totalTokens: record.totalTokens,
     usedSkills: [record.rawSkillName],
+    evolvedSkills: [],
+    triggerSource: "chat",
     rawAvailable: false,
     rawError: "未在 trace 索引中找到原始 trace 详情"
   }
@@ -3244,6 +3516,9 @@ async function fetchSkillUserStats(
   granularity: Granularity,
   skillName: string
 ): Promise<unknown> {
+  requireDashboardAccess()
+  // 统计指标不做组织级数据权限过滤。
+  const traceAccessFilter = null
   void granularity
   const escapedSkillName = escapeWildcard(skillName)
   const wildcardPattern = `${escapedSkillName}**`
@@ -3254,6 +3529,8 @@ async function fetchSkillUserStats(
       bool: {
         must: [
           timeRangeFilter("startedAt", range),
+          buildChatTriggeredTraceFilter(),
+          ...(traceAccessFilter ? [traceAccessFilter] : []),
           { exists: { field: "ystId" } },
           { bool: { must_not: { term: { ystId: "" } } } }
         ],
@@ -3278,7 +3555,13 @@ async function fetchSkillUserStats(
           filtered: {
             filter: {
               bool: {
-                must: [timeRangeFilter("startedAt", range), skillFilter, buildEmptyYstIdFilter()]
+                must: [
+                  timeRangeFilter("startedAt", range),
+                  buildChatTriggeredTraceFilter(),
+                  ...(traceAccessFilter ? [traceAccessFilter] : []),
+                  skillFilter,
+                  buildEmptyYstIdFilter()
+                ]
               }
             }
           }
@@ -3307,6 +3590,7 @@ async function fetchSkillUserStats(
 }
 
 async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
+  requireDashboardAccess()
   const sanitizedSapIds = Array.from(new Set(sapIds.map((id) => id.trim()).filter(Boolean))).slice(
     0,
     500
@@ -3331,6 +3615,7 @@ async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
     ]
   })
 
+  // 用户资料查询属于目录/统计数据，不做组织级数据权限过滤。
   const body = {
     size: 0,
     query: {
@@ -3450,13 +3735,43 @@ async function queryAllUser(): Promise<DashboardAllUserItem[]> {
   return users
 }
 
-async function fetchProductivity(range: TimeRange, granularity: Granularity): Promise<unknown> {
-  const interval = getCalendarInterval(granularity, range.from, range.to)
+// 返回时间范围内出现过的 LV1 组织列表，用于运营面板顶部的全量组织筛选下拉。
+async function fetchOrgOptions(range: TimeRange): Promise<string[]> {
+  requireDashboardAccess()
   const body = {
     size: 0,
     query: {
       bool: {
-        filter: [timeRangeFilter("eventTime", range), { term: { eventName: "git.commit.created" } }]
+        filter: [timeRangeFilter("startedAt", range), buildNonEmptyOrgLevelFilter("upperOrgLv1")]
+      }
+    },
+    aggs: {
+      orgs: { terms: { field: "upperOrgLv1", size: 200 } }
+    }
+  }
+  const raw = await esQuery(getEsIndex("trace"), body)
+  const rawBuckets = asRecord(asRecord(asRecord(raw).aggregations).orgs).buckets
+  const orgs = (Array.isArray(rawBuckets) ? rawBuckets : [])
+    .map((bucket) => asString(asRecord(bucket).key).trim())
+    .filter(Boolean)
+  return Array.from(new Set(orgs)).sort((a, b) => a.localeCompare(b, "zh-CN"))
+}
+
+async function fetchProductivity(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions): Promise<unknown> {
+  requireDashboardAccess()
+  const interval = getCalendarInterval(granularity, range.from, range.to)
+  // orgFilterClause 为用户主动选择的 LV1 组织维度筛选。
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
+  const filters = [
+    timeRangeFilter("eventTime", range),
+    { term: { "eventName": "git.commit.created" } },
+    ...(orgFilterClause ? [orgFilterClause] : [])
+  ]
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: filters
       }
     },
     aggs: {
@@ -3467,18 +3782,49 @@ async function fetchProductivity(range: TimeRange, granularity: Granularity): Pr
           time_zone: "Asia/Shanghai"
         }
       },
-      total_insertions: { sum: { field: "properties.insertions" } },
-      total_deletions: { sum: { field: "properties.deletions" } },
       total_files_changed: { sum: { field: "properties.filesChanged" } },
       active_users: { cardinality: { field: "sapId" } },
       total_commits: { value_count: { field: "eventId" } }
     }
   }
-  return esQuery(getEsIndex("event"), body)
+
+  // 新增 / 删除行数改为统计 Agent 生成的代码量（code_gen 事件），
+  // 而非直接取 git commit 的 insertions / deletions。
+  const codeGenFilters = [
+    { term: { eventName: "code_gen" } },
+    timeRangeFilter("eventTime", range),
+    ...(orgFilterClause ? [orgFilterClause] : [])
+  ]
+  const codeBody = {
+    size: 0,
+    query: { bool: { filter: codeGenFilters } },
+    aggs: {
+      code_generated_lines: { sum: { field: "properties.lineCount" } },
+      code_deleted_lines: { sum: { field: "properties.deletedLineCount" } }
+    }
+  }
+
+  const [commitRaw, codeRaw] = await Promise.all([
+    esQuery(getEsIndex("event"), body),
+    esQuery(getEsIndex("event"), codeBody)
+  ])
+  const commitRecord = asRecord(commitRaw)
+  const codeAggs = asRecord(asRecord(codeRaw).aggregations)
+  return {
+    ...commitRecord,
+    aggregations: {
+      ...asRecord(commitRecord.aggregations),
+      total_insertions: { value: asRecord(codeAggs.code_generated_lines).value ?? 0 },
+      total_deletions: { value: asRecord(codeAggs.code_deleted_lines).value ?? 0 }
+    }
+  }
 }
 
-async function fetchFeedback(range: TimeRange, granularity: Granularity): Promise<unknown> {
+async function fetchFeedback(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions): Promise<unknown> {
+  requireDashboardAccess()
   const interval = getCalendarInterval(granularity, range.from, range.to)
+  // orgFilterClause 为用户主动选择的 LV1 组织维度筛选。
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
   const dislikeTypeFilters = Object.fromEntries(
     DISLIKE_TYPE_OPTIONS.map((item) => [
       item.id,
@@ -3505,9 +3851,10 @@ async function fetchFeedback(range: TimeRange, granularity: Granularity): Promis
     size: 0,
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("eventTime", range),
-          {
+          filter: [
+            timeRangeFilter("eventTime", range),
+            ...(orgFilterClause ? [orgFilterClause] : []),
+            {
             terms: {
               eventName: ["message.feedback.like", "message.feedback.dislike.submit"]
             }
@@ -3583,54 +3930,108 @@ async function fetchFeedback(range: TimeRange, granularity: Granularity): Promis
 async function fetchSkillRecentTraces(
   skill: string,
   range: TimeRange,
-  options?: number | TracePageOptions
-): Promise<{ traces: DashboardTraceDetail[]; total: number; page: number; pageSize: number }> {
-  const { page, pageSize } = normalizeTracePageOptions(options)
+  limit = 10,
+  page = 1,
+  mode: TraceViewMode = "trace",
+  triggerScope: TraceTriggerScope = "active"
+): Promise<{
+  traces: DashboardTraceDetail[]
+  total: number
+  page: number
+  pageSize: number
+  mode: TraceViewMode
+}> {
+  const access = requireDashboardAccess()
+  const normalizedMode = normalizeTraceViewMode(mode)
+  const normalizedTriggerScope = normalizeTraceTriggerScope(triggerScope)
+  const size = clampLimit(limit, 10, normalizedMode === "thread" ? 30 : 50)
+  const currentPage = clampLimit(page, 1, 1000)
+  const filters = [
+    timeRangeFilter("startedAt", range),
+    buildSkillUsageWildcardFilter(skill)
+  ]
+  // trace 聊天明细列表：按 lv1 组织做数据权限过滤。
+  appendOptionalFilter(filters, buildTraceAccessFilter(access))
+  if (normalizedTriggerScope === "active") {
+    filters.splice(1, 0, buildChatTriggeredTraceFilter())
+  }
+  const sourceIncludes = dashboardTraceSourceIncludes()
+
+  if (normalizedMode === "thread") {
+    const maxThreadBuckets = 30
+    const requestedBuckets = Math.min(currentPage * size, maxThreadBuckets)
+    const fromBucket = (currentPage - 1) * size
+    const tracesPerThread = 5
+    const body = {
+      size: 0,
+      query: {
+        bool: { filter: filters }
+      },
+      aggs: {
+        total_threads: { cardinality: { field: "threadId" } },
+        by_thread: {
+          terms: {
+            field: "threadId",
+            size: requestedBuckets,
+            order: { latest_started_at: "desc" }
+          },
+          aggs: {
+            latest_started_at: { max: { field: "startedAt" } },
+            latest_traces: {
+              top_hits: {
+                size: tracesPerThread,
+                sort: [{ startedAt: { order: "desc" } }],
+                _source: { includes: sourceIncludes }
+              }
+            }
+          }
+        }
+      }
+    }
+    const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
+    const aggs = asRecord((raw as unknown as Record<string, unknown>).aggregations)
+    const buckets = asRecord(aggs.by_thread).buckets
+    const selectedBuckets = Array.isArray(buckets) ? buckets.slice(fromBucket, fromBucket + size) : []
+    const traces = selectedBuckets.flatMap((bucket) => {
+      const latestHits = asRecord(asRecord(bucket).latest_traces)
+      const rawHits = asRecord(latestHits.hits).hits
+      return Array.isArray(rawHits) ? rawHits.map((hit) => normalizeTraceDetail(hit as EsSearchHit)) : []
+    })
+    return {
+      traces,
+      total: Math.min(asNumber(asRecord(aggs.total_threads).value), maxThreadBuckets),
+      page: currentPage,
+      pageSize: size,
+      mode: normalizedMode
+    }
+  }
+
   const body = {
     track_total_hits: true,
-    from: (page - 1) * pageSize,
-    size: pageSize,
+    from: (currentPage - 1) * size,
+    size,
     sort: [{ startedAt: { order: "desc" } }],
     query: {
       bool: {
-        filter: [timeRangeFilter("startedAt", range), buildSkillUsageWildcardFilter(skill)]
+        filter: filters
       }
     },
     _source: {
-      includes: [
-        "_raw",
-        "traceId",
-        "threadId",
-        "startedAt",
-        "endedAt",
-        "durationMs",
-        "userMessage",
-        "sapId",
-        "ystId",
-        "userName",
-        "orgName",
-        "userIp",
-        "modelId",
-        "modelName",
-        "outcome",
-        "totalToolCalls",
-        "totalInputTokens",
-        "totalOutputTokens",
-        "totalTokens",
-        "usedSkills"
-      ]
+      includes: sourceIncludes
     }
   }
   const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
   return {
     traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
     total: getTotalHits(raw, raw.hits?.hits?.length ?? 0),
-    page,
-    pageSize
+    page: currentPage,
+    pageSize: size,
+    mode: normalizedMode
   }
 }
 
 async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<DashboardCodeStats> {
+  requireDashboardAccess()
   const skillTerms = getSkillIdentifierLookupTerms(skill)
   const codeGenFilters: Record<string, unknown>[] = [
     { term: { eventName: "code_gen" } },
@@ -3688,16 +4089,27 @@ async function fetchSkillDetail(
   range: TimeRange,
   options?: number | TracePageOptions
 ): Promise<DashboardSkillDetail> {
+  const pageOptions = typeof options === "number" ? { limit: options } : options
+  const traceViewMode = normalizeTraceViewMode(pageOptions?.viewMode ?? pageOptions?.mode)
+  const traceTriggerScope = normalizeTraceTriggerScope(pageOptions?.triggerScope)
+  const tracePageSize = clampLimit(
+    pageOptions?.pageSize ?? pageOptions?.limit,
+    10,
+    traceViewMode === "thread" ? 30 : 50
+  )
+  const tracePage = clampLimit(pageOptions?.page, 1, 1000)
   const [stats, tracePageData] = await Promise.all([
     fetchSkillCodeStats(skill, range),
-    fetchSkillRecentTraces(skill, range, options)
+    fetchSkillRecentTraces(skill, range, tracePageSize, tracePage, traceViewMode, traceTriggerScope)
   ])
   return {
     stats,
     traces: tracePageData.traces,
     tracePage: tracePageData.page,
     tracePageSize: tracePageData.pageSize,
-    totalTraces: tracePageData.total
+    totalTraces: tracePageData.total,
+    traceViewMode: tracePageData.mode,
+    traceTriggerScope
   }
 }
 
@@ -3711,13 +4123,17 @@ async function fetchCommitDetails(
   pushedOnly: boolean
   items: DashboardCommitDetail[]
 }> {
-  const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
+  requireDashboardAccess()
+  const { page, pageSize, pushedOnly, upperOrgLv1 } = normalizeCommitDetailsOptions(options)
   const filters: Record<string, unknown>[] = [
     timeRangeFilter("eventTime", range),
     { term: { eventName: "git.commit.created" } }
   ]
   if (pushedOnly) {
     filters.push({ term: { "properties.pushed": true } })
+  }
+  if (upperOrgLv1 !== null) {
+    filters.push(buildOrgLevelMatchFilter(upperOrgLv1))
   }
   const body = {
     track_total_hits: true,
@@ -3739,6 +4155,8 @@ async function fetchCommitDetails(
         "sapId",
         "ystId",
         "orgName",
+        "upperOrgLv0",
+        "upperOrgLv1",
         "properties.repoPath",
         "properties.repositoryName",
         "properties.repositoryFullName",
@@ -3761,8 +4179,9 @@ async function fetchCommitDetails(
   const raw = (await esQuery(getEsIndex("event"), body)) as EsSearchResponse
   const hits = raw.hits?.hits ?? []
   const items = hits.map(normalizeCommitDetail)
-  const adoptedSkillMap = await fetchCommitAdoptedSkillMap(
-    items.map((item) => item.commitSha ?? "").filter(Boolean)
+  const adoptionMap = await fetchCommitAdoptionMap(
+    items.map((item) => item.commitSha ?? "").filter(Boolean),
+    range
   )
   return {
     total: getTotalHits(raw, hits.length),
@@ -3770,11 +4189,16 @@ async function fetchCommitDetails(
     pageSize,
     pushedOnly,
     items: items.map((item) => {
-      const adoptedSkills = item.commitSha ? (adoptedSkillMap.get(item.commitSha) ?? []) : []
+      const adoption = item.commitSha ? adoptionMap.get(item.commitSha) : undefined
+      const adoptedSkills = adoption?.usedSkills ?? []
       return {
         ...item,
         usedSkills: adoptedSkills,
-        skillCount: adoptedSkills.length
+        skillCount: adoptedSkills.length,
+        codeGeneratedLines: adoption?.generatedLines ?? 0,
+        codeEffectiveGeneratedLines: adoption?.effectiveGeneratedLines ?? 0,
+        codeAdoptedLines: adoption?.adoptedLines ?? 0,
+        codeAdoptionRate: adoption?.adoptionRate ?? null
       }
     })
   }
@@ -3783,6 +4207,10 @@ async function fetchCommitDetails(
 // ─────────────────────────────────────────────────────────
 // Dev mock data
 // ─────────────────────────────────────────────────────────
+
+function makeMockOrgOptions(): string[] {
+  return ["测试 1 部", "开发二部", "平台三部"]
+}
 
 function makeMockOverview(range: TimeRange): unknown {
   const from = new Date(range.from)
@@ -4153,7 +4581,8 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
   const to = new Date(range.to)
   const diffMs = to.getTime() - from.getTime()
   const diffDays = diffMs / (1000 * 60 * 60 * 24)
-  const selectedUpperOrgLv1 = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
+  const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
+  const selectedUpperOrgLv1 = selectedOrgs.length === 1 ? selectedOrgs[0] : null
 
   const trendBuckets: Date[] = []
   if (diffDays <= 1) {
@@ -4674,10 +5103,20 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
 }
 
 function makeMockUserList(_range: TimeRange, options?: UserListOptions): DashboardUserListData {
-  const { pageSize, afterKey, keyword } = normalizeUserListOptions(options)
+  const { pageSize, afterKey, keyword, upperOrgLv1 } = normalizeUserListOptions(options)
   const normalizedKeyword = keyword.toLowerCase()
+  const normalizedUpperOrgLv1 = upperOrgLv1?.toLowerCase() ?? null
   const allUsers = Array.from({ length: 64 }, (_, index) => makeMockDashboardUser(index)).filter(
     (user) => {
+      if (
+        normalizedUpperOrgLv1 !== null &&
+        ![user.upperOrgLv1, user.upperOrgLv0].some((value) =>
+          String(value || "")
+            .toLowerCase()
+            .includes(normalizedUpperOrgLv1)
+        )
+      )
+        return false
       if (!normalizedKeyword) return true
       return [user.userName, user.ystId, user.sapId].some((value) =>
         String(value || "")
@@ -4715,7 +5154,7 @@ function makeMockUserDetail(
   const tracePage = clampLimit(options?.tracePage, 1, 1000)
   const totalTraces = user.count
   const startIndex = (tracePage - 1) * tracePageSize
-  const baseTraces = makeMockSkillRecentTraces("代码审查", range, 10).traces
+  const baseTraces = makeMockSkillRecentTraces("代码审查", range, 10)
   const traces = Array.from(
     { length: Math.max(0, Math.min(tracePageSize, totalTraces - startIndex)) },
     (_, traceIndex) => {
@@ -4764,7 +5203,8 @@ function makeMockUserDetail(
     traces,
     tracePage,
     tracePageSize,
-    totalTraces
+    totalTraces,
+    traceTriggerScope: normalizeTraceTriggerScope(options?.triggerScope)
   }
 }
 
@@ -4796,8 +5236,9 @@ function makeMockProductivity(range: TimeRange): unknown {
   return {
     aggregations: {
       commit_trend: { buckets: trend },
-      total_insertions: { value: 14820 },
-      total_deletions: { value: 6430 },
+      // Agent 生成 / 删除的代码行数（来自 code_gen 事件），非 git commit 原始行数
+      total_insertions: { value: 9240 },
+      total_deletions: { value: 2180 },
       total_files_changed: { value: 892 },
       total_commits: { value: 187 },
       active_users: { value: 24 }
@@ -4923,50 +5364,95 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
   const startedAt = new Date(to.getTime() - offsetMs)
   const endedAt = new Date(startedAt.getTime() + (index + 2) * 28_000)
   const traceId = `mock-trace-${skill}-${index + 1}`.replace(/\s+/g, "-")
-  const hasValidation = index % 2 === 0
-  const hasArtifact = index % 3 !== 1
-  const hasSubagent = index % 4 === 0
-  const safeSkillPath = skill.replace(/[^\w.-]+/g, "-").toLowerCase()
-  const secondStepToolCalls = [
-    ...(hasArtifact
-      ? [
-          {
-            name: "write_file",
-            args: { path: `reports/${safeSkillPath}-${index + 1}.md` },
-            result: "写入分析报告",
-            durationMs: 520
-          }
-        ]
-      : []),
-    ...(hasValidation
-      ? [
-          {
-            name: "exec_command",
-            args: { command: index % 4 === 0 ? "npm run test" : "npm run build" },
-            result: "验证通过",
-            durationMs: 1_800
-          }
-        ]
-      : []),
-    ...(hasSubagent
-      ? [
-          {
-            name: "task",
-            args: { prompt: `复核 ${skill} 的关键风险` },
-            result: "子 agent 已完成复核，未发现阻塞问题。",
-            durationMs: 2_600
-          }
-        ]
-      : [])
+  const threadId =
+    index < 3
+      ? "mock-thread-skill-review-flow"
+      : index < 5
+        ? "mock-thread-market-publish-flow"
+        : `mock-thread-${index + 1}`
+  const threadMessages = [
+    `请使用 ${skill} 帮我审查这次 dashboard trace 展示改动。`,
+    "继续，把刚才提到的分页边界和空数据状态也一起看一下。",
+    "再确认一下 Thread 维度下多条 trace 的聊天还原是否清楚。",
+    `用 ${skill} 看下这个 Skill 发布到市场前还有没有说明遗漏。`,
+    "继续检查应用市场最近 trace 弹窗的展示口径。",
+    `请使用 ${skill} 帮我分析这次变更，并给出可执行建议。`
   ]
+  const userMessage = threadMessages[index] ?? threadMessages[5]
+  const assistantSummary = [
+    `已完成 ${skill} 审查：主要建议是把 trace 详情先展示成对话，再保留执行树作为辅助信息。`,
+    "已补充检查分页边界：Thread 模式需要限制聚合上限，Trace 模式保留原分页更稳。",
+    "Thread 维度下的多 trace 展示是清楚的：左侧按会话折叠，右侧展示当前 trace 的问答。",
+    `已检查 ${skill} 市场发布说明，建议补充适用场景、输入要求和失败排查说明。`,
+    "最近 trace 弹窗建议默认 Thread 维度，并提供 Trace 维度切换，便于运营快速浏览。",
+    `已完成 ${skill} 分析，结论包含风险点、建议修改和验证方式。`
+  ][index] ?? `已完成 ${skill} 分析。`
+  const repeatedReadFileToolCalls = [
+    "src/renderer/src/components/dashboard/TraceHistoryDialog.tsx",
+    "src/renderer/src/components/trace/TraceConversation.tsx",
+    "src/main/ipc/dashboard.ts",
+    "src/preload/index.ts",
+    "src/preload/index.d.ts",
+    "src/renderer/src/components/customize/MarketPanel.tsx"
+  ].map((path, toolIndex) => ({
+    name: "read_file",
+    args: { path },
+    result: `读取 ${path}，命中 ${80 + toolIndex * 17} 行内容`,
+    durationMs: 260 + toolIndex * 45
+  }))
+  const mixedToolCalls = [
+    {
+      name: "rg",
+      args: { pattern: "TraceConversation", path: "src/renderer/src" },
+      result: "匹配 4 个文件，共 9 处",
+      durationMs: 180
+    },
+    {
+      name: "read_file",
+      args: { path: "src/renderer/src/components/trace/TraceConversation.tsx" },
+      result: "读取到对话组件和工具卡片实现",
+      durationMs: 310
+    },
+    {
+      name: "edit_file",
+      args: { path: "src/renderer/src/components/trace/TraceConversation.tsx", summary: "调整工具调用卡片位置" },
+      result: "替换 2 个 JSX 块",
+      durationMs: 960
+    },
+    {
+      name: "execute",
+      args: { command: "npm run typecheck" },
+      result: "typecheck:web passed",
+      durationMs: 4200
+    }
+  ]
+  const toolCalls =
+    index === 0
+      ? repeatedReadFileToolCalls
+      : index === 1
+        ? mixedToolCalls
+        : [
+            {
+              name: "read_file",
+              args: { path: "src/example.ts" },
+              result: "读取到 120 行内容",
+              durationMs: 420
+            },
+            {
+              name: "grep",
+              args: { pattern: "TODO", path: "src" },
+              result: "匹配 3 处",
+              durationMs: 310
+            }
+          ]
 
   const trace: AgentTrace = {
     traceId,
-    threadId: `mock-thread-${index + 1}`,
+    threadId,
     startedAt: startedAt.toISOString(),
     endedAt: endedAt.toISOString(),
     durationMs: endedAt.getTime() - startedAt.getTime(),
-    userMessage: `请使用 ${skill} 帮我分析这次变更，并给出可执行建议。`,
+    userMessage,
     modelId: "custom:minmax2.7",
     modelName: "MiniMax-M2.7",
     userName: ["张三", "李四", "王五"][index] ?? "张三",
@@ -4978,30 +5464,13 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
         index: 0,
         startedAt: startedAt.toISOString(),
         assistantText: `我会先定位和 ${skill} 相关的上下文，再整理问题和建议。`,
-        toolCalls: [
-          {
-            name: "read_file",
-            args: { path: "src/example.ts" },
-            result: "读取到 120 行内容",
-            durationMs: 420
-          }
-        ]
+        toolCalls: toolCalls.slice(0, Math.ceil(toolCalls.length / 2))
       },
       {
         index: 1,
         startedAt: new Date(startedAt.getTime() + 12_000).toISOString(),
-        assistantText: `已完成 ${skill} 分析，结论包含风险点、建议修改和验证方式。`,
-        toolCalls:
-          secondStepToolCalls.length > 0
-            ? secondStepToolCalls
-            : [
-                {
-                  name: "grep",
-                  args: { pattern: "TODO", path: "src" },
-                  result: "匹配 3 处",
-                  durationMs: 310
-                }
-              ]
+        assistantText: assistantSummary,
+        toolCalls: toolCalls.slice(Math.ceil(toolCalls.length / 2))
       }
     ],
     modelCalls: [
@@ -5009,11 +5478,11 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
         messageId: `mock-message-${index + 1}`,
         startedAt: startedAt.toISOString(),
         inputMessages: [
-          { role: "user", content: `请使用 ${skill} 帮我分析这次变更，并给出可执行建议。` }
+          { role: "user", content: userMessage }
         ],
         outputMessage: {
           role: "assistant",
-          content: `已完成 ${skill} 分析。`
+          content: assistantSummary
         },
         toolCalls: [],
         tokenUsage: {
@@ -5023,11 +5492,13 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
         }
       }
     ],
-    totalToolCalls: 1 + (secondStepToolCalls.length || 1),
+    totalToolCalls: toolCalls.length,
     outcome: index === 2 ? "error" : "success",
     ...(index === 2 ? { errorMessage: "Mock trace 用于展示异常状态" } : {}),
     appVersion: "0.3.6",
     usedSkills: [skill],
+    evolvedSkills: index % 2 === 0 ? [skill] : [],
+    triggerSource: "chat",
     metadata: {
       workspacePath: "/Users/demo/projects/cmbCowork"
     }
@@ -5052,14 +5523,9 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
 function makeMockSkillRecentTraces(
   skill: string,
   range: TimeRange,
-  options?: number | TracePageOptions
-): { total: number; page: number; pageSize: number; traces: DashboardTraceDetail[] } {
-  const { page, pageSize } = normalizeTracePageOptions(options)
-  const total = 46
-  const startIndex = (page - 1) * pageSize
-  const length = Math.max(0, Math.min(pageSize, total - startIndex))
-  const traces = Array.from({ length }, (_, localIndex) => {
-    const index = startIndex + localIndex
+  limit = 10
+): DashboardTraceDetail[] {
+  return Array.from({ length: clampLimit(limit, 10, 10) }, (_, index) => {
     const trace = makeMockAgentTrace(skill, range, index)
     const usage = summarizeTraceTokenUsage(trace.modelCalls)
     return {
@@ -5082,11 +5548,12 @@ function makeMockSkillRecentTraces(
       totalOutputTokens: usage.totalOutputTokens,
       totalTokens: usage.totalTokens,
       usedSkills: trace.usedSkills,
+      evolvedSkills: trace.evolvedSkills,
+      triggerSource: trace.triggerSource,
       nodes: buildTraceTree(trace),
       rawAvailable: true
     }
   })
-  return { total, page, pageSize, traces }
 }
 
 function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
@@ -5110,13 +5577,36 @@ function makeMockSkillDetail(
   range: TimeRange,
   options?: number | TracePageOptions
 ): DashboardSkillDetail {
-  const page = makeMockSkillRecentTraces(skill, range, options)
+  const pageOptions = typeof options === "number" ? { limit: options } : options
+  const traceViewMode = normalizeTraceViewMode(pageOptions?.viewMode ?? pageOptions?.mode)
+  const tracePageSize = clampLimit(
+    pageOptions?.pageSize ?? pageOptions?.limit,
+    10,
+    traceViewMode === "thread" ? 30 : 50
+  )
+  const tracePage = clampLimit(pageOptions?.page, 1, 1000)
+  const totalTraces = traceViewMode === "thread" ? 30 : 64
+  const startIndex = (tracePage - 1) * tracePageSize
+  const baseTraces = makeMockSkillRecentTraces(skill, range, 10)
+  const traces = Array.from(
+    { length: Math.max(0, Math.min(tracePageSize, totalTraces - startIndex)) },
+    (_, traceIndex) => {
+      const trace = baseTraces[traceIndex % baseTraces.length]
+      const mockIndex = startIndex + traceIndex
+      return {
+        ...trace,
+        traceId: `${trace.traceId}-skill-page-${tracePage}-${traceIndex}`,
+        startedAt: new Date(new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000).toISOString()
+      }
+    }
+  )
   return {
     stats: makeMockSkillCodeStats(skill),
-    traces: page.traces,
-    tracePage: page.page,
-    tracePageSize: page.pageSize,
-    totalTraces: page.total
+    traces,
+    tracePage,
+    tracePageSize,
+    totalTraces,
+    traceViewMode
   }
 }
 
@@ -5130,7 +5620,7 @@ function makeMockCommitDetails(
   pushedOnly: boolean
   items: DashboardCommitDetail[]
 } {
-  const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
+  const { page, pageSize, pushedOnly, upperOrgLv1 } = normalizeCommitDetailsOptions(options)
   const from = new Date(range.from)
   const to = new Date(range.to)
   const spanMs = Math.max(60_000, to.getTime() - from.getTime())
@@ -5146,6 +5636,8 @@ function makeMockCommitDetails(
       sapId: `100100${String(index + 1).padStart(2, "0")}`,
       ystId: `2743${String(50 + index).padStart(2, "0")}`,
       orgName: ["科技部", "零售一部", "风险管理部"][index % 3],
+      upperOrgLv1: ["信息研发部", "零售金融部", "风险平台部"][index % 3],
+      upperOrgLv0: index % 4 === 0 ? "" : ["架构工具组", "渠道研发组", "风控研发组"][index % 3],
       userIp: `10.0.0.${20 + index}`,
       repoPath: `/Users/demo/projects/${repoName}`,
       repositoryName: repoName,
@@ -5164,10 +5656,24 @@ function makeMockCommitDetails(
       triggeredBy: index % 4 === 0 ? "auto-push" : "manual",
       threadId: `mock-thread-${(index % 5) + 1}`,
       usedSkills: index % 2 === 0 ? ["代码审查-v1.0.0"] : ["需求分析-v1.0.0", "接口设计-v1.0.0"],
-      skillCount: index % 2 === 0 ? 1 : 2
+      skillCount: index % 2 === 0 ? 1 : 2,
+      codeGeneratedLines: 30 + index * 2,
+      codeEffectiveGeneratedLines: 24 + index,
+      codeAdoptedLines: 12 + (index % 18),
+      codeAdoptionRate: (12 + (index % 18)) / (24 + index)
     }
   })
-  const filteredItems = pushedOnly ? allItems.filter((item) => item.pushed) : allItems
+  const filteredItems = allItems.filter((item) => {
+    if (pushedOnly && !item.pushed) return false
+    if (upperOrgLv1 !== null) {
+      const normalizedUpperOrgLv1 = upperOrgLv1.toLowerCase()
+      const orgMatched = [item.upperOrgLv1, item.upperOrgLv0].some((value) =>
+        String(value || "").toLowerCase().includes(normalizedUpperOrgLv1)
+      )
+      if (!orgMatched) return false
+    }
+    return true
+  })
   const start = (page - 1) * pageSize
   return {
     total: filteredItems.length,
@@ -5184,28 +5690,47 @@ function makeMockCommitDetails(
 
 export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle("dashboard:isAllowed", async () => {
-    return true
+    return getDashboardAccessContext().loggedIn
   })
 
-  _ipcMain.handle("dashboard:overview", async (_, range: TimeRange, granularity: Granularity) => {
-    if (import.meta.env.DEV) return { success: true, data: makeMockOverview(range) }
-    try {
-      return { success: true, data: await fetchOverview(range, granularity) }
-    } catch (e) {
-      console.error("[Dashboard] overview error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
+  _ipcMain.handle(
+    "dashboard:overview",
+    async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockOverview(range) }
+      try {
+        return { success: true, data: await fetchOverview(range, granularity, opts) }
+      } catch (e) {
+        console.error("[Dashboard] overview error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
     }
-  })
+  )
 
-  _ipcMain.handle("dashboard:modelStats", async (_, range: TimeRange, granularity: Granularity) => {
-    if (import.meta.env.DEV) return { success: true, data: makeMockModelStats() }
-    try {
-      return { success: true, data: await fetchModelStats(range, granularity) }
-    } catch (e) {
-      console.error("[Dashboard] modelStats error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
+  _ipcMain.handle(
+    "dashboard:modelStats",
+    async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockModelStats() }
+      try {
+        return { success: true, data: await fetchModelStats(range, granularity, opts) }
+      } catch (e) {
+        console.error("[Dashboard] modelStats error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
     }
-  })
+  )
+
+  _ipcMain.handle(
+    "dashboard:orgOptions",
+    async (_, range: TimeRange) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockOrgOptions() }
+      try {
+        return { success: true, data: await fetchOrgOptions(range) }
+      } catch (e) {
+        console.error("[Dashboard] orgOptions error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
 
   _ipcMain.handle(
     "dashboard:userStats",
@@ -5326,10 +5851,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:productivity",
-    async (_, range: TimeRange, granularity: Granularity) => {
+    async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockProductivity(range) }
       try {
-        return { success: true, data: await fetchProductivity(range, granularity) }
+        return { success: true, data: await fetchProductivity(range, granularity, opts) }
       } catch (e) {
         console.error("[Dashboard] productivity error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -5337,24 +5862,45 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle("dashboard:feedback", async (_, range: TimeRange, granularity: Granularity) => {
-    if (import.meta.env.DEV) return { success: true, data: makeMockFeedback(range, granularity) }
-    try {
-      return { success: true, data: await fetchFeedback(range, granularity) }
-    } catch (e) {
-      console.error("[Dashboard] feedback error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
+  _ipcMain.handle(
+    "dashboard:feedback",
+    async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockFeedback(range, granularity) }
+      try {
+        return { success: true, data: await fetchFeedback(range, granularity, opts) }
+      } catch (e) {
+        console.error("[Dashboard] feedback error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
     }
-  })
+  )
 
   _ipcMain.handle(
     "dashboard:skillRecentTraces",
-    async (_, skill: string, range: TimeRange, options?: number | TracePageOptions) => {
-      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
+    async (
+      _,
+      skill: string,
+      range: TimeRange,
+      limit?: number,
+      mode?: TraceViewMode,
+      triggerScope?: TraceTriggerScope
+    ) => {
       if (import.meta.env.DEV)
-        return { success: true, data: makeMockSkillRecentTraces(skill, range, options) }
+        return { success: true, data: makeMockSkillRecentTraces(skill, range, limit) }
       try {
-        return { success: true, data: await fetchSkillRecentTraces(skill, range, options) }
+        return {
+          success: true,
+          data: (
+            await fetchSkillRecentTraces(
+              skill,
+              range,
+              limit,
+              1,
+              normalizeTraceViewMode(mode),
+              normalizeTraceTriggerScope(triggerScope)
+            )
+          ).traces
+        }
       } catch (e) {
         console.error("[Dashboard] skillRecentTraces error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -5364,13 +5910,32 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:marketSkillRecentTraces",
-    async (_, skill: string, range: TimeRange, options?: number | TracePageOptions) => {
+    async (
+      _,
+      skill: string,
+      range: TimeRange,
+      limit?: number,
+      mode?: TraceViewMode,
+      triggerScope?: TraceTriggerScope
+    ) => {
       const trimmedSkill = skill?.trim?.() ?? ""
       if (!trimmedSkill) return { success: false, error: "skill is required" }
       if (import.meta.env.DEV)
-        return { success: true, data: makeMockSkillRecentTraces(trimmedSkill, range, options) }
+        return { success: true, data: makeMockSkillRecentTraces(trimmedSkill, range, limit) }
       try {
-        return { success: true, data: await fetchSkillRecentTraces(trimmedSkill, range, options) }
+        return {
+          success: true,
+          data: (
+            await fetchSkillRecentTraces(
+              trimmedSkill,
+              range,
+              limit,
+              1,
+              normalizeTraceViewMode(mode),
+              normalizeTraceTriggerScope(triggerScope)
+            )
+          ).traces
+        }
       } catch (e) {
         console.error("[Dashboard] marketSkillRecentTraces error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }

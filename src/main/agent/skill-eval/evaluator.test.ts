@@ -48,6 +48,8 @@ function makeTrace(overrides: Partial<AgentTrace> = {}): AgentTrace {
     totalToolCalls: 0,
     outcome: "success",
     usedSkills: ["report-v1.0.0"],
+    evolvedSkills: [],
+    triggerSource: "chat",
     ...overrides
   }
 }

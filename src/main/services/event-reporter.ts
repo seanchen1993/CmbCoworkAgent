@@ -32,7 +32,7 @@ type FetchTimeout = typeof FETCH_TIMEOUT
 // Types
 // ─────────────────────────────────────────────────────────
 
-export type EventCategory = "skill" | "git" | "code_adoption"
+export type EventCategory = "skill" | "git" | "code_adoption" | "harness"
 
 /**
  * Wire format expected by the server.
@@ -55,6 +55,12 @@ export interface CoworkEvent {
   ystId?:        string
   originOrgId?:  string
   orgName?:      string
+  pathName?:     string
+  pathId?:       string
+  upperOrgLv0?:  string
+  upperOrgLv1?:  string
+  upperOrgLv2?:  string
+  upperOrgLv3?:  string
   properties?:   Record<string, unknown>
 }
 
@@ -138,8 +144,42 @@ export function getEventReporter(): IEventReporter {
 }
 
 // ─────────────────────────────────────────────────────────
-// Helpers — context resolution
-// ─────────────────────────────────────────────────────────
+function deriveUpperOrgLevels(pathName?: string): {
+  upperOrgLv0: string
+  upperOrgLv1: string
+  upperOrgLv2: string
+  upperOrgLv3: string
+} {
+  const emptyLevels = {
+    upperOrgLv0: "",
+    upperOrgLv1: "",
+    upperOrgLv2: "",
+    upperOrgLv3: ""
+  }
+  const parts = typeof pathName === "string"
+    ? pathName.split("/").map((part) => part.trim()).filter(Boolean)
+    : []
+  const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
+  if (itDeptIndex < 0) return emptyLevels
+
+  const lowerParts = parts.slice(itDeptIndex + 1)
+  const startsWithTeam = lowerParts[0]?.includes("团队") ?? false
+  if (startsWithTeam) {
+    return {
+      upperOrgLv0: lowerParts[2] ?? "",
+      upperOrgLv1: lowerParts[1] ?? "",
+      upperOrgLv2: lowerParts[0] ?? "",
+      upperOrgLv3: "本部团队"
+    }
+  }
+
+  return {
+    upperOrgLv0: lowerParts[3] ?? "",
+    upperOrgLv1: lowerParts[2] ?? "",
+    upperOrgLv2: lowerParts[1] ?? "",
+    upperOrgLv3: lowerParts[0] ?? ""
+  }
+}
 
 /**
  * Build a base event with all common fields prefilled from current user/system
@@ -156,6 +196,7 @@ export function buildEvent(
   properties?: Record<string, unknown>
 ): CoworkEvent {
   const userInfo = getUserInfo()
+  const upperOrgLevels = deriveUpperOrgLevels(userInfo?.pathName)
   return {
     eventId:       randomUUID(),
     eventName,
@@ -167,6 +208,12 @@ export function buildEvent(
     ystId:         userInfo?.ystId,
     originOrgId:   userInfo?.originOrgId,
     orgName:       userInfo?.orgName,
+    pathName:      userInfo?.pathName,
+    pathId:        userInfo?.originPathId,
+    upperOrgLv0:   upperOrgLevels.upperOrgLv0,
+    upperOrgLv1:   upperOrgLevels.upperOrgLv1,
+    upperOrgLv2:   upperOrgLevels.upperOrgLv2,
+    upperOrgLv3:   upperOrgLevels.upperOrgLv3,
     properties
   }
 }

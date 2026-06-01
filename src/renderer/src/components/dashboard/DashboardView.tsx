@@ -11,12 +11,15 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  Check,
   Download,
   Search,
   X,
   User,
   Users,
-  CircleAlert
+  CircleAlert,
+  Building2
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -24,7 +27,8 @@ import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { formatRelativeTime, truncate } from "@/lib/utils"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { cn, formatRelativeTime, truncate } from "@/lib/utils"
 import {
   formatTopUserOrgName,
   useDashboard,
@@ -32,6 +36,8 @@ import {
   type DashboardSkillEvalRun,
   type DashboardSkillEvalSummary,
   type DashboardSkillDetail,
+  type DashboardTraceTriggerScope,
+  type DashboardTraceViewMode,
   type DashboardUserDetail,
   type DashboardUserListData,
   type DashboardUserListItem,
@@ -43,7 +49,7 @@ import { ModelPanel } from "./panels/ModelPanel"
 import { UserPanel } from "./panels/UserPanel"
 import { ProductivityPanel } from "./panels/ProductivityPanel"
 import { FeedbackPanel } from "./panels/FeedbackPanel"
-import { TraceExplorer, TraceHistoryDialog } from "./TraceHistoryDialog"
+import { TraceExplorer, TraceHistoryDialog, TraceTriggerScopeToggle } from "./TraceHistoryDialog"
 import { CommitDetailsDialog } from "./CommitDetailsDialog"
 import { marketApi, type MarketItem } from "../../api/market"
 import {
@@ -283,6 +289,108 @@ function TimeControlBar({
   )
 }
 
+function OrgFilterBar({
+  value,
+  options,
+  loading,
+  onChange
+}: {
+  value: string[]
+  options: string[]
+  loading: boolean
+  onChange: (orgList: string[]) => void
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const selectedSet = new Set(value)
+
+  const toggleOrg = (org: string): void => {
+    if (selectedSet.has(org)) {
+      onChange(value.filter((item) => item !== org))
+    } else {
+      onChange([...value, org])
+    }
+  }
+
+  const triggerLabel =
+    value.length === 0
+      ? "全部"
+      : value.length === 1
+        ? value[0]
+        : `已选 ${value.length} 个室`
+
+  return (
+    <div className="flex items-center gap-2 px-6 py-2.5 border-b border-border bg-background/60">
+      <Building2 className="size-3.5 text-muted-foreground" />
+      <span className="text-xs text-muted-foreground">室筛选</span>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 w-[240px] justify-between gap-1 text-xs font-normal"
+            disabled={loading && options.length === 0}
+          >
+            <span className={cn("truncate", value.length === 0 && "text-muted-foreground")}>
+              {triggerLabel}
+            </span>
+            <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-[240px] p-1">
+          <button
+            type="button"
+            className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 text-xs hover:bg-muted/60"
+            onClick={() => onChange([])}
+          >
+            <span className={value.length === 0 ? "font-medium text-foreground" : "text-muted-foreground"}>
+              全部
+            </span>
+            {value.length === 0 && <Check className="size-3.5 text-primary" />}
+          </button>
+          <div className="my-1 h-px bg-border" />
+          <ScrollArea className="max-h-64">
+            <div className="pr-1">
+              {options.length === 0 ? (
+                <div className="px-2 py-3 text-center text-[11px] text-muted-foreground">
+                  暂无可选室
+                </div>
+              ) : (
+                options.map((org) => {
+                  const checked = selectedSet.has(org)
+                  return (
+                    <button
+                      key={org}
+                      type="button"
+                      className="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-muted/60"
+                      onClick={() => toggleOrg(org)}
+                    >
+                      <span className={cn("truncate", checked && "font-medium text-foreground")}>
+                        {org}
+                      </span>
+                      {checked && <Check className="size-3.5 shrink-0 text-primary" />}
+                    </button>
+                  )
+                })
+              )}
+            </div>
+          </ScrollArea>
+        </PopoverContent>
+      </Popover>
+      {value.length > 0 && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 px-2 text-xs text-muted-foreground"
+          onClick={() => onChange([])}
+        >
+          <X className="size-3.5" />
+          清除
+        </Button>
+      )}
+    </div>
+  )
+}
+
 // ─────────────────────────────────────────────────────────
 // Main Dashboard View
 // ─────────────────────────────────────────────────────────
@@ -324,6 +432,8 @@ const EMPTY_SKILL_DETAIL: DashboardSkillDetail = {
 }
 
 const USER_LIST_PAGE_SIZE = 20
+const USER_LIST_EXPORT_PAGE_SIZE = 100
+const USER_LIST_EXPORT_MAX_PAGES = 100
 const USER_TRACE_PAGE_SIZE = 10
 const SKILL_TRACE_PAGE_SIZE = 10
 
@@ -371,6 +481,32 @@ function formatDateOnly(iso?: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return iso
   return date.toLocaleDateString("zh-CN")
+}
+
+async function fetchAllActiveUsersForExport(range: TimeRange): Promise<DashboardUserListItem[]> {
+  const users: DashboardUserListItem[] = []
+  let afterKey: Record<string, string | number> | undefined
+
+  for (let page = 0; page < USER_LIST_EXPORT_MAX_PAGES; page++) {
+    const result = await window.api.dashboard.userList(range, {
+      pageSize: USER_LIST_EXPORT_PAGE_SIZE,
+      afterKey: afterKey ?? null,
+      keyword: null
+    })
+
+    if (!result.success) {
+      throw new Error(result.error ?? "获取活跃用户列表失败")
+    }
+
+    const data = result.data
+    if (!data) break
+    users.push(...data.items)
+
+    if (!data.nextAfterKey) break
+    afterKey = data.nextAfterKey
+  }
+
+  return users
 }
 
 function outcomeLabel(outcome: string): string {
@@ -534,9 +670,13 @@ function UserListPage({
   onNext,
   searchValue,
   searchKeyword,
+  departmentValue,
+  departmentFilter,
   onSearchValueChange,
+  onDepartmentValueChange,
   onSearch,
   onClearSearch,
+  onClearDepartment,
   onUserClick
 }: {
   data: DashboardUserListData | null
@@ -550,12 +690,17 @@ function UserListPage({
   onNext: () => void
   searchValue: string
   searchKeyword: string
+  departmentValue: string
+  departmentFilter: string
   onSearchValueChange: (value: string) => void
+  onDepartmentValueChange: (value: string) => void
   onSearch: () => void
   onClearSearch: () => void
+  onClearDepartment: () => void
   onUserClick: (user: DashboardUserListItem) => void
 }): React.JSX.Element {
   const hasSearchKeyword = searchKeyword.trim().length > 0
+  const hasDepartmentFilter = departmentFilter.trim().length > 0
 
   return (
     <div className="p-6">
@@ -601,12 +746,34 @@ function UserListPage({
               onSearch()
             }}
           >
+            <div className="relative w-full max-w-[220px]">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={departmentValue}
+                onChange={(event) => onDepartmentValueChange(event.target.value)}
+                aria-label="按 Lv1 或 Lv0 部门筛选"
+                placeholder="部门查询"
+                className="h-8 pl-8 pr-8 text-xs"
+              />
+              {departmentValue && (
+                <button
+                  type="button"
+                  onClick={onClearDepartment}
+                  className="absolute right-2 top-1/2 inline-flex size-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  aria-label="清空部门筛选"
+                  title="清空"
+                >
+                  <X className="size-3" />
+                </button>
+              )}
+            </div>
             <div className="relative w-full max-w-[280px]">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input
                 value={searchValue}
                 onChange={(event) => onSearchValueChange(event.target.value)}
                 aria-label="按用户名或 ystId 查询"
+                placeholder="用户查询"
                 className="h-8 pl-8 pr-8 text-xs"
               />
               {searchValue && (
@@ -702,6 +869,7 @@ function UserListPage({
                   <tr>
                     <td colSpan={6} className="px-3 py-10 text-center text-muted-foreground">
                       {hasSearchKeyword ? "未找到匹配用户" : "当前时间范围内暂无活跃用户"}
+                      {hasDepartmentFilter ? `（部门：${departmentFilter}）` : ""}
                     </td>
                   </tr>
                 )}
@@ -719,17 +887,21 @@ function UserDetailPage({
   loading,
   error,
   tracePage,
+  traceTriggerScope,
   onBack,
   onTracePrevious,
-  onTraceNext
+  onTraceNext,
+  onTraceTriggerScopeChange
 }: {
   data: DashboardUserDetail | null
   loading: boolean
   error: string | null
   tracePage: number
+  traceTriggerScope: DashboardTraceTriggerScope
   onBack: () => void
   onTracePrevious: () => void
   onTraceNext: () => void
+  onTraceTriggerScopeChange: (scope: DashboardTraceTriggerScope) => void
 }): React.JSX.Element {
   const tracePageSize = data?.tracePageSize ?? USER_TRACE_PAGE_SIZE
   const totalTraces = data?.totalTraces ?? data?.totalCalls ?? 0
@@ -848,9 +1020,13 @@ function UserDetailPage({
               traces={data.traces}
               loading={loading}
               title={traceTitle}
-              subtitle={`共 ${formatNumber(totalTraces)} 条，选择记录查看完整执行树`}
+              subtitle={`共 ${formatNumber(totalTraces)} 条，选择记录查看对话还原与执行树`}
               headerRight={
                 <div className="flex items-center gap-2">
+                  <TraceTriggerScopeToggle
+                    value={traceTriggerScope}
+                    onChange={onTraceTriggerScopeChange}
+                  />
                   <Button
                     type="button"
                     variant="outline"
@@ -1647,7 +1823,8 @@ export function DashboardView(): React.JSX.Element {
   const {
     granularity,
     range,
-    selectedUpperOrgLv1,
+    selectedOrgLv1List,
+    orgOptions,
     loading,
     userStatsLoading,
     skillEvalLoading,
@@ -1664,6 +1841,7 @@ export function DashboardView(): React.JSX.Element {
     refresh,
     fetchSkillEvalPage,
     clearSkillEval,
+    setOrgFilter,
     drillDownUserOrg,
     resetUserOrgDrilldown
   } = useDashboard()
@@ -1676,6 +1854,9 @@ export function DashboardView(): React.JSX.Element {
   const [skillTracePage, setSkillTracePage] = useState(1)
   const [skillTracesLoading, setSkillTracesLoading] = useState(false)
   const [skillTracesError, setSkillTracesError] = useState<string | null>(null)
+  const [skillTraceViewMode, setSkillTraceViewMode] = useState<DashboardTraceViewMode>("thread")
+  const [skillTraceTriggerScope, setSkillTraceTriggerScope] =
+    useState<DashboardTraceTriggerScope>("active")
   const [skillTraceExporting, setSkillTraceExporting] = useState(false)
   const [skillEvalTraceRun, setSkillEvalTraceRun] = useState<DashboardSkillEvalRun | null>(null)
   const [skillEvalSelectedSkillKey, setSkillEvalSelectedSkillKey] = useState<
@@ -1687,12 +1868,16 @@ export function DashboardView(): React.JSX.Element {
   const [commitDetails, setCommitDetails] = useState<DashboardCommitDetailsData | null>(null)
   const [commitDetailsLoading, setCommitDetailsLoading] = useState(false)
   const [commitDetailsError, setCommitDetailsError] = useState<string | null>(null)
+  const [commitDepartmentValue, setCommitDepartmentValue] = useState("")
+  const [commitDepartmentFilter, setCommitDepartmentFilter] = useState("")
   const [subPage, setSubPage] = useState<DashboardSubPage>({ kind: "main" })
   const [userList, setUserList] = useState<DashboardUserListData | null>(null)
   const [userListLoading, setUserListLoading] = useState(false)
   const [userListError, setUserListError] = useState<string | null>(null)
   const [userListSearchValue, setUserListSearchValue] = useState("")
   const [userListSearchKeyword, setUserListSearchKeyword] = useState("")
+  const [userListDepartmentValue, setUserListDepartmentValue] = useState("")
+  const [userListDepartmentFilter, setUserListDepartmentFilter] = useState("")
   const userListScopeRef = useRef("")
   const [userListAfterKey, setUserListAfterKey] = useState<
     Record<string, string | number> | undefined
@@ -1704,6 +1889,8 @@ export function DashboardView(): React.JSX.Element {
   const [userDetailLoading, setUserDetailLoading] = useState(false)
   const [userDetailError, setUserDetailError] = useState<string | null>(null)
   const [userDetailTracePage, setUserDetailTracePage] = useState(1)
+  const [userDetailTraceTriggerScope, setUserDetailTraceTriggerScope] =
+    useState<DashboardTraceTriggerScope>("active")
   const [marketSkillKeys, setMarketSkillKeys] = useState<Set<string>>(new Set())
   const [pluginSkillKeys, setPluginSkillKeys] = useState<Set<string>>(new Set())
   const [marketSkillMap, setMarketSkillMap] = useState<Map<string, MarketItem>>(new Map())
@@ -1995,17 +2182,26 @@ export function DashboardView(): React.JSX.Element {
   }, [])
 
   const loadSkillDetailPage = useCallback(
-    async (skill: string, page: number) => {
+    async (
+      skill: string,
+      page: number,
+      traceViewMode = skillTraceViewMode,
+      triggerScope = skillTraceTriggerScope
+    ) => {
       setSelectedSkill(skill)
       setSkillDialogOpen(true)
       setSkillTracePage(page)
+      setSkillTraceViewMode(traceViewMode)
+      setSkillTraceTriggerScope(triggerScope)
       if (page === 1) setSkillDetail(null)
       setSkillTracesError(null)
       setSkillTracesLoading(true)
       try {
         const result = await window.api.dashboard.skillDetail(skill, range, {
           page,
-          pageSize: SKILL_TRACE_PAGE_SIZE
+          pageSize: SKILL_TRACE_PAGE_SIZE,
+          mode: traceViewMode,
+          triggerScope
         })
         if (!result.success) throw new Error(result.error ?? "获取 Skill 详情失败")
         setSkillDetail(result.data ?? EMPTY_SKILL_DETAIL)
@@ -2015,7 +2211,7 @@ export function DashboardView(): React.JSX.Element {
         setSkillTracesLoading(false)
       }
     },
-    [range]
+    [range, skillTraceViewMode, skillTraceTriggerScope]
   )
 
   const handleSkillClick = useCallback(
@@ -2052,6 +2248,7 @@ export function DashboardView(): React.JSX.Element {
       totalOutputTokens: skillEvalTraceRun.totalOutputTokens,
       totalTokens: skillEvalTraceRun.totalTokens,
       usedSkills: [skillEvalTraceRun.rawSkillName],
+      evolvedSkills: [],
       rawAvailable: false,
       rawError: "该评估记录缺少完整 trace 详情"
     }
@@ -2171,6 +2368,28 @@ export function DashboardView(): React.JSX.Element {
     void loadSkillDetailPage(selectedSkill, skillTracePage + 1)
   }, [loadSkillDetailPage, selectedSkill, skillDetail, skillTracePage])
 
+  const handleSkillTraceViewModeChange = useCallback(
+    (mode: DashboardTraceViewMode) => {
+      if (!selectedSkill) {
+        setSkillTraceViewMode(mode)
+        return
+      }
+      void loadSkillDetailPage(selectedSkill, 1, mode, skillTraceTriggerScope)
+    },
+    [loadSkillDetailPage, selectedSkill, skillTraceTriggerScope]
+  )
+
+  const handleSkillTraceTriggerScopeChange = useCallback(
+    (scope: DashboardTraceTriggerScope) => {
+      if (!selectedSkill) {
+        setSkillTraceTriggerScope(scope)
+        return
+      }
+      void loadSkillDetailPage(selectedSkill, 1, skillTraceViewMode, scope)
+    },
+    [loadSkillDetailPage, selectedSkill, skillTraceViewMode]
+  )
+
   const handleSkillTraceExport = useCallback(async () => {
     if (!selectedSkill || !skillDetail || skillDetail.traces.length === 0) return
     setSkillTraceExporting(true)
@@ -2197,22 +2416,25 @@ export function DashboardView(): React.JSX.Element {
     async (
       afterKey?: Record<string, string | number>,
       backStack: Array<Record<string, string | number> | undefined> = [],
-      keyword = ""
+      keyword = "",
+      upperOrgLv1 = userListDepartmentFilter
     ) => {
       setUserListLoading(true)
       setUserListError(null)
       const normalizedKeyword = keyword.trim()
+      const normalizedDepartment = upperOrgLv1.trim()
       try {
         const result = await window.api.dashboard.userList(range, {
           pageSize: USER_LIST_PAGE_SIZE,
           afterKey: afterKey ?? null,
-          keyword: normalizedKeyword || null
+          keyword: normalizedKeyword || null,
+          upperOrgLv1: normalizedDepartment || null
         })
         if (!result.success) throw new Error(result.error ?? "获取用户列表失败")
         setUserList(
           result.data ?? { items: [], pageSize: USER_LIST_PAGE_SIZE, totalActiveUsers: 0 }
         )
-        userListScopeRef.current = `${range.from}|${range.to}|${normalizedKeyword}`
+        userListScopeRef.current = `${range.from}|${range.to}|${normalizedKeyword}|${normalizedDepartment}`
         setUserListAfterKey(afterKey)
         setUserListBackStack(backStack)
       } catch (e) {
@@ -2221,17 +2443,22 @@ export function DashboardView(): React.JSX.Element {
         setUserListLoading(false)
       }
     },
-    [range]
+    [range, userListDepartmentFilter]
   )
 
   const loadUserDetail = useCallback(
-    async (sapId: string, tracePage = 1) => {
+    async (
+      sapId: string,
+      tracePage = 1,
+      triggerScope: DashboardTraceTriggerScope = "active"
+    ) => {
       setUserDetailLoading(true)
       setUserDetailError(null)
       try {
         const result = await window.api.dashboard.userDetail(sapId, range, {
           tracePage,
-          tracePageSize: USER_TRACE_PAGE_SIZE
+          tracePageSize: USER_TRACE_PAGE_SIZE,
+          triggerScope
         })
         if (!result.success) throw new Error(result.error ?? "获取用户详情失败")
         setUserDetail(result.data ?? null)
@@ -2249,6 +2476,8 @@ export function DashboardView(): React.JSX.Element {
     setUserList(null)
     setUserListSearchValue("")
     setUserListSearchKeyword("")
+    setUserListDepartmentValue("")
+    setUserListDepartmentFilter("")
     setUserListAfterKey(undefined)
     setUserListBackStack([])
   }, [])
@@ -2261,6 +2490,7 @@ export function DashboardView(): React.JSX.Element {
       setSubPage({ kind: "user-detail", sapId: normalizedSapId, backTo: backTo ?? fallbackBackTo })
       setUserDetail(null)
       setUserDetailTracePage(1)
+      setUserDetailTraceTriggerScope("active")
     },
     [subPage.kind]
   )
@@ -2270,34 +2500,56 @@ export function DashboardView(): React.JSX.Element {
     void loadUserList(
       userList.nextAfterKey,
       [...userListBackStack, userListAfterKey],
-      userListSearchKeyword
+      userListSearchKeyword,
+      userListDepartmentFilter
     )
   }, [
     loadUserList,
     userList?.nextAfterKey,
     userListAfterKey,
     userListBackStack,
-    userListSearchKeyword
+    userListSearchKeyword,
+    userListDepartmentFilter
   ])
 
   const handleUserListPrevious = useCallback(() => {
     if (userListBackStack.length === 0) return
     const nextStack = userListBackStack.slice(0, -1)
     const previousAfterKey = userListBackStack[userListBackStack.length - 1]
-    void loadUserList(previousAfterKey, nextStack, userListSearchKeyword)
-  }, [loadUserList, userListBackStack, userListSearchKeyword])
+    void loadUserList(previousAfterKey, nextStack, userListSearchKeyword, userListDepartmentFilter)
+  }, [loadUserList, userListBackStack, userListSearchKeyword, userListDepartmentFilter])
 
   const handleUserListSearch = useCallback(() => {
     const keyword = userListSearchValue.trim()
+    const upperOrgLv1 = userListDepartmentValue.trim()
     setUserList(null)
     setUserListAfterKey(undefined)
     setUserListBackStack([])
-    if (keyword === userListSearchKeyword) {
-      void loadUserList(undefined, [], keyword)
+    if (keyword === userListSearchKeyword && upperOrgLv1 === userListDepartmentFilter) {
+      void loadUserList(undefined, [], keyword, upperOrgLv1)
       return
     }
     setUserListSearchKeyword(keyword)
-  }, [loadUserList, userListSearchKeyword, userListSearchValue])
+    setUserListDepartmentFilter(upperOrgLv1)
+  }, [
+    loadUserList,
+    userListDepartmentFilter,
+    userListDepartmentValue,
+    userListSearchKeyword,
+    userListSearchValue
+  ])
+
+  const handleUserListDepartmentClear = useCallback(() => {
+    setUserListDepartmentValue("")
+    setUserList(null)
+    setUserListAfterKey(undefined)
+    setUserListBackStack([])
+    if (!userListDepartmentFilter) {
+      void loadUserList(undefined, [], userListSearchKeyword, "")
+      return
+    }
+    setUserListDepartmentFilter("")
+  }, [loadUserList, userListDepartmentFilter, userListSearchKeyword])
 
   const handleUserListSearchClear = useCallback(() => {
     setUserListSearchValue("")
@@ -2331,16 +2583,24 @@ export function DashboardView(): React.JSX.Element {
     })
   }, [userDetail])
 
+  const handleUserTraceTriggerScopeChange = useCallback(
+    (scope: DashboardTraceTriggerScope) => {
+      setUserDetailTraceTriggerScope(scope)
+      setUserDetailTracePage(1)
+    },
+    []
+  )
+
   const subPageDetailSapId = subPage.kind === "user-detail" ? subPage.sapId : null
 
   useEffect(() => {
     if (subPage.kind === "user-list") {
-      const currentScope = `${range.from}|${range.to}|${userListSearchKeyword}`
+      const currentScope = `${range.from}|${range.to}|${userListSearchKeyword}|${userListDepartmentFilter}`
       if (!userList || userListScopeRef.current !== currentScope) {
-        void loadUserList(undefined, [], userListSearchKeyword)
+        void loadUserList(undefined, [], userListSearchKeyword, userListDepartmentFilter)
       }
     } else if (subPageDetailSapId) {
-      void loadUserDetail(subPageDetailSapId, userDetailTracePage)
+      void loadUserDetail(subPageDetailSapId, userDetailTracePage, userDetailTraceTriggerScope)
     }
   }, [
     range,
@@ -2350,22 +2610,32 @@ export function DashboardView(): React.JSX.Element {
     loadUserDetail,
     userList,
     userListSearchKeyword,
-    userDetailTracePage
+    userListDepartmentFilter,
+    userDetailTracePage,
+    userDetailTraceTriggerScope
   ])
 
   const loadCommitDetails = useCallback(
-    async (targetRange: TimeRange, scopeLabel: string, page = 1, pushedOnly = false) => {
+    async (
+      targetRange: TimeRange,
+      scopeLabel: string,
+      page = 1,
+      pushedOnly = false,
+      upperOrgLv1 = commitDepartmentFilter
+    ) => {
       setCommitScopeLabel(scopeLabel)
       setCommitDetailsRange(targetRange)
       setCommitDialogOpen(true)
       setCommitDetails(null)
       setCommitDetailsError(null)
       setCommitDetailsLoading(true)
+      const normalizedDepartment = upperOrgLv1.trim()
       try {
         const result = await window.api.dashboard.commitDetails(targetRange, {
           page,
           pageSize: 20,
-          pushedOnly
+          pushedOnly,
+          upperOrgLv1: normalizedDepartment || null
         })
         if (!result.success) throw new Error(result.error ?? "获取 Commit 明细失败")
         setCommitDetails(result.data ?? { total: 0, page, pageSize: 20, pushedOnly, items: [] })
@@ -2375,16 +2645,28 @@ export function DashboardView(): React.JSX.Element {
         setCommitDetailsLoading(false)
       }
     },
-    []
+    [commitDepartmentFilter]
   )
 
   const reloadCommitDetails = useCallback(
-    (page: number, pushedOnly: boolean) => {
+    (page: number, pushedOnly: boolean, upperOrgLv1 = commitDepartmentFilter) => {
       if (!commitDetailsRange) return
-      void loadCommitDetails(commitDetailsRange, commitScopeLabel, page, pushedOnly)
+      void loadCommitDetails(commitDetailsRange, commitScopeLabel, page, pushedOnly, upperOrgLv1)
     },
-    [commitDetailsRange, commitScopeLabel, loadCommitDetails]
+    [commitDepartmentFilter, commitDetailsRange, commitScopeLabel, loadCommitDetails]
   )
+
+  const handleCommitDepartmentSearch = useCallback(() => {
+    const upperOrgLv1 = commitDepartmentValue.trim()
+    setCommitDepartmentFilter(upperOrgLv1)
+    reloadCommitDetails(1, commitDetails?.pushedOnly ?? false, upperOrgLv1)
+  }, [commitDepartmentValue, commitDetails?.pushedOnly, reloadCommitDetails])
+
+  const handleCommitDepartmentClear = useCallback(() => {
+    setCommitDepartmentValue("")
+    setCommitDepartmentFilter("")
+    reloadCommitDetails(1, commitDetails?.pushedOnly ?? false, "")
+  }, [commitDetails?.pushedOnly, reloadCommitDetails])
 
   const handleCommitExternalOpen = useCallback((url: string) => {
     if (!url) return
@@ -2392,15 +2674,22 @@ export function DashboardView(): React.JSX.Element {
   }, [])
 
   const handleCommitTotalClick = useCallback(() => {
+    setCommitDepartmentValue("")
+    setCommitDepartmentFilter("")
     void loadCommitDetails(
       range,
-      `当前范围 · ${formatRangeLabel(range.from, range.to, granularity)}`
+      `当前范围 · ${formatRangeLabel(range.from, range.to, granularity)}`,
+      1,
+      false,
+      ""
     )
   }, [loadCommitDetails, range, granularity])
 
   const handleCommitBucketClick = useCallback(
     (bucket: { from: string; to: string; label: string }) => {
-      void loadCommitDetails({ from: bucket.from, to: bucket.to }, `时间桶 · ${bucket.label}`)
+      setCommitDepartmentValue("")
+      setCommitDepartmentFilter("")
+      void loadCommitDetails({ from: bucket.from, to: bucket.to }, `时间桶 · ${bucket.label}`, 1, false, "")
     },
     [loadCommitDetails]
   )
@@ -2577,11 +2866,9 @@ export function DashboardView(): React.JSX.Element {
           })
         }
         if (userStats.byOrg.length > 0) {
+          const drilledOrg = selectedOrgLv1List.length === 1 ? selectedOrgLv1List[0] : null
           sheets.push({
-            name:
-              selectedUpperOrgLv1 === null
-                ? "一级部门分布"
-                : `${selectedUpperOrgLv1 || "未知"}下级部门分布`,
+            name: drilledOrg ? `${drilledOrg}下级部门分布` : "一级部门分布",
             header: ["部门", "调用次数"],
             rows: userStats.byOrg.map((o) => [o.org, o.count])
           })
@@ -2602,8 +2889,8 @@ export function DashboardView(): React.JSX.Element {
           header: ["指标", "值"],
           rows: [
             ["Commit 总数", productivity.totalCommits],
-            ["新增行数", productivity.totalInsertions],
-            ["删除行数", productivity.totalDeletions],
+            ["新增行数(Agent生成)", productivity.totalInsertions],
+            ["删除行数(Agent生成)", productivity.totalDeletions],
             ["文件变更数", productivity.totalFilesChanged],
             ["活跃用户数", productivity.activeUsers],
             ["人均 Commit", Number(productivity.avgCommitsPerUser.toFixed(1))]
@@ -2617,6 +2904,45 @@ export function DashboardView(): React.JSX.Element {
           })
         }
       }
+
+      const activeUsers = await fetchAllActiveUsersForExport(range)
+      sheets.push({
+        name: "活跃用户列表",
+        header: [
+          "排名",
+          "SAP ID",
+          "YST ID",
+          "用户名",
+          "部门",
+          "一级部门",
+          "下级部门",
+          "调用次数",
+          "工具调用",
+          "输入Token",
+          "输出Token",
+          "总Token",
+          "平均耗时",
+          "最近活跃"
+        ],
+        rows: activeUsers.map((user, index) => [
+          index + 1,
+          user.sapId,
+          user.ystId || "",
+          user.userName || "",
+          user.upperOrgLv1 && user.upperOrgLv0
+            ? `${user.upperOrgLv1}/${user.upperOrgLv0}`
+            : user.orgName || "",
+          user.upperOrgLv1 || "",
+          user.upperOrgLv0 || "",
+          user.count,
+          user.totalToolCalls,
+          user.totalInputTokens,
+          user.totalOutputTokens,
+          user.totalTokens,
+          formatDuration(user.avgDurationMs),
+          formatDateTime(user.lastActiveAt)
+        ])
+      })
 
       if (sheets.length === 0) return
 
@@ -2634,7 +2960,8 @@ export function DashboardView(): React.JSX.Element {
     modelStats,
     userStats,
     productivity,
-    selectedUpperOrgLv1,
+    range,
+    selectedOrgLv1List,
     marketSkillMap,
     skillUploaderProfiles
   ])
@@ -2652,6 +2979,15 @@ export function DashboardView(): React.JSX.Element {
         loading={loading}
         exporting={exporting}
       />
+
+      {subPage.kind === "main" && (
+        <OrgFilterBar
+          value={selectedOrgLv1List}
+          options={orgOptions}
+          loading={loading}
+          onChange={setOrgFilter}
+        />
+      )}
 
       {error && (
         <div className="mx-6 mt-4 flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/5 px-4 py-3 text-sm text-destructive">
@@ -2674,15 +3010,24 @@ export function DashboardView(): React.JSX.Element {
             canGoNext={Boolean(userList?.nextAfterKey)}
             onBack={() => setSubPage({ kind: "main" })}
             onRefresh={() =>
-              loadUserList(userListAfterKey, userListBackStack, userListSearchKeyword)
+              loadUserList(
+                userListAfterKey,
+                userListBackStack,
+                userListSearchKeyword,
+                userListDepartmentFilter
+              )
             }
             onPrevious={handleUserListPrevious}
             onNext={handleUserListNext}
             searchValue={userListSearchValue}
             searchKeyword={userListSearchKeyword}
+            departmentValue={userListDepartmentValue}
+            departmentFilter={userListDepartmentFilter}
             onSearchValueChange={setUserListSearchValue}
+            onDepartmentValueChange={setUserListDepartmentValue}
             onSearch={handleUserListSearch}
             onClearSearch={handleUserListSearchClear}
+            onClearDepartment={handleUserListDepartmentClear}
             onUserClick={(user) => openUserDetail(user.sapId, "user-list")}
           />
         </ScrollArea>
@@ -2693,9 +3038,11 @@ export function DashboardView(): React.JSX.Element {
             loading={userDetailLoading}
             error={userDetailError}
             tracePage={userDetailTracePage}
+            traceTriggerScope={userDetail?.traceTriggerScope ?? userDetailTraceTriggerScope}
             onBack={handleUserDetailBack}
             onTracePrevious={handleUserTracePrevious}
             onTraceNext={handleUserTraceNext}
+            onTraceTriggerScopeChange={handleUserTraceTriggerScopeChange}
           />
         </ScrollArea>
       ) : (
@@ -2784,6 +3131,10 @@ export function DashboardView(): React.JSX.Element {
         tracePage={skillTracePage}
         tracePageSize={skillDetail?.tracePageSize ?? SKILL_TRACE_PAGE_SIZE}
         totalTraces={skillDetail?.totalTraces ?? skillDetail?.traces.length}
+        traceViewMode={skillDetail?.traceViewMode ?? skillTraceViewMode}
+        traceTriggerScope={skillDetail?.traceTriggerScope ?? skillTraceTriggerScope}
+        onTraceViewModeChange={handleSkillTraceViewModeChange}
+        onTraceTriggerScopeChange={handleSkillTraceTriggerScopeChange}
         onTracePrevious={handleSkillTracePrevious}
         onTraceNext={handleSkillTraceNext}
         onExportPage={handleSkillTraceExport}
@@ -2839,6 +3190,10 @@ export function DashboardView(): React.JSX.Element {
         error={commitDetailsError}
         onPageChange={(page) => reloadCommitDetails(page, commitDetails?.pushedOnly ?? false)}
         onPushedOnlyChange={(pushedOnly) => reloadCommitDetails(1, pushedOnly)}
+        departmentValue={commitDepartmentValue}
+        onDepartmentValueChange={setCommitDepartmentValue}
+        onDepartmentSearch={handleCommitDepartmentSearch}
+        onClearDepartment={handleCommitDepartmentClear}
         onOpenExternal={handleCommitExternalOpen}
       />
     </div>

@@ -174,6 +174,7 @@ import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
+import { startHarnessStatusReporter } from "./services/harness-status-reporter"
 import { initializeAdoptionTracker, shutdownAdoptionTracker } from "./services/adoption-tracker"
 import {
   startRegisteredGitHookEventSync,
@@ -494,6 +495,11 @@ if (!gotTheLock) {
       setEventReporter(new HttpEventReporter(traceBaseUrl))
       console.log("[Main] HttpEventReporter registered, sending events to:", traceBaseUrl)
     }
+
+    // Periodically upsert Harness Board project/feature status into the event
+    // index. Writes directly to ES (VITE_ES_NODES); no-ops when ES is not
+    // configured, so it does not depend on the trace upload base URL.
+    startHarnessStatusReporter()
 
     // Initialize database
     await initializeDatabase()

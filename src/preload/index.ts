@@ -1711,9 +1711,10 @@ const api = {
       >,
     /** Approve a candidate — writes the skill to disk */
     approve: (
-      candidateId: string
+      candidateId: string,
+      proposedContent?: string
     ): Promise<{ success: boolean; skillId?: string; error?: string }> =>
-      ipcRenderer.invoke("optimizer:approve", { candidateId }) as Promise<{
+      ipcRenderer.invoke("optimizer:approve", { candidateId, proposedContent }) as Promise<{
         success: boolean
         skillId?: string
         error?: string
@@ -1740,6 +1741,8 @@ const api = {
         totalTokens: number
         outcome: string
         usedSkills: string[]
+        evolvedSkills: string[]
+        triggerSource?: string
       }>
     > =>
       ipcRenderer.invoke("optimizer:traces", opts) as Promise<
@@ -1755,6 +1758,8 @@ const api = {
           totalTokens: number
           outcome: string
           usedSkills: string[]
+          evolvedSkills: string[]
+          triggerSource?: string
         }>
       >,
     /** Listen for auto-triggered skill evolution (main process fires this after threshold) */
@@ -1781,6 +1786,8 @@ const api = {
       outcome: string
       errorMessage?: string
       usedSkills: string[]
+      evolvedSkills: string[]
+      triggerSource?: string
       nodes?: Array<{
         id: string
         type: "trace" | "llm" | "tool" | "tool_result" | "message" | "error" | "cancel"
@@ -1846,6 +1853,8 @@ const api = {
         outcome: string
         errorMessage?: string
         usedSkills: string[]
+        evolvedSkills: string[]
+        triggerSource?: string
         nodes?: Array<{
           id: string
           type: "trace" | "llm" | "tool" | "tool_result" | "message" | "error" | "cancel"
@@ -2023,18 +2032,24 @@ const api = {
     isAllowed: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAllowed"),
     overview: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:overview", range, granularity),
+      ipcRenderer.invoke("dashboard:overview", range, granularity, opts),
     modelStats: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:modelStats", range, granularity),
+      ipcRenderer.invoke("dashboard:modelStats", range, granularity, opts),
+    orgOptions: (
+      range: { from: string; to: string }
+    ): Promise<{ success: boolean; data?: string[]; error?: string }> =>
+      ipcRenderer.invoke("dashboard:orgOptions", range),
     userStats: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | null }
+      opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userStats", range, granularity, opts),
     userList: (
@@ -2043,13 +2058,14 @@ const api = {
         pageSize?: number
         afterKey?: Record<string, string | number> | null
         keyword?: string | null
+        upperOrgLv1?: string | null
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userList", range, options),
     userDetail: (
       sapId: string,
       range: { from: string; to: string },
-      options?: { traceLimit?: number; tracePage?: number; tracePageSize?: number }
+      options?: { traceLimit?: number; tracePage?: number; tracePageSize?: number; triggerScope?: "active" | "all" }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userDetail", sapId, range, options),
     skillUsageSummary: (
@@ -2092,35 +2108,48 @@ const api = {
       ipcRenderer.invoke("dashboard:queryAllUser"),
     productivity: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:productivity", range, granularity),
+      ipcRenderer.invoke("dashboard:productivity", range, granularity, opts),
     feedback: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:feedback", range, granularity),
+      ipcRenderer.invoke("dashboard:feedback", range, granularity, opts),
     skillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      options?: number | { page?: number; pageSize?: number }
+      limit?: number,
+      mode?: "thread" | "trace",
+      triggerScope?: "active" | "all"
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, options),
+      ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit, mode, triggerScope),
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      options?: number | { page?: number; pageSize?: number }
+      limit?: number,
+      mode?: "thread" | "trace",
+      triggerScope?: "active" | "all"
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:marketSkillRecentTraces", skill, range, options),
+      ipcRenderer.invoke(
+        "dashboard:marketSkillRecentTraces",
+        skill,
+        range,
+        limit,
+        mode,
+        triggerScope
+      ),
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
-      options?: number | { page?: number; pageSize?: number; limit?: number }
+      options?: number | { page?: number; pageSize?: number; limit?: number; mode?: "thread" | "trace"; viewMode?: "thread" | "trace"; triggerScope?: "active" | "all" }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillDetail", skill, range, options),
     commitDetails: (
       range: { from: string; to: string },
-      options?: { page?: number; pageSize?: number; pushedOnly?: boolean }
+      options?: { page?: number; pageSize?: number; pushedOnly?: boolean; upperOrgLv1?: string | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:commitDetails", range, options),
     exportSkillTraces: (payload: {
