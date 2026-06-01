@@ -220,7 +220,8 @@ export async function runCompletionHooksWithRevision({
   maxRevisionAttempts,
   revisionPromptPrefix,
   runPostSkillUseHooks,
-  runStopHooks
+  runStopHooks,
+  onStopHooksFired
 }: {
   threadId: string
   workspacePath?: string
@@ -238,6 +239,7 @@ export async function runCompletionHooksWithRevision({
   revisionPromptPrefix: string
   runPostSkillUseHooks?: () => Promise<HookResult | null>
   runStopHooks?: () => Promise<HookResult | null>
+  onStopHooksFired?: () => void
 }): Promise<CompletionHookOutcome> {
   let postSkillRevisionCount = 0
   let stopRevisionCount = 0
@@ -295,6 +297,7 @@ export async function runCompletionHooksWithRevision({
       continue
     }
 
+    onStopHooksFired?.()
     const stopResult = await (runStopHooks
       ? runStopHooks()
       : runHooksEnriched(

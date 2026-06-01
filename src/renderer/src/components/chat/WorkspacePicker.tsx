@@ -7,9 +7,11 @@ import {
   GitBranch,
   Loader2,
   AlertCircle,
+  RefreshCw,
   Trash2
 } from "lucide-react"
 import { useState, useEffect } from "react"
+import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { useCurrentThread } from "@/lib/thread-context"
@@ -107,6 +109,24 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
   const [worktreeList, setWorktreeList] = useState<WorktreeItem[]>([])
   const [worktreeListLoading, setWorktreeListLoading] = useState(false)
   const [removingWorktreePath, setRemovingWorktreePath] = useState<string | null>(null)
+
+  // PR-11 — Setup(maintenance) re-run state. Independent of git/worktree flow.
+  const [reinitLoading, setReinitLoading] = useState(false)
+
+  async function handleReinitWorkspace(): Promise<void> {
+    if (!workspacePath || reinitLoading) return
+    setReinitLoading(true)
+    try {
+      await window.api.hooks.workspace.runSetupMaintenance(workspacePath)
+      toast.success("已触发工作区 Setup hooks（maintenance）")
+      setOpen(false)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      toast.error(`重新初始化失败：${msg}`)
+    } finally {
+      setReinitLoading(false)
+    }
+  }
 
   async function refreshWorktreeList(root: string): Promise<void> {
     setWorktreeListLoading(true)
@@ -487,6 +507,25 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
                   更换文件夹
                 </Button>
               )}
+              {/* PR-11 — Re-run workspace Setup hooks (`trigger: "maintenance"`).
+                  Available whenever a workspace is set; independent of whether
+                  the thread already has messages (Setup is workspace-level, not
+                  thread-level). No-op + silent toast if no Setup hook matches. */}
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full h-7 text-xs"
+                onClick={handleReinitWorkspace}
+                disabled={reinitLoading}
+                title="触发已配置的 Setup hook（trigger=maintenance）；用于重新执行工作区初始化脚本，不影响 setup-state 标记"
+              >
+                {reinitLoading ? (
+                  <Loader2 className="size-3 mr-1.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3.5 mr-1.5" />
+                )}
+                重新初始化工作区
+              </Button>
             </div>
           ) : (
             <div className="space-y-2">

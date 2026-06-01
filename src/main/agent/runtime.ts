@@ -95,6 +95,12 @@ import type { HookContext } from "../hooks/runner"
 import type { HookEvent, HookResult } from "../hooks/types"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
+import {
+  hasFailureFired,
+  markFailureFired,
+  toolFailureSignalFromThrow,
+  type ToolFailureSignal
+} from "../hooks/tool-failure"
 import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
   createHookScope,
@@ -537,6 +543,32 @@ function createScopedMcpCapabilityService(
         postResult,
         `MCP tool ${tool.toolId} was stopped by a PostToolUse hook`
       )
+      // PR-12 follow-up — MCP tools surface failure via `result.isError` rather
+      // than a throw or a `success: false` shape, so `detectToolFailure` (which
+      // looks at common ad-hoc shapes) doesn't see them. Translate isError →
+      // PostToolUseFailure here so OMC-style security/observability hooks see
+      // MCP failures on the same channel as the rest.
+      if (result.isError === true) {
+        const failureContext: HookContext = {
+          ...postContext,
+          toolResult: JSON.stringify({
+            error: result.text || `MCP tool ${tool.toolId} returned isError`,
+            error_type: "unknown",
+            failure_kind: "explicit-error",
+            is_interrupt: false,
+            is_timeout: false
+          })
+        }
+        const failureHooks = resolveHooksForContext("PostToolUseFailure", failureContext)
+        runHooksEnriched(
+          failureHooks,
+          "PostToolUseFailure",
+          failureContext,
+          onHookResult
+        ).catch((e) =>
+          console.warn("[Hooks] PostToolUseFailure(MCP isError) hook error:", e)
+        )
+      }
       const hookFeedback = formatPostHookFeedback(postResult)
       const isError =
         result.isError || postResult?.decision === "block" || postResult?.continue === false
@@ -653,7 +685,21 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     summarizationTruncateArgsSettings,
     subagentExtraSystemPrompt,
     toolConcurrencyQueueId = "default",
-    toolHookMiddleware
+    toolHookMiddleware,
+    // PR-12 — optional callback fired-and-forgotten by toolErrorMiddleware
+    // when a tool throws. Closed-over context (threadId / workspace /
+    // hookScope / onHookResult) lives at the createAgentRuntime layer; this
+    // adapter keeps createDeepAgent oblivious to that wiring.
+    onToolFailureSignal
+  }: {
+    onToolFailureSignal?: (input: {
+      toolName: string | undefined
+      toolCallId: string | undefined
+      toolArgs: unknown
+      signal: ToolFailureSignal
+    }) => void
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    [k: string]: any
   } = params
 
   // --- systemPrompt handling (identical to original) ---
@@ -959,7 +1005,26 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         const toolName = request.toolCall?.name
         const toolCallId = request.toolCall?.id
 
-        if ((request.runtime as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
+        const aborted =
+          (request.runtime as { signal?: AbortSignal } | undefined)?.signal?.aborted === true
+
+        // PR-12 — fire PostToolUseFailure fire-and-forget. Even when the abort
+        // path rethrows below, we still want hook scripts to observe the
+        // failure so security/observability hooks fire on the same signal as
+        // CC. Dedupe by tool_call_id so a downstream `detectToolFailure`
+        // check on a recovered ToolMessage doesn't re-fire.
+        if (onToolFailureSignal && toolCallId && !hasFailureFired(toolCallId)) {
+          const signal = toolFailureSignalFromThrow(error, { aborted })
+          markFailureFired(toolCallId)
+          onToolFailureSignal({
+            toolName,
+            toolCallId,
+            toolArgs: request.toolCall?.args,
+            signal
+          })
+        }
+
+        if (aborted) {
           throw error
         }
 
@@ -1741,7 +1806,15 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
         workspacePath,
         sessionId: threadId,
-        turnId: hookTurnId
+        turnId: hookTurnId,
+        // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
+        // Lets a Notification hook know whether the user is in YOLO mode (where
+        // approvals only fire for sandbox-escape) vs the default approve flow.
+        permissionMode: yoloMode ? "yolo" : "approve",
+        // PR-16 follow-up — CC matcher target for Notification is
+        // `notification_type`. The approval queue is the only Notification
+        // fire path today, so the value is always "permission_prompt".
+        notificationType: "permission_prompt"
       }
       runHooks(
         resolveHooksForContext("Notification", notificationContext),
@@ -2114,7 +2187,41 @@ The workspace root is: ${workspacePath}`
       maxLength: 2000
     },
     toolConcurrencyQueueId: options.threadId ?? workspacePath,
-    toolHookMiddleware
+    toolHookMiddleware,
+    // PR-12 — closure captures threadId / workspacePath / hookScope so
+    // createDeepAgent's middleware can fire-and-forget the PostToolUseFailure
+    // hook chain without knowing per-thread context.
+    onToolFailureSignal: (input: {
+      toolName: string | undefined
+      toolCallId: string | undefined
+      toolArgs: unknown
+      signal: ToolFailureSignal
+    }): void => {
+      const context: HookContext = {
+        workspacePath,
+        sessionId: threadId,
+        turnId: hookTurnId,
+        toolName: input.toolName,
+        toolArgs:
+          input.toolArgs && typeof input.toolArgs === "object" && !Array.isArray(input.toolArgs)
+            ? (input.toolArgs as Record<string, unknown>)
+            : undefined,
+        toolResult: JSON.stringify({
+          error: input.signal.message,
+          error_type: input.signal.errorType,
+          failure_kind: input.signal.kind,
+          is_interrupt: input.signal.isInterrupt,
+          is_timeout: input.signal.isTimeout,
+          tool_use_id: input.toolCallId
+        })
+      }
+      runHooks(
+        resolveHooksForContext("PostToolUseFailure", context),
+        "PostToolUseFailure",
+        context,
+        onHookResult
+      ).catch((e) => console.warn("[Hooks] PostToolUseFailure hook error:", e))
+    }
   })
 
   console.log(
