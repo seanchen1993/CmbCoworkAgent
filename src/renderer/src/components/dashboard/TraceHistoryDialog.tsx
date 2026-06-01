@@ -1,14 +1,19 @@
-import { useMemo, useState } from "react"
+import { useMemo, useState, type ReactNode } from "react"
 import {
   Activity,
   AlertCircle,
   Ban,
   Bot,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   Clock,
+  Code2,
   Coins,
+  Download,
+  Gauge,
   Hash,
+  Info,
   Loader2,
   MessageSquare,
   Terminal,
@@ -16,16 +21,17 @@ import {
   Wrench
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
-import type { DashboardTraceDetail, DashboardTraceNode } from "./use-dashboard"
+import type { DashboardCodeStats, DashboardTraceDetail, DashboardTraceNode } from "./use-dashboard"
 
 const EMPTY_NODES: DashboardTraceNode[] = []
 
@@ -44,10 +50,270 @@ function fmtTokens(tokens: number): string {
   return String(tokens)
 }
 
+function fmtLines(lines: number): string {
+  if (lines >= 1_000_000) return `${(lines / 1_000_000).toFixed(1)}M`
+  if (lines >= 1_000) return `${(lines / 1_000).toFixed(1)}K`
+  return String(Math.round(lines))
+}
+
+function fmtPercent(value: number | null): string {
+  if (value === null) return "—"
+  return `${(value * 100).toFixed(2)}%`
+}
+
+function fmtExactLines(lines: number): string {
+  return Math.round(lines).toLocaleString("zh-CN")
+}
+
+function GeneratedLinesTooltip(): React.JSX.Element {
+  return (
+    <div className="space-y-1 text-[11px]">
+      <div className="font-medium text-foreground">代码生成行数说明</div>
+      <div className="text-muted-foreground">当前按 agent 写入或编辑的非空行统计。</div>
+      <div className="text-muted-foreground">空行和仅包含空白字符的行不会计入。</div>
+      <div className="text-muted-foreground">该指标表示原始生成量，包含后续被 agent 自己改写的中间稿。</div>
+    </div>
+  )
+}
+
+function SkillAttributionTooltip(): React.JSX.Element {
+  return (
+    <div className="space-y-1 text-[11px]">
+      <div className="font-medium text-foreground">Skill 归因说明</div>
+      <div className="text-muted-foreground">代码生成优先归因到当前 run 实际命中的 Skill。</div>
+      <div className="text-muted-foreground">若当前 run 尚未命中 Skill，会回看最近 2 轮会话中的 Skill 共同归因。</div>
+      <div className="text-muted-foreground">若当前 run 已命中 Skill，还会补入上一轮会话中的 Skill 一并归因。</div>
+    </div>
+  )
+}
+
+function InfoHint({ content }: { content: React.ReactNode }): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="inline-flex size-4 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground"
+            aria-label="查看说明"
+          >
+            <Info className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-72">{content}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
 function formatTime(iso: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return iso || "-"
   return date.toLocaleString()
+}
+
+function SkillCodeStat({
+  icon: Icon,
+  label,
+  value,
+  sub,
+  tooltipContent
+}: {
+  icon: React.ElementType
+  label: string
+  value: string
+  sub?: string
+  tooltipContent?: React.ReactNode
+}): React.JSX.Element {
+  const card = (
+    <div
+      className={`flex min-w-0 items-center gap-2 rounded-lg border border-border bg-card px-4 py-3 ${tooltipContent ? "cursor-help" : ""}`}
+    >
+      <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+      <div className="min-w-0">
+        <p className="text-[10px] text-muted-foreground">{label}</p>
+        <p className="truncate text-[12px] font-semibold">{value}</p>
+        {sub && <p className="truncate text-[10px] text-muted-foreground/70">{sub}</p>}
+      </div>
+    </div>
+  )
+
+  if (!tooltipContent) return card
+
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>{card}</TooltipTrigger>
+        <TooltipContent className="max-w-64">{tooltipContent}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+function InclusiveAdoptionTooltip({ stats }: { stats: DashboardCodeStats }): React.JSX.Element {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-medium text-foreground">含未提交采纳率</div>
+      <div className="space-y-1 text-[11px]">
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">采纳行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.adoptedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已测量有效生成行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.effectiveGeneratedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">未提交生成行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.unmeasuredGeneratedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">含未提交分母</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.inclusiveEffectiveGeneratedLines)} 行</span>
+        </div>
+      </div>
+      <div className="space-y-0.5 text-[10px] text-muted-foreground">
+        <div>采纳率 = 采纳行数 / (已测量有效生成行数 + 未提交生成行数)。</div>
+        <div>已测量有效生成行数已剔除被 agent 自己改写的中间稿部分。</div>
+      </div>
+    </div>
+  )
+}
+
+function MeasuredAdoptionTooltip({ stats }: { stats: DashboardCodeStats }): React.JSX.Element {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-medium text-foreground">已Commit采纳率</div>
+      <div className="space-y-1 text-[11px]">
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">采纳行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.adoptedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已测量有效生成行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.effectiveGeneratedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已测量原始生成行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.measuredGeneratedLines)} 行</span>
+        </div>
+      </div>
+      <div className="space-y-0.5 text-[10px] text-muted-foreground">
+        <div>采纳率 = 采纳行数 / 已测量有效生成行数。</div>
+        <div>已测量有效生成行数已剔除被 agent 自己改写的中间稿部分。</div>
+      </div>
+    </div>
+  )
+}
+
+function PushedAdoptionTooltip({ stats }: { stats: DashboardCodeStats }): React.JSX.Element {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-medium text-foreground">已 Push 采纳率</div>
+      <div className="space-y-1 text-[11px]">
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已 Push 采纳行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.pushedAdoptedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已 Push 有效生成行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.pushedEffectiveGeneratedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已 Push 原始生成行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.pushedMeasuredGeneratedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已 Push Commit 数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.pushedCommitCount)} 次</span>
+        </div>
+      </div>
+      <div className="space-y-0.5 text-[10px] text-muted-foreground">
+        <div>采纳率 = 已 Push 采纳行数 / 已 Push 有效生成行数。</div>
+        <div>仅统计通过应用成功 Push 后的 commit。</div>
+      </div>
+    </div>
+  )
+}
+
+function SkillCodeStatsBar({ stats }: { stats: DashboardCodeStats | null }): React.JSX.Element {
+  if (!stats) {
+    return (
+      <section className="shrink-0 border-b border-border bg-background px-5 py-4">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-xs font-semibold text-foreground">代码指标</h3>
+            <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+              <span>按当前 Skill 归因</span>
+              <InfoHint content={<SkillAttributionTooltip />} />
+            </div>
+          </div>
+        </div>
+        <div className="rounded-lg border border-dashed border-border px-4 py-3 text-xs text-muted-foreground">
+          暂无代码采纳数据
+        </div>
+      </section>
+    )
+  }
+  return (
+    <section className="shrink-0 border-b border-border bg-background px-5 py-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-xs font-semibold text-foreground">代码指标</h3>
+          <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+            <span>按当前 Skill 归因</span>
+            <InfoHint content={<SkillAttributionTooltip />} />
+          </div>
+        </div>
+      </div>
+      <div className="grid grid-cols-5 gap-3">
+        <SkillCodeStat
+          icon={Code2}
+          label="生成行数"
+          value={fmtLines(stats.generatedLines)}
+          tooltipContent={<GeneratedLinesTooltip />}
+        />
+        <SkillCodeStat
+          icon={CheckCircle2}
+          label="采纳行数"
+          value={fmtLines(stats.adoptedLines)}
+        />
+        <SkillCodeStat
+          icon={Gauge}
+          label="含未提交采纳率"
+          value={fmtPercent(stats.inclusiveAdoptionRate)}
+          sub={
+            stats.inclusiveAdoptionRate === null
+              ? "暂无代码生成数据"
+              : `${fmtLines(stats.adoptedLines)} / ${fmtLines(stats.inclusiveEffectiveGeneratedLines)} 行`
+          }
+          tooltipContent={<InclusiveAdoptionTooltip stats={stats} />}
+        />
+        <SkillCodeStat
+          icon={Gauge}
+          label="已Commit采纳率"
+          value={fmtPercent(stats.measuredAdoptionRate)}
+          sub={
+            stats.measuredAdoptionRate === null
+              ? "暂无测量数据"
+              : `${fmtLines(stats.adoptedLines)} / ${fmtLines(stats.effectiveGeneratedLines)} 行`
+          }
+          tooltipContent={<MeasuredAdoptionTooltip stats={stats} />}
+        />
+        <SkillCodeStat
+          icon={Gauge}
+          label="已 Push 采纳率"
+          value={fmtPercent(stats.pushedAdoptionRate)}
+          sub={
+            stats.pushedAdoptionRate === null
+              ? "暂无已 Push 数据"
+              : `${fmtLines(stats.pushedAdoptedLines)} / ${fmtLines(stats.pushedEffectiveGeneratedLines)} 行`
+          }
+          tooltipContent={<PushedAdoptionTooltip stats={stats} />}
+        />
+      </div>
+    </section>
+  )
 }
 
 function outcomeLabel(outcome: string): string {
@@ -224,20 +490,28 @@ function TraceCard({
   )
 }
 
-export function TraceHistoryDialog({
-  open,
-  onOpenChange,
-  skill,
+export function TraceExplorer({
   traces,
-  loading,
-  error
+  codeStats = null,
+  loading = false,
+  error = null,
+  title = "最近 10 条 Trace 记录",
+  subtitle = "选择记录查看完整执行树",
+  headerRight = null,
+  emptyText = "当前时间范围内没有会话历史",
+  showCodeStats = true,
+  className
 }: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  skill: string | null
   traces: DashboardTraceDetail[]
-  loading: boolean
-  error: string | null
+  codeStats?: DashboardCodeStats | null
+  loading?: boolean
+  error?: string | null
+  title?: string
+  subtitle?: string
+  headerRight?: ReactNode
+  emptyText?: string
+  showCodeStats?: boolean
+  className?: string
 }): React.JSX.Element {
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null)
 
@@ -255,97 +529,212 @@ export function TraceHistoryDialog({
     return map
   }, [nodes])
 
+  if (loading) {
+    return (
+      <div className={cn("flex min-h-[360px] flex-1 items-center justify-center", className)}>
+        <Loader2 className="size-6 animate-spin text-muted-foreground" />
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className={cn("flex min-h-[360px] flex-1 items-center justify-center px-6 text-sm text-destructive", className)}>
+        {error}
+      </div>
+    )
+  }
+
+  if (traces.length === 0) {
+    return (
+      <div className={cn("flex min-h-0 flex-1 flex-col", className)}>
+        {showCodeStats && <SkillCodeStatsBar stats={codeStats} />}
+        <section className="flex min-h-0 flex-1 flex-col bg-background">
+          <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-5 py-3">
+            <div>
+              <h3 className="text-xs font-semibold text-foreground">{title}</h3>
+              <p className="text-[10px] text-muted-foreground">{subtitle}</p>
+            </div>
+            {headerRight}
+          </div>
+          <div className="flex flex-1 items-center justify-center px-6 py-12 text-sm text-muted-foreground">
+            {emptyText}
+          </div>
+        </section>
+      </div>
+    )
+  }
+
+  return (
+    <div className={cn("flex min-h-0 flex-1 flex-col", className)}>
+      {showCodeStats && <SkillCodeStatsBar stats={codeStats} />}
+      <section className="flex min-h-0 flex-1 flex-col bg-background">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-5 py-3">
+          <div>
+            <h3 className="text-xs font-semibold text-foreground">{title}</h3>
+            <p className="text-[10px] text-muted-foreground">{subtitle}</p>
+          </div>
+          {headerRight}
+        </div>
+        <div className="grid min-h-0 flex-1 grid-cols-[320px_minmax(0,1fr)]">
+          <div className="min-h-0 border-r border-border">
+            <ScrollArea className="h-full">
+              <div className="space-y-2 p-3">
+                {traces.map((trace) => (
+                  <TraceCard
+                    key={trace.traceId}
+                    trace={trace}
+                    selected={selectedTrace?.traceId === trace.traceId}
+                    onClick={() => setSelectedTraceId(trace.traceId)}
+                  />
+                ))}
+              </div>
+            </ScrollArea>
+          </div>
+
+          <div className="flex min-h-0 min-w-0 flex-col">
+            {selectedTrace && (
+              <div className="grid shrink-0 grid-cols-4 border-b border-border">
+                <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
+                  <Clock className="size-3.5 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <p className="text-[10px] text-muted-foreground">时间</p>
+                    <p className="truncate text-[12px] font-semibold">{formatTime(selectedTrace.startedAt)}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
+                  <Hash className="size-3.5 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <p className="text-[10px] text-muted-foreground">工具调用</p>
+                    <p className="truncate text-[12px] font-semibold">{selectedTrace.totalToolCalls}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
+                  <Timer className="size-3.5 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <p className="text-[10px] text-muted-foreground">耗时</p>
+                    <p className="truncate text-[12px] font-semibold">{fmtDuration(selectedTrace.durationMs)}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 px-4 py-2.5">
+                  <Coins className="size-3.5 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <p className="text-[10px] text-muted-foreground">Token</p>
+                    <p className="truncate text-[12px] font-semibold">{fmtTokens(selectedTrace.totalTokens)}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <ScrollArea className="min-h-0 flex-1">
+              <div className="p-4">
+                {selectedTrace && !selectedTrace.rawAvailable && (
+                  <div className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                    {selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法展示完整执行树"}
+                  </div>
+                )}
+                {root ? (
+                  <TraceTreeNode node={root} childrenByParent={childrenByParent} depth={0} />
+                ) : selectedTrace ? (
+                  <div className="rounded-md border border-border bg-card p-4">
+                    <p className="mb-2 text-xs font-semibold text-muted-foreground">Trace Summary</p>
+                    <JsonBlock value={selectedTrace} />
+                  </div>
+                ) : null}
+              </div>
+            </ScrollArea>
+          </div>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+export function TraceHistoryDialog({
+  open,
+  onOpenChange,
+  skill,
+  traces,
+  codeStats,
+  tracePage = 1,
+  tracePageSize = 10,
+  totalTraces = traces.length,
+  onTracePrevious,
+  onTraceNext,
+  onExportPage,
+  exporting = false,
+  loading,
+  error
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  skill: string | null
+  traces: DashboardTraceDetail[]
+  codeStats: DashboardCodeStats | null
+  tracePage?: number
+  tracePageSize?: number
+  totalTraces?: number
+  onTracePrevious?: () => void
+  onTraceNext?: () => void
+  onExportPage?: () => void
+  exporting?: boolean
+  loading: boolean
+  error: string | null
+}): React.JSX.Element {
+  const displayTotalTraces = Math.max(totalTraces, traces.length)
+  const canPrevious = tracePage > 1 && !loading
+  const canNext = tracePage * tracePageSize < displayTotalTraces && !loading
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[80vh] max-w-[1080px] grid-rows-none flex-col gap-0 p-0">
         <DialogHeader className="border-b border-border px-5 py-4">
           <DialogTitle className="text-base">Skill 会话历史 · {skill ?? "-"}</DialogTitle>
-          <DialogDescription>当前时间范围最近 10 次</DialogDescription>
         </DialogHeader>
-
-        {loading ? (
-          <div className="flex flex-1 items-center justify-center">
-            <Loader2 className="size-6 animate-spin text-muted-foreground" />
-          </div>
-        ) : error ? (
-          <div className="flex flex-1 items-center justify-center px-6 text-sm text-destructive">
-            {error}
-          </div>
-        ) : traces.length === 0 ? (
-          <div className="flex flex-1 items-center justify-center px-6 text-sm text-muted-foreground">
-            当前时间范围内没有该 Skill 的会话历史
-          </div>
-        ) : (
-          <div className="grid min-h-0 flex-1 grid-cols-[320px_minmax(0,1fr)]">
-            <div className="min-h-0 border-r border-border">
-              <ScrollArea className="h-full">
-                <div className="space-y-2 p-3">
-                  {traces.map((trace) => (
-                    <TraceCard
-                      key={trace.traceId}
-                      trace={trace}
-                      selected={selectedTrace?.traceId === trace.traceId}
-                      onClick={() => setSelectedTraceId(trace.traceId)}
-                    />
-                  ))}
-                </div>
-              </ScrollArea>
+        <TraceExplorer
+          traces={traces}
+          codeStats={codeStats}
+          loading={loading}
+          error={error}
+          title={`Trace 记录（第 ${tracePage} 页）`}
+          subtitle={`共 ${displayTotalTraces.toLocaleString("zh-CN")} 条，选择记录查看完整执行树`}
+          headerRight={
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-1"
+                onClick={onExportPage}
+                disabled={exporting || loading || traces.length === 0}
+              >
+                {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+                导出本页
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={onTracePrevious}
+                disabled={!canPrevious}
+              >
+                上一页
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-1"
+                onClick={onTraceNext}
+                disabled={!canNext}
+              >
+                下一页
+                <ChevronRight className="size-3.5" />
+              </Button>
             </div>
-
-            <div className="flex min-h-0 min-w-0 flex-col">
-              {selectedTrace && (
-                <div className="grid shrink-0 grid-cols-4 border-b border-border">
-                  <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
-                    <Clock className="size-3.5 text-muted-foreground" />
-                    <div className="min-w-0">
-                      <p className="text-[10px] text-muted-foreground">时间</p>
-                      <p className="truncate text-[12px] font-semibold">{formatTime(selectedTrace.startedAt)}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
-                    <Hash className="size-3.5 text-muted-foreground" />
-                    <div className="min-w-0">
-                      <p className="text-[10px] text-muted-foreground">工具调用</p>
-                      <p className="truncate text-[12px] font-semibold">{selectedTrace.totalToolCalls}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
-                    <Timer className="size-3.5 text-muted-foreground" />
-                    <div className="min-w-0">
-                      <p className="text-[10px] text-muted-foreground">耗时</p>
-                      <p className="truncate text-[12px] font-semibold">{fmtDuration(selectedTrace.durationMs)}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 px-4 py-2.5">
-                    <Coins className="size-3.5 text-muted-foreground" />
-                    <div className="min-w-0">
-                      <p className="text-[10px] text-muted-foreground">Token</p>
-                      <p className="truncate text-[12px] font-semibold">{fmtTokens(selectedTrace.totalTokens)}</p>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              <ScrollArea className="min-h-0 flex-1">
-                <div className="p-4">
-                  {selectedTrace && !selectedTrace.rawAvailable && (
-                    <div className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-                      {selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法展示完整执行树"}
-                    </div>
-                  )}
-                  {root ? (
-                    <TraceTreeNode node={root} childrenByParent={childrenByParent} depth={0} />
-                  ) : selectedTrace ? (
-                    <div className="rounded-md border border-border bg-card p-4">
-                      <p className="mb-2 text-xs font-semibold text-muted-foreground">Trace Summary</p>
-                      <JsonBlock value={selectedTrace} />
-                    </div>
-                  ) : null}
-                </div>
-              </ScrollArea>
-            </div>
-          </div>
-        )}
+          }
+          emptyText="当前时间范围内没有该 Skill 的会话历史"
+        />
       </DialogContent>
     </Dialog>
   )

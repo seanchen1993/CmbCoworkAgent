@@ -21,6 +21,7 @@ import {
   LayoutTemplate,
   Settings2,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   ShieldCheck,
   Info,
@@ -34,11 +35,21 @@ import {
   CircleAlert,
   FilePenLine,
   Plus,
-  Loader2
+  Loader2,
+  CornerDownLeft
 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Badge } from "@/components/ui/badge"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
@@ -46,6 +57,7 @@ import {
   useCurrentThread,
   useThreadStream,
   useThreadContext,
+  type HookLogBucket,
   type HookLogEntry
 } from "@/lib/thread-context"
 import {
@@ -58,107 +70,585 @@ import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
-import type { Message, SkillMetadata } from "@/types"
+import type { Message, SkillMetadata, ToolCallState, ToolCallStatus, UserInputResponse } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator, type ChatScrollQuestion } from "./ChatScrollNavigator"
-import { UpdateStatusCard } from "./UpdateStatusCard"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
+import {
+  UserInputRequestDialog,
+  type UserInputRequestDialogLayout
+} from "./UserInputRequestDialog"
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
+import {
+  buildMarketInstalledFlags,
+  isMarketVersionDifferent,
+  marketInstalledVersionStorage,
+  MarketUpdateBadge
+} from "@/components/customize/MarketUpdateBadge"
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
-import { UpdateDialog } from "../update/UpdateDialog"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
 import { useSlashCommands } from "@/features/slash-commands/useSlashCommands"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
+import { mergeChatSkills } from "@/features/slash-commands/skill-merge"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
+import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
+import { groupWelcomeSkills } from "./skill-grouping"
+import { GitBranchSwitcher } from "./GitBranchSwitcher"
 
-function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
-  const [expanded, setExpanded] = React.useState(false)
-  const hasIssue = logs.some(
-    (l) => l.blocked || l.exitCode === null || (l.exitCode !== 0 && l.exitCode !== 2)
-  )
+type WelcomeSkillCard = {
+  skill: SkillMetadata
+  label: string
+  icon: React.JSX.Element
+  installedVersion?: string | null
+  currentVersion?: string | null
+  updateAvailable?: boolean
+}
+
+type WelcomeSkillSceneGroup = {
+  category: string
+  cards: WelcomeSkillCard[]
+}
+
+type WelcomeSkillTreeNode = {
+  key: string
+  label: string
+  card?: WelcomeSkillCard
+  children: WelcomeSkillTreeNode[]
+}
+
+function getWelcomeSkillTreePath(skill: SkillMetadata): string {
+  const id = skill.id?.startsWith("plugin:") ? skill.id.split("/").slice(1).join("/") : skill.id
+  return String(skill.relativePath || id || skill.name || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+}
+
+function buildWelcomeSkillTree(cards: WelcomeSkillCard[]): WelcomeSkillTreeNode[] {
+  const root: WelcomeSkillTreeNode = { key: "root", label: "root", children: [] }
+  const indexByNode = new WeakMap<WelcomeSkillTreeNode, Map<string, WelcomeSkillTreeNode>>()
+
+  const getIndex = (node: WelcomeSkillTreeNode): Map<string, WelcomeSkillTreeNode> => {
+    let index = indexByNode.get(node)
+    if (!index) {
+      index = new Map(node.children.map((child) => [normalizeSkillId(child.label), child]))
+      indexByNode.set(node, index)
+    }
+    return index
+  }
+
+  for (const card of cards) {
+    const segments = getWelcomeSkillTreePath(card.skill).split("/").filter(Boolean)
+    const fallbackSegments = segments.length > 0 ? segments : [card.skill.name]
+    let current = root
+
+    for (const segment of fallbackSegments) {
+      const normalized = normalizeSkillId(segment)
+      const childIndex = getIndex(current)
+      let child = childIndex.get(normalized)
+      if (!child) {
+        child = { key: `${current.key}/${normalized}`, label: segment, children: [] }
+        current.children.push(child)
+        childIndex.set(normalized, child)
+      }
+      current = child
+    }
+
+    current.card = card
+  }
+
+  const sortNodes = (nodes: WelcomeSkillTreeNode[]): WelcomeSkillTreeNode[] =>
+    [...nodes]
+      .sort((a, b) => {
+        const labelA = a.card?.label || a.label
+        const labelB = b.card?.label || b.label
+        return labelA.localeCompare(labelB, "zh-CN")
+      })
+      .map((node) => ({ ...node, children: sortNodes(node.children) }))
+
+  return sortNodes(root.children)
+}
+
+function countWelcomeSkillTreeCards(node: WelcomeSkillTreeNode): number {
   return (
-    <div
-      className={`rounded-md border text-xs font-mono ${hasIssue ? "border-amber-400/60 bg-amber-50/40 dark:bg-amber-900/10" : "border-border/50 bg-muted/30"}`}
+    (node.card ? 1 : 0) +
+    node.children.reduce((sum, child) => sum + countWelcomeSkillTreeCards(child), 0)
+  )
+}
+
+function getWelcomeSkillTopLevelKey(skill: SkillMetadata): string {
+  return normalizeSkillId(
+    getWelcomeSkillTreePath(skill).split("/").filter(Boolean)[0] || skill.name
+  )
+}
+
+function limitWelcomeSkillsByTopLevel(
+  skills: SkillMetadata[],
+  previewLimit: number
+): SkillMetadata[] {
+  if (previewLimit <= 0) return []
+  const selectedRoots = new Set<string>()
+
+  for (const skill of skills) {
+    selectedRoots.add(getWelcomeSkillTopLevelKey(skill))
+    if (selectedRoots.size >= previewLimit) break
+  }
+
+  return skills.filter((skill) => selectedRoots.has(getWelcomeSkillTopLevelKey(skill)))
+}
+
+function WelcomeSkillButton(props: {
+  card: WelcomeSkillCard
+  disabled?: boolean
+  onUseSkill: (skill: SkillMetadata, label?: string) => void
+  getSkillShowLabel: (name: string) => string
+}): React.JSX.Element {
+  const { card, disabled = false, onUseSkill, getSkillShowLabel } = props
+  const label = getSkillShowLabel(card.label)
+
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => {
+        if (!disabled) onUseSkill(card.skill, card.label)
+      }}
+      className={cn(
+        "group w-full rounded-xl border px-3 py-2 text-left transition-all",
+        disabled
+          ? "cursor-not-allowed border-border/70 bg-background/60 opacity-65"
+          : "border-slate-300/90 bg-slate-50/70 shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:border-slate-400/95 hover:bg-slate-100/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] dark:border-slate-600/85 dark:bg-slate-900/35 dark:hover:border-slate-500/95 dark:hover:bg-slate-800/55"
+      )}
     >
+      <div className="flex items-center gap-2 min-w-0">
+        <div
+          className={cn(
+            "rounded-md border p-1.5 transition-colors",
+            disabled
+              ? "border-border/70 bg-background/70 text-muted-foreground"
+              : "border-slate-300/90 bg-white/80 text-slate-500 group-hover:text-slate-700 dark:border-slate-600/80 dark:bg-slate-900/45 dark:text-slate-300 dark:group-hover:text-slate-100"
+          )}
+        >
+          {card.icon}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <div
+              className={cn(
+                "min-w-0 flex-1 text-xs leading-5 truncate whitespace-nowrap",
+                disabled ? "text-muted-foreground line-through" : "text-foreground"
+              )}
+            >
+              {label}
+            </div>
+            {/* 仅当市场版本与本地安装版本不一致时展示更新标识；具体版本差异在 tooltip 中展示。 */}
+            {card.updateAvailable && (
+              <MarketUpdateBadge
+                typeLabel="技能"
+                installedVersion={card.installedVersion}
+                currentVersion={card.currentVersion}
+                className="text-[10px] px-1.5 py-0"
+              />
+            )}
+          </div>
+        </div>
+      </div>
+    </button>
+  )
+}
+
+function WelcomeSkillTree(props: {
+  cards: WelcomeSkillCard[]
+  disabled?: boolean
+  onUseSkill: (skill: SkillMetadata, label?: string) => void
+  getSkillShowLabel: (name: string) => string
+}): React.JSX.Element {
+  const { cards, disabled = false, onUseSkill, getSkillShowLabel } = props
+  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
+  const tree = useMemo(() => buildWelcomeSkillTree(cards), [cards])
+  const toggleNode = useCallback((nodeKey: string) => {
+    setExpandedNodes((prev) => {
+      const next = new Set(prev)
+      if (next.has(nodeKey)) next.delete(nodeKey)
+      else next.add(nodeKey)
+      return next
+    })
+  }, [])
+
+  return (
+    <WelcomeSkillTreeList
+      nodes={tree}
+      disabled={disabled}
+      nested={false}
+      expandedNodes={expandedNodes}
+      onToggleNode={toggleNode}
+      onUseSkill={onUseSkill}
+      getSkillShowLabel={getSkillShowLabel}
+    />
+  )
+}
+
+function WelcomeSkillTreeList(props: {
+  nodes: WelcomeSkillTreeNode[]
+  disabled: boolean
+  nested: boolean
+  expandedNodes: Set<string>
+  onToggleNode: (nodeKey: string) => void
+  onUseSkill: (skill: SkillMetadata, label?: string) => void
+  getSkillShowLabel: (name: string) => string
+}): React.JSX.Element {
+  const { nodes, disabled, nested, expandedNodes, onToggleNode, onUseSkill, getSkillShowLabel } =
+    props
+
+  return (
+    <div className={nested ? "grid grid-cols-1 gap-1.5" : "grid grid-cols-2 md:grid-cols-4 gap-2"}>
+      {nodes.map((node) => {
+        const childrenExpanded = expandedNodes.has(node.key)
+        const childCount = node.children.reduce(
+          (sum, child) => sum + countWelcomeSkillTreeCards(child),
+          0
+        )
+
+        return (
+          <div key={node.key} className="min-w-0 space-y-1.5">
+            {node.card ? (
+              <WelcomeSkillButton
+                card={node.card}
+                disabled={disabled}
+                onUseSkill={onUseSkill}
+                getSkillShowLabel={getSkillShowLabel}
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => onToggleNode(node.key)}
+                className="w-full rounded-xl border border-dashed border-border/70 bg-muted/20 px-3 py-2 text-left hover:bg-muted/35"
+              >
+                <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    {childrenExpanded ? (
+                      <ChevronDown className="size-3 shrink-0" />
+                    ) : (
+                      <ChevronRight className="size-3 shrink-0" />
+                    )}
+                    <span className="truncate">{node.label}</span>
+                  </span>
+                  <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
+                    {childCount}
+                  </Badge>
+                </div>
+              </button>
+            )}
+
+            {node.children.length > 0 && (
+              <button
+                type="button"
+                onClick={() => onToggleNode(node.key)}
+                className="flex min-h-7 w-full items-center gap-2 rounded-lg border border-dashed border-border/60 bg-muted/15 px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted/30"
+              >
+                {expandedNodes.has(node.key) ? (
+                  <ChevronDown className="size-3 shrink-0" />
+                ) : (
+                  <ChevronRight className="size-3 shrink-0" />
+                )}
+                <span className="min-w-0 flex-1 truncate">子技能</span>
+                <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
+                  {childCount}
+                </Badge>
+              </button>
+            )}
+
+            {expandedNodes.has(node.key) && (
+              <div className="border-l border-border/60 pl-2">
+                <WelcomeSkillTreeList
+                  nodes={node.children}
+                  disabled={disabled}
+                  nested
+                  expandedNodes={expandedNodes}
+                  onToggleNode={onToggleNode}
+                  onUseSkill={onUseSkill}
+                  getSkillShowLabel={getSkillShowLabel}
+                />
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/** Status descriptor for an executed log row. */
+function entryStatus(log: HookLogEntry): { ok: boolean; text: string } {
+  if (log.kind === "skipped") {
+    return { ok: false, text: "skipped" }
+  }
+  const ok =
+    !log.blocked && log.continue !== false && log.decision !== "block" && log.exitCode === 0
+  if (ok) return { ok: true, text: "✓" }
+  if (log.continue === false) return { ok: false, text: "终止" }
+  if (log.decision === "block") return { ok: false, text: "修订" }
+  if (log.blocked) return { ok: false, text: "✗ 拦截" }
+  if (log.exitCode === null) return { ok: false, text: "✗ 超时" }
+  return { ok: false, text: `✗ exit=${log.exitCode}` }
+}
+
+function formatSkipReason(reason: string | undefined): string {
+  switch (reason) {
+    case "plugin-not-active":
+      return "skipped — 插件未激活（scope 未包含 pluginId）"
+    case "skill-name-only-shadowed":
+      return "skipped — 同名 skill 被路径作用域屏蔽"
+    case "skill-not-in-scope":
+      return "skipped — skill 未激活"
+    default:
+      return reason ? `skipped — ${reason}` : "skipped"
+  }
+}
+
+/** Small inline pill rendered right under a user message. */
+function HookLogChip({
+  bucket,
+  onClick
+}: {
+  bucket: HookLogBucket
+  onClick: () => void
+}): React.JSX.Element {
+  // Count categories separately so the chip label can't mislead the user into
+  // thinking "Hook 7" means 7 hooks ran when 5 of them were scope-filtered.
+  let executedCount = 0
+  let skippedCount = 0
+  let issueCount = 0
+  for (const l of bucket.entries) {
+    if (l.kind === "skipped") {
+      skippedCount += 1
+      continue
+    }
+    executedCount += 1
+    if (!entryStatus(l).ok) issueCount += 1
+  }
+  // Diagnostic mode with no plugins active can produce buckets where every
+  // entry is "skipped". Showing "Hook 0 · skip 5" reads as a bug; surface the
+  // skip count as the primary label instead so the chip stays honest.
+  const onlySkipped = executedCount === 0 && skippedCount > 0
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-mono transition-colors",
+        issueCount > 0
+          ? "border-amber-400/60 bg-amber-50/60 text-amber-700 hover:bg-amber-100/70 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-300"
+          : "border-border/60 bg-muted/40 text-muted-foreground hover:bg-muted"
+      )}
+      title="点击查看本轮 Hook 执行详情"
+    >
+      <span>⚙</span>
+      {onlySkipped ? (
+        <span>Hook skip {skippedCount}</span>
+      ) : (
+        <>
+          <span>Hook {executedCount}</span>
+          {skippedCount > 0 && (
+            <span className="text-muted-foreground/70">· skip {skippedCount}</span>
+          )}
+        </>
+      )}
+      {issueCount > 0 && (
+        <span className="rounded-full bg-amber-500/20 px-1 text-[10px] text-amber-700 dark:text-amber-300">
+          ⚠{issueCount}
+        </span>
+      )}
+    </button>
+  )
+}
+
+function HookLogEntryRow({ log }: { log: HookLogEntry }): React.JSX.Element {
+  const [expanded, setExpanded] = React.useState(false)
+  const status = entryStatus(log)
+  const showCopy = (): void => {
+    try {
+      void navigator.clipboard.writeText(JSON.stringify(log, null, 2))
+      toast.success("已复制为 JSON")
+    } catch {
+      toast.error("复制失败")
+    }
+  }
+  return (
+    <div className="px-3 py-2 text-xs font-mono">
       <button
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-muted/50 transition-colors"
+        type="button"
+        className="flex w-full items-center gap-2 text-left"
         onClick={() => setExpanded((v) => !v)}
       >
-        <span className="shrink-0">⚙</span>
-        <span className="text-muted-foreground">
-          Hook 执行记录（{logs.length} 次）{hasIssue ? " ⚠" : ""}
+        <span className={status.ok ? "text-green-600 dark:text-green-400" : "text-red-500"}>
+          {status.text}
         </span>
-        <span className="ml-auto text-muted-foreground/60">{expanded ? "▲" : "▼"}</span>
+        <span className="text-foreground/80 font-semibold shrink-0">
+          [{log.event}
+          {log.toolSuffix}]
+        </span>
+        {log.pluginName && (
+          <span className="text-[10px] text-blue-600/70 dark:text-blue-400/70 shrink-0">
+            plugin: {log.pluginName}
+          </span>
+        )}
+        {log.skillName && (
+          <span className="text-[10px] text-purple-600/70 dark:text-purple-400/70 shrink-0">
+            skill: {log.skillName}
+          </span>
+        )}
+        <span className="text-muted-foreground truncate flex-1">
+          {log.hookType}: {log.label}
+        </span>
+        {typeof log.durationMs === "number" && log.kind === "executed" && (
+          <span className="text-[10px] text-muted-foreground/70 shrink-0">{log.durationMs}ms</span>
+        )}
+        <span className="text-[10px] text-muted-foreground/60 shrink-0">
+          {log.timestamp.toLocaleTimeString()}
+        </span>
+        <span className="text-muted-foreground/60 shrink-0">{expanded ? "▲" : "▼"}</span>
       </button>
       {expanded && (
-        <div className="border-t border-border/40 divide-y divide-border/30">
-          <div className="px-3 py-2 text-[11px] text-muted-foreground">
-            调试日志建议写到 <span className="font-mono text-foreground/80">stderr</span>。 如果{" "}
-            <span className="font-mono text-foreground/80">stdout</span> 输出的是 JSON，它会被当成
-            Hook 返回值解析。
+        <div className="pl-4 mt-1.5 space-y-1.5">
+          {log.kind === "skipped" && (
+            <div className="text-[11px] text-muted-foreground italic">
+              {formatSkipReason(log.skipReason)}
+            </div>
+          )}
+          {(log.reason || log.stopReason) && (
+            <LogBlock
+              label={log.stopReason ? "stopReason" : "reason"}
+              text={log.stopReason || log.reason || ""}
+              tone="amber"
+            />
+          )}
+          {log.stdout && <LogBlock label="stdout" text={log.stdout} tone="neutral" />}
+          {log.stderr && <LogBlock label="stderr" text={log.stderr} tone="red" />}
+          {log.additionalContext && (
+            <LogBlock label="additionalContext" text={log.additionalContext} tone="blue" />
+          )}
+          {log.systemMessage && <LogBlock label="systemMessage" text={log.systemMessage} tone="blue" />}
+          {log.stdinPayload && <LogBlock label="stdin (诊断)" text={log.stdinPayload} tone="neutral" />}
+          {log.command && <LogBlock label="command" text={log.command} tone="neutral" />}
+          {log.cwd && <LogBlock label="cwd" text={log.cwd} tone="neutral" />}
+          {log.hookSourcePath && (
+            <LogBlock label="hookSourcePath" text={log.hookSourcePath} tone="neutral" />
+          )}
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={showCopy}
+              className="text-[11px] text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
+            >
+              复制 JSON
+            </button>
           </div>
-          {logs.map((log) => {
-            const ok = !log.blocked && log.exitCode === 0
-            return (
-              <div key={log.id} className="px-3 py-2 space-y-0.5">
-                <div className="flex items-center gap-2">
-                  <span className={ok ? "text-green-600 dark:text-green-400" : "text-red-500"}>
-                    {ok
-                      ? "✓"
-                      : log.blocked
-                        ? "✗ 拦截"
-                        : log.exitCode === null
-                          ? "✗ 超时"
-                          : `✗ exit=${log.exitCode}`}
-                  </span>
-                  <span className="text-foreground/80 font-semibold">
-                    [{log.event}
-                    {log.toolSuffix}]
-                  </span>
-                  <span className="text-muted-foreground truncate">
-                    {log.hookType}: {log.label}
-                  </span>
-                  {log.decision && (
-                    <span className="text-xs text-amber-600 dark:text-amber-400">
-                      {log.decision}
-                    </span>
-                  )}
-                  <span className="ml-auto text-[10px] text-muted-foreground/70">
-                    {log.timestamp.toLocaleTimeString()}
-                  </span>
-                </div>
-                {log.stdout && (
-                  <div className="pl-4 space-y-1">
-                    <div className="text-[10px] uppercase tracking-wide text-muted-foreground/70">
-                      stdout
-                    </div>
-                    <div className="max-h-40 overflow-auto rounded-md border border-border/40 bg-background/70 px-2 py-1 text-muted-foreground whitespace-pre-wrap break-all">
-                      {log.stdout}
-                    </div>
-                  </div>
-                )}
-                {log.stderr && (
-                  <div className="pl-4 space-y-1">
-                    <div className="text-[10px] uppercase tracking-wide text-red-500/70">
-                      stderr / 日志
-                    </div>
-                    <div className="max-h-48 overflow-auto rounded-md border border-red-300/40 bg-red-50/40 px-2 py-1 text-red-500/80 whitespace-pre-wrap break-all dark:border-red-500/30 dark:bg-red-500/10">
-                      {log.stderr}
-                    </div>
-                  </div>
-                )}
-                {log.systemMessage && (
-                  <div className="text-blue-500/80 pl-4">{log.systemMessage}</div>
-                )}
-              </div>
-            )
-          })}
         </div>
       )}
     </div>
+  )
+}
+
+function LogBlock({
+  label,
+  text,
+  tone
+}: {
+  label: string
+  text: string
+  tone: "amber" | "red" | "blue" | "neutral"
+}): React.JSX.Element {
+  const toneClass =
+    tone === "amber"
+      ? "border-amber-300/40 bg-amber-50/40 text-amber-700/90 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300/90"
+      : tone === "red"
+        ? "border-red-300/40 bg-red-50/40 text-red-500/80 dark:border-red-500/30 dark:bg-red-500/10"
+        : tone === "blue"
+          ? "border-blue-300/40 bg-blue-50/40 text-blue-600/90 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300/90"
+          : "border-border/40 bg-background/70 text-muted-foreground"
+  return (
+    <div className="space-y-1">
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground/70">{label}</div>
+      <div
+        className={cn(
+          "max-h-48 overflow-auto rounded-md border px-2 py-1 whitespace-pre-wrap break-all",
+          toneClass
+        )}
+      >
+        {text}
+      </div>
+    </div>
+  )
+}
+
+/** Modal that shows a single turn's bucket of hook executions. */
+function HookLogModal({
+  bucket,
+  open,
+  onOpenChange
+}: {
+  bucket: HookLogBucket | null
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}): React.JSX.Element {
+  // Memoized so re-rendering the modal while the bucket grows doesn't reshuffle
+  // collapsed/expanded child state.
+  const entries = bucket?.entries ?? []
+  const exportJsonl = React.useCallback((): void => {
+    if (!bucket) return
+    const text = entries.map((e) => JSON.stringify(e)).join("\n")
+    const blob = new Blob([text], { type: "application/jsonl" })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `hook-logs-${bucket.turnId}.jsonl`
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [bucket, entries])
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-3xl max-h-[80vh] flex flex-col p-0">
+        <DialogHeader className="px-5 pt-5 pb-3 border-b border-border/60">
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <span>Hook 执行记录</span>
+            <span className="text-xs font-normal text-muted-foreground">
+              · 此轮 {entries.length} 次
+            </span>
+          </DialogTitle>
+          {bucket?.turnPreview && (
+            <DialogDescription className="line-clamp-2 text-xs">
+              用户消息：{bucket.turnPreview}
+            </DialogDescription>
+          )}
+        </DialogHeader>
+        <div className="flex items-center gap-2 px-5 py-2 border-b border-border/40 text-xs">
+          <button
+            type="button"
+            onClick={exportJsonl}
+            disabled={entries.length === 0}
+            className="text-muted-foreground hover:text-foreground underline-offset-2 hover:underline disabled:opacity-40 disabled:no-underline"
+          >
+            导出为 .jsonl
+          </button>
+          <span className="ml-auto text-[11px] text-muted-foreground/70">
+            调试日志写到 stderr；stdout 输出 JSON 会被当作 Hook 返回值解析
+          </span>
+        </div>
+        <div className="flex-1 overflow-auto divide-y divide-border/30">
+          {entries.length === 0 ? (
+            <div className="px-5 py-6 text-center text-xs text-muted-foreground">
+              本轮暂无 Hook 执行记录
+            </div>
+          ) : (
+            entries.map((log) => <HookLogEntryRow key={log.id} log={log} />)
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -173,6 +663,7 @@ interface StreamMessage {
   tool_calls?: Message["tool_calls"]
   tool_call_id?: string
   name?: string
+  is_error?: boolean
 }
 
 interface ChatContainerProps {
@@ -190,6 +681,42 @@ interface SkillIntentBannerRequest {
   recommendationReason?: string
   /** Opaque context — cached so the retry button can replay generation without a new threshold. */
   context: unknown
+}
+
+function mergeToolCallArgs(
+  baseArgs?: Record<string, unknown>,
+  liveArgs?: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    ...(baseArgs || {}),
+    ...(liveArgs || {})
+  }
+}
+
+function getToolCallFilePath(args?: Record<string, unknown>): string | undefined {
+  const path = args?.path ?? args?.file_path
+  return typeof path === "string" && path.trim() ? path : undefined
+}
+
+function getToolCallCommand(args?: Record<string, unknown>): string | undefined {
+  return typeof args?.command === "string" && args.command.trim() ? args.command : undefined
+}
+
+function getToolCallCode(args?: Record<string, unknown>): string | undefined {
+  return typeof args?.code === "string" && args.code.trim() ? args.code : undefined
+}
+
+function getToolCallTimeout(args?: Record<string, unknown>): number | undefined {
+  return typeof args?.timeoutMs === "number" ? args.timeoutMs : undefined
+}
+
+function isTerminalToolCallStatus(status?: ToolCallStatus): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "interrupted" ||
+    status === "rejected"
+  )
 }
 
 const THINKING_MESSAGES = [
@@ -246,6 +773,115 @@ const ROTATING_WORDS = [
   "分析日志",
   "部署上线"
 ]
+
+const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
+const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
+
+// 单条消息的起止时间，统一存为 ISO 字符串，方便写入 thread_values 并在重启后恢复。
+//
+// 这里刻意不保存 duration 字段：
+// 1. duration 是展示层派生值，后续计算规则变化时不需要迁移历史数据。
+// 2. 每条消息都有 start_at/end_at 后，可以按“一个 user 到下一个 user 之前最后一条消息”
+//    的规则实时计算该轮 assistant 总耗时。
+// 3. tool、assistant 多段回复都会自然落在同一个 user 分组内，不需要额外字段标记轮次。
+type MessageTimeValue = {
+  start_at?: string
+  end_at?: string
+}
+
+type MessageTimeMap = Record<string, MessageTimeValue>
+type MessageTimeEntry = MessageTimeValue & { id: string }
+
+const isMessageTimeMap = (value: unknown): value is MessageTimeMap => {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+const isMessageTimeEntryArray = (value: unknown): value is MessageTimeEntry[] => {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry) =>
+        !!entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string"
+    )
+  )
+}
+
+const getMessageTimeMap = (threadValues?: Record<string, unknown>): MessageTimeMap => {
+  const value = threadValues?.[MESSAGE_TIMES_THREAD_VALUE_KEY]
+  return isMessageTimeMap(value) ? value : {}
+}
+
+const getMessageTimeOrder = (threadValues?: Record<string, unknown>): MessageTimeEntry[] => {
+  const value = threadValues?.[MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]
+  if (isMessageTimeEntryArray(value)) return value
+  // 兼容旧数据：早期只保存了 messageTimes map，没有保存顺序数组。
+  // JS 对普通对象会保留字符串 key 的插入顺序；虽然这不如显式数组可靠，但对旧数据可以
+  // 最大程度恢复出当时写入的消息顺序，避免老会话重启后完全看不到耗时。
+  return Object.entries(getMessageTimeMap(threadValues)).map(([id, time]) => ({ id, ...time }))
+}
+
+// messageTimes 用 id 做精确匹配；messageTimeOrder 用顺序做兜底，解决重启后 checkpoint
+// 重新生成 message id 时，历史耗时无法按 id 命中的问题。
+//
+// 保存两份结构的原因：
+// - messageTimes: 当前会话里 id 稳定，按 id 查找最快也最准确。
+// - messageTimeOrder: app 重启后历史消息来自 LangGraph checkpoint，某些消息 id 可能变化；
+//   此时仍可用“消息展示顺序”和“时间写入顺序”对齐，恢复 start_at/end_at。
+//
+// merge 时不重排已有数组，只更新同 id 的时间并把新 id 追加到末尾，保证顺序数组能持续
+// 表达整条会话的消息时间线。
+const mergeMessageTimeOrder = (
+  existingOrder: MessageTimeEntry[],
+  updates: MessageTimeMap
+): MessageTimeEntry[] => {
+  const nextOrder = [...existingOrder]
+  const indexes = new Map(nextOrder.map((entry, index) => [entry.id, index]))
+
+  for (const [id, time] of Object.entries(updates)) {
+    const nextEntry = { id, ...time }
+    const existingIndex = indexes.get(id)
+    if (existingIndex === undefined) {
+      indexes.set(id, nextOrder.length)
+      nextOrder.push(nextEntry)
+    } else {
+      nextOrder[existingIndex] = { ...nextOrder[existingIndex], ...nextEntry }
+    }
+  }
+
+  return nextOrder
+}
+
+const toDate = (value: Date | string | undefined): Date | undefined => {
+  if (!value) return undefined
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value : undefined
+  const parsed = new Date(value)
+  return Number.isFinite(parsed.getTime()) ? parsed : undefined
+}
+
+const toTime = (value: Date | string | undefined): number | null => {
+  const date = toDate(value)
+  return date ? date.getTime() : null
+}
+
+const getMessageDisplayTime = (message: Message): number | null => {
+  return toTime(message.start_at) ?? toTime(message.created_at) ?? toTime(message.end_at)
+}
+
+const sortMessagesForDisplay = (messages: Message[]): Message[] => {
+  return messages
+    .map((message, index) => ({
+      message,
+      index,
+      time: getMessageDisplayTime(message)
+    }))
+    .sort((a, b) => {
+      if (a.time !== null && b.time !== null && a.time !== b.time) {
+        return a.time - b.time
+      }
+      return a.index - b.index
+    })
+    .map((entry) => entry.message)
+}
 
 const getMessageText = (content: Message["content"]): string => {
   if (typeof content === "string") return content
@@ -325,16 +961,20 @@ export function ChatContainer({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const userMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
+  const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isAtBottomRef = useRef(true)
   const requestedUserQuestionIndexRef = useRef<number | null>(null)
   const requestedUserQuestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isComposingRef = useRef(false)
   const [skills, setSkills] = useState<SkillMetadata[]>([])
+  const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(new Set())
   const [skillsLoading, setSkillsLoading] = useState(true)
   const [showAllProgrammingSkills, setShowAllProgrammingSkills] = useState(false)
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
   const [activeUserQuestionIndex, setActiveUserQuestionIndex] = useState(-1)
+  const [userInputDialogLayout, setUserInputDialogLayout] =
+    useState<UserInputRequestDialogLayout | null>(null)
   // Skill creation human-confirmation state
   const [skillConfirmRequest, setSkillConfirmRequest] = useState<SkillConfirmRequest | null>(null)
   // Skill intent banner state ("Want to save as a skill?")
@@ -369,9 +1009,7 @@ export function ChatContainer({
   const thinkingCycleRef = useRef(-1)
   const wasLoadingRef = useRef(false)
   const loadingMessageCountRef = useRef(0)
-  const [needUpdateVersion, setNeedUpdateVersion] = useState(false)
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
-  const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
   const initialAgentMode = isCoordinatorModeMetadata(
     useAppStore.getState().threads.find((thread) => thread.thread_id === threadId)?.metadata
   )
@@ -379,6 +1017,11 @@ export function ChatContainer({
     : "normal"
   const [agentMode, setAgentMode] = useState<ChatAgentMode>(initialAgentMode)
   const agentModeHydratedRef = useRef(initialAgentMode === "coordinator")
+  const streamMessageTimesRef = useRef<Record<string, { start_at: Date; end_at?: Date }>>({})
+  const streamMessageBaselineIdsRef = useRef<Set<string>>(new Set())
+  const streamMessageCapturePreparedRef = useRef(false)
+  const [messageTimes, setMessageTimes] = useState<MessageTimeMap>({})
+  const threadMessageIdsRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     const { ipcRenderer } = window.electron
@@ -438,11 +1081,11 @@ export function ChatContainer({
   const {
     threads,
     models,
-    loadThreads,
     updateThread,
     generateTitleForFirstMessage,
     setShowCustomizeView,
-    setMarketInitialSkillCategory
+    rightPanelCollapsed,
+    pluginVersion
   } = useAppStore()
 
   const resolveAgentMode = useCallback(
@@ -496,6 +1139,7 @@ export function ChatContainer({
   }, [threadId, threads, loadResolvedAgentMode])
 
   const allSkillsRef = useRef<MarketItem[]>([])
+  const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
   const [goodSkillsData, setGoodSkillsData] = useState<MarketItem[]>([])
 
   // Define loadSkills function at component level so it can be accessed everywhere
@@ -518,14 +1162,14 @@ export function ChatContainer({
         pluginSkillsPromise,
         window.api.skills.getDisabled()
       ])
-      const disabledSet = new Set(disabledList)
+      const disabledSet = new Set(disabledList.map(normalizeSkillId))
+      setDisabledSkillIds(disabledSet)
       const availableSkills = loadedSkills.filter(
-        (s) => (s.source === "project" || s.source === "user") && !disabledSet.has(s.name)
+        (s) => s.source === "project" || s.source === "user"
       )
-      // Built-in/custom names win over plugin names: plugins are third-party
-      // and shouldn't shadow first-party skills the user expects to see.
-      const seen = new Set(availableSkills.map((s) => s.name))
-      const merged = [...availableSkills, ...pluginSkills.filter((p) => !seen.has(p.name))]
+      // Enabled built-in/custom names win over plugin names; disabled local
+      // skills should not hide a plugin skill with the same name from slash.
+      const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet)
       setSkills([...merged].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
     } catch (error) {
       console.error("[ChatContainer] Failed to load skills:", error)
@@ -541,6 +1185,7 @@ export function ChatContainer({
       const allSkills = res?.data || []
       const goodSkills = res?.data?.filter((it) => it.featured === "精品")
       allSkillsRef.current = allSkills
+      setMarketSkillsData(allSkills)
       setGoodSkillsData(goodSkills || [])
 
       // 自动安装所有精品技能
@@ -578,11 +1223,27 @@ export function ChatContainer({
 
         console.log(`Installing skill: ${skillName}`)
 
-        // 删除已存在的技能（如果有的话）
         try {
           const skillsMetadata = await window.api.skills.list()
           const existingSkill = skillsMetadata.find((s) => s.name === skillName)
 
+          // 精品技能会在欢迎页初始化时自动补齐。为了避免每次进入会话都重复下载：
+          // 1. 本地没有这个技能：需要安装；
+          // 2. 本地有技能但没有安装版本记录：无法判断是否最新，按用户要求默认重新安装；
+          // 3. 本地安装版本和市场版本不一致：需要删除旧技能后重新安装；
+          // 4. 本地安装版本和市场版本一致：跳过安装，保留现有技能目录。
+          const installedVersion = marketInstalledVersionStorage.getVersion(skillName, "skill")
+          const shouldInstall =
+            !existingSkill ||
+            !installedVersion ||
+            isMarketVersionDifferent(installedVersion, skill.version)
+
+          if (!shouldInstall) {
+            console.log(`Skill ${skillName} is already up to date, skipping install.`)
+            continue
+          }
+
+          // 更新安装时先删除同名技能，避免旧文件残留影响新版本行为。
           if (existingSkill) {
             console.log(`Deleting existing skill: ${existingSkill.path}`)
             await window.api.skills.delete(existingSkill.path)
@@ -598,6 +1259,8 @@ export function ChatContainer({
         const response = await marketApi.downloadItem(skillName, "skill", false)
 
         if (response.success) {
+          // 安装成功后记录市场版本，下一次自动安装精品技能时据此判断是否需要重装。
+          marketInstalledVersionStorage.setVersion(skillName, "skill", skill.version)
           console.log(`Successfully installed skill: ${skillName}`)
         } else {
           console.error(`Failed to install skill ${skillName}:`, response.error)
@@ -613,10 +1276,14 @@ export function ChatContainer({
   // Get persisted thread state and actions from context
   const {
     messages: threadMessages,
+    toolCallStates,
+    pendingApprovals,
     pendingApproval,
     approvalQueue,
+    pendingUserInput,
     todos,
     error: threadError,
+    hookInterruption,
     workspacePath,
     tokenUsage,
     currentModel,
@@ -624,24 +1291,65 @@ export function ChatContainer({
     draftSkill: selectedSkill,
     coordinatorWorkers,
     scheduledTaskLoading,
+    historyLoading,
     scheduledTaskId,
     modelRetry,
+    setToolCallState,
     setTodos,
-    setPendingApproval,
     clearPendingApprovals,
+    removePendingApproval,
+    setPendingUserInput,
     appendMessage,
     setError,
     clearError,
+    clearHookInterruption,
     setDraftInput: setInput,
     setDraftSkill: setSelectedSkill
   } = useCurrentThread(threadId)
 
-  // Hook logs live in an external store so updates don't re-render the full provider tree
+  useEffect(() => {
+    threadMessageIdsRef.current = new Set(threadMessages.map((message) => message.id))
+  }, [threadMessages])
+
+  // Hook logs live in an external store so updates don't re-render the full provider tree.
+  // Per-turn buckets are keyed by the user message id that opened the turn,
+  // so the chip rendered under each user message can pull its own bucket.
   const threadContext = useThreadContext()
-  const hookLogs = useSyncExternalStore(
+  const hookLogBuckets = useSyncExternalStore(
     useCallback((cb) => threadContext.subscribeToHookLogs(threadId, cb), [threadContext, threadId]),
-    useCallback(() => threadContext.getHookLogs(threadId), [threadContext, threadId])
+    useCallback(() => threadContext.getHookLogBuckets(threadId), [threadContext, threadId])
   )
+  const hookLogBucketByTurnId = useMemo(() => {
+    const map = new Map<string, HookLogBucket>()
+    for (const bucket of hookLogBuckets) map.set(bucket.turnId, bucket)
+    return map
+  }, [hookLogBuckets])
+  const [hookLogConfig, setHookLogConfig] = useState<{ enabled: boolean; diagnostic: boolean }>({
+    enabled: false,
+    diagnostic: false
+  })
+  useEffect(() => {
+    let cancelled = false
+    const unsubscribe = window.api.hooks.logging.onChanged((cfg) => {
+      if (!cancelled) setHookLogConfig(cfg)
+    })
+    void window.api.hooks.logging
+      .get()
+      .then((cfg) => {
+        if (!cancelled) setHookLogConfig(cfg)
+      })
+      .catch(() => {
+        /* default already off */
+      })
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [])
+  const [openHookLogBucketId, setOpenHookLogBucketId] = useState<string | null>(null)
+  const openHookLogBucket = openHookLogBucketId
+    ? (hookLogBucketByTurnId.get(openHookLogBucketId) ?? null)
+    : null
 
   // Get the stream data via subscription - reactive updates without re-rendering provider
   const streamData = useThreadStream(threadId)
@@ -650,18 +1358,33 @@ export function ChatContainer({
   const [savedToolNameInput, setSavedToolNameInput] = useState("")
   const [savedToolDescriptionInput, setSavedToolDescriptionInput] = useState("")
   const [saveToolMetadataLoading, setSaveToolMetadataLoading] = useState(false)
+  const [saveToolMetadataLoadingThreadId, setSaveToolMetadataLoadingThreadId] = useState<string | null>(
+    null
+  )
+  const queuedApprovalCount = Math.max(0, pendingApprovals.length - 1)
+  const showSaveToolMetadataLoading =
+    saveToolMetadataLoading && saveToolMetadataLoadingThreadId === threadId
 
   useEffect(() => {
     const approval = pendingApproval as unknown as Record<string, unknown> | null
     if (approval?.operation === "save_code_exec_tool") {
       setSaveToolMetadataLoading(false)
-      setSavedToolNameInput(String(approval.savedToolName || ""))
+      setSaveToolMetadataLoadingThreadId(null)
+      setSavedToolNameInput(
+        String(
+          approval.savedToolName ||
+            approval.savedToolId ||
+            pendingApproval?.tool_call?.args?.toolId ||
+            ""
+        )
+      )
       setSavedToolDescriptionInput(String(approval.savedToolDescription || ""))
       return
     }
 
-    if (!pendingApproval || approval?.operation !== "prepare_save_code_exec_tool") {
+    if (pendingApproval && approval?.operation !== "prepare_save_code_exec_tool") {
       setSaveToolMetadataLoading(false)
+      setSaveToolMetadataLoadingThreadId(null)
     }
 
     setSavedToolNameInput("")
@@ -730,6 +1453,58 @@ export function ChatContainer({
     },
     [agentMode, threadId, threadMessages, updateThread]
   )
+  const inputDisabled = isLoading || historyLoading
+  const userInputScrollPadding = pendingUserInput
+    ? Math.ceil((userInputDialogLayout?.height ?? 320) + 24)
+    : undefined
+
+  const handleUserInputDialogLayoutChange = useCallback(
+    (layout: UserInputRequestDialogLayout | null): void => {
+      setUserInputDialogLayout((prev) => {
+        if (!layout) return prev === null ? prev : null
+
+        const next = {
+          height: Math.ceil(layout.height),
+          top: Math.round(layout.top),
+          bottom: Math.round(layout.bottom)
+        }
+        if (
+          prev &&
+          prev.height === next.height &&
+          prev.top === next.top &&
+          prev.bottom === next.bottom
+        ) {
+          return prev
+        }
+        return next
+      })
+    },
+    []
+  )
+
+  const prepareStreamMessageCapture = useCallback((): void => {
+    streamMessageTimesRef.current = {}
+    streamMessageBaselineIdsRef.current = new Set(
+      ((streamData.messages || []) as StreamMessage[])
+        .map((msg) => msg.id)
+        .filter((id): id is string => !!id)
+    )
+    streamMessageCapturePreparedRef.current = true
+  }, [streamData.messages])
+
+  useEffect(() => {
+    let cancelled = false
+    setMessageTimes({})
+    window.api.threads
+      .get(threadId)
+      .then((thread) => {
+        if (!cancelled) setMessageTimes(getMessageTimeMap(thread?.thread_values))
+      })
+      .catch((error) => console.warn("[ChatContainer] Failed to load message times:", error))
+    return () => {
+      cancelled = true
+    }
+  }, [threadId])
 
   // ── File attachments state ──
   const [attachments, setAttachments] = useState<FileAttachment[]>([])
@@ -904,43 +1679,6 @@ export function ChatContainer({
     }
   }, [currentModel])
 
-  const syncNeedUpdateVersion = useCallback(async () => {
-    try {
-      const status = await window.api.update.getStatus()
-      setNeedUpdateVersion(Boolean(status.update) && status.status !== "idle")
-    } catch (error) {
-      console.warn("[ChatContainer] Failed to sync update status:", error)
-      setNeedUpdateVersion(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    const updateApi = window.api.update
-    void syncNeedUpdateVersion()
-
-    const removeAvailable = updateApi.onAvailable(() => {
-      setNeedUpdateVersion(true)
-    })
-    const removeDownloaded = updateApi.onDownloaded(() => {
-      setNeedUpdateVersion(true)
-    })
-    const removeError = updateApi.onError(() => {
-      void syncNeedUpdateVersion()
-    })
-
-    return () => {
-      removeAvailable()
-      removeDownloaded()
-      removeError()
-    }
-  }, [syncNeedUpdateVersion])
-
-  useEffect(() => {
-    if (!updateDialogOpen) {
-      void syncNeedUpdateVersion()
-    }
-  }, [updateDialogOpen, syncNeedUpdateVersion])
-
   useEffect(() => {
     queryRemoteSkills()
     const fetchYoloMode = (): void => {
@@ -974,9 +1712,8 @@ export function ChatContainer({
     [threadId]
   )
 
-  // Check if NUX (first-run sandbox setup) is needed, then auto-start elevated setup.
-  // If elevated setup fails (UAC cancelled, setup exe missing, etc.), the main process
-  // automatically falls back to unelevated mode — so the app is always usable.
+  // Check if sandbox NUX is needed. The main process currently defaults sandbox mode to
+  // "none", so this remains dormant unless the setup flow is re-enabled later.
   useEffect(() => {
     window.api.sandbox
       .isNuxNeeded()
@@ -1057,8 +1794,10 @@ export function ChatContainer({
           operation === "prepare_save_code_exec_tool" && decision === "approve"
         if (keepPrepareApprovalForSaveMetadata) {
           setSaveToolMetadataLoading(true)
+          setSaveToolMetadataLoadingThreadId(threadId)
         } else {
           setSaveToolMetadataLoading(false)
+          setSaveToolMetadataLoadingThreadId(null)
         }
 
         // Send decision to main process via the orchestrator's IPC channel
@@ -1073,23 +1812,44 @@ export function ChatContainer({
             ? { savedToolDescription: savedToolDescriptionInput }
             : {})
         })
-
         if (!keepPrepareApprovalForSaveMetadata) {
-          setPendingApproval(null)
+          setSaveToolMetadataLoading(false)
+          setSaveToolMetadataLoadingThreadId(null)
+        }
+        setToolCallState(pendingApproval.tool_call?.id || "", {
+          status:
+            decision === "approve" ||
+            decision === "approve_session" ||
+            decision === "approve_permanent"
+              ? "running"
+              : "rejected"
+        })
+        if (!keepPrepareApprovalForSaveMetadata) {
+          removePendingApproval(pendingApproval.id)
         }
         return
       }
 
       // Legacy HITL approval path (non-execute tools)
       if (!stream) {
-        setPendingApproval(null)
+        setToolCallState(pendingApproval.tool_call?.id || "", { status: "rejected" })
+        removePendingApproval(pendingApproval.id)
         return
       }
-      setPendingApproval(null)
+      setToolCallState(pendingApproval.tool_call?.id || "", {
+        status:
+          decision === "approve" ||
+          decision === "approve_session" ||
+          decision === "approve_permanent"
+            ? "running"
+            : "rejected"
+      })
+      removePendingApproval(pendingApproval.id)
 
       try {
         const legacyDecision =
           decision === "approve_session" || decision === "approve_permanent" ? "approve" : decision
+        prepareStreamMessageCapture()
         await stream.submit(null, {
           command: {
             resume: { decision: legacyDecision, pendingCount: pendingApproval.pendingCount }
@@ -1106,12 +1866,23 @@ export function ChatContainer({
       currentModel,
       agentMode,
       pendingApproval,
+      setToolCallState,
+      removePendingApproval,
       savedToolDescriptionInput,
       savedToolNameInput,
-      setPendingApproval,
+      prepareStreamMessageCapture,
       stream,
       threadId
     ]
+  )
+
+  const handleUserInputSubmit = useCallback(
+    (response: UserInputResponse): void => {
+      window.api.userInput.sendResponse(response)
+      setPendingUserInput(null)
+      setUserInputDialogLayout(null)
+    },
+    [setPendingUserInput]
   )
 
   const agentValues = stream?.values as AgentStreamValues | undefined
@@ -1145,39 +1916,134 @@ export function ChatContainer({
 
   const prevLoadingRef = useRef(false)
   useEffect(() => {
-    if (prevLoadingRef.current && !isLoading) {
+    if (!prevLoadingRef.current && isLoading) {
+      // 本轮开始前应由 stream.submit 调用方采样 baseline。这里仅做兜底：
+      // 如果运行不是从 ChatContainer 的 submit 路径启动，就退回到已落库消息集合。
+      //
+      // 不能在 loading 已经变成 true 后再用当前 streamData.messages 采样；
+      // 第一条本轮 assistant/tool-call 可能已经到达，会被误判为历史消息而漏落库。
+      if (!streamMessageCapturePreparedRef.current) {
+        streamMessageTimesRef.current = {}
+        streamMessageBaselineIdsRef.current = new Set(threadMessageIdsRef.current)
+      }
+      streamMessageCapturePreparedRef.current = false
+    }
+
+    if (isLoading) {
       for (const rawMsg of streamData.messages) {
         const msg = rawMsg as StreamMessage
         if (msg.type === "human" && isCoordinatorNotificationPrompt(msg.content)) continue
-        if (msg.id) {
-          const streamMsg = msg as StreamMessage & { id: string }
-
-          let role: Message["role"] = "assistant"
-          if (streamMsg.type === "human") role = "user"
-          else if (streamMsg.type === "tool")
-            role = "tool" // ✅ 修复: tool 不应映射为 assistant
-          else if (streamMsg.type === "ai") role = "assistant"
-
-          const storeMsg: Message = {
-            id: streamMsg.id,
-            role,
-            content: typeof streamMsg.content === "string" ? streamMsg.content : "",
-            tool_calls: streamMsg.tool_calls,
-            ...(role === "tool" &&
-              streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
-            ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
-            created_at: new Date()
-          }
-          appendMessage(storeMsg)
+        // 只给本轮新增、且还未落入 threadMessages 的消息打 start_at。
+        //
+        // threadMessages 是当前前端已经 append 到会话状态里的消息；如果消息已经存在，
+        // 说明它已经完成过一次采集或恢复，不能重复覆盖 start_at。
+        if (
+          msg.id &&
+          !streamMessageBaselineIdsRef.current.has(msg.id) &&
+          !threadMessageIdsRef.current.has(msg.id) &&
+          !streamMessageTimesRef.current[msg.id]
+        ) {
+          const startedAt = new Date()
+          streamMessageTimesRef.current[msg.id] = { start_at: startedAt, end_at: startedAt }
         }
       }
     }
+
+    if (prevLoadingRef.current && !isLoading) {
+      const completedAt = new Date()
+      const nextMessageTimes: MessageTimeMap = {}
+      // 只处理本轮流式期间被记录过 start_at 的消息，避免重复 append 历史消息。
+      //
+      // 当前轮可能包含多条 assistant 消息和多条 tool 消息。这里不直接用全部 streamData.messages，
+      // 而是只取 streamMessageTimesRef 中出现过的 id，保证每条要落库的消息都拥有本轮采集到的
+      // start_at/end_at。
+      const currentTurnMessages = ((streamData.messages || []) as StreamMessage[]).filter(
+        (msg): msg is StreamMessage & { id: string } =>
+          !!msg.id &&
+          !!streamMessageTimesRef.current[msg.id] &&
+          !(msg.type === "human" && isCoordinatorNotificationPrompt(msg.content))
+      )
+
+      currentTurnMessages.forEach((streamMsg, index) => {
+        const trackedTime = streamMessageTimesRef.current[streamMsg.id]
+        const nextStreamMsg = currentTurnMessages[index + 1]
+        const nextStartAt = nextStreamMsg
+          ? streamMessageTimesRef.current[nextStreamMsg.id]?.start_at
+          : undefined
+
+        // 当前消息的 end_at 取下一条消息的 start_at；本轮最后一条消息取停止 loading 的时间。
+        //
+        // 这样每条消息时间段首尾相接：
+        // assistant.start_at -> tool.start_at -> assistant.start_at -> completedAt。
+        // 展示总耗时时，再从 user.start_at 减到“下一个 user 之前最后一条消息”的 end_at，
+        // 就能覆盖中间所有 assistant/tool 的耗时。
+        trackedTime.end_at = nextStartAt ?? completedAt
+
+        let role: Message["role"] = "assistant"
+        if (streamMsg.type === "human") role = "user"
+        else if (streamMsg.type === "tool")
+          role = "tool" // ✅ 修复: tool 不应映射为 assistant
+        else if (streamMsg.type === "ai") role = "assistant"
+
+        nextMessageTimes[streamMsg.id] = {
+          start_at: trackedTime.start_at.toISOString(),
+          end_at: trackedTime.end_at.toISOString()
+        }
+
+        const storeMsg: Message = {
+          id: streamMsg.id,
+          role,
+          content: typeof streamMsg.content === "string" ? streamMsg.content : "",
+          tool_calls: streamMsg.tool_calls,
+          ...(role === "tool" &&
+            streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
+          ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
+          ...(role === "tool" &&
+            streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
+          created_at: new Date(),
+          start_at: trackedTime.start_at,
+          end_at: trackedTime.end_at
+        }
+        appendMessage(storeMsg)
+      })
+
+      if (Object.keys(nextMessageTimes).length > 0) {
+        setMessageTimes((prev) => ({ ...prev, ...nextMessageTimes }))
+        window.api.threads
+          .get(threadId)
+          .then((thread) => {
+            if (!thread) return
+            const existingTimes = getMessageTimeMap(thread.thread_values)
+            return window.api.threads.update(threadId, {
+              thread_values: {
+                ...(thread.thread_values ?? {}),
+                // id map 用于当前会话和 id 稳定时的精确恢复。
+                //
+                // 例如用户还没有关闭 app，只是在同一个运行时切换线程或重新渲染，
+                // message id 仍然可靠，此时直接按 id 取 start_at/end_at。
+                [MESSAGE_TIMES_THREAD_VALUE_KEY]: {
+                  ...existingTimes,
+                  ...nextMessageTimes
+                },
+                // 顺序数组用于 app 重启后，checkpoint 恢复出的 message id 不一致时兜底匹配。
+                //
+                // 它不是用来计算 duration 的新字段，只是保存每条消息时间的展示顺序；
+                // duration 仍由 user.start_at 和分组内最后一条消息 end_at 动态计算。
+                [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
+                  getMessageTimeOrder(thread.thread_values),
+                  nextMessageTimes
+                )
+              }
+            })
+          })
+          .catch((error) => console.warn("[ChatContainer] Failed to save message times:", error))
+      }
+    }
     prevLoadingRef.current = isLoading
-  }, [isLoading, streamData.messages, loadThreads, appendMessage])
+  }, [isLoading, streamData.messages, threadId, appendMessage])
 
   const displayMessages = useMemo(() => {
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
-
     const streamingMsgs: Message[] = ((streamData.messages || []) as StreamMessage[])
       .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
       .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
@@ -1195,13 +2061,36 @@ export function ChatContainer({
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
           ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
-          created_at: new Date()
+          ...(role === "tool" &&
+            streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
+          created_at: new Date(),
+          ...(streamMessageTimesRef.current[streamMsg.id]?.start_at && {
+            start_at: streamMessageTimesRef.current[streamMsg.id].start_at
+          }),
+          ...(streamMessageTimesRef.current[streamMsg.id]?.end_at && {
+            end_at: streamMessageTimesRef.current[streamMsg.id].end_at
+          }),
+          ...(toDate(messageTimes[streamMsg.id]?.start_at) && {
+            start_at: toDate(messageTimes[streamMsg.id]?.start_at)
+          }),
+          ...(toDate(messageTimes[streamMsg.id]?.end_at) && {
+            end_at: toDate(messageTimes[streamMsg.id]?.end_at)
+          })
         }
       })
 
     // Clean up attachment XML tags in user messages for display
-    const allMessages = [...threadMessages, ...streamingMsgs]
-    const cleanedMessages = allMessages.map((msg) => {
+    const allMessages = [...threadMessages, ...streamingMsgs].map((msg) => {
+      const storedTime = messageTimes[msg.id]
+      const startAt = toDate(storedTime?.start_at) ?? msg.start_at ?? msg.created_at
+      const endAt = toDate(storedTime?.end_at) ?? msg.end_at ?? startAt
+      return {
+        ...msg,
+        start_at: startAt,
+        end_at: endAt
+      }
+    })
+    const cleanedMessages = sortMessagesForDisplay(allMessages).map((msg) => {
       if (
         msg.role !== "user" ||
         typeof msg.content !== "string" ||
@@ -1229,12 +2118,41 @@ export function ChatContainer({
       return { ...msg, content: cleaned }
     })
     return filterCoordinatorNoiseMessages(cleanedMessages)
-  }, [threadMessages, streamData.messages])
+  }, [threadMessages, streamData.messages, messageTimes])
+
+  const assistantDurationsByMessageId = useMemo(() => {
+    const durations = new Map<string, number>()
+    for (let index = 0; index < displayMessages.length; index++) {
+      const currentUser = displayMessages[index]
+      if (currentUser.role !== "user") continue
+
+      const group = displayMessages.slice(index + 1)
+      const nextUserIndex = group.findIndex((message) => message.role === "user")
+      const responseMessages = nextUserIndex >= 0 ? group.slice(0, nextUserIndex) : group
+      const firstAssistant = responseMessages.find((message) => message.role === "assistant")
+      const lastMessageWithEnd = [...responseMessages].reverse().find((message) => message.end_at)
+
+      if (!firstAssistant || !lastMessageWithEnd) continue
+      const startedAt = toTime(currentUser.start_at)
+      const endedAt = toTime(lastMessageWithEnd.end_at)
+      if (startedAt === null || endedAt === null || endedAt <= startedAt) continue
+      durations.set(firstAssistant.id, endedAt - startedAt)
+    }
+    return durations
+  }, [displayMessages])
 
   const userMessageIds = useMemo(
     () => displayMessages.filter((message) => message.role === "user").map((message) => message.id),
     [displayMessages]
   )
+
+  const lastContentMessageId = useMemo(() => {
+    for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
+      const message = displayMessages[index]
+      if (message.role !== "tool") return message.id
+    }
+    return null
+  }, [displayMessages])
 
   const userQuestions = useMemo<ChatScrollQuestion[]>(
     () =>
@@ -1247,14 +2165,20 @@ export function ChatContainer({
     [displayMessages]
   )
 
-  const setUserMessageRef = useCallback(
-    (messageId: string) =>
+  const setMessageRef = useCallback(
+    (messageId: string, role: Message["role"]) =>
       (node: HTMLDivElement | null): void => {
-        if (node) {
+        if (node && role === "user") {
           userMessageRefs.current.set(messageId, node)
+        } else {
+          userMessageRefs.current.delete(messageId)
+        }
+
+        if (node && role !== "tool") {
+          contentMessageRefs.current.set(messageId, node)
           return
         }
-        userMessageRefs.current.delete(messageId)
+        contentMessageRefs.current.delete(messageId)
       },
     []
   )
@@ -1266,12 +2190,77 @@ export function ChatContainer({
       if (msg.role === "tool" && msg.tool_call_id) {
         results.set(msg.tool_call_id, {
           content: msg.content,
-          is_error: false // Could be enhanced to track errors
+          is_error: msg.is_error
         })
       }
     }
     return results
   }, [displayMessages])
+
+  const toolCallDisplayStates = useMemo(() => {
+    const orderedToolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = []
+    const seenToolCallIds = new Set<string>()
+
+    for (const message of displayMessages) {
+      if (!Array.isArray(message.tool_calls)) continue
+      for (const toolCall of message.tool_calls) {
+        if (!toolCall?.id || seenToolCallIds.has(toolCall.id)) continue
+        seenToolCallIds.add(toolCall.id)
+        orderedToolCalls.push(toolCall)
+      }
+    }
+
+    const currentApprovalIds = new Set<string>()
+    if (pendingApproval?.pendingToolCallIds?.length) {
+      for (const id of pendingApproval.pendingToolCallIds) {
+        if (id) currentApprovalIds.add(id)
+      }
+    } else if (pendingApproval?.tool_call?.id) {
+      currentApprovalIds.add(pendingApproval.tool_call.id)
+    }
+
+    let activeAssigned = false
+    const nextStates = new Map<string, ToolCallState>()
+
+    for (const toolCall of orderedToolCalls) {
+      const baseState = toolCallStates[toolCall.id]
+      const mergedArgs = mergeToolCallArgs(baseState?.args, toolCall.args)
+      const result = toolResults.get(toolCall.id)
+      let status: ToolCallStatus
+
+      if (result !== undefined) {
+        status = result.is_error ? "failed" : "completed"
+      } else if (baseState?.status === "rejected") {
+        status = "rejected"
+      } else if (currentApprovalIds.has(toolCall.id)) {
+        status = "awaiting_approval"
+        activeAssigned = true
+      } else if (!isLoading) {
+        status = isTerminalToolCallStatus(baseState?.status) ? baseState!.status : "interrupted"
+      } else if (!activeAssigned) {
+        status = "running"
+        activeAssigned = true
+      } else {
+        status = "queued"
+      }
+
+      nextStates.set(toolCall.id, {
+        id: toolCall.id,
+        status,
+        name: toolCall.name || baseState?.name,
+        args: mergedArgs,
+        command: getToolCallCommand(mergedArgs) || baseState?.command,
+        filePath: getToolCallFilePath(mergedArgs) || baseState?.filePath,
+        reason: baseState?.reason,
+        operation: baseState?.operation,
+        code: getToolCallCode(mergedArgs) || baseState?.code,
+        timeoutMs: getToolCallTimeout(mergedArgs) ?? baseState?.timeoutMs,
+        updatedAt: baseState?.updatedAt ?? new Date()
+      })
+    }
+
+    return nextStates
+  }, [displayMessages, isLoading, pendingApproval, toolCallStates, toolResults])
 
   // Get the actual scrollable viewport element from Radix ScrollArea
   const getViewport = useCallback((): HTMLDivElement | null => {
@@ -1395,6 +2384,11 @@ export function ChatContainer({
   // Auto-scroll on new messages only if already at bottom
   useEffect(() => {
     const viewport = getViewport()
+    if (viewport && displayMessages.length === 0) {
+      viewport.scrollTop = 0
+      isAtBottomRef.current = true
+      return
+    }
     if (viewport && isAtBottomRef.current) {
       viewport.scrollTop = viewport.scrollHeight
     }
@@ -1410,14 +2404,52 @@ export function ChatContainer({
     }
   }, [pendingApproval, getViewport])
 
+  useEffect(() => {
+    if (!pendingUserInput || !userInputDialogLayout) return
+    const viewport = getViewport()
+    if (!viewport) return
+
+    const frame = requestAnimationFrame(() => {
+      const targetElement = lastContentMessageId
+        ? contentMessageRefs.current.get(lastContentMessageId)
+        : null
+      const viewportRect = viewport.getBoundingClientRect()
+      const targetBottom = Math.max(viewportRect.top + 24, userInputDialogLayout.top - 12)
+
+      if (targetElement) {
+        const targetRect = targetElement.getBoundingClientRect()
+        const scrollDelta = targetRect.bottom - targetBottom
+        if (Math.abs(scrollDelta) > 1) {
+          viewport.scrollTop = Math.max(0, viewport.scrollTop + scrollDelta)
+        }
+      } else {
+        viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+      }
+      isAtBottomRef.current = false
+    })
+
+    return () => cancelAnimationFrame(frame)
+  }, [
+    getViewport,
+    lastContentMessageId,
+    pendingUserInput,
+    userInputDialogLayout?.height,
+    userInputDialogLayout?.top
+  ])
+
   // Always scroll to bottom when switching threads
   useEffect(() => {
     const viewport = getViewport()
     if (viewport) {
+      if (displayMessages.length === 0) {
+        viewport.scrollTop = 0
+        isAtBottomRef.current = true
+        return
+      }
       viewport.scrollTop = viewport.scrollHeight
       isAtBottomRef.current = true
     }
-  }, [threadId, getViewport])
+  }, [displayMessages.length, threadId, getViewport])
 
   // Focus input on mount
   useEffect(() => {
@@ -1428,9 +2460,19 @@ export function ChatContainer({
     clearError()
   }
 
+  const isLocalSkillDisabled = useCallback(
+    (skill: SkillMetadata): boolean => !skill.pluginId && isSkillDisabled(skill, disabledSkillIds),
+    [disabledSkillIds]
+  )
+
+  const enabledSkillsForSlash = useMemo(
+    () => skills.filter((skill) => !isLocalSkillDisabled(skill)),
+    [skills, isLocalSkillDisabled]
+  )
+
   const slash = useSlashCommands({
     input,
-    skills,
+    skills: enabledSkillsForSlash,
     skillSelected: selectedSkill !== null
   })
 
@@ -1465,7 +2507,7 @@ export function ChatContainer({
     // future invoker (hotkey, programmatic call) can't accidentally ship the
     // literal "/xxx" text as a message.
     if (slash.mode.kind === "skill") return
-    if ((!input.trim() && attachments.length === 0 && !selectedSkill) || isLoading || !stream)
+    if ((!input.trim() && attachments.length === 0 && !selectedSkill) || inputDisabled || !stream)
       return
 
     if (!currentModel) {
@@ -1505,6 +2547,9 @@ export function ChatContainer({
             tool_call_id: approval?.tool_call?.id || ""
           })
         }
+      }
+      if (pendingApproval) {
+        setToolCallState(pendingApproval.tool_call?.id || "", { status: "rejected" })
       }
       clearPendingApprovals()
     }
@@ -1597,13 +2642,60 @@ export function ChatContainer({
       setAgentMode("coordinator")
     }
 
+    // 用户消息本身不消耗 assistant 响应时间，start_at/end_at 都取发送时刻。
+    //
+    // 但 user.start_at 是本轮耗时计算的起点：展示 CMBDevClaw 后面的 duration 时，会找到
+    // 当前 user 后面的第一条 assistant，再减到下一个 user 之前最后一条消息的 end_at。
+    // 所以 user 也必须持久化 start_at/end_at，否则重启后无法还原该轮起点。
+    const userStartAt = new Date()
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: "user",
       content: displayContent,
-      created_at: new Date()
+      created_at: new Date(),
+      start_at: userStartAt,
+      end_at: userStartAt
     }
     appendMessage(userMessage)
+    // 用户消息也需要持久化起止时间，后续 duration 用 user.start_at 作为起点。
+    //
+    // 这里先立即写入 thread_values，是为了尽量保证即使 assistant 回复还没结束，
+    // 当前 user 的起点也已经保存下来；assistant/tool 的结束时间会在 loading 结束后补齐。
+    const userMessageTime: MessageTimeMap = {
+      [userMessage.id]: {
+        start_at: userStartAt.toISOString(),
+        end_at: userStartAt.toISOString()
+      }
+    }
+    setMessageTimes((prev) => ({ ...prev, ...userMessageTime }))
+    try {
+      const thread = await window.api.threads.get(threadId)
+      if (thread) {
+        await window.api.threads.update(threadId, {
+          thread_values: {
+            ...(thread.thread_values ?? {}),
+            // 保留 id map，优先支持按 message id 精确恢复。
+            //
+            // user message 在前端先 append，checkpoint 恢复时 id 可能不一定完全一致；
+            // 因此仍需要下面的顺序数组作为兜底。
+            [MESSAGE_TIMES_THREAD_VALUE_KEY]: {
+              ...getMessageTimeMap(thread.thread_values),
+              ...userMessageTime
+            },
+            // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。
+            //
+            // 这条 user 时间会成为顺序数组中的一个节点，后续 assistant/tool 时间会继续 append，
+            // 最终形成完整的 user -> assistant/tool... 时间线。
+            [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
+              getMessageTimeOrder(thread.thread_values),
+              userMessageTime
+            )
+          }
+        })
+      }
+    } catch (error) {
+      console.warn("[ChatContainer] Failed to save user message time:", error)
+    }
 
     if (isFirstMessage) {
       const currentThread = threads.find((t) => t.thread_id === threadId)
@@ -1618,13 +2710,19 @@ export function ChatContainer({
       }
     }
 
+    prepareStreamMessageCapture()
     await stream.submit(
       {
         messages: [{ type: "human", content: fullMessage }]
       },
       {
         config: {
-          configurable: { thread_id: threadId, model_id: currentModel, agent_mode: submitAgentMode }
+          configurable: {
+            thread_id: threadId,
+            model_id: currentModel,
+            agent_mode: submitAgentMode,
+            hook_turn_id: userMessage.id
+          }
         }
       }
     )
@@ -1681,6 +2779,24 @@ export function ChatContainer({
     }
   }
 
+  const handleInsertNewline = useCallback((): void => {
+    if (inputDisabled) return
+
+    const textarea = inputRef.current
+    const selectionStart = textarea?.selectionStart ?? input.length
+    const selectionEnd = textarea?.selectionEnd ?? input.length
+    const nextInput = `${input.slice(0, selectionStart)}\n${input.slice(selectionEnd)}`
+    const nextCursor = selectionStart + 1
+
+    setInput(nextInput)
+    requestAnimationFrame(() => {
+      const target = inputRef.current
+      if (!target) return
+      target.focus()
+      target.setSelectionRange(nextCursor, nextCursor)
+    })
+  }, [input, inputDisabled, setInput])
+
   // Auto-resize textarea based on content
   const adjustTextareaHeight = (): void => {
     const textarea = inputRef.current
@@ -1734,7 +2850,7 @@ export function ChatContainer({
 
   useEffect(() => {
     void loadSkills()
-  }, [])
+  }, [loadSkills, pluginVersion])
 
   // ── Skill creation human-confirmation listener ──────────
   useEffect(() => {
@@ -1819,8 +2935,10 @@ export function ChatContainer({
   // ────────────────────────────────────────────────────────
 
   const getSkillId = useCallback((skill: SkillMetadata): string => {
-    const fromPath = skill?.path?.split("/").slice(-2, -1)[0]
-    return (fromPath || skill.name || "").toLowerCase()
+    const idSegments = getSkillMetadataId(skill).split("/").filter(Boolean)
+    const fromId = idSegments.length > 0 ? idSegments[idSegments.length - 1] : undefined
+    const fromPath = skill?.path?.replace(/\\/g, "/").split("/").slice(-2, -1)[0]
+    return (fromId || fromPath || skill.name || "").toLowerCase()
   }, [])
 
   const buildSkillPrompt = useCallback(
@@ -2100,33 +3218,49 @@ export function ChatContainer({
     [getSkillId, programmingSkillIds]
   )
 
-  const { generalSkills, programmingSkills, customSkills } = useMemo(() => {
-    const builtInSkills = skills.filter((skill) => skill.source === "project")
-    const userSkills = skills.filter((skill) => skill.source === "user")
-
-    const general = builtInSkills.filter((skill) => !isProgrammingSkill(skill))
-    const programming = builtInSkills.filter(isProgrammingSkill)
-
-    // 精品技能名称集合，从「我安装的技能」中剔除
-    const goodSkillNames = new Set(goodSkillsData.map((g) => g.name))
-    const pureCustomSkills = userSkills.filter(
-      (s) => !goodSkillNames.has(s.name) && s.name !== "encrypt-password"
-    )
-    // todo  s.name !== 'encrypt-password' 这个逻辑在代码暂时写死，后面排查
-
-    return {
-      generalSkills: general,
-      programmingSkills: programming,
-      customSkills: pureCustomSkills
-    }
-  }, [skills, isProgrammingSkill, goodSkillsData])
+  const { generalSkills, programmingSkills, enabledCustomSkills, disabledLocalSkills } =
+    useMemo(() => {
+      return groupWelcomeSkills(skills, goodSkillsData, isLocalSkillDisabled, isProgrammingSkill)
+    }, [skills, isLocalSkillDisabled, isProgrammingSkill, goodSkillsData])
 
   const handleOpenMarketBySecondaryCategory = useCallback(
     (secondaryCategory: string): void => {
-      setMarketInitialSkillCategory(secondaryCategory)
+      useAppStore.setState({
+        marketInitialSkillCategory: secondaryCategory,
+        marketInitialSkillFilters: ["featured", "certified"],
+        marketInitialSkillSearchQuery: null,
+        marketInitialSkillDetailName: null
+      })
       setShowCustomizeView(true, "market")
     },
-    [setMarketInitialSkillCategory, setShowCustomizeView]
+    [setShowCustomizeView]
+  )
+
+  const handleOpenMarketBySkill = useCallback(
+    (skillName: string): void => {
+      useAppStore.setState({
+        marketInitialSkillCategory: null,
+        marketInitialSkillFilters: null,
+        marketInitialSkillSearchQuery: null,
+        marketInitialSkillDetailName: skillName
+      })
+      setShowCustomizeView(true, "market")
+    },
+    [setShowCustomizeView]
+  )
+
+  const handleOpenOrganizationSkillMarket = useCallback(
+    (skillName?: string): void => {
+      useAppStore.setState({
+        marketInitialTab: "orgSkill",
+        marketInitialSkillCategory: null,
+        marketInitialSkillFilters: null,
+        marketInitialSkillSearchQuery: null,
+        marketInitialSkillDetailName: skillName || null
+      })
+      setShowCustomizeView(true, "market")
+    },
+    [setShowCustomizeView]
   )
 
   const programmingSkillCards = useMemo(() => {
@@ -2138,14 +3272,123 @@ export function ChatContainer({
     }))
   }, [showAllProgrammingSkills, programmingSkills, getSkillSummary, getSkillIcon])
 
-  const customSkillCards = useMemo(() => {
-    const source = showAllCustomSkills ? customSkills : customSkills.slice(0, 8)
-    return source.map((skill) => ({
-      skill,
-      label: getSkillSummary(skill),
-      icon: getSkillIcon(skill)
-    }))
-  }, [showAllCustomSkills, customSkills, getSkillSummary, getSkillIcon])
+  const marketSkillCategoryByName = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const item of marketSkillsData) {
+      if (!item.category) continue
+      map.set(item.name, item.category)
+      if (item.chinese_name) map.set(item.chinese_name, item.category)
+    }
+    return map
+  }, [marketSkillsData])
+
+  const marketSkillUpdateByName = useMemo(() => {
+    // 把市场技能列表转换成“技能名 -> 更新信息”的索引，供“我安装的技能”tab 快速匹配。
+    // 同时写入英文名和中文名两种 key，是因为本地技能元数据和市场展示数据可能使用不同名称。
+    const map = new Map<
+      string,
+      {
+        installedVersion?: string
+        currentVersion?: string | null
+        updateAvailable: boolean
+        displayName: string
+      }
+    >()
+
+    for (const item of marketSkillsData) {
+      // 这里复用 MarketPanel 的版本比较规则：
+      // 只有本地已记录安装版本、市场也返回版本，并且两者不一致时才显示“有更新”。
+      const flags = buildMarketInstalledFlags(item, "skill", true)
+      const updateInfo = {
+        installedVersion: flags.installedVersion,
+        currentVersion: item.version,
+        updateAvailable: flags.updateAvailable,
+        displayName: item.chinese_name || item.name
+      }
+      map.set(item.name, updateInfo)
+      if (item.chinese_name) map.set(item.chinese_name, updateInfo)
+    }
+
+    return map
+  }, [marketSkillsData])
+
+  const getSkillMarketUpdateInfo = useCallback(
+    (skill: SkillMetadata) => {
+      // 优先按本地技能名匹配市场条目；少数技能名来自目录路径时，再用 relativePath 兜底。
+      return (
+        marketSkillUpdateByName.get(skill.name) ||
+        (skill.relativePath ? marketSkillUpdateByName.get(skill.relativePath) : undefined) ||
+        null
+      )
+    },
+    [marketSkillUpdateByName]
+  )
+
+  const getSkillSceneCategory = useCallback(
+    (skill: SkillMetadata): string => {
+      const category =
+        skill.metadata?.category ||
+        marketSkillCategoryByName.get(skill.name) ||
+        DEFAULT_SCENE_CATEGORY
+      return category.trim() || DEFAULT_SCENE_CATEGORY
+    },
+    [marketSkillCategoryByName]
+  )
+
+  const buildWelcomeSkillGroups = useCallback(
+    (sourceSkills: SkillMetadata[]): WelcomeSkillSceneGroup[] => {
+      const groups = new Map<string, WelcomeSkillCard[]>()
+      for (const skill of sourceSkills) {
+        const category = getSkillSceneCategory(skill)
+        const cards = groups.get(category) ?? []
+        cards.push({
+          skill,
+          label: getSkillSummary(skill),
+          icon: getSkillIcon(skill),
+          // 将市场版本信息挂到技能卡片上，树形渲染时即可决定是否展示“有更新”标识。
+          ...getSkillMarketUpdateInfo(skill)
+        })
+        groups.set(category, cards)
+      }
+
+      const categoryOrder = new Map<string, number>(
+        SCENE_CATEGORY_OPTIONS.map((category, index) => [category, index])
+      )
+      return [...groups.entries()]
+        .sort(([a], [b]) => {
+          const rankA = categoryOrder.get(a) ?? Number.MAX_SAFE_INTEGER
+          const rankB = categoryOrder.get(b) ?? Number.MAX_SAFE_INTEGER
+          return rankA === rankB ? a.localeCompare(b, "zh-CN") : rankA - rankB
+        })
+        .map(([category, cards]) => ({ category, cards }))
+    },
+    [getSkillIcon, getSkillMarketUpdateInfo, getSkillSceneCategory, getSkillSummary]
+  )
+
+  const enabledCustomSkillGroups = useMemo(() => {
+    const source = showAllCustomSkills
+      ? enabledCustomSkills
+      : limitWelcomeSkillsByTopLevel(enabledCustomSkills, 8)
+    return buildWelcomeSkillGroups(source)
+  }, [buildWelcomeSkillGroups, enabledCustomSkills, showAllCustomSkills])
+
+  const disabledCustomSkillGroups = useMemo(
+    () => buildWelcomeSkillGroups(disabledLocalSkills),
+    [buildWelcomeSkillGroups, disabledLocalSkills]
+  )
+  const customSkillUpdates = useMemo(
+    () =>
+      // 统计已启用和已禁用的用户技能中有哪些存在市场新版本，用于 tab 上显示更新数量；
+      // 这里只计算数量和卡片标识，不弹 toast，避免进入会话时打扰用户。
+      [...enabledCustomSkills, ...disabledLocalSkills]
+        .map((skill) => ({
+          skill,
+          updateInfo: getSkillMarketUpdateInfo(skill)
+        }))
+        .filter((entry) => entry.updateInfo?.updateAvailable),
+    [disabledLocalSkills, enabledCustomSkills, getSkillMarketUpdateInfo]
+  )
+  const customSkillUpdateCount = customSkillUpdates.length
 
   const helpSceneSkillIds = useMemo(() => new Set(["scheduler-assistant", "skill-creator"]), [])
   const helpSceneSkillCards = useMemo(() => {
@@ -2293,7 +3536,7 @@ export function ChatContainer({
 
         <div className="flex items-start gap-2.5 rounded-md border border-amber-500/30 bg-amber-500/8 p-3 text-sm text-amber-700 dark:text-amber-400">
           <Info className="size-4 shrink-0 mt-0.5" />
-          <span>公司安全限制，默认选择 elevated 沙箱模式，确有其他需要请联系管理员。</span>
+          <span>当前默认关闭沙箱。需要隔离执行时，可在设置中手动启用沙箱模式。</span>
         </div>
 
         {nuxLoading ? (
@@ -2378,9 +3621,34 @@ export function ChatContainer({
       {nuxDialog}
 
       <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
-        <div className="p-4">
+        <div
+          className={cn(
+            "p-4",
+            userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
+          )}
+          style={
+            userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined
+          }
+        >
           <div className="max-w-3xl mx-auto space-y-4">
-            {displayMessages.length === 0 && !isLoading && (
+            {historyLoading && displayMessages.length === 0 && (
+              <div
+                className="flex min-h-[42vh] items-center justify-center px-4"
+                aria-live="polite"
+                aria-busy="true"
+              >
+                <div className="flex flex-col items-center gap-3 text-center">
+                  <div className="history-loading-icon">
+                    <Clock className="size-5" />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="text-sm font-medium text-foreground">正在加载会话历史</div>
+                    <div className="text-xs text-muted-foreground">内容较多时可能需要几秒钟...</div>
+                  </div>
+                </div>
+              </div>
+            )}
+            {displayMessages.length === 0 && !isLoading && !historyLoading && (
               <div className="pt-6 pb-8">
                 <RotatingHeadline />
                 {skillsLoading ? (
@@ -2437,8 +3705,13 @@ export function ChatContainer({
                         <TabsTrigger value="skills-by-category" className="text-xs">
                           场景技能
                         </TabsTrigger>
-                        <TabsTrigger value="installed-skills" className="text-xs">
+                        <TabsTrigger value="installed-skills" className="text-xs gap-1.5">
                           我安装的技能
+                          {customSkillUpdateCount > 0 && (
+                            <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-teal-100 px-1 text-[10px] font-semibold leading-none text-teal-700 dark:bg-teal-900/40 dark:text-teal-200">
+                              {customSkillUpdateCount}
+                            </span>
+                          )}
                         </TabsTrigger>
                         <TabsTrigger value="help" className="text-xs">
                           帮助
@@ -2448,54 +3721,61 @@ export function ChatContainer({
                       <TabsContent value="skills-by-category" className="mt-0">
                         {/* 市场技能：内部使用 getAllSkills 取数并按分类展示 */}
                         <SkillsByCategorySection
-                          skills={skills}
+                          skills={enabledSkillsForSlash}
                           previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
                           onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
+                          onOpenOrganizationSkillMarket={handleOpenOrganizationSkillMarket}
+                          onOpenMarketBySkill={handleOpenMarketBySkill}
                           onUseSkillPrompt={handleUseSkillPrompt}
                         />
                       </TabsContent>
 
-                      <TabsContent value="installed-skills" className="mt-0 space-y-2">
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                          {customSkillCards?.length ? (
-                            customSkillCards.map(({ skill, label }) => (
-                              <button
-                                key={label + skill.path}
-                                type="button"
-                                onClick={() => handleUseSkillPrompt(skill, label)}
-                                className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                      <TabsContent value="installed-skills" className="mt-0 space-y-3">
+                        {enabledCustomSkillGroups.length > 0 ? (
+                          <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
+                            <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium text-emerald-800 dark:text-emerald-200">
+                              <span>已启用技能</span>
+                              <Badge
+                                variant="outline"
+                                className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
                               >
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
-                                    <Wrench className={"size-4"} />
+                                {enabledCustomSkills.length}
+                              </Badge>
+                            </div>
+                            <div className="space-y-3">
+                              {enabledCustomSkillGroups.map((group) => (
+                                <div key={group.category} className="space-y-2">
+                                  <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                                    {group.category}
                                   </div>
-                                  <div className="min-w-0 flex-1">
-                                    <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
-                                      {getSkillShowLabel(label)}
-                                    </div>
-                                  </div>
+                                  <WelcomeSkillTree
+                                    cards={group.cards}
+                                    onUseSkill={handleUseSkillPrompt}
+                                    getSkillShowLabel={getSkillShowLabel}
+                                  />
                                 </div>
-                              </button>
-                            ))
-                          ) : (
-                            <button
-                              type="button"
-                              className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
-                            >
-                              <div className="flex items-center gap-2 min-w-0">
-                                <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
-                                  <CircleAlert className={"size-4"} />
-                                </div>
-                                <div className="min-w-0 flex-1">
-                                  <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
-                                    暂无
-                                  </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
+                                <CircleAlert className={"size-4"} />
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
+                                  暂无
                                 </div>
                               </div>
-                            </button>
-                          )}
-                        </div>
-                        {customSkills.length > 8 && (
+                            </div>
+                          </button>
+                        )}
+
+                        {enabledCustomSkills.length > 8 && (
                           <button
                             type="button"
                             onClick={() => setShowAllCustomSkills((prev) => !prev)}
@@ -2509,10 +3789,39 @@ export function ChatContainer({
                             ) : (
                               <>
                                 <ChevronDown className="size-3.5" />
-                                <span>展开更多（+{customSkills.length - 8}）</span>
+                                <span>展开更多（+{enabledCustomSkills.length - 8}）</span>
                               </>
                             )}
                           </button>
+                        )}
+
+                        {disabledLocalSkills.length > 0 && (
+                          <details className="rounded-lg border border-border/70 bg-muted/20 px-2 py-2">
+                            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
+                              <span>已禁用技能</span>
+                              <Badge
+                                variant="outline"
+                                className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
+                              >
+                                {disabledLocalSkills.length}
+                              </Badge>
+                            </summary>
+                            <div className="mt-2 space-y-2">
+                              {disabledCustomSkillGroups.map((group) => (
+                                <div key={group.category} className="space-y-2">
+                                  <div className="text-xs text-muted-foreground/80 font-medium tracking-wider">
+                                    {group.category}
+                                  </div>
+                                  <WelcomeSkillTree
+                                    cards={group.cards}
+                                    disabled
+                                    onUseSkill={handleUseSkillPrompt}
+                                    getSkillShowLabel={getSkillShowLabel}
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          </details>
                         )}
                       </TabsContent>
 
@@ -2560,13 +3869,7 @@ export function ChatContainer({
                               <div className="text-xs text-foreground leading-5">操作说明文档</div>
                             </div>
                           </button>
-
-                          <UpdateStatusCard
-                            hasUpdate={needUpdateVersion}
-                            onClick={() => {
-                              setUpdateDialogOpen(true)
-                            }}
-                          />
+                          {/*<UpdateActionButton />*/}
                         </div>
                       </TabsContent>
                     </Tabs>
@@ -2584,10 +3887,17 @@ export function ChatContainer({
                 !nextNonToolMessage ||
                 nextNonToolMessage.role !== "assistant"
 
+              // Per-turn hook log chip: shown right under the user message
+              // that opened the turn, only when Hook logging is enabled and
+              // the bucket has at least one entry. Click opens the modal.
+              const hookLogBucketForTurn =
+                hookLogConfig.enabled && message.role === "user"
+                  ? hookLogBucketByTurnId.get(message.id)
+                  : undefined
               return (
                 <div
                   key={message.id}
-                  ref={message.role === "user" ? setUserMessageRef(message.id) : undefined}
+                  ref={setMessageRef(message.id, message.role)}
                   data-message-role={message.role}
                 >
                   <MessageBubble
@@ -2596,12 +3906,22 @@ export function ChatContainer({
                     isStreaming={isLastMessage && isLoading}
                     showAssistantMeta={showAssistantMeta}
                     toolResults={toolResults}
+                    toolCallStates={toolCallDisplayStates}
                     pendingApproval={pendingApproval}
                     onApprovalDecision={handleApprovalDecision}
                     onEditUserMessage={handleEditUserMessage}
                     threadId={threadId}
                     isLoading={isLoading}
+                    assistantDurationMs={assistantDurationsByMessageId.get(message.id)}
                   />
+                  {hookLogBucketForTurn && hookLogBucketForTurn.entries.length > 0 && (
+                    <div className="mt-1 ml-12">
+                      <HookLogChip
+                        bucket={hookLogBucketForTurn}
+                        onClick={() => setOpenHookLogBucketId(hookLogBucketForTurn.turnId)}
+                      />
+                    </div>
+                  )}
                 </div>
               )
             })}
@@ -2609,8 +3929,25 @@ export function ChatContainer({
             {/*测试git diff功能*/}
             {/*<DisplayDiffTest/>*/}
 
-            {/* Hook execution logs — shown during/after a turn for debugging */}
-            {hookLogs.length > 0 && <HookLogsPanel logs={hookLogs} />}
+            {/*
+              Hook log chips now live under each user message above. The modal
+              is mounted once at component scope below so it's not bound to a
+              specific message render. The background-events bucket (no turn
+              id) has no user message to attach to, so render its chip here.
+            */}
+            {hookLogConfig.enabled &&
+              (() => {
+                const bg = hookLogBucketByTurnId.get("__background__")
+                if (!bg || bg.entries.length === 0) return null
+                return (
+                  <div className="flex justify-start mt-1">
+                    <HookLogChip
+                      bucket={bg}
+                      onClick={() => setOpenHookLogBucketId("__background__")}
+                    />
+                  </div>
+                )
+              })()}
 
             {/* Orchestrator standalone approval bar moved outside ScrollArea — see below */}
             {/* Model retry indicator — shown when the fetch layer is retrying a transient error */}
@@ -2642,6 +3979,40 @@ export function ChatContainer({
                   </span>
                 </div>
                 {todos.length > 0 && <ChatTodos todos={todos} />}
+              </div>
+            )}
+            {hookInterruption && !isLoading && (
+              <div className="flex items-start gap-3 rounded-md border border-amber-400/60 bg-amber-50/50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
+                <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
+                    {hookInterruption.action === "halt" ? "Hook 已停止本轮" : "Hook 已阻断本轮"}
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
+                    <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
+                      {hookInterruption.event}
+                    </span>
+                    <span>{hookInterruption.timestamp.toLocaleTimeString()}</span>
+                  </div>
+                  <div className="text-sm text-amber-900/90 mt-2 break-words dark:text-amber-100/90">
+                    {hookInterruption.reason}
+                  </div>
+                  {hookInterruption.systemMessage && (
+                    <div className="text-xs text-amber-700/80 mt-2 break-words dark:text-amber-200/80">
+                      {hookInterruption.systemMessage}
+                    </div>
+                  )}
+                  <div className="text-xs text-muted-foreground mt-2">
+                    这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。
+                  </div>
+                </div>
+                <button
+                  onClick={clearHookInterruption}
+                  className="shrink-0 rounded p-1 hover:bg-amber-500/20 transition-colors"
+                  aria-label="Dismiss hook notice"
+                >
+                  <X className="size-4 text-muted-foreground" />
+                </button>
               </div>
             )}
             {/* Error state */}
@@ -2677,10 +4048,19 @@ export function ChatContainer({
         />
       )}
       {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
-      {pendingApproval &&
-        Boolean((pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId) && (
-          <div className="px-4 pb-2">
-            {(() => {
+      {(showSaveToolMetadataLoading ||
+        (pendingApproval &&
+          Boolean((pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId))) && (
+        <div className={cn("px-4 pb-2", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
+          {showSaveToolMetadataLoading && (
+            <div className="max-w-3xl mx-auto mb-2 flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-700 shadow-sm dark:text-emerald-300">
+              <Loader2 className="size-3.5 animate-spin" />
+              正在改写脚本并生成工具信息...
+            </div>
+          )}
+          {pendingApproval &&
+            Boolean((pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId) &&
+            (() => {
               const approval = pendingApproval as unknown as Record<string, unknown>
               const operation = approval.operation
               const isFileApproval = operation === "write_file" || operation === "edit_file"
@@ -2698,8 +4078,7 @@ export function ChatContainer({
                 Object.keys(approvalParams as Record<string, unknown>).length > 0
               const isSaveToolApprovalInvalid =
                 isSaveCodeExecToolApproval &&
-                (!savedToolDescriptionInput.trim() ||
-                  (isManualSaveCodeExecToolApproval && !savedToolNameInput.trim()))
+                (!savedToolNameInput.trim() || !savedToolDescriptionInput.trim())
               const approvalTypes = Array.isArray(approval._approvalTypes)
                 ? (approval._approvalTypes as Array<
                     "approve" | "approve_session" | "approve_permanent" | "reject"
@@ -2736,13 +4115,18 @@ export function ChatContainer({
                         : operation === "edit_file"
                           ? "编辑文件需要审批"
                           : isCodeExecApproval
-                            ? "执行 MCP 脚本需要审批"
+                            ? "编程式工具调用"
                             : isPrepareSaveCodeExecToolApproval
-                              ? "是否将脚本注册为工具，便于后续复用"
+                              ? "改写脚本以注册为工具，便于复用"
                               : isSaveCodeExecToolApproval
-                                ? "保存脚本工具需要确认"
+                                ? "注册工具需要确认"
                                 : "命令需要审批"}
                     </span>
+                    {queuedApprovalCount > 0 && (
+                      <span className="text-xs text-muted-foreground">
+                        还有 {queuedApprovalCount} 条待审批
+                      </span>
+                    )}
                   </div>
                   {isCodeExecApproval ||
                   isPrepareSaveCodeExecToolApproval ||
@@ -2752,75 +4136,42 @@ export function ChatContainer({
                         <div className="grid gap-2 md:grid-cols-2">
                           <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
                             <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                              {isManualSaveCodeExecToolApproval ? "tool_name" : "tool_id"}
+                              工具名称
                             </div>
-                            {isManualSaveCodeExecToolApproval ? (
-                              <>
-                                <input
-                                  className="w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary"
-                                  value={savedToolNameInput}
-                                  onChange={(event) => setSavedToolNameInput(event.target.value)}
-                                  placeholder="例如：list_github_issues"
-                                />
-                                <div className="mt-1 text-[11px] text-muted-foreground">
-                                  最终 tool_id 会基于 tool_name 规范化生成。
-                                </div>
-                              </>
-                            ) : (
-                              <div className="font-mono break-all">
-                                {String(
-                                  approval.savedToolId ||
-                                    pendingApproval.tool_call?.args?.toolId ||
-                                    ""
-                                )}
-                              </div>
-                            )}
+                            <div className="font-mono break-all">
+                              {savedToolNameInput || "-"}
+                            </div>
                           </div>
                           <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
                             <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                              description
+                              工具描述
                             </div>
                             <textarea
-                              className="min-h-20 w-full resize-y rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary"
+                              className="min-h-12 w-full resize-y rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary"
                               value={savedToolDescriptionInput}
                               onChange={(event) => setSavedToolDescriptionInput(event.target.value)}
                             />
                           </div>
                         </div>
                       )}
-                      {isManualSaveCodeExecToolApproval && (
-                        <div className="text-xs text-amber-600 dark:text-amber-400">
-                          {String(approval.savedToolMetadataError)}
+                      <div className="overflow-hidden rounded-md border border-border bg-background shadow-sm">
+                        <div className="border-b border-border bg-muted/60 px-3 py-1.5 text-[11px] font-medium text-muted-foreground">
+                          脚本内容
+                        </div>
+                        <div className="max-h-36 overflow-auto px-3 py-2 font-mono text-xs whitespace-pre-wrap break-all">
+                          {String(approval.code || pendingApproval.tool_call?.args?.code || "")}
+                        </div>
+                      </div>
+                      {hasApprovalParams && (
+                        <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
+                          <div className="mb-1 text-[11px] font-medium text-muted-foreground">
+                            params
+                          </div>
+                          <pre className="whitespace-pre-wrap break-all font-mono">
+                            {JSON.stringify(approvalParams, null, 2)}
+                          </pre>
                         </div>
                       )}
-                      <div className="rounded-md bg-muted/50 px-3 py-2 font-mono text-sm whitespace-pre-wrap break-all overflow-auto max-h-64">
-                        {String(approval.code || pendingApproval.tool_call?.args?.code || "")}
-                      </div>
-                      <div className="grid gap-2 md:grid-cols-2">
-                        {hasApprovalParams && (
-                          <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
-                            <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                              params
-                            </div>
-                            <pre className="whitespace-pre-wrap break-all font-mono">
-                              {JSON.stringify(approvalParams, null, 2)}
-                            </pre>
-                          </div>
-                        )}
-                        <div className="rounded-md bg-muted/30 px-3 py-2 text-xs">
-                          <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                            timeout
-                          </div>
-                          <div className="font-mono">
-                            {String(
-                              approval.timeoutMs ??
-                                pendingApproval.tool_call?.args?.timeoutMs ??
-                                "default"
-                            )}{" "}
-                            ms
-                          </div>
-                        </div>
-                      </div>
                     </>
                   ) : (
                     <pre className="rounded-md bg-muted/50 px-3 py-2 font-mono text-sm whitespace-pre-wrap break-words overflow-auto max-h-40">
@@ -2838,22 +4189,24 @@ export function ChatContainer({
                       {String(approval._retryReason)}
                     </div>
                   )}
-                  {Boolean(approval.reason) && (
+                  {(Boolean(approval.reason) || isManualSaveCodeExecToolApproval) && (
                     <div className="text-xs text-muted-foreground">
-                      原因：{String(approval.reason)}
+                      {isManualSaveCodeExecToolApproval
+                        ? `原因：工具注册失败（${String(approval.savedToolMetadataError)}）`
+                        : `原因：${String(approval.reason)}`}
                     </div>
                   )}
                   <div className="flex items-center gap-2">
                     {approval._retryReason ? (
                       <>
                         <button
-                          className="px-3 py-1.5 text-xs bg-amber-500 text-white rounded-md hover:bg-amber-600 transition-colors"
+                          className="rounded-md bg-amber-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-amber-700"
                           onClick={() => handleApprovalDecision("approve")}
                         >
                           无沙箱重试
                         </button>
                         <button
-                          className="px-3 py-1.5 text-xs border border-border rounded-md hover:bg-muted transition-colors"
+                          className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/15"
                           onClick={() => handleApprovalDecision("reject")}
                         >
                           拒绝
@@ -2861,7 +4214,7 @@ export function ChatContainer({
                       </>
                     ) : (
                       <>
-                        {isPrepareSaveCodeExecToolApproval && saveToolMetadataLoading ? (
+                        {isPrepareSaveCodeExecToolApproval && showSaveToolMetadataLoading ? (
                           <div className="flex items-center gap-2 text-xs text-muted-foreground">
                             <Loader2 className="size-4 animate-spin" />
                             正在生成工具信息，请稍候...
@@ -2871,7 +4224,7 @@ export function ChatContainer({
                             {approvalTypes.includes("approve") && (
                               <button
                                 className={cn(
-                                  "px-3 py-1.5 text-xs rounded-md transition-colors",
+                                  "rounded-md px-4 py-2 text-sm font-semibold shadow-sm transition-colors",
                                   isSaveToolApprovalInvalid
                                     ? "bg-primary/50 text-primary-foreground/80 cursor-not-allowed"
                                     : "bg-primary text-primary-foreground hover:bg-primary/90"
@@ -2884,15 +4237,15 @@ export function ChatContainer({
                                   : isCodeExecApproval
                                     ? "执行脚本"
                                     : isPrepareSaveCodeExecToolApproval
-                                      ? "允许注册为工具"
+                                      ? "允许"
                                       : isSaveCodeExecToolApproval
-                                        ? "保存为工具"
+                                        ? "保存"
                                         : "运行"}
                               </button>
                             )}
                             {approvalTypes.includes("approve_session") && (
                               <button
-                                className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+                                className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700"
                                 onClick={() => handleApprovalDecision("approve_session")}
                               >
                                 本会话允许
@@ -2900,7 +4253,7 @@ export function ChatContainer({
                             )}
                             {approvalTypes.includes("approve_permanent") && (
                               <button
-                                className="px-3 py-1.5 text-xs bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors"
+                                className="rounded-md bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-green-700"
                                 onClick={() => handleApprovalDecision("approve_permanent")}
                               >
                                 始终允许
@@ -2908,7 +4261,7 @@ export function ChatContainer({
                             )}
                             {approvalTypes.includes("reject") && (
                               <button
-                                className="px-3 py-1.5 text-xs border border-border rounded-md hover:bg-muted transition-colors"
+                                className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/15"
                                 onClick={() => handleApprovalDecision("reject")}
                               >
                                 拒绝
@@ -2922,10 +4275,10 @@ export function ChatContainer({
                 </div>
               )
             })()}
-          </div>
-        )}
+        </div>
+      )}
       {/* Input */}
-      <div className="p-4">
+      <div className={cn("p-4", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
         {showGitChangeNotice && (
           <div className="max-w-3xl mx-auto mb-2 flex items-center justify-between gap-3 rounded-xl border border-status-warning/40 bg-status-warning/10 px-3 py-2">
             <div className="min-w-0 flex items-center gap-2 text-[12px] text-foreground">
@@ -2956,7 +4309,11 @@ export function ChatContainer({
                 ref={dropZoneRef}
                 className={cn(
                   "relative flex-1 min-w-0 flex flex-col rounded-3xl border border-border  transition-colors duration-300",
-                  glowVisible ? "bg-white/80" : "bg-white",
+                  pendingUserInput
+                    ? "border-primary/25 bg-background"
+                    : glowVisible
+                      ? "bg-white/80"
+                      : "bg-white",
                   dragOver && "border-primary"
                 )}
                 onDrop={handleDrop}
@@ -2969,7 +4326,7 @@ export function ChatContainer({
                     <SkillChip label={selectedSkill.name} onRemove={() => setSelectedSkill(null)} />
                   </div>
                 )}
-                {glowVisible && (
+                {glowVisible && !pendingUserInput && (
                   <div
                     className={cn("siri-bg-glow rounded-xl", !isLoading && "siri-bg-glow-out")}
                     onAnimationEnd={(e) => {
@@ -3040,9 +4397,9 @@ export function ChatContainer({
                   placeholder={
                     attachments.length > 0
                       ? "输入消息或直接发送文件..."
-                      : "向 CMBDevClaw 提问，/ 输入命令"
+                      : "向 CMBDevClaw 提问，/ 输入命令；Shift + Enter 换行"
                   }
-                  disabled={isLoading}
+                  disabled={inputDisabled}
                   className={cn(
                     "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
                     "p-4 text-sm placeholder:text-muted-foreground",
@@ -3058,7 +4415,7 @@ export function ChatContainer({
                     <button
                       type="button"
                       disabled={
-                        isLoading ||
+                        inputDisabled ||
                         attachmentLoading ||
                         attachments.length >= MAX_ATTACHMENTS ||
                         totalAttachmentChars >= MAX_TOTAL_CHARS
@@ -3085,6 +4442,24 @@ export function ChatContainer({
                     />
                   </div>
                   <div className="flex items-center gap-2">
+                    <TooltipProvider delayDuration={180}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            disabled={inputDisabled}
+                            onClick={handleInsertNewline}
+                            aria-label="换行"
+                            className="cursor-pointer flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <CornerDownLeft className="size-3.5" />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" sideOffset={6}>
+                          Shift + Enter 换行
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                     {isLoading ? (
                       <button
                         type="button"
@@ -3111,6 +4486,7 @@ export function ChatContainer({
                         <button
                           type="submit"
                           disabled={
+                            inputDisabled ||
                             (!input.trim() && attachments.length === 0 && !selectedSkill) ||
                             slash.mode.kind === "skill"
                           }
@@ -3122,6 +4498,11 @@ export function ChatContainer({
                     )}
                   </div>
                 </div>
+                <UserInputRequestDialog
+                  request={pendingUserInput}
+                  onSubmit={handleUserInputSubmit}
+                  onLayoutChange={handleUserInputDialogLayoutChange}
+                />
               </div>
             </div>
             {/*chat container bottom panel — moved inside input box above */}
@@ -3146,13 +4527,20 @@ export function ChatContainer({
                   />
                 )}
               </div>
-              {/*  GitBranch */}
-              {/*<GitBranchSwitcher workspacePath={workspacePath} />*/}
+              <div className="flex min-w-0 items-center gap-2">
+                <GitBranchSwitcher workspacePath={workspacePath} />
+              </div>
             </div>
           </div>
         </form>
       </div>
-      <UpdateDialog open={updateDialogOpen} onOpenChange={setUpdateDialogOpen} />
+      <HookLogModal
+        bucket={openHookLogBucket}
+        open={openHookLogBucketId !== null}
+        onOpenChange={(open) => {
+          if (!open) setOpenHookLogBucketId(null)
+        }}
+      />
     </div>
   )
 }

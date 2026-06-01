@@ -1,4 +1,5 @@
 import { create } from "zustand"
+import type { EvolutionCandidate } from "@/api/evolution"
 import type { Thread, ModelConfig, Provider, Message } from "@/types"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
@@ -168,7 +169,7 @@ function preferIncomingContent(
   return incoming ?? ""
 }
 
-type EvolutionTab = "candidates" | "traces"
+type EvolutionTab = "candidates" | "traces" | "review"
 
 interface EvolutionRunProgress {
   runId: string
@@ -240,6 +241,9 @@ interface AppState {
   customizeInitialTab: string | null
   marketInitialSkillCategory: string | null
   marketInitialSkillSearchQuery: string | null
+  marketInitialSkillDetailName: string | null
+  marketInitialSkillFilters: string[] | null
+  marketInitialTab: string | null
 
   // Thread actions
   loadThreads: () => Promise<void>
@@ -273,6 +277,9 @@ interface AppState {
   setShowCustomizeView: (show: boolean, tab?: string) => void
   setMarketInitialSkillCategory: (category: string | null) => void
   setMarketInitialSkillSearchQuery: (query: string | null) => void
+  setMarketInitialSkillDetailName: (name: string | null) => void
+  setMarketInitialSkillFilters: (filters: string[] | null) => void
+  setMarketInitialTab: (tab: string | null) => void
   setMainView: (
     view: "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard"
   ) => void
@@ -284,6 +291,8 @@ interface AppState {
   // Skill evolution — true when threshold reached, clears when Evolution panel opens
   pendingEvolution: boolean
   setPendingEvolution: (v: boolean) => void
+  cloudEvolutionUpdates: EvolutionCandidate[]
+  setCloudEvolutionUpdates: (updates: EvolutionCandidate[]) => void
 
   // Skill generation virtual subagent — shown in the right panel agents section.
   // State is stored per-thread so switching threads preserves each thread's card.
@@ -364,6 +373,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   customizeInitialTab: null,
   marketInitialSkillCategory: null,
   marketInitialSkillSearchQuery: null,
+  marketInitialSkillDetailName: null,
+  marketInitialSkillFilters: null,
+  marketInitialTab: null,
   pluginVersion: 0,
   evolutionTab: "candidates",
   evolutionRunning: false,
@@ -748,6 +760,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ marketInitialSkillSearchQuery: query })
   },
 
+  setMarketInitialSkillDetailName: (name) => {
+    set({ marketInitialSkillDetailName: name })
+  },
+
+  setMarketInitialSkillFilters: (filters) => {
+    set({ marketInitialSkillFilters: filters })
+  },
+
+  setMarketInitialTab: (tab) => {
+    set({ marketInitialTab: tab })
+  },
+
   setMainView: (view) => {
     if (view === "kanban") {
       set({
@@ -839,6 +863,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   pendingEvolution: false,
   setPendingEvolution: (v) => set({ pendingEvolution: v }),
+  cloudEvolutionUpdates: [],
+  setCloudEvolutionUpdates: (updates) => set({ cloudEvolutionUpdates: updates }),
 
   // Per-thread skill generation state — keyed by threadId.
   skillGenerationByThread: new Map(),

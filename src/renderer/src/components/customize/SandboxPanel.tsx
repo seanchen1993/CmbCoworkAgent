@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Shield, ShieldOff, ShieldCheck, ShieldPlus, Zap, Info, Loader2 } from "lucide-react"
+import {
+  Shield,
+  ShieldOff,
+  ShieldCheck,
+  ShieldPlus,
+  Zap,
+  Info,
+  Loader2
+} from "lucide-react"
 import { cn } from "@/lib/utils"
 
 type SandboxMode = "none" | "unelevated" | "readonly" | "elevated"
@@ -332,10 +340,11 @@ export function SandboxPanel(): React.JSX.Element {
               <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-700 dark:text-amber-400">
                 <Info className="size-4 mt-0.5 shrink-0" />
                 <p>
-                  根据公司安全管控要求，Agent 执行命令须在隔离环境中运行，日常开发请保持使用
-                  <strong>强隔离沙箱</strong>。
-                  <strong>当前版本临时放开“关闭（不启用沙箱）”选择</strong>
-                  ，其他受限模式仍仅限经授权的开发人员在调试场景下使用。
+                  当前默认关闭沙箱，命令会直接在当前用户权限下执行。需要隔离执行时，可手动切换到
+                  <strong>受限令牌沙箱</strong>
+                  或
+                  <strong>强隔离沙箱</strong>
+                  。
                 </p>
               </div>
               {unlocked && (

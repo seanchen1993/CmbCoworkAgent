@@ -35,6 +35,8 @@ import type { AgentTrace } from "../agent/trace/types"
 import {
   getCustomModelConfigs,
   getCustomSkillsDir,
+  clearDisabledSkillsForSkillDir,
+  findExistingSkillById,
   invalidateEnabledSkillsCache,
   isOnlineSkillEvolutionEnabled,
   setOnlineSkillEvolutionEnabled,
@@ -86,8 +88,12 @@ function getDefaultModel(): ChatOpenAI | null {
     model: config.model,
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
-    maxTokens: 4096,
-    temperature: 0.3,
+    maxTokens: config.maxOutputTokens,
+    temperature: config.temperature,
+    topP: config.topP,
+    modelKwargs: {
+      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+    },
     streaming: true
   })
 }
@@ -98,7 +104,9 @@ function getDefaultModel(): ChatOpenAI | null {
  * skillId — so that multiple analysis runs on the same skill remain visible
  * until they are approved, rejected, or cleared.
  */
-function mergePendingCandidates(newCandidates: OptimizationRunResult["candidates"]): OptimizationRunResult["candidates"] {
+function mergePendingCandidates(
+  newCandidates: OptimizationRunResult["candidates"]
+): OptimizationRunResult["candidates"] {
   const existingPending = getCandidates().filter((c) => c.status === "pending")
   const incomingPending = newCandidates.filter((c) => c.status === "pending")
 
@@ -114,11 +122,25 @@ function mergePendingCandidates(newCandidates: OptimizationRunResult["candidates
   return merged
 }
 
-function applyCandidate(skillId: string, content: string): { success: boolean; error?: string } {
+function applyCandidate(
+  action: OptimizationRunResult["candidates"][number]["action"],
+  skillId: string,
+  content: string
+): { success: boolean; error?: string } {
   try {
     const skillDir = join(getCustomSkillsDir(), skillId)
+    if (action === "create") {
+      const existingSkill = findExistingSkillById(skillId)
+      if (existingSkill) {
+        return {
+          success: false,
+          error: `skillId already exists in another source: ${skillId} (${existingSkill.rootDir})`
+        }
+      }
+    }
     mkdirSync(skillDir, { recursive: true })
     writeFileSync(join(skillDir, "SKILL.md"), content, "utf-8")
+    if (action === "create") clearDisabledSkillsForSkillDir(skillDir)
     invalidateEnabledSkillsCache()
     notifyRenderer("skills:changed")
     return { success: true }
@@ -169,7 +191,10 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
           .filter((trace): trace is AgentTrace => !!trace)
 
         if (selectedTraces.length === 0) {
-          notifyRenderer("optimizer:streamEnd", { success: false, error: "未找到可分析的 trace，请重新选择后再试。" })
+          notifyRenderer("optimizer:streamEnd", {
+            success: false,
+            error: "未找到可分析的 trace，请重新选择后再试。"
+          })
           return {
             startedAt: new Date().toISOString(),
             endedAt: new Date().toISOString(),
@@ -275,7 +300,7 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         return { success: false, error: `Candidate ${candidateId} not found` }
       }
 
-      const result = applyCandidate(candidate.skillId, candidate.proposedContent)
+      const result = applyCandidate(candidate.action, candidate.skillId, candidate.proposedContent)
       if (!result.success) {
         updateCandidateStatus(candidateId, "rejected")
         return { success: false, skillId: candidate.skillId, error: result.error }
@@ -334,7 +359,9 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         : readRecentTraces(opts?.limit ?? 20)
 
       return traces.map((trace) => {
-        const { totalInputTokens, totalOutputTokens, totalTokens } = summarizeTraceTokenUsage(trace.modelCalls)
+        const { totalInputTokens, totalOutputTokens, totalTokens } = summarizeTraceTokenUsage(
+          trace.modelCalls
+        )
         return {
           traceId: trace.traceId,
           threadId: trace.threadId,
@@ -382,9 +409,12 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
     return isOnlineSkillEvolutionEnabled()
   })
 
-  ipcMain.handle("optimizer:setOnlineSkillEvolutionEnabled", async (_event, enabled: boolean): Promise<void> => {
-    setOnlineSkillEvolutionEnabled(enabled)
-  })
+  ipcMain.handle(
+    "optimizer:setOnlineSkillEvolutionEnabled",
+    async (_event, enabled: boolean): Promise<void> => {
+      setOnlineSkillEvolutionEnabled(enabled)
+    }
+  )
 
   ipcMain.handle("optimizer:getAutoPropose", async (): Promise<boolean> => {
     return isSkillAutoProposeEnabled()

@@ -27,12 +27,22 @@ const DashboardView = lazy(() =>
   import("@/components/dashboard/DashboardView").then((m) => ({ default: m.DashboardView }))
 )
 import { ResizeHandle } from "@/components/ui/resizable"
+import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { useAppStore } from "@/lib/store"
 import { ThreadProvider } from "@/lib/thread-context"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
 import { initMMJ } from "../js/mmjUtils"
-import { Toaster } from "sonner"
+import { toast, Toaster } from "sonner"
 import { useShallow } from "zustand/react/shallow"
+import { evolutionApi } from "@/api/evolution"
+import {
+  cloudEvolutionUpdateSignature,
+  getCloudEvolutionPromptSignature,
+  hasUnreadCloudEvolutionUpdates,
+  markCloudEvolutionUpdatesSeen,
+  pendingCloudEvolutionUpdates,
+  setCloudEvolutionPromptSignature
+} from "@/lib/evolution-notices"
 interface UserInfoConfig {
   sapId: string
   ystId: string
@@ -128,7 +138,10 @@ function App(): React.JSX.Element {
     rightPanelCollapsed,
     toggleRightPanel,
     setPendingEvolution,
-    workerFocusView
+    workerFocusView,
+    setShowCustomizeView,
+    setEvolutionTab,
+    setCloudEvolutionUpdates
   } = useAppStore(
     useShallow((state) => ({
       currentThreadId: state.currentThreadId,
@@ -141,7 +154,10 @@ function App(): React.JSX.Element {
       rightPanelCollapsed: state.rightPanelCollapsed,
       toggleRightPanel: state.toggleRightPanel,
       setPendingEvolution: state.setPendingEvolution,
-      workerFocusView: state.workerFocusView
+      workerFocusView: state.workerFocusView,
+      setShowCustomizeView: state.setShowCustomizeView,
+      setEvolutionTab: state.setEvolutionTab,
+      setCloudEvolutionUpdates: state.setCloudEvolutionUpdates
     }))
   )
   const [isLoading, setIsLoading] = useState(true)
@@ -224,12 +240,13 @@ function App(): React.JSX.Element {
     window.api.models.getUserInfo().then(user => {
         const userInfo = user || {} as UserInfoConfig
         if (userInfo.sapId) {
+          const headers: Record<string, string> = {
+              ystRefreshToken: userInfo.ystRefreshToken || '',
+          }
+          if (userInfo.ystCode) headers.ystCode = userInfo.ystCode
           fetch(`https://archguardservice.paas.${import.meta.env.VITE_LOGIN_PT}.cn/cowork/login-info`, {
               method: 'GET',
-              headers: {
-                  ystCode: userInfo.ystCode || '',
-                  ystRefreshToken: userInfo.ystRefreshToken || '',
-              }
+              headers
           }).then(async res => {
               const result = await res.json()
               if (result.returnCode === 'SUC0000') {
@@ -420,6 +437,14 @@ function App(): React.JSX.Element {
     // always fall back to workspace mode.
     setRightModule("work")
     handlePreviewCollapse()
+
+    try {
+      // 主应用已经处于打开/查看状态，清空宠物完成任务提醒队列。
+      window.api.pet.clearCompletedTasks()
+    } catch (error) {
+      console.warn("[App] Failed to clear pet completed tasks:", error)
+    }
+
   }, [currentThreadId, mainView, handlePreviewCollapse])
 
   useEffect(() => {
@@ -468,6 +493,55 @@ function App(): React.JSX.Element {
     init()
   }, [loadThreads, createThread])
 
+  useEffect(() => {
+    let cancelled = false
+
+    const checkOptimizedSkillUpdates = async (): Promise<void> => {
+      try {
+        const installedSkills = await window.api.skills.list()
+        const updates = await evolutionApi.listAvailableUpdates(installedSkills)
+        if (cancelled) return
+
+        setCloudEvolutionUpdates(updates)
+        setPendingEvolution(hasUnreadCloudEvolutionUpdates(updates))
+
+        const pendingUpdates = pendingCloudEvolutionUpdates(updates)
+        if (pendingUpdates.length === 0) return
+
+        const signature = cloudEvolutionUpdateSignature(pendingUpdates)
+        if (!signature || signature === getCloudEvolutionPromptSignature()) return
+        setCloudEvolutionPromptSignature(signature)
+
+        const updateItem = pendingUpdates[0]
+        const message =
+          pendingUpdates.length === 1
+            ? `「${updateItem.skill_name}」有云端自进化版本可用`
+            : `有 ${pendingUpdates.length} 个云端自进化版本可用`
+        toast.info(message, {
+          duration: 8000,
+          action: {
+            label: "查看候选",
+            onClick: () => {
+              markCloudEvolutionUpdatesSeen(pendingUpdates)
+              setPendingEvolution(false)
+              setEvolutionTab("candidates")
+              setShowCustomizeView(true, "evolution")
+            }
+          }
+        })
+      } catch (error) {
+        console.warn("[SkillUpdatePrompt] failed to check optimized skill updates:", error)
+      }
+    }
+
+    void checkOptimizedSkillUpdates()
+    const timer = window.setInterval(() => void checkOptimizedSkillUpdates(), 30 * 60 * 1000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [setCloudEvolutionUpdates, setEvolutionTab, setPendingEvolution, setShowCustomizeView])
+
   // Listen for skill-evolution threshold events — set badge on Evolution tab
   useEffect(() => {
     return window.api.optimizer.onAutoTriggered(() => {
@@ -495,6 +569,7 @@ function App(): React.JSX.Element {
       try {
         const threads = await window.api.threads.list()
         useAppStore.setState({ threads })
+        window.api.pet.clearCompletedTasks()
       } catch {
         // ignore
       }
@@ -814,6 +889,7 @@ function App(): React.JSX.Element {
           </div>
         )}
       </div>
+      <PetStateBridge />
       <Toaster position="top-center" richColors duration={2200} />
     </ThreadProvider>
   )

@@ -5,9 +5,12 @@ import { basename, join, dirname } from "path"
 import { getUpdatesDir } from "./downloader"
 
 const isWindows = process.platform === "win32"
+const isLinux = process.platform === "linux"
+const LINUX_WRAPPER_NAME = "CMBDevClaw"
+const LINUX_REAL_EXE_NAME = "cmbdevclaw"
 
 /** Executable name varies by platform */
-const EXE_NAME = isWindows ? "CMBDevClaw.exe" : "cmbdevclaw"
+const EXE_NAME = isWindows ? "CMBDevClaw.exe" : LINUX_REAL_EXE_NAME
 
 /**
  * Process name used to detect running instances.
@@ -56,6 +59,10 @@ function toPsString(value: string): string {
   return `'${escapePowerShellLiteral(value)}'`
 }
 
+function makeUpdateMarkerJson(fromVersion: string, toVersion: string, updateType?: "full"): string {
+  return JSON.stringify(updateType ? { fromVersion, toVersion, updateType } : { fromVersion, toVersion })
+}
+
 /**
  * Windows PowerShell 5.1 treats BOM-less scripts as ANSI.
  * Prefix with BOM so install paths containing non-ASCII characters are safe.
@@ -84,6 +91,7 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0${
 export function launchDetachedPowerShellScript(ps1Path: string): void {
   const launcherPath = writePs1Launcher(ps1Path)
   const child = spawn("cmd.exe", ["/c", launcherPath], {
+    cwd: dirname(launcherPath),
     detached: true,
     stdio: "ignore",
     windowsHide: true
@@ -113,6 +121,7 @@ function generateUpdatePs1(
   const markerPath = getMarkerPath()
   const exePath = getExePath()
   const exeBaseName = EXE_NAME.replace(".exe", "")
+  const markerJson = makeUpdateMarkerJson(fromVersion, toVersion)
 
   return `
 $exeBaseName = ${toPsString(exeBaseName)}
@@ -121,6 +130,7 @@ $backupPath  = ${toPsString(backupPath)}
 $newAsarPath = ${toPsString(newAsarPath)}
 $markerPath  = ${toPsString(markerPath)}
 $exePath     = ${toPsString(exePath)}
+$exeDir      = Split-Path -Parent $exePath
 
 # Wait for process to exit (up to 30s)
 $n = 0
@@ -160,13 +170,13 @@ if (-not $ok) {
 }
 
 # Write marker
-Set-Content -Path $markerPath -Value '{"fromVersion":"${fromVersion}","toVersion":"${toVersion}"}' -Encoding UTF8
+Set-Content -Path $markerPath -Value ${toPsString(markerJson)} -Encoding UTF8 -ErrorAction Stop
 
 # Cleanup
 if (Test-Path $newAsarPath) { Remove-Item -Path $newAsarPath -Force -ErrorAction SilentlyContinue }
 
 # Restart
-Start-Process -FilePath $exePath -WindowStyle Normal
+Start-Process -FilePath $exePath -WorkingDirectory $exeDir -WindowStyle Normal
 `
 }
 
@@ -186,6 +196,7 @@ $backupAsarPath = ${toPsString(backupAsarPath)}
 $appAsarPath    = ${toPsString(appAsarPath)}
 $markerPath     = ${toPsString(markerPath)}
 $exePath        = ${toPsString(exePath)}
+$exeDir         = Split-Path -Parent $exePath
 
 # Wait for process to exit (up to 30s)
 $n = 0
@@ -208,7 +219,7 @@ try {
 if (Test-Path $markerPath) { Remove-Item -Path $markerPath -Force -ErrorAction SilentlyContinue }
 
 # Restart
-Start-Process -FilePath $exePath -WindowStyle Normal
+Start-Process -FilePath $exePath -WorkingDirectory $exeDir -WindowStyle Normal
 `
 }
 
@@ -241,6 +252,7 @@ function writeBashScript(shPath: string, content: string): void {
 function launchDetachedBashScript(shPath: string): void {
   const logPath = shPath.replace(/\.sh$/i, ".log")
   const child = spawn("bash", [shPath], {
+    cwd: dirname(shPath),
     detached: true,
     stdio: ["ignore", "ignore", "ignore"],
     env: { ...process.env, UPDATE_LOG: logPath }
@@ -264,6 +276,7 @@ function generateUpdateSh(
   const markerPath = getMarkerPath()
   const exePath = getExePath()
   const processName = getProcessName()
+  const markerJson = makeUpdateMarkerJson(fromVersion, toVersion)
 
   return `#!/bin/bash
 set -e
@@ -280,11 +293,11 @@ exec > "$LOG_FILE" 2>&1
 
 # Wait for process to exit (up to 30s)
 n=0
-while pgrep -x "$PROC_NAME" > /dev/null 2>&1 && [ $n -lt 30 ]; do
+while { pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/null 2>&1; } && [ $n -lt 30 ]; do
   sleep 1
   n=$((n+1))
 done
-if pgrep -x "$PROC_NAME" > /dev/null 2>&1; then
+if pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/null 2>&1; then
   echo "Process still running after 30s, aborting"
   exit 1
 fi
@@ -311,9 +324,7 @@ if [ $ok -eq 0 ]; then
 fi
 
 # Write marker
-cat > "$MARKER" << 'MARKER_EOF'
-{"fromVersion":"${fromVersion}","toVersion":"${toVersion}"}
-MARKER_EOF
+printf '%s\n' ${toBashString(markerJson)} > "$MARKER"
 
 # Cleanup
 rm -f "$NEW_ASAR"
@@ -346,11 +357,11 @@ exec > "$LOG_FILE" 2>&1
 
 # Wait for process to exit (up to 30s)
 n=0
-while pgrep -x "$PROC_NAME" > /dev/null 2>&1 && [ $n -lt 30 ]; do
+while { pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/null 2>&1; } && [ $n -lt 30 ]; do
   sleep 1
   n=$((n+1))
 done
-if pgrep -x "$PROC_NAME" > /dev/null 2>&1; then
+if pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/null 2>&1; then
   echo "Process still running after 30s, aborting"
   exit 1
 fi
@@ -379,6 +390,7 @@ function generateFullZipUpdateSh(
   const backupDir = `${appDir}.bak`
   const markerPath = join(appDir, "resources", "update-marker.json")
   const processName = getProcessName()
+  const markerJson = makeUpdateMarkerJson(fromVersion, toVersion, "full")
 
   return `#!/bin/bash
 set -e
@@ -390,48 +402,93 @@ MARKER=${toBashString(markerPath)}
 EXE=${toBashString(exePath)}
 PROC_NAME=${toBashString(processName)}
 TEMP_DIR="/tmp/cmbdevclaw_update_tmp"
+STAGE_DIR="$APP_DIR.new"
+EXE_FILE="$(basename "$EXE")"
+PRODUCT_WRAPPER=${toBashString(LINUX_WRAPPER_NAME)}
+PACKAGE_EXE=${toBashString(LINUX_REAL_EXE_NAME)}
+PRODUCT_BIN="$PRODUCT_WRAPPER.bin"
+STAGE_MARKER="$STAGE_DIR/resources/update-marker.json"
 LOG_FILE="\${UPDATE_LOG:-/tmp/cmbdevclaw-full-update.log}"
 
 exec > "$LOG_FILE" 2>&1
 
 # Wait for process to exit (up to 30s)
 n=0
-while pgrep -x "$PROC_NAME" > /dev/null 2>&1 && [ $n -lt 30 ]; do
+while { pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/null 2>&1; } && [ $n -lt 30 ]; do
   sleep 1
   n=$((n+1))
 done
-if pgrep -x "$PROC_NAME" > /dev/null 2>&1; then
+if pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/null 2>&1; then
   echo "Process still running after 30s, aborting"
   exit 1
 fi
 
-# Backup current installation
-rm -rf "$BACKUP_DIR"
-cp -a "$APP_DIR" "$BACKUP_DIR" || exit 1
-
-# Extract zip
+# Prepare a complete staged app before touching the live installation.
 rm -rf "$TEMP_DIR"
+rm -rf "$STAGE_DIR"
 mkdir -p "$TEMP_DIR"
+mkdir -p "$STAGE_DIR"
 unzip -o "$ZIP" -d "$TEMP_DIR" || { echo "Unzip failed"; exit 1; }
 
-# Copy extracted files over app directory
-cp -af "$TEMP_DIR"/* "$APP_DIR"/ || {
-  echo "Copy failed, restoring backup"
-  cp -af "$BACKUP_DIR"/* "$APP_DIR"/
-  exit 1
-}
+cp -a "$TEMP_DIR"/. "$STAGE_DIR"/ || { echo "Stage copy failed"; exit 1; }
 
-# Write marker
-cat > "$MARKER" << 'MARKER_EOF'
-{"fromVersion":"${fromVersion}","toVersion":"${toVersion}","updateType":"full"}
-MARKER_EOF
+# Repair Linux launcher layout and executable bits. Zip archives produced on
+# non-Linux hosts often lose mode bits, and older packages may contain a wrapper
+# that points at a missing binary.
+STAGE_WRAPPER="$STAGE_DIR/$PRODUCT_WRAPPER"
+if [ -f "$STAGE_WRAPPER" ] && [ ! -f "$STAGE_DIR/$PACKAGE_EXE" ] && [ ! -f "$STAGE_DIR/$PRODUCT_BIN" ]; then
+  if ! head -c 2 "$STAGE_WRAPPER" | grep -q '#!'; then
+    mv "$STAGE_WRAPPER" "$STAGE_DIR/$PACKAGE_EXE"
+  fi
+fi
+
+REAL_BIN=""
+for candidate in "$PACKAGE_EXE" "$PRODUCT_BIN" "$EXE_FILE"; do
+  if [ "$candidate" != "$PRODUCT_WRAPPER" ] && [ -f "$STAGE_DIR/$candidate" ]; then
+    REAL_BIN="$candidate"
+    break
+  fi
+done
+if [ -z "$REAL_BIN" ]; then
+  echo "Staged app is missing expected executable binary"
+  exit 1
+fi
+chmod 755 "$STAGE_DIR/$REAL_BIN" || true
+
+cat > "$STAGE_WRAPPER" << 'WRAPPER_EOF'
+#!/usr/bin/env bash
+DIR="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+cd "$DIR"
+for bin in "cmbdevclaw" "CMBDevClaw.bin"; do
+  if [ -x "./$bin" ]; then
+    exec "./$bin" --no-sandbox "$@"
+  fi
+done
+echo "CMBDevClaw launcher could not find an executable binary." >&2
+exit 1
+WRAPPER_EOF
+chmod 755 "$STAGE_WRAPPER" || true
+UPDATED_EXE="$APP_DIR/$REAL_BIN"
+
+mkdir -p "$(dirname "$STAGE_MARKER")"
+printf '%s\n' ${toBashString(markerJson)} > "$STAGE_MARKER"
+
+# Swap directories so stale files cannot remain in the new app directory.
+rm -rf "$BACKUP_DIR"
+mv "$APP_DIR" "$BACKUP_DIR" || exit 1
+if ! mv "$STAGE_DIR" "$APP_DIR"; then
+  echo "Swap failed, restoring previous installation"
+  rm -rf "$APP_DIR"
+  mv "$BACKUP_DIR" "$APP_DIR" || true
+  exit 1
+fi
 
 # Cleanup
 rm -rf "$TEMP_DIR"
 rm -f "$ZIP"
 
 # Restart
-nohup "$EXE" --no-sandbox > /dev/null 2>&1 &
+nohup "$UPDATED_EXE" --no-sandbox > /dev/null 2>&1 &
 `
 }
 
@@ -455,6 +512,7 @@ function generateFullZipUpdatePs1(
   const backupDir = `${appDir}.bak`
   const markerPath = join(appDir, "resources", "update-marker.json")
   const exeBaseName = EXE_NAME.replace(".exe", "")
+  const markerJson = makeUpdateMarkerJson(fromVersion, toVersion, "full")
 
   return `
 $exeBaseName = ${toPsString(exeBaseName)}
@@ -463,7 +521,11 @@ $appDir      = ${toPsString(appDir)}
 $backupDir   = ${toPsString(backupDir)}
 $markerPath  = ${toPsString(markerPath)}
 $exePath     = ${toPsString(exePath)}
+$exeDir      = Split-Path -Parent $exePath
 $tempDir     = Join-Path $env:TEMP 'cmbdevclaw_update_tmp'
+$stageDir    = Join-Path (Split-Path -Parent $appDir) ((Split-Path -Leaf $appDir) + '.new')
+$stageMarkerPath = Join-Path $stageDir 'resources\\update-marker.json'
+$exeFileName = Split-Path -Leaf $exePath
 
 # Wait for process to exit (up to 30s)
 $n = 0
@@ -475,40 +537,59 @@ if (Get-Process -Name $exeBaseName -ErrorAction SilentlyContinue) {
   exit 1
 }
 
-# Backup current installation (copy contents, not the folder itself)
-if (Test-Path $backupDir) { Remove-Item -Path $backupDir -Recurse -Force }
-New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-try {
-  Get-ChildItem -Path $appDir -Force | Copy-Item -Destination $backupDir -Recurse -Force -ErrorAction Stop
-} catch {
-  exit 1
-}
+# Prepare a complete staged app before touching the live installation.
+if (Test-Path -LiteralPath $tempDir) { Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction Stop }
+if (Test-Path -LiteralPath $stageDir) { Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction Stop }
+New-Item -ItemType Directory -Path $stageDir -Force -ErrorAction Stop | Out-Null
 
 # Extract zip
-if (Test-Path $tempDir) { Remove-Item -Path $tempDir -Recurse -Force }
 try {
-  Expand-Archive -Path $zipPath -DestinationPath $tempDir -Force -ErrorAction Stop
+  Expand-Archive -LiteralPath $zipPath -DestinationPath $tempDir -Force -ErrorAction Stop
 } catch {
+  Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
   exit 1
 }
 
-# Copy extracted files over app directory (include hidden files)
+# Copy extracted files into stage and write marker before the directory swap.
 try {
-  Get-ChildItem -Path $tempDir -Force | Copy-Item -Destination $appDir -Recurse -Force -ErrorAction Stop
+  Get-ChildItem -LiteralPath $tempDir -Force | Copy-Item -Destination $stageDir -Recurse -Force -ErrorAction Stop
+  $stageExePath = Join-Path $stageDir $exeFileName
+  if (-not (Test-Path -LiteralPath $stageExePath)) {
+    throw "Staged app is missing expected executable: $stageExePath"
+  }
+  $stageMarkerDir = Split-Path -Parent $stageMarkerPath
+  New-Item -ItemType Directory -Path $stageMarkerDir -Force -ErrorAction Stop | Out-Null
+  Set-Content -LiteralPath $stageMarkerPath -Value ${toPsString(markerJson)} -Encoding UTF8 -ErrorAction Stop
 } catch {
-  Get-ChildItem -Path $backupDir -Force | Copy-Item -Destination $appDir -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
   exit 1
 }
 
-# Write marker
-Set-Content -Path $markerPath -Value '{"fromVersion":"${fromVersion}","toVersion":"${toVersion}","updateType":"full"}' -Encoding UTF8
+# Swap directories. The previous installation is moved aside as .bak, so stale
+# files cannot remain in the new app directory and rollback material stays intact.
+try {
+  if (Test-Path -LiteralPath $backupDir) { Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction Stop }
+  Move-Item -LiteralPath $appDir -Destination $backupDir -Force -ErrorAction Stop
+  try {
+    Move-Item -LiteralPath $stageDir -Destination $appDir -Force -ErrorAction Stop
+  } catch {
+    if (Test-Path -LiteralPath $appDir) { Remove-Item -LiteralPath $appDir -Recurse -Force -ErrorAction SilentlyContinue }
+    Move-Item -LiteralPath $backupDir -Destination $appDir -Force -ErrorAction SilentlyContinue
+    throw
+  }
+} catch {
+  Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
+  exit 1
+}
 
 # Cleanup
-Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
 
 # Restart
-Start-Process -FilePath $exePath -WindowStyle Normal
+Start-Process -FilePath $exePath -WorkingDirectory $exeDir -WindowStyle Normal
 `
 }
 
@@ -568,16 +649,18 @@ export function installFullUpdate(filePath: string, toVersion: string): void {
       writePowerShellScript(ps1Path, ps1Content)
       console.log("[Updater] Generated full-update.ps1 at", ps1Path)
       launchDetachedPowerShellScript(ps1Path)
-    } else {
+    } else if (isLinux) {
       const shContent = generateFullZipUpdateSh(filePath, appDir, exePath, fromVersion, toVersion)
       const shPath = join(getUpdatesDir(), "full-update.sh")
       writeBashScript(shPath, shContent)
       console.log("[Updater] Generated full-update.sh at", shPath)
       launchDetachedBashScript(shPath)
+    } else {
+      throw new Error(`当前平台暂不支持完整 zip 更新: ${process.platform}`)
     }
 
     console.log("[Updater] Spawned full-update script, quitting app...")
-  } else if (ext === "deb" && !isWindows) {
+  } else if (ext === "deb" && isLinux) {
     // .deb mode: install via dpkg (Linux/UOS)
     console.log("[Updater] Installing .deb package:", filePath)
     const child = spawn("bash", ["-c", `sudo dpkg -i '${escapeBashLiteral(filePath)}' && rm -f '${escapeBashLiteral(filePath)}'`], {
@@ -597,8 +680,7 @@ export function installFullUpdate(filePath: string, toVersion: string): void {
     child.unref()
     console.log("[Updater] Spawned installer, quitting app...")
   } else {
-    console.error("[Updater] Unsupported update file format:", filePath)
-    return
+    throw new Error(`不支持的完整更新包格式: ${filePath}`)
   }
 
   app.quit()

@@ -20,10 +20,14 @@ import type {
   LspCallHierarchyOutgoingCall,
   LspStatus,
   ChatXConfig,
+  HookLoggingConfig,
   PluginHookMetadata,
   PluginMetadata,
   PluginManifest,
-  SkillHookMetadata
+  SkillHookMetadata,
+  AgentAutoCommitSettings,
+  UserInputRequest,
+  UserInputResponse
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -36,7 +40,7 @@ import type {
 import type { CoordinatorWorkerSnapshot } from "../main/agent/coordinator-worker-manager"
 
 interface ElectronAPI {
-  openExternal: Promise
+  openExternal: (url: string) => Promise<void>
   openLoginWindow: () => void
   closeLoginWindow: () => void
   openLoginPage: () => void
@@ -53,6 +57,42 @@ interface ElectronAPI {
     versions: NodeJS.ProcessVersions
   }
 }
+
+interface PetManifest {
+  // 宠物资源清单，来自 pets/<directoryId>/pet.json。
+  id: string
+  directoryId: string
+  source: "builtin" | "custom"
+  key: string
+  canDelete: boolean
+  name?: string
+  displayName?: string
+  description?: string
+  spritesheetPath: string
+  frameWidth?: number
+  frameHeight?: number
+  columns?: number
+  rows?: number
+  states?: Record<string, { y: number; frames: number; fps?: number }>
+}
+
+interface PetSettings {
+  enabled: boolean
+  selectedPetKey: string | null
+}
+
+type PetState =
+  // 与主进程 PetState 保持一致，renderer 只能通过 preload 发送这些状态。
+  | "idle"
+  | "busy"
+  | "waiting"
+  | "done"
+  | "error"
+  | "crying"
+  | "prompt"
+  | "running"
+  | "interaction"
+  | "hover"
 
 interface DashboardTraceNode {
   id: string
@@ -74,6 +114,11 @@ interface DashboardTraceDetail {
   endedAt?: string
   durationMs: number
   userMessage: string
+  sapId?: string
+  ystId?: string
+  userName?: string
+  orgName?: string
+  userIp?: string
   modelId?: string
   modelName?: string
   outcome: string
@@ -96,6 +141,13 @@ interface DashboardCommitDetail {
   orgName?: string
   userIp?: string
   repoPath?: string
+  repositoryName?: string
+  repositoryFullName?: string
+  repositoryWebUrl?: string
+  commitSha?: string
+  commitUrl?: string
+  pushed: boolean
+  pushedAt?: string
   branch?: string
   filesChanged: number
   insertions: number
@@ -106,6 +158,103 @@ interface DashboardCommitDetail {
   skillCount: number
 }
 
+interface DashboardCommitDetailsOptions {
+  page?: number
+  pageSize?: number
+  pushedOnly?: boolean
+}
+
+interface DashboardCodeStats {
+  generatedLines: number
+  deletedLines: number
+  effectiveGeneratedLines: number
+  measuredGeneratedLines: number
+  unmeasuredGeneratedLines: number
+  inclusiveEffectiveGeneratedLines: number
+  adoptedLines: number
+  pushedMeasuredGeneratedLines: number
+  pushedEffectiveGeneratedLines: number
+  pushedAdoptedLines: number
+  pushedCommitCount: number
+  measuredAdoptionRate: number | null
+  inclusiveAdoptionRate: number | null
+  pushedAdoptionRate: number | null
+  adoptionRate: number | null
+}
+
+interface DashboardSkillDetail {
+  stats: DashboardCodeStats
+  traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
+}
+
+interface DashboardUserListItem {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  count: number
+  lastActiveAt?: string
+  avgDurationMs: number
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+}
+
+interface DashboardUserListData {
+  items: DashboardUserListItem[]
+  pageSize: number
+  nextAfterKey?: Record<string, string | number>
+  totalActiveUsers: number
+}
+
+interface DashboardUserDetail {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  totalCalls: number
+  avgDurationMs: number
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  bySkill: Array<{ skill: string; count: number }>
+  byModel: Array<{ model: string; count: number }>
+  byOutcome: Array<{ outcome: string; count: number }>
+  traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
+}
+
+interface DashboardUserListOptions {
+  pageSize?: number
+  afterKey?: Record<string, string | number> | null
+  keyword?: string | null
+}
+
+interface DashboardAllUserItem {
+  sapId: string
+  userName: string
+  orgName: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+}
+
+interface DashboardUserDetailOptions {
+  traceLimit?: number
+  tracePage?: number
+  tracePageSize?: number
+}
+
 interface CustomAPI {
   agent: {
     invoke: (
@@ -114,7 +263,8 @@ interface CustomAPI {
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
       agentMode?: "normal" | "coordinator",
-      coordinatorInternalNotification?: boolean
+      coordinatorInternalNotification?: boolean,
+      userMessageId?: string
     ) => () => void
     streamAgent: (
       threadId: string,
@@ -123,7 +273,8 @@ interface CustomAPI {
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
       agentMode?: "normal" | "coordinator",
-      coordinatorInternalNotification?: boolean
+      coordinatorInternalNotification?: boolean,
+      userMessageId?: string
     ) => () => void
     interrupt: (
       threadId: string,
@@ -163,6 +314,9 @@ interface CustomAPI {
     create: (metadata?: Record<string, unknown>) => Promise<Thread>
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
     delete: (threadId: string) => Promise<void>
+    exportSession: (
+      threadId: string
+    ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     getHistory: (threadId: string) => Promise<unknown[]>
     getLatestCheckpoint: (threadId: string) => Promise<unknown | null>
     generateTitle: (message: string) => Promise<string>
@@ -177,6 +331,16 @@ interface CustomAPI {
       defaultMaxTokens: number
       minMaxTokens: number
       maxMaxTokens: number
+      defaultMaxOutputTokens: number
+      minMaxOutputTokens: number
+      maxMaxOutputTokens: number
+      defaultTemperature: number
+      maxTemperature: number
+      defaultTopP: number
+      maxTopP: number
+      defaultTopK: number
+      minTopK: number
+      maxTopK: number
     }>
     getCustomConfigs: () => Promise<
       Array<{
@@ -186,6 +350,10 @@ interface CustomAPI {
         model: string
         hasApiKey: boolean
         maxTokens: number
+        maxOutputTokens: number
+        temperature: number
+        topP: number
+        topK: number
         interleavedThinking?: boolean
         tier?: "premium" | "economy"
       }>
@@ -197,6 +365,10 @@ interface CustomAPI {
       model: string
       hasApiKey: boolean
       maxTokens: number
+      maxOutputTokens: number
+      temperature: number
+      topP: number
+      topK: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     } | null>
@@ -207,6 +379,10 @@ interface CustomAPI {
       model: string
       apiKey?: string
       maxTokens?: number
+      maxOutputTokens?: number
+      temperature?: number
+      topP?: number
+      topK?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }) => Promise<void>
@@ -218,6 +394,10 @@ interface CustomAPI {
       model: string
       apiKey?: string
       maxTokens?: number
+      maxOutputTokens?: number
+      temperature?: number
+      topP?: number
+      topK?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }) => Promise<{ id: string }>
@@ -229,6 +409,10 @@ interface CustomAPI {
       baseUrl?: string
       model?: string
       apiKey?: string
+      maxOutputTokens?: number
+      temperature?: number
+      topP?: number
+      topK?: number
     }) => Promise<{ success: boolean; error?: string; latencyMs?: number }>
   }
   workspace: {
@@ -378,14 +562,14 @@ interface CustomAPI {
     }>
     commitWorktree: (
       threadId: string,
-      message: string
+      message: string,
+      filePaths?: string[]
     ) => Promise<{
       success: boolean
       error?: string
     }>
     pushWorktree: (
-      threadId: string,
-      message?: string
+      threadId: string
     ) => Promise<{
       success: boolean
       autoCommitted?: boolean
@@ -416,6 +600,22 @@ interface CustomAPI {
       callback: (data: { threadId: string; workspacePath: string }) => void
     ) => () => void
   }
+  pet: {
+    // 列出内置 pets/ 与 OPENWORK_DIR/pets 下可用宠物。
+    list: () => Promise<PetManifest[]>
+    getSpriteDataUrl: (
+      directoryId: string,
+      source?: "builtin" | "custom"
+    ) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
+    // 将业务状态同步到独立宠物窗口；动画渲染不在 renderer 主 UI 中执行。
+    setState: (state: PetState) => void
+    // 告知主进程主应用已打开/获得焦点，用于清空宠物完成任务提醒队列。
+    clearCompletedTasks: () => void
+    getSettings: () => Promise<PetSettings>
+    updateSettings: (settings: Partial<PetSettings>) => Promise<PetSettings>
+    uploadCustomFolder: () => Promise<{ success: boolean; pet?: PetManifest; error?: string }>
+    deleteCustom: (directoryId: string) => Promise<{ success: boolean; error?: string }>
+  }
   file: {
     parse: (
       filePath: string,
@@ -434,6 +634,7 @@ interface CustomAPI {
     }>
     getFilePath: (file: File) => string
     select: () => Promise<{ canceled: boolean; filePaths: string[] }>
+    selectDirectory: (options?: { title?: string }) => Promise<{ canceled: boolean; filePaths: string[] }>
     supportedExtensions: () => Promise<string[]>
   }
   skills: {
@@ -447,18 +648,47 @@ interface CustomAPI {
     listFiles: (
       skillPath: string
     ) => Promise<{ success: boolean; files?: string[]; error?: string }>
+    readTextBundle: (
+      skillPath: string
+    ) => Promise<{
+      success: boolean
+      files?: Array<{ path: string; content: string }>
+      skipped?: Array<{ path: string; reason: string }>
+      error?: string
+    }>
     getDisabled: () => Promise<string[]>
     setDisabled: (skillNames: string[]) => Promise<void>
+    backupForCloudEvolution: (payload: {
+      skillPath: string
+      candidateId: string
+      skillName: string
+      sourceVersion?: string | null
+      targetVersion?: string | null
+    }) => Promise<{ success: boolean; backupId?: string; backupPath?: string; error?: string }>
+    restoreCloudEvolutionBackup: (
+      backupId: string
+    ) => Promise<{ success: boolean; skillName?: string; error?: string }>
+    exportCloudEvolutionBackup: (
+      backupId: string,
+      targetDir: string
+    ) => Promise<{ success: boolean; exportedPath?: string; error?: string }>
     upload: (
       buffer: ArrayBuffer,
-      fileName: string
-    ) => Promise<{ success: boolean; skillName?: string; error?: string }>
+      fileName: string,
+      options?: { allowNestedNameDuplicates?: boolean }
+    ) => Promise<{
+      success: boolean
+      skillName?: string
+      error?: string
+      nestedNameConflicts?: Array<{ name: string; relativePath: string }>
+    }>
     extractMarkdownFromZip: (
       buffer: ArrayBuffer,
       fileName?: string
     ) => Promise<{ success: boolean; filePath?: string; content?: string; error?: string }>
     exportForMarket: (
-      skillPath: string
+      skillPath: string,
+      options?: { includeNestedSkills?: boolean }
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (skillPath: string) => Promise<{ success: boolean; error?: string }>
   }
@@ -488,6 +718,10 @@ interface CustomAPI {
       enabled: boolean
     }>
     onChanged: (callback: () => void) => () => void
+  }
+  autoCommit: {
+    getSettings: () => Promise<AgentAutoCommitSettings>
+    saveSettings: (updates: Partial<AgentAutoCommitSettings>) => Promise<AgentAutoCommitSettings>
   }
   lsp: {
     getConfig: () => Promise<LspConfig>
@@ -619,11 +853,18 @@ interface CustomAPI {
     list: () => Promise<PluginMetadata[]>
     install: (
       buffer: ArrayBuffer,
-      fileName: string
+      fileName: string,
+      origin?: "market" | "local"
     ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
     installFromDir: () => Promise<{ success: boolean; pluginName?: string; error?: string }>
+    exportForMarket: (
+      id: string
+    ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (id: string) => Promise<{ success: boolean; error?: string }>
     setEnabled: (id: string, enabled: boolean) => Promise<void>
+    setOriginsBatch: (
+      updates: Array<{ id: string; origin: "market" | "local" }>
+    ) => Promise<{ success: boolean; error?: string }>
     getDetail: (id: string) => Promise<{
       skills: string[]
       mcpServers: string[]
@@ -668,6 +909,14 @@ interface CustomAPI {
       callback: (data: { requestId: string }) => void
     ) => () => void
     onChanged: (callback: () => void) => () => void
+  }
+  userInput: {
+    sendResponse: (response: UserInputResponse) => void
+    onRequest: (threadId: string, callback: (request: UserInputRequest) => void) => () => void
+    onCancel: (
+      threadId: string,
+      callback: (data: { requestId: string; reason?: string }) => void
+    ) => () => void
   }
   skillEvolution: {
     /** Phase 1 — intent banner: "Want to save this as a skill?" */
@@ -869,6 +1118,7 @@ interface CustomAPI {
     skills: {
       list: () => Promise<SkillHookMetadata[]>
     }
+    onChanged: (callback: (data: { reason?: string; at: string }) => void) => () => void
     create: (config: HookUpsert) => Promise<{ id: string }>
     update: (config: HookUpsert & { id: string }) => Promise<{ id: string }>
     delete: (id: string) => Promise<void>
@@ -883,6 +1133,13 @@ interface CustomAPI {
       onChanged: (
         callback: (data: { threadId: string; workspacePath: string }) => void
       ) => () => void
+    }
+    logging: {
+      get: () => Promise<HookLoggingConfig>
+      save: (updates: Partial<HookLoggingConfig>) => Promise<HookLoggingConfig>
+      getLogDir: () => Promise<string>
+      openLogDir: () => Promise<{ success: boolean; error?: string }>
+      onChanged: (callback: (config: HookLoggingConfig) => void) => () => void
     }
   }
   codeExecTools: {
@@ -917,6 +1174,15 @@ interface CustomAPI {
       granularity: "day" | "week" | "month" | "custom",
       opts?: { upperOrgLv1?: string | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    userList: (
+      range: { from: string; to: string },
+      options?: DashboardUserListOptions
+    ) => Promise<{ success: boolean; data?: DashboardUserListData; error?: string }>
+    userDetail: (
+      sapId: string,
+      range: { from: string; to: string },
+      options?: DashboardUserDetailOptions
+    ) => Promise<{ success: boolean; data?: DashboardUserDetail; error?: string }>
     skillUsageSummary: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -931,6 +1197,11 @@ interface CustomAPI {
     userProfiles: (
       sapIds: string[]
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    queryAllUser: () => Promise<{
+      success: boolean
+      data?: DashboardAllUserItem[]
+      error?: string
+    }>
     productivity: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"
@@ -944,14 +1215,38 @@ interface CustomAPI {
       range: { from: string; to: string },
       limit?: number
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
-    commitDetails: (
+    marketSkillRecentTraces: (
+      skill: string,
       range: { from: string; to: string },
       limit?: number
+    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+    skillDetail: (
+      skill: string,
+      range: { from: string; to: string },
+      options?: number | { page?: number; pageSize?: number; limit?: number }
+    ) => Promise<{ success: boolean; data?: DashboardSkillDetail; error?: string }>
+    commitDetails: (
+      range: { from: string; to: string },
+      options?: DashboardCommitDetailsOptions
     ) => Promise<{
       success: boolean
-      data?: { total: number; items: DashboardCommitDetail[] }
+      data?: {
+        total: number
+        page: number
+        pageSize: number
+        pushedOnly: boolean
+        items: DashboardCommitDetail[]
+      }
       error?: string
     }>
+    exportSkillTraces: (payload: {
+      skill: string
+      range: { from: string; to: string }
+      page: number
+      pageSize: number
+      totalTraces: number
+      traces: DashboardTraceDetail[]
+    }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     exportExcel: (
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
@@ -1039,7 +1334,8 @@ interface CustomAPI {
       cwd?: string
     ) => Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }>
     listBranches: (
-      cwd?: string
+      cwd?: string,
+      options?: { refreshRemote?: boolean }
     ) => Promise<{ success: boolean; branches: string[]; error?: string }>
     switchBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
     createBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>

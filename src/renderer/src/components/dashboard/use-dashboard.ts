@@ -2,6 +2,7 @@
  * Dashboard data fetching hook
  */
 import { useState, useEffect, useCallback, useRef } from "react"
+import type { SkillAdoptionRankingItem } from "./skill-adoption-ranking"
 
 // ─────────────────────────────────────────────────────────
 // Types
@@ -20,14 +21,33 @@ export interface OverviewData {
   avgDurationMs: number
   inputTokens: number
   outputTokens: number
+  codeGeneratedLines: number
+  codeDeletedLines: number
+  codeEffectiveGeneratedLines: number
+  codeMeasuredGeneratedLines: number
+  codeUnmeasuredGeneratedLines: number
+  codeInclusiveEffectiveGeneratedLines: number
+  codeAdoptedLines: number
+  codePushedMeasuredGeneratedLines: number
+  codePushedEffectiveGeneratedLines: number
+  codePushedAdoptedLines: number
+  codePushedCommitCount: number
+  codeMeasuredAdoptionRate: number | null
+  codeInclusiveAdoptionRate: number | null
+  codePushedAdoptionRate: number | null
+  codeAdoptionRate: number | null
   totalSkills: number
   totalTools: number
   totalSkillCalls: number
   totalToolCalls: number
   trend: Array<{ time: string; count: number; users: number }>
   bySkill: Array<{ skill: string; count: number }>
+  bySkillAll: Array<{ skill: string; count: number }>
+  bySkillAdoption: SkillAdoptionRankingItem[]
   byTool: Array<{ tool: string; count: number }>
   byToolAll: Array<{ tool: string; count: number }>
+  byToolFilteredAll: Array<{ tool: string; count: number }>
+  byToolAllFull: Array<{ tool: string; count: number }>
 }
 
 export interface ModelStatsData {
@@ -49,7 +69,25 @@ export interface UserStatsData {
     count: number
   }>
   byOrg: Array<{ key: string; org: string; count: number }>
+  byOrgPv: Array<{ key: string; org: string; count: number }>
+  byOrgUv: Array<{ key: string; org: string; count: number }>
   byVersion: Array<{ version: string; count: number }>
+  latestVersion: string
+  versionUsers: Array<{
+    sapId: string
+    userName: string
+    orgName: string
+    version: string
+    collectionTime: string
+  }>
+  userVersionUsage: Array<{
+    sapId: string
+    userName: string
+    orgName: string
+    version: string
+    collectionTime: string
+    isLatestVersion: boolean
+  }>
   userTrend: Array<{ time: string; users: number }>
   selectedUpperOrgLv1: string | null
 }
@@ -76,6 +114,11 @@ export interface DashboardTraceDetail {
   endedAt?: string
   durationMs: number
   userMessage: string
+  sapId?: string
+  ystId?: string
+  userName?: string
+  orgName?: string
+  userIp?: string
   modelId?: string
   modelName?: string
   outcome: string
@@ -98,6 +141,13 @@ export interface DashboardCommitDetail {
   orgName?: string
   userIp?: string
   repoPath?: string
+  repositoryName?: string
+  repositoryFullName?: string
+  repositoryWebUrl?: string
+  commitSha?: string
+  commitUrl?: string
+  pushed: boolean
+  pushedAt?: string
   branch?: string
   filesChanged: number
   insertions: number
@@ -106,6 +156,85 @@ export interface DashboardCommitDetail {
   threadId?: string
   usedSkills: string[]
   skillCount: number
+}
+
+export interface DashboardCommitDetailsData {
+  total: number
+  page: number
+  pageSize: number
+  pushedOnly: boolean
+  items: DashboardCommitDetail[]
+}
+
+export interface DashboardCodeStats {
+  generatedLines: number
+  deletedLines: number
+  effectiveGeneratedLines: number
+  measuredGeneratedLines: number
+  unmeasuredGeneratedLines: number
+  inclusiveEffectiveGeneratedLines: number
+  adoptedLines: number
+  pushedMeasuredGeneratedLines: number
+  pushedEffectiveGeneratedLines: number
+  pushedAdoptedLines: number
+  pushedCommitCount: number
+  measuredAdoptionRate: number | null
+  inclusiveAdoptionRate: number | null
+  pushedAdoptionRate: number | null
+  adoptionRate: number | null
+}
+
+export interface DashboardSkillDetail {
+  stats: DashboardCodeStats
+  traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
+}
+
+export interface DashboardUserListItem {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  count: number
+  lastActiveAt?: string
+  avgDurationMs: number
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+}
+
+export interface DashboardUserListData {
+  items: DashboardUserListItem[]
+  pageSize: number
+  nextAfterKey?: Record<string, string | number>
+  totalActiveUsers: number
+}
+
+export interface DashboardUserDetail {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  totalCalls: number
+  avgDurationMs: number
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  bySkill: Array<{ skill: string; count: number }>
+  byModel: Array<{ model: string; count: number }>
+  byOutcome: Array<{ outcome: string; count: number }>
+  traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
 }
 
 export interface ProductivityData {
@@ -187,6 +316,32 @@ export function getDefaultRange(granularity: Granularity): TimeRange {
       from = startOfDay(now)
   }
   return { from: from.toISOString(), to: now.toISOString() }
+}
+
+function getCurrentPeriodStart(granularity: Granularity, now = new Date()): Date | null {
+  switch (granularity) {
+    case "day":
+      return startOfDay(now)
+    case "week":
+      return startOfWeek(now)
+    case "month":
+      return startOfMonth(now)
+    default:
+      return null
+  }
+}
+
+export function getRefreshRange(range: TimeRange, granularity: Granularity): TimeRange {
+  const currentPeriodStart = getCurrentPeriodStart(granularity)
+  if (!currentPeriodStart) return range
+
+  const currentFrom = currentPeriodStart.toISOString()
+  if (range.from !== currentFrom) return range
+
+  return {
+    from: range.from,
+    to: new Date().toISOString()
+  }
 }
 
 /** Navigate day/week/month forward or backward. Returns new range. */
@@ -298,6 +453,27 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
   const avgDurationMs = aggs.avg_duration?.value ?? 0
   const inputTokens = aggs.total_input_tokens?.value ?? 0
   const outputTokens = aggs.total_output_tokens?.value ?? 0
+  const codeGeneratedLines = aggs.code_generated_lines?.value ?? 0
+  const codeDeletedLines = aggs.code_deleted_lines?.value ?? 0
+  const codeMeasuredGeneratedLines = aggs.code_measured_generated_lines?.value ?? 0
+  const codeEffectiveGeneratedLines = aggs.code_effective_generated_lines?.value ?? 0
+  const codeUnmeasuredGeneratedLines =
+    aggs.code_unmeasured_generated_lines?.value ?? Math.max(0, codeGeneratedLines - codeMeasuredGeneratedLines)
+  const codeInclusiveEffectiveGeneratedLines =
+    aggs.code_inclusive_effective_generated_lines?.value ??
+    codeEffectiveGeneratedLines + codeUnmeasuredGeneratedLines
+  const codeAdoptedLines = aggs.code_adopted_lines?.value ?? 0
+  const codePushedMeasuredGeneratedLines = aggs.code_pushed_measured_generated_lines?.value ?? 0
+  const codePushedEffectiveGeneratedLines = aggs.code_pushed_effective_generated_lines?.value ?? 0
+  const codePushedAdoptedLines = aggs.code_pushed_adopted_lines?.value ?? 0
+  const codePushedCommitCount = aggs.code_pushed_commit_count?.value ?? 0
+  const codeMeasuredAdoptionRate =
+    codeEffectiveGeneratedLines > 0 ? codeAdoptedLines / codeEffectiveGeneratedLines : null
+  const codeInclusiveAdoptionRate =
+    codeInclusiveEffectiveGeneratedLines > 0 ? codeAdoptedLines / codeInclusiveEffectiveGeneratedLines : null
+  const codePushedAdoptionRate =
+    codePushedEffectiveGeneratedLines > 0 ? codePushedAdoptedLines / codePushedEffectiveGeneratedLines : null
+  const codeAdoptionRate = codeMeasuredAdoptionRate
   const totalSkills = aggs.total_skills?.value ?? 0
   const totalTools = aggs.total_tools?.value ?? 0
   const totalSkillCalls = aggs.total_skill_calls?.value ?? 0
@@ -314,6 +490,34 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     count: b.doc_count
   }))
 
+  const bySkillAll: OverviewData["bySkillAll"] = (aggs.by_skill_all?.buckets ?? aggs.by_skill?.buckets ?? []).map((b: any) => ({
+    skill: b.key || "unknown",
+    count: b.doc_count
+  }))
+
+  const bySkillAdoption: OverviewData["bySkillAdoption"] = (aggs.code_by_skill_adoption?.buckets ?? []).map((b: any) => {
+    const measuredAdoptionRate = b.measured_adoption_rate?.value
+    const inclusiveAdoptionRate = b.inclusive_adoption_rate?.value
+    const pushedAdoptionRate = b.pushed_adoption_rate?.value
+    return {
+      skill: b.key || "unknown",
+      generatedLines: b.generated_lines?.value ?? 0,
+      measuredGeneratedLines: b.measured_generated_lines?.value ?? 0,
+      effectiveGeneratedLines: b.effective_generated_lines?.value ?? 0,
+      unmeasuredGeneratedLines: b.unmeasured_generated_lines?.value ?? 0,
+      inclusiveEffectiveGeneratedLines: b.inclusive_effective_generated_lines?.value ?? 0,
+      adoptedLines: b.adopted_lines?.value ?? 0,
+      pushedMeasuredGeneratedLines: b.pushed_measured_generated_lines?.value ?? 0,
+      pushedEffectiveGeneratedLines: b.pushed_effective_generated_lines?.value ?? 0,
+      pushedAdoptedLines: b.pushed_adopted_lines?.value ?? 0,
+      pushedCommitCount: b.pushed_commit_count?.value ?? 0,
+      measuredAdoptionRate: typeof measuredAdoptionRate === "number" ? measuredAdoptionRate : null,
+      inclusiveAdoptionRate: typeof inclusiveAdoptionRate === "number" ? inclusiveAdoptionRate : null,
+      pushedAdoptionRate: typeof pushedAdoptionRate === "number" ? pushedAdoptionRate : null,
+      commitCount: b.commit_count?.value ?? 0
+    }
+  })
+
   const byTool: OverviewData["byTool"] = (aggs.by_tool?.buckets ?? []).map((b: any) => ({
     tool: b.key || "unknown",
     count: b.doc_count
@@ -324,7 +528,54 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     count: b.doc_count
   }))
 
-  return { totalCalls, activeUsers, avgDurationMs, inputTokens, outputTokens, totalSkills, totalTools, totalSkillCalls, totalToolCalls, trend, bySkill, byTool, byToolAll }
+  const byToolFilteredAll: OverviewData["byToolFilteredAll"] = (
+    aggs.by_tool_filtered_all?.buckets ?? aggs.by_tool?.buckets ?? []
+  ).map((b: any) => ({
+    tool: b.key || "unknown",
+    count: b.doc_count
+  }))
+
+  const byToolAllFull: OverviewData["byToolAllFull"] = (
+    aggs.by_tool_all_full?.buckets ?? aggs.by_tool_all?.buckets ?? []
+  ).map((b: any) => ({
+    tool: b.key || "unknown",
+    count: b.doc_count
+  }))
+
+  return {
+    totalCalls,
+    activeUsers,
+    avgDurationMs,
+    inputTokens,
+    outputTokens,
+    codeGeneratedLines,
+    codeDeletedLines,
+    codeEffectiveGeneratedLines,
+    codeMeasuredGeneratedLines,
+    codeUnmeasuredGeneratedLines,
+    codeInclusiveEffectiveGeneratedLines,
+    codeAdoptedLines,
+    codePushedMeasuredGeneratedLines,
+    codePushedEffectiveGeneratedLines,
+    codePushedAdoptedLines,
+    codePushedCommitCount,
+    codeMeasuredAdoptionRate,
+    codeInclusiveAdoptionRate,
+    codePushedAdoptionRate,
+    codeAdoptionRate,
+    totalSkills,
+    totalTools,
+    totalSkillCalls,
+    totalToolCalls,
+    trend,
+    bySkill,
+    bySkillAll,
+    bySkillAdoption,
+    byTool,
+    byToolAll,
+    byToolFilteredAll,
+    byToolAllFull
+  }
 }
 
 function parseModelStats(raw: any): ModelStatsData {
@@ -350,57 +601,161 @@ function parseModelStats(raw: any): ModelStatsData {
   return { byModel, byTier, byLayer }
 }
 
-function formatTopUserOrgName(orgName: string, upperOrgLv1: string): string {
+function normalizeMetricValue(value: unknown): string {
+  if (Array.isArray(value)) return value.length > 0 ? String(value[0] ?? "") : ""
+  return value == null ? "" : String(value)
+}
+
+function getLatestUserMetric(bucket: any, field: string): string {
+  return normalizeMetricValue(bucket.latest_user_info?.hits?.hits?.[0]?._source?.[field])
+}
+
+function getLatestUserCollectionTime(bucket: any): string {
+  const hit = bucket?.latest_user_info?.hits?.hits?.[0]
+  return normalizeMetricValue(hit?._source?.startedAt) || normalizeMetricValue(hit?.sort?.[0])
+}
+
+function compareVersionLike(a: string, b: string): number {
+  const aParts = a.match(/\d+|[a-zA-Z]+/g) ?? []
+  const bParts = b.match(/\d+|[a-zA-Z]+/g) ?? []
+  const len = Math.max(aParts.length, bParts.length)
+  for (let i = 0; i < len; i++) {
+    const aPart = aParts[i] ?? "0"
+    const bPart = bParts[i] ?? "0"
+    const aNum = /^\d+$/.test(aPart) ? Number(aPart) : null
+    const bNum = /^\d+$/.test(bPart) ? Number(bPart) : null
+    if (aNum !== null && bNum !== null) {
+      if (aNum !== bNum) return aNum - bNum
+      continue
+    }
+    const compared = aPart.localeCompare(bPart)
+    if (compared !== 0) return compared
+  }
+  return 0
+}
+
+export function formatTopUserOrgName(orgName: string, upperOrgLv1: string, upperOrgLv0: string): string {
   const normalizedOrgName = orgName.trim()
   const normalizedUpperOrgLv1 = upperOrgLv1.trim()
-  if (!normalizedUpperOrgLv1) return normalizedOrgName
-  if (!normalizedOrgName) return normalizedUpperOrgLv1
-  return `${normalizedUpperOrgLv1}/${normalizedOrgName}`
+  const normalizedUpperOrgLv0 = upperOrgLv0.trim()
+  if (normalizedUpperOrgLv1 && normalizedUpperOrgLv0) return `${normalizedUpperOrgLv1}/${normalizedUpperOrgLv0}`
+  if (normalizedUpperOrgLv1) return normalizedUpperOrgLv1
+  return normalizedOrgName
 }
 
 function parseUserStats(raw: any, selectedUpperOrgLv1: string | null): UserStatsData {
   const aggs = raw?.aggregations ?? {}
-  const byOrgBuckets = Array.isArray(aggs.by_org?.buckets)
-    ? aggs.by_org.buckets
-    : (aggs.by_org?.items?.buckets ?? [])
+  const getOrgBuckets = (agg: any): any[] => Array.isArray(agg?.buckets)
+    ? agg.buckets
+    : (agg?.items?.buckets ?? [])
+  const mapOrgBuckets = (buckets: any[], metric: "pv" | "uv"): UserStatsData["byOrg"] => buckets
+    .filter((b: any) => String(b.key ?? "").trim() !== "")
+    .map((b: any) => ({
+      key: String(b.key ?? ""),
+      org: String(b.key ?? ""),
+      count: metric === "uv" ? (b.unique_users?.value ?? b.doc_count ?? 0) : (b.doc_count ?? 0)
+    }))
+  const byOrgPvBuckets = getOrgBuckets(aggs.by_org_pv ?? aggs.by_org)
+  const byOrgUvBuckets = getOrgBuckets(aggs.by_org_uv ?? aggs.by_org)
 
-  const topUsers: UserStatsData["topUsers"] = (aggs.top_users?.buckets ?? []).map((b: any) => ({
-    sapId: b.key,
-    userName: b.user_name?.buckets?.[0]?.key ?? b.key,
-    orgName: formatTopUserOrgName(
-      String(b.org_name?.buckets?.[0]?.key ?? ""),
-      String(b.upper_org_lv1?.buckets?.[0]?.key ?? "")
-    ),
-    count: b.doc_count
-  }))
+  const topUsers: UserStatsData["topUsers"] = (aggs.top_users?.buckets ?? []).map((b: any) => {
+    const userName = getLatestUserMetric(b, "userName") || b.key
+    const orgName = getLatestUserMetric(b, "orgName")
+    const upperOrgLv1 = getLatestUserMetric(b, "upperOrgLv1")
+    const upperOrgLv0 = getLatestUserMetric(b, "upperOrgLv0")
+    return {
+      sapId: b.key,
+      userName,
+      orgName: formatTopUserOrgName(orgName, upperOrgLv1, upperOrgLv0),
+      count: b.doc_count
+    }
+  })
 
-  const byOrg: UserStatsData["byOrg"] = byOrgBuckets.map((b: any) => ({
-    key: String(b.key ?? ""),
-    org: String(b.key ?? "") || "未知",
-    count: b.doc_count
-  }))
+  const byOrgPv = mapOrgBuckets(byOrgPvBuckets, "pv")
+  const byOrgUv = mapOrgBuckets(byOrgUvBuckets, "uv")
+  const byOrg = byOrgPv
 
   const byVersion: UserStatsData["byVersion"] = (aggs.by_version?.buckets ?? []).map((b: any) => ({
     version: b.key || "未知",
     count: b.unique_users?.value ?? b.doc_count
   }))
+  const latestVersion = byVersion
+    .map((item) => item.version)
+    .filter((version) => version && version !== "未知")
+    .sort(compareVersionLike)
+    .at(-1) ?? ""
+  const versionUserBuckets: UserStatsData["versionUsers"] = (
+    aggs.by_version?.buckets ?? []
+  ).flatMap((versionBucket: any) =>
+    (versionBucket.users?.buckets ?? []).map((userBucket: any) => {
+      const userName = getLatestUserMetric(userBucket, "userName") || userBucket.key
+      const orgName = getLatestUserMetric(userBucket, "orgName")
+      const upperOrgLv1 = getLatestUserMetric(userBucket, "upperOrgLv1")
+      const upperOrgLv0 = getLatestUserMetric(userBucket, "upperOrgLv0")
+      const version = getLatestUserMetric(userBucket, "appVersion") || versionBucket.key || "未知"
+      return {
+        sapId: userBucket.key,
+        userName,
+        orgName: formatTopUserOrgName(orgName, upperOrgLv1, upperOrgLv0),
+        version,
+        collectionTime: getLatestUserCollectionTime(userBucket)
+      }
+    })
+  )
+
+  const fallbackVersionUsers: UserStatsData["versionUsers"] = topUsers.map((user) => {
+    const bucket = (aggs.top_users?.buckets ?? []).find((item: any) => item.key === user.sapId)
+    const version = getLatestUserMetric(bucket, "appVersion") || "未知"
+    return {
+      sapId: user.sapId,
+      userName: user.userName,
+      orgName: user.orgName,
+      version,
+      collectionTime: getLatestUserCollectionTime(bucket)
+    }
+  })
+  const versionUsers = versionUserBuckets.length > 0 ? versionUserBuckets : fallbackVersionUsers
+
+  const userVersionUsage: UserStatsData["userVersionUsage"] = versionUsers
+    .map((user) => ({
+      ...user,
+      isLatestVersion: Boolean(latestVersion && user.version === latestVersion)
+    }))
+    .filter((user) => !user.isLatestVersion)
 
   const userTrend: UserStatsData["userTrend"] = (aggs.user_trend?.buckets ?? []).map((b: any) => ({
     time: b.key_as_string ?? new Date(b.key).toISOString(),
     users: b.users?.value ?? 0
   }))
 
-  return { topUsers, byOrg, byVersion, userTrend, selectedUpperOrgLv1 }
+  return {
+    topUsers,
+    byOrg,
+    byOrgPv,
+    byOrgUv,
+    byVersion,
+    latestVersion,
+    versionUsers,
+    userVersionUsage,
+    userTrend,
+    selectedUpperOrgLv1
+  }
 }
 
 export function parseTopUsersFromAgg(raw: any): ParsedTopUser[] {
   const aggs = raw?.aggregations ?? {}
-  return (aggs.top_users?.buckets ?? []).map((b: any) => ({
-    sapId: b.key,
-    userName: b.user_name?.buckets?.[0]?.key ?? b.key,
-    orgName: b.org_name?.buckets?.[0]?.key ?? "",
-    count: b.doc_count
-  }))
+  return (aggs.top_users?.buckets ?? []).map((b: any) => {
+    const userName = getLatestUserMetric(b, "userName") || b.user_name?.buckets?.[0]?.key || b.key
+    const orgName = getLatestUserMetric(b, "orgName") || b.org_name?.buckets?.[0]?.key || ""
+    const upperOrgLv1 = getLatestUserMetric(b, "upperOrgLv1")
+    const upperOrgLv0 = getLatestUserMetric(b, "upperOrgLv0")
+    return {
+      sapId: b.key,
+      userName,
+      orgName: formatTopUserOrgName(orgName, upperOrgLv1, upperOrgLv0),
+      count: b.doc_count
+    }
+  })
 }
 
 function parseProductivity(raw: any, granularity: Granularity, range: TimeRange): ProductivityData {
@@ -609,12 +964,19 @@ export function useDashboard() {
   }, [])
 
   const refresh = useCallback(() => {
+    const nextRange = getRefreshRange(range, granularity)
+    if (nextRange.from !== range.from || nextRange.to !== range.to) {
+      setRange(nextRange)
+      return
+    }
     fetchAll(range, granularity, selectedUpperOrgLv1)
   }, [fetchAll, range, granularity, selectedUpperOrgLv1])
 
   const drillDownUserOrg = useCallback((orgLv1: string) => {
-    setSelectedUpperOrgLv1(orgLv1)
-    fetchUserStatsOnly(range, granularity, orgLv1)
+    const normalizedOrgLv1 = orgLv1.trim()
+    if (!normalizedOrgLv1) return
+    setSelectedUpperOrgLv1(normalizedOrgLv1)
+    fetchUserStatsOnly(range, granularity, normalizedOrgLv1)
   }, [fetchUserStatsOnly, range, granularity])
 
   const resetUserOrgDrilldown = useCallback(() => {

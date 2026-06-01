@@ -2,6 +2,7 @@ import * as fs from "fs"
 import * as path from "path"
 import { BrowserWindow } from "electron"
 import micromatch from "micromatch"
+import { scheduleGitHookEventSync } from "./git-hook-service"
 
 // Store active watchers by thread ID
 const activeWatchers = new Map<string, fs.FSWatcher>()
@@ -158,7 +159,11 @@ function matchesGitignoreRule(relativePath: string, rule: GitignoreRule): boolea
 }
 
 // 按 Git 规则顺序求值：后匹配覆盖前匹配，支持 ! 反选
-function isIgnoredByGitignore(threadId: string, workspacePath: string, relativePath: string): boolean {
+function isIgnoredByGitignore(
+  threadId: string,
+  workspacePath: string,
+  relativePath: string
+): boolean {
   const rules = loadGitignoreRules(threadId, workspacePath)
   if (rules.length === 0) return false
 
@@ -217,6 +222,11 @@ export function startWatching(threadId: string, workspacePath: string): void {
         const parts = relativePath.split("/").filter(Boolean)
         const leaf = parts[parts.length - 1] || ""
         const hasHiddenPart = parts.some((p) => p.startsWith("."))
+        const isGitInternalPath = parts[0] === ".git"
+        if (isGitInternalPath) {
+          scheduleGitHookEventSync(workspacePath)
+          return
+        }
         const isGitIgnore = leaf === ".gitignore"
         if (isGitIgnore) {
           // .gitignore 改动后，下一次匹配会自动重载规则
@@ -254,6 +264,7 @@ export function startWatching(threadId: string, workspacePath: string): void {
 
     activeWatchers.set(threadId, watcher)
     console.log(`[WorkspaceWatcher] Started watching ${workspacePath} for thread ${threadId}`)
+    scheduleGitHookEventSync(workspacePath, 100)
   } catch (e) {
     console.error(`[WorkspaceWatcher] Failed to start watching ${workspacePath}:`, e)
   }

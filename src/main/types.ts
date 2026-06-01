@@ -1,5 +1,13 @@
 import type { HookConfig } from "./hooks/types"
 
+export type {
+  AgentAutoCommitMessageStrategy,
+  AgentAutoCommitMode,
+  AgentAutoCommitResult,
+  AgentAutoCommitSettings,
+  AgentAutoCommitStatus
+} from "../shared/auto-commit-types"
+
 // Thread types matching langgraph-api
 export type ThreadStatus = "idle" | "busy" | "interrupted" | "error"
 
@@ -14,6 +22,8 @@ export interface AgentInvokeParams {
   modelId?: string
   agentMode?: "normal" | "coordinator"
   coordinatorInternalNotification?: boolean
+  /** Renderer user message id for the turn, used to group hook log events. */
+  userMessageId?: string
 }
 
 export interface AgentResumeParams {
@@ -325,11 +335,33 @@ export interface PluginMetadata {
   author: string
   path: string
   enabled: boolean
+  /**
+   * Display-only. Counted once at install/update time by walking the plugin's
+   * skill sources. Never gate runtime behavior on this — actual skill
+   * discovery (slash popover, hook scope, etc.) re-walks the filesystem
+   * through `getEnabledPluginSkillSourceMetadata`, so a stale `skillCount`
+   * here cannot hide skills. Used for the "{n} skills" badge in PluginsPanel.
+   */
   skillCount: number
+  /**
+   * Display-only. Same contract as skillCount: counted at install time, never
+   * used for gating. getEnabledPluginMcpConfigs re-reads .mcp.json live.
+   */
   mcpServerCount: number
   hookCount?: number
   /** Cached hooks config path relative to plugin root, read from manifest at install/inspect time. */
   hookPath?: string
+  /**
+   * Where this plugin was installed from. Used by the UI to decide whether to
+   * expose component details. Older installs lack this field — when undefined,
+   * the renderer falls back to a legacy heuristic (name match against the
+   * current market list plus a localStorage-tracked "I uploaded this locally"
+   * set). The renderer also runs a one-time per-session migration that
+   * backfills a concrete value once the market list is successfully loaded,
+   * so legacy plugins are eventually pinned to "market" or "local" on disk
+   * and stop relying on the heuristic.
+   */
+  origin?: "market" | "local"
   createdAt: string
   updatedAt: string
 }
@@ -337,6 +369,7 @@ export interface PluginMetadata {
 export interface PluginHookMetadata extends HookConfig {
   pluginId: string
   pluginName: string
+  pluginRoot: string
   pluginEnabled: boolean
   hookPath: string
 }
@@ -344,7 +377,11 @@ export interface PluginHookMetadata extends HookConfig {
 export interface SkillHookMetadata extends HookConfig {
   skillName: string
   skillPath: string
+  skillRoot: string
   hookPath: string
+  pluginId?: string
+  pluginName?: string
+  pluginRoot?: string
 }
 
 export interface PluginMcpServerConfig {
@@ -526,6 +563,47 @@ export interface ApprovalDecision {
   savedToolDescription?: string
 }
 
+// User input request tool
+export interface UserInputOption {
+  label: string
+  description: string
+}
+
+export interface UserInputQuestion {
+  header: string
+  id: string
+  question: string
+  options: UserInputOption[]
+}
+
+export interface UserInputRequest {
+  requestId: string
+  threadId: string
+  questions: UserInputQuestion[]
+  createdAt: string
+}
+
+export type UserInputAnswer =
+  | {
+      type: "option"
+      questionId: string
+      optionIndex: number
+      label: string
+      description: string
+    }
+  | {
+      type: "other"
+      questionId: string
+      text: string
+    }
+
+export interface UserInputResponse {
+  requestId: string
+  answers: Record<string, UserInputAnswer>
+  submittedAt?: string
+  ignored?: boolean
+}
+
 // ChatX types
 export interface ChatXRobotConfig {
   chatId: string
@@ -546,12 +624,33 @@ export interface ChatXConfig {
   robots: ChatXRobotConfig[]
 }
 
+/**
+ * Hook execution logging configuration.
+ *
+ * - `enabled = false` (default): no logs collected anywhere — IPC events skipped,
+ *   no in-memory ring buffer, no jsonl writes. Zero overhead.
+ * - `enabled = true`: per-turn log chips appear in the chat. Click opens a modal
+ *   with that turn's hook execution records.
+ * - `diagnostic = true` (requires enabled): adds stdin payload, full command,
+ *   cwd, env subset; emits "skipped" entries for hooks filtered out by scope;
+ *   persists everything to `<openworkDir>/hooks/log/hooks.<YYYY-MM-DD>.jsonl`.
+ *   Off by default because the stdin payload can contain sensitive user input.
+ */
+export interface HookLoggingConfig {
+  enabled: boolean
+  diagnostic: boolean
+}
+
 // Skills types
 export interface SkillMetadata {
+  id?: string
   name: string
   description: string
   path: string
   source: "user" | "project"
+  relativePath?: string
+  pluginId?: string
+  pluginName?: string
   /** Skill version from SKILL.md frontmatter, defaults to "v1.0.0" */
   version: string
   license?: string | null

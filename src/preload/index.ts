@@ -24,7 +24,11 @@ import type {
   PluginMetadata,
   PluginManifest,
   SkillHookMetadata,
-  ChatXConfig
+  ChatXConfig,
+  HookLoggingConfig,
+  AgentAutoCommitSettings,
+  UserInputRequest,
+  UserInputResponse
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
@@ -45,6 +49,42 @@ interface LspDownloadState {
   isDownloading: boolean
   progress: LspDownloadProgress | null
 }
+
+interface PetManifest {
+  // 宠物资源清单，来自 pets/<directoryId>/pet.json。
+  id: string
+  directoryId: string
+  source: "builtin" | "custom"
+  key: string
+  canDelete: boolean
+  name?: string
+  displayName?: string
+  description?: string
+  spritesheetPath: string
+  frameWidth?: number
+  frameHeight?: number
+  columns?: number
+  rows?: number
+  states?: Record<string, { y: number; frames: number; fps?: number }>
+}
+
+interface PetSettings {
+  enabled: boolean
+  selectedPetKey: string | null
+}
+
+type PetState =
+  // 与主进程 PetState 保持一致，renderer 只能通过 preload 发送这些状态。
+  | "idle"
+  | "busy"
+  | "waiting"
+  | "done"
+  | "error"
+  | "crying"
+  | "prompt"
+  | "running"
+  | "interaction"
+  | "hover"
 
 // Simple electron API - replaces @electron-toolkit/preload
 const electronAPI = {
@@ -86,7 +126,8 @@ const api = {
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
       agentMode?: "normal" | "coordinator",
-      coordinatorInternalNotification?: boolean
+      coordinatorInternalNotification?: boolean,
+      userMessageId?: string
     ): (() => void) => {
       const channel = coordinatorInternalNotification
         ? `agent:stream:${threadId}:coordinator-internal`
@@ -105,7 +146,8 @@ const api = {
         message,
         modelId,
         agentMode,
-        coordinatorInternalNotification
+        coordinatorInternalNotification,
+        userMessageId
       })
 
       return () => {
@@ -119,7 +161,8 @@ const api = {
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
       agentMode?: "normal" | "coordinator",
-      coordinatorInternalNotification?: boolean
+      coordinatorInternalNotification?: boolean,
+      userMessageId?: string
     ): (() => void) => {
       const channel = coordinatorInternalNotification
         ? `agent:stream:${threadId}:coordinator-internal`
@@ -142,7 +185,8 @@ const api = {
           message,
           modelId,
           agentMode,
-          coordinatorInternalNotification
+          coordinatorInternalNotification,
+          userMessageId
         })
       }
 
@@ -253,6 +297,11 @@ const api = {
     delete: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("threads:delete", threadId)
     },
+    exportSession: (
+      threadId: string
+    ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> => {
+      return ipcRenderer.invoke("threads:exportSession", threadId)
+    },
     getHistory: (threadId: string): Promise<unknown[]> => {
       return ipcRenderer.invoke("threads:history", threadId)
     },
@@ -289,11 +338,31 @@ const api = {
       defaultMaxTokens: number
       minMaxTokens: number
       maxMaxTokens: number
+      defaultMaxOutputTokens: number
+      minMaxOutputTokens: number
+      maxMaxOutputTokens: number
+      defaultTemperature: number
+      maxTemperature: number
+      defaultTopP: number
+      maxTopP: number
+      defaultTopK: number
+      minTopK: number
+      maxTopK: number
     }> => {
       return ipcRenderer.invoke("models:getTokenLimits") as Promise<{
         defaultMaxTokens: number
         minMaxTokens: number
         maxMaxTokens: number
+        defaultMaxOutputTokens: number
+        minMaxOutputTokens: number
+        maxMaxOutputTokens: number
+        defaultTemperature: number
+        maxTemperature: number
+        defaultTopP: number
+        maxTopP: number
+        defaultTopK: number
+        minTopK: number
+        maxTopK: number
       }>
     },
     getCustomConfigs: (): Promise<
@@ -304,6 +373,10 @@ const api = {
         model: string
         hasApiKey: boolean
         maxTokens: number
+        maxOutputTokens: number
+        temperature: number
+        topP: number
+        topK: number
         interleavedThinking?: boolean
         tier?: "premium" | "economy"
       }>
@@ -316,6 +389,10 @@ const api = {
           model: string
           hasApiKey: boolean
           maxTokens: number
+          maxOutputTokens: number
+          temperature: number
+          topP: number
+          topK: number
           interleavedThinking?: boolean
           tier?: "premium" | "economy"
         }>
@@ -330,6 +407,10 @@ const api = {
       model: string
       hasApiKey: boolean
       maxTokens: number
+      maxOutputTokens: number
+      temperature: number
+      topP: number
+      topK: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     } | null> => {
@@ -340,6 +421,10 @@ const api = {
         model: string
         hasApiKey: boolean
         maxTokens: number
+        maxOutputTokens: number
+        temperature: number
+        topP: number
+        topK: number
         interleavedThinking?: boolean
         tier?: "premium" | "economy"
       } | null>
@@ -351,6 +436,10 @@ const api = {
       model: string
       apiKey?: string
       maxTokens?: number
+      maxOutputTokens?: number
+      temperature?: number
+      topP?: number
+      topK?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }): Promise<void> => {
@@ -363,6 +452,10 @@ const api = {
       model: string
       apiKey?: string
       maxTokens?: number
+      maxOutputTokens?: number
+      temperature?: number
+      topP?: number
+      topK?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }): Promise<{ id: string }> => {
@@ -382,6 +475,10 @@ const api = {
       baseUrl?: string
       model?: string
       apiKey?: string
+      maxOutputTokens?: number
+      temperature?: number
+      topP?: number
+      topK?: number
     }): Promise<{ success: boolean; error?: string; latencyMs?: number }> => {
       return ipcRenderer.invoke("models:testConnection", params) as Promise<{
         success: boolean
@@ -662,16 +759,16 @@ const api = {
     },
     commitWorktree: (
       threadId: string,
-      message: string
+      message: string,
+      filePaths?: string[]
     ): Promise<{ success: boolean; error?: string }> => {
-      return ipcRenderer.invoke("workspace:commitWorktree", { threadId, message }) as Promise<{
+      return ipcRenderer.invoke("workspace:commitWorktree", { threadId, message, filePaths }) as Promise<{
         success: boolean
         error?: string
       }>
     },
     pushWorktree: (
-      threadId: string,
-      message?: string
+      threadId: string
     ): Promise<{
       success: boolean
       autoCommitted?: boolean
@@ -682,7 +779,7 @@ const api = {
         detail: string
       }>
     }> => {
-      return ipcRenderer.invoke("workspace:pushWorktree", { threadId, message }) as Promise<{
+      return ipcRenderer.invoke("workspace:pushWorktree", { threadId }) as Promise<{
         success: boolean
         autoCommitted?: boolean
         error?: string
@@ -731,6 +828,49 @@ const api = {
       }
     }
   },
+  pet: {
+    // 列出内置 pets/ 与 OPENWORK_DIR/pets 下可用宠物。
+    list: (): Promise<PetManifest[]> => {
+      return ipcRenderer.invoke("pet:list") as Promise<PetManifest[]>
+    },
+    getSpriteDataUrl: (
+      directoryId: string,
+      source?: "builtin" | "custom"
+    ): Promise<{ success: boolean; dataUrl?: string; error?: string }> => {
+      return ipcRenderer.invoke("pet:getSpriteDataUrl", directoryId, source) as Promise<{
+        success: boolean
+        dataUrl?: string
+        error?: string
+      }>
+    },
+    // 将业务状态同步到独立宠物窗口；动画渲染不在 renderer 主 UI 中执行。
+    setState: (state: PetState): void => {
+      ipcRenderer.send("pet:setState", state)
+    },
+    // 告知主进程主应用已打开/获得焦点，用于清空宠物完成任务提醒队列。
+    clearCompletedTasks: (): void => {
+      ipcRenderer.send("pet:clearCompletedTasks")
+    },
+    getSettings: (): Promise<PetSettings> => {
+      return ipcRenderer.invoke("pet:getSettings") as Promise<PetSettings>
+    },
+    updateSettings: (settings: Partial<PetSettings>): Promise<PetSettings> => {
+      return ipcRenderer.invoke("pet:updateSettings", settings) as Promise<PetSettings>
+    },
+    uploadCustomFolder: (): Promise<{ success: boolean; pet?: PetManifest; error?: string }> => {
+      return ipcRenderer.invoke("pet:uploadCustomFolder") as Promise<{
+        success: boolean
+        pet?: PetManifest
+        error?: string
+      }>
+    },
+    deleteCustom: (directoryId: string): Promise<{ success: boolean; error?: string }> => {
+      return ipcRenderer.invoke("pet:deleteCustom", directoryId) as Promise<{
+        success: boolean
+        error?: string
+      }>
+    }
+  },
   file: {
     parse: (
       filePath: string,
@@ -755,6 +895,9 @@ const api = {
     select: (): Promise<{ canceled: boolean; filePaths: string[] }> => {
       return ipcRenderer.invoke("file:select")
     },
+    selectDirectory: (options?: { title?: string }): Promise<{ canceled: boolean; filePaths: string[] }> => {
+      return ipcRenderer.invoke("file:selectDirectory", options)
+    },
     supportedExtensions: (): Promise<string[]> => {
       return ipcRenderer.invoke("file:supportedExtensions")
     }
@@ -769,10 +912,7 @@ const api = {
     read: (skillPath: string): Promise<{ success: boolean; content?: string; error?: string }> => {
       return ipcRenderer.invoke("skills:read", skillPath)
     },
-    write: (
-      skillPath: string,
-      content: string
-    ): Promise<{ success: boolean; error?: string }> => {
+    write: (skillPath: string, content: string): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("skills:write", { skillPath, content })
     },
     readBinary: (
@@ -785,17 +925,53 @@ const api = {
     ): Promise<{ success: boolean; files?: string[]; error?: string }> => {
       return ipcRenderer.invoke("skills:listFiles", skillPath)
     },
+    readTextBundle: (
+      skillPath: string
+    ): Promise<{
+      success: boolean
+      files?: Array<{ path: string; content: string }>
+      skipped?: Array<{ path: string; reason: string }>
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("skills:readTextBundle", skillPath)
+    },
     getDisabled: (): Promise<string[]> => {
       return ipcRenderer.invoke("skills:getDisabled")
     },
     setDisabled: (skillNames: string[]): Promise<void> => {
       return ipcRenderer.invoke("skills:setDisabled", skillNames)
     },
+    backupForCloudEvolution: (payload: {
+      skillPath: string
+      candidateId: string
+      skillName: string
+      sourceVersion?: string | null
+      targetVersion?: string | null
+    }): Promise<{ success: boolean; backupId?: string; backupPath?: string; error?: string }> => {
+      return ipcRenderer.invoke("skills:backupForCloudEvolution", payload)
+    },
+    restoreCloudEvolutionBackup: (
+      backupId: string
+    ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
+      return ipcRenderer.invoke("skills:restoreCloudEvolutionBackup", backupId)
+    },
+    exportCloudEvolutionBackup: (
+      backupId: string,
+      targetDir: string
+    ): Promise<{ success: boolean; exportedPath?: string; error?: string }> => {
+      return ipcRenderer.invoke("skills:exportCloudEvolutionBackup", { backupId, targetDir })
+    },
     upload: (
       buffer: ArrayBuffer,
-      fileName: string
-    ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
-      return ipcRenderer.invoke("skills:upload", { buffer, fileName })
+      fileName: string,
+      options?: { allowNestedNameDuplicates?: boolean }
+    ): Promise<{
+      success: boolean
+      skillName?: string
+      error?: string
+      nestedNameConflicts?: Array<{ name: string; relativePath: string }>
+    }> => {
+      return ipcRenderer.invoke("skills:upload", { buffer, fileName, options })
     },
     extractMarkdownFromZip: (
       buffer: ArrayBuffer,
@@ -804,9 +980,10 @@ const api = {
       return ipcRenderer.invoke("skills:extractMarkdownFromZip", { buffer, fileName })
     },
     exportForMarket: (
-      skillPath: string
+      skillPath: string,
+      options?: { includeNestedSkills?: boolean }
     ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }> => {
-      return ipcRenderer.invoke("skills:exportForMarket", skillPath)
+      return ipcRenderer.invoke("skills:exportForMarket", skillPath, options)
     },
     delete: (skillPath: string): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("skills:delete", skillPath)
@@ -1054,6 +1231,12 @@ const api = {
       }
     }
   },
+  autoCommit: {
+    getSettings: (): Promise<AgentAutoCommitSettings> =>
+      ipcRenderer.invoke("autoCommit:getSettings") as Promise<AgentAutoCommitSettings>,
+    saveSettings: (updates: Partial<AgentAutoCommitSettings>): Promise<AgentAutoCommitSettings> =>
+      ipcRenderer.invoke("autoCommit:saveSettings", updates) as Promise<AgentAutoCommitSettings>
+  },
   heartbeat: {
     getConfig: (): Promise<HeartbeatConfig> =>
       ipcRenderer.invoke("heartbeat:getConfig") as Promise<HeartbeatConfig>,
@@ -1197,9 +1380,10 @@ const api = {
       ipcRenderer.invoke("plugins:list") as Promise<PluginMetadata[]>,
     install: (
       buffer: ArrayBuffer,
-      fileName: string
+      fileName: string,
+      origin?: "market" | "local"
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:install", { buffer, fileName }) as Promise<{
+      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin }) as Promise<{
         success: boolean
         pluginName?: string
         error?: string
@@ -1210,10 +1394,26 @@ const api = {
         pluginName?: string
         error?: string
       }>,
+    exportForMarket: (
+      id: string
+    ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }> =>
+      ipcRenderer.invoke("plugins:exportForMarket", id) as Promise<{
+        success: boolean
+        fileName?: string
+        buffer?: ArrayBuffer
+        error?: string
+      }>,
     delete: (id: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke("plugins:delete", id) as Promise<{ success: boolean; error?: string }>,
     setEnabled: (id: string, enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("plugins:setEnabled", { id, enabled }) as Promise<void>,
+    setOriginsBatch: (
+      updates: Array<{ id: string; origin: "market" | "local" }>
+    ): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke("plugins:setOriginsBatch", { updates }) as Promise<{
+        success: boolean
+        error?: string
+      }>,
     getDetail: (
       id: string
     ): Promise<{
@@ -1324,6 +1524,41 @@ const api = {
       ipcRenderer.on("sandbox:changed", handler)
       return () => {
         ipcRenderer.removeListener("sandbox:changed", handler)
+      }
+    }
+  },
+  userInput: {
+    sendResponse: (response: UserInputResponse): void => {
+      ipcRenderer.send("userInput:response", response)
+    },
+    onRequest: (
+      threadId: string,
+      callback: (request: UserInputRequest) => void
+    ): (() => void) => {
+      const channel = `userInput:request:${threadId}`
+      const handler = (_: unknown, request: UserInputRequest): void => {
+        ipcRenderer.send("userInput:ack", {
+          requestId: request.requestId,
+          threadId: request.threadId
+        })
+        callback(request)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
+    onCancel: (
+      threadId: string,
+      callback: (data: { requestId: string; reason?: string }) => void
+    ): (() => void) => {
+      const channel = `userInput:cancel:${threadId}`
+      const handler = (_: unknown, data: { requestId: string; reason?: string }): void => {
+        callback(data)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
       }
     }
   },
@@ -1663,6 +1898,15 @@ const api = {
     skills: {
       list: (): Promise<SkillHookMetadata[]> => ipcRenderer.invoke("hooks:skills:list")
     },
+    onChanged: (callback: (data: { reason?: string; at: string }) => void): (() => void) => {
+      const handler = (_: unknown, data: { reason?: string; at: string }): void => {
+        callback(data)
+      }
+      ipcRenderer.on("hooks:changed", handler)
+      return () => {
+        ipcRenderer.removeListener("hooks:changed", handler)
+      }
+    },
     create: (config: HookUpsert): Promise<{ id: string }> =>
       ipcRenderer.invoke("hooks:create", config),
     update: (config: HookUpsert & { id: string }): Promise<{ id: string }> =>
@@ -1690,6 +1934,26 @@ const api = {
         ipcRenderer.on("hooks:workspace:changed", handler)
         return () => {
           ipcRenderer.removeListener("hooks:workspace:changed", handler)
+        }
+      }
+    },
+    logging: {
+      get: (): Promise<HookLoggingConfig> => ipcRenderer.invoke("hooks:logging:get"),
+      save: (updates: Partial<HookLoggingConfig>): Promise<HookLoggingConfig> =>
+        ipcRenderer.invoke("hooks:logging:save", updates),
+      getLogDir: (): Promise<string> => ipcRenderer.invoke("hooks:logging:getLogDir"),
+      openLogDir: (): Promise<{ success: boolean; error?: string }> =>
+        ipcRenderer.invoke("hooks:logging:openLogDir"),
+      onChanged: (callback: (config: HookLoggingConfig) => void): (() => void) => {
+        const handler = (
+          _: unknown,
+          data: { config: HookLoggingConfig; at: string } | HookLoggingConfig
+        ): void => {
+          callback("config" in data ? data.config : data)
+        }
+        ipcRenderer.on("hooks:logging:changed", handler)
+        return () => {
+          ipcRenderer.removeListener("hooks:logging:changed", handler)
         }
       }
     }
@@ -1735,6 +1999,21 @@ const api = {
       opts?: { upperOrgLv1?: string | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userStats", range, granularity, opts),
+    userList: (
+      range: { from: string; to: string },
+      options?: {
+        pageSize?: number
+        afterKey?: Record<string, string | number> | null
+        keyword?: string | null
+      }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:userList", range, options),
+    userDetail: (
+      sapId: string,
+      range: { from: string; to: string },
+      options?: { traceLimit?: number; tracePage?: number; tracePageSize?: number }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:userDetail", sapId, range, options),
     skillUsageSummary: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -1752,6 +2031,8 @@ const api = {
       sapIds: string[]
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userProfiles", sapIds),
+    queryAllUser: (): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:queryAllUser"),
     productivity: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"
@@ -1768,11 +2049,32 @@ const api = {
       limit?: number
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit),
-    commitDetails: (
+    marketSkillRecentTraces: (
+      skill: string,
       range: { from: string; to: string },
       limit?: number
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:commitDetails", range, limit),
+      ipcRenderer.invoke("dashboard:marketSkillRecentTraces", skill, range, limit),
+    skillDetail: (
+      skill: string,
+      range: { from: string; to: string },
+      options?: number | { page?: number; pageSize?: number; limit?: number }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:skillDetail", skill, range, options),
+    commitDetails: (
+      range: { from: string; to: string },
+      options?: { page?: number; pageSize?: number; pushedOnly?: boolean }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:commitDetails", range, options),
+    exportSkillTraces: (payload: {
+      skill: string
+      range: { from: string; to: string }
+      page: number
+      pageSize: number
+      totalTraces: number
+      traces: unknown[]
+    }): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
+      ipcRenderer.invoke("dashboard:exportSkillTraces", payload),
     exportExcel: (
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
@@ -1886,9 +2188,13 @@ const api = {
         isWorktree: boolean
       }>,
     listBranches: (
-      cwd?: string
+      cwd?: string,
+      options?: { refreshRemote?: boolean }
     ): Promise<{ success: boolean; branches: string[]; error?: string }> =>
-      ipcRenderer.invoke("git:listBranches", cwd) as Promise<{
+      ipcRenderer.invoke("git:listBranches", {
+        cwd,
+        refreshRemote: Boolean(options?.refreshRemote)
+      }) as Promise<{
         success: boolean
         branches: string[]
         error?: string

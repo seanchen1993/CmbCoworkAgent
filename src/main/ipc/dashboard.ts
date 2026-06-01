@@ -7,10 +7,18 @@
  */
 
 import { ipcMain, dialog, BrowserWindow } from "electron"
-import { getUserInfo } from "../storage"
 import * as fs from "fs"
+import AdmZip from "adm-zip"
 import { buildTraceTree } from "../agent/trace/tree-builder"
 import type { AgentTrace, TraceNode } from "../agent/trace/types"
+import { getSkillIdentifierLookupTerms } from "../utils/skill-identifiers"
+import {
+  effectiveGeneratedLinesSumAgg,
+  makeDashboardCodeStats,
+  normalizeCodeStatsFromAggs,
+  normalizeSkillCodeAdoptionBuckets,
+  type DashboardCodeStats
+} from "./dashboard-code-stats"
 
 // ─────────────────────────────────────────────────────────
 // ES Configuration (from .env)
@@ -32,19 +40,6 @@ function getEsAuth(): { username: string; password: string } | null {
 function getEsIndex(type: "trace" | "event"): string {
   if (type === "trace") return (import.meta.env.VITE_ES_INDEX_TRACE as string) || "devclaw_trace"
   return (import.meta.env.VITE_ES_INDEX_EVENT as string) || "devclaw_event"
-}
-
-const ALLOWED_YST_IDS_RAW = (import.meta.env.VITE_DASHBOARD_ALLOWED_YST_IDS as string) || ""
-const ALLOWED_YST_IDS = new Set(
-  ALLOWED_YST_IDS_RAW.split(",").map((s) => s.trim()).filter(Boolean)
-)
-
-function isDashboardAllowedForCurrentUser(): boolean {
-  if (import.meta.env.DEV) return true
-  const userInfo = getUserInfo()
-  const ystId = userInfo?.ystId?.trim()
-  if (!ystId) return false
-  return ALLOWED_YST_IDS.has(ystId)
 }
 
 // ─────────────────────────────────────────────────────────
@@ -104,6 +99,14 @@ interface TimeRange {
 
 type Granularity = "day" | "week" | "month" | "custom"
 
+interface DashboardAllUserItem {
+  sapId: string
+  userName: string
+  orgName: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+}
+
 interface DashboardTraceDetail {
   traceId: string
   threadId: string
@@ -111,6 +114,11 @@ interface DashboardTraceDetail {
   endedAt?: string
   durationMs: number
   userMessage: string
+  sapId?: string
+  ystId?: string
+  userName?: string
+  orgName?: string
+  userIp?: string
   modelId?: string
   modelName?: string
   outcome: string
@@ -133,6 +141,13 @@ interface DashboardCommitDetail {
   orgName?: string
   userIp?: string
   repoPath?: string
+  repositoryName?: string
+  repositoryFullName?: string
+  repositoryWebUrl?: string
+  commitSha?: string
+  commitUrl?: string
+  pushed: boolean
+  pushedAt?: string
   branch?: string
   filesChanged: number
   insertions: number
@@ -141,6 +156,59 @@ interface DashboardCommitDetail {
   threadId?: string
   usedSkills: string[]
   skillCount: number
+}
+
+interface DashboardSkillDetail {
+  stats: DashboardCodeStats
+  traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
+}
+
+interface DashboardUserListItem {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  count: number
+  lastActiveAt?: string
+  avgDurationMs: number
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+}
+
+interface DashboardUserListData {
+  items: DashboardUserListItem[]
+  pageSize: number
+  nextAfterKey?: Record<string, string | number>
+  totalActiveUsers: number
+}
+
+interface DashboardUserDetail {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  totalCalls: number
+  avgDurationMs: number
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  bySkill: Array<{ skill: string; count: number }>
+  byModel: Array<{ model: string; count: number }>
+  byOutcome: Array<{ outcome: string; count: number }>
+  traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
 }
 
 interface EsSearchHit {
@@ -157,6 +225,39 @@ interface EsSearchResponse {
 
 interface UserStatsOptions {
   upperOrgLv1?: string | null
+}
+
+interface UserListOptions {
+  pageSize?: number
+  afterKey?: Record<string, string | number> | null
+  keyword?: string | null
+}
+
+interface UserDetailOptions {
+  traceLimit?: number
+  tracePage?: number
+  tracePageSize?: number
+}
+
+interface TracePageOptions {
+  page?: number
+  pageSize?: number
+  limit?: number
+}
+
+interface DashboardTraceExportPayload {
+  skill: string
+  range: TimeRange
+  page: number
+  pageSize: number
+  totalTraces: number
+  traces: DashboardTraceDetail[]
+}
+
+interface CommitDetailsOptions {
+  page?: number
+  pageSize?: number
+  pushedOnly?: boolean
 }
 
 const DISLIKE_TYPE_OPTIONS = [
@@ -188,6 +289,136 @@ function escapeWildcard(value: string): string {
   return value.replace(/[\\*?]/g, "\\$&")
 }
 
+function safeExportFileName(value: string): string {
+  const cleaned = value
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/-+/g, "-")
+    .slice(0, 80)
+    .trim()
+
+  return cleaned || "skill-traces"
+}
+
+function escapeMarkdown(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/`/g, "\\`")
+}
+
+function stringifyExportValue(value: unknown): string {
+  if (value === undefined) return ""
+  if (typeof value === "string") return value
+
+  const seen = new WeakSet<object>()
+  try {
+    return JSON.stringify(
+      value,
+      (_key, item) => {
+        if (typeof item === "bigint") return item.toString()
+        if (typeof item === "function") return `[Function ${item.name || "anonymous"}]`
+        if (typeof item === "symbol") return item.toString()
+        if (item && typeof item === "object") {
+          if (seen.has(item)) return "[Circular]"
+          seen.add(item)
+        }
+        return item
+      },
+      2
+    )
+  } catch {
+    return String(value)
+  }
+}
+
+function formatTraceExportMarkdown(payload: DashboardTraceExportPayload, exportedAt: string): string {
+  const lines: string[] = [
+    `# Skill 会话历史 · ${escapeMarkdown(payload.skill || "-")}`,
+    "",
+    `- Skill: \`${escapeMarkdown(payload.skill || "-")}\``,
+    `- Range: ${payload.range.from} 至 ${payload.range.to}`,
+    `- Page: ${payload.page}`,
+    `- Page Size: ${payload.pageSize}`,
+    `- Total Traces: ${payload.totalTraces}`,
+    `- Exported: ${exportedAt}`,
+    ""
+  ]
+
+  for (const trace of payload.traces) {
+    lines.push(`## Trace ${escapeMarkdown(trace.traceId || "-")}`, "")
+    lines.push(`- Thread ID: \`${escapeMarkdown(trace.threadId || "-")}\``)
+    lines.push(`- Time: ${trace.startedAt || "-"}`)
+    lines.push(`- Outcome: ${trace.outcome || "-"}`)
+    lines.push(`- Duration: ${Math.round(trace.durationMs || 0)}ms`)
+    lines.push(`- Model: ${escapeMarkdown(trace.modelName || trace.modelId || "-")}`)
+    lines.push(`- Tool Calls: ${trace.totalToolCalls}`)
+    lines.push(`- Tokens: ${trace.totalTokens} (input ${trace.totalInputTokens}, output ${trace.totalOutputTokens})`)
+    if (trace.userName || trace.sapId || trace.ystId) {
+      lines.push(
+        `- User: ${escapeMarkdown(trace.userName || "-")} / ${escapeMarkdown(trace.sapId || "-")} / ${escapeMarkdown(trace.ystId || "-")}`
+      )
+    }
+    if (trace.usedSkills.length > 0) {
+      lines.push(`- Skills: ${trace.usedSkills.map((skill) => `\`${escapeMarkdown(skill)}\``).join(", ")}`)
+    }
+    lines.push("")
+
+    if (trace.userMessage.trim()) {
+      lines.push("### User Message", "", trace.userMessage.trim(), "")
+    }
+
+    if (trace.nodes && trace.nodes.length > 0) {
+      lines.push("### Trace Nodes", "")
+      for (const node of trace.nodes) {
+        lines.push(`#### ${escapeMarkdown(node.type)} · ${escapeMarkdown(node.name || node.id)}`, "")
+        const metadata = [
+          `id: \`${escapeMarkdown(node.id)}\``,
+          node.parentId ? `parent: \`${escapeMarkdown(node.parentId)}\`` : null,
+          node.status ? `status: \`${escapeMarkdown(node.status)}\`` : null,
+          `startedAt: ${node.startedAt}`,
+          node.endedAt ? `endedAt: ${node.endedAt}` : null
+        ].filter(Boolean)
+        lines.push(`_${metadata.join(", ")}_`, "")
+        if (node.input !== undefined) {
+          lines.push("INPUT", "", "```json", stringifyExportValue(node.input), "```", "")
+        }
+        if (node.output !== undefined) {
+          lines.push("OUTPUT", "", "```json", stringifyExportValue(node.output), "```", "")
+        }
+        if (node.metadata && Object.keys(node.metadata).length > 0) {
+          lines.push("METADATA", "", "```json", stringifyExportValue(node.metadata), "```", "")
+        }
+      }
+    } else {
+      lines.push("### Trace Summary", "", "```json", stringifyExportValue(trace), "```", "")
+    }
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`
+}
+
+function normalizeTraceExportPayload(value: unknown): DashboardTraceExportPayload {
+  const payload = asRecord(value)
+  const skill = asString(payload.skill).trim()
+  const range = asRecord(payload.range)
+  const traces = Array.isArray(payload.traces)
+    ? payload.traces.map((trace) => trace as DashboardTraceDetail)
+    : []
+  const page = typeof payload.page === "number" ? payload.page : undefined
+  const pageSize = typeof payload.pageSize === "number" ? payload.pageSize : undefined
+
+  return {
+    skill,
+    range: {
+      from: asString(range.from),
+      to: asString(range.to)
+    },
+    page: clampLimit(page, 1, 1000),
+    pageSize: clampLimit(pageSize, 10, 50),
+    totalTraces: asNumber(payload.totalTraces, traces.length),
+    traces
+  }
+}
+
 /**
  * 过滤“有有效 ystId 的记录”：
  * - 字段存在
@@ -211,6 +442,37 @@ function buildEmptyYstIdFilter(): Record<string, unknown> {
   return {
     bool: {
       should: [{ term: { ystId: "" } }, { bool: { must_not: [{ exists: { field: "ystId" } }] } }],
+      minimum_should_match: 1
+    }
+  }
+}
+
+function buildNonEmptySapIdFilter(): Record<string, unknown> {
+  return {
+    bool: {
+      must: [{ exists: { field: "sapId" } }],
+      must_not: [{ term: { sapId: "" } }]
+    }
+  }
+}
+
+function buildUserListSearchFilter(keyword: string): Record<string, unknown> | null {
+  const normalizedKeyword = keyword.trim()
+  if (!normalizedKeyword) return null
+
+  const escaped = escapeWildcard(normalizedKeyword)
+  const wildcardPattern = `*${escaped}*`
+  const fields = ["userName", "username", "ystId"]
+  const should = fields.flatMap((field) => [
+    { term: { [field]: normalizedKeyword } },
+    { term: { [`${field}.keyword`]: normalizedKeyword } },
+    { wildcard: { [field]: wildcardPattern } },
+    { wildcard: { [`${field}.keyword`]: wildcardPattern } }
+  ])
+
+  return {
+    bool: {
+      should,
       minimum_should_match: 1
     }
   }
@@ -251,17 +513,51 @@ function normalizeSkillQueryNames(skillNames?: string[]): string[] {
   ).slice(0, 1000)
 }
 
-function isDashboardAllowed(): boolean {
-  if (import.meta.env.DEV) return true
-  const userInfo = getUserInfo()
-  const ystId = userInfo?.ystId?.trim()
-  if (!ystId) return false
-  return ALLOWED_YST_IDS.has(ystId)
-}
-
 function clampLimit(limit: number | undefined, fallback: number, max: number): number {
   if (!Number.isFinite(limit)) return fallback
   return Math.max(1, Math.min(max, Math.floor(Number(limit))))
+}
+
+function normalizeCommitDetailsOptions(value?: number | CommitDetailsOptions): Required<CommitDetailsOptions> {
+  if (typeof value === "number") {
+    return {
+      page: 1,
+      pageSize: clampLimit(value, 20, 500),
+      pushedOnly: false
+    }
+  }
+
+  const page = clampLimit(value?.page, 1, 10_000)
+  const pageSize = clampLimit(value?.pageSize, 20, 100)
+  return {
+    page,
+    pageSize,
+    pushedOnly: value?.pushedOnly === true
+  }
+}
+
+function normalizeUserListOptions(value?: UserListOptions): Required<
+  Omit<UserListOptions, "afterKey" | "keyword">
+> & {
+  afterKey?: Record<string, string | number>
+  keyword: string
+} {
+  const pageSize = clampLimit(value?.pageSize, 20, 100)
+  const rawAfterKey = value?.afterKey
+  const afterKey =
+    rawAfterKey && typeof rawAfterKey === "object" && !Array.isArray(rawAfterKey)
+      ? Object.fromEntries(
+          Object.entries(rawAfterKey).filter(
+            ([, item]) => typeof item === "string" || typeof item === "number"
+          )
+        )
+      : undefined
+  const keyword = typeof value?.keyword === "string" ? value.keyword.trim().slice(0, 100) : ""
+  return {
+    pageSize,
+    keyword,
+    ...(afterKey && Object.keys(afterKey).length > 0 ? { afterKey } : {})
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -290,6 +586,15 @@ function asNumber(value: unknown, fallback = 0): number {
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === "string")
+}
+
+function codeAdoptPushedAggs(): Record<string, unknown> {
+  return {
+    pushed_measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+    pushed_effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+    pushed_adopted_lines: { sum: { field: "properties.adoptedLineCount" } },
+    pushed_commit_count: { cardinality: { field: "properties.commitSha" } }
+  }
 }
 
 function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
@@ -392,6 +697,11 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       endedAt: trace.endedAt || asOptionalString(source.endedAt),
       durationMs: asNumber(trace.durationMs, asNumber(source.durationMs)),
       userMessage: trace.userMessage || asString(source.userMessage),
+      sapId: asOptionalString(source.sapId),
+      ystId: asOptionalString(source.ystId),
+      userName: asOptionalString(source.userName),
+      orgName: asOptionalString(source.orgName),
+      userIp: asOptionalString(source.userIp),
       modelId: trace.modelId || asOptionalString(source.modelId),
       modelName: trace.modelName || asOptionalString(source.modelName),
       outcome: trace.outcome || asString(source.outcome, "unknown"),
@@ -415,6 +725,11 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
     endedAt: asOptionalString(source.endedAt),
     durationMs: asNumber(source.durationMs),
     userMessage: asString(source.userMessage),
+    sapId: asOptionalString(source.sapId),
+    ystId: asOptionalString(source.ystId),
+    userName: asOptionalString(source.userName),
+    orgName: asOptionalString(source.orgName),
+    userIp: asOptionalString(source.userIp),
     modelId: asOptionalString(source.modelId),
     modelName: asOptionalString(source.modelName),
     outcome: asString(source.outcome, "unknown"),
@@ -441,6 +756,13 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
     orgName: asOptionalString(source.orgName),
     userIp: asOptionalString(source.userIp),
     repoPath: asOptionalString(properties.repoPath),
+    repositoryName: asOptionalString(properties.repositoryName),
+    repositoryFullName: asOptionalString(properties.repositoryFullName),
+    repositoryWebUrl: asOptionalString(properties.repositoryWebUrl),
+    commitSha: asOptionalString(properties.commitSha),
+    commitUrl: asOptionalString(properties.commitUrl),
+    pushed: properties.pushed === true,
+    pushedAt: asOptionalString(properties.pushedAt),
     branch: asOptionalString(properties.branch),
     filesChanged: asNumber(properties.filesChanged),
     insertions: asNumber(properties.insertions),
@@ -452,13 +774,74 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
   }
 }
 
+function normalizeSkillList(skills: string[]): string[] {
+  return Array.from(new Set(skills.map((skill) => skill.trim()).filter(Boolean)))
+}
+
+async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<string, string[]>> {
+  const normalizedCommitShas = normalizeSkillList(commitShas).slice(0, 100)
+  if (normalizedCommitShas.length === 0) return new Map()
+
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          { term: { eventName: "code_adopt" } },
+          { terms: { "properties.commitSha": normalizedCommitShas } }
+        ]
+      }
+    },
+    aggs: {
+      by_commit: {
+        terms: { field: "properties.commitSha", size: normalizedCommitShas.length },
+        aggs: {
+          by_skill: { terms: { field: "properties.usedSkills", size: 50 } }
+        }
+      }
+    }
+  }
+
+  const raw = asRecord(await esQuery(getEsIndex("event"), body))
+  const buckets = asRecord(asRecord(raw.aggregations).by_commit).buckets
+  if (!Array.isArray(buckets)) return new Map()
+
+  const result = new Map<string, string[]>()
+  for (const bucket of buckets) {
+    const record = asRecord(bucket)
+    const commitSha = asString(record.key)
+    if (!commitSha) continue
+
+    const skillBuckets = asRecord(record.by_skill).buckets
+    const skills = Array.isArray(skillBuckets)
+      ? normalizeSkillList(skillBuckets.map((skillBucket) => asString(asRecord(skillBucket).key)))
+      : []
+    if (skills.length > 0) result.set(commitSha, skills)
+  }
+  return result
+}
+
 // ─────────────────────────────────────────────────────────
 // Dashboard data fetchers
 // ─────────────────────────────────────────────────────────
 
 async function fetchOverview(range: TimeRange, granularity: Granularity): Promise<unknown> {
   const interval = getCalendarInterval(granularity, range.from, range.to)
-  const body = {
+  const rankingTopSize = 20
+  const rankingSearchSize = 1000
+  const filteredToolExcludes = [
+    // Claude Code 内置文件 / 系统工具
+    "execute", "read_file", "write_file", "glob", "grep",
+    "list_directory", "task", "task_output",
+    "ls", "edit_file",
+    // 工具搜索 / 元工具
+    "search_tool", "inspect_tool", "invoke_deferred_tool",
+    // 内置代码执行辅助
+    "code_exec", "prepare_save_code_exec_tool", "save_code_exec_tool",
+    // 内置任务管理
+    "write_todos"
+  ]
+  const traceBody = {
     size: 0,
     query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
     aggs: {
@@ -471,27 +854,27 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       total_tools:        { cardinality: { field: "toolNames" } },
       total_skill_calls:  { value_count: { field: "usedSkills" } },
       total_tool_calls:   { value_count: { field: "toolNames" } },
-      by_skill: { terms: { field: "usedSkills",  size: 20 } },
+      by_skill: { terms: { field: "usedSkills", size: rankingTopSize } },
+      by_skill_all: { terms: { field: "usedSkills", size: rankingSearchSize } },
       by_tool: {
         terms: {
           field: "toolNames",
-          size: 20,
-          exclude: [
-            // Claude Code 内置文件 / 系统工具
-            "execute", "read_file", "write_file", "glob", "grep",
-            "list_directory", "task", "task_output",
-            "ls", "edit_file",
-            // 工具搜索 / 元工具
-            "search_tool", "inspect_tool", "invoke_deferred_tool",
-            // 内置代码执行辅助
-            "code_exec", "prepare_save_code_exec_tool", "save_code_exec_tool",
-            // 内置任务管理
-            "write_todos"
-          ]
+          size: rankingTopSize,
+          exclude: filteredToolExcludes
+        }
+      },
+      by_tool_filtered_all: {
+        terms: {
+          field: "toolNames",
+          size: rankingSearchSize,
+          exclude: filteredToolExcludes
         }
       },
       by_tool_all: {
-        terms: { field: "toolNames", size: 20 }
+        terms: { field: "toolNames", size: rankingTopSize }
+      },
+      by_tool_all_full: {
+        terms: { field: "toolNames", size: rankingSearchSize }
       },
       trend: {
         date_histogram: { field: "startedAt", calendar_interval: interval, time_zone: "Asia/Shanghai" },
@@ -501,7 +884,123 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       }
     }
   }
-  return esQuery(getEsIndex("trace"), body)
+  const codeGenFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_gen" } },
+    timeRangeFilter("eventTime", range)
+  ]
+  const codeAdoptFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_adopt" } },
+    { exists: { field: "properties.adoptedLineCount" } },
+    { exists: { field: "properties.generatedLineCount" } },
+    { exists: { field: "properties.effectiveGeneratedLineCount" } },
+    timeRangeFilter("properties.generatedAt", range)
+  ]
+  const codeAdoptPushedFilters: Record<string, unknown>[] = [
+    ...codeAdoptFilters,
+    { term: { "properties.pushed": true } }
+  ]
+  const codeBody = {
+    size: 0,
+    query: {
+      bool: {
+        should: [
+          { bool: { filter: codeGenFilters } },
+          { bool: { filter: codeAdoptFilters } }
+        ],
+        minimum_should_match: 1
+      }
+    },
+    aggs: {
+      code_gen: {
+        filter: { bool: { filter: codeGenFilters } },
+        aggs: {
+          generated_lines: { sum: { field: "properties.lineCount" } },
+          deleted_lines: { sum: { field: "properties.deletedLineCount" } }
+        }
+      },
+      code_adopt_measured: {
+        filter: { bool: { filter: codeAdoptFilters } },
+        aggs: {
+          measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+          effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+          adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
+        }
+      },
+      code_adopt_pushed: {
+        filter: { bool: { filter: codeAdoptPushedFilters } },
+        aggs: codeAdoptPushedAggs()
+      },
+      by_skill_adoption: {
+        terms: { field: "properties.usedSkills", size: rankingSearchSize },
+        aggs: {
+          code_gen: {
+            filter: { bool: { filter: codeGenFilters } },
+            aggs: {
+              generated_lines: { sum: { field: "properties.lineCount" } },
+              deleted_lines: { sum: { field: "properties.deletedLineCount" } }
+            }
+          },
+          code_adopt_measured: {
+            filter: { bool: { filter: codeAdoptFilters } },
+            aggs: {
+              measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+              effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+              adopted_lines: { sum: { field: "properties.adoptedLineCount" } },
+              commit_count: { cardinality: { field: "properties.commitSha" } }
+            }
+          },
+          code_adopt_pushed: {
+            filter: { bool: { filter: codeAdoptPushedFilters } },
+            aggs: codeAdoptPushedAggs()
+          }
+        }
+      }
+    }
+  }
+
+  const [traceRaw, codeRaw] = await Promise.all([
+    esQuery(getEsIndex("trace"), traceBody),
+    esQuery(getEsIndex("event"), codeBody)
+  ])
+  const codeStats = normalizeCodeStatsFromAggs(codeRaw)
+  const skillCodeAdoption = normalizeSkillCodeAdoptionBuckets(codeRaw)
+  const traceRecord = asRecord(traceRaw)
+  return {
+    ...traceRecord,
+    aggregations: {
+      ...asRecord(traceRecord.aggregations),
+      code_generated_lines: { value: codeStats.generatedLines },
+      code_deleted_lines: { value: codeStats.deletedLines },
+      code_effective_generated_lines: { value: codeStats.effectiveGeneratedLines },
+      code_measured_generated_lines: { value: codeStats.measuredGeneratedLines },
+      code_unmeasured_generated_lines: { value: codeStats.unmeasuredGeneratedLines },
+      code_inclusive_effective_generated_lines: { value: codeStats.inclusiveEffectiveGeneratedLines },
+      code_adopted_lines: { value: codeStats.adoptedLines },
+      code_pushed_measured_generated_lines: { value: codeStats.pushedMeasuredGeneratedLines },
+      code_pushed_effective_generated_lines: { value: codeStats.pushedEffectiveGeneratedLines },
+      code_pushed_adopted_lines: { value: codeStats.pushedAdoptedLines },
+      code_pushed_commit_count: { value: codeStats.pushedCommitCount },
+      code_by_skill_adoption: {
+        buckets: skillCodeAdoption.map((item) => ({
+          key: item.skill,
+          generated_lines: { value: item.generatedLines },
+          measured_generated_lines: { value: item.measuredGeneratedLines },
+          effective_generated_lines: { value: item.effectiveGeneratedLines },
+          unmeasured_generated_lines: { value: item.unmeasuredGeneratedLines },
+          inclusive_effective_generated_lines: { value: item.inclusiveEffectiveGeneratedLines },
+          adopted_lines: { value: item.adoptedLines },
+          measured_adoption_rate: { value: item.measuredAdoptionRate },
+          inclusive_adoption_rate: { value: item.inclusiveAdoptionRate },
+          commit_count: { value: item.commitCount },
+          pushed_measured_generated_lines: { value: item.pushedMeasuredGeneratedLines },
+          pushed_effective_generated_lines: { value: item.pushedEffectiveGeneratedLines },
+          pushed_adopted_lines: { value: item.pushedAdoptedLines },
+          pushed_adoption_rate: { value: item.pushedAdoptionRate },
+          pushed_commit_count: { value: item.pushedCommitCount }
+        }))
+      }
+    }
+  }
 }
 
 async function fetchModelStats(range: TimeRange, granularity: Granularity): Promise<unknown> {
@@ -529,53 +1028,325 @@ async function fetchModelStats(range: TimeRange, granularity: Granularity): Prom
 }
 
 function buildUpperOrgLv1Filter(upperOrgLv1: string): Record<string, unknown> {
-  if (upperOrgLv1 === "") {
-    return {
-      bool: {
-        should: [
-          { term: { upperOrgLv1: "" } },
-          { bool: { must_not: [{ exists: { field: "upperOrgLv1" } }] } }
-        ],
-        minimum_should_match: 1
-      }
+  return { term: { upperOrgLv1 } }
+}
+
+function normalizeUpperOrgLv1Option(upperOrgLv1?: string | null): string | null {
+  if (typeof upperOrgLv1 !== "string") return null
+  const normalized = upperOrgLv1.trim()
+  return normalized ? normalized : null
+}
+
+function buildNonEmptyOrgLevelFilter(field: "upperOrgLv0" | "upperOrgLv1"): Record<string, unknown> {
+  return {
+    bool: {
+      must: [{ exists: { field } }],
+      must_not: [{ term: { [field]: "" } }]
     }
   }
+}
 
-  return { term: { upperOrgLv1 } }
+function buildOrgDistributionAgg(
+  selectedUpperOrgLv1: string | null,
+  metric: "pv" | "uv"
+): Record<string, unknown> {
+  const field = selectedUpperOrgLv1 !== null ? "upperOrgLv0" : "upperOrgLv1"
+  const terms: Record<string, unknown> = { field, size: 30, missing: "" }
+  const aggs = metric === "uv" ? { unique_users: { cardinality: { field: "sapId" } } } : undefined
+
+  if (metric === "uv") {
+    terms.order = { unique_users: "desc" }
+  }
+
+  const items = aggs ? { terms, aggs } : { terms }
+  const filters = [buildNonEmptyOrgLevelFilter(field)]
+  if (selectedUpperOrgLv1 !== null) {
+    filters.push(buildUpperOrgLv1Filter(selectedUpperOrgLv1))
+  }
+
+  return {
+    filter: { bool: { filter: filters } },
+    aggs: { items }
+  }
 }
 
 async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?: UserStatsOptions): Promise<unknown> {
   void granularity
-  const selectedUpperOrgLv1 = opts?.upperOrgLv1 ?? null
+  const selectedUpperOrgLv1 = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
+  const queryFilters = [timeRangeFilter("startedAt", range)]
+  if (selectedUpperOrgLv1 !== null) {
+    queryFilters.push(buildUpperOrgLv1Filter(selectedUpperOrgLv1))
+  }
+
   const body = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+    query: { bool: { filter: queryFilters } },
     aggs: {
       top_users: {
         terms: { field: "sapId", size: 50 },
         aggs: {
-          user_name: { terms: { field: "userName",  size: 1 } },
-          org_name:  { terms: { field: "orgName",   size: 1 } },
-          upper_org_lv1: { terms: { field: "upperOrgLv1", size: 1, missing: "" } }
-        }
-      },
-      by_org: selectedUpperOrgLv1 !== null
-        ? {
-            filter: buildUpperOrgLv1Filter(selectedUpperOrgLv1),
-            aggs: {
-              items: { terms: { field: "orgName", size: 30, missing: "" } }
+          latest_user_info: {
+            top_hits: {
+              size: 1,
+              sort: [{ startedAt: { order: "desc" } }],
+              _source: {
+                includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1", "appVersion", "startedAt"]
+              }
             }
           }
-        : {
-            terms: { field: "upperOrgLv1", size: 30, missing: "" }
-          },
+        }
+      },
+      by_org: buildOrgDistributionAgg(selectedUpperOrgLv1, "pv"),
+      by_org_pv: buildOrgDistributionAgg(selectedUpperOrgLv1, "pv"),
+      by_org_uv: buildOrgDistributionAgg(selectedUpperOrgLv1, "uv"),
       by_version: {
         terms: { field: "appVersion", size: 20 },
-        aggs: { unique_users: { cardinality: { field: "sapId" } } }
+        aggs: {
+          unique_users: { cardinality: { field: "sapId" } },
+          users: {
+            terms: { field: "sapId", size: 200 },
+            aggs: {
+              latest_user_info: {
+                top_hits: {
+                  size: 1,
+                  sort: [{ startedAt: { order: "desc" } }],
+                  _source: {
+                    includes: [
+                      "userName",
+                      "orgName",
+                      "upperOrgLv0",
+                      "upperOrgLv1",
+                      "appVersion",
+                      "startedAt"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
   return esQuery(getEsIndex("trace"), body)
+}
+
+function getLatestHitSource(bucket: Record<string, unknown>, aggName: string): Record<string, unknown> {
+  const agg = asRecord(bucket[aggName])
+  const hitsWrapper = asRecord(agg.hits)
+  const hits = hitsWrapper.hits
+  if (!Array.isArray(hits) || hits.length === 0) return {}
+  return asRecord(asRecord(hits[0])._source)
+}
+
+function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUserListItem {
+  const source = getLatestHitSource(bucket, "latest_user_info")
+  const key = asRecord(bucket.key)
+  const sapId = typeof bucket.key === "string" ? bucket.key : asString(key.sap_id, asString(source.sapId))
+  const totalInputTokens = asNumber(asRecord(bucket.total_input_tokens).value)
+  const totalOutputTokens = asNumber(asRecord(bucket.total_output_tokens).value)
+  const totalTokens = asNumber(
+    asRecord(bucket.total_tokens).value,
+    totalInputTokens + totalOutputTokens
+  )
+  return {
+    sapId,
+    ystId: asOptionalString(source.ystId),
+    userName: asString(source.userName, sapId || "unknown"),
+    orgName: asOptionalString(source.orgName),
+    upperOrgLv0: asOptionalString(source.upperOrgLv0),
+    upperOrgLv1: asOptionalString(source.upperOrgLv1),
+    count: asNumber(bucket.doc_count),
+    lastActiveAt: asOptionalString(source.startedAt),
+    avgDurationMs: asNumber(asRecord(bucket.avg_duration).value),
+    totalToolCalls: asNumber(asRecord(bucket.total_tool_calls).value),
+    totalInputTokens,
+    totalOutputTokens,
+    totalTokens
+  }
+}
+
+async function fetchUserList(range: TimeRange, options?: UserListOptions): Promise<DashboardUserListData> {
+  const { pageSize, afterKey, keyword } = normalizeUserListOptions(options)
+  const offsetValue = Number(afterKey?.offset ?? 0)
+  const offset = Number.isFinite(offsetValue) && offsetValue > 0 ? Math.floor(offsetValue) : 0
+  const aggregationSize = Math.min(offset + pageSize, 10_000)
+  const shardSize = Math.min(Math.max(aggregationSize * 3, 100), 50_000)
+  const filters = [timeRangeFilter("startedAt", range), buildNonEmptySapIdFilter()]
+  const searchFilter = buildUserListSearchFilter(keyword)
+  if (searchFilter) filters.push(searchFilter)
+
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: filters
+      }
+    },
+    aggs: {
+      total_active_users: { cardinality: { field: "sapId" } },
+      users: {
+        terms: {
+          field: "sapId",
+          size: aggregationSize,
+          shard_size: shardSize,
+          order: { _count: "desc" }
+        },
+        aggs: {
+          latest_user_info: {
+            top_hits: {
+              size: 1,
+              sort: [{ startedAt: { order: "desc" } }],
+              _source: {
+                includes: [
+                  "startedAt",
+                  "sapId",
+                  "ystId",
+                  "userName",
+                  "orgName",
+                  "upperOrgLv0",
+                  "upperOrgLv1"
+                ]
+              }
+            }
+          },
+          avg_duration: { avg: { field: "durationMs" } },
+          total_tool_calls: { sum: { field: "totalToolCalls" } },
+          total_input_tokens: { sum: { field: "totalInputTokens" } },
+          total_output_tokens: { sum: { field: "totalOutputTokens" } },
+          total_tokens: { sum: { field: "totalTokens" } }
+        }
+      }
+    }
+  }
+
+  const raw = asRecord(await esQuery(getEsIndex("trace"), body))
+  const aggs = asRecord(raw.aggregations)
+  const usersAgg = asRecord(aggs.users)
+  const allBuckets = Array.isArray(usersAgg.buckets) ? usersAgg.buckets : []
+  const buckets = allBuckets.slice(offset, offset + pageSize)
+  const totalActiveUsers = asNumber(asRecord(aggs.total_active_users).value)
+  const nextOffset = offset + pageSize
+  const hasMoreBuckets = asNumber(usersAgg.sum_other_doc_count) > 0
+  return {
+    items: buckets.map((bucket) => normalizeUserListBucket(asRecord(bucket))).filter((item) => item.sapId),
+    pageSize,
+    ...(hasMoreBuckets && nextOffset < 10_000 ? { nextAfterKey: { offset: nextOffset } } : {}),
+    totalActiveUsers
+  }
+}
+
+function normalizeTermsBucketList(
+  rawBuckets: unknown,
+  keyName: "skill" | "model" | "outcome"
+): Array<Record<typeof keyName, string> & { count: number }> {
+  if (!Array.isArray(rawBuckets)) return []
+  return rawBuckets.map((bucket) => {
+    const record = asRecord(bucket)
+    return {
+      [keyName]: asString(record.key, "unknown"),
+      count: asNumber(record.doc_count)
+    } as Record<typeof keyName, string> & { count: number }
+  })
+}
+
+async function fetchUserDetail(
+  sapId: string,
+  range: TimeRange,
+  options?: UserDetailOptions
+): Promise<DashboardUserDetail> {
+  const normalizedSapId = sapId.trim()
+  if (!normalizedSapId) throw new Error("sapId is required")
+  const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
+  const tracePage = clampLimit(options?.tracePage, 1, 1000)
+  const body = {
+    track_total_hits: true,
+    from: (tracePage - 1) * tracePageSize,
+    size: tracePageSize,
+    sort: [{ startedAt: { order: "desc" } }],
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("startedAt", range),
+          { term: { sapId: normalizedSapId } }
+        ]
+      }
+    },
+    aggs: {
+      latest_user_info: {
+        top_hits: {
+          size: 1,
+          sort: [{ startedAt: { order: "desc" } }],
+          _source: {
+            includes: ["sapId", "ystId", "userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+          }
+        }
+      },
+      avg_duration: { avg: { field: "durationMs" } },
+      total_tool_calls: { sum: { field: "totalToolCalls" } },
+      total_input_tokens: { sum: { field: "totalInputTokens" } },
+      total_output_tokens: { sum: { field: "totalOutputTokens" } },
+      total_tokens: { sum: { field: "totalTokens" } },
+      by_skill: { terms: { field: "usedSkills", size: 10 } },
+      by_model: { terms: { field: "modelName", size: 10 } },
+      by_outcome: { terms: { field: "outcome", size: 10 } }
+    },
+    _source: {
+      includes: [
+        "_raw",
+        "traceId",
+        "threadId",
+        "startedAt",
+        "endedAt",
+        "durationMs",
+        "userMessage",
+        "sapId",
+        "ystId",
+        "userName",
+        "orgName",
+        "userIp",
+        "modelId",
+        "modelName",
+        "outcome",
+        "totalToolCalls",
+        "totalInputTokens",
+        "totalOutputTokens",
+        "totalTokens",
+        "usedSkills"
+      ]
+    }
+  }
+
+  const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
+  const rawRecord = asRecord(raw)
+  const aggs = asRecord(rawRecord.aggregations)
+  const userInfo = getLatestHitSource(aggs, "latest_user_info")
+  const totalInputTokens = asNumber(asRecord(aggs.total_input_tokens).value)
+  const totalOutputTokens = asNumber(asRecord(aggs.total_output_tokens).value)
+  const totalTokens = asNumber(asRecord(aggs.total_tokens).value, totalInputTokens + totalOutputTokens)
+  const totalTraces = getTotalHits(raw, raw.hits?.hits?.length ?? 0)
+
+  return {
+    sapId: asString(userInfo.sapId, normalizedSapId),
+    ystId: asOptionalString(userInfo.ystId),
+    userName: asString(userInfo.userName, normalizedSapId),
+    orgName: asOptionalString(userInfo.orgName),
+    upperOrgLv0: asOptionalString(userInfo.upperOrgLv0),
+    upperOrgLv1: asOptionalString(userInfo.upperOrgLv1),
+    totalCalls: totalTraces,
+    avgDurationMs: asNumber(asRecord(aggs.avg_duration).value),
+    totalToolCalls: asNumber(asRecord(aggs.total_tool_calls).value),
+    totalInputTokens,
+    totalOutputTokens,
+    totalTokens,
+    bySkill: normalizeTermsBucketList(asRecord(aggs.by_skill).buckets, "skill") as DashboardUserDetail["bySkill"],
+    byModel: normalizeTermsBucketList(asRecord(aggs.by_model).buckets, "model") as DashboardUserDetail["byModel"],
+    byOutcome: normalizeTermsBucketList(asRecord(aggs.by_outcome).buckets, "outcome") as DashboardUserDetail["byOutcome"],
+    traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
+    tracePage,
+    tracePageSize,
+    totalTraces
+  }
 }
 
 async function fetchSkillUsageSummary(
@@ -676,6 +1447,15 @@ async function fetchSkillUserStats(
       top_users: {
         terms: { field: "ystId", size: 100 },
         aggs: {
+          latest_user_info: {
+            top_hits: {
+              size: 1,
+              sort: [{ startedAt: { order: "desc" } }],
+              _source: {
+                includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+              }
+            }
+          },
           user_name: { terms: { field: "userName", size: 1 } },
           org_name: { terms: { field: "orgName", size: 1 } }
         }
@@ -734,6 +1514,15 @@ async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
           size: Math.min(Math.max(sanitizedSapIds.length * 5, 100), 2000)
         },
         aggs: {
+          latest_user_info: {
+            top_hits: {
+              size: 1,
+              sort: [{ startedAt: { order: "desc" } }],
+              _source: {
+                includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+              }
+            }
+          },
           user_name: { terms: { field: "userName", size: 1 } },
           org_name: { terms: { field: "orgName", size: 1 } }
         }
@@ -741,6 +1530,86 @@ async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
     }
   }
   return esQuery(getEsIndex("trace"), body)
+}
+
+async function queryAllUser(): Promise<DashboardAllUserItem[]> {
+  const users: DashboardAllUserItem[] = []
+  let afterKey: Record<string, string> | undefined
+
+  do {
+    const body = {
+      size: 0,
+      query: {
+        bool: {
+          filter: [buildNonEmptySapIdFilter()]
+        }
+      },
+      aggs: {
+        by_sap: {
+          composite: {
+            size: 1000,
+            sources: [{ sapId: { terms: { field: "sapId" } } }],
+            ...(afterKey ? { after: afterKey } : {})
+          },
+          aggs: {
+            latest_user_info: {
+              top_hits: {
+                size: 1,
+                sort: [{ startedAt: { order: "desc" } }],
+                _source: {
+                  includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+                }
+              }
+            },
+            user_name: { terms: { field: "userName", size: 1 } },
+            org_name: { terms: { field: "orgName", size: 1 } }
+          }
+        }
+      }
+    }
+
+    const response = (await esQuery(getEsIndex("trace"), body)) as {
+      aggregations?: {
+        by_sap?: {
+          after_key?: Record<string, string>
+          buckets?: Array<{
+            key?: { sapId?: string }
+            user_name?: { buckets?: Array<{ key?: string }> }
+            org_name?: { buckets?: Array<{ key?: string }> }
+            latest_user_info?: {
+              hits?: {
+                hits?: Array<{
+                  _source?: {
+                    userName?: string
+                    orgName?: string
+                    upperOrgLv0?: string
+                    upperOrgLv1?: string
+                  }
+                }>
+              }
+            }
+          }>
+        }
+      }
+    }
+
+    for (const bucket of response.aggregations?.by_sap?.buckets ?? []) {
+      const sapId = String(bucket.key?.sapId || "").trim()
+      if (!sapId) continue
+      const latestUserInfo = bucket.latest_user_info?.hits?.hits?.[0]?._source
+      users.push({
+        sapId,
+        userName: latestUserInfo?.userName ?? bucket.user_name?.buckets?.[0]?.key ?? "",
+        orgName: latestUserInfo?.orgName ?? bucket.org_name?.buckets?.[0]?.key ?? "",
+        upperOrgLv0: latestUserInfo?.upperOrgLv0 ?? "",
+        upperOrgLv1: latestUserInfo?.upperOrgLv1 ?? ""
+      })
+    }
+
+    afterKey = response.aggregations?.by_sap?.after_key
+  } while (afterKey)
+
+  return users
 }
 
 async function fetchProductivity(range: TimeRange, granularity: Granularity): Promise<unknown> {
@@ -878,17 +1747,21 @@ async function fetchFeedback(range: TimeRange, granularity: Granularity): Promis
 async function fetchSkillRecentTraces(
   skill: string,
   range: TimeRange,
-  limit = 10
-): Promise<DashboardTraceDetail[]> {
-  const size = clampLimit(limit, 10, 10)
+  limit = 10,
+  page = 1
+): Promise<{ traces: DashboardTraceDetail[]; total: number; page: number; pageSize: number }> {
+  const size = clampLimit(limit, 10, 50)
+  const currentPage = clampLimit(page, 1, 1000)
   const body = {
+    track_total_hits: true,
+    from: (currentPage - 1) * size,
     size,
     sort: [{ startedAt: { order: "desc" } }],
     query: {
       bool: {
         filter: [
           timeRangeFilter("startedAt", range),
-          { term: { usedSkills: skill } }
+          buildSkillUsageWildcardFilter(skill)
         ]
       }
     },
@@ -901,6 +1774,11 @@ async function fetchSkillRecentTraces(
         "endedAt",
         "durationMs",
         "userMessage",
+        "sapId",
+        "ystId",
+        "userName",
+        "orgName",
+        "userIp",
         "modelId",
         "modelName",
         "outcome",
@@ -913,24 +1791,111 @@ async function fetchSkillRecentTraces(
     }
   }
   const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
-  return (raw.hits?.hits ?? []).map(normalizeTraceDetail)
+  return {
+    traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
+    total: getTotalHits(raw, raw.hits?.hits?.length ?? 0),
+    page: currentPage,
+    pageSize: size
+  }
+}
+
+async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<DashboardCodeStats> {
+  const skillTerms = getSkillIdentifierLookupTerms(skill)
+  const codeGenFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_gen" } },
+    timeRangeFilter("eventTime", range),
+    { terms: { "properties.usedSkills": skillTerms } }
+  ]
+  const codeAdoptFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_adopt" } },
+    { exists: { field: "properties.adoptedLineCount" } },
+    { exists: { field: "properties.generatedLineCount" } },
+    { exists: { field: "properties.effectiveGeneratedLineCount" } },
+    timeRangeFilter("properties.generatedAt", range),
+    { terms: { "properties.usedSkills": skillTerms } }
+  ]
+  const codeAdoptPushedFilters: Record<string, unknown>[] = [
+    ...codeAdoptFilters,
+    { term: { "properties.pushed": true } }
+  ]
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        should: [
+          { bool: { filter: codeGenFilters } },
+          { bool: { filter: codeAdoptFilters } }
+        ],
+        minimum_should_match: 1
+      }
+    },
+    aggs: {
+      code_gen: {
+        filter: { bool: { filter: codeGenFilters } },
+        aggs: {
+          generated_lines: { sum: { field: "properties.lineCount" } },
+          deleted_lines: { sum: { field: "properties.deletedLineCount" } }
+        }
+      },
+      code_adopt_measured: {
+        filter: { bool: { filter: codeAdoptFilters } },
+        aggs: {
+          measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+          effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+          adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
+        }
+      },
+      code_adopt_pushed: {
+        filter: { bool: { filter: codeAdoptPushedFilters } },
+        aggs: codeAdoptPushedAggs()
+      }
+    }
+  }
+  const raw = await esQuery(getEsIndex("event"), body)
+  return normalizeCodeStatsFromAggs(raw)
+}
+
+async function fetchSkillDetail(
+  skill: string,
+  range: TimeRange,
+  options?: number | TracePageOptions
+): Promise<DashboardSkillDetail> {
+  const pageOptions = typeof options === "number" ? { limit: options } : options
+  const tracePageSize = clampLimit(pageOptions?.pageSize ?? pageOptions?.limit, 10, 50)
+  const tracePage = clampLimit(pageOptions?.page, 1, 1000)
+  const [stats, tracePageData] = await Promise.all([
+    fetchSkillCodeStats(skill, range),
+    fetchSkillRecentTraces(skill, range, tracePageSize, tracePage)
+  ])
+  return {
+    stats,
+    traces: tracePageData.traces,
+    tracePage: tracePageData.page,
+    tracePageSize: tracePageData.pageSize,
+    totalTraces: tracePageData.total
+  }
 }
 
 async function fetchCommitDetails(
   range: TimeRange,
-  limit = 50
-): Promise<{ total: number; items: DashboardCommitDetail[] }> {
-  const size = clampLimit(limit, 50, 500)
+  options?: number | CommitDetailsOptions
+): Promise<{ total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }> {
+  const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
+  const filters: Record<string, unknown>[] = [
+    timeRangeFilter("eventTime", range),
+    { term: { eventName: "git.commit.created" } }
+  ]
+  if (pushedOnly) {
+    filters.push({ term: { "properties.pushed": true } })
+  }
   const body = {
     track_total_hits: true,
-    size,
+    from: (page - 1) * pageSize,
+    size: pageSize,
     sort: [{ eventTime: { order: "desc" } }],
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("eventTime", range),
-          { term: { eventName: "git.commit.created" } }
-        ]
+        filter: filters
       }
     },
     _source: {
@@ -944,6 +1909,13 @@ async function fetchCommitDetails(
         "ystId",
         "orgName",
         "properties.repoPath",
+        "properties.repositoryName",
+        "properties.repositoryFullName",
+        "properties.repositoryWebUrl",
+        "properties.commitSha",
+        "properties.commitUrl",
+        "properties.pushed",
+        "properties.pushedAt",
         "properties.branch",
         "properties.filesChanged",
         "properties.insertions",
@@ -957,9 +1929,23 @@ async function fetchCommitDetails(
   }
   const raw = await esQuery(getEsIndex("event"), body) as EsSearchResponse
   const hits = raw.hits?.hits ?? []
+  const items = hits.map(normalizeCommitDetail)
+  const adoptedSkillMap = await fetchCommitAdoptedSkillMap(
+    items.map((item) => item.commitSha ?? "").filter(Boolean)
+  )
   return {
     total: getTotalHits(raw, hits.length),
-    items: hits.map(normalizeCommitDetail)
+    page,
+    pageSize,
+    pushedOnly,
+    items: items.map((item) => {
+      const adoptedSkills = item.commitSha ? adoptedSkillMap.get(item.commitSha) ?? [] : []
+      return {
+        ...item,
+        usedSkills: adoptedSkills,
+        skillCount: adoptedSkills.length
+      }
+    })
   }
 }
 
@@ -1018,6 +2004,17 @@ function makeMockOverview(range: TimeRange): unknown {
       total_tools: { value: 27 },
       total_skill_calls: { value: 2022 },
       total_tool_calls: { value: 6538 },
+      code_generated_lines: { value: 4820 },
+      code_deleted_lines: { value: 930 },
+      code_measured_generated_lines: { value: 3900 },
+      code_effective_generated_lines: { value: 3720 },
+      code_unmeasured_generated_lines: { value: 920 },
+      code_inclusive_effective_generated_lines: { value: 4640 },
+      code_adopted_lines: { value: 2860 },
+      code_pushed_measured_generated_lines: { value: 2500 },
+      code_pushed_effective_generated_lines: { value: 2360 },
+      code_pushed_adopted_lines: { value: 1880 },
+      code_pushed_commit_count: { value: 21 },
       by_skill: {
         buckets: [
           { key: "代码审查",     doc_count: 312 },
@@ -1025,6 +2022,7 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "文档生成",     doc_count: 245 },
           { key: "单元测试",     doc_count: 198 },
           { key: "SQL优化",      doc_count: 167 },
+          { key: "plugin-release-note-v1.0.0", doc_count: 156 },
           { key: "接口设计",     doc_count: 143 },
           { key: "日志分析",     doc_count: 121 },
           { key: "数据清洗",     doc_count: 98  },
@@ -1040,6 +2038,125 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "埋点分析",     doc_count: 18  },
           { key: "前端走查",     doc_count: 13  },
           { key: "脚本生成",     doc_count: 9   }
+        ]
+      },
+      by_skill_all: {
+        buckets: [
+          { key: "代码审查",     doc_count: 312 },
+          { key: "需求分析",     doc_count: 278 },
+          { key: "文档生成",     doc_count: 245 },
+          { key: "单元测试",     doc_count: 198 },
+          { key: "SQL优化",      doc_count: 167 },
+          { key: "plugin-release-note-v1.0.0", doc_count: 156 },
+          { key: "接口设计",     doc_count: 143 },
+          { key: "日志分析",     doc_count: 121 },
+          { key: "数据清洗",     doc_count: 98  },
+          { key: "性能诊断",     doc_count: 87  },
+          { key: "安全扫描",     doc_count: 62  },
+          { key: "代码重构",     doc_count: 54  },
+          { key: "异常排查",     doc_count: 49  },
+          { key: "接口联调",     doc_count: 44  },
+          { key: "依赖升级",     doc_count: 38  },
+          { key: "配置检查",     doc_count: 33  },
+          { key: "发布诊断",     doc_count: 29  },
+          { key: "性能优化",     doc_count: 24  },
+          { key: "埋点分析",     doc_count: 18  },
+          { key: "前端走查",     doc_count: 13  },
+          { key: "脚本生成",     doc_count: 9   },
+          { key: "冒烟测试",     doc_count: 8   },
+          { key: "链路排查",     doc_count: 7   },
+          { key: "Schema 校验",  doc_count: 6   },
+          { key: "接口 Mock",    doc_count: 5   },
+          { key: "灰度检查",     doc_count: 4   }
+        ]
+      },
+      code_by_skill_adoption: {
+        buckets: [
+          {
+            key: "代码审查",
+            generated_lines: { value: 850 },
+            measured_generated_lines: { value: 760 },
+            effective_generated_lines: { value: 700 },
+            unmeasured_generated_lines: { value: 90 },
+            inclusive_effective_generated_lines: { value: 790 },
+            adopted_lines: { value: 511 },
+            measured_adoption_rate: { value: 511 / 700 },
+            inclusive_adoption_rate: { value: 511 / 790 },
+            pushed_measured_generated_lines: { value: 520 },
+            pushed_effective_generated_lines: { value: 490 },
+            pushed_adopted_lines: { value: 380 },
+            pushed_adoption_rate: { value: 380 / 490 },
+            pushed_commit_count: { value: 8 },
+            commit_count: { value: 18 }
+          },
+          {
+            key: "单元测试",
+            generated_lines: { value: 620 },
+            measured_generated_lines: { value: 620 },
+            effective_generated_lines: { value: 560 },
+            unmeasured_generated_lines: { value: 0 },
+            inclusive_effective_generated_lines: { value: 560 },
+            adopted_lines: { value: 470 },
+            measured_adoption_rate: { value: 470 / 560 },
+            inclusive_adoption_rate: { value: 470 / 560 },
+            pushed_measured_generated_lines: { value: 420 },
+            pushed_effective_generated_lines: { value: 380 },
+            pushed_adopted_lines: { value: 340 },
+            pushed_adoption_rate: { value: 340 / 380 },
+            pushed_commit_count: { value: 6 },
+            commit_count: { value: 12 }
+          },
+          {
+            key: "SQL优化",
+            generated_lines: { value: 460 },
+            measured_generated_lines: { value: 360 },
+            effective_generated_lines: { value: 330 },
+            unmeasured_generated_lines: { value: 100 },
+            inclusive_effective_generated_lines: { value: 430 },
+            adopted_lines: { value: 260 },
+            measured_adoption_rate: { value: 260 / 330 },
+            inclusive_adoption_rate: { value: 260 / 430 },
+            pushed_measured_generated_lines: { value: 200 },
+            pushed_effective_generated_lines: { value: 180 },
+            pushed_adopted_lines: { value: 140 },
+            pushed_adoption_rate: { value: 140 / 180 },
+            pushed_commit_count: { value: 3 },
+            commit_count: { value: 7 }
+          },
+          {
+            key: "plugin-release-note-v1.0.0",
+            generated_lines: { value: 410 },
+            measured_generated_lines: { value: 360 },
+            effective_generated_lines: { value: 340 },
+            unmeasured_generated_lines: { value: 50 },
+            inclusive_effective_generated_lines: { value: 390 },
+            adopted_lines: { value: 255 },
+            measured_adoption_rate: { value: 255 / 340 },
+            inclusive_adoption_rate: { value: 255 / 390 },
+            pushed_measured_generated_lines: { value: 260 },
+            pushed_effective_generated_lines: { value: 245 },
+            pushed_adopted_lines: { value: 180 },
+            pushed_adoption_rate: { value: 180 / 245 },
+            pushed_commit_count: { value: 4 },
+            commit_count: { value: 9 }
+          },
+          {
+            key: "接口设计",
+            generated_lines: { value: 380 },
+            measured_generated_lines: { value: 0 },
+            effective_generated_lines: { value: 0 },
+            unmeasured_generated_lines: { value: 380 },
+            inclusive_effective_generated_lines: { value: 380 },
+            adopted_lines: { value: 0 },
+            measured_adoption_rate: { value: null },
+            inclusive_adoption_rate: { value: 0 },
+            pushed_measured_generated_lines: { value: 0 },
+            pushed_effective_generated_lines: { value: 0 },
+            pushed_adopted_lines: { value: 0 },
+            pushed_adoption_rate: { value: null },
+            pushed_commit_count: { value: 0 },
+            commit_count: { value: 0 }
+          }
         ]
       },
       by_tool: {
@@ -1066,6 +2183,33 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "ticket_update",      doc_count: 12  }
         ]
       },
+      by_tool_filtered_all: {
+        buckets: [
+          { key: "git_workflow",       doc_count: 412 },
+          { key: "browser_playwright", doc_count: 356 },
+          { key: "manage_skill",       doc_count: 298 },
+          { key: "manage_scheduler",   doc_count: 241 },
+          { key: "web_search",         doc_count: 198 },
+          { key: "db_query",           doc_count: 163 },
+          { key: "create_pr",          doc_count: 134 },
+          { key: "run_tests",          doc_count: 112 },
+          { key: "search_code",        doc_count: 98  },
+          { key: "notify",             doc_count: 76  },
+          { key: "query_logs",         doc_count: 68  },
+          { key: "schema_check",       doc_count: 59  },
+          { key: "open_preview",       doc_count: 53  },
+          { key: "analyze_diff",       doc_count: 47  },
+          { key: "format_code",        doc_count: 42  },
+          { key: "lint_fix",           doc_count: 36  },
+          { key: "dependency_audit",   doc_count: 31  },
+          { key: "deploy_check",       doc_count: 26  },
+          { key: "trace_lookup",       doc_count: 19  },
+          { key: "ticket_update",      doc_count: 12  },
+          { key: "mcp_sqlQuery",       doc_count: 11  },
+          { key: "browser_visualDiff", doc_count: 9   },
+          { key: "workflow_template",  doc_count: 7   }
+        ]
+      },
       by_tool_all: {
         buckets: [
           { key: "read_file",          doc_count: 1823 },
@@ -1088,6 +2232,35 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "run_tests",          doc_count: 112  },
           { key: "search_code",        doc_count: 98   },
           { key: "code_exec",          doc_count: 92   }
+        ]
+      },
+      by_tool_all_full: {
+        buckets: [
+          { key: "read_file",                  doc_count: 1823 },
+          { key: "write_file",                 doc_count: 1245 },
+          { key: "execute",                    doc_count: 987  },
+          { key: "grep",                       doc_count: 876  },
+          { key: "glob",                       doc_count: 654  },
+          { key: "git_workflow",               doc_count: 412  },
+          { key: "browser_playwright",         doc_count: 356  },
+          { key: "manage_skill",               doc_count: 298  },
+          { key: "edit_file",                  doc_count: 267  },
+          { key: "manage_scheduler",           doc_count: 241  },
+          { key: "web_search",                 doc_count: 198  },
+          { key: "list_directory",             doc_count: 187  },
+          { key: "db_query",                   doc_count: 163  },
+          { key: "task",                       doc_count: 156  },
+          { key: "task_output",                doc_count: 148  },
+          { key: "create_pr",                  doc_count: 134  },
+          { key: "search_tool",                doc_count: 128  },
+          { key: "run_tests",                  doc_count: 112  },
+          { key: "search_code",                doc_count: 98   },
+          { key: "code_exec",                  doc_count: 92   },
+          { key: "prepare_save_code_exec_tool",doc_count: 81   },
+          { key: "notify",                     doc_count: 76   },
+          { key: "query_logs",                 doc_count: 68   },
+          { key: "schema_check",               doc_count: 59   },
+          { key: "open_preview",               doc_count: 53   }
         ]
       },
       trend: { buckets: trend }
@@ -1128,7 +2301,7 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
   const to = new Date(range.to)
   const diffMs = to.getTime() - from.getTime()
   const diffDays = diffMs / (1000 * 60 * 60 * 24)
-  const selectedUpperOrgLv1 = opts?.upperOrgLv1 ?? null
+  const selectedUpperOrgLv1 = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
 
   const trendBuckets: Date[] = []
   if (diffDays <= 1) {
@@ -1148,58 +2321,67 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
 
   const byOrgBuckets = selectedUpperOrgLv1 === null
     ? [
-        { key: "零售金融", doc_count: 748 },
-        { key: "公司金融", doc_count: 245 },
-        { key: "风险管理", doc_count: 189 },
-        { key: "科技管理", doc_count: 65 }
+        { key: "测试 1 部", doc_count: 748, unique_users: { value: 60 } },
+        { key: "开发二部", doc_count: 245, unique_users: { value: 20 } },
+        { key: "平台三部", doc_count: 189, unique_users: { value: 15 } }
       ]
-    : selectedUpperOrgLv1 === "零售金融"
+    : selectedUpperOrgLv1 === "测试 1 部"
       ? [
-          { key: "零售一部", doc_count: 430 },
-          { key: "零售二部", doc_count: 318 }
+          { key: "测试 1 组", doc_count: 430, unique_users: { value: 36 } },
+          { key: "测试 2 组", doc_count: 318, unique_users: { value: 24 } }
         ]
-      : selectedUpperOrgLv1 === "公司金融"
+      : selectedUpperOrgLv1 === "开发二部"
         ? [
-            { key: "企业金融部", doc_count: 245 }
+            { key: "开发三组", doc_count: 245, unique_users: { value: 20 } }
           ]
-        : selectedUpperOrgLv1 === "风险管理"
+        : selectedUpperOrgLv1 === "平台三部"
           ? [
-              { key: "风险管理部", doc_count: 189 }
+              { key: "平台一组", doc_count: 189, unique_users: { value: 15 } }
             ]
-          : selectedUpperOrgLv1 === "科技管理"
-            ? [
-                { key: "科技部", doc_count: 65 }
-              ]
-            : []
+          : []
+
+  const makeOrgAgg = (buckets: typeof byOrgBuckets): Record<string, unknown> => {
+    const docCount = buckets.reduce((sum, bucket) => sum + bucket.doc_count, 0)
+    return { doc_count: docCount, items: { buckets } }
+  }
+  const byOrgPv = makeOrgAgg(byOrgBuckets)
+  const byOrgUv = makeOrgAgg(byOrgBuckets)
+
+  const allTopUserBuckets = [
+    { key: "10010001", doc_count: 142, latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "张三", orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组", appVersion: "1.3.0" } }] } } },
+    { key: "10010002", doc_count: 118, latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "李四", orgName: "测试 2 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 2 组", appVersion: "1.2.5" } }] } } },
+    { key: "10010003", doc_count: 97,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "王五", orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组", appVersion: "1.3.0" } }] } } },
+    { key: "10010004", doc_count: 85,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "赵六", orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组", appVersion: "1.2.0" } }] } } },
+    { key: "10010005", doc_count: 73,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "钱七", orgName: "平台一组", upperOrgLv1: "平台三部", upperOrgLv0: "平台一组", appVersion: "1.3.0" } }] } } },
+    { key: "10010006", doc_count: 61,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "孙八", orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组", appVersion: "1.1.8" } }] } } }
+  ]
+  const topUserBuckets = selectedUpperOrgLv1 === null
+    ? allTopUserBuckets
+    : allTopUserBuckets.filter((bucket) => bucket.latest_user_info.hits.hits[0]._source.upperOrgLv1 === selectedUpperOrgLv1)
+
+  const byVersionBuckets = selectedUpperOrgLv1 === null
+    ? [
+        { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
+        { key: "1.2.5", doc_count: 298, unique_users: { value: 62 } },
+        { key: "1.2.0", doc_count: 187, unique_users: { value: 41 } },
+        { key: "1.1.x", doc_count: 143, unique_users: { value: 28 } },
+        { key: "1.0.x", doc_count: 107, unique_users: { value: 19 } }
+      ]
+    : [
+        { key: "1.3.0", doc_count: Math.max(12, byOrgBuckets[0]?.doc_count ?? 0), unique_users: { value: Math.max(3, topUserBuckets.length) } },
+        { key: "1.2.5", doc_count: Math.max(6, Math.floor((byOrgBuckets[1]?.doc_count ?? byOrgBuckets[0]?.doc_count ?? 0) * 0.4)), unique_users: { value: Math.max(1, Math.ceil(topUserBuckets.length / 2)) } }
+      ]
 
   return {
     aggregations: {
       top_users: {
-        buckets: [
-          { key: "10010001", doc_count: 142, user_name: { buckets: [{ key: "张三", doc_count: 142 }] }, org_name: { buckets: [{ key: "零售一部", doc_count: 142 }] }, upper_org_lv1: { buckets: [{ key: "零售金融", doc_count: 142 }] }, success_count: { doc_count: 130 } },
-          { key: "10010002", doc_count: 118, user_name: { buckets: [{ key: "李四", doc_count: 118 }] }, org_name: { buckets: [{ key: "零售二部", doc_count: 118 }] }, upper_org_lv1: { buckets: [{ key: "零售金融", doc_count: 118 }] }, success_count: { doc_count: 110 } },
-          { key: "10010003", doc_count: 97,  user_name: { buckets: [{ key: "王五", doc_count: 97  }] }, org_name: { buckets: [{ key: "企业金融部", doc_count: 97  }] }, upper_org_lv1: { buckets: [{ key: "公司金融", doc_count: 97 }] }, success_count: { doc_count: 89  } },
-          { key: "10010004", doc_count: 85,  user_name: { buckets: [{ key: "赵六", doc_count: 85  }] }, org_name: { buckets: [{ key: "零售一部", doc_count: 85  }] }, upper_org_lv1: { buckets: [{ key: "零售金融", doc_count: 85 }] }, success_count: { doc_count: 72  } },
-          { key: "10010005", doc_count: 73,  user_name: { buckets: [{ key: "钱七", doc_count: 73  }] }, org_name: { buckets: [{ key: "风险管理部", doc_count: 73  }] }, upper_org_lv1: { buckets: [{ key: "风险管理", doc_count: 73 }] }, success_count: { doc_count: 68  } },
-          { key: "10010006", doc_count: 61,  user_name: { buckets: [{ key: "孙八", doc_count: 61  }] }, org_name: { buckets: [{ key: "科技部",    doc_count: 61  }] }, upper_org_lv1: { buckets: [{ key: "科技管理", doc_count: 61 }] }, success_count: { doc_count: 55  } }
-        ]
+        buckets: topUserBuckets
       },
-      by_org: selectedUpperOrgLv1 === null
-        ? {
-            buckets: byOrgBuckets
-          }
-        : {
-            doc_count: byOrgBuckets.reduce((sum, bucket) => sum + bucket.doc_count, 0),
-            items: { buckets: byOrgBuckets }
-          },
+      by_org: byOrgPv,
+      by_org_pv: byOrgPv,
+      by_org_uv: byOrgUv,
       by_version: {
-        buckets: [
-          { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
-          { key: "1.2.5", doc_count: 298, unique_users: { value: 62 } },
-          { key: "1.2.0", doc_count: 187, unique_users: { value: 41 } },
-          { key: "1.1.x", doc_count: 143, unique_users: { value: 28 } },
-          { key: "1.0.x", doc_count: 107, unique_users: { value: 19 } }
-        ]
+        buckets: byVersionBuckets
       },
       user_trend: { buckets: trend }
     }
@@ -1266,6 +2448,18 @@ function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
           key: string
           user_name?: { buckets?: Array<{ key: string }> }
           org_name?: { buckets?: Array<{ key: string }> }
+          latest_user_info?: {
+            hits?: {
+              hits?: Array<{
+                _source?: {
+                  userName?: string
+                  orgName?: string
+                  upperOrgLv0?: string
+                  upperOrgLv1?: string
+                }
+              }>
+            }
+          }
         }>
       }
     }
@@ -1273,13 +2467,18 @@ function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
 
   const fallbackBuckets = userStats.aggregations?.top_users?.buckets ?? []
   const fallbackMap = new Map(
-    fallbackBuckets.map((bucket) => [
-      bucket.key,
-      {
-        userName: bucket.user_name?.buckets?.[0]?.key ?? bucket.key,
-        orgName: bucket.org_name?.buckets?.[0]?.key ?? ""
-      }
-    ])
+    fallbackBuckets.map((bucket) => {
+      const latestUserInfo = bucket.latest_user_info?.hits?.hits?.[0]?._source
+      return [
+        bucket.key,
+        {
+          userName: latestUserInfo?.userName ?? bucket.user_name?.buckets?.[0]?.key ?? bucket.key,
+          orgName: latestUserInfo?.orgName ?? bucket.org_name?.buckets?.[0]?.key ?? "",
+          upperOrgLv0: latestUserInfo?.upperOrgLv0 ?? "",
+          upperOrgLv1: latestUserInfo?.upperOrgLv1 ?? ""
+        }
+      ]
+    })
   )
 
   const buckets = Array.from(
@@ -1293,6 +2492,20 @@ function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
     return {
       key: sapId,
       doc_count: 1,
+      latest_user_info: {
+        hits: {
+          hits: [
+            {
+              _source: {
+                userName: fallback?.userName ?? `用户${sapId.slice(-4)}`,
+                orgName: fallback?.orgName ?? "未知部门",
+                upperOrgLv0: fallback?.upperOrgLv0 ?? "",
+                upperOrgLv1: fallback?.upperOrgLv1 ?? ""
+              }
+            }
+          ]
+        }
+      },
       user_name: { buckets: [{ key: fallback?.userName ?? `用户${sapId.slice(-4)}` }] },
       org_name: { buckets: [{ key: fallback?.orgName ?? "未知部门" }] }
     }
@@ -1302,6 +2515,132 @@ function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
     aggregations: {
       by_sap: { buckets }
     }
+  }
+}
+
+function makeMockAllUsers(): DashboardAllUserItem[] {
+  return Array.from({ length: 80 }, (_, index) => {
+    const user = makeMockDashboardUser(index)
+    return {
+      sapId: user.sapId,
+      userName: user.userName,
+      orgName: user.orgName || "",
+      upperOrgLv0: user.upperOrgLv0 || "",
+      upperOrgLv1: user.upperOrgLv1 || ""
+    }
+  })
+}
+
+function makeMockDashboardUser(index: number): DashboardUserListItem {
+  const names = ["张三", "李四", "王五", "赵六", "钱七", "孙八", "周九", "吴十"]
+  const orgs = [
+    { orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组" },
+    { orgName: "测试 2 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 2 组" },
+    { orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组" },
+    { orgName: "平台一组", upperOrgLv1: "平台三部", upperOrgLv0: "平台一组" }
+  ]
+  const org = orgs[index % orgs.length]
+  const count = Math.max(3, 150 - index * 3)
+  const totalInputTokens = count * (820 + (index % 7) * 120)
+  const totalOutputTokens = count * (240 + (index % 5) * 80)
+  return {
+    sapId: `10010${String(index + 1).padStart(3, "0")}`,
+    ystId: `2743${String(index + 1).padStart(3, "0")}`,
+    userName: names[index % names.length],
+    ...org,
+    count,
+    lastActiveAt: new Date(Date.now() - index * 42 * 60 * 1000).toISOString(),
+    avgDurationMs: 4200 + (index % 9) * 650,
+    totalToolCalls: count * (2 + (index % 4)),
+    totalInputTokens,
+    totalOutputTokens,
+    totalTokens: totalInputTokens + totalOutputTokens
+  }
+}
+
+function makeMockUserList(_range: TimeRange, options?: UserListOptions): DashboardUserListData {
+  const { pageSize, afterKey, keyword } = normalizeUserListOptions(options)
+  const normalizedKeyword = keyword.toLowerCase()
+  const allUsers = Array.from({ length: 64 }, (_, index) => makeMockDashboardUser(index)).filter((user) => {
+    if (!normalizedKeyword) return true
+    return [user.userName, user.ystId, user.sapId].some((value) =>
+      String(value || "").toLowerCase().includes(normalizedKeyword)
+    )
+  })
+  const afterOffset = Number(afterKey?.offset ?? 0)
+  const afterSapId = typeof afterKey?.sap_id === "string" ? afterKey.sap_id : ""
+  const startIndex = Number.isFinite(afterOffset) && afterOffset > 0
+    ? Math.floor(afterOffset)
+    : afterSapId
+    ? Math.max(0, allUsers.findIndex((item) => item.sapId === afterSapId) + 1)
+    : 0
+  const items = allUsers.slice(startIndex, startIndex + pageSize)
+  const hasNext = startIndex + pageSize < allUsers.length
+  return {
+    items,
+    pageSize,
+    ...(hasNext ? { nextAfterKey: { offset: startIndex + pageSize } } : {}),
+    totalActiveUsers: allUsers.length
+  }
+}
+
+function makeMockUserDetail(sapId: string, range: TimeRange, options?: UserDetailOptions): DashboardUserDetail {
+  const index = Math.max(0, Number(sapId.slice(-3)) - 1)
+  const user = makeMockDashboardUser(Number.isFinite(index) ? index : 0)
+  const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
+  const tracePage = clampLimit(options?.tracePage, 1, 1000)
+  const totalTraces = user.count
+  const startIndex = (tracePage - 1) * tracePageSize
+  const baseTraces = makeMockSkillRecentTraces("代码审查", range, 10)
+  const traces = Array.from(
+    { length: Math.max(0, Math.min(tracePageSize, totalTraces - startIndex)) },
+    (_, traceIndex) => {
+      const trace = baseTraces[traceIndex % baseTraces.length]
+      const mockIndex = startIndex + traceIndex
+      return {
+        ...trace,
+        traceId: `${trace.traceId}-page-${tracePage}-${traceIndex}`,
+        sapId,
+        ystId: user.ystId,
+        userName: user.userName,
+        orgName: user.orgName,
+        userIp: `10.0.1.${20 + (mockIndex % 200)}`,
+        startedAt: new Date(new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000).toISOString()
+      }
+    }
+  )
+  return {
+    sapId,
+    ystId: user.ystId,
+    userName: user.userName,
+    orgName: user.orgName,
+    upperOrgLv0: user.upperOrgLv0,
+    upperOrgLv1: user.upperOrgLv1,
+    totalCalls: user.count,
+    avgDurationMs: user.avgDurationMs,
+    totalToolCalls: user.totalToolCalls,
+    totalInputTokens: user.totalInputTokens,
+    totalOutputTokens: user.totalOutputTokens,
+    totalTokens: user.totalTokens,
+    bySkill: [
+      { skill: "代码审查", count: Math.floor(user.count * 0.34) },
+      { skill: "单元测试", count: Math.floor(user.count * 0.22) },
+      { skill: "SQL优化", count: Math.floor(user.count * 0.15) }
+    ],
+    byModel: [
+      { model: "GPT-5.4", count: Math.floor(user.count * 0.6) },
+      { model: "Claude Sonnet", count: Math.floor(user.count * 0.28) },
+      { model: "Gemini Pro", count: Math.floor(user.count * 0.12) }
+    ],
+    byOutcome: [
+      { outcome: "success", count: Math.floor(user.count * 0.86) },
+      { outcome: "error", count: Math.floor(user.count * 0.1) },
+      { outcome: "cancelled", count: Math.max(0, user.count - Math.floor(user.count * 0.96)) }
+    ],
+    traces,
+    tracePage,
+    tracePageSize,
+    totalTraces
   }
 }
 
@@ -1539,6 +2878,11 @@ function makeMockSkillRecentTraces(skill: string, range: TimeRange, limit = 10):
       endedAt: trace.endedAt,
       durationMs: trace.durationMs,
       userMessage: trace.userMessage,
+      sapId: `100100${String(index + 1).padStart(2, "0")}`,
+      ystId: `2743${String(50 + index).padStart(2, "0")}`,
+      userName: ["张三", "李四", "王五"][index % 3],
+      orgName: ["测试 1 组", "测试 2 组", "开发三组"][index % 3],
+      userIp: `10.0.0.${20 + index}`,
       modelId: trace.modelId,
       modelName: trace.modelName,
       outcome: trace.outcome,
@@ -1553,13 +2897,67 @@ function makeMockSkillRecentTraces(skill: string, range: TimeRange, limit = 10):
   })
 }
 
-function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; items: DashboardCommitDetail[] } {
+function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
+  const seed = Array.from(skill).reduce((acc, char) => acc + char.charCodeAt(0), 0)
+  const generatedLines = 680 + (seed % 360)
+  const deletedLines = 80 + (seed % 90)
+  const measuredGeneratedLines = Math.max(0, generatedLines - 120)
+  const effectiveGeneratedLines = Math.max(0, measuredGeneratedLines - 30)
+  const adoptedLines = Math.round(effectiveGeneratedLines * (0.62 + (seed % 18) / 100))
+  return makeDashboardCodeStats({
+    generatedLines,
+    deletedLines,
+    effectiveGeneratedLines,
+    measuredGeneratedLines,
+    adoptedLines
+  })
+}
+
+function makeMockSkillDetail(
+  skill: string,
+  range: TimeRange,
+  options?: number | TracePageOptions
+): DashboardSkillDetail {
+  const pageOptions = typeof options === "number" ? { limit: options } : options
+  const tracePageSize = clampLimit(pageOptions?.pageSize ?? pageOptions?.limit, 10, 50)
+  const tracePage = clampLimit(pageOptions?.page, 1, 1000)
+  const totalTraces = 64
+  const startIndex = (tracePage - 1) * tracePageSize
+  const baseTraces = makeMockSkillRecentTraces(skill, range, 10)
+  const traces = Array.from(
+    { length: Math.max(0, Math.min(tracePageSize, totalTraces - startIndex)) },
+    (_, traceIndex) => {
+      const trace = baseTraces[traceIndex % baseTraces.length]
+      const mockIndex = startIndex + traceIndex
+      return {
+        ...trace,
+        traceId: `${trace.traceId}-skill-page-${tracePage}-${traceIndex}`,
+        startedAt: new Date(new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000).toISOString()
+      }
+    }
+  )
+  return {
+    stats: makeMockSkillCodeStats(skill),
+    traces,
+    tracePage,
+    tracePageSize,
+    totalTraces
+  }
+}
+
+function makeMockCommitDetails(
+  range: TimeRange,
+  options?: number | CommitDetailsOptions
+): { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] } {
+  const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
   const from = new Date(range.from)
   const to = new Date(range.to)
   const spanMs = Math.max(60_000, to.getTime() - from.getTime())
-  const count = Math.min(clampLimit(limit, 200, 500), 18)
-  const items = Array.from({ length: count }, (_, index): DashboardCommitDetail => {
+  const allItems = Array.from({ length: 240 }, (_, index): DashboardCommitDetail => {
     const eventTime = new Date(to.getTime() - Math.min(spanMs - 1, index * 42 * 60 * 1000))
+    const pushed = index % 3 !== 1
+    const repoName = `cmb-${index % 3}`
+    const commitSha = `mock${String(index + 1).padStart(36, "0")}`
     return {
       eventId: `mock-commit-event-${index + 1}`,
       eventTime: eventTime.toISOString(),
@@ -1568,7 +2966,14 @@ function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; 
       ystId: `2743${String(50 + index).padStart(2, "0")}`,
       orgName: ["科技部", "零售一部", "风险管理部"][index % 3],
       userIp: `10.0.0.${20 + index}`,
-      repoPath: `/Users/demo/projects/cmb-${index % 3}`,
+      repoPath: `/Users/demo/projects/${repoName}`,
+      repositoryName: repoName,
+      repositoryFullName: `demo/${repoName}`,
+      repositoryWebUrl: `https://git.example.internal/demo/${repoName}`,
+      commitSha,
+      commitUrl: pushed ? `https://git.example.internal/demo/${repoName}/commit/${commitSha}` : undefined,
+      pushed,
+      pushedAt: pushed ? new Date(eventTime.getTime() + 30 * 60 * 1000).toISOString() : undefined,
       branch: index % 2 === 0 ? "feature/smart-model-routing" : "fix/dashboard-detail",
       filesChanged: 2 + (index % 6),
       insertions: 18 + index * 7,
@@ -1579,7 +2984,15 @@ function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; 
       skillCount: index % 2 === 0 ? 1 : 2
     }
   })
-  return { total: 240, items }
+  const filteredItems = pushedOnly ? allItems.filter((item) => item.pushed) : allItems
+  const start = (page - 1) * pageSize
+  return {
+    total: filteredItems.length,
+    page,
+    pageSize,
+    pushedOnly,
+    items: filteredItems.slice(start, start + pageSize)
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1587,9 +3000,8 @@ function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; 
 // ─────────────────────────────────────────────────────────
 
 export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
-  // Check if current user is allowed to see the dashboard
   _ipcMain.handle("dashboard:isAllowed", async () => {
-    return isDashboardAllowed()
+    return true
   })
 
   _ipcMain.handle(
@@ -1632,6 +3044,34 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   )
 
   _ipcMain.handle(
+    "dashboard:userList",
+    async (_, range: TimeRange, options?: UserListOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockUserList(range, options) }
+      try {
+        return { success: true, data: await fetchUserList(range, options) }
+      } catch (e) {
+        console.error("[Dashboard] userList error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:userDetail",
+    async (_, sapId: string, range: TimeRange, options?: UserDetailOptions) => {
+      const normalizedSapId = sapId?.trim?.() ?? ""
+      if (!normalizedSapId) return { success: false, error: "sapId is required" }
+      if (import.meta.env.DEV) return { success: true, data: makeMockUserDetail(normalizedSapId, range, options) }
+      try {
+        return { success: true, data: await fetchUserDetail(normalizedSapId, range, options) }
+      } catch (e) {
+        console.error("[Dashboard] userDetail error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
     "dashboard:skillUsageSummary",
     async (_, range: TimeRange, granularity: Granularity, skillNames?: string[]) => {
       // `skillNames` 为可选参数：传入后走更精确的 filters 聚合。
@@ -1651,9 +3091,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       const trimmedSkillName = skillName?.trim?.() ?? ""
       if (!trimmedSkillName) {
         return { success: false, error: "skillName is required" }
-      }
-      if (!isDashboardAllowedForCurrentUser()) {
-        return { success: false, error: "当前用户无权限查看 Skill 用户明细" }
       }
       if (import.meta.env.DEV) {
         return { success: true, data: makeMockSkillUserStats(range, trimmedSkillName) }
@@ -1689,6 +3126,21 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   )
 
   _ipcMain.handle(
+    "dashboard:queryAllUser",
+    async () => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockAllUsers() }
+      }
+      try {
+        return { success: true, data: await queryAllUser() }
+      } catch (e) {
+        console.error("[Dashboard] queryAllUser error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
     "dashboard:productivity",
     async (_, range: TimeRange, granularity: Granularity) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockProductivity(range) }
@@ -1717,10 +3169,9 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:skillRecentTraces",
     async (_, skill: string, range: TimeRange, limit?: number) => {
-      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
       if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(skill, range, limit) }
       try {
-        return { success: true, data: await fetchSkillRecentTraces(skill, range, limit) }
+        return { success: true, data: (await fetchSkillRecentTraces(skill, range, limit)).traces }
       } catch (e) {
         console.error("[Dashboard] skillRecentTraces error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -1729,18 +3180,79 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   )
 
   _ipcMain.handle(
-    "dashboard:commitDetails",
-    async (_, range: TimeRange, limit?: number) => {
-      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
-      if (import.meta.env.DEV) return { success: true, data: makeMockCommitDetails(range, limit) }
+    "dashboard:marketSkillRecentTraces",
+    async (_, skill: string, range: TimeRange, limit?: number) => {
+      const trimmedSkill = skill?.trim?.() ?? ""
+      if (!trimmedSkill) return { success: false, error: "skill is required" }
+      if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(trimmedSkill, range, limit) }
       try {
-        return { success: true, data: await fetchCommitDetails(range, limit) }
+        return { success: true, data: (await fetchSkillRecentTraces(trimmedSkill, range, limit)).traces }
+      } catch (e) {
+        console.error("[Dashboard] marketSkillRecentTraces error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:skillDetail",
+    async (_, skill: string, range: TimeRange, options?: number | TracePageOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockSkillDetail(skill, range, options) }
+      try {
+        return { success: true, data: await fetchSkillDetail(skill, range, options) }
+      } catch (e) {
+        console.error("[Dashboard] skillDetail error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:commitDetails",
+    async (_, range: TimeRange, options?: number | CommitDetailsOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockCommitDetails(range, options) }
+      try {
+        return { success: true, data: await fetchCommitDetails(range, options) }
       } catch (e) {
         console.error("[Dashboard] commitDetails error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
   )
+
+  _ipcMain.handle("dashboard:exportSkillTraces", async (event, rawPayload: unknown) => {
+    try {
+      const payload = normalizeTraceExportPayload(rawPayload)
+      if (!payload.skill) return { success: false, error: "skill is required" }
+      if (payload.traces.length === 0) return { success: false, error: "暂无可导出的会话记录" }
+
+      const exportedAt = new Date().toISOString()
+      const date = exportedAt.slice(0, 10)
+      const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
+      const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+        title: "导出 Skill 会话历史",
+        defaultPath: `${safeExportFileName(payload.skill)}-traces-page-${payload.page}-${date}.zip`,
+        filters: [{ name: "Zip Archive", extensions: ["zip"] }]
+      })
+
+      if (result.canceled || !result.filePath) {
+        return { success: false, canceled: true }
+      }
+
+      const zip = new AdmZip()
+      zip.addFile("traces.md", Buffer.from(formatTraceExportMarkdown(payload, exportedAt), "utf-8"))
+      zip.addFile(
+        "traces.json",
+        Buffer.from(`${stringifyExportValue({ version: 1, exportedAt, ...payload })}\n`, "utf-8")
+      )
+      zip.writeZip(result.filePath)
+
+      return { success: true, filePath: result.filePath }
+    } catch (e) {
+      console.error("[Dashboard] exportSkillTraces error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
 
   _ipcMain.handle(
     "dashboard:exportExcel",

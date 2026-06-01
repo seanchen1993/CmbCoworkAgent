@@ -1,4 +1,4 @@
-import { IpcMain, BrowserWindow } from "electron"
+import { IpcMain, BrowserWindow, dialog } from "electron"
 import { nowIsoLocal } from "../util/local-time"
 import { AsyncKeyedLock } from "./async-keyed-lock"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
@@ -21,15 +21,23 @@ import {
   isSkillAutoProposeEnabled,
   getGlobalRoutingMode,
   getEnabledHooks,
+  getEnabledPluginHookMetadata,
+  getEnabledSkillHookMetadata,
   getHooks,
   getWorkspaceHooks,
   getEnabledPluginHooks,
-  getEnabledSkillHooks
+  getEnabledSkillHooks,
+  getEnabledSkillsSources,
+  getEnabledPluginSkillSourceMetadata,
+  getDisabledSkillDirs,
+  getHookLoggingConfig
 } from "../storage"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
+import { showPetCompletedTaskNotice } from "../pet"
 import { trackEvent } from "../services/event-reporter"
 import { trySendChatXReply } from "../services/chatx"
+import { setAdoptionContext } from "../services/adoption-tracker"
 import { TraceCollector } from "../agent/trace/collector"
 import {
   requestSkillIntent,
@@ -37,7 +45,7 @@ import {
   sanitizeSkillId
 } from "../agent/tools/skill-evolution-tool"
 import { mkdirSync, writeFileSync } from "fs"
-import { join } from "path"
+import { join, resolve } from "path"
 import { v4 as uuid } from "uuid"
 import { LocalSandbox } from "../agent/local-sandbox"
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
@@ -49,6 +57,7 @@ import {
 import {
   appendSkillProposalWindowTurn,
   buildSkillProposalWindowContext,
+  getRecentSkillUsageNames,
   snapshotSkillProposalWindow,
   isSkillProposalWindowContext,
   type SkillProposalWindowContext
@@ -79,11 +88,40 @@ import {
   type CoordinatorWorkerSnapshot
 } from "../agent/coordinator-worker-manager"
 import { isRetryableApiError, buildOrderedChain, type FailoverAttempt } from "../agent/failover"
-import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
-import type { HookResult } from "../hooks/types"
+import { type HookContext, type HookResultCallback } from "../hooks/runner"
+import {
+  createHookScope,
+  normalizePathKey,
+  normalizePluginId,
+  normalizeSkillName,
+  resolveEnabledHooksForRun,
+  type HookScopeController
+} from "../hooks/scope"
+import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
-import { makeHookResultCallback } from "../hooks/result-callback"
+import { isHookHaltError, throwIfHookHalt, type HookHaltError } from "../hooks/halt"
+import { activateSkillLifecycle, formatSkillHookContext } from "../agent/skill-lifecycle/activation"
+import { parseSkillUseBlock, type ParsedSkillUseBlock } from "../agent/skill-lifecycle/marker"
+import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "../agent/skill-lifecycle/registry"
+import { createSkillUseTracker, type SkillUseTracker } from "../agent/skill-lifecycle/tracker"
+import {
+  runCompletionHooksWithRevision,
+  type StopHookContext
+} from "../agent/skill-lifecycle/completion-hooks"
+import {
+  discardAgentAutoCommitTracking,
+  maybeAutoCommitAfterAgentRun,
+  recordAgentTouchedFile,
+  startAgentGitSnapshot,
+  type AgentGitSnapshot
+} from "../services/agent-auto-commit"
+import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
+import type { AgentAutoCommitResult } from "../types"
+import { formatAutoCommitLines } from "../../shared/auto-commit-format"
+import { makeHookResultCallback, makeHookSkippedCallback } from "../hooks/result-callback"
+import type { ScopeSkipCallback } from "../hooks/scope"
+import { notifyHooksChanged } from "../hooks/notifications"
 import type {
   AgentInvokeParams,
   AgentResumeParams,
@@ -206,7 +244,369 @@ async function withActiveRunReplacementLock<T>(threadId: string, fn: () => Promi
   return activeRunReplacementLocks.withKey(threadId, fn)
 }
 
-type StopHookContext = NonNullable<HookContext["stopContext"]>
+function sendHookHalt(window: BrowserWindow, channel: string, error: HookHaltError): void {
+  window.webContents.send(channel, {
+    type: "custom",
+    data: {
+      type: "hook_blocked",
+      hookEvent: error.hookEvent,
+      action: "halt",
+      reason: error.reason,
+      systemMessage: error.systemMessage
+    }
+  })
+  window.webContents.send(channel, { type: "done" })
+}
+
+/**
+ * Thread-scoped hook state shared across IPC handler boundaries. A new
+ * `agent:invoke` starts a fresh turn, but keeps the session-level persistent
+ * hook keys that were activated by earlier skill / plugin use in this thread.
+ * `agent:resume` / `agent:interrupt` reuse the current turn state. Without
+ * this Map, every IPC handler entry would reset hookScope etc. and scoped
+ * hooks would stop firing after a HITL pause or later user message.
+ */
+interface TurnState {
+  hookScope: HookScopeController
+  skillUseTracker: SkillUseTracker
+  skillHookKeys: Set<string>
+  stopContextCollector: StopHookContextCollector
+  runToken: string
+  turnId?: string
+}
+
+const turnStates = new Map<string, TurnState>()
+
+function createTurnState(initialUserMessage?: string, turnId?: string): TurnState {
+  return {
+    hookScope: createHookScope(),
+    skillUseTracker: createSkillUseTracker(),
+    skillHookKeys: new Set<string>(),
+    stopContextCollector: new StopHookContextCollector(initialUserMessage),
+    runToken: uuid(),
+    turnId
+  }
+}
+
+function resetTurnStateForNewInvoke(
+  state: TurnState,
+  initialUserMessage?: string,
+  turnId?: string
+): void {
+  const snapshot = state.hookScope.snapshot()
+  state.hookScope = createHookScope()
+  state.hookScope.activatePersistentHookKeys(snapshot.persistentHookKeys ?? [])
+  state.skillUseTracker = createSkillUseTracker()
+  state.skillHookKeys = new Set<string>()
+  state.stopContextCollector = new StopHookContextCollector(initialUserMessage)
+  state.turnId = turnId
+}
+
+function getOrCreateTurnState(
+  threadId: string,
+  initialUserMessage?: string,
+  turnId?: string
+): TurnState {
+  const existing = turnStates.get(threadId)
+  if (existing) return existing
+  const fresh = createTurnState(initialUserMessage, turnId)
+  turnStates.set(threadId, fresh)
+  return fresh
+}
+
+/**
+ * Ensure `turnState.turnId` is non-empty so hook events emitted during this
+ * run can be grouped on the renderer side. The `agent:invoke` path always
+ * supplies the renderer-side user message id, but `agent:resume` /
+ * `agent:interrupt` do not — and when the original turnState was disposed
+ * (process restart, thread idle eviction), all hook events would otherwise
+ * fall into the `__background__` bucket and look orphaned.
+ *
+ * Returns the (possibly newly-assigned) turnId so callers can pass it into
+ * any non-turnState-scoped helpers without re-reading.
+ */
+function ensureTurnId(turnState: TurnState, threadId: string, label: string): string {
+  if (!turnState.turnId) {
+    turnState.turnId = `${label}:${threadId}:${Date.now()}`
+  }
+  return turnState.turnId
+}
+
+function disposeTurnState(threadId: string): void {
+  turnStates.delete(threadId)
+}
+
+export function disposeAgentThreadState(threadId: string): void {
+  disposeTurnState(threadId)
+}
+
+export function disposeAllAgentThreadStates(): void {
+  turnStates.clear()
+}
+
+function disposeTurnRuntimeState(state: TurnState): void {
+  state.skillUseTracker = createSkillUseTracker()
+  state.skillHookKeys = new Set<string>()
+  state.stopContextCollector = new StopHookContextCollector()
+}
+
+function startTurnStateRun(state: TurnState): string {
+  state.runToken = uuid()
+  return state.runToken
+}
+
+function shouldDisposeTurnState(threadId: string, runToken: string): boolean {
+  return turnStates.get(threadId)?.runToken === runToken
+}
+
+/**
+ * Snapshot every enabled hook (global + workspace + plugin + skill) so the
+ * prune step can search across all sources for `persistAfterInterrupt: true`.
+ * The lists are filtered for `enabled` already at the storage layer.
+ */
+function getAllEnabledHooksForInterrupt(workspacePath: string | undefined): HookConfig[] {
+  return [
+    ...getEnabledHooks(workspacePath),
+    ...getEnabledPluginHookMetadata(),
+    ...getEnabledSkillHookMetadata()
+  ]
+}
+
+async function maybeRunSubagentStopHooksFromStreamPayload(params: {
+  payload: unknown
+  workspacePath?: string
+  threadId: string
+  turnId?: string
+  hookScope: HookScopeController
+  firedToolCallIds: Set<string>
+  onHookResult?: HookResultCallback
+  /** Diagnostic-only callback for "matched event but filtered out by scope". */
+  onHookSkipped?: ScopeSkipCallback
+}): Promise<void> {
+  const [msgChunk] = params.payload as [
+    { id?: unknown; kwargs?: Record<string, unknown>; content?: unknown } | undefined
+  ]
+  if (!msgChunk) return
+
+  const kwargs = (msgChunk.kwargs || {}) as Record<string, unknown>
+  const classId: string[] = Array.isArray(msgChunk.id) ? msgChunk.id : []
+  const className = classId[classId.length - 1] || ""
+  const isTool = className.includes("Tool") || kwargs.type === "tool"
+  const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
+  if (!isTool || kwargs.name !== "task" || !toolCallId) return
+  if (params.firedToolCallIds.has(toolCallId)) return
+  params.firedToolCallIds.add(toolCallId)
+
+  const additionalKwargs = kwargs.additional_kwargs as Record<string, unknown> | undefined
+  const isErr =
+    kwargs.status === "error" || kwargs.is_error === true || additionalKwargs?.is_error === true
+  const subagentStopContext: HookContext = {
+    workspacePath: params.workspacePath,
+    sessionId: params.threadId,
+    turnId: params.turnId,
+    subagent: {
+      id: toolCallId,
+      status: isErr ? "failed" : "completed"
+    }
+  }
+  const result = await runHooksEnriched(
+    resolveEnabledHooksForRun(
+      params.workspacePath,
+      "SubagentStop",
+      subagentStopContext,
+      params.hookScope,
+      params.onHookSkipped
+    ),
+    "SubagentStop",
+    subagentStopContext,
+    params.onHookResult
+  )
+  throwIfHookHalt("SubagentStop", result, "SubagentStop hook stopped the turn")
+}
+
+/**
+ * At a HITL interrupt boundary (resume / interrupt entry), drop activations
+ * for skills / plugins that have no `persistAfterInterrupt: true` hook.
+ * Anything kept stays scoped for the next stream; anything pruned reverts to
+ * pre-interrupt fresh-state behaviour. `stopContextCollector` is intentionally
+ * not pruned — it tracks turn-wide history regardless of skill scope.
+ */
+function pruneTurnStateAtInterrupt(state: TurnState, allHooks: readonly HookConfig[]): void {
+  const keepPluginIds = new Set<string>()
+  const keepSkillPaths = new Set<string>()
+  const keepSkillNames = new Set<string>()
+  for (const hook of allHooks) {
+    if (hook.persistAfterInterrupt !== true) continue
+    const scoped = hook as HookConfig & {
+      pluginId?: string
+      skillName?: string
+      skillPath?: string
+      skillRoot?: string
+    }
+    if (typeof scoped.pluginId === "string" && scoped.pluginId.length > 0) {
+      keepPluginIds.add(normalizePluginId(scoped.pluginId))
+    }
+    const skillPath = scoped.skillPath ?? scoped.skillRoot ?? hook.hookSourceRoot
+    if (typeof skillPath === "string" && skillPath.length > 0) {
+      keepSkillPaths.add(normalizePathKey(skillPath))
+    }
+    if (typeof scoped.skillName === "string" && scoped.skillName.length > 0) {
+      keepSkillNames.add(normalizeSkillName(scoped.skillName))
+    }
+  }
+
+  state.hookScope.activatePersistentHooks(
+    allHooks.filter((hook) => {
+      if (hook.persistAfterInterrupt !== true) return false
+      const scoped = hook as HookConfig & {
+        pluginId?: string
+        skillName?: string
+        skillPath?: string
+        skillRoot?: string
+      }
+      const hookPluginId = normalizePluginId(scoped.pluginId)
+      const hookSkillPath = normalizePathKey(
+        scoped.skillPath ?? scoped.skillRoot ?? hook.hookSourceRoot
+      )
+      const hookSkillName = normalizeSkillName(scoped.skillName)
+      return (
+        (hookPluginId && state.hookScope.activePluginIds.has(hookPluginId)) ||
+        (hookSkillPath && state.hookScope.activeSkillPaths.has(hookSkillPath)) ||
+        (hookSkillName && state.hookScope.activeSkillNames.has(hookSkillName))
+      )
+    })
+  )
+
+  state.hookScope.pruneActivations({
+    keepPluginId: (id) => keepPluginIds.has(id),
+    keepSkillPath: (path) => keepSkillPaths.has(path),
+    keepSkillName: (name) => keepSkillNames.has(name)
+  })
+  state.skillUseTracker.pruneRecords((record) => {
+    return (
+      keepSkillPaths.has(normalizePathKey(record.rootDir)) ||
+      keepSkillNames.has(normalizeSkillName(record.name))
+    )
+  })
+  // skillHookKeys is keyed by the same normalized rootDir path the scope
+  // uses, so we can filter against keepSkillPaths directly.
+  for (const key of [...state.skillHookKeys]) {
+    if (!keepSkillPaths.has(key)) state.skillHookKeys.delete(key)
+  }
+}
+
+interface ExplicitSkillActivation {
+  parsed: ParsedSkillUseBlock
+  skill?: SkillLifecycleMatch
+  hookContext?: string
+  blocked: boolean
+  reason?: string
+}
+
+function normalizeSkillPathKey(input: string): string {
+  const normalized = resolve(input).replace(/\\/g, "/").replace(/\/+$/, "")
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+function isSameOrChildSkillPath(targetPath: string, parentPath: string): boolean {
+  const target = normalizeSkillPathKey(targetPath)
+  const parent = normalizeSkillPathKey(parentPath)
+  return target === parent || target.startsWith(`${parent}/`)
+}
+
+function isDisabledSkillMatch(skill: SkillLifecycleMatch): boolean {
+  return getDisabledSkillDirs().some((dir) => isSameOrChildSkillPath(skill.rootDir, dir))
+}
+
+async function buildSkillLifecycleRegistryForHooks(): Promise<SkillLifecycleRegistry | null> {
+  const rootSources = await getEnabledSkillsSources()
+  const pluginSources = getEnabledPluginSkillSourceMetadata()
+  const sources = [...rootSources, ...pluginSources]
+  return sources.length > 0 ? new SkillLifecycleRegistry(sources) : null
+}
+
+async function activateExplicitSkillFromMessage({
+  message,
+  workspacePath,
+  sessionId,
+  turnId,
+  hookScope,
+  firedSkillKeys,
+  skillUseTracker,
+  onHookResult,
+  onHookSkippedFactory
+}: {
+  message: string
+  workspacePath: string
+  sessionId: string
+  turnId?: string
+  hookScope: HookScopeController
+  firedSkillKeys: Set<string>
+  skillUseTracker: SkillUseTracker
+  onHookResult?: HookResultCallback
+  /**
+   * Factory that builds a per-event scope-skip callback. `resolveHooks` is
+   * called with the actual event, so we construct the callback there with
+   * the matching event bound in its closure. Optional — diagnostic-only.
+   */
+  onHookSkippedFactory?: (event: HookEvent) => ScopeSkipCallback | undefined
+}): Promise<ExplicitSkillActivation | null> {
+  const parsed = parseSkillUseBlock(message)
+  if (!parsed) return null
+
+  const registry = await buildSkillLifecycleRegistryForHooks()
+  const skill = registry?.resolveExplicit({
+    skillName: parsed.skillName,
+    skillPath: parsed.skillPath
+  })
+
+  if (!skill || isDisabledSkillMatch(skill)) {
+    return {
+      parsed,
+      blocked: true,
+      reason: `显式选择的技能不存在或已禁用：${parsed.skillName}`
+    }
+  }
+
+  const result = await activateSkillLifecycle({
+    skill,
+    trigger: "explicit",
+    toolName: "skill_select",
+    toolArgs: {
+      skillName: parsed.skillName,
+      skillPath: parsed.skillPath
+    },
+    toolResult: JSON.stringify({
+      selected: true,
+      trigger: "explicit",
+      skillName: skill.name,
+      skillPath: skill.path
+    }),
+    workspacePath,
+    sessionId,
+    turnId,
+    hookScope,
+    firedSkillKeys,
+    skillUseTracker,
+    resolveHooks: (event: HookEvent, context: HookContext): HookConfig[] =>
+      resolveEnabledHooksForRun(
+        workspacePath,
+        event,
+        context,
+        hookScope,
+        onHookSkippedFactory?.(event)
+      ),
+    onHookResult
+  })
+
+  return {
+    parsed,
+    skill,
+    hookContext: formatSkillHookContext(skill, result.notes) ?? undefined,
+    blocked: result.blocked,
+    reason: result.reason
+  }
+}
 
 interface ActiveHookSummary {
   global: number
@@ -233,14 +633,29 @@ function getActiveHookSummary(workspacePath?: string): ActiveHookSummary {
 }
 
 function formatActiveHookNotice(summary: ActiveHookSummary): string | null {
-  if (summary.total === 0) return null
-  const parts = [
-    summary.global > 0 ? `全局 ${summary.global}` : "",
-    summary.workspace > 0 ? `工作区 ${summary.workspace}` : "",
-    summary.plugin > 0 ? `插件 ${summary.plugin}` : "",
-    summary.skill > 0 ? `技能 ${summary.skill}` : ""
-  ].filter(Boolean)
-  return `本轮已启用 ${summary.total} 个钩子（${parts.join("，")}）`
+  // 全局 / 工作区 hook 进入本轮即生效；插件 / 技能 hook 走作用域化激活
+  // （只有当其所属插件/技能本轮被使用时才会触发），不能与前两类合并展示，
+  // 否则用户会以为所有 plugin/skill hook 都会跑。
+  const baseTotal = summary.global + summary.workspace
+  const scopedTotal = summary.plugin + summary.skill
+  if (baseTotal === 0 && scopedTotal === 0) return null
+
+  const segments: string[] = []
+  if (baseTotal > 0) {
+    const baseParts = [
+      summary.global > 0 ? `全局 ${summary.global}` : "",
+      summary.workspace > 0 ? `工作区 ${summary.workspace}` : ""
+    ].filter(Boolean)
+    segments.push(`本轮已启用 ${baseTotal} 个钩子（${baseParts.join("，")}）`)
+  }
+  if (scopedTotal > 0) {
+    const scopedParts = [
+      summary.plugin > 0 ? `插件 ${summary.plugin}` : "",
+      summary.skill > 0 ? `技能 ${summary.skill}` : ""
+    ].filter(Boolean)
+    segments.push(`按需触发：${scopedParts.join("，")}（仅在对应插件/技能本轮被使用时生效）`)
+  }
+  return segments.join("；")
 }
 
 function safeSendToWindow(window: BrowserWindow, channel: string, payload: unknown): void {
@@ -264,6 +679,7 @@ function sendActiveHookNotice(
   channel: string,
   workspacePath?: string
 ): void {
+  if (!getHookLoggingConfig().enabled) return
   const message = formatActiveHookNotice(getActiveHookSummary(workspacePath))
   if (!message) return
   sendHookNotice(window, channel, message)
@@ -996,6 +1412,84 @@ function containsCoordinatorInternalMarker(content: string): boolean {
   return COORDINATOR_INTERNAL_MARKERS.some((marker) => content.includes(marker))
 }
 
+function sendAutoCommitResult(
+  window: BrowserWindow,
+  channel: string,
+  result: AgentAutoCommitResult
+): void {
+  if (result.status === "disabled") return
+  window.webContents.send(channel, {
+    type: "custom",
+    data: { type: "auto_commit_result", result }
+  })
+}
+
+async function confirmAutoCommit(
+  window: BrowserWindow,
+  result: AgentAutoCommitResult
+): Promise<boolean> {
+  const lines = formatAutoCommitLines(result)
+  const response = await dialog.showMessageBox(window, {
+    type: "question",
+    buttons: ["提交", "取消"],
+    defaultId: 0,
+    cancelId: 1,
+    title: "确认自动提交",
+    message: result.message || "是否提交本轮 Agent 改动？",
+    detail: lines.join("\n")
+  })
+  return response.response === 0
+}
+
+async function finalizeAutoCommit({
+  threadId,
+  workspacePath,
+  userPrompt,
+  snapshot,
+  window,
+  channel
+}: {
+  threadId: string
+  workspacePath: string | undefined
+  userPrompt?: string
+  snapshot: AgentGitSnapshot | null
+  window: BrowserWindow
+  channel: string
+}): Promise<void> {
+  const result = await maybeAutoCommitAfterAgentRun({
+    threadId,
+    workspacePath,
+    userPrompt,
+    snapshot,
+    confirm: (preview) => confirmAutoCommit(window, preview)
+  })
+  sendAutoCommitResult(window, channel, result)
+}
+
+async function beginAutoCommitTracking(
+  threadId: string,
+  workspacePath: string | undefined
+): Promise<{
+  snapshot: AgentGitSnapshot | null
+  onFileMutation?: (filePath: string) => void
+}> {
+  let snapshot: AgentGitSnapshot | null = null
+  try {
+    snapshot = await startAgentGitSnapshot(threadId, workspacePath)
+  } catch (error) {
+    console.warn("[AutoCommit] failed to capture start snapshot:", error)
+  }
+  return {
+    snapshot,
+    onFileMutation: workspacePath
+      ? (filePath: string) => {
+          recordAgentTouchedFile(threadId, workspacePath, filePath)
+          scheduleAutoInstallGitHooksForPath(workspacePath, filePath)
+        }
+      : undefined
+  }
+}
+
 interface SerializedHookMessage {
   id?: string[]
   content?: unknown
@@ -1324,88 +1818,6 @@ class StopHookContextCollector {
   }
 }
 
-function getStopHookBlockReason(result: HookResult): string {
-  return (
-    result.reason ||
-    result.stopReason ||
-    result.stdout ||
-    result.stderr ||
-    "Stop hook requested revision"
-  )
-}
-
-function buildStopRevisionPrompt(result: HookResult, attempt: number): string {
-  const parts = [
-    `${STOP_HOOK_REVISION_PROMPT_PREFIX} Internal revision request. Do not mention this marker.`,
-    "A completion hook reviewed your previous response and requested a revision.",
-    "Revise the work now. Address the issue directly, run any checks that are needed, and then provide an updated final answer.",
-    `Revision attempt: ${attempt}/${MAX_STOP_HOOK_REVISIONS}`,
-    `Hook reason:\n${getStopHookBlockReason(result)}`
-  ]
-  if (result.additionalContext) {
-    parts.push(`Additional hook context:\n${result.additionalContext}`)
-  }
-  if (result.systemMessage) {
-    parts.push(`Hook message:\n${result.systemMessage}`)
-  }
-  return parts.join("\n\n")
-}
-
-async function runStopHooksWithRevision({
-  threadId,
-  workspacePath,
-  abortSignal,
-  getStopContext,
-  runRevision,
-  sendNotice,
-  sendError,
-  onHookResult
-}: {
-  threadId: string
-  workspacePath?: string
-  abortSignal: AbortSignal
-  getStopContext: () => StopHookContext
-  runRevision: (prompt: string) => Promise<void>
-  sendNotice: (message: string) => void
-  sendError: (message: string) => void
-  onHookResult?: HookResultCallback
-}): Promise<boolean> {
-  let revisionCount = 0
-  while (!abortSignal.aborted) {
-    const stopResult = await runHooksEnriched(
-      getEnabledHooks(workspacePath),
-      "Stop",
-      {
-        workspacePath,
-        sessionId: threadId,
-        stopContext: getStopContext()
-      },
-      onHookResult
-    ).catch((e) => {
-      console.warn("[Hooks] Stop hook error:", e)
-      return null
-    })
-
-    if (stopResult?.decision !== "block") return true
-    if (stopResult.systemMessage) sendNotice(stopResult.systemMessage)
-
-    const reason = getStopHookBlockReason(stopResult)
-    if (revisionCount >= MAX_STOP_HOOK_REVISIONS) {
-      sendError(
-        `Stop hook blocked completion after ${MAX_STOP_HOOK_REVISIONS} revision attempts: ${reason}`
-      )
-      return false
-    }
-
-    revisionCount += 1
-    sendNotice(
-      `Stop hook requested revision (${revisionCount}/${MAX_STOP_HOOK_REVISIONS}): ${reason}`
-    )
-    await runRevision(buildStopRevisionPrompt(stopResult, revisionCount))
-  }
-  return false
-}
-
 // ─────────────────────────────────────────────────────────
 // Auto skill proposal: generate a skill from conversation context
 // ─────────────────────────────────────────────────────────
@@ -1482,6 +1894,19 @@ function emitSkillGenerating(
 }
 
 /**
+ * 生成宠物完成气泡中展示的任务名称。
+ *
+ * 优先使用用户显式命名过的线程标题；如果仍是默认线程名，则退回到本轮用户消息摘要。
+ */
+function getCompletedTaskTitle(threadTitle: string | undefined, message: string): string {
+  const title = threadTitle?.trim()
+  if (title && !/^Thread\s+\d{1,2}\/\d{1,2}\/\d{4}$/i.test(title)) return title
+  const prompt = stripThink(message).replace(/\s+/g, " ").trim()
+  if (!prompt) return "任务"
+  return prompt.length > 18 ? `${prompt.slice(0, 18)}...` : prompt
+}
+
+/**
  * Build ModelRetryHooks that forward retry status to the renderer as custom
  * stream events on the given channel. Used to display the inline "retrying…"
  * indicator in the chat view.
@@ -1552,8 +1977,12 @@ async function judgeSkillWorthiness(
     model: config.model,
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
-    maxTokens: 1024,
-    temperature: 0
+    maxTokens: config.maxOutputTokens,
+    temperature: config.temperature,
+    topP: config.topP,
+    modelKwargs: {
+      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+    }
   })
 
   const userPrompt = `## Conversation window since last skill-evolution reset (${context.turnCount} turns)
@@ -1641,8 +2070,12 @@ Based on this conversation, generate a reusable skill. Output JSON only.`
       model: config.model,
       apiKey: config.apiKey,
       configuration: { baseURL: config.baseUrl },
-      maxTokens: 2048,
-      temperature: 0.3,
+      maxTokens: config.maxOutputTokens,
+      temperature: config.temperature,
+      topP: config.topP,
+      modelKwargs: {
+        ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+      },
       streaming: true
     })
 
@@ -1719,6 +2152,7 @@ async function writeSkillToDisk(skillId: string, content: string, name: string):
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send("skills:changed")
   }
+  notifyHooksChanged("skill-written")
   console.log(`[Agent] Wrote skill "${name}" to ${skillDir}`)
 }
 
@@ -2158,6 +2592,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         threadId,
         message,
         modelId,
+        userMessageId,
         agentMode: requestedAgentMode,
         coordinatorInternalNotification
       }: AgentInvokeParams
@@ -2225,6 +2660,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
       const { abortController, activeRunSettledPromise, resolveActiveRunSettled } = replacement
 
+      const turnState = getOrCreateTurnState(
+        threadId,
+        isTrustedCoordinatorNotificationInvoke ? undefined : message,
+        userMessageId
+      )
+      resetTurnStateForNewInvoke(
+        turnState,
+        isTrustedCoordinatorNotificationInvoke ? undefined : message,
+        userMessageId
+      )
+      const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
+      const runToken = startTurnStateRun(turnState)
+      let turnStateShouldDispose = false
+
       // Abort the stream if the window is closed/destroyed
       const onWindowClosed = (): void => {
         console.log("[Agent] Window closed, aborting stream for thread:", threadId)
@@ -2237,15 +2686,31 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const skillUsageDetector = new SkillUsageDetector()
       const toolCallCounter = new ToolCallCounter()
       let assistantText = ""
+      const recentCompletedTurns = snapshotSkillProposalWindow(threadId).slice(-2)
       let drainedCoordinatorNotifications: CoordinatorTurnNotification[] = []
       let coordinatorNotificationsConsumed = false
       let coordinatorNotificationsDelivered = false
       let clearCoordinatorNotificationSelectedSkillsOnExit = false
       const consumedCoordinatorNotificationIds = new Set<string>()
       const trackedCoordinatorNotificationIds = new Set<string>()
-      const stopContextCollector = new StopHookContextCollector(
-        isTrustedCoordinatorNotificationInvoke ? undefined : message
-      )
+
+      const computeCodeGenAttributionSkills = (currentRunSkills: string[]): string[] => {
+        const inheritedTurns =
+          currentRunSkills.length > 0 ? recentCompletedTurns.slice(-1) : recentCompletedTurns
+        return Array.from(
+          new Set([...currentRunSkills, ...inheritedTurns.flatMap((turn) => turn.usedSkills)])
+        )
+      }
+
+      const syncUsedSkillsContext = (): void => {
+        const currentRunSkills = skillUsageDetector.getUsedSkillNames()
+        tracer.setUsedSkills(currentRunSkills)
+        setAdoptionContext(threadId, {
+          usedSkills: computeCodeGenAttributionSkills(currentRunSkills)
+        })
+      }
+
+      syncUsedSkillsContext()
 
       const sendHookNotice = (notice: string): void => {
         safeSendToWindow(window, channel, {
@@ -2260,6 +2725,29 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           error
         })
       }
+
+      const sendHookBlocked = (
+        event: HookEvent,
+        result: HookResult,
+        fallbackReason: string
+      ): void => {
+        const reason =
+          result.stopReason || result.reason || result.stderr || result.stdout || fallbackReason
+        const action = result.continue === false ? "halt" : "block"
+        safeSendToWindow(window, channel, {
+          type: "custom",
+          data: {
+            type: "hook_blocked",
+            hookEvent: event,
+            action,
+            reason,
+            systemMessage: result.systemMessage
+          }
+        })
+        turnStateShouldDispose = true
+        safeSendToWindow(window, channel, { type: "done" })
+      }
+
       const onCoordinatorWorkerEvent = (event: {
         worker: CoordinatorWorkerSnapshot
         workers?: CoordinatorWorkerSnapshot[]
@@ -2342,7 +2830,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         coordinatorNotificationsDelivered = false
       }
 
-      const onHookResult = makeHookResultCallback(window, channel)
+      const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+      const onHookSkippedFactory = (event: HookEvent): ScopeSkipCallback =>
+        makeHookSkippedCallback(window, channel, event, turnState.turnId)
 
       const appendTurnToProposalWindow = (
         status: "success" | "error",
@@ -2385,6 +2875,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         string,
         CoordinatorSelectedSkill | undefined
       > = {}
+      let isCoordinatorNotificationTurn = false
 
       try {
         // Get workspace path from thread metadata - REQUIRED
@@ -2411,11 +2902,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           return
         }
 
-        // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
-        // thread is deleted (threads:delete) or the app is quitting.
-        fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult)
-        sendActiveHookNotice(window, channel, workspacePath)
-
         // Apply hook-supplied prompt rewrite / context injection. `message` remains the raw
         // user input for tracing and proposal capture; `effectiveMessage` is what the LLM sees.
         let effectiveMessage = message
@@ -2424,7 +2910,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           .startsWith(COORDINATOR_NOTIFICATION_PROMPT_PREFIX)
         const isTrustedCoordinatorNotificationRequest =
           coordinatorInternalNotification === true && hasCoordinatorNotificationPrefix
-        const isCoordinatorNotificationTurn =
+        isCoordinatorNotificationTurn =
           isTrustedCoordinatorNotificationRequest &&
           coordinatorWorkerManager.hasNotifications(threadId)
 
@@ -2437,30 +2923,72 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           return
         }
 
+        // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
+        // thread is deleted (threads:delete) or the app is quitting.
+        fireSessionStartOnce(
+          threadId,
+          sessionWorkspacePath,
+          onHookResult,
+          hookScope,
+          onHookSkippedFactory("SessionStart"),
+          turnState.turnId
+        )
+        sendActiveHookNotice(window, channel, workspacePath)
+
         if (!isCoordinatorNotificationTurn) {
+          const explicitSkillActivation = await activateExplicitSkillFromMessage({
+            message,
+            workspacePath,
+            sessionId: threadId,
+            turnId: turnState.turnId,
+            hookScope,
+            firedSkillKeys: skillHookKeys,
+            skillUseTracker,
+            onHookResult,
+            onHookSkippedFactory
+          })
+          if (explicitSkillActivation?.blocked) {
+            const reason = explicitSkillActivation.reason || "显式选择的技能被 Hook 拦截"
+            safeSendToWindow(window, channel, { type: "error", error: reason })
+            await tracer.finish("error", reason)
+            turnStateShouldDispose = true
+            return
+          }
+          if (explicitSkillActivation?.skill) {
+            skillUsageDetector.onSkillsMetadata([
+              {
+                name: explicitSkillActivation.skill.name,
+                path: explicitSkillActivation.skill.path
+              }
+            ])
+            skillUsageDetector.onReadFilePath(explicitSkillActivation.skill.path)
+            syncUsedSkillsContext()
+          }
+
           // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
           // or inject additional context that the LLM should see alongside the user's message.
+          const promptSubmitContext: HookContext = {
+            toolArgs: { message },
+            userPrompt: message,
+            workspacePath: workspacePath ?? undefined,
+            sessionId: threadId,
+            turnId: turnState.turnId
+          }
           const promptSubmitResult = await runHooksEnriched(
-            getEnabledHooks(workspacePath ?? undefined),
+            resolveEnabledHooksForRun(
+              workspacePath ?? undefined,
+              "UserPromptSubmit",
+              promptSubmitContext,
+              hookScope,
+              onHookSkippedFactory("UserPromptSubmit")
+            ),
             "UserPromptSubmit",
-            {
-              toolArgs: { message },
-              userPrompt: message,
-              workspacePath: workspacePath ?? undefined,
-              sessionId: threadId
-            },
+            promptSubmitContext,
             onHookResult
           )
           if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
-            const reason =
-              promptSubmitResult.stopReason ||
-              promptSubmitResult.stderr ||
-              promptSubmitResult.stdout ||
-              "消息被 Hook 策略拦截"
-            safeSendToWindow(window, channel, {
-              type: "error",
-              error: reason
-            })
+            sendHookBlocked("UserPromptSubmit", promptSubmitResult, "消息被 Hook 策略拦截")
+            await tracer.finish("cancelled", "UserPromptSubmit hook stopped the turn")
             return
           }
           const updatedMessage =
@@ -2470,8 +2998,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
             effectiveMessage = updatedMessage
           }
-          if (promptSubmitResult?.additionalContext) {
-            effectiveMessage = `${promptSubmitResult.additionalContext}\n\n${effectiveMessage}`
+          if (explicitSkillActivation?.parsed && !parseSkillUseBlock(effectiveMessage)) {
+            effectiveMessage = [effectiveMessage.trimEnd(), explicitSkillActivation.parsed.block]
+              .filter(Boolean)
+              .join("\n\n")
+          }
+          const promptContextBlocks = [
+            explicitSkillActivation?.hookContext,
+            promptSubmitResult?.additionalContext
+          ].filter((item): item is string => Boolean(item?.trim()))
+          if (promptContextBlocks.length > 0) {
+            effectiveMessage = `${promptContextBlocks.join("\n\n")}\n\n${effectiveMessage}`
           }
           if (promptSubmitResult?.systemMessage) {
             safeSendToWindow(window, channel, {
@@ -2620,6 +3157,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             /* non-critical */
           }
         }
+
+        const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)
 
         let coordinatorSelectedSkill: CoordinatorSelectedSkill | undefined
         let coordinatorExplicitSelectedSkill: CoordinatorSelectedSkill | undefined
@@ -2855,11 +3394,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
+              enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: effectiveAgentMode,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              hookTurnId: turnState.turnId,
+              onHookSkippedFactory,
+              hookScope,
+              skillHookKeys,
+              skillUseTracker,
+              onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -3089,7 +3635,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           })
         }
 
-        const processMessagesSideEffects = (payload: unknown): void => {
+        const processMessagesSideEffects = async (payload: unknown): Promise<void> => {
           try {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const [msgChunk] = payload as [any]
@@ -3103,30 +3649,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
             // SubagentStop — a "task" tool message signals subagent completion
             if (isTool && kwargs.name === "task" && kwargs.tool_call_id) {
-              const toolCallId = kwargs.tool_call_id as string
-              if (!_subagentStopFired.has(toolCallId)) {
-                _subagentStopFired.add(toolCallId)
-                const additionalKwargs = kwargs.additional_kwargs as
-                  | Record<string, unknown>
-                  | undefined
-                const isErr =
-                  kwargs.status === "error" ||
-                  kwargs.is_error === true ||
-                  additionalKwargs?.is_error === true
-                runHooks(
-                  getEnabledHooks(sessionWorkspacePath),
-                  "SubagentStop",
-                  {
-                    workspacePath: sessionWorkspacePath,
-                    sessionId: threadId,
-                    subagent: {
-                      id: toolCallId,
-                      status: isErr ? "failed" : "completed"
-                    }
-                  },
-                  onHookResult
-                ).catch((e) => console.warn("[Hooks] SubagentStop hook error:", e))
-              }
+              await maybeRunSubagentStopHooksFromStreamPayload({
+                payload,
+                workspacePath: sessionWorkspacePath,
+                threadId,
+                turnId: turnState.turnId,
+                hookScope,
+                firedToolCallIds: _subagentStopFired,
+                onHookResult,
+                onHookSkipped: onHookSkippedFactory("SubagentStop")
+              })
             }
 
             if (!isAI) return
@@ -3161,7 +3693,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
                   ""
                 if (readPathRaw) {
-                  skillUsageDetector.onReadFilePath(readPathRaw)
+                  const hit = skillUsageDetector.onReadFilePath(readPathRaw)
+                  // See the read_file branch in processMessagesSideEffects —
+                  // a following write/edit in this same messages loop would
+                  // otherwise see a stale usedSkills snapshot.
+                  if (hit) {
+                    syncUsedSkillsContext()
+                  }
                 }
               }
 
@@ -3354,7 +3892,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
                     ""
                   if (readPathRaw) {
-                    skillUsageDetector.onReadFilePath(readPathRaw)
+                    const hit = skillUsageDetector.onReadFilePath(readPathRaw)
+                    if (hit) {
+                      syncUsedSkillsContext()
+                    }
                   }
                 }
               }
@@ -3411,9 +3952,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         }
 
-        const processChunkSideEffects = (mode: string, payload: unknown): void => {
+        const processChunkSideEffects = async (mode: string, payload: unknown): Promise<void> => {
           if (mode === "messages") {
-            processMessagesSideEffects(payload)
+            await processMessagesSideEffects(payload)
             return
           }
           if (mode === "values") {
@@ -3462,7 +4003,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             // UI forwarding is the primary path. Trace / metrics / skill-evolution
             // processing below are side effects and must never block streaming.
             forwardStreamChunk(mode, serialized)
-            processChunkSideEffects(mode, serialized)
+            await processChunkSideEffects(mode, serialized)
             stopContextCollector.processStreamChunk(mode, serialized)
           }
         }
@@ -3503,11 +4044,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
+              enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: effectiveAgentMode,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              hookTurnId: turnState.turnId,
+              onHookSkippedFactory,
+              hookScope,
+              skillHookKeys,
+              skillUseTracker,
+              onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -3518,9 +4066,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
 
         if (!abortController.signal.aborted) {
-          const stopPassed = await runStopHooksWithRevision({
+          const completionOutcome = await runCompletionHooksWithRevision({
             threadId,
             workspacePath: workspacePath ?? undefined,
+            turnId: turnState.turnId,
             abortSignal: abortController.signal,
             getStopContext: () =>
               stopContextCollector.snapshot({
@@ -3540,19 +4089,42 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             },
             sendNotice: sendHookNotice,
             sendError: sendStreamError,
-            onHookResult
+            hookScope,
+            skillUseTracker,
+            maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
+            revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
+            onHookResult,
+            onHookSkippedFactory
           })
 
-          if (!stopPassed) {
+          if (completionOutcome === "failed") {
             clearCoordinatorNotificationSelectedSkillsOnExit = true
             await tracer.finish("error", "Stop hook blocked completion")
+            turnStateShouldDispose = true
             return
           }
+          // "halted" falls through to the normal done path so the renderer stops
+          // its loading indicator. The hook already explained why via sendNotice.
 
           clearCoordinatorNotificationSelectedSkillsOnExit = true
           await settleDrainedCoordinatorNotifications("ack")
+          await finalizeAutoCommit({
+            threadId,
+            workspacePath,
+            userPrompt: isCoordinatorNotificationTurn ? "coordinator notification turn" : message,
+            snapshot: autoCommit.snapshot,
+            window,
+            channel
+          })
+          turnStateShouldDispose = true
           safeSendToWindow(window, channel, { type: "done" })
           notifyIfBackground("✅ 任务完成", lastFinalText || assistantText.trim() || "对话已完成")
+          if (!isCoordinatorNotificationTurn) {
+            showPetCompletedTaskNotice(
+              threadId,
+              getCompletedTaskTitle(thread?.title ?? undefined, message)
+            )
+          }
 
           // Finish trace
           tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
@@ -3572,6 +4144,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!isCoordinatorNotificationTurn && isOnlineSkillEvolutionEnabled()) {
             const proposalContext = appendTurnToProposalWindow("success")
+            const recentUsedSkills = getRecentSkillUsageNames(threadId)
+            const blockingUsedSkills = Array.from(
+              new Set([...proposalContext.usedSkills, ...recentUsedSkills])
+            )
 
             // Check if this turn crossed the skill-evolution threshold.
             const sessionToolCallCount = proposalContext.toolCallCount
@@ -3585,13 +4161,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threshold,
                   mode,
                   usedSkills: proposalContext.usedSkills,
+                  recentUsedSkills,
                   turnCount: proposalContext.turnCount,
                   errorCount: proposalContext.errorCount,
                   toolCallSummary: proposalContext.toolCallSummary
                 })}`
               )
-              if (proposalContext.usedSkills.length > 0) {
-                const names = ` [${proposalContext.usedSkills.join(", ")}]`
+              if (blockingUsedSkills.length > 0) {
+                const names = ` [${blockingUsedSkills.join(", ")}]`
                 console.log(
                   `[SkillEvolution][${threadId}] Threshold skip because used skills were detected${names}`
                 )
@@ -3652,6 +4229,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       } catch (error) {
         await settleDrainedCoordinatorNotifications("restore")
+        if (isHookHaltError(error)) {
+          clearCoordinatorNotificationSelectedSkillsOnExit = true
+          console.warn("[Agent] Hook halted turn:", error.reason)
+          sendHookHalt(window, channel, error)
+          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+          tracer.finish("cancelled", error.reason).catch(() => {})
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "cancelled",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
+          }
+          turnStateShouldDispose = true
+          return
+        }
         // Ignore abort-related errors (expected when stream is cancelled)
         const isAbortError =
           error instanceof Error &&
@@ -3668,9 +4264,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             error: errMsg
           })
           notifyIfBackground("❌ 任务失败", errMsg)
-          if (isOnlineSkillEvolutionEnabled()) {
+          if (!isCoordinatorNotificationTurn && isOnlineSkillEvolutionEnabled()) {
             appendTurnToProposalWindow("error", errMsg)
-          } else {
+          } else if (!isCoordinatorNotificationTurn) {
             resetSkillEvolutionSession(threadId)
           }
           tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
@@ -3685,6 +4281,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
             })
           }
+          turnStateShouldDispose = true
         } else {
           tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
           tracer.finish("cancelled").catch(() => {})
@@ -3698,6 +4295,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
             })
           }
+          turnStateShouldDispose = true
         }
       } finally {
         window.removeListener("closed", onWindowClosed)
@@ -3729,10 +4327,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           activeRuns.delete(threadId)
         }
         if (!replacedByNewRun) {
-          // Clean up sandbox ACLs granted during this run (unelevated mode keeps them
-          // across commands for performance, so we revoke them when the run ends).
-          // If a newer run already owns this threadId, it shares the same sandbox runId
-          // and will perform the cleanup when that newer run finishes.
           LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
             console.warn("[Agent] ACL cleanup error:", err)
           })
@@ -3741,6 +4335,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           activeRunSettled.delete(threadId)
         }
         resolveActiveRunSettled()
+        if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
+          disposeTurnRuntimeState(turnState)
+        }
+        discardAgentAutoCommitTracking(threadId)
         // SessionEnd is NOT fired here — it belongs to thread lifecycle (delete / app quit),
         // not turn completion. See fireSessionEnd call in threads:delete handler.
       }
@@ -3841,6 +4439,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         threadId,
         metadata
       )
+      // Resume = same logical turn as the interrupted invoke. Keep hook scope
+      // continuity while pruning scopes that did not opt in to interrupt persistence.
+      const turnState = getOrCreateTurnState(threadId)
+      const runToken = startTurnStateRun(turnState)
+      pruneTurnStateAtInterrupt(turnState, getAllEnabledHooksForInterrupt(workspacePath))
+      ensureTurnId(turnState, threadId, "resume")
+      const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
+      let turnStateShouldDispose = false
+      const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)
       const resumeCoordinatorExplicitSelectedSkill =
         getActiveOrPersistedCoordinatorExplicitSelectedSkill(threadId, metadata)
       let resumeCoordinatorTurnPrompt = getActiveOrPersistedCoordinatorTurnPrompt(
@@ -3856,7 +4463,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       let drainedResumeCoordinatorNotifications: CoordinatorTurnNotification[] = []
       let resumeCoordinatorNotificationsConsumed = false
       const consumedResumeCoordinatorNotificationIds = new Set<string>()
-      const stopContextCollector = new StopHookContextCollector()
       const sendHookNotice = (notice: string): void => {
         safeSendToWindow(window, channel, {
           type: "custom",
@@ -3916,7 +4522,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           consumedResumeCoordinatorNotificationIds.add(notificationId)
         }
       }
-      const onHookResult = makeHookResultCallback(window, channel)
+      const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+      const onHookSkippedFactory = (event: HookEvent): ScopeSkipCallback =>
+        makeHookSkippedCallback(window, channel, event, turnState.turnId)
 
       const settleResumeDrainedCoordinatorNotifications = async (
         mode: "ack" | "restore"
@@ -4115,11 +4723,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorNotificationSelectedSkills: resumeCoordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning: resumeCoordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
+              enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: resumeAgentMode,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              hookTurnId: turnState.turnId,
+              onHookSkippedFactory,
+              hookScope,
+              skillHookKeys,
+              skillUseTracker,
+              onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -4201,6 +4816,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             : resumeOrderedChain.length
         )
         let activeResumeStream: AsyncIterable<unknown> = resumeStream
+        const resumeSubagentStopFired = new Set<string>()
 
         const consumeResumeStream = async (source: AsyncIterable<unknown>): Promise<void> => {
           for await (const chunk of source) {
@@ -4215,6 +4831,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               mode,
               data: sanitizeStreamDataForRenderer(mode, serialized)
             })
+            if (mode === "messages") {
+              await maybeRunSubagentStopHooksFromStreamPayload({
+                payload: serialized,
+                workspacePath,
+                threadId,
+                turnId: turnState.turnId,
+                hookScope,
+                firedToolCallIds: resumeSubagentStopFired,
+                onHookResult,
+                onHookSkipped: onHookSkippedFactory("SubagentStop")
+              })
+            }
             stopContextCollector.processStreamChunk(mode, serialized)
           }
         }
@@ -4248,11 +4876,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorNotificationSelectedSkills: resumeCoordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning: resumeCoordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
+              enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: resumeAgentMode,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              hookTurnId: turnState.turnId,
+              onHookSkippedFactory,
+              hookScope,
+              skillHookKeys,
+              skillUseTracker,
+              onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -4266,90 +4901,119 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         }
 
-        if (!abortController.signal.aborted) {
-          const stopPassed = await runStopHooksWithRevision({
-            threadId,
-            workspacePath: workspacePath ?? undefined,
-            abortSignal: abortController.signal,
-            getStopContext: () => stopContextCollector.snapshot(),
-            runRevision: async (revisionPrompt) => {
-              if (!resumeAgentRuntime)
-                throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
-              const revisionStream = await resumeAgentRuntime.stream(
-                { messages: [new HumanMessage(revisionPrompt)] },
-                resumeStreamConfig
-              )
-              await consumeResumeStream(revisionStream)
-            },
-            sendNotice: sendHookNotice,
-            sendError: sendStreamError,
-            onHookResult
-          })
+      if (!abortController.signal.aborted) {
+        const completionOutcome = await runCompletionHooksWithRevision({
+          threadId,
+          workspacePath: workspacePath ?? undefined,
+          turnId: turnState.turnId,
+          abortSignal: abortController.signal,
+          getStopContext: () => stopContextCollector.snapshot(),
+          runRevision: async (revisionPrompt) => {
+            if (!resumeAgentRuntime)
+              throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+            const revisionStream = await resumeAgentRuntime.stream(
+              { messages: [new HumanMessage(revisionPrompt)] },
+              resumeStreamConfig
+            )
+            await consumeResumeStream(revisionStream)
+          },
+          sendNotice: sendHookNotice,
+          sendError: sendStreamError,
+          hookScope,
+          skillUseTracker,
+          maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
+          revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
+          onHookResult,
+          onHookSkippedFactory
+        })
 
-          if (!stopPassed) {
-            clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
-            return
-          }
-
+        if (completionOutcome === "failed") {
           clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
-          safeSendToWindow(window, channel, { type: "done" })
-          await settleResumeDrainedCoordinatorNotifications("restore")
+          turnStateShouldDispose = true
+          return
         }
-      } catch (error) {
-        const isAbortError =
-          error instanceof Error &&
-          (error.name === "AbortError" ||
-            error.message.includes("aborted") ||
-            error.message.includes("Controller is already closed"))
+        // "halted" falls through to the done path so the renderer stops loading.
 
-        if (!isAbortError) {
-          clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
-          console.error("[Agent] Resume error:", error)
-          safeSendToWindow(window, channel, {
-            type: "error",
-            error: error instanceof Error ? error.message : "Unknown error"
-          })
-        }
-      } finally {
-        window.removeListener("closed", onWindowClosed)
+        clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
         await settleResumeDrainedCoordinatorNotifications("restore")
-        if (clearResumeCoordinatorNotificationSelectedSkillsOnExit) {
-          const nextResumeCoordinatorNotificationSelectedSkills =
-            omitCoordinatorNotificationSelectedSkills(
-              resumeCoordinatorNotificationSelectedSkills,
-              trackedResumeCoordinatorNotificationIds
-            )
-          if (
-            !coordinatorNotificationSelectedSkillsEqual(
-              resumeCoordinatorNotificationSelectedSkills,
-              nextResumeCoordinatorNotificationSelectedSkills
-            )
-          ) {
-            resumeCoordinatorNotificationSelectedSkills =
-              nextResumeCoordinatorNotificationSelectedSkills ?? {}
-            setCoordinatorNotificationSelectedSkillsState(
-              threadId,
-              metadata,
-              nextResumeCoordinatorNotificationSelectedSkills
-            )
-            updateThread(threadId, { metadata: JSON.stringify(metadata) })
-          }
-        }
-        const currentController = activeRuns.get(threadId)
-        const replacedByNewRun = Boolean(currentController && currentController !== abortController)
-        if (currentController === abortController) {
-          activeRuns.delete(threadId)
-        }
-        if (!replacedByNewRun) {
-          LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
-            console.warn("[Agent] ACL cleanup error:", err)
-          })
-        }
-        if (activeRunSettled.get(threadId) === resumeRunSettledPromise) {
-          activeRunSettled.delete(threadId)
-        }
-        resolveResumeRunSettled()
+        await finalizeAutoCommit({
+          threadId,
+          workspacePath,
+          userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
+          snapshot: autoCommit.snapshot,
+          window,
+          channel
+        })
+        turnStateShouldDispose = true
+        safeSendToWindow(window, channel, { type: "done" })
       }
+    } catch (error) {
+      if (isHookHaltError(error)) {
+        clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+        console.warn("[Agent] Resume hook halted turn:", error.reason)
+        sendHookHalt(window, channel, error)
+        turnStateShouldDispose = true
+        return
+      }
+      const isAbortError =
+        error instanceof Error &&
+        (error.name === "AbortError" ||
+          error.message.includes("aborted") ||
+          error.message.includes("Controller is already closed"))
+
+      if (!isAbortError) {
+        clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+        console.error("[Agent] Resume error:", error)
+        safeSendToWindow(window, channel, {
+          type: "error",
+          error: error instanceof Error ? error.message : "Unknown error"
+        })
+      }
+      turnStateShouldDispose = true
+    } finally {
+      window.removeListener("closed", onWindowClosed)
+      await settleResumeDrainedCoordinatorNotifications("restore")
+      if (clearResumeCoordinatorNotificationSelectedSkillsOnExit) {
+        const nextResumeCoordinatorNotificationSelectedSkills =
+          omitCoordinatorNotificationSelectedSkills(
+            resumeCoordinatorNotificationSelectedSkills,
+            trackedResumeCoordinatorNotificationIds
+          )
+        if (
+          !coordinatorNotificationSelectedSkillsEqual(
+            resumeCoordinatorNotificationSelectedSkills,
+            nextResumeCoordinatorNotificationSelectedSkills
+          )
+        ) {
+          resumeCoordinatorNotificationSelectedSkills =
+            nextResumeCoordinatorNotificationSelectedSkills ?? {}
+          setCoordinatorNotificationSelectedSkillsState(
+            threadId,
+            metadata,
+            nextResumeCoordinatorNotificationSelectedSkills
+          )
+          updateThread(threadId, { metadata: JSON.stringify(metadata) })
+        }
+      }
+      const currentController = activeRuns.get(threadId)
+      const replacedByNewRun = Boolean(currentController && currentController !== abortController)
+      if (currentController === abortController) {
+        activeRuns.delete(threadId)
+      }
+      if (!replacedByNewRun) {
+        LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
+          console.warn("[Agent] ACL cleanup error:", err)
+        })
+      }
+      if (activeRunSettled.get(threadId) === resumeRunSettledPromise) {
+        activeRunSettled.delete(threadId)
+      }
+      resolveResumeRunSettled()
+      if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
+        disposeTurnRuntimeState(turnState)
+      }
+      discardAgentAutoCommitTracking(threadId)
+    }
     }
   )
 
@@ -4382,6 +5046,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         type: "error",
         error: "Workspace path is required"
       })
+      disposeTurnState(threadId)
       return
     }
 
@@ -4411,6 +5076,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       threadId,
       metadata
     )
+    const turnState = getOrCreateTurnState(threadId)
+    const runToken = startTurnStateRun(turnState)
+    pruneTurnStateAtInterrupt(turnState, getAllEnabledHooksForInterrupt(workspacePath))
+    ensureTurnId(turnState, threadId, "interrupt")
+    const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
+    let turnStateShouldDispose = false
+    const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)
     const interruptCoordinatorExplicitSelectedSkill =
       getActiveOrPersistedCoordinatorExplicitSelectedSkill(threadId, metadata)
     let interruptCoordinatorTurnPrompt = getActiveOrPersistedCoordinatorTurnPrompt(
@@ -4426,7 +5098,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     let drainedInterruptCoordinatorNotifications: CoordinatorTurnNotification[] = []
     let interruptCoordinatorNotificationsConsumed = false
     const consumedInterruptCoordinatorNotificationIds = new Set<string>()
-    const stopContextCollector = new StopHookContextCollector()
     const sendHookNotice = (notice: string): void => {
       safeSendToWindow(window, channel, {
         type: "custom",
@@ -4486,7 +5157,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         consumedInterruptCoordinatorNotificationIds.add(notificationId)
       }
     }
-    const onHookResult = makeHookResultCallback(window, channel)
+    const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+    const onHookSkippedFactory = (event: HookEvent): ScopeSkipCallback =>
+      makeHookSkippedCallback(window, channel, event, turnState.turnId)
 
     const settleInterruptDrainedCoordinatorNotifications = async (
       mode: "ack" | "restore"
@@ -4676,11 +5349,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorNotificationSelectedSkills: interruptCoordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning: interruptCoordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
+              enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: interruptAgentMode,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              hookTurnId: turnState.turnId,
+              onHookSkippedFactory,
+              hookScope,
+              skillHookKeys,
+              skillUseTracker,
+              onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -4759,6 +5439,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           intUsedModelId ? intOrderedChain.indexOf(intUsedModelId) + 1 : intOrderedChain.length
         )
         let activeIntStream: AsyncIterable<unknown> = intStream
+        const interruptSubagentStopFired = new Set<string>()
 
         const consumeInterruptStream = async (source: AsyncIterable<unknown>): Promise<void> => {
           for await (const chunk of source) {
@@ -4773,6 +5454,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               mode,
               data: sanitizeStreamDataForRenderer(mode, serialized)
             })
+            if (mode === "messages") {
+              await maybeRunSubagentStopHooksFromStreamPayload({
+                payload: serialized,
+                workspacePath,
+                threadId,
+                turnId: turnState.turnId,
+                hookScope,
+                firedToolCallIds: interruptSubagentStopFired,
+                onHookResult,
+                onHookSkipped: onHookSkippedFactory("SubagentStop")
+              })
+            }
             stopContextCollector.processStreamChunk(mode, serialized)
           }
         }
@@ -4806,11 +5499,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorNotificationSelectedSkills: interruptCoordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning: interruptCoordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
+              enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: interruptAgentMode,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              hookTurnId: turnState.turnId,
+              onHookSkippedFactory,
+              hookScope,
+              skillHookKeys,
+              skillUseTracker,
+              onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -4822,9 +5522,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
 
         if (!abortController.signal.aborted) {
-          const stopPassed = await runStopHooksWithRevision({
+          const completionOutcome = await runCompletionHooksWithRevision({
             threadId,
             workspacePath: workspacePath ?? undefined,
+            turnId: turnState.turnId,
             abortSignal: abortController.signal,
             getStopContext: () => stopContextCollector.snapshot(),
             runRevision: async (revisionPrompt) => {
@@ -4838,26 +5539,49 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             },
             sendNotice: sendHookNotice,
             sendError: sendStreamError,
-            onHookResult
+            hookScope,
+            skillUseTracker,
+            maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
+            revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
+            onHookResult,
+            onHookSkippedFactory
           })
 
-          if (!stopPassed) {
+          if (completionOutcome === "failed") {
             clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
+            turnStateShouldDispose = true
             return
           }
+          // "halted" falls through to the done path so the renderer stops loading.
 
           clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
-          safeSendToWindow(window, channel, { type: "done" })
           await settleInterruptDrainedCoordinatorNotifications("restore")
+          await finalizeAutoCommit({
+            threadId,
+            workspacePath,
+            userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
+            snapshot: autoCommit.snapshot,
+            window,
+            channel
+          })
+          turnStateShouldDispose = true
+          safeSendToWindow(window, channel, { type: "done" })
         }
       } else if (decision.type === "reject") {
         // For reject, we need to send a Command with reject decision
         // For now, just send done - the agent will see no resumption happened
         clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
         safeSendToWindow(window, channel, { type: "done" })
+        turnStateShouldDispose = true
       }
       // edit case handled similarly to approve with modified args
     } catch (error) {
+      if (isHookHaltError(error)) {
+        console.warn("[Agent] Interrupt hook halted turn:", error.reason)
+        sendHookHalt(window, channel, error)
+        turnStateShouldDispose = true
+        return
+      }
       const isAbortError =
         error instanceof Error &&
         (error.name === "AbortError" ||
@@ -4872,6 +5596,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           error: error instanceof Error ? error.message : "Unknown error"
         })
       }
+      turnStateShouldDispose = true
     } finally {
       window.removeListener("closed", onWindowClosed)
       await settleInterruptDrainedCoordinatorNotifications("restore")
@@ -4911,6 +5636,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         activeRunSettled.delete(threadId)
       }
       resolveInterruptRunSettled()
+      if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
+        disposeTurnRuntimeState(turnState)
+      }
+      discardAgentAutoCommitTracking(threadId)
     }
   })
 

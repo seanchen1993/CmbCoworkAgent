@@ -1,10 +1,12 @@
-import { IpcMain, dialog, app, BrowserWindow } from "electron"
+import { IpcMain, dialog, app, BrowserWindow, type MessageBoxOptions } from "electron"
 import Store from "electron-store"
+import { randomUUID } from "crypto"
 import * as fs from "fs/promises"
 import { existsSync } from "fs"
 import * as path from "path"
 import { execFile } from "child_process"
 import { promisify } from "util"
+import { getWindowsSandboxMode } from "../storage"
 import type {
   ModelConfig,
   Provider,
@@ -12,8 +14,12 @@ import type {
   WorkspaceLoadParams,
   WorkspaceFileParams
 } from "../types"
+import { LocalSandbox } from "../agent/local-sandbox"
 import { startWatching, stopWatching } from "../services/workspace-watcher"
 import { trackEvent } from "../services/event-reporter"
+import { captureStagedSnapshotsForCommit, measureForCommit } from "../services/adoption-tracker"
+import { scheduleMarkCodeAdoptionCommitsPushed } from "../services/code-adoption-push-updater"
+import { CMBDEVCLAW_INTERNAL_GIT_ENV } from "../services/git-hook-service"
 import { getTracesDir } from "../agent/trace/collector"
 import type { AgentTrace } from "../agent/trace/types"
 import {
@@ -21,6 +27,8 @@ import {
   deleteCoordinatorWorkerArtifacts
 } from "../agent/coordinator-worker-manager"
 import { forgetCoordinatorThreadState, hasActiveAgentRun } from "./agent"
+import { nowIsoLocal } from "../util/local-time"
+import { parseGitRemoteInfo } from "../utils/git-remote"
 
 const execFileAsync = promisify(execFile)
 
@@ -35,9 +43,19 @@ export interface WorktreeInfo {
 
 interface GitPanelFileDiff {
   path: string
+  previousPath?: string
+  status: GitPanelFileStatus
   diff: string
   additions: number
   deletions: number
+}
+
+type GitPanelFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+
+interface GitPanelChangedFile {
+  path: string
+  previousPath?: string
+  status: GitPanelFileStatus
 }
 
 interface GitPanelMetaStatePayload {
@@ -77,6 +95,63 @@ interface FileHistorySnapshot {
   exists: boolean
   content: string | null
   ts: string
+}
+
+async function prepareWorkspaceSelectionSandbox(
+  workspacePath: string,
+  parentWindow?: BrowserWindow | null
+): Promise<boolean> {
+  if (!workspacePath || process.platform !== "win32") return true
+
+  LocalSandbox.prewarmForWorkspace(workspacePath)
+  try {
+    const result = await LocalSandbox.prepareWorkspaceForSelection(workspacePath)
+    if (result.ready || !result.error) return true
+    if (getWindowsSandboxMode() !== "elevated") return true
+
+    const isWorkspacePathRestricted =
+      result.reason === "system-sensitive-path" || result.reason === "invalid-workspace-path"
+    const messageBoxOptions: MessageBoxOptions = isWorkspacePathRestricted
+      ? {
+          type: "warning",
+          title: "Elevated 工作区受限",
+          message: "Elevated 模式可以读取系统目录，也可能执行不涉及写入的命令；但当前模式需要为工作区准备写入权限，不支持将系统敏感目录作为工作区。",
+          detail: result.error,
+          buttons: ["知道了"],
+          defaultId: 0
+        }
+      : {
+          type: "warning",
+          title: "Elevated 沙箱配置未完成",
+          message: "工作区尚未切换，因为 Elevated 沙箱配置未完成。",
+          detail: `${result.error}\n\n请在设置中手动完成 Elevated 配置，或切换到 unelevated / none 后重试。`,
+          buttons: ["知道了"],
+          defaultId: 0
+        }
+
+    if (parentWindow && !parentWindow.isDestroyed()) {
+      await dialog.showMessageBox(parentWindow, messageBoxOptions)
+    } else {
+      await dialog.showMessageBox(messageBoxOptions)
+    }
+    return false
+  } catch (err) {
+    console.warn("[Workspace] elevated sandbox workspace preparation failed:", err)
+    const messageBoxOptions: MessageBoxOptions = {
+      type: "warning",
+      title: "Elevated 沙箱配置未完成",
+      message: "工作区尚未切换，因为 Elevated 沙箱准备失败。",
+      detail: `${err instanceof Error ? err.message : String(err)}\n\n请在设置中手动完成 Elevated 配置，或切换到 unelevated / none 后重试。`,
+      buttons: ["知道了"],
+      defaultId: 0
+    }
+    if (parentWindow && !parentWindow.isDestroyed()) {
+      await dialog.showMessageBox(parentWindow, messageBoxOptions)
+    } else {
+      await dialog.showMessageBox(messageBoxOptions)
+    }
+    return false
+  }
 }
 
 type PushStepStatus = "ok" | "failed" | "skipped"
@@ -291,6 +366,17 @@ function isRenameOrCopyStatus(status: string): boolean {
   return x === "R" || x === "C" || y === "R" || y === "C"
 }
 
+function getGitPanelFileStatus(status: string): GitPanelFileStatus {
+  const x = status[0] || " "
+  const y = status[1] || " "
+  if (x === "?" && y === "?") return "untracked"
+  if (x === "R" || y === "R") return "renamed"
+  if (x === "C" || y === "C") return "copied"
+  if (x === "D" || y === "D") return "deleted"
+  if (x === "A" || y === "A") return "added"
+  return "modified"
+}
+
 function decodeGitQuotedPath(rawPath: string): string {
   const quoted = rawPath.startsWith("\"") && rawPath.endsWith("\"")
   if (!quoted) return rawPath
@@ -362,27 +448,31 @@ function decodeGitQuotedPath(rawPath: string): string {
   return Buffer.from(bytes).toString("utf8")
 }
 
-function parsePorcelainPaths(output: string): string[] {
+function parsePorcelainPathEntries(output: string): GitPanelChangedFile[] {
   // Prefer NUL-delimited porcelain (`git status --porcelain -z`) to avoid
   // C-style quoted paths (e.g. "\\345\\220...") being misparsed as "345/220/...".
   if (output.includes("\0")) {
     const entries = output.split("\0").filter(Boolean)
-    const files: string[] = []
+    const files: GitPanelChangedFile[] = []
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i]
       if (entry.length < 4) continue
       const status = entry.slice(0, 2)
       const rawPath = entry.slice(3)
       if (!rawPath) continue
+      const fileStatus = getGitPanelFileStatus(status)
       if (isRenameOrCopyStatus(status) && i + 1 < entries.length) {
-        // In -z mode rename/copy record layout is:
-        //   "R100 <old-path>\0<new-path>\0"
-        // We want the destination/current path.
-        const renamedTo = normalizeGitRelativePath(entries[i + 1] || "")
-        if (renamedTo) files.push(renamedTo)
+        // In `status -z`, rename/copy records use:
+        //   "R  <new-path>\0<old-path>\0"
+        // Keep the current path for git add/commit and skip the historical source path.
+        files.push({
+          path: normalizeGitRelativePath(rawPath),
+          previousPath: normalizeGitRelativePath(entries[i + 1] || ""),
+          status: fileStatus
+        })
         i += 1
       } else {
-        files.push(normalizeGitRelativePath(rawPath))
+        files.push({ path: normalizeGitRelativePath(rawPath), status: fileStatus })
       }
     }
     return files
@@ -390,17 +480,24 @@ function parsePorcelainPaths(output: string): string[] {
 
   // Fallback for newline-delimited porcelain output.
   const lines = output.split("\n").map((line) => line.trimEnd()).filter(Boolean)
-  const files: string[] = []
+  const files: GitPanelChangedFile[] = []
   for (const line of lines) {
     if (line.length < 4) continue
     const status = line.slice(0, 2)
     let rawPath = line.slice(3).trim()
     if (!rawPath) continue
+    let previousPath: string | undefined
     if (isRenameOrCopyStatus(status) && rawPath.includes(" -> ")) {
-      rawPath = rawPath.split(" -> ").pop() || rawPath
+      const parts = rawPath.split(" -> ")
+      previousPath = decodeGitQuotedPath(parts.slice(0, -1).join(" -> "))
+      rawPath = parts[parts.length - 1] || rawPath
     }
     rawPath = decodeGitQuotedPath(rawPath)
-    files.push(normalizeGitRelativePath(rawPath))
+    files.push({
+      path: normalizeGitRelativePath(rawPath),
+      previousPath: previousPath ? normalizeGitRelativePath(previousPath) : undefined,
+      status: getGitPanelFileStatus(status)
+    })
   }
   return files
 }
@@ -413,11 +510,14 @@ async function runStatusPorcelain(
   const silent = Boolean(options?.silent)
 
   try {
+    // Git 的 pathspec 默认支持 glob 语法，文件名中包含 []、*、? 等字符时会被当作模式匹配。
+    // Git 面板传入的是已经解析出的真实文件路径，因此这里必须按字面量处理 pathspec。
     return await runGit(
       worktreePath,
       [
         "-c",
         "core.quotepath=false",
+        "--literal-pathspecs",
         "status",
         "--porcelain",
         "--untracked-files=all",
@@ -428,13 +528,14 @@ async function runStatusPorcelain(
       { silent, timeoutMs: 15_000 }
     )
   } catch {
-    // Older Git may not support `-z` with this porcelain invocation.
-    // Fallback keeps compatibility, and parsePorcelainPaths handles quoted paths.
+    // 旧版 Git 可能不支持当前 porcelain 命令组合里的 -z。
+    // 回退到非 NUL 分隔输出以保持兼容，路径反引号/转义由 parsePorcelainPathEntries 统一处理。
     return runGit(
       worktreePath,
       [
         "-c",
         "core.quotepath=false",
+        "--literal-pathspecs",
         "status",
         "--porcelain",
         "--untracked-files=all",
@@ -522,7 +623,15 @@ type ThreadGitContextCache = {
   gitRoot: string | null
 }
 
+/**
+ * 清理线程 metadata 中的 Git 探测缓存。
+ *
+ * 新版缓存统一放在 `metadata.gitContext` 对象里；旧版曾经把同一组信息拆成
+ * `cachedIsGitRepo` / `cachedIsWorktreePath` / `cachedGitRoot` 等多个顶层字段。
+ * 这里同时删除新旧字段，确保工作区切换、worktree context 清理等场景不会留下过期状态。
+ */
 function clearThreadGitContextCache(metadata: Record<string, unknown>): void {
+  delete metadata.gitContext
   delete metadata.cachedIsGitRepo
   delete metadata.cachedIsWorktreePath
   delete metadata.cachedGitRoot
@@ -530,26 +639,91 @@ function clearThreadGitContextCache(metadata: Record<string, unknown>): void {
   delete metadata.cachedGitContextAt
 }
 
+/**
+ * 写入线程级 Git context 缓存。
+ *
+ * 该缓存记录“某个 workspacePath 最近一次 Git 探测的结果”，包括：
+ * - 当前路径是否是 Git 仓库；
+ * - 当前路径是否是 worktree；
+ * - 对应的 git root。
+ *
+ * GitPanel、WorkspacePicker 等入口会频繁需要这些信息。把它们写入 metadata 后，进入同一
+ * thread 时可以先用缓存渲染 UI，再由后台刷新补齐实时状态。
+ */
 function writeThreadGitContextCache(
   metadata: Record<string, unknown>,
   payload: { workspacePath: string; isGitRepo: boolean; isWorktreePath: boolean; gitRoot: string | null }
 ): void {
-  metadata.cachedGitContextWorkspacePath = payload.workspacePath
-  metadata.cachedGitContextAt = new Date().toISOString()
-  metadata.cachedIsGitRepo = payload.isGitRepo
-  metadata.cachedIsWorktreePath = payload.isWorktreePath
-  if (payload.gitRoot) {
-    metadata.cachedGitRoot = payload.gitRoot
-  } else {
-    delete metadata.cachedGitRoot
+  // 写入前先清掉新旧缓存字段，避免 metadata 同时存在两套 Git context 表达。
+  clearThreadGitContextCache(metadata)
+  metadata.gitContext = {
+    workspacePath: payload.workspacePath,
+    checkedAt: new Date().toISOString(),
+    isGitRepo: payload.isGitRepo,
+    isWorktreePath: payload.isWorktreePath,
+    gitRoot: payload.gitRoot
   }
 }
 
+/**
+ * 读取线程级 Git context 缓存。
+ *
+ * 返回值只代表“可复用的探测结果”，因此会做三层校验：
+ * - 必须和当前 workspacePath 匹配；
+ * - 必须在 TTL 内，避免长期使用陈旧仓库状态；
+ * - 至少包含 isGitRepo / isWorktreePath / gitRoot 中的一项有效信息。
+ *
+ * 读取顺序是新版 `metadata.gitContext` 优先，旧版 `cached*` 顶层字段作为兼容 fallback。
+ */
 function readThreadGitContextCache(
   metadata: Record<string, unknown>,
   workspacePath: string | null
 ): ThreadGitContextCache | null {
   if (!workspacePath) return null
+  // 优先读取新版结构：所有 Git 探测结果都收敛在 metadata.gitContext 中。
+  const gitContext =
+    metadata.gitContext && typeof metadata.gitContext === "object" && !Array.isArray(metadata.gitContext)
+      ? (metadata.gitContext as Record<string, unknown>)
+      : null
+  if (gitContext) {
+    // 缓存必须属于当前 workspacePath。路径不一致说明线程后来切换过工作区，不能复用。
+    const contextWorkspacePath =
+      typeof gitContext.workspacePath === "string" ? gitContext.workspacePath : null
+    if (!contextWorkspacePath || contextWorkspacePath !== workspacePath) {
+      return null
+    }
+
+    // Git context 是探测结果缓存，只用于减少短时间内的重复 rev-parse/worktree 查询。
+    const checkedAtRaw =
+      typeof gitContext.checkedAt === "string" ? Date.parse(gitContext.checkedAt) : Number.NaN
+    if (!Number.isFinite(checkedAtRaw)) {
+      return null
+    }
+    if (Date.now() - checkedAtRaw > THREAD_GIT_CONTEXT_CACHE_TTL_MS) {
+      return null
+    }
+
+    // 字段级别做宽松读取：老数据或手工编辑 metadata 时，缺字段也不会抛错。
+    const isGitRepo = typeof gitContext.isGitRepo === "boolean" ? gitContext.isGitRepo : null
+    const isWorktreePath =
+      typeof gitContext.isWorktreePath === "boolean" ? gitContext.isWorktreePath : null
+    const gitRoot =
+      typeof gitContext.gitRoot === "string" && gitContext.gitRoot.trim()
+        ? gitContext.gitRoot
+        : null
+
+    if (isGitRepo === null && isWorktreePath === null && !gitRoot) {
+      return null
+    }
+
+    return {
+      isGitRepo: isGitRepo ?? Boolean(gitRoot),
+      isWorktreePath: isWorktreePath ?? false,
+      gitRoot
+    }
+  }
+
+  // 兼容旧 metadata：新写入都会使用 metadata.gitContext 对象。
   const cachedWorkspacePath =
     typeof metadata.cachedGitContextWorkspacePath === "string"
       ? metadata.cachedGitContextWorkspacePath
@@ -593,12 +767,16 @@ function readThreadGitContextCache(
   }
 }
 
-function collectChangedFilesFromStatus(
+function pickBestWorktreeRelativePath(candidates: string[]): string | null {
+  return candidates.find((candidate) => candidate && !candidate.startsWith("../") && !path.isAbsolute(candidate)) ?? null
+}
+
+function collectChangedFileEntriesFromStatus(
   worktreePath: string,
   statusOutput: string,
   trackedFiles: string[],
   options?: { filterByTracked?: boolean }
-): string[] {
+): GitPanelChangedFile[] {
   const trackedSet = new Set<string>()
   for (const tracked of trackedFiles) {
     for (const rel of toWorktreeRelativePath(worktreePath, tracked)) {
@@ -607,25 +785,122 @@ function collectChangedFilesFromStatus(
   }
 
   const filterByTracked = Boolean(options?.filterByTracked) && trackedSet.size > 0
-  const changedSet = new Set<string>()
+  const changedMap = new Map<string, GitPanelChangedFile>()
 
-  for (const raw of parsePorcelainPaths(statusOutput)) {
-    const candidates = toWorktreeRelativePath(worktreePath, raw)
-    if (candidates.length === 0) continue
+  for (const entry of parsePorcelainPathEntries(statusOutput)) {
+    const pathCandidates = toWorktreeRelativePath(worktreePath, entry.path)
+    if (pathCandidates.length === 0) continue
+
+    const previousPathCandidates = entry.previousPath
+      ? toWorktreeRelativePath(worktreePath, entry.previousPath)
+      : []
+    const mappedPreviousPath =
+      pickBestWorktreeRelativePath(previousPathCandidates) ??
+      (entry.previousPath ? normalizeGitRelativePath(entry.previousPath) : undefined)
 
     if (filterByTracked) {
-      const matched = candidates.find((candidate) => trackedSet.has(candidate))
-      if (matched) changedSet.add(matched)
+      const matched = pathCandidates.find((candidate) => trackedSet.has(candidate))
+      if (matched) changedMap.set(matched, { ...entry, path: matched, previousPath: mappedPreviousPath })
       continue
     }
 
-    const best = candidates.find((candidate) => candidate && !candidate.startsWith("../") && !path.isAbsolute(candidate))
+    const best = pickBestWorktreeRelativePath(pathCandidates)
     if (best) {
-      changedSet.add(best)
+      changedMap.set(best, { ...entry, path: best, previousPath: mappedPreviousPath })
     }
   }
 
-  return Array.from(changedSet)
+  return Array.from(changedMap.values())
+}
+
+function collectChangedFilesFromStatus(
+  worktreePath: string,
+  statusOutput: string,
+  trackedFiles: string[],
+  options?: { filterByTracked?: boolean }
+): string[] {
+  return collectChangedFileEntriesFromStatus(worktreePath, statusOutput, trackedFiles, options).map(
+    (entry) => entry.path
+  )
+}
+
+async function getHeadBlobHash(worktreePath: string, relPath: string, options?: { silent?: boolean }): Promise<string | null> {
+  try {
+    const out = await runGitWithLiteralPathspecs(
+      worktreePath,
+      ["ls-files", "-s"],
+      [relPath],
+      { silent: Boolean(options?.silent), timeoutMs: 10_000 }
+    )
+    const match = out.match(/^\d+\s+([0-9a-f]{40,64})\s+\d+\t/)
+    return match?.[1] ?? null
+  } catch {
+    return null
+  }
+}
+
+async function getWorktreeBlobHash(worktreePath: string, relPath: string, options?: { silent?: boolean }): Promise<string | null> {
+  try {
+    const out = await runGitWithLiteralPathspecs(
+      worktreePath,
+      ["hash-object"],
+      [relPath],
+      { silent: Boolean(options?.silent), timeoutMs: 10_000 }
+    )
+    const hash = out.trim()
+    return /^[0-9a-f]{40,64}$/i.test(hash) ? hash : null
+  } catch {
+    return null
+  }
+}
+
+async function combineFilesystemMovesForDisplay(
+  worktreePath: string,
+  entries: GitPanelChangedFile[],
+  options?: { silent?: boolean }
+): Promise<GitPanelChangedFile[]> {
+  const deletedEntries = entries.filter((entry) => entry.status === "deleted" && !entry.previousPath)
+  const newEntries = entries.filter(
+    (entry) => (entry.status === "untracked" || entry.status === "added") && !entry.previousPath
+  )
+  if (deletedEntries.length === 0 || newEntries.length === 0) {
+    return entries
+  }
+
+  const deletedByHash = new Map<string, GitPanelChangedFile[]>()
+  await Promise.all(
+    deletedEntries.map(async (entry) => {
+      const hash = await getHeadBlobHash(worktreePath, entry.path, options)
+      if (!hash) return
+      const bucket = deletedByHash.get(hash) ?? []
+      bucket.push(entry)
+      deletedByHash.set(hash, bucket)
+    })
+  )
+
+  const matchedDeleted = new Set<string>()
+  const replacements = new Map<string, GitPanelChangedFile>()
+  for (const entry of newEntries) {
+    const hash = await getWorktreeBlobHash(worktreePath, entry.path, options)
+    if (!hash) continue
+    const candidates = deletedByHash.get(hash)
+    const previous = candidates?.find((candidate) => !matchedDeleted.has(candidate.path))
+    if (!previous) continue
+    matchedDeleted.add(previous.path)
+    replacements.set(entry.path, {
+      ...entry,
+      previousPath: previous.path,
+      status: "renamed"
+    })
+  }
+
+  if (matchedDeleted.size === 0) {
+    return entries
+  }
+
+  return entries
+    .filter((entry) => !matchedDeleted.has(entry.path))
+    .map((entry) => replacements.get(entry.path) ?? entry)
 }
 
 function parseNumstatTotals(output: string): { additions: number; deletions: number } {
@@ -709,7 +984,14 @@ function formatGitCommand(worktreePath: string, args: string[]): string {
 const GIT_BASE_ENV: NodeJS.ProcessEnv = {
   ...process.env,
   // 禁用 LFS smudge，避免与面板状态/差异无关的网络或大文件拉取开销。
-  GIT_LFS_SKIP_SMUDGE: "1"
+  GIT_LFS_SKIP_SMUDGE: "1",
+  // DevClaw 自己发起的 Git 操作已有采纳统计链路，hook 只采集外部 IDEA/bash 等入口。
+  [CMBDEVCLAW_INTERNAL_GIT_ENV]: "1"
+}
+
+function isGitLfsVersionHookError(error: unknown): boolean {
+  const text = getExecErrorText(error).toLowerCase()
+  return text.includes("git version >= 1.8.2 is required for git lfs")
 }
 
 async function addSafeDirectory(worktreePath: string): Promise<void> {
@@ -720,7 +1002,12 @@ async function addSafeDirectory(worktreePath: string): Promise<void> {
 async function runGit(
   worktreePath: string,
   args: string[],
-  options?: { silent?: boolean; timeoutMs?: number; maxBufferBytes?: number }
+  options?: {
+    silent?: boolean
+    timeoutMs?: number
+    maxBufferBytes?: number
+    env?: NodeJS.ProcessEnv
+  }
 ): Promise<string> {
   const silent = Boolean(options?.silent)
   const maxBufferBytes = options?.maxBufferBytes ?? GIT_EXEC_MAX_BUFFER_BYTES
@@ -729,7 +1016,7 @@ async function runGit(
   if (!silent) console.log(`[GitPanel][exec] ${command}`)
   try {
     const { stdout } = await execFileAsync("git", baseArgs, {
-      env: GIT_BASE_ENV,
+      env: { ...GIT_BASE_ENV, ...options?.env },
       timeout: options?.timeoutMs,
       maxBuffer: maxBufferBytes
     })
@@ -745,13 +1032,119 @@ async function runGit(
     // 保证正常用户路径能自愈，同时限制为“仅一次重试”避免无限循环。
     await addSafeDirectory(worktreePath)
     const { stdout } = await execFileAsync("git", baseArgs, {
-      env: GIT_BASE_ENV,
+      env: { ...GIT_BASE_ENV, ...options?.env },
       timeout: options?.timeoutMs,
       maxBuffer: maxBufferBytes
     })
     if (!silent) console.log(`[GitPanel][exec][ok-after-retry] ${command}`)
     return stdout
   }
+}
+
+async function runGitPushWithLfsCompat(
+  threadId: string,
+  worktreePath: string,
+  args: string[]
+): Promise<string> {
+  try {
+    return await runGit(worktreePath, args)
+  } catch (error) {
+    if (!isGitLfsVersionHookError(error)) {
+      throw error
+    }
+
+    logGitStep(threadId, "push", "检测到 Git LFS pre-push 版本误报，跳过 LFS pre-push hook 后重试一次")
+    return runGit(worktreePath, args, {
+      env: {
+        // Enterprise Windows Git setups can occasionally make the Git LFS hook
+        // fail to read `git --version` and report an empty version string. The
+        // normal push already failed before updating refs, so retry once without
+        // the LFS pre-push hook to keep non-LFS pushes from being blocked.
+        GIT_LFS_SKIP_PUSH: "1"
+      }
+    })
+  }
+}
+
+async function runGitWithLiteralPathspecs(
+  worktreePath: string,
+  args: string[],
+  pathspecs: string[],
+  options?: { silent?: boolean; timeoutMs?: number; maxBufferBytes?: number }
+): Promise<string> {
+  // 提交面板里的文件列表来自 git status / diff 结果，语义上是“文件名”而不是“匹配模式”。
+  // 使用 --literal-pathspecs 可以避免带方括号、星号或问号的真实文件名触发 pathspec 匹配失败。
+  return runGit(worktreePath, ["--literal-pathspecs", ...args, "--", ...pathspecs], options)
+}
+
+async function pathExistsForGitAdd(worktreePath: string, relPath: string): Promise<boolean> {
+  try {
+    await fs.stat(path.join(worktreePath, relPath))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 暂存 GitPanel 中用户勾选的文件。
+ *
+ * 这里不能简单使用 `git add .`，因为 GitPanel 支持“只提交已勾选文件”；
+ * 也不能把所有 path 都直接交给 `git add -- <path>`，因为删除文件或移动文件的旧路径
+ * 在工作区中已经不存在，Windows Git/WebStorm 场景下可能报：
+ *
+ *   fatal: pathspec 'test/maxSubArray.js' did not match any files
+ *
+ * 因此按路径是否仍存在拆成两类：
+ *
+ * 1. 新增/修改/移动后的新路径：
+ *
+ *   git -C <repo> --literal-pathspecs add -- test/fibonacci.js
+ *
+ * 2. 删除文件或移动前的旧路径：
+ *
+ *   git -C <repo> --literal-pathspecs update-index --remove -- fibonacci.js
+ *
+ * 移动文件本质上是“删除旧路径 + 新增新路径”。例如：
+ *
+ *   fibonacci.js -> test/fibonacci.js
+ *
+ * 会分解为：
+ *
+ *   git -C <repo> --literal-pathspecs add -- test/fibonacci.js
+ *   git -C <repo> --literal-pathspecs update-index --remove -- fibonacci.js
+ *
+ * 最后 commit 时仍带上用户勾选的 pathspec，保证只提交本次选择范围内的变更。
+ */
+async function stageFilesForCommit(
+  worktreePath: string,
+  pathspecs: string[]
+): Promise<{ existingPathspecs: string[]; removedPathspecs: string[] }> {
+  const normalizedPathspecs = Array.from(new Set(pathspecs.map(normalizeGitRelativePath).filter(Boolean)))
+  const existingPathspecs: string[] = []
+  const removedPathspecs: string[] = []
+
+  await Promise.all(
+    normalizedPathspecs.map(async (pathspec) => {
+      if (await pathExistsForGitAdd(worktreePath, pathspec)) {
+        existingPathspecs.push(pathspec)
+      } else {
+        removedPathspecs.push(pathspec)
+      }
+    })
+  )
+
+  if (existingPathspecs.length > 0) {
+    // 示例：git -C <repo> --literal-pathspecs add -- test/fibonacci.js
+    await runGitWithLiteralPathspecs(worktreePath, ["add"], existingPathspecs)
+  }
+
+  if (removedPathspecs.length > 0) {
+    // 示例：git -C <repo> --literal-pathspecs update-index --remove -- fibonacci.js
+    await runGitWithLiteralPathspecs(worktreePath, ["update-index", "--remove"], removedPathspecs)
+  }
+
+  return { existingPathspecs, removedPathspecs }
 }
 
 function isGitDirWorktree(gitDir: string): boolean {
@@ -954,41 +1347,6 @@ function isMissingRemoteBranchError(error: unknown): boolean {
     text.includes("couldn't find remote branch")
 }
 
-async function getUnmergedFiles(worktreePath: string): Promise<string[]> {
-  const out = await runGit(worktreePath, ["diff", "--name-only", "--diff-filter=U"]).catch(() => "")
-  return out
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-}
-
-async function getFilesWithConflictMarkers(
-  worktreePath: string,
-  files: string[]
-): Promise<string[]> {
-  const relSet = new Set<string>()
-  for (const file of files) {
-    for (const rel of toWorktreeRelativePath(worktreePath, file)) {
-      relSet.add(rel)
-    }
-  }
-  const relFiles = Array.from(relSet)
-  if (relFiles.length === 0) return []
-  const out = await runGit(
-    worktreePath,
-    ["grep", "-n", "-E", "^(<<<<<<<|=======|>>>>>>>)", "--", ...relFiles]
-  ).catch(() => "")
-  const matched = new Set<string>()
-  for (const line of out.split("\n")) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    const idx = trimmed.indexOf(":")
-    if (idx <= 0) continue
-    matched.add(trimmed.slice(0, idx))
-  }
-  return Array.from(matched)
-}
-
 async function resolveThreadWorkspaceContext(threadId: string): Promise<{
   metadata: Record<string, unknown>
   workspacePath: string | null
@@ -1109,9 +1467,10 @@ function getRecentlyRevertedFiles(metadata: Record<string, unknown>): string[] {
 async function buildGitPanelFileDiff(
   worktreePath: string,
   relPath: string,
-  options?: { silent?: boolean }
+  options?: { silent?: boolean; status?: GitPanelFileStatus }
 ): Promise<GitPanelFileDiff | null> {
   const silent = Boolean(options?.silent)
+  const fileStatus = options?.status ?? "modified"
   const targetPath = normalizeGitRelativePath(relPath)
   if (!targetPath) {
     return null
@@ -1225,6 +1584,7 @@ async function buildGitPanelFileDiff(
 
   return {
     path: targetPath,
+    status: fileStatus,
     diff: diffText,
     additions,
     deletions
@@ -1277,11 +1637,24 @@ async function buildGitPanelState(
 
   const statusPathspecs = filterByTracked ? normalizedTrackedFiles : ["."]
   const statusOut = await runStatusPorcelain(worktreePath, statusPathspecs, { silent })
-  const changedFiles = collectChangedFilesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
+  const rawChangedFileEntries = collectChangedFileEntriesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
     filterByTracked
   })
+  const changedFileEntries = await combineFilesystemMovesForDisplay(
+    worktreePath,
+    rawChangedFileEntries,
+    { silent }
+  )
+  const changedFiles = Array.from(
+    new Set(
+      changedFileEntries.flatMap((entry) =>
+        entry.previousPath ? [entry.previousPath, entry.path] : [entry.path]
+      )
+    )
+  )
+  const displayChangedFiles = changedFileEntries.map((entry) => entry.path)
 
-  if (changedFiles.length === 0) {
+  if (displayChangedFiles.length === 0) {
     return {
       files: [],
       changedFiles: [],
@@ -1292,8 +1665,10 @@ async function buildGitPanelState(
   }
 
   // 保留文件数量上限，避免超大仓库一次返回过多数据导致渲染阻塞。
-  const visibleChangedFiles = changedFiles.slice(0, GIT_PANEL_MAX_VISIBLE_FILES)
-  const omittedFileCount = Math.max(0, changedFiles.length - visibleChangedFiles.length)
+  const visibleChangedFiles = displayChangedFiles.slice(0, GIT_PANEL_MAX_VISIBLE_FILES)
+  const statusByPath = new Map(changedFileEntries.map((entry) => [entry.path, entry.status]))
+  const previousPathByPath = new Map(changedFileEntries.map((entry) => [entry.path, entry.previousPath]))
+  const omittedFileCount = Math.max(0, displayChangedFiles.length - visibleChangedFiles.length)
 
   let numstatMap = new Map<string, { additions: number; deletions: number }>()
   try {
@@ -1332,10 +1707,16 @@ async function buildGitPanelState(
     if (!normalizedPath) {
       continue
     }
-    const resolvedDiff = await buildGitPanelFileDiff(worktreePath, normalizedPath, { silent })
+    const fileStatus = statusByPath.get(normalizedPath) ?? "modified"
+    const resolvedDiff = await buildGitPanelFileDiff(worktreePath, normalizedPath, {
+      silent,
+      status: fileStatus
+    })
     const stats = numstatMap.get(normalizedPath) || { additions: 0, deletions: 0 }
     fileDiffs.push({
       path: normalizedPath,
+      previousPath: previousPathByPath.get(normalizedPath),
+      status: resolvedDiff?.status ?? fileStatus,
       diff: truncateGitPanelDiff(resolvedDiff?.diff || ""),
       additions: resolvedDiff?.additions ?? stats.additions,
       deletions: resolvedDiff?.deletions ?? stats.deletions
@@ -1351,7 +1732,7 @@ async function buildGitPanelState(
   return {
     files: fileDiffs,
     changedFiles,
-    changedFilesTotal: changedFiles.length,
+    changedFilesTotal: displayChangedFiles.length,
     omittedFileCount,
     totals: {
       additions: totals.additions,
@@ -1367,11 +1748,11 @@ async function buildGitPanelState(
  * Unlike buildGitPanelState(), this only computes changed file paths from
  * porcelain status and does not calculate per-file diffs/numstat.
  */
-async function getChangedFilesForGitOps(
+async function getChangedFileEntriesForGitOps(
   worktreePath: string,
   trackedFiles: string[],
   options?: { silent?: boolean; includeAllWhenNoTracked?: boolean }
-): Promise<string[]> {
+): Promise<GitPanelChangedFile[]> {
   // commit/push 场景只需要“文件列表”即可，不做重型 diff 计算。
   // 该函数是 Git 提交流程的轻量快速路径。
   const silent = Boolean(options?.silent)
@@ -1390,9 +1771,52 @@ async function getChangedFilesForGitOps(
 
   const statusPathspecs = filterByTracked ? normalizedTrackedFiles : ["."]
   const statusOut = await runStatusPorcelain(worktreePath, statusPathspecs, { silent })
-  return collectChangedFilesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
+  const rawEntries = collectChangedFileEntriesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
     filterByTracked
   })
+  return combineFilesystemMovesForDisplay(worktreePath, rawEntries, { silent })
+}
+
+function normalizeSelectedChangedFileEntries(
+  worktreePath: string,
+  changedEntries: GitPanelChangedFile[],
+  selectedFilePaths?: string[]
+): string[] {
+  const changedFiles = Array.from(
+    new Set(
+      changedEntries.flatMap((entry) => entry.previousPath ? [entry.previousPath, entry.path] : [entry.path])
+    )
+  )
+  if (!Array.isArray(selectedFilePaths)) {
+    return changedFiles
+  }
+  if (selectedFilePaths.length === 0) return []
+
+  const changedSet = new Set(changedFiles.map(normalizeGitRelativePath))
+  const entryByPath = new Map<string, GitPanelChangedFile>()
+  for (const entry of changedEntries) {
+    entryByPath.set(normalizeGitRelativePath(entry.path), entry)
+    if (entry.previousPath) {
+      entryByPath.set(normalizeGitRelativePath(entry.previousPath), entry)
+    }
+  }
+  const selectedSet = new Set<string>()
+  for (const selected of selectedFilePaths) {
+    if (typeof selected !== "string" || !selected.trim()) continue
+    for (const rel of toWorktreeRelativePath(worktreePath, selected)) {
+      const normalized = normalizeGitRelativePath(rel)
+      if (changedSet.has(normalized)) {
+        const entry = entryByPath.get(normalized)
+        if (entry?.previousPath) {
+          selectedSet.add(normalizeGitRelativePath(entry.previousPath))
+          selectedSet.add(normalizeGitRelativePath(entry.path))
+        } else {
+          selectedSet.add(normalized)
+        }
+      }
+    }
+  }
+  return Array.from(selectedSet)
 }
 
 async function getHeadCommitStats(
@@ -1619,7 +2043,12 @@ import {
   getUserInfo,
   DEFAULT_MAX_TOKENS,
   MIN_MAX_TOKENS,
-  MAX_MAX_TOKENS
+  MAX_MAX_TOKENS,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  MIN_MAX_OUTPUT_TOKENS,
+  MAX_MAX_OUTPUT_TOKENS,
+  DEFAULT_TEMPERATURE,
+  MAX_TEMPERATURE
 } from "../storage"
 import type { CustomModelConfig } from "../storage"
 
@@ -1724,7 +2153,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     return {
       defaultMaxTokens: DEFAULT_MAX_TOKENS,
       minMaxTokens: MIN_MAX_TOKENS,
-      maxMaxTokens: MAX_MAX_TOKENS
+      maxMaxTokens: MAX_MAX_TOKENS,
+      defaultMaxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      minMaxOutputTokens: MIN_MAX_OUTPUT_TOKENS,
+      maxMaxOutputTokens: MAX_MAX_OUTPUT_TOKENS,
+      defaultTemperature: DEFAULT_TEMPERATURE,
+      maxTemperature: MAX_TEMPERATURE
     }
   })
 
@@ -1733,11 +2167,20 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     "models:testConnection",
     async (
       _event,
-      params: { id?: string; baseUrl?: string; model?: string; apiKey?: string }
+      params: {
+        id?: string
+        baseUrl?: string
+        model?: string
+        apiKey?: string
+        maxOutputTokens?: number
+        temperature?: number
+      }
     ): Promise<{ success: boolean; error?: string; latencyMs?: number }> => {
       let baseUrl: string
       let model: string
       let apiKey: string
+      let maxOutputTokens: number
+      let temperature: number
 
       if (params.id) {
         // Test an existing saved config — read API key from storage
@@ -1746,10 +2189,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         baseUrl = params.baseUrl || saved.baseUrl
         model = params.model || saved.model
         apiKey = params.apiKey || saved.apiKey || ""
+        maxOutputTokens = params.maxOutputTokens ?? saved.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+        temperature = params.temperature ?? saved.temperature ?? DEFAULT_TEMPERATURE
       } else {
         baseUrl = params.baseUrl || ""
         model = params.model || ""
         apiKey = params.apiKey || ""
+        maxOutputTokens = params.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+        temperature = params.temperature ?? DEFAULT_TEMPERATURE
       }
 
       if (!baseUrl) return { success: false, error: "接口地址不能为空" }
@@ -1784,7 +2231,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           body: JSON.stringify({
             model,
             messages: [{ role: "user", content: "Hi" }],
-            max_tokens: 1,
+            max_tokens: maxOutputTokens,
+            temperature,
             stream: false
           }),
           signal: controller.signal
@@ -1848,10 +2296,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   // Set workspace path for a thread (stores in thread metadata)
   ipcMain.handle(
     "workspace:set",
-    async (_event, { threadId, path: newPath }: WorkspaceSetParams) => {
+    async (event, { threadId, path: newPath }: WorkspaceSetParams) => {
+      const parentWindow = BrowserWindow.fromWebContents(event.sender)
       if (!threadId) {
         // Fallback to global setting
         if (newPath) {
+          const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
+          if (!ready) return null
           store.set("workspacePath", newPath)
         } else {
           store.delete("workspacePath")
@@ -1865,16 +2316,23 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
       const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
       await assertWorkspaceSwitchAllowed(threadId, metadata.workspacePath, newPath)
-      metadata.workspacePath = newPath
-      clearThreadGitContextCache(metadata)
-      updateThread(threadId, { metadata: JSON.stringify(metadata) })
-
-      // Update file watcher
       if (newPath) {
+        const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
+        if (!ready) return null
+
+        const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+        metadata.workspacePath = newPath
+        clearThreadGitContextCache(metadata)
+        updateThread(threadId, { metadata: JSON.stringify(metadata) })
+
         startWatching(threadId, newPath)
         // 同步刷新“最近工作区”，供新建线程默认复用。
         store.set("workspacePath", newPath)
       } else {
+        const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+        metadata.workspacePath = newPath
+        clearThreadGitContextCache(metadata)
+        updateThread(threadId, { metadata: JSON.stringify(metadata) })
         stopWatching(threadId)
       }
 
@@ -1883,7 +2341,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   )
 
   // Select workspace folder via dialog (for a specific thread)
-  ipcMain.handle("workspace:select", async (_event, threadId?: string) => {
+  ipcMain.handle("workspace:select", async (event, threadId?: string) => {
+    const parentWindow = BrowserWindow.fromWebContents(event.sender)
     // 选择器默认路径优先级：
     // 1) 当前线程已绑定的 workspacePath
     // 2) 全局记录的最近 workspacePath
@@ -1915,8 +2374,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
     const result = await dialog.showOpenDialog({
       properties: ["openDirectory", "createDirectory"],
-      title: "Select Workspace Folder",
-      message: "Choose a folder for the agent to work in",
+      title: "选择工作区文件夹",
+      message: "请选择代理要工作的文件夹",
       defaultPath
     })
 
@@ -1925,6 +2384,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     }
 
     const selectedPath = result.filePaths[0]
+    const ready = await prepareWorkspaceSelectionSandbox(selectedPath, parentWindow)
+    if (!ready) return null
 
     if (threadId) {
       const { getThread, updateThread } = await import("../db")
@@ -2430,7 +2891,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     "workspace:commitWorktree",
     async (
       _event,
-      { threadId, message }: { threadId: string; message: string }
+      { threadId, message, filePaths }: { threadId: string; message: string; filePaths?: string[] }
     ) => {
       try {
         logGitStep(threadId, "commit", "开始提交")
@@ -2441,20 +2902,54 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "当前任务不在 Git 仓库中" }
         }
         const tracked = getTrackedLlmFiles(context.metadata)
-        const changedFiles = await getChangedFilesForGitOps(worktreePath, tracked, {
+        const changedEntries = await getChangedFileEntriesForGitOps(worktreePath, tracked, {
           includeAllWhenNoTracked: true
         })
-        if (changedFiles.length === 0) {
+        const filesToCommit = normalizeSelectedChangedFileEntries(worktreePath, changedEntries, filePaths)
+        logGitStep(
+          threadId,
+          "commit",
+          `前端选择路径：${Array.isArray(filePaths) ? filePaths.join(", ") || "(空)" : "(未指定，提交全部)"}`
+        )
+        logGitStep(
+          threadId,
+          "commit",
+          `后端展开路径：${filesToCommit.join(", ") || "(空)"}`
+        )
+        if (filesToCommit.length === 0) {
           logGitStep(threadId, "commit", "失败：没有需要提交的改动")
           return { success: false, error: "没有需要提交的改动" }
         }
 
-        logGitStep(threadId, "commit", `add 文件数：${changedFiles.length}`)
-        await runGit(worktreePath, ["add", "--", ...changedFiles])
+        logGitStep(threadId, "commit", `add 文件数：${filesToCommit.length}`)
+        // 这里会按文件是否存在拆分暂存命令：
+        // - 存在路径：git add -- <path>
+        // - 删除路径：git update-index --remove -- <path>
+        // 详见 stageFilesForCommit 上方注释中的 Windows 兼容说明和完整命令案例。
+        const stagedPaths = await stageFilesForCommit(worktreePath, filesToCommit)
+        logGitStep(
+          threadId,
+          "commit",
+          `暂存分组：add=[${stagedPaths.existingPathspecs.join(", ")}] remove=[${stagedPaths.removedPathspecs.join(", ")}]`
+        )
+        const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
         logGitStep(threadId, "commit", `commit message: ${message}`)
-        await runGit(worktreePath, ["commit", "-m", message])
+        if (Array.isArray(filePaths) && filePaths.length > 0) {
+          await runGitWithLiteralPathspecs(worktreePath, ["commit", "-m", message], filesToCommit)
+        } else {
+          await runGit(worktreePath, ["commit", "-m", message])
+        }
+        let commitSha: string | undefined
+        try {
+          commitSha = (await runGit(worktreePath, ["rev-parse", "HEAD"], { silent: true })).trim() || undefined
+        } catch {
+          // best-effort: adoption can still be measured without the SHA
+        }
         // 提交后主动刷新 HEAD 短缓存，保证后续 push/telemetry 读取到最新提交。
         void getHeadCommitCached(worktreePath, { silent: true, forceRefresh: true }).catch(() => null)
+        if (adoptionSnapshots.length > 0) {
+          measureForCommit(adoptionSnapshots, commitSha)
+        }
         const { getThread, updateThread } = await import("../db")
         const thread = getThread(threadId)
         if (thread) {
@@ -2478,7 +2973,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           trackGitEventWithSkills("git.commit.created", threadId, {
             repoPath:     worktreePath,
             branch: branch || "",
-            filesChanged: commitStats.fileCount || changedFiles.length,
+            commitSha: commitSha ?? "",
+            filesChanged: commitStats.fileCount || filesToCommit.length,
             insertions: commitStats.additions,
             deletions: commitStats.deletions,
             triggeredBy:  "manual"
@@ -2495,10 +2991,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "workspace:pushWorktree",
-    async (_event, { threadId, message }: { threadId: string; message?: string }) => {
+    async (
+      _event,
+      { threadId }: { threadId: string }
+    ) => {
       logGitStep(threadId, "push", "开始推送流程")
-      let autoCommitted = false
-      let autoCommitHead: string | null = null
       const steps: PushStepResult[] = []
       try {
         const context = await resolveThreadWorkspaceContext(threadId)
@@ -2509,112 +3006,33 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "当前任务不在 Git 仓库中", steps }
         }
 
-        const rollbackAutoCommit = async (): Promise<void> => {
-          if (!autoCommitted || !autoCommitHead) return
-          try {
-            // 对比当前 HEAD 与自动提交产生的 commit，只有一致时才回滚，避免误回滚用户后续提交。
-            const currentHead = await getHeadCommitCached(worktreePath, {
-              silent: true,
-              forceRefresh: true
-            })
-            if (currentHead === autoCommitHead) {
-              await runGit(worktreePath, ["reset", "--mixed", "HEAD~1"])
-            }
-          } catch {
-            // ignore rollback failure; return original error to user
-          }
-        }
-
         const branch =
           context.worktreeBranch || (await getCurrentBranchCached(worktreePath, { silent: true })) || "HEAD"
 
-        // Step 1: Auto-commit pending workspace changes first.
-        const tracked = getTrackedLlmFiles(context.metadata)
-        // push 前走轻量 changed-files 快速路径，不构建完整 diff，减少等待。
-        const pendingChangedFiles = await getChangedFilesForGitOps(worktreePath, tracked, {
-          includeAllWhenNoTracked: true
-        })
-        if (pendingChangedFiles.length > 0) {
-          const commitMessage = (message || "").trim() ||
-            `chore(task:${threadId.slice(0, 8)}): auto commit before push`
-          try {
-            logGitStep(threadId, "push", `自动提交 message: ${commitMessage}`)
-            await runGit(worktreePath, ["add", "--", ...pendingChangedFiles])
-            await runGit(worktreePath, ["commit", "-m", commitMessage])
-            autoCommitted = true
-            autoCommitHead = await getHeadCommitCached(worktreePath, {
-              silent: true,
-              forceRefresh: true
-            })
-            if (!autoCommitHead) {
-              // 极端情况下缓存刷新失败，回退到直接 rev-parse，保证流程鲁棒性。
-              autoCommitHead = (await runGit(worktreePath, ["rev-parse", "HEAD"], { silent: true })).trim()
-            }
-            steps.push({ step: "commit", status: "ok", detail: `自动提交成功：${commitMessage}` })
-
-            // Operational telemetry (fire-and-forget, never blocks push flow)
-            {
-              // 提交后直接读取 HEAD 统计，避免重复计算 pending diff totals。
-              const commitStats = await getHeadCommitStats(worktreePath, { silent: true })
-              trackGitEventWithSkills("git.commit.created", threadId, {
-                repoPath:     worktreePath,
-                branch,
-                filesChanged: commitStats.fileCount || pendingChangedFiles.length,
-                insertions: commitStats.additions,
-                deletions: commitStats.deletions,
-                triggeredBy:  "auto-push"
-              })
-            }
-          } catch (commitError) {
-            const detail = getExecErrorText(commitError)
-            steps.push({ step: "commit", status: "failed", detail: detail || "自动提交失败" })
-            steps.push({ step: "final", status: "failed", detail: "流程中断：commit 失败" })
-            return { success: false, error: detail || "自动提交失败", steps }
-          }
-        } else {
-          steps.push({ step: "commit", status: "skipped", detail: "无待提交改动，跳过自动提交" })
-        }
+        steps.push({ step: "commit", status: "skipped", detail: "Push 不执行提交，仅推送已有 commit" })
 
         // 快速路径：push 流程跳过 pull --rebase，减少端到端等待。
         // 若后续 push 失败，会把错误精确返回给用户处理（例如非 fast-forward）。
         steps.push({ step: "pull", status: "skipped", detail: "快速模式：跳过 pull --rebase" })
 
-        const unmerged = await getUnmergedFiles(worktreePath)
-        if (unmerged.length > 0) {
-          steps.push({
-            step: "final",
-            status: "failed",
-            detail: `检测到未解决冲突文件：${unmerged.slice(0, 3).join(", ")}${unmerged.length > 3 ? "..." : ""}`
+        const pushedCommitsPromise = getPushabilitySnapshot(
+          worktreePath,
+          branch,
+          context.worktreeBaseCommit,
+          { silent: true }
+        )
+          .then((snapshot) => snapshot.pendingCommits)
+          .catch((e) => {
+            console.warn("[GitPush] failed to capture push telemetry commit snapshot:", e)
+            return [] as Array<{ hash: string; message: string; date: string }>
           })
-          steps.push({ step: "final", status: "failed", detail: "流程中断：存在未解决冲突" })
-          return {
-            success: false,
-            error: "存在未解决的 Git 冲突，请先解决后再 Push。",
-            steps
-          }
-        }
-
-        const markerFiles = await getFilesWithConflictMarkers(worktreePath, tracked)
-        if (markerFiles.length > 0) {
-          steps.push({
-            step: "final",
-            status: "failed",
-            detail: `检测到冲突标记（<<<<<<< / ======= / >>>>>>>）：${markerFiles.slice(0, 3).join(", ")}${markerFiles.length > 3 ? "..." : ""}`
-          })
-          return {
-            success: false,
-            error: "检测到代码中仍有 Git 冲突标记，请先处理后再 Push。",
-            steps
-          }
-        }
 
         // Step 2: Push
         try {
           logGitStep(threadId, "push", `执行 push origin ${branch}`)
-          await runGit(worktreePath, ["push", "-u", "origin", branch])
+          await runGitPushWithLfsCompat(threadId, worktreePath, ["push", "-u", "origin", branch])
           steps.push({ step: "push", status: "ok", detail: `push origin ${branch} 成功` })
         } catch (pushError) {
-          await rollbackAutoCommit()
           const detail = getExecErrorText(pushError)
           if (detail.toLowerCase().includes("detected dubious ownership")) {
             steps.push({ step: "push", status: "failed", detail: "Git safe.directory 校验失败" })
@@ -2630,37 +3048,56 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           return { success: false, error: detail || "推送失败", steps }
         }
 
-        if (autoCommitted) {
-          const { getThread, updateThread } = await import("../db")
-          const thread = getThread(threadId)
-          if (thread) {
-            let metadata: Record<string, unknown> = {}
-            try { metadata = thread.metadata ? JSON.parse(thread.metadata) : {} } catch { metadata = {} }
-            metadata.llmModifiedFiles = []
-            metadata.llmFileHistory = {}
-            metadata.llmRecentlyRevertedFiles = []
-            updateThread(threadId, { metadata: JSON.stringify(metadata) })
-          }
-        }
-
-        steps.push({ step: "final", status: "ok", detail: autoCommitted ? "自动提交并推送成功" : "推送成功" })
+        steps.push({ step: "final", status: "ok", detail: "推送成功" })
         notifyWorkspaceFilesChanged(threadId, worktreePath)
         logGitStep(threadId, "push", "推送流程成功")
 
-        // Operational telemetry (fire-and-forget, never blocks return)
-        {
+        // Operational telemetry and code-adoption marking run in the background so
+        // the user sees push success as soon as git push itself completes.
+        void (async () => {
+          const pushedCommits = await pushedCommitsPromise
+          const pushOperationId = randomUUID()
+          const pushedAt = nowIsoLocal()
           let remoteUrl = ""
           try {
             remoteUrl = (await runGit(worktreePath, ["remote", "get-url", "origin"], { silent: true })).trim()
           } catch { /* best-effort */ }
+          const remoteInfo = parseGitRemoteInfo(remoteUrl)
+          const pushedCommitShas = pushedCommits.map((commit) => commit.hash)
+          console.log(
+            `[GitPush] scheduling code adoption push marking: commitCount=${pushedCommitShas.length} shas=${pushedCommitShas.join(",")} branch=${branch}`
+          )
+          scheduleMarkCodeAdoptionCommitsPushed({
+            commitShas: pushedCommitShas,
+            repoPath: worktreePath,
+            branch,
+            remoteUrl,
+            repositoryName: remoteInfo?.repositoryName ?? "",
+            repositoryFullName: remoteInfo?.repositoryFullName ?? "",
+            repositoryHost: remoteInfo?.repositoryHost ?? "",
+            repositoryWebUrl: remoteInfo?.repositoryWebUrl ?? "",
+            commitUrlTemplate: remoteInfo?.commitUrlTemplate ?? "",
+            pushedAt,
+            pushOperationId
+          })
           trackGitEventWithSkills("git.push.executed", threadId, {
             repoPath: worktreePath,
             branch,
-            remoteUrl
+            remoteUrl,
+            repositoryName: remoteInfo?.repositoryName ?? "",
+            repositoryFullName: remoteInfo?.repositoryFullName ?? "",
+            repositoryHost: remoteInfo?.repositoryHost ?? "",
+            repositoryWebUrl: remoteInfo?.repositoryWebUrl ?? "",
+            pushedCommitShas,
+            pushedCommitCount: pushedCommitShas.length,
+            pushedAt,
+            pushOperationId
           })
-        }
+        })().catch((e) => {
+          console.warn("[GitPush] background telemetry failed:", e)
+        })
 
-        return { success: true, autoCommitted, steps }
+        return { success: true, autoCommitted: false, steps }
       } catch (e) {
         const detail = getExecErrorText(e)
         logGitStep(threadId, "push", `异常：${detail || (e instanceof Error ? e.message : "推送失败")}`)

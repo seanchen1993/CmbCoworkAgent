@@ -1,55 +1,70 @@
 import { BrowserWindow, type WebContents } from "electron"
 import type { HookResultCallback } from "./runner"
 import type { HookConfig, HookEvent, HookResult } from "./types"
+import type { ScopeSkipCallback, ScopeSkipReason } from "./scope"
+import {
+  buildHookResultRecord,
+  buildHookSkippedRecord,
+  persistHookRecordOnce,
+  type HookExecutedEnvelope,
+  type ScopedHook
+} from "./log-record"
 
-const MAX_STDOUT_PREVIEW_CHARS = 4_000
-const MAX_STDERR_PREVIEW_CHARS = 8_000
-
-function truncatePreview(text: string | undefined, maxChars: number): string {
-  if (!text) return ""
-  if (text.length <= maxChars) return text
-  return `${text.slice(0, maxChars)}\n...[truncated ${text.length - maxChars} chars]`
-}
-
-function sendHookResult(webContents: WebContents, channel: string, event: HookEvent, hook: HookConfig, result: HookResult): void {
+function emit(webContents: WebContents, channel: string, envelope: HookExecutedEnvelope): void {
   if (webContents.isDestroyed()) return
-
-  const hookType = hook.type ?? "command"
-  const label = hookType === "command"
-    ? (hook.command ?? "").slice(0, 60)
-    : (hook.prompt ?? "").slice(0, 60)
-  const toolSuffix = hook.matcher && hook.matcher !== "*" ? `/${hook.matcher}` : ""
-
-  webContents.send(channel, {
-    type: "custom",
-    data: {
-      type: "hook_executed",
-      event,
-      hookType,
-      label,
-      toolSuffix,
-      exitCode: result.exitCode,
-      blocked: result.blocked,
-      decision: result.decision,
-      stdout: truncatePreview(result.stdout, MAX_STDOUT_PREVIEW_CHARS),
-      stderr: truncatePreview(result.stderr, MAX_STDERR_PREVIEW_CHARS),
-      systemMessage: result.systemMessage
-    }
-  })
+  webContents.send(channel, { type: "custom", data: envelope })
 }
 
-export function makeHookResultCallback(window: BrowserWindow, channel: string): HookResultCallback {
+export function makeHookResultCallback(
+  window: BrowserWindow,
+  channel: string,
+  turnId?: string
+): HookResultCallback {
   return (event: HookEvent, hook: HookConfig, result: HookResult): void => {
+    const envelope = buildHookResultRecord(event, hook, result, turnId)
+    if (!envelope) return
     if (window.isDestroyed()) return
-    sendHookResult(window.webContents, channel, event, hook, result)
+    emit(window.webContents, channel, envelope)
   }
 }
 
-export function makeBroadcastHookResultCallback(channel: string): HookResultCallback {
+export function makeBroadcastHookResultCallback(channel: string, turnId?: string): HookResultCallback {
   return (event: HookEvent, hook: HookConfig, result: HookResult): void => {
+    const envelope = buildHookResultRecord(event, hook, result, turnId)
+    if (!envelope) return
     for (const window of BrowserWindow.getAllWindows()) {
       if (window.isDestroyed()) continue
-      sendHookResult(window.webContents, channel, event, hook, result)
+      emit(window.webContents, channel, envelope)
     }
+  }
+}
+
+/**
+ * Skip-event callback factory — diagnostic mode only. Feed this into
+ * `resolveEnabledHooksForRun(..., onSkipped)` so the renderer can show
+ * "matched but filtered out" rows.
+ *
+ * `event` is captured in the closure rather than passed at call time:
+ * `ScopeSkipCallback` only receives `(hook, reason)` — the event isn't part
+ * of the per-hook information `filterScopedHooks` has, so callers must
+ * supply it once when constructing the callback (one factory call per
+ * `resolveEnabledHooksForRun` invocation).
+ *
+ * Diagnostic gate lives inside `buildHookSkippedRecord`, so constructing the
+ * callback is cheap even when logging is disabled — calling it just hits the
+ * gate and returns.
+ */
+export function makeHookSkippedCallback(
+  window: BrowserWindow,
+  channel: string,
+  event: HookEvent,
+  turnId?: string
+): ScopeSkipCallback {
+  return (hook, reason: ScopeSkipReason): void => {
+    const envelope = buildHookSkippedRecord(event, hook as ScopedHook, reason, turnId)
+    if (!envelope) return
+    persistHookRecordOnce(envelope)
+    if (window.isDestroyed()) return
+    emit(window.webContents, channel, envelope)
   }
 }

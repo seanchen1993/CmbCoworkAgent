@@ -233,6 +233,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       | undefined
     const coordinatorInternalNotification =
       payload.config?.configurable?.coordinator_internal_notification === true
+    const userMessageId = payload.config?.configurable?.hook_turn_id as string | undefined
     if (!threadId) {
       return this.createErrorGenerator("MISSING_THREAD_ID", "Thread ID is required")
     }
@@ -264,7 +265,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
       payload.signal,
       modelId,
       agentMode,
-      coordinatorInternalNotification
+      coordinatorInternalNotification,
+      userMessageId
     )
   }
 
@@ -331,7 +333,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     signal: AbortSignal,
     modelId?: string,
     agentMode?: "normal" | "coordinator",
-    coordinatorInternalNotification = false
+    coordinatorInternalNotification = false,
+    userMessageId?: string
   ): AsyncGenerator<StreamEvent> {
     // Create a queue to buffer events from IPC
     const eventQueue: StreamEvent[] = []
@@ -390,7 +393,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
       },
       modelId,
       agentMode,
-      coordinatorInternalNotification
+      coordinatorInternalNotification,
+      userMessageId
     )
 
     let cleanedUp = false

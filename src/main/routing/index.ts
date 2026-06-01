@@ -1,7 +1,14 @@
 import { createHash } from "crypto"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
-import { getModelByTier, getCustomModelConfigs, getGlobalRoutingMode, DEFAULT_MAX_TOKENS } from "../storage"
+import {
+  getModelByTier,
+  getCustomModelConfigs,
+  getGlobalRoutingMode,
+  DEFAULT_MAX_TOKENS,
+  DEFAULT_TOP_P,
+  DEFAULT_TOP_K
+} from "../storage"
 import { getThread, updateThread } from "../db"
 import type { RoutingTrace, RoutingLayerRecord } from "../agent/trace/types"
 
@@ -61,9 +68,9 @@ export interface RoutingFeedback {
   lastInputTokens?: number
 }
 
-const PREMIUM_STICKY_TTL_MS  = 40 * 60 * 1000  // 40 min
-const FORCE_PREMIUM_TTL_MS   = 60 * 60 * 1000  // 60 min
-const FAILOVER_STICKY_TTL_MS = 30 * 60 * 1000  // 30 min — after failover, prefer the successful model
+const PREMIUM_STICKY_TTL_MS = 40 * 60 * 1000 // 40 min
+const FORCE_PREMIUM_TTL_MS = 60 * 60 * 1000 // 60 min
+const FAILOVER_STICKY_TTL_MS = 30 * 60 * 1000 // 30 min — after failover, prefer the successful model
 
 function readThreadRoutingState(threadId: string | undefined): ThreadRoutingState | null {
   if (!threadId) return null
@@ -81,7 +88,11 @@ function writeThreadRoutingState(threadId: string, patch: Partial<ThreadRoutingS
   const row = getThread(threadId)
   if (!row) return
   let meta: Record<string, unknown> = {}
-  try { meta = row.metadata ? JSON.parse(row.metadata) : {} } catch { /* keep empty */ }
+  try {
+    meta = row.metadata ? JSON.parse(row.metadata) : {}
+  } catch {
+    /* keep empty */
+  }
   const prev = (meta.routingState as ThreadRoutingState | undefined) ?? {}
   meta.routingState = { ...prev, ...patch }
   updateThread(threadId, { metadata: JSON.stringify(meta) })
@@ -95,7 +106,9 @@ export function setFailoverSticky(threadId: string | undefined, modelId: string)
       failoverStickyModelId: modelId,
       failoverStickyUntil: Date.now() + FAILOVER_STICKY_TTL_MS
     })
-    console.log(`[ROUTING] Failover sticky set for thread ${threadId}: ${modelId} (${FAILOVER_STICKY_TTL_MS / 60_000}min)`)
+    console.log(
+      `[ROUTING] Failover sticky set for thread ${threadId}: ${modelId} (${FAILOVER_STICKY_TTL_MS / 60_000}min)`
+    )
   } catch (err) {
     console.warn(`[ROUTING] Failed to set failover sticky for thread ${threadId}:`, err)
   }
@@ -119,14 +132,13 @@ export function rememberRoutingDecision(
     if (failoverStickyModelId) {
       patch.failoverStickyModelId = failoverStickyModelId
       patch.failoverStickyUntil = Date.now() + FAILOVER_STICKY_TTL_MS
-      console.log(`[ROUTING] Failover sticky set for thread ${threadId}: ${failoverStickyModelId} (${FAILOVER_STICKY_TTL_MS / 60_000}min)`)
+      console.log(
+        `[ROUTING] Failover sticky set for thread ${threadId}: ${failoverStickyModelId} (${FAILOVER_STICKY_TTL_MS / 60_000}min)`
+      )
     }
     writeThreadRoutingState(threadId, patch)
   } catch (err) {
-    console.warn(
-      `[ROUTING] Failed to persist routing decision for thread ${threadId}:`,
-      err
-    )
+    console.warn(`[ROUTING] Failed to persist routing decision for thread ${threadId}:`, err)
   }
 }
 
@@ -143,8 +155,7 @@ export function rememberRoutingFeedback(threadId: string | undefined, fb: Routin
     const touchedTools = fb.toolCallCount > 0
     // economy mis-route: economy model was used but either errored or made tool calls it botched
     const misroutedEconomy =
-      fb.resolvedTier === "economy" &&
-      (fb.toolErrorCount > 0 || fb.outcome === "error")
+      fb.resolvedTier === "economy" && (fb.toolErrorCount > 0 || fb.outcome === "error")
 
     writeThreadRoutingState(threadId, {
       lastResolvedTier: fb.resolvedTier,
@@ -160,10 +171,7 @@ export function rememberRoutingFeedback(threadId: string | undefined, fb: Routin
       lastInputTokens: fb.lastInputTokens ?? prev.lastInputTokens
     })
   } catch (err) {
-    console.warn(
-      `[ROUTING] Failed to persist routing feedback for thread ${threadId}:`,
-      err
-    )
+    console.warn(`[ROUTING] Failed to persist routing feedback for thread ${threadId}:`, err)
   }
 }
 
@@ -220,8 +228,7 @@ const TECH_QUESTION_PATTERN =
 /**
  * Ambiguous continuation words — short but carry task intent; must go to Layer 3.
  */
-const AMBIGUOUS_SHORT_PATTERN =
-  /^(继续|接着|然后|下一步|next|go on|proceed|continue)$/i
+const AMBIGUOUS_SHORT_PATTERN = /^(继续|接着|然后|下一步|next|go on|proceed|continue)$/i
 
 /**
  * Lightweight feature-scoring classifier — runs in <1ms, zero dependencies.
@@ -261,7 +268,7 @@ function scoreSocialEconomy(trimmed: string): { result: "economy" | "uncertain";
 
   // No technical/question intent keywords — required for economy; penalise if matched
   if (!TECH_QUESTION_PATTERN.test(trimmed)) score += 2
-  else score -= 2  // tech keyword found → strong signal against economy
+  else score -= 2 // tech keyword found → strong signal against economy
 
   // Explicit penalties
   if (/[?？]/.test(trimmed)) score -= 3
@@ -290,7 +297,11 @@ function requiresToolCapability(message: string): boolean {
   // paired with a file reference — otherwise the model can answer in-context.
   // FILE_OR_REPO_PATTERN already caught the path above, so nothing extra here.
   // Error output pasted in → agent needs to debug real code → premium
-  if (/```/.test(message) && /(error|traceback|exception|stack trace|npm |pnpm |tsc |jest |pytest)/i.test(message)) return true
+  if (
+    /```/.test(message) &&
+    /(error|traceback|exception|stack trace|npm |pnpm |tsc |jest |pytest)/i.test(message)
+  )
+    return true
   return false
 }
 
@@ -341,21 +352,33 @@ function applyLayer2RulesWithDetail(message: string): Layer2Detail {
   // File path present → must touch filesystem → premium
   const fileMatch = FILE_OR_REPO_PATTERN.exec(trimmed)
   if (fileMatch) {
-    return { result: "premium", matchedRule: "FILE_OR_REPO_PATTERN", filePatternMatch: fileMatch[0] }
+    return {
+      result: "premium",
+      matchedRule: "FILE_OR_REPO_PATTERN",
+      filePatternMatch: fileMatch[0]
+    }
   }
 
   // In-context code verbs without file reference → let Layer 3 decide.
   // "帮我写一个快排" / "实现 debounce" are within economy model capability.
 
   // Check pasted error output
-  if (/```/.test(trimmed) && /(error|traceback|exception|stack trace|npm |pnpm |tsc |jest |pytest)/i.test(trimmed)) {
+  if (
+    /```/.test(trimmed) &&
+    /(error|traceback|exception|stack trace|npm |pnpm |tsc |jest |pytest)/i.test(trimmed)
+  ) {
     return { result: "premium", matchedRule: "pasted-error-output", codeBlockCount }
   }
 
   // Pure in-context requests: code gen / explanation / comparison / translation
   // without any file reference → economy model handles these well
   if (trimmed.length <= 200 && INCTX_ECONOMY_PATTERN.test(trimmed)) {
-    return { result: "economy", matchedRule: "INCTX_ECONOMY_PATTERN", inCtxMatch: true, messageLength: trimmed.length }
+    return {
+      result: "economy",
+      matchedRule: "INCTX_ECONOMY_PATTERN",
+      inCtxMatch: true,
+      messageLength: trimmed.length
+    }
   }
 
   // Strict economy allow-list
@@ -367,7 +390,12 @@ function applyLayer2RulesWithDetail(message: string): Layer2Detail {
   // (e.g. "好兄弟", "辛苦了", "还在吗", "加油") without needing an LLM call
   const scored = scoreSocialEconomy(trimmed)
   if (scored.result === "economy") {
-    return { result: "economy", matchedRule: "social-score→economy", socialScore: scored.score, messageLength: trimmed.length }
+    return {
+      result: "economy",
+      matchedRule: "social-score→economy",
+      socialScore: scored.score,
+      messageLength: trimmed.length
+    }
   }
 
   return { result: "uncertain", matchedRule: "no-rule-matched", messageLength: trimmed.length }
@@ -377,7 +405,7 @@ function applyLayer2RulesWithDetail(message: string): Layer2Detail {
 
 const CLASSIFIER_CACHE = new Map<string, { tier: "premium" | "economy"; expiresAt: number }>()
 const CACHE_TTL_MS = 5 * 60 * 1000 // 5 minutes
-const CACHE_MAX_SIZE = 200          // hard cap — evict oldest entries when exceeded
+const CACHE_MAX_SIZE = 200 // hard cap — evict oldest entries when exceeded
 
 /** Evict all expired entries; if still over cap, drop the oldest half. */
 function evictClassifierCache(): void {
@@ -405,12 +433,28 @@ function hashMessage(text: string): string {
  *  Only available in internal builds — all three VITE_ROUTING_CLASSIFIER_* env vars must be set.
  *  Returns null if any of the three is missing.
  */
-function getInternalClassifierModel(): { id: string; name: string; model: string; apiKey: string; baseUrl: string } | null {
+function getInternalClassifierModel(): {
+  id: string
+  name: string
+  model: string
+  apiKey: string
+  baseUrl: string
+  topP: number
+  topK: number
+} | null {
   const model = import.meta.env.VITE_ROUTING_CLASSIFIER_MODEL ?? ""
   const apiKey = import.meta.env.VITE_ROUTING_CLASSIFIER_API_KEY ?? ""
   const baseUrl = import.meta.env.VITE_ROUTING_CLASSIFIER_BASE_URL ?? ""
   if (!model || !apiKey || !baseUrl) return null
-  return { id: "__internal_classifier__", name: "Internal Classifier", model, apiKey, baseUrl }
+  return {
+    id: "__internal_classifier__",
+    name: "Internal Classifier",
+    model,
+    apiKey,
+    baseUrl,
+    topP: DEFAULT_TOP_P,
+    topK: DEFAULT_TOP_K
+  }
 }
 
 /** Pick the best model for Layer 3 classification.
@@ -449,7 +493,12 @@ function pickClassifierModel() {
             name: selected.name,
             model: selected.model,
             baseUrl: selected.baseUrl,
-            source: selected === userQwen ? "user-qwen" : selected === internalFallback ? "internal-fallback" : "user-non-qwen"
+            source:
+              selected === userQwen
+                ? "user-qwen"
+                : selected === internalFallback
+                  ? "internal-fallback"
+                  : "user-non-qwen"
           }
         : null,
       hasInternalFallback: !!internalFallback,
@@ -545,11 +594,14 @@ async function classifyWithLlm(message: string): Promise<Layer3Result> {
       // 1000 tokens: reasoning models emit a <think> block (~200-500 tok) before the final word
       maxTokens: 1000,
       temperature: 0,
+      topP: classifierModel.topP,
+      modelKwargs: {
+        ...(classifierModel.topK && classifierModel.topK > 0 ? { top_k: classifierModel.topK } : {})
+      },
       ...noThinkParams
     })
 
-    const systemPrompt =
-      `You are a routing classifier for an AI coding agent that can read/write files, run commands, and execute code.
+    const systemPrompt = `You are a routing classifier for an AI coding agent that can read/write files, run commands, and execute code.
 
 Reply with exactly one word: "premium" or "economy".
 Default to "premium" if uncertain — task quality and agent stability come first.
@@ -657,8 +709,12 @@ function buildFallbackChain(primaryTier: "premium" | "economy"): string[] {
   const configs = getCustomModelConfigs()
   const fallbackTier: "premium" | "economy" = primaryTier === "economy" ? "premium" : "economy"
 
-  const primary = configs.filter((c) => (c.tier ?? "premium") === primaryTier).map((c) => `custom:${c.id}`)
-  const fallback = configs.filter((c) => (c.tier ?? "premium") === fallbackTier).map((c) => `custom:${c.id}`)
+  const primary = configs
+    .filter((c) => (c.tier ?? "premium") === primaryTier)
+    .map((c) => `custom:${c.id}`)
+  const fallback = configs
+    .filter((c) => (c.tier ?? "premium") === fallbackTier)
+    .map((c) => `custom:${c.id}`)
   const all = configs.map((c) => `custom:${c.id}`)
 
   // deduplicate while preserving order
@@ -744,7 +800,12 @@ function guardContextCapacity(
         durationMs: 0,
         result: "economy",
         reason: guardReason,
-        detail: { lastInputTokens, originalMax: currentMax, switchedTo: candidate.id, switchedMax: candidateMax }
+        detail: {
+          lastInputTokens,
+          originalMax: currentMax,
+          switchedTo: candidate.id,
+          switchedMax: candidateMax
+        }
       })
       return {
         ...result,
@@ -778,8 +839,16 @@ function guardContextCapacity(
     detail: { lastInputTokens, economyMax: currentMax, candidatesChecked: otherEconomy.length }
   })
   // Guard only runs for layer2/layer3 economy results, but TS doesn't know — cast safely
-  const safeLayer = (result.layer === "pinned" ? "layer2" : result.layer) as "layer1" | "thread" | "layer2" | "layer3"
-  const premiumResult = resolveFromTier("premium", `${result.routeReason}→${guardReason}`, safeLayer)
+  const safeLayer = (result.layer === "pinned" ? "layer2" : result.layer) as
+    | "layer1"
+    | "thread"
+    | "layer2"
+    | "layer3"
+  const premiumResult = resolveFromTier(
+    "premium",
+    `${result.routeReason}→${guardReason}`,
+    safeLayer
+  )
   return premiumResult
 }
 
@@ -792,7 +861,7 @@ function resolveFromTier(
 ): RoutingResult {
   const model = getModelByTier(tier)
   const configs = getCustomModelConfigs()
-  const fallbackId = model ? `custom:${model.id}` : (configs[0] ? `custom:${configs[0].id}` : "")
+  const fallbackId = model ? `custom:${model.id}` : configs[0] ? `custom:${configs[0].id}` : ""
   const fallbackChain = buildFallbackChain(tier)
 
   const result: RoutingResult = {
@@ -893,14 +962,20 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
 
   /** Safely push a layer record — never throws. */
   function recordLayer(rec: RoutingLayerRecord): void {
-    try { layerRecords.push(rec) } catch { /* ignore */ }
+    try {
+      layerRecords.push(rec)
+    } catch {
+      /* ignore */
+    }
   }
 
   /** Attach routingTrace to result and return — never throws. */
   function withTrace(result: RoutingResult): RoutingResult {
     try {
       result.routingTrace = buildRoutingTrace(ctx, layerRecords, result)
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     return result
   }
 
@@ -914,7 +989,9 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
 
     if (requestedId) {
       modelId = requestedId
-      const cfgId = requestedId.startsWith("custom:") ? requestedId.slice("custom:".length) : requestedId
+      const cfgId = requestedId.startsWith("custom:")
+        ? requestedId.slice("custom:".length)
+        : requestedId
       const cfg = configs.find((c) => c.id === cfgId)
       tier = cfg?.tier ?? "premium"
     } else {
@@ -958,7 +1035,9 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
           reason: `taskSource=${ctx.taskSource}→economy`
         })
         const r = resolveFromTier("economy", `layer1:${ctx.taskSource}→economy`, "layer1")
-        console.log(`[ROUTING] ${JSON.stringify({ ...logCtx, layer: r.layer, resolvedTier: r.resolvedTier, routeReason: r.routeReason })}`)
+        console.log(
+          `[ROUTING] ${JSON.stringify({ ...logCtx, layer: r.layer, resolvedTier: r.resolvedTier, routeReason: r.routeReason })}`
+        )
         return withTrace(r)
       }
       case "optimizer": {
@@ -969,7 +1048,9 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
           reason: "taskSource=optimizer→premium"
         })
         const r = resolveFromTier("premium", "layer1:optimizer→premium", "layer1")
-        console.log(`[ROUTING] ${JSON.stringify({ ...logCtx, layer: r.layer, resolvedTier: r.resolvedTier, routeReason: r.routeReason })}`)
+        console.log(
+          `[ROUTING] ${JSON.stringify({ ...logCtx, layer: r.layer, resolvedTier: r.resolvedTier, routeReason: r.routeReason })}`
+        )
         return withTrace(r)
       }
       default:
@@ -1011,10 +1092,7 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
       }
 
       // Failover sticky: after a model API failover, prefer the successful model
-      if (
-        threadState.failoverStickyModelId &&
-        (threadState.failoverStickyUntil ?? 0) > now
-      ) {
+      if (threadState.failoverStickyModelId && (threadState.failoverStickyUntil ?? 0) > now) {
         const foCfgId = threadState.failoverStickyModelId.startsWith("custom:")
           ? threadState.failoverStickyModelId.slice("custom:".length)
           : threadState.failoverStickyModelId
@@ -1037,7 +1115,9 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
           return withTrace(r)
         }
         // Sticky model no longer available, fall through to normal routing
-        console.warn(`[ROUTING] Failover sticky model ${threadState.failoverStickyModelId} no longer available, skipping`)
+        console.warn(
+          `[ROUTING] Failover sticky model ${threadState.failoverStickyModelId} no longer available, skipping`
+        )
       }
 
       // Force premium: economy mis-route detected
@@ -1115,7 +1195,9 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
       let r = resolveFromTier(l2Detail.result, `layer2:rules→${l2Detail.result}`, "layer2")
       // Context window capacity guard — ensure economy model can handle current context
       r = guardContextCapacity(r, ctx.threadId, layerRecords)
-      console.log(`[ROUTING] ${JSON.stringify({ ...logCtx, layer: r.layer, resolvedTier: r.resolvedTier, routeReason: r.routeReason })}`)
+      console.log(
+        `[ROUTING] ${JSON.stringify({ ...logCtx, layer: r.layer, resolvedTier: r.resolvedTier, routeReason: r.routeReason })}`
+      )
       return withTrace(r)
     }
 
@@ -1155,7 +1237,9 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
     let r = resolveFromTier(l3.tier, `layer3:llm→${l3.tier}`, "layer3")
     // Context window capacity guard — ensure economy model can handle current context
     r = guardContextCapacity(r, ctx.threadId, layerRecords)
-    console.log(`[ROUTING] ${JSON.stringify({ ...logCtx, layer: r.layer, resolvedTier: r.resolvedTier, routeReason: r.routeReason })}`)
+    console.log(
+      `[ROUTING] ${JSON.stringify({ ...logCtx, layer: r.layer, resolvedTier: r.resolvedTier, routeReason: r.routeReason })}`
+    )
     return withTrace(r)
   }
 }

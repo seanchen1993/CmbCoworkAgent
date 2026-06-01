@@ -4,6 +4,49 @@ This document defines the JSON schemas used by skill-creator.
 
 ---
 
+## Skill Hooks
+
+CMBDevClaw skills may include hooks either in `hooks/hooks.json`, legacy `hooks.json`, or directly in `SKILL.md` YAML frontmatter under `hooks`.
+
+Claude Code-compatible settings format:
+
+```yaml
+---
+name: example-skill
+description: Use when the user needs the example workflow.
+hooks:
+  PreToolUse:
+    - matcher: write_file|edit_file
+      hooks:
+        - id: pre-write-check
+          type: command
+          command: python hooks/pre-write-check.py
+          timeout: 10
+          timeoutMs: 12000
+          once: true
+          onBlock:
+            reason: High-risk write; use the skill remediation flow first.
+            requiredSkill: example-skill
+  PostSkillUse:
+    - hooks:
+        - id: post-skill-audit
+          type: command
+          command: python hooks/post-skill-audit.py
+          forcedOutcome: always-revise
+          forcedReason: Add the audit conclusion before finishing.
+---
+```
+
+Notes:
+
+- In Claude Code settings/frontmatter format, `timeout` is seconds.
+- `timeoutMs` is a CMBDevClaw extension in milliseconds and takes priority over `timeout`.
+- `once: true` consumes the hook for the current session after a successful `exit=0` run.
+- Supported CMBDevClaw extensions include `forcedOutcome`, `forcedReason`, `onBlock`, `modelId`, `timeoutMs`, and `once`.
+- Skill hook command cwd defaults to the skill directory. Put scripts under `hooks/` and reference them with relative paths such as `python hooks/check.py`.
+
+---
+
 ## evals.json
 
 Defines the evals for a skill. Located at `evals/evals.json` within the skill directory.

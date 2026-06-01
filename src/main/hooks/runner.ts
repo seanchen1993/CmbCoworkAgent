@@ -4,14 +4,23 @@ import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import type { HookConfig, HookEvent, HookResult } from "./types"
+import type { PluginHookMetadata, SkillHookMetadata } from "../types"
 import { joinHookText } from "./text"
-import { getCustomModelConfigs } from "../storage"
+import { mergeUpdatedInput } from "./updated-input"
+import { getCustomModelConfigs, getHookLoggingConfig } from "../storage"
+import { persistHookResultRecord } from "./log-record"
 
 const DEFAULT_TIMEOUT = 10_000
 const MAX_OUTPUT_BYTES = 1_000_000 // 1 MB per hook
 const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
 const MAX_HOOK_ENV_JSON_CHARS = 4_096
+const ONCE_HOOK_KEY_SEPARATOR = "\u0000"
+// `once` fired-state, partitioned by sessionId so we can drop a session's
+// entries when a thread ends (or when a hook is mutated). Aligns conceptually
+// with CC's session-scoped session-hooks Map, except we track fired state
+// rather than registering ephemeral hooks.
+const firedOnceHookKeys = new Map<string, Set<string>>()
 
 // Compiled regex cache keyed by matcher string. null = invalid pattern (fallback to exact match).
 const _regexCache = new Map<string, RegExp | null>()
@@ -23,8 +32,22 @@ export interface HookContext {
   workspacePath?: string
   /** Session / thread identifier — exposed to hooks as SESSION_ID and session_id in stdin JSON */
   sessionId?: string
+  /** Renderer user message id that owns this hook event, used only for log grouping. */
+  turnId?: string
+  /** Plugin that owns the capability currently being used, when known. */
+  pluginId?: string
+  pluginName?: string
+  pluginRoot?: string
+  hookSourceType?: HookConfig["hookSourceType"]
+  hookSourceRoot?: string
+  hookSourcePath?: string
   /** User prompt text for UserPromptSubmit — exposed as USER_PROMPT env and prompt in stdin JSON */
   userPrompt?: string
+  /** Skill lifecycle context for PreSkillUse/PostSkillUse. */
+  skillName?: string
+  skillPath?: string
+  skillRoot?: string
+  skillTriggerToolName?: string
   /** Subagent descriptor for SubagentStop — exposed in stdin JSON */
   subagent?: { id?: string; name?: string; status?: string }
   /** Stop event context — gives hooks visibility into what the agent did this turn */
@@ -34,6 +57,15 @@ export interface HookContext {
     toolCalls?: string[]
     usedSkills?: string[]
   }
+}
+
+/**
+ * Canonical cwd resolver used both for spawning the child process AND for
+ * populating `envelope.cwd` in diagnostic logs. Keep these two callers in
+ * sync so the UI's reported cwd is always what the hook actually saw.
+ */
+export function getCommandCwd(context: HookContext): string {
+  return context.hookSourceRoot ?? context.workspacePath ?? process.cwd()
 }
 
 /**
@@ -66,14 +98,18 @@ function getCachedRegex(matcher: string): RegExp | null {
   }
 }
 
-function matchesToolName(matcher: string | undefined, toolName: string | undefined): boolean {
+function matchesName(matcher: string | undefined, name: string | undefined): boolean {
   if (!matcher || matcher === "*") return true
-  if (!toolName) return false
+  if (!name) return false
   if (isRegexPattern(matcher)) {
     const re = getCachedRegex(matcher)
-    return re ? re.test(toolName) : matcher.toLowerCase() === toolName.toLowerCase()
+    return re ? re.test(name) : matcher.toLowerCase() === name.toLowerCase()
   }
-  return matcher.toLowerCase() === toolName.toLowerCase()
+  return matcher.toLowerCase() === name.toLowerCase()
+}
+
+function getMatcherTarget(event: HookEvent, context: HookContext): string | undefined {
+  return event === "PreSkillUse" || event === "PostSkillUse" ? context.skillName : context.toolName
 }
 
 /**
@@ -94,6 +130,15 @@ function buildHookEnv(event: HookEvent, context: HookContext): Record<string, st
     HOOK_EVENT: event
   }
   if (context.toolName) env.TOOL_NAME = context.toolName
+  if (context.hookSourceType) env.HOOK_SOURCE_TYPE = context.hookSourceType
+  if (context.hookSourceRoot) env.HOOK_SOURCE_ROOT = context.hookSourceRoot
+  if (context.hookSourcePath) env.HOOK_SOURCE_PATH = context.hookSourcePath
+  if (context.pluginId) env.PLUGIN_ID = context.pluginId
+  if (context.pluginName) env.PLUGIN_NAME = context.pluginName
+  if (context.pluginRoot) env.PLUGIN_ROOT = context.pluginRoot
+  if (context.skillName) env.SKILL_NAME = context.skillName
+  if (context.skillPath) env.SKILL_PATH = context.skillPath
+  if (context.skillRoot) env.SKILL_ROOT = context.skillRoot
   // stdin JSON is the canonical payload. TOOL_ARGS / TOOL_RESULT are small-payload
   // compatibility helpers only, so they don't blow up the child-process env block.
   if (context.toolArgs) {
@@ -119,10 +164,16 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
   const payload: Record<string, unknown> = {
     hook_event_name: event,
     session_id: context.sessionId ?? "",
-    cwd: context.workspacePath ?? process.cwd()
+    cwd: getCommandCwd(context)
   }
+  if (context.hookSourceType) payload.hook_source_type = context.hookSourceType
+  if (context.hookSourceRoot) payload.hook_source_root = context.hookSourceRoot
+  if (context.hookSourcePath) payload.hook_source_path = context.hookSourcePath
   if (context.toolName) payload.tool_name = context.toolName
   if (context.toolArgs) payload.tool_input = context.toolArgs
+  if (context.pluginId) payload.plugin_id = context.pluginId
+  if (context.pluginName) payload.plugin_name = context.pluginName
+  if (context.pluginRoot) payload.plugin_root = context.pluginRoot
   if (context.toolResult !== undefined) {
     // Upstream passes JSON.stringify(result); parse it back so hooks see a real object
     // (matches Claude Code spec where tool_response is the structured response).
@@ -134,6 +185,10 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
     }
   }
   if (context.userPrompt) payload.prompt = context.userPrompt
+  if (context.skillName) payload.skill_name = context.skillName
+  if (context.skillPath) payload.skill_path = context.skillPath
+  if (context.skillRoot) payload.skill_root = context.skillRoot
+  if (context.skillTriggerToolName) payload.skill_trigger_tool_name = context.skillTriggerToolName
   if (context.subagent) payload.subagent = context.subagent
   if (context.stopContext) payload.stop_context = context.stopContext
   return JSON.stringify(payload)
@@ -141,6 +196,49 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
 
 function isBlockingResult(result: HookResult): boolean {
   return result.blocked || result.decision === "block" || result.continue === false
+}
+
+/**
+ * Rewrite a hook's runtime result based on the hook's static `forcedOutcome`
+ * config. Always called once per hook invocation, before any aggregator sees
+ * the result, so all event branches can stay agnostic of the override.
+ */
+function applyForcedOutcome(result: HookResult, hook: HookConfig): HookResult {
+  if (!hook.forcedOutcome) return result
+  const reason =
+    (hook.forcedReason && hook.forcedReason.trim()) ||
+    result.reason ||
+    result.stopReason ||
+    result.stdout ||
+    result.stderr ||
+    (hook.forcedOutcome === "always-halt"
+      ? "Hook 配置为直接终止本轮"
+      : "Hook 配置为要求 Agent 修订")
+
+  if (hook.forcedOutcome === "always-halt") {
+    return {
+      ...result,
+      // Halt overrides revision — clear decision/blocked so aggregators don't
+      // also feed a revision request.
+      blocked: false,
+      decision: undefined,
+      reason: undefined,
+      continue: false,
+      stopReason: reason
+    }
+  }
+
+  // "always-revise" → force decision=block, leave continue alone
+  return {
+    ...result,
+    blocked: true,
+    decision: "block",
+    reason,
+    // If the script already asked for halt, the user's "always-revise" config
+    // explicitly opts back into revision — clear the halt signal.
+    continue: undefined,
+    stopReason: undefined
+  }
 }
 
 function isValidUtf8(buf: Buffer): boolean {
@@ -214,7 +312,8 @@ function decodeHookOutput(
 function executeCommandHook(
   hook: HookConfig,
   env: Record<string, string>,
-  stdinPayload: string
+  stdinPayload: string,
+  cwd: string
 ): Promise<HookResult> {
   return new Promise((resolve) => {
     const command = hook.command ?? ""
@@ -233,7 +332,7 @@ function executeCommandHook(
       shell: isWindows ? true : false,
       stdio: ["pipe", "pipe", "pipe"],
       timeout,
-      cwd: env.WORKSPACE_PATH || process.cwd()
+      cwd
     })
 
     // Write the Claude Code JSON payload to stdin so hooks can parse structured input.
@@ -383,8 +482,43 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
     apiKey: config.apiKey,
     maxRetries: 0,
     timeout,
+    maxTokens: config.maxOutputTokens,
+    temperature: config.temperature,
+    topP: config.topP,
+    modelKwargs: {
+      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+    },
     configuration: { baseURL: config.baseUrl }
   })
+}
+
+function buildPromptHookUserMessage(
+  event: HookEvent,
+  policy: string,
+  context: HookContext
+): string {
+  return JSON.stringify(
+    {
+      hook_event_name: event,
+      policy,
+      ...(context.userPrompt ? { prompt: context.userPrompt } : {}),
+      tool_name: context.toolName ?? "(unknown)",
+      tool_args: context.toolArgs ?? {},
+      ...(context.toolResult !== undefined ? { tool_result: context.toolResult } : {}),
+      ...(context.skillName ? { skill_name: context.skillName } : {}),
+      ...(context.skillPath ? { skill_path: context.skillPath } : {}),
+      ...(context.skillRoot ? { skill_root: context.skillRoot } : {}),
+      ...(context.pluginRoot ? { plugin_root: context.pluginRoot } : {}),
+      ...(context.hookSourceType ? { hook_source_type: context.hookSourceType } : {}),
+      ...(context.hookSourceRoot ? { hook_source_root: context.hookSourceRoot } : {}),
+      ...(context.hookSourcePath ? { hook_source_path: context.hookSourcePath } : {}),
+      cwd: getCommandCwd(context),
+      ...(context.stopContext ? { stop_context: context.stopContext } : {}),
+      workspace: context.workspacePath ?? ""
+    },
+    null,
+    2
+  )
 }
 
 /**
@@ -428,20 +562,7 @@ async function executePromptHook(
     return fallbackResult("[PromptHook] No model configured — cannot evaluate prompt hook")
   }
 
-  const userMsg = JSON.stringify(
-    {
-      hook_event_name: event,
-      policy,
-      ...(context.userPrompt ? { prompt: context.userPrompt } : {}),
-      tool_name: context.toolName ?? "(unknown)",
-      tool_args: context.toolArgs ?? {},
-      ...(context.toolResult !== undefined ? { tool_result: context.toolResult } : {}),
-      ...(context.stopContext ? { stop_context: context.stopContext } : {}),
-      workspace: context.workspacePath ?? ""
-    },
-    null,
-    2
-  )
+  const userMsg = buildPromptHookUserMessage(event, policy, context)
 
   let timeoutId: ReturnType<typeof setTimeout> | undefined
   try {
@@ -619,6 +740,11 @@ function applyConfiguredOnBlock(result: HookResult, hook: HookConfig): HookResul
 
 /**
  * Execute a single hook (command or prompt type).
+ *
+ * Always records `durationMs` on the result (wall-clock from entry to return).
+ * Also attaches the stdin payload when Hook diagnostic mode is enabled — the
+ * UI / persisted log uses it for debugging "what did the hook actually see".
+ * Off by default to avoid streaming user input through IPC + disk on every run.
  */
 async function executeHook(
   hook: HookConfig,
@@ -626,25 +752,161 @@ async function executeHook(
   context: HookContext,
   event: HookEvent
 ): Promise<HookResult> {
+  const startedAt = Date.now()
+  const diagnostic = getHookLoggingConfig().diagnostic
   const hookType = hook.type ?? "command"
   let result: HookResult
+  let stdinPayload: string | undefined
   if (hookType === "prompt") {
+    if (diagnostic) {
+      const policy = hook.prompt?.trim()
+      if (policy) stdinPayload = buildPromptHookUserMessage(event, policy, context)
+    }
     result = await executePromptHook(hook, context, event)
   } else {
-    const stdinPayload = buildHookStdinPayload(event, context)
-    result = await executeCommandHook(hook, env, stdinPayload)
+    const builtPayload = buildHookStdinPayload(event, context)
+    if (diagnostic) stdinPayload = builtPayload
+    result = await executeCommandHook(hook, env, builtPayload, getCommandCwd(context))
   }
-  return applyConfiguredOnBlock(parseHookJsonOutput(result), hook)
+  const finalized = applyConfiguredOnBlock(parseHookJsonOutput(result), hook)
+  finalized.durationMs = Date.now() - startedAt
+  if (stdinPayload !== undefined) finalized.stdinPayload = stdinPayload
+  if (diagnostic) finalized.cwd = getCommandCwd(context)
+  return finalized
 }
 
 /**
  * Run all matching hooks for a given event.
  *
- * - PreToolUse/UserPromptSubmit: exit code 2 or decision=block stops the turn.
- * - PostToolUse: collects stdout from all hooks as extra context.
- * - Stop/SubagentStop/Notification/SessionStart/SessionEnd: fire-and-forget.
+ * - PreToolUse/PreSkillUse/UserPromptSubmit: exit code 2 or decision=block stops the turn.
+ * - PostToolUse: collects hook output so callers can decide how to surface it.
+ * - PostSkillUse: logs every hook result, but only blocking results are returned for revision.
+ * - Stop: awaited — can request revision or halt the turn.
+ * - SubagentStop: awaited for halt semantics; non-halting output is only logged.
+ * - Notification/SessionStart/SessionEnd: fire-and-forget.
  */
 export type HookResultCallback = (event: HookEvent, hook: HookConfig, result: HookResult) => void
+
+/**
+ * Hook entries reaching this runner may carry plugin or skill ownership metadata
+ * from {@link PluginHookMetadata} or {@link SkillHookMetadata}. Use a partial union
+ * to recover those fields without forcing every caller to know which kind it is.
+ */
+type ScopedHook = HookConfig &
+  Partial<Pick<PluginHookMetadata, "pluginId" | "pluginName" | "pluginRoot">> &
+  Partial<Pick<SkillHookMetadata, "skillName" | "skillPath" | "skillRoot">>
+
+function getOnceSessionId(context: HookContext): string {
+  return context.sessionId ?? ""
+}
+
+/**
+ * Per-hook part of the once-key. sessionId is intentionally excluded — we use
+ * it as the outer Map key so a session's entries can be dropped in O(1) on
+ * `clearOnceStateForSession`.
+ */
+function getOnceHookKey(hook: HookConfig, event: HookEvent, context: HookContext): string {
+  const scopedHook = hook as ScopedHook
+  return [
+    event,
+    hook.hookSourceType ?? scopedHook.hookSourceType ?? "",
+    hook.hookSourceRoot ?? scopedHook.hookSourceRoot ?? "",
+    hook.hookSourcePath ?? scopedHook.hookSourcePath ?? "",
+    scopedHook.pluginId ?? context.pluginId ?? "",
+    scopedHook.skillPath ?? context.skillPath ?? "",
+    hook.id
+  ].join(ONCE_HOOK_KEY_SEPARATOR)
+}
+
+function shouldSkipOnceHook(hook: HookConfig, event: HookEvent, context: HookContext): boolean {
+  if (hook.once !== true) return false
+  const sessionSet = firedOnceHookKeys.get(getOnceSessionId(context))
+  if (!sessionSet) return false
+  return sessionSet.has(getOnceHookKey(hook, event, context))
+}
+
+function shouldConsumeOnceHook(result: HookResult): boolean {
+  return result.exitCode === 0
+}
+
+function markOnceHookIfNeeded(
+  hook: HookConfig,
+  event: HookEvent,
+  context: HookContext,
+  result: HookResult
+): void {
+  if (hook.once !== true || !shouldConsumeOnceHook(result)) return
+  const sessionId = getOnceSessionId(context)
+  let sessionSet = firedOnceHookKeys.get(sessionId)
+  if (!sessionSet) {
+    sessionSet = new Set<string>()
+    firedOnceHookKeys.set(sessionId, sessionSet)
+  }
+  sessionSet.add(getOnceHookKey(hook, event, context))
+}
+
+/** Drop all once-fired entries belonging to a session — call from fireSessionEnd. */
+export function clearOnceStateForSession(sessionId: string): void {
+  firedOnceHookKeys.delete(sessionId)
+}
+
+/**
+ * Drop once-fired entries that match a hook id across all sessions. Called
+ * after the hook is created/updated/deleted/toggled so a fresh `once` cycle
+ * applies — mirrors CC's "register/unregister hook" semantics.
+ */
+export function clearOnceStateForHook(hookId: string): void {
+  const suffix = ONCE_HOOK_KEY_SEPARATOR + hookId
+  for (const sessionSet of firedOnceHookKeys.values()) {
+    for (const key of [...sessionSet]) {
+      if (key.endsWith(suffix)) sessionSet.delete(key)
+    }
+  }
+}
+
+export function resetHookOnceStateForTests(): void {
+  firedOnceHookKeys.clear()
+}
+
+function enrichContextFromHook(hook: HookConfig, context: HookContext): HookContext {
+  const scopedHook = hook as ScopedHook
+  return {
+    ...context,
+    pluginId: context.pluginId ?? scopedHook.pluginId,
+    pluginName: context.pluginName ?? scopedHook.pluginName,
+    pluginRoot: context.pluginRoot ?? scopedHook.pluginRoot,
+    hookSourceType: context.hookSourceType ?? scopedHook.hookSourceType,
+    hookSourceRoot: context.hookSourceRoot ?? scopedHook.hookSourceRoot,
+    hookSourcePath: context.hookSourcePath ?? scopedHook.hookSourcePath,
+    skillName: context.skillName ?? scopedHook.skillName,
+    skillPath: context.skillPath ?? scopedHook.skillPath,
+    skillRoot: context.skillRoot ?? scopedHook.skillRoot
+  }
+}
+
+export function hookMatchesRunCriteria(
+  hook: HookConfig,
+  event: HookEvent,
+  context: HookContext
+): boolean {
+  return (
+    hook.enabled &&
+    hook.event === event &&
+    matchesName(hook.matcher, getMatcherTarget(event, context)) &&
+    !shouldSkipOnceHook(hook, event, context)
+  )
+}
+
+function recordHookResult(
+  event: HookEvent,
+  hook: HookConfig,
+  result: HookResult,
+  context: HookContext,
+  onHookResult?: HookResultCallback
+): void {
+  persistHookResultRecord(event, hook, result, context.turnId)
+  onHookResult?.(event, hook, result)
+}
 
 export async function runHooks(
   hooks: HookConfig[],
@@ -652,24 +914,26 @@ export async function runHooks(
   context: HookContext,
   onHookResult?: HookResultCallback
 ): Promise<HookResult | null> {
-  const matched = hooks.filter(
-    (h) => h.enabled && h.event === event && matchesToolName(h.matcher, context.toolName)
-  )
+  const matched = hooks.filter((h) => hookMatchesRunCriteria(h, event, context))
 
   if (matched.length === 0) return null
 
-  const env = buildHookEnv(event, context)
-
-  if (event === "PreToolUse" || event === "UserPromptSubmit") {
+  if (event === "PreToolUse" || event === "PreSkillUse" || event === "UserPromptSubmit") {
     let mergedUpdatedInput: Record<string, unknown> | undefined
     let mergedAdditionalContext: string | undefined
     let mergedSystemMessage: string | undefined
+    let mergedSuppressOutput = false
     for (const hook of matched) {
-      const result = await executeHook(hook, env, context, event)
+      const hookContext = enrichContextFromHook(hook, context)
+      const result = applyForcedOutcome(
+        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        hook
+      )
       console.log(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) "${(hook.command ?? hook.prompt ?? "").slice(0, 60)}" → exit=${result.exitCode}, blocked=${result.blocked}`
       )
-      onHookResult?.(event, hook, result)
+      recordHookResult(event, hook, result, hookContext, onHookResult)
+      markOnceHookIfNeeded(hook, event, hookContext, result)
       // continue=false halts the entire agent turn, overrides everything else
       if (result.continue === false) {
         const reason =
@@ -704,13 +968,16 @@ export async function runHooks(
         )
       }
       if (result.updatedInput) {
-        mergedUpdatedInput = { ...(mergedUpdatedInput ?? {}), ...result.updatedInput }
+        mergedUpdatedInput = mergeUpdatedInput(mergedUpdatedInput ?? {}, result.updatedInput)
       }
       if (result.additionalContext) {
         mergedAdditionalContext = joinHookText(mergedAdditionalContext, result.additionalContext)
       }
       if (result.systemMessage) {
         mergedSystemMessage = joinHookText(mergedSystemMessage, result.systemMessage)
+      }
+      if (result.suppressOutput === true) {
+        mergedSuppressOutput = true
       }
     }
     return {
@@ -720,7 +987,8 @@ export async function runHooks(
       blocked: false,
       updatedInput: mergedUpdatedInput,
       additionalContext: mergedAdditionalContext,
-      systemMessage: mergedSystemMessage
+      systemMessage: mergedSystemMessage,
+      suppressOutput: mergedSuppressOutput || undefined
     }
   }
 
@@ -732,20 +1000,25 @@ export async function runHooks(
     let shouldHalt = false
     let haltReason: string | undefined
     for (const hook of matched) {
-      const result = await executeHook(hook, env, context, event)
-      console.log(
-        `[Hooks] PostToolUse hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
+      const hookContext = enrichContextFromHook(hook, context)
+      const result = applyForcedOutcome(
+        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        hook
       )
-      onHookResult?.(event, hook, result)
+      console.log(
+        `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
+      )
+      recordHookResult(event, hook, result, hookContext, onHookResult)
+      markOnceHookIfNeeded(hook, event, hookContext, result)
       if (result.continue === false) {
         shouldHalt = true
         haltReason = result.stopReason ?? haltReason
       }
-      // PostToolUse decision=block: feed reason back to agent for reconsideration
+      // PostToolUse decision=block: feed reason back to agent for reconsideration.
       if (result.decision === "block" && result.reason) {
         blockReasons.push(result.reason)
       }
-      if (result.stdout) outputs.push(result.stdout)
+      if (result.stdout && result.suppressOutput !== true) outputs.push(result.stdout)
       if (result.additionalContext) contexts.push(result.additionalContext)
       if (result.systemMessage) messages.push(result.systemMessage)
     }
@@ -763,19 +1036,98 @@ export async function runHooks(
     }
   }
 
-  // Stop: awaited — results can trigger revision or inject feedback
+  if (event === "PostSkillUse") {
+    const contexts: string[] = []
+    const messages: string[] = []
+    const revisionReasons: string[] = []
+    const stopReasons: string[] = []
+    for (const hook of matched) {
+      const hookContext = enrichContextFromHook(hook, context)
+      const result = applyForcedOutcome(
+        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        hook
+      )
+      console.log(
+        `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
+      )
+      recordHookResult(event, hook, result, hookContext, onHookResult)
+      markOnceHookIfNeeded(hook, event, hookContext, result)
+
+      // continue:false → halt the turn (no revision); takes priority over decision:block.
+      // Non-blocking PostSkillUse output is intentionally dropped here — it remains observable
+      // through onHookResult callbacks but must not pollute the revision/halt context.
+      if (result.continue === false) {
+        stopReasons.push(
+          result.stopReason ||
+            result.reason ||
+            result.stdout ||
+            result.stderr ||
+            "PostSkillUse hook stopped the turn"
+        )
+        if (result.additionalContext) contexts.push(result.additionalContext)
+        if (result.systemMessage) messages.push(result.systemMessage)
+      } else if (result.blocked || result.decision === "block") {
+        revisionReasons.push(
+          result.reason ||
+            result.stopReason ||
+            result.stdout ||
+            result.stderr ||
+            "PostSkillUse hook requested revision"
+        )
+        if (result.additionalContext) contexts.push(result.additionalContext)
+        if (result.systemMessage) messages.push(result.systemMessage)
+      }
+    }
+
+    if (stopReasons.length === 0 && revisionReasons.length === 0) return null
+
+    const halt = stopReasons.length > 0
+    const reasons = halt ? stopReasons : revisionReasons
+    return {
+      exitCode: 0,
+      stdout: reasons.join("\n"),
+      stderr: "",
+      blocked: !halt && revisionReasons.length > 0,
+      continue: halt ? false : undefined,
+      stopReason: halt ? stopReasons.join("\n") : undefined,
+      decision: halt ? undefined : revisionReasons.length > 0 ? "block" : undefined,
+      reason: halt
+        ? undefined
+        : revisionReasons.length > 0
+          ? revisionReasons.join("\n")
+          : undefined,
+      additionalContext: contexts.length > 0 ? contexts.join("\n") : undefined,
+      systemMessage: messages.length > 0 ? messages.join("\n") : undefined
+    }
+  }
+
+  // Stop: awaited — results can trigger revision, inject feedback, or halt the turn
   if (event === "Stop") {
-    const blockReasons: string[] = []
+    const revisionReasons: string[] = []
+    const stopReasons: string[] = []
     let additionalContext: string | undefined
     let systemMessage: string | undefined
     for (const hook of matched) {
-      const result = await executeHook(hook, env, context, event)
-      console.log(
-        `[Hooks] Stop hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
+      const hookContext = enrichContextFromHook(hook, context)
+      const result = applyForcedOutcome(
+        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        hook
       )
-      onHookResult?.(event, hook, result)
-      if (isBlockingResult(result)) {
-        blockReasons.push(
+      console.log(
+        `[Hooks] Stop hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
+      )
+      recordHookResult(event, hook, result, hookContext, onHookResult)
+      markOnceHookIfNeeded(hook, event, hookContext, result)
+      if (result.continue === false) {
+        stopReasons.push(
+          result.stopReason ||
+            result.reason ||
+            result.stdout ||
+            result.stderr ||
+            "Stop hook stopped the turn"
+        )
+      } else if (result.blocked || result.decision === "block") {
+        revisionReasons.push(
           result.reason ||
             result.stopReason ||
             result.stdout ||
@@ -790,14 +1142,26 @@ export async function runHooks(
         systemMessage = joinHookText(systemMessage, result.systemMessage)
       }
     }
-    if (blockReasons.length > 0 || additionalContext || systemMessage) {
+    if (
+      stopReasons.length > 0 ||
+      revisionReasons.length > 0 ||
+      additionalContext ||
+      systemMessage
+    ) {
+      const halt = stopReasons.length > 0
       return {
         exitCode: 0,
-        stdout: blockReasons.join("\n"),
+        stdout: (halt ? stopReasons : revisionReasons).join("\n"),
         stderr: "",
-        blocked: blockReasons.length > 0,
-        decision: blockReasons.length > 0 ? "block" : undefined,
-        reason: blockReasons.length > 0 ? blockReasons.join("\n") : undefined,
+        blocked: !halt && revisionReasons.length > 0,
+        continue: halt ? false : undefined,
+        stopReason: halt ? stopReasons.join("\n") : undefined,
+        decision: halt ? undefined : revisionReasons.length > 0 ? "block" : undefined,
+        reason: halt
+          ? undefined
+          : revisionReasons.length > 0
+            ? revisionReasons.join("\n")
+            : undefined,
         additionalContext,
         systemMessage
       }
@@ -805,12 +1169,105 @@ export async function runHooks(
     return null
   }
 
-  // SubagentStop / Notification / SessionStart / SessionEnd: fire-and-forget
+  // SubagentStop: awaited so `continue:false` can halt the parent turn after a task finishes.
+  if (event === "SubagentStop") {
+    const stopReasons: string[] = []
+    let additionalContext: string | undefined
+    let systemMessage: string | undefined
+    for (const hook of matched) {
+      const hookContext = enrichContextFromHook(hook, context)
+      const result = applyForcedOutcome(
+        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        hook
+      )
+      console.log(
+        `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
+      )
+      recordHookResult(event, hook, result, hookContext, onHookResult)
+      markOnceHookIfNeeded(hook, event, hookContext, result)
+      if (result.continue === false) {
+        stopReasons.push(
+          result.stopReason ||
+            result.reason ||
+            result.stdout ||
+            result.stderr ||
+            "SubagentStop hook stopped the turn"
+        )
+      }
+      if (result.additionalContext) {
+        additionalContext = joinHookText(additionalContext, result.additionalContext)
+      }
+      if (result.systemMessage) {
+        systemMessage = joinHookText(systemMessage, result.systemMessage)
+      }
+      if (result.stderr) {
+        console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)
+      }
+    }
+
+    if (stopReasons.length === 0) return null
+    return {
+      exitCode: 0,
+      stdout: stopReasons.join("\n"),
+      stderr: "",
+      blocked: false,
+      continue: false,
+      stopReason: stopReasons.join("\n"),
+      additionalContext,
+      systemMessage
+    }
+  }
+
+  // SessionEnd is awaited by thread deletion and app shutdown paths so hooks
+  // can finish and their diagnostic jsonl records can flush before teardown.
+  //
+  // Run hooks in parallel (each already has its own per-hook timeout — there's
+  // no ordering dependency at SessionEnd) and cap the total wall time so a
+  // single slow hook can't block the "delete thread" UI or app shutdown.
+  // Anything past the cap is allowed to keep running in the background; we
+  // just stop blocking the caller.
+  if (event === "SessionEnd") {
+    const SESSION_END_TOTAL_TIMEOUT_MS = 5_000
+    const tasks = matched.map(async (hook) => {
+      const hookContext = enrichContextFromHook(hook, context)
+      try {
+        const rawResult = await executeHook(
+          hook,
+          buildHookEnv(event, hookContext),
+          hookContext,
+          event
+        )
+        const result = applyForcedOutcome(rawResult, hook)
+        console.log(
+          `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
+        )
+        recordHookResult(event, hook, result, hookContext, onHookResult)
+        markOnceHookIfNeeded(hook, event, hookContext, result)
+        if (result.stderr) {
+          console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)
+        }
+      } catch (err) {
+        console.warn(`[Hooks] ${event} hook error:`, err)
+      }
+    })
+    await Promise.race([
+      Promise.allSettled(tasks),
+      new Promise<void>((resolve) => setTimeout(resolve, SESSION_END_TOTAL_TIMEOUT_MS))
+    ])
+    return null
+  }
+
+  // Notification / SessionStart: fire-and-forget
   for (const hook of matched) {
-    executeHook(hook, env, context, event)
-      .then((result) => {
-        console.log(`[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}`)
-        onHookResult?.(event, hook, result)
+    const hookContext = enrichContextFromHook(hook, context)
+    executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)
+      .then((rawResult) => {
+        const result = applyForcedOutcome(rawResult, hook)
+        console.log(
+          `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
+        )
+        recordHookResult(event, hook, result, hookContext, onHookResult)
+        markOnceHookIfNeeded(hook, event, hookContext, result)
         if (result.stderr) {
           console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)
         }

@@ -12,6 +12,11 @@ src/renderer/.vite/
 .claude/
 .env
 .playwright-browsers/
+__pycache__/
+*.pyc
+.trace-evolver-state/
+*.egg-info/
+trace_evolver_service/
 
 # Codex local files
 .codex/

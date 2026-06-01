@@ -14,10 +14,6 @@ import {
 import { useStream } from "@langchain/langgraph-sdk/react"
 import { ElectronIPCTransport } from "./electron-transport"
 import { isCoordinatorModeMetadata, isExplicitNormalModeMetadata } from "./coordinator-mode-helpers"
-import type { Message, Todo, FileInfo, Subagent, HITLRequest, SkillMetadata } from "@/types"
-import { useAppStore } from "@/lib/store"
-import type { DeepAgent } from "../../../main/agent/types"
-import { toast } from "sonner"
 import {
   coordinatorWorkersEqual,
   mergeCoordinatorWorkers,
@@ -27,6 +23,68 @@ import {
 } from "./thread-state-helpers"
 
 export type { CoordinatorWorkerView, SubagentInternalLogEntry } from "./thread-state-helpers"
+import type {
+  Message,
+  Todo,
+  FileInfo,
+  Subagent,
+  HITLRequest,
+  ToolCallState,
+  SkillMetadata,
+  AgentAutoCommitResult,
+  UserInputRequest
+} from "@/types"
+import { useAppStore } from "@/lib/store"
+import type { DeepAgent } from "../../../main/agent/types"
+import { toast } from "sonner"
+import { formatAutoCommitText } from "../../../shared/auto-commit-format"
+
+const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
+const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
+
+// 历史消息耗时不单独存 duration，而是存每条消息的 start_at/end_at。
+//
+// ChatContainer 展示时会根据消息分组实时计算：
+// 当前 user.start_at -> 下一个 user 之前最后一条消息.end_at。
+// 因此这里恢复历史消息时，只要把每条消息的 start_at/end_at 补回 Message，
+// 展示层就能用同一套逻辑显示历史耗时。
+type MessageTimeMap = Record<string, { start_at?: string; end_at?: string }>
+type MessageTimeEntry = MessageTimeMap[string] & { id: string }
+
+const isMessageTimeMap = (value: unknown): value is MessageTimeMap => {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+const isMessageTimeEntryArray = (value: unknown): value is MessageTimeEntry[] => {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry) =>
+        !!entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string"
+    )
+  )
+}
+
+const getMessageTimeMap = (threadValues?: Record<string, unknown>): MessageTimeMap => {
+  const value = threadValues?.[MESSAGE_TIMES_THREAD_VALUE_KEY]
+  return isMessageTimeMap(value) ? value : {}
+}
+
+const getMessageTimeOrder = (threadValues?: Record<string, unknown>): MessageTimeEntry[] => {
+  const value = threadValues?.[MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]
+  if (isMessageTimeEntryArray(value)) return value
+  // 兼容旧数据：如果没有顺序数组，就尽量按 messageTimes map 的插入顺序恢复。
+  //
+  // 旧数据无法做到百分百保证 id 与 checkpoint 消息一致，但按插入顺序恢复可以覆盖大多数
+  // “当时按会话顺序写入 messageTimes”的历史会话。
+  return Object.entries(getMessageTimeMap(threadValues)).map(([id, time]) => ({ id, ...time }))
+}
+
+const toDate = (value: string | undefined): Date | undefined => {
+  if (!value) return undefined
+  const parsed = new Date(value)
+  return Number.isFinite(parsed.getTime()) ? parsed : undefined
+}
 
 // Open file tab type
 export interface OpenFile {
@@ -63,17 +121,76 @@ export interface ModelRetryState {
 
 export interface HookLogEntry {
   id: string
+  /** "executed" = ran to completion; "skipped" = matched event but scope-filtered. */
+  kind: "executed" | "skipped"
   event: string
   hookType: string
   label: string
+  command?: string
   toolSuffix: string
+  pluginId?: string
+  pluginName?: string
+  skillName?: string
+  skillPath?: string
+  hookSourcePath?: string
+  cwd?: string
+  durationMs?: number
   exitCode: number | null
   blocked: boolean
+  continue?: boolean
+  stopReason?: string
   decision?: string
+  reason?: string
   stdout: string
   stderr: string
+  additionalContext?: string
+  systemMessage?: string
+  stdinPayload?: string
+  skipReason?: string
+  timestamp: Date
+  turnId?: string
+}
+
+/**
+ * Per-turn bucket of hook log entries.
+ *
+ * `turnId` is the id of the user message that opened the turn — used as the
+ * grouping key so historical turns can still be looked up after subsequent
+ * user messages arrive. Without this we'd lose old turns the moment a new
+ * user message landed (the original behavior, which made post-mortem
+ * debugging impossible).
+ */
+export interface HookLogBucket {
+  turnId: string
+  /** First user message text preview — shown in the modal title. */
+  turnPreview: string
+  /**
+   * True when this bucket was opened by an early hook event (or the
+   * background sentinel) and is still waiting for the real user message to
+   * arrive. `openHookLogBucket` upgrades placeholders in place; we use this
+   * flag (not a `turnPreview.startsWith("(")` heuristic) so users whose own
+   * messages happen to start with `(` aren't misclassified.
+   */
+  isPlaceholder?: boolean
+  startedAt: Date
+  entries: HookLogEntry[]
+}
+
+/** Max per-thread retention of historical turn buckets, in-memory. */
+const HOOK_LOG_BUCKET_RING_SIZE = 10
+
+export interface HookInterruptionState {
+  event: string
+  action: "block" | "halt"
+  reason: string
   systemMessage?: string
   timestamp: Date
+}
+
+export interface ThreadGitContext {
+  isGitRepo?: boolean
+  isWorktree?: boolean
+  branch?: string | null
 }
 
 // Per-thread state (persisted/restored from checkpoints)
@@ -82,13 +199,18 @@ export interface ThreadState {
   todos: Todo[]
   workspaceFiles: FileInfo[]
   workspacePath: string | null
+  gitContext: ThreadGitContext | null
   subagents: Subagent[]
   coordinatorWorkers: CoordinatorWorkerView[]
   subagentToolCallCount: number
   subagentInternalLogs: SubagentInternalLogEntry[]
+  toolCallStates: Record<string, ToolCallState>
+  pendingApprovals: HITLRequest[]
   pendingApproval: HITLRequest | null
   approvalQueue: HITLRequest[]
+  pendingUserInput: UserInputRequest | null
   error: string | null
+  hookInterruption: HookInterruptionState | null
   currentModel: string
   openFiles: OpenFile[]
   activeTab: "agent" | string
@@ -102,6 +224,7 @@ export interface ThreadState {
    */
   draftSkill: SkillMetadata | null
   scheduledTaskLoading: boolean
+  historyLoading: boolean
   scheduledTaskId: string | null
   routingResult: RoutingResultState | null
   modelRetry: ModelRetryState | null
@@ -152,11 +275,17 @@ export interface ThreadActions {
   setTodos: (todos: Todo[]) => void
   setWorkspaceFiles: (files: FileInfo[] | ((prev: FileInfo[]) => FileInfo[])) => void
   setWorkspacePath: (path: string | null) => void
+  setGitContext: (context: ThreadGitContext | null) => void
   setSubagents: (subagents: Subagent[]) => void
+  setToolCallState: (toolCallId: string, updates: Partial<ToolCallState>) => void
   setPendingApproval: (request: HITLRequest | null) => void
   clearPendingApprovals: () => void
+  enqueuePendingApproval: (request: HITLRequest) => void
+  removePendingApproval: (requestId?: string) => void
+  setPendingUserInput: (request: UserInputRequest | null) => void
   setError: (error: string | null) => void
   clearError: () => void
+  clearHookInterruption: () => void
   setCurrentModel: (modelId: string) => void
   openFile: (path: string, name: string) => void
   closeFile: (path: string) => void
@@ -175,9 +304,12 @@ interface ThreadContextValue {
   // Stream subscription
   subscribeToStream: (threadId: string, callback: () => void) => () => void
   getStreamData: (threadId: string) => StreamData
-  // Hook log subscription (external store — no re-renders on ThreadProvider)
+  // Hook log subscription (external store — no re-renders on ThreadProvider).
+  // Returns the per-turn buckets in chronological order; the most recent
+  // bucket is the current turn. Capped at HOOK_LOG_BUCKET_RING_SIZE buckets
+  // per thread to bound memory.
   subscribeToHookLogs: (threadId: string, callback: () => void) => () => void
-  getHookLogs: (threadId: string) => HookLogEntry[]
+  getHookLogBuckets: (threadId: string) => HookLogBucket[]
   // Get all initialized thread states (for kanban view)
   getAllThreadStates: () => Record<string, ThreadState>
   // Get all stream loading states (for kanban view)
@@ -193,13 +325,18 @@ const createDefaultThreadState = (): ThreadState => ({
   todos: [],
   workspaceFiles: [],
   workspacePath: null,
+  gitContext: null,
   subagents: [],
   coordinatorWorkers: [],
   subagentToolCallCount: 0,
   subagentInternalLogs: [],
+  toolCallStates: {},
+  pendingApprovals: [],
   pendingApproval: null,
   approvalQueue: [],
+  pendingUserInput: null,
   error: null,
+  hookInterruption: null,
   currentModel: "",
   openFiles: [],
   activeTab: "agent",
@@ -208,6 +345,7 @@ const createDefaultThreadState = (): ThreadState => ({
   draftInput: "",
   draftSkill: null,
   scheduledTaskLoading: false,
+  historyLoading: false,
   scheduledTaskId: null,
   routingResult: null,
   modelRetry: null
@@ -223,12 +361,88 @@ function isThreadMetadataExplicitNormalMode(threadId: string): boolean {
   return isExplicitNormalModeMetadata(thread?.metadata)
 }
 
+/**
+ * 从持久化的 thread metadata 中提取 renderer 可直接消费的 Git context。
+ *
+ * metadata 是数据库里的存储格式，里面既可能有新版 `gitContext` 对象，也可能有旧版
+ * `cached*` 顶层字段。ThreadState 则是 UI 运行时状态，只需要知道：
+ * - 是否是 Git 仓库；
+ * - 是否是 worktree；
+ * - 当前 worktree 分支名。
+ *
+ * 这个函数负责把存储格式归一化成 `ThreadGitContext`，让 GitPanel 首屏可以先展示已有
+ * repo/worktree/branch 信息，而不必等一次 GitPanel meta IPC 返回。
+ */
+function getGitContextFromMetadata(metadata: Record<string, unknown>): ThreadGitContext | null {
+  const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
+  // 新版结构：Git 探测结果统一收敛在 metadata.gitContext。
+  const gitContext =
+    metadata.gitContext &&
+    typeof metadata.gitContext === "object" &&
+    !Array.isArray(metadata.gitContext)
+      ? (metadata.gitContext as Record<string, unknown>)
+      : null
+  const contextMatchesWorkspace = Boolean(
+    workspacePath &&
+    typeof gitContext?.workspacePath === "string" &&
+    gitContext.workspacePath === workspacePath
+  )
+  const metadataMarkedWorktree = Boolean(metadata.isWorktree)
+
+  if (contextMatchesWorkspace && gitContext) {
+    // 如果 isGitRepo 缺失，但 gitRoot 存在，也可以推断当前 workspace 是 Git 仓库。
+    const isGitRepo =
+      typeof gitContext.isGitRepo === "boolean"
+        ? gitContext.isGitRepo
+        : typeof gitContext.gitRoot === "string" && gitContext.gitRoot
+          ? true
+          : metadataMarkedWorktree
+            ? true
+            : undefined
+    const isWorktree =
+      metadataMarkedWorktree ||
+      (typeof gitContext.isWorktreePath === "boolean" ? gitContext.isWorktreePath : undefined)
+    const branch = typeof metadata.worktreeBranch === "string" ? metadata.worktreeBranch : null
+
+    if (isGitRepo === undefined && isWorktree === undefined && !branch) return null
+    return { isGitRepo, isWorktree, branch }
+  }
+
+  // 兼容旧 metadata：新写入都会使用 metadata.gitContext 对象。
+  const cachedWorkspacePath =
+    typeof metadata.cachedGitContextWorkspacePath === "string"
+      ? metadata.cachedGitContextWorkspacePath
+      : null
+  const cachedMatchesWorkspace = Boolean(
+    workspacePath && cachedWorkspacePath && cachedWorkspacePath === workspacePath
+  )
+  const cachedIsGitRepo =
+    cachedMatchesWorkspace && typeof metadata.cachedIsGitRepo === "boolean"
+      ? metadata.cachedIsGitRepo
+      : undefined
+  const cachedIsWorktree =
+    cachedMatchesWorkspace && typeof metadata.cachedIsWorktreePath === "boolean"
+      ? metadata.cachedIsWorktreePath
+      : undefined
+  const cachedGitRoot =
+    cachedMatchesWorkspace && typeof metadata.cachedGitRoot === "string" && metadata.cachedGitRoot
+      ? metadata.cachedGitRoot
+      : null
+  const branch = typeof metadata.worktreeBranch === "string" ? metadata.worktreeBranch : null
+  const isGitRepo =
+    cachedIsGitRepo ?? (cachedGitRoot ? true : metadataMarkedWorktree ? true : undefined)
+  const isWorktree = metadataMarkedWorktree || cachedIsWorktree
+
+  if (isGitRepo === undefined && isWorktree === undefined && !branch) return null
+  return { isGitRepo, isWorktree, branch }
+}
+
 const defaultStreamData: StreamData = {
   messages: [],
   isLoading: false,
   stream: null
 }
-const EMPTY_HOOK_LOGS: HookLogEntry[] = []
+const EMPTY_HOOK_LOG_BUCKETS: HookLogBucket[] = []
 const COORDINATOR_NOTIFICATION_RETRY_MS = 1_000
 const COORDINATOR_NOTIFICATION_MAX_RETRIES = 30
 const COORDINATOR_NOTIFICATION_SUPPRESS_MS = 15_000
@@ -241,66 +455,153 @@ function isTerminalCoordinatorWorker(worker: CoordinatorWorkerView): boolean {
   )
 }
 
-function approvalRequestId(request: HITLRequest | null | undefined): string | null {
-  if (!request) return null
-  const raw = request as unknown as Record<string, unknown>
-  const orchestratorId = raw._orchestratorRequestId
-  if (typeof orchestratorId === "string" && orchestratorId) return orchestratorId
-  return request.id || null
+function getPendingApprovalId(request: HITLRequest): string {
+  const approval = request as unknown as Record<string, unknown>
+  const orchestratorRequestId = approval._orchestratorRequestId
+  if (typeof orchestratorRequestId === "string" && orchestratorRequestId.trim()) {
+    return orchestratorRequestId
+  }
+  return request.id
 }
 
-function approvalOperation(request: HITLRequest | null | undefined): string | null {
-  if (!request) return null
-  const raw = request as unknown as Record<string, unknown>
-  const operation = raw.operation
+function getPendingApprovalOperation(request: HITLRequest | null | undefined): string | null {
+  const approval = request as unknown as Record<string, unknown> | null | undefined
+  const operation = approval?.operation
   return typeof operation === "string" ? operation : null
 }
 
-function enqueuePendingApproval(
-  state: ThreadState,
-  request: HITLRequest
-): Partial<ThreadState> {
-  const requestId = approvalRequestId(request)
-  const currentId = approvalRequestId(state.pendingApproval)
-  const approvalQueue = state.approvalQueue ?? []
-  if (requestId && requestId === currentId) return {}
-  if (requestId && approvalQueue.some((queued) => approvalRequestId(queued) === requestId)) {
-    return {}
+function approvalOperation(request: HITLRequest | null | undefined): string | null {
+  return getPendingApprovalOperation(request)
+}
+
+function buildPendingApprovalState(
+  queue: HITLRequest[]
+): Pick<ThreadState, "pendingApprovals" | "pendingApproval" | "approvalQueue"> {
+  return {
+    pendingApprovals: queue,
+    pendingApproval: queue[0] ?? null,
+    approvalQueue: queue.slice(1)
   }
-  if (!state.pendingApproval) {
-    return { pendingApproval: request }
-  }
+}
+
+function enqueuePendingApproval(queue: HITLRequest[], request: HITLRequest): HITLRequest[] {
+  const requestId = getPendingApprovalId(request)
+  const nextQueue = queue.filter((item) => getPendingApprovalId(item) !== requestId)
+  const state = buildPendingApprovalState(nextQueue)
   if (
+    nextQueue.length === 1 &&
     approvalOperation(state.pendingApproval) === "prepare_save_code_exec_tool" &&
     approvalOperation(request) === "save_code_exec_tool"
   ) {
-    return { pendingApproval: request }
+    return [request]
   }
-  return { approvalQueue: [...approvalQueue, request] }
+  nextQueue.push(request)
+  return nextQueue
 }
 
-function advancePendingApproval(state: ThreadState): Partial<ThreadState> {
-  const [nextApproval, ...remainingApprovals] = state.approvalQueue ?? []
-  return {
-    pendingApproval: nextApproval ?? null,
-    approvalQueue: remainingApprovals
-  }
+function removePendingApproval(queue: HITLRequest[], requestId?: string): HITLRequest[] {
+  if (queue.length === 0) return queue
+  if (!requestId) return queue.slice(1)
+  return queue.filter((item) => getPendingApprovalId(item) !== requestId)
+}
+
+function advancePendingApproval(queue: HITLRequest[], requestId?: string): HITLRequest[] {
+  return removePendingApproval(queue, requestId)
 }
 
 function removePendingApprovalByRequestId(
   state: ThreadState,
-  requestId: string
-): Partial<ThreadState> {
-  const currentId = approvalRequestId(state.pendingApproval)
-  if (currentId === requestId) {
-    return advancePendingApproval(state)
+  requestId?: string
+): Pick<ThreadState, "pendingApprovals" | "pendingApproval" | "approvalQueue"> {
+  return buildPendingApprovalState(advancePendingApproval(state.pendingApprovals, requestId))
+}
+
+function normalizeThreadState(state: ThreadState): ThreadState {
+  const pendingQueue = Array.isArray(state.pendingApprovals)
+    ? state.pendingApprovals
+    : (state.pendingApproval ? [state.pendingApproval] : [])
+  return {
+    ...state,
+    toolCallStates: state.toolCallStates || {},
+    ...buildPendingApprovalState(pendingQueue)
   }
-  const approvalQueue = state.approvalQueue ?? []
-  const filteredQueue = approvalQueue.filter(
-    (approval) => approvalRequestId(approval) !== requestId
-  )
-  if (filteredQueue.length === approvalQueue.length) return {}
-  return { approvalQueue: filteredQueue }
+}
+
+function mergeToolCallArgs(
+  existingArgs?: Record<string, unknown>,
+  incomingArgs?: Record<string, unknown>
+): Record<string, unknown> | undefined {
+  if (!existingArgs && !incomingArgs) return undefined
+  return {
+    ...(existingArgs || {}),
+    ...(incomingArgs || {})
+  }
+}
+
+function upsertToolCallState(
+  states: Record<string, ToolCallState>,
+  toolCallId: string | undefined,
+  updates: Partial<ToolCallState>
+): Record<string, ToolCallState> {
+  if (!toolCallId?.trim()) return states
+  const existing = states[toolCallId]
+  return {
+    ...states,
+    [toolCallId]: {
+      id: toolCallId,
+      status: updates.status || existing?.status || "queued",
+      name: updates.name ?? existing?.name,
+      args: mergeToolCallArgs(existing?.args, updates.args),
+      command: updates.command ?? existing?.command,
+      filePath: updates.filePath ?? existing?.filePath,
+      reason: updates.reason ?? existing?.reason,
+      operation: updates.operation ?? existing?.operation,
+      code: updates.code ?? existing?.code,
+      timeoutMs: updates.timeoutMs ?? existing?.timeoutMs,
+      updatedAt: new Date()
+    }
+  }
+}
+
+function upsertToolCallStateFromRequest(
+  states: Record<string, ToolCallState>,
+  request: HITLRequest & Record<string, unknown>,
+  status: ToolCallState["status"] = "awaiting_approval"
+): Record<string, ToolCallState> {
+  const toolCall = request.tool_call
+  if (!toolCall?.id) return states
+
+  const mergedArgs: Record<string, unknown> = {
+    ...(toolCall.args || {})
+  }
+  if (typeof request.command === "string" && !mergedArgs.command) {
+    mergedArgs.command = request.command
+  }
+  if (typeof request.filePath === "string") {
+    if (!mergedArgs.path) mergedArgs.path = request.filePath
+    if (!mergedArgs.file_path) mergedArgs.file_path = request.filePath
+  }
+  if (typeof request.code === "string" && mergedArgs.code === undefined) {
+    mergedArgs.code = request.code
+  }
+  if (request.params !== undefined && mergedArgs.params === undefined) {
+    mergedArgs.params = request.params
+  }
+  if (typeof request.timeoutMs === "number" && mergedArgs.timeoutMs === undefined) {
+    mergedArgs.timeoutMs = request.timeoutMs
+  }
+
+  return upsertToolCallState(states, toolCall.id, {
+    status,
+    name: toolCall.name,
+    args: mergedArgs,
+    command: typeof request.command === "string" ? request.command : undefined,
+    filePath: typeof request.filePath === "string" ? request.filePath : undefined,
+    reason: typeof request.reason === "string" ? request.reason : undefined,
+    operation: typeof request.operation === "string" ? request.operation : undefined,
+    code: typeof request.code === "string" ? request.code : undefined,
+    timeoutMs: typeof request.timeoutMs === "number" ? request.timeoutMs : undefined
+  })
 }
 
 const ThreadContext = createContext<ThreadContextValue | null>(null)
@@ -350,16 +651,35 @@ interface CustomEventData {
   message?: string
   delayMs?: number
   // hook_executed fields
+  kind?: "executed" | "skipped"
   event?: string
   hookType?: string
+  hookEvent?: string
+  action?: string
   label?: string
+  command?: string
   toolSuffix?: string
+  pluginId?: string
+  pluginName?: string
+  skillName?: string
+  skillPath?: string
+  hookSourcePath?: string
+  cwd?: string
+  durationMs?: number
   exitCode?: number | null
   blocked?: boolean
+  continue?: boolean
+  stopReason?: string
   decision?: string
   stdout?: string
   stderr?: string
+  additionalContext?: string
   systemMessage?: string
+  stdinPayload?: string
+  skipReason?: string
+  timestamp?: string
+  turnId?: string
+  result?: AgentAutoCommitResult
 }
 
 // Component that holds a stream and notifies subscribers
@@ -459,9 +779,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const coordinatorNotificationAutoRunSuppressedRef = useRef<Set<string>>(new Set())
   const coordinatorNotificationSuppressTimersRef = useRef<Record<string, number>>({})
   const environmentCoordinatorThreadIdsRef = useRef<Set<string>>(new Set())
+  const allStreamSubscribersRef = useRef<Set<() => void>>(new Set())
 
-  // Hook logs store (not React state — avoids re-rendering chat on every hook fire)
-  const hookLogsRef = useRef<Record<string, HookLogEntry[]>>({})
+  // Hook logs store (not React state — avoids re-rendering chat on every hook fire).
+  //
+  // Structure: per-thread → ordered list of per-turn buckets (oldest first).
+  // A bucket is opened by `openHookLogBucket(threadId, userMessage)` at the
+  // start of each new user turn; subsequent `hook_executed` events append to
+  // the most recent bucket. Buckets are not cleared on new user messages —
+  // they're kept up to HOOK_LOG_BUCKET_RING_SIZE so the user can scroll back
+  // and inspect what hooks ran in earlier turns. Old buckets fall off the
+  // front when the ring fills; the jsonl log file (diagnostic mode) holds
+  // anything older.
+  const hookLogBucketsRef = useRef<Record<string, HookLogBucket[]>>({})
   const hookLogsSubscribersRef = useRef<Record<string, Set<() => void>>>({})
 
   useEffect(() => {
@@ -557,12 +887,67 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       hookLogsSubscribersRef.current[threadId] = new Set()
     }
     hookLogsSubscribersRef.current[threadId].add(callback)
-    return () => { hookLogsSubscribersRef.current[threadId]?.delete(callback) }
+    return () => {
+      hookLogsSubscribersRef.current[threadId]?.delete(callback)
+    }
   }, [])
 
-  const getHookLogs = useCallback((threadId: string): HookLogEntry[] => {
-    return hookLogsRef.current[threadId] ?? EMPTY_HOOK_LOGS
+  const getHookLogBuckets = useCallback((threadId: string): HookLogBucket[] => {
+    return hookLogBucketsRef.current[threadId] ?? EMPTY_HOOK_LOG_BUCKETS
   }, [])
+
+  // Opens a new bucket for the incoming user turn. Trims the ring to size.
+  // Called from appendMessage when a `role === "user"` message arrives.
+  const openHookLogBucket = useCallback((threadId: string, userMessage: Message): void => {
+    const preview =
+      typeof userMessage.content === "string"
+        ? userMessage.content
+        : Array.isArray(userMessage.content)
+          ? userMessage.content
+              .map((block) => {
+                const text = (block as { text?: unknown })?.text
+                return typeof text === "string" ? text : ""
+              })
+              .join(" ")
+          : ""
+    const bucket: HookLogBucket = {
+      turnId: userMessage.id,
+      turnPreview: preview.trim().slice(0, 120),
+      startedAt: new Date(),
+      entries: []
+    }
+    const existing = hookLogBucketsRef.current[threadId] ?? []
+    // Idempotent: if appendMessage fires twice for the same id, don't open
+    // duplicate buckets. If a hook event arrived first and created a
+    // placeholder bucket, fill in the real user preview while preserving
+    // existing entries. Use the explicit isPlaceholder flag (not a
+    // turnPreview prefix heuristic) so user messages that legitimately start
+    // with "(" aren't misclassified.
+    const existingIdx = existing.findIndex((b) => b.turnId === bucket.turnId)
+    if (existingIdx >= 0) {
+      const current = existing[existingIdx]
+      if (current.isPlaceholder && bucket.turnPreview) {
+        hookLogBucketsRef.current[threadId] = [
+          ...existing.slice(0, existingIdx),
+          {
+            ...current,
+            turnPreview: bucket.turnPreview,
+            startedAt: bucket.startedAt,
+            isPlaceholder: false
+          },
+          ...existing.slice(existingIdx + 1)
+        ]
+        notifyHookLogSubscribers(threadId)
+      }
+      return
+    }
+    const next = [...existing, bucket]
+    if (next.length > HOOK_LOG_BUCKET_RING_SIZE) {
+      next.splice(0, next.length - HOOK_LOG_BUCKET_RING_SIZE)
+    }
+    hookLogBucketsRef.current[threadId] = next
+    notifyHookLogSubscribers(threadId)
+  }, [notifyHookLogSubscribers])
 
   // Notify subscribers for a thread
   const notifyStreamSubscribers = useCallback((threadId: string) => {
@@ -570,6 +955,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     if (subscribers) {
       subscribers.forEach((callback) => callback())
     }
+    allStreamSubscribersRef.current.forEach((callback) => callback())
   }, [])
 
   // Handle stream updates from ThreadStreamHolder
@@ -616,12 +1002,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   const getThreadState = useCallback(
     (threadId: string): ThreadState => {
-      const state = threadStates[threadId] || createDefaultThreadState()
-      if (state.pendingApproval) {
+      const state = normalizeThreadState(threadStates[threadId] || createDefaultThreadState())
+      if (state.pendingApprovals.length > 0) {
         console.log(
-          "[ThreadContext] getThreadState returning pendingApproval for:",
+          "[ThreadContext] getThreadState returning pending approvals for:",
           threadId,
-          state.pendingApproval
+          state.pendingApprovals.length
         )
       }
       return state
@@ -637,8 +1023,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     return loadingStates
   }, [loadingStates])
 
-  const subscribeToAllStreams = useCallback(() => {
-    return () => {}
+  const subscribeToAllStreams = useCallback((callback: () => void) => {
+    allStreamSubscribersRef.current.add(callback)
+    return () => {
+      allStreamSubscribersRef.current.delete(callback)
+    }
   }, [])
 
   const unresolvedCoordinatorThreadIdsKey = useMemo(() => {
@@ -673,7 +1062,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const updateThreadState = useCallback(
     (threadId: string, updater: (prev: ThreadState) => Partial<ThreadState>) => {
       setThreadStates((prev) => {
-        const currentState = prev[threadId] || createDefaultThreadState()
+        const currentState = normalizeThreadState(prev[threadId] || createDefaultThreadState())
         const updates = updater(currentState)
         const updateKeys = Object.keys(updates) as Array<keyof ThreadState>
         if (updateKeys.length === 0) return prev
@@ -882,12 +1271,39 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     }
   }, [unresolvedCoordinatorThreadIdsKey, scheduleCoordinatorNotificationTurn, updateThreadState])
 
+  const loadWorkspaceFilesInBackground = useCallback(
+    (threadId: string, workspacePath: string) => {
+      // 工作区文件树可能很大，不能阻塞会话历史首屏恢复。
+      // 这里后台加载，避免 “正在加载会话历史” 被完整目录扫描拖住。
+      window.api.workspace
+        .loadFromDisk(threadId)
+        .then((diskResult) => {
+          if (!diskResult.success) return
+
+          // 后台扫描期间用户可能切走/关闭了这个线程，避免把旧结果写回已清理状态。
+          if (!initializedThreadsRef.current.has(threadId)) return
+
+          updateThreadState(threadId, (state) => {
+            // 如果扫描完成前用户切换了工作区，丢弃旧 workspace 的文件树结果。
+            if (state.workspacePath !== workspacePath) return {}
+            return { workspaceFiles: diskResult.files }
+          })
+        })
+        .catch((error) => {
+          console.error("[ThreadContext] Failed to load workspace files:", error)
+        })
+    },
+    [updateThreadState]
+  )
+
   // Parse error messages into user-friendly format
   const parseErrorMessage = useCallback((error: Error | string): string => {
     const raw = typeof error === "string" ? error : error.message
 
     // Strip LangChain troubleshooting URL suffix (appended by @langchain/openai on 4xx errors)
-    const errorMessage = raw.replace(/\n\nTroubleshooting URL: https:\/\/docs\.langchain\.com\S*/g, "").trim()
+    const errorMessage = raw
+      .replace(/\n\nTroubleshooting URL: https:\/\/docs\.langchain\.com\S*/g, "")
+      .trim()
 
     // Check for context window exceeded errors
     const contextWindowMatch = errorMessage.match(
@@ -917,7 +1333,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     // Check for model not found (404 — wrong model name)
     // Use lc_error_code as primary signal; fall back to pattern matching "404" + model-related keywords
     const lcCode = (error as Error & { lc_error_code?: string }).lc_error_code
-    if (lcCode === "MODEL_NOT_FOUND" || (/\b404\b/.test(errorMessage) && /model|not.found|does.not.exist/i.test(errorMessage))) {
+    if (
+      lcCode === "MODEL_NOT_FOUND" ||
+      (/\b404\b/.test(errorMessage) && /model|not.found|does.not.exist/i.test(errorMessage))
+    ) {
       return `模型不存在，请检查设置中的模型名称是否正确。\n${errorMessage}`
     }
 
@@ -958,7 +1377,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               threadId,
               data.request
             )
-            updateThreadState(threadId, (state) => enqueuePendingApproval(state, data.request!))
+            updateThreadState(threadId, (state) => ({
+              ...buildPendingApprovalState(
+                enqueuePendingApproval(state.pendingApprovals, data.request!)
+              ),
+              toolCallStates: upsertToolCallStateFromRequest(
+                state.toolCallStates,
+                data.request as HITLRequest & Record<string, unknown>
+              )
+            }))
           }
           break
         case "workspace":
@@ -1106,22 +1533,149 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             toast.info(data.message)
           }
           break
+        case "hook_blocked": {
+          const reason =
+            (typeof data.reason === "string" && data.reason.trim()) ||
+            (typeof data.message === "string" && data.message.trim()) ||
+            "Hook 已阻断本轮"
+          const action = data.action === "halt" ? "halt" : "block"
+          const eventName =
+            (typeof data.hookEvent === "string" && data.hookEvent) ||
+            (typeof data.event === "string" && data.event) ||
+            "Hook"
+          const systemMessage =
+            typeof data.systemMessage === "string" && data.systemMessage.trim()
+              ? data.systemMessage
+              : undefined
+          updateThreadState(threadId, () => ({
+            error: null,
+            hookInterruption: {
+              event: eventName,
+              action,
+              reason,
+              systemMessage,
+              timestamp: new Date()
+            }
+          }))
+          toast.warning(action === "halt" ? `Hook 已停止本轮：${reason}` : `Hook 已阻断：${reason}`)
+          break
+        }
+        case "auto_commit_result":
+          if (data.result) {
+            const message = formatAutoCommitText(data.result)
+            if (data.result.status === "committed") {
+              toast.success(message || "自动提交成功")
+            } else if (data.result.status === "failed") {
+              toast.error(message || "自动提交失败")
+            } else if (data.result.status === "skipped") {
+              toast.info(message || "自动提交已跳过")
+            }
+          }
+          break
         case "hook_executed": {
           const entry: HookLogEntry = {
             id: `${Date.now()}-${Math.random()}`,
+            kind: data.kind === "skipped" ? "skipped" : "executed",
             event: data.event ?? "",
             hookType: data.hookType ?? "command",
             label: data.label ?? "",
+            command: data.command,
             toolSuffix: data.toolSuffix ?? "",
+            pluginId: data.pluginId,
+            pluginName: data.pluginName,
+            skillName: data.skillName,
+            skillPath: data.skillPath,
+            hookSourcePath: data.hookSourcePath,
+            cwd: data.cwd,
+            durationMs: data.durationMs,
             exitCode: data.exitCode ?? null,
             blocked: data.blocked ?? false,
+            continue: data.continue,
+            stopReason: data.stopReason,
             decision: data.decision,
+            reason: data.reason,
             stdout: data.stdout ?? "",
             stderr: data.stderr ?? "",
+            additionalContext: data.additionalContext,
             systemMessage: data.systemMessage,
-            timestamp: new Date()
+            stdinPayload: data.stdinPayload,
+            skipReason: data.skipReason,
+            timestamp: data.timestamp ? new Date(data.timestamp) : new Date(),
+            turnId: data.turnId
           }
-          hookLogsRef.current[threadId] = [...(hookLogsRef.current[threadId] ?? []), entry]
+          // Prefer the explicit turn id from main. Falling back to the latest
+          // bucket keeps legacy/background events visible, but normal chat
+          // turns no longer drift when async hook events arrive late.
+          //
+          // IMPORTANT: we MUST produce a new outer array (and a new bucket
+          // object). useSyncExternalStore compares the snapshot by reference
+          // identity — mutating bucket.entries in place would leave the outer
+          // array pointer unchanged and the chip would never re-render.
+          // Bucket assignment rules:
+          //   1. entry.turnId matches an existing bucket → append.
+          //   2. entry.turnId set but no matching bucket → create a new
+          //      "earlier hook event" bucket (subject to ring trim).
+          //   3. entry.turnId missing → create / append to a dedicated
+          //      background-events bucket. Older code routed these to
+          //      `buckets[last]` which polluted whichever user turn happened
+          //      to be most recent (e.g. SessionStart firing after a new
+          //      conversation began would inflate the previous chip).
+          const buckets = hookLogBucketsRef.current[threadId] ?? []
+          const BACKGROUND_BUCKET_ID = "__background__"
+          const trim = (list: HookLogBucket[]): HookLogBucket[] => {
+            if (list.length > HOOK_LOG_BUCKET_RING_SIZE) {
+              list.splice(0, list.length - HOOK_LOG_BUCKET_RING_SIZE)
+            }
+            return list
+          }
+          let nextBuckets: HookLogBucket[]
+          if (entry.turnId) {
+            const explicitIdx = buckets.findIndex((bucket) => bucket.turnId === entry.turnId)
+            if (explicitIdx >= 0) {
+              const target = buckets[explicitIdx]
+              nextBuckets = [
+                ...buckets.slice(0, explicitIdx),
+                { ...target, entries: [...target.entries, entry] },
+                ...buckets.slice(explicitIdx + 1)
+              ]
+            } else {
+              nextBuckets = trim([
+                ...buckets,
+                {
+                  turnId: entry.turnId,
+                  turnPreview: "(较早的 Hook 事件)",
+                  isPlaceholder: true,
+                  startedAt: new Date(),
+                  entries: [entry]
+                }
+              ])
+            }
+          } else {
+            const bgIdx = buckets.findIndex((bucket) => bucket.turnId === BACKGROUND_BUCKET_ID)
+            if (bgIdx >= 0) {
+              const target = buckets[bgIdx]
+              nextBuckets = [
+                ...buckets.slice(0, bgIdx),
+                { ...target, entries: [...target.entries, entry] },
+                ...buckets.slice(bgIdx + 1)
+              ]
+            } else {
+              // The background bucket has no corresponding user message so it
+              // never gets "upgraded" — mark it placeholder anyway for any
+              // future code that wants to treat it as not-a-real-turn.
+              nextBuckets = trim([
+                ...buckets,
+                {
+                  turnId: BACKGROUND_BUCKET_ID,
+                  turnPreview: "(会话生命周期事件)",
+                  isPlaceholder: true,
+                  startedAt: new Date(),
+                  entries: [entry]
+                }
+              ])
+            }
+          }
+          hookLogBucketsRef.current[threadId] = nextBuckets
           notifyHookLogSubscribers(threadId)
           break
         }
@@ -1172,27 +1726,73 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       const actions: ThreadActions = {
         appendMessage: (message: Message) => {
-          // Clear hook logs (external store) at the start of each new user turn
+          // Open a new hook-log bucket for each user turn instead of clearing.
+          // Old buckets stay around (up to HOOK_LOG_BUCKET_RING_SIZE) so a
+          // user can scroll back and inspect what hooks ran in earlier turns.
           if (message.role === "user") {
-            hookLogsRef.current[threadId] = []
-            notifyHookLogSubscribers(threadId)
             coordinatorNotificationAutoRunSuppressedRef.current.delete(threadId)
             const suppressTimer = coordinatorNotificationSuppressTimersRef.current[threadId]
             if (suppressTimer !== undefined) {
               window.clearTimeout(suppressTimer)
             }
             delete coordinatorNotificationSuppressTimersRef.current[threadId]
+            openHookLogBucket(threadId, message)
           }
           updateThreadState(threadId, (state) => {
             const exists = state.messages.some((m) => m.id === message.id)
-            if (exists) {
-              return { messages: state.messages.map((m) => (m.id === message.id ? message : m)) }
+            let nextToolCallStates = state.toolCallStates
+            if (Array.isArray(message.tool_calls)) {
+              for (const toolCall of message.tool_calls) {
+                nextToolCallStates = upsertToolCallState(nextToolCallStates, toolCall.id, {
+                  name: toolCall.name,
+                  args: toolCall.args,
+                  status: "queued"
+                })
+              }
             }
-            return { messages: [...state.messages, message] }
+            if (message.role === "tool" && message.tool_call_id) {
+              nextToolCallStates = upsertToolCallState(nextToolCallStates, message.tool_call_id, {
+                name: message.name,
+                status: message.is_error ? "failed" : "completed"
+              })
+            }
+            if (exists) {
+              return {
+                messages: state.messages.map((m) => (m.id === message.id ? message : m)),
+                toolCallStates: nextToolCallStates,
+                hookInterruption: message.role === "user" ? null : state.hookInterruption
+              }
+            }
+            return {
+              messages: [...state.messages, message],
+              toolCallStates: nextToolCallStates,
+              hookInterruption: message.role === "user" ? null : state.hookInterruption
+            }
           })
         },
         setMessages: (messages: Message[]) => {
-          updateThreadState(threadId, () => ({ messages }))
+          updateThreadState(threadId, (state) => {
+            const nextToolCallStates = messages.reduce<Record<string, ToolCallState>>((acc, message) => {
+              if (Array.isArray(message.tool_calls)) {
+                for (const toolCall of message.tool_calls) {
+                  acc = upsertToolCallState(acc, toolCall.id, {
+                    name: toolCall.name,
+                    args: toolCall.args,
+                    status: "queued"
+                  })
+                }
+              }
+              if (message.role === "tool" && message.tool_call_id) {
+                acc = upsertToolCallState(acc, message.tool_call_id, {
+                  name: message.name,
+                  status: message.is_error ? "failed" : "completed"
+                })
+              }
+              return acc
+            }, state.toolCallStates)
+
+            return { messages, toolCallStates: nextToolCallStates }
+          })
         },
         setTodos: (todos: Todo[]) => {
           updateThreadState(threadId, () => ({ todos }))
@@ -1209,22 +1809,53 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               : { workspacePath: path, coordinatorWorkers: [] }
           )
         },
+        setGitContext: (context: ThreadGitContext | null) => {
+          updateThreadState(threadId, () => ({ gitContext: context }))
+        },
         setSubagents: (subagents: Subagent[]) => {
           updateThreadState(threadId, () => ({ subagents }))
         },
+        setToolCallState: (toolCallId: string, updates: Partial<ToolCallState>) => {
+          updateThreadState(threadId, (state) => ({
+            toolCallStates: upsertToolCallState(state.toolCallStates, toolCallId, updates)
+          }))
+        },
         setPendingApproval: (request: HITLRequest | null) => {
+          updateThreadState(threadId, (state) => ({
+            ...buildPendingApprovalState(request ? [request] : []),
+            ...(request
+              ? { toolCallStates: upsertToolCallStateFromRequest(state.toolCallStates, request as HITLRequest & Record<string, unknown>) }
+              : {})
+          }))
+        },
+        enqueuePendingApproval: (request: HITLRequest) => {
+          updateThreadState(threadId, (state) => ({
+            ...buildPendingApprovalState(enqueuePendingApproval(state.pendingApprovals, request)),
+            toolCallStates: upsertToolCallStateFromRequest(
+              state.toolCallStates,
+              request as HITLRequest & Record<string, unknown>
+            )
+          }))
+        },
+        removePendingApproval: (requestId?: string) => {
           updateThreadState(threadId, (state) =>
-            request ? enqueuePendingApproval(state, request) : advancePendingApproval(state)
+            buildPendingApprovalState(advancePendingApproval(state.pendingApprovals, requestId))
           )
         },
         clearPendingApprovals: () => {
-          updateThreadState(threadId, () => ({ pendingApproval: null, approvalQueue: [] }))
+          updateThreadState(threadId, () => buildPendingApprovalState([]))
+        },
+        setPendingUserInput: (request: UserInputRequest | null) => {
+          updateThreadState(threadId, () => ({ pendingUserInput: request }))
         },
         setError: (error: string | null) => {
           updateThreadState(threadId, () => ({ error }))
         },
         clearError: () => {
           updateThreadState(threadId, () => ({ error: null }))
+        },
+        clearHookInterruption: () => {
+          updateThreadState(threadId, () => ({ hookInterruption: null }))
         },
         setCurrentModel: (modelId: string) => {
           updateThreadState(threadId, () => ({ currentModel: modelId }))
@@ -1284,31 +1915,37 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       actionsCache.current[threadId] = actions
       return actions
     },
-    [notifyHookLogSubscribers, updateThreadState]
+    [updateThreadState, openHookLogBucket]
   )
 
   const loadThreadHistory = useCallback(
     async (threadId: string) => {
       const actions = getThreadActions(threadId)
+      let persistedMessageTimes: MessageTimeMap = {}
+      let persistedMessageTimeOrder: MessageTimeEntry[] = []
+      updateThreadState(threadId, () => ({ historyLoading: true }))
 
       // Load workspace path and thread metadata
       try {
         const thread = await window.api.threads.get(threadId)
         if (thread) {
+          persistedMessageTimes = getMessageTimeMap(thread.thread_values)
+          persistedMessageTimeOrder = getMessageTimeOrder(thread.thread_values)
           const metadata = thread.metadata || {}
+          actions.setGitContext(getGitContextFromMetadata(metadata))
           if (metadata.workspacePath) {
-            actions.setWorkspacePath(metadata.workspacePath as string)
-            const diskResult = await window.api.workspace.loadFromDisk(threadId)
-            if (diskResult.success) {
-              actions.setWorkspaceFiles(diskResult.files)
-            }
+            const workspacePath = metadata.workspacePath as string
+            actions.setWorkspacePath(workspacePath)
+            // 文件树仅用于侧边栏/文件面板展示，和聊天历史恢复解耦后可显著缩短首屏等待。
+            loadWorkspaceFilesInBackground(threadId, workspacePath)
           }
           // Restore the effective model: prefer the routing-resolved model (smart routing),
           // fall back to user's pinned model selection.
           const routingState = metadata.routingState as
             | { lastResolvedModelId?: string; lastResolvedTier?: string }
             | undefined
-          const effectiveModel = routingState?.lastResolvedModelId || (metadata.model as string) || ""
+          const effectiveModel =
+            routingState?.lastResolvedModelId || (metadata.model as string) || ""
           if (effectiveModel) {
             updateThreadState(threadId, () => ({
               currentModel: effectiveModel,
@@ -1316,7 +1953,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 ? {
                     routingResult: {
                       resolvedModelId: routingState.lastResolvedModelId!,
-                      resolvedTier: (routingState.lastResolvedTier as "premium" | "economy") ?? "premium",
+                      resolvedTier:
+                        (routingState.lastResolvedTier as "premium" | "economy") ?? "premium",
                       routeReason: "restored from thread state"
                     }
                   }
@@ -1455,6 +2093,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               const toolName = msg.name ?? msg.kwargs?.name
               const messageId =
                 msg.kwargs?.id ?? (typeof msg.id === "string" ? msg.id : `msg-${index}`)
+              const fallbackTime = new Date()
+              // 优先按 id 恢复；如果重启后 checkpoint 中的 id 变化，则按消息顺序兜底恢复。
+              //
+              // 这里不直接用 created_at 作为历史耗时依据，因为 created_at 的原有逻辑不能改；
+              // checkpoint 重新加载时 created_at 可能是当前时间。start_at/end_at 才是本功能
+              // 专门用于跨重启恢复耗时的时间字段。
+              const persistedTime =
+                persistedMessageTimes[messageId] ?? persistedMessageTimeOrder[index]
+              const startAt = toDate(persistedTime?.start_at) ?? fallbackTime
+              const endAt = toDate(persistedTime?.end_at) ?? startAt
 
               return {
                 id: messageId,
@@ -1463,7 +2111,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 tool_calls: toolCalls as Message["tool_calls"],
                 ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
                 ...(role === "tool" && toolName && { name: toolName }),
-                created_at: new Date()
+                created_at: new Date(),
+                start_at: startAt,
+                end_at: endAt
               }
             })
             actions.setMessages(messages)
@@ -1517,8 +2167,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       } catch (error) {
         console.error("[ThreadContext] Failed to load thread history:", error)
       }
+
+      updateThreadState(threadId, () => ({ historyLoading: false }))
     },
-    [getThreadActions, updateThreadState]
+    [getThreadActions, loadWorkspaceFilesInBackground, updateThreadState]
   )
 
   // Track passive scheduler/heartbeat stream listeners per thread
@@ -1526,6 +2178,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const heartbeatListenerCleanups = useRef<Record<string, () => void>>({})
   // Track approval listeners per thread (registered globally, not per-component)
   const approvalListenerCleanups = useRef<Record<string, Array<() => void>>>({})
+  // Track request_user_input listeners per thread.
+  const userInputListenerCleanups = useRef<Record<string, Array<() => void>>>({})
 
   // Track streaming AI message state per thread (for token-by-token accumulation)
   const schedulerStreamingRef = useRef<
@@ -1551,10 +2205,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         return
       }
 
-      // "started" fires before agent runtime creation — show loading immediately
+      // "started" fires before agent runtime creation — show loading immediately.
+      // Hook-log buckets are now per-turn and not cleared here; the new bucket
+      // is opened when the scheduled task's user message lands via appendMessage.
       if (event.type === "started") {
-        hookLogsRef.current[threadId] = []
-        notifyHookLogSubscribers(threadId)
         updateThreadState(threadId, () => ({ scheduledTaskLoading: true }))
         return
       }
@@ -1581,9 +2235,37 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             tool_calls?: unknown[]
             tool_call_id?: string
             name?: string
+            is_error?: boolean
           }>
+          const nextToolCallStates = msgs.reduce<Record<string, ToolCallState>>((acc, msg) => {
+            if (Array.isArray(msg.tool_calls)) {
+              for (const toolCall of msg.tool_calls as Array<{
+                id?: string
+                name?: string
+                args?: Record<string, unknown>
+              }>) {
+                if (!toolCall.id) continue
+                acc = upsertToolCallState(acc, toolCall.id, {
+                  name: toolCall.name,
+                  args: toolCall.args,
+                  status: "queued"
+                })
+              }
+            }
+            if (msg.role === "tool" && msg.tool_call_id) {
+              acc = upsertToolCallState(acc, msg.tool_call_id, {
+                name: msg.name,
+                status: msg.is_error ? "failed" : "completed"
+              })
+            }
+            return acc
+          }, {})
           updateThreadState(threadId, () => ({
-            messages: msgs.map((m) => ({ ...m, created_at: new Date() }) as Message)
+            messages: msgs.map((m) => {
+              const now = new Date()
+              return { ...m, created_at: now, start_at: now, end_at: now } as Message
+            }),
+            toolCallStates: nextToolCallStates
           }))
           break
         }
@@ -1626,6 +2308,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
           const finalContent = tracker.accumulatedContent
           updateThreadState(threadId, (prev) => {
+            const nextToolCallStates = (toolCalls || []).reduce<Record<string, ToolCallState>>(
+              (acc, toolCall) =>
+                upsertToolCallState(acc, toolCall.id, {
+                  name: toolCall.name,
+                  args: toolCall.args,
+                  status: "queued"
+                }),
+              prev.toolCallStates
+            )
             const idx = prev.messages.findIndex((m) => m.id === id)
             // Defensive clear: any real assistant token means data is flowing
             // again, so a stale retry indicator must disappear.
@@ -1635,12 +2326,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               updated[idx] = {
                 ...updated[idx],
                 content: finalContent,
-                ...(toolCalls?.length && { tool_calls: toolCalls })
+                ...(toolCalls?.length && { tool_calls: toolCalls }),
+                end_at: new Date()
               }
-              return { ...clearRetry, messages: updated }
+              return { ...clearRetry, messages: updated, toolCallStates: nextToolCallStates }
             }
+            const now = new Date()
             return {
               ...clearRetry,
+              toolCallStates: nextToolCallStates,
               messages: [
                 ...prev.messages,
                 {
@@ -1648,7 +2342,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   role: "assistant" as const,
                   content: finalContent,
                   ...(toolCalls?.length && { tool_calls: toolCalls }),
-                  created_at: new Date()
+                  created_at: now,
+                  start_at: now,
+                  end_at: now
                 }
               ]
             }
@@ -1662,9 +2358,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const content = event.content as string
           const toolCallId = event.toolCallId as string
           const name = event.name as string | undefined
+          const isError = event.isError as boolean | undefined
+          const now = new Date()
           updateThreadState(threadId, (prev) => {
             if (prev.messages.some((m) => m.id === id)) return {}
             return {
+              toolCallStates: upsertToolCallState(prev.toolCallStates, toolCallId, {
+                name,
+                status: isError ? "failed" : "completed"
+              }),
               messages: [
                 ...prev.messages,
                 {
@@ -1673,7 +2375,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   content,
                   tool_call_id: toolCallId,
                   name,
-                  created_at: new Date()
+                  is_error: isError,
+                  created_at: now,
+                  start_at: now,
+                  end_at: now
                 }
               ]
             }
@@ -1701,7 +2406,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       setThreadStates((prev) => {
         if (prev[threadId]) return prev
-        return { ...prev, [threadId]: createDefaultThreadState() }
+        return { ...prev, [threadId]: { ...createDefaultThreadState(), historyLoading: true } }
       })
 
       loadThreadHistory(threadId)
@@ -1723,30 +2428,42 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       const cleanupApproval = window.api.sandbox.onApprovalRequest(threadId, (request: unknown) => {
         console.log(`[ThreadProvider] Approval request for thread ${threadId}:`, request)
         const req = request as Record<string, unknown>
-        const pendingApproval: HITLRequest & Record<string, unknown> = {
-          id: (req.id as string) || "",
-          tool_call: (req.tool_call as { id: string; name: string; args: Record<string, unknown> }) || {
-            id: "",
-            name: "execute",
-            args: {}
-          },
-          allowed_decisions: ["approve", "reject"],
-          command: req.command,
-          reason: req.reason,
-          operation: req.operation,
-          filePath: req.filePath,
-          code: req.code,
-          params: req.params,
-          timeoutMs: req.timeoutMs,
-          savedToolName: req.savedToolName,
-          savedToolId: req.savedToolId,
-          savedToolDescription: req.savedToolDescription,
-          savedToolMetadataError: req.savedToolMetadataError,
-          _orchestratorRequestId: req.id,
-          _retryReason: req.retry_reason,
-          _approvalTypes: req.allowed_approval_types
-        }
-        updateThreadState(threadId, (state) => enqueuePendingApproval(state, pendingApproval))
+        updateThreadState(threadId, (state) => {
+          const approvalRequest = {
+            id: (req.id as string) || "",
+            tool_call:
+              (req.tool_call as { id: string; name: string; args: Record<string, unknown> }) || {
+                id: "",
+                name: "execute",
+                args: {}
+              },
+            allowed_decisions: ["approve", "reject"],
+            command: req.command,
+            reason: req.reason,
+            operation: req.operation,
+            filePath: req.filePath,
+            code: req.code,
+            params: req.params,
+            timeoutMs: req.timeoutMs,
+            savedToolName: req.savedToolName,
+            savedToolId: req.savedToolId,
+            savedToolDescription: req.savedToolDescription,
+            savedToolMetadataError: req.savedToolMetadataError,
+            _orchestratorRequestId: req.id,
+            _retryReason: req.retry_reason,
+            _approvalTypes: req.allowed_approval_types
+          } as HITLRequest & Record<string, unknown>
+
+          return {
+            ...buildPendingApprovalState(
+              enqueuePendingApproval(state.pendingApprovals, approvalRequest)
+            ),
+            toolCallStates: upsertToolCallStateFromRequest(
+              state.toolCallStates,
+              approvalRequest
+            )
+          }
+        })
         // Auto-switch to this thread so the approval UI is visible
         const currentId = useAppStore.getState().currentThreadId
         if (currentId !== threadId) {
@@ -1756,11 +2473,43 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
       const cleanupTimeout = window.api.sandbox.onApprovalTimeout(threadId, (data) => {
         console.warn(`[ThreadProvider] Approval timed out for thread ${threadId}: requestId=${data.requestId}`)
-        updateThreadState(threadId, (state) =>
-          removePendingApprovalByRequestId(state, data.requestId)
-        )
+        updateThreadState(threadId, (state) => {
+          const timedOutApproval = state.pendingApprovals.find(
+            (approval) => getPendingApprovalId(approval) === data.requestId
+          )
+          return {
+            ...removePendingApprovalByRequestId(state, data.requestId),
+            ...(timedOutApproval?.tool_call?.id
+              ? {
+                  toolCallStates: upsertToolCallState(
+                    state.toolCallStates,
+                    timedOutApproval.tool_call.id,
+                    { status: "interrupted" }
+                  )
+                }
+              : {})
+          }
+        })
       })
       approvalListenerCleanups.current[threadId] = [cleanupApproval, cleanupTimeout]
+
+      const cleanupUserInput = window.api.userInput.onRequest(threadId, (request) => {
+        console.log(`[ThreadProvider] User input request for thread ${threadId}:`, request)
+        updateThreadState(threadId, () => ({ pendingUserInput: request }))
+      })
+      const cleanupUserInputCancel = window.api.userInput.onCancel(threadId, (data) => {
+        console.log(
+          `[ThreadProvider] User input cancelled for thread ${threadId}: requestId=${data.requestId}`
+        )
+        updateThreadState(threadId, (state) => {
+          if (state.pendingUserInput?.requestId !== data.requestId) return {}
+          return { pendingUserInput: null }
+        })
+      })
+      userInputListenerCleanups.current[threadId] = [
+        cleanupUserInput,
+        cleanupUserInputCancel
+      ]
     },
     [loadThreadHistory, processSchedulerEvent, updateThreadState]
   )
@@ -1808,6 +2557,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     delete heartbeatListenerCleanups.current[threadId]
     approvalListenerCleanups.current[threadId]?.forEach((c) => c())
     delete approvalListenerCleanups.current[threadId]
+    userInputListenerCleanups.current[threadId]?.forEach((c) => c())
+    delete userInputListenerCleanups.current[threadId]
     delete schedulerStreamingRef.current[threadId]
     const coordinatorNotificationTimer = coordinatorNotificationTimersRef.current[threadId]
     if (coordinatorNotificationTimer !== undefined) {
@@ -1828,7 +2579,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     delete actionsCache.current[threadId]
     delete streamDataRef.current[threadId]
     delete streamSubscribersRef.current[threadId]
-    delete hookLogsRef.current[threadId]
+    delete hookLogBucketsRef.current[threadId]
     delete hookLogsSubscribersRef.current[threadId]
     setActiveThreadIds((prev) => {
       const next = new Set(prev)
@@ -1851,7 +2602,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       subscribeToStream,
       getStreamData,
       subscribeToHookLogs,
-      getHookLogs,
+      getHookLogBuckets,
       getAllThreadStates,
       getAllStreamLoadingStates,
       subscribeToAllStreams,
@@ -1865,7 +2616,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       subscribeToStream,
       getStreamData,
       subscribeToHookLogs,
-      getHookLogs,
+      getHookLogBuckets,
       getAllThreadStates,
       getAllStreamLoadingStates,
       subscribeToAllStreams,
@@ -1949,5 +2700,9 @@ export function useAllThreadStates(): Record<string, ThreadState> {
 // Hook to get all stream loading states with reactivity
 export function useAllStreamLoadingStates(): Record<string, boolean> {
   const context = useThreadContext()
-  return context.getAllStreamLoadingStates()
+  return useSyncExternalStore(
+    context.subscribeToAllStreams,
+    context.getAllStreamLoadingStates,
+    context.getAllStreamLoadingStates
+  )
 }

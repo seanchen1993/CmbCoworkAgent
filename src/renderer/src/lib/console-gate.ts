@@ -106,8 +106,9 @@ function ensureMainLogListener(): void {
   const ipcRenderer = getIpcRenderer()
   if (!ipcRenderer) return
 
-  const off = ipcRenderer.on(MAIN_LOG_EVENT_CHANNEL, (payload: MainLogPayload) => {
+  const off = ipcRenderer.on(MAIN_LOG_EVENT_CHANNEL, (...args: unknown[]) => {
     if (!globalWindow.__CMBConsoleEnabled) return
+    const payload = args[0] as MainLogPayload
     const nativeConsole = globalWindow.__CMBConsoleNative as Record<ConsoleMethod, ConsoleFn>
     const method = methodFromLevel(payload?.level)
     const text = typeof payload?.message === "string" ? payload.message : String(payload?.message ?? "")

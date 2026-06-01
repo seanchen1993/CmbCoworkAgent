@@ -75,8 +75,17 @@ import type {
   LspCallHierarchyItem,
   LspCallHierarchyIncomingCall,
   LspCallHierarchyOutgoingCall,
-  LspStatus
+  LspStatus,
+  UserInputRequest,
+  UserInputResponse,
+  UserInputAnswer,
 } from "../../main/types"
+import type {
+  AgentAutoCommitMessageStrategy,
+  AgentAutoCommitMode,
+  AgentAutoCommitResult,
+  AgentAutoCommitSettings
+} from "../../shared/auto-commit-types"
 import type {
   ManagedSavedCodeExecTool,
   SavedCodeExecPreviewResult,
@@ -105,7 +114,14 @@ export type {
   LspCallHierarchyItem,
   LspCallHierarchyIncomingCall,
   LspCallHierarchyOutgoingCall,
-  LspStatus
+  LspStatus,
+  UserInputRequest,
+  UserInputResponse,
+  UserInputAnswer,
+  AgentAutoCommitMode,
+  AgentAutoCommitMessageStrategy,
+  AgentAutoCommitSettings,
+  AgentAutoCommitResult
 }
 
 export type {
@@ -137,8 +153,11 @@ export interface Message {
   name?: string
   // For tool messages - provider/tool execution status
   status?: string
+  // For tool messages - whether the tool call failed
   is_error?: boolean
   created_at: Date
+  start_at?: Date
+  end_at?: Date
 }
 
 export interface ContentBlock {
@@ -154,6 +173,29 @@ export interface ToolCall {
   id: string
   name: string
   args: Record<string, unknown>
+}
+
+export type ToolCallStatus =
+  | "queued"
+  | "awaiting_approval"
+  | "running"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "rejected"
+
+export interface ToolCallState {
+  id: string
+  status: ToolCallStatus
+  name?: string
+  args?: Record<string, unknown>
+  command?: string
+  filePath?: string
+  reason?: string
+  operation?: string
+  code?: string
+  timeoutMs?: number
+  updatedAt: Date
 }
 
 export interface ToolResult {
@@ -197,10 +239,14 @@ export interface GrepMatch {
 }
 
 export interface SkillMetadata {
+  id?: string
   name: string
   description: string
   path: string
   source: "user" | "project"
+  relativePath?: string
+  pluginId?: string
+  pluginName?: string
   license?: string | null
   compatibility?: string | null
   metadata?: Record<string, string>
