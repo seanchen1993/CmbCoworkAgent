@@ -12,7 +12,15 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from "@/components/ui/select"
 import { cn } from "@/lib/utils"
+import type { Thread } from "@/types"
 
 type TaskMmdSettings = Awaited<ReturnType<typeof window.api.taskMmd.getSettings>>
 type TaskMmdSnapshot = Awaited<ReturnType<typeof window.api.taskMmd.getSnapshot>>
@@ -20,7 +28,8 @@ type TaskMmdCompileModelInfo = Awaited<ReturnType<typeof window.api.taskMmd.getC
 type TaskMmdEntry = TaskMmdSnapshot["entries"][number]
 
 interface TaskMmdPanelProps {
-  threadId?: string | null
+  currentThreadId?: string | null
+  threads: Thread[]
 }
 
 function formatSize(bytes: number): string {
@@ -72,6 +81,25 @@ function exportText(filename: string, text: string): void {
   URL.revokeObjectURL(url)
 }
 
+function shortThreadId(threadId: string): string {
+  return threadId.length > 8 ? threadId.slice(0, 8) : threadId
+}
+
+function getThreadTitle(thread: Thread): string {
+  return (
+    thread.title ||
+    (typeof thread.metadata?.title === "string" ? thread.metadata.title : "") ||
+    "未命名会话"
+  )
+}
+
+function getThreadSubtitle(thread: Thread): string {
+  const workspacePath =
+    typeof thread.metadata?.workspacePath === "string" ? thread.metadata.workspacePath : ""
+  const updatedAt = new Date(thread.updated_at).toLocaleString()
+  return workspacePath ? `${updatedAt} · ${workspacePath}` : updatedAt
+}
+
 function EntryRow({ entry }: { entry: TaskMmdEntry }): React.JSX.Element {
   return (
     <div className="rounded-md border border-border/70 bg-background px-2.5 py-2">
@@ -97,11 +125,13 @@ function EntryRow({ entry }: { entry: TaskMmdEntry }): React.JSX.Element {
   )
 }
 
-export function TaskMmdPanel({ threadId }: TaskMmdPanelProps): React.JSX.Element {
+export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): React.JSX.Element {
+  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(
+    currentThreadId ?? threads[0]?.thread_id ?? null
+  )
   const [settings, setSettings] = useState<TaskMmdSettings | null>(null)
   const [snapshot, setSnapshot] = useState<TaskMmdSnapshot | null>(null)
-  const [compileModelInfo, setCompileModelInfo] =
-    useState<TaskMmdCompileModelInfo | null>(null)
+  const [compileModelInfo, setCompileModelInfo] = useState<TaskMmdCompileModelInfo | null>(null)
   const [directorySize, setDirectorySize] = useState(0)
   const [svg, setSvg] = useState("")
   const [renderError, setRenderError] = useState<string | null>(null)
@@ -109,6 +139,11 @@ export function TaskMmdPanel({ threadId }: TaskMmdPanelProps): React.JSX.Element
   const [saving, setSaving] = useState(false)
   const mountedRef = useRef(true)
   const renderId = useMemo(() => `task-mmd-${Math.random().toString(36).slice(2)}`, [])
+  const selectedThread = useMemo(
+    () => threads.find((thread) => thread.thread_id === selectedThreadId) ?? null,
+    [selectedThreadId, threads]
+  )
+  const threadId = selectedThreadId
 
   useEffect(() => {
     mountedRef.current = true
@@ -116,6 +151,23 @@ export function TaskMmdPanel({ threadId }: TaskMmdPanelProps): React.JSX.Element
       mountedRef.current = false
     }
   }, [])
+
+  useEffect(() => {
+    if (selectedThreadId && threads.some((thread) => thread.thread_id === selectedThreadId)) {
+      return
+    }
+    setSelectedThreadId(currentThreadId ?? threads[0]?.thread_id ?? null)
+  }, [currentThreadId, selectedThreadId, threads])
+
+  // Clear stale data when switching threads so we never show another
+  // thread's snapshot/graph during the brief reload.
+  useEffect(() => {
+    setSnapshot(null)
+    setCompileModelInfo(null)
+    setDirectorySize(0)
+    setSvg("")
+    setRenderError(null)
+  }, [threadId])
 
   const loadData = useCallback(async () => {
     setLoading(true)
@@ -210,24 +262,21 @@ export function TaskMmdPanel({ threadId }: TaskMmdPanelProps): React.JSX.Element
     }
   }, [renderId, snapshot?.mmd])
 
-  const updateSettings = useCallback(
-    async (patch: Partial<TaskMmdSettings>) => {
-      setSaving(true)
-      try {
-        const next = await window.api.taskMmd.setSettings(patch)
-        if (mountedRef.current) setSettings(next)
-      } catch (error) {
-        console.error(error)
-      } finally {
-        if (mountedRef.current) setSaving(false)
-      }
-    },
-    []
-  )
+  const updateSettings = useCallback(async (patch: Partial<TaskMmdSettings>) => {
+    setSaving(true)
+    try {
+      const next = await window.api.taskMmd.setSettings(patch)
+      if (mountedRef.current) setSettings(next)
+    } catch (error) {
+      console.error(error)
+    } finally {
+      if (mountedRef.current) setSaving(false)
+    }
+  }, [])
 
   const clearThread = useCallback(async () => {
     if (!threadId) return
-    if (!confirm("确定清空当前线程的任务画布吗？此操作不可撤销。")) return
+    if (!confirm("确定清空所选会话的任务画布吗？此操作不可撤销。")) return
     await window.api.taskMmd.clearThread(threadId)
     await loadData()
   }, [loadData, threadId])
@@ -235,151 +284,214 @@ export function TaskMmdPanel({ threadId }: TaskMmdPanelProps): React.JSX.Element
   const currentSettings = settings
   const state = snapshot?.state
   const entries = snapshot?.entries ?? []
+  const isViewingCurrentThread = Boolean(threadId && threadId === currentThreadId)
 
   return (
-    <div className="flex flex-1 overflow-hidden isolate">
-      <div className="w-[340px] shrink-0 border-r border-border flex flex-col">
-        <div className="space-y-3 border-b border-border p-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="min-w-0">
-              <h2 className="text-base font-bold">Task MMD</h2>
-              <p className="truncate text-xs text-muted-foreground">
-                {threadId ? `线程 ${threadId}` : "未选择线程"}
-              </p>
-            </div>
-            <button
-              className={cn(
-                "shrink-0 rounded-full border px-2 py-0.5 text-xs transition-colors",
-                currentSettings?.enabled
-                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                  : "border-border bg-muted text-muted-foreground"
-              )}
-              disabled={!currentSettings || saving}
-              onClick={() => updateSettings({ enabled: !currentSettings?.enabled })}
-            >
-              {currentSettings?.enabled ? "已启用" : "已禁用"}
-            </button>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2 text-[11px]">
-            <div className="rounded-md border border-border/70 bg-muted/30 p-2">
-              <p className="text-muted-foreground">工具记录</p>
-              <p className="mt-1 text-sm font-semibold">{state?.totalEntryCount ?? 0}</p>
-            </div>
-            <div className="rounded-md border border-border/70 bg-muted/30 p-2">
-              <p className="text-muted-foreground">目录大小</p>
-              <p className="mt-1 text-sm font-semibold">{formatSize(directorySize)}</p>
-            </div>
-            <div className="col-span-2 rounded-md border border-border/70 bg-muted/30 p-2">
-              <p className="text-muted-foreground">最近编译</p>
-              <p className="mt-1 truncate text-xs font-medium">{formatDate(state?.lastCompiledAt ?? null)}</p>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <label className="block text-[11px] font-medium text-muted-foreground">
-              编译模型
-            </label>
-            <div className="grid grid-cols-2 gap-1 rounded-md border border-border/70 bg-muted/30 p-1">
-              {(["economy", "premium"] as const).map((tier) => (
-                <button
-                  key={tier}
-                  className={cn(
-                    "rounded-sm px-2 py-1.5 text-xs transition-colors",
-                    currentSettings?.compileModelTier === tier
-                      ? "bg-background text-foreground shadow-sm"
-                      : "text-muted-foreground hover:bg-background/60"
-                  )}
-                  disabled={!currentSettings || saving}
-                  onClick={() => updateSettings({ compileModelTier: tier })}
-                >
-                  {tier === "economy" ? "经济" : "高级"}
-                </button>
-              ))}
-            </div>
-            <div className="rounded-md border border-border/70 bg-muted/30 p-2 text-[11px] leading-relaxed">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-medium text-muted-foreground">实际使用</span>
-                <span className="shrink-0 text-muted-foreground">
-                  {compileModelInfo ? formatModelSource(compileModelInfo.source) : "正在解析"}
-                </span>
+    <div className="isolate flex min-h-0 flex-1 overflow-hidden">
+      <div className="flex min-h-0 w-[340px] shrink-0 flex-col border-r border-border">
+        <ScrollArea className="min-h-0 flex-1">
+          <div className="space-y-3 border-b border-border p-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <h2 className="text-base font-bold">任务画布</h2>
+                <p className="truncate text-xs text-muted-foreground">
+                  {threadId ? `线程 ${shortThreadId(threadId)}` : "未选择会话"}
+                </p>
               </div>
-              <p className="mt-1 truncate text-xs font-semibold">
-                {compileModelInfo?.name ?? "未配置可用模型"}
+              <button
+                className={cn(
+                  "shrink-0 rounded-full border px-2 py-0.5 text-xs transition-colors",
+                  currentSettings?.enabled
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                    : "border-border bg-muted text-muted-foreground"
+                )}
+                disabled={!currentSettings || saving}
+                onClick={() => updateSettings({ enabled: !currentSettings?.enabled })}
+              >
+                {currentSettings?.enabled ? "已启用" : "已禁用"}
+              </button>
+            </div>
+
+            <div className="rounded-md border border-border/70 bg-muted/30 p-2.5 text-[11px] leading-relaxed text-muted-foreground">
+              <p>
+                任务画布会把会话里的工具调用摘要整理成流程图，帮助 Agent
+                在长任务和上下文压缩后记住已完成步骤、阻塞点和继续方向。
               </p>
-              <p className="mt-0.5 truncate text-muted-foreground">
-                {compileModelInfo?.model ?? "会使用确定性兜底图谱"}
-              </p>
-              {compileModelInfo ? (
-                <p className="mt-0.5 truncate text-muted-foreground">
-                  {formatTier(compileModelInfo.resolvedTier)} · {formatBaseUrl(compileModelInfo.baseUrl)}
-                </p>
-              ) : null}
-              {compileModelInfo?.reason ? (
-                <p className="mt-1 line-clamp-2 text-muted-foreground">
-                  {compileModelInfo.reason}
+              <p className="mt-1">设置全局生效；画布内容按会话单独保存，只保存脱敏摘要。</p>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-[11px] font-medium text-muted-foreground">查看会话</label>
+                {isViewingCurrentThread ? (
+                  <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                    当前主页会话
+                  </span>
+                ) : null}
+              </div>
+              {threads.length > 0 ? (
+                <Select
+                  value={threadId ?? undefined}
+                  onValueChange={(value) => setSelectedThreadId(value)}
+                >
+                  <SelectTrigger className="h-9 text-xs">
+                    <SelectValue placeholder="选择会话" />
+                  </SelectTrigger>
+                  <SelectContent className="max-w-[360px]">
+                    {threads.map((thread) => (
+                      <SelectItem
+                        key={thread.thread_id}
+                        value={thread.thread_id}
+                        textValue={getThreadTitle(thread)}
+                      >
+                        <span className="flex min-w-0 flex-col">
+                          <span className="truncate">{getThreadTitle(thread)}</span>
+                          <span className="truncate text-[10px] text-muted-foreground">
+                            {shortThreadId(thread.thread_id)} ·{" "}
+                            {new Date(thread.updated_at).toLocaleString()}
+                          </span>
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <div className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">
+                  暂无会话，开始一次对话后会生成任务画布数据。
+                </div>
+              )}
+              {selectedThread ? (
+                <p className="line-clamp-2 text-[10px] leading-relaxed text-muted-foreground">
+                  {getThreadSubtitle(selectedThread)}
                 </p>
               ) : null}
             </div>
 
-            <label className="block text-[11px] font-medium text-muted-foreground">
-              触发条数
-            </label>
-            <Input
-              type="number"
-              min={1}
-              max={50}
-              value={currentSettings?.l2NullThreshold ?? 4}
-              disabled={!currentSettings || saving}
-              onChange={(event) =>
-                updateSettings({ l2NullThreshold: Number(event.currentTarget.value) })
-              }
-            />
-            <label className="block text-[11px] font-medium text-muted-foreground">
-              触发间隔（秒）
-            </label>
-            <Input
-              type="number"
-              min={10}
-              max={3600}
-              value={currentSettings?.l2TimeoutSeconds ?? 300}
-              disabled={!currentSettings || saving}
-              onChange={(event) =>
-                updateSettings({ l2TimeoutSeconds: Number(event.currentTarget.value) })
-              }
-            />
+            <div className="grid grid-cols-2 gap-2 text-[11px]">
+              <div className="rounded-md border border-border/70 bg-muted/30 p-2">
+                <p className="text-muted-foreground">工具记录</p>
+                <p className="mt-1 text-sm font-semibold">{state?.totalEntryCount ?? 0}</p>
+              </div>
+              <div className="rounded-md border border-border/70 bg-muted/30 p-2">
+                <p className="text-muted-foreground">目录大小</p>
+                <p className="mt-1 text-sm font-semibold">{formatSize(directorySize)}</p>
+              </div>
+              <div className="col-span-2 rounded-md border border-border/70 bg-muted/30 p-2">
+                <p className="text-muted-foreground">最近编译</p>
+                <p className="mt-1 truncate text-xs font-medium">
+                  {formatDate(state?.lastCompiledAt ?? null)}
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-[11px] font-medium text-muted-foreground">
+                编译模型
+              </label>
+              <div className="grid grid-cols-2 gap-1 rounded-md border border-border/70 bg-muted/30 p-1">
+                {(["economy", "premium"] as const).map((tier) => (
+                  <button
+                    key={tier}
+                    className={cn(
+                      "rounded-sm px-2 py-1.5 text-xs transition-colors",
+                      currentSettings?.compileModelTier === tier
+                        ? "bg-background text-foreground shadow-sm"
+                        : "text-muted-foreground hover:bg-background/60"
+                    )}
+                    disabled={!currentSettings || saving}
+                    onClick={() => updateSettings({ compileModelTier: tier })}
+                  >
+                    {tier === "economy" ? "经济" : "高级"}
+                  </button>
+                ))}
+              </div>
+              <div className="rounded-md border border-border/70 bg-muted/30 p-2 text-[11px] leading-relaxed">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium text-muted-foreground">实际使用</span>
+                  <span className="shrink-0 text-muted-foreground">
+                    {compileModelInfo ? formatModelSource(compileModelInfo.source) : "正在解析"}
+                  </span>
+                </div>
+                <p className="mt-1 truncate text-xs font-semibold">
+                  {compileModelInfo?.name ?? "未配置可用模型"}
+                </p>
+                <p className="mt-0.5 truncate text-muted-foreground">
+                  {compileModelInfo?.model ?? "会使用确定性兜底图谱"}
+                </p>
+                {compileModelInfo ? (
+                  <p className="mt-0.5 truncate text-muted-foreground">
+                    {formatTier(compileModelInfo.resolvedTier)} ·{" "}
+                    {formatBaseUrl(compileModelInfo.baseUrl)}
+                  </p>
+                ) : null}
+                {compileModelInfo?.reason ? (
+                  <p className="mt-1 line-clamp-2 text-muted-foreground">
+                    {compileModelInfo.reason}
+                  </p>
+                ) : null}
+              </div>
+
+              <label className="block text-[11px] font-medium text-muted-foreground">
+                触发条数
+              </label>
+              <Input
+                type="number"
+                min={1}
+                max={50}
+                value={currentSettings?.l2NullThreshold ?? 4}
+                disabled={!currentSettings || saving}
+                onChange={(event) =>
+                  updateSettings({ l2NullThreshold: Number(event.currentTarget.value) })
+                }
+              />
+              <label className="block text-[11px] font-medium text-muted-foreground">
+                触发间隔（秒）
+              </label>
+              <Input
+                type="number"
+                min={10}
+                max={3600}
+                value={currentSettings?.l2TimeoutSeconds ?? 300}
+                disabled={!currentSettings || saving}
+                onChange={(event) =>
+                  updateSettings({ l2TimeoutSeconds: Number(event.currentTarget.value) })
+                }
+              />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" className="flex-1" onClick={loadData}>
+                {loading ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3" />
+                )}
+                刷新
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!snapshot?.mmd}
+                onClick={() => exportText("task-map.mmd", snapshot?.mmd ?? "")}
+              >
+                <Download className="size-3" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground hover:text-destructive"
+                disabled={!threadId}
+                onClick={clearThread}
+              >
+                <Trash2 className="size-3" />
+              </Button>
+            </div>
+
+            <div className="rounded-md border border-border/70 bg-muted/30 p-2 text-[11px] leading-relaxed text-muted-foreground">
+              设置为全局生效。编译时只发送脱敏后的工具摘要到所选模型，不保存完整工具结果。
+            </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" className="flex-1" onClick={loadData}>
-              {loading ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
-              刷新
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!snapshot?.mmd}
-              onClick={() => exportText("task-map.mmd", snapshot?.mmd ?? "")}
-            >
-              <Download className="size-3" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-muted-foreground hover:text-destructive"
-              disabled={!threadId}
-              onClick={clearThread}
-            >
-              <Trash2 className="size-3" />
-            </Button>
-          </div>
-
-          <div className="rounded-md border border-border/70 bg-muted/30 p-2 text-[11px] leading-relaxed text-muted-foreground">
-            设置为全局生效。编译时只发送脱敏后的工具摘要到所选模型，不保存完整工具结果。
-          </div>
-        </div>
-
-        <ScrollArea className="flex-1">
           <div className="space-y-2 p-2">
             {entries.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
@@ -396,7 +508,7 @@ export function TaskMmdPanel({ threadId }: TaskMmdPanelProps): React.JSX.Element
         </ScrollArea>
       </div>
 
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <div className="flex items-center justify-between border-b border-border p-4">
           <div className="flex min-w-0 items-center gap-3">
             <div className="flex size-9 items-center justify-center rounded-md border border-border bg-muted/40">
@@ -411,9 +523,9 @@ export function TaskMmdPanel({ threadId }: TaskMmdPanelProps): React.JSX.Element
                     ? state.lastError || "编译失败"
                     : state?.lastCompileMode === "fallback"
                       ? `使用兜底图谱${state.lastError ? `：${state.lastError}` : ""}`
-                    : snapshot?.mmd
-                      ? "已生成"
-                      : "等待工具调用"}
+                      : snapshot?.mmd
+                        ? "已生成"
+                        : "等待工具调用"}
               </p>
             </div>
           </div>
@@ -423,7 +535,7 @@ export function TaskMmdPanel({ threadId }: TaskMmdPanelProps): React.JSX.Element
           </div>
         </div>
 
-        <ScrollArea className="flex-1">
+        <ScrollArea className="min-h-0 flex-1">
           <div className="p-4">
             {!threadId ? (
               <div className="flex min-h-[360px] items-center justify-center text-sm text-muted-foreground">

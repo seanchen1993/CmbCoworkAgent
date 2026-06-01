@@ -177,6 +177,7 @@ export function CustomizeView(): React.JSX.Element {
     customizeInitialTab,
     pendingEvolution,
     currentThreadId,
+    threads,
   } = useAppStore()
   const [activeTab, setActiveTab] = useState<CustomizeTab>(
     (customizeInitialTab as CustomizeTab) || "skills"
@@ -297,7 +298,7 @@ export function CustomizeView(): React.JSX.Element {
         ) : activeTab === "memory" ? (
           <MemoryPanel />
         ) : activeTab === "taskMmd" ? (
-          <TaskMmdPanel threadId={currentThreadId} />
+          <TaskMmdPanel currentThreadId={currentThreadId} threads={threads} />
         ) : activeTab === "market" ? (
           <MarketPanel />
         ) : activeTab === "evolution" ? (
