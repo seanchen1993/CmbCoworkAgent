@@ -137,6 +137,12 @@ interface HarnessAgentContext {
   workingDirPromptAppendix?: string
   pluginOutputDir?: string
   systemId?: string
+  pluginRoot?: string
+  pluginId?: string
+  pluginName?: string
+  pluginWorkspace?: string
+  featureId?: string
+  projectCode?: string
 }
 
 function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgentContext {
@@ -147,7 +153,13 @@ function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgent
     return {
       workingDirPromptAppendix: featureContext.systemPromptInject,
       pluginOutputDir: featureContext.pluginOutputDir,
-      systemId: featureContext.systemId
+      systemId: featureContext.systemId,
+      pluginRoot: featureContext.pluginRoot,
+      pluginId: featureContext.pluginId,
+      pluginName: featureContext.pluginName,
+      pluginWorkspace: featureContext.pluginWorkspace,
+      featureId: featureContext.featureId,
+      projectCode: featureContext.projectCode
     }
   } catch (error) {
     console.warn("[HarnessBoard] Failed to build harness agent context:", error)

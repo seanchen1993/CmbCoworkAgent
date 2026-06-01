@@ -290,6 +290,18 @@ export interface LocalSandboxOptions {
   pluginOutputDir?: string
   /** Optional system identifier exposed to child processes and hooks as SYSTEM_ID. */
   systemId?: string
+  /** Optional harness plugin root exposed to child processes as PLUGIN_ROOT. */
+  pluginRoot?: string
+  /** Optional harness plugin identifier exposed to child processes as PLUGIN_ID. */
+  pluginId?: string
+  /** Optional harness plugin display name exposed to child processes as PLUGIN_NAME. */
+  pluginName?: string
+  /** Optional harness plugin workspace exposed to child processes as PLUGIN_WORKSPACE. */
+  pluginWorkspace?: string
+  /** Optional harness feature identifier exposed to child processes as FEATURE_ID. */
+  featureId?: string
+  /** Optional harness project code exposed to child processes as PROJECT_CODE. */
+  projectCode?: string
 }
 
 interface ExecuteRawOptions {
@@ -1524,6 +1536,18 @@ export class LocalSandbox
     baseEnv.SESSION_ID = this.runId
     const systemId = options.systemId?.trim()
     if (systemId) baseEnv.SYSTEM_ID = systemId
+    const pluginRoot = options.pluginRoot?.trim()
+    if (pluginRoot) baseEnv.PLUGIN_ROOT = pluginRoot
+    const pluginId = options.pluginId?.trim()
+    if (pluginId) baseEnv.PLUGIN_ID = pluginId
+    const pluginName = options.pluginName?.trim()
+    if (pluginName) baseEnv.PLUGIN_NAME = pluginName
+    const pluginWorkspace = options.pluginWorkspace?.trim()
+    if (pluginWorkspace) baseEnv.PLUGIN_WORKSPACE = pluginWorkspace
+    const featureId = options.featureId?.trim()
+    if (featureId) baseEnv.FEATURE_ID = featureId
+    const projectCode = options.projectCode?.trim()
+    if (projectCode) baseEnv.PROJECT_CODE = projectCode
     // Ensure UTF-8 locale for spawned shells (Git Bash via pipe defaults to
     // Windows console code page, e.g. GBK, producing garbled CJK output)
     if (process.platform === "win32") {
