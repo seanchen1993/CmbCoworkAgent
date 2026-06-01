@@ -6,7 +6,7 @@ if (process.platform === "linux") {
   app.commandLine.appendSwitch("no-sandbox")
 }
 
-import { existsSync } from "fs"
+import { existsSync, rmSync } from "fs"
 import { join } from "path"
 import { writeMainLog, writeRendererLog } from "./logging"
 
@@ -169,7 +169,7 @@ import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
-import { isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
+import { getOpenworkDir, isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
 import {
@@ -182,6 +182,25 @@ import {
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
 const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
+
+function cleanupLegacySkillEvalRecords(): void {
+  const roots = new Set(
+    [getOpenworkDir(), process.env.CMB_COWORK_AGENT_HOME?.trim()].filter(
+      (value): value is string => Boolean(value)
+    )
+  )
+
+  for (const root of roots) {
+    const legacyDir = join(root, "skill-evals")
+    if (!existsSync(legacyDir)) continue
+    try {
+      rmSync(legacyDir, { recursive: true, force: true })
+      console.log("[Main] Removed legacy SkillEval records:", legacyDir)
+    } catch (error) {
+      console.warn("[Main] Failed to remove legacy SkillEval records:", error)
+    }
+  }
+}
 
 // ── Keep Awake ──
 let keepAwakeBlockerId: number | null = null
@@ -444,7 +463,6 @@ if (!gotTheLock) {
       })
     }
 
-    // Register cloud trace reporter if trace base URL is configured
     const traceBaseUrl = import.meta.env.VITE_API_TRACE_BASE_URL as string | undefined
     if (traceBaseUrl) {
       setTraceReporter(new CloudTraceReporter(traceBaseUrl))
@@ -457,6 +475,7 @@ if (!gotTheLock) {
 
     // Initialize database
     await initializeDatabase()
+    cleanupLegacySkillEvalRecords()
 
     // Initialize adoption tracker (side-effect only; never blocks startup)
     try {

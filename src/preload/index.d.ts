@@ -168,6 +168,22 @@ interface DashboardCommitDetailsOptions {
   pushedOnly?: boolean
 }
 
+interface DashboardSkillEvalOptions {
+  limit?: number
+  recentPage?: number
+  recentPageSize?: number
+  skillPage?: number
+  skillPageSize?: number
+  skillSearch?: string
+  skillName?: string
+  skillVersion?: string
+  skillNames?: string[]
+  defaultRecentToLatestSkill?: boolean
+  recentOnly?: boolean
+  listOnly?: boolean
+  statsOnly?: boolean
+}
+
 interface DashboardCodeStats {
   generatedLines: number
   deletedLines: number
@@ -1206,6 +1222,10 @@ interface CustomAPI {
       granularity: "day" | "week" | "month" | "custom",
       skillName: string
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    skillEvalSummary: (
+      range: { from: string; to: string },
+      options?: DashboardSkillEvalOptions
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     userProfiles: (
       sapIds: string[]
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
@@ -1225,13 +1245,21 @@ interface CustomAPI {
     skillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
-    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+      options?: number | { page?: number; pageSize?: number }
+    ) => Promise<{
+      success: boolean
+      data?: { total: number; page: number; pageSize: number; traces: DashboardTraceDetail[] }
+      error?: string
+    }>
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
-    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+      options?: number | { page?: number; pageSize?: number }
+    ) => Promise<{
+      success: boolean
+      data?: { total: number; page: number; pageSize: number; traces: DashboardTraceDetail[] }
+      error?: string
+    }>
     skillDetail: (
       skill: string,
       range: { from: string; to: string },

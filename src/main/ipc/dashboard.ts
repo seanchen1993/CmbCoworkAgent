@@ -7,11 +7,17 @@
  */
 
 import { ipcMain, dialog, BrowserWindow } from "electron"
+import { getUserInfo } from "../storage"
 import * as fs from "fs"
 import AdmZip from "adm-zip"
 import { buildTraceTree } from "../agent/trace/tree-builder"
-import type { AgentTrace, TraceNode } from "../agent/trace/types"
-import { getSkillIdentifierLookupTerms } from "../utils/skill-identifiers"
+import type { AgentTrace, TraceNode, TraceSkillEvalRecord } from "../agent/trace/types"
+import { buildSkillEvalTraceExtension } from "../agent/skill-eval/documents"
+import {
+  getSkillIdentifierLookupTerms,
+  normalizeSkillQueryName,
+  parseSkillNameVersionIdentifier
+} from "../utils/skill-identifiers"
 import {
   effectiveGeneratedLinesSumAgg,
   makeDashboardCodeStats,
@@ -27,7 +33,10 @@ import {
 function getEsNodes(): string[] {
   const raw = import.meta.env.VITE_ES_NODES as string | undefined
   if (!raw) return []
-  return raw.split(",").map((n) => n.trim()).filter(Boolean)
+  return raw
+    .split(",")
+    .map((n) => n.trim())
+    .filter(Boolean)
 }
 
 function getEsAuth(): { username: string; password: string } | null {
@@ -37,9 +46,27 @@ function getEsAuth(): { username: string; password: string } | null {
   return { username, password }
 }
 
-function getEsIndex(type: "trace" | "event"): string {
+function getEsIndex(type: "trace" | "event" | "skillEval"): string {
   if (type === "trace") return (import.meta.env.VITE_ES_INDEX_TRACE as string) || "devclaw_trace"
+  if (type === "skillEval") {
+    return (import.meta.env.VITE_ES_INDEX_SKILL_EVAL as string) || "devclaw_skill_eval_record"
+  }
   return (import.meta.env.VITE_ES_INDEX_EVENT as string) || "devclaw_event"
+}
+
+const ALLOWED_YST_IDS_RAW = (import.meta.env.VITE_DASHBOARD_ALLOWED_YST_IDS as string) || ""
+const ALLOWED_YST_IDS = new Set(
+  ALLOWED_YST_IDS_RAW.split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+)
+
+function isDashboardAllowed(): boolean {
+  if (import.meta.env.DEV) return true
+  const userInfo = getUserInfo()
+  const ystId = userInfo?.ystId?.trim()
+  if (!ystId) return false
+  return ALLOWED_YST_IDS.has(ystId)
 }
 
 // ─────────────────────────────────────────────────────────
@@ -48,14 +75,19 @@ function getEsIndex(type: "trace" | "event"): string {
 
 let nodeIndex = 0
 
-async function esQuery(index: string, body: Record<string, unknown>): Promise<unknown> {
+async function esQuery(
+  index: string,
+  body: Record<string, unknown>,
+  options?: { timeoutMs?: number }
+): Promise<unknown> {
   const nodes = getEsNodes()
   if (nodes.length === 0) throw new Error("ES_NODES not configured")
 
   const auth = getEsAuth()
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (auth) {
-    headers["Authorization"] = "Basic " + Buffer.from(`${auth.username}:${auth.password}`).toString("base64")
+    headers["Authorization"] =
+      "Basic " + Buffer.from(`${auth.username}:${auth.password}`).toString("base64")
   }
 
   // Round-robin with fallback
@@ -72,7 +104,7 @@ async function esQuery(index: string, body: Record<string, unknown>): Promise<un
         method: "POST",
         headers,
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(15_000)
+        signal: AbortSignal.timeout(options?.timeoutMs ?? 15_000)
       })
       if (!resp.ok) {
         const text = await resp.text().catch(() => "")
@@ -93,8 +125,8 @@ async function esQuery(index: string, body: Record<string, unknown>): Promise<un
 // ─────────────────────────────────────────────────────────
 
 interface TimeRange {
-  from: string  // ISO string
-  to: string    // ISO string
+  from: string // ISO string
+  to: string // ISO string
 }
 
 type Granularity = "day" | "week" | "month" | "custom"
@@ -166,6 +198,152 @@ interface DashboardSkillDetail {
   totalTraces: number
 }
 
+interface DashboardSkillEvalRun {
+  traceId: string
+  threadId: string
+  startedAt: string
+  endedAt: string
+  userMessage: string
+  skillName: string
+  skillVersion?: string
+  rawSkillName: string
+  skillTaskId?: string
+  skillTaskTraceIndex?: number
+  evalSource?: "explicit" | "inherited_context"
+  contextTraceIds: string[]
+  skillEvalTraceIds: string[]
+  contextTraceCount: number
+  skillEvalTraceCount: number
+  outcome: string
+  processScore: number
+  outcomeScore: number
+  score: number
+  outcomePass: boolean
+  pass: boolean
+  resultScore?: number
+  resultPass: boolean
+  totalToolCalls: number
+  modelCallCount: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  promptInputTokens: number
+  totalTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+  peakInputTokens: number
+  errorCount: number
+  durationMs: number
+  checks: Array<{
+    name: string
+    label: string
+    ok: boolean
+    weight: number
+    detail?: Record<string, unknown>
+  }>
+  outcomeChecks: Array<{
+    name: string
+    label: string
+    ok: boolean
+    weight: number
+    detail?: Record<string, unknown>
+  }>
+  resultChecks: Array<{
+    name: string
+    label: string
+    ok: boolean
+    weight: number
+    detail?: Record<string, unknown>
+  }>
+  warnings: string[]
+  outcomeWarnings: string[]
+  resultWarnings: string[]
+  resultIssues: string[]
+  resultArtifacts: Array<{
+    type: string
+    label: string
+    path?: string
+    url?: string
+    detail?: Record<string, unknown>
+  }>
+  resultGenerated: boolean
+  traceDetail: DashboardTraceDetail
+  traceDetails: DashboardTraceDetail[]
+  evidence: {
+    finalResponseLength: number
+    changedFiles: number
+    validationCommands: number
+    artifactSignals: number
+    dangerousCommands: number
+    subagentRuns: number
+    subagentCompleted: number
+    subagentResultLength: number
+    subagentFailed: number
+    toolResultErrors: number
+  }
+}
+
+interface DashboardSkillEvalSkillSummary {
+  skillName: string
+  skillVersion?: string
+  runs: number
+  resultEvaluatedRuns: number
+  passRate: number
+  resultPassRate: number
+  averageScore: number
+  averageProcessScore: number
+  averageOutcomeScore: number
+  averageResultScore: number
+  averageToolCalls: number
+  averageModelCalls: number
+  averageInputTokens: number
+  averageOutputTokens: number
+  averagePromptInputTokens: number
+  averageTotalTokens: number
+  averagePeakInputTokens: number
+  averageDurationMs: number
+  validationRate: number
+  outputSignalRate: number
+  dangerRate: number
+  failureCount: number
+  lastRunAt: string
+}
+
+interface DashboardSkillEvalSummary {
+  generatedAt: string
+  totalTraceHits: number
+  evaluatedTraceCount: number
+  sampledTraceCount: number
+  statTraceLimit: number
+  recentTotal: number
+  recentPage: number
+  recentPageSize: number
+  skillPage: number
+  skillPageSize: number
+  totalRuns: number
+  resultEvaluatedRuns: number
+  totalSkills: number
+  passRate: number
+  resultPassRate: number
+  averageScore: number
+  averageProcessScore: number
+  averageOutcomeScore: number
+  averageResultScore: number
+  averageToolCalls: number
+  averageModelCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalPromptInputTokens: number
+  totalTokens: number
+  averageInputTokens: number
+  averageOutputTokens: number
+  averagePromptInputTokens: number
+  averageTotalTokens: number
+  averagePeakInputTokens: number
+  averageDurationMs: number
+  skills: DashboardSkillEvalSkillSummary[]
+  recent: DashboardSkillEvalRun[]
+}
+
 interface DashboardUserListItem {
   sapId: string
   ystId?: string
@@ -214,6 +392,13 @@ interface DashboardUserDetail {
 interface EsSearchHit {
   _id?: string
   _source?: Record<string, unknown>
+  sort?: Array<string | number>
+}
+
+interface EsAggregation {
+  value?: number
+  buckets?: unknown
+  [key: string]: unknown
 }
 
 interface EsSearchResponse {
@@ -221,6 +406,7 @@ interface EsSearchResponse {
     total?: number | { value?: number }
     hits?: EsSearchHit[]
   }
+  aggregations?: Record<string, EsAggregation | undefined>
 }
 
 interface UserStatsOptions {
@@ -258,6 +444,22 @@ interface CommitDetailsOptions {
   page?: number
   pageSize?: number
   pushedOnly?: boolean
+}
+
+interface DashboardSkillEvalOptions {
+  limit?: number
+  recentPage?: number
+  recentPageSize?: number
+  skillPage?: number
+  skillPageSize?: number
+  skillSearch?: string
+  skillName?: string
+  skillVersion?: string
+  skillNames?: string[]
+  defaultRecentToLatestSkill?: boolean
+  recentOnly?: boolean
+  listOnly?: boolean
+  statsOnly?: boolean
 }
 
 const DISLIKE_TYPE_OPTIONS = [
@@ -330,7 +532,10 @@ function stringifyExportValue(value: unknown): string {
   }
 }
 
-function formatTraceExportMarkdown(payload: DashboardTraceExportPayload, exportedAt: string): string {
+function formatTraceExportMarkdown(
+  payload: DashboardTraceExportPayload,
+  exportedAt: string
+): string {
   const lines: string[] = [
     `# Skill 会话历史 · ${escapeMarkdown(payload.skill || "-")}`,
     "",
@@ -351,14 +556,18 @@ function formatTraceExportMarkdown(payload: DashboardTraceExportPayload, exporte
     lines.push(`- Duration: ${Math.round(trace.durationMs || 0)}ms`)
     lines.push(`- Model: ${escapeMarkdown(trace.modelName || trace.modelId || "-")}`)
     lines.push(`- Tool Calls: ${trace.totalToolCalls}`)
-    lines.push(`- Tokens: ${trace.totalTokens} (input ${trace.totalInputTokens}, output ${trace.totalOutputTokens})`)
+    lines.push(
+      `- Tokens: ${trace.totalTokens} (input ${trace.totalInputTokens}, output ${trace.totalOutputTokens})`
+    )
     if (trace.userName || trace.sapId || trace.ystId) {
       lines.push(
         `- User: ${escapeMarkdown(trace.userName || "-")} / ${escapeMarkdown(trace.sapId || "-")} / ${escapeMarkdown(trace.ystId || "-")}`
       )
     }
     if (trace.usedSkills.length > 0) {
-      lines.push(`- Skills: ${trace.usedSkills.map((skill) => `\`${escapeMarkdown(skill)}\``).join(", ")}`)
+      lines.push(
+        `- Skills: ${trace.usedSkills.map((skill) => `\`${escapeMarkdown(skill)}\``).join(", ")}`
+      )
     }
     lines.push("")
 
@@ -369,7 +578,10 @@ function formatTraceExportMarkdown(payload: DashboardTraceExportPayload, exporte
     if (trace.nodes && trace.nodes.length > 0) {
       lines.push("### Trace Nodes", "")
       for (const node of trace.nodes) {
-        lines.push(`#### ${escapeMarkdown(node.type)} · ${escapeMarkdown(node.name || node.id)}`, "")
+        lines.push(
+          `#### ${escapeMarkdown(node.type)} · ${escapeMarkdown(node.name || node.id)}`,
+          ""
+        )
         const metadata = [
           `id: \`${escapeMarkdown(node.id)}\``,
           node.parentId ? `parent: \`${escapeMarkdown(node.parentId)}\`` : null,
@@ -480,21 +692,32 @@ function buildUserListSearchFilter(keyword: string): Record<string, unknown> | n
 
 /**
  * 统一构建技能命中条件：
- * 使用 wildcard 兼容 `技能名-版本` 这一类上报格式。
+ * 使用 prefix 兼容 `技能名-v版本` 这一类上报格式，避免宽泛 wildcard 扫描。
  */
 function buildSkillUsageWildcardFilter(skillName: string): Record<string, unknown> {
-  const escapedSkillName = escapeWildcard(skillName)
-  const wildcardPattern = `${escapedSkillName}**`
+  const versionPrefix = buildVersionPrefix(skillName)
   return {
     bool: {
       should: [
-        { wildcard: { usedSkills: wildcardPattern } },
-        { wildcard: { "usedSkills.keyword": wildcardPattern } }
+        { term: { usedSkills: skillName } },
+        { term: { "usedSkills.keyword": skillName } },
+        { prefix: { usedSkills: versionPrefix } },
+        { prefix: { "usedSkills.keyword": versionPrefix } }
       ],
       minimum_should_match: 1
     }
   }
 }
+
+function buildVersionPrefix(skillName: string): string {
+  return `${skillName}-v`
+}
+
+const SKILL_EVAL_STATS_PAGE_SIZE = 500
+const SKILL_EVAL_STATS_TRACE_LIMIT = 2000
+const SKILL_EVAL_STAT_CACHE_TTL_MS = 60_000
+const SKILL_EVAL_STAT_CACHE_LIMIT = 30
+const SKILL_EVAL_STATS_QUERY_TIMEOUT_MS = 45_000
 
 /**
  * 清洗技能名参数：
@@ -506,9 +729,7 @@ function normalizeSkillQueryNames(skillNames?: string[]): string[] {
   if (!Array.isArray(skillNames)) return []
   return Array.from(
     new Set(
-      skillNames
-        .map((name) => String(name || "").trim())
-        .filter(Boolean)
+      skillNames.map((name) => normalizeSkillQueryName(String(name || "").trim())).filter(Boolean)
     )
   ).slice(0, 1000)
 }
@@ -518,7 +739,9 @@ function clampLimit(limit: number | undefined, fallback: number, max: number): n
   return Math.max(1, Math.min(max, Math.floor(Number(limit))))
 }
 
-function normalizeCommitDetailsOptions(value?: number | CommitDetailsOptions): Required<CommitDetailsOptions> {
+function normalizeCommitDetailsOptions(
+  value?: number | CommitDetailsOptions
+): Required<CommitDetailsOptions> {
   if (typeof value === "number") {
     return {
       page: 1,
@@ -534,6 +757,101 @@ function normalizeCommitDetailsOptions(value?: number | CommitDetailsOptions): R
     pageSize,
     pushedOnly: value?.pushedOnly === true
   }
+}
+
+function normalizeTracePageOptions(value?: number | TracePageOptions): {
+  page: number
+  pageSize: number
+} {
+  if (typeof value === "number") {
+    return {
+      page: 1,
+      pageSize: clampLimit(value, 10, 50)
+    }
+  }
+  return {
+    page: clampLimit(value?.page, 1, 1000),
+    pageSize: clampLimit(value?.pageSize ?? value?.limit, 10, 50)
+  }
+}
+
+function normalizeSkillEvalOptions(value?: DashboardSkillEvalOptions): {
+  sampleLimit: number
+  recentPage: number
+  recentPageSize: number
+  skillPage: number
+  skillPageSize: number
+  skillSearch: string
+  skillName?: string
+  skillVersion: string | undefined
+  skillNames: string[]
+  skillNamesProvided: boolean
+  defaultRecentToLatestSkill: boolean
+  recentOnly: boolean
+  listOnly: boolean
+  statsOnly: boolean
+} {
+  const skillName = typeof value?.skillName === "string" ? value.skillName.trim() : ""
+  const skillVersion = typeof value?.skillVersion === "string" ? value.skillVersion.trim() : ""
+  const skillSearch =
+    typeof value?.skillSearch === "string" ? normalizeSkillQueryName(value.skillSearch) : ""
+  const rawSkillNames = Array.isArray(value?.skillNames)
+    ? value.skillNames.filter((item): item is string => typeof item === "string")
+    : []
+  const skillNames = normalizeSkillQueryNames(rawSkillNames).slice(0, 100)
+  return {
+    sampleLimit: clampLimit(value?.limit, 500, 2000),
+    recentPage: clampLimit(value?.recentPage, 1, 10_000),
+    recentPageSize: clampLimit(value?.recentPageSize, 10, 100),
+    skillPage: clampLimit(value?.skillPage, 1, 10_000),
+    skillPageSize: clampLimit(value?.skillPageSize, 10, 100),
+    skillSearch,
+    ...(skillName ? { skillName } : {}),
+    skillVersion: skillName ? skillVersion || undefined : undefined,
+    skillNames,
+    skillNamesProvided: Array.isArray(value?.skillNames),
+    defaultRecentToLatestSkill: value?.defaultRecentToLatestSkill === true,
+    recentOnly: value?.recentOnly === true,
+    listOnly: value?.listOnly === true,
+    statsOnly: value?.statsOnly === true
+  }
+}
+
+function skillEvalTraceSourceIncludes(): string[] {
+  return [
+    "_raw",
+    "traceId",
+    "threadId",
+    "startedAt",
+    "endedAt",
+    "durationMs",
+    "userMessage",
+    "modelId",
+    "modelName",
+    "outcome",
+    "totalToolCalls",
+    "totalInputTokens",
+    "totalOutputTokens",
+    "totalTokens",
+    "usedSkills"
+  ]
+}
+
+type SkillEvalExactFilter = { skillName: string; skillVersion: string | undefined }
+type SkillEvalNamesFilter = { skillNames: string[] }
+type SkillEvalFilter = SkillEvalExactFilter | SkillEvalNamesFilter
+
+function isSkillEvalExactFilter(filter?: SkillEvalFilter): filter is SkillEvalExactFilter {
+  if (!filter || !("skillName" in filter)) return false
+  return typeof filter.skillName === "string" && filter.skillName.length > 0
+}
+
+function skillEvalFilterCacheKey(skillFilter: SkillEvalFilter | undefined): string {
+  if (!skillFilter) return "all"
+  if (isSkillEvalExactFilter(skillFilter)) {
+    return `skill:${skillVersionKey(skillFilter.skillName, skillFilter.skillVersion)}`
+  }
+  return `names:${skillFilter.skillNames.join("|")}`
 }
 
 function normalizeUserListOptions(value?: UserListOptions): Required<
@@ -588,6 +906,37 @@ function asStringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string")
 }
 
+function skillVersionKey(skillName: string, skillVersion?: string): string {
+  return `${skillName}:${skillVersion ?? ""}`
+}
+
+function getFirstSkillFilterFromSummaries(
+  skills: DashboardSkillEvalSkillSummary[]
+): { skillName: string; skillVersion: string | undefined } | undefined {
+  if (skills.length === 0) return undefined
+  const skill = skills[0]
+  return {
+    skillName: skill.skillName,
+    skillVersion: skill.skillVersion
+  }
+}
+
+function hasAllowedSkillName(skillName: string, allowedSkillNames?: Set<string>): boolean {
+  return !allowedSkillNames || allowedSkillNames.has(normalizeSkillQueryName(skillName))
+}
+
+function matchesSkillSearch(skillName: string, skillSearch: string): boolean {
+  return (
+    !skillSearch ||
+    normalizeSkillQueryName(skillName).toLowerCase().includes(skillSearch.toLowerCase())
+  )
+}
+
+function averageValue(total: number, count: number): number {
+  if (count === 0) return 0
+  return Number((total / count).toFixed(4))
+}
+
 function codeAdoptPushedAggs(): Record<string, unknown> {
   return {
     pushed_measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
@@ -632,7 +981,11 @@ function parseRawTrace(raw: unknown): { trace?: AgentTrace; error?: string } {
   return { error: "_raw 字段格式不受支持" }
 }
 
-function normalizeParsedTrace(trace: AgentTrace, source: Record<string, unknown>, hit: EsSearchHit): AgentTrace {
+function normalizeParsedTrace(
+  trace: AgentTrace,
+  source: Record<string, unknown>,
+  hit: EsSearchHit
+): AgentTrace {
   const candidate = trace as Partial<AgentTrace>
   const startedAt = candidate.startedAt || asString(source.startedAt)
   const endedAt = candidate.endedAt || asString(source.endedAt, startedAt)
@@ -658,7 +1011,10 @@ function normalizeParsedTrace(trace: AgentTrace, source: Record<string, unknown>
     nodes: Array.isArray(candidate.nodes) ? candidate.nodes : undefined,
     totalToolCalls: asNumber(candidate.totalToolCalls, asNumber(source.totalToolCalls)),
     outcome: safeOutcome,
-    usedSkills: Array.isArray(candidate.usedSkills) ? candidate.usedSkills : asStringArray(source.usedSkills)
+    skillEval: candidate.skillEval,
+    usedSkills: Array.isArray(candidate.usedSkills)
+      ? candidate.usedSkills
+      : asStringArray(source.usedSkills)
   }
 }
 
@@ -678,10 +1034,14 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
     const usage = summarizeTraceTokenUsage(trace.modelCalls)
     const fallbackInputTokens = asNumber(source.totalInputTokens)
     const fallbackOutputTokens = asNumber(source.totalOutputTokens)
-    const fallbackTotalTokens = asNumber(source.totalTokens, fallbackInputTokens + fallbackOutputTokens)
+    const fallbackTotalTokens = asNumber(
+      source.totalTokens,
+      fallbackInputTokens + fallbackOutputTokens
+    )
     const totalInputTokens = usage.totalInputTokens || fallbackInputTokens
     const totalOutputTokens = usage.totalOutputTokens || fallbackOutputTokens
-    const totalTokens = usage.totalTokens || fallbackTotalTokens || totalInputTokens + totalOutputTokens
+    const totalTokens =
+      usage.totalTokens || fallbackTotalTokens || totalInputTokens + totalOutputTokens
     let nodes: TraceNode[] | undefined
     let rawError: string | undefined
     try {
@@ -709,7 +1069,9 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       totalInputTokens,
       totalOutputTokens,
       totalTokens,
-      usedSkills: Array.isArray(trace.usedSkills) ? trace.usedSkills : asStringArray(source.usedSkills),
+      usedSkills: Array.isArray(trace.usedSkills)
+        ? trace.usedSkills
+        : asStringArray(source.usedSkills),
       ...(nodes ? { nodes } : {}),
       rawAvailable: !rawError,
       ...(rawError ? { rawError } : {})
@@ -740,6 +1102,37 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
     usedSkills: asStringArray(source.usedSkills),
     rawAvailable: false,
     rawError: parsed.error
+  }
+}
+
+function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
+  const usage = summarizeTraceTokenUsage(trace.modelCalls)
+  let nodes: TraceNode[] | undefined
+  let rawError: string | undefined
+  try {
+    nodes = buildTraceTree(trace)
+  } catch (e) {
+    rawError = `解析 trace 树失败：${e instanceof Error ? e.message : String(e)}`
+  }
+
+  return {
+    traceId: trace.traceId,
+    threadId: trace.threadId,
+    startedAt: trace.startedAt,
+    endedAt: trace.endedAt,
+    durationMs: asNumber(trace.durationMs),
+    userMessage: trace.userMessage,
+    modelId: trace.modelId,
+    ...(trace.modelName ? { modelName: trace.modelName } : {}),
+    outcome: trace.outcome,
+    totalToolCalls: asNumber(trace.totalToolCalls),
+    totalInputTokens: usage.totalInputTokens,
+    totalOutputTokens: usage.totalOutputTokens,
+    totalTokens: usage.totalTokens || usage.totalInputTokens + usage.totalOutputTokens,
+    usedSkills: Array.isArray(trace.usedSkills) ? trace.usedSkills : [],
+    ...(nodes ? { nodes } : {}),
+    rawAvailable: !rawError,
+    ...(rawError ? { rawError } : {})
   }
 }
 
@@ -831,13 +1224,24 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
   const rankingSearchSize = 1000
   const filteredToolExcludes = [
     // Claude Code 内置文件 / 系统工具
-    "execute", "read_file", "write_file", "glob", "grep",
-    "list_directory", "task", "task_output",
-    "ls", "edit_file",
+    "execute",
+    "read_file",
+    "write_file",
+    "glob",
+    "grep",
+    "list_directory",
+    "task",
+    "task_output",
+    "ls",
+    "edit_file",
     // 工具搜索 / 元工具
-    "search_tool", "inspect_tool", "invoke_deferred_tool",
+    "search_tool",
+    "inspect_tool",
+    "invoke_deferred_tool",
     // 内置代码执行辅助
-    "code_exec", "prepare_save_code_exec_tool", "save_code_exec_tool",
+    "code_exec",
+    "prepare_save_code_exec_tool",
+    "save_code_exec_tool",
     // 内置任务管理
     "write_todos"
   ]
@@ -845,15 +1249,15 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
     size: 0,
     query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
     aggs: {
-      total_calls:        { value_count: { field: "traceId" } },
-      active_users:       { cardinality: { field: "sapId" } },
-      avg_duration:       { avg: { field: "durationMs" } },
+      total_calls: { value_count: { field: "traceId" } },
+      active_users: { cardinality: { field: "sapId" } },
+      avg_duration: { avg: { field: "durationMs" } },
       total_input_tokens: { sum: { field: "totalInputTokens" } },
-      total_output_tokens:{ sum: { field: "totalOutputTokens" } },
-      total_skills:       { cardinality: { field: "usedSkills" } },
-      total_tools:        { cardinality: { field: "toolNames" } },
-      total_skill_calls:  { value_count: { field: "usedSkills" } },
-      total_tool_calls:   { value_count: { field: "toolNames" } },
+      total_output_tokens: { sum: { field: "totalOutputTokens" } },
+      total_skills: { cardinality: { field: "usedSkills" } },
+      total_tools: { cardinality: { field: "toolNames" } },
+      total_skill_calls: { value_count: { field: "usedSkills" } },
+      total_tool_calls: { value_count: { field: "toolNames" } },
       by_skill: { terms: { field: "usedSkills", size: rankingTopSize } },
       by_skill_all: { terms: { field: "usedSkills", size: rankingSearchSize } },
       by_tool: {
@@ -877,7 +1281,11 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
         terms: { field: "toolNames", size: rankingSearchSize }
       },
       trend: {
-        date_histogram: { field: "startedAt", calendar_interval: interval, time_zone: "Asia/Shanghai" },
+        date_histogram: {
+          field: "startedAt",
+          calendar_interval: interval,
+          time_zone: "Asia/Shanghai"
+        },
         aggs: {
           users: { cardinality: { field: "sapId" } }
         }
@@ -903,10 +1311,7 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
     size: 0,
     query: {
       bool: {
-        should: [
-          { bool: { filter: codeGenFilters } },
-          { bool: { filter: codeAdoptFilters } }
-        ],
+        should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
         minimum_should_match: 1
       }
     },
@@ -974,7 +1379,9 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       code_effective_generated_lines: { value: codeStats.effectiveGeneratedLines },
       code_measured_generated_lines: { value: codeStats.measuredGeneratedLines },
       code_unmeasured_generated_lines: { value: codeStats.unmeasuredGeneratedLines },
-      code_inclusive_effective_generated_lines: { value: codeStats.inclusiveEffectiveGeneratedLines },
+      code_inclusive_effective_generated_lines: {
+        value: codeStats.inclusiveEffectiveGeneratedLines
+      },
       code_adopted_lines: { value: codeStats.adoptedLines },
       code_pushed_measured_generated_lines: { value: codeStats.pushedMeasuredGeneratedLines },
       code_pushed_effective_generated_lines: { value: codeStats.pushedEffectiveGeneratedLines },
@@ -1012,7 +1419,7 @@ async function fetchModelStats(range: TimeRange, granularity: Granularity): Prom
       by_model: {
         terms: { field: "modelName", size: 30 },
         aggs: {
-          total_input_tokens:  { sum: { field: "totalInputTokens" } },
+          total_input_tokens: { sum: { field: "totalInputTokens" } },
           total_output_tokens: { sum: { field: "totalOutputTokens" } }
         }
       },
@@ -1037,7 +1444,9 @@ function normalizeUpperOrgLv1Option(upperOrgLv1?: string | null): string | null 
   return normalized ? normalized : null
 }
 
-function buildNonEmptyOrgLevelFilter(field: "upperOrgLv0" | "upperOrgLv1"): Record<string, unknown> {
+function buildNonEmptyOrgLevelFilter(
+  field: "upperOrgLv0" | "upperOrgLv1"
+): Record<string, unknown> {
   return {
     bool: {
       must: [{ exists: { field } }],
@@ -1070,7 +1479,11 @@ function buildOrgDistributionAgg(
   }
 }
 
-async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?: UserStatsOptions): Promise<unknown> {
+async function fetchUserStats(
+  range: TimeRange,
+  granularity: Granularity,
+  opts?: UserStatsOptions
+): Promise<unknown> {
   void granularity
   const selectedUpperOrgLv1 = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
   const queryFilters = [timeRangeFilter("startedAt", range)]
@@ -1090,7 +1503,14 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?:
               size: 1,
               sort: [{ startedAt: { order: "desc" } }],
               _source: {
-                includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1", "appVersion", "startedAt"]
+                includes: [
+                  "userName",
+                  "orgName",
+                  "upperOrgLv0",
+                  "upperOrgLv1",
+                  "appVersion",
+                  "startedAt"
+                ]
               }
             }
           }
@@ -1131,7 +1551,10 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?:
   return esQuery(getEsIndex("trace"), body)
 }
 
-function getLatestHitSource(bucket: Record<string, unknown>, aggName: string): Record<string, unknown> {
+function getLatestHitSource(
+  bucket: Record<string, unknown>,
+  aggName: string
+): Record<string, unknown> {
   const agg = asRecord(bucket[aggName])
   const hitsWrapper = asRecord(agg.hits)
   const hits = hitsWrapper.hits
@@ -1142,7 +1565,8 @@ function getLatestHitSource(bucket: Record<string, unknown>, aggName: string): R
 function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUserListItem {
   const source = getLatestHitSource(bucket, "latest_user_info")
   const key = asRecord(bucket.key)
-  const sapId = typeof bucket.key === "string" ? bucket.key : asString(key.sap_id, asString(source.sapId))
+  const sapId =
+    typeof bucket.key === "string" ? bucket.key : asString(key.sap_id, asString(source.sapId))
   const totalInputTokens = asNumber(asRecord(bucket.total_input_tokens).value)
   const totalOutputTokens = asNumber(asRecord(bucket.total_output_tokens).value)
   const totalTokens = asNumber(
@@ -1166,7 +1590,10 @@ function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUser
   }
 }
 
-async function fetchUserList(range: TimeRange, options?: UserListOptions): Promise<DashboardUserListData> {
+async function fetchUserList(
+  range: TimeRange,
+  options?: UserListOptions
+): Promise<DashboardUserListData> {
   const { pageSize, afterKey, keyword } = normalizeUserListOptions(options)
   const offsetValue = Number(afterKey?.offset ?? 0)
   const offset = Number.isFinite(offsetValue) && offsetValue > 0 ? Math.floor(offsetValue) : 0
@@ -1229,7 +1656,9 @@ async function fetchUserList(range: TimeRange, options?: UserListOptions): Promi
   const nextOffset = offset + pageSize
   const hasMoreBuckets = asNumber(usersAgg.sum_other_doc_count) > 0
   return {
-    items: buckets.map((bucket) => normalizeUserListBucket(asRecord(bucket))).filter((item) => item.sapId),
+    items: buckets
+      .map((bucket) => normalizeUserListBucket(asRecord(bucket)))
+      .filter((item) => item.sapId),
     pageSize,
     ...(hasMoreBuckets && nextOffset < 10_000 ? { nextAfterKey: { offset: nextOffset } } : {}),
     totalActiveUsers
@@ -1266,10 +1695,7 @@ async function fetchUserDetail(
     sort: [{ startedAt: { order: "desc" } }],
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("startedAt", range),
-          { term: { sapId: normalizedSapId } }
-        ]
+        filter: [timeRangeFilter("startedAt", range), { term: { sapId: normalizedSapId } }]
       }
     },
     aggs: {
@@ -1317,13 +1743,16 @@ async function fetchUserDetail(
     }
   }
 
-  const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
+  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
   const rawRecord = asRecord(raw)
   const aggs = asRecord(rawRecord.aggregations)
   const userInfo = getLatestHitSource(aggs, "latest_user_info")
   const totalInputTokens = asNumber(asRecord(aggs.total_input_tokens).value)
   const totalOutputTokens = asNumber(asRecord(aggs.total_output_tokens).value)
-  const totalTokens = asNumber(asRecord(aggs.total_tokens).value, totalInputTokens + totalOutputTokens)
+  const totalTokens = asNumber(
+    asRecord(aggs.total_tokens).value,
+    totalInputTokens + totalOutputTokens
+  )
   const totalTraces = getTotalHits(raw, raw.hits?.hits?.length ?? 0)
 
   return {
@@ -1339,9 +1768,18 @@ async function fetchUserDetail(
     totalInputTokens,
     totalOutputTokens,
     totalTokens,
-    bySkill: normalizeTermsBucketList(asRecord(aggs.by_skill).buckets, "skill") as DashboardUserDetail["bySkill"],
-    byModel: normalizeTermsBucketList(asRecord(aggs.by_model).buckets, "model") as DashboardUserDetail["byModel"],
-    byOutcome: normalizeTermsBucketList(asRecord(aggs.by_outcome).buckets, "outcome") as DashboardUserDetail["byOutcome"],
+    bySkill: normalizeTermsBucketList(
+      asRecord(aggs.by_skill).buckets,
+      "skill"
+    ) as DashboardUserDetail["bySkill"],
+    byModel: normalizeTermsBucketList(
+      asRecord(aggs.by_model).buckets,
+      "model"
+    ) as DashboardUserDetail["byModel"],
+    byOutcome: normalizeTermsBucketList(
+      asRecord(aggs.by_outcome).buckets,
+      "outcome"
+    ) as DashboardUserDetail["byOutcome"],
     traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
     tracePage,
     tracePageSize,
@@ -1396,6 +1834,1370 @@ async function fetchSkillUsageSummary(
     }
   }
   return esQuery(getEsIndex("trace"), body)
+}
+
+async function fetchSkillEvalSummary(
+  range: TimeRange,
+  options?: DashboardSkillEvalOptions
+): Promise<DashboardSkillEvalSummary> {
+  const {
+    sampleLimit,
+    recentPage,
+    recentPageSize,
+    skillPage,
+    skillPageSize,
+    skillSearch,
+    skillName,
+    skillVersion,
+    skillNames,
+    skillNamesProvided,
+    defaultRecentToLatestSkill,
+    recentOnly,
+    listOnly,
+    statsOnly
+  } = normalizeSkillEvalOptions(options)
+  const recentFrom = (recentPage - 1) * recentPageSize
+  const skillNamesFilter: SkillEvalNamesFilter | undefined =
+    skillNames.length > 0 ? { skillNames } : undefined
+  const allowedSkillNames = skillNames.length > 0 ? new Set(skillNames) : undefined
+  const explicitRecentFilter: SkillEvalExactFilter | undefined = skillName
+    ? { skillName, skillVersion }
+    : undefined
+
+  if (statsOnly && !explicitRecentFilter) {
+    throw new Error("statsOnly requires skillName")
+  }
+  if (skillNamesProvided && skillNames.length === 0) {
+    return buildSkillEvalSummaryFromRuns({
+      sampleRuns: [],
+      totalTraceHits: 0,
+      sampledTraceCount: 0,
+      recentTotal: 0,
+      recentPage,
+      recentPageSize,
+      skillPage,
+      skillPageSize,
+      allowedSkillNames: new Set()
+    })
+  }
+
+  let recentSkillFilter = explicitRecentFilter ?? skillNamesFilter
+
+  // statsOnly is intentionally handled before recentOnly; if both flags are
+  // present, the lightweight stats-only path wins and does not fetch recent runs.
+  if (statsOnly && explicitRecentFilter) {
+    const statsResult = await fetchSkillEvalStatRecords(range, explicitRecentFilter, sampleLimit)
+    const statsRuns = skillEvalStoredRecordsToDashboardRuns(
+      statsResult.records,
+      undefined,
+      explicitRecentFilter,
+      allowedSkillNames
+    )
+    return buildSkillEvalSummaryFromRuns({
+      sampleRuns: statsRuns,
+      recentRuns: [],
+      totalTraceHits: statsResult.totalRecordHits,
+      sampledTraceCount: statsResult.records.length,
+      recentTotal: 0,
+      recentPage,
+      recentPageSize,
+      skillPage,
+      skillPageSize,
+      recentSkillFilter: explicitRecentFilter,
+      allowedSkillNames
+    })
+  }
+
+  if (recentOnly && explicitRecentFilter) {
+    const [statsResult, recentResult] = await Promise.all([
+      fetchSkillEvalStatRecords(range, explicitRecentFilter, sampleLimit),
+      fetchSkillEvalRecordPage(range, explicitRecentFilter, recentFrom, recentPageSize, true)
+    ])
+    const statsRuns = skillEvalStoredRecordsToDashboardRuns(
+      statsResult.records,
+      undefined,
+      explicitRecentFilter,
+      allowedSkillNames
+    )
+    return buildSkillEvalSummaryFromRuns({
+      sampleRuns: statsRuns,
+      recentRuns: recentResult.runs,
+      totalTraceHits: statsResult.totalRecordHits,
+      sampledTraceCount: statsResult.records.length,
+      recentTotal: recentResult.totalRecordHits,
+      recentPage,
+      recentPageSize,
+      skillPage,
+      skillPageSize,
+      recentSkillFilter: explicitRecentFilter,
+      allowedSkillNames
+    })
+  }
+
+  if (!explicitRecentFilter && defaultRecentToLatestSkill) {
+    const skillList = await fetchSkillEvalRecordSkillList(
+      range,
+      skillNamesFilter,
+      allowedSkillNames,
+      skillPage,
+      skillPageSize,
+      skillSearch
+    )
+    if (listOnly) {
+      return buildSkillEvalListOnlySummary({
+        skillList,
+        recentPage,
+        recentPageSize,
+        skillPage,
+        skillPageSize
+      })
+    }
+    recentSkillFilter = getFirstSkillFilterFromSummaries(skillList.skills) ?? skillNamesFilter
+    const [statsResult, recentResult] = await Promise.all([
+      fetchSkillEvalStatRecords(range, recentSkillFilter, sampleLimit),
+      fetchSkillEvalRecordPage(range, recentSkillFilter, recentFrom, recentPageSize, true)
+    ])
+    const focusedSampleRuns = skillEvalStoredRecordsToDashboardRuns(
+      statsResult.records,
+      undefined,
+      isSkillEvalExactFilter(recentSkillFilter) ? recentSkillFilter : undefined,
+      allowedSkillNames
+    )
+    const summary = buildSkillEvalSummaryFromRuns({
+      sampleRuns: focusedSampleRuns,
+      recentRuns: recentResult.runs,
+      totalTraceHits: statsResult.totalRecordHits,
+      sampledTraceCount: statsResult.records.length,
+      recentTotal: recentResult.totalRecordHits,
+      recentPage,
+      recentPageSize,
+      skillPage,
+      skillPageSize,
+      ...(isSkillEvalExactFilter(recentSkillFilter) ? { recentSkillFilter } : {}),
+      allowedSkillNames,
+      skillList: skillList.skills
+    })
+    return {
+      ...summary,
+      totalTraceHits: skillList.totalTraceHits,
+      totalSkills: skillList.totalSkills
+    }
+  }
+
+  const skillListPromise = !explicitRecentFilter
+    ? fetchSkillEvalRecordSkillList(
+        range,
+        skillNamesFilter,
+        allowedSkillNames,
+        skillPage,
+        skillPageSize,
+        skillSearch
+      )
+    : undefined
+  if (listOnly && skillListPromise) {
+    const skillList = await skillListPromise
+    return buildSkillEvalListOnlySummary({
+      skillList,
+      recentPage,
+      recentPageSize,
+      skillPage,
+      skillPageSize
+    })
+  }
+
+  const [statsResult, recentResult, skillList] = await Promise.all([
+    fetchSkillEvalStatRecords(range, recentSkillFilter, sampleLimit),
+    fetchSkillEvalRecordPage(range, recentSkillFilter, recentFrom, recentPageSize, true),
+    skillListPromise ?? Promise.resolve(undefined)
+  ])
+  const sampleRuns = skillEvalStoredRecordsToDashboardRuns(
+    statsResult.records,
+    undefined,
+    isSkillEvalExactFilter(recentSkillFilter) ? recentSkillFilter : undefined,
+    allowedSkillNames
+  )
+  const summary = buildSkillEvalSummaryFromRuns({
+    sampleRuns,
+    recentRuns: recentResult.runs,
+    totalTraceHits: statsResult.totalRecordHits,
+    sampledTraceCount: statsResult.records.length,
+    recentTotal: recentResult.totalRecordHits,
+    recentPage,
+    recentPageSize,
+    skillPage,
+    skillPageSize,
+    ...(isSkillEvalExactFilter(recentSkillFilter) ? { recentSkillFilter } : {}),
+    allowedSkillNames,
+    ...(skillList ? { skillList: skillList.skills } : {})
+  })
+
+  return skillList
+    ? {
+        ...summary,
+        totalTraceHits: skillList.totalTraceHits,
+        totalSkills: skillList.totalSkills
+      }
+    : summary
+}
+
+type SkillEvalRecordPageResult = {
+  records: TraceSkillEvalRecord[]
+  runs: DashboardSkillEvalRun[]
+  totalRecordHits: number
+}
+
+type SkillEvalStatRecordResult = { records: TraceSkillEvalRecord[]; totalRecordHits: number }
+
+function skillEvalRecordSourceIncludes(): string[] {
+  return [
+    "id",
+    "traceId",
+    "threadId",
+    "rawSkillName",
+    "skillName",
+    "skillVersion",
+    "skillTaskId",
+    "skillTaskTraceIndex",
+    "evalSource",
+    "contextTraceIds",
+    "skillEvalTraceIds",
+    "contextTraceCount",
+    "skillEvalTraceCount",
+    "startedAt",
+    "endedAt",
+    "startedDate",
+    "startedMonth",
+    "ystId",
+    "sapId",
+    "userName",
+    "orgName",
+    "originOrgId",
+    "upperOrgLv0",
+    "upperOrgLv1",
+    "upperOrgLv2",
+    "upperOrgLv3",
+    "appVersion",
+    "skillAuthor",
+    "userMessage",
+    "modelId",
+    "modelName",
+    "outcome",
+    "score",
+    "processScore",
+    "outcomeScore",
+    "resultScore",
+    "processWeight",
+    "outcomeWeight",
+    "pass",
+    "passNumeric",
+    "outcomePass",
+    "outcomePassNumeric",
+    "resultPass",
+    "resultPassNumeric",
+    "resultStatus",
+    "durationMs",
+    "totalToolCalls",
+    "modelCallCount",
+    "errorCount",
+    "totalInputTokens",
+    "totalOutputTokens",
+    "promptInputTokens",
+    "totalTokens",
+    "cacheReadTokens",
+    "cacheCreationTokens",
+    "peakInputTokens",
+    "totalTokensIncludesCache",
+    "failedProcessChecks",
+    "failedOutcomeChecks",
+    "failedResultChecks",
+    "failedProcessCheckCount",
+    "totalProcessCheckCount",
+    "failedOutcomeCheckCount",
+    "totalOutcomeCheckCount",
+    "failedResultCheckCount",
+    "totalResultCheckCount",
+    "warningTags",
+    "checks",
+    "outcomeChecks",
+    "resultChecks",
+    "warnings",
+    "outcomeWarnings",
+    "resultWarnings",
+    "resultIssues",
+    "artifacts",
+    "evidence"
+  ]
+}
+
+function skillEvalRecordQuery(
+  range: TimeRange,
+  skillFilter?: SkillEvalFilter
+): Record<string, unknown> {
+  const filter: Record<string, unknown>[] = [timeRangeFilter("startedAt", range)]
+  if (isSkillEvalExactFilter(skillFilter)) {
+    filter.push(
+      buildSkillEvalRecordExactSkillFilter(skillFilter.skillName, skillFilter.skillVersion)
+    )
+  } else if (skillFilter?.skillNames && skillFilter.skillNames.length > 0) {
+    filter.push(buildSkillEvalRecordSkillNamesFilter(skillFilter.skillNames))
+  }
+  return { bool: { filter } }
+}
+
+function buildSkillEvalRecordExactSkillFilter(
+  skillName: string,
+  skillVersion?: string
+): Record<string, unknown> {
+  const must: Record<string, unknown>[] = [keywordShouldFilter("skillName", skillName)]
+  if (skillVersion) must.push(keywordShouldFilter("skillVersion", skillVersion))
+  return { bool: { must } }
+}
+
+function buildSkillEvalRecordSkillNamesFilter(skillNames: string[]): Record<string, unknown> {
+  return {
+    bool: {
+      should: skillNames.map((skillName) => keywordShouldFilter("skillName", skillName)),
+      minimum_should_match: 1
+    }
+  }
+}
+
+function keywordShouldFilter(field: string, value: string): Record<string, unknown> {
+  return {
+    bool: {
+      should: [{ term: { [field]: value } }, { term: { [field + ".keyword"]: value } }],
+      minimum_should_match: 1
+    }
+  }
+}
+
+function parseSkillEvalRecordHit(hit: EsSearchHit): TraceSkillEvalRecord | null {
+  const source = hit._source ?? {}
+  const traceId = asString(source.traceId)
+  const rawSkillName = asString(source.rawSkillName)
+  const parsed = parseSkillNameVersionIdentifier(
+    rawSkillName || asString(source.skillName),
+    "unknown"
+  )
+  const skillName = asString(source.skillName, parsed.skillName)
+  if (!traceId || !skillName) return null
+
+  const skillVersion = asOptionalString(source.skillVersion) ?? parsed.skillVersion
+  const startedAt = asString(source.startedAt)
+  const endedAt = asString(source.endedAt, startedAt)
+  const outcome = normalizeTraceOutcome(source.outcome)
+  const pass = asBoolean(source.pass, asNumber(source.passNumeric) === 1)
+  const outcomePass = asBoolean(source.outcomePass, asNumber(source.outcomePassNumeric) === 1)
+  const resultPass = asBoolean(source.resultPass, asNumber(source.resultPassNumeric) === 1)
+  const resultStatus = normalizeResultStatus(
+    source.resultStatus,
+    source.resultScore,
+    source.resultPass
+  )
+  const skillAuthor = asOptionalString(source.skillAuthor)
+  const record: TraceSkillEvalRecord = {
+    id: asString(source.id, hit._id ?? traceId + ":" + (rawSkillName || skillName)),
+    traceId,
+    threadId: asString(source.threadId),
+    rawSkillName: rawSkillName || (skillVersion ? skillName + "-" + skillVersion : skillName),
+    skillName,
+    ...(skillVersion ? { skillVersion } : {}),
+    skillTaskId: asString(
+      source.skillTaskId,
+      asString(source.threadId) + ":" + (rawSkillName || skillName) + ":" + traceId
+    ),
+    skillTaskTraceIndex: asNumber(source.skillTaskTraceIndex),
+    evalSource: normalizeEvalSource(source.evalSource),
+    contextTraceIds: asStringArray(source.contextTraceIds),
+    skillEvalTraceIds: asStringArray(source.skillEvalTraceIds),
+    contextTraceCount: asNumber(source.contextTraceCount, 1),
+    skillEvalTraceCount: asNumber(source.skillEvalTraceCount, 1),
+    startedAt,
+    endedAt,
+    startedDate: asString(source.startedDate),
+    startedMonth: asString(source.startedMonth),
+    ystId: asString(source.ystId),
+    sapId: asString(source.sapId),
+    userName: asString(source.userName),
+    orgName: asString(source.orgName),
+    originOrgId: asString(source.originOrgId),
+    upperOrgLv0: asString(source.upperOrgLv0),
+    upperOrgLv1: asString(source.upperOrgLv1),
+    upperOrgLv2: asString(source.upperOrgLv2),
+    upperOrgLv3: asString(source.upperOrgLv3),
+    appVersion: asString(source.appVersion),
+    ...(skillAuthor ? { skillAuthor } : {}),
+    userMessage: asString(source.userMessage),
+    modelId: asString(source.modelId),
+    modelName: asString(source.modelName),
+    outcome,
+    score: normalizeStoredScore(source.score),
+    processScore: normalizeStoredScore(source.processScore),
+    outcomeScore: normalizeStoredScore(source.outcomeScore),
+    ...(source.resultScore !== undefined
+      ? { resultScore: normalizeStoredScore(source.resultScore) }
+      : {}),
+    processWeight: asNumber(source.processWeight, 0.4),
+    outcomeWeight: asNumber(source.outcomeWeight, 0.6),
+    pass,
+    passNumeric: pass ? 1 : 0,
+    outcomePass,
+    outcomePassNumeric: outcomePass ? 1 : 0,
+    resultPass,
+    resultPassNumeric: resultPass ? 1 : 0,
+    resultStatus,
+    durationMs: asNumber(source.durationMs),
+    totalToolCalls: asNumber(source.totalToolCalls),
+    modelCallCount: asNumber(source.modelCallCount),
+    errorCount: asNumber(source.errorCount),
+    totalInputTokens: asNumber(source.totalInputTokens),
+    totalOutputTokens: asNumber(source.totalOutputTokens),
+    totalTokens: asNumber(source.totalTokens),
+    promptInputTokens: asNumber(source.promptInputTokens),
+    cacheReadTokens: asNumber(source.cacheReadTokens),
+    cacheCreationTokens: asNumber(source.cacheCreationTokens),
+    peakInputTokens: asNumber(source.peakInputTokens),
+    totalTokensIncludesCache: normalizeTotalTokensIncludesCache(source.totalTokensIncludesCache),
+    failedProcessChecks: asStringArray(source.failedProcessChecks),
+    failedOutcomeChecks: asStringArray(source.failedOutcomeChecks),
+    failedResultChecks: asStringArray(source.failedResultChecks),
+    failedProcessCheckCount: asNumber(source.failedProcessCheckCount),
+    totalProcessCheckCount: asNumber(source.totalProcessCheckCount),
+    failedOutcomeCheckCount: asNumber(source.failedOutcomeCheckCount),
+    totalOutcomeCheckCount: asNumber(source.totalOutcomeCheckCount),
+    failedResultCheckCount: asNumber(source.failedResultCheckCount),
+    totalResultCheckCount: asNumber(source.totalResultCheckCount),
+    warningTags: asStringArray(source.warningTags) as TraceSkillEvalRecord["warningTags"],
+    checks: parseTraceSkillEvalChecks(source.checks, "process"),
+    outcomeChecks: parseTraceSkillEvalChecks(source.outcomeChecks, "outcome"),
+    resultChecks: parseTraceSkillEvalChecks(source.resultChecks, "result"),
+    warnings: asStringArray(source.warnings),
+    outcomeWarnings: asStringArray(source.outcomeWarnings),
+    resultWarnings: asStringArray(source.resultWarnings),
+    resultIssues: asStringArray(source.resultIssues),
+    artifacts: parseTraceSkillEvalArtifacts(source.artifacts),
+    evidence: parseTraceSkillEvalEvidence(source.evidence)
+  }
+
+  if (record.contextTraceIds.length === 0) record.contextTraceIds = [traceId]
+  if (record.skillEvalTraceIds.length === 0) record.skillEvalTraceIds = [traceId]
+  if (record.contextTraceCount <= 0) record.contextTraceCount = record.contextTraceIds.length || 1
+  if (record.skillEvalTraceCount <= 0)
+    record.skillEvalTraceCount = record.skillEvalTraceIds.length || 1
+  return record
+}
+
+function normalizeTraceOutcome(value: unknown): AgentTrace["outcome"] {
+  const outcome = asString(value, "unknown")
+  return outcome === "success" ||
+    outcome === "error" ||
+    outcome === "cancelled" ||
+    outcome === "unknown"
+    ? outcome
+    : "unknown"
+}
+
+function normalizeEvalSource(value: unknown): TraceSkillEvalRecord["evalSource"] {
+  return value === "inherited_context" ? "inherited_context" : "explicit"
+}
+
+function normalizeResultStatus(
+  value: unknown,
+  resultScore: unknown,
+  resultPass: unknown
+): TraceSkillEvalRecord["resultStatus"] {
+  if (value === "evaluated" || value === "skipped" || value === "failed") return value
+  return resultScore !== undefined || resultPass !== undefined ? "evaluated" : "skipped"
+}
+
+function normalizeTotalTokensIncludesCache(
+  value: unknown
+): TraceSkillEvalRecord["totalTokensIncludesCache"] {
+  return value === "true" || value === "false" || value === "mixed" ? value : "false"
+}
+
+function normalizeStoredScore(value: unknown): number {
+  return asNumber(value)
+}
+
+function asBoolean(value: unknown, fallback = false): boolean {
+  if (typeof value === "boolean") return value
+  if (typeof value === "number") return value !== 0
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === "true") return true
+    if (normalized === "false") return false
+  }
+  return fallback
+}
+
+function parseTraceSkillEvalChecks(
+  value: unknown,
+  fallbackCategory: TraceSkillEvalRecord["checks"][number]["category"]
+): TraceSkillEvalRecord["checks"] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => {
+      const record = asRecord(item)
+      const name = asString(record.name)
+      if (!name) return null
+      const category = asString(record.category, fallbackCategory)
+      return {
+        name,
+        label: asString(record.label, name),
+        category:
+          category === "process" || category === "outcome" || category === "result"
+            ? category
+            : fallbackCategory,
+        ok: asBoolean(record.ok),
+        weight: asNumber(record.weight, 1),
+        ...(record.detail && typeof record.detail === "object"
+          ? { detail: asRecord(record.detail) }
+          : {})
+      }
+    })
+    .filter((item): item is TraceSkillEvalRecord["checks"][number] => Boolean(item))
+}
+
+function parseTraceSkillEvalArtifacts(value: unknown): TraceSkillEvalRecord["artifacts"] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => {
+      const record = asRecord(item)
+      const label = asString(record.label)
+      if (!label) return null
+      const type = asString(record.type, "other")
+      return {
+        type:
+          type === "response" ||
+          type === "file" ||
+          type === "command" ||
+          type === "screenshot" ||
+          type === "log" ||
+          type === "other"
+            ? type
+            : "other",
+        label
+      }
+    })
+    .filter((item): item is TraceSkillEvalRecord["artifacts"][number] => Boolean(item))
+}
+
+function parseTraceSkillEvalEvidence(value: unknown): TraceSkillEvalRecord["evidence"] {
+  const evidence = asRecord(value)
+  return {
+    finalResponseLength: asNumber(evidence.finalResponseLength),
+    changedFiles: asNumber(evidence.changedFiles),
+    validationCommands: asNumber(evidence.validationCommands),
+    artifactSignals: asNumber(evidence.artifactSignals),
+    dangerousCommands: asNumber(evidence.dangerousCommands),
+    subagentRuns: asNumber(evidence.subagentRuns),
+    subagentCompleted: asNumber(evidence.subagentCompleted),
+    subagentFailed: asNumber(evidence.subagentFailed),
+    subagentResultLength: asNumber(evidence.subagentResultLength),
+    toolResultErrors: asNumber(evidence.toolResultErrors)
+  }
+}
+
+async function fetchSkillEvalRecordPage(
+  range: TimeRange,
+  skillFilter: SkillEvalFilter | undefined,
+  from: number,
+  size: number,
+  includeTraceDetails: boolean
+): Promise<SkillEvalRecordPageResult> {
+  const body = {
+    track_total_hits: true,
+    from,
+    size,
+    sort: [{ startedAt: { order: "desc" } }, { id: { order: "desc", unmapped_type: "keyword" } }],
+    query: skillEvalRecordQuery(range, skillFilter),
+    _source: { includes: skillEvalRecordSourceIncludes() }
+  }
+  const raw = (await esQuery(getEsIndex("skillEval"), body, {
+    timeoutMs: SKILL_EVAL_STATS_QUERY_TIMEOUT_MS
+  })) as EsSearchResponse
+  const records = parseSkillEvalRecordHits(raw)
+  const traceDetails = includeTraceDetails
+    ? await fetchTraceDetailsForSkillEvalRecords(records)
+    : undefined
+  return {
+    records,
+    runs: skillEvalStoredRecordsToDashboardRuns(records, traceDetails, skillFilter),
+    totalRecordHits: getTotalHits(raw, records.length)
+  }
+}
+
+async function fetchSkillEvalStatRecords(
+  range: TimeRange,
+  skillFilter: SkillEvalFilter | undefined,
+  recordLimit = SKILL_EVAL_STATS_TRACE_LIMIT
+): Promise<SkillEvalStatRecordResult> {
+  const cached = getCachedSkillEvalStatRecords(range, skillFilter, recordLimit)
+  if (cached) return cached
+
+  const records: TraceSkillEvalRecord[] = []
+  const maxRecords = Math.max(1, recordLimit)
+  let totalRecordHits = 0
+  let loadedHits = 0
+  let searchAfter: Array<string | number> | undefined
+
+  while (records.length < maxRecords) {
+    const body: Record<string, unknown> = {
+      track_total_hits: loadedHits === 0,
+      size: Math.min(SKILL_EVAL_STATS_PAGE_SIZE, maxRecords - records.length),
+      sort: [{ startedAt: { order: "desc" } }, { id: { order: "desc", unmapped_type: "keyword" } }],
+      query: skillEvalRecordQuery(range, skillFilter),
+      _source: { includes: skillEvalRecordSourceIncludes() }
+    }
+    if (searchAfter) body.search_after = searchAfter
+    const raw = (await esQuery(getEsIndex("skillEval"), body, {
+      timeoutMs: SKILL_EVAL_STATS_QUERY_TIMEOUT_MS
+    })) as EsSearchResponse
+    const hits = raw.hits?.hits ?? []
+    const hitCount = hits.length
+    if (loadedHits === 0) totalRecordHits = getTotalHits(raw, hitCount)
+    if (hitCount === 0) break
+
+    for (const record of parseSkillEvalRecordHits(raw)) {
+      if (records.length >= maxRecords) break
+      records.push(record)
+    }
+    loadedHits += hitCount
+    searchAfter = hits[hitCount - 1]?.sort
+    if (
+      loadedHits >= totalRecordHits ||
+      hitCount < SKILL_EVAL_STATS_PAGE_SIZE ||
+      records.length >= maxRecords
+    ) {
+      break
+    }
+  }
+
+  const result = { records, totalRecordHits }
+  setCachedSkillEvalStatRecords(range, skillFilter, recordLimit, result)
+  return result
+}
+
+const skillEvalStatRecordCache = new Map<
+  string,
+  { expiresAt: number; result: SkillEvalStatRecordResult }
+>()
+
+function getCachedSkillEvalStatRecords(
+  range: TimeRange,
+  skillFilter: SkillEvalFilter | undefined,
+  recordLimit: number
+): SkillEvalStatRecordResult | undefined {
+  const key = skillEvalStatRecordCacheKey(range, skillFilter, recordLimit)
+  const cached = skillEvalStatRecordCache.get(key)
+  if (!cached) return undefined
+  if (cached.expiresAt <= Date.now()) {
+    skillEvalStatRecordCache.delete(key)
+    return undefined
+  }
+  skillEvalStatRecordCache.delete(key)
+  skillEvalStatRecordCache.set(key, cached)
+  return cached.result
+}
+
+function setCachedSkillEvalStatRecords(
+  range: TimeRange,
+  skillFilter: SkillEvalFilter | undefined,
+  recordLimit: number,
+  result: SkillEvalStatRecordResult
+): void {
+  const key = skillEvalStatRecordCacheKey(range, skillFilter, recordLimit)
+  skillEvalStatRecordCache.set(key, {
+    expiresAt: Date.now() + SKILL_EVAL_STAT_CACHE_TTL_MS,
+    result
+  })
+  while (skillEvalStatRecordCache.size > SKILL_EVAL_STAT_CACHE_LIMIT) {
+    const oldestKey = skillEvalStatRecordCache.keys().next().value
+    if (!oldestKey) break
+    skillEvalStatRecordCache.delete(oldestKey)
+  }
+}
+
+function skillEvalStatRecordCacheKey(
+  range: TimeRange,
+  skillFilter: SkillEvalFilter | undefined,
+  recordLimit: number
+): string {
+  return [
+    range.from,
+    range.to,
+    Math.max(1, recordLimit),
+    skillEvalFilterCacheKey(skillFilter)
+  ].join("\u0001")
+}
+
+function parseSkillEvalRecordHits(raw: EsSearchResponse): TraceSkillEvalRecord[] {
+  const records: TraceSkillEvalRecord[] = []
+  for (const hit of raw.hits?.hits ?? []) {
+    const record = parseSkillEvalRecordHit(hit)
+    if (record) records.push(record)
+  }
+  return records
+}
+
+async function fetchTraceDetailsForSkillEvalRecords(
+  records: TraceSkillEvalRecord[]
+): Promise<Map<string, DashboardTraceDetail>> {
+  const traceIds = Array.from(
+    new Set(
+      records
+        .flatMap((record) => [
+          record.traceId,
+          // Current window semantics keep these arrays equal; the context fallback is for
+          // a future split where context traces can be wider than scored eval traces.
+          ...(record.skillEvalTraceIds.length > 0
+            ? record.skillEvalTraceIds
+            : record.contextTraceIds)
+        ])
+        .filter(Boolean)
+    )
+  )
+  if (traceIds.length === 0) return new Map()
+  const limitedTraceIds = traceIds.slice(0, 500)
+  if (traceIds.length > limitedTraceIds.length) {
+    console.warn(
+      "[Dashboard] skill eval trace detail ids truncated: " +
+        traceIds.length +
+        " -> " +
+        limitedTraceIds.length
+    )
+  }
+  const body = {
+    track_total_hits: false,
+    size: limitedTraceIds.length,
+    query: {
+      bool: {
+        should: [
+          { ids: { values: limitedTraceIds } },
+          { terms: { traceId: limitedTraceIds } },
+          { terms: { "traceId.keyword": limitedTraceIds } }
+        ],
+        minimum_should_match: 1
+      }
+    },
+    _source: { includes: skillEvalTraceSourceIncludes() }
+  }
+  const raw = (await esQuery(getEsIndex("trace"), body, {
+    timeoutMs: SKILL_EVAL_STATS_QUERY_TIMEOUT_MS
+  })) as EsSearchResponse
+  const details = new Map<string, DashboardTraceDetail>()
+  for (const hit of raw.hits?.hits ?? []) {
+    const detail = normalizeTraceDetail(hit)
+    if (detail.traceId) details.set(detail.traceId, detail)
+  }
+  return details
+}
+
+function skillEvalStoredRecordsToDashboardRuns(
+  records: TraceSkillEvalRecord[],
+  traceDetails?: Map<string, DashboardTraceDetail>,
+  skillFilter?: SkillEvalFilter,
+  allowedSkillNames?: Set<string>
+): DashboardSkillEvalRun[] {
+  return records
+    .filter((record) => {
+      if (isSkillEvalExactFilter(skillFilter) && !isSameSkillVersion(record, skillFilter)) {
+        return false
+      }
+      return hasAllowedSkillName(record.skillName, allowedSkillNames)
+    })
+    .map((record) => {
+      const fallbackTraceDetail = fallbackTraceDetailFromSkillEvalRecord(record)
+      const traceDetail = traceDetails?.get(record.traceId) ?? fallbackTraceDetail
+      // Current window semantics keep these arrays equal; the context fallback is for
+      // a future split where context traces can be wider than scored eval traces.
+      const orderedTraceIds = Array.from(
+        new Set([
+          ...(record.skillEvalTraceIds.length > 0
+            ? record.skillEvalTraceIds
+            : record.contextTraceIds),
+          record.traceId
+        ])
+      )
+      const traceDetailList = orderedTraceIds
+        .map((traceId) =>
+          traceId === record.traceId ? traceDetail : (traceDetails?.get(traceId) ?? undefined)
+        )
+        .filter((detail): detail is DashboardTraceDetail => Boolean(detail))
+        .sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt))
+      return skillEvalRecordToDashboardRun(record, traceDetail, traceDetailList)
+    })
+}
+
+function fallbackTraceDetailFromSkillEvalRecord(
+  record: TraceSkillEvalRecord
+): DashboardTraceDetail {
+  return {
+    traceId: record.traceId,
+    threadId: record.threadId,
+    startedAt: record.startedAt,
+    endedAt: record.endedAt,
+    durationMs: record.durationMs,
+    userMessage: record.userMessage,
+    sapId: record.sapId || undefined,
+    ystId: record.ystId || undefined,
+    userName: record.userName || undefined,
+    orgName: record.orgName || undefined,
+    modelId: record.modelId || undefined,
+    modelName: record.modelName || undefined,
+    outcome: record.outcome,
+    totalToolCalls: record.totalToolCalls,
+    totalInputTokens: record.totalInputTokens,
+    totalOutputTokens: record.totalOutputTokens,
+    totalTokens: record.totalTokens,
+    usedSkills: [record.rawSkillName],
+    rawAvailable: false,
+    rawError: "未在 trace 索引中找到原始 trace 详情"
+  }
+}
+
+async function fetchSkillEvalRecordSkillList(
+  range: TimeRange,
+  skillFilter?: SkillEvalFilter,
+  allowedSkillNames?: Set<string>,
+  page = 1,
+  pageSize = 10,
+  skillSearch = ""
+): Promise<{
+  skills: DashboardSkillEvalSkillSummary[]
+  totalTraceHits: number
+  totalSkills: number
+}> {
+  const normalizedPage = clampLimit(page, 1, 10_000)
+  const normalizedPageSize = clampLimit(pageSize, 10, 100)
+  const skillFrom = (normalizedPage - 1) * normalizedPageSize
+  const bucketSize =
+    allowedSkillNames || skillSearch ? 10_000 : Math.min(10_000, skillFrom + normalizedPageSize)
+  const body = {
+    track_total_hits: true,
+    size: 0,
+    query: skillEvalRecordQuery(range, skillFilter),
+    aggs: {
+      ...(!allowedSkillNames && !skillSearch
+        ? { skill_count: { cardinality: { field: "rawSkillName" } } }
+        : {}),
+      by_skill: {
+        terms: { field: "rawSkillName", size: bucketSize, order: { _count: "desc" } },
+        aggs: {
+          latest_record: {
+            top_hits: {
+              size: 1,
+              sort: [{ startedAt: { order: "desc" } }],
+              _source: {
+                includes: ["startedAt", "rawSkillName", "skillName", "skillVersion"]
+              }
+            }
+          },
+          pass_count: { sum: { field: "passNumeric" } },
+          result_evaluated_runs: { filter: keywordShouldFilter("resultStatus", "evaluated") },
+          result_pass_count: { sum: { field: "resultPassNumeric" } },
+          avg_score: { avg: { field: "score" } },
+          avg_process_score: { avg: { field: "processScore" } },
+          avg_outcome_score: { avg: { field: "outcomeScore" } },
+          avg_result_score: { avg: { field: "resultScore" } },
+          avg_tool_calls: { avg: { field: "totalToolCalls" } },
+          avg_model_calls: { avg: { field: "modelCallCount" } },
+          avg_input_tokens: { avg: { field: "totalInputTokens" } },
+          avg_output_tokens: { avg: { field: "totalOutputTokens" } },
+          avg_prompt_input_tokens: { avg: { field: "promptInputTokens" } },
+          avg_total_tokens: { avg: { field: "totalTokens" } },
+          avg_peak_input_tokens: { avg: { field: "peakInputTokens" } },
+          avg_duration_ms: { avg: { field: "durationMs" } },
+          validation_runs: { filter: { range: { "evidence.validationCommands": { gt: 0 } } } },
+          output_signal_runs: {
+            filter: {
+              bool: {
+                should: [
+                  { range: { "evidence.changedFiles": { gt: 0 } } },
+                  { range: { "evidence.artifactSignals": { gt: 0 } } },
+                  { range: { "evidence.finalResponseLength": { gte: 20 } } }
+                ],
+                minimum_should_match: 1
+              }
+            }
+          },
+          danger_runs: { filter: { range: { "evidence.dangerousCommands": { gt: 0 } } } }
+        }
+      }
+    }
+  }
+  const raw = (await esQuery(getEsIndex("skillEval"), body, {
+    timeoutMs: SKILL_EVAL_STATS_QUERY_TIMEOUT_MS
+  })) as EsSearchResponse
+  const allSkills = parseSkillEvalRecordSkillList(raw, allowedSkillNames, skillSearch)
+  return {
+    skills: allSkills.slice(skillFrom, skillFrom + normalizedPageSize),
+    totalTraceHits: getTotalHits(raw, 0),
+    totalSkills:
+      allowedSkillNames || skillSearch
+        ? allSkills.length
+        : asNumber(raw.aggregations?.skill_count?.value, allSkills.length)
+  }
+}
+
+function parseSkillEvalRecordSkillList(
+  raw: EsSearchResponse,
+  allowedSkillNames?: Set<string>,
+  skillSearch = ""
+): DashboardSkillEvalSkillSummary[] {
+  const buckets = raw.aggregations?.by_skill?.buckets
+  if (!Array.isArray(buckets)) return []
+  return buckets
+    .map((bucket) => {
+      const record = asRecord(bucket)
+      const runs = asNumber(record.doc_count)
+      if (runs <= 0) return null
+      const rawSkill = asString(record.key)
+      const latestSource = getLatestHitSource(record, "latest_record")
+      const parsed = parseSkillNameVersionIdentifier(rawSkill || asString(latestSource.skillName))
+      const skillName = asString(latestSource.skillName, parsed.skillName)
+      const skillVersion = asOptionalString(latestSource.skillVersion) ?? parsed.skillVersion
+      if (!hasAllowedSkillName(skillName, allowedSkillNames)) return null
+      if (!matchesSkillSearch(skillName, skillSearch)) return null
+      const passCount = metricValue(record, "pass_count")
+      const resultPassCount = metricValue(record, "result_pass_count")
+      const resultEvaluatedRuns = bucketDocCount(record, "result_evaluated_runs")
+      return {
+        skillName,
+        ...(skillVersion ? { skillVersion } : {}),
+        runs,
+        resultEvaluatedRuns,
+        passRate: averageValue(passCount, runs),
+        resultPassRate: averageValue(resultPassCount, resultEvaluatedRuns),
+        averageScore: averageStoredScoreMetric(record, "avg_score"),
+        averageProcessScore: averageStoredScoreMetric(record, "avg_process_score"),
+        averageOutcomeScore: averageStoredScoreMetric(record, "avg_outcome_score"),
+        averageResultScore: averageStoredScoreMetric(record, "avg_result_score"),
+        averageToolCalls: metricValue(record, "avg_tool_calls"),
+        averageModelCalls: metricValue(record, "avg_model_calls"),
+        averageInputTokens: metricValue(record, "avg_input_tokens"),
+        averageOutputTokens: metricValue(record, "avg_output_tokens"),
+        averagePromptInputTokens: metricValue(record, "avg_prompt_input_tokens"),
+        averageTotalTokens: metricValue(record, "avg_total_tokens"),
+        averagePeakInputTokens: metricValue(record, "avg_peak_input_tokens"),
+        averageDurationMs: metricValue(record, "avg_duration_ms"),
+        validationRate: averageValue(bucketDocCount(record, "validation_runs"), runs),
+        outputSignalRate: averageValue(bucketDocCount(record, "output_signal_runs"), runs),
+        dangerRate: averageValue(bucketDocCount(record, "danger_runs"), runs),
+        failureCount: Math.max(0, runs - passCount),
+        lastRunAt: asString(latestSource.startedAt)
+      }
+    })
+    .filter((item): item is DashboardSkillEvalSkillSummary => Boolean(item))
+}
+
+function metricValue(bucket: Record<string, unknown>, name: string): number {
+  return asNumber(asRecord(bucket[name]).value)
+}
+
+function bucketDocCount(bucket: Record<string, unknown>, name: string): number {
+  return asNumber(asRecord(bucket[name]).doc_count)
+}
+
+function averageStoredScoreMetric(bucket: Record<string, unknown>, name: string): number {
+  return averageValue(metricValue(bucket, name), 100)
+}
+
+function skillEvalTaskKey(run: DashboardSkillEvalRun): string {
+  return run.skillTaskId || [run.threadId, run.rawSkillName, run.traceId].join(":")
+}
+
+function aggregateSkillEvalTaskRuns(runs: DashboardSkillEvalRun[]): DashboardSkillEvalRun[] {
+  const byTask = new Map<string, DashboardSkillEvalRun[]>()
+  for (const run of runs) {
+    const key = skillEvalTaskKey(run)
+    const bucket = byTask.get(key) ?? []
+    bucket.push(run)
+    byTask.set(key, bucket)
+  }
+
+  return [...byTask.values()].map((taskRuns) => {
+    const sorted = [...taskRuns].sort(
+      (a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime()
+    )
+    const first = sorted[0]
+    const latest = sorted[sorted.length - 1]
+    const latestResult = [...sorted].reverse().find((run) => run.resultGenerated)
+    if (sorted.length === 1) return latest
+
+    const sum = (selector: (run: DashboardSkillEvalRun) => number): number =>
+      sorted.reduce((total, run) => total + selector(run), 0)
+    const any = (selector: (run: DashboardSkillEvalRun) => boolean): boolean =>
+      sorted.some((run) => selector(run))
+
+    return {
+      ...latest,
+      startedAt: first.startedAt,
+      endedAt: latest.endedAt,
+      traceId: latest.traceId,
+      userMessage: first.userMessage || latest.userMessage,
+      evalSource: any((run) => run.evalSource === "explicit") ? "explicit" : latest.evalSource,
+      skillTaskId: skillEvalTaskKey(latest),
+      skillTaskTraceIndex: sorted.length - 1,
+      pass: latest.pass,
+      outcomePass: latest.outcomePass,
+      resultPass: latestResult?.resultPass ?? latest.resultPass,
+      score: latest.score,
+      processScore: latest.processScore,
+      outcomeScore: latest.outcomeScore,
+      ...(latestResult?.resultScore !== undefined ? { resultScore: latestResult.resultScore } : {}),
+      totalToolCalls: sum((run) => run.totalToolCalls),
+      modelCallCount: sum((run) => run.modelCallCount),
+      totalInputTokens: sum((run) => run.totalInputTokens),
+      totalOutputTokens: sum((run) => run.totalOutputTokens),
+      promptInputTokens: sum((run) => run.promptInputTokens),
+      totalTokens: sum((run) => run.totalTokens),
+      cacheReadTokens: sum((run) => run.cacheReadTokens),
+      cacheCreationTokens: sum((run) => run.cacheCreationTokens),
+      peakInputTokens: Math.max(...sorted.map((run) => run.peakInputTokens)),
+      errorCount: sum((run) => run.errorCount),
+      durationMs: sum((run) => run.durationMs),
+      warnings: Array.from(new Set(sorted.flatMap((run) => run.warnings))),
+      outcomeWarnings: Array.from(new Set(sorted.flatMap((run) => run.outcomeWarnings))),
+      resultWarnings: Array.from(new Set(sorted.flatMap((run) => run.resultWarnings))),
+      resultIssues: Array.from(new Set(sorted.flatMap((run) => run.resultIssues))),
+      resultArtifacts: sorted.flatMap((run) => run.resultArtifacts),
+      resultGenerated: latestResult !== undefined,
+      evidence: {
+        finalResponseLength: latest.evidence.finalResponseLength,
+        changedFiles: sum((run) => run.evidence.changedFiles),
+        validationCommands: sum((run) => run.evidence.validationCommands),
+        artifactSignals: sum((run) => run.evidence.artifactSignals),
+        dangerousCommands: sum((run) => run.evidence.dangerousCommands),
+        subagentRuns: sum((run) => run.evidence.subagentRuns),
+        subagentCompleted: sum((run) => run.evidence.subagentCompleted),
+        subagentResultLength: sum((run) => run.evidence.subagentResultLength),
+        subagentFailed: sum((run) => run.evidence.subagentFailed),
+        toolResultErrors: sum((run) => run.evidence.toolResultErrors)
+      }
+    }
+  })
+}
+
+function buildSkillEvalSummaryFromRuns({
+  sampleRuns,
+  recentRuns,
+  totalTraceHits = sampleRuns.length,
+  sampledTraceCount = sampleRuns.length,
+  recentTotal = sampleRuns.length,
+  recentPage = 1,
+  recentPageSize = 10,
+  skillPage = 1,
+  skillPageSize = 10,
+  allowedSkillNames,
+  skillList
+}: {
+  sampleRuns: DashboardSkillEvalRun[]
+  recentRuns?: DashboardSkillEvalRun[]
+  totalTraceHits?: number
+  sampledTraceCount?: number
+  recentTotal?: number
+  recentPage?: number
+  recentPageSize?: number
+  skillPage?: number
+  skillPageSize?: number
+  recentSkillFilter?: { skillName: string; skillVersion: string | undefined }
+  allowedSkillNames?: Set<string>
+  skillList?: DashboardSkillEvalSkillSummary[]
+}): DashboardSkillEvalSummary {
+  const filteredSampleRuns = aggregateSkillEvalTaskRuns(
+    sampleRuns.filter((run) => hasAllowedSkillName(run.skillName, allowedSkillNames))
+  )
+  const grouped = skillList ? undefined : new Map<string, DashboardSkillEvalRun[]>()
+  const evaluatedTraceIds = new Set<string>()
+
+  for (const run of filteredSampleRuns) {
+    if (grouped) {
+      const key = skillVersionKey(run.skillName, run.skillVersion)
+      const bucket = grouped.get(key) ?? []
+      bucket.push(run)
+      grouped.set(key, bucket)
+    }
+    if (run.traceId) evaluatedTraceIds.add(run.traceId)
+  }
+
+  const sortedRecentRuns = (recentRuns ?? filteredSampleRuns)
+    .filter((run) => hasAllowedSkillName(run.skillName, allowedSkillNames))
+    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
+
+  const skills = skillList ?? summarizeSkillEvalRunBuckets(grouped ?? new Map())
+  const totalRuns = filteredSampleRuns.length
+  const normalizedRecentPage = clampLimit(recentPage, 1, 10_000)
+  const normalizedRecentPageSize = clampLimit(recentPageSize, 10, 100)
+  const normalizedSkillPage = clampLimit(skillPage, 1, 10_000)
+  const normalizedSkillPageSize = clampLimit(skillPageSize, 10, 100)
+  const recentTotalPages = Math.max(1, Math.ceil(recentTotal / normalizedRecentPageSize))
+  const effectiveRecentPage = Math.min(normalizedRecentPage, recentTotalPages)
+  const totals = summarizeSkillEvalRunTotals(filteredSampleRuns)
+
+  return {
+    generatedAt: new Date().toISOString(),
+    totalTraceHits,
+    evaluatedTraceCount: evaluatedTraceIds.size,
+    sampledTraceCount,
+    statTraceLimit: SKILL_EVAL_STATS_TRACE_LIMIT,
+    recentTotal,
+    recentPage: effectiveRecentPage,
+    recentPageSize: normalizedRecentPageSize,
+    skillPage: normalizedSkillPage,
+    skillPageSize: normalizedSkillPageSize,
+    totalRuns,
+    resultEvaluatedRuns: totals.resultEvaluatedRuns,
+    totalSkills: skills.length,
+    passRate: averageValue(totals.passCount, totalRuns),
+    resultPassRate: averageValue(totals.resultPassCount, totals.resultEvaluatedRuns),
+    averageScore: averageValue(totals.score, totalRuns),
+    averageProcessScore: averageValue(totals.processScore, totalRuns),
+    averageOutcomeScore: averageValue(totals.outcomeScore, totalRuns),
+    averageResultScore: averageValue(totals.resultScore, totals.resultEvaluatedRuns),
+    averageToolCalls: averageValue(totals.toolCalls, totalRuns),
+    averageModelCalls: averageValue(totals.modelCalls, totalRuns),
+    totalInputTokens: totals.inputTokens,
+    totalOutputTokens: totals.outputTokens,
+    totalPromptInputTokens: totals.promptInputTokens,
+    totalTokens: totals.totalTokens,
+    averageInputTokens: averageValue(totals.inputTokens, totalRuns),
+    averageOutputTokens: averageValue(totals.outputTokens, totalRuns),
+    averagePromptInputTokens: averageValue(totals.promptInputTokens, totalRuns),
+    averageTotalTokens: averageValue(totals.totalTokens, totalRuns),
+    averagePeakInputTokens: averageValue(totals.peakInputTokens, totalRuns),
+    averageDurationMs: averageValue(totals.durationMs, totalRuns),
+    skills,
+    recent: sortedRecentRuns
+  }
+}
+
+function summarizeSkillEvalRunBuckets(
+  grouped: Map<string, DashboardSkillEvalRun[]>
+): DashboardSkillEvalSkillSummary[] {
+  return [...grouped.values()]
+    .map((runs) => {
+      const latest = runs.reduce(
+        (max, run) =>
+          new Date(run.startedAt).getTime() > new Date(max.startedAt).getTime() ? run : max,
+        runs[0]
+      )
+      const totals = summarizeSkillEvalRunTotals(runs)
+      return {
+        skillName: latest.skillName,
+        ...(latest.skillVersion ? { skillVersion: latest.skillVersion } : {}),
+        runs: runs.length,
+        resultEvaluatedRuns: totals.resultEvaluatedRuns,
+        passRate: averageValue(totals.passCount, runs.length),
+        resultPassRate: averageValue(totals.resultPassCount, totals.resultEvaluatedRuns),
+        averageScore: averageValue(totals.score, runs.length),
+        averageProcessScore: averageValue(totals.processScore, runs.length),
+        averageOutcomeScore: averageValue(totals.outcomeScore, runs.length),
+        averageResultScore: averageValue(totals.resultScore, totals.resultEvaluatedRuns),
+        averageToolCalls: averageValue(totals.toolCalls, runs.length),
+        averageModelCalls: averageValue(totals.modelCalls, runs.length),
+        averageInputTokens: averageValue(totals.inputTokens, runs.length),
+        averageOutputTokens: averageValue(totals.outputTokens, runs.length),
+        averagePromptInputTokens: averageValue(totals.promptInputTokens, runs.length),
+        averageTotalTokens: averageValue(totals.totalTokens, runs.length),
+        averagePeakInputTokens: averageValue(totals.peakInputTokens, runs.length),
+        averageDurationMs: averageValue(totals.durationMs, runs.length),
+        validationRate: averageValue(totals.validationCount, runs.length),
+        outputSignalRate: averageValue(totals.outputSignalCount, runs.length),
+        dangerRate: averageValue(totals.dangerCount, runs.length),
+        failureCount: runs.length - totals.passCount,
+        lastRunAt: latest.startedAt
+      }
+    })
+    .sort((a, b) => b.runs - a.runs || b.averageResultScore - a.averageResultScore)
+}
+
+function summarizeSkillEvalRunTotals(runs: DashboardSkillEvalRun[]): {
+  passCount: number
+  resultPassCount: number
+  resultEvaluatedRuns: number
+  score: number
+  processScore: number
+  outcomeScore: number
+  resultScore: number
+  toolCalls: number
+  modelCalls: number
+  inputTokens: number
+  outputTokens: number
+  promptInputTokens: number
+  totalTokens: number
+  peakInputTokens: number
+  durationMs: number
+  validationCount: number
+  outputSignalCount: number
+  dangerCount: number
+} {
+  return runs.reduce(
+    (acc, run) => {
+      acc.passCount += run.pass ? 1 : 0
+      if (run.resultGenerated) {
+        acc.resultEvaluatedRuns += 1
+        acc.resultPassCount += run.resultPass ? 1 : 0
+        acc.resultScore += run.resultScore ?? 0
+      }
+      acc.score += run.score
+      acc.processScore += run.processScore
+      acc.outcomeScore += run.outcomeScore
+      acc.toolCalls += run.totalToolCalls
+      acc.modelCalls += run.modelCallCount
+      acc.inputTokens += run.totalInputTokens
+      acc.outputTokens += run.totalOutputTokens
+      acc.promptInputTokens += run.promptInputTokens
+      acc.totalTokens += run.totalTokens
+      acc.peakInputTokens += run.peakInputTokens
+      acc.durationMs += run.durationMs
+      acc.validationCount += run.evidence.validationCommands > 0 ? 1 : 0
+      acc.outputSignalCount +=
+        run.evidence.changedFiles > 0 ||
+        run.evidence.artifactSignals > 0 ||
+        run.evidence.finalResponseLength >= 20
+          ? 1
+          : 0
+      acc.dangerCount += run.evidence.dangerousCommands > 0 ? 1 : 0
+      return acc
+    },
+    {
+      passCount: 0,
+      resultPassCount: 0,
+      resultEvaluatedRuns: 0,
+      score: 0,
+      processScore: 0,
+      outcomeScore: 0,
+      resultScore: 0,
+      toolCalls: 0,
+      modelCalls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      promptInputTokens: 0,
+      totalTokens: 0,
+      peakInputTokens: 0,
+      durationMs: 0,
+      validationCount: 0,
+      outputSignalCount: 0,
+      dangerCount: 0
+    }
+  )
+}
+
+function buildSkillEvalListOnlySummary({
+  skillList,
+  recentPage,
+  recentPageSize,
+  skillPage,
+  skillPageSize
+}: {
+  skillList: {
+    skills: DashboardSkillEvalSkillSummary[]
+    totalTraceHits: number
+    totalSkills: number
+  }
+  recentPage: number
+  recentPageSize: number
+  skillPage: number
+  skillPageSize: number
+}): DashboardSkillEvalSummary {
+  return {
+    ...buildSkillEvalSummaryFromRuns({
+      sampleRuns: [],
+      recentRuns: [],
+      totalTraceHits: skillList.totalTraceHits,
+      sampledTraceCount: 0,
+      recentTotal: 0,
+      recentPage,
+      recentPageSize,
+      skillPage,
+      skillPageSize,
+      skillList: skillList.skills
+    }),
+    totalTraceHits: skillList.totalTraceHits,
+    totalSkills: skillList.totalSkills,
+    skills: skillList.skills
+  }
+}
+
+function isSameSkillVersion(
+  record: { skillName: string; skillVersion?: string },
+  filter: { skillName: string; skillVersion: string | undefined }
+): boolean {
+  if (record.skillName !== filter.skillName) return false
+  return filter.skillVersion ? (record.skillVersion ?? undefined) === filter.skillVersion : true
+}
+
+function skillEvalRecordToDashboardRun(
+  record: TraceSkillEvalRecord,
+  traceDetail: DashboardTraceDetail,
+  traceDetails: DashboardTraceDetail[] = [traceDetail]
+): DashboardSkillEvalRun {
+  const processScore = record.processScore / 100
+  const outcomeScore = record.outcomeScore / 100
+  const score = record.score / 100
+  const resultScore = record.resultScore !== undefined ? record.resultScore / 100 : undefined
+
+  return {
+    traceId: record.traceId,
+    threadId: record.threadId,
+    startedAt: record.startedAt,
+    endedAt: record.endedAt,
+    userMessage: record.userMessage,
+    skillName: record.skillName,
+    ...(record.skillVersion ? { skillVersion: record.skillVersion } : {}),
+    rawSkillName: record.rawSkillName,
+    skillTaskId: record.skillTaskId,
+    skillTaskTraceIndex: record.skillTaskTraceIndex,
+    evalSource: record.evalSource,
+    contextTraceIds: [...record.contextTraceIds],
+    skillEvalTraceIds: [...record.skillEvalTraceIds],
+    contextTraceCount: record.contextTraceCount,
+    skillEvalTraceCount: record.skillEvalTraceCount,
+    outcome: record.outcome,
+    processScore,
+    outcomeScore,
+    score,
+    outcomePass: record.outcomePass,
+    pass: record.pass,
+    ...(resultScore !== undefined ? { resultScore } : {}),
+    resultPass: Boolean(record.resultPass),
+    totalToolCalls: record.totalToolCalls,
+    modelCallCount: record.modelCallCount,
+    totalInputTokens: record.totalInputTokens,
+    totalOutputTokens: record.totalOutputTokens,
+    promptInputTokens: record.promptInputTokens,
+    totalTokens: record.totalTokens,
+    cacheReadTokens: record.cacheReadTokens,
+    cacheCreationTokens: record.cacheCreationTokens,
+    peakInputTokens: record.peakInputTokens,
+    errorCount: record.errorCount,
+    durationMs: record.durationMs,
+    checks: record.checks ?? [],
+    outcomeChecks: record.outcomeChecks ?? [],
+    resultChecks: record.resultChecks ?? [],
+    warnings: record.warnings ?? [],
+    outcomeWarnings: record.outcomeWarnings ?? [],
+    resultWarnings: record.resultWarnings ?? [],
+    resultIssues: record.resultIssues ?? [],
+    resultArtifacts: record.artifacts ?? [],
+    resultGenerated: record.resultStatus === "evaluated",
+    traceDetail,
+    traceDetails,
+    evidence: {
+      finalResponseLength: record.evidence.finalResponseLength ?? 0,
+      changedFiles: record.evidence.changedFiles ?? 0,
+      validationCommands: record.evidence.validationCommands ?? 0,
+      artifactSignals: record.evidence.artifactSignals ?? 0,
+      dangerousCommands: record.evidence.dangerousCommands ?? 0,
+      subagentRuns: record.evidence.subagentRuns ?? 0,
+      subagentCompleted: record.evidence.subagentCompleted ?? 0,
+      subagentResultLength: record.evidence.subagentResultLength ?? 0,
+      subagentFailed: record.evidence.subagentFailed ?? 0,
+      toolResultErrors: record.evidence.toolResultErrors ?? 0
+    }
+  }
 }
 
 async function fetchSkillUserStats(
@@ -1466,13 +3268,10 @@ async function fetchSkillUserStats(
 }
 
 async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
-  const sanitizedSapIds = Array.from(
-    new Set(
-      sapIds
-        .map((id) => id.trim())
-        .filter(Boolean)
-    )
-  ).slice(0, 500)
+  const sanitizedSapIds = Array.from(new Set(sapIds.map((id) => id.trim()).filter(Boolean))).slice(
+    0,
+    500
+  )
 
   if (sanitizedSapIds.length === 0) {
     return {
@@ -1618,15 +3417,16 @@ async function fetchProductivity(range: TimeRange, granularity: Granularity): Pr
     size: 0,
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("eventTime", range),
-          { term: { "eventName": "git.commit.created" } }
-        ]
+        filter: [timeRangeFilter("eventTime", range), { term: { eventName: "git.commit.created" } }]
       }
     },
     aggs: {
       commit_trend: {
-        date_histogram: { field: "eventTime", calendar_interval: interval, time_zone: "Asia/Shanghai" }
+        date_histogram: {
+          field: "eventTime",
+          calendar_interval: interval,
+          time_zone: "Asia/Shanghai"
+        }
       },
       total_insertions: { sum: { field: "properties.insertions" } },
       total_deletions: { sum: { field: "properties.deletions" } },
@@ -1670,10 +3470,7 @@ async function fetchFeedback(range: TimeRange, granularity: Granularity): Promis
           timeRangeFilter("eventTime", range),
           {
             terms: {
-              eventName: [
-                "message.feedback.like",
-                "message.feedback.dislike.submit"
-              ]
+              eventName: ["message.feedback.like", "message.feedback.dislike.submit"]
             }
           }
         ]
@@ -1747,22 +3544,17 @@ async function fetchFeedback(range: TimeRange, granularity: Granularity): Promis
 async function fetchSkillRecentTraces(
   skill: string,
   range: TimeRange,
-  limit = 10,
-  page = 1
+  options?: number | TracePageOptions
 ): Promise<{ traces: DashboardTraceDetail[]; total: number; page: number; pageSize: number }> {
-  const size = clampLimit(limit, 10, 50)
-  const currentPage = clampLimit(page, 1, 1000)
+  const { page, pageSize } = normalizeTracePageOptions(options)
   const body = {
     track_total_hits: true,
-    from: (currentPage - 1) * size,
-    size,
+    from: (page - 1) * pageSize,
+    size: pageSize,
     sort: [{ startedAt: { order: "desc" } }],
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("startedAt", range),
-          buildSkillUsageWildcardFilter(skill)
-        ]
+        filter: [timeRangeFilter("startedAt", range), buildSkillUsageWildcardFilter(skill)]
       }
     },
     _source: {
@@ -1790,12 +3582,12 @@ async function fetchSkillRecentTraces(
       ]
     }
   }
-  const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
+  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
   return {
     traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
     total: getTotalHits(raw, raw.hits?.hits?.length ?? 0),
-    page: currentPage,
-    pageSize: size
+    page,
+    pageSize
   }
 }
 
@@ -1822,10 +3614,7 @@ async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<Das
     size: 0,
     query: {
       bool: {
-        should: [
-          { bool: { filter: codeGenFilters } },
-          { bool: { filter: codeAdoptFilters } }
-        ],
+        should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
         minimum_should_match: 1
       }
     },
@@ -1860,12 +3649,9 @@ async function fetchSkillDetail(
   range: TimeRange,
   options?: number | TracePageOptions
 ): Promise<DashboardSkillDetail> {
-  const pageOptions = typeof options === "number" ? { limit: options } : options
-  const tracePageSize = clampLimit(pageOptions?.pageSize ?? pageOptions?.limit, 10, 50)
-  const tracePage = clampLimit(pageOptions?.page, 1, 1000)
   const [stats, tracePageData] = await Promise.all([
     fetchSkillCodeStats(skill, range),
-    fetchSkillRecentTraces(skill, range, tracePageSize, tracePage)
+    fetchSkillRecentTraces(skill, range, options)
   ])
   return {
     stats,
@@ -1879,7 +3665,13 @@ async function fetchSkillDetail(
 async function fetchCommitDetails(
   range: TimeRange,
   options?: number | CommitDetailsOptions
-): Promise<{ total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }> {
+): Promise<{
+  total: number
+  page: number
+  pageSize: number
+  pushedOnly: boolean
+  items: DashboardCommitDetail[]
+}> {
   const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
   const filters: Record<string, unknown>[] = [
     timeRangeFilter("eventTime", range),
@@ -1927,7 +3719,7 @@ async function fetchCommitDetails(
       ]
     }
   }
-  const raw = await esQuery(getEsIndex("event"), body) as EsSearchResponse
+  const raw = (await esQuery(getEsIndex("event"), body)) as EsSearchResponse
   const hits = raw.hits?.hits ?? []
   const items = hits.map(normalizeCommitDetail)
   const adoptedSkillMap = await fetchCommitAdoptedSkillMap(
@@ -1939,7 +3731,7 @@ async function fetchCommitDetails(
     pageSize,
     pushedOnly,
     items: items.map((item) => {
-      const adoptedSkills = item.commitSha ? adoptedSkillMap.get(item.commitSha) ?? [] : []
+      const adoptedSkills = item.commitSha ? (adoptedSkillMap.get(item.commitSha) ?? []) : []
       return {
         ...item,
         usedSkills: adoptedSkills,
@@ -2017,57 +3809,57 @@ function makeMockOverview(range: TimeRange): unknown {
       code_pushed_commit_count: { value: 21 },
       by_skill: {
         buckets: [
-          { key: "代码审查",     doc_count: 312 },
-          { key: "需求分析",     doc_count: 278 },
-          { key: "文档生成",     doc_count: 245 },
-          { key: "单元测试",     doc_count: 198 },
-          { key: "SQL优化",      doc_count: 167 },
+          { key: "代码审查", doc_count: 312 },
+          { key: "需求分析", doc_count: 278 },
+          { key: "文档生成", doc_count: 245 },
+          { key: "单元测试", doc_count: 198 },
+          { key: "SQL优化", doc_count: 167 },
           { key: "plugin-release-note-v1.0.0", doc_count: 156 },
-          { key: "接口设计",     doc_count: 143 },
-          { key: "日志分析",     doc_count: 121 },
-          { key: "数据清洗",     doc_count: 98  },
-          { key: "性能诊断",     doc_count: 87  },
-          { key: "安全扫描",     doc_count: 62  },
-          { key: "代码重构",     doc_count: 54  },
-          { key: "异常排查",     doc_count: 49  },
-          { key: "接口联调",     doc_count: 44  },
-          { key: "依赖升级",     doc_count: 38  },
-          { key: "配置检查",     doc_count: 33  },
-          { key: "发布诊断",     doc_count: 29  },
-          { key: "性能优化",     doc_count: 24  },
-          { key: "埋点分析",     doc_count: 18  },
-          { key: "前端走查",     doc_count: 13  },
-          { key: "脚本生成",     doc_count: 9   }
+          { key: "接口设计", doc_count: 143 },
+          { key: "日志分析", doc_count: 121 },
+          { key: "数据清洗", doc_count: 98 },
+          { key: "性能诊断", doc_count: 87 },
+          { key: "安全扫描", doc_count: 62 },
+          { key: "代码重构", doc_count: 54 },
+          { key: "异常排查", doc_count: 49 },
+          { key: "接口联调", doc_count: 44 },
+          { key: "依赖升级", doc_count: 38 },
+          { key: "配置检查", doc_count: 33 },
+          { key: "发布诊断", doc_count: 29 },
+          { key: "性能优化", doc_count: 24 },
+          { key: "埋点分析", doc_count: 18 },
+          { key: "前端走查", doc_count: 13 },
+          { key: "脚本生成", doc_count: 9 }
         ]
       },
       by_skill_all: {
         buckets: [
-          { key: "代码审查",     doc_count: 312 },
-          { key: "需求分析",     doc_count: 278 },
-          { key: "文档生成",     doc_count: 245 },
-          { key: "单元测试",     doc_count: 198 },
-          { key: "SQL优化",      doc_count: 167 },
+          { key: "代码审查", doc_count: 312 },
+          { key: "需求分析", doc_count: 278 },
+          { key: "文档生成", doc_count: 245 },
+          { key: "单元测试", doc_count: 198 },
+          { key: "SQL优化", doc_count: 167 },
           { key: "plugin-release-note-v1.0.0", doc_count: 156 },
-          { key: "接口设计",     doc_count: 143 },
-          { key: "日志分析",     doc_count: 121 },
-          { key: "数据清洗",     doc_count: 98  },
-          { key: "性能诊断",     doc_count: 87  },
-          { key: "安全扫描",     doc_count: 62  },
-          { key: "代码重构",     doc_count: 54  },
-          { key: "异常排查",     doc_count: 49  },
-          { key: "接口联调",     doc_count: 44  },
-          { key: "依赖升级",     doc_count: 38  },
-          { key: "配置检查",     doc_count: 33  },
-          { key: "发布诊断",     doc_count: 29  },
-          { key: "性能优化",     doc_count: 24  },
-          { key: "埋点分析",     doc_count: 18  },
-          { key: "前端走查",     doc_count: 13  },
-          { key: "脚本生成",     doc_count: 9   },
-          { key: "冒烟测试",     doc_count: 8   },
-          { key: "链路排查",     doc_count: 7   },
-          { key: "Schema 校验",  doc_count: 6   },
-          { key: "接口 Mock",    doc_count: 5   },
-          { key: "灰度检查",     doc_count: 4   }
+          { key: "接口设计", doc_count: 143 },
+          { key: "日志分析", doc_count: 121 },
+          { key: "数据清洗", doc_count: 98 },
+          { key: "性能诊断", doc_count: 87 },
+          { key: "安全扫描", doc_count: 62 },
+          { key: "代码重构", doc_count: 54 },
+          { key: "异常排查", doc_count: 49 },
+          { key: "接口联调", doc_count: 44 },
+          { key: "依赖升级", doc_count: 38 },
+          { key: "配置检查", doc_count: 33 },
+          { key: "发布诊断", doc_count: 29 },
+          { key: "性能优化", doc_count: 24 },
+          { key: "埋点分析", doc_count: 18 },
+          { key: "前端走查", doc_count: 13 },
+          { key: "脚本生成", doc_count: 9 },
+          { key: "冒烟测试", doc_count: 8 },
+          { key: "链路排查", doc_count: 7 },
+          { key: "Schema 校验", doc_count: 6 },
+          { key: "接口 Mock", doc_count: 5 },
+          { key: "灰度检查", doc_count: 4 }
         ]
       },
       code_by_skill_adoption: {
@@ -2161,106 +3953,106 @@ function makeMockOverview(range: TimeRange): unknown {
       },
       by_tool: {
         buckets: [
-          { key: "git_workflow",       doc_count: 412 },
+          { key: "git_workflow", doc_count: 412 },
           { key: "browser_playwright", doc_count: 356 },
-          { key: "manage_skill",       doc_count: 298 },
-          { key: "manage_scheduler",   doc_count: 241 },
-          { key: "web_search",         doc_count: 198 },
-          { key: "db_query",           doc_count: 163 },
-          { key: "create_pr",          doc_count: 134 },
-          { key: "run_tests",          doc_count: 112 },
-          { key: "search_code",        doc_count: 98  },
-          { key: "notify",             doc_count: 76  },
-          { key: "query_logs",         doc_count: 68  },
-          { key: "schema_check",       doc_count: 59  },
-          { key: "open_preview",       doc_count: 53  },
-          { key: "analyze_diff",       doc_count: 47  },
-          { key: "format_code",        doc_count: 42  },
-          { key: "lint_fix",           doc_count: 36  },
-          { key: "dependency_audit",   doc_count: 31  },
-          { key: "deploy_check",       doc_count: 26  },
-          { key: "trace_lookup",       doc_count: 19  },
-          { key: "ticket_update",      doc_count: 12  }
+          { key: "manage_skill", doc_count: 298 },
+          { key: "manage_scheduler", doc_count: 241 },
+          { key: "web_search", doc_count: 198 },
+          { key: "db_query", doc_count: 163 },
+          { key: "create_pr", doc_count: 134 },
+          { key: "run_tests", doc_count: 112 },
+          { key: "search_code", doc_count: 98 },
+          { key: "notify", doc_count: 76 },
+          { key: "query_logs", doc_count: 68 },
+          { key: "schema_check", doc_count: 59 },
+          { key: "open_preview", doc_count: 53 },
+          { key: "analyze_diff", doc_count: 47 },
+          { key: "format_code", doc_count: 42 },
+          { key: "lint_fix", doc_count: 36 },
+          { key: "dependency_audit", doc_count: 31 },
+          { key: "deploy_check", doc_count: 26 },
+          { key: "trace_lookup", doc_count: 19 },
+          { key: "ticket_update", doc_count: 12 }
         ]
       },
       by_tool_filtered_all: {
         buckets: [
-          { key: "git_workflow",       doc_count: 412 },
+          { key: "git_workflow", doc_count: 412 },
           { key: "browser_playwright", doc_count: 356 },
-          { key: "manage_skill",       doc_count: 298 },
-          { key: "manage_scheduler",   doc_count: 241 },
-          { key: "web_search",         doc_count: 198 },
-          { key: "db_query",           doc_count: 163 },
-          { key: "create_pr",          doc_count: 134 },
-          { key: "run_tests",          doc_count: 112 },
-          { key: "search_code",        doc_count: 98  },
-          { key: "notify",             doc_count: 76  },
-          { key: "query_logs",         doc_count: 68  },
-          { key: "schema_check",       doc_count: 59  },
-          { key: "open_preview",       doc_count: 53  },
-          { key: "analyze_diff",       doc_count: 47  },
-          { key: "format_code",        doc_count: 42  },
-          { key: "lint_fix",           doc_count: 36  },
-          { key: "dependency_audit",   doc_count: 31  },
-          { key: "deploy_check",       doc_count: 26  },
-          { key: "trace_lookup",       doc_count: 19  },
-          { key: "ticket_update",      doc_count: 12  },
-          { key: "mcp_sqlQuery",       doc_count: 11  },
-          { key: "browser_visualDiff", doc_count: 9   },
-          { key: "workflow_template",  doc_count: 7   }
+          { key: "manage_skill", doc_count: 298 },
+          { key: "manage_scheduler", doc_count: 241 },
+          { key: "web_search", doc_count: 198 },
+          { key: "db_query", doc_count: 163 },
+          { key: "create_pr", doc_count: 134 },
+          { key: "run_tests", doc_count: 112 },
+          { key: "search_code", doc_count: 98 },
+          { key: "notify", doc_count: 76 },
+          { key: "query_logs", doc_count: 68 },
+          { key: "schema_check", doc_count: 59 },
+          { key: "open_preview", doc_count: 53 },
+          { key: "analyze_diff", doc_count: 47 },
+          { key: "format_code", doc_count: 42 },
+          { key: "lint_fix", doc_count: 36 },
+          { key: "dependency_audit", doc_count: 31 },
+          { key: "deploy_check", doc_count: 26 },
+          { key: "trace_lookup", doc_count: 19 },
+          { key: "ticket_update", doc_count: 12 },
+          { key: "mcp_sqlQuery", doc_count: 11 },
+          { key: "browser_visualDiff", doc_count: 9 },
+          { key: "workflow_template", doc_count: 7 }
         ]
       },
       by_tool_all: {
         buckets: [
-          { key: "read_file",          doc_count: 1823 },
-          { key: "write_file",         doc_count: 1245 },
-          { key: "execute",            doc_count: 987  },
-          { key: "grep",               doc_count: 876  },
-          { key: "glob",               doc_count: 654  },
-          { key: "git_workflow",       doc_count: 412  },
-          { key: "browser_playwright", doc_count: 356  },
-          { key: "manage_skill",       doc_count: 298  },
-          { key: "edit_file",          doc_count: 267  },
-          { key: "manage_scheduler",   doc_count: 241  },
-          { key: "web_search",         doc_count: 198  },
-          { key: "list_directory",     doc_count: 187  },
-          { key: "db_query",           doc_count: 163  },
-          { key: "task",               doc_count: 156  },
-          { key: "task_output",        doc_count: 148  },
-          { key: "create_pr",          doc_count: 134  },
-          { key: "search_tool",        doc_count: 128  },
-          { key: "run_tests",          doc_count: 112  },
-          { key: "search_code",        doc_count: 98   },
-          { key: "code_exec",          doc_count: 92   }
+          { key: "read_file", doc_count: 1823 },
+          { key: "write_file", doc_count: 1245 },
+          { key: "execute", doc_count: 987 },
+          { key: "grep", doc_count: 876 },
+          { key: "glob", doc_count: 654 },
+          { key: "git_workflow", doc_count: 412 },
+          { key: "browser_playwright", doc_count: 356 },
+          { key: "manage_skill", doc_count: 298 },
+          { key: "edit_file", doc_count: 267 },
+          { key: "manage_scheduler", doc_count: 241 },
+          { key: "web_search", doc_count: 198 },
+          { key: "list_directory", doc_count: 187 },
+          { key: "db_query", doc_count: 163 },
+          { key: "task", doc_count: 156 },
+          { key: "task_output", doc_count: 148 },
+          { key: "create_pr", doc_count: 134 },
+          { key: "search_tool", doc_count: 128 },
+          { key: "run_tests", doc_count: 112 },
+          { key: "search_code", doc_count: 98 },
+          { key: "code_exec", doc_count: 92 }
         ]
       },
       by_tool_all_full: {
         buckets: [
-          { key: "read_file",                  doc_count: 1823 },
-          { key: "write_file",                 doc_count: 1245 },
-          { key: "execute",                    doc_count: 987  },
-          { key: "grep",                       doc_count: 876  },
-          { key: "glob",                       doc_count: 654  },
-          { key: "git_workflow",               doc_count: 412  },
-          { key: "browser_playwright",         doc_count: 356  },
-          { key: "manage_skill",               doc_count: 298  },
-          { key: "edit_file",                  doc_count: 267  },
-          { key: "manage_scheduler",           doc_count: 241  },
-          { key: "web_search",                 doc_count: 198  },
-          { key: "list_directory",             doc_count: 187  },
-          { key: "db_query",                   doc_count: 163  },
-          { key: "task",                       doc_count: 156  },
-          { key: "task_output",                doc_count: 148  },
-          { key: "create_pr",                  doc_count: 134  },
-          { key: "search_tool",                doc_count: 128  },
-          { key: "run_tests",                  doc_count: 112  },
-          { key: "search_code",                doc_count: 98   },
-          { key: "code_exec",                  doc_count: 92   },
-          { key: "prepare_save_code_exec_tool",doc_count: 81   },
-          { key: "notify",                     doc_count: 76   },
-          { key: "query_logs",                 doc_count: 68   },
-          { key: "schema_check",               doc_count: 59   },
-          { key: "open_preview",               doc_count: 53   }
+          { key: "read_file", doc_count: 1823 },
+          { key: "write_file", doc_count: 1245 },
+          { key: "execute", doc_count: 987 },
+          { key: "grep", doc_count: 876 },
+          { key: "glob", doc_count: 654 },
+          { key: "git_workflow", doc_count: 412 },
+          { key: "browser_playwright", doc_count: 356 },
+          { key: "manage_skill", doc_count: 298 },
+          { key: "edit_file", doc_count: 267 },
+          { key: "manage_scheduler", doc_count: 241 },
+          { key: "web_search", doc_count: 198 },
+          { key: "list_directory", doc_count: 187 },
+          { key: "db_query", doc_count: 163 },
+          { key: "task", doc_count: 156 },
+          { key: "task_output", doc_count: 148 },
+          { key: "create_pr", doc_count: 134 },
+          { key: "search_tool", doc_count: 128 },
+          { key: "run_tests", doc_count: 112 },
+          { key: "search_code", doc_count: 98 },
+          { key: "code_exec", doc_count: 92 },
+          { key: "prepare_save_code_exec_tool", doc_count: 81 },
+          { key: "notify", doc_count: 76 },
+          { key: "query_logs", doc_count: 68 },
+          { key: "schema_check", doc_count: 59 },
+          { key: "open_preview", doc_count: 53 }
         ]
       },
       trend: { buckets: trend }
@@ -2273,23 +4065,44 @@ function makeMockModelStats(): unknown {
     aggregations: {
       by_model: {
         buckets: [
-          { key: "claude-sonnet-4-6", doc_count: 620, success_count: { doc_count: 578 }, avg_duration: { value: 3800 }, total_input_tokens: { value: 1_200_000 }, total_output_tokens: { value: 430_000 } },
-          { key: "claude-opus-4-6",   doc_count: 280, success_count: { doc_count: 265 }, avg_duration: { value: 8200 }, total_input_tokens: { value: 780_000 },  total_output_tokens: { value: 310_000 } },
-          { key: "claude-haiku-4-5",  doc_count: 347, success_count: { doc_count: 259 }, avg_duration: { value: 1100 }, total_input_tokens: { value: 360_000 },  total_output_tokens: { value: 150_000 } }
+          {
+            key: "claude-sonnet-4-6",
+            doc_count: 620,
+            success_count: { doc_count: 578 },
+            avg_duration: { value: 3800 },
+            total_input_tokens: { value: 1_200_000 },
+            total_output_tokens: { value: 430_000 }
+          },
+          {
+            key: "claude-opus-4-6",
+            doc_count: 280,
+            success_count: { doc_count: 265 },
+            avg_duration: { value: 8200 },
+            total_input_tokens: { value: 780_000 },
+            total_output_tokens: { value: 310_000 }
+          },
+          {
+            key: "claude-haiku-4-5",
+            doc_count: 347,
+            success_count: { doc_count: 259 },
+            avg_duration: { value: 1100 },
+            total_input_tokens: { value: 360_000 },
+            total_output_tokens: { value: 150_000 }
+          }
         ]
       },
       by_tier: {
         buckets: [
-          { key: "high",   doc_count: 280 },
+          { key: "high", doc_count: 280 },
           { key: "medium", doc_count: 620 },
-          { key: "low",    doc_count: 347 }
+          { key: "low", doc_count: 347 }
         ]
       },
       by_layer: {
         buckets: [
-          { key: "user_explicit",   doc_count: 210 },
-          { key: "skill_override",  doc_count: 390 },
-          { key: "auto_routing",    doc_count: 647 }
+          { key: "user_explicit", doc_count: 210 },
+          { key: "skill_override", doc_count: 390 },
+          { key: "auto_routing", doc_count: 647 }
         ]
       }
     }
@@ -2305,11 +4118,15 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
 
   const trendBuckets: Date[] = []
   if (diffDays <= 1) {
-    const start = new Date(from); start.setMinutes(0, 0, 0)
-    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 60 * 60 * 1000)) trendBuckets.push(new Date(t))
+    const start = new Date(from)
+    start.setMinutes(0, 0, 0)
+    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 60 * 60 * 1000))
+      trendBuckets.push(new Date(t))
   } else {
-    const start = new Date(from); start.setHours(0, 0, 0, 0)
-    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 24 * 60 * 60 * 1000)) trendBuckets.push(new Date(t))
+    const start = new Date(from)
+    start.setHours(0, 0, 0, 0)
+    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 24 * 60 * 60 * 1000))
+      trendBuckets.push(new Date(t))
   }
 
   const trend = trendBuckets.map((t) => ({
@@ -2319,26 +4136,23 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
     users: { value: Math.floor(3 + Math.random() * 15) }
   }))
 
-  const byOrgBuckets = selectedUpperOrgLv1 === null
-    ? [
-        { key: "测试 1 部", doc_count: 748, unique_users: { value: 60 } },
-        { key: "开发二部", doc_count: 245, unique_users: { value: 20 } },
-        { key: "平台三部", doc_count: 189, unique_users: { value: 15 } }
-      ]
-    : selectedUpperOrgLv1 === "测试 1 部"
+  const byOrgBuckets =
+    selectedUpperOrgLv1 === null
       ? [
-          { key: "测试 1 组", doc_count: 430, unique_users: { value: 36 } },
-          { key: "测试 2 组", doc_count: 318, unique_users: { value: 24 } }
+          { key: "测试 1 部", doc_count: 748, unique_users: { value: 60 } },
+          { key: "开发二部", doc_count: 245, unique_users: { value: 20 } },
+          { key: "平台三部", doc_count: 189, unique_users: { value: 15 } }
         ]
-      : selectedUpperOrgLv1 === "开发二部"
+      : selectedUpperOrgLv1 === "测试 1 部"
         ? [
-            { key: "开发三组", doc_count: 245, unique_users: { value: 20 } }
+            { key: "测试 1 组", doc_count: 430, unique_users: { value: 36 } },
+            { key: "测试 2 组", doc_count: 318, unique_users: { value: 24 } }
           ]
-        : selectedUpperOrgLv1 === "平台三部"
-          ? [
-              { key: "平台一组", doc_count: 189, unique_users: { value: 15 } }
-            ]
-          : []
+        : selectedUpperOrgLv1 === "开发二部"
+          ? [{ key: "开发三组", doc_count: 245, unique_users: { value: 20 } }]
+          : selectedUpperOrgLv1 === "平台三部"
+            ? [{ key: "平台一组", doc_count: 189, unique_users: { value: 15 } }]
+            : []
 
   const makeOrgAgg = (buckets: typeof byOrgBuckets): Record<string, unknown> => {
     const docCount = buckets.reduce((sum, bucket) => sum + bucket.doc_count, 0)
@@ -2348,29 +4162,159 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
   const byOrgUv = makeOrgAgg(byOrgBuckets)
 
   const allTopUserBuckets = [
-    { key: "10010001", doc_count: 142, latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "张三", orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组", appVersion: "1.3.0" } }] } } },
-    { key: "10010002", doc_count: 118, latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "李四", orgName: "测试 2 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 2 组", appVersion: "1.2.5" } }] } } },
-    { key: "10010003", doc_count: 97,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "王五", orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组", appVersion: "1.3.0" } }] } } },
-    { key: "10010004", doc_count: 85,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "赵六", orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组", appVersion: "1.2.0" } }] } } },
-    { key: "10010005", doc_count: 73,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "钱七", orgName: "平台一组", upperOrgLv1: "平台三部", upperOrgLv0: "平台一组", appVersion: "1.3.0" } }] } } },
-    { key: "10010006", doc_count: 61,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "孙八", orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组", appVersion: "1.1.8" } }] } } }
+    {
+      key: "10010001",
+      doc_count: 142,
+      latest_user_info: {
+        hits: {
+          hits: [
+            {
+              sort: ["2026-04-21T10:00:00.000Z"],
+              _source: {
+                userName: "张三",
+                orgName: "测试 1 组",
+                upperOrgLv1: "测试 1 部",
+                upperOrgLv0: "测试 1 组",
+                appVersion: "1.3.0"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      key: "10010002",
+      doc_count: 118,
+      latest_user_info: {
+        hits: {
+          hits: [
+            {
+              sort: ["2026-04-21T10:00:00.000Z"],
+              _source: {
+                userName: "李四",
+                orgName: "测试 2 组",
+                upperOrgLv1: "测试 1 部",
+                upperOrgLv0: "测试 2 组",
+                appVersion: "1.2.5"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      key: "10010003",
+      doc_count: 97,
+      latest_user_info: {
+        hits: {
+          hits: [
+            {
+              sort: ["2026-04-21T10:00:00.000Z"],
+              _source: {
+                userName: "王五",
+                orgName: "开发三组",
+                upperOrgLv1: "开发二部",
+                upperOrgLv0: "开发三组",
+                appVersion: "1.3.0"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      key: "10010004",
+      doc_count: 85,
+      latest_user_info: {
+        hits: {
+          hits: [
+            {
+              sort: ["2026-04-21T10:00:00.000Z"],
+              _source: {
+                userName: "赵六",
+                orgName: "测试 1 组",
+                upperOrgLv1: "测试 1 部",
+                upperOrgLv0: "测试 1 组",
+                appVersion: "1.2.0"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      key: "10010005",
+      doc_count: 73,
+      latest_user_info: {
+        hits: {
+          hits: [
+            {
+              sort: ["2026-04-21T10:00:00.000Z"],
+              _source: {
+                userName: "钱七",
+                orgName: "平台一组",
+                upperOrgLv1: "平台三部",
+                upperOrgLv0: "平台一组",
+                appVersion: "1.3.0"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      key: "10010006",
+      doc_count: 61,
+      latest_user_info: {
+        hits: {
+          hits: [
+            {
+              sort: ["2026-04-21T10:00:00.000Z"],
+              _source: {
+                userName: "孙八",
+                orgName: "开发三组",
+                upperOrgLv1: "开发二部",
+                upperOrgLv0: "开发三组",
+                appVersion: "1.1.8"
+              }
+            }
+          ]
+        }
+      }
+    }
   ]
-  const topUserBuckets = selectedUpperOrgLv1 === null
-    ? allTopUserBuckets
-    : allTopUserBuckets.filter((bucket) => bucket.latest_user_info.hits.hits[0]._source.upperOrgLv1 === selectedUpperOrgLv1)
+  const topUserBuckets =
+    selectedUpperOrgLv1 === null
+      ? allTopUserBuckets
+      : allTopUserBuckets.filter(
+          (bucket) =>
+            bucket.latest_user_info.hits.hits[0]._source.upperOrgLv1 === selectedUpperOrgLv1
+        )
 
-  const byVersionBuckets = selectedUpperOrgLv1 === null
-    ? [
-        { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
-        { key: "1.2.5", doc_count: 298, unique_users: { value: 62 } },
-        { key: "1.2.0", doc_count: 187, unique_users: { value: 41 } },
-        { key: "1.1.x", doc_count: 143, unique_users: { value: 28 } },
-        { key: "1.0.x", doc_count: 107, unique_users: { value: 19 } }
-      ]
-    : [
-        { key: "1.3.0", doc_count: Math.max(12, byOrgBuckets[0]?.doc_count ?? 0), unique_users: { value: Math.max(3, topUserBuckets.length) } },
-        { key: "1.2.5", doc_count: Math.max(6, Math.floor((byOrgBuckets[1]?.doc_count ?? byOrgBuckets[0]?.doc_count ?? 0) * 0.4)), unique_users: { value: Math.max(1, Math.ceil(topUserBuckets.length / 2)) } }
-      ]
+  const byVersionBuckets =
+    selectedUpperOrgLv1 === null
+      ? [
+          { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
+          { key: "1.2.5", doc_count: 298, unique_users: { value: 62 } },
+          { key: "1.2.0", doc_count: 187, unique_users: { value: 41 } },
+          { key: "1.1.x", doc_count: 143, unique_users: { value: 28 } },
+          { key: "1.0.x", doc_count: 107, unique_users: { value: 19 } }
+        ]
+      : [
+          {
+            key: "1.3.0",
+            doc_count: Math.max(12, byOrgBuckets[0]?.doc_count ?? 0),
+            unique_users: { value: Math.max(3, topUserBuckets.length) }
+          },
+          {
+            key: "1.2.5",
+            doc_count: Math.max(
+              6,
+              Math.floor((byOrgBuckets[1]?.doc_count ?? byOrgBuckets[0]?.doc_count ?? 0) * 0.4)
+            ),
+            unique_users: { value: Math.max(1, Math.ceil(topUserBuckets.length / 2)) }
+          }
+        ]
 
   return {
     aggregations: {
@@ -2404,6 +4348,144 @@ function makeMockSkillUsageSummary(range: TimeRange): unknown {
   }
 }
 
+function makeMockSkillEvalSummary(
+  range: TimeRange,
+  options?: DashboardSkillEvalOptions
+): DashboardSkillEvalSummary {
+  const {
+    sampleLimit,
+    recentPage,
+    recentPageSize,
+    skillPage,
+    skillPageSize,
+    skillSearch,
+    skillName,
+    skillVersion,
+    skillNames,
+    skillNamesProvided,
+    defaultRecentToLatestSkill,
+    listOnly,
+    statsOnly
+  } = normalizeSkillEvalOptions(options)
+  const skills = ["代码审查-v1.0.0", "单元测试-v1.1.0", "SQL优化-v2.0.0", "前端走查-v1.3.0"]
+  const filteredSkills = skillName
+    ? skills.filter((skill) => {
+        const parsed = parseMockSkillIdentifier(skill)
+        return (
+          parsed.skillName === skillName &&
+          (skillVersion ? parsed.skillVersion === skillVersion : true)
+        )
+      })
+    : skillNames.length > 0
+      ? skills.filter((skill) => skillNames.includes(parseMockSkillIdentifier(skill).skillName))
+      : skillNamesProvided
+        ? []
+        : skills
+
+  const traces = filteredSkills.flatMap((skill) =>
+    Array.from({ length: 8 }, (_, index) => makeMockAgentTrace(skill, range, index))
+  )
+  const records = traces.flatMap((trace) => trace.skillEval?.records ?? [])
+  const traceDetails = new Map(
+    traces.map((trace) => [trace.traceId, traceToDashboardTraceDetail(trace)] as const)
+  )
+  const allowedSkillNames = skillNames.length > 0 ? new Set(skillNames) : undefined
+  const explicitFilter: SkillEvalExactFilter | undefined = skillName
+    ? { skillName, skillVersion }
+    : undefined
+  const namesFilter: SkillEvalNamesFilter | undefined =
+    skillNames.length > 0 ? { skillNames } : undefined
+  const baseFilter = explicitFilter ?? namesFilter
+  const allRuns = skillEvalStoredRecordsToDashboardRuns(
+    records,
+    traceDetails,
+    baseFilter,
+    allowedSkillNames
+  )
+    .filter((run) => matchesSkillSearch(run.skillName, skillSearch))
+    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
+
+  const allSkillList = buildSkillEvalSummaryFromRuns({
+    sampleRuns: allRuns,
+    recentRuns: [],
+    totalTraceHits: allRuns.length,
+    sampledTraceCount: allRuns.length,
+    recentTotal: 0,
+    recentPage,
+    recentPageSize,
+    skillPage,
+    skillPageSize,
+    allowedSkillNames
+  }).skills
+  const skillFrom = (skillPage - 1) * skillPageSize
+  const skillList = {
+    skills: allSkillList.slice(skillFrom, skillFrom + skillPageSize),
+    totalTraceHits: allRuns.length,
+    totalSkills: allSkillList.length
+  }
+  if (listOnly) {
+    return buildSkillEvalListOnlySummary({
+      skillList,
+      recentPage,
+      recentPageSize,
+      skillPage,
+      skillPageSize
+    })
+  }
+
+  const latestFilter =
+    !explicitFilter && defaultRecentToLatestSkill
+      ? getFirstSkillFilterFromSummaries(skillList.skills)
+      : undefined
+  const recentFilter = explicitFilter ?? latestFilter
+  const filteredRuns = filterSkillEvalRunsByFilter(allRuns, recentFilter)
+  const sampleRuns = filteredRuns.slice(0, sampleLimit)
+  const recentFrom = (recentPage - 1) * recentPageSize
+  const recentRuns = statsOnly ? [] : filteredRuns.slice(recentFrom, recentFrom + recentPageSize)
+  const summary = buildSkillEvalSummaryFromRuns({
+    sampleRuns,
+    recentRuns,
+    totalTraceHits: filteredRuns.length,
+    sampledTraceCount: sampleRuns.length,
+    recentTotal: statsOnly ? 0 : filteredRuns.length,
+    recentPage,
+    recentPageSize,
+    skillPage,
+    skillPageSize,
+    ...(recentFilter ? { recentSkillFilter: recentFilter } : {}),
+    allowedSkillNames,
+    ...(!explicitFilter ? { skillList: skillList.skills } : {})
+  })
+
+  return !explicitFilter
+    ? {
+        ...summary,
+        totalTraceHits: skillList.totalTraceHits,
+        totalSkills: skillList.totalSkills
+      }
+    : summary
+}
+
+function filterSkillEvalRunsByFilter(
+  runs: DashboardSkillEvalRun[],
+  filter?: SkillEvalFilter
+): DashboardSkillEvalRun[] {
+  if (isSkillEvalExactFilter(filter)) {
+    return runs.filter((run) => isSameSkillVersion(run, filter))
+  }
+  if (filter?.skillNames && filter.skillNames.length > 0) {
+    const allowed = new Set(filter.skillNames)
+    return runs.filter((run) => allowed.has(normalizeSkillQueryName(run.skillName)))
+  }
+  return runs
+}
+
+function parseMockSkillIdentifier(skill: string): { skillName: string; skillVersion?: string } {
+  const match = skill.match(/^(.*?)-(v\d+(?:\.\d+){0,3})$/)
+  if (!match) return { skillName: skill }
+  return { skillName: match[1], skillVersion: match[2] }
+}
+
 function makeMockSkillUserStats(range: TimeRange, skillName: string): unknown {
   const userStats = makeMockUserStats(range) as {
     aggregations?: {
@@ -2418,9 +4500,7 @@ function makeMockSkillUserStats(range: TimeRange, skillName: string): unknown {
     }
   }
   const topUsers = userStats.aggregations?.top_users?.buckets ?? []
-  const offset = Math.abs(
-    Array.from(skillName).reduce((acc, ch) => acc + ch.charCodeAt(0), 0)
-  ) % 7
+  const offset = Math.abs(Array.from(skillName).reduce((acc, ch) => acc + ch.charCodeAt(0), 0)) % 7
   const picked = topUsers.slice(0, Math.max(3, 6 - offset))
   const totalCalls = picked.reduce((sum, item) => sum + item.doc_count, 0)
   // 模拟环境下给出一个小比例空用户调用，便于前端联调空用户行展示。
@@ -2481,35 +4561,31 @@ function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
     })
   )
 
-  const buckets = Array.from(
-    new Set(
-      sapIds
-        .map((id) => id.trim())
-        .filter(Boolean)
-    )
-  ).map((sapId) => {
-    const fallback = fallbackMap.get(sapId)
-    return {
-      key: sapId,
-      doc_count: 1,
-      latest_user_info: {
-        hits: {
-          hits: [
-            {
-              _source: {
-                userName: fallback?.userName ?? `用户${sapId.slice(-4)}`,
-                orgName: fallback?.orgName ?? "未知部门",
-                upperOrgLv0: fallback?.upperOrgLv0 ?? "",
-                upperOrgLv1: fallback?.upperOrgLv1 ?? ""
+  const buckets = Array.from(new Set(sapIds.map((id) => id.trim()).filter(Boolean))).map(
+    (sapId) => {
+      const fallback = fallbackMap.get(sapId)
+      return {
+        key: sapId,
+        doc_count: 1,
+        latest_user_info: {
+          hits: {
+            hits: [
+              {
+                _source: {
+                  userName: fallback?.userName ?? `用户${sapId.slice(-4)}`,
+                  orgName: fallback?.orgName ?? "未知部门",
+                  upperOrgLv0: fallback?.upperOrgLv0 ?? "",
+                  upperOrgLv1: fallback?.upperOrgLv1 ?? ""
+                }
               }
-            }
-          ]
-        }
-      },
-      user_name: { buckets: [{ key: fallback?.userName ?? `用户${sapId.slice(-4)}` }] },
-      org_name: { buckets: [{ key: fallback?.orgName ?? "未知部门" }] }
+            ]
+          }
+        },
+        user_name: { buckets: [{ key: fallback?.userName ?? `用户${sapId.slice(-4)}` }] },
+        org_name: { buckets: [{ key: fallback?.orgName ?? "未知部门" }] }
+      }
     }
-  })
+  )
 
   return {
     aggregations: {
@@ -2561,19 +4637,24 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
 function makeMockUserList(_range: TimeRange, options?: UserListOptions): DashboardUserListData {
   const { pageSize, afterKey, keyword } = normalizeUserListOptions(options)
   const normalizedKeyword = keyword.toLowerCase()
-  const allUsers = Array.from({ length: 64 }, (_, index) => makeMockDashboardUser(index)).filter((user) => {
-    if (!normalizedKeyword) return true
-    return [user.userName, user.ystId, user.sapId].some((value) =>
-      String(value || "").toLowerCase().includes(normalizedKeyword)
-    )
-  })
+  const allUsers = Array.from({ length: 64 }, (_, index) => makeMockDashboardUser(index)).filter(
+    (user) => {
+      if (!normalizedKeyword) return true
+      return [user.userName, user.ystId, user.sapId].some((value) =>
+        String(value || "")
+          .toLowerCase()
+          .includes(normalizedKeyword)
+      )
+    }
+  )
   const afterOffset = Number(afterKey?.offset ?? 0)
   const afterSapId = typeof afterKey?.sap_id === "string" ? afterKey.sap_id : ""
-  const startIndex = Number.isFinite(afterOffset) && afterOffset > 0
-    ? Math.floor(afterOffset)
-    : afterSapId
-    ? Math.max(0, allUsers.findIndex((item) => item.sapId === afterSapId) + 1)
-    : 0
+  const startIndex =
+    Number.isFinite(afterOffset) && afterOffset > 0
+      ? Math.floor(afterOffset)
+      : afterSapId
+        ? Math.max(0, allUsers.findIndex((item) => item.sapId === afterSapId) + 1)
+        : 0
   const items = allUsers.slice(startIndex, startIndex + pageSize)
   const hasNext = startIndex + pageSize < allUsers.length
   return {
@@ -2584,14 +4665,18 @@ function makeMockUserList(_range: TimeRange, options?: UserListOptions): Dashboa
   }
 }
 
-function makeMockUserDetail(sapId: string, range: TimeRange, options?: UserDetailOptions): DashboardUserDetail {
+function makeMockUserDetail(
+  sapId: string,
+  range: TimeRange,
+  options?: UserDetailOptions
+): DashboardUserDetail {
   const index = Math.max(0, Number(sapId.slice(-3)) - 1)
   const user = makeMockDashboardUser(Number.isFinite(index) ? index : 0)
   const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
   const tracePage = clampLimit(options?.tracePage, 1, 1000)
   const totalTraces = user.count
   const startIndex = (tracePage - 1) * tracePageSize
-  const baseTraces = makeMockSkillRecentTraces("代码审查", range, 10)
+  const baseTraces = makeMockSkillRecentTraces("代码审查", range, 10).traces
   const traces = Array.from(
     { length: Math.max(0, Math.min(tracePageSize, totalTraces - startIndex)) },
     (_, traceIndex) => {
@@ -2652,11 +4737,15 @@ function makeMockProductivity(range: TimeRange): unknown {
 
   const trendBuckets: Date[] = []
   if (diffDays <= 1) {
-    const start = new Date(from); start.setMinutes(0, 0, 0)
-    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 60 * 60 * 1000)) trendBuckets.push(new Date(t))
+    const start = new Date(from)
+    start.setMinutes(0, 0, 0)
+    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 60 * 60 * 1000))
+      trendBuckets.push(new Date(t))
   } else {
-    const start = new Date(from); start.setHours(0, 0, 0, 0)
-    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 24 * 60 * 60 * 1000)) trendBuckets.push(new Date(t))
+    const start = new Date(from)
+    start.setHours(0, 0, 0, 0)
+    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 24 * 60 * 60 * 1000))
+      trendBuckets.push(new Date(t))
   }
 
   const trend = trendBuckets.map((t) => ({
@@ -2668,11 +4757,11 @@ function makeMockProductivity(range: TimeRange): unknown {
   return {
     aggregations: {
       commit_trend: { buckets: trend },
-      total_insertions:   { value: 14820 },
-      total_deletions:    { value: 6430 },
-      total_files_changed:{ value: 892 },
-      total_commits:      { value: 187 },
-      active_users:       { value: 24 }
+      total_insertions: { value: 14820 },
+      total_deletions: { value: 6430 },
+      total_files_changed: { value: 892 },
+      total_commits: { value: 187 },
+      active_users: { value: 24 }
     }
   }
 }
@@ -2795,8 +4884,44 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
   const startedAt = new Date(to.getTime() - offsetMs)
   const endedAt = new Date(startedAt.getTime() + (index + 2) * 28_000)
   const traceId = `mock-trace-${skill}-${index + 1}`.replace(/\s+/g, "-")
+  const hasValidation = index % 2 === 0
+  const hasArtifact = index % 3 !== 1
+  const hasSubagent = index % 4 === 0
+  const safeSkillPath = skill.replace(/[^\w.-]+/g, "-").toLowerCase()
+  const secondStepToolCalls = [
+    ...(hasArtifact
+      ? [
+          {
+            name: "write_file",
+            args: { path: `reports/${safeSkillPath}-${index + 1}.md` },
+            result: "写入分析报告",
+            durationMs: 520
+          }
+        ]
+      : []),
+    ...(hasValidation
+      ? [
+          {
+            name: "exec_command",
+            args: { command: index % 4 === 0 ? "npm run test" : "npm run build" },
+            result: "验证通过",
+            durationMs: 1_800
+          }
+        ]
+      : []),
+    ...(hasSubagent
+      ? [
+          {
+            name: "task",
+            args: { prompt: `复核 ${skill} 的关键风险` },
+            result: "子 agent 已完成复核，未发现阻塞问题。",
+            durationMs: 2_600
+          }
+        ]
+      : [])
+  ]
 
-  return {
+  const trace: AgentTrace = {
     traceId,
     threadId: `mock-thread-${index + 1}`,
     startedAt: startedAt.toISOString(),
@@ -2827,14 +4952,17 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
         index: 1,
         startedAt: new Date(startedAt.getTime() + 12_000).toISOString(),
         assistantText: `已完成 ${skill} 分析，结论包含风险点、建议修改和验证方式。`,
-        toolCalls: [
-          {
-            name: "grep",
-            args: { pattern: "TODO", path: "src" },
-            result: "匹配 3 处",
-            durationMs: 310
-          }
-        ]
+        toolCalls:
+          secondStepToolCalls.length > 0
+            ? secondStepToolCalls
+            : [
+                {
+                  name: "grep",
+                  args: { pattern: "TODO", path: "src" },
+                  result: "匹配 3 处",
+                  durationMs: 310
+                }
+              ]
       }
     ],
     modelCalls: [
@@ -2856,7 +4984,7 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
         }
       }
     ],
-    totalToolCalls: 2,
+    totalToolCalls: 1 + (secondStepToolCalls.length || 1),
     outcome: index === 2 ? "error" : "success",
     ...(index === 2 ? { errorMessage: "Mock trace 用于展示异常状态" } : {}),
     appVersion: "0.3.6",
@@ -2865,10 +4993,34 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
       workspacePath: "/Users/demo/projects/cmbCowork"
     }
   }
+  const skillEval = buildSkillEvalTraceExtension(trace, {
+    skillAuthorByRawName: { [skill]: "Mock Skill Author" },
+    windowContextByRawName: {
+      [skill]: {
+        skillTaskId: [trace.threadId, skill, trace.traceId].join(":"),
+        skillTaskTraceIndex: 0,
+        contextTraceIds: [trace.traceId],
+        skillEvalTraceIds: [trace.traceId],
+        contextTraceCount: 1,
+        skillEvalTraceCount: 1
+      }
+    },
+    evalRawSkillNames: trace.usedSkills
+  })
+  return skillEval ? { ...trace, skillEval } : trace
 }
 
-function makeMockSkillRecentTraces(skill: string, range: TimeRange, limit = 10): DashboardTraceDetail[] {
-  return Array.from({ length: clampLimit(limit, 10, 10) }, (_, index) => {
+function makeMockSkillRecentTraces(
+  skill: string,
+  range: TimeRange,
+  options?: number | TracePageOptions
+): { total: number; page: number; pageSize: number; traces: DashboardTraceDetail[] } {
+  const { page, pageSize } = normalizeTracePageOptions(options)
+  const total = 46
+  const startIndex = (page - 1) * pageSize
+  const length = Math.max(0, Math.min(pageSize, total - startIndex))
+  const traces = Array.from({ length }, (_, localIndex) => {
+    const index = startIndex + localIndex
     const trace = makeMockAgentTrace(skill, range, index)
     const usage = summarizeTraceTokenUsage(trace.modelCalls)
     return {
@@ -2895,6 +5047,7 @@ function makeMockSkillRecentTraces(skill: string, range: TimeRange, limit = 10):
       rawAvailable: true
     }
   })
+  return { total, page, pageSize, traces }
 }
 
 function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
@@ -2918,37 +5071,26 @@ function makeMockSkillDetail(
   range: TimeRange,
   options?: number | TracePageOptions
 ): DashboardSkillDetail {
-  const pageOptions = typeof options === "number" ? { limit: options } : options
-  const tracePageSize = clampLimit(pageOptions?.pageSize ?? pageOptions?.limit, 10, 50)
-  const tracePage = clampLimit(pageOptions?.page, 1, 1000)
-  const totalTraces = 64
-  const startIndex = (tracePage - 1) * tracePageSize
-  const baseTraces = makeMockSkillRecentTraces(skill, range, 10)
-  const traces = Array.from(
-    { length: Math.max(0, Math.min(tracePageSize, totalTraces - startIndex)) },
-    (_, traceIndex) => {
-      const trace = baseTraces[traceIndex % baseTraces.length]
-      const mockIndex = startIndex + traceIndex
-      return {
-        ...trace,
-        traceId: `${trace.traceId}-skill-page-${tracePage}-${traceIndex}`,
-        startedAt: new Date(new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000).toISOString()
-      }
-    }
-  )
+  const page = makeMockSkillRecentTraces(skill, range, options)
   return {
     stats: makeMockSkillCodeStats(skill),
-    traces,
-    tracePage,
-    tracePageSize,
-    totalTraces
+    traces: page.traces,
+    tracePage: page.page,
+    tracePageSize: page.pageSize,
+    totalTraces: page.total
   }
 }
 
 function makeMockCommitDetails(
   range: TimeRange,
   options?: number | CommitDetailsOptions
-): { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] } {
+): {
+  total: number
+  page: number
+  pageSize: number
+  pushedOnly: boolean
+  items: DashboardCommitDetail[]
+} {
   const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
   const from = new Date(range.from)
   const to = new Date(range.to)
@@ -2971,7 +5113,9 @@ function makeMockCommitDetails(
       repositoryFullName: `demo/${repoName}`,
       repositoryWebUrl: `https://git.example.internal/demo/${repoName}`,
       commitSha,
-      commitUrl: pushed ? `https://git.example.internal/demo/${repoName}/commit/${commitSha}` : undefined,
+      commitUrl: pushed
+        ? `https://git.example.internal/demo/${repoName}/commit/${commitSha}`
+        : undefined,
       pushed,
       pushedAt: pushed ? new Date(eventTime.getTime() + 30 * 60 * 1000).toISOString() : undefined,
       branch: index % 2 === 0 ? "feature/smart-model-routing" : "fix/dashboard-detail",
@@ -3004,31 +5148,25 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     return true
   })
 
-  _ipcMain.handle(
-    "dashboard:overview",
-    async (_, range: TimeRange, granularity: Granularity) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockOverview(range) }
-      try {
-        return { success: true, data: await fetchOverview(range, granularity) }
-      } catch (e) {
-        console.error("[Dashboard] overview error:", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
+  _ipcMain.handle("dashboard:overview", async (_, range: TimeRange, granularity: Granularity) => {
+    if (import.meta.env.DEV) return { success: true, data: makeMockOverview(range) }
+    try {
+      return { success: true, data: await fetchOverview(range, granularity) }
+    } catch (e) {
+      console.error("[Dashboard] overview error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
-  )
+  })
 
-  _ipcMain.handle(
-    "dashboard:modelStats",
-    async (_, range: TimeRange, granularity: Granularity) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockModelStats() }
-      try {
-        return { success: true, data: await fetchModelStats(range, granularity) }
-      } catch (e) {
-        console.error("[Dashboard] modelStats error:", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
+  _ipcMain.handle("dashboard:modelStats", async (_, range: TimeRange, granularity: Granularity) => {
+    if (import.meta.env.DEV) return { success: true, data: makeMockModelStats() }
+    try {
+      return { success: true, data: await fetchModelStats(range, granularity) }
+    } catch (e) {
+      console.error("[Dashboard] modelStats error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
-  )
+  })
 
   _ipcMain.handle(
     "dashboard:userStats",
@@ -3043,25 +5181,24 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
-    "dashboard:userList",
-    async (_, range: TimeRange, options?: UserListOptions) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockUserList(range, options) }
-      try {
-        return { success: true, data: await fetchUserList(range, options) }
-      } catch (e) {
-        console.error("[Dashboard] userList error:", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
+  _ipcMain.handle("dashboard:userList", async (_, range: TimeRange, options?: UserListOptions) => {
+    if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
+    if (import.meta.env.DEV) return { success: true, data: makeMockUserList(range, options) }
+    try {
+      return { success: true, data: await fetchUserList(range, options) }
+    } catch (e) {
+      console.error("[Dashboard] userList error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
-  )
+  })
 
   _ipcMain.handle(
     "dashboard:userDetail",
     async (_, sapId: string, range: TimeRange, options?: UserDetailOptions) => {
       const normalizedSapId = sapId?.trim?.() ?? ""
       if (!normalizedSapId) return { success: false, error: "sapId is required" }
-      if (import.meta.env.DEV) return { success: true, data: makeMockUserDetail(normalizedSapId, range, options) }
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockUserDetail(normalizedSapId, range, options) }
       try {
         return { success: true, data: await fetchUserDetail(normalizedSapId, range, options) }
       } catch (e) {
@@ -3080,6 +5217,21 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchSkillUsageSummary(range, granularity, skillNames) }
       } catch (e) {
         console.error("[Dashboard] skillUsageSummary error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:skillEvalSummary",
+    async (_, range: TimeRange, options?: DashboardSkillEvalOptions) => {
+      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockSkillEvalSummary(range, options) }
+      try {
+        return { success: true, data: await fetchSkillEvalSummary(range, options) }
+      } catch (e) {
+        console.error("[Dashboard] skillEvalSummary error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
@@ -3107,38 +5259,32 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
-    "dashboard:userProfiles",
-    async (_, sapIds: string[]) => {
-      const sanitizedSapIds = Array.isArray(sapIds)
-        ? sapIds.filter((id): id is string => typeof id === "string")
-        : []
-      if (import.meta.env.DEV) {
-        return { success: true, data: makeMockUserProfilesBySapIds(sanitizedSapIds) }
-      }
-      try {
-        return { success: true, data: await fetchUserProfilesBySapIds(sanitizedSapIds) }
-      } catch (e) {
-        console.error("[Dashboard] userProfiles error:", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
+  _ipcMain.handle("dashboard:userProfiles", async (_, sapIds: string[]) => {
+    const sanitizedSapIds = Array.isArray(sapIds)
+      ? sapIds.filter((id): id is string => typeof id === "string")
+      : []
+    if (import.meta.env.DEV) {
+      return { success: true, data: makeMockUserProfilesBySapIds(sanitizedSapIds) }
     }
-  )
+    try {
+      return { success: true, data: await fetchUserProfilesBySapIds(sanitizedSapIds) }
+    } catch (e) {
+      console.error("[Dashboard] userProfiles error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
 
-  _ipcMain.handle(
-    "dashboard:queryAllUser",
-    async () => {
-      if (import.meta.env.DEV) {
-        return { success: true, data: makeMockAllUsers() }
-      }
-      try {
-        return { success: true, data: await queryAllUser() }
-      } catch (e) {
-        console.error("[Dashboard] queryAllUser error:", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
+  _ipcMain.handle("dashboard:queryAllUser", async () => {
+    if (import.meta.env.DEV) {
+      return { success: true, data: makeMockAllUsers() }
     }
-  )
+    try {
+      return { success: true, data: await queryAllUser() }
+    } catch (e) {
+      console.error("[Dashboard] queryAllUser error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
 
   _ipcMain.handle(
     "dashboard:productivity",
@@ -3153,25 +5299,24 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
-    "dashboard:feedback",
-    async (_, range: TimeRange, granularity: Granularity) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockFeedback(range, granularity) }
-      try {
-        return { success: true, data: await fetchFeedback(range, granularity) }
-      } catch (e) {
-        console.error("[Dashboard] feedback error:", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
+  _ipcMain.handle("dashboard:feedback", async (_, range: TimeRange, granularity: Granularity) => {
+    if (import.meta.env.DEV) return { success: true, data: makeMockFeedback(range, granularity) }
+    try {
+      return { success: true, data: await fetchFeedback(range, granularity) }
+    } catch (e) {
+      console.error("[Dashboard] feedback error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
-  )
+  })
 
   _ipcMain.handle(
     "dashboard:skillRecentTraces",
-    async (_, skill: string, range: TimeRange, limit?: number) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(skill, range, limit) }
+    async (_, skill: string, range: TimeRange, options?: number | TracePageOptions) => {
+      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockSkillRecentTraces(skill, range, options) }
       try {
-        return { success: true, data: (await fetchSkillRecentTraces(skill, range, limit)).traces }
+        return { success: true, data: await fetchSkillRecentTraces(skill, range, options) }
       } catch (e) {
         console.error("[Dashboard] skillRecentTraces error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -3181,12 +5326,13 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:marketSkillRecentTraces",
-    async (_, skill: string, range: TimeRange, limit?: number) => {
+    async (_, skill: string, range: TimeRange, options?: number | TracePageOptions) => {
       const trimmedSkill = skill?.trim?.() ?? ""
       if (!trimmedSkill) return { success: false, error: "skill is required" }
-      if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(trimmedSkill, range, limit) }
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockSkillRecentTraces(trimmedSkill, range, options) }
       try {
-        return { success: true, data: (await fetchSkillRecentTraces(trimmedSkill, range, limit)).traces }
+        return { success: true, data: await fetchSkillRecentTraces(trimmedSkill, range, options) }
       } catch (e) {
         console.error("[Dashboard] marketSkillRecentTraces error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -3197,7 +5343,9 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:skillDetail",
     async (_, skill: string, range: TimeRange, options?: number | TracePageOptions) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockSkillDetail(skill, range, options) }
+      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockSkillDetail(skill, range, options) }
       try {
         return { success: true, data: await fetchSkillDetail(skill, range, options) }
       } catch (e) {
@@ -3256,10 +5404,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:exportExcel",
-    async (
-      _,
-      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
-    ) => {
+    async (_, sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>) => {
       try {
         // Dynamic import xlsx to avoid bundling issues
         const XLSX = await import("xlsx")

@@ -80,6 +80,7 @@ import { TraceExplorer } from "../dashboard/TraceHistoryDialog"
 import { toast } from "sonner"
 import {
   buildUploaderIdCandidates,
+  getUploaderIdCandidates,
   getAllSkills,
   getSkillMetricByName,
   sortSkillItemsByUsage,
@@ -786,7 +787,7 @@ export function MarketPanel(): React.JSX.Element {
       if (!response.success || !response.data) {
         throw new Error(response.error || "获取 Skill Trace 失败")
       }
-      setSelectedSkillTraces(response.data)
+      setSelectedSkillTraces(Array.isArray(response.data) ? response.data : response.data.traces)
     } catch (err) {
       console.warn(`[MarketPanel] Failed to load skill traces for ${skillName}:`, err)
       setSelectedSkillTraces([])
@@ -1518,7 +1519,7 @@ export function MarketPanel(): React.JSX.Element {
     (item: MarketItem): boolean => {
       if (localStorageHelper.canDeleteItem(item.name, activeTab)) return true
       if (!item.user_id || currentUserCandidateSet.size === 0) return false
-      return buildUploaderIdCandidates(item.user_id).some((id) => currentUserCandidateSet.has(id))
+      return getUploaderIdCandidates(item.user_id).some((id) => currentUserCandidateSet.has(id))
     },
     [activeTab, currentUserCandidateSet]
   )

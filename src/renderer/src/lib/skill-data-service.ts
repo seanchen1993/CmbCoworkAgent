@@ -72,6 +72,15 @@ export function buildUploaderIdCandidates(rawUserIdOrSapId?: string): string[] {
   return Array.from(candidates)
 }
 
+export function getUploaderIdCandidates(rawUserId?: string): string[] {
+  const parsed = parseUploaderIdentity(rawUserId)
+  return [
+    rawUserId?.trim(),
+    parsed?.sapId,
+    ...buildUploaderIdCandidates(parsed?.sapId || rawUserId)
+  ].filter((value): value is string => Boolean(value))
+}
+
 export function isCompleteUploaderUserId(rawUserId?: string): boolean {
   const parsed = parseUploaderIdentity(rawUserId)
   if (!parsed) return false

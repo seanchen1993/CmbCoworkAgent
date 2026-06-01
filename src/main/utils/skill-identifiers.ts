@@ -1,6 +1,8 @@
 export const DEFAULT_SKILL_VERSION = "v1.0.0"
 
-const SKILL_VERSION_SUFFIX_RE = /^(.*?)-(v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/
+const SKILL_VERSION_SUFFIX_RE = /^(.*?)-(v?\d+(?:\.\d+){0,3}(?:[-+][0-9A-Za-z.-]+)?)$/
+const SKILL_VERSION_QUERY_SUFFIX_RE = /-v?\d+(?:\.\d+){0,3}(?:[-+][0-9A-Za-z.-]+)?$/i
+const SKILL_PACKAGE_EXTENSION_RE = /\.(zip|tar\.gz|tgz|md)$/i
 
 export function normalizeSkillVersion(version: string | undefined | null): string {
   const trimmed = typeof version === "string" ? version.trim() : ""
@@ -8,8 +10,21 @@ export function normalizeSkillVersion(version: string | undefined | null): strin
   return trimmed.startsWith("v") ? trimmed : `v${trimmed}`
 }
 
+export function normalizeSkillIdentifierText(raw: string): string {
+  return String(raw || "")
+    .trim()
+    .replace(/^\$/, "")
+    .replace(SKILL_PACKAGE_EXTENSION_RE, "")
+}
+
+export function normalizeSkillQueryName(raw: string): string {
+  return normalizeSkillIdentifierText(raw)
+    .replace(SKILL_VERSION_QUERY_SUFFIX_RE, "")
+    .trim()
+}
+
 export function parseSkillIdentifier(skill: string): { name: string; version?: string } {
-  const trimmed = typeof skill === "string" ? skill.trim() : ""
+  const trimmed = normalizeSkillIdentifierText(skill)
   if (!trimmed) return { name: "" }
 
   const match = trimmed.match(SKILL_VERSION_SUFFIX_RE)
@@ -21,6 +36,17 @@ export function parseSkillIdentifier(skill: string): { name: string; version?: s
   return {
     name,
     version: normalizeSkillVersion(match[2])
+  }
+}
+
+export function parseSkillNameVersionIdentifier(
+  skill: string,
+  fallbackName = "unknown"
+): { skillName: string; skillVersion?: string } {
+  const parsed = parseSkillIdentifier(skill)
+  return {
+    skillName: parsed.name || fallbackName,
+    ...(parsed.version ? { skillVersion: parsed.version } : {})
   }
 }
 
