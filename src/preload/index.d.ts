@@ -149,10 +149,15 @@ interface DashboardTraceDetail {
   totalOutputTokens: number
   totalTokens: number
   usedSkills: string[]
+  evolvedSkills: string[]
+  triggerSource?: string
   nodes?: DashboardTraceNode[]
   rawAvailable: boolean
   rawError?: string
 }
+
+type DashboardTraceViewMode = "thread" | "trace"
+type DashboardTraceTriggerScope = "active" | "all"
 
 interface DashboardCommitDetail {
   eventId: string
@@ -161,6 +166,8 @@ interface DashboardCommitDetail {
   sapId?: string
   ystId?: string
   orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
   userIp?: string
   repoPath?: string
   repositoryName?: string
@@ -178,12 +185,17 @@ interface DashboardCommitDetail {
   threadId?: string
   usedSkills: string[]
   skillCount: number
+  codeGeneratedLines: number
+  codeEffectiveGeneratedLines: number
+  codeAdoptedLines: number
+  codeAdoptionRate: number | null
 }
 
 interface DashboardCommitDetailsOptions {
   page?: number
   pageSize?: number
   pushedOnly?: boolean
+  upperOrgLv1?: string | null
 }
 
 interface DashboardSkillEvalOptions {
@@ -226,6 +238,8 @@ interface DashboardSkillDetail {
   tracePage: number
   tracePageSize: number
   totalTraces: number
+  traceViewMode?: DashboardTraceViewMode
+  traceTriggerScope?: DashboardTraceTriggerScope
 }
 
 interface DashboardUserListItem {
@@ -271,12 +285,14 @@ interface DashboardUserDetail {
   tracePage: number
   tracePageSize: number
   totalTraces: number
+  traceTriggerScope?: DashboardTraceTriggerScope
 }
 
 interface DashboardUserListOptions {
   pageSize?: number
   afterKey?: Record<string, string | number> | null
   keyword?: string | null
+  upperOrgLv1?: string | null
 }
 
 interface DashboardAllUserItem {
@@ -291,6 +307,7 @@ interface DashboardUserDetailOptions {
   traceLimit?: number
   tracePage?: number
   tracePageSize?: number
+  triggerScope?: DashboardTraceTriggerScope
 }
 
 interface CustomAPI {
@@ -1093,7 +1110,8 @@ interface CustomAPI {
       }>
     >
     approve: (
-      candidateId: string
+      candidateId: string,
+      proposedContent?: string
     ) => Promise<{ success: boolean; skillId?: string; error?: string }>
     reject: (candidateId: string) => Promise<{ success: boolean }>
     clear: () => Promise<void>
@@ -1110,6 +1128,8 @@ interface CustomAPI {
         totalTokens: number
         outcome: string
         usedSkills: string[]
+        evolvedSkills: string[]
+        triggerSource?: string
       }>
     >
     onAutoTriggered: (
@@ -1127,6 +1147,8 @@ interface CustomAPI {
       outcome: string
       errorMessage?: string
       usedSkills: string[]
+      evolvedSkills: string[]
+      triggerSource?: string
       nodes?: Array<{
         id: string
         type: "trace" | "llm" | "tool" | "tool_result" | "message" | "error" | "cancel"
@@ -1248,16 +1270,21 @@ interface CustomAPI {
     isAllowed: () => Promise<boolean>
     overview: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     modelStats: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    orgOptions: (
+      range: { from: string; to: string }
+    ) => Promise<{ success: boolean; data?: string[]; error?: string }>
     userStats: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | null }
+      opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     userList: (
       range: { from: string; to: string },
@@ -1293,34 +1320,32 @@ interface CustomAPI {
     }>
     productivity: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     feedback: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     skillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      options?: number | { page?: number; pageSize?: number }
-    ) => Promise<{
-      success: boolean
-      data?: { total: number; page: number; pageSize: number; traces: DashboardTraceDetail[] }
-      error?: string
-    }>
+      limit?: number,
+      mode?: DashboardTraceViewMode,
+      triggerScope?: DashboardTraceTriggerScope
+    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      options?: number | { page?: number; pageSize?: number }
-    ) => Promise<{
-      success: boolean
-      data?: { total: number; page: number; pageSize: number; traces: DashboardTraceDetail[] }
-      error?: string
-    }>
+      limit?: number,
+      mode?: DashboardTraceViewMode,
+      triggerScope?: DashboardTraceTriggerScope
+    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
-      options?: number | { page?: number; pageSize?: number; limit?: number }
+      options?: number | { page?: number; pageSize?: number; limit?: number; mode?: DashboardTraceViewMode; viewMode?: DashboardTraceViewMode; triggerScope?: DashboardTraceTriggerScope }
     ) => Promise<{ success: boolean; data?: DashboardSkillDetail; error?: string }>
     commitDetails: (
       range: { from: string; to: string },

@@ -299,11 +299,12 @@ export interface SkillMetadata {
   metadata?: Record<string, string>
   allowedTools?: string[]
 }
-
 export type {
   HookConfig,
   HookEvent,
   HookType,
   PromptHookFallback,
-  HookUpsert
+  HookUpsert,
+  HookInjectUserContext,
+  HookUserContextField
 } from "../../main/hooks/types"

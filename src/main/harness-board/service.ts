@@ -1339,7 +1339,7 @@ function initializeHarnessProject(project: HarnessProjectMetadata): void {
   }
 }
 
-function readHarnessFeatureMetadata(metadata: unknown): { projectId: string; slug: string } | null {
+export function readHarnessFeatureMetadata(metadata: unknown): { projectId: string; slug: string } | null {
   if (!isObject(metadata) || !isObject(metadata.harnessFeature)) return null
   const projectId = normalizeText(metadata.harnessFeature.projectId).trim()
   const slug = normalizeText(metadata.harnessFeature.slug).trim()
@@ -1350,6 +1350,12 @@ export interface HarnessFeatureAgentContext {
   systemPromptInject?: string
   pluginOutputDir?: string
   systemId?: string
+  pluginRoot?: string
+  pluginId?: string
+  pluginName?: string
+  pluginWorkspace?: string
+  featureId?: string
+  projectCode?: string
 }
 
 export function buildHarnessFeatureAgentContext(
@@ -1360,6 +1366,8 @@ export function buildHarnessFeatureAgentContext(
 
   const project = requireProject(feature.projectId)
   const cwd = adapterPluginDir(project)
+  const adapter = project["harness-adapter"]
+  const plugin = findAdapterPlugin(project)
   const systemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
   const systemId = normalizeText(project.systemId).trim()
@@ -1375,7 +1383,13 @@ export function buildHarnessFeatureAgentContext(
   return {
     systemPromptInject: render(systemPromptInject, "run"),
     pluginOutputDir: render(pluginOutputDir, "run"),
-    systemId: systemId || undefined
+    systemId: systemId || undefined,
+    pluginRoot: cwd,
+    pluginId: normalizeText(plugin?.id) || adapter.id,
+    pluginName: normalizeText(plugin?.name) || adapter.name,
+    pluginWorkspace: project.workspacePath,
+    featureId: feature.slug,
+    projectCode: project.projectCode
   }
 }
 

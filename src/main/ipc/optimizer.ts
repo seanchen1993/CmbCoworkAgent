@@ -139,7 +139,7 @@ function applyCandidate(
       }
     }
     mkdirSync(skillDir, { recursive: true })
-    writeFileSync(join(skillDir, "SKILL.md"), content, "utf-8")
+    writeFileSync(join(skillDir, "SKILL.md"), ensureEvolvedSkillMarker(content), "utf-8")
     if (action === "create") clearDisabledSkillsForSkillDir(skillDir)
     invalidateEnabledSkillsCache()
     notifyRenderer("skills:changed")
@@ -147,6 +147,22 @@ function applyCandidate(
   } catch (e) {
     return { success: false, error: String(e) }
   }
+}
+
+function ensureEvolvedSkillMarker(content: string): string {
+  const marker = "evolved-by: CMBDevClaw Trace Evolver"
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n)?/)
+  if (!match) return `---\n${marker}\n---\n\n${content.replace(/^\n+/, "")}`.replace(/\s*$/, "\n")
+
+  const yaml = match[1].replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+  const lines = yaml.split("\n")
+  const index = lines.findIndex((line) => line.split(":", 1)[0]?.trim().toLowerCase() === "evolved-by")
+  if (index >= 0) {
+    lines[index] = marker
+  } else {
+    lines.push(marker)
+  }
+  return `---\n${lines.join("\n").trimEnd()}\n---\n\n${content.slice(match[0].length).replace(/^\n+/, "")}`.replace(/\s*$/, "\n")
 }
 
 export function registerOptimizerHandlers(ipcMain: IpcMain): void {
@@ -293,14 +309,15 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
     "optimizer:approve",
     async (
       _event,
-      { candidateId }: { candidateId: string }
+      { candidateId, proposedContent }: { candidateId: string; proposedContent?: string }
     ): Promise<{ success: boolean; skillId?: string; error?: string }> => {
       const candidate = updateCandidateStatus(candidateId, "approved")
       if (!candidate) {
         return { success: false, error: `Candidate ${candidateId} not found` }
       }
 
-      const result = applyCandidate(candidate.action, candidate.skillId, candidate.proposedContent)
+      const content = typeof proposedContent === "string" ? proposedContent : candidate.proposedContent
+      const result = applyCandidate(candidate.action, candidate.skillId, content)
       if (!result.success) {
         updateCandidateStatus(candidateId, "rejected")
         return { success: false, skillId: candidate.skillId, error: result.error }
@@ -352,6 +369,8 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         totalTokens: number
         outcome: string
         usedSkills: string[]
+        evolvedSkills: string[]
+        triggerSource: string
       }>
     > => {
       const traces = opts?.threadId
@@ -373,7 +392,9 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
           totalOutputTokens,
           totalTokens,
           outcome: trace.outcome,
-          usedSkills: trace.usedSkills
+          usedSkills: trace.usedSkills,
+          evolvedSkills: trace.evolvedSkills,
+          triggerSource: trace.triggerSource
         }
       })
     }

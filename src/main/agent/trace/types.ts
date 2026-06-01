@@ -149,6 +149,8 @@ export interface RoutingTrace {
   layers: RoutingLayerRecord[]
 }
 
+export type TraceTriggerSource = RoutingTrace["taskSource"]
+
 /** How the agent's run ended. */
 export type TraceOutcome =
   | "success" // Agent completed the task and said so
@@ -375,6 +377,18 @@ export interface AgentTrace {
   usedSkills: string[]
   /** Optional skill-eval payload computed before upload. Existing trace fields remain unchanged. */
   skillEval?: TraceSkillEvalExtension
+  /** Used skills that were produced by the cloud trace evolver, same format as usedSkills. */
+  evolvedSkills: string[]
+  /** Source that triggered this trace. Missing values in older traces are treated as chat by dashboard queries. */
+  triggerSource: TraceTriggerSource
+  /**
+   * Harness Board project id this conversation belongs to, copied from the
+   * thread's `harnessFeature` binding. Absent for non-project (plain chat) threads.
+   * Lets the operations dashboard link a feature to its conversation traces.
+   */
+  harnessProjectId?: string
+  /** Harness Board feature slug this conversation belongs to (paired with harnessProjectId). */
+  harnessFeatureSlug?: string
   /**
    * Optional free-form metadata.
    * Known keys:

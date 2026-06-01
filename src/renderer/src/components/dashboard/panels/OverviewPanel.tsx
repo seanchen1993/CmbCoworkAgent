@@ -66,10 +66,10 @@ function StatCard({
       <div className={`flex size-9 items-center justify-center rounded-lg ${color}`}>
         <Icon className="size-4 text-white" />
       </div>
-      <div>
-        <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className="min-w-0">
+        <div className="truncate whitespace-nowrap text-[11px] text-muted-foreground">{label}</div>
         <div className="text-lg font-bold text-foreground leading-tight">{value}</div>
-        {sub && <div className="text-[10px] text-muted-foreground">{sub}</div>}
+        {sub && <div className="whitespace-nowrap text-[10px] text-muted-foreground">{sub}</div>}
       </div>
     </>
   )
@@ -113,6 +113,98 @@ function formatPercent(value: number | null): string {
 
 function formatExactNumber(n: number): string {
   return Math.round(n).toLocaleString("zh-CN")
+}
+
+// 代码采纳漏斗：真·漏斗形状（梯形逐级收窄）。
+// 漏斗宽度 = 各级生成行数（全部生成 → 已 Commit → 已 Push），标签 = 各级采纳率（越靠后越高）。
+function CodeAdoptionFunnel({ data }: { data: OverviewData }): React.JSX.Element {
+  const stages = [
+    {
+      key: "all",
+      label: "全部生成",
+      lines: data.codeInclusiveEffectiveGeneratedLines,
+      adoptedLines: data.codeAdoptedLines,
+      rate: data.codeInclusiveAdoptionRate,
+      color: "#06b6d4"
+    },
+    {
+      key: "commit",
+      label: "已 Commit",
+      lines: data.codeEffectiveGeneratedLines,
+      adoptedLines: data.codeAdoptedLines,
+      rate: data.codeMeasuredAdoptionRate,
+      color: "#3b82f6"
+    },
+    {
+      key: "push",
+      label: "已 Push",
+      lines: data.codePushedEffectiveGeneratedLines,
+      adoptedLines: data.codePushedAdoptedLines,
+      rate: data.codePushedAdoptionRate,
+      color: "#6366f1"
+    }
+  ]
+  const hasData = stages.some((s) => s.lines > 0)
+  const BAND_H = 40
+  // 各级生成行数量级可能相差很大（如全部生成 50k vs 已 Commit 6k）。
+  // 直接线性映射会让后段塌缩成不可见的细条、整体退化成三角形。
+  // 这里用平方根压缩比例，并设最小宽度下限，保证每段可见且仍“逐级收窄”。
+  const maxScaled = Math.max(...stages.map((s) => Math.sqrt(Math.max(0, s.lines))), 1)
+  const halfWidthOf = (lines: number): number =>
+    Math.max(9, (Math.sqrt(Math.max(0, lines)) / maxScaled) * 50)
+
+  return (
+    <div className="flex h-full flex-col rounded-xl border border-border bg-card p-4">
+      <h3 className="text-xs font-semibold text-foreground">代码采纳漏斗</h3>
+      <p className="mb-2 mt-0.5 text-[10px] leading-tight text-muted-foreground">
+        漏斗按各级生成行数依次收窄，标签为各级采纳率
+      </p>
+      {!hasData ? (
+        <div className="flex flex-1 items-center justify-center py-6 text-xs text-muted-foreground">
+          暂无代码生成数据
+        </div>
+      ) : (
+        <div className="flex flex-1 items-center gap-2.5">
+          {/* 漏斗形状：纯锥形，撑满左侧空间 */}
+          <div className="flex flex-1 flex-col">
+            {stages.map((s, i) => {
+              const topHalf = halfWidthOf(s.lines)
+              const next = stages[i + 1]
+              const botHalf = next ? halfWidthOf(next.lines) : topHalf * 0.5
+              const clip = `polygon(${50 - topHalf}% 0, ${50 + topHalf}% 0, ${50 + botHalf}% 100%, ${50 - botHalf}% 100%)`
+              return (
+                <div
+                  key={s.key}
+                  className="relative"
+                  style={{ height: BAND_H }}
+                  title={`${s.label}：生成 ${formatExactNumber(s.lines)} 行 · 采纳 ${formatExactNumber(s.adoptedLines)} 行 · 采纳率 ${formatPercent(s.rate)}`}
+                >
+                  <div className="absolute inset-0" style={{ clipPath: clip, background: s.color }} />
+                </div>
+              )
+            })}
+          </div>
+          {/* 右侧标签：百分比移到此处（带颜色），自身宽度紧贴右边 */}
+          <div className="flex shrink-0 flex-col">
+            {stages.map((s) => (
+              <div key={s.key} className="flex flex-col justify-center" style={{ height: BAND_H }}>
+                <div className="flex items-center gap-1.5 whitespace-nowrap text-[11px] font-medium text-foreground">
+                  <span className="inline-block size-2 shrink-0 rounded-sm" style={{ background: s.color }} />
+                  {s.label}
+                  <span className="font-semibold" style={{ color: s.color }}>
+                    {formatPercent(s.rate)}
+                  </span>
+                </div>
+                <div className="mt-0.5 whitespace-nowrap text-[10px] text-muted-foreground">
+                  生成 {formatNumber(s.lines)} / 采纳 {formatNumber(s.adoptedLines)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
 
 function InclusiveAdoptionTooltip({ data }: { data: OverviewData }) {
@@ -231,6 +323,9 @@ function GeneratedLinesTooltip(): React.JSX.Element {
       <div className="text-muted-foreground">空行和仅包含空白字符的行不会计入。</div>
       <div className="text-muted-foreground">
         该指标表示原始生成量，包含后续被 agent 自己改写的中间稿。
+      </div>
+      <div className="text-muted-foreground">
+        以下文件不纳入统计：非代码文件（如 Markdown、JSON、图片等）、锁文件（package-lock.json、pnpm-lock.yaml、yarn.lock）、压缩/构建产物（.min.js/.min.css、.map）、依赖与构建目录（node_modules、dist、build 等）。
       </div>
     </div>
   )
@@ -881,92 +976,92 @@ export function OverviewPanel({
 
   return (
     <div className="space-y-4">
-      {/* Row 1: Core metrics */}
-      <div className="grid grid-cols-5 gap-3">
-        <StatCard
-          icon={Activity}
-          label="调用总次数"
-          value={formatNumber(data.totalCalls)}
-          color="bg-blue-500"
-        />
-        <StatCard
-          icon={Users}
-          label="活跃用户数"
-          value={String(data.activeUsers)}
-          color="bg-violet-500"
-          onClick={onActiveUsersClick}
-        />
-        <StatCard
-          icon={Clock}
-          label="平均耗时"
-          value={formatDuration(data.avgDurationMs)}
-          color="bg-amber-500"
-        />
-        <StatCard
-          icon={ArrowDownToLine}
-          label="输入 Token"
-          value={formatNumber(data.inputTokens)}
-          color="bg-sky-500"
-        />
-        <StatCard
-          icon={ArrowUpFromLine}
-          label="输出 Token"
-          value={formatNumber(data.outputTokens)}
-          color="bg-rose-500"
-        />
-      </div>
-
-      {/* Row 2: Code adoption metrics */}
-      <div className="grid grid-cols-5 gap-3">
-        <StatCard
-          icon={Code2}
-          label="代码生成行数"
-          value={formatNumber(data.codeGeneratedLines)}
-          color="bg-emerald-500"
-          tooltipContent={<GeneratedLinesTooltip />}
-        />
-        <StatCard
-          icon={Trash2}
-          label="代码删除行数"
-          value={formatNumber(data.codeDeletedLines)}
-          color="bg-zinc-500"
-        />
-        <StatCard
-          icon={Gauge}
-          label="已 Push 采纳率"
-          value={formatPercent(data.codePushedAdoptionRate)}
-          sub={
-            data.codePushedAdoptionRate === null
-              ? "暂无已 Push 数据"
-              : `${formatNumber(data.codePushedAdoptedLines)} / ${formatNumber(data.codePushedEffectiveGeneratedLines)} 行`
-          }
-          color="bg-indigo-500"
-          tooltipContent={<PushedAdoptionTooltip data={data} />}
-        />
-        <StatCard
-          icon={Gauge}
-          label="已Commit采纳率"
-          value={formatPercent(data.codeMeasuredAdoptionRate)}
-          sub={
-            data.codeMeasuredAdoptionRate === null
-              ? "暂无测量数据"
-              : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeEffectiveGeneratedLines)} 行`
-          }
-          color="bg-blue-500"
-          tooltipContent={<MeasuredAdoptionTooltip data={data} />}
-        />
-        <StatCard
-          icon={Gauge}
-          label="含未提交采纳率"
-          value={formatPercent(data.codeInclusiveAdoptionRate)}
-          sub={
-            data.codeInclusiveAdoptionRate === null
-              ? "暂无代码生成数据"
-              : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeInclusiveEffectiveGeneratedLines)} 行`
-          }
-          color="bg-cyan-500"
-          tooltipContent={<InclusiveAdoptionTooltip data={data} />}
-        />
+      {/* 概览卡片（左，统一大小）+ 代码采纳漏斗（右，跨整列高度）*/}
+      <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3">
+        <div className="grid grid-cols-5 gap-3 content-start">
+          <StatCard
+            icon={Activity}
+            label="调用总次数"
+            value={formatNumber(data.totalCalls)}
+            color="bg-blue-500"
+          />
+          <StatCard
+            icon={Users}
+            label="活跃用户数"
+            value={String(data.activeUsers)}
+            color="bg-violet-500"
+            onClick={onActiveUsersClick}
+          />
+          <StatCard
+            icon={Clock}
+            label="平均耗时"
+            value={formatDuration(data.avgDurationMs)}
+            color="bg-amber-500"
+          />
+          <StatCard
+            icon={ArrowDownToLine}
+            label="输入 Token"
+            value={formatNumber(data.inputTokens)}
+            color="bg-sky-500"
+          />
+          <StatCard
+            icon={ArrowUpFromLine}
+            label="输出 Token"
+            value={formatNumber(data.outputTokens)}
+            color="bg-rose-500"
+          />
+          <StatCard
+            icon={Code2}
+            label="代码生成行数"
+            value={formatNumber(data.codeGeneratedLines)}
+            color="bg-emerald-500"
+            tooltipContent={<GeneratedLinesTooltip />}
+          />
+          <StatCard
+            icon={Trash2}
+            label="代码删除行数"
+            value={formatNumber(data.codeDeletedLines)}
+            color="bg-zinc-500"
+            tooltipContent={<GeneratedLinesTooltip />}
+          />
+          <StatCard
+            icon={Gauge}
+            label="已 Push 采纳率"
+            value={formatPercent(data.codePushedAdoptionRate)}
+            sub={
+              data.codePushedAdoptionRate === null
+                ? "暂无已 Push 数据"
+                : `${formatNumber(data.codePushedAdoptedLines)} / ${formatNumber(data.codePushedEffectiveGeneratedLines)} 行`
+            }
+            color="bg-indigo-500"
+            tooltipContent={<PushedAdoptionTooltip data={data} />}
+          />
+          <StatCard
+            icon={Gauge}
+            label="已Commit采纳率"
+            value={formatPercent(data.codeMeasuredAdoptionRate)}
+            sub={
+              data.codeMeasuredAdoptionRate === null
+                ? "暂无测量数据"
+                : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeEffectiveGeneratedLines)} 行`
+            }
+            color="bg-blue-500"
+            tooltipContent={<MeasuredAdoptionTooltip data={data} />}
+          />
+          <StatCard
+            icon={Gauge}
+            label="含未提交采纳率"
+            value={formatPercent(data.codeInclusiveAdoptionRate)}
+            sub={
+              data.codeInclusiveAdoptionRate === null
+                ? "暂无代码生成数据"
+                : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeInclusiveEffectiveGeneratedLines)} 行`
+            }
+            color="bg-cyan-500"
+            tooltipContent={<InclusiveAdoptionTooltip data={data} />}
+          />
+        </div>
+        <CodeAdoptionFunnel data={data} />
       </div>
 
       {/* Skill & Tool Top rankings */}

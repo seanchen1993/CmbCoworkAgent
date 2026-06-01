@@ -10,6 +10,7 @@ const MAX_ADDITIONAL_CONTEXT_PREVIEW_CHARS = 4_000
 // since diagnostic mode also writes the untruncated record to jsonl this
 // preview just needs to be wide enough to be useful at a glance.
 const MAX_STDIN_PREVIEW_CHARS = 32_000
+const USER_CONTEXT_SECRET_KEYS = new Set(["yst_id_token"])
 
 function truncatePreview(text: string | undefined, maxChars: number): string {
   if (!text) return ""
@@ -20,6 +21,29 @@ function truncatePreview(text: string | undefined, maxChars: number): string {
 function maybePreview(text: string | undefined, maxChars: number, preview: boolean): string {
   if (!text) return ""
   return preview ? truncatePreview(text, maxChars) : text
+}
+
+function redactHookStdinPayload(text: string | undefined): string | undefined {
+  if (!text) return text
+  try {
+    const parsed = JSON.parse(text) as unknown
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return text
+    const payload = parsed as Record<string, unknown>
+    if (!payload.user_context || typeof payload.user_context !== "object") return text
+
+    const userContext = { ...(payload.user_context as Record<string, unknown>) }
+    for (const key of Object.keys(userContext)) {
+      if (USER_CONTEXT_SECRET_KEYS.has(key) || /token/i.test(key)) {
+        userContext[key] = "[redacted]"
+      }
+    }
+    return JSON.stringify({ ...payload, user_context: userContext })
+  } catch {
+    return text.replace(
+      /("(?:yst_id_token|[^"]*token[^"]*)"\s*:\s*")[^"]*(")/gi,
+      "$1[redacted]$2"
+    )
+  }
 }
 
 /**
@@ -130,7 +154,7 @@ function buildExecutedEnvelope(
     envelope.cwd = result.cwd ?? hook.hookSourceRoot
     if (result.stdinPayload !== undefined) {
       envelope.stdinPayload = maybePreview(
-        result.stdinPayload,
+        redactHookStdinPayload(result.stdinPayload),
         MAX_STDIN_PREVIEW_CHARS,
         options.preview
       )

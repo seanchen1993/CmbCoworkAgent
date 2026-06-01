@@ -125,7 +125,10 @@ import {
   type AgentGitSnapshot
 } from "../services/agent-auto-commit"
 import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
-import { buildHarnessFeatureAgentContext } from "../harness-board/service"
+import {
+  buildHarnessFeatureAgentContext,
+  readHarnessFeatureMetadata
+} from "../harness-board/service"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
 import { makeHookResultCallback, makeHookSkippedCallback } from "../hooks/result-callback"
@@ -257,6 +260,12 @@ interface HarnessAgentContext {
   workingDirPromptAppendix?: string
   pluginOutputDir?: string
   systemId?: string
+  pluginRoot?: string
+  pluginId?: string
+  pluginName?: string
+  pluginWorkspace?: string
+  featureId?: string
+  projectCode?: string
 }
 
 function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgentContext {
@@ -267,7 +276,13 @@ function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgent
     return {
       workingDirPromptAppendix: featureContext.systemPromptInject,
       pluginOutputDir: featureContext.pluginOutputDir,
-      systemId: featureContext.systemId
+      systemId: featureContext.systemId,
+      pluginRoot: featureContext.pluginRoot,
+      pluginId: featureContext.pluginId,
+      pluginName: featureContext.pluginName,
+      pluginWorkspace: featureContext.pluginWorkspace,
+      featureId: featureContext.featureId,
+      projectCode: featureContext.projectCode
     }
   } catch (error) {
     console.warn("[HarnessBoard] Failed to build harness agent context:", error)
@@ -2778,8 +2793,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
       window.once("closed", onWindowClosed)
 
+      // Resolve the Harness Board feature binding (if any) so traces can be
+      // linked back to the feature/project that owns this conversation.
+      let harnessFeatureBinding: { projectId: string; slug: string } | undefined
+      try {
+        const bindingThread = getThread(threadId)
+        if (bindingThread?.metadata) {
+          harnessFeatureBinding =
+            readHarnessFeatureMetadata(JSON.parse(bindingThread.metadata)) ?? undefined
+        }
+      } catch {
+        // Non-project threads or unparsable metadata: leave the trace untagged.
+      }
+
       // Start trace collection for this invocation (modelId resolved later)
-      const tracer = new TraceCollector(threadId, message, modelId ?? "unknown")
+      const tracer = new TraceCollector(threadId, message, modelId ?? "unknown", {
+        triggerSource: "chat",
+        ...(harnessFeatureBinding ? { harnessFeature: harnessFeatureBinding } : {})
+      })
       const skillUsageDetector = new SkillUsageDetector()
       const toolCallCounter = new ToolCallCounter()
       let assistantText = ""
@@ -2803,6 +2834,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const syncUsedSkillsContext = (): void => {
         const currentRunSkills = skillUsageDetector.getUsedSkillNames()
         tracer.setUsedSkills(currentRunSkills)
+        tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
         setAdoptionContext(threadId, {
           usedSkills: computeCodeGenAttributionSkills(currentRunSkills)
         })
@@ -3889,7 +3921,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const skillsMetadata = Array.isArray(state.skillsMetadata) ? state.skillsMetadata : []
             if (skillsMetadata.length > 0) {
               skillUsageDetector.onSkillsMetadata(skillsMetadata)
-              tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+              syncUsedSkillsContext()
             }
 
             if (!Array.isArray(state.messages)) return
@@ -4280,7 +4312,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
 
           // Finish trace
-          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+          syncUsedSkillsContext()
           await tracer.finish("success")
 
           // Write routing feedback so next turn can use sticky/force logic
@@ -4436,7 +4468,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           clearCoordinatorNotificationSelectedSkillsOnExit = true
           console.warn("[Agent] Hook halted turn:", error.reason)
           sendHookHalt(window, channel, error)
-          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+          syncUsedSkillsContext()
           tracer.finish("cancelled", error.reason).catch(() => {})
           if (invokeRoutingResult) {
             rememberRoutingFeedback(threadId, {
@@ -4497,7 +4529,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           } else if (!isCoordinatorNotificationTurn) {
             resetSkillEvolutionSession(threadId)
           }
-          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+          syncUsedSkillsContext()
           tracer.finish("error", errMsg).catch(() => {})
           if (invokeRoutingResult) {
             rememberRoutingFeedback(threadId, {
@@ -4511,7 +4543,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
           turnStateShouldDispose = true
         } else {
-          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+          syncUsedSkillsContext()
           tracer.finish("cancelled").catch(() => {})
           if (invokeRoutingResult) {
             rememberRoutingFeedback(threadId, {

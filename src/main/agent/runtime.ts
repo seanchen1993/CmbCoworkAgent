@@ -2126,6 +2126,18 @@ export interface CreateAgentRuntimeOptions {
   pluginOutputDir?: string
   /** Optional system identifier exposed to child processes and hooks as SYSTEM_ID. */
   systemId?: string
+  /** Harness plugin root exposed to child processes as PLUGIN_ROOT. */
+  pluginRoot?: string
+  /** Harness plugin identifier exposed to child processes as PLUGIN_ID. */
+  pluginId?: string
+  /** Harness plugin display name exposed to child processes as PLUGIN_NAME. */
+  pluginName?: string
+  /** Harness plugin workspace exposed to child processes as PLUGIN_WORKSPACE. */
+  pluginWorkspace?: string
+  /** Harness feature identifier exposed to child processes as FEATURE_ID. */
+  featureId?: string
+  /** Harness project code exposed to child processes as PROJECT_CODE. */
+  projectCode?: string
   /** Skip the manage_scheduler tool (used by scheduled task / heartbeat execution to prevent recursive scheduling) */
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
@@ -2201,6 +2213,12 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     workingDirPromptAppendix,
     pluginOutputDir,
     systemId,
+    pluginRoot,
+    pluginId,
+    pluginName,
+    pluginWorkspace,
+    featureId,
+    projectCode,
     retryHooks,
     maxRetryAttempts,
     coordinatorWorkerTurnPlanning,
@@ -2325,6 +2343,12 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     hookTurnId,
     pluginOutputDir,
     systemId,
+    pluginRoot,
+    pluginId,
+    pluginName,
+    pluginWorkspace,
+    featureId,
+    projectCode,
     onFileMutation,
     abortSignal: options.abortSignal,
     runId: threadId,
