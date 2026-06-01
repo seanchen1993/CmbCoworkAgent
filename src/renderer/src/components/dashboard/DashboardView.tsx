@@ -15,13 +15,15 @@ import {
   Search,
   X,
   User,
-  Users
+  Users,
+  CircleAlert
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { formatRelativeTime, truncate } from "@/lib/utils"
 import {
   formatTopUserOrgName,
@@ -376,6 +378,130 @@ function outcomeLabel(outcome: string): string {
   if (outcome === "error") return "失败"
   if (outcome === "cancelled") return "已取消"
   return outcome || "未知"
+}
+
+type SkillEvalCheckItem = DashboardSkillEvalRun["checks"][number]
+
+function detailValue(detail: Record<string, unknown> | undefined, key: string): unknown {
+  return detail && Object.prototype.hasOwnProperty.call(detail, key) ? detail[key] : undefined
+}
+
+function formatCheckDetailValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "0"
+    return value.map((item) => formatCheckDetailValue(item)).join("、")
+  }
+  if (typeof value === "boolean") return value ? "是" : "否"
+  if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(2)
+  if (typeof value === "string") return value || "空"
+  if (value === null || value === undefined) return "无"
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function checkRuleLines(check: SkillEvalCheckItem): string[] {
+  const detail = check.detail
+  const value = (key: string) => formatCheckDetailValue(detailValue(detail, key))
+
+  switch (check.name) {
+    case "step_budget_reasonable":
+      return ["步骤数 <= " + value("max") + " 通过", "当前步骤数：" + value("steps")]
+    case "tool_budget_reasonable":
+      return ["工具调用数 <= " + value("max") + " 通过", "当前工具调用：" + value("totalToolCalls")]
+    case "no_repeated_tool_calls":
+      return [
+        "连续相同工具调用不超过 " + value("maxConsecutiveSameCall") + " 次",
+        "当前重复次数：" + value("repeatedToolCalls")
+      ]
+    case "input_tokens_reasonable":
+      return [
+        "平均 Prompt 输入 <= " + value("max") + " 通过",
+        "当前平均输入：" + value("averagePromptInputTokens")
+      ]
+    case "peak_input_tokens_reasonable":
+      return [
+        "最高单次输入 <= " + value("max") + " 通过",
+        "当前峰值输入：" + value("peakInputTokens")
+      ]
+    case "run_completed_successfully":
+      return ["trace outcome 必须是 success", "当前 outcome：" + value("outcome")]
+    case "final_response_present":
+      return ["能提取到最终回复文本即通过", "当前回复长度：" + value("responseLength")]
+    case "terminal_message_success":
+      return [
+        "终止消息节点有输出内容即通过",
+        "当前输出长度：" + value("terminalOutputLength"),
+        "终止状态：" + value("terminalStatus")
+      ]
+    case "no_tool_result_errors":
+      return ["工具结果错误数为 0 即通过", "当前错误数：" + value("toolResultErrors")]
+    case "final_response_substantive":
+      return [
+        "最终响应长度 >= " + value("min") + " 字即通过",
+        "当前响应长度：" + value("responseLength")
+      ]
+    case "has_output_signal":
+      return [
+        "有文件改动、工具产物信号，或最终响应达到实质长度即通过",
+        "改动文件：" + value("changedFiles"),
+        "工具产物信号：" + value("artifactSignals"),
+        "最终响应长度：" + value("finalResponseLength")
+      ]
+    case "has_validation_signal":
+      return [
+        "没有文件改动时不要求验证；有文件改动时需检测到验证命令",
+        "是否需要验证：" + value("validationNeeded"),
+        "验证命令：" + value("validationCommands")
+      ]
+    case "no_dangerous_commands":
+      return ["未检测到高风险命令即通过", "高风险命令：" + value("dangerousCommands")]
+    default:
+      return detail
+        ? Object.entries(detail).map(([key, item]) => key + "：" + formatCheckDetailValue(item))
+        : ["暂无详细判定数据"]
+  }
+}
+
+function SkillEvalCheckBadge({
+  check,
+  prefix
+}: {
+  check: SkillEvalCheckItem
+  prefix?: string
+}): React.JSX.Element {
+  return (
+    <Badge
+      variant={check.ok ? "nominal" : "warning"}
+      className="inline-flex items-center gap-1 normal-case tracking-normal"
+    >
+      <span>{prefix ? prefix + check.label : check.label}</span>
+      <TooltipProvider delayDuration={150}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span
+              className="inline-flex size-3.5 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:text-foreground"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <CircleAlert className="size-3" />
+            </span>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-80 text-xs leading-relaxed">
+            <div className="space-y-1">
+              <div className="font-medium text-foreground">{check.label}</div>
+              <div>状态：{check.ok ? "通过" : "未通过"}</div>
+              <div>权重：{check.weight}</div>
+              {checkRuleLines(check).map((line, index) => (
+                <div key={check.name + ":" + index}>{line}</div>
+              ))}
+            </div>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    </Badge>
+  )
 }
 
 function UserMetricCard({
@@ -1007,22 +1133,10 @@ const SkillEvalRunRow = memo(function SkillEvalRunRow({
           )}
           <div className="mt-2 flex flex-wrap gap-1.5">
             {checks.map((check) => (
-              <Badge
-                key={check.name}
-                variant={check.ok ? "nominal" : "warning"}
-                className="normal-case tracking-normal"
-              >
-                {check.label}
-              </Badge>
+              <SkillEvalCheckBadge key={check.name} check={check} />
             ))}
             {run.resultChecks.map((check) => (
-              <Badge
-                key={`result:${check.name}`}
-                variant={check.ok ? "nominal" : "warning"}
-                className="normal-case tracking-normal"
-              >
-                结果: {check.label}
-              </Badge>
+              <SkillEvalCheckBadge key={`result:${check.name}`} check={check} prefix="结果: " />
             ))}
           </div>
           {run.resultGenerated ? (
@@ -1160,22 +1274,10 @@ const SkillEvalRunSummary = memo(function SkillEvalRunSummary({
           )}
           <div className="mt-2 flex flex-wrap gap-1.5">
             {checks.map((check) => (
-              <Badge
-                key={check.name}
-                variant={check.ok ? "nominal" : "warning"}
-                className="normal-case tracking-normal"
-              >
-                {check.label}
-              </Badge>
+              <SkillEvalCheckBadge key={check.name} check={check} />
             ))}
             {run.resultChecks.map((check) => (
-              <Badge
-                key={`result:${check.name}`}
-                variant={check.ok ? "nominal" : "warning"}
-                className="normal-case tracking-normal"
-              >
-                结果: {check.label}
-              </Badge>
+              <SkillEvalCheckBadge key={`result:${check.name}`} check={check} prefix="结果: " />
             ))}
           </div>
           {run.resultGenerated ? (
