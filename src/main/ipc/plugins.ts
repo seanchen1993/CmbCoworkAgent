@@ -20,8 +20,10 @@ import {
 import { copyDirRecursive, createAsyncMutex } from "../utils/fs"
 import type {
   PluginHookMetadata,
+  PluginDetail,
   PluginManifest,
   PluginMetadata,
+  PluginMcpServerDetail,
   PluginMcpServerConfig
 } from "../types"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
@@ -39,6 +41,7 @@ interface ParsedPlugin {
   manifest: PluginManifest | null
   skillDirs: string[]
   mcpConfigs: Record<string, PluginMcpServerConfig>
+  mcpServerDetails: PluginMcpServerDetail[]
   hookCount: number
   hookPath: string
   name: string
@@ -107,6 +110,22 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
   // Read .mcp.json
   const mcpJsonPath = path.join(dirPath, ".mcp.json")
   mcpConfigs = parseMcpJsonFile(mcpJsonPath) ?? {}
+  const mcpServerDetails: PluginMcpServerDetail[] = Object.entries(mcpConfigs).map(
+    ([serverName, config]) => ({
+      name: serverName,
+      kind: config.url ? "remote" : "stdio",
+      transport: config.transport,
+      injectUserHeaders: config.command ? false : config.injectUserHeaders !== false,
+      priority: config.priority ?? 50,
+      activePriority: config.priority ?? 50,
+      scope: config.scope ?? "plugin-active",
+      fallbackEnabled: Boolean(config.fallback?.enabled && config.fallback.safeToRetry === true),
+      fallbackTo: config.fallback?.to ?? (config.fallback?.enabled ? "global" : undefined),
+      fallbackMatch:
+        config.fallback?.match ?? (config.fallback?.enabled ? "toolNameAndSchema" : undefined),
+      fallbackSafeToRetry: config.fallback?.safeToRetry === true
+    })
+  )
 
   // Count hooks — supports our flat array and CC formats
   let hookCount = 0
@@ -142,7 +161,7 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
     }
   }
 
-  return { manifest, skillDirs, mcpConfigs, hookCount, hookPath, name }
+  return { manifest, skillDirs, mcpConfigs, mcpServerDetails, hookCount, hookPath, name }
 }
 
 function formatAuthor(author: PluginManifest["author"]): string {
@@ -606,22 +625,24 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
     async (
       _event,
       id: string
-    ): Promise<{
-      skills: string[]
-      mcpServers: string[]
-      hookCount: number
-      hooks: PluginHookMetadata[]
-      manifest: PluginManifest | null
-    }> => {
+    ): Promise<PluginDetail> => {
       const plugins = getPlugins()
       const plugin = plugins.find((p) => p.id === id)
       if (!plugin || !existsSync(plugin.path)) {
-        return { skills: [], mcpServers: [], hookCount: 0, hooks: [], manifest: null }
+        return {
+          skills: [],
+          mcpServers: [],
+          mcpServerDetails: [],
+          hookCount: 0,
+          hooks: [],
+          manifest: null
+        }
       }
       const parsed = await parsePluginDir(plugin.path)
       return {
         skills: parsed.skillDirs,
         mcpServers: Object.keys(parsed.mcpConfigs),
+        mcpServerDetails: parsed.mcpServerDetails,
         hookCount: parsed.hookCount,
         hooks: getPluginHooks(plugin.id),
         manifest: parsed.manifest

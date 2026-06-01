@@ -21,8 +21,8 @@ import type {
   LspCallHierarchyOutgoingCall,
   LspStatus,
   PluginHookMetadata,
+  PluginDetail,
   PluginMetadata,
-  PluginManifest,
   SkillHookMetadata,
   ChatXConfig,
   HookLoggingConfig,
@@ -1328,22 +1328,8 @@ const api = {
         success: boolean
         error?: string
       }>,
-    getDetail: (
-      id: string
-    ): Promise<{
-      skills: string[]
-      mcpServers: string[]
-      hookCount: number
-      hooks: PluginHookMetadata[]
-      manifest: PluginManifest | null
-    }> =>
-      ipcRenderer.invoke("plugins:getDetail", id) as Promise<{
-        skills: string[]
-        mcpServers: string[]
-        hookCount: number
-        hooks: PluginHookMetadata[]
-        manifest: PluginManifest | null
-      }>,
+    getDetail: (id: string): Promise<PluginDetail> =>
+      ipcRenderer.invoke("plugins:getDetail", id) as Promise<PluginDetail>,
     listHooks: (): Promise<PluginHookMetadata[]> =>
       ipcRenderer.invoke("plugins:listHooks") as Promise<PluginHookMetadata[]>,
     setHookEnabled: (

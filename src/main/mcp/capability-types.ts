@@ -1,8 +1,18 @@
 export type McpToolVisibility = "eager" | "lazy"
+export type McpSourceKind = "connector" | "plugin"
+export type McpSourceScope = "global" | "plugin-active" | "plugin-installed"
+
+export interface McpFallbackPolicy {
+  enabled: boolean
+  to?: "global"
+  match?: "toolNameAndSchema" | "toolName"
+  safeToRetry?: boolean
+}
 
 export interface McpCapabilityTool {
   capabilityId: string
   toolId: string
+  canonicalToolId?: string
   providerKey: string
   providerAlias: string
   providerDisplayName: string
@@ -11,10 +21,16 @@ export interface McpCapabilityTool {
   inputSchema?: Record<string, unknown>
   outputSchema?: Record<string, unknown>
   visibility: McpToolVisibility
+  sourceKind?: McpSourceKind
+  scope?: McpSourceScope
+  priority?: number
+  pluginId?: string
+  fallback?: McpFallbackPolicy
 }
 
 export interface McpInvocationResult {
   capabilityId: string
+  fallbackCapabilityId?: string
   raw: unknown
   text: string
   structuredContent?: unknown
@@ -33,4 +49,5 @@ export interface McpCapabilityService {
 export interface McpCapabilityAliasMaps {
   capabilityById: Map<string, McpCapabilityTool>
   toolIds: Map<string, McpCapabilityTool>
+  canonicalToolIds: Map<string, McpCapabilityTool>
 }

@@ -2003,6 +2003,28 @@ export function parseMcpJsonFile(filePath: string): Record<string, PluginMcpServ
         }
         if (Object.keys(headers).length > 0) validated.headers = headers
       }
+      if (typeof entry.injectUserHeaders === "boolean") {
+        validated.injectUserHeaders = entry.injectUserHeaders
+      }
+      if (typeof entry.priority === "number" && Number.isFinite(entry.priority)) {
+        validated.priority = Math.max(0, Math.min(100, entry.priority))
+      }
+      if (entry.scope === "plugin-active" || entry.scope === "plugin-installed") {
+        validated.scope = entry.scope
+      }
+      if (entry.fallback && typeof entry.fallback === "object" && !Array.isArray(entry.fallback)) {
+        const rawFallback = entry.fallback as Record<string, unknown>
+        validated.fallback = {
+          enabled: typeof rawFallback.enabled === "boolean" ? rawFallback.enabled : false,
+          to: rawFallback.to === "global" ? "global" : undefined,
+          match:
+            rawFallback.match === "toolName" || rawFallback.match === "toolNameAndSchema"
+              ? rawFallback.match
+              : undefined,
+          safeToRetry:
+            typeof rawFallback.safeToRetry === "boolean" ? rawFallback.safeToRetry : false
+        }
+      }
       result[name] = validated
     }
     return Object.keys(result).length > 0 ? result : null
