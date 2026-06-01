@@ -117,7 +117,6 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
       transport: config.transport,
       injectUserHeaders: config.command ? false : config.injectUserHeaders !== false,
       priority: config.priority ?? 50,
-      activePriority: config.priority ?? 50,
       scope: config.scope ?? "plugin-active",
       fallbackEnabled: Boolean(config.fallback?.enabled && config.fallback.safeToRetry === true),
       fallbackTo: config.fallback?.to ?? (config.fallback?.enabled ? "global" : undefined),

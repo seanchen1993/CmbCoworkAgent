@@ -1350,7 +1350,7 @@ export function PluginDetailPanel(props: {
               <div className="flex items-center justify-between gap-3">
                 <h3 className="text-sm font-medium">MCP Servers</h3>
                 <span className="text-[11px] text-muted-foreground">
-                  默认携带当前用户身份，激活插件后优先调用
+                  默认携带当前用户身份，激活后显示并参与调用
                 </span>
               </div>
               <div className="rounded-lg border border-blue-300/40 bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300 leading-relaxed">
@@ -1373,7 +1373,6 @@ export function PluginDetailPanel(props: {
                       kind: "remote" as const,
                       injectUserHeaders: true,
                       priority: 50,
-                      activePriority: 50,
                       scope: "plugin-active" as const,
                       fallbackEnabled: false,
                       fallbackSafeToRetry: false

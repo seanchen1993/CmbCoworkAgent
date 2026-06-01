@@ -407,7 +407,6 @@ export interface PluginMcpServerDetail {
   transport?: "sse" | "streamable-http"
   injectUserHeaders: boolean
   priority: number
-  activePriority: number
   scope: "plugin-active" | "plugin-installed"
   fallbackEnabled: boolean
   fallbackTo?: "global"

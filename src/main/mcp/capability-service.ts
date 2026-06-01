@@ -218,6 +218,14 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     return [...(this.cache?.tools ?? [])]
   }
 
+  async getSnapshot(): Promise<{ fingerprint: string; tools: McpCapabilityTool[] }> {
+    await this.ensureInitialized()
+    return {
+      fingerprint: this.cache?.fingerprint ?? "",
+      tools: [...(this.cache?.tools ?? [])]
+    }
+  }
+
   async getTool(idOrAlias: string): Promise<McpCapabilityTool | null> {
     if (!idOrAlias.trim()) return null
     await this.ensureInitialized()

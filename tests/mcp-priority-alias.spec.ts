@@ -134,4 +134,42 @@ const pluginOnlyAliases = buildScopedToolAliases(
 )
 assert(!pluginOnlyAliases.some((item) => item.toolId === "mcp__sync"))
 
+const caseCollisionTools = [
+  tool({
+    capabilityId: "connector:upper:Search",
+    providerKey: "upper",
+    toolName: "Search",
+    sourceKind: "connector",
+    priority: 100
+  }),
+  tool({
+    capabilityId: "plugin:p1/upper:Search",
+    providerKey: "plugin:p1/upper",
+    toolName: "Search",
+    sourceKind: "plugin",
+    priority: 50
+  }),
+  tool({
+    capabilityId: "connector:lower:search",
+    providerKey: "lower",
+    toolName: "search",
+    sourceKind: "connector",
+    priority: 100
+  }),
+  tool({
+    capabilityId: "plugin:p1/lower:search",
+    providerKey: "plugin:p1/lower",
+    toolName: "search",
+    sourceKind: "plugin",
+    priority: 50
+  })
+]
+const caseCollisionForward = buildScopedToolAliases(caseCollisionTools, (item) => item.priority ?? 0)
+  .map((item) => [item.capabilityId, item.toolId])
+  .sort()
+const caseCollisionReverse = buildScopedToolAliases([...caseCollisionTools].reverse(), (item) => item.priority ?? 0)
+  .map((item) => [item.capabilityId, item.toolId])
+  .sort()
+assert.deepEqual(caseCollisionForward, caseCollisionReverse)
+
 console.log("PASS MCP priority aliases")

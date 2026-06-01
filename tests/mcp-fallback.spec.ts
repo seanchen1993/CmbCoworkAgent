@@ -131,10 +131,51 @@ function testRetryableErrorClassifier(): void {
   assert.equal(isRetryableMcpTransportError(new Error("amount 5024.00")), false)
 }
 
+async function testScopedSnapshotCacheReusesBaseSnapshot(): Promise<void> {
+  const tool = makeTool({
+    capabilityId: "connector:g1:search",
+    providerKey: "g1",
+    toolName: "search",
+    sourceKind: "connector"
+  })
+  let snapshotCalls = 0
+  const service: McpCapabilityService = {
+    listTools: async () => {
+      throw new Error("listTools should not be used when getSnapshot is available")
+    },
+    getSnapshot: async () => {
+      snapshotCalls += 1
+      return { fingerprint: "fp-1", tools: [tool] }
+    },
+    getTool: async (id) => (id === tool.capabilityId || id === tool.toolId ? tool : null),
+    invoke: async (id) => makeResult(id, "ok"),
+    invalidate: async () => undefined,
+    close: async () => undefined
+  }
+
+  const scoped = createScopedMcpCapabilityService(
+    service,
+    createHookScope(),
+    () => [],
+    undefined,
+    { workspacePath: process.cwd(), threadId: "thread-cache" }
+  )
+
+  await scoped.listTools()
+  await scoped.getTool(tool.capabilityId)
+  await scoped.listTools()
+  assert.equal(snapshotCalls, 1)
+
+  await scoped.invalidate("test")
+  await scoped.listTools()
+  assert.equal(snapshotCalls, 2)
+}
+
 async function run(): Promise<void> {
   testRetryableErrorClassifier()
   await testFallbackOnlyInvokedOnceAfterPrimaryThrow()
   await testFallbackRequiresSafeToRetry()
+  await testScopedSnapshotCacheReusesBaseSnapshot()
   console.log("PASS MCP fallback invokes fallback once")
 }
 

@@ -211,9 +211,29 @@ export function buildScopedToolAliases(
     }
   }
 
+  const orderedGroups = Array.from(byToolName.entries()).sort(
+    ([leftName, leftGroup], [rightName, rightGroup]) => {
+      const leftAlias = toSnakeCase(leftName, "tool")
+      const rightAlias = toSnakeCase(rightName, "tool")
+      const aliasCompare = leftAlias.localeCompare(rightAlias)
+      if (aliasCompare !== 0) return aliasCompare
+      const nameCompare = leftName.localeCompare(rightName)
+      if (nameCompare !== 0) return nameCompare
+      const leftFirstId =
+        [...leftGroup].sort((left, right) =>
+          left.capabilityId.localeCompare(right.capabilityId)
+        )[0]?.capabilityId ?? ""
+      const rightFirstId =
+        [...rightGroup].sort((left, right) =>
+          left.capabilityId.localeCompare(right.capabilityId)
+        )[0]?.capabilityId ?? ""
+      return leftFirstId.localeCompare(rightFirstId)
+    }
+  )
+
   const usedToolIds = new Set<string>()
   const result: McpCapabilityTool[] = []
-  for (const group of Array.from(byToolName.values())) {
+  for (const [toolName, group] of orderedGroups) {
     const ranked = [...group].sort((left, right) => {
       const priorityCompare = getEffectivePriority(right) - getEffectivePriority(left)
       if (priorityCompare !== 0) return priorityCompare
@@ -225,7 +245,7 @@ export function buildScopedToolAliases(
     const shortAliasTool = ranked.find(
       (tool) => tool.visibility === "eager" && tool.sourceKind === "connector"
     )
-    const shortBase = toMcpToolId("", toSnakeCase(ranked[0].toolName, "tool"))
+    const shortBase = toMcpToolId("", toSnakeCase(toolName, "tool"))
     for (const tool of ranked) {
       const canonicalToolId = tool.canonicalToolId ?? tool.toolId
       let nextToolId = canonicalToolId

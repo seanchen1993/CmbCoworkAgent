@@ -502,8 +502,52 @@ export function createScopedMcpCapabilityService(
     return tool.priority ?? (tool.sourceKind === "connector" ? 100 : 50)
   }
 
-  const getScopedTools = async (): Promise<McpCapabilityTool[]> => {
-    const tools = (await service.listTools()).map((tool) => {
+  let scopedSnapshotCache:
+    | {
+        key: string
+        tools: McpCapabilityTool[]
+        maps: ReturnType<typeof buildAliasMaps>
+      }
+    | null = null
+  let baseSnapshotCache: { fingerprint: string; tools: McpCapabilityTool[] } | null = null
+
+  const getActivePluginKey = (): string => {
+    return [...hookScope.activePluginIds].sort().join("\u001f")
+  }
+
+  const getBaseToolSnapshot = async (): Promise<{
+    fingerprint: string
+    tools: McpCapabilityTool[]
+  }> => {
+    if (baseSnapshotCache) {
+      return { fingerprint: baseSnapshotCache.fingerprint, tools: [...baseSnapshotCache.tools] }
+    }
+
+    let snapshot: { fingerprint: string; tools: McpCapabilityTool[] }
+    if (service.getSnapshot) {
+      snapshot = await service.getSnapshot()
+    } else {
+      const tools = await service.listTools()
+      snapshot = {
+        fingerprint: tools.map((tool) => tool.capabilityId).sort().join("\u001f"),
+        tools
+      }
+    }
+    baseSnapshotCache = { fingerprint: snapshot.fingerprint, tools: [...snapshot.tools] }
+    return { fingerprint: snapshot.fingerprint, tools: [...snapshot.tools] }
+  }
+
+  const getScopedToolSnapshot = async (): Promise<{
+    tools: McpCapabilityTool[]
+    maps: ReturnType<typeof buildAliasMaps>
+  }> => {
+    const baseSnapshot = await getBaseToolSnapshot()
+    const cacheKey = `${baseSnapshot.fingerprint}\u001e${getActivePluginKey()}`
+    if (scopedSnapshotCache?.key === cacheKey) {
+      return { tools: [...scopedSnapshotCache.tools], maps: scopedSnapshotCache.maps }
+    }
+
+    const tools = baseSnapshot.tools.map((tool) => {
       const pluginId = extractPluginIdFromProviderKey(tool.providerKey)
       const isInactiveScopedPlugin =
         tool.scope === "plugin-active" &&
@@ -511,15 +555,10 @@ export function createScopedMcpCapabilityService(
         !hookScope.activePluginIds.has(pluginId.toLowerCase())
       return isInactiveScopedPlugin ? { ...tool, visibility: "lazy" as const } : tool
     })
-    return buildScopedToolAliases(tools, getEffectivePriority)
-  }
-
-  const getScopedToolSnapshot = async (): Promise<{
-    tools: McpCapabilityTool[]
-    maps: ReturnType<typeof buildAliasMaps>
-  }> => {
-    const tools = await getScopedTools()
-    return { tools, maps: buildAliasMaps(tools) }
+    const scopedTools = buildScopedToolAliases(tools, getEffectivePriority)
+    const maps = buildAliasMaps(scopedTools)
+    scopedSnapshotCache = { key: cacheKey, tools: scopedTools, maps }
+    return { tools: [...scopedTools], maps }
   }
 
   const resolveScopedTool = async (idOrAlias: string): Promise<McpCapabilityTool | null> => {
@@ -617,7 +656,15 @@ export function createScopedMcpCapabilityService(
   }
 
   return {
-    listTools: getScopedTools,
+    listTools: async () => (await getScopedToolSnapshot()).tools,
+    getSnapshot: async () => {
+      const baseSnapshot = await getBaseToolSnapshot()
+      const scopedSnapshot = await getScopedToolSnapshot()
+      return {
+        fingerprint: `${baseSnapshot.fingerprint}\u001e${getActivePluginKey()}`,
+        tools: scopedSnapshot.tools
+      }
+    },
     getTool: resolveScopedTool,
     invoke: async (idOrAlias, args) => {
       const snapshot = await getScopedToolSnapshot()
@@ -703,8 +750,16 @@ export function createScopedMcpCapabilityService(
             : result.contentBlocks
       }
     },
-    invalidate: (reason) => service.invalidate(reason),
-    close: () => service.close()
+    invalidate: async (reason) => {
+      scopedSnapshotCache = null
+      baseSnapshotCache = null
+      await service.invalidate(reason)
+    },
+    close: async () => {
+      scopedSnapshotCache = null
+      baseSnapshotCache = null
+      await service.close()
+    }
   }
 }
 
