@@ -24,6 +24,10 @@ function assertNotIncludes(value: string, unexpected: string, label: string): vo
   assert(!value.includes(unexpected), `${label}: expected not to include "${unexpected}"`)
 }
 
+function assertMatches(value: string, pattern: RegExp, label: string): void {
+  assert(pattern.test(value), `${label}: expected to match ${pattern}`)
+}
+
 function assertSourceOrder(value: string, first: string, second: string, label: string): void {
   const firstIndex = value.indexOf(first)
   const secondIndex = value.indexOf(second)
@@ -181,7 +185,7 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    'worker.notification_acknowledged === false\n            && worker.suppress_notification_auto_run !== true',
+    "worker.notification_acknowledged === false\n            && worker.suppress_notification_auto_run !== true",
     "thread context treats only unsuppressed unacknowledged terminal coordinator notifications as unresolved from running workers"
   )
   assertIncludes(
@@ -392,9 +396,9 @@ async function testSidebarKeepsThreadLoadingWhileWorkerRuns(): Promise<void> {
     'worker.status === "running"',
     "sidebar checks for running coordinator workers"
   )
-  assertIncludes(
+  assertMatches(
     sidebar,
-    "(allStreamLoadingStates[thread.thread_id] ?? false) || hasRunningCoordinatorWorker",
+    /const\s+isLoading\s*=\s*\(allStreamLoadingStates\[thread\.thread_id\]\s*\?\?\s*false\)\s*\|\|\s*hasRunningCoordinatorWorker/u,
     "sidebar keeps spinner active after main stream completes while worker is running"
   )
   assertSourceOrder(

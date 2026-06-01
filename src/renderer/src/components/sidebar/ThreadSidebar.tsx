@@ -580,12 +580,17 @@ export function ThreadSidebar(): React.JSX.Element {
     }
   }
 
-  const confirmDeleteThread = useCallback(() => {
+  const confirmDeleteThread = useCallback(async () => {
     if (!threadToDelete) return
-    cleanupThread(threadToDelete.thread_id)
-    deleteThread(threadToDelete.thread_id)
-    markRead(threadToDelete.thread_id)
-    setThreadToDelete(null)
+
+    try {
+      await deleteThread(threadToDelete.thread_id)
+      cleanupThread(threadToDelete.thread_id)
+      markRead(threadToDelete.thread_id)
+      setThreadToDelete(null)
+    } catch (error) {
+      console.error("[ThreadSidebar] Failed to delete thread:", error)
+    }
   }, [cleanupThread, deleteThread, markRead, threadToDelete])
 
   const handleExportThread = useCallback(
@@ -613,8 +618,8 @@ export function ThreadSidebar(): React.JSX.Element {
     if (!projectToDelete) return
 
     for (const thread of projectToDelete.threads) {
-      cleanupThread(thread.thread_id)
       await deleteThread(thread.thread_id)
+      cleanupThread(thread.thread_id)
       markRead(thread.thread_id)
     }
 
@@ -902,7 +907,9 @@ export function ThreadSidebar(): React.JSX.Element {
                     {project.threads.map((thread) => {
                       const threadState = allThreadStates[thread.thread_id]
                       const hasRunningCoordinatorWorker = Boolean(
-                        threadState?.coordinatorWorkers.some((worker) => worker.status === "running")
+                        threadState?.coordinatorWorkers.some(
+                          (worker) => worker.status === "running"
+                        )
                       )
                       const isLoading =
                         (allStreamLoadingStates[thread.thread_id] ?? false) ||
