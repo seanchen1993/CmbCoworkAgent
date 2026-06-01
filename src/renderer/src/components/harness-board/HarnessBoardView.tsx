@@ -81,6 +81,13 @@ import { HARNESS_SOURCE } from "../../../../shared/harness-board-types"
 
 const harnessActionButtonClassName =
   "cursor-pointer group relative overflow-hidden rounded-md shadow-sm transition-all duration-200 hover:-translate-y-px hover:shadow-md"
+const harnessPageHeaderClassName =
+  "h-[106px] shrink-0 border-b border-border bg-background/90 px-6 py-4 app-no-drag"
+const harnessPageHeaderContentClassName =
+  "flex h-full items-start justify-between gap-4"
+const harnessPageHeaderActionsClassName = "flex shrink-0 items-center gap-2"
+const harnessDetailRefreshButtonClassName = "w-[84px] gap-2"
+const harnessDetailPrimaryButtonClassName = "w-[112px] gap-2"
 const harnessActionOverlayClassName =
   "pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-primary-foreground/10 to-primary-foreground/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
 const harnessActionIconClassName =
@@ -2045,8 +2052,8 @@ function ProjectDetailPage({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
-      <div className="shrink-0 border-b border-border bg-background/90 px-6 py-4 app-no-drag">
-        <div className="flex items-start justify-between gap-4">
+      <div className={harnessPageHeaderClassName}>
+        <div className={harnessPageHeaderContentClassName}>
           <div className="min-w-0 space-y-2">
             <HarnessBreadcrumb
               project={project}
@@ -2058,11 +2065,20 @@ function ProjectDetailPage({
               <h1 className="truncate text-xl font-semibold">{project.name}</h1>
             </ProjectBadgeRow>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className={harnessPageHeaderActionsClassName}>
             <Button
               variant="ghost"
               size="sm"
               className="gap-2"
+              onClick={() => onEditProject(project)}
+            >
+              <Pencil className="size-4" />
+              编辑项目信息
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={harnessDetailRefreshButtonClassName}
               onClick={() => onRefresh(project.projectId)}
             >
               {loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
@@ -2071,7 +2087,7 @@ function ProjectDetailPage({
             {!archived && (
               <Button
                 size="sm"
-                className={cn("gap-2", harnessActionButtonClassName)}
+                className={cn(harnessDetailPrimaryButtonClassName, harnessActionButtonClassName)}
                 onClick={() => onCreateFeature(project)}
                 disabled={creatingFeature || !!pluginCompatibilityMessage}
                 title={pluginCompatibilityMessage || undefined}
@@ -2087,15 +2103,6 @@ function ProjectDetailPage({
                 <span className="relative">新建特性</span>
               </Button>
             )}
-            <Button
-              variant="ghost"
-              size="sm"
-              className="gap-2"
-              onClick={() => onEditProject(project)}
-            >
-              <Pencil className="size-4" />
-              编辑项目信息
-            </Button>
           </div>
         </div>
       </div>
@@ -2480,8 +2487,8 @@ function FeatureDetailPage({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
-      <div className="shrink-0 border-b border-border bg-background/90 px-6 py-4 app-no-drag">
-        <div className="flex items-start justify-between gap-4">
+      <div className={harnessPageHeaderClassName}>
+        <div className={harnessPageHeaderContentClassName}>
           <div className="min-w-0 space-y-2">
             <HarnessBreadcrumb
               project={
@@ -2522,12 +2529,12 @@ function FeatureDetailPage({
             </div>
           </div>
           {effectiveActiveDetailTab === "feature" && (
-            <div className="flex shrink-0 items-center gap-2">
+            <div className={harnessPageHeaderActionsClassName}>
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="gap-2"
+                className={harnessDetailRefreshButtonClassName}
                 onClick={onRefresh}
                 disabled={loading || !detail || unbound}
               >
@@ -2537,7 +2544,7 @@ function FeatureDetailPage({
               <Button
                 type="button"
                 size="sm"
-                className={cn("gap-2", harnessActionButtonClassName)}
+                className={cn(harnessDetailPrimaryButtonClassName, harnessActionButtonClassName)}
                 onClick={() => void handleCreateSession()}
                 disabled={loading || !detail || unbound || sessionBusy !== null}
               >
@@ -3132,14 +3139,23 @@ export function HarnessBoardView(): React.JSX.Element {
 
   const refreshSelectedRunDetail = useCallback(async (): Promise<void> => {
     if (!selectedFeature) return
-    const detail = await window.api.harnessBoard.getRunDetail(
-      selectedFeature.projectId,
-      selectedFeature.slug
-    )
-    setRunDetail((currentDetail) =>
-      areHarnessValuesEqual(currentDetail, detail) ? currentDetail : detail
-    )
-  }, [selectedFeature])
+    setLoadingRun(true)
+    setLoadError(null)
+    try {
+      const detail = await window.api.harnessBoard.getRunDetail(
+        selectedFeature.projectId,
+        selectedFeature.slug
+      )
+      setRunDetail((currentDetail) =>
+        areHarnessValuesEqual(currentDetail, detail) ? currentDetail : detail
+      )
+      await loadProjectDetail(selectedFeature.projectId, { showLoading: false, reportError: false })
+    } catch (error) {
+      setLoadError(cleanIpcError(error))
+    } finally {
+      setLoadingRun(false)
+    }
+  }, [loadProjectDetail, selectedFeature])
 
   const { activeSystemGroups, archivedSystemGroups } = useMemo<{
     activeSystemGroups: SystemGroup[]
@@ -3407,7 +3423,6 @@ export function HarnessBoardView(): React.JSX.Element {
     },
     [isViewingSession, runDetail, selectedFeature, selectedFeatureProjectDetail, selectedFeatureSessions]
   )
-  const effectiveLoadingRun = loadingRun && !runDetailWithSessions
   const showingUnboundRunDetail =
     runDetailWithSessions !== null &&
     runDetail === null &&
@@ -3743,7 +3758,7 @@ export function HarnessBoardView(): React.JSX.Element {
       <>
         <FeatureDetailPage
           detail={runDetailWithSessions}
-          loading={effectiveLoadingRun}
+          loading={loadingRun}
           unbound={showingUnboundRunDetail}
           activeSessionThreadId={selectedFeature.activeSessionThreadId}
           isViewingSession={isViewingSession}
@@ -3807,8 +3822,8 @@ export function HarnessBoardView(): React.JSX.Element {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
-      <div className="shrink-0 border-b border-border bg-background/90 px-6 py-4 app-no-drag">
-        <div className="flex items-center gap-3">
+      <div className={harnessPageHeaderClassName}>
+        <div className={harnessPageHeaderContentClassName}>
           <div className="flex w-[360px] max-w-[48vw] min-w-[220px] items-center gap-3 rounded-md border border-border bg-background px-3 py-2">
             <Search className="size-4 shrink-0 text-muted-foreground" />
             <Input
@@ -3818,14 +3833,19 @@ export function HarnessBoardView(): React.JSX.Element {
               className="h-8 border-0 bg-transparent px-0 shadow-none focus-visible:ring-0"
             />
           </div>
-          <div className="ml-auto flex items-center gap-2">
-            <Button variant="ghost" size="sm" className="gap-2" onClick={() => void loadProjects()}>
+          <div className={harnessPageHeaderActionsClassName}>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={harnessDetailRefreshButtonClassName}
+              onClick={() => void loadProjects()}
+            >
               {loadingProjects ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
               刷新
             </Button>
             <Button
               size="sm"
-              className={cn("gap-2", harnessActionButtonClassName)}
+              className={cn(harnessDetailPrimaryButtonClassName, harnessActionButtonClassName)}
               onClick={openCreateDialog}
             >
               <span aria-hidden="true" className={harnessActionOverlayClassName} />
