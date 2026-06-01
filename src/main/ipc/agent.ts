@@ -136,13 +136,8 @@ function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgent
     const featureContext = buildHarnessFeatureAgentContext(metadata)
     if (!featureContext) return {}
 
-    const promptBlocks = [
-      featureContext.createPrompt,
-      featureContext.pluginDirPrompt
-    ].filter((item): item is string => Boolean(item?.trim()))
-
     return {
-      workingDirPromptAppendix: promptBlocks.length > 0 ? promptBlocks.join("\n") : undefined,
+      workingDirPromptAppendix: featureContext.systemPromptInject,
       pluginOutputDir: featureContext.pluginOutputDir,
       systemId: featureContext.systemId
     }

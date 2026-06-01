@@ -43,10 +43,9 @@ type HarnessInspectCommandName = "project" | "run" | "createProject" | "createFe
 type HarnessInspectCommandConfigKey = "project_status" | "feature_status" | "create_project" | "create_feature"
 type HarnessPlatformConfigKey =
   | HarnessInspectCommandConfigKey
-  | "plugin_dir_prompt"
+  | "system_prompt_inject"
   | "plugin_dir_hook"
   | "dialog_tips"
-  | "feature_create_prompt"
 
 const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<HarnessInspectCommandName, HarnessInspectCommandConfigKey> = {
   project: "project_status",
@@ -1348,8 +1347,7 @@ function readHarnessFeatureMetadata(metadata: unknown): { projectId: string; slu
 }
 
 export interface HarnessFeatureAgentContext {
-  createPrompt?: string
-  pluginDirPrompt?: string
+  systemPromptInject?: string
   pluginOutputDir?: string
   systemId?: string
 }
@@ -1362,8 +1360,7 @@ export function buildHarnessFeatureAgentContext(
 
   const project = requireProject(feature.projectId)
   const cwd = adapterPluginDir(project)
-  const createPrompt = readBoardConfigPlatformText(cwd, "feature_create_prompt")
-  const pluginDirPrompt = readBoardConfigPlatformText(cwd, "plugin_dir_prompt")
+  const systemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
   const systemId = normalizeText(project.systemId).trim()
   const render = (
@@ -1376,8 +1373,7 @@ export function buildHarnessFeatureAgentContext(
       : undefined
 
   return {
-    createPrompt: render(createPrompt, "createFeature"),
-    pluginDirPrompt: render(pluginDirPrompt, "run"),
+    systemPromptInject: render(systemPromptInject, "run"),
     pluginOutputDir: render(pluginOutputDir, "run"),
     systemId: systemId || undefined
   }
