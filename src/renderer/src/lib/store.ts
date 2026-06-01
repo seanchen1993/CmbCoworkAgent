@@ -727,10 +727,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     const state = get()
     set({
       dashboardAllowed: allowed,
-      ...(allowed ? {} : {
-        showDashboardView: false,
-        mainView: state.mainView === "dashboard" ? "thread" as const : state.mainView
-      })
+      ...(allowed
+        ? {}
+        : {
+            showDashboardView: false,
+            mainView: state.mainView === "dashboard" ? ("thread" as const) : state.mainView
+          })
     })
   },
 
@@ -809,7 +811,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         showDashboardView: false,
         mainView: "harness",
         currentThreadId: null,
-        previousThreadId: prev
+        previousThreadId: prev,
+        workerFocusView: null,
+        workerFocusMessagesThreadId: null,
+        workerFocusMessages: []
       })
     } else {
       const restored = get().previousThreadId
@@ -947,7 +952,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         showHarnessBoardView: false,
         showDashboardView: false,
         previousThreadId: prev,
-        currentThreadId: null
+        currentThreadId: null,
+        workerFocusView: null,
+        workerFocusMessagesThreadId: null,
+        workerFocusMessages: []
       })
       return
     }

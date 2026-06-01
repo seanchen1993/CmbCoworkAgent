@@ -3543,28 +3543,30 @@ export class LocalSandbox
         await this.recordReadTime(resolvedPath)
         return { path: effectiveFilePath, filesUpdate: null, occurrences }
       })
-      this._onFileMutation?.(effectiveFilePath, "edit")
-      // Adoption tracking (side-effect only, never throws).
-      // At this point withFileLock resolved successfully — the edit was applied.
-      try {
-        recordAdoptionGen({
-          threadId: this.runId,
-          tool: "edit_file",
-          filePath: effectiveFilePath,
-          // For edits, the local generated fragment is new_string; the tracker
-          // expands its line hashes by occurrences for replaceAll.
-          generatedContent: effectiveNewString,
-          workspacePath: this.workingDir,
-          // Pass the edit fragments only — no full-file references. Tracker
-          // derives deletedLineCount in a microtask via
-          // max(0, countNonBlankLines(oldString) - countNonBlankLines(newString)) * occurrences,
-          // avoiding any full-file scan or retention of editor buffers.
-          oldString: effectiveOldString,
-          newString: effectiveNewString,
-          occurrences: result.occurrences
-        })
-      } catch {
-        // tracker must not affect tool result
+      if (!result.error) {
+        this._onFileMutation?.(effectiveFilePath, "edit")
+        // Adoption tracking (side-effect only, never throws).
+        // Only successful edits should be counted as generated code adoption.
+        try {
+          recordAdoptionGen({
+            threadId: this.runId,
+            tool: "edit_file",
+            filePath: effectiveFilePath,
+            // For edits, the local generated fragment is new_string; the tracker
+            // expands its line hashes by occurrences for replaceAll.
+            generatedContent: effectiveNewString,
+            workspacePath: this.workingDir,
+            // Pass the edit fragments only — no full-file references. Tracker
+            // derives deletedLineCount in a microtask via
+            // max(0, countNonBlankLines(oldString) - countNonBlankLines(newString)) * occurrences,
+            // avoiding any full-file scan or retention of editor buffers.
+            oldString: effectiveOldString,
+            newString: effectiveNewString,
+            occurrences: result.occurrences
+          })
+        } catch {
+          // tracker must not affect tool result
+        }
       }
       // PostToolUse hook
       try {

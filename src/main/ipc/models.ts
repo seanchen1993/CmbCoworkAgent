@@ -2394,8 +2394,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     }
 
     const selectedPath = result.filePaths[0]
-    const ready = await prepareWorkspaceSelectionSandbox(selectedPath, parentWindow)
-    if (!ready) return null
 
     if (threadId) {
       const { getThread, updateThread } = await import("../db")
@@ -2403,6 +2401,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       if (thread) {
         const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
         await assertWorkspaceSwitchAllowed(threadId, metadata.workspacePath, selectedPath)
+        const ready = await prepareWorkspaceSelectionSandbox(selectedPath, parentWindow)
+        if (!ready) return null
         metadata.workspacePath = selectedPath
         clearThreadGitContextCache(metadata)
         updateThread(threadId, { metadata: JSON.stringify(metadata) })
@@ -2410,6 +2410,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         // Start watching the new workspace
         startWatching(threadId, selectedPath)
       }
+    } else {
+      const ready = await prepareWorkspaceSelectionSandbox(selectedPath, parentWindow)
+      if (!ready) return null
     }
 
     // 无论是线程模式还是全局模式，都更新“最近工作区”。

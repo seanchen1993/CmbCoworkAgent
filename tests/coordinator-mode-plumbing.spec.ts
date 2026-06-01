@@ -1689,6 +1689,12 @@ async function testWorkspaceSwitchGuardsRunningCoordinatorWorkers(): Promise<voi
     2,
     "workspace:set and workspace:select both enforce the running worker guard"
   )
+  assertSourceOrder(
+    modelsIpc,
+    "await assertWorkspaceSwitchAllowed(threadId, metadata.workspacePath, selectedPath)",
+    "const ready = await prepareWorkspaceSelectionSandbox(selectedPath, parentWindow)",
+    "workspace:select checks coordinator worker state before preparing a new workspace"
+  )
 }
 
 async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
