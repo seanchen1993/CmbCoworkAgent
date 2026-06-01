@@ -415,6 +415,34 @@ function removePendingApproval(queue: HITLRequest[], requestId?: string): HITLRe
   return queue.filter((item) => getPendingApprovalId(item) !== requestId)
 }
 
+function normalizeApprovalPayload(request: unknown): HITLRequest & Record<string, unknown> {
+  const req = request as Record<string, unknown>
+  return {
+    id: (req.id as string) || "",
+    tool_call:
+      (req.tool_call as { id: string; name: string; args: Record<string, unknown> }) || {
+        id: "",
+        name: "execute",
+        args: {}
+      },
+    allowed_decisions: ["approve", "reject"],
+    command: req.command,
+    reason: req.reason,
+    operation: req.operation,
+    filePath: req.filePath,
+    code: req.code,
+    params: req.params,
+    timeoutMs: req.timeoutMs,
+    savedToolName: req.savedToolName,
+    savedToolId: req.savedToolId,
+    savedToolDescription: req.savedToolDescription,
+    savedToolMetadataError: req.savedToolMetadataError,
+    _orchestratorRequestId: req.id,
+    _retryReason: req.retry_reason,
+    _approvalTypes: req.allowed_approval_types
+  } as HITLRequest & Record<string, unknown>
+}
+
 function normalizeThreadState(state: ThreadState): ThreadState {
   const pendingQueue = Array.isArray(state.pendingApprovals)
     ? state.pendingApprovals
@@ -1841,36 +1869,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         schedulerListenerCleanups.current[threadId] = schedulerCleanup
       }
 
+      const cancelledApprovalRequestIds = new Set<string>()
+
       // Register global approval listeners for this thread (not tied to ChatContainer mount)
       const cleanupApproval = window.api.sandbox.onApprovalRequest(threadId, (request: unknown) => {
         console.log(`[ThreadProvider] Approval request for thread ${threadId}:`, request)
-        const req = request as Record<string, unknown>
+        if (!initializedThreadsRef.current.has(threadId)) return
+        const approvalRequest = normalizeApprovalPayload(request)
+        if (cancelledApprovalRequestIds.has(getPendingApprovalId(approvalRequest))) return
         updateThreadState(threadId, (state) => {
-          const approvalRequest = {
-            id: (req.id as string) || "",
-            tool_call:
-              (req.tool_call as { id: string; name: string; args: Record<string, unknown> }) || {
-                id: "",
-                name: "execute",
-                args: {}
-              },
-            allowed_decisions: ["approve", "reject"],
-            command: req.command,
-            reason: req.reason,
-            operation: req.operation,
-            filePath: req.filePath,
-            code: req.code,
-            params: req.params,
-            timeoutMs: req.timeoutMs,
-            savedToolName: req.savedToolName,
-            savedToolId: req.savedToolId,
-            savedToolDescription: req.savedToolDescription,
-            savedToolMetadataError: req.savedToolMetadataError,
-            _orchestratorRequestId: req.id,
-            _retryReason: req.retry_reason,
-            _approvalTypes: req.allowed_approval_types
-          } as HITLRequest & Record<string, unknown>
-
           return {
             ...buildPendingApprovalState(
               enqueuePendingApproval(state.pendingApprovals, approvalRequest)
@@ -1890,6 +1897,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
       const cleanupTimeout = window.api.sandbox.onApprovalTimeout(threadId, (data) => {
         console.warn(`[ThreadProvider] Approval timed out for thread ${threadId}: requestId=${data.requestId}`)
+        if (!initializedThreadsRef.current.has(threadId)) return
+        cancelledApprovalRequestIds.add(data.requestId)
         updateThreadState(threadId, (state) => {
           const timedOutApproval = state.pendingApprovals.find(
             (approval) => getPendingApprovalId(approval) === data.requestId
@@ -1908,7 +1917,61 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
         })
       })
-      approvalListenerCleanups.current[threadId] = [cleanupApproval, cleanupTimeout]
+      const cleanupCancel = window.api.sandbox.onApprovalCancel(threadId, (data) => {
+        console.log(
+          `[ThreadProvider] Approval cancelled for thread ${threadId}: requestId=${data.requestId}, reason=${data.reason ?? "unknown"}`
+        )
+        if (!initializedThreadsRef.current.has(threadId)) return
+        cancelledApprovalRequestIds.add(data.requestId)
+        updateThreadState(threadId, (state) => {
+          const cancelledApproval = state.pendingApprovals.find(
+            (approval) => getPendingApprovalId(approval) === data.requestId
+          )
+          return {
+            ...buildPendingApprovalState(removePendingApproval(state.pendingApprovals, data.requestId)),
+            ...(cancelledApproval?.tool_call?.id
+              ? {
+                  toolCallStates: upsertToolCallState(
+                    state.toolCallStates,
+                    cancelledApproval.tool_call.id,
+                    { status: "interrupted" }
+                  )
+                }
+              : {})
+          }
+        })
+      })
+      approvalListenerCleanups.current[threadId] = [cleanupApproval, cleanupTimeout, cleanupCancel]
+      window.api.sandbox
+        .getPendingApprovals(threadId)
+        .then((requests) => {
+          if (!initializedThreadsRef.current.has(threadId)) return
+          if (!Array.isArray(requests) || requests.length === 0) return
+          const approvalRequests = requests
+            .map((request) => normalizeApprovalPayload(request))
+            .filter((request) => !cancelledApprovalRequestIds.has(getPendingApprovalId(request)))
+          if (approvalRequests.length === 0) return
+          updateThreadState(threadId, (state) => {
+            let pendingApprovals = state.pendingApprovals
+            let toolCallStates = state.toolCallStates
+            for (const approvalRequest of approvalRequests) {
+              pendingApprovals = enqueuePendingApproval(pendingApprovals, approvalRequest)
+              toolCallStates = upsertToolCallStateFromRequest(toolCallStates, approvalRequest)
+            }
+            return {
+              ...buildPendingApprovalState(pendingApprovals),
+              toolCallStates
+            }
+          })
+          const currentId = useAppStore.getState().currentThreadId
+          if (currentId !== threadId && initializedThreadsRef.current.has(threadId)) {
+            console.log(`[ThreadProvider] Auto-switching to thread ${threadId} for restored pending approval`)
+            useAppStore.getState().selectThread(threadId)
+          }
+        })
+        .catch((error) => {
+          console.warn(`[ThreadProvider] Failed to restore pending approvals for thread ${threadId}:`, error)
+        })
 
       const cleanupUserInput = window.api.userInput.onRequest(threadId, (request) => {
         console.log(`[ThreadProvider] User input request for thread ${threadId}:`, request)

@@ -160,6 +160,7 @@ export const pendingApprovals = new Map<
   {
     resolve: (decision: ApprovalDecision) => void
     request: ApprovalRequest
+    threadId: string
     targetWebContentsIds: number[]
   }
 >()
@@ -1698,39 +1699,64 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
 
   // ── Wire up the approval orchestrator ──
   const yoloMode = getYoloMode()
-  let approvalStore: ApprovalStore | undefined
-  let requestApproval: ((req: ApprovalRequest) => Promise<ApprovalDecision>) | undefined
   // Keep approval IPC available even in YOLO mode. YOLO skips the initial shell/file
   // approval, but escaping the sandbox after a sandbox denial still needs explicit
   // one-shot user approval, matching Codex's retry-without-sandbox flow.
-  const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
-  requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
+  // Approval requests are a human safety gate: they should not auto-reject just
+  // because the user stepped away. They are resolved by an explicit user
+  // decision, or by the run abort signal when the user stops/cancels the turn.
+  const APPROVAL_TIMEOUT_MS: number | null = null
+  const requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
     // IPC fires immediately; the renderer owns the queue (pendingApprovals[]).
     // Multiple concurrent tool calls each register their own resolver here —
     // the renderer shows them one at a time, but the events are not serialized
     // back-end side. This matches how Codex surfaces ExecApprovalRequest events.
     return new Promise<ApprovalDecision>((resolve) => {
-      const timeoutId = setTimeout(() => {
+      let timeoutId: ReturnType<typeof setTimeout> | undefined
+      const cleanup = (): void => {
+        if (timeoutId) clearTimeout(timeoutId)
+        options.abortSignal?.removeEventListener("abort", onAbort)
+      }
+      const rejectPending = (reason: "timeout" | "abort"): void => {
         if (pendingApprovals.has(req.id)) {
           pendingApprovals.delete(req.id)
-          console.warn(
-            `[Orchestrator] approval request timed out after ${APPROVAL_TIMEOUT_MS / 1000}s: reqId=${req.id}`
-          )
+          cleanup()
+          console.warn(`[Orchestrator] approval request ${reason}: reqId=${req.id}`)
+          const channel = reason === "timeout" ? `approval:timeout:${threadId}` : `approval:cancel:${threadId}`
           for (const win of BrowserWindow.getAllWindows()) {
-            win.webContents.send(`approval:timeout:${threadId}`, { requestId: req.id })
+            win.webContents.send(channel, { requestId: req.id, reason })
           }
           resolve({ type: "reject", tool_call_id: req.tool_call?.id ?? req.id })
         }
-      }, APPROVAL_TIMEOUT_MS)
+      }
+
+      const onAbort = (): void => {
+        rejectPending("abort")
+      }
+
+      if (options.abortSignal?.aborted) {
+        resolve({ type: "reject", tool_call_id: req.tool_call?.id ?? req.id })
+        return
+      }
+
+      if (APPROVAL_TIMEOUT_MS !== null) {
+        timeoutId = setTimeout(() => rejectPending("timeout"), APPROVAL_TIMEOUT_MS)
+      }
 
       pendingApprovals.set(req.id, {
         resolve: (decision: ApprovalDecision) => {
-          clearTimeout(timeoutId)
+          cleanup()
           resolve(decision)
         },
         request: req,
+        threadId,
         targetWebContentsIds: BrowserWindow.getAllWindows().map((w) => w.webContents.id)
       })
+      options.abortSignal?.addEventListener("abort", onAbort, { once: true })
+      if (options.abortSignal?.aborted) {
+        onAbort()
+        return
+      }
       console.log(
         `[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`
       )
@@ -1755,7 +1781,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     })
   }
 
-  approvalStore = getOrCreateApprovalStore(threadId)
+  const approvalStore = getOrCreateApprovalStore(threadId)
 
   const rawExecute = (
     command: string,

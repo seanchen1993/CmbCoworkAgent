@@ -861,6 +861,7 @@ interface CustomAPI {
     runElevatedSetup: (workspacePaths?: string[]) => Promise<{ success: boolean; error?: string }>
     getYoloMode: () => Promise<boolean>
     setYoloMode: (yolo: boolean) => Promise<void>
+    getPendingApprovals: (threadId: string) => Promise<unknown[]>
     isNuxNeeded: () => Promise<boolean>
     completeNux: (mode: "elevated" | "unelevated" | "none") => Promise<void>
     getApprovalRules: () => Promise<Array<{ pattern: string; decision: string }>>
@@ -876,6 +877,10 @@ interface CustomAPI {
     onApprovalTimeout: (
       threadId: string,
       callback: (data: { requestId: string }) => void
+    ) => () => void
+    onApprovalCancel: (
+      threadId: string,
+      callback: (data: { requestId: string; reason?: string }) => void
     ) => () => void
     onChanged: (callback: () => void) => () => void
   }
