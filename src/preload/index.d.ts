@@ -970,7 +970,8 @@ interface CustomAPI {
       }>
     >
     approve: (
-      candidateId: string
+      candidateId: string,
+      proposedContent?: string
     ) => Promise<{ success: boolean; skillId?: string; error?: string }>
     reject: (candidateId: string) => Promise<{ success: boolean }>
     clear: () => Promise<void>

@@ -7,6 +7,8 @@ import { cn } from "@/lib/utils"
 import { evolutionApi, type EvolutionCandidate } from "@/api/evolution"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
 import { trackCloudEvolutionCandidatePublished } from "@/lib/cloud-evolution-events"
+import { extractTextBundleFromZip, type TextBundleFile } from "@/lib/skill-bundle-diff"
+import { SkillBundleMergeEditor } from "./SkillBundleMergeEditor"
 
 function statusLabel(status: string): string {
   return {
@@ -30,6 +32,11 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
   const [diff, setDiff] = useState("")
   const [loading, setLoading] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
+  const [draftEditorOpen, setDraftEditorOpen] = useState(false)
+  const [draftEditorLoading, setDraftEditorLoading] = useState(false)
+  const [draftSaving, setDraftSaving] = useState(false)
+  const [draftBaseFiles, setDraftBaseFiles] = useState<TextBundleFile[]>([])
+  const [draftFiles, setDraftFiles] = useState<TextBundleFile[]>([])
   const [useLocalDebugEndpoint, setUseLocalDebugEndpoint] = useState(() => evolutionApi.isLocalDebugEndpointEnabled())
   const selected = useMemo(
     () => items.find((item) => item.candidate_id === selectedId) || items[0] || null,
@@ -79,6 +86,14 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
 
   const reviewer = localStorage.getItem("userName") || localStorage.getItem("ystId") || "admin"
 
+  const refreshSelectedDiff = useCallback(async (candidateId: string): Promise<void> => {
+    try {
+      setDiff(await evolutionApi.getDiff(candidateId))
+    } catch (error) {
+      setDiff(error instanceof Error ? error.message : String(error))
+    }
+  }, [])
+
   const toggleLocalDebugEndpoint = useCallback(() => {
     const next = !useLocalDebugEndpoint
     evolutionApi.setLocalDebugEndpointEnabled(next)
@@ -88,6 +103,44 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
     setDiff("")
     void load()
   }, [load, useLocalDebugEndpoint])
+
+  const openDraftEditor = useCallback(async (candidate: EvolutionCandidate): Promise<void> => {
+    setDraftEditorLoading(true)
+    try {
+      const [baseBundle, bundle] = await Promise.all([
+        evolutionApi.downloadCandidateBaseBundle(candidate.candidate_id),
+        evolutionApi.downloadCandidateBundle(candidate.candidate_id)
+      ])
+      const [baseFiles, files] = await Promise.all([
+        extractTextBundleFromZip(await baseBundle.blob.arrayBuffer()),
+        extractTextBundleFromZip(await bundle.blob.arrayBuffer())
+      ])
+      setDraftBaseFiles(baseFiles)
+      setDraftFiles(files)
+      setDraftEditorOpen(true)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载候选草稿失败")
+    } finally {
+      setDraftEditorLoading(false)
+    }
+  }, [])
+
+  const saveDraft = useCallback(async (files: TextBundleFile[]): Promise<void> => {
+    if (!selected) return
+    setDraftSaving(true)
+    try {
+      const updated = await evolutionApi.saveDraft(selected.candidate_id, files, reviewer, selected.notes || undefined)
+      setItems((prev) => prev.map((item) => item.candidate_id === updated.candidate_id ? updated : item))
+      setDraftEditorOpen(false)
+      await refreshSelectedDiff(selected.candidate_id)
+      toast.success("候选草稿已保存")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存候选草稿失败")
+      throw error
+    } finally {
+      setDraftSaving(false)
+    }
+  }, [refreshSelectedDiff, reviewer, selected])
 
   async function runAction(action: "approve" | "reject" | "publish" | "unpublish" | "delete", candidate: EvolutionCandidate): Promise<void> {
     if (action === "delete") {
@@ -210,6 +263,14 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
                 <div className="flex gap-2">
                   <Button
                     variant="outline"
+                    disabled={Boolean(actionLoading) || draftEditorLoading || selected.evolution_status === "published"}
+                    onClick={() => void openDraftEditor(selected)}
+                  >
+                    {draftEditorLoading ? <Loader2 className="mr-1.5 size-4 animate-spin" /> : <RefreshCcw className="mr-1.5 size-4" />}
+                    编辑草稿
+                  </Button>
+                  <Button
+                    variant="outline"
                     disabled={Boolean(actionLoading) || selected.evolution_status !== "awaiting_review"}
                     onClick={() => void runAction("reject", selected)}
                   >
@@ -268,6 +329,17 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
           </>
         )}
       </div>
+      <SkillBundleMergeEditor
+        open={draftEditorOpen}
+        title={`编辑候选草稿：${selected?.skill_name || ""}`}
+        description="保存后，审批 diff、通过和发布都会使用这份草稿。"
+        baseFiles={draftBaseFiles}
+        initialFiles={draftFiles}
+        confirmLabel="保存草稿"
+        saving={draftSaving}
+        onOpenChange={setDraftEditorOpen}
+        onConfirm={saveDraft}
+      />
     </div>
   )
 }
