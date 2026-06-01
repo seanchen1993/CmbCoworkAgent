@@ -285,6 +285,10 @@ export interface DashboardSkillEvalRun {
   skillTaskId?: string
   skillTaskTraceIndex?: number
   evalSource?: "explicit" | "inherited_context"
+  contextTraceIds: string[]
+  skillEvalTraceIds: string[]
+  contextTraceCount: number
+  skillEvalTraceCount: number
   outcome: string
   processScore: number
   outcomeScore: number
@@ -338,6 +342,7 @@ export interface DashboardSkillEvalRun {
   }>
   resultGenerated: boolean
   traceDetail?: DashboardTraceDetail
+  traceDetails?: DashboardTraceDetail[]
   evidence: {
     finalResponseLength: number
     changedFiles: number
@@ -1280,6 +1285,14 @@ function parseSkillEvalSummary(
         ...(item.evalSource === "explicit" || item.evalSource === "inherited_context"
           ? { evalSource: item.evalSource }
           : {}),
+        contextTraceIds: Array.isArray(item.contextTraceIds)
+          ? item.contextTraceIds.map(String)
+          : [],
+        skillEvalTraceIds: Array.isArray(item.skillEvalTraceIds)
+          ? item.skillEvalTraceIds.map(String)
+          : [],
+        contextTraceCount: numberValue(item.contextTraceCount),
+        skillEvalTraceCount: numberValue(item.skillEvalTraceCount),
         outcome: String(item.outcome ?? "unknown"),
         processScore: numberValue(item.processScore),
         outcomeScore: numberValue(item.outcomeScore),
@@ -1311,6 +1324,13 @@ function parseSkillEvalSummary(
         resultArtifacts: parseSkillEvalArtifacts(item.resultArtifacts),
         resultGenerated: item.resultGenerated === true,
         traceDetail: parseDashboardTraceDetail(item.traceDetail),
+        traceDetails: Array.isArray(item.traceDetails)
+          ? item.traceDetails
+              .map((trace: any) => parseDashboardTraceDetail(trace))
+              .filter((trace: DashboardTraceDetail | undefined): trace is DashboardTraceDetail =>
+                Boolean(trace)
+              )
+          : [],
         evidence: {
           finalResponseLength: numberValue(item.evidence?.finalResponseLength),
           changedFiles: numberValue(item.evidence?.changedFiles),

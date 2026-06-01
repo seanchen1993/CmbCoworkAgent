@@ -210,6 +210,10 @@ interface DashboardSkillEvalRun {
   skillTaskId?: string
   skillTaskTraceIndex?: number
   evalSource?: "explicit" | "inherited_context"
+  contextTraceIds: string[]
+  skillEvalTraceIds: string[]
+  contextTraceCount: number
+  skillEvalTraceCount: number
   outcome: string
   processScore: number
   outcomeScore: number
@@ -263,6 +267,7 @@ interface DashboardSkillEvalRun {
   }>
   resultGenerated: boolean
   traceDetail: DashboardTraceDetail
+  traceDetails: DashboardTraceDetail[]
   evidence: {
     finalResponseLength: number
     changedFiles: number
@@ -2539,9 +2544,30 @@ function parseSkillEvalRecordHits(raw: EsSearchResponse): TraceSkillEvalRecord[]
 async function fetchTraceDetailsForSkillEvalRecords(
   records: TraceSkillEvalRecord[]
 ): Promise<Map<string, DashboardTraceDetail>> {
-  const traceIds = Array.from(new Set(records.map((record) => record.traceId).filter(Boolean)))
+  const traceIds = Array.from(
+    new Set(
+      records
+        .flatMap((record) => [
+          record.traceId,
+          // Current window semantics keep these arrays equal; the context fallback is for
+          // a future split where context traces can be wider than scored eval traces.
+          ...(record.skillEvalTraceIds.length > 0
+            ? record.skillEvalTraceIds
+            : record.contextTraceIds)
+        ])
+        .filter(Boolean)
+    )
+  )
   if (traceIds.length === 0) return new Map()
-  const limitedTraceIds = traceIds.slice(0, 200)
+  const limitedTraceIds = traceIds.slice(0, 500)
+  if (traceIds.length > limitedTraceIds.length) {
+    console.warn(
+      "[Dashboard] skill eval trace detail ids truncated: " +
+        traceIds.length +
+        " -> " +
+        limitedTraceIds.length
+    )
+  }
   const body = {
     track_total_hits: false,
     size: limitedTraceIds.length,
@@ -2581,12 +2607,27 @@ function skillEvalStoredRecordsToDashboardRuns(
       }
       return hasAllowedSkillName(record.skillName, allowedSkillNames)
     })
-    .map((record) =>
-      skillEvalRecordToDashboardRun(
-        record,
-        traceDetails?.get(record.traceId) ?? fallbackTraceDetailFromSkillEvalRecord(record)
+    .map((record) => {
+      const fallbackTraceDetail = fallbackTraceDetailFromSkillEvalRecord(record)
+      const traceDetail = traceDetails?.get(record.traceId) ?? fallbackTraceDetail
+      // Current window semantics keep these arrays equal; the context fallback is for
+      // a future split where context traces can be wider than scored eval traces.
+      const orderedTraceIds = Array.from(
+        new Set([
+          ...(record.skillEvalTraceIds.length > 0
+            ? record.skillEvalTraceIds
+            : record.contextTraceIds),
+          record.traceId
+        ])
       )
-    )
+      const traceDetailList = orderedTraceIds
+        .map((traceId) =>
+          traceId === record.traceId ? traceDetail : (traceDetails?.get(traceId) ?? undefined)
+        )
+        .filter((detail): detail is DashboardTraceDetail => Boolean(detail))
+        .sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt))
+      return skillEvalRecordToDashboardRun(record, traceDetail, traceDetailList)
+    })
 }
 
 function fallbackTraceDetailFromSkillEvalRecord(
@@ -3090,7 +3131,8 @@ function isSameSkillVersion(
 
 function skillEvalRecordToDashboardRun(
   record: TraceSkillEvalRecord,
-  traceDetail: DashboardTraceDetail
+  traceDetail: DashboardTraceDetail,
+  traceDetails: DashboardTraceDetail[] = [traceDetail]
 ): DashboardSkillEvalRun {
   const processScore = record.processScore / 100
   const outcomeScore = record.outcomeScore / 100
@@ -3109,6 +3151,10 @@ function skillEvalRecordToDashboardRun(
     skillTaskId: record.skillTaskId,
     skillTaskTraceIndex: record.skillTaskTraceIndex,
     evalSource: record.evalSource,
+    contextTraceIds: [...record.contextTraceIds],
+    skillEvalTraceIds: [...record.skillEvalTraceIds],
+    contextTraceCount: record.contextTraceCount,
+    skillEvalTraceCount: record.skillEvalTraceCount,
     outcome: record.outcome,
     processScore,
     outcomeScore,
@@ -3138,6 +3184,7 @@ function skillEvalRecordToDashboardRun(
     resultArtifacts: record.artifacts ?? [],
     resultGenerated: record.resultStatus === "evaluated",
     traceDetail,
+    traceDetails,
     evidence: {
       finalResponseLength: record.evidence.finalResponseLength ?? 0,
       changedFiles: record.evidence.changedFiles ?? 0,

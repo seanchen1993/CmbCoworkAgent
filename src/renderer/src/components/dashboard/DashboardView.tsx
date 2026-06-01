@@ -2039,24 +2039,32 @@ export function DashboardView(): React.JSX.Element {
 
   const skillEvalTraceExplorerTraces = useMemo<DashboardSkillDetail["traces"]>(() => {
     if (!skillEvalTraceRun) return []
-    return [
-      skillEvalTraceRun.traceDetail ?? {
-        traceId: skillEvalTraceRun.traceId,
-        threadId: skillEvalTraceRun.threadId,
-        startedAt: skillEvalTraceRun.startedAt,
-        endedAt: skillEvalTraceRun.endedAt,
-        durationMs: skillEvalTraceRun.durationMs,
-        userMessage: skillEvalTraceRun.userMessage,
-        outcome: skillEvalTraceRun.outcome,
-        totalToolCalls: skillEvalTraceRun.totalToolCalls,
-        totalInputTokens: skillEvalTraceRun.totalInputTokens,
-        totalOutputTokens: skillEvalTraceRun.totalOutputTokens,
-        totalTokens: skillEvalTraceRun.totalTokens,
-        usedSkills: [skillEvalTraceRun.rawSkillName],
-        rawAvailable: false,
-        rawError: "该评估记录缺少完整 trace 详情"
-      }
-    ]
+    const fallbackTrace = skillEvalTraceRun.traceDetail ?? {
+      traceId: skillEvalTraceRun.traceId,
+      threadId: skillEvalTraceRun.threadId,
+      startedAt: skillEvalTraceRun.startedAt,
+      endedAt: skillEvalTraceRun.endedAt,
+      durationMs: skillEvalTraceRun.durationMs,
+      userMessage: skillEvalTraceRun.userMessage,
+      outcome: skillEvalTraceRun.outcome,
+      totalToolCalls: skillEvalTraceRun.totalToolCalls,
+      totalInputTokens: skillEvalTraceRun.totalInputTokens,
+      totalOutputTokens: skillEvalTraceRun.totalOutputTokens,
+      totalTokens: skillEvalTraceRun.totalTokens,
+      usedSkills: [skillEvalTraceRun.rawSkillName],
+      rawAvailable: false,
+      rawError: "该评估记录缺少完整 trace 详情"
+    }
+    const traceDetails = skillEvalTraceRun.traceDetails ?? []
+    const hasCurrentTrace = traceDetails.some(
+      (trace) => trace.traceId === skillEvalTraceRun.traceId
+    )
+    const traces = hasCurrentTrace ? traceDetails : [...traceDetails, fallbackTrace]
+    return traces
+      .filter(
+        (trace, index, list) => list.findIndex((item) => item.traceId === trace.traceId) === index
+      )
+      .sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt))
   }, [skillEvalTraceRun])
 
   const getSkillEvalFilterForKey = useCallback(
@@ -2800,7 +2808,15 @@ export function DashboardView(): React.JSX.Element {
             </DialogTitle>
             <p className="mt-1 text-[11px] text-muted-foreground">
               {skillEvalTraceRun
-                ? `${formatRelativeTime(skillEvalTraceRun.startedAt)} · 链路 ${skillEvalTraceRun.traceId}`
+                ? [
+                    formatRelativeTime(skillEvalTraceRun.startedAt),
+                    ...(skillEvalTraceExplorerTraces.length > 1
+                      ? [
+                          skillEvalTraceExplorerTraces.length + " 轮",
+                          "当前链路 " + skillEvalTraceRun.traceId
+                        ]
+                      : ["链路 " + skillEvalTraceRun.traceId])
+                  ].join(" · ")
                 : ""}
             </p>
           </DialogHeader>
@@ -2808,7 +2824,7 @@ export function DashboardView(): React.JSX.Element {
           <TraceExplorer
             traces={skillEvalTraceExplorerTraces}
             codeStats={null}
-            title="执行步骤详情"
+            title={skillEvalTraceExplorerTraces.length > 1 ? "多轮执行步骤详情" : "执行步骤详情"}
             emptyText="该评估记录没有可展示的 trace 步骤"
             showCodeStats={false}
           />
