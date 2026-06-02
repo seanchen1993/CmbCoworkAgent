@@ -419,18 +419,20 @@ export function TraceConversation({
 export function TraceThreadConversation({
   traces,
   className,
-  title = "Thread 对话还原"
+  title = "Thread 对话还原",
+  loading = false
 }: {
   traces: TraceConversationSource[]
   className?: string
   title?: string
+  loading?: boolean
 }): React.JSX.Element {
   const conversation = useMemo(() => buildThreadConversation(traces), [traces])
 
   if (conversation.messages.length === 0) {
     return (
       <section className={cn("rounded-lg border border-dashed border-border px-4 py-3 text-xs text-muted-foreground", className)}>
-        thread 中暂无可还原的对话内容
+        {loading ? "正在加载完整会话…" : "thread 中暂无可还原的对话内容"}
       </section>
     )
   }
@@ -441,7 +443,9 @@ export function TraceThreadConversation({
         <div>
           <h4 className="text-xs font-semibold text-foreground">{title}</h4>
           <p className="mt-0.5 text-[10px] text-muted-foreground">
-            已聚合 {traces.length} 条 trace 的用户输入与助手回复
+            {loading
+              ? `正在加载完整会话…（已展示 ${traces.length} 条 trace）`
+              : `已聚合 ${traces.length} 条 trace 的用户输入与助手回复`}
           </p>
         </div>
       </div>

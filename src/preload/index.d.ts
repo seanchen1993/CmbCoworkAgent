@@ -196,6 +196,7 @@ interface DashboardCommitDetailsOptions {
   pageSize?: number
   pushedOnly?: boolean
   upperOrgLv1?: string | null
+  orgLv1List?: string[]
 }
 
 interface DashboardSkillEvalOptions {
@@ -1399,6 +1400,9 @@ interface CustomAPI {
       limit?: number,
       mode?: DashboardTraceViewMode,
       triggerScope?: DashboardTraceTriggerScope
+    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+    threadTraces: (
+      threadId: string
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     marketSkillRecentTraces: (
       skill: string,
