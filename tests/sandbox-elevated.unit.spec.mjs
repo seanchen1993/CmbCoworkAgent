@@ -859,10 +859,29 @@ test("approval requests do not auto-timeout and are cleaned up on run abort", ()
     /options\.abortSignal\?\.addEventListener\("abort", onAbort, \{ once: true \}\)/,
     "approval requests should subscribe to the run abort signal"
   )
+  // On run abort: onAbort → rejectPending("abort") notifies the renderer on the
+  // cancel channel, then resolveOnce removes the pending approval and resolves a
+  // reject decision to unblock the orchestrator. (Coordinator V2 renamed the
+  // thread id to approvalThreadId and factored the reject into rejectDecision.)
   assert.match(
     runtimeApprovalSection,
-    /pendingApprovals\.delete\(req\.id\)[\s\S]*`approval:cancel:\$\{threadId\}`[\s\S]*resolve\(\{ type: "reject"/,
-    "aborted runs should remove the pending approval, notify the renderer, and unblock the orchestrator"
+    /const onAbort = \(\): void => \{\s*rejectPending\("abort"\)/,
+    "run abort should funnel through rejectPending(\"abort\")"
+  )
+  assert.match(
+    runtimeApprovalSection,
+    /`approval:cancel:\$\{approvalThreadId\}`/,
+    "aborted runs should notify the renderer on the approval:cancel channel"
+  )
+  assert.match(
+    runtimeApprovalSection,
+    /const rejectDecision = \(\): ApprovalDecision => \(\{\s*type: "reject"/,
+    "aborted runs should resolve a reject decision to unblock the orchestrator"
+  )
+  assert.match(
+    runtimeApprovalSection,
+    /pendingApprovals\.delete\(req\.id\)[\s\S]*resolve\(decision\)/,
+    "resolving an approval should remove the pending entry before resolving the decision"
   )
 })
 
