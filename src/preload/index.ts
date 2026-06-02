@@ -2345,6 +2345,10 @@ const api = {
       triggerScope?: "active" | "all"
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit, mode, triggerScope),
+    threadTraces: (
+      threadId: string
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:threadTraces", threadId),
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
@@ -2368,7 +2372,7 @@ const api = {
       ipcRenderer.invoke("dashboard:skillDetail", skill, range, options),
     commitDetails: (
       range: { from: string; to: string },
-      options?: { page?: number; pageSize?: number; pushedOnly?: boolean; upperOrgLv1?: string | null }
+      options?: { page?: number; pageSize?: number; pushedOnly?: boolean; upperOrgLv1?: string | null; orgLv1List?: string[] }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:commitDetails", range, options),
     exportSkillTraces: (payload: {

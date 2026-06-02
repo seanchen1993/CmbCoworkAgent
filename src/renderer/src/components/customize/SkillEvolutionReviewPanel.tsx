@@ -93,6 +93,13 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
   const [useLocalDebugEndpoint, setUseLocalDebugEndpoint] = useState(() =>
     evolutionApi.isLocalDebugEndpointEnabled()
   )
+  // 本地调试开关默认隐藏；若此前已开启则保持可见，便于关闭。
+  // 否则需要在标题处连点 3 次作为隐藏入口才会出现（开发者彩蛋）。
+  const [showDebugToggle, setShowDebugToggle] = useState(() =>
+    evolutionApi.isLocalDebugEndpointEnabled()
+  )
+  const debugRevealCountRef = useRef(0)
+  const debugRevealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const selected = useMemo(
     () => items.find((item) => item.candidate_id === selectedId) || items[0] || null,
     [items, selectedId]
@@ -162,6 +169,27 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
     setDiff("")
     void load()
   }, [load, useLocalDebugEndpoint])
+
+  // 标题处连点 3 次（1.2s 内）显示本地调试开关。
+  const handleDebugReveal = useCallback(() => {
+    if (showDebugToggle) return
+    debugRevealCountRef.current += 1
+    if (debugRevealTimerRef.current) clearTimeout(debugRevealTimerRef.current)
+    if (debugRevealCountRef.current >= 3) {
+      debugRevealCountRef.current = 0
+      setShowDebugToggle(true)
+      return
+    }
+    debugRevealTimerRef.current = setTimeout(() => {
+      debugRevealCountRef.current = 0
+    }, 1200)
+  }, [showDebugToggle])
+
+  useEffect(() => {
+    return () => {
+      if (debugRevealTimerRef.current) clearTimeout(debugRevealTimerRef.current)
+    }
+  }, [])
 
   const openDraftEditor = useCallback(
     async (candidate: EvolutionCandidate): Promise<void> => {
@@ -283,31 +311,38 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
         <div className="p-5 border-b border-[#ebe8dd]">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <h2 className="text-lg font-semibold text-[#181713]">技能进化审批</h2>
+              <h2
+                className="text-lg font-semibold text-[#181713] cursor-default select-none"
+                onClick={handleDebugReveal}
+              >
+                技能进化审批
+              </h2>
               <p className="mt-1 text-sm text-[#7b7970]">审阅 Trace Evolver 生成的候选补丁。</p>
-              <div className="mt-3 flex min-w-0 items-start gap-2 text-xs leading-5 text-[#7b7970]">
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={useLocalDebugEndpoint}
-                  onClick={toggleLocalDebugEndpoint}
-                  className={cn(
-                    "relative mt-px h-5 w-9 shrink-0 rounded-full border transition-colors",
-                    useLocalDebugEndpoint
-                      ? "border-[#3b68a8] bg-[#3b68a8]"
-                      : "border-[#d8d3c2] bg-[#eeeae0]"
-                  )}
-                  title="开启后所有 Trace Evolver 请求走本地 8017"
-                >
-                  <span
+              {showDebugToggle && (
+                <div className="mt-3 flex min-w-0 items-start gap-2 text-xs leading-5 text-[#7b7970]">
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={useLocalDebugEndpoint}
+                    onClick={toggleLocalDebugEndpoint}
                     className={cn(
-                      "absolute left-0.5 top-0.5 size-4 rounded-full bg-white shadow transition-transform",
-                      useLocalDebugEndpoint ? "translate-x-4" : "translate-x-0"
+                      "relative mt-px h-5 w-9 shrink-0 rounded-full border transition-colors",
+                      useLocalDebugEndpoint
+                        ? "border-[#3b68a8] bg-[#3b68a8]"
+                        : "border-[#d8d3c2] bg-[#eeeae0]"
                     )}
-                  />
-                </button>
-                <span className="min-w-0 text-left">连接本地Trace Evolver服务(开发者调试使用)</span>
-              </div>
+                    title="开启后所有 Trace Evolver 请求走本地 8017"
+                  >
+                    <span
+                      className={cn(
+                        "absolute left-0.5 top-0.5 size-4 rounded-full bg-white shadow transition-transform",
+                        useLocalDebugEndpoint ? "translate-x-4" : "translate-x-0"
+                      )}
+                    />
+                  </button>
+                  <span className="min-w-0 text-left">连接本地Trace Evolver服务(开发者调试使用)</span>
+                </div>
+              )}
             </div>
             <Button variant="ghost" size="sm" onClick={() => void load()} disabled={loading}>
               {loading ? (

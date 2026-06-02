@@ -484,6 +484,8 @@ interface CommitDetailsOptions {
   pageSize?: number
   pushedOnly?: boolean
   upperOrgLv1?: string | null
+  // 全局「室筛选」（多选 LV1，含「未归类」哨兵），与弹窗内部门搜索 AND 叠加。
+  orgLv1List?: string[]
 }
 
 interface DashboardAccessContext {
@@ -891,7 +893,8 @@ function normalizeCommitDetailsOptions(
       page: 1,
       pageSize: clampLimit(value, 20, 500),
       pushedOnly: false,
-      upperOrgLv1: null
+      upperOrgLv1: null,
+      orgLv1List: []
     }
   }
 
@@ -901,7 +904,8 @@ function normalizeCommitDetailsOptions(
     page,
     pageSize,
     pushedOnly: value?.pushedOnly === true,
-    upperOrgLv1: normalizeUpperOrgLv1Option(value?.upperOrgLv1)
+    upperOrgLv1: normalizeUpperOrgLv1Option(value?.upperOrgLv1),
+    orgLv1List: normalizeUpperOrgLv1List(value?.orgLv1List)
   }
 }
 
@@ -4057,6 +4061,31 @@ async function fetchSkillRecentTraces(
   }
 }
 
+// 单个 thread 的完整 trace 列表，用于「Thread 对话还原」抽屉展开时还原完整会话。
+// 与 fetchSkillRecentTraces 的 thread 概览不同，这里：
+// - 仅按 threadId 精确匹配，不做时间窗裁剪（避免丢掉 thread 开头早于所选时间范围的 trace）；
+// - 不做 skill / 主动触发过滤（还原真实完整会话）；
+// - 仍保留组织级数据权限过滤；
+// - 按 startedAt 升序返回（从首条到末条），上限 MAX_THREAD_TRACES 防止单 thread 过大撑爆查询。
+const MAX_THREAD_TRACES = 200
+
+async function fetchThreadTraces(threadId: string): Promise<DashboardTraceDetail[]> {
+  const access = requireDashboardAccess()
+  const trimmed = threadId?.trim?.() ?? ""
+  if (!trimmed) return []
+  const filters: Record<string, unknown>[] = [{ term: { threadId: trimmed } }]
+  appendOptionalFilter(filters, buildTraceAccessFilter(access))
+  const body = {
+    track_total_hits: false,
+    size: MAX_THREAD_TRACES,
+    sort: [{ startedAt: { order: "asc" } }],
+    query: { bool: { filter: filters } },
+    _source: { includes: dashboardTraceSourceIncludes() }
+  }
+  const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
+  return (raw.hits?.hits ?? []).map(normalizeTraceDetail)
+}
+
 async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<DashboardCodeStats> {
   requireDashboardAccess()
   const skillTerms = getSkillIdentifierLookupTerms(skill)
@@ -4151,7 +4180,7 @@ async function fetchCommitDetails(
   items: DashboardCommitDetail[]
 }> {
   requireDashboardAccess()
-  const { page, pageSize, pushedOnly, upperOrgLv1 } = normalizeCommitDetailsOptions(options)
+  const { page, pageSize, pushedOnly, upperOrgLv1, orgLv1List } = normalizeCommitDetailsOptions(options)
   const filters: Record<string, unknown>[] = [
     timeRangeFilter("eventTime", range),
     { term: { eventName: "git.commit.created" } }
@@ -4159,6 +4188,9 @@ async function fetchCommitDetails(
   if (pushedOnly) {
     filters.push({ term: { "properties.pushed": true } })
   }
+  // 全局「室筛选」（多选 LV1，含未归类）
+  appendOptionalFilter(filters, buildUpperOrgLv1ListFilter(orgLv1List))
+  // 弹窗内的部门搜索（单值，模糊匹配 LV1/LV0）
   if (upperOrgLv1 !== null) {
     filters.push(buildOrgLevelMatchFilter(upperOrgLv1))
   }
@@ -5583,6 +5615,18 @@ function makeMockSkillRecentTraces(
   })
 }
 
+function makeMockThreadTraces(threadId: string): DashboardTraceDetail[] {
+  const now = Date.now()
+  const range: TimeRange = {
+    from: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+    to: new Date(now).toISOString()
+  }
+  const all = makeMockSkillRecentTraces("auto-code-workflow-v1.0.0", range, 10)
+  const matched = all.filter((trace) => trace.threadId === threadId)
+  const list = matched.length > 0 ? matched : all
+  return [...list].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+}
+
 function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
   const seed = Array.from(skill).reduce((acc, char) => acc + char.charCodeAt(0), 0)
   const generatedLines = 680 + (seed % 360)
@@ -5929,6 +5973,19 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         }
       } catch (e) {
         console.error("[Dashboard] skillRecentTraces error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:threadTraces",
+    async (_, threadId: string) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockThreadTraces(threadId) }
+      try {
+        return { success: true, data: await fetchThreadTraces(threadId) }
+      } catch (e) {
+        console.error("[Dashboard] threadTraces error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

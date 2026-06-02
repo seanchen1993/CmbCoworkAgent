@@ -3,7 +3,7 @@
  *
  * Operations overview and skill evaluation dashboard.
  */
-import { memo, useState, useCallback, useEffect, useMemo, useRef } from "react"
+import { memo, useState, useCallback, useEffect, useMemo, useRef, type ReactNode } from "react"
 import {
   RefreshCw,
   Loader2,
@@ -156,7 +156,8 @@ function TimeControlBar({
   onRefresh,
   onExport,
   loading,
-  exporting
+  exporting,
+  orgFilter
 }: {
   granularity: Granularity
   range: { from: string; to: string }
@@ -167,6 +168,7 @@ function TimeControlBar({
   onExport: () => void
   loading: boolean
   exporting: boolean
+  orgFilter?: ReactNode
 }) {
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [customFrom, setCustomFrom] = useState("")
@@ -255,6 +257,9 @@ function TimeControlBar({
         </span>
       )}
 
+      {/* 室筛选：紧跟日期控件之后 */}
+      {orgFilter}
+
       {/* Spacer + Export + Refresh */}
       <div className="flex-1" />
       <Button
@@ -323,7 +328,7 @@ function OrgFilterBar({
         : `已选 ${value.length} 个室`
 
   return (
-    <div className="flex items-center gap-2 px-6 py-2.5 border-b border-border bg-background/60">
+    <div className="flex items-center gap-2">
       <Building2 className="size-3.5 text-muted-foreground" />
       <span className="text-xs text-muted-foreground">室筛选</span>
       <Popover open={open} onOpenChange={setOpen}>
@@ -2637,7 +2642,9 @@ export function DashboardView(): React.JSX.Element {
           page,
           pageSize: 20,
           pushedOnly,
-          upperOrgLv1: normalizedDepartment || null
+          upperOrgLv1: normalizedDepartment || null,
+          // 带入顶部全局「室筛选」
+          orgLv1List: selectedOrgLv1List
         })
         if (!result.success) throw new Error(result.error ?? "获取 Commit 明细失败")
         setCommitDetails(result.data ?? { total: 0, page, pageSize: 20, pushedOnly, items: [] })
@@ -2647,7 +2654,7 @@ export function DashboardView(): React.JSX.Element {
         setCommitDetailsLoading(false)
       }
     },
-    [commitDepartmentFilter]
+    [commitDepartmentFilter, selectedOrgLv1List]
   )
 
   const reloadCommitDetails = useCallback(
@@ -2980,16 +2987,17 @@ export function DashboardView(): React.JSX.Element {
         onExport={handleExport}
         loading={loading}
         exporting={exporting}
+        orgFilter={
+          subPage.kind === "main" ? (
+            <OrgFilterBar
+              value={selectedOrgLv1List}
+              options={orgOptions}
+              loading={loading}
+              onChange={setOrgFilter}
+            />
+          ) : null
+        }
       />
-
-      {subPage.kind === "main" && (
-        <OrgFilterBar
-          value={selectedOrgLv1List}
-          options={orgOptions}
-          loading={loading}
-          onChange={setOrgFilter}
-        />
-      )}
 
       {error && (
         <div className="mx-6 mt-4 flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/5 px-4 py-3 text-sm text-destructive">
