@@ -265,6 +265,20 @@ function resolveWorkspaceFilePath(filePath: string, workspacePath: string): stri
   return `${workspaceRoot}/${input.replace(/^\/+/, "")}`
 }
 
+async function openPathInFileManager(targetPath: string, fallbackError: string): Promise<void> {
+  try {
+    const platform = await window.electron.ipcRenderer.invoke("get-platform")
+    const normalizedPath = platform === "win32" ? targetPath.replace(/\//g, "\\") : targetPath
+    const result = await window.electron.ipcRenderer.invoke("show-item-in-folder", normalizedPath)
+    if (result && typeof result === "object" && "success" in result && !result.success) {
+      const error = "error" in result && typeof result.error === "string" ? result.error : fallbackError
+      toast.error(error)
+    }
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : fallbackError)
+  }
+}
+
 function normalizeWorkspacePath(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null
 }
@@ -2059,6 +2073,9 @@ function ProjectDetailPage({
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
   const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
+  const openProjectWorkspaceInFileManager = useCallback((): void => {
+    void openPathInFileManager(project.workspacePath, "无法打开项目工作区")
+  }, [project.workspacePath])
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
@@ -2147,8 +2164,21 @@ function ProjectDetailPage({
                   </div>
                   <div>
                     <dt className="text-xs text-muted-foreground">工作区</dt>
-                    <dd className="mt-1 truncate font-medium" title={project.workspacePath}>
-                      {getWorkspaceName(project.workspacePath)}
+                    <dd className="mt-1 flex min-w-0 items-center gap-1.5">
+                      <span className="min-w-0 flex-1 truncate font-medium" title={project.workspacePath}>
+                        {getWorkspaceName(project.workspacePath)}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        className="size-6 shrink-0"
+                        title="打开项目工作区"
+                        aria-label="打开项目工作区"
+                        onClick={openProjectWorkspaceInFileManager}
+                      >
+                        <FolderOpen className="size-3.5" />
+                      </Button>
                     </dd>
                   </div>
                 </dl>
