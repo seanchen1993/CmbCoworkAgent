@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { Bot, ChevronDown, ChevronRight, User, Wrench } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 
 type TraceRole = "user" | "assistant" | "tool"
 
@@ -35,6 +36,7 @@ interface TraceConversationStep {
 }
 
 export interface TraceConversationSource {
+  traceId?: string
   userMessage?: string
   startedAt?: string
   outcome?: string
@@ -50,6 +52,8 @@ export interface TraceConversationMessage {
   content: string
   label: string
   tools?: TraceConversationToolInfo[]
+  /** Which trace this message was reconstructed from (thread view only). */
+  traceId?: string
 }
 
 export interface TraceConversationSummary {
@@ -94,6 +98,22 @@ function textFromUnknown(value: unknown): string {
   return ""
 }
 
+/**
+ * Slash-command invocations append a verbose `<CMBDEVCLAW-SKILL-USE-V1>` block
+ * (read-instructions + name + path) to the end of the user message. That block
+ * is plumbing meant for the model, not something a human wants to read back in
+ * the conversation reconstruction. Strip it: keep the user's own prose, and if
+ * the prose is empty, fall back to a short "使用 /skill 技能" label.
+ */
+function cleanUserText(raw: string): string {
+  const text = raw.trim()
+  if (!text) return text
+  const parsed = parseSkillUseBlock(text)
+  if (!parsed) return text
+  const prose = parsed.rest.trim()
+  return prose || `使用 /${parsed.skillName} 技能`
+}
+
 function uniqueToolNames(names: string[]): string[] {
   const seen = new Set<string>()
   const result: string[] = []
@@ -119,7 +139,7 @@ function summarizeToolNames(tools: TraceConversationToolInfo[], limit = 8): stri
   return `${labels.slice(0, limit).join("、")} 等`
 }
 
-function compactValue(value: unknown, limit = 220): string {
+function serializeValue(value: unknown): string {
   if (value === undefined || value === null) return ""
   let text = ""
   if (typeof value === "string") {
@@ -131,9 +151,7 @@ function compactValue(value: unknown, limit = 220): string {
       text = String(value)
     }
   }
-  const trimmed = text.trim()
-  if (trimmed.length <= limit) return trimmed
-  return `${trimmed.slice(0, limit)}...`
+  return text.trim()
 }
 
 function formatDuration(ms?: number): string {
@@ -198,7 +216,7 @@ export function buildTraceConversation(trace: TraceConversationSource | null | u
   }
 
   const rootInput = trace.nodes?.find((node) => node.type === "trace")?.input
-  const userText = textFromUnknown(trace.userMessage) || textFromUnknown(rootInput)
+  const userText = cleanUserText(textFromUnknown(trace.userMessage) || textFromUnknown(rootInput))
 
   const assistantCandidates = [
     ...(trace.modelCalls ?? []).map((call) => textFromUnknown(call.outputMessage?.content)),
@@ -247,13 +265,14 @@ export function buildThreadConversation(traces: TraceConversationSource[]): Trac
     const time = formatMessageTime(trace.startedAt)
     const suffix = time ? ` · ${time}` : ""
     if (item.userText) {
-      messages.push({ role: "user", label: `用户${suffix}`, content: item.userText })
+      messages.push({ role: "user", label: `用户${suffix}`, content: item.userText, traceId: trace.traceId })
     }
     if (item.assistantText) {
       messages.push({
         role: "assistant",
         label: `助手${suffix}`,
-        content: item.assistantText
+        content: item.assistantText,
+        traceId: trace.traceId
       })
     }
     if (item.tools.length > 0) {
@@ -261,7 +280,8 @@ export function buildThreadConversation(traces: TraceConversationSource[]): Trac
         role: "tool",
         label: `工具${suffix}`,
         content: `调用 ${trace.totalToolCalls ?? item.tools.length} 次工具：${summarizeToolNames(item.tools)}`,
-        tools: item.tools
+        tools: item.tools,
+        traceId: trace.traceId
       })
     }
     allTools.push(...item.tools)
@@ -279,6 +299,41 @@ function roleIcon(role: TraceRole): React.JSX.Element {
   if (role === "user") return <User className="size-3.5" />
   if (role === "tool") return <Wrench className="size-3.5" />
   return <Bot className="size-3.5" />
+}
+
+const VALUE_PREVIEW_LIMIT = 220
+
+/**
+ * Render a tool input/output value with a head preview and an opt-in "展开" to
+ * reveal the rest. The execution tree used to be the only place you could see
+ * the full value; now that it's gone this is the only window into tool args/
+ * results, so a collapsed-by-default expander keeps the conversation compact
+ * while still letting you read everything the trace retained.
+ */
+function ExpandableValue({ label, value }: { label: string; value: unknown }): React.JSX.Element | null {
+  const [expanded, setExpanded] = useState(false)
+  const text = serializeValue(value)
+  if (!text) return null
+  const truncated = text.length > VALUE_PREVIEW_LIMIT
+  const shown = !truncated || expanded ? text : `${text.slice(0, VALUE_PREVIEW_LIMIT)}...`
+
+  return (
+    <div className="mt-1.5">
+      <div className="text-[9px] uppercase tracking-wider text-muted-foreground/70">{label}</div>
+      <pre className="mt-0.5 whitespace-pre-wrap break-all text-[10px] leading-4 text-muted-foreground">
+        {shown}
+      </pre>
+      {truncated && (
+        <button
+          type="button"
+          className="mt-0.5 text-[10px] text-blue-500 hover:underline"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "收起" : "展开"}
+        </button>
+      )}
+    </div>
+  )
 }
 
 function ToolCallDetails({
@@ -318,22 +373,8 @@ function ToolCallDetails({
                   <span className="ml-auto text-[10px] text-muted-foreground">{formatDuration(tool.durationMs)}</span>
                 ) : null}
               </div>
-              {compactValue(tool.input) && (
-                <div className="mt-1.5">
-                  <div className="text-[9px] uppercase tracking-wider text-muted-foreground/70">Input</div>
-                  <pre className="mt-0.5 whitespace-pre-wrap break-all text-[10px] leading-4 text-muted-foreground">
-                    {compactValue(tool.input)}
-                  </pre>
-                </div>
-              )}
-              {compactValue(tool.output) && (
-                <div className="mt-1.5">
-                  <div className="text-[9px] uppercase tracking-wider text-muted-foreground/70">Output</div>
-                  <pre className="mt-0.5 whitespace-pre-wrap break-all text-[10px] leading-4 text-muted-foreground">
-                    {compactValue(tool.output)}
-                  </pre>
-                </div>
-              )}
+              <ExpandableValue label="Input" value={tool.input} />
+              <ExpandableValue label="Output" value={tool.output} />
             </div>
           ))}
         </div>
@@ -420,14 +461,29 @@ export function TraceThreadConversation({
   traces,
   className,
   title = "Thread 对话还原",
-  loading = false
+  loading = false,
+  selectedTraceId
 }: {
   traces: TraceConversationSource[]
   className?: string
   title?: string
   loading?: boolean
+  /** When set, the matching trace's messages are highlighted and scrolled into view. */
+  selectedTraceId?: string | null
 }): React.JSX.Element {
   const conversation = useMemo(() => buildThreadConversation(traces), [traces])
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  // When the user picks a trace in the left list, jump the reconstructed
+  // conversation to that trace's first message instead of forcing them to
+  // scan the aggregated thread by hand.
+  useEffect(() => {
+    if (!selectedTraceId) return
+    const container = scrollRef.current
+    if (!container) return
+    const target = container.querySelector<HTMLElement>(`[data-trace-id="${CSS.escape(selectedTraceId)}"]`)
+    if (target) target.scrollIntoView({ behavior: "smooth", block: "center" })
+  }, [selectedTraceId, conversation.messages.length])
 
   if (conversation.messages.length === 0) {
     return (
@@ -450,50 +506,55 @@ export function TraceThreadConversation({
         </div>
       </div>
 
-      <div className="max-h-[360px] space-y-3 overflow-y-auto pr-1">
-        {conversation.messages.map((message, index) => (
-          <div
-            key={`${message.role}-${index}`}
-            className={cn(
-              "flex gap-2",
-              message.role === "user" ? "justify-end" : "justify-start",
-              message.role === "tool" ? "pl-8" : ""
-            )}
-          >
-            {message.role !== "user" && message.role !== "tool" && (
-              <span className="mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                {roleIcon(message.role)}
-              </span>
-            )}
-            {message.role === "tool" && message.tools ? (
-              <div className="max-w-[78%]">
-                <ToolCallDetails tools={message.tools} label={message.content} />
-              </div>
-            ) : (
-              <div
-                className={cn(
-                  "max-w-[78%] rounded-lg px-3 py-2 text-xs leading-5 shadow-sm",
-                  message.role === "user"
-                    ? "bg-primary text-primary-foreground"
-                    : "border border-border bg-background text-foreground"
-                )}
-              >
-                <div className={cn(
-                  "mb-1 text-[10px] font-medium",
-                  message.role === "user" ? "text-primary-foreground/70" : "text-muted-foreground"
-                )}>
-                  {message.label}
+      <div ref={scrollRef} className="max-h-[360px] space-y-3 overflow-y-auto pr-1">
+        {conversation.messages.map((message, index) => {
+          const isSelected = !!selectedTraceId && message.traceId === selectedTraceId
+          return (
+            <div
+              key={`${message.role}-${index}`}
+              data-trace-id={message.traceId}
+              className={cn(
+                "flex scroll-mt-2 gap-2",
+                message.role === "user" ? "justify-end" : "justify-start",
+                message.role === "tool" ? "pl-8" : ""
+              )}
+            >
+              {message.role !== "user" && message.role !== "tool" && (
+                <span className="mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                  {roleIcon(message.role)}
+                </span>
+              )}
+              {message.role === "tool" && message.tools ? (
+                <div className={cn("max-w-[78%] rounded-lg", isSelected && "ring-2 ring-primary/50")}>
+                  <ToolCallDetails tools={message.tools} label={message.content} />
                 </div>
-                <div className="whitespace-pre-wrap break-words">{message.content}</div>
-              </div>
-            )}
-            {message.role === "user" && (
-              <span className="mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
-                {roleIcon(message.role)}
-              </span>
-            )}
-          </div>
-        ))}
+              ) : (
+                <div
+                  className={cn(
+                    "max-w-[78%] rounded-lg px-3 py-2 text-xs leading-5 shadow-sm",
+                    message.role === "user"
+                      ? "bg-primary text-primary-foreground"
+                      : "border border-border bg-background text-foreground",
+                    isSelected && "ring-2 ring-primary/50"
+                  )}
+                >
+                  <div className={cn(
+                    "mb-1 text-[10px] font-medium",
+                    message.role === "user" ? "text-primary-foreground/70" : "text-muted-foreground"
+                  )}>
+                    {message.label}
+                  </div>
+                  <div className="whitespace-pre-wrap break-words">{message.content}</div>
+                </div>
+              )}
+              {message.role === "user" && (
+                <span className="mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
+                  {roleIcon(message.role)}
+                </span>
+              )}
+            </div>
+          )
+        })}
       </div>
     </section>
   )

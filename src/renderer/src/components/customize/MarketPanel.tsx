@@ -2768,7 +2768,7 @@ export function MarketPanel(): React.JSX.Element {
             loading={skillTracesLoading}
             error={skillTracesError}
             title="最近 10 条 Trace 记录（本月）"
-            subtitle="选择记录查看对话还原与执行树"
+            subtitle="选择记录定位到对话"
             viewMode={skillTraceViewMode}
             onViewModeChange={handleSkillTraceViewModeChange}
             emptyText="本月暂无该 Skill 的 trace 记录"
