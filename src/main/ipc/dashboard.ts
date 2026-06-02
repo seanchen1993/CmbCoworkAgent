@@ -308,6 +308,8 @@ interface CommitDetailsOptions {
   pageSize?: number
   pushedOnly?: boolean
   upperOrgLv1?: string | null
+  // 全局「室筛选」（多选 LV1，含「未归类」哨兵），与弹窗内部门搜索 AND 叠加。
+  orgLv1List?: string[]
 }
 
 interface DashboardAccessContext {
@@ -676,7 +678,8 @@ function normalizeCommitDetailsOptions(value?: number | CommitDetailsOptions): R
       page: 1,
       pageSize: clampLimit(value, 20, 500),
       pushedOnly: false,
-      upperOrgLv1: null
+      upperOrgLv1: null,
+      orgLv1List: []
     }
   }
 
@@ -686,7 +689,8 @@ function normalizeCommitDetailsOptions(value?: number | CommitDetailsOptions): R
     page,
     pageSize,
     pushedOnly: value?.pushedOnly === true,
-    upperOrgLv1: normalizeUpperOrgLv1Option(value?.upperOrgLv1)
+    upperOrgLv1: normalizeUpperOrgLv1Option(value?.upperOrgLv1),
+    orgLv1List: normalizeUpperOrgLv1List(value?.orgLv1List)
   }
 }
 
@@ -2318,7 +2322,7 @@ async function fetchCommitDetails(
   options?: number | CommitDetailsOptions
 ): Promise<{ total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }> {
   requireDashboardAccess()
-  const { page, pageSize, pushedOnly, upperOrgLv1 } = normalizeCommitDetailsOptions(options)
+  const { page, pageSize, pushedOnly, upperOrgLv1, orgLv1List } = normalizeCommitDetailsOptions(options)
   const filters: Record<string, unknown>[] = [
     timeRangeFilter("eventTime", range),
     { term: { eventName: "git.commit.created" } }
@@ -2326,6 +2330,9 @@ async function fetchCommitDetails(
   if (pushedOnly) {
     filters.push({ term: { "properties.pushed": true } })
   }
+  // 全局「室筛选」（多选 LV1，含未归类）
+  appendOptionalFilter(filters, buildUpperOrgLv1ListFilter(orgLv1List))
+  // 弹窗内的部门搜索（单值，模糊匹配 LV1/LV0）
   if (upperOrgLv1 !== null) {
     filters.push(buildOrgLevelMatchFilter(upperOrgLv1))
   }

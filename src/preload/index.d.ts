@@ -190,6 +190,7 @@ interface DashboardCommitDetailsOptions {
   pageSize?: number
   pushedOnly?: boolean
   upperOrgLv1?: string | null
+  orgLv1List?: string[]
 }
 
 interface DashboardCodeStats {

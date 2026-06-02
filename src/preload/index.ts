@@ -2022,7 +2022,7 @@ const api = {
       ipcRenderer.invoke("dashboard:skillDetail", skill, range, options),
     commitDetails: (
       range: { from: string; to: string },
-      options?: { page?: number; pageSize?: number; pushedOnly?: boolean; upperOrgLv1?: string | null }
+      options?: { page?: number; pageSize?: number; pushedOnly?: boolean; upperOrgLv1?: string | null; orgLv1List?: string[] }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:commitDetails", range, options),
     exportSkillTraces: (payload: {
