@@ -1,4 +1,4 @@
-import { GitCommit, Maximize2, Minimize2, Eye, EyeOff, Minus, Plus } from "lucide-react"
+import { GitCommit, Maximize2, Minimize2, Eye, Minus, Plus } from "lucide-react"
 import { memo, useEffect, useMemo, useState } from "react"
 import { cn } from "@/lib/utils"
 

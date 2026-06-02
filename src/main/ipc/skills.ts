@@ -2,7 +2,7 @@ import AdmZip from "adm-zip"
 import { IpcMain, shell } from "electron"
 import * as fs from "fs/promises"
 import * as path from "path"
-import { existsSync, mkdirSync } from "fs"
+import { existsSync, mkdirSync, rmSync } from "fs"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import {
