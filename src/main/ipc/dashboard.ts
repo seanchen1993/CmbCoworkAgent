@@ -1269,7 +1269,8 @@ function buildUpperOrgLv1Filter(upperOrgLv1: string): Record<string, unknown> {
   return { term: { upperOrgLv1 } }
 }
 
-function buildOrgLevelMatchFilter(orgLevel: string): Record<string, unknown> {
+// 单个室文本 → LV1/LV0 模糊匹配子句（含精确 term + 通配 wildcard）。
+function buildSingleOrgLevelClause(orgLevel: string): Record<string, unknown> {
   const escaped = escapeWildcard(orgLevel)
   const wildcardPattern = `*${escaped}*`
   return {
@@ -1285,6 +1286,30 @@ function buildOrgLevelMatchFilter(orgLevel: string): Record<string, unknown> {
   }
 }
 
+// 「部门查询」按逗号（中/英文）拆分为多个室 token；ES 与 dev mock 共用此规则。
+function splitOrgQueryTokens(orgLevel: string): string[] {
+  const tokens = orgLevel
+    .split(/[，,]/)
+    .map((token) => token.trim())
+    .filter(Boolean)
+  return tokens.length > 0 ? tokens : [orgLevel]
+}
+
+// 判断单个 token 是否代表「未归类」（空/缺失 LV1）。
+function isUnclassifiedOrgToken(token: string): boolean {
+  return token === DASHBOARD_UNCLASSIFIED_LABEL || token === DASHBOARD_UNCLASSIFIED_ORG
+}
+
+// 「部门查询」支持逗号（中/英文）分隔的多个室：来自顶部全局「室筛选」的回填或用户手输，
+// 各 token 之间按 OR 叠加。「未归类」token 走空/缺失 LV1 的专用子句。
+function buildOrgLevelMatchFilter(orgLevel: string): Record<string, unknown> {
+  const clauses = splitOrgQueryTokens(orgLevel).map((token) =>
+    isUnclassifiedOrgToken(token) ? buildUnclassifiedOrgClause() : buildSingleOrgLevelClause(token)
+  )
+  if (clauses.length === 1) return clauses[0]
+  return { bool: { should: clauses, minimum_should_match: 1 } }
+}
+
 function normalizeUpperOrgLv1Option(upperOrgLv1?: string | null): string | null {
   if (typeof upperOrgLv1 !== "string") return null
   const normalized = upperOrgLv1.trim()
@@ -1293,6 +1318,8 @@ function normalizeUpperOrgLv1Option(upperOrgLv1?: string | null): string | null 
 
 // 「未归类」哨兵：代表 upperOrgLv1 为空或缺失的记录（前后端约定一致）。
 const DASHBOARD_UNCLASSIFIED_ORG = "__unclassified__"
+// 「未归类」回填到「部门查询」文本框时使用的展示标签，需与渲染层 orgOptionLabel 一致。
+const DASHBOARD_UNCLASSIFIED_LABEL = "（未归类）"
 // fetchOrgOptions 内部用来给「字段缺失」的文档归桶的临时 key（不外泄）。
 const DASHBOARD_ORG_MISSING_BUCKET = "__org_missing__"
 
@@ -3047,14 +3074,19 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
 function makeMockUserList(_range: TimeRange, options?: UserListOptions): DashboardUserListData {
   const { pageSize, afterKey, keyword, upperOrgLv1 } = normalizeUserListOptions(options)
   const normalizedKeyword = keyword.toLowerCase()
-  const normalizedUpperOrgLv1 = upperOrgLv1?.toLowerCase() ?? null
+  // 与 ES 路径一致：「部门查询」按逗号拆分多个室，命中任一即保留（含「未归类」）。
+  const orgTokens = upperOrgLv1 !== null ? splitOrgQueryTokens(upperOrgLv1) : []
   const allUsers = Array.from({ length: 64 }, (_, index) => makeMockDashboardUser(index)).filter((user) => {
-    if (
-      normalizedUpperOrgLv1 !== null &&
-      ![user.upperOrgLv1, user.upperOrgLv0].some((value) =>
-        String(value || "").toLowerCase().includes(normalizedUpperOrgLv1)
-      )
-    ) return false
+    if (orgTokens.length > 0) {
+      const matched = orgTokens.some((token) => {
+        if (isUnclassifiedOrgToken(token)) return !user.upperOrgLv1
+        const lower = token.toLowerCase()
+        return [user.upperOrgLv1, user.upperOrgLv0].some((value) =>
+          String(value || "").toLowerCase().includes(lower)
+        )
+      })
+      if (!matched) return false
+    }
     if (!normalizedKeyword) return true
     return [user.userName, user.ystId, user.sapId].some((value) =>
       String(value || "").toLowerCase().includes(normalizedKeyword)
