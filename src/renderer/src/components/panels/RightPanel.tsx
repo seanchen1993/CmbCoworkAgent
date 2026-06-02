@@ -172,6 +172,7 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 }
 
 interface RightPanelProps {
+  threadId?: string | null
   moduleMode: "work" | "preview" | "git"
   onRequestPreviewMode?: () => void
   onRequestWorkMode?: () => void
@@ -188,12 +189,18 @@ function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
 }
 
 export function RightPanel({
+  threadId,
   moduleMode,
   onRequestPreviewMode,
   onRequestWorkMode,
   onPreviewFullscreenChange
 }: RightPanelProps): React.JSX.Element {
-  const { currentThreadId, pluginVersion, skillGenerationByThread, setSkillGenerationPhase } =
+  const {
+    currentThreadId: storeCurrentThreadId,
+    pluginVersion,
+    skillGenerationByThread,
+    setSkillGenerationPhase
+  } =
     useAppStore(
       useShallow((s) => ({
         currentThreadId: s.currentThreadId,
@@ -203,6 +210,8 @@ export function RightPanel({
         setSkillGenerationPhase: s.setSkillGenerationPhase
       }))
     )
+  const currentThreadId = threadId ?? storeCurrentThreadId
+  const canMutateCurrentThreadState = currentThreadId === storeCurrentThreadId
   // Derive the current thread's card state from the per-thread map
   const skillGenerationAgent = selectSkillGenerationAgent(
     { skillGenerationByThread } as Parameters<typeof selectSkillGenerationAgent>[0],
@@ -379,12 +388,12 @@ export function RightPanel({
   // "error" is intentionally NOT auto-cleared — it stays visible so the user
   // can read the error, and must be dismissed manually via the ✕ button on the card.
   useEffect(() => {
-    if (skillGenerationAgent.phase === "done") {
+    if (canMutateCurrentThreadState && skillGenerationAgent.phase === "done") {
       const t = setTimeout(() => setSkillGenerationPhase(null), 3000)
       return () => clearTimeout(t)
     }
     return undefined
-  }, [skillGenerationAgent.phase, setSkillGenerationPhase])
+  }, [canMutateCurrentThreadState, skillGenerationAgent.phase, setSkillGenerationPhase])
 
   // Log skill generation errors to the console for easier diagnosis on Windows
   useEffect(() => {
@@ -1176,7 +1185,7 @@ export function RightPanel({
             />
             {tasksOpen && (
               <div className="overflow-auto right-panel-scroll" style={{ height: heights.tasks }}>
-                <TasksContent />
+                <TasksContent threadId={currentThreadId} />
               </div>
             )}
           </div>
@@ -1195,7 +1204,7 @@ export function RightPanel({
             />
             {filesOpen && (
               <div className="overflow-auto right-panel-scroll" style={{ height: heights.files }}>
-                <FilesContent />
+                <FilesContent threadId={currentThreadId} />
               </div>
             )}
           </div>
@@ -1218,7 +1227,7 @@ export function RightPanel({
             />
             {agentsOpen && (
               <div className="overflow-auto right-panel-scroll" style={{ height: heights.agents }}>
-                <AgentsContent />
+                <AgentsContent threadId={currentThreadId} />
               </div>
             )}
           </div>
@@ -1338,9 +1347,8 @@ const STATUS_CONFIG = {
   }
 }
 
-function TasksContent(): React.JSX.Element {
-  const { currentThreadId } = useAppStore()
-  const threadState = useThreadState(currentThreadId)
+function TasksContent({ threadId }: { threadId: string | null }): React.JSX.Element {
+  const threadState = useThreadState(threadId)
   const todos = threadState?.todos ?? []
   const [completedExpanded, setCompletedExpanded] = useState(false)
 
@@ -1571,9 +1579,8 @@ function buildPreviewEvent(
   }
 }
 
-function FilesContent(): React.JSX.Element {
-  const { currentThreadId } = useAppStore()
-  const threadState = useThreadState(currentThreadId)
+function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Element {
+  const threadState = useThreadState(threadId)
   const workspaceFiles = threadState?.workspaceFiles ?? []
   const workspacePath = threadState?.workspacePath ?? null
   const setWorkspacePath = threadState?.setWorkspacePath
@@ -1584,14 +1591,14 @@ function FilesContent(): React.JSX.Element {
     let cancelled = false
 
     async function loadWorkspace(): Promise<void> {
-      if (currentThreadId && setWorkspacePath && setWorkspaceFiles) {
-        const path = await window.api.workspace.get(currentThreadId)
+      if (threadId && setWorkspacePath && setWorkspaceFiles) {
+        const path = await window.api.workspace.get(threadId)
         if (cancelled) return
         setWorkspacePath(path)
 
         // If a folder is linked, load files from disk
         if (path) {
-          const result = await window.api.workspace.loadFromDisk(currentThreadId)
+          const result = await window.api.workspace.loadFromDisk(threadId)
           if (cancelled) return
           if (result.success && result.files) {
             setWorkspaceFiles(result.files)
@@ -1605,20 +1612,20 @@ function FilesContent(): React.JSX.Element {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentThreadId])
+  }, [threadId])
 
   // Listen for file changes from the workspace watcher
   useEffect(() => {
-    if (!currentThreadId || !setWorkspaceFiles) return
+    if (!threadId || !setWorkspaceFiles) return
 
     const cleanup = window.api.workspace.onFilesChanged(async (data) => {
       // Only reload if the event is for the current thread
-      if (data.threadId === currentThreadId) {
+      if (data.threadId === threadId) {
         console.log("[FilesContent] Files changed, reloading...", {
           threadId: data.threadId,
           workspacePath: data.workspacePath
         })
-        const result = await window.api.workspace.loadFromDisk(currentThreadId)
+        const result = await window.api.workspace.loadFromDisk(threadId)
         if (result.success && result.files) {
           setWorkspaceFiles(result.files)
         }
@@ -1627,7 +1634,7 @@ function FilesContent(): React.JSX.Element {
 
     return cleanup
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentThreadId])
+  }, [threadId])
 
   return (
     <div className="flex flex-col h-full">
@@ -1654,7 +1661,7 @@ function FilesContent(): React.JSX.Element {
         </div>
       ) : (
         <div className="py-1 overflow-auto flex-1">
-          <FileTree files={workspaceFiles} />
+          <FileTree files={workspaceFiles} threadId={threadId} />
         </div>
       )}
     </div>
@@ -1961,9 +1968,8 @@ function buildFileTree(files: FileInfo[]): TreeNode[] {
   return root
 }
 
-function FileTree({ files }: { files: FileInfo[] }): React.JSX.Element {
-  const { currentThreadId } = useAppStore()
-  const threadState = useThreadState(currentThreadId)
+function FileTree({ files, threadId }: { files: FileInfo[]; threadId: string | null }): React.JSX.Element {
+  const threadState = useThreadState(threadId)
   const openFile = threadState?.openFile
   const tree = useMemo(() => buildFileTree(files), [files])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -2271,9 +2277,9 @@ function SkillGenerationCard({
   )
 }
 
-function AgentsContent(): React.JSX.Element {
+function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Element {
   const {
-    currentThreadId,
+    currentThreadId: storeCurrentThreadId,
     skillGenerationByThread,
     skillRetryContextByThread,
     setSkillGenerationPhase
@@ -2287,14 +2293,15 @@ function AgentsContent(): React.JSX.Element {
   )
   const skillGenerationAgent = selectSkillGenerationAgent(
     { skillGenerationByThread } as Parameters<typeof selectSkillGenerationAgent>[0],
-    currentThreadId
+    threadId
   )
   const skillRetryContext = selectSkillRetryContext(
     { skillRetryContextByThread } as Parameters<typeof selectSkillRetryContext>[0],
-    currentThreadId
+    threadId
   )
+  const canMutateCurrentThreadState = threadId === storeCurrentThreadId
   const retryInFlightRef = useRef(false)
-  const threadState = useThreadState(currentThreadId)
+  const threadState = useThreadState(threadId)
   const subagents = threadState?.subagents ?? []
   const coordinatorWorkers = threadState?.coordinatorWorkers ?? []
   const subagentToolCallCount = threadState?.subagentToolCallCount ?? 0
@@ -2308,10 +2315,11 @@ function AgentsContent(): React.JSX.Element {
   const hasSkillGen = skillGenerationAgent.phase !== null
 
   const handleRetry = useCallback((): void => {
-    if (!currentThreadId || !skillRetryContext || retryInFlightRef.current) return
+    if (!threadId || !canMutateCurrentThreadState || !skillRetryContext || retryInFlightRef.current)
+      return
     retryInFlightRef.current = true
     void window.api.skillEvolution
-      .retryGeneration(currentThreadId, skillRetryContext)
+      .retryGeneration(threadId, skillRetryContext)
       .catch((err: unknown) => {
         console.error("[SkillGen] Retry IPC failed:", err)
         setSkillGenerationPhase("error", err instanceof Error ? err.message : "重试失败")
@@ -2319,7 +2327,7 @@ function AgentsContent(): React.JSX.Element {
       .finally(() => {
         retryInFlightRef.current = false
       })
-  }, [currentThreadId, skillRetryContext, setSkillGenerationPhase])
+  }, [canMutateCurrentThreadState, threadId, skillRetryContext, setSkillGenerationPhase])
 
   useEffect(() => {
     if (!hasRunningSubagent && !hasRunningCoordinatorWorker) return
@@ -2361,9 +2369,12 @@ function AgentsContent(): React.JSX.Element {
           streamedText={skillGenerationAgent.streamedText}
           errorText={skillGenerationAgent.errorText}
           onDismiss={
-            skillGenerationAgent.phase === "error" ? () => setSkillGenerationPhase(null) : undefined
+            canMutateCurrentThreadState && skillGenerationAgent.phase === "error"
+              ? () => setSkillGenerationPhase(null)
+              : undefined
           }
           onRetry={
+            canMutateCurrentThreadState &&
             (skillGenerationAgent.phase === "error" ||
               skillGenerationAgent.phase === "generating") &&
             skillRetryContext
@@ -2379,7 +2390,7 @@ function AgentsContent(): React.JSX.Element {
         <CoordinatorWorkerCard
           key={worker.worker_id}
           worker={worker}
-          threadId={currentThreadId ?? undefined}
+          threadId={threadId ?? undefined}
           nowMs={sharedNowMs}
         />
       ))}

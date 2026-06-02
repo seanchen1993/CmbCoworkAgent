@@ -1744,9 +1744,15 @@ function StageArtifactPanel({
 }
 
 function FeatureConversationPanel({
-  threadId
+  threadId,
+  hasPendingGitDiffNotice,
+  onRequestOpenGitPanel,
+  onThreadGitStatusChange
 }: {
   threadId: string | null
+  hasPendingGitDiffNotice?: boolean
+  onRequestOpenGitPanel?: () => void
+  onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
 }): React.JSX.Element {
   return (
     <section className="flex min-h-0 flex-1 overflow-hidden rounded-md border border-border bg-background">
@@ -1755,8 +1761,11 @@ function FeatureConversationPanel({
           <TabbedPanel
             threadId={threadId}
             showTabBar={false}
+            hasPendingGitDiffNotice={hasPendingGitDiffNotice}
             chatSurface="harness-project"
             hideWelcomeSkillTabs
+            onRequestOpenGitPanel={onRequestOpenGitPanel}
+            onThreadGitStatusChange={onThreadGitStatusChange}
           />
         </div>
       ) : (
@@ -2212,6 +2221,7 @@ function FeatureDetailPage({
   unbound,
   activeSessionThreadId,
   isViewingSession,
+  hasPendingGitDiffNotice,
   fallbackProjectName,
   fallbackFeatureTitle,
   fallbackFeatureSlug,
@@ -2219,13 +2229,17 @@ function FeatureDetailPage({
   onBackToProject,
   onRefresh,
   onActiveSessionChange,
-  onSessionViewChange
+  onSessionViewChange,
+  onActiveSessionThreadChange,
+  onRequestOpenGitPanel,
+  onThreadGitStatusChange
 }: {
   detail: HarnessRunDetailViewModel | null
   loading: boolean
   unbound?: boolean
   activeSessionThreadId?: string
   isViewingSession: boolean
+  hasPendingGitDiffNotice?: boolean
   fallbackProjectName?: string
   fallbackFeatureTitle?: string
   fallbackFeatureSlug?: string
@@ -2234,6 +2248,9 @@ function FeatureDetailPage({
   onRefresh: () => void
   onActiveSessionChange?: (threadId: string) => void
   onSessionViewChange?: (viewing: boolean) => void
+  onActiveSessionThreadChange?: (threadId: string | null) => void
+  onRequestOpenGitPanel?: () => void
+  onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
 }): React.JSX.Element {
   const defaultNodeId = useMemo(() => {
     if (!detail) return null
@@ -2333,6 +2350,10 @@ function FeatureDetailPage({
   const activeSessionThreadIdForView =
     activeDetailTab === "session" ? selectedSessionThreadId : null
   const effectiveActiveDetailTab = activeSessionThreadIdForView ? "session" : "feature"
+
+  useEffect(() => {
+    onActiveSessionThreadChange?.(activeSessionThreadIdForView)
+  }, [activeSessionThreadIdForView, onActiveSessionThreadChange])
 
   const handleBackToFeature = (): void => {
     setActiveDetailTab("feature")
@@ -2566,7 +2587,12 @@ function FeatureDetailPage({
 
       {activeSessionThreadIdForView ? (
         <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col overflow-hidden p-6">
-          <FeatureConversationPanel threadId={activeSessionThreadIdForView} />
+          <FeatureConversationPanel
+            threadId={activeSessionThreadIdForView}
+            hasPendingGitDiffNotice={hasPendingGitDiffNotice}
+            onRequestOpenGitPanel={onRequestOpenGitPanel}
+            onThreadGitStatusChange={onThreadGitStatusChange}
+          />
         </div>
       ) : loading || !detail ? (
         <div className="flex flex-1 items-center justify-center text-muted-foreground">
@@ -2832,7 +2858,19 @@ function ProjectFeatureSidebar({
   )
 }
 
-export function HarnessBoardView(): React.JSX.Element {
+interface HarnessBoardViewProps {
+  hasPendingGitDiffNotice?: boolean
+  onRequestOpenGitPanel?: () => void
+  onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
+  onActiveSessionThreadChange?: (threadId: string | null) => void
+}
+
+export function HarnessBoardView({
+  hasPendingGitDiffNotice,
+  onRequestOpenGitPanel,
+  onThreadGitStatusChange,
+  onActiveSessionThreadChange
+}: HarnessBoardViewProps = {}): React.JSX.Element {
   const [projects, setProjects] = useState<HarnessProjectListItem[]>([])
   const [detailsByProjectId, setDetailsByProjectId] = useState<Record<string, HarnessProjectDetailViewModel>>({})
   const [loadingDetailIds, setLoadingDetailIds] = useState<Set<string>>(new Set())
@@ -3754,6 +3792,11 @@ export function HarnessBoardView(): React.JSX.Element {
   const fallbackFeatureSummary =
     selectedFeatureProjectDetail?.runs.find((run) => run.slug === selectedFeature?.slug)
 
+  useEffect(() => {
+    if (selectedFeature) return
+    onActiveSessionThreadChange?.(null)
+  }, [onActiveSessionThreadChange, selectedFeature])
+
   if (selectedFeature) {
     return (
       <>
@@ -3763,6 +3806,7 @@ export function HarnessBoardView(): React.JSX.Element {
           unbound={showingUnboundRunDetail}
           activeSessionThreadId={selectedFeature.activeSessionThreadId}
           isViewingSession={isViewingSession}
+          hasPendingGitDiffNotice={hasPendingGitDiffNotice}
           fallbackProjectName={selectedFeatureProjectDetail?.project?.name ?? selectedProject?.name}
           fallbackFeatureTitle={fallbackFeatureSummary?.title ?? selectedFeature.slug}
           fallbackFeatureSlug={fallbackFeatureSummary?.slug ?? selectedFeature.slug}
@@ -3771,6 +3815,9 @@ export function HarnessBoardView(): React.JSX.Element {
           onRefresh={() => void refreshSelectedRunDetail()}
           onActiveSessionChange={handleActiveSessionChange}
           onSessionViewChange={handleSessionViewChange}
+          onActiveSessionThreadChange={onActiveSessionThreadChange}
+          onRequestOpenGitPanel={onRequestOpenGitPanel}
+          onThreadGitStatusChange={onThreadGitStatusChange}
         />
         {sidebarDeleteDialog}
         {sidebarPortal}
