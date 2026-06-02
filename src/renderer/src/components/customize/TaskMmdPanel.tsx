@@ -28,6 +28,13 @@ type TaskMmdCompileModelInfo = Awaited<ReturnType<typeof window.api.taskMmd.getC
 type TaskMmdEntry = TaskMmdSnapshot["entries"][number]
 type GraphTooltip = { text: string; x: number; y: number }
 
+const ANSI_ESCAPE = String.fromCharCode(27)
+const ANSI_BEL = String.fromCharCode(7)
+const ANSI_ESCAPE_PATTERN = new RegExp(
+  `${ANSI_ESCAPE}(?:\\[[0-?]*[ -/]*[@-~]|\\][^${ANSI_BEL}]*(?:${ANSI_BEL}|${ANSI_ESCAPE}\\\\)|[@-Z\\\\-_])`,
+  "g"
+)
+
 interface TaskMmdPanelProps {
   currentThreadId?: string | null
   threads: Thread[]
@@ -91,6 +98,10 @@ function truncateTooltip(value: string, maxChars = 1600): string {
   return `${value.slice(0, maxChars).trimEnd()}\n...`
 }
 
+function stripAnsiText(text: string): string {
+  return text.replace(ANSI_ESCAPE_PATTERN, "")
+}
+
 function decodeHtmlEntities(value: string): string {
   const named: Record<string, string> = {
     amp: "&",
@@ -108,7 +119,7 @@ function decodeHtmlEntities(value: string): string {
 }
 
 function cleanGraphLabel(value: string): string {
-  return decodeHtmlEntities(value)
+  return stripAnsiText(decodeHtmlEntities(value))
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/?[^>]+>/g, " ")
     .replace(/\r/g, "")
@@ -174,7 +185,7 @@ function tooltipPosition(clientX: number, clientY: number): { x: number; y: numb
 }
 
 function entrySearchText(entry: TaskMmdEntry): string {
-  return [entry.toolName, entry.argsPreview, entry.resultPreview].join(" ").toLowerCase()
+  return stripAnsiText([entry.toolName, entry.argsPreview, entry.resultPreview].join(" ")).toLowerCase()
 }
 
 function scoreEntryForLabel(label: string, entry: TaskMmdEntry): number {
@@ -232,12 +243,12 @@ function findEntryForGraphNode(
 function buildEntryTooltip(entry: TaskMmdEntry): string {
   const status = entry.status === "error" ? "失败" : "成功"
   const lines = [
-    `执行：${entry.toolName}`,
+    `执行：${stripAnsiText(entry.toolName)}`,
     `范围：${entry.scope} · 状态：${status} · 耗时：${entry.durationMs}ms`,
     `时间：${new Date(entry.timestamp).toLocaleString()}`
   ]
-  if (entry.argsPreview) lines.push(`参数：${entry.argsPreview}`)
-  if (entry.resultPreview) lines.push(`结果：${entry.resultPreview}`)
+  if (entry.argsPreview) lines.push(`参数：${stripAnsiText(entry.argsPreview)}`)
+  if (entry.resultPreview) lines.push(`结果：${stripAnsiText(entry.resultPreview)}`)
   return truncateTooltip(lines.join("\n"))
 }
 
@@ -245,7 +256,7 @@ function buildGraphTooltip(label: string, entry: TaskMmdEntry | null): string {
   const lines: string[] = []
   if (label) lines.push(label)
   if (entry) lines.push(buildEntryTooltip(entry))
-  return truncateTooltip(lines.join("\n\n"))
+  return truncateTooltip(stripAnsiText(lines.join("\n\n")))
 }
 
 function getThreadTitle(thread: Thread): string {
@@ -264,6 +275,9 @@ function getThreadSubtitle(thread: Thread): string {
 }
 
 function EntryRow({ entry }: { entry: TaskMmdEntry }): React.JSX.Element {
+  const preview = stripAnsiText(entry.resultPreview || entry.argsPreview || "(empty)")
+  const toolName = stripAnsiText(entry.toolName)
+
   return (
     <div className="rounded-md border border-border/70 bg-background px-2.5 py-2">
       <div className="flex items-center gap-2">
@@ -273,8 +287,8 @@ function EntryRow({ entry }: { entry: TaskMmdEntry }): React.JSX.Element {
             entry.status === "error" ? "bg-destructive" : "bg-emerald-500"
           )}
         />
-        <span className="min-w-0 flex-1 truncate text-xs font-medium" title={entry.toolName}>
-          {entry.toolName}
+        <span className="min-w-0 flex-1 truncate text-xs font-medium" title={toolName}>
+          {toolName}
         </span>
         <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
           {entry.scope}
@@ -282,9 +296,9 @@ function EntryRow({ entry }: { entry: TaskMmdEntry }): React.JSX.Element {
       </div>
       <p
         className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-muted-foreground"
-        title={entry.resultPreview || entry.argsPreview || "(empty)"}
+        title={preview}
       >
-        {entry.resultPreview || entry.argsPreview || "(empty)"}
+        {preview}
       </p>
       <p className="mt-1 text-[10px] text-muted-foreground/70">
         {new Date(entry.timestamp).toLocaleTimeString()} · {entry.durationMs}ms
@@ -308,6 +322,9 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
   const [saving, setSaving] = useState(false)
   const mountedRef = useRef(true)
   const graphRef = useRef<HTMLDivElement | null>(null)
+  const tooltipHideTimerRef = useRef<number | null>(null)
+  const tooltipHoverRef = useRef(false)
+  const tooltipInteractingRef = useRef(false)
   const renderId = useMemo(() => `task-mmd-${Math.random().toString(36).slice(2)}`, [])
   const selectedThread = useMemo(
     () => threads.find((thread) => thread.thread_id === selectedThreadId) ?? null,
@@ -325,6 +342,64 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
       mountedRef.current = false
     }
   }, [])
+
+  const cancelGraphTooltipHide = useCallback(() => {
+    if (tooltipHideTimerRef.current == null) return
+    window.clearTimeout(tooltipHideTimerRef.current)
+    tooltipHideTimerRef.current = null
+  }, [])
+
+  const forceHideGraphTooltip = useCallback(() => {
+    cancelGraphTooltipHide()
+    tooltipHoverRef.current = false
+    tooltipInteractingRef.current = false
+    setGraphTooltip(null)
+  }, [cancelGraphTooltipHide])
+
+  const scheduleGraphTooltipHide = useCallback(
+    (delayMs = 220) => {
+      cancelGraphTooltipHide()
+      tooltipHideTimerRef.current = window.setTimeout(() => {
+        tooltipHideTimerRef.current = null
+        if (!tooltipHoverRef.current && !tooltipInteractingRef.current) {
+          setGraphTooltip(null)
+        }
+      }, delayMs)
+    },
+    [cancelGraphTooltipHide]
+  )
+
+  const handleGraphTooltipEnter = useCallback(() => {
+    tooltipHoverRef.current = true
+    cancelGraphTooltipHide()
+  }, [cancelGraphTooltipHide])
+
+  const handleGraphTooltipLeave = useCallback(() => {
+    tooltipHoverRef.current = false
+    scheduleGraphTooltipHide(650)
+  }, [scheduleGraphTooltipHide])
+
+  const handleGraphTooltipPointerDown = useCallback(() => {
+    tooltipHoverRef.current = true
+    tooltipInteractingRef.current = true
+    cancelGraphTooltipHide()
+  }, [cancelGraphTooltipHide])
+
+  const handleGraphTooltipPointerUp = useCallback(() => {
+    if (!tooltipInteractingRef.current) return
+    tooltipInteractingRef.current = false
+    if (!tooltipHoverRef.current) scheduleGraphTooltipHide(650)
+  }, [scheduleGraphTooltipHide])
+
+  useEffect(() => {
+    window.addEventListener("pointerup", handleGraphTooltipPointerUp)
+    window.addEventListener("pointercancel", handleGraphTooltipPointerUp)
+    return () => {
+      window.removeEventListener("pointerup", handleGraphTooltipPointerUp)
+      window.removeEventListener("pointercancel", handleGraphTooltipPointerUp)
+      cancelGraphTooltipHide()
+    }
+  }, [cancelGraphTooltipHide, handleGraphTooltipPointerUp])
 
   useEffect(() => {
     if (selectedThreadId && threads.some((thread) => thread.thread_id === selectedThreadId)) {
@@ -396,7 +471,7 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
   useEffect(() => {
     let cancelled = false
     async function render(): Promise<void> {
-      const mmd = snapshot?.mmd?.trim()
+      const mmd = stripAnsiText(snapshot?.mmd?.trim() ?? "")
       if (!mmd) {
         setSvg("")
         setRenderError(null)
@@ -444,7 +519,7 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
   }, [renderId, snapshot?.mmd])
 
   useEffect(() => {
-    setGraphTooltip(null)
+    forceHideGraphTooltip()
 
     const root = graphRef.current
     if (!root || !svg) return
@@ -480,13 +555,18 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
       tooltipByNode.set(node, tooltip)
     }
 
-    const hideTooltip = (): void => setGraphTooltip(null)
+    const hideTooltip = (): void => scheduleGraphTooltipHide(450)
+    const hideTooltipSoon = (): void => scheduleGraphTooltipHide(650)
+    const hideTooltipNow = (): void => forceHideGraphTooltip()
     const showTooltip = (node: SVGGElement, clientX: number, clientY: number): void => {
       const tooltip = tooltipByNode.get(node)
       if (!tooltip) {
         hideTooltip()
         return
       }
+      tooltipHoverRef.current = false
+      tooltipInteractingRef.current = false
+      cancelGraphTooltipHide()
       const position = tooltipPosition(clientX, clientY)
       setGraphTooltip({ text: tooltip, ...position })
     }
@@ -511,24 +591,32 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
     root.addEventListener("mousemove", onMouseMove)
     root.addEventListener("mouseleave", hideTooltip)
     root.addEventListener("pointerleave", hideTooltip)
-    root.addEventListener("scroll", hideTooltip)
+    root.addEventListener("scroll", hideTooltipNow)
     root.addEventListener("focusin", onFocusIn)
-    root.addEventListener("focusout", hideTooltip)
-    window.addEventListener("blur", hideTooltip)
-    window.addEventListener("scroll", hideTooltip, true)
+    root.addEventListener("focusout", hideTooltipSoon)
+    window.addEventListener("blur", hideTooltipNow)
+    window.addEventListener("scroll", hideTooltipNow, true)
 
     return () => {
       root.removeEventListener("mousemove", onMouseMove)
       root.removeEventListener("mouseleave", hideTooltip)
       root.removeEventListener("pointerleave", hideTooltip)
-      root.removeEventListener("scroll", hideTooltip)
+      root.removeEventListener("scroll", hideTooltipNow)
       root.removeEventListener("focusin", onFocusIn)
-      root.removeEventListener("focusout", hideTooltip)
-      window.removeEventListener("blur", hideTooltip)
-      window.removeEventListener("scroll", hideTooltip, true)
-      setGraphTooltip(null)
+      root.removeEventListener("focusout", hideTooltipSoon)
+      window.removeEventListener("blur", hideTooltipNow)
+      window.removeEventListener("scroll", hideTooltipNow, true)
+      forceHideGraphTooltip()
     }
-  }, [entries, snapshot?.mmd, snapshot?.state.lastCompileMode, svg])
+  }, [
+    cancelGraphTooltipHide,
+    entries,
+    forceHideGraphTooltip,
+    scheduleGraphTooltipHide,
+    snapshot?.mmd,
+    snapshot?.state.lastCompileMode,
+    svg
+  ])
 
   const updateSettings = useCallback(async (patch: Partial<TaskMmdSettings>) => {
     setSaving(true)
@@ -817,12 +905,19 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
                 />
                 {graphTooltip ? (
                   <div
-                    className="pointer-events-none fixed z-[100] max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-popover px-3 py-2 text-[11px] leading-relaxed text-popover-foreground shadow-lg"
+                    className="pointer-events-auto fixed z-[100] max-h-72 cursor-text select-text overflow-auto whitespace-pre-wrap rounded-md border border-border bg-popover px-3 py-2 text-[11px] leading-relaxed text-popover-foreground shadow-lg"
                     style={{
                       left: graphTooltip.x,
                       top: graphTooltip.y,
                       width: "min(420px, calc(100vw - 24px))"
                     }}
+                    onMouseEnter={handleGraphTooltipEnter}
+                    onMouseLeave={handleGraphTooltipLeave}
+                    onFocus={handleGraphTooltipEnter}
+                    onBlur={handleGraphTooltipLeave}
+                    onPointerDown={handleGraphTooltipPointerDown}
+                    onPointerUp={handleGraphTooltipPointerUp}
+                    onPointerCancel={handleGraphTooltipPointerUp}
                   >
                     {graphTooltip.text}
                   </div>
@@ -839,9 +934,9 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
             {snapshot?.mmd ? (
               <pre
                 className="mt-4 overflow-auto rounded-md border border-border/70 bg-muted/30 p-3 text-xs leading-relaxed"
-                title={snapshot.mmd}
+                title={stripAnsiText(snapshot.mmd)}
               >
-                {snapshot.mmd}
+                {stripAnsiText(snapshot.mmd)}
               </pre>
             ) : null}
           </div>

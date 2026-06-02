@@ -10,13 +10,24 @@ const SECRET_VALUE_PATTERNS: Array<[RegExp, string]> = [
   [/(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----)/g, "$1\n[REDACTED]\n$2"]
 ]
 
+const ANSI_ESCAPE = String.fromCharCode(27)
+const ANSI_BEL = String.fromCharCode(7)
+const ANSI_ESCAPE_PATTERN = new RegExp(
+  `${ANSI_ESCAPE}(?:\\[[0-?]*[ -/]*[@-~]|\\][^${ANSI_BEL}]*(?:${ANSI_BEL}|${ANSI_ESCAPE}\\\\)|[@-Z\\\\-_])`,
+  "g"
+)
+
+export function stripAnsiText(text: string): string {
+  return text.replace(ANSI_ESCAPE_PATTERN, "")
+}
+
 function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text
   return `${text.slice(0, maxChars)}\n...[truncated ${text.length - maxChars} chars]`
 }
 
 function redactText(text: string): string {
-  let next = text
+  let next = stripAnsiText(text)
   for (const [pattern, replacement] of SECRET_VALUE_PATTERNS) {
     next = next.replace(pattern, replacement)
   }

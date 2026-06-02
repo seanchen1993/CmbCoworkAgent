@@ -1,4 +1,5 @@
 import type { TaskMmdToolEntry } from "./types"
+import { stripAnsiText } from "./sanitizer"
 
 export function renderTaskMmdSystemBlock(mmd: string): string {
   return `\n\n## Current Task Map\n\nThe following Mermaid graph is a compact navigation aid for the current thread. Use it to remember completed work, active branches, blockers, and where to continue. It is not a replacement for the actual conversation or tool results.\n\n\`\`\`mermaid\n${mmd.trim()}\n\`\`\`\n`
@@ -10,8 +11,8 @@ export function renderTaskMmdCompilePrompt(
 ): string {
   const entryLines = entries
     .map((entry, index) => {
-      const args = entry.argsPreview.replace(/\s+/g, " ").slice(0, 360)
-      const result = entry.resultPreview.replace(/\s+/g, " ").slice(0, 520)
+      const args = stripAnsiText(entry.argsPreview).replace(/\s+/g, " ").slice(0, 360)
+      const result = stripAnsiText(entry.resultPreview).replace(/\s+/g, " ").slice(0, 520)
       return [
         `#${index + 1}`,
         `tool_call_id: ${entry.toolCallId}`,
@@ -50,7 +51,7 @@ Graph rules:
 
 Existing Mermaid:
 \`\`\`mermaid
-${existingMmd.trim() || "flowchart TD"}
+${stripAnsiText(existingMmd).trim() || "flowchart TD"}
 \`\`\`
 
 New tool-call evidence:

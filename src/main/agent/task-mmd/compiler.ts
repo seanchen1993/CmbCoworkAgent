@@ -13,6 +13,7 @@ import {
   writeTaskMmd,
   writeTaskMmdState
 } from "./storage"
+import { stripAnsiText } from "./sanitizer"
 import type { TaskMmdCompileModelInfo, TaskMmdToolEntry } from "./types"
 
 const compileInFlight = new Set<string>()
@@ -49,7 +50,7 @@ function parseMmdFromResponse(text: string): string | null {
 }
 
 function escapeMermaidLabel(value: string): string {
-  return value
+  return stripAnsiText(value)
     .replace(/\\/g, "\\\\")
     .replace(/"/g, "'")
     .replace(/[<>]/g, "")
@@ -85,16 +86,16 @@ function extractPathBasename(text: string): string | null {
 }
 
 function summarizeEntry(entry: TaskMmdToolEntry): string {
-  const preview = [entry.argsPreview, entry.resultPreview].filter(Boolean).join(" ")
+  const preview = stripAnsiText([entry.argsPreview, entry.resultPreview].filter(Boolean).join(" "))
   const basename = extractPathBasename(preview)
   const toolName = readableToolName(entry.toolName)
   if (basename) return `${toolName}: ${ellipsize(basename, 72)}`
 
-  const source = [entry.toolName, entry.argsPreview, entry.resultPreview]
+  const source = stripAnsiText([entry.toolName, entry.argsPreview, entry.resultPreview]
     .filter(Boolean)
     .join(" ")
     .replace(/\s+/g, " ")
-    .trim()
+    .trim())
   if (!source) return entry.toolName
   return ellipsize(source, 72)
 }
