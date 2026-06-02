@@ -59,20 +59,6 @@ function getEsIndex(type: "trace" | "event" | "skillEval"): string {
   return (import.meta.env.VITE_ES_INDEX_EVENT as string) || "devclaw_event"
 }
 
-const ALLOWED_YST_IDS_RAW = (import.meta.env.VITE_DASHBOARD_ALLOWED_YST_IDS as string) || ""
-const ALLOWED_YST_IDS = new Set(
-  ALLOWED_YST_IDS_RAW.split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-)
-
-function isDashboardAllowed(): boolean {
-  if (import.meta.env.DEV) return true
-  const userInfo = getUserInfo()
-  const ystId = userInfo?.ystId?.trim()
-  if (!ystId) return false
-  return ALLOWED_YST_IDS.has(ystId)
-}
 
 // ─────────────────────────────────────────────────────────
 // ES HTTP helper
@@ -5787,7 +5773,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   )
 
   _ipcMain.handle("dashboard:userList", async (_, range: TimeRange, options?: UserListOptions) => {
-    if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
     if (import.meta.env.DEV) return { success: true, data: makeMockUserList(range, options) }
     try {
       return { success: true, data: await fetchUserList(range, options) }
@@ -5987,7 +5972,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:skillDetail",
     async (_, skill: string, range: TimeRange, options?: number | TracePageOptions) => {
-      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
       if (import.meta.env.DEV)
         return { success: true, data: makeMockSkillDetail(skill, range, options) }
       try {
