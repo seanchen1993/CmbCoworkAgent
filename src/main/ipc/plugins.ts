@@ -12,6 +12,7 @@ import {
   upsertPlugin,
   deletePlugin as deletePluginStorage,
   setPluginEnabled,
+  setPluginOriginsBatch,
   setPluginHookEnabled,
   invalidateEnabledSkillsCache,
   parseMcpJsonFile
@@ -582,6 +583,33 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         invalidateEnabledSkillsCache()
         await invalidateGlobalMcpCapabilityService("plugin:setEnabled")
         notifyHooksChanged("plugin-enabled-changed")
+        return { success: true }
+      } catch (e) {
+        return { success: false, error: e instanceof Error ? e.message : "设置失败" }
+      } finally {
+        pluginMutex.release()
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "plugins:setOriginsBatch",
+    async (
+      _event,
+      payload: { updates: Array<{ id: string; origin: "market" | "local" }> }
+    ): Promise<{ success: boolean; error?: string }> => {
+      const raw = Array.isArray(payload?.updates) ? payload.updates : []
+      const sanitized = raw.filter(
+        (update): update is { id: string; origin: "market" | "local" } =>
+          !!update &&
+          typeof update.id === "string" &&
+          update.id.length > 0 &&
+          (update.origin === "market" || update.origin === "local")
+      )
+      if (sanitized.length === 0) return { success: true }
+      await pluginMutex.acquire()
+      try {
+        setPluginOriginsBatch(sanitized)
         return { success: true }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "设置失败" }
