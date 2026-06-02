@@ -175,6 +175,51 @@ async function upsertProjectDoc(docId: string, doc: Record<string, unknown>): Pr
   throw lastError ?? new Error("All ES nodes failed")
 }
 
+/**
+ * Read the feature count of the project's existing snapshot in ES.
+ *
+ * Returns the count when it can be determined (a missing document / 404 counts
+ * as 0), or `null` when ES could not be reached at all. The caller treats
+ * `null` as "can't confirm" and errs on the side of preserving existing data.
+ */
+async function fetchExistingFeatureCount(docId: string): Promise<number | null> {
+  const nodes = getEsNodes()
+  if (nodes.length === 0) return null
+
+  const auth = getEsAuth()
+  const headers: Record<string, string> = {}
+  if (auth) {
+    headers.Authorization =
+      "Basic " + Buffer.from(`${auth.username}:${auth.password}`).toString("base64")
+  }
+
+  for (const node of nodes) {
+    const url = `${node}/${getEventIndex()}/_doc/${encodeURIComponent(docId)}?_source=properties.featureCount,properties.features`
+    try {
+      const resp = await fetch(url, {
+        method: "GET",
+        headers,
+        signal: AbortSignal.timeout(WRITE_TIMEOUT_MS)
+      })
+      if (resp.status === 404) return 0
+      if (!resp.ok) throw new Error(`ES ${resp.status}`)
+      const json = (await resp.json()) as {
+        _source?: { properties?: { featureCount?: unknown; features?: unknown } }
+      }
+      const props = json._source?.properties
+      if (typeof props?.featureCount === "number") return props.featureCount
+      if (Array.isArray(props?.features)) return props.features.length
+      return 0
+    } catch (e) {
+      console.warn(
+        `[HarnessStatusReporter] ES read failed on ${node} for ${docId}:`,
+        e instanceof Error ? e.message : String(e)
+      )
+    }
+  }
+  return null
+}
+
 // ─────────────────────────────────────────────────────────
 // Polling
 // ─────────────────────────────────────────────────────────
@@ -201,16 +246,41 @@ async function pollOnce(): Promise<void> {
   }
 
   let reported = 0
+  let skipped = 0
   for (const project of projects) {
     try {
       const { docId, doc } = buildProjectDoc(project, details[project.projectId])
+      const props = (doc as { properties?: { featureCount?: unknown } }).properties
+      const newFeatureCount = typeof props?.featureCount === "number" ? props.featureCount : 0
+
+      // The snapshot is a full-document overwrite built from a *local* probe of
+      // the workspace. If the workspace was manually altered (or the inspect
+      // failed), the probe can come back with 0 features even though the project
+      // still exists and previously reported features. Don't let that empty
+      // result clobber a good snapshot: when the probe is empty but the stored
+      // doc already has features, preserve the existing data and skip the write.
+      if (newFeatureCount === 0) {
+        const existing = await fetchExistingFeatureCount(docId)
+        if (existing === null || existing > 0) {
+          console.warn(
+            `[HarnessStatusReporter] Skipped ${project.projectId}: probe returned 0 features ` +
+              `but existing snapshot has ${existing ?? "unknown"} — preserving previous data`
+          )
+          skipped += 1
+          continue
+        }
+      }
+
       await upsertProjectDoc(docId, doc)
       reported += 1
     } catch (e) {
       console.warn(`[HarnessStatusReporter] Failed to report project ${project.projectId}:`, e)
     }
   }
-  console.log(`[HarnessStatusReporter] Upserted ${reported}/${projects.length} project snapshots`)
+  console.log(
+    `[HarnessStatusReporter] Upserted ${reported}/${projects.length} project snapshots` +
+      (skipped > 0 ? ` (${skipped} skipped to preserve non-empty data)` : "")
+  )
 }
 
 /**
