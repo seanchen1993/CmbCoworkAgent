@@ -1239,6 +1239,9 @@ interface CustomAPI {
       mode?: DashboardTraceViewMode,
       triggerScope?: DashboardTraceTriggerScope
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+    threadTraces: (
+      threadId: string
+    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },

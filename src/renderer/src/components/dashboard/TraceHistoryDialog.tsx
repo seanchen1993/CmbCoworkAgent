@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import {
   Activity,
   AlertCircle,
@@ -514,6 +514,25 @@ interface TraceThreadGroup {
   totalTokens: number
 }
 
+function summarizeThreadGroup(threadId: string, threadTraces: DashboardTraceDetail[]): TraceThreadGroup {
+  // thread 内部按时间升序：第一条卡片即该 thread 的首轮对话，符合自然阅读顺序。
+  const sorted = [...threadTraces].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+  const latestStartedAt = sorted.reduce(
+    (latest, trace) => (trace.startedAt > latest ? trace.startedAt : latest),
+    sorted[0]?.startedAt ?? ""
+  )
+  return {
+    threadId,
+    traces: sorted,
+    latestStartedAt,
+    successCount: sorted.filter((trace) => trace.outcome === "success").length,
+    errorCount: sorted.filter((trace) => trace.outcome === "error").length,
+    totalToolCalls: sorted.reduce((sum, trace) => sum + trace.totalToolCalls, 0),
+    totalDurationMs: sorted.reduce((sum, trace) => sum + trace.durationMs, 0),
+    totalTokens: sorted.reduce((sum, trace) => sum + trace.totalTokens, 0)
+  }
+}
+
 function buildTraceThreadGroups(traces: DashboardTraceDetail[]): TraceThreadGroup[] {
   const grouped = new Map<string, DashboardTraceDetail[]>()
   for (const trace of traces) {
@@ -523,20 +542,9 @@ function buildTraceThreadGroups(traces: DashboardTraceDetail[]): TraceThreadGrou
     grouped.set(threadId, list)
   }
 
+  // thread 列表本身按最近活跃时间降序：最新的会话排在最前。
   return Array.from(grouped.entries())
-    .map(([threadId, threadTraces]) => {
-      const sorted = [...threadTraces].sort((a, b) => b.startedAt.localeCompare(a.startedAt))
-      return {
-        threadId,
-        traces: sorted,
-        latestStartedAt: sorted[0]?.startedAt ?? "",
-        successCount: sorted.filter((trace) => trace.outcome === "success").length,
-        errorCount: sorted.filter((trace) => trace.outcome === "error").length,
-        totalToolCalls: sorted.reduce((sum, trace) => sum + trace.totalToolCalls, 0),
-        totalDurationMs: sorted.reduce((sum, trace) => sum + trace.durationMs, 0),
-        totalTokens: sorted.reduce((sum, trace) => sum + trace.totalTokens, 0)
-      }
-    })
+    .map(([threadId, threadTraces]) => summarizeThreadGroup(threadId, threadTraces))
     .sort((a, b) => b.latestStartedAt.localeCompare(a.latestStartedAt))
 }
 
@@ -691,6 +699,7 @@ export function TraceExplorer({
   defaultViewMode = "thread",
   onViewModeChange,
   showViewModeToggle = true,
+  loadThreadTraces,
   className
 }: {
   traces: DashboardTraceDetail[]
@@ -706,24 +715,89 @@ export function TraceExplorer({
   defaultViewMode?: DashboardTraceViewMode
   onViewModeChange?: (mode: DashboardTraceViewMode) => void
   showViewModeToggle?: boolean
+  loadThreadTraces?: (threadId: string) => Promise<DashboardTraceDetail[]>
   className?: string
 }): React.JSX.Element {
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null)
   const [localViewMode, setLocalViewMode] = useState<DashboardTraceViewMode>(defaultViewMode)
+  // 按 threadId 缓存「完整 thread」拉取结果，避免重复请求。
+  const [threadTraceCache, setThreadTraceCache] = useState<Record<string, DashboardTraceDetail[]>>({})
+  const [threadLoadingId, setThreadLoadingId] = useState<string | null>(null)
   const activeViewMode = viewMode ?? localViewMode
   const handleViewModeChange = (mode: DashboardTraceViewMode): void => {
     if (!viewMode) setLocalViewMode(mode)
     onViewModeChange?.(mode)
   }
 
-  const selectedTrace = traces.find((trace) => trace.traceId === selectedTraceId) ?? traces[0] ?? null
-  const traceGroups = useMemo(() => buildTraceThreadGroups(traces), [traces])
+  // 默认通过 IPC 拉取单个 thread 的完整 trace（不受时间窗 / skill / 触发方式裁剪）。
+  const defaultLoadThreadTraces = useCallback(async (threadId: string): Promise<DashboardTraceDetail[]> => {
+    const api = window.api?.dashboard
+    if (!api || typeof api.threadTraces !== "function") return []
+    try {
+      const res = await api.threadTraces(threadId)
+      return res?.success && Array.isArray(res.data) ? (res.data as DashboardTraceDetail[]) : []
+    } catch {
+      return []
+    }
+  }, [])
+  const effectiveLoadThreadTraces = loadThreadTraces ?? defaultLoadThreadTraces
+
+  // 概览分组（来自分页接口，每个 thread 仅含预览的若干条 trace）。
+  const baseGroups = useMemo(() => buildTraceThreadGroups(traces), [traces])
+  // 若某 thread 已拉到完整 trace，则用完整数据重建该分组。
+  const traceGroups = useMemo(
+    () =>
+      baseGroups.map((group) => {
+        const full = threadTraceCache[group.threadId]
+        return full && full.length > 0 ? summarizeThreadGroup(group.threadId, full) : group
+      }),
+    [baseGroups, threadTraceCache]
+  )
+
+  // 选中 trace 的查找范围同时覆盖概览列表与已加载的完整 thread，
+  // 这样点击「完整会话」里新出现的 trace 也能正确定位并渲染执行树。
+  const tracesById = useMemo(() => {
+    const map = new Map<string, DashboardTraceDetail>()
+    for (const trace of traces) map.set(trace.traceId, trace)
+    for (const list of Object.values(threadTraceCache)) {
+      for (const trace of list) map.set(trace.traceId, trace)
+    }
+    return map
+  }, [traces, threadTraceCache])
+
+  const selectedTrace =
+    (selectedTraceId ? tracesById.get(selectedTraceId) ?? null : null) ?? traces[0] ?? null
   const selectedThreadGroup = useMemo(() => {
     if (!selectedTrace) return traceGroups[0] ?? null
     return traceGroups.find((group) =>
       group.traces.some((trace) => trace.traceId === selectedTrace.traceId)
     ) ?? traceGroups[0] ?? null
   }, [selectedTrace, traceGroups])
+
+  // thread 模式下选中某个 thread 时，懒加载其完整 trace 列表。
+  const selectedThreadId = selectedThreadGroup?.threadId ?? null
+  useEffect(() => {
+    if (activeViewMode !== "thread") return
+    if (!selectedThreadId || selectedThreadId === "unknown-thread") return
+    if (threadTraceCache[selectedThreadId]) return
+    let cancelled = false
+    setThreadLoadingId(selectedThreadId)
+    void effectiveLoadThreadTraces(selectedThreadId)
+      .then((full) => {
+        if (cancelled) return
+        setThreadTraceCache((prev) =>
+          prev[selectedThreadId] ? prev : { ...prev, [selectedThreadId]: Array.isArray(full) ? full : [] }
+        )
+      })
+      .finally(() => {
+        if (!cancelled) setThreadLoadingId((current) => (current === selectedThreadId ? null : current))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activeViewMode, selectedThreadId, threadTraceCache, effectiveLoadThreadTraces])
+
+  const threadLoading = threadLoadingId !== null && threadLoadingId === selectedThreadId
   const metricMode = activeViewMode === "thread" && selectedThreadGroup ? "thread" : "trace"
   const metricStartedAt =
     metricMode === "thread" ? selectedThreadGroup?.latestStartedAt : selectedTrace?.startedAt
@@ -872,7 +946,7 @@ export function TraceExplorer({
                 {root ? (
                   <div className="space-y-4">
                     {activeViewMode === "thread" && selectedThreadGroup ? (
-                      <TraceThreadConversation traces={selectedThreadGroup.traces} />
+                      <TraceThreadConversation traces={selectedThreadGroup.traces} loading={threadLoading} />
                     ) : (
                       <TraceConversation trace={selectedTrace} />
                     )}
@@ -889,7 +963,7 @@ export function TraceExplorer({
                 ) : selectedTrace ? (
                   <div className="space-y-4">
                     {activeViewMode === "thread" && selectedThreadGroup ? (
-                      <TraceThreadConversation traces={selectedThreadGroup.traces} />
+                      <TraceThreadConversation traces={selectedThreadGroup.traces} loading={threadLoading} />
                     ) : (
                       <TraceConversation trace={selectedTrace} />
                     )}

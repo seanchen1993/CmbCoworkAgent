@@ -2006,6 +2006,10 @@ const api = {
       triggerScope?: "active" | "all"
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit, mode, triggerScope),
+    threadTraces: (
+      threadId: string
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:threadTraces", threadId),
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
