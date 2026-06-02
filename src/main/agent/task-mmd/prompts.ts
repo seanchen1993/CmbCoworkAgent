@@ -42,6 +42,7 @@ Status vocabulary:
 Graph rules:
 - Use Mermaid flowchart TD.
 - Keep node labels short and factual.
+- When a node is about a file, keep the complete basename visible; omit directories before clipping the filename.
 - Include status in each node label using "<br/>status: done" style.
 - Prefer 5-20 nodes.
 - Avoid raw secrets, long logs, stack traces, or full file contents.

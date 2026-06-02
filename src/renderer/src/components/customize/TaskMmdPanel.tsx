@@ -26,6 +26,7 @@ type TaskMmdSettings = Awaited<ReturnType<typeof window.api.taskMmd.getSettings>
 type TaskMmdSnapshot = Awaited<ReturnType<typeof window.api.taskMmd.getSnapshot>>
 type TaskMmdCompileModelInfo = Awaited<ReturnType<typeof window.api.taskMmd.getCompileModelInfo>>
 type TaskMmdEntry = TaskMmdSnapshot["entries"][number]
+type GraphTooltip = { text: string; x: number; y: number }
 
 interface TaskMmdPanelProps {
   currentThreadId?: string | null
@@ -85,6 +86,168 @@ function shortThreadId(threadId: string): string {
   return threadId.length > 8 ? threadId.slice(0, 8) : threadId
 }
 
+function truncateTooltip(value: string, maxChars = 1600): string {
+  if (value.length <= maxChars) return value
+  return `${value.slice(0, maxChars).trimEnd()}\n...`
+}
+
+function decodeHtmlEntities(value: string): string {
+  const named: Record<string, string> = {
+    amp: "&",
+    apos: "'",
+    gt: ">",
+    lt: "<",
+    nbsp: " ",
+    quot: '"'
+  }
+  return value.replace(/&(#(\d+)|#x([\da-f]+)|[a-z]+);/gi, (match, entity, decimal, hex) => {
+    if (decimal) return String.fromCodePoint(Number(decimal))
+    if (hex) return String.fromCodePoint(Number.parseInt(hex, 16))
+    return named[String(entity).toLowerCase()] ?? match
+  })
+}
+
+function cleanGraphLabel(value: string): string {
+  return decodeHtmlEntities(value)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/?[^>]+>/g, " ")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n")
+}
+
+function extractMmdNodeLabels(mmd: string): Map<string, string> {
+  const labels = new Map<string, string>()
+  const patterns = [
+    /(?:^|[\s>;])([A-Za-z_][\w-]*)\s*\[\s*"((?:\\.|[^"])*)"\s*\]/gm,
+    /(?:^|[\s>;])([A-Za-z_][\w-]*)\s*\(\s*"((?:\\.|[^"])*)"\s*\)/gm,
+    /(?:^|[\s>;])([A-Za-z_][\w-]*)\s*\{\s*"((?:\\.|[^"])*)"\s*\}/gm,
+    /(?:^|[\s>;])([A-Za-z_][\w-]*)\s*\[\s*([^\]\n]+?)\s*\]/gm,
+    /(?:^|[\s>;])([A-Za-z_][\w-]*)\s*\(\s*([^)\n]+?)\s*\)/gm,
+    /(?:^|[\s>;])([A-Za-z_][\w-]*)\s*\{\s*([^}\n]+?)\s*\}/gm
+  ]
+
+  for (const pattern of patterns) {
+    for (const match of mmd.matchAll(pattern)) {
+      const nodeId = match[1]
+      const rawLabel = match[2]
+      if (!nodeId || !rawLabel || labels.has(nodeId)) continue
+      labels.set(nodeId, cleanGraphLabel(rawLabel.replace(/\\"/g, '"')))
+    }
+  }
+
+  return labels
+}
+
+function mermaidDomNodeId(rawId: string | null): string | null {
+  if (!rawId) return null
+  const withoutPrefix = rawId.replace(/^flowchart-/, "")
+  const withoutSuffix = withoutPrefix.replace(/-\d+$/, "")
+  return withoutSuffix || rawId
+}
+
+function graphNodeVisibleText(node: SVGGElement): string {
+  return Array.from(node.childNodes)
+    .filter((child) => child.nodeName.toLowerCase() !== "title")
+    .map((child) => child.textContent ?? "")
+    .join(" ")
+}
+
+function closestGraphNode(target: EventTarget | null, root: HTMLElement): SVGGElement | null {
+  if (!(target instanceof Element)) return null
+  const node = target.closest<SVGGElement>("g.node")
+  return node && root.contains(node) ? node : null
+}
+
+function tooltipPosition(clientX: number, clientY: number): { x: number; y: number } {
+  const margin = 12
+  const tooltipWidth = 420
+  const tooltipHeight = 260
+  const maxX = Math.max(margin, window.innerWidth - tooltipWidth - margin)
+  const maxY = Math.max(margin, window.innerHeight - tooltipHeight - margin)
+  return {
+    x: Math.max(margin, Math.min(clientX + 14, maxX)),
+    y: Math.max(margin, Math.min(clientY + 14, maxY))
+  }
+}
+
+function entrySearchText(entry: TaskMmdEntry): string {
+  return [entry.toolName, entry.argsPreview, entry.resultPreview].join(" ").toLowerCase()
+}
+
+function scoreEntryForLabel(label: string, entry: TaskMmdEntry): number {
+  const normalizedLabel = label
+    .replace(/status:\s*\w+/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+  if (!normalizedLabel) return 0
+
+  const haystack = entrySearchText(entry)
+  const toolName = entry.toolName.toLowerCase()
+  let score = 0
+  if (normalizedLabel.length >= 4 && haystack.includes(normalizedLabel)) score += 10
+  if (normalizedLabel.includes(toolName) || toolName.includes(normalizedLabel)) score += 8
+
+  const terms = Array.from(
+    new Set(
+      normalizedLabel
+        .split(/[^\w\u4e00-\u9fa5./:\\-]+/)
+        .map((term) => term.trim())
+        .filter((term) => term.length >= 3 && !["status", "done", "doing", "paused", "blocked"].includes(term))
+    )
+  ).slice(0, 12)
+
+  for (const term of terms) {
+    if (haystack.includes(term)) score += 1
+  }
+  return score
+}
+
+function findEntryForGraphNode(
+  nodeId: string | null,
+  label: string,
+  entries: TaskMmdEntry[],
+  isFallbackGraph: boolean
+): TaskMmdEntry | null {
+  if (isFallbackGraph && nodeId) {
+    const numbered = /^N(\d+)$/.exec(nodeId)
+    if (numbered) {
+      const recent = entries.slice(-12)
+      const entry = recent[Number(numbered[1]) - 1]
+      if (entry) return entry
+    }
+  }
+
+  let best: { entry: TaskMmdEntry; score: number } | null = null
+  for (const entry of entries) {
+    const score = scoreEntryForLabel(label, entry)
+    if (score > (best?.score ?? 0)) best = { entry, score }
+  }
+  return best && best.score >= 3 ? best.entry : null
+}
+
+function buildEntryTooltip(entry: TaskMmdEntry): string {
+  const status = entry.status === "error" ? "失败" : "成功"
+  const lines = [
+    `执行：${entry.toolName}`,
+    `范围：${entry.scope} · 状态：${status} · 耗时：${entry.durationMs}ms`,
+    `时间：${new Date(entry.timestamp).toLocaleString()}`
+  ]
+  if (entry.argsPreview) lines.push(`参数：${entry.argsPreview}`)
+  if (entry.resultPreview) lines.push(`结果：${entry.resultPreview}`)
+  return truncateTooltip(lines.join("\n"))
+}
+
+function buildGraphTooltip(label: string, entry: TaskMmdEntry | null): string {
+  const lines: string[] = []
+  if (label) lines.push(label)
+  if (entry) lines.push(buildEntryTooltip(entry))
+  return truncateTooltip(lines.join("\n\n"))
+}
+
 function getThreadTitle(thread: Thread): string {
   return (
     thread.title ||
@@ -110,12 +273,17 @@ function EntryRow({ entry }: { entry: TaskMmdEntry }): React.JSX.Element {
             entry.status === "error" ? "bg-destructive" : "bg-emerald-500"
           )}
         />
-        <span className="min-w-0 flex-1 truncate text-xs font-medium">{entry.toolName}</span>
+        <span className="min-w-0 flex-1 truncate text-xs font-medium" title={entry.toolName}>
+          {entry.toolName}
+        </span>
         <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
           {entry.scope}
         </span>
       </div>
-      <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-muted-foreground">
+      <p
+        className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-muted-foreground"
+        title={entry.resultPreview || entry.argsPreview || "(empty)"}
+      >
         {entry.resultPreview || entry.argsPreview || "(empty)"}
       </p>
       <p className="mt-1 text-[10px] text-muted-foreground/70">
@@ -135,15 +303,21 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
   const [directorySize, setDirectorySize] = useState(0)
   const [svg, setSvg] = useState("")
   const [renderError, setRenderError] = useState<string | null>(null)
+  const [graphTooltip, setGraphTooltip] = useState<GraphTooltip | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const mountedRef = useRef(true)
+  const graphRef = useRef<HTMLDivElement | null>(null)
   const renderId = useMemo(() => `task-mmd-${Math.random().toString(36).slice(2)}`, [])
   const selectedThread = useMemo(
     () => threads.find((thread) => thread.thread_id === selectedThreadId) ?? null,
     [selectedThreadId, threads]
   )
   const threadId = selectedThreadId
+  const currentSettings = settings
+  const state = snapshot?.state
+  const entries = snapshot?.entries ?? []
+  const isViewingCurrentThread = Boolean(threadId && threadId === currentThreadId)
 
   useEffect(() => {
     mountedRef.current = true
@@ -226,6 +400,7 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
       if (!mmd) {
         setSvg("")
         setRenderError(null)
+        setGraphTooltip(null)
         return
       }
       try {
@@ -242,6 +417,12 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
             lineColor: "#7a8496",
             secondaryColor: "#f5f7fb",
             tertiaryColor: "#fff7ed"
+          },
+          flowchart: {
+            htmlLabels: true,
+            nodeSpacing: 36,
+            rankSpacing: 52,
+            padding: 14
           }
         })
         const result = await mermaid.default.render(renderId, mmd)
@@ -262,6 +443,93 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
     }
   }, [renderId, snapshot?.mmd])
 
+  useEffect(() => {
+    setGraphTooltip(null)
+
+    const root = graphRef.current
+    if (!root || !svg) return
+
+    const svgElement = root.querySelector<SVGSVGElement>("svg")
+    if (svgElement) {
+      svgElement.style.maxWidth = "none"
+      svgElement.style.height = "auto"
+      svgElement.style.overflow = "visible"
+    }
+
+    const nodeLabels = extractMmdNodeLabels(snapshot?.mmd ?? "")
+    const isFallbackGraph = snapshot?.state.lastCompileMode === "fallback"
+    const nodes = Array.from(root.querySelectorAll<SVGGElement>("g.node"))
+    const tooltipByNode = new WeakMap<SVGGElement, string>()
+
+    for (const node of nodes) {
+      const nodeId = mermaidDomNodeId(node.getAttribute("id"))
+      const label = cleanGraphLabel(
+        (nodeId ? nodeLabels.get(nodeId) : "") || graphNodeVisibleText(node)
+      )
+      const entry = findEntryForGraphNode(nodeId, label, entries, isFallbackGraph)
+      const tooltip = buildGraphTooltip(label, entry)
+      if (!tooltip) continue
+
+      node.style.cursor = "help"
+      node.setAttribute("tabindex", "0")
+      node.setAttribute("role", "img")
+      node.setAttribute("aria-label", tooltip.replace(/\s+/g, " "))
+      Array.from(node.children)
+        .filter((child) => child.tagName.toLowerCase() === "title")
+        .forEach((child) => child.remove())
+      tooltipByNode.set(node, tooltip)
+    }
+
+    const hideTooltip = (): void => setGraphTooltip(null)
+    const showTooltip = (node: SVGGElement, clientX: number, clientY: number): void => {
+      const tooltip = tooltipByNode.get(node)
+      if (!tooltip) {
+        hideTooltip()
+        return
+      }
+      const position = tooltipPosition(clientX, clientY)
+      setGraphTooltip({ text: tooltip, ...position })
+    }
+    const onMouseMove = (event: MouseEvent): void => {
+      const node = closestGraphNode(event.target, root)
+      if (!node) {
+        hideTooltip()
+        return
+      }
+      showTooltip(node, event.clientX, event.clientY)
+    }
+    const onFocusIn = (event: FocusEvent): void => {
+      const node = closestGraphNode(event.target, root)
+      if (!node) {
+        hideTooltip()
+        return
+      }
+      const rect = node.getBoundingClientRect()
+      showTooltip(node, rect.left + rect.width / 2, rect.top + rect.height / 2)
+    }
+
+    root.addEventListener("mousemove", onMouseMove)
+    root.addEventListener("mouseleave", hideTooltip)
+    root.addEventListener("pointerleave", hideTooltip)
+    root.addEventListener("scroll", hideTooltip)
+    root.addEventListener("focusin", onFocusIn)
+    root.addEventListener("focusout", hideTooltip)
+    window.addEventListener("blur", hideTooltip)
+    window.addEventListener("scroll", hideTooltip, true)
+
+    return () => {
+      root.removeEventListener("mousemove", onMouseMove)
+      root.removeEventListener("mouseleave", hideTooltip)
+      root.removeEventListener("pointerleave", hideTooltip)
+      root.removeEventListener("scroll", hideTooltip)
+      root.removeEventListener("focusin", onFocusIn)
+      root.removeEventListener("focusout", hideTooltip)
+      window.removeEventListener("blur", hideTooltip)
+      window.removeEventListener("scroll", hideTooltip, true)
+      setGraphTooltip(null)
+    }
+  }, [entries, snapshot?.mmd, snapshot?.state.lastCompileMode, svg])
+
   const updateSettings = useCallback(async (patch: Partial<TaskMmdSettings>) => {
     setSaving(true)
     try {
@@ -280,11 +548,6 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
     await window.api.taskMmd.clearThread(threadId)
     await loadData()
   }, [loadData, threadId])
-
-  const currentSettings = settings
-  const state = snapshot?.state
-  const entries = snapshot?.entries ?? []
-  const isViewingCurrentThread = Boolean(threadId && threadId === currentThreadId)
 
   return (
     <div className="isolate flex min-h-0 flex-1 overflow-hidden">
@@ -546,10 +809,25 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
                 {renderError}
               </pre>
             ) : svg ? (
-              <div
-                className="min-h-[360px] overflow-auto rounded-md border border-border bg-background p-4"
-                dangerouslySetInnerHTML={{ __html: svg }}
-              />
+              <div className="relative">
+                <div
+                  ref={graphRef}
+                  className="min-h-[360px] overflow-auto rounded-md border border-border bg-background p-4 [&_.node]:outline-none [&_svg]:max-w-none [&_svg]:overflow-visible"
+                  dangerouslySetInnerHTML={{ __html: svg }}
+                />
+                {graphTooltip ? (
+                  <div
+                    className="pointer-events-none fixed z-[100] max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-popover px-3 py-2 text-[11px] leading-relaxed text-popover-foreground shadow-lg"
+                    style={{
+                      left: graphTooltip.x,
+                      top: graphTooltip.y,
+                      width: "min(420px, calc(100vw - 24px))"
+                    }}
+                  >
+                    {graphTooltip.text}
+                  </div>
+                ) : null}
+              </div>
             ) : (
               <div className="flex min-h-[360px] flex-col items-center justify-center rounded-md border border-dashed border-border text-muted-foreground">
                 <FileText className="mb-3 size-8 opacity-40" />
@@ -559,7 +837,10 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
             )}
 
             {snapshot?.mmd ? (
-              <pre className="mt-4 overflow-auto rounded-md border border-border/70 bg-muted/30 p-3 text-xs leading-relaxed">
+              <pre
+                className="mt-4 overflow-auto rounded-md border border-border/70 bg-muted/30 p-3 text-xs leading-relaxed"
+                title={snapshot.mmd}
+              >
                 {snapshot.mmd}
               </pre>
             ) : null}

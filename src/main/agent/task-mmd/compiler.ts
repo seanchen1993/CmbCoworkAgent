@@ -57,14 +57,46 @@ function escapeMermaidLabel(value: string): string {
     .trim()
 }
 
+function ellipsize(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value
+  return `${value.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`
+}
+
+function readableToolName(toolName: string): string {
+  return toolName
+    .replace(/^(functions|mcp__[.\w-]+)\./, "")
+    .replace(/_/g, " ")
+}
+
+function extractPathBasename(text: string): string | null {
+  const normalized = text.replace(/\\\\/g, "\\")
+  const pathPattern =
+    /(?:[A-Za-z]:\\|\.{1,2}[\\/]|[\\/])(?:[^\s"'`<>|{}[\],;:)]+[\\/])*[^\s"'`<>|{}[\],;:)]+/g
+  const relativePathPattern =
+    /(?:[A-Za-z0-9_.-]+[\\/]){1,}[A-Za-z0-9_.-]+\.[A-Za-z0-9]+/g
+  const matches = [
+    ...(normalized.match(pathPattern) ?? []),
+    ...(normalized.match(relativePathPattern) ?? [])
+  ]
+  const candidate = matches
+    .map((pathValue) => pathValue.split(/[\\/]+/).filter(Boolean).pop() ?? "")
+    .find((basename) => basename.length > 0)
+  return candidate || null
+}
+
 function summarizeEntry(entry: TaskMmdToolEntry): string {
+  const preview = [entry.argsPreview, entry.resultPreview].filter(Boolean).join(" ")
+  const basename = extractPathBasename(preview)
+  const toolName = readableToolName(entry.toolName)
+  if (basename) return `${toolName}: ${ellipsize(basename, 72)}`
+
   const source = [entry.toolName, entry.argsPreview, entry.resultPreview]
     .filter(Boolean)
     .join(" ")
     .replace(/\s+/g, " ")
     .trim()
   if (!source) return entry.toolName
-  return source.slice(0, 42)
+  return ellipsize(source, 72)
 }
 
 function fallbackMmd(entries: TaskMmdToolEntry[]): string {
