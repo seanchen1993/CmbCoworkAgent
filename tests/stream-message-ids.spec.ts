@@ -5,7 +5,10 @@
  *   npx tsx tests/stream-message-ids.spec.ts
  */
 
-import { buildStableValuesMessageId } from "../src/renderer/src/lib/stream-message-ids.ts"
+import {
+  buildStableValuesMessageId,
+  buildSyntheticCheckpointBaselineIds
+} from "../src/renderer/src/lib/stream-message-ids.ts"
 import {
   ElectronIPCTransport,
   transformSerializedValuesMessages
@@ -187,6 +190,142 @@ function testMessagesAndValuesFallbackIdsAlignForAssistantAndTool(): void {
     toolMessage?.[0]?.id,
     valuesMessages[1]?.id,
     "id-less tool messages should use the same fallback id in messages and values mode"
+  )
+}
+
+function testSyntheticCheckpointBaselineIncludesCoordinatorCurrentTurnIds(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  const toolCalls = [{ id: "call-1", name: "read_file", args: { path: "a.ts" } }]
+  const events = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "HumanMessage"],
+            kwargs: { content: "Inspect a.ts" }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: {
+              content: "checking",
+              tool_calls: toolCalls
+            }
+          },
+          {
+            id: ["langchain_core", "messages", "ToolMessage"],
+            kwargs: {
+              content: "tool output",
+              tool_call_id: "call-1",
+              name: "read_file"
+            }
+          }
+        ]
+      }
+    },
+    "thread-1",
+    "coordinator"
+  )
+  const emittedIds = events
+    .filter((event) => event.event === "messages")
+    .map((event) => (event.data as Array<{ id?: string }>)[0]?.id)
+    .filter((id): id is string => !!id)
+
+  const assistantBaselineIds = buildSyntheticCheckpointBaselineIds({
+    index: 0,
+    type: "ai",
+    className: "AIMessage",
+    content: "checking",
+    toolCalls
+  })
+  const toolBaselineIds = buildSyntheticCheckpointBaselineIds({
+    index: 0,
+    type: "tool",
+    className: "ToolMessage",
+    content: "tool output",
+    toolCallId: "call-1",
+    name: "read_file"
+  })
+
+  assertEqual(emittedIds.length, 2, "coordinator values snapshot should emit AI and tool messages")
+  assertEqual(
+    assistantBaselineIds.includes(emittedIds[0]),
+    true,
+    "synthetic checkpoint baseline should include coordinator AI current-turn fallback id"
+  )
+  assertEqual(
+    toolBaselineIds.includes(emittedIds[1]),
+    true,
+    "synthetic checkpoint baseline should include coordinator tool current-turn fallback id"
+  )
+}
+
+function testCoordinatorCurrentTurnValuesUpdatesGrowingAssistantContent(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  const emitValuesSnapshot = (content: string): Array<{ id?: string; content?: string }> =>
+    convertToSDKEvents(
+      {
+        type: "stream",
+        mode: "values",
+        data: {
+          messages: [
+            {
+              id: ["langchain_core", "messages", "HumanMessage"],
+              kwargs: { content: "Inspect a.ts" }
+            },
+            {
+              id: ["langchain_core", "messages", "AIMessage"],
+              kwargs: { content }
+            }
+          ]
+        }
+      },
+      "thread-1",
+      "coordinator"
+    )
+      .filter((event) => event.event === "messages")
+      .map((event) => (event.data as Array<{ id?: string; content?: string }>)[0])
+      .filter((message): message is { id: string; content?: string } => !!message?.id)
+
+  const firstMessages = emitValuesSnapshot("partial handoff")
+  const secondMessages = emitValuesSnapshot("partial handoff with more detail")
+
+  assertEqual(firstMessages.length, 1, "first coordinator values snapshot should emit assistant")
+  assertEqual(
+    secondMessages.length,
+    1,
+    "growing coordinator values snapshot should update assistant"
+  )
+  assertEqual(
+    secondMessages[0]?.id,
+    firstMessages[0]?.id,
+    "growing id-less coordinator assistant values snapshots should reuse the same message id"
+  )
+  assertEqual(
+    secondMessages[0]?.content,
+    " with more detail",
+    "growing coordinator values snapshot should only carry the appended assistant delta"
   )
 }
 
@@ -502,6 +641,14 @@ const tests: Array<[string, () => void]> = [
   [
     "testMessagesAndValuesFallbackIdsAlignForAssistantAndTool",
     testMessagesAndValuesFallbackIdsAlignForAssistantAndTool
+  ],
+  [
+    "testSyntheticCheckpointBaselineIncludesCoordinatorCurrentTurnIds",
+    testSyntheticCheckpointBaselineIncludesCoordinatorCurrentTurnIds
+  ],
+  [
+    "testCoordinatorCurrentTurnValuesUpdatesGrowingAssistantContent",
+    testCoordinatorCurrentTurnValuesUpdatesGrowingAssistantContent
   ],
   [
     "testGoalSubturnCompleteResetsAssistantFallbackId",

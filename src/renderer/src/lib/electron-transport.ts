@@ -8,7 +8,11 @@ import {
   isCoordinatorWorkerToolName,
   normalizeCoordinatorWorkerToolArgsForDisplay
 } from "./coordinator-worker-tool-args"
-import { buildStableValuesMessageId } from "./stream-message-ids"
+import {
+  buildCurrentTurnMessageFallbackId,
+  buildStableValuesMessageId,
+  buildToolMessageFallbackId
+} from "./stream-message-ids"
 import { isInternalGoalPromptMessage } from "./goal-notice-messages"
 
 export type StreamFallbackIndexBaselines = {
@@ -121,10 +125,6 @@ interface MessageMetadata {
   name?: string
 }
 
-function createToolMessageFallbackId(toolCallId: string, toolName?: string): string {
-  return `tool-${toolCallId}-${toolName || "result"}`
-}
-
 function getSerializedMessageClassName(msg: SerializedMessageChunk): string {
   const classId = Array.isArray(msg.id) ? msg.id : []
   return classId[classId.length - 1] || ""
@@ -184,7 +184,7 @@ export function transformSerializedValuesMessages(
     const id =
       kwargs.id ||
       (type === "tool" && kwargs.tool_call_id
-        ? createToolMessageFallbackId(kwargs.tool_call_id, kwargs.name)
+        ? buildToolMessageFallbackId(kwargs.tool_call_id, kwargs.name)
         : buildStableValuesMessageId({
             index: fallbackIndex,
             type,
@@ -309,6 +309,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
   // we have already surfaced so fallback extraction can stay incremental.
   private emittedMessageIds: Set<string> = new Set()
 
+  // `useStream` treats repeated messages with the same ID as incremental text.
+  // Values snapshots are full-state, so only forward the newly appended suffix.
+  private mainAssistantTextByMessageId: Map<string, string> = new Map()
+
   // Track accumulated tool call chunks (for streaming tool calls)
   private accumulatedToolCalls: Map<string, AccumulatedToolCall> = new Map()
 
@@ -343,6 +347,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.subagentLogSequence = 0
     this.quietCoordinatorToolCallIds.clear()
     this.emittedMessageIds.clear()
+    this.mainAssistantTextByMessageId.clear()
     this.accumulatedToolCalls.clear()
     this.lastToolCallChunkArgsById.clear()
     this.completedToolCallsByName.clear()
@@ -971,8 +976,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
             kwargs.tool_call_chunks,
             isCoordinatorMode
           )
+          const contentDelta = this.prepareMainAssistantChunkContent(msgId, content)
 
-          if (content || visibleToolCalls.length) {
+          if (contentDelta !== undefined || visibleToolCalls.length) {
             if (visibleToolCalls.length) {
               this.rememberCompletedToolCallsForMessage(msgId, visibleToolCalls)
             }
@@ -983,7 +989,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 {
                   id: msgId,
                   type: "ai",
-                  content: content || "",
+                  content: contentDelta ?? "",
                   ...(visibleToolCalls.length && { tool_calls: visibleToolCalls })
                 },
                 {
@@ -1563,6 +1569,43 @@ export class ElectronIPCTransport implements UseStreamTransport {
     return `${existing}${nextChunk}`
   }
 
+  private prepareMainAssistantChunkContent(
+    messageId: string,
+    incoming: string
+  ): string | undefined {
+    if (!incoming) return undefined
+    const existing = this.mainAssistantTextByMessageId.get(messageId) ?? ""
+    const merged = this.mergeWorkerAssistantTextChunk(existing, incoming)
+    if (merged === existing) return undefined
+    this.mainAssistantTextByMessageId.set(messageId, merged)
+    pruneMapToLimit(this.mainAssistantTextByMessageId, MAX_TRACKED_EMITTED_MESSAGES)
+    return merged.slice(existing.length)
+  }
+
+  private prepareMainAssistantSnapshotContent(
+    messageId: string,
+    snapshot: string
+  ): string | undefined {
+    if (!snapshot) return undefined
+    const existing = this.mainAssistantTextByMessageId.get(messageId) ?? ""
+    if (!existing) {
+      this.mainAssistantTextByMessageId.set(messageId, snapshot)
+      pruneMapToLimit(this.mainAssistantTextByMessageId, MAX_TRACKED_EMITTED_MESSAGES)
+      return snapshot
+    }
+    if (snapshot === existing || existing.endsWith(snapshot)) return undefined
+    if (snapshot.startsWith(existing)) {
+      this.mainAssistantTextByMessageId.set(messageId, snapshot)
+      return snapshot.slice(existing.length)
+    }
+
+    const merged = this.mergeWorkerAssistantTextChunk(existing, snapshot)
+    if (merged === existing) return undefined
+    this.mainAssistantTextByMessageId.set(messageId, merged)
+    pruneMapToLimit(this.mainAssistantTextByMessageId, MAX_TRACKED_EMITTED_MESSAGES)
+    return merged.slice(existing.length)
+  }
+
   private createStableFallbackMessageId(input: {
     type: "ai" | "tool"
     content?: string
@@ -1570,26 +1613,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     toolName?: string
     toolCalls?: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>
   }): string {
-    if (input.type === "tool" && input.toolCallId) {
-      return createToolMessageFallbackId(input.toolCallId, input.toolName)
-    }
-
-    const toolCallKey = input.toolCalls
-      ?.map((toolCall, index) => {
-        const args = toolCall.args ? this.stableStringify(toolCall.args) : ""
-        return `${toolCall.id || index}:${toolCall.name || "tool"}:${args}`
-      })
-      .join("|")
-
-    const source = [
-      input.type,
-      input.toolCallId || "",
-      input.toolName || "",
-      toolCallKey || "",
-      input.content || ""
-    ].join("\u001f")
-
-    return `${input.type}-${this.stableHash(source)}`
+    return buildCurrentTurnMessageFallbackId(input)
   }
 
   private rememberEmittedMessage(id?: string): void {
@@ -1642,8 +1666,32 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
     }
 
-    for (const message of messages.slice(currentTurnStart)) {
+    let latestCurrentTurnAiIndex = -1
+    for (let index = currentTurnStart; index < messages.length; index += 1) {
+      if (this.isSerializedAIMessage(messages[index])) latestCurrentTurnAiIndex = index
+    }
+
+    const fallbackIndexes: Record<"ai" | "tool" | "system" | "human", number> = {
+      ai: 0,
+      tool: 0,
+      system: 0,
+      human: 0
+    }
+
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index]
       const kwargs = message.kwargs || {}
+      const className = this.getSerializedMessageClassName(message)
+      const fallbackType = this.isSerializedToolMessage(message)
+        ? "tool"
+        : this.isSerializedHumanMessage(message)
+          ? "human"
+          : className.includes("System") || kwargs.type === "system"
+            ? "system"
+            : "ai"
+      const fallbackIndex = fallbackIndexes[fallbackType]++
+      if (index < currentTurnStart) continue
+
       if (this.isSerializedAIMessage(message)) {
         const content = this.extractContent(kwargs.content)
         const visibleToolCalls = this.hydrateToolCallsWithAccumulatedArgs(
@@ -1651,17 +1699,24 @@ export class ElectronIPCTransport implements UseStreamTransport {
         )
         if (!content && visibleToolCalls.length === 0) continue
 
+        const reusableCurrentMessageId =
+          index === latestCurrentTurnAiIndex &&
+          this.currentMessageId &&
+          this.hasEmittedMessage(this.currentMessageId)
+            ? this.currentMessageId
+            : undefined
         const msgId =
           kwargs.id ||
-          (this.currentMessageId && this.hasEmittedMessage(this.currentMessageId)
-            ? this.currentMessageId
-            : this.createStableFallbackMessageId({
-                type: "ai",
-                content,
-                toolCalls: visibleToolCalls
-              }))
-        if (this.hasEmittedMessage(msgId)) continue
-
+          reusableCurrentMessageId ||
+          buildStableValuesMessageId({
+            index: fallbackIndex,
+            type: "ai",
+            className,
+            content,
+            toolCalls: visibleToolCalls
+          })
+        const contentDelta = this.prepareMainAssistantSnapshotContent(msgId, content)
+        if (contentDelta === undefined && visibleToolCalls.length === 0) continue
         this.rememberEmittedMessage(msgId)
         events.push({
           event: "messages",
@@ -1669,7 +1724,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
             {
               id: msgId,
               type: "ai",
-              content: content || "",
+              content: contentDelta ?? "",
               ...(visibleToolCalls.length && { tool_calls: visibleToolCalls })
             },
             { langgraph_node: "agent" }
@@ -1729,31 +1784,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
 
     return events
-  }
-
-  private stableStringify(value: unknown): string {
-    if (value === null || typeof value !== "object") {
-      return JSON.stringify(value)
-    }
-
-    if (Array.isArray(value)) {
-      return `[${value.map((item) => this.stableStringify(item)).join(",")}]`
-    }
-
-    const record = value as Record<string, unknown>
-    return `{${Object.keys(record)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${this.stableStringify(record[key])}`)
-      .join(",")}}`
-  }
-
-  private stableHash(value: string): string {
-    let hash = 0x811c9dc5
-    for (let i = 0; i < value.length; i += 1) {
-      hash ^= value.charCodeAt(i)
-      hash = Math.imul(hash, 0x01000193)
-    }
-    return (hash >>> 0).toString(36)
   }
 
   /**

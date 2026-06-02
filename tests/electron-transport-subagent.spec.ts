@@ -1980,9 +1980,23 @@ async function testCoordinatorValuesModeDoesNotDuplicateRepeatedSnapshots(): Pro
     messageEvents(convertCoordinator(transport, snapshot)).length === 2,
     "first coordinator values snapshot should surface current-turn tool messages"
   )
+  const repeatedEvents = messageEvents(convertCoordinator(transport, snapshot))
   assert(
-    messageEvents(convertCoordinator(transport, snapshot)).length === 0,
-    "repeated coordinator values snapshots should not duplicate already emitted messages"
+    repeatedEvents.length === 1,
+    "repeated coordinator values snapshots should only update the assistant message"
+  )
+  const repeatedData = repeatedEvents[0]?.data as Array<{
+    id?: string
+    type?: string
+    content?: string
+  }>
+  assert(
+    repeatedData?.[0]?.id === "duplicate-values-ai" && repeatedData?.[0]?.type === "ai",
+    "repeated coordinator values snapshots should not duplicate already emitted tool messages"
+  )
+  assert(
+    repeatedData?.[0]?.content === "",
+    "repeated coordinator values snapshots should not append duplicate assistant text"
   )
 }
 
@@ -2198,7 +2212,40 @@ async function testCoordinatorAiFallbackIdDedupesMessagesThenValues(): Promise<v
 
   assert(
     valuesModeEvents.length === 0,
-    "values-mode AI fallback should not duplicate the already emitted messages-mode AI message"
+    "values-mode AI fallback should not append an already emitted messages-mode AI snapshot"
+  )
+}
+
+async function testCoordinatorAiFallbackEmitsOnlyGrowingValuesDelta(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const messagesModeEvents = convertCoordinator(
+    transport,
+    streamMessageEvent(aiMessage({ content: "partial answer" }))
+  ).filter((event) => event.event === "messages")
+
+  assert(messagesModeEvents.length === 1, "messages-mode AI fallback should emit initial text")
+  const messagesModeData = messagesModeEvents[0]?.data as Array<{ id?: string }>
+
+  const valuesModeEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      { id: ["langchain_core", "messages", "HumanMessage"], kwargs: { content: "question" } },
+      aiMessage({ content: "partial answer with detail" })
+    ])
+  ).filter((event) => event.event === "messages")
+
+  assert(
+    valuesModeEvents.length === 1,
+    "growing values-mode AI fallback should append one delta event"
+  )
+  const valuesModeData = valuesModeEvents[0]?.data as Array<{ id?: string; content?: string }>
+  assert(
+    valuesModeData?.[0]?.id === messagesModeData?.[0]?.id,
+    "growing values-mode AI fallback should update the existing messages-mode AI id"
+  )
+  assert(
+    valuesModeData?.[0]?.content === " with detail",
+    "growing values-mode AI fallback should only emit the appended assistant text"
   )
 }
 
@@ -2285,6 +2332,8 @@ async function run(): Promise<void> {
   console.log("PASS electron transport keeps ToolMessage fallback IDs stable")
   await testCoordinatorAiFallbackIdDedupesMessagesThenValues()
   console.log("PASS electron transport dedupes AI fallback IDs across messages and values")
+  await testCoordinatorAiFallbackEmitsOnlyGrowingValuesDelta()
+  console.log("PASS electron transport emits only growing AI fallback deltas")
   await testValuesModeRegistersAndCompletesSubagents()
   console.log("PASS electron transport values-mode subagent lifecycle")
 }

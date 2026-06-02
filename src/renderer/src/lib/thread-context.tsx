@@ -57,7 +57,7 @@ import {
   restoreVisibleCheckpointMessageTimes
 } from "./checkpoint-message-times"
 import { mergeLiveStreamMessages, type LiveStreamMessage } from "./live-stream-messages"
-import { buildStableValuesMessageId } from "./stream-message-ids"
+import { buildSyntheticCheckpointBaselineIds } from "./stream-message-ids"
 import {
   liveStreamMessageToStoreMessage,
   resolveLiveStreamMessageEndAt,
@@ -1262,18 +1262,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         const fallbackIndex = fallbackIndexes[fallbackType]++
         if (!isSyntheticCheckpointMessageId(checkpointMessage.id)) continue
 
-        accumulator.baselineIds.add(
-          buildStableValuesMessageId({
-            index: fallbackIndex,
-            type: fallbackType,
-            className: stableClassNameForFallbackType(fallbackType),
-            content:
-              typeof checkpointMessage.content === "string" ? checkpointMessage.content : undefined,
-            toolCallId: checkpointMessage.tool_call_id,
-            name: checkpointMessage.name,
-            toolCalls: checkpointMessage.tool_calls
-          })
-        )
+        for (const baselineId of buildSyntheticCheckpointBaselineIds({
+          index: fallbackIndex,
+          type: fallbackType,
+          className: stableClassNameForFallbackType(fallbackType),
+          content:
+            typeof checkpointMessage.content === "string" ? checkpointMessage.content : undefined,
+          toolCallId: checkpointMessage.tool_call_id,
+          name: checkpointMessage.name,
+          toolCalls: checkpointMessage.tool_calls
+        })) {
+          accumulator.baselineIds.add(baselineId)
+        }
       }
     },
     [getOrCreateLiveStreamAccumulator]
@@ -2584,7 +2584,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       actionsCache.current[threadId] = actions
       return actions
     },
-    [notifyHookLogSubscribers, openHookLogBucket, refreshGoalUi, updateThreadState]
+    [openHookLogBucket, refreshGoalUi, updateThreadState]
   )
 
   const loadThreadHistory = useCallback(
@@ -2958,6 +2958,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       getThreadActions,
       handleStreamUpdate,
       loadWorkspaceFilesInBackground,
+      scheduleCoordinatorNotificationTurn,
       seedLiveStreamBaselineFromCheckpoint,
       updateThreadState
     ]
@@ -3172,13 +3173,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [
-      updateThreadState,
-      loadThreadHistory,
-      handleCustomEvent,
-      notifyHookLogSubscribers,
-      scheduleCoordinatorNotificationTurn
-    ]
+    [updateThreadState, loadThreadHistory, handleCustomEvent]
   )
 
   const initializeThread = useCallback(
