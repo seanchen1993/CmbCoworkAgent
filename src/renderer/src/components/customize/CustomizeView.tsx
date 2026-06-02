@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  BriefcaseBusiness,
   Code2,
   GitBranch,
   GitCommit,
@@ -32,6 +33,9 @@ const SkillsPanel = lazy(() =>
 const McpPanel = lazy(() => import("./McpPanel").then((m) => ({ default: m.McpPanel })))
 const ScheduledPanel = lazy(() =>
   import("./ScheduledPanel").then((m) => ({ default: m.ScheduledPanel }))
+)
+const BackgroundJobsCustomizePanel = lazy(() =>
+  import("./BackgroundJobsCustomizePanel").then((m) => ({ default: m.BackgroundJobsCustomizePanel }))
 )
 const MemoryPanel = lazy(() =>
   import("./MemoryPanel").then((m) => ({ default: m.MemoryPanel }))
@@ -76,6 +80,7 @@ type CustomizeTab =
   | "connectors"
   | "plugins"
   | "scheduled"
+  | "backgroundJobs"
   | "heartbeat"
   | "memory"
   | "market"
@@ -114,6 +119,7 @@ const MENU_GROUPS: MenuGroup[] = [
       { tab: "connectors", label: "MCP 连接器", icon: Plug },
       { tab: "plugins", label: "插件", icon: Puzzle },
       { tab: "scheduled", label: "定时任务", icon: Clock },
+      { tab: "backgroundJobs", label: "后台任务", icon: BriefcaseBusiness },
       { tab: "market", label: "应用市场", icon: ShoppingBag },
       { tab: "sandbox", label: "沙盒环境", icon: Shield, beta: true }
     ]
@@ -281,6 +287,8 @@ export function CustomizeView(): React.JSX.Element {
           <PluginsPanel />
         ) : activeTab === "scheduled" ? (
           <ScheduledPanel />
+        ) : activeTab === "backgroundJobs" ? (
+          <BackgroundJobsCustomizePanel />
         ) : activeTab === "heartbeat" ? (
           <HeartbeatPanel />
         ) : activeTab === "memory" ? (
