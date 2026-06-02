@@ -21,6 +21,10 @@ const LIMITS = {
   errorMessage: { max: 2048, head: 1024, tail: 768 },
   compressedMessage: { max: 512, head: 384, tail: 96 },
   compressedValue: { max: 768, head: 512, tail: 192 },
+  // Node input/output in the last-resort oversized-trace summary: kept small on
+  // purpose (a single >96KB trace can carry dozens of tool nodes), but still
+  // head+tail so the value shape stays recognizable.
+  oversizedNodeValue: { max: 256, head: 192, tail: 64 },
   binary: { max: 256, head: 256, tail: 0 }
 } as const
 
@@ -296,6 +300,15 @@ function summarizeOversizedTrace(trace: AgentTrace, state: TruncationState): Age
       status: node.status,
       startedAt: node.startedAt,
       endedAt: node.endedAt,
+      // Keep a hard-capped, serialized form of input/output so the dashboard
+      // execution tree still shows tool args/results for oversized traces
+      // instead of empty panels. The compressedValue limit bounds each field.
+      ...(node.input !== undefined
+        ? { input: { _traceTruncatedJson: truncateSerialized(node.input, LIMITS.oversizedNodeValue, `nodes.${node.id}.input`, state) } }
+        : {}),
+      ...(node.output !== undefined
+        ? { output: { _traceTruncatedJson: truncateSerialized(node.output, LIMITS.oversizedNodeValue, `nodes.${node.id}.output`, state) } }
+        : {}),
       metadata: node.metadata?.tokenUsage ? { tokenUsage: node.metadata.tokenUsage } : undefined
     })),
     errorMessage: trace.errorMessage

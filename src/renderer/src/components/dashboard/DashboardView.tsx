@@ -894,7 +894,7 @@ function UserDetailPage({
               traces={data.traces}
               loading={loading}
               title={traceTitle}
-              subtitle={`共 ${formatNumber(totalTraces)} 条，选择记录查看对话还原与执行树`}
+              subtitle={`共 ${formatNumber(totalTraces)} 条，选择记录定位到对话`}
               headerRight={
                 <div className="flex items-center gap-2">
                   <TraceTriggerScopeToggle

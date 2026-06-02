@@ -1,9 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import {
-  Activity,
-  AlertCircle,
-  Ban,
-  Bot,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -15,8 +11,6 @@ import {
   Hash,
   Info,
   Loader2,
-  MessageSquare,
-  Terminal,
   Timer,
   Wrench
 } from "lucide-react"
@@ -35,12 +29,9 @@ import { TraceConversation, TraceThreadConversation, buildTraceConversation } fr
 import type {
   DashboardCodeStats,
   DashboardTraceDetail,
-  DashboardTraceNode,
   DashboardTraceTriggerScope,
   DashboardTraceViewMode
 } from "./use-dashboard"
-
-const EMPTY_NODES: DashboardTraceNode[] = []
 
 function fmtDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`
@@ -336,125 +327,6 @@ function outcomeClass(outcome: string): string {
   return "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400 border-zinc-500/20"
 }
 
-function nodeIcon(node: DashboardTraceNode): React.JSX.Element {
-  if (node.type === "trace") return <Activity className="size-3.5" />
-  if (node.type === "llm") return <Bot className="size-3.5" />
-  if (node.type === "tool") return <Wrench className="size-3.5" />
-  if (node.type === "tool_result") return <Terminal className="size-3.5" />
-  if (node.type === "error") return <AlertCircle className="size-3.5" />
-  if (node.type === "cancel") return <Ban className="size-3.5" />
-  return <MessageSquare className="size-3.5" />
-}
-
-function nodeStatusClass(status?: DashboardTraceNode["status"]): string {
-  if (status === "success") return "text-emerald-600"
-  if (status === "error") return "text-red-500"
-  if (status === "running") return "text-blue-500"
-  if (status === "cancelled") return "text-zinc-500"
-  return "text-muted-foreground"
-}
-
-function JsonBlock({ value }: { value: unknown }): React.JSX.Element {
-  const [expanded, setExpanded] = useState(false)
-  let text = ""
-  try {
-    text = JSON.stringify(value, null, 2)
-  } catch {
-    text = String(value)
-  }
-
-  if (text.length <= 220) {
-    return <pre className="text-[11px] font-mono whitespace-pre-wrap break-all text-foreground/70">{text}</pre>
-  }
-
-  return (
-    <div className="space-y-1">
-      <pre className="text-[11px] font-mono whitespace-pre-wrap break-all text-foreground/70">
-        {expanded ? text : `${text.slice(0, 220)}...`}
-      </pre>
-      <button
-        type="button"
-        className="text-[10px] text-blue-500 hover:underline"
-        onClick={() => setExpanded((value) => !value)}
-      >
-        {expanded ? "收起" : "展开"}
-      </button>
-    </div>
-  )
-}
-
-function TraceTreeNode({
-  node,
-  childrenByParent,
-  depth
-}: {
-  node: DashboardTraceNode
-  childrenByParent: Map<string, DashboardTraceNode[]>
-  depth: number
-}): React.JSX.Element {
-  const children = childrenByParent.get(node.id) ?? []
-  const hasDetail = node.input !== undefined || node.output !== undefined || node.metadata !== undefined || children.length > 0
-  const [open, setOpen] = useState(depth <= 1)
-
-  return (
-    <div style={{ marginLeft: `${depth * 14}px` }}>
-      <div className="mb-2 overflow-hidden rounded-md border border-border bg-card/70">
-        <button
-          type="button"
-          className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-muted/30 disabled:hover:bg-transparent"
-          disabled={!hasDetail}
-          onClick={() => setOpen((value) => !value)}
-        >
-          <span className={cn("shrink-0", nodeStatusClass(node.status))}>{nodeIcon(node)}</span>
-          <span className="truncate text-[12px] font-medium text-foreground/85">
-            {node.name || node.type}
-          </span>
-          <span className="shrink-0 text-[10px] text-muted-foreground/60">
-            {new Date(node.startedAt).toLocaleTimeString()}
-          </span>
-          {node.status && (
-            <Badge variant="outline" className="ml-auto text-[10px]">
-              {node.status}
-            </Badge>
-          )}
-          {hasDetail && (open ? (
-            <ChevronDown className="size-3.5 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="size-3.5 text-muted-foreground" />
-          ))}
-        </button>
-
-        {open && hasDetail && (
-          <div className="space-y-2 border-t border-border/60 bg-background/60 px-3 py-2">
-            {node.input !== undefined && (
-              <div>
-                <p className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">Input</p>
-                <JsonBlock value={node.input} />
-              </div>
-            )}
-            {node.output !== undefined && (
-              <div>
-                <p className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">Output</p>
-                <JsonBlock value={node.output} />
-              </div>
-            )}
-            {node.metadata && Object.keys(node.metadata).length > 0 && (
-              <div>
-                <p className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">Metadata</p>
-                <JsonBlock value={node.metadata} />
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {open && children.map((child) => (
-        <TraceTreeNode key={child.id} node={child} childrenByParent={childrenByParent} depth={depth + 1} />
-      ))}
-    </div>
-  )
-}
-
 function TraceCard({
   trace,
   selected,
@@ -691,7 +563,7 @@ export function TraceExplorer({
   loading = false,
   error = null,
   title = "最近 10 条 Trace 记录",
-  subtitle = "选择记录查看完整执行树",
+  subtitle = "选择记录查看对话还原",
   headerRight = null,
   emptyText = "当前时间范围内没有会话历史",
   showCodeStats = true,
@@ -755,7 +627,7 @@ export function TraceExplorer({
   )
 
   // 选中 trace 的查找范围同时覆盖概览列表与已加载的完整 thread，
-  // 这样点击「完整会话」里新出现的 trace 也能正确定位并渲染执行树。
+  // 这样点击「完整会话」里新出现的 trace 也能在对话还原中正确定位。
   const tracesById = useMemo(() => {
     const map = new Map<string, DashboardTraceDetail>()
     for (const trace of traces) map.set(trace.traceId, trace)
@@ -807,19 +679,6 @@ export function TraceExplorer({
     metricMode === "thread" ? selectedThreadGroup?.totalDurationMs ?? 0 : selectedTrace?.durationMs ?? 0
   const metricTokens =
     metricMode === "thread" ? selectedThreadGroup?.totalTokens ?? 0 : selectedTrace?.totalTokens ?? 0
-  const nodes = selectedTrace?.nodes ?? EMPTY_NODES
-  const root = nodes.find((node) => node.parentId === null) ?? nodes[0]
-  const childrenByParent = useMemo(() => {
-    const map = new Map<string, DashboardTraceNode[]>()
-    for (const node of nodes) {
-      if (!node.parentId) continue
-      const list = map.get(node.parentId) ?? []
-      list.push(node)
-      map.set(node.parentId, list)
-    }
-    return map
-  }, [nodes])
-
   if (loading) {
     return (
       <div className={cn("flex min-h-[360px] flex-1 items-center justify-center", className)}>
@@ -940,38 +799,19 @@ export function TraceExplorer({
               <div className="p-4">
                 {selectedTrace && !selectedTrace.rawAvailable && (
                   <div className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-                    {selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法展示完整执行树"}
+                    {selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法还原完整对话"}
                   </div>
                 )}
-                {root ? (
-                  <div className="space-y-4">
-                    {activeViewMode === "thread" && selectedThreadGroup ? (
-                      <TraceThreadConversation traces={selectedThreadGroup.traces} loading={threadLoading} />
-                    ) : (
-                      <TraceConversation trace={selectedTrace} />
-                    )}
-                    <div>
-                      <div className="mb-2 flex items-center justify-between gap-3">
-                        <p className="text-xs font-semibold text-foreground">执行树</p>
-                        <p className="text-[10px] text-muted-foreground">
-                          当前选中 trace 的工具、模型调用与原始结构
-                        </p>
-                      </div>
-                      <TraceTreeNode node={root} childrenByParent={childrenByParent} depth={0} />
-                    </div>
-                  </div>
-                ) : selectedTrace ? (
-                  <div className="space-y-4">
-                    {activeViewMode === "thread" && selectedThreadGroup ? (
-                      <TraceThreadConversation traces={selectedThreadGroup.traces} loading={threadLoading} />
-                    ) : (
-                      <TraceConversation trace={selectedTrace} />
-                    )}
-                    <div className="rounded-md border border-border bg-card p-4">
-                      <p className="mb-2 text-xs font-semibold text-muted-foreground">Trace Summary</p>
-                      <JsonBlock value={selectedTrace} />
-                    </div>
-                  </div>
+                {selectedTrace ? (
+                  activeViewMode === "thread" && selectedThreadGroup ? (
+                    <TraceThreadConversation
+                      traces={selectedThreadGroup.traces}
+                      loading={threadLoading}
+                      selectedTraceId={selectedTrace.traceId}
+                    />
+                  ) : (
+                    <TraceConversation trace={selectedTrace} />
+                  )
                 ) : null}
               </div>
             </ScrollArea>
@@ -1039,7 +879,7 @@ export function TraceHistoryDialog({
           loading={loading}
           error={error}
           title={`${titleLabel}（第 ${tracePage} 页）`}
-          subtitle={`共 ${displayTotalTraces.toLocaleString("zh-CN")} ${totalLabel}，选择记录查看对话还原与执行树`}
+          subtitle={`共 ${displayTotalTraces.toLocaleString("zh-CN")} ${totalLabel}，选择记录定位到对话`}
           viewMode={traceViewMode}
           onViewModeChange={onTraceViewModeChange}
           headerRight={
