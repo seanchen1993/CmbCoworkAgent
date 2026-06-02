@@ -390,6 +390,16 @@ export interface AgentTrace {
   /** Harness Board feature slug this conversation belongs to (paired with harnessProjectId). */
   harnessFeatureSlug?: string
   /**
+   * Harness adapter (plugin) bound to this project. Only populated for
+   * project-mode traces (those with harnessProjectId). Lets the dashboard see
+   * which adapter plugin version drove a project conversation.
+   */
+  harnessAdapterId?: string
+  /** Harness adapter (plugin) display name — only for project-mode traces. */
+  harnessAdapterName?: string
+  /** Harness adapter (plugin) version, i.e. PluginMetadata.version — only for project-mode traces. */
+  harnessAdapterVersion?: string
+  /**
    * Optional free-form metadata.
    * Known keys:
    *   - routingTrace: RoutingTrace — complete three-layer routing funnel record
