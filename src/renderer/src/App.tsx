@@ -187,9 +187,13 @@ function App(): React.JSX.Element {
   const moduleInactiveClass = "text-foreground hover:bg-muted/45"
   const sidebarToggleText = sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"
   const rightPanelToggleText = rightPanelCollapsed ? "显示右侧面板" : "隐藏右侧面板"
-  const isWorkerFocusActive =
+  const isThreadWorkerFocusActive =
     mainView === "thread" &&
     Boolean(currentThreadId && workerFocusView?.threadId === currentThreadId)
+  const isHarnessWorkerFocusActive =
+    mainView === "harness" &&
+    Boolean(harnessSessionThreadId && workerFocusView?.threadId === harnessSessionThreadId)
+  const isWorkerFocusActive = isThreadWorkerFocusActive || isHarnessWorkerFocusActive
 
   useEffect(() => {
     if (!workerFocusView?.threadId || !workerFocusView.workerThreadId) return
@@ -470,6 +474,13 @@ function App(): React.JSX.Element {
       setHarnessSessionThreadId(null)
     }
   }, [mainView])
+
+  useEffect(() => {
+    if (mainView !== "harness" || !workerFocusView?.threadId) return
+    if (!harnessSessionThreadId || workerFocusView.threadId !== harnessSessionThreadId) {
+      useAppStore.getState().closeWorkerFocusView()
+    }
+  }, [harnessSessionThreadId, mainView, workerFocusView?.threadId])
 
   useEffect(() => {
     if (mainView === "claudecode") {
@@ -895,8 +906,11 @@ function App(): React.JSX.Element {
 
         {/* Harness Board 面板 */}
         {mainView === "harness" && (
-          <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
-            {!sidebarCollapsed && (
+          <div
+            ref={isHarnessWorkerFocusActive ? workerSplitRef : undefined}
+            className="relative flex flex-1 overflow-hidden bg-grid-subtle"
+          >
+            {!sidebarCollapsed && !isHarnessWorkerFocusActive && (
               <>
                 <div style={{ width: leftWidth }} className="shrink-0">
                   <ThreadSidebar />
@@ -905,10 +919,14 @@ function App(): React.JSX.Element {
               </>
             )}
             <main
+              key="harness-main"
+              style={isHarnessWorkerFocusActive ? { width: `${workerSplitLeftPercent}%` } : undefined}
               className={
-                previewFullscreen && harnessSessionThreadId && !rightPanelCollapsed
+                previewFullscreen && harnessSessionThreadId && !rightPanelCollapsed && !isHarnessWorkerFocusActive
                   ? "hidden"
-                  : "relative flex flex-1 flex-col min-w-0 overflow-hidden"
+                  : isHarnessWorkerFocusActive
+                    ? "relative flex min-w-0 flex-col overflow-hidden"
+                    : "relative flex flex-1 flex-col min-w-0 overflow-hidden"
               }
             >
               <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
@@ -920,7 +938,15 @@ function App(): React.JSX.Element {
                 />
               </Suspense>
             </main>
-            {harnessSessionThreadId && !rightPanelCollapsed && (
+            {isHarnessWorkerFocusActive && (
+              <>
+                <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
+                <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
+                  <WorkerStreamPanel />
+                </section>
+              </>
+            )}
+            {harnessSessionThreadId && !rightPanelCollapsed && !isHarnessWorkerFocusActive && (
               <>
                 {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
                 <div
