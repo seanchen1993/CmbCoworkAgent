@@ -3531,6 +3531,110 @@ export function setGlobalRoutingMode(mode: "auto" | "pinned"): void {
   writeFileSync(ROUTING_SETTINGS_FILE, JSON.stringify({ mode }, null, 2), "utf-8")
 }
 
+// ─── Preferred IDE ──────────────────────────────────────────────────────────
+
+const IDE_SETTINGS_FILE = join(OPENWORK_DIR, "ide-settings.json")
+
+type IdeSettings = import("./types").IdeSettings
+type PreferredIde = import("./types").PreferredIde
+type SupportedIde = import("./types").SupportedIde
+
+function isSupportedIde(value: unknown): value is Exclude<PreferredIde, null> {
+  return value === "idea" || value === "vscode" || value === "webstorm"
+}
+
+function normalizeExecutablePaths(value: unknown): Partial<Record<SupportedIde, string>> {
+  if (!value || typeof value !== "object") return {}
+  const normalized: Partial<Record<SupportedIde, string>> = {}
+
+  for (const [key, pathValue] of Object.entries(value as Record<string, unknown>)) {
+    if (!isSupportedIde(key) || typeof pathValue !== "string") continue
+    const trimmed = pathValue.trim()
+    if (trimmed) {
+      normalized[key] = trimmed
+    }
+  }
+
+  return normalized
+}
+
+function readIdeSettings(): IdeSettings {
+  if (!existsSync(IDE_SETTINGS_FILE)) return { preferredIde: null, executablePaths: {} }
+  try {
+    const content = readFileSync(IDE_SETTINGS_FILE, "utf-8")
+    const parsed = JSON.parse(content) as unknown
+    if (parsed && typeof parsed === "object") {
+      const record = parsed as Record<string, unknown>
+      const preferredIde = record.preferredIde
+      return {
+        preferredIde: isSupportedIde(preferredIde) ? preferredIde : null,
+        executablePaths: normalizeExecutablePaths(record.executablePaths)
+      }
+    }
+  } catch {
+    // ignore parse errors, fall back to default
+  }
+  return { preferredIde: null, executablePaths: {} }
+}
+
+function writeIdeSettings(settings: IdeSettings): IdeSettings {
+  getOpenworkDir()
+  const next: IdeSettings = {
+    preferredIde: isSupportedIde(settings.preferredIde) ? settings.preferredIde : null,
+    executablePaths: normalizeExecutablePaths(settings.executablePaths)
+  }
+  writeFileSync(IDE_SETTINGS_FILE, JSON.stringify(next, null, 2), "utf-8")
+  return next
+}
+
+export function getIdeSettings(): IdeSettings {
+  return readIdeSettings()
+}
+
+export function getPreferredIde(): PreferredIde {
+  return readIdeSettings().preferredIde
+}
+
+export function setPreferredIde(preferredIde: PreferredIde): PreferredIde {
+  return saveIdeSettings({ preferredIde }).preferredIde
+}
+
+export function saveIdeSettings(
+  partial: Partial<IdeSettings> & {
+    executablePaths?: Partial<Record<SupportedIde, string | null | undefined>>
+  }
+): IdeSettings {
+  const current = readIdeSettings()
+  const mergedExecutablePaths = { ...current.executablePaths }
+
+  if (partial.executablePaths) {
+    for (const [key, pathValue] of Object.entries(partial.executablePaths)) {
+      if (!isSupportedIde(key)) continue
+      const trimmed = typeof pathValue === "string" ? pathValue.trim() : ""
+      if (trimmed) {
+        mergedExecutablePaths[key] = trimmed
+      } else {
+        delete mergedExecutablePaths[key]
+      }
+    }
+  }
+
+  return writeIdeSettings({
+    preferredIde:
+      partial.preferredIde === undefined
+        ? current.preferredIde
+        : isSupportedIde(partial.preferredIde)
+          ? partial.preferredIde
+          : null,
+    executablePaths: mergedExecutablePaths
+  })
+}
+
+export function getConfiguredIdeExecutablePath(ide: SupportedIde): string | null {
+  const path = readIdeSettings().executablePaths[ide]
+  return typeof path === "string" && path.trim().length > 0 ? path.trim() : null
+}
+
 /**
  * Get the best model config for a given tier.
  * Priority: exact tier match → fallback tier → configs[0]

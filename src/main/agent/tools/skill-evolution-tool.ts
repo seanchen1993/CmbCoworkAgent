@@ -16,10 +16,9 @@ import {
   existsSync,
   mkdirSync,
   writeFileSync,
-  readFileSync,
-  rmSync
+  readFileSync
 } from "fs"
-import { BrowserWindow, ipcMain } from "electron"
+import { BrowserWindow, ipcMain, shell } from "electron"
 import {
   clearDisabledSkillsForSkillDir,
   findExistingSkillById,
@@ -463,7 +462,7 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
           if (!existsSync(skillDir)) return `Error: skill not found: ${input.skillId}`
           const cleanupDisabledSkills = prepareDisabledSkillsCleanupForSkillDir(skillDir)
 
-          rmSync(skillDir, { recursive: true, force: true })
+          await shell.trashItem(skillDir)
           cleanupDisabledSkills()
           invalidateEnabledSkillsCache()
           notifyRenderer("skills:changed")
@@ -472,7 +471,7 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
           return JSON.stringify({
             success: true,
             skillId: resolved.id,
-            message: `Skill '${resolved.id}' deleted.`
+            message: `Skill '${resolved.id}' moved to trash.`
           })
         }
 
@@ -508,7 +507,7 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
         "- view: Read the full SKILL.md content of a specific skill\n" +
         "- create: Write a new skill (requires name, description, content)\n" +
         "- patch: Update a skill — either full content replace or targeted string replace\n" +
-        "- delete: Remove a skill permanently\n\n" +
+        "- delete: Move a skill to the system trash\n\n" +
         "PATCHING TIPS:\n" +
         "- Use action='view' first to read the current content\n" +
         "- Use patchOldString + patchNewString for targeted updates\n" +

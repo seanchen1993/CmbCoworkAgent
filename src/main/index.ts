@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, nativeImage, powerSaveBlocker } from "electron"
+import { app, BrowserWindow, ipcMain, nativeImage, powerSaveBlocker, shell } from "electron"
 
 // Fix Linux sandbox error: "The setuid sandbox is not running as root"
 // On Linux the chrome-sandbox binary often lacks setuid permissions in packaged apps.
@@ -6,31 +6,14 @@ if (process.platform === "linux") {
   app.commandLine.appendSwitch("no-sandbox")
 }
 
-import { existsSync, rmSync, statSync } from "fs"
 import { join } from "path"
+import { existsSync, rmSync } from "fs"
 import { writeMainLog, writeRendererLog } from "./logging"
+import { registerPathOpenersHandlers } from "./ipc/path-openers"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
 let mainLogForwardingEnabled = false
-
-async function showPathInFileManager(filePath: string): Promise<{ success: boolean; error?: string }> {
-  if (typeof filePath !== "string" || !filePath.trim()) {
-    return { success: false, error: "Invalid path" }
-  }
-
-  if (!existsSync(filePath)) {
-    return { success: false, error: `Path does not exist: ${filePath}` }
-  }
-
-  if (statSync(filePath).isDirectory()) {
-    const error = await shell.openPath(filePath)
-    return error ? { success: false, error } : { success: true }
-  }
-
-  shell.showItemInFolder(filePath)
-  return { success: true }
-}
 
 function getConsoleLevelName(level: number): string {
   switch (level) {
@@ -540,6 +523,7 @@ if (!gotTheLock) {
     registerHarnessBoardHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
+    registerPathOpenersHandlers(ipcMain)
     prewarmRecentSandboxWorkspaces()
     registerAutoCommitHandlers(ipcMain)
     registerPetHandlers(ipcMain)
@@ -572,34 +556,6 @@ if (!gotTheLock) {
 
     ipcMain.handle("get-version", async () => {
       return app.getVersion()
-    })
-
-    ipcMain.handle("open-folder", async (_, folderPath: string) => {
-      try {
-        await shell.openPath(folderPath)
-        return { success: true }
-      } catch (error) {
-        console.error("Failed to open folder:", error)
-        return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
-      }
-    })
-
-    ipcMain.handle("show-item-in-folder", async (_, filePath: string) => {
-      try {
-        return await showPathInFileManager(filePath)
-      } catch (error) {
-        console.error("Failed to show item in folder:", error)
-        return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
-      }
-    })
-
-    ipcMain.handle("shell-show-item-in-folder", async (_, filePath: string) => {
-      try {
-        return await showPathInFileManager(filePath)
-      } catch (error) {
-        console.error("Failed to show item in folder:", error)
-        return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
-      }
     })
 
     ipcMain.handle("open-login-window", async () => {

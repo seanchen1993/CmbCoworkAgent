@@ -32,6 +32,14 @@ function SourceBadge({ skill }: { skill: SkillMetadata }): React.ReactElement {
   )
 }
 
+function PluginBadge(): React.ReactElement {
+  return (
+    <span className="shrink-0 rounded-sm border border-sky-200 bg-sky-50 px-1 py-px text-[9px] font-medium leading-3 text-sky-700 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-300">
+      Plugin
+    </span>
+  )
+}
+
 export function SlashCommandPopover({
   mode,
   selectedIdx,
@@ -123,6 +131,7 @@ export function SlashCommandPopover({
             const isSelected = itemIdx === selectedIdx
             const isDuplicate = duplicateNames.has(normalizeSkillId(s.name))
             const subline = isDuplicate ? getDisambiguationLabel(s) : null
+            const isPluginSkill = Boolean(s.pluginName || s.pluginId)
             return (
               <button
                 key={s.path}
@@ -146,6 +155,7 @@ export function SlashCommandPopover({
                     <span className="text-sm text-muted-foreground truncate flex-1">
                       {s.description}
                     </span>
+                    {isPluginSkill && <PluginBadge />}
                     <SourceBadge skill={s} />
                   </div>
                   {subline && (

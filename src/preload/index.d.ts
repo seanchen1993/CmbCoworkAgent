@@ -27,7 +27,12 @@ import type {
   SkillHookMetadata,
   AgentAutoCommitSettings,
   UserInputRequest,
-  UserInputResponse
+  UserInputResponse,
+  ConfigurePreferredIdeRequest,
+  ConfigurePreferredIdeResult,
+  IdeSettings,
+  OpenIdeRequest,
+  PreferredIde
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -60,6 +65,7 @@ import type {
   TaskMmdSettings,
   TaskMmdSnapshot
 } from "../main/agent/task-mmd/types"
+import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -535,6 +541,18 @@ interface CustomAPI {
       topP?: number
       topK?: number
     }) => Promise<{ success: boolean; error?: string; latencyMs?: number }>
+  }
+  ide: {
+    getPreferred: () => Promise<PreferredIde>
+    getSettings: () => Promise<IdeSettings>
+    setPreferred: (preferredIde: PreferredIde) => Promise<PreferredIde>
+    configurePreferred: (
+      request: ConfigurePreferredIdeRequest
+    ) => Promise<ConfigurePreferredIdeResult>
+    open: (request: OpenIdeRequest) => Promise<{
+      editor: string
+      mode: "workspace+file+line" | "workspace+file" | "workspace"
+    }>
   }
   workspace: {
     get: (threadId?: string) => Promise<string | null>
@@ -1549,6 +1567,22 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; branches: string[]; error?: string }>
     switchBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
     createBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
+  }
+  gitPanel: {
+    getCommitHistory: (threadId: string) => Promise<{
+      success: boolean
+      projectPath: string | null
+      records: GitCommitHistoryRecord[]
+      error?: string
+    }>
+    recordCommitHistory: (
+      threadId: string,
+      fullMessage: string
+    ) => Promise<{
+      success: boolean
+      record: GitCommitHistoryRecord | null
+      error?: string
+    }>
   }
 }
 

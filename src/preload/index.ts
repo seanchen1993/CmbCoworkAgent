@@ -28,7 +28,12 @@ import type {
   HookLoggingConfig,
   AgentAutoCommitSettings,
   UserInputRequest,
-  UserInputResponse
+  UserInputResponse,
+  ConfigurePreferredIdeRequest,
+  ConfigurePreferredIdeResult,
+  IdeSettings,
+  OpenIdeRequest,
+  PreferredIde
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
@@ -60,6 +65,7 @@ import type {
   TaskMmdSettings,
   TaskMmdSnapshot
 } from "../main/agent/task-mmd/types"
+import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 
 interface LspDownloadProgress {
   percent: number
@@ -642,6 +648,36 @@ const api = {
       }>
     }
   },
+  ide: {
+    getPreferred: (): Promise<PreferredIde> => {
+      return ipcRenderer.invoke("ide:getPreferred") as Promise<PreferredIde>
+    },
+    getSettings: (): Promise<IdeSettings> => {
+      return ipcRenderer.invoke("ide:getSettings") as Promise<IdeSettings>
+    },
+    setPreferred: (preferredIde: PreferredIde): Promise<PreferredIde> => {
+      return ipcRenderer.invoke("ide:setPreferred", preferredIde) as Promise<PreferredIde>
+    },
+    configurePreferred: (
+      request: ConfigurePreferredIdeRequest
+    ): Promise<ConfigurePreferredIdeResult> => {
+      return ipcRenderer.invoke(
+        "ide:configurePreferred",
+        request
+      ) as Promise<ConfigurePreferredIdeResult>
+    },
+    open: (
+      request: OpenIdeRequest
+    ): Promise<{
+      editor: string
+      mode: "workspace+file+line" | "workspace+file" | "workspace"
+    }> => {
+      return ipcRenderer.invoke("ide:open", request) as Promise<{
+        editor: string
+        mode: "workspace+file+line" | "workspace+file" | "workspace"
+      }>
+    }
+  },
   workspace: {
     get: (threadId?: string): Promise<string | null> => {
       return ipcRenderer.invoke("workspace:get", threadId)
@@ -917,7 +953,11 @@ const api = {
       message: string,
       filePaths?: string[]
     ): Promise<{ success: boolean; error?: string }> => {
-      return ipcRenderer.invoke("workspace:commitWorktree", { threadId, message, filePaths }) as Promise<{
+      return ipcRenderer.invoke("workspace:commitWorktree", {
+        threadId,
+        message,
+        filePaths
+      }) as Promise<{
         success: boolean
         error?: string
       }>
@@ -2519,6 +2559,35 @@ const api = {
       ipcRenderer.on("update:error", wrapper)
       return () => ipcRenderer.removeListener("update:error", wrapper)
     }
+  },
+  gitPanel: {
+    getCommitHistory: (
+      threadId: string
+    ): Promise<{
+      success: boolean
+      projectPath: string | null
+      records: GitCommitHistoryRecord[]
+      error?: string
+    }> =>
+      ipcRenderer.invoke("git-panel:getCommitHistory", { threadId }) as Promise<{
+        success: boolean
+        projectPath: string | null
+        records: GitCommitHistoryRecord[]
+        error?: string
+      }>,
+    recordCommitHistory: (
+      threadId: string,
+      fullMessage: string
+    ): Promise<{
+      success: boolean
+      record: GitCommitHistoryRecord | null
+      error?: string
+    }> =>
+      ipcRenderer.invoke("git-panel:recordCommitHistory", { threadId, fullMessage }) as Promise<{
+        success: boolean
+        record: GitCommitHistoryRecord | null
+        error?: string
+      }>
   },
   git: {
     currentBranch: (

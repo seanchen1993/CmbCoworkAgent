@@ -19,14 +19,26 @@ import {
 import { cn } from "@/lib/utils"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
 import { Badge } from "@/components/ui/badge"
+import { IconPopoverButton } from "@/components/ui/icon-popover-button"
+import { OpenInIdeButton } from "@/components/ui/open-in-ide-button"
 import { toast } from "sonner"
 import { GitCommitDialog } from "./GitCommitDialog"
 import type { CommitType } from "./GitCommitDialog"
 import { GitPushDialog } from "./GitPushDialog"
 import { insertLog } from "../../../js/mmjUtils"
 import type { ThreadGitContext } from "@/lib/thread-context"
+import type { GitCommitHistoryRecord } from "../../../../shared/git-commit-history"
 
 const GIT_BRANCH_REFRESH_EVENT = "cmb:git-branch-switched"
+const COMMIT_TYPE_VALUES = new Set<string>([
+  "fix",
+  "feat",
+  "refactor",
+  "docs",
+  "style",
+  "test",
+  "chore"
+])
 
 type GitPanelMetaState = {
   success: boolean
@@ -71,7 +83,11 @@ function getPathParentDir(filePath?: string): string {
   return index >= 0 ? normalized.slice(0, index) : ""
 }
 
-function getFileStatusMeta(status?: GitPanelFileStatus, path?: string, previousPath?: string): {
+function getFileStatusMeta(
+  status?: GitPanelFileStatus,
+  path?: string,
+  previousPath?: string
+): {
   label: string
   className: string
 } {
@@ -160,6 +176,7 @@ export function GitPanelView({
   const [cardNumber, setCardNumber] = useState("")
   const [commitType, setCommitType] = useState<CommitType>("fix")
   const [commitMessage, setCommitMessage] = useState("")
+  const [commitHistory, setCommitHistory] = useState<GitCommitHistoryRecord[]>([])
   const [expandedFilePaths, setExpandedFilePaths] = useState<Set<string>>(new Set())
   const [selectedFilePaths, setSelectedFilePaths] = useState<Set<string>>(new Set())
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
@@ -180,6 +197,7 @@ export function GitPanelView({
     setDiffLoading(true)
     setError(null)
     setSubmitAction(null)
+    setCommitHistory([])
     setExpandedFilePaths(new Set())
     setSelectedFilePaths(new Set())
   }, [threadId, initialMetaState])
@@ -308,6 +326,34 @@ export function GitPanelView({
     })
   }, [diffState?.files])
 
+  const applyCommitHistoryRecord = useCallback((record: GitCommitHistoryRecord): void => {
+    setCardNumber(record.cardNumber)
+    if (COMMIT_TYPE_VALUES.has(record.commitType)) {
+      setCommitType(record.commitType as CommitType)
+    }
+    setCommitMessage(record.commitMessage)
+  }, [])
+
+  useEffect(() => {
+    if (submitAction !== "commit" || !threadId) return
+    let canceled = false
+    void window.api.gitPanel
+      .getCommitHistory(threadId)
+      .then((result) => {
+        if (canceled) return
+        const records = result.success ? result.records : []
+        setCommitHistory(records)
+      })
+      .catch((error) => {
+        if (canceled) return
+        console.warn("[GitPanel] failed to load commit history:", error)
+        setCommitHistory([])
+      })
+    return () => {
+      canceled = true
+    }
+  }, [submitAction, threadId])
+
   const toggleFileExpanded = useCallback((filePath: string): void => {
     setExpandedFilePaths((prev) => {
       const next = new Set(prev)
@@ -408,8 +454,17 @@ export function GitPanelView({
       setError(null)
       try {
         if (action === "commit") {
-          const result = await window.api.workspace.commitWorktree(threadId, finalMessage ?? "", selectedPaths)
+          const result = await window.api.workspace.commitWorktree(
+            threadId,
+            finalMessage ?? "",
+            selectedPaths
+          )
           if (!result.success) throw new Error(result.error || "提交失败")
+          void window.api.gitPanel
+            .recordCommitHistory(threadId, finalMessage ?? "")
+            .catch((historyError) => {
+              console.warn("[GitPanel] failed to record commit history:", historyError)
+            })
           showToast("提交成功", "success")
           insertLog("commit成功")
         } else {
@@ -518,8 +573,9 @@ export function GitPanelView({
       ),
     [selectedFiles]
   )
-  const allVisibleFilesSelected =
-    diffState?.files.length ? selectedFiles.length === diffState.files.length : false
+  const allVisibleFilesSelected = diffState?.files.length
+    ? selectedFiles.length === diffState.files.length
+    : false
 
   return (
     <div className="rounded-xl border border-border/70 overflow-hidden bg-background flex flex-col min-h-0 h-full">
@@ -805,7 +861,9 @@ export function GitPanelView({
                 <div className="rounded-md border border-border/70 bg-background px-2.5 py-2 flex flex-wrap items-center justify-between gap-2">
                   <div className="text-xs text-muted-foreground">
                     已选择{" "}
-                    <span className="font-semibold text-foreground">{selectedTotals.fileCount}</span>{" "}
+                    <span className="font-semibold text-foreground">
+                      {selectedTotals.fileCount}
+                    </span>{" "}
                     / {diffState.files.length} 个文件
                     <span className="ml-2 text-emerald-600 dark:text-emerald-400">
                       +{selectedTotals.additions}
@@ -834,17 +892,12 @@ export function GitPanelView({
                   const isSelected = selectedFilePaths.has(file.path)
                   const statusMeta = getFileStatusMeta(file.status, file.path, file.previousPath)
                   const showMovePath = file.status === "renamed" && Boolean(file.previousPath)
+                  const revertHint =
+                    revertingFilePath === file.path ? "回退中..." : "回退（大模型改动的上一个版本）"
                   return (
-                    <div
-                      key={file.path}
-                      className="rounded-md border border-border/70 p-2 bg-white"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => toggleFileExpanded(file.path)}
-                        className="w-full flex items-center justify-between gap-2 text-xs"
-                      >
-                        <span className="flex items-center gap-1.5 min-w-0">
+                    <div key={file.path} className="rounded-md border border-border/70 bg-white">
+                      <div className="flex items-center justify-between gap-2 p-2 text-xs">
+                        <div className="flex min-w-0 flex-1 items-center gap-1.5">
                           <input
                             type="checkbox"
                             checked={isSelected}
@@ -856,90 +909,85 @@ export function GitPanelView({
                             onClick={(e) => e.stopPropagation()}
                             className="size-3.5 shrink-0 accent-blue-600"
                           />
-                          {isExpanded ? (
-                            <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-                          ) : (
-                            <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-                          )}
-                          <span
-                            className={cn(
-                              "inline-flex h-4 shrink-0 items-center rounded border px-1 text-[9px] font-medium leading-none",
-                              statusMeta.className
+                          <button
+                            type="button"
+                            aria-expanded={isExpanded}
+                            onClick={() => toggleFileExpanded(file.path)}
+                            className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+                          >
+                            {isExpanded ? (
+                              <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+                            ) : (
+                              <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
                             )}
-                            title={`文件状态：${statusMeta.label}`}
-                          >
-                            {statusMeta.label}
-                          </span>
-                          <span
-                            className="font-mono font-semibold truncate text-left"
-                            title={file.path}
-                          >
-                            {file.path}
-                          </span>
-                          <span className="shrink-0 flex items-center gap-1.5 text-[11px] font-semibold">
-                            <span className="text-emerald-600 dark:text-emerald-400">
-                              +{file.additions}
+                            <span
+                              className={cn(
+                                "inline-flex h-4 shrink-0 items-center rounded border px-1 text-[9px] font-medium leading-none",
+                                statusMeta.className
+                              )}
+                              title={`文件状态：${statusMeta.label}`}
+                            >
+                              {statusMeta.label}
                             </span>
-                            <span className="text-muted-foreground">/</span>
-                            <span className="text-rose-600 dark:text-rose-400">
-                              -{file.deletions}
+                            <span
+                              className="font-mono font-semibold truncate text-left"
+                              title={file.path}
+                            >
+                              {file.path}
                             </span>
-                          </span>
-                        </span>
+                            <span className="shrink-0 flex items-center gap-1.5 text-[11px] font-semibold">
+                              <span className="text-emerald-600 dark:text-emerald-400">
+                                +{file.additions}
+                              </span>
+                              <span className="text-muted-foreground">/</span>
+                              <span className="text-rose-600 dark:text-rose-400">
+                                -{file.deletions}
+                              </span>
+                            </span>
+                          </button>
+                        </div>
                         <span className="flex items-center gap-2 shrink-0">
-                          <span
-                            role="button"
-                            tabIndex={0}
-                            title="打开文件夹"
+                          <OpenInIdeButton
+                            filePath={file.path}
+                            workspacePath={workspacePath}
+                            fileMissing={file.status === "deleted"}
+                            align="end"
+                            stopPropagation
+                            onOpenError={(message) => {
+                              showToast(message, "error")
+                            }}
+                          />
+                          <IconPopoverButton
+                            icon={<FolderOpen className="size-3" />}
+                            popoverContent="打开文件夹"
                             aria-label="打开文件夹"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              onOpenFileFolder?.(file.path)
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" || e.key === " ") {
-                                e.preventDefault()
-                                e.stopPropagation()
-                                onOpenFileFolder?.(file.path)
-                              }
-                            }}
-                            className="inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-background-interactive"
-                          >
-                            <FolderOpen className="size-3" />
-                          </span>
-                          <span
-                            role="button"
-                            tabIndex={0}
-                            title={revertingFilePath === file.path ? "回退中..." : "回退"}
-                            aria-label={revertingFilePath === file.path ? "回退中..." : "回退"}
-                            onClick={(e) => {
-                              e.stopPropagation()
+                            align="end"
+                            stopPropagation
+                            onClick={() => onOpenFileFolder?.(file.path)}
+                          />
+                          <IconPopoverButton
+                            icon={
+                              <Undo2
+                                className={cn(
+                                  "size-3",
+                                  revertingFilePath === file.path && "animate-spin"
+                                )}
+                              />
+                            }
+                            popoverContent={revertHint}
+                            disabled={Boolean(revertingFilePath && revertingFilePath !== file.path)}
+                            aria-label={revertHint}
+                            align="end"
+                            stopPropagation
+                            className={cn(revertingFilePath === file.path && "opacity-80")}
+                            onClick={() => {
                               if (!revertingFilePath) void handleRevertFile(file.path)
                             }}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" || e.key === " ") {
-                                e.preventDefault()
-                                e.stopPropagation()
-                                if (!revertingFilePath) void handleRevertFile(file.path)
-                              }
-                            }}
-                            className={cn(
-                              "inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-background-interactive",
-                              revertingFilePath && revertingFilePath !== file.path && "opacity-60",
-                              revertingFilePath === file.path && "opacity-80"
-                            )}
-                          >
-                            <Undo2
-                              className={cn(
-                                "size-3",
-                                revertingFilePath === file.path && "animate-spin"
-                              )}
-                            />
-                          </span>
+                          />
                         </span>
-                      </button>
+                      </div>
                       {isExpanded && (
-                        <div className="mt-2">
+                        <div className="px-2 pb-2">
                           {showMovePath && (
                             <div className="mb-2 rounded-md border border-blue-500/20 bg-blue-500/5 px-3 py-2 text-xs">
                               <div className="mb-1 flex items-center gap-1.5 font-medium text-blue-700 dark:text-blue-300">
@@ -958,7 +1006,10 @@ export function GitPanelView({
                                 </div>
                                 <div className="flex min-w-0 items-center gap-2">
                                   <span className="shrink-0 text-muted-foreground">现路径</span>
-                                  <span className="truncate font-semibold text-foreground" title={file.path}>
+                                  <span
+                                    className="truncate font-semibold text-foreground"
+                                    title={file.path}
+                                  >
                                     {file.path}
                                   </span>
                                 </div>
@@ -966,7 +1017,7 @@ export function GitPanelView({
                             </div>
                           )}
                           {diff && diff.trim() !== "" ? (
-                            <DiffDisplay diff={diff} />
+                            <DiffDisplay diff={diff} filePath={file.path} />
                           ) : (
                             <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                               当前文件暂无可展示 diff（可能已恢复、删除或为二进制文件）。
@@ -993,12 +1044,14 @@ export function GitPanelView({
         cardNumber={cardNumber}
         commitType={commitType}
         commitMessage={commitMessage}
+        commitHistory={commitHistory}
         onOpenChange={(open) => {
           if (!open) setSubmitAction(null)
         }}
         onCardNumberChange={setCardNumber}
         onCommitTypeChange={setCommitType}
         onCommitMessageChange={setCommitMessage}
+        onHistorySelect={applyCommitHistoryRecord}
         onSubmit={() => {
           void runSubmit("commit")
         }}
