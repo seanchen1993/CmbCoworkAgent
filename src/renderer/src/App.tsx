@@ -99,6 +99,7 @@ function App(): React.JSX.Element {
   const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT)
   const [rightModule, setRightModule] = useState<"work" | "preview" | "git">("work")
   const [previewFullscreen, setPreviewFullscreen] = useState(false)
+  const [harnessSessionThreadId, setHarnessSessionThreadId] = useState<string | null>(null)
   const [pendingGitDiffByThread, setPendingGitDiffByThread] = useState<Record<string, boolean>>({})
   const [isGitWorkspaceByThread, setIsGitWorkspaceByThread] = useState<Record<string, boolean>>({})
 
@@ -280,18 +281,28 @@ function App(): React.JSX.Element {
     })
   }, [])
 
+  const handleHarnessActiveSessionThreadChange = useCallback((threadId: string | null) => {
+    setHarnessSessionThreadId((prev) => (prev === threadId ? prev : threadId))
+  }, [])
+
+  const activeRightPanelThreadId =
+    mainView === "harness" ? harnessSessionThreadId : currentThreadId
+  const isActiveRightPanelThreadGit = activeRightPanelThreadId
+    ? Boolean(isGitWorkspaceByThread[activeRightPanelThreadId])
+    : false
+  const hasPendingGitDiff = activeRightPanelThreadId
+    ? Boolean(pendingGitDiffByThread[activeRightPanelThreadId] && isActiveRightPanelThreadGit)
+    : false
+  const showRightPanelModuleControls =
+    mainView === "thread" || (mainView === "harness" && Boolean(harnessSessionThreadId))
+
   const selectGitModule = useCallback(() => {
-    if (currentThreadId) {
-      setThreadPendingGitDiff(currentThreadId, false)
+    if (activeRightPanelThreadId) {
+      setThreadPendingGitDiff(activeRightPanelThreadId, false)
     }
     setRightModule("git")
     handlePreviewExpand()
-  }, [currentThreadId, handlePreviewExpand, setThreadPendingGitDiff])
-
-  const isCurrentThreadGit = currentThreadId ? Boolean(isGitWorkspaceByThread[currentThreadId]) : false
-  const hasPendingGitDiff = currentThreadId
-    ? Boolean(pendingGitDiffByThread[currentThreadId] && isCurrentThreadGit)
-    : false
+  }, [activeRightPanelThreadId, handlePreviewExpand, setThreadPendingGitDiff])
 
   useEffect(() => {
     // Keep right panel behavior predictable: when switching thread or entering thread view,
@@ -306,7 +317,13 @@ function App(): React.JSX.Element {
       console.warn("[App] Failed to clear pet completed tasks:", error)
     }
 
-  }, [currentThreadId, mainView, handlePreviewCollapse])
+  }, [activeRightPanelThreadId, mainView, handlePreviewCollapse])
+
+  useEffect(() => {
+    if (mainView !== "harness") {
+      setHarnessSessionThreadId(null)
+    }
+  }, [mainView])
 
   useEffect(() => {
     if (mainView === "claudecode") {
@@ -319,12 +336,12 @@ function App(): React.JSX.Element {
       const changedThreadId = data.threadId
       if (!changedThreadId) return
       // Keep current behavior: when user is already in current thread's Git panel, don't raise notice.
-      if (rightModule === "git" && changedThreadId === currentThreadId) return
+      if (rightModule === "git" && changedThreadId === activeRightPanelThreadId) return
       setThreadPendingGitDiff(changedThreadId, true)
     })
 
     return cleanupFs
-  }, [currentThreadId, rightModule, setThreadPendingGitDiff])
+  }, [activeRightPanelThreadId, rightModule, setThreadPendingGitDiff])
 
   // Reset drag start on mouse up
   useEffect(() => {
@@ -530,7 +547,7 @@ function App(): React.JSX.Element {
           <div
             className="flex flex-1 h-full items-center justify-end pl-1 gap-1"
           >
-            {mainView === "thread" && (
+            {showRightPanelModuleControls && (
               <>
                 <button
                   type="button"
@@ -712,11 +729,39 @@ function App(): React.JSX.Element {
                 <ResizeHandle onDrag={handleLeftResize} />
               </>
             )}
-            <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
+            <main
+              className={
+                previewFullscreen && harnessSessionThreadId && !rightPanelCollapsed
+                  ? "hidden"
+                  : "relative flex flex-1 flex-col min-w-0 overflow-hidden"
+              }
+            >
               <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
-                <HarnessBoardView />
+                <HarnessBoardView
+                  hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
+                  onRequestOpenGitPanel={selectGitModule}
+                  onThreadGitStatusChange={handleThreadGitStatusChange}
+                  onActiveSessionThreadChange={handleHarnessActiveSessionThreadChange}
+                />
               </Suspense>
             </main>
+            {harnessSessionThreadId && !rightPanelCollapsed && (
+              <>
+                {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
+                <div
+                  style={previewFullscreen ? undefined : { width: rightWidth }}
+                  className={previewFullscreen ? "flex-1 min-w-0 p-2 pl-0" : "shrink-0 p-2 pl-0"}
+                >
+                  <RightPanel
+                    threadId={harnessSessionThreadId}
+                    moduleMode={rightModule}
+                    onRequestPreviewMode={selectPreviewModule}
+                    onRequestWorkMode={selectWorkModule}
+                    onPreviewFullscreenChange={setPreviewFullscreen}
+                  />
+                </div>
+              </>
+            )}
           </div>
         )}
 
