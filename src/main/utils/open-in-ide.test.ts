@@ -2,22 +2,26 @@ import { EventEmitter } from "node:events"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { SupportedIde } from "../types"
 
-const mockSpawn = vi.fn()
-const mockExecFileSync = vi.fn()
-let configuredPaths: Partial<Record<SupportedIde, string>> = {}
+const testState = vi.hoisted(() => ({
+  mockExecFileSync: vi.fn(),
+  mockSpawn: vi.fn(),
+  configuredPaths: {} as Partial<Record<SupportedIde, string>>
+}))
 
 vi.mock("child_process", () => ({
-  execFileSync: mockExecFileSync,
-  spawn: mockSpawn
+  execFileSync: testState.mockExecFileSync,
+  spawn: testState.mockSpawn
 }))
 
 vi.mock("../storage", () => ({
-  getConfiguredIdeExecutablePath: (ide: SupportedIde) => configuredPaths[ide] ?? null,
-  getIdeSettings: () => ({ preferredIde: "webstorm", executablePaths: configuredPaths }),
+  getConfiguredIdeExecutablePath: (ide: SupportedIde) => testState.configuredPaths[ide] ?? null,
+  getIdeSettings: () => ({ preferredIde: "webstorm", executablePaths: testState.configuredPaths }),
   saveIdeSettings: vi.fn()
 }))
 
 import { openIde } from "./open-in-ide"
+
+const { mockExecFileSync, mockSpawn } = testState
 
 type MockChildProcess = EventEmitter & {
   unref: ReturnType<typeof vi.fn>
@@ -40,7 +44,7 @@ function createMockChildProcess(): MockChildProcess {
 
 describe("openIde", () => {
   beforeEach(() => {
-    configuredPaths = {}
+    testState.configuredPaths = {}
     mockSpawn.mockReset()
     mockExecFileSync.mockReset()
   })
@@ -51,7 +55,7 @@ describe("openIde", () => {
 
   it("treats spawned Windows IDE executables with exit code 1 as success", async () => {
     setPlatform("win32")
-    configuredPaths.webstorm = "D:\\tools\\WebStorm\\bin\\webstorm64.exe"
+    testState.configuredPaths.webstorm = "D:\\tools\\WebStorm\\bin\\webstorm64.exe"
 
     const child = createMockChildProcess()
     mockSpawn.mockImplementation(() => {
@@ -67,7 +71,7 @@ describe("openIde", () => {
         line: 27
       })
     ).resolves.toEqual({
-      editor: configuredPaths.webstorm,
+      editor: testState.configuredPaths.webstorm,
       mode: "workspace+file+line"
     })
 
@@ -77,7 +81,7 @@ describe("openIde", () => {
 
   it("still rejects non-zero exits from shell launchers on Windows", async () => {
     setPlatform("win32")
-    configuredPaths.vscode = "C:\\tools\\Microsoft VS Code\\bin\\code.cmd"
+    testState.configuredPaths.vscode = "C:\\tools\\Microsoft VS Code\\bin\\code.cmd"
 
     const child = createMockChildProcess()
     mockSpawn.mockImplementation(() => {
@@ -97,7 +101,7 @@ describe("openIde", () => {
 
   it("still rejects real spawn errors for Windows IDE executables", async () => {
     setPlatform("win32")
-    configuredPaths.webstorm = "D:\\tools\\WebStorm\\bin\\webstorm64.exe"
+    testState.configuredPaths.webstorm = "D:\\tools\\WebStorm\\bin\\webstorm64.exe"
 
     const child = createMockChildProcess()
     mockSpawn.mockImplementation(() => {
