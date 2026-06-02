@@ -1396,6 +1396,30 @@ export function listHarnessProjects(): HarnessProjectListItem[] {
   return readProjectStore().projects.map(toListItem)
 }
 
+/**
+ * Returns the harness adapter (plugin) bound to a project, including its version.
+ * Prefers the currently-installed plugin's version; falls back to the version
+ * stored in project metadata when the plugin can't be resolved (e.g. uninstalled).
+ * Returns null when the project does not exist.
+ */
+export function getHarnessProjectAdapterSnapshot(projectId: string): HarnessAdapterSnapshot | null {
+  const project = readProjectStore().projects.find((item) => item.projectId === projectId)
+  if (!project) return null
+  const stored = project["harness-adapter"]
+  try {
+    const plugin = findPluginForAdapterSnapshot(stored)
+    if (plugin) return pluginToHarnessAdapterSnapshot(plugin)
+  } catch {
+    // fall through to the stored metadata snapshot below
+  }
+  return {
+    id: normalizeText(stored.id),
+    name: normalizeText(stored.name),
+    version: normalizeText(stored.version),
+    type: stored.type
+  }
+}
+
 export function createHarnessProject(input: HarnessProjectCreateInput): HarnessProjectMetadata {
   validateCreateInput(input)
   const store = readProjectStore()

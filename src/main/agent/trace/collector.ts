@@ -45,6 +45,7 @@ import { app } from "electron"
 import { getLocalIP } from "../../net-utils"
 import { getUserInfo } from "../../storage"
 import { listAllSkills } from "../../ipc/skills"
+import { getHarnessProjectAdapterSnapshot } from "../../harness-board/service"
 import { nowIsoLocal } from "../../util/local-time"
 import {
   DEFAULT_SKILL_VERSION,
@@ -569,6 +570,30 @@ export class TraceCollector {
 
     const userInfo = getUserInfo()
     const upperOrgLevels = deriveUpperOrgLevels(userInfo?.pathName)
+
+    // Project-mode traces also record the bound adapter plugin's version, so
+    // operations analytics can attribute a project conversation to a plugin
+    // version. Best-effort: any resolution failure leaves the fields absent.
+    let harnessAdapterFields: {
+      harnessAdapterId?: string
+      harnessAdapterName?: string
+      harnessAdapterVersion?: string
+    } = {}
+    if (this.harnessFeature) {
+      try {
+        const adapter = getHarnessProjectAdapterSnapshot(this.harnessFeature.projectId)
+        if (adapter) {
+          harnessAdapterFields = {
+            harnessAdapterId: adapter.id,
+            harnessAdapterName: adapter.name,
+            harnessAdapterVersion: adapter.version
+          }
+        }
+      } catch (e) {
+        console.warn("[Tracer] Failed to resolve harness adapter for trace:", e)
+      }
+    }
+
     const trace: AgentTrace = {
       traceId: this.traceId,
       threadId: this.threadId,
@@ -609,7 +634,8 @@ export class TraceCollector {
       ...(this.harnessFeature
         ? {
             harnessProjectId: this.harnessFeature.projectId,
-            harnessFeatureSlug: this.harnessFeature.slug
+            harnessFeatureSlug: this.harnessFeature.slug,
+            ...harnessAdapterFields
           }
         : {}),
       ...(this.routingTrace ? { metadata: { routingTrace: this.routingTrace } } : {})

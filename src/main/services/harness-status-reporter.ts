@@ -24,7 +24,11 @@
  * block the others.
  */
 
-import { listHarnessProjects, getHarnessProjectDetails } from "../harness-board/service"
+import {
+  listHarnessProjects,
+  getHarnessProjectDetails,
+  getHarnessProjectAdapterSnapshot
+} from "../harness-board/service"
 import type {
   HarnessFeatureSummary,
   HarnessProjectDetailViewModel,
@@ -99,6 +103,15 @@ function buildProjectDoc(
   const features = (detail?.runs ?? []).map(toFeatureSnapshot)
   const docId = projectDocId(project.projectId)
 
+  // The bound adapter plugin's version (HarnessProjectListItem.harnessAdapter
+  // carries id/name but not version, so resolve it separately). Best-effort.
+  let adapterVersion: string | undefined
+  try {
+    adapterVersion = getHarnessProjectAdapterSnapshot(project.projectId)?.version || undefined
+  } catch {
+    adapterVersion = undefined
+  }
+
   // Reuse buildEvent so the doc carries the same identity fields and shape as
   // every other event doc in the index.
   const doc = buildEvent("harness.project.snapshot", "harness", {
@@ -111,6 +124,7 @@ function buildProjectDoc(
     workspacePath: project.workspacePath,
     adapterId: project.harnessAdapter?.id,
     adapterName: project.harnessAdapter?.name,
+    adapterVersion,
     lifecycleStatus: project.lifecycle?.status,
     compatible: project.boardCompatibility?.compatible,
     compatibilityStatus: project.boardCompatibility?.status,
