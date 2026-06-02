@@ -147,6 +147,8 @@ import { registerDashboardHandlers } from "./ipc/dashboard"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
 import { registerUserInputHandlers } from "./ipc/user-input"
+import { registerPluginModelJobHandlers } from "./ipc/plugin-model-jobs"
+import { startPluginModelJobs, stopPluginModelJobs } from "./services/plugin-model-jobs"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
@@ -491,6 +493,7 @@ if (!gotTheLock) {
     registerAutoCommitHandlers(ipcMain)
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
+    registerPluginModelJobHandlers(ipcMain)
 
     ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
       mainLogForwardingEnabled = Boolean(enabled)
@@ -611,6 +614,7 @@ if (!gotTheLock) {
     startHeartbeat()
     startChatX()
     startHookConfigWatcher()
+    startPluginModelJobs()
     startUpdateChecker()
     markFullBackupCleanupReady(selfCheckResult)
 
@@ -686,6 +690,7 @@ if (!gotTheLock) {
     stopHeartbeat()
     stopChatX()
     stopHookConfigWatcher()
+    stopPluginModelJobs()
     stopRegisteredGitHookEventSync()
     stopUpdateChecker()
     try {

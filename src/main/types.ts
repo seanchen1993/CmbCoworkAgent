@@ -320,6 +320,8 @@ export interface PluginManifest {
   mcpServers?: string
   /** Path to hooks config file relative to plugin root (default: "hooks/hooks.json") */
   hooks?: string
+  /** Path to background model job manifest relative to plugin root. Omit to disable background jobs. */
+  backgroundJobs?: string
 }
 
 export interface PluginMetadata {

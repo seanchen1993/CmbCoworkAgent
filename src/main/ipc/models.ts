@@ -16,6 +16,7 @@ import type {
 } from "../types"
 import { LocalSandbox } from "../agent/local-sandbox"
 import { startWatching, stopWatching } from "../services/workspace-watcher"
+import { scanPluginModelJobsWorkspace } from "../services/plugin-model-jobs"
 import { trackEvent } from "../services/event-reporter"
 import { captureStagedSnapshotsForCommit, measureForCommit } from "../services/adoption-tracker"
 import { scheduleMarkCodeAdoptionCommitsPushed } from "../services/code-adoption-push-updater"
@@ -2256,6 +2257,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
           if (!ready) return null
           store.set("workspacePath", newPath)
+          scanPluginModelJobsWorkspace(newPath)
         } else {
           store.delete("workspacePath")
         }
@@ -2276,6 +2278,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         updateThread(threadId, { metadata: JSON.stringify(metadata) })
 
         startWatching(threadId, newPath)
+        scanPluginModelJobsWorkspace(newPath)
         // 同步刷新“最近工作区”，供新建线程默认复用。
         store.set("workspacePath", newPath)
       } else {

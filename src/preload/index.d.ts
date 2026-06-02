@@ -31,6 +31,7 @@ import type {
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
+import type { BackgroundJobListOptions, BackgroundJobStatusRecord, BackgroundJobUpdatedEvent } from "../shared/plugin-model-jobs"
 import type {
   ManagedSavedCodeExecTool,
   SavedCodeExecPreviewPayload,
@@ -787,6 +788,11 @@ interface CustomAPI {
   keepAwake: {
     get: () => Promise<boolean>
     set: (enabled: boolean) => Promise<void>
+  }
+  pluginJobs: {
+    list: (options?: BackgroundJobListOptions) => Promise<BackgroundJobStatusRecord[]>
+    get: (params: { workspace: string; pluginId: string; jobId: string }) => Promise<BackgroundJobStatusRecord | null>
+    onUpdated: (callback: (event: BackgroundJobUpdatedEvent) => void) => () => void
   }
   scheduledTasks: {
     list: () => Promise<ScheduledTask[]>

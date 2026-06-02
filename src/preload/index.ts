@@ -31,6 +31,7 @@ import type {
   UserInputResponse
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
+import type { BackgroundJobListOptions, BackgroundJobStatusRecord, BackgroundJobUpdatedEvent } from "../shared/plugin-model-jobs"
 import { UserInfoConfig } from "../main/storage"
 import type {
   ManagedSavedCodeExecTool,
@@ -1085,6 +1086,21 @@ const api = {
   keepAwake: {
     get: (): Promise<boolean> => ipcRenderer.invoke("keepAwake:get"),
     set: (enabled: boolean): Promise<void> => ipcRenderer.invoke("keepAwake:set", enabled)
+  },
+  pluginJobs: {
+    list: (options?: BackgroundJobListOptions): Promise<BackgroundJobStatusRecord[]> =>
+      ipcRenderer.invoke("pluginJobs:list", options) as Promise<BackgroundJobStatusRecord[]>,
+    get: (params: { workspace: string; pluginId: string; jobId: string }): Promise<BackgroundJobStatusRecord | null> =>
+      ipcRenderer.invoke("pluginJobs:get", params) as Promise<BackgroundJobStatusRecord | null>,
+    onUpdated: (callback: (event: BackgroundJobUpdatedEvent) => void): (() => void) => {
+      const handler = (_: unknown, event: BackgroundJobUpdatedEvent): void => {
+        callback(event)
+      }
+      ipcRenderer.on("pluginJobs:updated", handler)
+      return () => {
+        ipcRenderer.removeListener("pluginJobs:updated", handler)
+      }
+    }
   },
   scheduledTasks: {
     list: (): Promise<ScheduledTask[]> => ipcRenderer.invoke("scheduledTasks:list"),

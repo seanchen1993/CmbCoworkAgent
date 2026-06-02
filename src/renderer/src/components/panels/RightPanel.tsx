@@ -31,7 +31,8 @@ import {
   EyeOff,
   Loader2,
   Copy,
-  Check
+  Check,
+  BriefcaseBusiness
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -45,6 +46,7 @@ import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "
 import { isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
+import { BackgroundJobsPanel } from "@/components/panels/BackgroundJobsPanel"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
@@ -79,6 +81,7 @@ type PanelHeights = {
   skills: number
   plugins: number
   hooks: number
+  jobs: number
   lsp: number
 }
 
@@ -222,6 +225,7 @@ export function RightPanel({
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [pluginsOpen, setPluginsOpen] = useState(false)
   const [hooksOpen, setHooksOpen] = useState(false)
+  const [jobsOpen, setJobsOpen] = useState(false)
   const [lspOpen, setLspOpen] = useState(false)
   const [lspConfig, setLspConfig] = useState<LspConfig | null>(null)
   const [lspStatus, setLspStatus] = useState<LspStatus | null>(null)
@@ -576,6 +580,7 @@ export function RightPanel({
   const [skillsHeight, setSkillsHeight] = useState<number | null>(null)
   const [pluginsHeight, setPluginsHeight] = useState<number | null>(null)
   const [hooksHeight, setHooksHeight] = useState<number | null>(null)
+  const [jobsHeight, setJobsHeight] = useState<number | null>(null)
   const [lspHeight, setLspHeight] = useState<number | null>(null)
 
   // Track drag start heights
@@ -586,6 +591,7 @@ export function RightPanel({
     skills: number
     plugins: number
     hooks: number
+    jobs: number
     lsp: number
   } | null>(null)
 
@@ -602,11 +608,12 @@ export function RightPanel({
       skillsOpen,
       pluginsOpen,
       hooksOpen,
+      jobsOpen,
       lspOpen
     ]
-    let used = HEADER_HEIGHT * 7
+    let used = HEADER_HEIGHT * 8
     // Fixed visual gaps between section blocks
-    used += SECTION_GAP * 6
+    used += SECTION_GAP * 7
 
     // Count handles between consecutive open panels
     let handles = 0
@@ -618,7 +625,7 @@ export function RightPanel({
     used += HANDLE_HEIGHT * handles
 
     return Math.max(0, totalHeight - used)
-  }, [moduleMode, tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, lspOpen])
+  }, [moduleMode, tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, jobsOpen, lspOpen])
 
   // Get current heights for each panel's content area
   const getContentHeights = useCallback(() => {
@@ -630,11 +637,12 @@ export function RightPanel({
       skillsOpen,
       pluginsOpen,
       hooksOpen,
+      jobsOpen,
       lspOpen
     ].filter(Boolean).length
 
     if (openCount === 0) {
-      return { tasks: 0, files: 0, agents: 0, skills: 0, plugins: 0, hooks: 0, lsp: 0 }
+      return { tasks: 0, files: 0, agents: 0, skills: 0, plugins: 0, hooks: 0, jobs: 0, lsp: 0 }
     }
 
     const defaultHeight = available / openCount
@@ -646,6 +654,7 @@ export function RightPanel({
       skills: skillsOpen ? (skillsHeight ?? defaultHeight) : 0,
       plugins: pluginsOpen ? (pluginsHeight ?? defaultHeight) : 0,
       hooks: hooksOpen ? (hooksHeight ?? defaultHeight) : 0,
+      jobs: jobsOpen ? (jobsHeight ?? defaultHeight) : 0,
       lsp: lspOpen ? (lspHeight ?? defaultHeight) : 0
     }
   }, [
@@ -656,6 +665,7 @@ export function RightPanel({
     skillsOpen,
     pluginsOpen,
     hooksOpen,
+    jobsOpen,
     lspOpen,
     tasksHeight,
     filesHeight,
@@ -663,6 +673,7 @@ export function RightPanel({
     skillsHeight,
     pluginsHeight,
     hooksHeight,
+    jobsHeight,
     lspHeight
   ])
 
@@ -924,7 +935,7 @@ export function RightPanel({
     [getContentHeights, getAvailableContentHeight, tasksOpen, filesOpen, agentsOpen, skillsOpen]
   )
 
-  // Handle resize between hooks and lsp
+  // Handle resize between hooks and background jobs
   const handleHooksResize = useCallback(
     (totalDelta: number) => {
       if (!dragStartHeights.current) {
@@ -940,34 +951,95 @@ export function RightPanel({
         (agentsOpen ? start.agents : 0) +
         (skillsOpen ? start.skills : 0) +
         (pluginsOpen ? start.plugins : 0)
-      const maxForHooksAndLsp = available - usedByUpperPanels
+      const maxForHooksAndJobs = available - usedByUpperPanels
 
       let newHooksHeight = start.hooks + totalDelta
-      let newLspHeight = start.lsp - totalDelta
+      let newJobsHeight = start.jobs - totalDelta
 
       if (newHooksHeight < MIN_CONTENT_HEIGHT) {
         newHooksHeight = MIN_CONTENT_HEIGHT
-        newLspHeight = start.lsp + (start.hooks - MIN_CONTENT_HEIGHT)
+        newJobsHeight = start.jobs + (start.hooks - MIN_CONTENT_HEIGHT)
       }
-      if (newLspHeight < MIN_CONTENT_HEIGHT) {
-        newLspHeight = MIN_CONTENT_HEIGHT
-        newHooksHeight = start.hooks + (start.lsp - MIN_CONTENT_HEIGHT)
+      if (newJobsHeight < MIN_CONTENT_HEIGHT) {
+        newJobsHeight = MIN_CONTENT_HEIGHT
+        newHooksHeight = start.hooks + (start.jobs - MIN_CONTENT_HEIGHT)
       }
 
-      if (newHooksHeight + newLspHeight > maxForHooksAndLsp) {
-        const excess = newHooksHeight + newLspHeight - maxForHooksAndLsp
+      if (newHooksHeight + newJobsHeight > maxForHooksAndJobs) {
+        const excess = newHooksHeight + newJobsHeight - maxForHooksAndJobs
         if (totalDelta > 0) {
-          newLspHeight = Math.max(MIN_CONTENT_HEIGHT, newLspHeight - excess)
+          newJobsHeight = Math.max(MIN_CONTENT_HEIGHT, newJobsHeight - excess)
         } else {
           newHooksHeight = Math.max(MIN_CONTENT_HEIGHT, newHooksHeight - excess)
         }
       }
 
       setHooksHeight(newHooksHeight)
-      setLspHeight(newLspHeight)
+      setJobsHeight(newJobsHeight)
 
       if (newHooksHeight < COLLAPSE_THRESHOLD) {
         setHooksOpen(false)
+      }
+      if (newJobsHeight < COLLAPSE_THRESHOLD) {
+        setJobsOpen(false)
+      }
+    },
+    [
+      getContentHeights,
+      getAvailableContentHeight,
+      tasksOpen,
+      filesOpen,
+      agentsOpen,
+      skillsOpen,
+      pluginsOpen
+    ]
+  )
+
+  // Handle resize between background jobs and lsp
+  const handleJobsResize = useCallback(
+    (totalDelta: number) => {
+      if (!dragStartHeights.current) {
+        const currentHeights = getContentHeights()
+        dragStartHeights.current = { ...currentHeights }
+      }
+
+      const start = dragStartHeights.current
+      const available = getAvailableContentHeight()
+      const usedByUpperPanels =
+        (tasksOpen ? start.tasks : 0) +
+        (filesOpen ? start.files : 0) +
+        (agentsOpen ? start.agents : 0) +
+        (skillsOpen ? start.skills : 0) +
+        (pluginsOpen ? start.plugins : 0) +
+        (hooksOpen ? start.hooks : 0)
+      const maxForJobsAndLsp = available - usedByUpperPanels
+
+      let newJobsHeight = start.jobs + totalDelta
+      let newLspHeight = start.lsp - totalDelta
+
+      if (newJobsHeight < MIN_CONTENT_HEIGHT) {
+        newJobsHeight = MIN_CONTENT_HEIGHT
+        newLspHeight = start.lsp + (start.jobs - MIN_CONTENT_HEIGHT)
+      }
+      if (newLspHeight < MIN_CONTENT_HEIGHT) {
+        newLspHeight = MIN_CONTENT_HEIGHT
+        newJobsHeight = start.jobs + (start.lsp - MIN_CONTENT_HEIGHT)
+      }
+
+      if (newJobsHeight + newLspHeight > maxForJobsAndLsp) {
+        const excess = newJobsHeight + newLspHeight - maxForJobsAndLsp
+        if (totalDelta > 0) {
+          newLspHeight = Math.max(MIN_CONTENT_HEIGHT, newLspHeight - excess)
+        } else {
+          newJobsHeight = Math.max(MIN_CONTENT_HEIGHT, newJobsHeight - excess)
+        }
+      }
+
+      setJobsHeight(newJobsHeight)
+      setLspHeight(newLspHeight)
+
+      if (newJobsHeight < COLLAPSE_THRESHOLD) {
+        setJobsOpen(false)
       }
       if (newLspHeight < COLLAPSE_THRESHOLD) {
         setLspOpen(false)
@@ -980,7 +1052,8 @@ export function RightPanel({
       filesOpen,
       agentsOpen,
       skillsOpen,
-      pluginsOpen
+      pluginsOpen,
+      hooksOpen
     ]
   )
 
@@ -1001,8 +1074,9 @@ export function RightPanel({
     setSkillsHeight(null)
     setPluginsHeight(null)
     setHooksHeight(null)
+    setJobsHeight(null)
     setLspHeight(null)
-  }, [tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, lspOpen])
+  }, [tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, jobsOpen, lspOpen])
 
   // Calculate heights in an effect (refs can't be accessed during render)
   const [heights, setHeights] = useState<PanelHeights>({
@@ -1012,6 +1086,7 @@ export function RightPanel({
     skills: 0,
     plugins: 0,
     hooks: 0,
+    jobs: 0,
     lsp: 0
   })
   useEffect(() => {
@@ -1026,6 +1101,7 @@ export function RightPanel({
     !skillsOpen &&
     !pluginsOpen &&
     !hooksOpen &&
+    !jobsOpen &&
     !lspOpen
 
   return (
@@ -1226,7 +1302,25 @@ export function RightPanel({
           </div>
 
           {/* Resize handle after HOOKS */}
-          {hooksOpen && lspOpen && <ResizeHandle onDrag={handleHooksResize} />}
+          {hooksOpen && jobsOpen && <ResizeHandle onDrag={handleHooksResize} />}
+
+          {/* BACKGROUND JOBS */}
+          <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+            <SectionHeader
+              title="后台任务"
+              icon={BriefcaseBusiness}
+              isOpen={jobsOpen}
+              onToggle={() => setJobsOpen((prev) => !prev)}
+            />
+            {jobsOpen && (
+              <div className="overflow-auto right-panel-scroll" style={{ height: heights.jobs }}>
+                <BackgroundJobsPanel workspacePath={threadState?.workspacePath ?? null} />
+              </div>
+            )}
+          </div>
+
+          {/* Resize handle after BACKGROUND JOBS */}
+          {jobsOpen && lspOpen && <ResizeHandle onDrag={handleJobsResize} />}
 
           {/* LSP */}
           <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
