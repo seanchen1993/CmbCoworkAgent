@@ -1665,6 +1665,13 @@ const api = {
       ipcRenderer.invoke("plugins:delete", id) as Promise<{ success: boolean; error?: string }>,
     setEnabled: (id: string, enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("plugins:setEnabled", { id, enabled }) as Promise<void>,
+    setOriginsBatch: (
+      updates: Array<{ id: string; origin: "market" | "local" }>
+    ): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke("plugins:setOriginsBatch", { updates }) as Promise<{
+        success: boolean
+        error?: string
+      }>,
     getDetail: (id: string): Promise<PluginDetail> =>
       ipcRenderer.invoke("plugins:getDetail", id) as Promise<PluginDetail>,
     listHooks: (): Promise<PluginHookMetadata[]> =>

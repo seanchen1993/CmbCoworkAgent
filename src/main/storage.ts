@@ -1941,6 +1941,41 @@ export function setPluginEnabled(id: string, enabled: boolean): void {
   writePlugins(next)
 }
 
+/**
+ * Backfill origin for plugins installed before the field existed.
+ *
+ * Used by the renderer's one-shot legacy migration. Writes plugins.json once
+ * for the whole batch so users with many legacy plugins avoid N IPC calls and
+ * N file writes.
+ *
+ * Callers must hold `pluginMutex`.
+ */
+export function setPluginOriginsBatch(
+  updates: ReadonlyArray<{ id: string; origin: "market" | "local" }>
+): void {
+  const byId = new Map<string, "market" | "local">()
+  for (const update of updates) {
+    if (
+      update &&
+      typeof update.id === "string" &&
+      (update.origin === "market" || update.origin === "local")
+    ) {
+      byId.set(update.id, update.origin)
+    }
+  }
+  if (byId.size === 0) return
+
+  const items = getPlugins()
+  let changed = false
+  const next = items.map((item) => {
+    const desired = byId.get(item.id)
+    if (!desired || item.origin === desired) return item
+    changed = true
+    return { ...item, origin: desired }
+  })
+  if (changed) writePlugins(next)
+}
+
 export function getEnabledPluginSkillsSources(): string[] {
   if (_pluginSkillsCache) return _pluginSkillsCache
   _pluginSkillsCache = getEnabledPluginSkillSourceMetadata().map((source) => source.sourceDir)
