@@ -19,7 +19,8 @@ import {
   User,
   Users,
   CircleAlert,
-  Building2
+  Building2,
+  Info
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -298,6 +299,29 @@ function TimeControlBar({
 const ORG_UNCLASSIFIED = "__unclassified__"
 const orgOptionLabel = (org: string): string => (org === ORG_UNCLASSIFIED ? "（未归类）" : org)
 
+// 进入活跃用户列表时，把顶部全局「室筛选」（多选）回填进「部门查询」文本框。
+// 多选用中文逗号连接，后端 buildOrgLevelMatchFilter 会按逗号拆分并 OR 匹配。
+const buildDepartmentPrefill = (orgList: string[]): string => orgList.map(orgOptionLabel).join("，")
+
+function InfoHint({ content }: { content: ReactNode }): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="inline-flex size-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground"
+            aria-label="查看部门查询说明"
+          >
+            <Info className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-72">{content}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
 function OrgFilterBar({
   value,
   options,
@@ -351,7 +375,11 @@ function OrgFilterBar({
             className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 text-xs hover:bg-muted/60"
             onClick={() => onChange([])}
           >
-            <span className={value.length === 0 ? "font-medium text-foreground" : "text-muted-foreground"}>
+            <span
+              className={
+                value.length === 0 ? "font-medium text-foreground" : "text-muted-foreground"
+              }
+            >
               全部
             </span>
             {value.length === 0 && <Check className="size-3.5 text-primary" />}
@@ -753,6 +781,14 @@ function UserListPage({
               onSearch()
             }}
           >
+            <InfoHint
+              content={
+                <div className="space-y-1">
+                  <div>支持按室 / 部门名称模糊查询。</div>
+                  <div className="text-muted-foreground">多个用逗号分隔，命中其中任一即显示。</div>
+                </div>
+              }
+            />
             <div className="relative w-full max-w-[220px]">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -2454,11 +2490,7 @@ export function DashboardView(): React.JSX.Element {
   )
 
   const loadUserDetail = useCallback(
-    async (
-      sapId: string,
-      tracePage = 1,
-      triggerScope: DashboardTraceTriggerScope = "active"
-    ) => {
+    async (sapId: string, tracePage = 1, triggerScope: DashboardTraceTriggerScope = "active") => {
       setUserDetailLoading(true)
       setUserDetailError(null)
       try {
@@ -2479,15 +2511,17 @@ export function DashboardView(): React.JSX.Element {
   )
 
   const openUserList = useCallback(() => {
+    // 带入顶部全局「室筛选」：自动回填到「部门查询」，用户可自行编辑/清空。
+    const departmentPrefill = buildDepartmentPrefill(selectedOrgLv1List)
     setSubPage({ kind: "user-list" })
     setUserList(null)
     setUserListSearchValue("")
     setUserListSearchKeyword("")
-    setUserListDepartmentValue("")
-    setUserListDepartmentFilter("")
+    setUserListDepartmentValue(departmentPrefill)
+    setUserListDepartmentFilter(departmentPrefill)
     setUserListAfterKey(undefined)
     setUserListBackStack([])
-  }, [])
+  }, [selectedOrgLv1List])
 
   const openUserDetail = useCallback(
     (sapId: string, backTo?: "main" | "user-list") => {
@@ -2590,13 +2624,10 @@ export function DashboardView(): React.JSX.Element {
     })
   }, [userDetail])
 
-  const handleUserTraceTriggerScopeChange = useCallback(
-    (scope: DashboardTraceTriggerScope) => {
-      setUserDetailTraceTriggerScope(scope)
-      setUserDetailTracePage(1)
-    },
-    []
-  )
+  const handleUserTraceTriggerScopeChange = useCallback((scope: DashboardTraceTriggerScope) => {
+    setUserDetailTraceTriggerScope(scope)
+    setUserDetailTracePage(1)
+  }, [])
 
   const subPageDetailSapId = subPage.kind === "user-detail" ? subPage.sapId : null
 
@@ -2698,7 +2729,13 @@ export function DashboardView(): React.JSX.Element {
     (bucket: { from: string; to: string; label: string }) => {
       setCommitDepartmentValue("")
       setCommitDepartmentFilter("")
-      void loadCommitDetails({ from: bucket.from, to: bucket.to }, `时间桶 · ${bucket.label}`, 1, false, "")
+      void loadCommitDetails(
+        { from: bucket.from, to: bucket.to },
+        `时间桶 · ${bucket.label}`,
+        1,
+        false,
+        ""
+      )
     },
     [loadCommitDetails]
   )

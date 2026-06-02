@@ -59,7 +59,6 @@ function getEsIndex(type: "trace" | "event" | "skillEval"): string {
   return (import.meta.env.VITE_ES_INDEX_EVENT as string) || "devclaw_event"
 }
 
-
 // ─────────────────────────────────────────────────────────
 // ES HTTP helper
 // ─────────────────────────────────────────────────────────
@@ -533,15 +532,19 @@ function splitEnvIds(value: string | undefined): Set<string> {
 }
 
 function deriveDashboardUpperOrgLv1(pathName?: string): string {
-  const parts = typeof pathName === "string"
-    ? pathName.split("/").map((part) => part.trim()).filter(Boolean)
-    : []
+  const parts =
+    typeof pathName === "string"
+      ? pathName
+          .split("/")
+          .map((part) => part.trim())
+          .filter(Boolean)
+      : []
   const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
   if (itDeptIndex < 0) return ""
 
   const lowerParts = parts.slice(itDeptIndex + 1)
   const startsWithTeam = lowerParts[0]?.includes("团队") ?? false
-  return startsWithTeam ? lowerParts[1] ?? "" : lowerParts[2] ?? ""
+  return startsWithTeam ? (lowerParts[1] ?? "") : (lowerParts[2] ?? "")
 }
 
 function getDashboardUnrestrictedIds(): Set<string> {
@@ -590,7 +593,10 @@ function buildTraceAccessFilter(access: DashboardAccessContext): Record<string, 
   return buildUpperOrgLv1Filter(access.upperOrgLv1)
 }
 
-function appendOptionalFilter(filters: Record<string, unknown>[], filter: Record<string, unknown> | null): void {
+function appendOptionalFilter(
+  filters: Record<string, unknown>[],
+  filter: Record<string, unknown> | null
+): void {
   if (filter) filters.push(filter)
 }
 
@@ -1075,14 +1081,14 @@ function averageValue(total: number, count: number): number {
 }
 
 function normalizeTraceTriggerSource(value: unknown): TraceTriggerSource {
-  return (
-    value === "chat" ||
+  return value === "chat" ||
     value === "heartbeat" ||
     value === "scheduler_reminder" ||
     value === "scheduler_action" ||
     value === "memory_summarize" ||
     value === "optimizer"
-  ) ? value : "chat"
+    ? value
+    : "chat"
 }
 
 function dashboardTraceSourceIncludes(): string[] {
@@ -1430,7 +1436,11 @@ async function fetchCommitAdoptionMap(
 // Dashboard data fetchers
 // ─────────────────────────────────────────────────────────
 
-async function fetchOverview(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions): Promise<unknown> {
+async function fetchOverview(
+  range: TimeRange,
+  granularity: Granularity,
+  opts?: OrgFilterOptions
+): Promise<unknown> {
   requireDashboardAccess()
   // 统计指标不做组织级数据权限过滤；orgFilterClause 是用户主动选择的 LV1 组织维度筛选。
   const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
@@ -1462,7 +1472,11 @@ async function fetchOverview(range: TimeRange, granularity: Granularity, opts?: 
   ]
   const traceBody = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range), ...(orgFilterClause ? [orgFilterClause] : [])] } },
+    query: {
+      bool: {
+        filter: [timeRangeFilter("startedAt", range), ...(orgFilterClause ? [orgFilterClause] : [])]
+      }
+    },
     aggs: {
       total_calls: { value_count: { field: "traceId" } },
       active_users: { cardinality: { field: "sapId" } },
@@ -1627,14 +1641,22 @@ async function fetchOverview(range: TimeRange, granularity: Granularity, opts?: 
   }
 }
 
-async function fetchModelStats(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions): Promise<unknown> {
+async function fetchModelStats(
+  range: TimeRange,
+  granularity: Granularity,
+  opts?: OrgFilterOptions
+): Promise<unknown> {
   requireDashboardAccess()
   // 统计指标不做组织级数据权限过滤；orgFilterClause 为用户主动选择的 LV1 组织维度筛选。
   const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
   void granularity
   const body = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range), ...(orgFilterClause ? [orgFilterClause] : [])] } },
+    query: {
+      bool: {
+        filter: [timeRangeFilter("startedAt", range), ...(orgFilterClause ? [orgFilterClause] : [])]
+      }
+    },
     aggs: {
       by_model: {
         terms: { field: "modelName", size: 30 },
@@ -1658,7 +1680,8 @@ function buildUpperOrgLv1Filter(upperOrgLv1: string): Record<string, unknown> {
   return { term: { upperOrgLv1 } }
 }
 
-function buildOrgLevelMatchFilter(orgLevel: string): Record<string, unknown> {
+// 单个室文本 → LV1/LV0 模糊匹配子句（含精确 term + 通配 wildcard）。
+function buildSingleOrgLevelClause(orgLevel: string): Record<string, unknown> {
   const escaped = escapeWildcard(orgLevel)
   const wildcardPattern = `*${escaped}*`
   return {
@@ -1674,6 +1697,30 @@ function buildOrgLevelMatchFilter(orgLevel: string): Record<string, unknown> {
   }
 }
 
+// 「部门查询」按逗号（中/英文）拆分为多个室 token；ES 与 dev mock 共用此规则。
+function splitOrgQueryTokens(orgLevel: string): string[] {
+  const tokens = orgLevel
+    .split(/[，,]/)
+    .map((token) => token.trim())
+    .filter(Boolean)
+  return tokens.length > 0 ? tokens : [orgLevel]
+}
+
+// 判断单个 token 是否代表「未归类」（空/缺失 LV1）。
+function isUnclassifiedOrgToken(token: string): boolean {
+  return token === DASHBOARD_UNCLASSIFIED_LABEL || token === DASHBOARD_UNCLASSIFIED_ORG
+}
+
+// 「部门查询」支持逗号（中/英文）分隔的多个室：来自顶部全局「室筛选」的回填或用户手输，
+// 各 token 之间按 OR 叠加。「未归类」token 走空/缺失 LV1 的专用子句。
+function buildOrgLevelMatchFilter(orgLevel: string): Record<string, unknown> {
+  const clauses = splitOrgQueryTokens(orgLevel).map((token) =>
+    isUnclassifiedOrgToken(token) ? buildUnclassifiedOrgClause() : buildSingleOrgLevelClause(token)
+  )
+  if (clauses.length === 1) return clauses[0]
+  return { bool: { should: clauses, minimum_should_match: 1 } }
+}
+
 function normalizeUpperOrgLv1Option(upperOrgLv1?: string | null): string | null {
   if (typeof upperOrgLv1 !== "string") return null
   const normalized = upperOrgLv1.trim()
@@ -1682,6 +1729,8 @@ function normalizeUpperOrgLv1Option(upperOrgLv1?: string | null): string | null 
 
 // 「未归类」哨兵：代表 upperOrgLv1 为空或缺失的记录（前后端约定一致）。
 const DASHBOARD_UNCLASSIFIED_ORG = "__unclassified__"
+// 「未归类」回填到「部门查询」文本框时使用的展示标签，需与渲染层 orgOptionLabel 一致。
+const DASHBOARD_UNCLASSIFIED_LABEL = "（未归类）"
 // fetchOrgOptions 内部用来给「字段缺失」的文档归桶的临时 key（不外泄）。
 const DASHBOARD_ORG_MISSING_BUCKET = "__org_missing__"
 
@@ -2090,7 +2139,15 @@ async function fetchSkillUsageSummary(
     )
     const body = {
       size: 0,
-      query: { bool: { filter: [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter(), ...(traceAccessFilter ? [traceAccessFilter] : [])] } },
+      query: {
+        bool: {
+          filter: [
+            timeRangeFilter("startedAt", range),
+            buildChatTriggeredTraceFilter(),
+            ...(traceAccessFilter ? [traceAccessFilter] : [])
+          ]
+        }
+      },
       aggs: {
         by_skill: {
           filters: { filters },
@@ -2111,7 +2168,15 @@ async function fetchSkillUsageSummary(
   // 模式 B：兼容旧调用方，保留 terms 聚合结构。
   const body = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter(), ...(traceAccessFilter ? [traceAccessFilter] : [])] } },
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("startedAt", range),
+          buildChatTriggeredTraceFilter(),
+          ...(traceAccessFilter ? [traceAccessFilter] : [])
+        ]
+      }
+    },
     aggs: {
       by_skill: {
         terms: { field: "usedSkills", size: 1000 },
@@ -3788,14 +3853,18 @@ async function fetchOrgOptions(range: TimeRange): Promise<string[]> {
   return sorted
 }
 
-async function fetchProductivity(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions): Promise<unknown> {
+async function fetchProductivity(
+  range: TimeRange,
+  granularity: Granularity,
+  opts?: OrgFilterOptions
+): Promise<unknown> {
   requireDashboardAccess()
   const interval = getCalendarInterval(granularity, range.from, range.to)
   // orgFilterClause 为用户主动选择的 LV1 组织维度筛选。
   const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
   const filters = [
     timeRangeFilter("eventTime", range),
-    { term: { "eventName": "git.commit.created" } },
+    { term: { eventName: "git.commit.created" } },
     ...(orgFilterClause ? [orgFilterClause] : [])
   ]
   const body = {
@@ -3851,7 +3920,11 @@ async function fetchProductivity(range: TimeRange, granularity: Granularity, opt
   }
 }
 
-async function fetchFeedback(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions): Promise<unknown> {
+async function fetchFeedback(
+  range: TimeRange,
+  granularity: Granularity,
+  opts?: OrgFilterOptions
+): Promise<unknown> {
   requireDashboardAccess()
   const interval = getCalendarInterval(granularity, range.from, range.to)
   // orgFilterClause 为用户主动选择的 LV1 组织维度筛选。
@@ -3882,10 +3955,10 @@ async function fetchFeedback(range: TimeRange, granularity: Granularity, opts?: 
     size: 0,
     query: {
       bool: {
-          filter: [
-            timeRangeFilter("eventTime", range),
-            ...(orgFilterClause ? [orgFilterClause] : []),
-            {
+        filter: [
+          timeRangeFilter("eventTime", range),
+          ...(orgFilterClause ? [orgFilterClause] : []),
+          {
             terms: {
               eventName: ["message.feedback.like", "message.feedback.dislike.submit"]
             }
@@ -3977,10 +4050,7 @@ async function fetchSkillRecentTraces(
   const normalizedTriggerScope = normalizeTraceTriggerScope(triggerScope)
   const size = clampLimit(limit, 10, normalizedMode === "thread" ? 30 : 50)
   const currentPage = clampLimit(page, 1, 1000)
-  const filters = [
-    timeRangeFilter("startedAt", range),
-    buildSkillUsageWildcardFilter(skill)
-  ]
+  const filters = [timeRangeFilter("startedAt", range), buildSkillUsageWildcardFilter(skill)]
   // trace 聊天明细列表：按 lv1 组织做数据权限过滤。
   appendOptionalFilter(filters, buildTraceAccessFilter(access))
   if (normalizedTriggerScope === "active") {
@@ -4019,14 +4089,18 @@ async function fetchSkillRecentTraces(
         }
       }
     }
-    const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
+    const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
     const aggs = asRecord((raw as unknown as Record<string, unknown>).aggregations)
     const buckets = asRecord(aggs.by_thread).buckets
-    const selectedBuckets = Array.isArray(buckets) ? buckets.slice(fromBucket, fromBucket + size) : []
+    const selectedBuckets = Array.isArray(buckets)
+      ? buckets.slice(fromBucket, fromBucket + size)
+      : []
     const traces = selectedBuckets.flatMap((bucket) => {
       const latestHits = asRecord(asRecord(bucket).latest_traces)
       const rawHits = asRecord(latestHits.hits).hits
-      return Array.isArray(rawHits) ? rawHits.map((hit) => normalizeTraceDetail(hit as EsSearchHit)) : []
+      return Array.isArray(rawHits)
+        ? rawHits.map((hit) => normalizeTraceDetail(hit as EsSearchHit))
+        : []
     })
     return {
       traces,
@@ -4082,7 +4156,7 @@ async function fetchThreadTraces(threadId: string): Promise<DashboardTraceDetail
     query: { bool: { filter: filters } },
     _source: { includes: dashboardTraceSourceIncludes() }
   }
-  const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
+  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
   return (raw.hits?.hits ?? []).map(normalizeTraceDetail)
 }
 
@@ -4180,7 +4254,8 @@ async function fetchCommitDetails(
   items: DashboardCommitDetail[]
 }> {
   requireDashboardAccess()
-  const { page, pageSize, pushedOnly, upperOrgLv1, orgLv1List } = normalizeCommitDetailsOptions(options)
+  const { page, pageSize, pushedOnly, upperOrgLv1, orgLv1List } =
+    normalizeCommitDetailsOptions(options)
   const filters: Record<string, unknown>[] = [
     timeRangeFilter("eventTime", range),
     { term: { eventName: "git.commit.created" } }
@@ -5164,18 +5239,22 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
 function makeMockUserList(_range: TimeRange, options?: UserListOptions): DashboardUserListData {
   const { pageSize, afterKey, keyword, upperOrgLv1 } = normalizeUserListOptions(options)
   const normalizedKeyword = keyword.toLowerCase()
-  const normalizedUpperOrgLv1 = upperOrgLv1?.toLowerCase() ?? null
+  // 与 ES 路径一致：「部门查询」按逗号拆分多个室，命中任一即保留（含「未归类」）。
+  const orgTokens = upperOrgLv1 !== null ? splitOrgQueryTokens(upperOrgLv1) : []
   const allUsers = Array.from({ length: 64 }, (_, index) => makeMockDashboardUser(index)).filter(
     (user) => {
-      if (
-        normalizedUpperOrgLv1 !== null &&
-        ![user.upperOrgLv1, user.upperOrgLv0].some((value) =>
-          String(value || "")
-            .toLowerCase()
-            .includes(normalizedUpperOrgLv1)
-        )
-      )
-        return false
+      if (orgTokens.length > 0) {
+        const matched = orgTokens.some((token) => {
+          if (isUnclassifiedOrgToken(token)) return !user.upperOrgLv1
+          const lower = token.toLowerCase()
+          return [user.upperOrgLv1, user.upperOrgLv0].some((value) =>
+            String(value || "")
+              .toLowerCase()
+              .includes(lower)
+          )
+        })
+        if (!matched) return false
+      }
       if (!normalizedKeyword) return true
       return [user.userName, user.ystId, user.sapId].some((value) =>
         String(value || "")
@@ -5438,14 +5517,15 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
     `请使用 ${skill} 帮我分析这次变更，并给出可执行建议。`
   ]
   const userMessage = threadMessages[index] ?? threadMessages[5]
-  const assistantSummary = [
-    `已完成 ${skill} 审查：主要建议是把 trace 详情先展示成对话，再保留执行树作为辅助信息。`,
-    "已补充检查分页边界：Thread 模式需要限制聚合上限，Trace 模式保留原分页更稳。",
-    "Thread 维度下的多 trace 展示是清楚的：左侧按会话折叠，右侧展示当前 trace 的问答。",
-    `已检查 ${skill} 市场发布说明，建议补充适用场景、输入要求和失败排查说明。`,
-    "最近 trace 弹窗建议默认 Thread 维度，并提供 Trace 维度切换，便于运营快速浏览。",
-    `已完成 ${skill} 分析，结论包含风险点、建议修改和验证方式。`
-  ][index] ?? `已完成 ${skill} 分析。`
+  const assistantSummary =
+    [
+      `已完成 ${skill} 审查：主要建议是把 trace 详情先展示成对话，再保留执行树作为辅助信息。`,
+      "已补充检查分页边界：Thread 模式需要限制聚合上限，Trace 模式保留原分页更稳。",
+      "Thread 维度下的多 trace 展示是清楚的：左侧按会话折叠，右侧展示当前 trace 的问答。",
+      `已检查 ${skill} 市场发布说明，建议补充适用场景、输入要求和失败排查说明。`,
+      "最近 trace 弹窗建议默认 Thread 维度，并提供 Trace 维度切换，便于运营快速浏览。",
+      `已完成 ${skill} 分析，结论包含风险点、建议修改和验证方式。`
+    ][index] ?? `已完成 ${skill} 分析。`
   const repeatedReadFileToolCalls = [
     "src/renderer/src/components/dashboard/TraceHistoryDialog.tsx",
     "src/renderer/src/components/trace/TraceConversation.tsx",
@@ -5474,7 +5554,10 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
     },
     {
       name: "edit_file",
-      args: { path: "src/renderer/src/components/trace/TraceConversation.tsx", summary: "调整工具调用卡片位置" },
+      args: {
+        path: "src/renderer/src/components/trace/TraceConversation.tsx",
+        summary: "调整工具调用卡片位置"
+      },
       result: "替换 2 个 JSX 块",
       durationMs: 960
     },
@@ -5536,9 +5619,7 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
       {
         messageId: `mock-message-${index + 1}`,
         startedAt: startedAt.toISOString(),
-        inputMessages: [
-          { role: "user", content: userMessage }
-        ],
+        inputMessages: [{ role: "user", content: userMessage }],
         outputMessage: {
           role: "assistant",
           content: assistantSummary
@@ -5739,7 +5820,9 @@ function makeMockCommitDetails(
     if (upperOrgLv1 !== null) {
       const normalizedUpperOrgLv1 = upperOrgLv1.toLowerCase()
       const orgMatched = [item.upperOrgLv1, item.upperOrgLv0].some((value) =>
-        String(value || "").toLowerCase().includes(normalizedUpperOrgLv1)
+        String(value || "")
+          .toLowerCase()
+          .includes(normalizedUpperOrgLv1)
       )
       if (!orgMatched) return false
     }
@@ -5790,18 +5873,15 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
-    "dashboard:orgOptions",
-    async (_, range: TimeRange) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockOrgOptions() }
-      try {
-        return { success: true, data: await fetchOrgOptions(range) }
-      } catch (e) {
-        console.error("[Dashboard] orgOptions error:", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
+  _ipcMain.handle("dashboard:orgOptions", async (_, range: TimeRange) => {
+    if (import.meta.env.DEV) return { success: true, data: makeMockOrgOptions() }
+    try {
+      return { success: true, data: await fetchOrgOptions(range) }
+    } catch (e) {
+      console.error("[Dashboard] orgOptions error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
-  )
+  })
 
   _ipcMain.handle(
     "dashboard:userStats",
@@ -5978,18 +6058,15 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
-    "dashboard:threadTraces",
-    async (_, threadId: string) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockThreadTraces(threadId) }
-      try {
-        return { success: true, data: await fetchThreadTraces(threadId) }
-      } catch (e) {
-        console.error("[Dashboard] threadTraces error:", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
+  _ipcMain.handle("dashboard:threadTraces", async (_, threadId: string) => {
+    if (import.meta.env.DEV) return { success: true, data: makeMockThreadTraces(threadId) }
+    try {
+      return { success: true, data: await fetchThreadTraces(threadId) }
+    } catch (e) {
+      console.error("[Dashboard] threadTraces error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
-  )
+  })
 
   _ipcMain.handle(
     "dashboard:marketSkillRecentTraces",
