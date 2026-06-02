@@ -7,7 +7,6 @@
  */
 
 import { ipcMain, dialog, BrowserWindow } from "electron"
-import { getUserInfo } from "../storage"
 import * as fs from "fs"
 import AdmZip from "adm-zip"
 import { buildTraceTree } from "../agent/trace/tree-builder"
@@ -52,21 +51,6 @@ function getEsIndex(type: "trace" | "event" | "skillEval"): string {
     return (import.meta.env.VITE_ES_INDEX_SKILL_EVAL as string) || "devclaw_skill_eval_record"
   }
   return (import.meta.env.VITE_ES_INDEX_EVENT as string) || "devclaw_event"
-}
-
-const ALLOWED_YST_IDS_RAW = (import.meta.env.VITE_DASHBOARD_ALLOWED_YST_IDS as string) || ""
-const ALLOWED_YST_IDS = new Set(
-  ALLOWED_YST_IDS_RAW.split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-)
-
-function isDashboardAllowed(): boolean {
-  if (import.meta.env.DEV) return true
-  const userInfo = getUserInfo()
-  const ystId = userInfo?.ystId?.trim()
-  if (!ystId) return false
-  return ALLOWED_YST_IDS.has(ystId)
 }
 
 // ─────────────────────────────────────────────────────────
@@ -5221,7 +5205,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   )
 
   _ipcMain.handle("dashboard:userList", async (_, range: TimeRange, options?: UserListOptions) => {
-    if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
     if (import.meta.env.DEV) return { success: true, data: makeMockUserList(range, options) }
     try {
       return { success: true, data: await fetchUserList(range, options) }
@@ -5350,7 +5333,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:skillRecentTraces",
     async (_, skill: string, range: TimeRange, options?: number | TracePageOptions) => {
-      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
       if (import.meta.env.DEV)
         return { success: true, data: makeMockSkillRecentTraces(skill, range, options) }
       try {
@@ -5381,7 +5363,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:skillDetail",
     async (_, skill: string, range: TimeRange, options?: number | TracePageOptions) => {
-      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
       if (import.meta.env.DEV)
         return { success: true, data: makeMockSkillDetail(skill, range, options) }
       try {
