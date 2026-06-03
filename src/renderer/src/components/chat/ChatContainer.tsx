@@ -94,7 +94,7 @@ import type {
   UserInputResponse
 } from "@/types"
 import { MessageBubble } from "./MessageBubble"
-import { ChatScrollNavigator, type ChatScrollQuestion } from "./ChatScrollNavigator"
+import { ChatScrollNavigator } from "./ChatScrollNavigator"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
@@ -1416,17 +1416,6 @@ const getMessageText = (content: Message["content"]): string => {
     .join("\n")
 }
 
-const getQuestionPreview = (content: Message["content"]): string => {
-  const text = getMessageText(content)
-    .replace(/<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g, "📎 $1")
-    .replace(/<CMBDEVCLAW-SKILL-USE-V1>[\s\S]*?<\/CMBDEVCLAW-SKILL-USE-V1>/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-
-  if (!text) return "（空提问）"
-  return text.length > 120 ? `${text.slice(0, 120)}...` : text
-}
-
 function RotatingHeadline() {
   const [wordIndex, setWordIndex] = useState(0)
   const [displayed, setDisplayed] = useState("")
@@ -1598,11 +1587,8 @@ export function ChatContainer({
   const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const userMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isAtBottomRef = useRef(true)
-  const requestedUserQuestionIndexRef = useRef<number | null>(null)
-  const requestedUserQuestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isComposingRef = useRef(false)
   const submitInFlightRef = useRef<Set<string>>(new Set())
   const [skills, setSkills] = useState<SkillMetadata[]>([])
@@ -1613,7 +1599,6 @@ export function ChatContainer({
   const [showAllProgrammingSkills, setShowAllProgrammingSkills] = useState(false)
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
-  const [activeUserQuestionIndex, setActiveUserQuestionIndex] = useState(-1)
   const [userInputDialogLayout, setUserInputDialogLayout] =
     useState<UserInputRequestDialogLayout | null>(null)
   const [goalDetailsOpen, setGoalDetailsOpen] = useState(false)
@@ -2903,11 +2888,6 @@ export function ChatContainer({
     return filterCoordinatorNoiseMessages(cleanedMessages)
   }, [threadMessages, streamData.liveMessages, messageTimes])
 
-  const userMessageIds = useMemo(
-    () => displayMessages.filter((message) => message.role === "user").map((message) => message.id),
-    [displayMessages]
-  )
-
   const lastContentMessageId = useMemo(() => {
     for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
       const message = displayMessages[index]
@@ -2915,35 +2895,6 @@ export function ChatContainer({
     }
     return null
   }, [displayMessages])
-
-  const userQuestions = useMemo<ChatScrollQuestion[]>(
-    () =>
-      displayMessages
-        .filter((message) => message.role === "user")
-        .map((message) => ({
-          id: message.id,
-          preview: getQuestionPreview(message.content)
-        })),
-    [displayMessages]
-  )
-
-  const setMessageRef = useCallback(
-    (messageId: string, role: Message["role"]) =>
-      (node: HTMLDivElement | null): void => {
-        if (node && role === "user") {
-          userMessageRefs.current.set(messageId, node)
-        } else {
-          userMessageRefs.current.delete(messageId)
-        }
-
-        if (node && role !== "tool") {
-          contentMessageRefs.current.set(messageId, node)
-          return
-        }
-        contentMessageRefs.current.delete(messageId)
-      },
-    []
-  )
 
   // Build tool results map from tool messages
   const toolResults = useMemo(() => {
@@ -3031,78 +2982,6 @@ export function ChatContainer({
     ) as HTMLDivElement | null
   }, [])
 
-  const getElementTopInViewport = useCallback(
-    (element: HTMLElement, viewport: HTMLElement): number => {
-      const elementRect = element.getBoundingClientRect()
-      const viewportRect = viewport.getBoundingClientRect()
-      return elementRect.top - viewportRect.top + viewport.scrollTop
-    },
-    []
-  )
-
-  const scrollToUserQuestionByIndex = useCallback(
-    (index: number): void => {
-      if (index < 0 || index >= userMessageIds.length) return
-
-      const viewport = getViewport()
-      if (!viewport) return
-
-      const messageId = userMessageIds[index]
-      const targetElement = userMessageRefs.current.get(messageId)
-      if (!targetElement) return
-
-      const targetTop = Math.max(0, getElementTopInViewport(targetElement, viewport) - 8)
-      requestedUserQuestionIndexRef.current = index
-      if (requestedUserQuestionTimerRef.current) {
-        clearTimeout(requestedUserQuestionTimerRef.current)
-      }
-      requestedUserQuestionTimerRef.current = setTimeout(() => {
-        requestedUserQuestionIndexRef.current = null
-      }, 700)
-      viewport.scrollTo({ top: targetTop, behavior: "smooth" })
-      isAtBottomRef.current = false
-      setActiveUserQuestionIndex(index)
-    },
-    [getElementTopInViewport, getViewport, userMessageIds]
-  )
-
-  const getCurrentUserQuestionIndex = useCallback((): number => {
-    const viewport = getViewport()
-    if (!viewport || userMessageIds.length === 0) return -1
-
-    const { scrollTop, scrollHeight, clientHeight } = viewport
-    const nearBottom = scrollHeight - scrollTop - clientHeight < 80
-    const viewportAnchor = scrollTop + 24
-    const viewportBottomAnchor = scrollTop + clientHeight - 80
-    let currentIndex = -1
-
-    for (let i = 0; i < userMessageIds.length; i += 1) {
-      const messageId = userMessageIds[i]
-      const targetElement = userMessageRefs.current.get(messageId)
-      if (!targetElement) continue
-
-      const top = getElementTopInViewport(targetElement, viewport)
-      if (top <= viewportAnchor) {
-        currentIndex = i
-      } else {
-        break
-      }
-    }
-
-    if (nearBottom) {
-      for (let i = userMessageIds.length - 1; i >= 0; i -= 1) {
-        const messageId = userMessageIds[i]
-        const targetElement = userMessageRefs.current.get(messageId)
-        if (!targetElement) continue
-
-        const top = getElementTopInViewport(targetElement, viewport)
-        if (top <= viewportBottomAnchor) return i
-      }
-    }
-
-    return currentIndex
-  }, [getElementTopInViewport, getViewport, userMessageIds])
-
   // Track scroll position to determine if user is at bottom
   const handleScroll = useCallback((): void => {
     const viewport = getViewport()
@@ -3112,12 +2991,7 @@ export function ChatContainer({
     // Consider "at bottom" if within 50px of the bottom
     const threshold = 50
     isAtBottomRef.current = scrollHeight - scrollTop - clientHeight < threshold
-    if (requestedUserQuestionIndexRef.current !== null) {
-      setActiveUserQuestionIndex(requestedUserQuestionIndexRef.current)
-      return
-    }
-    setActiveUserQuestionIndex(getCurrentUserQuestionIndex())
-  }, [getCurrentUserQuestionIndex, getViewport])
+  }, [getViewport])
 
   // Attach scroll listener to viewport
   useEffect(() => {
@@ -3127,21 +3001,6 @@ export function ChatContainer({
     viewport.addEventListener("scroll", handleScroll)
     return () => viewport.removeEventListener("scroll", handleScroll)
   }, [getViewport, handleScroll])
-
-  useEffect(() => {
-    return () => {
-      if (requestedUserQuestionTimerRef.current) {
-        clearTimeout(requestedUserQuestionTimerRef.current)
-      }
-    }
-  }, [])
-
-  useEffect(() => {
-    const frame = requestAnimationFrame(() => {
-      setActiveUserQuestionIndex(getCurrentUserQuestionIndex())
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [getCurrentUserQuestionIndex, userMessageIds.length])
 
   // Auto-scroll on new messages only if already at bottom
   useEffect(() => {
@@ -4871,15 +4730,25 @@ export function ChatContainer({
       {skillIntentBanner}
       {nuxDialog}
 
-      <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
-        <div
-          className={cn("p-4", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}
-          style={
-            userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined
-          }
-        >
-          <div className="max-w-3xl mx-auto space-y-4">
-            {historyLoading && displayMessages.length === 0 && (
+      <ChatScrollNavigator
+        messages={displayMessages}
+        scrollContainerRef={scrollRef}
+        rightPanelCollapsed={rightPanelCollapsed}
+        onScrollToQuestion={() => {
+          isAtBottomRef.current = false
+        }}
+      >
+        {({ reserveRightSpace, setMessageRef }) => (
+          <>
+            <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
+              <div
+                className={cn("p-4", reserveRightSpace && "md:pr-20")}
+                style={
+                  userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined
+                }
+              >
+                <div className="max-w-3xl mx-auto space-y-4">
+                  {historyLoading && displayMessages.length === 0 && (
               <div
                 className="flex min-h-[42vh] items-center justify-center px-4"
                 aria-live="polite"
@@ -5135,55 +5004,61 @@ export function ChatContainer({
                 )}
               </div>
             )}
-            {displayMessages.map((message, index) => {
-              const previousMessage = index > 0 ? displayMessages[index - 1] : null
-              const isLastMessage = index === displayMessages.length - 1
-              const nextNonToolMessage =
-                displayMessages.slice(index + 1).find((m) => m.role !== "tool") ?? null
-              const showAssistantMeta =
-                message.role !== "assistant" ||
-                !nextNonToolMessage ||
-                nextNonToolMessage.role !== "assistant"
+                  {displayMessages.map((message, index) => {
+                    const previousMessage = index > 0 ? displayMessages[index - 1] : null
+                    const isLastMessage = index === displayMessages.length - 1
+                    const nextNonToolMessage =
+                      displayMessages.slice(index + 1).find((m) => m.role !== "tool") ?? null
+                    const showAssistantMeta =
+                      message.role !== "assistant" ||
+                      !nextNonToolMessage ||
+                      nextNonToolMessage.role !== "assistant"
 
-              // Per-turn hook log chip: shown right under the user message
-              // that opened the turn, only when Hook logging is enabled and
-              // the bucket has at least one entry. Click opens the modal.
-              const hookLogBucketForTurn =
-                hookLogConfig.enabled && message.role === "user"
-                  ? hookLogBucketByTurnId.get(message.id)
-                  : undefined
-              return (
-                <div
-                  key={message.id}
-                  ref={setMessageRef(message.id, message.role)}
-                  data-message-role={message.role}
-                >
-                  <MessageBubble
-                    durationMap={durationMap}
-                    message={message}
-                    previousMessage={previousMessage}
-                    isStreaming={isLastMessage && isLoading}
-                    showAssistantMeta={showAssistantMeta}
-                    toolResults={toolResults}
-                    toolCallStates={toolCallDisplayStates}
-                    pendingApproval={pendingApproval}
-                    onApprovalDecision={handleApprovalDecision}
-                    onEditUserMessage={handleEditUserMessage}
-                    onSetGoalFromMessage={handleSetGoalFromMessage}
-                    threadId={threadId}
-                    isLoading={isLoading}
-                  />
-                  {hookLogBucketForTurn && hookLogBucketForTurn.entries.length > 0 && (
-                    <div className="mt-1 ml-12">
-                      <HookLogChip
-                        bucket={hookLogBucketForTurn}
-                        onClick={() => setOpenHookLogBucketId(hookLogBucketForTurn.turnId)}
-                      />
-                    </div>
-                  )}
-                </div>
-              )
-            })}
+                    // Per-turn hook log chip: shown right under the user message
+                    // that opened the turn, only when Hook logging is enabled and
+                    // the bucket has at least one entry. Click opens the modal.
+                    const hookLogBucketForTurn =
+                      hookLogConfig.enabled && message.role === "user"
+                        ? hookLogBucketByTurnId.get(message.id)
+                        : undefined
+                    const navigatorRef = setMessageRef(message.id, message.role)
+                    const combinedRef = (node: HTMLDivElement | null): void => {
+                      navigatorRef(node)
+                      if (node && message.role !== "tool") {
+                        contentMessageRefs.current.set(message.id, node)
+                        return
+                      }
+                      contentMessageRefs.current.delete(message.id)
+                    }
+
+                    return (
+                      <div key={message.id} ref={combinedRef} data-message-role={message.role}>
+                        <MessageBubble
+                          durationMap={durationMap}
+                          message={message}
+                          previousMessage={previousMessage}
+                          isStreaming={isLastMessage && isLoading}
+                          showAssistantMeta={showAssistantMeta}
+                          toolResults={toolResults}
+                          toolCallStates={toolCallDisplayStates}
+                          pendingApproval={pendingApproval}
+                          onApprovalDecision={handleApprovalDecision}
+                          onEditUserMessage={handleEditUserMessage}
+                          onSetGoalFromMessage={handleSetGoalFromMessage}
+                          threadId={threadId}
+                          isLoading={isLoading}
+                        />
+                        {hookLogBucketForTurn && hookLogBucketForTurn.entries.length > 0 && (
+                          <div className="mt-1 ml-12">
+                            <HookLogChip
+                              bucket={hookLogBucketForTurn}
+                              onClick={() => setOpenHookLogBucketId(hookLogBucketForTurn.turnId)}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
 
             {/*测试git diff功能*/}
             {/*<DisplayDiffTest/>*/}
@@ -5303,28 +5178,16 @@ export function ChatContainer({
                 </button>
               </div>
             )}
-          </div>
-        </div>
-      </ScrollArea>
-      {userQuestions.length > 0 && (
-        <ChatScrollNavigator
-          questions={userQuestions}
-          activeQuestionIndex={activeUserQuestionIndex}
-          onScrollToQuestion={scrollToUserQuestionByIndex}
-        />
-      )}
-      {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
-      {(showSaveToolMetadataLoading ||
-        (pendingApproval &&
-          Boolean(
-            (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId
-          ))) && (
-        <div
-          className={cn(
-            "px-4 pb-2",
-            userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
-          )}
-        >
+                </div>
+              </div>
+            </ScrollArea>
+            {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
+            {(showSaveToolMetadataLoading ||
+              (pendingApproval &&
+                Boolean(
+                  (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId
+                ))) && (
+              <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>
           {showSaveToolMetadataLoading && (
             <div className="max-w-3xl mx-auto mb-2 flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-700 shadow-sm dark:text-emerald-300">
               <Loader2 className="size-3.5 animate-spin" />
@@ -5548,32 +5411,27 @@ export function ChatContainer({
                 </div>
               )
             })()}
-        </div>
-      )}
-      {goalUi.goal && (
-        <div
-          className={cn(
-            "px-4 pb-1",
-            userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
-          )}
-        >
-          <GoalStatusPanel
-            goalUi={goalUi}
-            open={goalDetailsOpen}
-            onOpenChange={setGoalDetailsOpen}
-            onCommand={applyGoalPanelCommand}
-            onEditGoal={handleEditGoal}
-          />
-        </div>
-      )}
-      {/* Input */}
-      <div
-        className={cn(
-          "px-4 pb-4",
-          goalUi.goal ? "pt-1" : "pt-4",
-          userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
-        )}
-      >
+              </div>
+            )}
+            {goalUi.goal && (
+              <div className={cn("px-4 pb-1", reserveRightSpace && "md:pr-20")}>
+                <GoalStatusPanel
+                  goalUi={goalUi}
+                  open={goalDetailsOpen}
+                  onOpenChange={setGoalDetailsOpen}
+                  onCommand={applyGoalPanelCommand}
+                  onEditGoal={handleEditGoal}
+                />
+              </div>
+            )}
+            {/* Input */}
+            <div
+              className={cn(
+                "px-4 pb-4",
+                goalUi.goal ? "pt-1" : "pt-4",
+                reserveRightSpace && "md:pr-20"
+              )}
+            >
         {showGitChangeNotice && (
           <div className="max-w-3xl mx-auto mb-2 flex items-center justify-between gap-3 rounded-xl border border-status-warning/40 bg-status-warning/10 px-3 py-2">
             <div className="min-w-0 flex items-center gap-2 text-[12px] text-foreground">
@@ -5837,7 +5695,10 @@ export function ChatContainer({
             </div>
           </div>
         </form>
-      </div>
+            </div>
+          </>
+        )}
+      </ChatScrollNavigator>
       <HookLogModal
         bucket={openHookLogBucket}
         open={openHookLogBucketId !== null}
