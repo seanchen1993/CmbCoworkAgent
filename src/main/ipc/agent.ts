@@ -4417,8 +4417,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const userHumanMessage = isCoordinatorNotificationTurn
           ? undefined
           : effectiveMessage === message
-            ? new HumanMessage(effectiveMessage)
+            ? new HumanMessage({
+                id: userMessageId,
+                content: effectiveMessage
+              })
             : new HumanMessage({
+                id: userMessageId,
                 content: effectiveMessage,
                 additional_kwargs: {
                   [COORDINATOR_AUGMENTED_USER_MESSAGE_KEY]: true,

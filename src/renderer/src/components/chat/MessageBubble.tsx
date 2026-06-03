@@ -1,5 +1,4 @@
 import type { Message, HITLRequest, ToolCallState, ToolCallStatus } from "@/types"
-import type { TurnTiming } from "@/lib/thread-context"
 import { ToolCallRenderer } from "./ToolCallRenderer"
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { getToolLabel } from "@/lib/tool-labels"
@@ -34,16 +33,6 @@ import {
 import { getWorkerToolResultKey, getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import { DurationShow } from "./DurationShow"
 import { isGoalClearAlias } from "../../../../shared/goal-slash"
-
-function formatSendTime(sendTime?: number): string | null {
-  if (typeof sendTime !== "number" || !Number.isFinite(sendTime)) return null
-
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false
-  }).format(new Date(sendTime))
-}
 
 /**
  * Strip the trailing `<CMBDEVCLAW-SKILL-USE-V1>…</…>` block when present.
@@ -561,7 +550,7 @@ interface MessageBubbleProps {
   threadId: string
   isLoading: boolean
   assistantDurationMs?: number
-  durationMap?: TurnTiming[]
+  userSendTimeLabel?: string | null
 }
 
 export function MessageBubble({
@@ -577,7 +566,8 @@ export function MessageBubble({
   onSetGoalFromMessage,
   threadId,
   isLoading,
-  durationMap
+  assistantDurationMs,
+  userSendTimeLabel = null
 }: MessageBubbleProps): React.JSX.Element | null {
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
@@ -607,21 +597,9 @@ export function MessageBubble({
     (!previousMessage || previousMessage.role === "user" || previousMessage.role === "system")
 
   const duration = useMemo(() => {
-    if (shouldShowMessageHead && durationMap?.length && previousMessage?.id) {
-      const target = durationMap.find(
-        (it) => it.thread_id === threadId && previousMessage.id === it.user_id
-      )
-      return target?.duration
-    }
-    return 0
-  }, [durationMap, threadId, previousMessage, shouldShowMessageHead])
-
-  const userSendTimeLabel = useMemo(() => {
-    if (!isUser || !durationMap?.length) return null
-
-    const target = durationMap.find((it) => it.thread_id === threadId && it.user_id === message.id)
-    return formatSendTime(target?.sendTime)
-  }, [durationMap, isUser, message.id, threadId])
+    if (!shouldShowMessageHead || typeof assistantDurationMs !== "number") return 0
+    return assistantDurationMs
+  }, [assistantDurationMs, shouldShowMessageHead])
 
   // 切换工具调用详情的展开状态
   const toggleToolExpansion = (toolId: string, defaultExpanded = false) => {
@@ -953,7 +931,7 @@ export function MessageBubble({
             <circle cx="76" cy="34" r="2.5" fill="#00e5cc" />
           </svg>
           <span className="text-xs font-medium text-muted-foreground">CMBDevClaw</span>
-          <DurationShow durationMs={duration} text="耗时" />
+          {!isLoading &&  <DurationShow durationMs={duration} text="耗时" />}
         </div>
       )}
       <div className="flex-1 min-w-0 space-y-2 overflow-hidden pl-7">
