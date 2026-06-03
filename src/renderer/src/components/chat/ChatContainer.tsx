@@ -149,7 +149,7 @@ import {
 } from "@/lib/submit-in-flight-lock"
 import { groupWelcomeSkills } from "./skill-grouping"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
-import { DurationShow } from "./DurationShow"
+import { ProcessingDuration } from "./ProcessingDuration"
 
 type WelcomeSkillCard = {
   skill: SkillMetadata
@@ -1641,7 +1641,6 @@ export function ChatContainer({
   const [nuxLoadingStep, setNuxLoadingStep] = useState(0)
 
   const [durationMap, setDurationMap] = useState<TurnTiming[]>([])
-  const [durationNow, setDurationNow] = useState(0)
 
   const NUX_LOADING_STEPS: string[] = [
     "正在准备沙箱环境...",
@@ -2046,6 +2045,7 @@ export function ChatContainer({
     historyLoading,
     scheduledTaskId,
     modelRetry,
+    activeTurnStartTime,
     setToolCallState,
     setTodos,
     clearPendingApprovals,
@@ -2053,6 +2053,7 @@ export function ChatContainer({
     setPendingApproval,
     setPendingUserInput,
     setTurnTimings,
+    setActiveTurnStartTime,
     appendMessage,
     refreshGoalUi,
     setError,
@@ -3832,18 +3833,8 @@ export function ChatContainer({
         setAgentMode("coordinator")
       }
 
-      // 用户消息本身不消耗 assistant 响应时间，start_at/end_at 都取发送时刻。
-      //
-      // 但 user.start_at 是本轮耗时计算的起点：展示 CMBDevClaw 后面的 duration 时，会找到
-      // 当前 user 后面的第一条 assistant，再减到下一个 user 之前最后一条消息的 end_at。
-      // 所以 user 也必须持久化 start_at/end_at，否则重启后无法还原该轮起点。
       let visibleUserMessage: Message | null = null
       if (shouldAppendVisibleUserMessage) {
-        // 用户消息也需要持久化起止时间，后续 duration 用 user.start_at 作为起点。
-        //
-        // 这里先立即写入 thread_values，是为了尽量保证即使 assistant 回复还没结束，
-        // 当前 user 的起点也已经保存下来；assistant/tool 的结束时间会在 loading 结束后补齐。
-        //
         // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。user message 在前端先 append，
         // checkpoint 恢复时 id 可能不一定完全一致；因此仍需要顺序数组作为兜底。
         visibleUserMessage = await appendVisibleUserMessageWithTime(displayContent, {
@@ -3879,11 +3870,8 @@ export function ChatContainer({
         }
       }
 
-      const startTime = Date.now()
-      setDurationNow(0)
-      const timer = setInterval(() => {
-        setDurationNow((t) => t + 1)
-      }, 1000)
+    const startTime = Date.now()
+    setActiveTurnStartTime(startTime)
 
       try {
         await stream.submit(
@@ -3902,27 +3890,25 @@ export function ChatContainer({
         }
       )
       } finally {
-        setDurationNow(0)
-        clearInterval(timer)
-      }
-
-      if (visibleUserMessage) {
-        const endTime = Date.now()
-        const map = {
-          duration: endTime - startTime,
-          thread_id: threadId,
-          user_id: visibleUserMessage.id,
-          sendTime: startTime
+        if (visibleUserMessage) {
+          const endTime = Date.now()
+          const map = {
+            duration: endTime - startTime,
+            thread_id: threadId,
+            user_id: visibleUserMessage.id,
+            sendTime: startTime
+          }
+          const nextDurationMap = [
+            ...durationMap.filter(
+              (item) => !(item.thread_id === threadId && item.user_id === visibleUserMessage.id)
+            ),
+            map
+          ]
+          setDurationMap(nextDurationMap)
+          setTurnTimings(nextDurationMap)
+          setActiveTurnStartTime(null)
         }
-        const nextDurationMap = [
-          ...durationMap.filter(
-            (item) => !(item.thread_id === threadId && item.user_id === visibleUserMessage.id)
-          ),
-          map
-        ]
-        setDurationMap(nextDurationMap)
-        setTurnTimings(nextDurationMap)
-      }
+     }
     } finally {
       releaseSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)
     }
@@ -5250,7 +5236,13 @@ export function ChatContainer({
                   >
                     {THINKING_MESSAGES[thinkingMessageIndex]}
                   </span>
-                  <DurationShow text={"已处理"} durationMs={durationNow * 1000} />
+                  {
+                   streamData.isLoading &&  <ProcessingDuration
+                      key={threadId}
+                      startTime={activeTurnStartTime}
+                      text="已处理"
+                    />
+                  }
                 </div>
                 {todos.length > 0 && <ChatTodos todos={todos} />}
               </div>

@@ -382,6 +382,7 @@ export interface ThreadState {
   messages: Message[]
   turnTimings: TurnTiming[]
   goalUi: GoalUiState
+  activeTurnStartTime: number | null
   todos: Todo[]
   workspaceFiles: FileInfo[]
   workspacePath: string | null
@@ -462,6 +463,7 @@ export interface ThreadActions {
   setTurnTimings: (turnTimings: TurnTiming[], options?: SetTurnTimingsOptions) => void
   setGoalUi: (goalUi: GoalUiState) => void
   refreshGoalUi: (options?: { includeEvents?: boolean }) => Promise<void>
+  setActiveTurnStartTime: (startTime: number | null) => void
   setTodos: (todos: Todo[]) => void
   setWorkspaceFiles: (files: FileInfo[] | ((prev: FileInfo[]) => FileInfo[])) => void
   setWorkspacePath: (path: string | null) => void
@@ -514,6 +516,7 @@ const createDefaultThreadState = (): ThreadState => ({
   messages: [],
   turnTimings: [],
   goalUi: { goal: null, events: [], lastUpdated: null },
+  activeTurnStartTime: null,
   todos: [],
   workspaceFiles: [],
   workspacePath: null,
@@ -2458,6 +2461,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           updateThreadState(threadId, () => ({ goalUi }))
         },
         refreshGoalUi: (options = {}) => refreshGoalUi(threadId, options),
+        setActiveTurnStartTime: (startTime: number | null) => {
+          updateThreadState(threadId, () => ({ activeTurnStartTime: startTime }))
+        },
         setTodos: (todos: Todo[]) => {
           updateThreadState(threadId, () => ({ todos }))
         },
