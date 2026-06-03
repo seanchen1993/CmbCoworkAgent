@@ -990,12 +990,20 @@ function normalizeSkillList(skills: string[]): string[] {
 }
 
 async function fetchCommitAdoptionMap(
-  commitShas: string[],
-  range: TimeRange
+  commitShas: string[]
 ): Promise<Map<string, CommitAdoptionSummary>> {
   const normalizedCommitShas = normalizeSkillList(commitShas).slice(0, 100)
   if (normalizedCommitShas.length === 0) return new Map()
 
+  // NOTE: deliberately NO time-range filter here. The `commitSha` terms clause is
+  // already a precise, globally-unique selector for the exact commits in the
+  // visible (eventTime-filtered) list. A `code_adopt` event is timestamped at
+  // *commit* time but carries `generatedAt` = the *generation* time, which can
+  // predate the commit by up to the attribution window (≈7 days). Filtering by
+  // `generatedAt` within the commit-list range would drop adoption rows for any
+  // commit whose code was generated before the window started — making the
+  // commit show up in the list with an empty 采纳率. Matching on commitSha alone
+  // is both correct and safe.
   const body = {
     size: 0,
     query: {
@@ -1005,7 +1013,6 @@ async function fetchCommitAdoptionMap(
           { exists: { field: "properties.adoptedLineCount" } },
           { exists: { field: "properties.generatedLineCount" } },
           { exists: { field: "properties.effectiveGeneratedLineCount" } },
-          timeRangeFilter("properties.generatedAt", range),
           { terms: { "properties.commitSha": normalizedCommitShas } }
         ]
       }
@@ -2433,8 +2440,7 @@ async function fetchCommitDetails(
   const hits = raw.hits?.hits ?? []
   const items = hits.map(normalizeCommitDetail)
   const adoptionMap = await fetchCommitAdoptionMap(
-    items.map((item) => item.commitSha ?? "").filter(Boolean),
-    range
+    items.map((item) => item.commitSha ?? "").filter(Boolean)
   )
   return {
     total: getTotalHits(raw, hits.length),
