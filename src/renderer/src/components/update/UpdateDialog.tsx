@@ -98,10 +98,13 @@ export function UpdateDialog({
           setProgress(s.progress)
           setStage("downloading")
         } else if (s.status === "downloaded" && s.update) {
+          // Don't self-open: UpdateActionButton owns the per-version auto-open
+          // coordination so card/tag variants and any future mount points stay
+          // consistent. We just hydrate stage so an already-open dialog shows
+          // the correct UI.
           setUpdateInfo(s.update)
           setProgress(null)
           setStage("downloaded")
-          onOpenChange(true)
         } else if (s.status === "error" && s.update) {
           setUpdateInfo(s.update)
           setProgress(null)
@@ -144,7 +147,11 @@ export function UpdateDialog({
       )
       setProgress(null)
       setStage("downloaded")
-      onOpenChange(true) // always pop up when download completes
+      // Don't self-open here. UpdateActionButton owns the per-version auto-open
+      // gate (autoOpenedVersions Set) and will set dialogOpen=true. Opening
+      // ourselves would bypass that coordination if/when the dialog is ever
+      // mounted while closed (e.g. variant="card", which keeps UpdateDialog
+      // mounted regardless of dialogOpen).
     })
 
     const removeError = api.onError((err) => {
@@ -266,14 +273,14 @@ export function UpdateDialog({
     <Dialog
       open={open}
       onOpenChange={(v) => {
-        if (!v && stage === "installing") return
-        if (!v && stage === "downloading") {
-          handleHideDownloading()
-          return
-        }
-        if (!v && isMandatory && stage !== "downloaded") return
-        if (!v) handleDismiss()
-        else onOpenChange(v)
+        if (v) return onOpenChange(true)
+        if (stage === "installing") return
+        if (stage === "downloading") return handleHideDownloading()
+        // Keep main process state so the sidebar tag stays red and the user
+        // can re-open this dialog later to install.
+        if (stage === "downloaded") return onOpenChange(false)
+        if (isMandatory) return
+        handleDismiss()
       }}
     >
       <DialogContent className="sm:max-w-md">
@@ -405,7 +412,7 @@ export function UpdateDialog({
 
             <DialogFooter>
               {!isMandatory && (
-                <Button variant="outline" onClick={handleDismiss}>
+                <Button variant="outline" onClick={() => onOpenChange(false)}>
                   稍后重启
                 </Button>
               )}
