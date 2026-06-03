@@ -11,11 +11,34 @@ import {
   Loader2,
   AlertCircle,
   Plug,
-  CircleAlert
+  CircleAlert,
+  Code2,
+  Gauge
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
-import type { DashboardProjectModeData, DashboardProjectModeProject } from "../use-dashboard"
+import {
+  CodeAdoptionFunnel,
+  SearchableRankingPanel,
+  type CodeAdoptionFunnelData,
+  type RankingItem
+} from "./dashboard-shared"
+import type {
+  DashboardProjectModeData,
+  DashboardProjectModeProject,
+  DashboardProjectModeSkillCount
+} from "../use-dashboard"
+
+const EMPTY_FUNNEL_DATA: CodeAdoptionFunnelData = {
+  inclusiveEffectiveGeneratedLines: 0,
+  effectiveGeneratedLines: 0,
+  pushedEffectiveGeneratedLines: 0,
+  adoptedLines: 0,
+  pushedAdoptedLines: 0,
+  inclusiveAdoptionRate: null,
+  measuredAdoptionRate: null,
+  pushedAdoptionRate: null
+}
 
 function formatNumber(value: number): string {
   return Math.round(value).toLocaleString("zh-CN")
@@ -25,6 +48,11 @@ function formatCompact(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
   return String(Math.round(value))
+}
+
+function formatPercent(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "—"
+  return `${(value * 100).toFixed(1)}%`
 }
 
 function StatCard({
@@ -154,6 +182,9 @@ function ProjectRow({
         <td className="px-3 py-2 text-right font-medium tabular-nums">
           {formatNumber(project.conversationCount)}
         </td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          {formatPercent(project.codeStats?.measuredAdoptionRate)}
+        </td>
         <td className="px-3 py-2 text-right">
           <button
             type="button"
@@ -170,39 +201,86 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={7} className="px-3 py-3">
-            {project.features.length === 0 ? (
-              <div className="text-xs text-muted-foreground">该项目暂无功能记录</div>
-            ) : (
-              <div className="space-y-2">
-                {project.features.map((feature) => (
-                  <div
-                    key={feature.slug}
-                    className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs"
-                  >
-                    <span className="font-medium text-foreground">{feature.title}</span>
-                    {feature.statusLabel && (
-                      <Badge variant="outline" className="normal-case tracking-normal">
-                        {feature.statusLabel}
-                      </Badge>
-                    )}
-                    {feature.currentNodeStatusLabel && (
-                      <span className="text-muted-foreground">
-                        当前节点：{feature.currentNodeStatusLabel}
-                      </span>
-                    )}
-                    {feature.summary && (
-                      <span className="truncate text-muted-foreground" title={feature.summary}>
-                        · {feature.summary}
-                      </span>
-                    )}
-                  </div>
-                ))}
+          <td colSpan={8} className="px-3 py-3">
+            <div className="space-y-3">
+              {/* 常用技能 + 采纳明细 */}
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-muted-foreground">常用技能：</span>
+                  {project.topSkills.length === 0 ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : (
+                    <SkillChips skills={project.topSkills} />
+                  )}
+                </div>
+                <div className="flex items-center gap-3 text-muted-foreground">
+                  <span>
+                    生成行数{" "}
+                    <span className="font-medium text-foreground">
+                      {formatNumber(project.codeStats?.effectiveGeneratedLines ?? 0)}
+                    </span>
+                  </span>
+                  <span>
+                    采纳行数{" "}
+                    <span className="font-medium text-foreground">
+                      {formatNumber(project.codeStats?.adoptedLines ?? 0)}
+                    </span>
+                  </span>
+                  <span>
+                    采纳率{" "}
+                    <span className="font-medium text-foreground">
+                      {formatPercent(project.codeStats?.measuredAdoptionRate)}
+                    </span>
+                  </span>
+                </div>
               </div>
-            )}
+
+              {/* 功能状态 */}
+              {project.features.length === 0 ? (
+                <div className="text-xs text-muted-foreground">该项目暂无功能记录</div>
+              ) : (
+                <div className="space-y-2">
+                  {project.features.map((feature) => (
+                    <div
+                      key={feature.slug}
+                      className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs"
+                    >
+                      <span className="font-medium text-foreground">{feature.title}</span>
+                      {feature.statusLabel && (
+                        <Badge variant="outline" className="normal-case tracking-normal">
+                          {feature.statusLabel}
+                        </Badge>
+                      )}
+                      {feature.currentNodeStatusLabel && (
+                        <span className="text-muted-foreground">
+                          当前节点：{feature.currentNodeStatusLabel}
+                        </span>
+                      )}
+                      {feature.summary && (
+                        <span className="truncate text-muted-foreground" title={feature.summary}>
+                          · {feature.summary}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </td>
         </tr>
       )}
+    </>
+  )
+}
+
+function SkillChips({ skills }: { skills: DashboardProjectModeSkillCount[] }): React.JSX.Element {
+  return (
+    <>
+      {skills.map((item) => (
+        <Badge key={item.skill} variant="outline" className="normal-case tracking-normal">
+          {item.skill} · {formatNumber(item.count)}
+        </Badge>
+      ))}
     </>
   )
 }
@@ -240,56 +318,119 @@ export function ProjectModePanel({
   const summary = data?.summary
   const adapters = data?.adapters ?? []
   const projects = data?.projects ?? []
+  const funnelData: CodeAdoptionFunnelData = summary?.codeStats ?? EMPTY_FUNNEL_DATA
+  const skillItems: RankingItem[] = (data?.topSkills ?? []).map((item) => ({
+    name: item.skill,
+    count: item.count
+  }))
 
   return (
     <div className="space-y-6">
-      {/* Summary metrics */}
+      {/* 概览卡片（左）+ 代码采纳漏斗（右），与平台运营概览一致 */}
       <section>
-        <h2 className="mb-3 text-sm font-semibold text-foreground">项目模式概览</h2>
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-          <StatCard
-            icon={Boxes}
-            label="项目总数"
-            value={formatNumber(summary?.projectCount ?? 0)}
-            color="bg-blue-500"
-          />
-          <StatCard
-            icon={Layers}
-            label="功能总数"
-            value={formatNumber(summary?.featureCount ?? 0)}
-            color="bg-indigo-500"
-          />
-          <StatCard
-            icon={Activity}
-            label="活跃项目"
-            value={formatNumber(summary?.activeProjectCount ?? 0)}
-            sub="时间范围内有对话"
-            color="bg-emerald-500"
-          />
-          <StatCard
-            icon={MessagesSquare}
-            label="项目对话数"
-            value={formatNumber(summary?.conversationCount ?? 0)}
-            color="bg-violet-500"
-          />
-          <StatCard
-            icon={Wrench}
-            label="工具调用"
-            value={formatNumber(summary?.totalToolCalls ?? 0)}
-            color="bg-amber-500"
-          />
-          <StatCard
-            icon={Cpu}
-            label="Token"
-            value={formatCompact(summary?.totalTokens ?? 0)}
-            color="bg-rose-500"
-          />
+        <h2 className="mb-3 text-sm font-semibold text-foreground">项目运营概览</h2>
+        <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3">
+          <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-3 xl:grid-cols-5">
+            <StatCard
+              icon={Boxes}
+              label="项目总数"
+              value={formatNumber(summary?.projectCount ?? 0)}
+              color="bg-blue-500"
+            />
+            <StatCard
+              icon={Layers}
+              label="功能总数"
+              value={formatNumber(summary?.featureCount ?? 0)}
+              color="bg-indigo-500"
+            />
+            <StatCard
+              icon={Activity}
+              label="活跃项目"
+              value={formatNumber(summary?.activeProjectCount ?? 0)}
+              sub="时间范围内有对话"
+              color="bg-emerald-500"
+            />
+            <StatCard
+              icon={MessagesSquare}
+              label="项目对话数"
+              value={formatNumber(summary?.conversationCount ?? 0)}
+              color="bg-violet-500"
+            />
+            <StatCard
+              icon={Wrench}
+              label="工具调用"
+              value={formatNumber(summary?.totalToolCalls ?? 0)}
+              color="bg-amber-500"
+            />
+            <StatCard
+              icon={Cpu}
+              label="Token"
+              value={formatCompact(summary?.totalTokens ?? 0)}
+              color="bg-rose-500"
+            />
+            <StatCard
+              icon={Code2}
+              label="代码生成行数"
+              value={formatNumber(summary?.codeStats?.generatedLines ?? 0)}
+              color="bg-sky-500"
+            />
+            <StatCard
+              icon={Gauge}
+              label="已Commit采纳率"
+              value={formatPercent(summary?.codeStats?.measuredAdoptionRate)}
+              sub={
+                summary?.codeStats
+                  ? `${formatNumber(summary.codeStats.adoptedLines)} / ${formatNumber(summary.codeStats.effectiveGeneratedLines)} 行`
+                  : "暂无代码生成数据"
+              }
+              color="bg-indigo-500"
+            />
+            <StatCard
+              icon={Gauge}
+              label="已 Push 采纳率"
+              value={formatPercent(summary?.codeStats?.pushedAdoptionRate)}
+              sub={
+                summary?.codeStats
+                  ? `${formatNumber(summary.codeStats.pushedAdoptedLines)} / ${formatNumber(summary.codeStats.pushedEffectiveGeneratedLines)} 行`
+                  : "暂无已 Push 数据"
+              }
+              color="bg-teal-500"
+            />
+            <StatCard
+              icon={Gauge}
+              label="含未提交采纳率"
+              value={formatPercent(summary?.codeStats?.inclusiveAdoptionRate)}
+              sub={
+                summary?.codeStats
+                  ? `${formatNumber(summary.codeStats.adoptedLines)} / ${formatNumber(summary.codeStats.inclusiveEffectiveGeneratedLines)} 行`
+                  : "暂无代码生成数据"
+              }
+              color="bg-cyan-500"
+            />
+          </div>
+          <CodeAdoptionFunnel data={funnelData} />
         </div>
+      </section>
+
+      {/* Skill 使用排行，与平台运营概览同款 */}
+      <section>
+        <h2 className="mb-3 text-sm font-semibold text-foreground">技能使用</h2>
+        <SearchableRankingPanel
+          title="Skill 使用"
+          totalKinds={summary?.distinctSkillCount ?? 0}
+          totalCalls={summary?.skillCallCount ?? 0}
+          defaultItems={skillItems}
+          searchItems={skillItems}
+          searchPlaceholder="搜索 Skill 名称"
+          emptyLabel="暂无 Skill 数据"
+          emptySearchLabel="未找到匹配的 Skill"
+          barColorClassName="bg-blue-500"
+        />
       </section>
 
       {/* Adapter distribution */}
       <section>
-        <h2 className="mb-3 text-sm font-semibold text-foreground">适配器分布</h2>
+        <h2 className="mb-3 text-sm font-semibold text-foreground">插件列表</h2>
         <div className="rounded-xl border border-border bg-card">
           {adapters.length === 0 ? (
             <div className="px-4 py-10 text-center text-sm text-muted-foreground">暂无数据</div>
@@ -348,6 +489,7 @@ export function ProjectModePanel({
                 <th className="px-3 py-2 text-left font-medium">兼容性</th>
                 <th className="px-3 py-2 text-right font-medium">功能数</th>
                 <th className="px-3 py-2 text-right font-medium">对话数</th>
+                <th className="px-3 py-2 text-right font-medium">采纳率</th>
                 <th className="px-3 py-2 text-right font-medium">操作</th>
               </tr>
             </thead>
@@ -365,7 +507,7 @@ export function ProjectModePanel({
               ))}
               {projects.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-3 py-10 text-center text-muted-foreground">
+                  <td colSpan={8} className="px-3 py-10 text-center text-muted-foreground">
                     暂无项目模式数据
                   </td>
                 </tr>

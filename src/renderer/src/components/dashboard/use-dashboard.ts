@@ -259,6 +259,11 @@ export interface DashboardProjectModeFeature {
   summary?: string
 }
 
+export interface DashboardProjectModeSkillCount {
+  skill: string
+  count: number
+}
+
 export interface DashboardProjectModeProject {
   projectId: string
   name: string
@@ -274,6 +279,8 @@ export interface DashboardProjectModeProject {
   conversationCount: number
   hasError: boolean
   features: DashboardProjectModeFeature[]
+  topSkills: DashboardProjectModeSkillCount[]
+  codeStats: DashboardCodeStats | null
 }
 
 export interface DashboardProjectModeAdapter {
@@ -291,8 +298,12 @@ export interface DashboardProjectModeData {
     conversationCount: number
     totalToolCalls: number
     totalTokens: number
+    skillCallCount: number
+    distinctSkillCount: number
+    codeStats: DashboardCodeStats | null
   }
   adapters: DashboardProjectModeAdapter[]
+  topSkills: DashboardProjectModeSkillCount[]
   projects: DashboardProjectModeProject[]
 }
 

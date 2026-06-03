@@ -9,8 +9,7 @@ import {
   Trash2,
   Gauge,
   Search,
-  X,
-  Info
+  X
 } from "lucide-react"
 import {
   ComposedChart,
@@ -25,6 +24,14 @@ import {
 } from "recharts"
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import {
+  CodeAdoptionFunnel,
+  InfoHint,
+  SearchableRankingPanel,
+  highlightRankingName,
+  sumRankingCounts,
+  type RankingItem
+} from "./dashboard-shared"
 import type { OverviewData } from "../use-dashboard"
 import { hasMarketSkill, normalizeMarketSkillKey } from "../skill-market"
 import {
@@ -113,98 +120,6 @@ function formatPercent(value: number | null): string {
 
 function formatExactNumber(n: number): string {
   return Math.round(n).toLocaleString("zh-CN")
-}
-
-// 代码采纳漏斗：真·漏斗形状（梯形逐级收窄）。
-// 漏斗宽度 = 各级生成行数（全部生成 → 已 Commit → 已 Push），标签 = 各级采纳率（越靠后越高）。
-function CodeAdoptionFunnel({ data }: { data: OverviewData }): React.JSX.Element {
-  const stages = [
-    {
-      key: "all",
-      label: "全部生成",
-      lines: data.codeInclusiveEffectiveGeneratedLines,
-      adoptedLines: data.codeAdoptedLines,
-      rate: data.codeInclusiveAdoptionRate,
-      color: "#06b6d4"
-    },
-    {
-      key: "commit",
-      label: "已 Commit",
-      lines: data.codeEffectiveGeneratedLines,
-      adoptedLines: data.codeAdoptedLines,
-      rate: data.codeMeasuredAdoptionRate,
-      color: "#3b82f6"
-    },
-    {
-      key: "push",
-      label: "已 Push",
-      lines: data.codePushedEffectiveGeneratedLines,
-      adoptedLines: data.codePushedAdoptedLines,
-      rate: data.codePushedAdoptionRate,
-      color: "#6366f1"
-    }
-  ]
-  const hasData = stages.some((s) => s.lines > 0)
-  const BAND_H = 40
-  // 各级生成行数量级可能相差很大（如全部生成 50k vs 已 Commit 6k）。
-  // 直接线性映射会让后段塌缩成不可见的细条、整体退化成三角形。
-  // 这里用平方根压缩比例，并设最小宽度下限，保证每段可见且仍“逐级收窄”。
-  const maxScaled = Math.max(...stages.map((s) => Math.sqrt(Math.max(0, s.lines))), 1)
-  const halfWidthOf = (lines: number): number =>
-    Math.max(9, (Math.sqrt(Math.max(0, lines)) / maxScaled) * 50)
-
-  return (
-    <div className="flex h-full flex-col rounded-xl border border-border bg-card p-4">
-      <h3 className="text-xs font-semibold text-foreground">代码采纳漏斗</h3>
-      <p className="mb-2 mt-0.5 text-[10px] leading-tight text-muted-foreground">
-        漏斗按各级生成行数依次收窄，标签为各级采纳率
-      </p>
-      {!hasData ? (
-        <div className="flex flex-1 items-center justify-center py-6 text-xs text-muted-foreground">
-          暂无代码生成数据
-        </div>
-      ) : (
-        <div className="flex flex-1 items-center gap-2.5">
-          {/* 漏斗形状：纯锥形，撑满左侧空间 */}
-          <div className="flex flex-1 flex-col">
-            {stages.map((s, i) => {
-              const topHalf = halfWidthOf(s.lines)
-              const next = stages[i + 1]
-              const botHalf = next ? halfWidthOf(next.lines) : topHalf * 0.5
-              const clip = `polygon(${50 - topHalf}% 0, ${50 + topHalf}% 0, ${50 + botHalf}% 100%, ${50 - botHalf}% 100%)`
-              return (
-                <div
-                  key={s.key}
-                  className="relative"
-                  style={{ height: BAND_H }}
-                  title={`${s.label}：生成 ${formatExactNumber(s.lines)} 行 · 采纳 ${formatExactNumber(s.adoptedLines)} 行 · 采纳率 ${formatPercent(s.rate)}`}
-                >
-                  <div className="absolute inset-0" style={{ clipPath: clip, background: s.color }} />
-                </div>
-              )
-            })}
-          </div>
-          {/* 右侧标签：百分比移到此处（带颜色），自身宽度紧贴右边 */}
-          <div className="flex shrink-0 flex-col">
-            {stages.map((s) => (
-              <div key={s.key} className="flex flex-col justify-center" style={{ height: BAND_H }}>
-                <div className="flex items-center gap-1.5 whitespace-nowrap text-[11px] font-medium text-foreground">
-                  <span className="inline-block size-2 shrink-0 rounded-sm" style={{ background: s.color }} />
-                  {s.label}
-                  <span className="font-semibold" style={{ color: s.color }}>
-                    {formatPercent(s.rate)}
-                  </span>
-                </div>
-                <div className="mt-0.5 whitespace-nowrap text-[10px] text-muted-foreground">
-                  生成 {formatNumber(s.lines)} / 采纳 {formatNumber(s.adoptedLines)}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  )
 }
 
 function InclusiveAdoptionTooltip({ data }: { data: OverviewData }) {
@@ -325,7 +240,9 @@ function GeneratedLinesTooltip(): React.JSX.Element {
         该指标表示原始生成量，包含后续被 agent 自己改写的中间稿。
       </div>
       <div className="text-muted-foreground">
-        以下文件不纳入统计：非代码文件（如 Markdown、JSON、图片等）、锁文件（package-lock.json、pnpm-lock.yaml、yarn.lock）、压缩/构建产物（.min.js/.min.css、.map）、依赖与构建目录（node_modules、dist、build 等）。
+        以下文件不纳入统计：非代码文件（如
+        Markdown、JSON、图片等）、锁文件（package-lock.json、pnpm-lock.yaml、yarn.lock）、压缩/构建产物（.min.js/.min.css、.map）、依赖与构建目录（node_modules、dist、build
+        等）。
       </div>
     </div>
   )
@@ -344,69 +261,6 @@ function SkillUsageTooltip(): React.JSX.Element {
       </div>
     </div>
   )
-}
-
-function InfoHint({ content }: { content: React.ReactNode }): React.JSX.Element {
-  return (
-    <TooltipProvider delayDuration={150}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            className="inline-flex size-4 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground"
-            aria-label="查看说明"
-          >
-            <Info className="size-3.5" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent className="max-w-72">{content}</TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  )
-}
-
-type RankingItem = {
-  name: string
-  count: number
-}
-
-function normalizeRankingLookup(value: string): string {
-  return value.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim()
-}
-
-function matchesRankingQuery(name: string, query: string): boolean {
-  const trimmed = query.trim()
-  if (!trimmed) return true
-
-  const rawQuery = trimmed.toLowerCase()
-  const normalizedQuery = normalizeRankingLookup(trimmed)
-  return (
-    name.toLowerCase().includes(rawQuery) || normalizeRankingLookup(name).includes(normalizedQuery)
-  )
-}
-
-function highlightRankingName(name: string, query: string): React.ReactNode {
-  const trimmed = query.trim()
-  if (!trimmed) return name
-
-  const rawName = name.toLowerCase()
-  const rawQuery = trimmed.toLowerCase()
-  const matchIndex = rawName.indexOf(rawQuery)
-  if (matchIndex === -1) return name
-
-  return (
-    <>
-      {name.slice(0, matchIndex)}
-      <mark className="rounded bg-primary/15 px-0.5 text-foreground">
-        {name.slice(matchIndex, matchIndex + trimmed.length)}
-      </mark>
-      {name.slice(matchIndex + trimmed.length)}
-    </>
-  )
-}
-
-function sumRankingCounts(items: RankingItem[]): number {
-  return items.reduce((total, item) => total + item.count, 0)
 }
 
 type SkillRankingTab = "usage" | "adoption"
@@ -442,168 +296,6 @@ function SkillRankingTabs({
       >
         代码采纳
       </button>
-    </div>
-  )
-}
-
-function SearchableRankingPanel({
-  title,
-  totalKinds,
-  totalCalls,
-  defaultItems,
-  searchItems,
-  searchPlaceholder,
-  emptyLabel,
-  emptySearchLabel,
-  barColorClassName,
-  labelClassName,
-  onItemClick,
-  headerActions,
-  titleTooltipContent,
-  renderNameAddon
-}: {
-  title: string
-  totalKinds: number
-  totalCalls: number
-  defaultItems: RankingItem[]
-  searchItems: RankingItem[]
-  searchPlaceholder: string
-  emptyLabel: string
-  emptySearchLabel: string
-  barColorClassName: string
-  labelClassName?: string
-  onItemClick?: (name: string) => void
-  headerActions?: React.ReactNode
-  titleTooltipContent?: React.ReactNode
-  renderNameAddon?: (name: string) => React.ReactNode
-}) {
-  const [query, setQuery] = useState("")
-  const trimmedQuery = query.trim()
-  const visibleItems = trimmedQuery
-    ? searchItems.filter((item) => matchesRankingQuery(item.name, trimmedQuery))
-    : defaultItems
-  const maxCount = searchItems[0]?.count ?? defaultItems[0]?.count ?? 0
-  const statusLabel = trimmedQuery
-    ? `匹配 ${visibleItems.length} 项`
-    : defaultItems.length > 0
-      ? `Top ${defaultItems.length}`
-      : "暂无排行"
-
-  return (
-    <div className="flex h-[340px] flex-col rounded-xl border border-border bg-card p-4">
-      <div className="mb-3 flex shrink-0 items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
-            {titleTooltipContent ? <InfoHint content={titleTooltipContent} /> : null}
-            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-              {statusLabel}
-            </span>
-          </div>
-          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-            <span>
-              <span className="font-semibold text-foreground">{totalKinds}</span> 种
-            </span>
-            <span className="text-border">|</span>
-            <span>
-              共 <span className="font-semibold text-foreground">{formatNumber(totalCalls)}</span>{" "}
-              次调用
-            </span>
-          </div>
-        </div>
-        {headerActions}
-      </div>
-
-      <div className="mb-3 flex shrink-0 items-center gap-2">
-        <div className="relative flex-1">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={searchPlaceholder}
-            className="h-8 rounded-md border-border bg-background pl-8 pr-8 text-xs"
-          />
-          {trimmedQuery ? (
-            <button
-              type="button"
-              className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              onClick={() => setQuery("")}
-              aria-label="清空搜索"
-            >
-              <X className="size-3.5" />
-            </button>
-          ) : null}
-        </div>
-      </div>
-
-      {searchItems.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">
-          {emptyLabel}
-        </div>
-      ) : visibleItems.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">
-          {emptySearchLabel}
-        </div>
-      ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-          <div className="space-y-1.5">
-            {visibleItems.map((item, i) => {
-              const pct = maxCount > 0 ? (item.count / maxCount) * 100 : 0
-              const rank = trimmedQuery
-                ? searchItems.findIndex((candidate) => candidate.name === item.name) + 1
-                : i + 1
-              const content = (
-                <>
-                  <span className="w-7 shrink-0 text-right text-[10px] text-muted-foreground">
-                    {rank}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="mb-0.5 flex items-center justify-between gap-2">
-                      <div className="flex min-w-0 items-center gap-1.5">
-                        <span
-                          title={item.name}
-                          className={`min-w-0 truncate text-xs text-foreground ${labelClassName ?? ""}`}
-                        >
-                          {highlightRankingName(item.name, trimmedQuery)}
-                        </span>
-                        {renderNameAddon?.(item.name)}
-                      </div>
-                      <span className="shrink-0 text-[11px] text-muted-foreground">
-                        {item.count}
-                      </span>
-                    </div>
-                    <div className="h-1 overflow-hidden rounded-full bg-muted">
-                      <div
-                        className={`h-full rounded-full ${barColorClassName}`}
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
-                  </div>
-                </>
-              )
-
-              if (onItemClick) {
-                return (
-                  <button
-                    key={item.name}
-                    type="button"
-                    className="flex w-full cursor-pointer items-center gap-2 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-muted/50 hover:text-primary focus:outline-none focus:ring-2 focus:ring-ring"
-                    onClick={() => onItemClick(item.name)}
-                  >
-                    {content}
-                  </button>
-                )
-              }
-
-              return (
-                <div key={item.name} className="flex items-center gap-2">
-                  {content}
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
     </div>
   )
 }
@@ -1061,7 +753,18 @@ export function OverviewPanel({
             tooltipContent={<InclusiveAdoptionTooltip data={data} />}
           />
         </div>
-        <CodeAdoptionFunnel data={data} />
+        <CodeAdoptionFunnel
+          data={{
+            inclusiveEffectiveGeneratedLines: data.codeInclusiveEffectiveGeneratedLines,
+            effectiveGeneratedLines: data.codeEffectiveGeneratedLines,
+            pushedEffectiveGeneratedLines: data.codePushedEffectiveGeneratedLines,
+            adoptedLines: data.codeAdoptedLines,
+            pushedAdoptedLines: data.codePushedAdoptedLines,
+            inclusiveAdoptionRate: data.codeInclusiveAdoptionRate,
+            measuredAdoptionRate: data.codeMeasuredAdoptionRate,
+            pushedAdoptionRate: data.codePushedAdoptionRate
+          }}
+        />
       </div>
 
       {/* Skill & Tool Top rankings */}

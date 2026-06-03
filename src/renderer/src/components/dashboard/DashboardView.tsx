@@ -1114,9 +1114,9 @@ function DashboardTabBar({
   onChange: (tab: DashboardMainTab) => void
 }): React.JSX.Element {
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
-    { id: "overview", label: "经营概览" },
-    { id: "skill-eval", label: "技能评估" },
-    { id: "project-mode", label: "项目模式" }
+    { id: "overview", label: "平台运营概览" },
+    { id: "project-mode", label: "项目运营概览" },
+    { id: "skill-eval", label: "技能评估" }
   ]
 
   return (

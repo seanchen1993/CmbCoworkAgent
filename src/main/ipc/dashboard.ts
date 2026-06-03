@@ -28,7 +28,8 @@ import {
   makeDashboardCodeStats,
   normalizeCodeStatsFromAggs,
   normalizeSkillCodeAdoptionBuckets,
-  type DashboardCodeStats
+  type DashboardCodeStats,
+  type DashboardSkillCodeAdoptionStats
 } from "./dashboard-code-stats"
 
 // ─────────────────────────────────────────────────────────
@@ -5362,6 +5363,22 @@ function makeMockProjectMode(range: TimeRange): DashboardProjectModeData {
       featureCount: 3,
       conversationCount: 128,
       hasError: false,
+      topSkills: [
+        { skill: "代码审查", count: 40 },
+        { skill: "单元测试", count: 25 },
+        { skill: "SQL优化", count: 12 }
+      ],
+      codeStats: makeDashboardCodeStats({
+        generatedLines: 5200,
+        deletedLines: 800,
+        measuredGeneratedLines: 4800,
+        effectiveGeneratedLines: 4200,
+        adoptedLines: 3100,
+        pushedMeasuredGeneratedLines: 4000,
+        pushedEffectiveGeneratedLines: 3600,
+        pushedAdoptedLines: 2700,
+        pushedCommitCount: 42
+      }),
       features: [
         {
           slug: "harness-board",
@@ -5403,6 +5420,21 @@ function makeMockProjectMode(range: TimeRange): DashboardProjectModeData {
       featureCount: 2,
       conversationCount: 47,
       hasError: false,
+      topSkills: [
+        { skill: "代码审查", count: 18 },
+        { skill: "重构助手", count: 9 }
+      ],
+      codeStats: makeDashboardCodeStats({
+        generatedLines: 2100,
+        deletedLines: 300,
+        measuredGeneratedLines: 1900,
+        effectiveGeneratedLines: 1700,
+        adoptedLines: 900,
+        pushedMeasuredGeneratedLines: 1500,
+        pushedEffectiveGeneratedLines: 1300,
+        pushedAdoptedLines: 700,
+        pushedCommitCount: 11
+      }),
       features: [
         {
           slug: "settlement",
@@ -5432,6 +5464,8 @@ function makeMockProjectMode(range: TimeRange): DashboardProjectModeData {
       featureCount: 1,
       conversationCount: 0,
       hasError: true,
+      topSkills: [],
+      codeStats: null,
       features: [
         {
           slug: "rule-dsl",
@@ -5454,12 +5488,31 @@ function makeMockProjectMode(range: TimeRange): DashboardProjectModeData {
       activeProjectCount,
       conversationCount,
       totalToolCalls: 1842,
-      totalTokens: 9_650_000
+      totalTokens: 9_650_000,
+      skillCallCount: 312,
+      distinctSkillCount: 14,
+      codeStats: makeDashboardCodeStats({
+        generatedLines: 7300,
+        deletedLines: 1100,
+        measuredGeneratedLines: 6700,
+        effectiveGeneratedLines: 5900,
+        adoptedLines: 4000,
+        pushedMeasuredGeneratedLines: 5500,
+        pushedEffectiveGeneratedLines: 4900,
+        pushedAdoptedLines: 3400,
+        pushedCommitCount: 53
+      })
     },
     adapters: [
       { name: "claude-code", version: "1.4.2", projectCount: 1, conversationCount: 128 },
       { name: "claude-code", version: "1.4.0", projectCount: 1, conversationCount: 47 },
       { name: "codex", version: "0.9.1", projectCount: 1, conversationCount: 0 }
+    ],
+    topSkills: [
+      { skill: "代码审查", count: 58 },
+      { skill: "单元测试", count: 31 },
+      { skill: "重构助手", count: 22 },
+      { skill: "SQL优化", count: 15 }
     ],
     projects
   }
@@ -5980,6 +6033,11 @@ interface ProjectModeFeatureView {
   summary?: string
 }
 
+interface ProjectModeSkillCount {
+  skill: string
+  count: number
+}
+
 interface ProjectModeProjectView {
   projectId: string
   name: string
@@ -5995,6 +6053,8 @@ interface ProjectModeProjectView {
   conversationCount: number
   hasError: boolean
   features: ProjectModeFeatureView[]
+  topSkills: ProjectModeSkillCount[]
+  codeStats: DashboardCodeStats | null
 }
 
 interface ProjectModeAdapterView {
@@ -6012,8 +6072,12 @@ interface DashboardProjectModeData {
     conversationCount: number
     totalToolCalls: number
     totalTokens: number
+    skillCallCount: number
+    distinctSkillCount: number
+    codeStats: DashboardCodeStats | null
   }
   adapters: ProjectModeAdapterView[]
+  topSkills: ProjectModeSkillCount[]
   projects: ProjectModeProjectView[]
 }
 
@@ -6091,11 +6155,28 @@ async function fetchProjectModeSnapshots(): Promise<{
       featureCount: declaredCount,
       conversationCount: 0,
       hasError: typeof props.error === "string" && props.error.length > 0,
-      features
+      features,
+      topSkills: [],
+      codeStats: null
     })
   }
 
   return { projects: [...byProject.values()], featureCount }
+}
+
+/** Upper bound on the traceId set forwarded to the code-adoption join (ES terms cap is 65536). */
+const PROJECT_MODE_TRACE_ID_LIMIT = 10000
+
+/** Convert a `terms usedSkills` bucket list into a {skill,count}[] ranking. */
+function parseSkillCountBuckets(raw: unknown): ProjectModeSkillCount[] {
+  if (!Array.isArray(raw)) return []
+  const result: ProjectModeSkillCount[] = []
+  for (const bucket of raw) {
+    const b = asRecord(bucket)
+    const skill = asString(b.key)
+    if (skill) result.push({ skill, count: asNumber(b.doc_count) })
+  }
+  return result
 }
 
 /** Aggregate project-mode usage from the trace index over the selected range. */
@@ -6107,7 +6188,13 @@ async function fetchProjectModeUsage(
   activeProjectCount: number
   totalToolCalls: number
   totalTokens: number
+  skillCallCount: number
+  distinctSkillCount: number
+  topSkills: ProjectModeSkillCount[]
   perProject: Map<string, number>
+  perProjectSkills: Map<string, ProjectModeSkillCount[]>
+  traceIdsByProject: Map<string, string[]>
+  allTraceIds: string[]
   adapters: Map<string, ProjectModeAdapterView>
 }> {
   const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
@@ -6121,7 +6208,16 @@ async function fetchProjectModeUsage(
       total_input_tokens: { sum: { field: "totalInputTokens" } },
       total_output_tokens: { sum: { field: "totalOutputTokens" } },
       total_tokens: { sum: { field: "totalTokens" } },
-      by_project: { terms: { field: "harnessProjectId", size: 500 } },
+      total_skill_calls: { value_count: { field: "usedSkills" } },
+      distinct_skills: { cardinality: { field: "usedSkills" } },
+      top_skills: { terms: { field: "usedSkills", size: 20 } },
+      by_project: {
+        terms: { field: "harnessProjectId", size: 500 },
+        aggs: {
+          traces: { terms: { field: "traceId", size: 2000 } },
+          skills: { terms: { field: "usedSkills", size: 10 } }
+        }
+      },
       by_adapter: {
         terms: { field: "harnessAdapterName", size: 200 },
         aggs: { by_version: { terms: { field: "harnessAdapterVersion", size: 50 } } }
@@ -6139,12 +6235,29 @@ async function fetchProjectModeUsage(
   )
 
   const perProject = new Map<string, number>()
+  const perProjectSkills = new Map<string, ProjectModeSkillCount[]>()
+  const traceIdsByProject = new Map<string, string[]>()
+  const allTraceIds: string[] = []
   const projectBuckets = asRecord(aggs.by_project).buckets
   if (Array.isArray(projectBuckets)) {
     for (const bucket of projectBuckets) {
       const b = asRecord(bucket)
       const key = asString(b.key)
-      if (key) perProject.set(key, asNumber(b.doc_count))
+      if (!key) continue
+      perProject.set(key, asNumber(b.doc_count))
+      perProjectSkills.set(key, parseSkillCountBuckets(asRecord(b.skills).buckets))
+
+      const traceBuckets = asRecord(b.traces).buckets
+      const traceIds: string[] = []
+      if (Array.isArray(traceBuckets)) {
+        for (const tb of traceBuckets) {
+          const traceId = asString(asRecord(tb).key)
+          if (!traceId) continue
+          traceIds.push(traceId)
+          if (allTraceIds.length < PROJECT_MODE_TRACE_ID_LIMIT) allTraceIds.push(traceId)
+        }
+      }
+      traceIdsByProject.set(key, traceIds)
     }
   }
 
@@ -6184,9 +6297,131 @@ async function fetchProjectModeUsage(
     activeProjectCount: asNumber(asRecord(aggs.active_projects).value),
     totalToolCalls: asNumber(asRecord(aggs.total_tool_calls).value),
     totalTokens,
+    skillCallCount: asNumber(asRecord(aggs.total_skill_calls).value),
+    distinctSkillCount: asNumber(asRecord(aggs.distinct_skills).value),
+    topSkills: parseSkillCountBuckets(asRecord(aggs.top_skills).buckets),
     perProject,
+    perProjectSkills,
+    traceIdsByProject,
+    allTraceIds,
     adapters
   }
+}
+
+/**
+ * Code-adoption stats for project mode, joined via `properties.traceId`.
+ *
+ * Adoption events (`code_gen` / `code_adopt`) carry no `harnessProjectId`, but
+ * they do carry `traceId`, and each trace belongs to exactly one project. So we
+ * filter the code events by the project-mode traceId set and bucket by traceId
+ * (named `by_skill_adoption` to reuse `normalizeSkillCodeAdoptionBuckets`, whose
+ * `.skill` field then holds the traceId), letting the caller roll the per-trace
+ * stats up to per-project totals.
+ */
+async function fetchProjectModeCodeStats(
+  traceIds: string[],
+  range: TimeRange
+): Promise<{ overall: DashboardCodeStats; perTrace: DashboardSkillCodeAdoptionStats[] }> {
+  if (traceIds.length === 0) {
+    return {
+      overall: makeDashboardCodeStats({
+        generatedLines: 0,
+        deletedLines: 0,
+        measuredGeneratedLines: 0,
+        effectiveGeneratedLines: 0,
+        adoptedLines: 0
+      }),
+      perTrace: []
+    }
+  }
+  const traceFilter = { terms: { "properties.traceId": traceIds } }
+  const codeGenFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_gen" } },
+    timeRangeFilter("eventTime", range),
+    traceFilter
+  ]
+  const codeAdoptFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_adopt" } },
+    { exists: { field: "properties.adoptedLineCount" } },
+    { exists: { field: "properties.generatedLineCount" } },
+    { exists: { field: "properties.effectiveGeneratedLineCount" } },
+    timeRangeFilter("properties.generatedAt", range),
+    traceFilter
+  ]
+  const codeAdoptPushedFilters: Record<string, unknown>[] = [
+    ...codeAdoptFilters,
+    { term: { "properties.pushed": true } }
+  ]
+  const perTraceAggs = {
+    code_gen: {
+      filter: { bool: { filter: codeGenFilters } },
+      aggs: {
+        generated_lines: { sum: { field: "properties.lineCount" } },
+        deleted_lines: { sum: { field: "properties.deletedLineCount" } }
+      }
+    },
+    code_adopt_measured: {
+      filter: { bool: { filter: codeAdoptFilters } },
+      aggs: {
+        measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+        effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+        adopted_lines: { sum: { field: "properties.adoptedLineCount" } },
+        commit_count: { cardinality: { field: "properties.commitSha" } }
+      }
+    },
+    code_adopt_pushed: {
+      filter: { bool: { filter: codeAdoptPushedFilters } },
+      aggs: codeAdoptPushedAggs()
+    }
+  }
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
+        minimum_should_match: 1
+      }
+    },
+    aggs: {
+      ...perTraceAggs,
+      by_skill_adoption: {
+        terms: { field: "properties.traceId", size: Math.max(1, traceIds.length) },
+        aggs: perTraceAggs
+      }
+    }
+  }
+  const raw = await esQuery(getEsIndex("event"), body)
+  return {
+    overall: normalizeCodeStatsFromAggs(raw),
+    perTrace: normalizeSkillCodeAdoptionBuckets(raw)
+  }
+}
+
+/** Sum the additive line fields of several traces' adoption stats into one project's stats. */
+function sumProjectCodeStats(items: DashboardSkillCodeAdoptionStats[]): DashboardCodeStats {
+  const acc = {
+    generatedLines: 0,
+    deletedLines: 0,
+    measuredGeneratedLines: 0,
+    effectiveGeneratedLines: 0,
+    adoptedLines: 0,
+    pushedMeasuredGeneratedLines: 0,
+    pushedEffectiveGeneratedLines: 0,
+    pushedAdoptedLines: 0,
+    pushedCommitCount: 0
+  }
+  for (const item of items) {
+    acc.generatedLines += item.generatedLines
+    acc.deletedLines += item.deletedLines
+    acc.measuredGeneratedLines += item.measuredGeneratedLines
+    acc.effectiveGeneratedLines += item.effectiveGeneratedLines
+    acc.adoptedLines += item.adoptedLines
+    acc.pushedMeasuredGeneratedLines += item.pushedMeasuredGeneratedLines
+    acc.pushedEffectiveGeneratedLines += item.pushedEffectiveGeneratedLines
+    acc.pushedAdoptedLines += item.pushedAdoptedLines
+    acc.pushedCommitCount += item.pushedCommitCount
+  }
+  return makeDashboardCodeStats(acc)
 }
 
 /** Combine snapshot status + trace usage into the project-mode dashboard payload. */
@@ -6200,12 +6435,32 @@ async function fetchProjectMode(
     fetchProjectModeUsage(range, opts)
   ])
 
-  // Join per-project conversation counts into the snapshot project list.
+  const code = await fetchProjectModeCodeStats(usage.allTraceIds, range)
+  // traceId → projectId, so per-trace adoption stats can be rolled up per project.
+  const projectIdByTrace = new Map<string, string>()
+  for (const [projectId, traceIds] of usage.traceIdsByProject) {
+    for (const traceId of traceIds) projectIdByTrace.set(traceId, projectId)
+  }
+  const perTraceByProject = new Map<string, DashboardSkillCodeAdoptionStats[]>()
+  for (const item of code.perTrace) {
+    const projectId = projectIdByTrace.get(item.skill)
+    if (!projectId) continue
+    const list = perTraceByProject.get(projectId)
+    if (list) list.push(item)
+    else perTraceByProject.set(projectId, [item])
+  }
+
+  // Join per-project conversation counts, skills and adoption stats into the snapshot list.
   const projects = snapshot.projects
-    .map((project) => ({
-      ...project,
-      conversationCount: usage.perProject.get(project.projectId) ?? 0
-    }))
+    .map((project) => {
+      const traces = perTraceByProject.get(project.projectId)
+      return {
+        ...project,
+        conversationCount: usage.perProject.get(project.projectId) ?? 0,
+        topSkills: usage.perProjectSkills.get(project.projectId) ?? [],
+        codeStats: traces && traces.length > 0 ? sumProjectCodeStats(traces) : null
+      }
+    })
     .sort((a, b) => b.conversationCount - a.conversationCount || a.name.localeCompare(b.name))
 
   // Adapter rows: start from usage (carries conversation counts), then add
@@ -6241,9 +6496,13 @@ async function fetchProjectMode(
       activeProjectCount: usage.activeProjectCount,
       conversationCount: usage.conversationCount,
       totalToolCalls: usage.totalToolCalls,
-      totalTokens: usage.totalTokens
+      totalTokens: usage.totalTokens,
+      skillCallCount: usage.skillCallCount,
+      distinctSkillCount: usage.distinctSkillCount,
+      codeStats: code.overall
     },
     adapters: adapterList,
+    topSkills: usage.topSkills,
     projects
   }
 }
