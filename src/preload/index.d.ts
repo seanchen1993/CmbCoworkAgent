@@ -317,6 +317,57 @@ interface DashboardUserDetailOptions {
   triggerScope?: DashboardTraceTriggerScope
 }
 
+interface DashboardProjectModeFeature {
+  slug: string
+  title: string
+  location?: string
+  statusLabel?: string
+  currentNodeStatusLabel?: string
+  summary?: string
+}
+
+interface DashboardProjectModeProject {
+  projectId: string
+  name: string
+  description?: string
+  systemName?: string
+  workspacePath?: string
+  adapterName?: string
+  adapterVersion?: string
+  lifecycleStatus?: string
+  compatible?: boolean
+  compatibilityStatus?: string
+  featureCount: number
+  conversationCount: number
+  hasError: boolean
+  features: DashboardProjectModeFeature[]
+}
+
+interface DashboardProjectModeAdapter {
+  name: string
+  version?: string
+  projectCount: number
+  conversationCount: number
+}
+
+interface DashboardProjectModeData {
+  summary: {
+    projectCount: number
+    featureCount: number
+    activeProjectCount: number
+    conversationCount: number
+    totalToolCalls: number
+    totalTokens: number
+  }
+  adapters: DashboardProjectModeAdapter[]
+  projects: DashboardProjectModeProject[]
+}
+
+interface DashboardProjectModeTracesOptions {
+  limit?: number
+  triggerScope?: DashboardTraceTriggerScope
+}
+
 interface CustomAPI {
   agent: {
     invoke: (
@@ -396,7 +447,10 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     getHistory: (threadId: string) => Promise<unknown[]>
     getLatestCheckpoint: (threadId: string) => Promise<unknown | null>
-    getGoalEvents: (threadId: string, options?: { restore?: boolean; limit?: number }) => Promise<
+    getGoalEvents: (
+      threadId: string,
+      options?: { restore?: boolean; limit?: number }
+    ) => Promise<
       Array<{
         event_id: number
         thread_id: string
@@ -1355,6 +1409,16 @@ interface CustomAPI {
   }
   dashboard: {
     isAllowed: () => Promise<boolean>
+    projectMode: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{ success: boolean; data?: DashboardProjectModeData; error?: string }>
+    projectModeTraces: (
+      projectId: string,
+      range: { from: string; to: string },
+      options?: DashboardProjectModeTracesOptions
+    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     overview: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -1365,9 +1429,10 @@ interface CustomAPI {
       granularity: "day" | "week" | "month" | "custom",
       opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
-    orgOptions: (
-      range: { from: string; to: string }
-    ) => Promise<{ success: boolean; data?: string[]; error?: string }>
+    orgOptions: (range: {
+      from: string
+      to: string
+    }) => Promise<{ success: boolean; data?: string[]; error?: string }>
     userStats: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -1435,7 +1500,16 @@ interface CustomAPI {
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
-      options?: number | { page?: number; pageSize?: number; limit?: number; mode?: DashboardTraceViewMode; viewMode?: DashboardTraceViewMode; triggerScope?: DashboardTraceTriggerScope }
+      options?:
+        | number
+        | {
+            page?: number
+            pageSize?: number
+            limit?: number
+            mode?: DashboardTraceViewMode
+            viewMode?: DashboardTraceViewMode
+            triggerScope?: DashboardTraceTriggerScope
+          }
     ) => Promise<{ success: boolean; data?: DashboardSkillDetail; error?: string }>
     commitDetails: (
       range: { from: string; to: string },

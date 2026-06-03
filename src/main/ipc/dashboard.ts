@@ -5346,6 +5346,132 @@ function makeMockUserDetail(
   }
 }
 
+function makeMockProjectMode(range: TimeRange): DashboardProjectModeData {
+  const projects: ProjectModeProjectView[] = [
+    {
+      projectId: "proj-cmb-cowork",
+      name: "CmbCowork Agent",
+      description: "桌面 AI Agent 主项目",
+      systemName: "智能研发平台",
+      workspacePath: "/Users/demo/projects/cmbCowork",
+      adapterName: "claude-code",
+      adapterVersion: "1.4.2",
+      lifecycleStatus: "active",
+      compatible: true,
+      compatibilityStatus: "compatible",
+      featureCount: 3,
+      conversationCount: 128,
+      hasError: false,
+      features: [
+        {
+          slug: "harness-board",
+          title: "运营看板",
+          location: "src/main/harness-board",
+          statusLabel: "进行中",
+          currentNodeStatusLabel: "实现中",
+          summary: "新增项目模式看板 tab"
+        },
+        {
+          slug: "code-adoption",
+          title: "代码采纳追踪",
+          location: "src/main/services",
+          statusLabel: "已完成",
+          currentNodeStatusLabel: "已合并",
+          summary: "采纳率统计上线"
+        },
+        {
+          slug: "skill-eval",
+          title: "技能评估",
+          location: "src/main/agent/skill-eval",
+          statusLabel: "待评审",
+          currentNodeStatusLabel: "评审中",
+          summary: "离线 trace 评估流水线"
+        }
+      ]
+    },
+    {
+      projectId: "proj-payment-core",
+      name: "支付核心系统",
+      description: "支付清结算重构",
+      systemName: "支付平台",
+      workspacePath: "/Users/demo/projects/payment-core",
+      adapterName: "claude-code",
+      adapterVersion: "1.4.0",
+      lifecycleStatus: "active",
+      compatible: false,
+      compatibilityStatus: "outdated",
+      featureCount: 2,
+      conversationCount: 47,
+      hasError: false,
+      features: [
+        {
+          slug: "settlement",
+          title: "清结算重构",
+          statusLabel: "进行中",
+          currentNodeStatusLabel: "开发中",
+          summary: "拆分清算与结算链路"
+        },
+        {
+          slug: "refund",
+          title: "退款流程",
+          statusLabel: "阻塞",
+          currentNodeStatusLabel: "等待依赖",
+          summary: "依赖账务系统接口"
+        }
+      ]
+    },
+    {
+      projectId: "proj-risk-engine",
+      name: "风控引擎",
+      systemName: "风险管理平台",
+      adapterName: "codex",
+      adapterVersion: "0.9.1",
+      lifecycleStatus: "paused",
+      compatible: true,
+      compatibilityStatus: "compatible",
+      featureCount: 1,
+      conversationCount: 0,
+      hasError: true,
+      features: [
+        {
+          slug: "rule-dsl",
+          title: "规则 DSL",
+          statusLabel: "暂停",
+          currentNodeStatusLabel: "—",
+          summary: "探测进程返回异常"
+        }
+      ]
+    }
+  ]
+  void range
+  const featureCount = projects.reduce((sum, p) => sum + p.featureCount, 0)
+  const conversationCount = projects.reduce((sum, p) => sum + p.conversationCount, 0)
+  const activeProjectCount = projects.filter((p) => p.conversationCount > 0).length
+  return {
+    summary: {
+      projectCount: projects.length,
+      featureCount,
+      activeProjectCount,
+      conversationCount,
+      totalToolCalls: 1842,
+      totalTokens: 9_650_000
+    },
+    adapters: [
+      { name: "claude-code", version: "1.4.2", projectCount: 1, conversationCount: 128 },
+      { name: "claude-code", version: "1.4.0", projectCount: 1, conversationCount: 47 },
+      { name: "codex", version: "0.9.1", projectCount: 1, conversationCount: 0 }
+    ],
+    projects
+  }
+}
+
+function makeMockProjectModeTraces(projectId: string, range: TimeRange): DashboardTraceDetail[] {
+  return makeMockSkillRecentTraces("项目模式", range, 8).map((trace, index) => ({
+    ...trace,
+    traceId: `${projectId}-${trace.traceId}-${index}`
+  }))
+}
+
 function makeMockProductivity(range: TimeRange): unknown {
   const from = new Date(range.from)
   const to = new Date(range.to)
@@ -5839,6 +5965,326 @@ function makeMockCommitDetails(
 }
 
 // ─────────────────────────────────────────────────────────
+// Project Mode (Harness Board) dashboard
+// ─────────────────────────────────────────────────────────
+
+/** Event name written by HarnessStatusReporter for project snapshots. */
+const HARNESS_PROJECT_SNAPSHOT_EVENT = "harness.project.snapshot"
+
+interface ProjectModeFeatureView {
+  slug: string
+  title: string
+  location?: string
+  statusLabel?: string
+  currentNodeStatusLabel?: string
+  summary?: string
+}
+
+interface ProjectModeProjectView {
+  projectId: string
+  name: string
+  description?: string
+  systemName?: string
+  workspacePath?: string
+  adapterName?: string
+  adapterVersion?: string
+  lifecycleStatus?: string
+  compatible?: boolean
+  compatibilityStatus?: string
+  featureCount: number
+  conversationCount: number
+  hasError: boolean
+  features: ProjectModeFeatureView[]
+}
+
+interface ProjectModeAdapterView {
+  name: string
+  version?: string
+  projectCount: number
+  conversationCount: number
+}
+
+interface DashboardProjectModeData {
+  summary: {
+    projectCount: number
+    featureCount: number
+    activeProjectCount: number
+    conversationCount: number
+    totalToolCalls: number
+    totalTokens: number
+  }
+  adapters: ProjectModeAdapterView[]
+  projects: ProjectModeProjectView[]
+}
+
+/** Time-range filter over the trace index, plus an `exists harnessProjectId` clause. */
+function projectModeTraceFilters(
+  range: TimeRange,
+  orgFilterClause: Record<string, unknown> | null
+): Record<string, unknown>[] {
+  return [
+    timeRangeFilter("startedAt", range),
+    { exists: { field: "harnessProjectId" } },
+    ...(orgFilterClause ? [orgFilterClause] : [])
+  ]
+}
+
+/** Build the `name@version` key used to merge adapter rows across snapshot + usage. */
+function adapterKey(name: string, version?: string): string {
+  return `${name}@@${version ?? ""}`
+}
+
+/** Read the current status snapshot of every project from the event index. */
+async function fetchProjectModeSnapshots(): Promise<{
+  projects: ProjectModeProjectView[]
+  featureCount: number
+}> {
+  const body = {
+    track_total_hits: true,
+    size: 500,
+    query: {
+      bool: { filter: [{ term: { eventName: HARNESS_PROJECT_SNAPSHOT_EVENT } }] }
+    },
+    sort: [{ eventTime: { order: "desc" } }],
+    _source: { includes: ["eventTime", "properties"] }
+  }
+  const raw = (await esQuery(getEsIndex("event"), body)) as EsSearchResponse
+  const hits = raw.hits?.hits ?? []
+
+  // A project may have several snapshot docs over time (the deterministic _id
+  // upsert keeps one, but older append docs can linger); keep the newest per id.
+  const byProject = new Map<string, ProjectModeProjectView>()
+  let featureCount = 0
+
+  for (const hit of hits) {
+    const props = asRecord(asRecord(hit._source).properties)
+    const projectId = asString(props.projectId)
+    if (!projectId || byProject.has(projectId)) continue
+
+    const rawFeatures = Array.isArray(props.features) ? props.features : []
+    const features: ProjectModeFeatureView[] = rawFeatures.map((entry) => {
+      const f = asRecord(entry)
+      return {
+        slug: asString(f.slug),
+        title: asString(f.title, asString(f.slug)),
+        location: asOptionalString(f.location),
+        statusLabel: asOptionalString(f.overallStatusLabel),
+        currentNodeStatusLabel: asOptionalString(f.currentNodeStatusLabel),
+        summary: asOptionalString(f.summary)
+      }
+    })
+
+    const declaredCount = asNumber(props.featureCount, features.length)
+    featureCount += declaredCount
+
+    byProject.set(projectId, {
+      projectId,
+      name: asString(props.name, projectId),
+      description: asOptionalString(props.description),
+      systemName: asOptionalString(props.systemName),
+      workspacePath: asOptionalString(props.workspacePath),
+      adapterName: asOptionalString(props.adapterName),
+      adapterVersion: asOptionalString(props.adapterVersion),
+      lifecycleStatus: asOptionalString(props.lifecycleStatus),
+      compatible: typeof props.compatible === "boolean" ? props.compatible : undefined,
+      compatibilityStatus: asOptionalString(props.compatibilityStatus),
+      featureCount: declaredCount,
+      conversationCount: 0,
+      hasError: typeof props.error === "string" && props.error.length > 0,
+      features
+    })
+  }
+
+  return { projects: [...byProject.values()], featureCount }
+}
+
+/** Aggregate project-mode usage from the trace index over the selected range. */
+async function fetchProjectModeUsage(
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<{
+  conversationCount: number
+  activeProjectCount: number
+  totalToolCalls: number
+  totalTokens: number
+  perProject: Map<string, number>
+  adapters: Map<string, ProjectModeAdapterView>
+}> {
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
+  const body = {
+    size: 0,
+    query: { bool: { filter: projectModeTraceFilters(range, orgFilterClause) } },
+    aggs: {
+      conversation_count: { value_count: { field: "traceId" } },
+      active_projects: { cardinality: { field: "harnessProjectId" } },
+      total_tool_calls: { sum: { field: "totalToolCalls" } },
+      total_input_tokens: { sum: { field: "totalInputTokens" } },
+      total_output_tokens: { sum: { field: "totalOutputTokens" } },
+      total_tokens: { sum: { field: "totalTokens" } },
+      by_project: { terms: { field: "harnessProjectId", size: 500 } },
+      by_adapter: {
+        terms: { field: "harnessAdapterName", size: 200 },
+        aggs: { by_version: { terms: { field: "harnessAdapterVersion", size: 50 } } }
+      }
+    }
+  }
+  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  const aggs = asRecord(raw.aggregations)
+
+  const totalInputTokens = asNumber(asRecord(aggs.total_input_tokens).value)
+  const totalOutputTokens = asNumber(asRecord(aggs.total_output_tokens).value)
+  const totalTokens = asNumber(
+    asRecord(aggs.total_tokens).value,
+    totalInputTokens + totalOutputTokens
+  )
+
+  const perProject = new Map<string, number>()
+  const projectBuckets = asRecord(aggs.by_project).buckets
+  if (Array.isArray(projectBuckets)) {
+    for (const bucket of projectBuckets) {
+      const b = asRecord(bucket)
+      const key = asString(b.key)
+      if (key) perProject.set(key, asNumber(b.doc_count))
+    }
+  }
+
+  const adapters = new Map<string, ProjectModeAdapterView>()
+  const adapterBuckets = asRecord(aggs.by_adapter).buckets
+  if (Array.isArray(adapterBuckets)) {
+    for (const bucket of adapterBuckets) {
+      const b = asRecord(bucket)
+      const name = asString(b.key)
+      if (!name) continue
+      const rawVersions = asRecord(b.by_version).buckets
+      const versions = Array.isArray(rawVersions) ? rawVersions : []
+      if (versions.length === 0) {
+        adapters.set(adapterKey(name), {
+          name,
+          version: undefined,
+          projectCount: 0,
+          conversationCount: asNumber(b.doc_count)
+        })
+        continue
+      }
+      for (const vb of versions) {
+        const v = asRecord(vb)
+        const version = asOptionalString(v.key)
+        adapters.set(adapterKey(name, version), {
+          name,
+          version,
+          projectCount: 0,
+          conversationCount: asNumber(v.doc_count)
+        })
+      }
+    }
+  }
+
+  return {
+    conversationCount: asNumber(asRecord(aggs.conversation_count).value),
+    activeProjectCount: asNumber(asRecord(aggs.active_projects).value),
+    totalToolCalls: asNumber(asRecord(aggs.total_tool_calls).value),
+    totalTokens,
+    perProject,
+    adapters
+  }
+}
+
+/** Combine snapshot status + trace usage into the project-mode dashboard payload. */
+async function fetchProjectMode(
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<DashboardProjectModeData> {
+  requireDashboardAccess()
+  const [snapshot, usage] = await Promise.all([
+    fetchProjectModeSnapshots(),
+    fetchProjectModeUsage(range, opts)
+  ])
+
+  // Join per-project conversation counts into the snapshot project list.
+  const projects = snapshot.projects
+    .map((project) => ({
+      ...project,
+      conversationCount: usage.perProject.get(project.projectId) ?? 0
+    }))
+    .sort((a, b) => b.conversationCount - a.conversationCount || a.name.localeCompare(b.name))
+
+  // Adapter rows: start from usage (carries conversation counts), then add
+  // project counts from the snapshots, unioning adapters that appear in only one.
+  const adapters = new Map<string, ProjectModeAdapterView>()
+  for (const [key, view] of usage.adapters) adapters.set(key, { ...view })
+  for (const project of snapshot.projects) {
+    if (!project.adapterName) continue
+    const key = adapterKey(project.adapterName, project.adapterVersion)
+    const existing = adapters.get(key)
+    if (existing) {
+      existing.projectCount += 1
+    } else {
+      adapters.set(key, {
+        name: project.adapterName,
+        version: project.adapterVersion,
+        projectCount: 1,
+        conversationCount: 0
+      })
+    }
+  }
+  const adapterList = [...adapters.values()].sort(
+    (a, b) =>
+      b.conversationCount - a.conversationCount ||
+      b.projectCount - a.projectCount ||
+      a.name.localeCompare(b.name)
+  )
+
+  return {
+    summary: {
+      projectCount: snapshot.projects.length,
+      featureCount: snapshot.featureCount,
+      activeProjectCount: usage.activeProjectCount,
+      conversationCount: usage.conversationCount,
+      totalToolCalls: usage.totalToolCalls,
+      totalTokens: usage.totalTokens
+    },
+    adapters: adapterList,
+    projects
+  }
+}
+
+interface ProjectModeTracesOptions {
+  limit?: number
+  triggerScope?: TraceTriggerScope
+}
+
+/** Recent project-mode traces for a single project (drill-down list). */
+async function fetchProjectModeTraces(
+  projectId: string,
+  range: TimeRange,
+  options?: ProjectModeTracesOptions
+): Promise<DashboardTraceDetail[]> {
+  const access = requireDashboardAccess()
+  const normalizedProjectId = projectId.trim()
+  if (!normalizedProjectId) throw new Error("projectId is required")
+  const limit = clampLimit(options?.limit, 50, 100)
+  const triggerScope = normalizeTraceTriggerScope(options?.triggerScope)
+  const traceAccessFilter = buildTraceAccessFilter(access)
+  const body = {
+    size: limit,
+    sort: [{ startedAt: { order: "desc" } }],
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("startedAt", range),
+          { term: { harnessProjectId: normalizedProjectId } },
+          ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
+        ]
+      }
+    },
+    ...(traceAccessFilter ? { post_filter: traceAccessFilter } : {}),
+    _source: { includes: dashboardTraceSourceIncludes() }
+  }
+  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  return (raw.hits?.hits ?? []).map(normalizeTraceDetail)
+}
+
+// ─────────────────────────────────────────────────────────
 // IPC Registration
 // ─────────────────────────────────────────────────────────
 
@@ -5846,6 +6292,33 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle("dashboard:isAllowed", async () => {
     return getDashboardAccessContext().loggedIn
   })
+
+  _ipcMain.handle(
+    "dashboard:projectMode",
+    async (_, range: TimeRange, _granularity: Granularity, opts?: OrgFilterOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockProjectMode(range) }
+      try {
+        return { success: true, data: await fetchProjectMode(range, opts) }
+      } catch (e) {
+        console.error("[Dashboard] projectMode error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:projectModeTraces",
+    async (_, projectId: string, range: TimeRange, options?: ProjectModeTracesOptions) => {
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockProjectModeTraces(projectId, range) }
+      try {
+        return { success: true, data: await fetchProjectModeTraces(projectId, range, options) }
+      } catch (e) {
+        console.error("[Dashboard] projectModeTraces error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
 
   _ipcMain.handle(
     "dashboard:overview",

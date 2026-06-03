@@ -250,6 +250,52 @@ export interface DashboardUserDetail {
   traceTriggerScope?: DashboardTraceTriggerScope
 }
 
+export interface DashboardProjectModeFeature {
+  slug: string
+  title: string
+  location?: string
+  statusLabel?: string
+  currentNodeStatusLabel?: string
+  summary?: string
+}
+
+export interface DashboardProjectModeProject {
+  projectId: string
+  name: string
+  description?: string
+  systemName?: string
+  workspacePath?: string
+  adapterName?: string
+  adapterVersion?: string
+  lifecycleStatus?: string
+  compatible?: boolean
+  compatibilityStatus?: string
+  featureCount: number
+  conversationCount: number
+  hasError: boolean
+  features: DashboardProjectModeFeature[]
+}
+
+export interface DashboardProjectModeAdapter {
+  name: string
+  version?: string
+  projectCount: number
+  conversationCount: number
+}
+
+export interface DashboardProjectModeData {
+  summary: {
+    projectCount: number
+    featureCount: number
+    activeProjectCount: number
+    conversationCount: number
+    totalToolCalls: number
+    totalTokens: number
+  }
+  adapters: DashboardProjectModeAdapter[]
+  projects: DashboardProjectModeProject[]
+}
+
 export interface ProductivityData {
   commitTrend: Array<{ time: string; count: number; from: string; to: string }>
   totalInsertions: number
@@ -1615,6 +1661,9 @@ export function useDashboard() {
   const [productivity, setProductivity] = useState<ProductivityData | null>(null)
   const [feedback, setFeedback] = useState<FeedbackData | null>(null)
   const [skillEval, setSkillEval] = useState<DashboardSkillEvalSummary | null>(null)
+  const [projectMode, setProjectMode] = useState<DashboardProjectModeData | null>(null)
+  const [projectModeLoading, setProjectModeLoading] = useState(false)
+  const [projectModeError, setProjectModeError] = useState<string | null>(null)
   // 顶部全量组织（LV1）筛选可选项，随时间范围刷新。
   const [orgOptions, setOrgOptions] = useState<string[]>([])
 
@@ -1622,6 +1671,7 @@ export function useDashboard() {
   const userStatsFetchIdRef = useRef(0)
   const skillEvalFetchIdRef = useRef(0)
   const orgOptionsFetchIdRef = useRef(0)
+  const projectModeFetchIdRef = useRef(0)
 
   const fetchAll = useCallback(async (r: TimeRange, g: Granularity, orgList: string[]) => {
     const id = ++fetchIdRef.current
@@ -1681,6 +1731,24 @@ export function useDashboard() {
     },
     []
   )
+
+  const fetchProjectMode = useCallback(async (r: TimeRange, g: Granularity, orgList: string[]) => {
+    const id = ++projectModeFetchIdRef.current
+    setProjectModeLoading(true)
+    setProjectModeError(null)
+
+    try {
+      const result = await window.api.dashboard.projectMode(r, g, { upperOrgLv1: orgList })
+      if (id !== projectModeFetchIdRef.current) return
+      if (!result.success) throw new Error(result.error ?? "获取项目模式数据失败")
+      setProjectMode((result.data as DashboardProjectModeData) ?? null)
+    } catch (e) {
+      if (id !== projectModeFetchIdRef.current) return
+      setProjectModeError(e instanceof Error ? e.message : String(e))
+    } finally {
+      if (id === projectModeFetchIdRef.current) setProjectModeLoading(false)
+    }
+  }, [])
 
   const fetchSkillEvalPage = useCallback(
     async (
@@ -1898,7 +1966,6 @@ export function useDashboard() {
     [fetchUserStatsOnly, range, granularity]
   )
 
-
   const resetUserOrgDrilldown = useCallback(() => {
     setSelectedOrgLv1List([])
   }, [])
@@ -1918,6 +1985,10 @@ export function useDashboard() {
     productivity,
     feedback,
     skillEval,
+    projectMode,
+    projectModeLoading,
+    projectModeError,
+    fetchProjectMode,
     changeGranularity,
     navigate,
     setCustomRange,

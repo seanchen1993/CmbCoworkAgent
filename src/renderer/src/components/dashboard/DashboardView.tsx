@@ -42,10 +42,13 @@ import {
   type DashboardUserDetail,
   type DashboardUserListData,
   type DashboardUserListItem,
+  type DashboardProjectModeProject,
+  type DashboardTraceDetail,
   type Granularity,
   type TimeRange
 } from "./use-dashboard"
 import { OverviewPanel } from "./panels/OverviewPanel"
+import { ProjectModePanel } from "./panels/ProjectModePanel"
 import { ModelPanel } from "./panels/ModelPanel"
 import { UserPanel } from "./panels/UserPanel"
 import { ProductivityPanel } from "./panels/ProductivityPanel"
@@ -477,7 +480,7 @@ type DashboardSubPage =
   | { kind: "user-list" }
   | { kind: "user-detail"; sapId: string; backTo: "main" | "user-list" }
 
-type DashboardMainTab = "overview" | "skill-eval"
+type DashboardMainTab = "overview" | "skill-eval" | "project-mode"
 
 function formatNumber(value: number): string {
   return Math.round(value).toLocaleString("zh-CN")
@@ -1112,7 +1115,8 @@ function DashboardTabBar({
 }): React.JSX.Element {
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
     { id: "overview", label: "经营概览" },
-    { id: "skill-eval", label: "技能评估" }
+    { id: "skill-eval", label: "技能评估" },
+    { id: "project-mode", label: "项目模式" }
   ]
 
   return (
@@ -1878,6 +1882,10 @@ export function DashboardView(): React.JSX.Element {
     productivity,
     feedback,
     skillEval,
+    projectMode,
+    projectModeLoading,
+    projectModeError,
+    fetchProjectMode,
     changeGranularity,
     navigate,
     setCustomRange,
@@ -1905,6 +1913,11 @@ export function DashboardView(): React.JSX.Element {
   const [skillEvalSelectedSkillKey, setSkillEvalSelectedSkillKey] = useState<
     string | null | undefined
   >(undefined)
+  const [projectTraceProject, setProjectTraceProject] =
+    useState<DashboardProjectModeProject | null>(null)
+  const [projectTraces, setProjectTraces] = useState<DashboardTraceDetail[]>([])
+  const [projectTracesLoading, setProjectTracesLoading] = useState(false)
+  const [projectTracesError, setProjectTracesError] = useState<string | null>(null)
   const [commitDialogOpen, setCommitDialogOpen] = useState(false)
   const [commitScopeLabel, setCommitScopeLabel] = useState("当前范围")
   const [commitDetailsRange, setCommitDetailsRange] = useState<TimeRange | null>(null)
@@ -2037,6 +2050,12 @@ export function DashboardView(): React.JSX.Element {
     skillEvalLoading,
     skillEvalScopeOptions
   ])
+
+  // 项目模式 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选变化时重拉。
+  useEffect(() => {
+    if (activeMainTab !== "project-mode") return
+    void fetchProjectMode(range, granularity, selectedOrgLv1List)
+  }, [activeMainTab, fetchProjectMode, range, granularity, selectedOrgLv1List])
 
   useEffect(() => {
     if (
@@ -2360,7 +2379,39 @@ export function DashboardView(): React.JSX.Element {
       setSkillEvalSelectedSkillKey(undefined)
       clearSkillEval()
     }
-  }, [activeMainTab, clearSkillEval, refresh])
+    if (activeMainTab === "project-mode") {
+      void fetchProjectMode(range, granularity, selectedOrgLv1List)
+    }
+  }, [
+    activeMainTab,
+    clearSkillEval,
+    fetchProjectMode,
+    granularity,
+    range,
+    refresh,
+    selectedOrgLv1List
+  ])
+
+  const handleProjectOpenTraces = useCallback(
+    async (project: DashboardProjectModeProject) => {
+      setProjectTraceProject(project)
+      setProjectTraces([])
+      setProjectTracesError(null)
+      setProjectTracesLoading(true)
+      try {
+        const res = await window.api.dashboard.projectModeTraces(project.projectId, range, {
+          limit: 50
+        })
+        if (!res.success) throw new Error(res.error ?? "获取项目对话失败")
+        setProjectTraces((res.data as DashboardTraceDetail[]) ?? [])
+      } catch (e) {
+        setProjectTracesError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setProjectTracesLoading(false)
+      }
+    },
+    [range]
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -3113,6 +3164,15 @@ export function DashboardView(): React.JSX.Element {
                 onSelectedSkillKeyChange={setSkillEvalSelectedSkillKey}
               />
             </div>
+          ) : activeMainTab === "project-mode" ? (
+            <div className="space-y-6 p-6">
+              <ProjectModePanel
+                data={projectMode}
+                loading={projectModeLoading}
+                error={projectModeError}
+                onOpenTraces={handleProjectOpenTraces}
+              />
+            </div>
           ) : (
             <div className="space-y-6 p-6">
               {/* Overview */}
@@ -3226,6 +3286,39 @@ export function DashboardView(): React.JSX.Element {
             emptyText="该评估记录没有可展示的 trace 步骤"
             showCodeStats={false}
           />
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={Boolean(projectTraceProject)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setProjectTraceProject(null)
+            setProjectTraces([])
+            setProjectTracesError(null)
+          }
+        }}
+      >
+        <DialogContent className="flex h-[80vh] max-w-[1080px] grid-rows-none flex-col gap-0 p-0">
+          <DialogHeader className="border-b border-border px-5 py-4">
+            <DialogTitle className="truncate text-base">
+              项目对话 · {projectTraceProject?.name ?? "-"}
+            </DialogTitle>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              该项目模式下的最近对话（最多 50 条），选择记录定位到会话
+            </p>
+          </DialogHeader>
+          <div className="min-h-0 flex-1">
+            <TraceExplorer
+              traces={projectTraces}
+              loading={projectTracesLoading}
+              error={projectTracesError}
+              title="项目模式 Trace"
+              subtitle="选择记录查看对话还原"
+              emptyText="该项目在当前时间范围内没有对话"
+              showCodeStats={false}
+              className="h-full"
+            />
+          </div>
         </DialogContent>
       </Dialog>
       <CommitDetailsDialog
