@@ -309,19 +309,22 @@ export class TraceCollector {
     }
   }
 
-  /** Set which skills were actually used for this run. */
+  /**
+   * Set which skills were actually used for this run (feeds the trace document's
+   * own `usedSkills`).
+   *
+   * NOTE: this intentionally does NOT write the adoption context's usedSkills.
+   * Code-gen skill attribution is sticky across the thread and is owned solely
+   * by the caller (ipc/agent.ts `syncUsedSkillsContext`), which writes the
+   * adoption context with the thread's active skill set right after this call.
+   * Writing current-run skills here would only be a value the caller overwrites,
+   * and risks bypassing the sticky attribution if ever called on its own.
+   */
   setUsedSkills(skills: string[]): void {
     this.usedSkills = [...skills]
     const root = this.getNode(this.rootNodeId)
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), usedSkills: [...skills] }
-    }
-    try {
-      setAdoptionContext(this.threadId, {
-        usedSkills: [...skills]
-      })
-    } catch {
-      // ignore
     }
   }
 
