@@ -381,27 +381,11 @@ export function PluginsPanel(): React.JSX.Element {
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [fileEditorOpen, setFileEditorOpen] = useState(false)
 
-  const shouldHidePluginDetails = useCallback(
-    (plugin: PluginMetadata | null): boolean => {
-      if (!plugin) return false
-      const key = normalizePluginNameKey(plugin.name)
-      if (!key) return false
-      if (uploadedPluginNames.has(key)) return false
-      if (plugin.origin === "market") return true
-      if (plugin.origin === "local") return false
-      if (localUploadedPluginNames.has(key)) return false
-      if (!marketPluginsLoaded) return true
-      if (marketPluginsLoadFailed) return false
-      return Boolean(marketPluginMap[key])
-    },
-    [
-      localUploadedPluginNames,
-      marketPluginMap,
-      marketPluginsLoadFailed,
-      marketPluginsLoaded,
-      uploadedPluginNames
-    ]
-  )
+  // 市场下载的 Plugin 不再隐藏 Skill/Hook/MCP 详情，统一展示组件详情。
+  // 历史上这里会对 origin === "market" 的插件隐藏详情；现按需求恒为可见。
+  const shouldHidePluginDetails = useCallback((_plugin: PluginMetadata | null): boolean => {
+    return false
+  }, [])
 
   // Clean up debounce timer on unmount
   useEffect(() => {
