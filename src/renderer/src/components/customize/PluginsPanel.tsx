@@ -383,7 +383,9 @@ export function PluginsPanel(): React.JSX.Element {
 
   // 市场下载的 Plugin 不再隐藏 Skill/Hook/MCP 详情，统一展示组件详情。
   // 历史上这里会对 origin === "market" 的插件隐藏详情；现按需求恒为可见。
-  const shouldHidePluginDetails = useCallback((_plugin: PluginMetadata | null): boolean => {
+  // 保留入参以兼容调用点签名（恒返回 false）。
+  const shouldHidePluginDetails = useCallback((plugin: PluginMetadata | null): boolean => {
+    void plugin
     return false
   }, [])
 

@@ -2,6 +2,7 @@ import AdmZip from "adm-zip"
 import { IpcMain, dialog } from "electron"
 import * as fs from "fs/promises"
 import * as path from "path"
+import * as os from "os"
 import { existsSync, mkdirSync, rmSync } from "fs"
 import { v4 as uuid } from "uuid"
 import {
@@ -320,100 +321,188 @@ async function selectExtractedPluginRoot(tempDir: string): Promise<string> {
   return validCandidates[0] ?? tempDir
 }
 
+type ExtractZipResult =
+  | { success: true; tempDir: string; pluginRoot: string }
+  | { success: false; error: string }
+
+/**
+ * Validate and extract a plugin zip into a throwaway temp directory under
+ * `baseDir`, returning the temp dir and the resolved plugin root.
+ *
+ * The caller owns cleanup of `tempDir` on the success path (use a `finally`).
+ * On validation failure a `{ success: false, error }` is returned; on a
+ * structural error (e.g. path traversal) the temp dir is removed and the error
+ * is thrown so the caller's try/catch surfaces it.
+ *
+ * `baseDir` decides where the transient files land:
+ *   - install passes `getPluginsDir()` (a copy stays there afterwards anyway).
+ *   - inspect passes `os.tmpdir()` so the user's plugins folder is never
+ *     touched — that folder is recursively watched by the hook-config watcher,
+ *     and writing plugin.json/SKILL.md/hooks.json into it would spuriously
+ *     trigger hook reloads.
+ */
+async function extractZipToTemp(
+  buffer: ArrayBuffer,
+  baseDir: string,
+  tempPrefix: string
+): Promise<ExtractZipResult> {
+  const zip = new AdmZip(Buffer.from(buffer))
+  const entries = zip.getEntries()
+  const decodedEntries = entries.map((entry) => ({
+    entry,
+    decodedName: decodeArchiveEntryName(entry)
+  }))
+
+  // Check total uncompressed size and entry count before extracting
+  let totalSize = 0
+  let fileCount = 0
+  for (const entry of entries) {
+    if (!entry.isDirectory) {
+      fileCount++
+      if (fileCount > MAX_ENTRY_COUNT) {
+        return { success: false, error: `ZIP 包含文件数量超过 ${MAX_ENTRY_COUNT} 个限制` }
+      }
+      totalSize += entry.header.size
+      if (totalSize > MAX_EXTRACTED_SIZE) {
+        return {
+          success: false,
+          error: `ZIP 解压后大小超过 ${MAX_EXTRACTED_SIZE / 1024 / 1024}MB 限制`
+        }
+      }
+    }
+  }
+
+  // Check available disk space before extracting
+  try {
+    const { statfs } = await import("fs/promises")
+    const fsInfo = await statfs(baseDir)
+    const availableBytes = fsInfo.bavail * fsInfo.bsize
+    // Require at least 2x the total uncompressed size (temp + final copy)
+    if (availableBytes < totalSize * 2) {
+      return {
+        success: false,
+        error: `磁盘可用空间不足，需要至少 ${Math.ceil((totalSize * 2) / 1024 / 1024)}MB`
+      }
+    }
+  } catch {
+    // statfs may not be available on all platforms — continue without check
+  }
+
+  // Determine root prefix — the zip may have a single root directory
+  let rootPrefix = ""
+  const firstEntry = decodedEntries.find((item) => !item.entry.isDirectory)
+  if (firstEntry) {
+    const parts = firstEntry.decodedName.split("/")
+    if (parts.length > 1) {
+      // Check if all entries share the same root directory
+      const candidate = parts[0] + "/"
+      const allMatch = decodedEntries.every(
+        (item) =>
+          item.decodedName.startsWith(candidate) || item.decodedName === candidate.slice(0, -1)
+      )
+      if (allMatch) rootPrefix = candidate
+    }
+  }
+
+  // Extract to a unique temp directory. uuid avoids collisions when callers
+  // run concurrently (inspect is not mutex-guarded); the prefix keeps the
+  // existing install fallback-name heuristic working.
+  const tempDir = path.join(baseDir, `${tempPrefix}${Date.now()}_${uuid()}`)
+  mkdirSync(tempDir, { recursive: true })
+
+  try {
+    for (const { entry, decodedName } of decodedEntries) {
+      if (entry.isDirectory) continue
+      let relativePath = decodedName
+      if (rootPrefix && relativePath.startsWith(rootPrefix)) {
+        relativePath = relativePath.slice(rootPrefix.length)
+      }
+      if (!relativePath) continue
+
+      const destPath = path.resolve(tempDir, relativePath)
+      // Path traversal check — normalize both sides so separator style is consistent
+      const normalDest = path.normalize(destPath)
+      const normalBase = path.normalize(path.resolve(tempDir))
+      if (!normalDest.startsWith(normalBase + path.sep) && normalDest !== normalBase) {
+        throw new Error(`ZIP 包含路径穿越条目: ${decodedName || entry.entryName}`)
+      }
+      const destDirPath = path.dirname(destPath)
+      mkdirSync(destDirPath, { recursive: true })
+      await fs.writeFile(destPath, entry.getData())
+    }
+
+    const pluginRoot = await selectExtractedPluginRoot(tempDir)
+    return { success: true, tempDir, pluginRoot }
+  } catch (e) {
+    // Clean up temp on structural error before propagating
+    if (existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+    throw e
+  }
+}
+
+/**
+ * Parse a plugin zip WITHOUT installing it, returning the same shape as
+ * `plugins:getDetail` so the market detail panel can show real component
+ * counts. Extraction goes to the OS temp dir (never the watched plugins
+ * folder) and is removed afterwards. Never throws — on any failure it returns
+ * an empty detail so the caller can degrade gracefully to zeros.
+ *
+ * Exported for unit testing the extract+parse path directly.
+ */
+export async function inspectPluginZip(buffer: ArrayBuffer): Promise<PluginDetail> {
+  const empty: PluginDetail = {
+    skills: [],
+    mcpServers: [],
+    mcpServerDetails: [],
+    hookCount: 0,
+    hooks: [],
+    manifest: null
+  }
+  if (!buffer) return empty
+  let tempDir: string | null = null
+  try {
+    const extracted = await extractZipToTemp(buffer, os.tmpdir(), "cmb-plugin-inspect-")
+    if (!extracted.success) {
+      console.warn("[Plugins] inspectZip extract failed:", extracted.error)
+      return empty
+    }
+    tempDir = extracted.tempDir
+    const parsed = await parsePluginDir(extracted.pluginRoot)
+    return {
+      skills: parsed.skillDirs,
+      mcpServers: Object.keys(parsed.mcpConfigs),
+      mcpServerDetails: parsed.mcpServerDetails,
+      hookCount: parsed.hookCount,
+      // Uninstalled plugins have no per-hook enable metadata; only the count
+      // is meaningful here. The detail panel reads hookCount for the summary.
+      hooks: [],
+      manifest: parsed.manifest
+    }
+  } catch (e) {
+    console.warn("[Plugins] inspectZip failed:", e)
+    return empty
+  } finally {
+    if (tempDir && existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  }
+}
+
 async function installPluginFromZip(
   buffer: ArrayBuffer,
   fileName?: string,
   origin?: "market" | "local"
 ): Promise<{ success: boolean; pluginName?: string; error?: string }> {
   try {
-    const zip = new AdmZip(Buffer.from(buffer))
-    const entries = zip.getEntries()
-    const decodedEntries = entries.map((entry) => ({
-      entry,
-      decodedName: decodeArchiveEntryName(entry)
-    }))
-
-    // Check total uncompressed size and entry count before extracting
-    let totalSize = 0
-    let fileCount = 0
-    for (const entry of entries) {
-      if (!entry.isDirectory) {
-        fileCount++
-        if (fileCount > MAX_ENTRY_COUNT) {
-          return { success: false, error: `ZIP 包含文件数量超过 ${MAX_ENTRY_COUNT} 个限制` }
-        }
-        totalSize += entry.header.size
-        if (totalSize > MAX_EXTRACTED_SIZE) {
-          return {
-            success: false,
-            error: `ZIP 解压后大小超过 ${MAX_EXTRACTED_SIZE / 1024 / 1024}MB 限制`
-          }
-        }
-      }
+    const extracted = await extractZipToTemp(buffer, getPluginsDir(), "_temp_")
+    if (!extracted.success) {
+      return { success: false, error: extracted.error }
     }
-
-    // Check available disk space before extracting
-    try {
-      const pluginsDir = getPluginsDir()
-      const { statfs } = await import("fs/promises")
-      const fsInfo = await statfs(pluginsDir)
-      const availableBytes = fsInfo.bavail * fsInfo.bsize
-      // Require at least 2x the total uncompressed size (temp + final copy)
-      if (availableBytes < totalSize * 2) {
-        return {
-          success: false,
-          error: `磁盘可用空间不足，需要至少 ${Math.ceil((totalSize * 2) / 1024 / 1024)}MB`
-        }
-      }
-    } catch {
-      // statfs may not be available on all platforms — continue without check
-    }
-
-    // Determine root prefix — the zip may have a single root directory
-    let rootPrefix = ""
-    const firstEntry = decodedEntries.find((item) => !item.entry.isDirectory)
-    if (firstEntry) {
-      const parts = firstEntry.decodedName.split("/")
-      if (parts.length > 1) {
-        // Check if all entries share the same root directory
-        const candidate = parts[0] + "/"
-        const allMatch = decodedEntries.every(
-          (item) =>
-            item.decodedName.startsWith(candidate) ||
-            item.decodedName === candidate.slice(0, -1)
-        )
-        if (allMatch) rootPrefix = candidate
-      }
-    }
-
-    // Extract to temp directory
-    const pluginsDir = getPluginsDir()
-    const tempName = `_temp_${Date.now()}`
-    const tempDir = path.join(pluginsDir, tempName)
-    mkdirSync(tempDir, { recursive: true })
+    const { tempDir, pluginRoot } = extracted
 
     try {
-      for (const { entry, decodedName } of decodedEntries) {
-        if (entry.isDirectory) continue
-        let relativePath = decodedName
-        if (rootPrefix && relativePath.startsWith(rootPrefix)) {
-          relativePath = relativePath.slice(rootPrefix.length)
-        }
-        if (!relativePath) continue
-
-        const destPath = path.resolve(tempDir, relativePath)
-        // Path traversal check — normalize both sides so separator style is consistent
-        const normalDest = path.normalize(destPath)
-        const normalBase = path.normalize(path.resolve(tempDir))
-        if (!normalDest.startsWith(normalBase + path.sep) && normalDest !== normalBase) {
-          throw new Error(`ZIP 包含路径穿越条目: ${decodedName || entry.entryName}`)
-        }
-        const destDirPath = path.dirname(destPath)
-        mkdirSync(destDirPath, { recursive: true })
-        await fs.writeFile(destPath, entry.getData())
-      }
-
-      const pluginRoot = await selectExtractedPluginRoot(tempDir)
       const rootName = path.basename(pluginRoot)
       const zipFallbackName = getZipFallbackName(fileName)
       const fallbackName =
@@ -421,21 +510,13 @@ async function installPluginFromZip(
           ? zipFallbackName ?? rootName
           : rootName
 
-      // Parse and install
-      const result = await installPluginFromDir(pluginRoot, fallbackName, origin)
-
-      // Clean up temp directory (the real copy is at destDir)
+      // Parse and install (the real copy lands in getPluginsDir() via installPluginFromDir)
+      return await installPluginFromDir(pluginRoot, fallbackName, origin)
+    } finally {
+      // Clean up temp directory regardless of install outcome
       if (existsSync(tempDir)) {
         rmSync(tempDir, { recursive: true, force: true })
       }
-
-      return result
-    } catch (e) {
-      // Clean up temp on error
-      if (existsSync(tempDir)) {
-        rmSync(tempDir, { recursive: true, force: true })
-      }
-      throw e
     }
   } catch (e) {
     return { success: false, error: e instanceof Error ? e.message : "解压失败" }
@@ -646,6 +727,22 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         hooks: getPluginHooks(plugin.id),
         manifest: parsed.manifest
       }
+    }
+  )
+
+  // Parse a plugin zip (e.g. a market download) WITHOUT installing it, so the
+  // market detail panel can show real component counts. The zip is extracted to
+  // the OS temp dir — never the watched plugins folder — and removed afterwards.
+  // No mutex: it only touches its own unique temp dir and never writes plugins.json.
+  // Parse a plugin zip (e.g. a market download) WITHOUT installing it, so the
+  // market detail panel can show real component counts. See inspectPluginZip.
+  ipcMain.handle(
+    "plugins:inspectZip",
+    async (_event, payload: { buffer: ArrayBuffer }): Promise<PluginDetail> => {
+      if (!payload?.buffer) {
+        return { skills: [], mcpServers: [], mcpServerDetails: [], hookCount: 0, hooks: [], manifest: null }
+      }
+      return inspectPluginZip(payload.buffer)
     }
   )
 
