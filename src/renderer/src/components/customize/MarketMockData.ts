@@ -6,8 +6,8 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
   orgSkill: [],
   skill: [
     {
-      name: "代码审查",
-      chinese_name: "代码审查",
+      name: "pinchtab",
+      chinese_name: "代码审查pinchtab",
       category: "研发类场景/应用类研发",
       tag: "认证",
       featured: "精品",

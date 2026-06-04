@@ -44,6 +44,7 @@ import {
   DialogFooter
 } from "@/components/ui/dialog"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { McpConnectorConfig, PluginManifest, PluginMetadata, SkillMetadata } from "@/types"
 import { UniversalUploadDialog } from "./UniversalUploadDialog"
 import { SkillDetail } from "./SkillsPanel"
@@ -99,6 +100,20 @@ import {
 
 // Local storage helper functions for tracking user uploads
 const UPLOADED_ITEMS_KEY = "marketplace_uploaded_items"
+const LOCAL_UPLOADED_SKILL_PATHS_KEY = "skills_panel_uploaded_skill_paths"
+
+function normalizeSkillName(value?: string): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+}
+
+function normalizeSkillPathKey(skillPath: string): string {
+  return String(skillPath || "")
+    .replace(/\\/g, "/")
+    .trim()
+    .toLowerCase()
+}
 
 function getSecondaryCategory(category?: string): string {
   if (!category) return ""
@@ -131,6 +146,11 @@ interface UploadedItemRecord {
   uploadedAt: string
 }
 
+interface LocalUploadedSkillPathRecord {
+  path: string
+  uploadedAt?: string
+}
+
 function parseMarkdownFrontmatterMetadata(content: string | null): Record<string, string> | undefined {
   if (typeof content !== "string") return undefined
 
@@ -153,6 +173,43 @@ function parseMarkdownFrontmatterMetadata(content: string | null): Record<string
 function formatMarketVersionLabel(version?: string | null): string {
   const normalized = normalizeMarketVersion(version)
   return normalized ? `v${normalized}` : "未知版本"
+}
+
+function readUploadedSkillNamesFromStorage(): Set<string> {
+  try {
+    const raw = localStorage.getItem(UPLOADED_ITEMS_KEY)
+    const parsed: UploadedItemRecord[] = raw ? JSON.parse(raw) : []
+    if (!Array.isArray(parsed)) return new Set()
+
+    const names = new Set<string>()
+    for (const item of parsed) {
+      if (!item || item.type !== "skill") continue
+      const normalized = normalizeSkillName(item.name)
+      if (normalized) names.add(normalized)
+    }
+    return names
+  } catch (error) {
+    console.warn("[MarketPanel] Failed to read uploaded skill names from localStorage:", error)
+    return new Set()
+  }
+}
+
+function readLocalUploadedSkillPathSetFromStorage(): Set<string> {
+  try {
+    const raw = localStorage.getItem(LOCAL_UPLOADED_SKILL_PATHS_KEY)
+    const parsed: LocalUploadedSkillPathRecord[] = raw ? JSON.parse(raw) : []
+    if (!Array.isArray(parsed)) return new Set()
+
+    const paths = new Set<string>()
+    for (const item of parsed) {
+      if (!item?.path) continue
+      paths.add(normalizeSkillPathKey(item.path))
+    }
+    return paths
+  } catch (error) {
+    console.warn("[MarketPanel] Failed to read local uploaded skill paths from localStorage:", error)
+    return new Set()
+  }
 }
 
 interface SkillUserUsage {
@@ -282,6 +339,7 @@ interface MarketItemCardProps {
   skillUserCount?: number | null
   uploaderProfile?: UploaderProfile | null
   showResolvedUploader?: boolean
+  installDisabledReason?: string
 }
 
 function MarketItemCard({
@@ -301,7 +359,8 @@ function MarketItemCard({
   skillCallCount = null,
   skillUserCount = null,
   uploaderProfile = null,
-  showResolvedUploader = false
+  showResolvedUploader = false,
+  installDisabledReason
 }: MarketItemCardProps) {
   const formatMetricValue = (value: number | null): string => {
     if (value === null) return "0"
@@ -327,6 +386,13 @@ function MarketItemCard({
   const isFeatured = item.featured === "精品"
   const itemTag = item.tag?.trim()
   const isSkillCard = skillCallCount !== null || skillUserCount !== null
+  const installActionDisabled = !!installDisabledReason
+
+  const installDisabledTooltip = (
+    <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
+      {installDisabledReason}
+    </TooltipContent>
+  )
 
   return (
     <div
@@ -470,6 +536,26 @@ function MarketItemCard({
                     <Zap className="size-3" />
                     自动保持最新
                   </span>
+                ) : installActionDisabled ? (
+                  <TooltipProvider delayDuration={180}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="inline-flex cursor-not-allowed">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="pointer-events-none h-7 px-3 gap-1 text-xs rounded-lg text-[#9b8f80] border-[#e8e0d4] bg-[#f6f2ea] opacity-90"
+                            disabled
+                            aria-disabled="true"
+                          >
+                            <Zap className="size-3" />
+                            无需安装
+                          </Button>
+                        </span>
+                      </TooltipTrigger>
+                      {installDisabledTooltip}
+                    </Tooltip>
+                  </TooltipProvider>
                 ) : updateAvailable ? (
                   <UpdateVersionTooltip
                     typeLabel={marketTypeLabel}
@@ -498,14 +584,35 @@ function MarketItemCard({
                   </Button>
                 )
               ) : (
-                <Button
-                  size="sm"
-                  className="h-7 px-3 gap-1 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c4956a_0px_0px_0px_0px,#c4956a_0px_0px_0px_1px] cursor-pointer rounded-lg"
-                  onClick={handleInstallDownload}
-                >
-                  <Zap className="size-3" />
-                  安装
-                </Button>
+                installActionDisabled ? (
+                  <TooltipProvider delayDuration={180}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="inline-flex cursor-not-allowed">
+                          <Button
+                            size="sm"
+                            className="pointer-events-none h-7 px-3 gap-1 text-xs bg-[#d8c8b5] text-[#faf9f5] border-0 rounded-lg opacity-85"
+                            disabled
+                            aria-disabled="true"
+                          >
+                            <Zap className="size-3" />
+                            无需安装
+                          </Button>
+                        </span>
+                      </TooltipTrigger>
+                      {installDisabledTooltip}
+                    </Tooltip>
+                  </TooltipProvider>
+                ) : (
+                  <Button
+                    size="sm"
+                    className="h-7 px-3 gap-1 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c4956a_0px_0px_0px_0px,#c4956a_0px_0px_0px_1px] cursor-pointer rounded-lg"
+                    onClick={handleInstallDownload}
+                  >
+                    <Zap className="size-3" />
+                    安装
+                  </Button>
+                )
               )}
               {isInstalled && !isFeatured && (
                 <Button
@@ -647,6 +754,9 @@ export function MarketPanel(): React.JSX.Element {
   const [canViewSkillUserDetail, setCanViewSkillUserDetail] = useState(false)
   const [uploaderProfiles, setUploaderProfiles] = useState<Record<string, UploaderProfile>>({})
   const [currentUserUploadCandidates, setCurrentUserUploadCandidates] = useState<string[]>([])
+  const [uploadedSkillNames, setUploadedSkillNames] = useState<Set<string>>(() =>
+    readUploadedSkillNamesFromStorage()
+  )
   const installedSkillsRef = useRef<string[]>([])
   const installedMcpsRef = useRef<string[]>([])
   const installedPluginsRef = useRef<string[]>([])
@@ -657,6 +767,8 @@ export function MarketPanel(): React.JSX.Element {
     () => new Set(currentUserUploadCandidates),
     [currentUserUploadCandidates]
   )
+  const uploadedSkillDisabledReason = "这个技能已经存在于“我上传的技能”里，无需重复安装。"
+  const uploadedSkillNameSetRef = useRef<Set<string>>(uploadedSkillNames)
 
   const getItemKey = (item: MarketItem) => item.id || item.name
   const getMarketTypeLabel = (type: MarketItemType) =>
@@ -858,6 +970,10 @@ export function MarketPanel(): React.JSX.Element {
     }
   }, [])
 
+  useEffect(() => {
+    uploadedSkillNameSetRef.current = uploadedSkillNames
+  }, [uploadedSkillNames])
+
   const loadCurrentUserUploadCandidates = useCallback(async () => {
     try {
       if (typeof window.api?.models?.getUserInfo !== "function") {
@@ -929,6 +1045,18 @@ export function MarketPanel(): React.JSX.Element {
       if (window.api?.skills?.list) {
         const skillsMetadata = await window.api.skills.list()
         const skillNames = skillsMetadata.map((skill) => skill.name)
+        const uploadedNames = readUploadedSkillNamesFromStorage()
+        const uploadedPaths = readLocalUploadedSkillPathSetFromStorage()
+        const uploadedInstalledNames = new Set<string>()
+        for (const skill of skillsMetadata) {
+          if (skill.source !== "user") continue
+          const normalizedName = normalizeSkillName(skill.name)
+          const normalizedPath = normalizeSkillPathKey(skill.path)
+          if (uploadedPaths.has(normalizedPath) || uploadedNames.has(normalizedName)) {
+            uploadedInstalledNames.add(normalizedName)
+          }
+        }
+        setUploadedSkillNames(uploadedInstalledNames)
         setInstalledSkills(skillNames)
       }
     } catch (error) {
@@ -1124,6 +1252,10 @@ export function MarketPanel(): React.JSX.Element {
 
   // 新增：更新安装功能
   const handleUpdateInstall = async (item: MarketItem) => {
+    if (item.installDisabledReason) {
+      toast.info(item.installDisabledReason)
+      return
+    }
     const itemKey = item.id || item.name
 
     // 添加到更新中集合
@@ -1240,6 +1372,7 @@ export function MarketPanel(): React.JSX.Element {
 
     const addItemFlags = (items: MarketItem[], type: MarketItemType): MarketItem[] => {
       return items.map((item) => {
+        const normalizedSkillName = normalizeSkillName(item.name)
         const isInstalled =
           type === "skill"
             ? installedSkillsRef.current.includes(item.name) ||
@@ -1253,6 +1386,10 @@ export function MarketPanel(): React.JSX.Element {
         return {
           ...item,
           canDelete: localStorageHelper.canDeleteItem(item.name, type),
+          installDisabledReason:
+            type === "skill" && uploadedSkillNameSetRef.current.has(normalizedSkillName)
+              ? uploadedSkillDisabledReason
+              : undefined,
           ...buildMarketInstalledFlags(item, type, isInstalled)
         }
       })
@@ -1336,7 +1473,7 @@ export function MarketPanel(): React.JSX.Element {
     }
 
     loadData()
-  }, [activeTab, reloadToken])
+  }, [activeTab, reloadToken, uploadedSkillDisabledReason])
 
   useEffect(() => {
     const previousActiveTab = previousActiveTabRef.current
@@ -1827,6 +1964,10 @@ export function MarketPanel(): React.JSX.Element {
   }
 
   const handleDownload = async (item: MarketItem, downloadToLocal = false) => {
+    if (!downloadToLocal && item.installDisabledReason) {
+      toast.info(item.installDisabledReason)
+      return
+    }
     const itemKey = item.id || item.name
 
     // Add to downloading set
@@ -2280,6 +2421,28 @@ export function MarketPanel(): React.JSX.Element {
                           <Zap className="size-3" />
                           自动保持最新
                         </span>
+                      ) : selectedItem.installDisabledReason ? (
+                        <TooltipProvider delayDuration={180}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="col-span-2 inline-flex cursor-not-allowed">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="pointer-events-none h-8 w-full gap-1.5 text-xs rounded-lg text-[#9b8f80] border-[#e8e0d4] bg-[#f6f2ea] opacity-90"
+                                  disabled
+                                  aria-disabled="true"
+                                >
+                                  <Zap className="size-3" />
+                                  无需安装
+                                </Button>
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
+                              {selectedItem.installDisabledReason}
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
                       ) : selectedItem.updateAvailable ? (
                         <UpdateVersionTooltip
                           typeLabel={getMarketTypeLabel(activeTab)}
@@ -2310,15 +2473,38 @@ export function MarketPanel(): React.JSX.Element {
                         </Button>
                       )
                     ) : (
-                      <Button
-                        size="sm"
-                        className="h-8 gap-1.5 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c4956a_0px_0px_0px_0px,#c4956a_0px_0px_0px_1px] rounded-lg cursor-pointer"
-                        onClick={() => handleDownload(selectedItem, false)}
-                        disabled={downloadingItems.has(getItemKey(selectedItem))}
-                      >
-                        <Zap className="size-3" />
-                        安装
-                      </Button>
+                      selectedItem.installDisabledReason ? (
+                        <TooltipProvider delayDuration={180}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="col-span-2 inline-flex cursor-not-allowed">
+                                <Button
+                                  size="sm"
+                                  className="pointer-events-none h-8 w-full gap-1.5 text-xs bg-[#d8c8b5] text-[#faf9f5] border-0 rounded-lg opacity-85"
+                                  disabled
+                                  aria-disabled="true"
+                                >
+                                  <Zap className="size-3" />
+                                  无需安装
+                                </Button>
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
+                              {selectedItem.installDisabledReason}
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      ) : (
+                        <Button
+                          size="sm"
+                          className="h-8 gap-1.5 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c4956a_0px_0px_0px_0px,#c4956a_0px_0px_0px_1px] rounded-lg cursor-pointer"
+                          onClick={() => handleDownload(selectedItem, false)}
+                          disabled={downloadingItems.has(getItemKey(selectedItem))}
+                        >
+                          <Zap className="size-3" />
+                          安装
+                        </Button>
+                      )
                     )}
                     {selectedItem.installed && selectedItem.featured !== "精品" && (
                       <Button

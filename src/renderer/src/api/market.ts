@@ -71,6 +71,7 @@ export interface MarketItem {
   published_at?: string
   installedVersion?: string
   updateAvailable?: boolean
+  installDisabledReason?: string
   orgSkillId?: number
   orgSkillVersionId?: number
   sourceOriginName?: string
