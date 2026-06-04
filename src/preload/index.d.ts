@@ -374,6 +374,7 @@ interface DashboardProjectModeAdapter {
   projectCount: number
   featureCount: number
   conversationCount: number
+  codeStats: DashboardCodeStats | null
 }
 
 interface DashboardProjectModeData {

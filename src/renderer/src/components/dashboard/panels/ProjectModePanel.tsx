@@ -497,7 +497,7 @@ function AdapterListSection({
     <section>
       <h2 className="mb-1 text-sm font-semibold text-foreground">插件列表</h2>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-        按项目数降序排列；项目数为当前状态，对话数按所选时间范围统计。
+        按项目数降序排列；项目数为当前状态，对话数、已Commit/已Push采纳率按所选时间范围统计。
       </p>
       <div className="rounded-xl border border-border bg-card">
         {sortedAdapters.length === 0 ? (
@@ -536,6 +536,18 @@ function AdapterListSection({
                       对话{" "}
                       <span className="font-medium text-foreground">
                         {formatNumber(adapter.conversationCount)}
+                      </span>
+                    </span>
+                    <span>
+                      已Commit采纳率{" "}
+                      <span className="font-medium text-foreground">
+                        {formatPercent(adapter.codeStats?.measuredAdoptionRate)}
+                      </span>
+                    </span>
+                    <span>
+                      已Push采纳率{" "}
+                      <span className="font-medium text-foreground">
+                        {formatPercent(adapter.codeStats?.pushedAdoptionRate)}
                       </span>
                     </span>
                   </div>

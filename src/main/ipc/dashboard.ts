@@ -27,6 +27,7 @@ import {
   effectiveGeneratedLinesSumAgg,
   makeDashboardCodeStats,
   normalizeCodeStatsFromAggs,
+  normalizeCodeStatsFromContainer,
   normalizeSkillCodeAdoptionBuckets,
   type DashboardCodeStats,
   type DashboardSkillCodeAdoptionStats
@@ -5660,16 +5661,45 @@ function makeMockProjectMode(range: TimeRange): DashboardProjectModeData {
         version: "1.4.2",
         projectCount: 1,
         featureCount: 3,
-        conversationCount: 128
+        conversationCount: 128,
+        codeStats: makeDashboardCodeStats({
+          generatedLines: 5200,
+          deletedLines: 800,
+          measuredGeneratedLines: 4800,
+          effectiveGeneratedLines: 4200,
+          adoptedLines: 3100,
+          pushedMeasuredGeneratedLines: 4000,
+          pushedEffectiveGeneratedLines: 3600,
+          pushedAdoptedLines: 2700,
+          pushedCommitCount: 42
+        })
       },
       {
         name: "claude-code",
         version: "1.4.0",
         projectCount: 1,
         featureCount: 2,
-        conversationCount: 47
+        conversationCount: 47,
+        codeStats: makeDashboardCodeStats({
+          generatedLines: 1800,
+          deletedLines: 200,
+          measuredGeneratedLines: 1600,
+          effectiveGeneratedLines: 1400,
+          adoptedLines: 900,
+          pushedMeasuredGeneratedLines: 1200,
+          pushedEffectiveGeneratedLines: 1000,
+          pushedAdoptedLines: 650,
+          pushedCommitCount: 14
+        })
       },
-      { name: "codex", version: "0.9.1", projectCount: 1, featureCount: 1, conversationCount: 0 }
+      {
+        name: "codex",
+        version: "0.9.1",
+        projectCount: 1,
+        featureCount: 1,
+        conversationCount: 0,
+        codeStats: null
+      }
     ],
     topSkills: [
       { skill: "代码审查", count: 58 },
@@ -6392,6 +6422,7 @@ interface ProjectModeAdapterView {
   projectCount: number
   featureCount: number
   conversationCount: number
+  codeStats: DashboardCodeStats | null
 }
 
 interface DashboardProjectModeData {
@@ -6505,8 +6536,8 @@ async function fetchProjectModeSnapshots(): Promise<{
   return { projects: [...byProject.values()], featureCount }
 }
 
-/** Upper bound on the traceId set forwarded to the code-adoption join (ES terms cap is 65536). */
-const PROJECT_MODE_TRACE_ID_LIMIT = 10000
+/** Upper bound on the project set forwarded to the code-adoption query (ES terms cap is 65536). */
+const PROJECT_MODE_PROJECT_ID_LIMIT = 1000
 
 /** Convert a `terms usedSkills` bucket list into a {skill,count}[] ranking. */
 function parseSkillCountBuckets(raw: unknown): ProjectModeSkillCount[] {
@@ -6547,8 +6578,6 @@ async function fetchProjectModeUsage(
   tools: ProjectModeToolUsage
   perProject: Map<string, number>
   perProjectSkills: Map<string, ProjectModeSkillCount[]>
-  traceIdsByProject: Map<string, string[]>
-  allTraceIds: string[]
   adapters: Map<string, ProjectModeAdapterView>
 }> {
   const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
@@ -6576,7 +6605,6 @@ async function fetchProjectModeUsage(
       by_project: {
         terms: { field: "harnessProjectId", size: 500 },
         aggs: {
-          traces: { terms: { field: "traceId", size: 2000 } },
           skills: { terms: { field: "usedSkills", size: 10 } }
         }
       },
@@ -6598,8 +6626,6 @@ async function fetchProjectModeUsage(
 
   const perProject = new Map<string, number>()
   const perProjectSkills = new Map<string, ProjectModeSkillCount[]>()
-  const traceIdsByProject = new Map<string, string[]>()
-  const allTraceIds: string[] = []
   const projectBuckets = asRecord(aggs.by_project).buckets
   if (Array.isArray(projectBuckets)) {
     for (const bucket of projectBuckets) {
@@ -6608,18 +6634,6 @@ async function fetchProjectModeUsage(
       if (!key) continue
       perProject.set(key, asNumber(b.doc_count))
       perProjectSkills.set(key, parseSkillCountBuckets(asRecord(b.skills).buckets))
-
-      const traceBuckets = asRecord(b.traces).buckets
-      const traceIds: string[] = []
-      if (Array.isArray(traceBuckets)) {
-        for (const tb of traceBuckets) {
-          const traceId = asString(asRecord(tb).key)
-          if (!traceId) continue
-          traceIds.push(traceId)
-          if (allTraceIds.length < PROJECT_MODE_TRACE_ID_LIMIT) allTraceIds.push(traceId)
-        }
-      }
-      traceIdsByProject.set(key, traceIds)
     }
   }
 
@@ -6638,7 +6652,8 @@ async function fetchProjectModeUsage(
           version: undefined,
           projectCount: 0,
           featureCount: 0,
-          conversationCount: asNumber(b.doc_count)
+          conversationCount: asNumber(b.doc_count),
+          codeStats: null
         })
         continue
       }
@@ -6650,7 +6665,8 @@ async function fetchProjectModeUsage(
           version,
           projectCount: 0,
           featureCount: 0,
-          conversationCount: asNumber(v.doc_count)
+          conversationCount: asNumber(v.doc_count),
+          codeStats: null
         })
       }
     }
@@ -6674,36 +6690,33 @@ async function fetchProjectModeUsage(
     },
     perProject,
     perProjectSkills,
-    traceIdsByProject,
-    allTraceIds,
     adapters
   }
 }
 
 /**
- * Code-adoption stats for project mode, joined via `properties.traceId`.
+ * Code-adoption stats for project mode.
  *
- * Adoption events (`code_gen` / `code_adopt`) carry no `harnessProjectId`, but
- * they do carry `traceId`, and each trace belongs to exactly one project. So we
- * filter the code events by the project-mode traceId set and bucket by traceId
- * (named `by_skill_adoption` to reuse `normalizeSkillCodeAdoptionBuckets`, whose
- * `.skill` field then holds the traceId), letting the caller roll the per-trace
- * stats up to per-project totals.
+ * `code_gen` / `code_adopt` events carry `properties.harnessProjectId` plus the
+ * bound adapter (`harnessAdapterName` / `harnessAdapterVersion`), so adoption can
+ * be aggregated directly by project / adapter / skill in one query — no traceId →
+ * project join and no per-trace fan-out cap. `projectIds` scopes the events to the
+ * in-range, org-filtered project set (≤ a few hundred), which both preserves the
+ * org filter and keeps the terms clause small.
  */
-/** Shared code-adoption filters + per-bucket sub-aggs for project-mode (traceId-scoped) queries. */
 function buildProjectModeCodeAggs(
-  traceIds: string[],
+  projectIds: string[],
   range: TimeRange
 ): {
   codeGenFilters: Record<string, unknown>[]
   codeAdoptFilters: Record<string, unknown>[]
   perBucketAggs: Record<string, unknown>
 } {
-  const traceFilter = { terms: { "properties.traceId": traceIds } }
+  const projectFilter = { terms: { "properties.harnessProjectId": projectIds } }
   const codeGenFilters: Record<string, unknown>[] = [
     { term: { eventName: "code_gen" } },
     timeRangeFilter("eventTime", range),
-    traceFilter
+    projectFilter
   ]
   const codeAdoptFilters: Record<string, unknown>[] = [
     { term: { eventName: "code_adopt" } },
@@ -6711,7 +6724,7 @@ function buildProjectModeCodeAggs(
     { exists: { field: "properties.generatedLineCount" } },
     { exists: { field: "properties.effectiveGeneratedLineCount" } },
     timeRangeFilter("properties.generatedAt", range),
-    traceFilter
+    projectFilter
   ]
   const codeAdoptPushedFilters: Record<string, unknown>[] = [
     ...codeAdoptFilters,
@@ -6742,24 +6755,76 @@ function buildProjectModeCodeAggs(
   return { codeGenFilters, codeAdoptFilters, perBucketAggs }
 }
 
-async function fetchProjectModeCodeStats(
-  traceIds: string[],
-  range: TimeRange
-): Promise<{ overall: DashboardCodeStats; perTrace: DashboardSkillCodeAdoptionStats[] }> {
-  if (traceIds.length === 0) {
-    return {
-      overall: makeDashboardCodeStats({
-        generatedLines: 0,
-        deletedLines: 0,
-        measuredGeneratedLines: 0,
-        effectiveGeneratedLines: 0,
-        adoptedLines: 0
-      }),
-      perTrace: []
+/** Map a `terms` bucket list (project / skill) keyed by `key` → per-bucket code stats. */
+function parseCodeStatsBucketsByKey(buckets: unknown): Map<string, DashboardCodeStats> {
+  const map = new Map<string, DashboardCodeStats>()
+  if (!Array.isArray(buckets)) return map
+  for (const bucket of buckets) {
+    const b = asRecord(bucket)
+    const key = asString(b.key)
+    if (!key) continue
+    map.set(key, normalizeCodeStatsFromContainer(b))
+  }
+  return map
+}
+
+/**
+ * Map the nested `harnessAdapterName → harnessAdapterVersion` bucket tree → code
+ * stats keyed by `adapterKey(name, version)`. Mirrors the usage-side adapter
+ * merge: read version-level stats when versions exist, else the name-level bucket.
+ */
+function parseAdapterCodeStatsBuckets(buckets: unknown): Map<string, DashboardCodeStats> {
+  const map = new Map<string, DashboardCodeStats>()
+  if (!Array.isArray(buckets)) return map
+  for (const bucket of buckets) {
+    const b = asRecord(bucket)
+    const name = asString(b.key)
+    if (!name) continue
+    const rawVersions = asRecord(b.by_version).buckets
+    const versions = Array.isArray(rawVersions) ? rawVersions : []
+    if (versions.length === 0) {
+      map.set(adapterKey(name), normalizeCodeStatsFromContainer(b))
+      continue
+    }
+    for (const vb of versions) {
+      const v = asRecord(vb)
+      const version = asOptionalString(v.key)
+      map.set(adapterKey(name, version), normalizeCodeStatsFromContainer(v))
     }
   }
+  return map
+}
+
+/**
+ * Single code-adoption query for project mode: overall totals plus per-project,
+ * per-adapter and per-skill breakdowns, all from one scan of the event index.
+ */
+async function fetchProjectModeCodeStats(
+  projectIds: string[],
+  range: TimeRange
+): Promise<{
+  overall: DashboardCodeStats
+  byProject: Map<string, DashboardCodeStats>
+  byAdapter: Map<string, DashboardCodeStats>
+  bySkill: DashboardSkillCodeAdoptionStats[]
+}> {
+  const empty = {
+    overall: makeDashboardCodeStats({
+      generatedLines: 0,
+      deletedLines: 0,
+      measuredGeneratedLines: 0,
+      effectiveGeneratedLines: 0,
+      adoptedLines: 0
+    }),
+    byProject: new Map<string, DashboardCodeStats>(),
+    byAdapter: new Map<string, DashboardCodeStats>(),
+    bySkill: [] as DashboardSkillCodeAdoptionStats[]
+  }
+  if (projectIds.length === 0) return empty
+
+  const scopedProjectIds = projectIds.slice(0, PROJECT_MODE_PROJECT_ID_LIMIT)
   const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
-    traceIds,
+    scopedProjectIds,
     range
   )
   const body = {
@@ -6772,74 +6837,34 @@ async function fetchProjectModeCodeStats(
     },
     aggs: {
       ...perBucketAggs,
-      // Keyed by traceId so the caller can roll the per-trace stats up per project.
-      by_skill_adoption: {
-        terms: { field: "properties.traceId", size: Math.max(1, traceIds.length) },
+      by_project: {
+        terms: { field: "properties.harnessProjectId", size: Math.max(1, scopedProjectIds.length) },
         aggs: perBucketAggs
-      }
-    }
-  }
-  const raw = await esQuery(getEsIndex("event"), body)
-  return {
-    overall: normalizeCodeStatsFromAggs(raw),
-    perTrace: normalizeSkillCodeAdoptionBuckets(raw)
-  }
-}
-
-/** Per-skill code adoption within project mode (adoption events joined via traceId, grouped by usedSkills). */
-async function fetchProjectModeSkillAdoption(
-  traceIds: string[],
-  range: TimeRange
-): Promise<DashboardSkillCodeAdoptionStats[]> {
-  if (traceIds.length === 0) return []
-  const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
-    traceIds,
-    range
-  )
-  const body = {
-    size: 0,
-    query: {
-      bool: {
-        should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
-        minimum_should_match: 1
-      }
-    },
-    aggs: {
-      by_skill_adoption: {
+      },
+      by_adapter: {
+        terms: { field: "properties.harnessAdapterName", size: 200 },
+        aggs: {
+          ...perBucketAggs,
+          by_version: {
+            terms: { field: "properties.harnessAdapterVersion", size: 50 },
+            aggs: perBucketAggs
+          }
+        }
+      },
+      by_skill: {
         terms: { field: "properties.usedSkills", size: 1000 },
         aggs: perBucketAggs
       }
     }
   }
   const raw = await esQuery(getEsIndex("event"), body)
-  return normalizeSkillCodeAdoptionBuckets(raw)
-}
-
-/** Sum the additive line fields of several traces' adoption stats into one project's stats. */
-function sumProjectCodeStats(items: DashboardSkillCodeAdoptionStats[]): DashboardCodeStats {
-  const acc = {
-    generatedLines: 0,
-    deletedLines: 0,
-    measuredGeneratedLines: 0,
-    effectiveGeneratedLines: 0,
-    adoptedLines: 0,
-    pushedMeasuredGeneratedLines: 0,
-    pushedEffectiveGeneratedLines: 0,
-    pushedAdoptedLines: 0,
-    pushedCommitCount: 0
+  const aggs = asRecord(asRecord(raw).aggregations)
+  return {
+    overall: normalizeCodeStatsFromAggs(raw),
+    byProject: parseCodeStatsBucketsByKey(asRecord(aggs.by_project).buckets),
+    byAdapter: parseAdapterCodeStatsBuckets(asRecord(aggs.by_adapter).buckets),
+    bySkill: normalizeSkillCodeAdoptionBuckets(raw, "by_skill")
   }
-  for (const item of items) {
-    acc.generatedLines += item.generatedLines
-    acc.deletedLines += item.deletedLines
-    acc.measuredGeneratedLines += item.measuredGeneratedLines
-    acc.effectiveGeneratedLines += item.effectiveGeneratedLines
-    acc.adoptedLines += item.adoptedLines
-    acc.pushedMeasuredGeneratedLines += item.pushedMeasuredGeneratedLines
-    acc.pushedEffectiveGeneratedLines += item.pushedEffectiveGeneratedLines
-    acc.pushedAdoptedLines += item.pushedAdoptedLines
-    acc.pushedCommitCount += item.pushedCommitCount
-  }
-  return makeDashboardCodeStats(acc)
 }
 
 /** Combine snapshot status + trace usage into the project-mode dashboard payload. */
@@ -6853,35 +6878,19 @@ async function fetchProjectMode(
     fetchProjectModeUsage(range, opts)
   ])
 
-  const [code, bySkillAdoption] = await Promise.all([
-    fetchProjectModeCodeStats(usage.allTraceIds, range),
-    fetchProjectModeSkillAdoption(usage.allTraceIds, range)
-  ])
-  // traceId → projectId, so per-trace adoption stats can be rolled up per project.
-  const projectIdByTrace = new Map<string, string>()
-  for (const [projectId, traceIds] of usage.traceIdsByProject) {
-    for (const traceId of traceIds) projectIdByTrace.set(traceId, projectId)
-  }
-  const perTraceByProject = new Map<string, DashboardSkillCodeAdoptionStats[]>()
-  for (const item of code.perTrace) {
-    const projectId = projectIdByTrace.get(item.skill)
-    if (!projectId) continue
-    const list = perTraceByProject.get(projectId)
-    if (list) list.push(item)
-    else perTraceByProject.set(projectId, [item])
-  }
+  // Code events now carry harnessProjectId/adapter, so adoption is aggregated
+  // directly by project/adapter/skill — scoped to the in-range, org-filtered
+  // project set (perProject keys) so the org filter is preserved.
+  const code = await fetchProjectModeCodeStats([...usage.perProject.keys()], range)
 
   // Join per-project conversation counts, skills and adoption stats into the snapshot list.
   const projects = snapshot.projects
-    .map((project) => {
-      const traces = perTraceByProject.get(project.projectId)
-      return {
-        ...project,
-        conversationCount: usage.perProject.get(project.projectId) ?? 0,
-        topSkills: usage.perProjectSkills.get(project.projectId) ?? [],
-        codeStats: traces && traces.length > 0 ? sumProjectCodeStats(traces) : null
-      }
-    })
+    .map((project) => ({
+      ...project,
+      conversationCount: usage.perProject.get(project.projectId) ?? 0,
+      topSkills: usage.perProjectSkills.get(project.projectId) ?? [],
+      codeStats: code.byProject.get(project.projectId) ?? null
+    }))
     .sort((a, b) => b.conversationCount - a.conversationCount || a.name.localeCompare(b.name))
 
   // Adapter rows: start from usage (carries conversation counts), then add
@@ -6901,9 +6910,13 @@ async function fetchProjectMode(
         version: project.adapterVersion,
         projectCount: 1,
         featureCount: project.featureCount,
-        conversationCount: 0
+        conversationCount: 0,
+        codeStats: null
       })
     }
+  }
+  for (const [key, adapter] of adapters) {
+    adapter.codeStats = code.byAdapter.get(key) ?? null
   }
   const adapterList = [...adapters.values()].sort(
     (a, b) =>
@@ -6927,7 +6940,7 @@ async function fetchProjectMode(
     },
     adapters: adapterList,
     topSkills: usage.topSkills,
-    bySkillAdoption,
+    bySkillAdoption: code.bySkill,
     tools: usage.tools,
     projects
   }

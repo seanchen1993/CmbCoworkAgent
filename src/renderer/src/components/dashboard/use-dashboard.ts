@@ -300,6 +300,7 @@ export interface DashboardProjectModeAdapter {
   projectCount: number
   featureCount: number
   conversationCount: number
+  codeStats: DashboardCodeStats | null
 }
 
 export interface DashboardProjectModeData {
