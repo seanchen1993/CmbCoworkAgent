@@ -31,9 +31,12 @@ import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import type { PluginMetadata, PluginManifest } from "@/types"
 import { marketApi, type MarketItem } from "../../api/market"
-import { MarketPublishDialog, type MarketPublishTarget } from "./MarketPublishDialog"
+import {
+  MarketPublishDialog,
+  type MarketPublishTarget
+} from "./MarketPanel/MarketPublishDialog"
 import { PluginFileEditorDialog } from "./PluginFileEditorDialog"
-import { readUploadedItemNamesFromStorage } from "./marketPublishStorage"
+import { readUploadedItemNamesFromStorage } from "./MarketPanel/marketPublishStorage"
 import { toast } from "sonner"
 
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]

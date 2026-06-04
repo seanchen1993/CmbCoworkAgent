@@ -105,7 +105,7 @@ import {
   isMarketVersionDifferent,
   marketInstalledVersionStorage,
   MarketUpdateBadge
-} from "@/components/customize/MarketUpdateBadge"
+} from "@/components/customize/MarketPanel/MarketUpdateBadge"
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"

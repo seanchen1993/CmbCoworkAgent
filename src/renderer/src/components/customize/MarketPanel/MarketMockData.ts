@@ -1,4 +1,4 @@
-import type { MarketApiResponse, MarketItem, MarketItemType } from "../../api/market"
+import type { MarketApiResponse, MarketItem, MarketItemType } from "../../../api/market"
 
 const MOCK_CREATED_AT = "2026-01-01T00:00:00.000Z"
 

@@ -47,9 +47,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { McpConnectorConfig, PluginManifest, PluginMetadata, SkillMetadata } from "@/types"
 import { UniversalUploadDialog } from "./UniversalUploadDialog"
-import { SkillDetail } from "./SkillsPanel"
-import { MCPConnectorDetail } from "./MCPConnectorDetail"
-import { PluginDetailPanel } from "./PluginsPanel"
+import { SkillDetail } from "../SkillsPanel"
+import { MCPConnectorDetail } from "../MCPConnectorDetail"
+import { PluginDetailPanel } from "../PluginsPanel"
 import {
   buildMarketInstalledFlags,
   marketInstalledVersionStorage,
@@ -69,8 +69,8 @@ import {
   MarketApiResponse,
   MarketItem,
   MarketItemType
-} from "../../api/market"
-import { USE_MARKET_MOCK_ON_ERROR } from "../../api/market-flags"
+} from "../../../api/market"
+import { USE_MARKET_MOCK_ON_ERROR } from "../../../api/market-flags"
 import { getMarketMockResponse } from "./MarketMockData"
 import {
   formatTopUserOrgName,
@@ -78,8 +78,8 @@ import {
   parseTopUsersFromAgg,
   type DashboardTraceDetail,
   type DashboardTraceViewMode
-} from "../dashboard/use-dashboard"
-import { TraceExplorer } from "../dashboard/TraceHistoryDialog"
+} from "../../dashboard/use-dashboard"
+import { TraceExplorer } from "../../dashboard/TraceHistoryDialog"
 import { toast } from "sonner"
 import {
   buildUploaderIdCandidates,
@@ -89,7 +89,7 @@ import {
   sortSkillItemsByUsage,
   type SkillSortMode,
   type SkillUsageSummaryMetric
-} from "../../lib/skill-data-service"
+} from "../../../lib/skill-data-service"
 import {
   ORG_SKILL_MARKET_TYPE,
   OrgSkillMarketContent,

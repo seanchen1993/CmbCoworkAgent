@@ -1,4 +1,4 @@
-import { MOCK_MARKET_DATA } from "../components/customize/MarketMockData"
+import { MOCK_MARKET_DATA } from "../components/customize/MarketPanel/MarketMockData"
 import { toast } from "sonner"
 import { getMockOrgSkillMarketResponse, orgSkillMarketApi } from "./org-skill-market"
 import { USE_MARKET_MOCK_ON_ERROR } from "./market-flags"

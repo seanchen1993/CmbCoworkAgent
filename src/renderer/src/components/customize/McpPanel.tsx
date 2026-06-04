@@ -9,8 +9,11 @@ import type { McpConnectorConfig } from "@/types"
 import { AddMcpConnectorDialog } from "./AddMcpConnectorDialog"
 import { MCPConnectorDetail } from "./MCPConnectorDetail"
 import { marketApi, type MarketItem } from "../../api/market"
-import { MarketPublishDialog, type MarketPublishTarget } from "./MarketPublishDialog"
-import { readUploadedItemNamesFromStorage } from "./marketPublishStorage"
+import {
+  MarketPublishDialog,
+  type MarketPublishTarget
+} from "./MarketPanel/MarketPublishDialog"
+import { readUploadedItemNamesFromStorage } from "./MarketPanel/marketPublishStorage"
 import { toast } from "sonner"
 
 function makeSafeJsonFileName(rawName: string): string {

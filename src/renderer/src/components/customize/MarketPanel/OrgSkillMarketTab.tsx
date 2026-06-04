@@ -19,9 +19,9 @@ import {
   getMockOrgSkillMarketResponse,
   orgSkillMarketApi,
   type OrgSkillLabel
-} from "../../api/org-skill-market"
-import { USE_MARKET_MOCK_ON_ERROR } from "../../api/market-flags"
-import type { MarketApiResponse, MarketItem } from "../../api/market"
+} from "../../../api/org-skill-market"
+import { USE_MARKET_MOCK_ON_ERROR } from "../../../api/market-flags"
+import type { MarketApiResponse, MarketItem } from "../../../api/market"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { buildMarketInstalledFlags } from "./MarketUpdateBadge"

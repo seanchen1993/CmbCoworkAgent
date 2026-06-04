@@ -1,5 +1,5 @@
 import type React from "react"
-import { marketApi, type MarketItem, type MarketItemType } from "../../api/market"
+import { marketApi, type MarketItem, type MarketItemType } from "../../../api/market"
 import { UniversalUploadDialog } from "./UniversalUploadDialog"
 import { markUploadedItemInStorage } from "./marketPublishStorage"
 

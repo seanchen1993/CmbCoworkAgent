@@ -38,10 +38,10 @@ import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/ski
 import { marketApi, type MarketItem } from "../../api/market"
 import { DEFAULT_SCENE_CATEGORY } from "../../lib/skill-data-service"
 import { SkillFileEditor } from "./SkillFileEditor"
-import { UniversalUploadDialog } from "./UniversalUploadDialog"
+import { UniversalUploadDialog } from "./MarketPanel/UniversalUploadDialog"
 import { toast } from "sonner"
-import { marketInstalledVersionStorage } from "./MarketUpdateBadge"
-import { marketInstalledSourceStorage } from "./market-installed-source-storage"
+import { marketInstalledVersionStorage } from "./MarketPanel/MarketUpdateBadge"
+import { marketInstalledSourceStorage } from "./MarketPanel/market-installed-source-storage"
 
 type FilePreviewKind = "text" | "html" | "image" | "pdf"
 type FileTreeNode = {
