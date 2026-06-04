@@ -19,12 +19,14 @@ import { cn } from "@/lib/utils"
 import {
   CodeAdoptionFunnel,
   SkillRankingPanel,
+  ToolRankingPanel,
   type CodeAdoptionFunnelData
 } from "./dashboard-shared"
 import type {
   DashboardProjectModeData,
   DashboardProjectModeProject,
-  DashboardProjectModeSkillCount
+  DashboardProjectModeSkillCount,
+  DashboardProjectModeToolUsage
 } from "../use-dashboard"
 
 const EMPTY_FUNNEL_DATA: CodeAdoptionFunnelData = {
@@ -36,6 +38,15 @@ const EMPTY_FUNNEL_DATA: CodeAdoptionFunnelData = {
   inclusiveAdoptionRate: null,
   measuredAdoptionRate: null,
   pushedAdoptionRate: null
+}
+
+const EMPTY_TOOL_USAGE: DashboardProjectModeToolUsage = {
+  byTool: [],
+  byToolAll: [],
+  byToolFilteredAll: [],
+  byToolAllFull: [],
+  totalTools: 0,
+  totalToolCalls: 0
 }
 
 function formatNumber(value: number): string {
@@ -307,6 +318,7 @@ export function ProjectModePanel({
   const funnelData: CodeAdoptionFunnelData = summary?.codeStats ?? EMPTY_FUNNEL_DATA
   const topSkills = data?.topSkills ?? []
   const bySkillAdoption = data?.bySkillAdoption ?? []
+  const tools = data?.tools ?? EMPTY_TOOL_USAGE
   const archivedProjects = projects.filter((p) => p.lifecycleStatus === "archived")
   const archivedCount = archivedProjects.length
   const archivedFeatureCount = archivedProjects.reduce((sum, p) => sum + p.featureCount, 0)
@@ -459,19 +471,29 @@ export function ProjectModePanel({
         </div>
       </section>
 
-      {/* Skill 使用排行 + 代码采纳，与平台运营概览同款 */}
+      {/* Skill / Tool 使用排行，与平台运营概览同款 */}
       <section>
-        <h2 className="mb-3 text-sm font-semibold text-foreground">技能使用</h2>
-        <SkillRankingPanel
-          bySkill={topSkills}
-          bySkillAll={topSkills}
-          totalSkills={summary?.distinctSkillCount ?? 0}
-          totalSkillCalls={summary?.skillCallCount ?? 0}
-          bySkillAdoption={bySkillAdoption}
-          onSkillClick={onSkillClick}
-          marketSkillKeys={marketSkillKeys}
-          pluginSkillKeys={pluginSkillKeys}
-        />
+        <h2 className="mb-3 text-sm font-semibold text-foreground">技能 / 工具使用</h2>
+        <div className="grid grid-cols-2 gap-3">
+          <SkillRankingPanel
+            bySkill={topSkills}
+            bySkillAll={topSkills}
+            totalSkills={summary?.distinctSkillCount ?? 0}
+            totalSkillCalls={summary?.skillCallCount ?? 0}
+            bySkillAdoption={bySkillAdoption}
+            onSkillClick={onSkillClick}
+            marketSkillKeys={marketSkillKeys}
+            pluginSkillKeys={pluginSkillKeys}
+          />
+          <ToolRankingPanel
+            byTool={tools.byTool}
+            byToolAll={tools.byToolAll}
+            byToolFilteredAll={tools.byToolFilteredAll}
+            byToolAllFull={tools.byToolAllFull}
+            totalTools={tools.totalTools}
+            totalToolCalls={tools.totalToolCalls}
+          />
+        </div>
       </section>
 
       {/* Adapter distribution */}
@@ -504,6 +526,12 @@ export function ProjectModePanel({
                       项目{" "}
                       <span className="font-medium text-foreground">
                         {formatNumber(adapter.projectCount)}
+                      </span>
+                    </span>
+                    <span>
+                      特性{" "}
+                      <span className="font-medium text-foreground">
+                        {formatNumber(adapter.featureCount)}
                       </span>
                     </span>
                     <span>

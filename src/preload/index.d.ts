@@ -336,6 +336,15 @@ interface DashboardProjectModeSkillAdoption extends DashboardCodeStats {
   commitCount: number
 }
 
+interface DashboardProjectModeToolUsage {
+  byTool: Array<{ tool: string; count: number }>
+  byToolAll: Array<{ tool: string; count: number }>
+  byToolFilteredAll: Array<{ tool: string; count: number }>
+  byToolAllFull: Array<{ tool: string; count: number }>
+  totalTools: number
+  totalToolCalls: number
+}
+
 interface DashboardProjectModeProject {
   projectId: string
   name: string
@@ -359,6 +368,7 @@ interface DashboardProjectModeAdapter {
   name: string
   version?: string
   projectCount: number
+  featureCount: number
   conversationCount: number
 }
 
@@ -377,6 +387,7 @@ interface DashboardProjectModeData {
   adapters: DashboardProjectModeAdapter[]
   topSkills: DashboardProjectModeSkillCount[]
   bySkillAdoption: DashboardProjectModeSkillAdoption[]
+  tools: DashboardProjectModeToolUsage
   projects: DashboardProjectModeProject[]
 }
 

@@ -1448,29 +1448,7 @@ async function fetchOverview(
   const interval = getCalendarInterval(granularity, range.from, range.to)
   const rankingTopSize = 20
   const rankingSearchSize = 1000
-  const filteredToolExcludes = [
-    // Claude Code 内置文件 / 系统工具
-    "execute",
-    "read_file",
-    "write_file",
-    "glob",
-    "grep",
-    "list_directory",
-    "task",
-    "task_output",
-    "ls",
-    "edit_file",
-    // 工具搜索 / 元工具
-    "search_tool",
-    "inspect_tool",
-    "invoke_deferred_tool",
-    // 内置代码执行辅助
-    "code_exec",
-    "prepare_save_code_exec_tool",
-    "save_code_exec_tool",
-    // 内置任务管理
-    "write_todos"
-  ]
+  const filteredToolExcludes = FILTERED_TOOL_EXCLUDES
   const traceBody = {
     size: 0,
     query: {
@@ -5539,9 +5517,21 @@ function makeMockProjectMode(range: TimeRange): DashboardProjectModeData {
       })
     },
     adapters: [
-      { name: "claude-code", version: "1.4.2", projectCount: 1, conversationCount: 128 },
-      { name: "claude-code", version: "1.4.0", projectCount: 1, conversationCount: 47 },
-      { name: "codex", version: "0.9.1", projectCount: 1, conversationCount: 0 }
+      {
+        name: "claude-code",
+        version: "1.4.2",
+        projectCount: 1,
+        featureCount: 3,
+        conversationCount: 128
+      },
+      {
+        name: "claude-code",
+        version: "1.4.0",
+        projectCount: 1,
+        featureCount: 2,
+        conversationCount: 47
+      },
+      { name: "codex", version: "0.9.1", projectCount: 1, featureCount: 1, conversationCount: 0 }
     ],
     topSkills: [
       { skill: "代码审查", count: 58 },
@@ -5549,6 +5539,36 @@ function makeMockProjectMode(range: TimeRange): DashboardProjectModeData {
       { skill: "重构助手", count: 22 },
       { skill: "SQL优化", count: 15 }
     ],
+    tools: {
+      byTool: [
+        { tool: "git_workflow", count: 142 },
+        { tool: "manage_skill", count: 88 },
+        { tool: "manage_scheduler", count: 61 },
+        { tool: "db_query", count: 44 },
+        { tool: "create_pr", count: 33 }
+      ],
+      byToolAll: [
+        { tool: "git_workflow", count: 142 },
+        { tool: "execute", count: 120 },
+        { tool: "read_file", count: 96 },
+        { tool: "manage_skill", count: 88 }
+      ],
+      byToolFilteredAll: [
+        { tool: "git_workflow", count: 142 },
+        { tool: "manage_skill", count: 88 },
+        { tool: "manage_scheduler", count: 61 },
+        { tool: "db_query", count: 44 },
+        { tool: "create_pr", count: 33 }
+      ],
+      byToolAllFull: [
+        { tool: "git_workflow", count: 142 },
+        { tool: "execute", count: 120 },
+        { tool: "read_file", count: 96 },
+        { tool: "manage_skill", count: 88 }
+      ],
+      totalTools: 23,
+      totalToolCalls: 1842
+    },
     bySkillAdoption: [
       {
         skill: "代码审查",
@@ -6106,6 +6126,31 @@ function makeMockCommitDetails(
 /** Event name written by HarnessStatusReporter for project snapshots. */
 const HARNESS_PROJECT_SNAPSHOT_EVENT = "harness.project.snapshot"
 
+/** Built-in file/system/meta tools excluded from the "已过滤" tool ranking. */
+const FILTERED_TOOL_EXCLUDES = [
+  // Claude Code 内置文件 / 系统工具
+  "execute",
+  "read_file",
+  "write_file",
+  "glob",
+  "grep",
+  "list_directory",
+  "task",
+  "task_output",
+  "ls",
+  "edit_file",
+  // 工具搜索 / 元工具
+  "search_tool",
+  "inspect_tool",
+  "invoke_deferred_tool",
+  // 内置代码执行辅助
+  "code_exec",
+  "prepare_save_code_exec_tool",
+  "save_code_exec_tool",
+  // 内置任务管理
+  "write_todos"
+]
+
 interface ProjectModeFeatureView {
   slug: string
   title: string
@@ -6118,6 +6163,20 @@ interface ProjectModeFeatureView {
 interface ProjectModeSkillCount {
   skill: string
   count: number
+}
+
+interface ProjectModeToolCount {
+  tool: string
+  count: number
+}
+
+interface ProjectModeToolUsage {
+  byTool: ProjectModeToolCount[]
+  byToolAll: ProjectModeToolCount[]
+  byToolFilteredAll: ProjectModeToolCount[]
+  byToolAllFull: ProjectModeToolCount[]
+  totalTools: number
+  totalToolCalls: number
 }
 
 interface ProjectModeProjectView {
@@ -6143,6 +6202,7 @@ interface ProjectModeAdapterView {
   name: string
   version?: string
   projectCount: number
+  featureCount: number
   conversationCount: number
 }
 
@@ -6161,6 +6221,7 @@ interface DashboardProjectModeData {
   adapters: ProjectModeAdapterView[]
   topSkills: ProjectModeSkillCount[]
   bySkillAdoption: DashboardSkillCodeAdoptionStats[]
+  tools: ProjectModeToolUsage
   projects: ProjectModeProjectView[]
 }
 
@@ -6262,6 +6323,18 @@ function parseSkillCountBuckets(raw: unknown): ProjectModeSkillCount[] {
   return result
 }
 
+/** Convert a `terms toolNames` bucket list into a {tool,count}[] ranking. */
+function parseToolCountBuckets(raw: unknown): ProjectModeToolCount[] {
+  if (!Array.isArray(raw)) return []
+  const result: ProjectModeToolCount[] = []
+  for (const bucket of raw) {
+    const b = asRecord(bucket)
+    const tool = asString(b.key)
+    if (tool) result.push({ tool, count: asNumber(b.doc_count) })
+  }
+  return result
+}
+
 /** Aggregate project-mode usage from the trace index over the selected range. */
 async function fetchProjectModeUsage(
   range: TimeRange,
@@ -6274,6 +6347,7 @@ async function fetchProjectModeUsage(
   skillCallCount: number
   distinctSkillCount: number
   topSkills: ProjectModeSkillCount[]
+  tools: ProjectModeToolUsage
   perProject: Map<string, number>
   perProjectSkills: Map<string, ProjectModeSkillCount[]>
   traceIdsByProject: Map<string, string[]>
@@ -6294,6 +6368,14 @@ async function fetchProjectModeUsage(
       total_skill_calls: { value_count: { field: "usedSkills" } },
       distinct_skills: { cardinality: { field: "usedSkills" } },
       top_skills: { terms: { field: "usedSkills", size: 20 } },
+      total_tools: { cardinality: { field: "toolNames" } },
+      tool_call_count: { value_count: { field: "toolNames" } },
+      by_tool: { terms: { field: "toolNames", size: 20, exclude: FILTERED_TOOL_EXCLUDES } },
+      by_tool_filtered_all: {
+        terms: { field: "toolNames", size: 1000, exclude: FILTERED_TOOL_EXCLUDES }
+      },
+      by_tool_all: { terms: { field: "toolNames", size: 20 } },
+      by_tool_all_full: { terms: { field: "toolNames", size: 1000 } },
       by_project: {
         terms: { field: "harnessProjectId", size: 500 },
         aggs: {
@@ -6358,6 +6440,7 @@ async function fetchProjectModeUsage(
           name,
           version: undefined,
           projectCount: 0,
+          featureCount: 0,
           conversationCount: asNumber(b.doc_count)
         })
         continue
@@ -6369,6 +6452,7 @@ async function fetchProjectModeUsage(
           name,
           version,
           projectCount: 0,
+          featureCount: 0,
           conversationCount: asNumber(v.doc_count)
         })
       }
@@ -6383,6 +6467,14 @@ async function fetchProjectModeUsage(
     skillCallCount: asNumber(asRecord(aggs.total_skill_calls).value),
     distinctSkillCount: asNumber(asRecord(aggs.distinct_skills).value),
     topSkills: parseSkillCountBuckets(asRecord(aggs.top_skills).buckets),
+    tools: {
+      byTool: parseToolCountBuckets(asRecord(aggs.by_tool).buckets),
+      byToolAll: parseToolCountBuckets(asRecord(aggs.by_tool_all).buckets),
+      byToolFilteredAll: parseToolCountBuckets(asRecord(aggs.by_tool_filtered_all).buckets),
+      byToolAllFull: parseToolCountBuckets(asRecord(aggs.by_tool_all_full).buckets),
+      totalTools: asNumber(asRecord(aggs.total_tools).value),
+      totalToolCalls: asNumber(asRecord(aggs.tool_call_count).value)
+    },
     perProject,
     perProjectSkills,
     traceIdsByProject,
@@ -6605,11 +6697,13 @@ async function fetchProjectMode(
     const existing = adapters.get(key)
     if (existing) {
       existing.projectCount += 1
+      existing.featureCount += project.featureCount
     } else {
       adapters.set(key, {
         name: project.adapterName,
         version: project.adapterVersion,
         projectCount: 1,
+        featureCount: project.featureCount,
         conversationCount: 0
       })
     }
@@ -6636,6 +6730,7 @@ async function fetchProjectMode(
     adapters: adapterList,
     topSkills: usage.topSkills,
     bySkillAdoption,
+    tools: usage.tools,
     projects
   }
 }

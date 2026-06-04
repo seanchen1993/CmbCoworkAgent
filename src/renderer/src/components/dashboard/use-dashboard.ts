@@ -264,6 +264,15 @@ export interface DashboardProjectModeSkillCount {
   count: number
 }
 
+export interface DashboardProjectModeToolUsage {
+  byTool: Array<{ tool: string; count: number }>
+  byToolAll: Array<{ tool: string; count: number }>
+  byToolFilteredAll: Array<{ tool: string; count: number }>
+  byToolAllFull: Array<{ tool: string; count: number }>
+  totalTools: number
+  totalToolCalls: number
+}
+
 export interface DashboardProjectModeProject {
   projectId: string
   name: string
@@ -287,6 +296,7 @@ export interface DashboardProjectModeAdapter {
   name: string
   version?: string
   projectCount: number
+  featureCount: number
   conversationCount: number
 }
 
@@ -305,6 +315,7 @@ export interface DashboardProjectModeData {
   adapters: DashboardProjectModeAdapter[]
   topSkills: DashboardProjectModeSkillCount[]
   bySkillAdoption: SkillAdoptionRankingItem[]
+  tools: DashboardProjectModeToolUsage
   projects: DashboardProjectModeProject[]
 }
 

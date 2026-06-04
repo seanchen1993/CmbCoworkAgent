@@ -1,4 +1,3 @@
-import { useState } from "react"
 import {
   Activity,
   Users,
@@ -21,13 +20,7 @@ import {
   Legend
 } from "recharts"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import {
-  CodeAdoptionFunnel,
-  SearchableRankingPanel,
-  SkillRankingPanel,
-  sumRankingCounts,
-  type RankingItem
-} from "./dashboard-shared"
+import { CodeAdoptionFunnel, SkillRankingPanel, ToolRankingPanel } from "./dashboard-shared"
 import type { OverviewData } from "../use-dashboard"
 
 function StatCard({
@@ -234,66 +227,6 @@ function GeneratedLinesTooltip(): React.JSX.Element {
   )
 }
 
-function ToolRankingPanel({ data }: { data: OverviewData }) {
-  const [showAll, setShowAll] = useState(false)
-  const defaultItems: RankingItem[] = (showAll ? data.byToolAll : data.byTool).map((item) => ({
-    name: item.tool,
-    count: item.count
-  }))
-  const searchItems: RankingItem[] = (
-    showAll
-      ? data.byToolAllFull.length > 0
-        ? data.byToolAllFull
-        : data.byToolAll
-      : data.byToolFilteredAll.length > 0
-        ? data.byToolFilteredAll
-        : data.byTool
-  ).map((item) => ({ name: item.tool, count: item.count }))
-  const totalKinds = searchItems.length > 0 ? searchItems.length : data.totalTools
-  const totalCalls = searchItems.length > 0 ? sumRankingCounts(searchItems) : data.totalToolCalls
-
-  return (
-    <SearchableRankingPanel
-      title="Tool 使用"
-      totalKinds={totalKinds}
-      totalCalls={totalCalls}
-      defaultItems={defaultItems}
-      searchItems={searchItems}
-      searchPlaceholder={showAll ? "搜索 Tool 名称（全部）" : "搜索 Tool 名称（已过滤）"}
-      emptyLabel="暂无 Tool 数据"
-      emptySearchLabel="未找到匹配的 Tool"
-      barColorClassName="bg-violet-500"
-      labelClassName="font-mono"
-      headerActions={
-        <div className="flex items-center rounded-md border border-border overflow-hidden">
-          <button
-            type="button"
-            className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
-              !showAll
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:bg-muted/50"
-            }`}
-            onClick={() => setShowAll(false)}
-          >
-            已过滤
-          </button>
-          <button
-            type="button"
-            className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
-              showAll
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:bg-muted/50"
-            }`}
-            onClick={() => setShowAll(true)}
-          >
-            全部
-          </button>
-        </div>
-      }
-    />
-  )
-}
-
 export function OverviewPanel({
   data,
   loading,
@@ -429,7 +362,14 @@ export function OverviewPanel({
           marketSkillKeys={marketSkillKeys}
           pluginSkillKeys={pluginSkillKeys}
         />
-        <ToolRankingPanel data={data} />
+        <ToolRankingPanel
+          byTool={data.byTool}
+          byToolAll={data.byToolAll}
+          byToolFilteredAll={data.byToolFilteredAll}
+          byToolAllFull={data.byToolAllFull}
+          totalTools={data.totalTools}
+          totalToolCalls={data.totalToolCalls}
+        />
       </div>
 
       {/* Trend chart */}

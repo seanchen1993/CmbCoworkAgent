@@ -743,3 +743,86 @@ export function SkillRankingPanel({
     />
   )
 }
+
+// ─────────────────────────────────────────────────────────
+// Tool ranking panel (已过滤 / 全部 toggle)
+// ─────────────────────────────────────────────────────────
+
+export interface ToolRankingDatum {
+  tool: string
+  count: number
+}
+
+export function ToolRankingPanel({
+  byTool,
+  byToolAll,
+  byToolFilteredAll,
+  byToolAllFull,
+  totalTools,
+  totalToolCalls
+}: {
+  byTool: ToolRankingDatum[]
+  byToolAll: ToolRankingDatum[]
+  byToolFilteredAll: ToolRankingDatum[]
+  byToolAllFull: ToolRankingDatum[]
+  totalTools: number
+  totalToolCalls: number
+}): React.JSX.Element {
+  const [showAll, setShowAll] = useState(false)
+  const defaultItems: RankingItem[] = (showAll ? byToolAll : byTool).map((item) => ({
+    name: item.tool,
+    count: item.count
+  }))
+  const searchItems: RankingItem[] = (
+    showAll
+      ? byToolAllFull.length > 0
+        ? byToolAllFull
+        : byToolAll
+      : byToolFilteredAll.length > 0
+        ? byToolFilteredAll
+        : byTool
+  ).map((item) => ({ name: item.tool, count: item.count }))
+  const totalKinds = searchItems.length > 0 ? searchItems.length : totalTools
+  const totalCalls = searchItems.length > 0 ? sumRankingCounts(searchItems) : totalToolCalls
+
+  return (
+    <SearchableRankingPanel
+      title="Tool 使用"
+      totalKinds={totalKinds}
+      totalCalls={totalCalls}
+      defaultItems={defaultItems}
+      searchItems={searchItems}
+      searchPlaceholder={showAll ? "搜索 Tool 名称（全部）" : "搜索 Tool 名称（已过滤）"}
+      emptyLabel="暂无 Tool 数据"
+      emptySearchLabel="未找到匹配的 Tool"
+      barColorClassName="bg-violet-500"
+      labelClassName="font-mono"
+      headerActions={
+        <div className="flex items-center rounded-md border border-border overflow-hidden">
+          <button
+            type="button"
+            className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
+              !showAll
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:bg-muted/50"
+            }`}
+            onClick={() => setShowAll(false)}
+          >
+            已过滤
+          </button>
+          <button
+            type="button"
+            className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
+              showAll
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:bg-muted/50"
+            }`}
+            onClick={() => setShowAll(true)}
+          >
+            全部
+          </button>
+        </div>
+      }
+    />
+  )
+}
