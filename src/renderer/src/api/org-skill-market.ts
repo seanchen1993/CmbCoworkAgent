@@ -176,7 +176,7 @@ const ORG_SKILL_ENDPOINTS = {
       .map(encodeURIComponent)
       .join(",")
     const normalizedKeyword = keyword.trim()
-    const queryParts = [`pageNum=${pageNum}`, `pageSize=${pageSize}`]
+    const queryParts = [`pageNum=${pageNum}`, `pageSize=${pageSize}`, `queryAll=true`, 'queryType=null']
     if (labelIdsParam) queryParts.push(`labelIds=${labelIdsParam}`)
     if (normalizedKeyword) queryParts.push(`keyword=${encodeURIComponent(normalizedKeyword)}`)
     return `${ORG_SKILL_GATEWAY_URL}/gw/mgr/open-api/skill/page?${queryParts.join("&")}`
