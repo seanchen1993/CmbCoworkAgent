@@ -131,6 +131,25 @@ interface UploadedItemRecord {
   uploadedAt: string
 }
 
+function parseMarkdownFrontmatterMetadata(content: string | null): Record<string, string> | undefined {
+  if (typeof content !== "string") return undefined
+
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)
+  if (!match) return undefined
+
+  const metadata: Record<string, string> = {}
+  for (const line of match[1].split(/\r?\n/)) {
+    const colonIndex = line.indexOf(":")
+    if (colonIndex <= 0) continue
+    const key = line.slice(0, colonIndex).trim()
+    const rawValue = line.slice(colonIndex + 1).trim()
+    const value = rawValue.replace(/^['"]|['"]$/g, "")
+    if (key && value) metadata[key] = value
+  }
+
+  return Object.keys(metadata).length > 0 ? metadata : undefined
+}
+
 function formatMarketVersionLabel(version?: string | null): string {
   const normalized = normalizeMarketVersion(version)
   return normalized ? `v${normalized}` : "未知版本"
@@ -706,7 +725,26 @@ export function MarketPanel(): React.JSX.Element {
     setSkillTraceDialogOpen(false)
   }
 
-  const loadSkillPreviewFromInstallFile = async (filename: string, blob: Blob) => {
+  const applySkillDetailMarkdown = useCallback(
+    (baseSkill: SkillMetadata, filePath: string, markdownContent: string) => {
+      const metadata = parseMarkdownFrontmatterMetadata(markdownContent)
+      setSkillDetailSelectedFile(filePath)
+      setSkillDetailContent(markdownContent)
+      setSkillDetailSkill({
+        ...baseSkill,
+        path: filePath,
+        version: metadata?.version?.trim() || baseSkill.version,
+        metadata
+      })
+    },
+    []
+  )
+
+  const loadSkillPreviewFromInstallFile = async (
+    baseSkill: SkillMetadata,
+    filename: string,
+    blob: Blob
+  ) => {
     setSkillDetailSelectedFile(filename)
     setSkillDetailContent(null)
     setSkillDetailBinaryBase64(null)
@@ -716,7 +754,7 @@ export function MarketPanel(): React.JSX.Element {
     if (ext === "md") {
       setSkillDetailPreviewKind("text")
       const text = await blob.text()
-      setSkillDetailContent(text)
+      applySkillDetailMarkdown(baseSkill, filename, text)
       return
     }
     if (ext === "zip") {
@@ -724,8 +762,7 @@ export function MarketPanel(): React.JSX.Element {
       const arrayBuffer = await blob.arrayBuffer()
       const extracted = await window.api.skills.extractMarkdownFromZip(arrayBuffer, filename)
       if (extracted.success && extracted.content) {
-        setSkillDetailSelectedFile(extracted.filePath || "SKILL.md")
-        setSkillDetailContent(extracted.content)
+        applySkillDetailMarkdown(baseSkill, extracted.filePath || "SKILL.md", extracted.content)
       } else {
         setSkillDetailContent(extracted.error || "Zip 中未找到可预览的 markdown 文件。")
       }
@@ -1440,14 +1477,15 @@ export function MarketPanel(): React.JSX.Element {
       }
 
       if (activeTab === "skill" || activeTab === "orgSkill") {
-        setSkillDetailSkill({
+        const baseSkill: SkillMetadata = {
           name: item.name,
           description: item.description || "Market skill",
           path: installFilename,
           source: "user",
           version: item.version ? formatMarketVersionLabel(item.version) : "v1.0.0"
-        })
-        await loadSkillPreviewFromInstallFile(installFilename, installFile.blob)
+        }
+        setSkillDetailSkill(baseSkill)
+        await loadSkillPreviewFromInstallFile(baseSkill, installFilename, installFile.blob)
       } else if (activeTab === "mcp") {
         const text = await installFile.blob.text()
         const parsed = JSON.parse(text)
