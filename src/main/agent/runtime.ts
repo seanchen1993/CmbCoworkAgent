@@ -106,6 +106,7 @@ import {
 import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
   createHookScope,
+  createInheritedHookScope,
   extractPluginIdFromProviderKey,
   resolveEnabledHooksForRun,
   type ScopeSkipCallback,
@@ -3037,6 +3038,17 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       let workerStream: AsyncIterable<unknown> | null = null
       let usedWorkerModelId = workerRoutingResult?.resolvedModelId ?? modelId
 
+      // Inherit the coordinator's plugin/skill activation scope so plugin- and
+      // skill-scoped hooks (e.g. a plugin's edit_file PreToolUse) fire inside
+      // the worker the same way they see the parent's activations in a task-tool
+      // subagent. Workers can run in parallel, so we snapshot the coordinator
+      // scope at spawn time into a fresh per-worker scope rather than sharing the
+      // mutable instance — that keeps concurrent workers from cross-contaminating
+      // each other's activations while still seeing what was active when they
+      // launched. Trade-off: activations a worker makes during its run stay local
+      // to that worker and are not reflected back to the coordinator.
+      const workerHookScope = createInheritedHookScope(hookScope)
+
       for (const candidateId of workerOrderedChain) {
         if (workerInput.abortSignal.aborted) break
         try {
@@ -3059,6 +3071,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             abortSignal: workerInput.abortSignal,
             retryHooks,
             maxRetryAttempts,
+            hookScope: workerHookScope,
             onHookResult
           })
 
@@ -3126,6 +3139,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             abortSignal: workerInput.abortSignal,
             retryHooks,
             maxRetryAttempts,
+            hookScope: workerHookScope,
             onHookResult
           })
           activeWorkerStream = await workerAgent.stream(null, streamConfig)
@@ -3174,6 +3188,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             abortSignal: workerInput.abortSignal,
             retryHooks,
             maxRetryAttempts,
+            hookScope: workerHookScope,
             onHookResult
           })
           const handoffStream = await handoffAgent.stream(

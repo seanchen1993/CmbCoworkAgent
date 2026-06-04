@@ -9,6 +9,7 @@
 
 import {
   createHookScope,
+  createInheritedHookScope,
   extractPluginIdFromProviderKey,
   filterScopedHooks,
   mergeHookScopeSnapshot,
@@ -264,6 +265,53 @@ async function testMergeHookScopeSnapshotIsAdditive(): Promise<void> {
   assert(target.activeSkillPaths.has(expectedSecond), "merge should add new path")
 }
 
+async function testInheritedHookScopeMirrorsCoordinatorIntoWorker(): Promise<void> {
+  // Models the coordinator → worker spawn: the coordinator has activated a
+  // plugin, and the worker must see that plugin's hooks (scope inheritance)
+  // without being able to mutate the coordinator's scope (isolation).
+  const coordinator = createHookScope()
+  coordinator.activatePlugin("plugin-a")
+
+  const pluginHook = {
+    ...makeHook({
+      id: "plugin-a-edit",
+      event: "PreToolUse",
+      matcher: "edit_file",
+      command: "echo plugin-a"
+    }),
+    pluginId: "plugin-a"
+  } as HookConfig & { pluginId: string }
+
+  const worker = createInheritedHookScope(coordinator)
+
+  // Inheritance: the worker scope sees the coordinator's active plugin, so the
+  // plugin's edit_file hook passes the scope filter inside the worker.
+  const inWorker = filterScopedHooks(
+    { baseHooks: [], pluginHooks: [pluginHook], skillHooks: [] },
+    { toolName: "edit_file" },
+    worker
+  )
+  assert(
+    inWorker.length === 1 && inWorker[0].id === "plugin-a-edit",
+    `worker should inherit coordinator's plugin scope, got ${inWorker.map((h) => h.id).join(",") || "none"}`
+  )
+
+  // Isolation 1: a worker-side activation must not leak back to the coordinator.
+  worker.activatePlugin("plugin-b")
+  assert(
+    !coordinator.activePluginIds.has("plugin-b"),
+    "worker activation must not leak back into coordinator scope"
+  )
+
+  // Isolation 2: snapshot is point-in-time — a coordinator activation made
+  // after the worker spawned must not retroactively appear in the worker.
+  coordinator.activatePlugin("plugin-c")
+  assert(
+    !worker.activePluginIds.has("plugin-c"),
+    "post-spawn coordinator activation must not appear in the worker snapshot"
+  )
+}
+
 async function testPruneActivationsDropsUnkeptScope(): Promise<void> {
   const scope = createHookScope()
   scope.activatePlugin("plugin-a")
@@ -448,6 +496,8 @@ async function run(): Promise<void> {
   console.log("PASS S9 extractPluginIdFromProviderKey edge cases")
   await testMergeHookScopeSnapshotIsAdditive()
   console.log("PASS S10 mergeHookScopeSnapshot adds without dropping prior state")
+  await testInheritedHookScopeMirrorsCoordinatorIntoWorker()
+  console.log("PASS S10a createInheritedHookScope inherits coordinator scope, isolates worker")
   await testPruneActivationsDropsUnkeptScope()
   console.log("PASS S10b pruneActivations drops unkept plugin / skill scope")
   await testPersistentHookIdFiresWithoutCurrentSkillScope()
