@@ -956,7 +956,7 @@ export function MessageBubble({
           <DurationShow durationMs={duration} text="耗时" />
         </div>
       )}
-      <div className="flex-1 min-w-0 space-y-2 overflow-hidden pl-7">
+      <div className="flex-1 min-w-0 space-y-2 overflow-hidden">
         {content && (
           <div className="min-w-0 max-w-full overflow-hidden break-words rounded-lg px-3 [overflow-wrap:anywhere]">
             {content}

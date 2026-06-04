@@ -800,10 +800,26 @@ export function ThreadSidebar(): React.JSX.Element {
                 setShowCustomizeView(true, pendingEvolution ? "evolution" : undefined)
               }}
             >
-              <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+              <div
+                className={cn(
+                  "flex size-5 items-center justify-center rounded-full ring-1 transition-colors",
+                  mainView === "customize"
+                    ? "bg-amber-500/20 ring-amber-500/25 text-amber-700 dark:bg-amber-400/20 dark:ring-amber-400/30 dark:text-amber-200"
+                    : "bg-amber-500/12 ring-amber-500/20 text-amber-700 dark:bg-amber-400/15 dark:ring-amber-400/20 dark:text-amber-300"
+                )}
+              >
                 <Briefcase className="size-3" />
               </div>
-              <span className="flex-1 text-left text-muted-foreground">自定义</span>
+              <span
+                className={cn(
+                  "flex-1 text-left",
+                  mainView === "customize"
+                    ? "text-foreground"
+                    : "text-muted-foreground"
+                )}
+              >
+                自定义
+              </span>
               {pendingEvolution && <span className="size-2 rounded-full bg-orange-500 shrink-0" />}
             </Button>
             <Button
