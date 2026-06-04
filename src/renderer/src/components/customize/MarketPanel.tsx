@@ -53,6 +53,7 @@ import {
   buildMarketInstalledFlags,
   marketInstalledVersionStorage,
   MarketUpdateBadge,
+  normalizeMarketVersion,
   UpdateVersionTooltip
 } from "./MarketUpdateBadge"
 import {
@@ -128,6 +129,11 @@ interface UploadedItemRecord {
   name: string
   type: MarketItemType
   uploadedAt: string
+}
+
+function formatMarketVersionLabel(version?: string | null): string {
+  const normalized = normalizeMarketVersion(version)
+  return normalized ? `v${normalized}` : "未知版本"
 }
 
 interface SkillUserUsage {
@@ -406,8 +412,10 @@ function MarketItemCard({
             <div className="flex items-center gap-1">
               <GitBranch className="size-3 shrink-0" />
               <span>
-                {updateAvailable && installedVersion ? `v${installedVersion} -> ` : ""}v
-                {item.version}
+                {updateAvailable && installedVersion
+                  ? `${formatMarketVersionLabel(installedVersion)} -> `
+                  : ""}
+                {formatMarketVersionLabel(item.version)}
               </span>
             </div>
           )}
@@ -1436,7 +1444,8 @@ export function MarketPanel(): React.JSX.Element {
           name: item.name,
           description: item.description || "Market skill",
           path: installFilename,
-          source: "user"
+          source: "user",
+          version: item.version ? formatMarketVersionLabel(item.version) : "v1.0.0"
         })
         await loadSkillPreviewFromInstallFile(installFilename, installFile.blob)
       } else if (activeTab === "mcp") {
@@ -1864,6 +1873,7 @@ export function MarketPanel(): React.JSX.Element {
     name: string,
     description: string,
     category: string,
+    version: string,
     guidance?: string,
     chineseName?: string,
     userId?: string
@@ -1882,6 +1892,7 @@ export function MarketPanel(): React.JSX.Element {
         name,
         description,
         category,
+        version,
         guidance,
         chineseName,
         userId
@@ -1908,6 +1919,7 @@ export function MarketPanel(): React.JSX.Element {
     name: string,
     description: string,
     category: string,
+    version: string,
     guidance?: string,
     chineseName?: string,
     userId?: string
@@ -1927,6 +1939,7 @@ export function MarketPanel(): React.JSX.Element {
         name,
         description,
         category,
+        version,
         guidance,
         chineseName,
         userId
@@ -2158,8 +2171,8 @@ export function MarketPanel(): React.JSX.Element {
                       <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
                         <GitBranch className="size-3" />
                         {selectedItem.updateAvailable && selectedItem.installedVersion
-                          ? `v${selectedItem.installedVersion} -> v${selectedItem.version}`
-                          : `v${selectedItem.version}`}
+                          ? `${formatMarketVersionLabel(selectedItem.installedVersion)} -> ${formatMarketVersionLabel(selectedItem.version)}`
+                          : formatMarketVersionLabel(selectedItem.version)}
                       </span>
                     )}
                     <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
@@ -2803,6 +2816,7 @@ export function MarketPanel(): React.JSX.Element {
                     name: updateDialog.item.name,
                     description: updateDialog.item.description,
                     category: updateDialog.item.category || "研发场景",
+                    version: updateDialog.item.version,
                     guidance: updateDialog.item.guidance,
                     chinese_name: updateDialog.item.chinese_name,
                     user_id: updateDialog.item.user_id

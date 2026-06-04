@@ -2,11 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import {
+  AlertCircle,
   ChevronDown,
   ChevronRight,
   CloudUpload,
   FileText,
   Folder,
+  GitBranch,
   Plus,
   Power,
   Search,
@@ -21,6 +23,7 @@ import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
   Dialog,
   DialogContent,
@@ -57,7 +60,14 @@ type SkillTreeNode = {
 
 type SkillMarketInfo = Pick<
   MarketItem,
-  "name" | "chinese_name" | "category" | "description" | "featured" | "guidance" | "user_id"
+  | "name"
+  | "chinese_name"
+  | "category"
+  | "description"
+  | "featured"
+  | "guidance"
+  | "user_id"
+  | "version"
 >
 type SaveSkillFileResult = { success: boolean; error?: string }
 type PublishMode = "upload" | "update"
@@ -116,6 +126,7 @@ const KNOWN_TEXT_EXTS = new Set([
 const UPLOADED_ITEMS_KEY = "marketplace_uploaded_items"
 const LOCAL_UPLOADED_SKILL_PATHS_KEY = "skills_panel_uploaded_skill_paths"
 const EDITED_SKILL_PATHS_KEY = "skills_panel_edited_skill_paths"
+const DEFAULT_SKILL_VERSION = "v1.0.0"
 
 /**
  * 统一路径 Key，保证在 Windows/Linux 下本地标记可稳定命中：
@@ -547,6 +558,7 @@ function PublishSkillDialog(props: {
         name: skill.name,
         description: skill.description || marketInfo?.description || "",
         category: getSkillCategory(skill, marketInfo) || DEFAULT_SCENE_CATEGORY,
+        version: skill.version || marketInfo?.version || undefined,
         guidance: skill.metadata?.guidance || marketInfo?.guidance || "",
         chinese_name: getSkillChineseName(skill, marketInfo),
         user_id: marketInfo?.user_id
@@ -560,7 +572,7 @@ function PublishSkillDialog(props: {
       descriptionOverride="会自动打包当前技能目录为 zip 并提交到 Market。若包含嵌套子技能，发布前会询问是否一并上传。"
       submitLabel={mode === "update" ? "更新发布" : "一键发布"}
       submittingLabel={mode === "update" ? "更新中..." : "发布中..."}
-      onUpload={(file, name, description, category, guidance, chineseName, userId) => {
+      onUpload={(file, name, description, category, version, guidance, chineseName, userId) => {
         if (mode === "update") {
           return marketApi.updateItem(
             file,
@@ -568,6 +580,7 @@ function PublishSkillDialog(props: {
             name,
             description,
             category,
+            version,
             guidance || undefined,
             chineseName || undefined,
             userId || undefined
@@ -580,6 +593,7 @@ function PublishSkillDialog(props: {
           name,
           description,
           category,
+          version,
           guidance || undefined,
           chineseName || undefined,
           userId || undefined
@@ -2884,6 +2898,12 @@ export function SkillDetail(props: {
   const chineseName = getSkillChineseName(skill, marketInfo)
   const category = getSkillCategory(skill, marketInfo)
   const description = marketInfo?.description || skill.description || "暂无描述"
+  const skillFrontmatterVersion = skill.metadata?.version?.trim() || ""
+  const resolvedSkillVersion = skillFrontmatterVersion || skill.version || DEFAULT_SKILL_VERSION
+  const skillVersionMissingInFrontmatter = !skillFrontmatterVersion
+  const skillVersionTooltip = skillVersionMissingInFrontmatter
+    ? `当前没有在 SKILL.md frontmatter 里找到 version，所以这里显示的是默认值 ${DEFAULT_SKILL_VERSION}。`
+    : "这个值直接读取自 SKILL.md frontmatter 里的 version 字段。"
   const isFeatured = isFeaturedSkill(marketInfo)
   const isMarkdown = !!selectedFilePath && /\.md$/i.test(selectedFilePath)
   const previewContent =
@@ -2964,6 +2984,27 @@ export function SkillDetail(props: {
                 已编辑
               </Badge>
             )}
+            <TooltipProvider delayDuration={180}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Badge
+                    variant="outline"
+                    className={cn(
+                      "h-5 gap-1 px-2 text-[10px] cursor-help",
+                      skillVersionMissingInFrontmatter
+                        ? "border-amber-200 text-amber-800 bg-amber-50"
+                        : "border-sky-200 text-sky-700 bg-sky-50"
+                    )}
+                  >
+                    <GitBranch className="size-3 shrink-0" />
+                    {resolvedSkillVersion}
+                  </Badge>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
+                  {skillVersionTooltip}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
             {category && (
               <Badge variant="outline" className="h-5 px-2 text-[10px]">
                 {category}
@@ -3050,9 +3091,22 @@ export function SkillDetail(props: {
       </div>
 
       <div className="px-4 py-3 border-b border-border">
-        <p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">
-          {description}
-        </p>
+        <div className="space-y-3">
+          <p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">
+            {description}
+          </p>
+          {skillVersionMissingInFrontmatter && (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-relaxed text-amber-900">
+              <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
+              <p>
+                当前没有在 <code className="rounded bg-amber-100 px-1">SKILL.md frontmatter</code>{" "}
+                里找到 <code className="rounded bg-amber-100 px-1">version</code>，系统当前按{" "}
+                <code className="rounded bg-amber-100 px-1">{DEFAULT_SKILL_VERSION}</code>{" "}
+                处理。建议补上 version，方便发布、追踪和版本识别。
+              </p>
+            </div>
+          )}
+        </div>
       </div>
 
       {hideContentPreview ? (

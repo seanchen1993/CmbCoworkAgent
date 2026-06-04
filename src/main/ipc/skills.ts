@@ -29,7 +29,7 @@ import {
   normalizeArchiveEntryName,
   selectRootSkillMarkdownEntry
 } from "../skills/archive"
-import { parseYamlFrontmatter } from "../utils/skill-identifiers"
+import { DEFAULT_SKILL_VERSION, normalizeSkillVersion, parseYamlFrontmatter } from "../utils/skill-identifiers"
 
 interface ZipEntryLike {
   entryName: string
@@ -1267,18 +1267,39 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
     async (
       _event,
       payload: { buffer: ArrayBuffer; fileName: string }
-    ): Promise<{ success: boolean; name?: string; error?: string }> => {
+    ): Promise<{
+      success: boolean
+      name?: string
+      version?: string
+      versionFoundInFrontmatter?: boolean
+      error?: string
+    }> => {
       const { buffer, fileName } = payload
       if (!buffer || !fileName) return { success: false, error: "无效参数" }
+
+      const extractSkillMetadata = (
+        content: string
+      ): {
+        success: boolean
+        name?: string
+        version?: string
+        versionFoundInFrontmatter?: boolean
+        error?: string
+      } => {
+        const frontmatter = parseYamlFrontmatter(content)
+        const name = frontmatter.name?.trim()
+        if (!name) return { success: false, error: "MD 文件 frontmatter 中未找到 name 字段" }
+        const rawVersion = frontmatter.version?.trim()
+        const versionFoundInFrontmatter = Boolean(rawVersion)
+        const version = normalizeSkillVersion(rawVersion || DEFAULT_SKILL_VERSION)
+        return { success: true, name, version, versionFoundInFrontmatter }
+      }
 
       const ext = path.extname(fileName).toLowerCase()
       try {
         if (ext === ".md") {
           const content = Buffer.from(buffer).toString("utf-8")
-          const frontmatter = parseYamlFrontmatter(content)
-          const name = frontmatter.name?.trim()
-          if (!name) return { success: false, error: "MD 文件 frontmatter 中未找到 name 字段" }
-          return { success: true, name }
+          return extractSkillMetadata(content)
         }
 
         if (ext === ".zip") {
@@ -1304,10 +1325,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
             mdEntry.entry.getData(),
             mdEntry.decodedName || "SKILL.md"
           )
-          const frontmatter = parseYamlFrontmatter(content)
-          const name = frontmatter.name?.trim()
-          if (!name) return { success: false, error: "MD 文件 frontmatter 中未找到 name 字段" }
-          return { success: true, name }
+          return extractSkillMetadata(content)
         }
 
         return { success: false, error: "仅支持 .md 或 .zip 文件" }

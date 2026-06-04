@@ -22,7 +22,10 @@ export function MarketPublishDialog(props: {
   open: boolean
   mode: PublishMode
   target: MarketPublishTarget | null
-  marketInfo?: Pick<MarketItem, "name" | "description" | "category" | "chinese_name" | "guidance">
+  marketInfo?: Pick<
+    MarketItem,
+    "name" | "description" | "category" | "chinese_name" | "guidance" | "version"
+  >
   buildFile: (
     target: MarketPublishTarget
   ) => Promise<{ success: boolean; file?: File; error?: string }>
@@ -46,7 +49,7 @@ export function MarketPublishDialog(props: {
         onSuccess({ name: target.name, type: target.type, mode })
       }}
       resourceType={target?.type ?? "mcp"}
-      onUpload={(file, name, description, category, guidance, chineseName, userId) => {
+      onUpload={(file, name, description, category, version, guidance, chineseName, userId) => {
         if (!target) return Promise.resolve({ success: false, error: "未选择项目" })
         if (mode === "update") {
           return marketApi.updateItem(
@@ -55,6 +58,7 @@ export function MarketPublishDialog(props: {
             name,
             description,
             category,
+            version,
             guidance,
             chineseName,
             userId
@@ -67,6 +71,7 @@ export function MarketPublishDialog(props: {
           name,
           description,
           category,
+          version,
           guidance,
           chineseName,
           userId
@@ -79,6 +84,7 @@ export function MarketPublishDialog(props: {
               name: target.name,
               description: target.description || marketInfo?.description || "",
               category: target.category || marketInfo?.category || "",
+              version: marketInfo?.version || undefined,
               guidance: target.guidance || marketInfo?.guidance || "",
               chinese_name: target.chineseName || marketInfo?.chinese_name || ""
             }
