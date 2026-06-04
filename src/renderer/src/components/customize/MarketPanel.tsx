@@ -614,7 +614,7 @@ function MarketItemCard({
                   </Button>
                 )
               )}
-              {isInstalled && !isFeatured && (
+              {isInstalled && !isFeatured && !installActionDisabled && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -1864,6 +1864,10 @@ export function MarketPanel(): React.JSX.Element {
   }
 
   const handleUninstall = async (item: MarketItem) => {
+    if (item.installDisabledReason) {
+      toast.info(item.installDisabledReason)
+      return
+    }
     const itemName = item.name || item.id || ""
     if (!itemName) return
 
@@ -2506,7 +2510,9 @@ export function MarketPanel(): React.JSX.Element {
                         </Button>
                       )
                     )}
-                    {selectedItem.installed && selectedItem.featured !== "精品" && (
+                    {selectedItem.installed &&
+                      selectedItem.featured !== "精品" &&
+                      !selectedItem.installDisabledReason && (
                       <Button
                         variant="outline"
                         size="sm"

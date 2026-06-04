@@ -1741,26 +1741,11 @@ export function SkillsPanel(): React.JSX.Element {
     () => !!selectedSkill && selectedSkillUploadedInPanel,
     [selectedSkill, selectedSkillUploadedInPanel]
   )
-  const selectedSkillCanPublish = useMemo(
-    () =>
-      !!selectedSkill &&
-      selectedSkill.source !== "project" &&
-      // 规则 2：我上传但尚未“我发布过”时，提供“一键发布”。
-      selectedSkillUploadedInPanel &&
-      !selectedSkillUploadedByMe,
-    [selectedSkill, selectedSkillUploadedByMe, selectedSkillUploadedInPanel]
+  const selectedSkillShowPublishButton = useMemo(
+    () => !!selectedSkill && selectedSkill.source !== "project" && selectedSkillUploadedInPanel,
+    [selectedSkill, selectedSkillUploadedInPanel]
   )
-  const selectedSkillCanUpdate = useMemo(
-    () =>
-      !!selectedSkill &&
-      selectedSkill.source !== "project" &&
-      // 规则 4：我上传且已经发布到市场，并且发生过编辑时，支持“更新发布”。
-      selectedSkillUploadedInPanel &&
-      selectedSkillUploadedByMe &&
-      selectedSkillIsEdited,
-    [selectedSkill, selectedSkillIsEdited, selectedSkillUploadedByMe, selectedSkillUploadedInPanel]
-  )
-  const selectedSkillPublishLabel = selectedSkillCanUpdate ? "更新到市场" : "发布到市场"
+  const selectedSkillPublishLabel = "同步到市场"
   const selectedSkillDeleteDisabledReason = selectedSkillHideContent
     ? "精品技能是内置技能，不允许删除。你可以点击按钮不启动这个技能。"
     : undefined
@@ -2057,7 +2042,7 @@ export function SkillsPanel(): React.JSX.Element {
         }
         deleteDisabledReason={selectedSkillDeleteDisabledReason}
         onPublish={
-          selectedSkill && (selectedSkillCanPublish || selectedSkillCanUpdate)
+          selectedSkill && selectedSkillShowPublishButton
             ? () => openPublishDialog(selectedSkill)
             : undefined
         }
