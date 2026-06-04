@@ -3546,7 +3546,7 @@ export function ChatContainer({
   }
 
   useEffect(() => {
-   console.log(threadMessages, ' test threadMessages//')
+   console.log(" test threadMessages//=====>", JSON.stringify(threadMessages, null, 2))
   }, [threadMessages])
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
@@ -4785,6 +4785,9 @@ export function ChatContainer({
                     const isLastMessage = index === displayMessages.length - 1
                     const nextNonToolMessage =
                       displayMessages.slice(index + 1).find((m) => m.role !== "tool") ?? null
+                    const hasUserAfterHead = displayMessages
+                      .slice(index + 1)
+                      .some((m) => m.role === "user")
                     const showAssistantMeta =
                       message.role !== "assistant" ||
                       !nextNonToolMessage ||
@@ -4822,6 +4825,7 @@ export function ChatContainer({
                           onSetGoalFromMessage={handleSetGoalFromMessage}
                           threadId={threadId}
                           isLoading={isLoading}
+                          hasUserAfterHead={hasUserAfterHead}
                           assistantDurationMs={assistantDurationMsById.get(message.id)}
                           userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
                         />

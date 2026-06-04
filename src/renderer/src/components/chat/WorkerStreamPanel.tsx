@@ -685,6 +685,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
             {messages.map((message, index) => {
               const previousMessage = index > 0 ? messages[index - 1] : null
               const isLastMessage = index === messages.length - 1
+              const hasUserAfterHead = messages.slice(index + 1).some((m) => m.role === "user")
 
               return (
                 <MessageBubble
@@ -696,6 +697,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
                   toolResults={toolResults}
                   threadId={workerFocusView.threadId}
                   isLoading={isRunning}
+                  hasUserAfterHead={hasUserAfterHead}
                   assistantDurationMs={assistantDurationMsById.get(message.id)}
                   userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
                 />
