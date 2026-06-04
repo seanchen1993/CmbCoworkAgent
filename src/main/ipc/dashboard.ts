@@ -5491,6 +5491,33 @@ function makeMockProjectMode(range: TimeRange): DashboardProjectModeData {
     }
   ]
   void range
+  // 额外填充若干进行中项目，便于在 DEV 模式演示项目列表的分页/搜索交互。
+  for (let i = 1; i <= 12; i++) {
+    projects.push({
+      projectId: `proj-demo-${i}`,
+      name: `示例项目 ${i}`,
+      systemName: "示例平台",
+      adapterName: "claude-code",
+      adapterVersion: "1.4.2",
+      lifecycleStatus: "active",
+      compatible: true,
+      compatibilityStatus: "compatible",
+      featureCount: (i % 3) + 1,
+      conversationCount: (i * 7) % 90,
+      hasError: false,
+      topSkills: [{ skill: "代码审查", count: (i * 3) % 20 }],
+      codeStats: null,
+      features: [
+        {
+          slug: `demo-${i}-feature`,
+          title: `示例特性 ${i}`,
+          statusLabel: "进行中",
+          currentNodeStatusLabel: "开发中",
+          summary: "演示用占位特性"
+        }
+      ]
+    })
+  }
   const featureCount = projects.reduce((sum, p) => sum + p.featureCount, 0)
   const conversationCount = projects.reduce((sum, p) => sum + p.conversationCount, 0)
   const activeProjectCount = projects.filter((p) => p.conversationCount > 0).length

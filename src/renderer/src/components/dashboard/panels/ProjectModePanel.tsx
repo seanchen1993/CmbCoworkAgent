@@ -12,9 +12,12 @@ import {
   AlertCircle,
   Plug,
   Code2,
-  Gauge
+  Gauge,
+  Search,
+  X
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import {
   CodeAdoptionFunnel,
@@ -117,14 +120,10 @@ function ProjectRow({
   onToggle: () => void
   onOpenTraces: () => void
 }): React.JSX.Element {
-  const isArchived = project.lifecycleStatus === "archived"
   return (
     <>
       <tr
-        className={cn(
-          "cursor-pointer border-b border-border/50 transition-colors hover:bg-muted/30",
-          isArchived && "opacity-60"
-        )}
+        className="cursor-pointer border-b border-border/50 transition-colors hover:bg-muted/30"
         onClick={onToggle}
       >
         <td className="px-3 py-2">
@@ -137,11 +136,6 @@ function ProjectRow({
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
                 <span className="truncate font-medium text-foreground">{project.name}</span>
-                {isArchived && (
-                  <Badge variant="outline" className="shrink-0 normal-case tracking-normal">
-                    已归档
-                  </Badge>
-                )}
               </div>
               {project.systemName && (
                 <div className="truncate text-[10px] text-muted-foreground">
@@ -276,6 +270,182 @@ function SkillChips({ skills }: { skills: DashboardProjectModeSkillCount[] }): R
   )
 }
 
+const PROJECT_PAGE_SIZE = 10
+
+type ProjectListTab = "active" | "archived"
+
+/**
+ * 项目列表：进行中 / 已归档双 tab + 项目名搜索 + 客户端分页。
+ * 项目快照随使用累积可能很多，因此默认只看「进行中」，并支持搜索定位与翻页。
+ */
+function ProjectListSection({
+  projects,
+  loading,
+  onOpenTraces
+}: {
+  projects: DashboardProjectModeProject[]
+  loading: boolean
+  onOpenTraces: (project: DashboardProjectModeProject) => void
+}): React.JSX.Element {
+  const [tab, setTab] = useState<ProjectListTab>("active")
+  const [query, setQuery] = useState("")
+  const [page, setPage] = useState(1)
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+
+  const activeProjects = projects.filter((p) => p.lifecycleStatus !== "archived")
+  const archivedProjects = projects.filter((p) => p.lifecycleStatus === "archived")
+  const tabProjects = tab === "archived" ? archivedProjects : activeProjects
+
+  const trimmed = query.trim().toLowerCase()
+  const filtered = trimmed
+    ? tabProjects.filter(
+        (p) =>
+          p.name.toLowerCase().includes(trimmed) ||
+          (p.systemName ?? "").toLowerCase().includes(trimmed)
+      )
+    : tabProjects
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PROJECT_PAGE_SIZE))
+  const currentPage = Math.min(page, totalPages)
+  const pageItems = filtered.slice(
+    (currentPage - 1) * PROJECT_PAGE_SIZE,
+    currentPage * PROJECT_PAGE_SIZE
+  )
+
+  const switchTab = (next: ProjectListTab): void => {
+    setTab(next)
+    setPage(1)
+    setExpandedId(null)
+  }
+  const changeQuery = (value: string): void => {
+    setQuery(value)
+    setPage(1)
+  }
+
+  const tabs: Array<{ id: ProjectListTab; label: string; count: number }> = [
+    { id: "active", label: "进行中", count: activeProjects.length },
+    { id: "archived", label: "已归档", count: archivedProjects.length }
+  ]
+
+  return (
+    <section>
+      <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
+      <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
+        项目、插件、生命周期、特性数为当前状态；对话数、采纳率及展开行的技能与采纳明细按所选时间范围统计。
+      </p>
+
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center overflow-hidden rounded-md border border-border">
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              className={`px-3 py-1 text-xs font-medium transition-colors ${
+                tab === t.id
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-muted/50"
+              }`}
+              onClick={() => switchTab(t.id)}
+            >
+              {t.label} ({t.count})
+            </button>
+          ))}
+        </div>
+        <div className="relative w-full max-w-[240px]">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(event) => changeQuery(event.target.value)}
+            placeholder="搜索项目名称"
+            className="h-8 rounded-md border-border bg-background pl-8 pr-8 text-xs"
+          />
+          {query ? (
+            <button
+              type="button"
+              className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              onClick={() => changeQuery("")}
+              aria-label="清空搜索"
+            >
+              <X className="size-3.5" />
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <div
+        className={cn(
+          "overflow-hidden rounded-xl border border-border bg-card",
+          loading && "opacity-70"
+        )}
+      >
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-border bg-muted/30 text-muted-foreground">
+              <th className="px-3 py-2 text-left font-medium">项目</th>
+              <th className="px-3 py-2 text-left font-medium">插件</th>
+              <th className="px-3 py-2 text-left font-medium">生命周期</th>
+              <th className="px-3 py-2 text-right font-medium">特性数</th>
+              <th className="px-3 py-2 text-right font-medium">对话数</th>
+              <th className="px-3 py-2 text-right font-medium">采纳率</th>
+              <th className="px-3 py-2 text-right font-medium">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pageItems.map((project) => (
+              <ProjectRow
+                key={project.projectId}
+                project={project}
+                expanded={expandedId === project.projectId}
+                onToggle={() =>
+                  setExpandedId((prev) => (prev === project.projectId ? null : project.projectId))
+                }
+                onOpenTraces={() => onOpenTraces(project)}
+              />
+            ))}
+            {pageItems.length === 0 && (
+              <tr>
+                <td colSpan={7} className="px-3 py-10 text-center text-muted-foreground">
+                  {trimmed
+                    ? "未找到匹配的项目"
+                    : tab === "archived"
+                      ? "暂无已归档项目"
+                      : "暂无进行中项目"}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+        {filtered.length > 0 && (
+          <div className="flex items-center justify-between gap-3 border-t border-border px-3 py-2 text-xs text-muted-foreground">
+            <span>共 {formatNumber(filtered.length)} 个</span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="rounded-md border border-border px-2 py-1 transition-colors hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={currentPage <= 1}
+                onClick={() => setPage(currentPage - 1)}
+              >
+                上一页
+              </button>
+              <span>
+                第 {currentPage} / {totalPages} 页
+              </span>
+              <button
+                type="button"
+                className="rounded-md border border-border px-2 py-1 transition-colors hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={currentPage >= totalPages}
+                onClick={() => setPage(currentPage + 1)}
+              >
+                下一页
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
 export function ProjectModePanel({
   data,
   loading,
@@ -293,8 +463,6 @@ export function ProjectModePanel({
   marketSkillKeys?: Set<string>
   pluginSkillKeys?: Set<string>
 }): React.JSX.Element {
-  const [expandedId, setExpandedId] = useState<string | null>(null)
-
   if (loading && !data) {
     return (
       <div className="flex h-64 items-center justify-center">
@@ -423,53 +591,7 @@ export function ProjectModePanel({
       </section>
 
       {/* Project list */}
-      <section>
-        <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
-        <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-          项目、适配器、生命周期、特性数为当前状态；对话数、采纳率及展开行的技能与采纳明细按所选时间范围统计。
-          {archivedCount > 0 ? ` 含 ${archivedCount} 个已归档项目（置灰显示）。` : ""}
-        </p>
-        <div
-          className={cn(
-            "overflow-hidden rounded-xl border border-border bg-card",
-            loading && "opacity-70"
-          )}
-        >
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-border bg-muted/30 text-muted-foreground">
-                <th className="px-3 py-2 text-left font-medium">项目</th>
-                <th className="px-3 py-2 text-left font-medium">适配器</th>
-                <th className="px-3 py-2 text-left font-medium">生命周期</th>
-                <th className="px-3 py-2 text-right font-medium">特性数</th>
-                <th className="px-3 py-2 text-right font-medium">对话数</th>
-                <th className="px-3 py-2 text-right font-medium">采纳率</th>
-                <th className="px-3 py-2 text-right font-medium">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {projects.map((project) => (
-                <ProjectRow
-                  key={project.projectId}
-                  project={project}
-                  expanded={expandedId === project.projectId}
-                  onToggle={() =>
-                    setExpandedId((prev) => (prev === project.projectId ? null : project.projectId))
-                  }
-                  onOpenTraces={() => onOpenTraces(project)}
-                />
-              ))}
-              {projects.length === 0 && (
-                <tr>
-                  <td colSpan={7} className="px-3 py-10 text-center text-muted-foreground">
-                    暂无项目模式数据
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      <ProjectListSection projects={projects} loading={loading} onOpenTraces={onOpenTraces} />
 
       {/* Skill / Tool 使用排行，与平台运营概览同款 */}
       <section>
