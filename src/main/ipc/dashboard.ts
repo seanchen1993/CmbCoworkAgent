@@ -5475,6 +5475,41 @@ function makeMockProjectMode(range: TimeRange): DashboardProjectModeData {
           summary: "探测进程返回异常"
         }
       ]
+    },
+    {
+      projectId: "proj-legacy-portal",
+      name: "门户旧版迁移",
+      description: "旧门户下线",
+      systemName: "统一门户",
+      adapterName: "claude-code",
+      adapterVersion: "1.3.5",
+      lifecycleStatus: "archived",
+      compatible: true,
+      compatibilityStatus: "compatible",
+      featureCount: 1,
+      conversationCount: 12,
+      hasError: false,
+      topSkills: [{ skill: "代码审查", count: 6 }],
+      codeStats: makeDashboardCodeStats({
+        generatedLines: 900,
+        deletedLines: 1500,
+        measuredGeneratedLines: 850,
+        effectiveGeneratedLines: 700,
+        adoptedLines: 520,
+        pushedMeasuredGeneratedLines: 700,
+        pushedEffectiveGeneratedLines: 600,
+        pushedAdoptedLines: 450,
+        pushedCommitCount: 8
+      }),
+      features: [
+        {
+          slug: "portal-migrate",
+          title: "门户迁移",
+          statusLabel: "已归档",
+          currentNodeStatusLabel: "已下线",
+          summary: "迁移完成并归档"
+        }
+      ]
     }
   ]
   void range

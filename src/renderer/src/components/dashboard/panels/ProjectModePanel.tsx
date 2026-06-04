@@ -123,10 +123,14 @@ function ProjectRow({
   onToggle: () => void
   onOpenTraces: () => void
 }): React.JSX.Element {
+  const isArchived = project.lifecycleStatus === "archived"
   return (
     <>
       <tr
-        className="cursor-pointer border-b border-border/50 transition-colors hover:bg-muted/30"
+        className={cn(
+          "cursor-pointer border-b border-border/50 transition-colors hover:bg-muted/30",
+          isArchived && "opacity-60"
+        )}
         onClick={onToggle}
       >
         <td className="px-3 py-2">
@@ -139,6 +143,11 @@ function ProjectRow({
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
                 <span className="truncate font-medium text-foreground">{project.name}</span>
+                {isArchived && (
+                  <Badge variant="outline" className="shrink-0 normal-case tracking-normal">
+                    已归档
+                  </Badge>
+                )}
                 {project.hasError && (
                   <CircleAlert
                     className="size-3.5 shrink-0 text-status-critical"
@@ -323,6 +332,7 @@ export function ProjectModePanel({
     name: item.skill,
     count: item.count
   }))
+  const archivedCount = projects.filter((p) => p.lifecycleStatus === "archived").length
 
   return (
     <div className="space-y-6">
@@ -340,7 +350,7 @@ export function ProjectModePanel({
               icon={Boxes}
               label="项目总数"
               value={formatNumber(summary?.projectCount ?? 0)}
-              sub="当前状态"
+              sub={archivedCount > 0 ? `当前状态 · 含 ${archivedCount} 已归档` : "当前状态"}
               color="bg-blue-500"
             />
             <StatCard
@@ -486,6 +496,7 @@ export function ProjectModePanel({
         <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
         <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
           项目、适配器、生命周期、兼容性、功能数为当前状态；对话数、采纳率及展开行的技能与采纳明细按所选时间范围统计。
+          {archivedCount > 0 ? ` 含 ${archivedCount} 个已归档项目（置灰显示）。` : ""}
         </p>
         <div
           className={cn(
