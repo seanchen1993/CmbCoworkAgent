@@ -348,43 +348,11 @@ export interface ThreadGitContext {
   branch?: string | null
 }
 
-export interface TurnTiming {
-  duration: number
-  thread_id: string
-  user_id: string
-  sendTime?: number
-}
-
-interface SetTurnTimingsOptions {
-  persist?: boolean
-}
-
-const TURN_TIMINGS_THREAD_VALUE_KEY = "turnTimings"
-
-const isTurnTiming = (value: unknown): value is TurnTiming => {
-  return (
-    !!value &&
-    typeof value === "object" &&
-    typeof (value as { duration?: unknown }).duration === "number" &&
-    Number.isFinite((value as { duration?: number }).duration) &&
-    typeof (value as { thread_id?: unknown }).thread_id === "string" &&
-    typeof (value as { user_id?: unknown }).user_id === "string" &&
-    ((value as { sendTime?: unknown }).sendTime === undefined ||
-      (typeof (value as { sendTime?: unknown }).sendTime === "number" &&
-        Number.isFinite((value as { sendTime?: number }).sendTime)))
-  )
-}
-
-const getTurnTimings = (threadValues?: Record<string, unknown>): TurnTiming[] => {
-  const value = threadValues?.[TURN_TIMINGS_THREAD_VALUE_KEY]
-  return Array.isArray(value) ? value.filter(isTurnTiming) : []
-}
-
 // Per-thread state (persisted/restored from checkpoints)
 export interface ThreadState {
   messages: Message[]
-  turnTimings: TurnTiming[]
   goalUi: GoalUiState
+  activeTurnStartTime: number | null
   todos: Todo[]
   workspaceFiles: FileInfo[]
   workspacePath: string | null
@@ -462,9 +430,9 @@ interface StreamData {
 export interface ThreadActions {
   appendMessage: (message: Message) => void
   setMessages: (messages: Message[]) => void
-  setTurnTimings: (turnTimings: TurnTiming[], options?: SetTurnTimingsOptions) => void
   setGoalUi: (goalUi: GoalUiState) => void
   refreshGoalUi: (options?: { includeEvents?: boolean }) => Promise<void>
+  setActiveTurnStartTime: (startTime: number | null) => void
   setTodos: (todos: Todo[]) => void
   setWorkspaceFiles: (files: FileInfo[] | ((prev: FileInfo[]) => FileInfo[])) => void
   setWorkspacePath: (path: string | null) => void
@@ -515,8 +483,8 @@ interface ThreadContextValue {
 // Default thread state
 const createDefaultThreadState = (): ThreadState => ({
   messages: [],
-  turnTimings: [],
   goalUi: { goal: null, events: [], lastUpdated: null },
+  activeTurnStartTime: null,
   todos: [],
   workspaceFiles: [],
   workspacePath: null,
@@ -2558,29 +2526,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             return { messages, toolCallStates: nextToolCallStates }
           })
         },
-        setTurnTimings: (turnTimings: TurnTiming[], options?: SetTurnTimingsOptions) => {
-          updateThreadState(threadId, () => ({ turnTimings }))
-          if (options?.persist === false) return
-
-          window.api.threads
-            .get(threadId)
-            .then((thread) => {
-              if (!thread) return
-              return window.api.threads.update(threadId, {
-                thread_values: {
-                  ...(thread.thread_values || {}),
-                  [TURN_TIMINGS_THREAD_VALUE_KEY]: turnTimings
-                }
-              })
-            })
-            .catch((error) => {
-              console.warn("[ThreadContext] Failed to persist turn timings:", error)
-            })
-        },
         setGoalUi: (goalUi: GoalUiState) => {
           updateThreadState(threadId, () => ({ goalUi }))
         },
         refreshGoalUi: (options = {}) => refreshGoalUi(threadId, options),
+        setActiveTurnStartTime: (startTime: number | null) => {
+          updateThreadState(threadId, () => ({ activeTurnStartTime: startTime }))
+        },
         setTodos: (todos: Todo[]) => {
           updateThreadState(threadId, () => ({ todos }))
         },
@@ -2735,7 +2687,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           )
           persistedMessageTimeOrder = getMessageTimeOrder(thread.thread_values)
           const metadata = thread.metadata || {}
-          actions.setTurnTimings(getTurnTimings(thread.thread_values), { persist: false })
           actions.setGitContext(getGitContextFromMetadata(metadata))
           if (metadata.workspacePath) {
             const workspacePath = metadata.workspacePath as string
