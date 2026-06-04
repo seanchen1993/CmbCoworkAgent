@@ -1033,6 +1033,7 @@ interface CustomAPI {
       updates: Array<{ id: string; origin: "market" | "local" }>
     ) => Promise<{ success: boolean; error?: string }>
     getDetail: (id: string) => Promise<PluginDetail>
+    inspectZip: (buffer: ArrayBuffer) => Promise<PluginDetail>
     listHooks: () => Promise<PluginHookMetadata[]>
     setHookEnabled: (
       pluginId: string,

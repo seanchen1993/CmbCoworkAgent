@@ -1481,6 +1481,10 @@ export function MarketPanel(): React.JSX.Element {
           updatedAt: item.created_at
         })
       } else if (activeTab === "plugin") {
+        // The zip is already downloaded above; parse it (without installing) to
+        // surface real Skill/MCP/Hook counts instead of hardcoded zeros.
+        const buffer = await installFile.blob.arrayBuffer()
+        const detail = await window.api.plugins.inspectZip(buffer)
         setPluginDetailPlugin({
           id: item.name,
           name: item.name,
@@ -1489,19 +1493,15 @@ export function MarketPanel(): React.JSX.Element {
           author: item.user_id ? `用户 ${item.user_id}` : "未知作者",
           path: installFilename,
           enabled: false,
-          skillCount: 0,
-          mcpServerCount: 0,
-          hookCount: 0,
+          skillCount: detail.skills.length,
+          mcpServerCount: detail.mcpServers.length,
+          hookCount: detail.hookCount,
           createdAt: item.created_at,
           updatedAt: item.created_at
         })
         setPluginDetailData({
-          skills: [],
-          mcpServers: [],
-          mcpServerDetails: [],
-          hookCount: 0,
-          hooks: [],
-          manifest: {
+          ...detail,
+          manifest: detail.manifest ?? {
             name: item.name,
             version: item.version,
             description: item.description,
