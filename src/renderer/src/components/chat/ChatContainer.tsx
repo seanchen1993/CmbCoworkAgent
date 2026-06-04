@@ -3546,7 +3546,8 @@ export function ChatContainer({
   }
 
   useEffect(() => {
-   console.log(" test threadMessages//=====>", JSON.stringify(threadMessages, null, 2))
+    // todo 测试log专用，后续要删除
+   console.log(" test threadMessages//=====>", JSON.stringify(threadMessages.map(item => ({...item, tool_calls:[], content: item.content?.slice(0, 10) + '（已截断）'})), null, 2))
   }, [threadMessages])
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
