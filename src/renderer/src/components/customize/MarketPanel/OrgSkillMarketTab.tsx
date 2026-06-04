@@ -32,7 +32,7 @@ export const ORG_SKILL_MARKET_TYPE = "orgSkill" as const
 const ORG_SKILL_PAGE_SIZE = 10
 
 export const orgSkillTabIntro = {
-  title: "组织级技能来自技能开放平台",
+  title: "组织级技能来自-Skills市场",
   description:
     "这里展示组织发布和平台内置的技能，安装后会进入本地 Skills，与普通技能保持一致的调用体验。"
 }

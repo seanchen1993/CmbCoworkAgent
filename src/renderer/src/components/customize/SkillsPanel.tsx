@@ -1647,7 +1647,7 @@ export function SkillsPanel(): React.JSX.Element {
   const handleDeleteSkill = useCallback(
     async (skill: SkillMetadata) => {
       if (!window.api?.skills?.delete) return
-      if (!confirm(`确定要删除技能「${skill.name}」吗？`)) return
+      if (!confirm(`确定要删除技能「${skill.name}」吗？\n\n特别注意：删除后的技能文件不会进入垃圾箱，会直接从磁盘移除。`)) return
       const res = await window.api.skills.delete(skill.path)
       if (res.success) {
         removeLocalUploadedSkillPathFromStorage(skill.path)
