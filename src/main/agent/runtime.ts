@@ -2819,7 +2819,20 @@ The workspace root is: ${workspacePath}`
     console.log("[Runtime] Added code_exec prompt")
   }
 
-  const coordinatorProjectInstructions = [agentsPrompt.prompt, extraSystemPrompt]
+  const coordinatorWorkingDirAppendix = workingDirPromptAppendix?.trim()
+  const coordinatorProjectInstructions = [
+    agentsPrompt.prompt,
+    extraSystemPrompt
+  ]
+    .filter(Boolean)
+    .join("\n\n")
+  const coordinatorWorkerProjectInstructions = [
+    agentsPrompt.prompt,
+    coordinatorWorkingDirAppendix
+      ? `### Project Mode Adapter Instructions\n\n${coordinatorWorkingDirAppendix}`
+      : "",
+    extraSystemPrompt
+  ]
     .filter(Boolean)
     .join("\n\n")
 
@@ -2856,7 +2869,7 @@ The workspace root is: ${workspacePath}`
 
   const coordinatorWorkerRunner: CoordinatorWorkerRunner = async (workerInput) => {
     const workerSubagent = buildCoordinatorWorkerSubagents(
-      coordinatorProjectInstructions || undefined,
+      coordinatorWorkerProjectInstructions || undefined,
       undefined,
       threadId,
       timeContext
@@ -3361,6 +3374,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       shell,
       timezone: timeContext.timezone,
       currentTime: timeContext.currentTime,
+      projectModeAdapterInstructions: coordinatorWorkingDirAppendix,
       projectInstructions: coordinatorProjectInstructions,
       turnContext: coordinatorTurnPrompt,
       hasBrowserTool: hasNamedTool("browser_playwright"),
