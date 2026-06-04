@@ -5605,15 +5605,23 @@ export function ChatContainer({
                     ) : (
                       <>
                         {hasRunningCoordinatorWorker && (
-                          <button
-                            type="button"
-                            onClick={handleCancelBackgroundWorkers}
-                            aria-label="停止后台子代理"
-                            title="停止后台子代理"
-                            className="flex items-center justify-center size-7 rounded-md border border-border/70 bg-background text-muted-foreground transition-colors hover:border-red-200 hover:bg-red-50/70 hover:text-red-600 dark:hover:border-red-900/60 dark:hover:bg-red-950/30 dark:hover:text-red-300"
-                          >
-                            <Square className="size-3 fill-current" />
-                          </button>
+                          <TooltipProvider delayDuration={0}>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <button
+                                  type="button"
+                                  onClick={handleCancelBackgroundWorkers}
+                                  aria-label="停止后台子代理"
+                                  className="flex items-center justify-center size-7 rounded-md border border-red-300 bg-red-50 text-red-600 shadow-sm transition-colors hover:border-red-400 hover:bg-red-100 hover:text-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50 dark:border-red-900/70 dark:bg-red-950/35 dark:text-red-300 dark:hover:border-red-800 dark:hover:bg-red-950/55 dark:hover:text-red-200"
+                                >
+                                  <Square className="size-3 fill-current" />
+                                </button>
+                              </TooltipTrigger>
+                              <TooltipContent side="top" sideOffset={6}>
+                                停止后台子代理
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
                         )}
                         <button
                           type="submit"
