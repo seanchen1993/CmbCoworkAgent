@@ -761,27 +761,37 @@ function UserDetailPage({
   loading,
   error,
   tracePage,
+  traceViewMode,
   traceTriggerScope,
   onBack,
   onTracePrevious,
   onTraceNext,
+  onTraceViewModeChange,
   onTraceTriggerScopeChange
 }: {
   data: DashboardUserDetail | null
   loading: boolean
   error: string | null
   tracePage: number
+  traceViewMode: DashboardTraceViewMode
   traceTriggerScope: DashboardTraceTriggerScope
   onBack: () => void
   onTracePrevious: () => void
   onTraceNext: () => void
+  onTraceViewModeChange: (mode: DashboardTraceViewMode) => void
   onTraceTriggerScopeChange: (scope: DashboardTraceTriggerScope) => void
 }): React.JSX.Element {
   const tracePageSize = data?.tracePageSize ?? USER_TRACE_PAGE_SIZE
-  const totalTraces = data?.totalTraces ?? data?.totalCalls ?? 0
+  // 列表翻页总数按当前视图模式：thread → 会话数；trace → trace 总数。
+  const total = data?.total ?? 0
   const canTracePrevious = tracePage > 1 && !loading
-  const canTraceNext = Boolean(data) && tracePage * tracePageSize < totalTraces && !loading
-  const traceTitle = `Trace 记录（第 ${tracePage} 页）`
+  const canTraceNext = Boolean(data) && tracePage * tracePageSize < total && !loading
+  const traceTitle =
+    traceViewMode === "thread" ? `会话记录（第 ${tracePage} 页）` : `Trace 记录（第 ${tracePage} 页）`
+  const traceSubtitle =
+    traceViewMode === "thread"
+      ? `共 ${formatNumber(total)} 个会话，选择记录定位到对话`
+      : `共 ${formatNumber(total)} 条，选择记录定位到对话`
 
   return (
     <div className="p-6">
@@ -894,7 +904,9 @@ function UserDetailPage({
               traces={data.traces}
               loading={loading}
               title={traceTitle}
-              subtitle={`共 ${formatNumber(totalTraces)} 条，选择记录定位到对话`}
+              subtitle={traceSubtitle}
+              viewMode={traceViewMode}
+              onViewModeChange={onTraceViewModeChange}
               headerRight={
                 <div className="flex items-center gap-2">
                   <TraceTriggerScopeToggle
@@ -992,6 +1004,8 @@ export function DashboardView(): React.JSX.Element {
   const [userDetailLoading, setUserDetailLoading] = useState(false)
   const [userDetailError, setUserDetailError] = useState<string | null>(null)
   const [userDetailTracePage, setUserDetailTracePage] = useState(1)
+  const [userDetailTraceViewMode, setUserDetailTraceViewMode] =
+    useState<DashboardTraceViewMode>("thread")
   const [userDetailTraceTriggerScope, setUserDetailTraceTriggerScope] =
     useState<DashboardTraceTriggerScope>("active")
   const [marketSkillKeys, setMarketSkillKeys] = useState<Set<string>>(new Set())
@@ -1293,6 +1307,7 @@ export function DashboardView(): React.JSX.Element {
     async (
       sapId: string,
       tracePage = 1,
+      viewMode: DashboardTraceViewMode = "thread",
       triggerScope: DashboardTraceTriggerScope = "active"
     ) => {
       setUserDetailLoading(true)
@@ -1301,6 +1316,7 @@ export function DashboardView(): React.JSX.Element {
         const result = await window.api.dashboard.userDetail(sapId, range, {
           tracePage,
           tracePageSize: USER_TRACE_PAGE_SIZE,
+          mode: viewMode,
           triggerScope
         })
         if (!result.success) throw new Error(result.error ?? "获取用户详情失败")
@@ -1335,6 +1351,7 @@ export function DashboardView(): React.JSX.Element {
       setSubPage({ kind: "user-detail", sapId: normalizedSapId, backTo: backTo ?? fallbackBackTo })
       setUserDetail(null)
       setUserDetailTracePage(1)
+      setUserDetailTraceViewMode("thread")
       setUserDetailTraceTriggerScope("active")
     },
     [subPage.kind]
@@ -1424,9 +1441,14 @@ export function DashboardView(): React.JSX.Element {
     if (!userDetail) return
     setUserDetailTracePage((prev) => {
       const pageSize = userDetail.tracePageSize || USER_TRACE_PAGE_SIZE
-      return prev * pageSize < userDetail.totalTraces ? prev + 1 : prev
+      return prev * pageSize < userDetail.total ? prev + 1 : prev
     })
   }, [userDetail])
+
+  const handleUserTraceViewModeChange = useCallback((mode: DashboardTraceViewMode) => {
+    setUserDetailTraceViewMode(mode)
+    setUserDetailTracePage(1)
+  }, [])
 
   const handleUserTraceTriggerScopeChange = useCallback(
     (scope: DashboardTraceTriggerScope) => {
@@ -1445,7 +1467,12 @@ export function DashboardView(): React.JSX.Element {
         void loadUserList(undefined, [], userListSearchKeyword, userListDepartmentFilter)
       }
     } else if (subPageDetailSapId) {
-      void loadUserDetail(subPageDetailSapId, userDetailTracePage, userDetailTraceTriggerScope)
+      void loadUserDetail(
+        subPageDetailSapId,
+        userDetailTracePage,
+        userDetailTraceViewMode,
+        userDetailTraceTriggerScope
+      )
     }
   }, [
     range,
@@ -1457,6 +1484,7 @@ export function DashboardView(): React.JSX.Element {
     userListSearchKeyword,
     userListDepartmentFilter,
     userDetailTracePage,
+    userDetailTraceViewMode,
     userDetailTraceTriggerScope
   ])
 
@@ -1882,10 +1910,12 @@ export function DashboardView(): React.JSX.Element {
             loading={userDetailLoading}
             error={userDetailError}
             tracePage={userDetailTracePage}
+            traceViewMode={userDetail?.traceViewMode ?? userDetailTraceViewMode}
             traceTriggerScope={userDetail?.traceTriggerScope ?? userDetailTraceTriggerScope}
             onBack={handleUserDetailBack}
             onTracePrevious={handleUserTracePrevious}
             onTraceNext={handleUserTraceNext}
+            onTraceViewModeChange={handleUserTraceViewModeChange}
             onTraceTriggerScopeChange={handleUserTraceTriggerScopeChange}
           />
         </ScrollArea>

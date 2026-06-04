@@ -245,7 +245,9 @@ interface DashboardUserDetail {
   traces: DashboardTraceDetail[]
   tracePage: number
   tracePageSize: number
-  totalTraces: number
+  /** 当前视图模式下的翻页总数：thread → 会话数；trace → trace 总数。 */
+  total: number
+  traceViewMode?: TraceViewMode
   traceTriggerScope?: TraceTriggerScope
 }
 
@@ -279,6 +281,8 @@ interface UserDetailOptions {
   traceLimit?: number
   tracePage?: number
   tracePageSize?: number
+  mode?: TraceViewMode
+  viewMode?: TraceViewMode
   triggerScope?: TraceTriggerScope
 }
 
@@ -1407,7 +1411,9 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?:
   void granularity
   const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
   // 统计指标不做组织级数据权限过滤，仅保留用户主动选择的组织（LV1）多选维度。
-  const queryFilters = [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter()]
+  // 统计指标计入全部触发来源（含定时任务/心跳等后台触发，均视为真人参与）。
+  // triggerSource 仅用于 trace 分析页的「主动触发/全部」切换，不在统计口径里过滤。
+  const queryFilters = [timeRangeFilter("startedAt", range)]
   const orgFilterClause = buildUpperOrgLv1ListFilter(selectedOrgs)
   if (orgFilterClause) {
     queryFilters.push(orgFilterClause)
@@ -1509,9 +1515,9 @@ async function fetchUserList(range: TimeRange, options?: UserListOptions): Promi
   const aggregationSize = Math.min(offset + pageSize, 10_000)
   const shardSize = Math.min(Math.max(aggregationSize * 3, 100), 50_000)
   // 用户列表属于统计/目录数据，不做组织级数据权限过滤，仅保留用户主动选择的组织维度。
+  // 统计口径计入全部触发来源；triggerSource 仅用于 trace 分析页切换，不在此过滤。
   const filters = [
     timeRangeFilter("startedAt", range),
-    buildChatTriggeredTraceFilter(),
     buildNonEmptySapIdFilter()
   ]
   if (upperOrgLv1 !== null) {
@@ -1594,6 +1600,70 @@ function normalizeTermsBucketList(
   })
 }
 
+// ── 会话（thread）列表分页：用户页 / 技能页 thread 视图共用同一套逻辑 ──
+// 会话按最近活跃时间倒序取桶后切片分页；该上限同时约束 terms 桶数与可翻到的
+// 最深页（page * pageSize ≤ 上限）。单用户 / 单技能的会话量有界，300 足够。
+const MAX_THREAD_LIST_BUCKETS = 300
+// 每个会话在列表里展开渲染的 trace 数上限。会话内 trace 通常很少；超大会话的
+// 完整还原由「Thread 对话还原」抽屉（fetchThreadTraces）负责，列表无需全量。
+const THREAD_LIST_TRACES_PER_THREAD = 50
+
+/** 当前页所需的 terms 桶数（取到第 page 页末尾，封顶 MAX_THREAD_LIST_BUCKETS）。 */
+function threadListBucketsNeeded(page: number, pageSize: number): number {
+  return Math.min(page * pageSize, MAX_THREAD_LIST_BUCKETS)
+}
+
+/**
+ * 「按会话分页」的聚合定义：按 threadId 分桶（按最近活跃倒序）、每桶回带该会话
+ * 的 trace（升序、最多 THREAD_LIST_TRACES_PER_THREAD 条）。用户页与技能页 thread
+ * 视图共用，保证两边口径完全一致。
+ */
+function threadListAgg(bucketsNeeded: number): Record<string, unknown> {
+  return {
+    total_threads: { cardinality: { field: "threadId" } },
+    by_thread: {
+      terms: {
+        field: "threadId",
+        size: bucketsNeeded,
+        order: { latest_started_at: "desc" }
+      },
+      aggs: {
+        latest_started_at: { max: { field: "startedAt" } },
+        traces: {
+          top_hits: {
+            size: THREAD_LIST_TRACES_PER_THREAD,
+            sort: [{ startedAt: { order: "asc" } }],
+            _source: { includes: dashboardTraceSourceIncludes() }
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * 解析 threadListAgg 的结果容器（含 total_threads + by_thread），按当前页切片，
+ * 并把当页每个会话的全部 trace 摊平返回，交给客户端按 thread 归组（每组完整、不跨页）。
+ */
+function parseThreadListContainer(
+  container: Record<string, unknown>,
+  page: number,
+  pageSize: number
+): { traces: DashboardTraceDetail[]; totalThreads: number } {
+  const totalThreads = Math.min(
+    asNumber(asRecord(container.total_threads).value),
+    MAX_THREAD_LIST_BUCKETS
+  )
+  const buckets = asRecord(container.by_thread).buckets
+  const fromBucket = (page - 1) * pageSize
+  const selected = Array.isArray(buckets) ? buckets.slice(fromBucket, fromBucket + pageSize) : []
+  const traces = selected.flatMap((bucket) => {
+    const hits = asRecord(asRecord(asRecord(bucket).traces).hits).hits
+    return Array.isArray(hits) ? hits.map((hit) => normalizeTraceDetail(hit as EsSearchHit)) : []
+  })
+  return { traces, totalThreads }
+}
+
 async function fetchUserDetail(
   sapId: string,
   range: TimeRange,
@@ -1602,51 +1672,70 @@ async function fetchUserDetail(
   const access = requireDashboardAccess()
   const normalizedSapId = sapId.trim()
   if (!normalizedSapId) throw new Error("sapId is required")
+  const traceViewMode = normalizeTraceViewMode(options?.viewMode ?? options?.mode)
   const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
   const tracePage = clampLimit(options?.tracePage, 1, 1000)
   const triggerScope = normalizeTraceTriggerScope(options?.triggerScope)
-  // 统计指标（聚合）按该用户全量计算，不做组织级权限过滤；
-  // 组织级权限仅通过 post_filter 作用于返回的 trace 聊天明细命中，避免跨组织读取对话内容。
+  // 统计指标（顶层聚合）按该用户全量计算，不做组织级权限过滤；
+  // 组织级权限作用于返回的会话/trace 明细（thread 模式经 thread_list 的 filter 聚合，
+  // trace 模式经 post_filter），避免跨组织读取对话内容。
   const traceAccessFilter = buildTraceAccessFilter(access)
-  const body = {
-    track_total_hits: true,
-    from: (tracePage - 1) * tracePageSize,
-    size: tracePageSize,
-    sort: [{ startedAt: { order: "desc" } }],
-    query: {
-      bool: {
-        filter: [
-          timeRangeFilter("startedAt", range),
-          { term: { sapId: normalizedSapId } },
-          ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
-        ]
+  const baseFilter = [
+    timeRangeFilter("startedAt", range),
+    { term: { sapId: normalizedSapId } },
+    ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
+  ]
+  // 两种视图共用的全量统计聚合（与列表口径隔离）。
+  const statsAggs: Record<string, unknown> = {
+    latest_user_info: {
+      top_hits: {
+        size: 1,
+        sort: [{ startedAt: { order: "desc" } }],
+        _source: {
+          includes: ["sapId", "ystId", "userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+        }
       }
     },
-    ...(traceAccessFilter ? { post_filter: traceAccessFilter } : {}),
-    aggs: {
-      latest_user_info: {
-        top_hits: {
-          size: 1,
-          sort: [{ startedAt: { order: "desc" } }],
-          _source: {
-            includes: ["sapId", "ystId", "userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+    total_calls: { value_count: { field: "traceId" } },
+    avg_duration: { avg: { field: "durationMs" } },
+    total_tool_calls: { sum: { field: "totalToolCalls" } },
+    total_input_tokens: { sum: { field: "totalInputTokens" } },
+    total_output_tokens: { sum: { field: "totalOutputTokens" } },
+    total_tokens: { sum: { field: "totalTokens" } },
+    by_skill: { terms: { field: "usedSkills", size: 10 } },
+    by_model: { terms: { field: "modelName", size: 10 } },
+    by_outcome: { terms: { field: "outcome", size: 10 } }
+  }
+
+  // 列表：
+  // - thread 视图：按会话分页，每页返回若干「完整会话」（与技能页共用 threadListAgg）。
+  // - trace 视图：按 trace 时间（startedAt 倒序）直接分页，一条 trace 一行。
+  const body =
+    traceViewMode === "thread"
+      ? {
+          size: 0,
+          query: { bool: { filter: baseFilter } },
+          aggs: {
+            ...statsAggs,
+            thread_list: {
+              filter: traceAccessFilter ?? { match_all: {} },
+              aggs: threadListAgg(threadListBucketsNeeded(tracePage, tracePageSize))
+            }
           }
         }
-      },
-      total_calls: { value_count: { field: "traceId" } },
-      avg_duration: { avg: { field: "durationMs" } },
-      total_tool_calls: { sum: { field: "totalToolCalls" } },
-      total_input_tokens: { sum: { field: "totalInputTokens" } },
-      total_output_tokens: { sum: { field: "totalOutputTokens" } },
-      total_tokens: { sum: { field: "totalTokens" } },
-      by_skill: { terms: { field: "usedSkills", size: 10 } },
-      by_model: { terms: { field: "modelName", size: 10 } },
-      by_outcome: { terms: { field: "outcome", size: 10 } }
-    },
-    _source: {
-      includes: dashboardTraceSourceIncludes()
-    }
-  }
+      : {
+          // trace 视图：按 trace 时间（startedAt 倒序）直接分页，一条 trace 一行。
+          // 用顶层 hits + post_filter：支持深翻页（max_result_window），且 post_filter
+          // 只裁剪命中列表与 hits.total（统计聚合仍为全量），与组织数据权限语义一致。
+          track_total_hits: true,
+          from: (tracePage - 1) * tracePageSize,
+          size: tracePageSize,
+          sort: [{ startedAt: { order: "desc" } }],
+          query: { bool: { filter: baseFilter } },
+          ...(traceAccessFilter ? { post_filter: traceAccessFilter } : {}),
+          aggs: statsAggs,
+          _source: { includes: dashboardTraceSourceIncludes() }
+        }
 
   const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
   const rawRecord = asRecord(raw)
@@ -1655,9 +1744,22 @@ async function fetchUserDetail(
   const totalInputTokens = asNumber(asRecord(aggs.total_input_tokens).value)
   const totalOutputTokens = asNumber(asRecord(aggs.total_output_tokens).value)
   const totalTokens = asNumber(asRecord(aggs.total_tokens).value, totalInputTokens + totalOutputTokens)
-  // 统计指标：调用次数取自聚合（全量）；trace 列表分页用 post_filter 后的命中总数。
+  // 统计指标：调用次数取自全量聚合。
   const totalCalls = asNumber(asRecord(aggs.total_calls).value)
-  const totalTraces = getTotalHits(raw, raw.hits?.hits?.length ?? 0)
+
+  // 列表与翻页总数（按当前视图模式）：
+  // thread → 会话数；trace → 受权限过滤的 trace 总数（post_filter 后的 hits.total）。
+  let traces: DashboardTraceDetail[]
+  let total: number
+  if (traceViewMode === "thread") {
+    const parsed = parseThreadListContainer(asRecord(aggs.thread_list), tracePage, tracePageSize)
+    traces = parsed.traces
+    total = parsed.totalThreads
+  } else {
+    const hits = raw.hits?.hits ?? []
+    traces = hits.map(normalizeTraceDetail)
+    total = getTotalHits(raw, hits.length)
+  }
 
   return {
     sapId: asString(userInfo.sapId, normalizedSapId),
@@ -1675,10 +1777,11 @@ async function fetchUserDetail(
     bySkill: normalizeTermsBucketList(asRecord(aggs.by_skill).buckets, "skill") as DashboardUserDetail["bySkill"],
     byModel: normalizeTermsBucketList(asRecord(aggs.by_model).buckets, "model") as DashboardUserDetail["byModel"],
     byOutcome: normalizeTermsBucketList(asRecord(aggs.by_outcome).buckets, "outcome") as DashboardUserDetail["byOutcome"],
-    traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
+    traces,
     tracePage,
     tracePageSize,
-    totalTraces,
+    total,
+    traceViewMode,
     traceTriggerScope: triggerScope
   }
 }
@@ -1699,9 +1802,10 @@ async function fetchSkillUsageSummary(
     const filters = Object.fromEntries(
       normalizedSkillNames.map((skillName) => [skillName, buildSkillUsageWildcardFilter(skillName)])
     )
+    // 统计口径计入全部触发来源；triggerSource 仅用于 trace 分析页切换，不在此过滤。
     const body = {
       size: 0,
-      query: { bool: { filter: [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter(), ...(traceAccessFilter ? [traceAccessFilter] : [])] } },
+      query: { bool: { filter: [timeRangeFilter("startedAt", range), ...(traceAccessFilter ? [traceAccessFilter] : [])] } },
       aggs: {
         by_skill: {
           filters: { filters },
@@ -1720,9 +1824,10 @@ async function fetchSkillUsageSummary(
   }
 
   // 模式 B：兼容旧调用方，保留 terms 聚合结构。
+  // 统计口径计入全部触发来源；triggerSource 仅用于 trace 分析页切换，不在此过滤。
   const body = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter(), ...(traceAccessFilter ? [traceAccessFilter] : [])] } },
+    query: { bool: { filter: [timeRangeFilter("startedAt", range), ...(traceAccessFilter ? [traceAccessFilter] : [])] } },
     aggs: {
       by_skill: {
         terms: { field: "usedSkills", size: 1000 },
@@ -1749,11 +1854,11 @@ async function fetchSkillUserStats(
   const skillFilter = buildSkillUsageWildcardFilter(skillName)
   const body = {
     size: 0,
+    // 统计口径计入全部触发来源；triggerSource 仅用于 trace 分析页切换，不在此过滤。
     query: {
       bool: {
         must: [
           timeRangeFilter("startedAt", range),
-          buildChatTriggeredTraceFilter(),
           ...(traceAccessFilter ? [traceAccessFilter] : []),
           { exists: { field: "ystId" } },
           { bool: { must_not: { term: { ystId: "" } } } }
@@ -1781,7 +1886,6 @@ async function fetchSkillUserStats(
               bool: {
                 must: [
                   timeRangeFilter("startedAt", range),
-                  buildChatTriggeredTraceFilter(),
                   ...(traceAccessFilter ? [traceAccessFilter] : []),
                   skillFilter,
                   buildEmptyYstIdFilter()
@@ -2193,48 +2297,21 @@ async function fetchSkillRecentTraces(
   const sourceIncludes = dashboardTraceSourceIncludes()
 
   if (normalizedMode === "thread") {
-    const maxThreadBuckets = 30
-    const requestedBuckets = Math.min(currentPage * size, maxThreadBuckets)
-    const fromBucket = (currentPage - 1) * size
-    const tracesPerThread = 5
+    // 与用户页 thread 视图共用同一套「按会话分页 + 完整会话」逻辑：每页 size 个完整会话，
+    // 每会话最多 THREAD_LIST_TRACES_PER_THREAD 条，封顶 MAX_THREAD_LIST_BUCKETS 个会话。
     const body = {
       size: 0,
       query: {
         bool: { filter: filters }
       },
-      aggs: {
-        total_threads: { cardinality: { field: "threadId" } },
-        by_thread: {
-          terms: {
-            field: "threadId",
-            size: requestedBuckets,
-            order: { latest_started_at: "desc" }
-          },
-          aggs: {
-            latest_started_at: { max: { field: "startedAt" } },
-            latest_traces: {
-              top_hits: {
-                size: tracesPerThread,
-                sort: [{ startedAt: { order: "desc" } }],
-                _source: { includes: sourceIncludes }
-              }
-            }
-          }
-        }
-      }
+      aggs: threadListAgg(threadListBucketsNeeded(currentPage, size))
     }
     const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
     const aggs = asRecord((raw as unknown as Record<string, unknown>).aggregations)
-    const buckets = asRecord(aggs.by_thread).buckets
-    const selectedBuckets = Array.isArray(buckets) ? buckets.slice(fromBucket, fromBucket + size) : []
-    const traces = selectedBuckets.flatMap((bucket) => {
-      const latestHits = asRecord(asRecord(bucket).latest_traces)
-      const rawHits = asRecord(latestHits.hits).hits
-      return Array.isArray(rawHits) ? rawHits.map((hit) => normalizeTraceDetail(hit as EsSearchHit)) : []
-    })
+    const { traces, totalThreads } = parseThreadListContainer(aggs, currentPage, size)
     return {
       traces,
-      total: Math.min(asNumber(asRecord(aggs.total_threads).value), maxThreadBuckets),
+      total: totalThreads,
       page: currentPage,
       pageSize: size,
       mode: normalizedMode
@@ -3118,28 +3195,61 @@ function makeMockUserList(_range: TimeRange, options?: UserListOptions): Dashboa
 function makeMockUserDetail(sapId: string, range: TimeRange, options?: UserDetailOptions): DashboardUserDetail {
   const index = Math.max(0, Number(sapId.slice(-3)) - 1)
   const user = makeMockDashboardUser(Number.isFinite(index) ? index : 0)
+  const traceViewMode = normalizeTraceViewMode(options?.viewMode ?? options?.mode)
   const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
   const tracePage = clampLimit(options?.tracePage, 1, 1000)
-  const totalTraces = user.count
-  const startIndex = (tracePage - 1) * tracePageSize
   const baseTraces = makeMockSkillRecentTraces("代码审查", range, 10)
-  const traces = Array.from(
-    { length: Math.max(0, Math.min(tracePageSize, totalTraces - startIndex)) },
-    (_, traceIndex) => {
-      const trace = baseTraces[traceIndex % baseTraces.length]
-      const mockIndex = startIndex + traceIndex
-      return {
-        ...trace,
-        traceId: `${trace.traceId}-page-${tracePage}-${traceIndex}`,
-        sapId,
-        ystId: user.ystId,
-        userName: user.userName,
-        orgName: user.orgName,
-        userIp: `10.0.1.${20 + (mockIndex % 200)}`,
-        startedAt: new Date(new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000).toISOString()
+  // 列表按会话（thread）分页：每页 tracePageSize 个完整会话，每个会话内含若干 trace。
+  const tracesPerThread = 3
+  const totalThreads = Math.min(MAX_THREAD_LIST_BUCKETS, Math.max(1, Math.floor(user.count / tracesPerThread)))
+  let traces: DashboardTraceDetail[]
+  let total: number
+  if (traceViewMode === "trace") {
+    // trace 视图：按时间倒序的扁平 trace 分页。
+    total = user.count
+    const startIndex = (tracePage - 1) * tracePageSize
+    traces = Array.from(
+      { length: Math.max(0, Math.min(tracePageSize, total - startIndex)) },
+      (_, traceIndex) => {
+        const mockIndex = startIndex + traceIndex
+        const trace = baseTraces[mockIndex % baseTraces.length]
+        return {
+          ...trace,
+          traceId: `mock-trace-${sapId}-${mockIndex}`,
+          threadId: `mock-thread-${sapId}-${Math.floor(mockIndex / tracesPerThread)}`,
+          sapId,
+          ystId: user.ystId,
+          userName: user.userName,
+          orgName: user.orgName,
+          userIp: `10.0.1.${20 + (mockIndex % 200)}`,
+          startedAt: new Date(new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000).toISOString()
+        }
       }
-    }
-  )
+    )
+  } else {
+    total = totalThreads
+    const startThread = (tracePage - 1) * tracePageSize
+    const threadCountThisPage = Math.max(0, Math.min(tracePageSize, totalThreads - startThread))
+    traces = Array.from({ length: threadCountThisPage }).flatMap((_, threadIndex) => {
+      const threadOrdinal = startThread + threadIndex
+      const threadId = `mock-thread-${sapId}-${threadOrdinal}`
+      const threadStartMs = new Date(range.to).getTime() - threadOrdinal * 3 * 60 * 60 * 1000
+      return Array.from({ length: tracesPerThread }, (_, traceIndex) => {
+        const trace = baseTraces[(threadOrdinal + traceIndex) % baseTraces.length]
+        return {
+          ...trace,
+          traceId: `${threadId}-${traceIndex}`,
+          threadId,
+          sapId,
+          ystId: user.ystId,
+          userName: user.userName,
+          orgName: user.orgName,
+          userIp: `10.0.1.${20 + (threadOrdinal % 200)}`,
+          startedAt: new Date(threadStartMs + traceIndex * 8 * 60 * 1000).toISOString()
+        }
+      })
+    })
+  }
   return {
     sapId,
     ystId: user.ystId,
@@ -3171,7 +3281,8 @@ function makeMockUserDetail(sapId: string, range: TimeRange, options?: UserDetai
     traces,
     tracePage,
     tracePageSize,
-    totalTraces,
+    total,
+    traceViewMode,
     traceTriggerScope: normalizeTraceTriggerScope(options?.triggerScope)
   }
 }
