@@ -70,7 +70,6 @@ import {
   useCurrentThread,
   useThreadStream,
   useThreadContext,
-  type TurnTiming,
   type HookLogBucket,
   type HookLogEntry
 } from "@/lib/thread-context"
@@ -94,7 +93,7 @@ import type {
   UserInputResponse
 } from "@/types"
 import { MessageBubble } from "./MessageBubble"
-import { ChatScrollNavigator, type ChatScrollQuestion } from "./ChatScrollNavigator"
+import { ChatScrollNavigator } from "./ChatScrollNavigator"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
@@ -133,6 +132,7 @@ import {
   stringifyMessageContentForReport,
   type LiveStreamMessage as StreamMessage
 } from "@/lib/live-stream-messages"
+import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
 import {
   markChatReportUploadFailed,
   markChatReportUploadSucceeded,
@@ -149,7 +149,7 @@ import {
 } from "@/lib/submit-in-flight-lock"
 import { groupWelcomeSkills } from "./skill-grouping"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
-import { DurationShow } from "./DurationShow"
+import { ProcessingDuration } from "./ProcessingDuration"
 
 type WelcomeSkillCard = {
   skill: SkillMetadata
@@ -1310,63 +1310,8 @@ type MessageTimeValue = {
 }
 
 type MessageTimeMap = Record<string, MessageTimeValue>
-type MessageTimeEntry = MessageTimeValue & { id: string }
 
-const isMessageTimeMap = (value: unknown): value is MessageTimeMap => {
-  return !!value && typeof value === "object" && !Array.isArray(value)
-}
-
-const isMessageTimeEntryArray = (value: unknown): value is MessageTimeEntry[] => {
-  return (
-    Array.isArray(value) &&
-    value.every(
-      (entry) =>
-        !!entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string"
-    )
-  )
-}
-
-const getMessageTimeMap = (threadValues?: Record<string, unknown>): MessageTimeMap => {
-  const value = threadValues?.[MESSAGE_TIMES_THREAD_VALUE_KEY]
-  return isMessageTimeMap(value) ? value : {}
-}
-
-const getMessageTimeOrder = (threadValues?: Record<string, unknown>): MessageTimeEntry[] => {
-  const value = threadValues?.[MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]
-  if (isMessageTimeEntryArray(value)) return value
-  return Object.entries(getMessageTimeMap(threadValues)).map(([id, time]) => ({ id, ...time }))
-}
-
-const mergeMessageTimeOrder = (
-  existingOrder: MessageTimeEntry[],
-  updates: MessageTimeMap
-): MessageTimeEntry[] => {
-  const nextOrder = [...existingOrder]
-  const indexes = new Map(nextOrder.map((entry, index) => [entry.id, index]))
-
-  for (const [id, time] of Object.entries(updates)) {
-    const nextEntry = { id, ...time }
-    const existingIndex = indexes.get(id)
-    if (existingIndex === undefined) {
-      indexes.set(id, nextOrder.length)
-      nextOrder.push(nextEntry)
-    } else {
-      nextOrder[existingIndex] = { ...nextOrder[existingIndex], ...nextEntry }
-    }
-  }
-
-  return nextOrder
-}
-
-// messageTimes 用 id 做精确匹配；messageTimeOrder 用顺序做兜底，解决重启后 checkpoint
-// 重新生成 message id 时，历史耗时无法按 id 命中的问题。
-//
-// 保存两份结构的原因：
-// - messageTimes: 当前会话里 id 稳定，按 id 查找最快也最准确。
-// - messageTimeOrder: app 重启后历史消息来自 LangGraph checkpoint，某些消息 id 可能变化；
-//   此时仍可用“消息展示顺序”和“时间写入顺序”对齐，恢复 start_at/end_at。
-//
-const messageTimeOrderEntries = (updates: MessageTimeMap): MessageTimeEntry[] => {
+const messageTimeOrderEntries = (updates: MessageTimeMap): Array<MessageTimeValue & { id: string }> => {
   return Object.entries(updates).map(([id, time]) => ({ id, ...time }))
 }
 
@@ -1414,17 +1359,6 @@ const getMessageText = (content: Message["content"]): string => {
     })
     .filter(Boolean)
     .join("\n")
-}
-
-const getQuestionPreview = (content: Message["content"]): string => {
-  const text = getMessageText(content)
-    .replace(/<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g, "📎 $1")
-    .replace(/<CMBDEVCLAW-SKILL-USE-V1>[\s\S]*?<\/CMBDEVCLAW-SKILL-USE-V1>/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-
-  if (!text) return "（空提问）"
-  return text.length > 120 ? `${text.slice(0, 120)}...` : text
 }
 
 function RotatingHeadline() {
@@ -1598,11 +1532,8 @@ export function ChatContainer({
   const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const userMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isAtBottomRef = useRef(true)
-  const requestedUserQuestionIndexRef = useRef<number | null>(null)
-  const requestedUserQuestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isComposingRef = useRef(false)
   const submitInFlightRef = useRef<Set<string>>(new Set())
   const [skills, setSkills] = useState<SkillMetadata[]>([])
@@ -1613,7 +1544,6 @@ export function ChatContainer({
   const [showAllProgrammingSkills, setShowAllProgrammingSkills] = useState(false)
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
-  const [activeUserQuestionIndex, setActiveUserQuestionIndex] = useState(-1)
   const [userInputDialogLayout, setUserInputDialogLayout] =
     useState<UserInputRequestDialogLayout | null>(null)
   const [goalDetailsOpen, setGoalDetailsOpen] = useState(false)
@@ -1640,9 +1570,6 @@ export function ChatContainer({
   const [nuxError, setNuxError] = useState<string | null>(null)
   const [nuxLoadingStep, setNuxLoadingStep] = useState(0)
 
-  const [durationMap, setDurationMap] = useState<TurnTiming[]>([])
-  const [durationNow, setDurationNow] = useState(0)
-
   const NUX_LOADING_STEPS: string[] = [
     "正在准备沙箱环境...",
     "等待管理员授权，请在弹出的窗口中点击「是」...",
@@ -1662,11 +1589,6 @@ export function ChatContainer({
     : "normal"
   const [agentMode, setAgentMode] = useState<ChatAgentMode>(initialAgentMode)
   const agentModeHydratedRef = useRef(initialAgentMode === "coordinator")
-  const streamMessageTimesRef = useRef<Record<string, { start_at: Date; end_at?: Date }>>({})
-  const streamMessageBaselineIdsRef = useRef<Set<string>>(new Set())
-  const streamMessageCapturePreparedRef = useRef(false)
-  const [messageTimes, setMessageTimes] = useState<MessageTimeMap>({})
-  const threadMessageIdsRef = useRef<Set<string>>(new Set())
   const chatReportUploadTimersRef = useRef<Record<string, number>>({})
   const chatReportRetryTimersRef = useRef<Record<string, number>>({})
   const chatReportRetryQueuesRef = useRef<
@@ -2033,7 +1955,6 @@ export function ChatContainer({
     approvalQueue,
     pendingUserInput,
     todos,
-    turnTimings,
     error: threadError,
     hookInterruption,
     workspacePath,
@@ -2046,13 +1967,14 @@ export function ChatContainer({
     historyLoading,
     scheduledTaskId,
     modelRetry,
+    activeTurnStartTime,
     setToolCallState,
     setTodos,
     clearPendingApprovals,
     removePendingApproval,
     setPendingApproval,
     setPendingUserInput,
-    setTurnTimings,
+    setActiveTurnStartTime,
     appendMessage,
     refreshGoalUi,
     setError,
@@ -2071,9 +1993,6 @@ export function ChatContainer({
     useCallback(() => threadContext.getHookLogBuckets(threadId), [threadContext, threadId])
   )
 
-  useEffect(() => {
-    threadMessageIdsRef.current = new Set(threadMessages.map((message) => message.id))
-  }, [threadMessages])
   const hookLogBucketByTurnId = useMemo(() => {
     const map = new Map<string, HookLogBucket>()
     for (const bucket of hookLogBuckets) map.set(bucket.turnId, bucket)
@@ -2702,133 +2621,6 @@ export function ChatContainer({
     return () => clearTimeout(timer)
   }, [isLoading])
 
-  const prevLoadingRef = useRef(false)
-  useEffect(() => {
-    if (!prevLoadingRef.current && isLoading) {
-      // 本轮开始前应由 stream.submit 调用方采样 baseline。这里仅做兜底：
-      // 如果运行不是从 ChatContainer 的 submit 路径启动，就退回到已落库消息集合。
-      //
-      // 不能在 loading 已经变成 true 后再用当前 streamData.messages 采样；
-      // 第一条本轮 assistant/tool-call 可能已经到达，会被误判为历史消息而漏落库。
-      if (!streamMessageCapturePreparedRef.current) {
-        streamMessageTimesRef.current = {}
-        streamMessageBaselineIdsRef.current = new Set(threadMessageIdsRef.current)
-      }
-      streamMessageCapturePreparedRef.current = false
-    }
-
-    if (isLoading) {
-      for (const rawMsg of streamData.messages) {
-        const msg = rawMsg as StreamMessage
-        if (msg.type === "human" && isCoordinatorNotificationPrompt(msg.content)) continue
-        // 只给本轮新增、且还未落入 threadMessages 的消息打 start_at。
-        //
-        // threadMessages 是当前前端已经 append 到会话状态里的消息；如果消息已经存在，
-        // 说明它已经完成过一次采集或恢复，不能重复覆盖 start_at。
-        if (
-          msg.id &&
-          !streamMessageBaselineIdsRef.current.has(msg.id) &&
-          !threadMessageIdsRef.current.has(msg.id) &&
-          !streamMessageTimesRef.current[msg.id]
-        ) {
-          const startedAt = new Date()
-          streamMessageTimesRef.current[msg.id] = { start_at: startedAt, end_at: startedAt }
-        }
-      }
-    }
-
-    if (prevLoadingRef.current && !isLoading) {
-      const completedAt = new Date()
-      const nextMessageTimes: MessageTimeMap = {}
-      // 只处理本轮流式期间被记录过 start_at 的消息，避免重复 append 历史消息。
-      //
-      // 当前轮可能包含多条 assistant 消息和多条 tool 消息。这里不直接用全部 streamData.messages，
-      // 而是只取 streamMessageTimesRef 中出现过的 id，保证每条要落库的消息都拥有本轮采集到的
-      // start_at/end_at。
-      const currentTurnMessages = ((streamData.messages || []) as StreamMessage[]).filter(
-        (msg): msg is StreamMessage & { id: string } =>
-          !!msg.id &&
-          !!streamMessageTimesRef.current[msg.id] &&
-          !(msg.type === "human" && isCoordinatorNotificationPrompt(msg.content))
-      )
-
-      currentTurnMessages.forEach((streamMsg, index) => {
-        const trackedTime = streamMessageTimesRef.current[streamMsg.id]
-        const nextStreamMsg = currentTurnMessages[index + 1]
-        const nextStartAt = nextStreamMsg
-          ? streamMessageTimesRef.current[nextStreamMsg.id]?.start_at
-          : undefined
-
-        // 当前消息的 end_at 取下一条消息的 start_at；本轮最后一条消息取停止 loading 的时间。
-        //
-        // 这样每条消息时间段首尾相接：
-        // assistant.start_at -> tool.start_at -> assistant.start_at -> completedAt。
-        // 展示总耗时时，再从 user.start_at 减到“下一个 user 之前最后一条消息”的 end_at，
-        // 就能覆盖中间所有 assistant/tool 的耗时。
-        trackedTime.end_at = nextStartAt ?? completedAt
-
-        let role: Message["role"] = "assistant"
-        if (streamMsg.type === "human") role = "user"
-        else if (streamMsg.type === "tool") role = "tool"
-        else if (streamMsg.type === "ai") role = "assistant"
-
-        nextMessageTimes[streamMsg.id] = {
-          start_at: trackedTime.start_at.toISOString(),
-          end_at: trackedTime.end_at.toISOString()
-        }
-
-        const storeMsg: Message = {
-          id: streamMsg.id,
-          role,
-          content: typeof streamMsg.content === "string" ? streamMsg.content : "",
-          tool_calls: streamMsg.tool_calls,
-          ...(role === "tool" &&
-            streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
-          ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
-          ...(role === "tool" &&
-            streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
-          created_at: new Date(),
-          start_at: trackedTime.start_at,
-          end_at: trackedTime.end_at
-        }
-        appendMessage(storeMsg)
-      })
-
-      if (Object.keys(nextMessageTimes).length > 0) {
-        setMessageTimes((prev) => ({ ...prev, ...nextMessageTimes }))
-        window.api.threads
-          .get(threadId)
-          .then((thread) => {
-            if (!thread) return
-            const existingTimes = getMessageTimeMap(thread.thread_values)
-            return window.api.threads.update(threadId, {
-              thread_values: {
-                ...(thread.thread_values ?? {}),
-                // id map 用于当前会话和 id 稳定时的精确恢复。
-                //
-                // 例如用户还没有关闭 app，只是在同一个运行时切换线程或重新渲染，
-                // message id 仍然可靠，此时直接按 id 取 start_at/end_at。
-                [MESSAGE_TIMES_THREAD_VALUE_KEY]: {
-                  ...existingTimes,
-                  ...nextMessageTimes
-                },
-                // 顺序数组用于 app 重启后，checkpoint 恢复出的 message id 不一致时兜底匹配。
-                //
-                // 它不是用来计算 duration 的新字段，只是保存每条消息时间的展示顺序；
-                // duration 仍由 user.start_at 和分组内最后一条消息 end_at 动态计算。
-                [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
-                  getMessageTimeOrder(thread.thread_values),
-                  nextMessageTimes
-                )
-              }
-            })
-          })
-          .catch((error) => console.warn("[ChatContainer] Failed to save message times:", error))
-      }
-    }
-    prevLoadingRef.current = isLoading
-  }, [isLoading, streamData.messages, threadId, appendMessage])
-
   const displayMessages = useMemo(() => {
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
     const streamingMsgs: Message[] = (streamData.liveMessages || [])
@@ -2849,29 +2641,13 @@ export function ChatContainer({
             streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
           created_at: new Date(),
           ...(streamMsg.start_at && { start_at: streamMsg.start_at }),
-          ...(streamMsg.end_at && { end_at: streamMsg.end_at }),
-          ...(toDate(messageTimes[streamMsg.id]?.start_at) && {
-            start_at: toDate(messageTimes[streamMsg.id]?.start_at)
-          }),
-          ...(toDate(messageTimes[streamMsg.id]?.end_at) && {
-            end_at: toDate(messageTimes[streamMsg.id]?.end_at)
-          })
+          ...(streamMsg.end_at && { end_at: streamMsg.end_at })
         }
       })
 
     // Clean up attachment XML tags in user messages for display
     const allMessages = [...threadMessages, ...streamingMsgs]
       .filter(isVisibleCheckpointTranscriptMessage)
-      .map((msg) => {
-        const storedTime = messageTimes[msg.id]
-        const startAt = toDate(storedTime?.start_at) ?? msg.start_at ?? msg.created_at
-        const endAt = toDate(storedTime?.end_at) ?? msg.end_at ?? startAt
-        return {
-          ...msg,
-          start_at: startAt,
-          end_at: endAt
-        }
-      })
     const cleanedMessages = sortMessagesForDisplay(allMessages).map((msg) => {
       if (
         msg.role !== "user" ||
@@ -2900,12 +2676,7 @@ export function ChatContainer({
       return { ...msg, content: cleaned }
     })
     return filterCoordinatorNoiseMessages(cleanedMessages)
-  }, [threadMessages, streamData.liveMessages, messageTimes])
-
-  const userMessageIds = useMemo(
-    () => displayMessages.filter((message) => message.role === "user").map((message) => message.id),
-    [displayMessages]
-  )
+  }, [threadMessages, streamData.liveMessages])
 
   const lastContentMessageId = useMemo(() => {
     for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
@@ -2914,35 +2685,6 @@ export function ChatContainer({
     }
     return null
   }, [displayMessages])
-
-  const userQuestions = useMemo<ChatScrollQuestion[]>(
-    () =>
-      displayMessages
-        .filter((message) => message.role === "user")
-        .map((message) => ({
-          id: message.id,
-          preview: getQuestionPreview(message.content)
-        })),
-    [displayMessages]
-  )
-
-  const setMessageRef = useCallback(
-    (messageId: string, role: Message["role"]) =>
-      (node: HTMLDivElement | null): void => {
-        if (node && role === "user") {
-          userMessageRefs.current.set(messageId, node)
-        } else {
-          userMessageRefs.current.delete(messageId)
-        }
-
-        if (node && role !== "tool") {
-          contentMessageRefs.current.set(messageId, node)
-          return
-        }
-        contentMessageRefs.current.delete(messageId)
-      },
-    []
-  )
 
   // Build tool results map from tool messages
   const toolResults = useMemo(() => {
@@ -2957,6 +2699,11 @@ export function ChatContainer({
     }
     return results
   }, [displayMessages])
+
+  const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
+    () => buildMessageBubbleTimingMeta(displayMessages),
+    [displayMessages]
+  )
 
   const toolCallDisplayStates = useMemo(() => {
     const orderedToolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = []
@@ -3030,78 +2777,6 @@ export function ChatContainer({
     ) as HTMLDivElement | null
   }, [])
 
-  const getElementTopInViewport = useCallback(
-    (element: HTMLElement, viewport: HTMLElement): number => {
-      const elementRect = element.getBoundingClientRect()
-      const viewportRect = viewport.getBoundingClientRect()
-      return elementRect.top - viewportRect.top + viewport.scrollTop
-    },
-    []
-  )
-
-  const scrollToUserQuestionByIndex = useCallback(
-    (index: number): void => {
-      if (index < 0 || index >= userMessageIds.length) return
-
-      const viewport = getViewport()
-      if (!viewport) return
-
-      const messageId = userMessageIds[index]
-      const targetElement = userMessageRefs.current.get(messageId)
-      if (!targetElement) return
-
-      const targetTop = Math.max(0, getElementTopInViewport(targetElement, viewport) - 8)
-      requestedUserQuestionIndexRef.current = index
-      if (requestedUserQuestionTimerRef.current) {
-        clearTimeout(requestedUserQuestionTimerRef.current)
-      }
-      requestedUserQuestionTimerRef.current = setTimeout(() => {
-        requestedUserQuestionIndexRef.current = null
-      }, 700)
-      viewport.scrollTo({ top: targetTop, behavior: "smooth" })
-      isAtBottomRef.current = false
-      setActiveUserQuestionIndex(index)
-    },
-    [getElementTopInViewport, getViewport, userMessageIds]
-  )
-
-  const getCurrentUserQuestionIndex = useCallback((): number => {
-    const viewport = getViewport()
-    if (!viewport || userMessageIds.length === 0) return -1
-
-    const { scrollTop, scrollHeight, clientHeight } = viewport
-    const nearBottom = scrollHeight - scrollTop - clientHeight < 80
-    const viewportAnchor = scrollTop + 24
-    const viewportBottomAnchor = scrollTop + clientHeight - 80
-    let currentIndex = -1
-
-    for (let i = 0; i < userMessageIds.length; i += 1) {
-      const messageId = userMessageIds[i]
-      const targetElement = userMessageRefs.current.get(messageId)
-      if (!targetElement) continue
-
-      const top = getElementTopInViewport(targetElement, viewport)
-      if (top <= viewportAnchor) {
-        currentIndex = i
-      } else {
-        break
-      }
-    }
-
-    if (nearBottom) {
-      for (let i = userMessageIds.length - 1; i >= 0; i -= 1) {
-        const messageId = userMessageIds[i]
-        const targetElement = userMessageRefs.current.get(messageId)
-        if (!targetElement) continue
-
-        const top = getElementTopInViewport(targetElement, viewport)
-        if (top <= viewportBottomAnchor) return i
-      }
-    }
-
-    return currentIndex
-  }, [getElementTopInViewport, getViewport, userMessageIds])
-
   // Track scroll position to determine if user is at bottom
   const handleScroll = useCallback((): void => {
     const viewport = getViewport()
@@ -3111,12 +2786,7 @@ export function ChatContainer({
     // Consider "at bottom" if within 50px of the bottom
     const threshold = 50
     isAtBottomRef.current = scrollHeight - scrollTop - clientHeight < threshold
-    if (requestedUserQuestionIndexRef.current !== null) {
-      setActiveUserQuestionIndex(requestedUserQuestionIndexRef.current)
-      return
-    }
-    setActiveUserQuestionIndex(getCurrentUserQuestionIndex())
-  }, [getCurrentUserQuestionIndex, getViewport])
+  }, [getViewport])
 
   // Attach scroll listener to viewport
   useEffect(() => {
@@ -3126,21 +2796,6 @@ export function ChatContainer({
     viewport.addEventListener("scroll", handleScroll)
     return () => viewport.removeEventListener("scroll", handleScroll)
   }, [getViewport, handleScroll])
-
-  useEffect(() => {
-    return () => {
-      if (requestedUserQuestionTimerRef.current) {
-        clearTimeout(requestedUserQuestionTimerRef.current)
-      }
-    }
-  }, [])
-
-  useEffect(() => {
-    const frame = requestAnimationFrame(() => {
-      setActiveUserQuestionIndex(getCurrentUserQuestionIndex())
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [getCurrentUserQuestionIndex, userMessageIds.length])
 
   // Auto-scroll on new messages only if already at bottom
   useEffect(() => {
@@ -3356,10 +3011,6 @@ export function ChatContainer({
     [setInput, slashResetSelection, setSelectedSkill]
   )
 
-  useEffect(() => {
-    setDurationMap(turnTimings)
-  }, [turnTimings])
-
   const applySlashCommand = useCallback(
     (command: SlashCommandItem) => {
       const nextInput = command.insertText
@@ -3383,7 +3034,7 @@ export function ChatContainer({
         id: crypto.randomUUID(),
         role: "user",
         content,
-        created_at: new Date(),
+        created_at: userStartAt,
         start_at: userStartAt,
         end_at: userStartAt
       }
@@ -3396,7 +3047,6 @@ export function ChatContainer({
           end_at: userStartAt.toISOString()
         }
       }
-      setMessageTimes((prev) => ({ ...prev, ...userMessageTime }))
       try {
         await window.api.threads.mergeThreadValues(threadId, {
           [MESSAGE_TIMES_THREAD_VALUE_KEY]: userMessageTime,
@@ -3832,18 +3482,8 @@ export function ChatContainer({
         setAgentMode("coordinator")
       }
 
-      // 用户消息本身不消耗 assistant 响应时间，start_at/end_at 都取发送时刻。
-      //
-      // 但 user.start_at 是本轮耗时计算的起点：展示 CMBDevClaw 后面的 duration 时，会找到
-      // 当前 user 后面的第一条 assistant，再减到下一个 user 之前最后一条消息的 end_at。
-      // 所以 user 也必须持久化 start_at/end_at，否则重启后无法还原该轮起点。
       let visibleUserMessage: Message | null = null
       if (shouldAppendVisibleUserMessage) {
-        // 用户消息也需要持久化起止时间，后续 duration 用 user.start_at 作为起点。
-        //
-        // 这里先立即写入 thread_values，是为了尽量保证即使 assistant 回复还没结束，
-        // 当前 user 的起点也已经保存下来；assistant/tool 的结束时间会在 loading 结束后补齐。
-        //
         // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。user message 在前端先 append，
         // checkpoint 恢复时 id 可能不一定完全一致；因此仍需要顺序数组作为兜底。
         visibleUserMessage = await appendVisibleUserMessageWithTime(displayContent, {
@@ -3879,12 +3519,8 @@ export function ChatContainer({
         }
       }
 
-      const startTime = Date.now()
-      setDurationNow(0)
-      const timer = setInterval(() => {
-        setDurationNow((t) => t + 1)
-      }, 1000)
-
+    const startTime = Date.now()
+    setActiveTurnStartTime(startTime)
       try {
         await stream.submit(
         {
@@ -3902,31 +3538,17 @@ export function ChatContainer({
         }
       )
       } finally {
-        setDurationNow(0)
-        clearInterval(timer)
-      }
-
-      if (visibleUserMessage) {
-        const endTime = Date.now()
-        const map = {
-          duration: endTime - startTime,
-          thread_id: threadId,
-          user_id: visibleUserMessage.id,
-          sendTime: startTime
-        }
-        const nextDurationMap = [
-          ...durationMap.filter(
-            (item) => !(item.thread_id === threadId && item.user_id === visibleUserMessage.id)
-          ),
-          map
-        ]
-        setDurationMap(nextDurationMap)
-        setTurnTimings(nextDurationMap)
+        setActiveTurnStartTime(null)
       }
     } finally {
       releaseSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)
     }
   }
+
+  useEffect(() => {
+    // todo 测试log专用，后续要删除
+   console.log(" test threadMessages//=====>", JSON.stringify(threadMessages.map(item => ({...item, tool_calls:[], content: item.content?.slice(0, 10) + '（已截断）'})), null, 2))
+  }, [threadMessages])
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
     // IME composing (Chinese/Japanese/Korean) should not trigger submit on Enter
@@ -4885,15 +4507,25 @@ export function ChatContainer({
       {skillIntentBanner}
       {nuxDialog}
 
-      <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
-        <div
-          className={cn("p-4", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}
-          style={
-            userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined
-          }
-        >
-          <div className="max-w-3xl mx-auto space-y-4">
-            {historyLoading && displayMessages.length === 0 && (
+      <ChatScrollNavigator
+        messages={displayMessages}
+        scrollContainerRef={scrollRef}
+        rightPanelCollapsed={rightPanelCollapsed}
+        onScrollToQuestion={() => {
+          isAtBottomRef.current = false
+        }}
+      >
+        {({ reserveRightSpace, setMessageRef }) => (
+          <>
+            <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
+              <div
+                className={cn("p-4", reserveRightSpace && "md:pr-20")}
+                style={
+                  userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined
+                }
+              >
+                <div className="max-w-3xl mx-auto space-y-4">
+                  {historyLoading && displayMessages.length === 0 && (
               <div
                 className="flex min-h-[42vh] items-center justify-center px-4"
                 aria-live="polite"
@@ -5149,55 +4781,66 @@ export function ChatContainer({
                 )}
               </div>
             )}
-            {displayMessages.map((message, index) => {
-              const previousMessage = index > 0 ? displayMessages[index - 1] : null
-              const isLastMessage = index === displayMessages.length - 1
-              const nextNonToolMessage =
-                displayMessages.slice(index + 1).find((m) => m.role !== "tool") ?? null
-              const showAssistantMeta =
-                message.role !== "assistant" ||
-                !nextNonToolMessage ||
-                nextNonToolMessage.role !== "assistant"
+                  {displayMessages.map((message, index) => {
+                    const previousMessage = index > 0 ? displayMessages[index - 1] : null
+                    const isLastMessage = index === displayMessages.length - 1
+                    const nextNonToolMessage =
+                      displayMessages.slice(index + 1).find((m) => m.role !== "tool") ?? null
+                    const hasUserAfterHead = displayMessages
+                      .slice(index + 1)
+                      .some((m) => m.role === "user")
+                    const showAssistantMeta =
+                      message.role !== "assistant" ||
+                      !nextNonToolMessage ||
+                      nextNonToolMessage.role !== "assistant"
 
-              // Per-turn hook log chip: shown right under the user message
-              // that opened the turn, only when Hook logging is enabled and
-              // the bucket has at least one entry. Click opens the modal.
-              const hookLogBucketForTurn =
-                hookLogConfig.enabled && message.role === "user"
-                  ? hookLogBucketByTurnId.get(message.id)
-                  : undefined
-              return (
-                <div
-                  key={message.id}
-                  ref={setMessageRef(message.id, message.role)}
-                  data-message-role={message.role}
-                >
-                  <MessageBubble
-                    durationMap={durationMap}
-                    message={message}
-                    previousMessage={previousMessage}
-                    isStreaming={isLastMessage && isLoading}
-                    showAssistantMeta={showAssistantMeta}
-                    toolResults={toolResults}
-                    toolCallStates={toolCallDisplayStates}
-                    pendingApproval={pendingApproval}
-                    onApprovalDecision={handleApprovalDecision}
-                    onEditUserMessage={handleEditUserMessage}
-                    onSetGoalFromMessage={handleSetGoalFromMessage}
-                    threadId={threadId}
-                    isLoading={isLoading}
-                  />
-                  {hookLogBucketForTurn && hookLogBucketForTurn.entries.length > 0 && (
-                    <div className="mt-1 ml-12">
-                      <HookLogChip
-                        bucket={hookLogBucketForTurn}
-                        onClick={() => setOpenHookLogBucketId(hookLogBucketForTurn.turnId)}
-                      />
-                    </div>
-                  )}
-                </div>
-              )
-            })}
+                    // Per-turn hook log chip: shown right under the user message
+                    // that opened the turn, only when Hook logging is enabled and
+                    // the bucket has at least one entry. Click opens the modal.
+                    const hookLogBucketForTurn =
+                      hookLogConfig.enabled && message.role === "user"
+                        ? hookLogBucketByTurnId.get(message.id)
+                        : undefined
+                    const navigatorRef = setMessageRef(message.id, message.role)
+                    const combinedRef = (node: HTMLDivElement | null): void => {
+                      navigatorRef(node)
+                      if (node && message.role !== "tool") {
+                        contentMessageRefs.current.set(message.id, node)
+                        return
+                      }
+                      contentMessageRefs.current.delete(message.id)
+                    }
+
+                    return (
+                      <div key={message.id} ref={combinedRef} data-message-role={message.role}>
+                        <MessageBubble
+                          message={message}
+                          previousMessage={previousMessage}
+                          isStreaming={isLastMessage && isLoading}
+                          showAssistantMeta={showAssistantMeta}
+                          toolResults={toolResults}
+                          toolCallStates={toolCallDisplayStates}
+                          pendingApproval={pendingApproval}
+                          onApprovalDecision={handleApprovalDecision}
+                          onEditUserMessage={handleEditUserMessage}
+                          onSetGoalFromMessage={handleSetGoalFromMessage}
+                          threadId={threadId}
+                          isLoading={isLoading}
+                          hasUserAfterHead={hasUserAfterHead}
+                          assistantDurationMs={assistantDurationMsById.get(message.id)}
+                          userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
+                        />
+                        {hookLogBucketForTurn && hookLogBucketForTurn.entries.length > 0 && (
+                          <div className="mt-1 ml-12">
+                            <HookLogChip
+                              bucket={hookLogBucketForTurn}
+                              onClick={() => setOpenHookLogBucketId(hookLogBucketForTurn.turnId)}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
 
             {/*测试git diff功能*/}
             {/*<DisplayDiffTest/>*/}
@@ -5250,7 +4893,13 @@ export function ChatContainer({
                   >
                     {THINKING_MESSAGES[thinkingMessageIndex]}
                   </span>
-                  <DurationShow text={"已处理"} durationMs={durationNow * 1000} />
+                  {
+                   streamData.isLoading &&  <ProcessingDuration
+                      key={threadId}
+                      startTime={activeTurnStartTime}
+                      text="已处理"
+                    />
+                  }
                 </div>
                 {todos.length > 0 && <ChatTodos todos={todos} />}
               </div>
@@ -5311,28 +4960,16 @@ export function ChatContainer({
                 </button>
               </div>
             )}
-          </div>
-        </div>
-      </ScrollArea>
-      {userQuestions.length > 0 && (
-        <ChatScrollNavigator
-          questions={userQuestions}
-          activeQuestionIndex={activeUserQuestionIndex}
-          onScrollToQuestion={scrollToUserQuestionByIndex}
-        />
-      )}
-      {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
-      {(showSaveToolMetadataLoading ||
-        (pendingApproval &&
-          Boolean(
-            (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId
-          ))) && (
-        <div
-          className={cn(
-            "px-4 pb-2",
-            userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
-          )}
-        >
+                </div>
+              </div>
+            </ScrollArea>
+            {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
+            {(showSaveToolMetadataLoading ||
+              (pendingApproval &&
+                Boolean(
+                  (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId
+                ))) && (
+              <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>
           {showSaveToolMetadataLoading && (
             <div className="max-w-3xl mx-auto mb-2 flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-700 shadow-sm dark:text-emerald-300">
               <Loader2 className="size-3.5 animate-spin" />
@@ -5556,32 +5193,27 @@ export function ChatContainer({
                 </div>
               )
             })()}
-        </div>
-      )}
-      {goalUi.goal && (
-        <div
-          className={cn(
-            "px-4 pb-1",
-            userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
-          )}
-        >
-          <GoalStatusPanel
-            goalUi={goalUi}
-            open={goalDetailsOpen}
-            onOpenChange={setGoalDetailsOpen}
-            onCommand={applyGoalPanelCommand}
-            onEditGoal={handleEditGoal}
-          />
-        </div>
-      )}
-      {/* Input */}
-      <div
-        className={cn(
-          "px-4 pb-4",
-          goalUi.goal ? "pt-1" : "pt-4",
-          userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
-        )}
-      >
+              </div>
+            )}
+            {goalUi.goal && (
+              <div className={cn("px-4 pb-1", reserveRightSpace && "md:pr-20")}>
+                <GoalStatusPanel
+                  goalUi={goalUi}
+                  open={goalDetailsOpen}
+                  onOpenChange={setGoalDetailsOpen}
+                  onCommand={applyGoalPanelCommand}
+                  onEditGoal={handleEditGoal}
+                />
+              </div>
+            )}
+            {/* Input */}
+            <div
+              className={cn(
+                "px-4 pb-4",
+                goalUi.goal ? "pt-1" : "pt-4",
+                reserveRightSpace && "md:pr-20"
+              )}
+            >
         {showGitChangeNotice && (
           <div className="max-w-3xl mx-auto mb-2 flex items-center justify-between gap-3 rounded-xl border border-status-warning/40 bg-status-warning/10 px-3 py-2">
             <div className="min-w-0 flex items-center gap-2 text-[12px] text-foreground">
@@ -5785,15 +5417,23 @@ export function ChatContainer({
                     ) : (
                       <>
                         {hasRunningCoordinatorWorker && (
-                          <button
-                            type="button"
-                            onClick={handleCancelBackgroundWorkers}
-                            aria-label="停止后台子代理"
-                            title="停止后台子代理"
-                            className="flex items-center justify-center size-7 rounded-md border border-border/70 bg-background text-muted-foreground transition-colors hover:border-red-200 hover:bg-red-50/70 hover:text-red-600 dark:hover:border-red-900/60 dark:hover:bg-red-950/30 dark:hover:text-red-300"
-                          >
-                            <Square className="size-3 fill-current" />
-                          </button>
+                          <TooltipProvider delayDuration={0}>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <button
+                                  type="button"
+                                  onClick={handleCancelBackgroundWorkers}
+                                  aria-label="停止后台子代理"
+                                  className="flex items-center justify-center size-7 rounded-md border border-red-300 bg-red-50 text-red-600 shadow-sm transition-colors hover:border-red-400 hover:bg-red-100 hover:text-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50 dark:border-red-900/70 dark:bg-red-950/35 dark:text-red-300 dark:hover:border-red-800 dark:hover:bg-red-950/55 dark:hover:text-red-200"
+                                >
+                                  <Square className="size-3 fill-current" />
+                                </button>
+                              </TooltipTrigger>
+                              <TooltipContent side="top" sideOffset={6}>
+                                停止后台子代理
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
                         )}
                         <button
                           type="submit"
@@ -5845,7 +5485,10 @@ export function ChatContainer({
             </div>
           </div>
         </form>
-      </div>
+            </div>
+          </>
+        )}
+      </ChatScrollNavigator>
       <HookLogModal
         bucket={openHookLogBucket}
         open={openHookLogBucketId !== null}

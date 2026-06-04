@@ -48,7 +48,10 @@ import {
 import {
   buildRestoredCheckpointTranscript,
   formatGoalEventMessage,
+  getInternalGoalPromptIdentity,
   goalNoticeEventsToGoalUiEvents,
+  hasGoalResumeUserEvent,
+  isGoalResumeCommandContent,
   isVisibleCheckpointTranscriptMessage
 } from "./goal-transcript"
 import { mergeGoalUiEvents } from "./goal-ui-events"
@@ -345,43 +348,11 @@ export interface ThreadGitContext {
   branch?: string | null
 }
 
-export interface TurnTiming {
-  duration: number
-  thread_id: string
-  user_id: string
-  sendTime?: number
-}
-
-interface SetTurnTimingsOptions {
-  persist?: boolean
-}
-
-const TURN_TIMINGS_THREAD_VALUE_KEY = "turnTimings"
-
-const isTurnTiming = (value: unknown): value is TurnTiming => {
-  return (
-    !!value &&
-    typeof value === "object" &&
-    typeof (value as { duration?: unknown }).duration === "number" &&
-    Number.isFinite((value as { duration?: number }).duration) &&
-    typeof (value as { thread_id?: unknown }).thread_id === "string" &&
-    typeof (value as { user_id?: unknown }).user_id === "string" &&
-    ((value as { sendTime?: unknown }).sendTime === undefined ||
-      (typeof (value as { sendTime?: unknown }).sendTime === "number" &&
-        Number.isFinite((value as { sendTime?: number }).sendTime)))
-  )
-}
-
-const getTurnTimings = (threadValues?: Record<string, unknown>): TurnTiming[] => {
-  const value = threadValues?.[TURN_TIMINGS_THREAD_VALUE_KEY]
-  return Array.isArray(value) ? value.filter(isTurnTiming) : []
-}
-
 // Per-thread state (persisted/restored from checkpoints)
 export interface ThreadState {
   messages: Message[]
-  turnTimings: TurnTiming[]
   goalUi: GoalUiState
+  activeTurnStartTime: number | null
   todos: Todo[]
   workspaceFiles: FileInfo[]
   workspacePath: string | null
@@ -459,9 +430,9 @@ interface StreamData {
 export interface ThreadActions {
   appendMessage: (message: Message) => void
   setMessages: (messages: Message[]) => void
-  setTurnTimings: (turnTimings: TurnTiming[], options?: SetTurnTimingsOptions) => void
   setGoalUi: (goalUi: GoalUiState) => void
   refreshGoalUi: (options?: { includeEvents?: boolean }) => Promise<void>
+  setActiveTurnStartTime: (startTime: number | null) => void
   setTodos: (todos: Todo[]) => void
   setWorkspaceFiles: (files: FileInfo[] | ((prev: FileInfo[]) => FileInfo[])) => void
   setWorkspacePath: (path: string | null) => void
@@ -512,8 +483,8 @@ interface ThreadContextValue {
 // Default thread state
 const createDefaultThreadState = (): ThreadState => ({
   messages: [],
-  turnTimings: [],
   goalUi: { goal: null, events: [], lastUpdated: null },
+  activeTurnStartTime: null,
   todos: [],
   workspaceFiles: [],
   workspacePath: null,
@@ -824,6 +795,45 @@ function upsertToolCallStateFromRequest(
   })
 }
 
+function toolResultStatusFromMessage(message: Message): ToolCallState["status"] {
+  switch (message.status) {
+    case "completed":
+    case "failed":
+    case "interrupted":
+    case "rejected":
+      return message.status
+    case "error":
+      return "failed"
+    default:
+      return message.is_error ? "failed" : "completed"
+  }
+}
+
+function upsertToolCallStatesFromMessages(
+  states: Record<string, ToolCallState>,
+  messages: Message[]
+): Record<string, ToolCallState> {
+  let nextStates = states
+  for (const message of messages) {
+    if (Array.isArray(message.tool_calls)) {
+      for (const toolCall of message.tool_calls) {
+        nextStates = upsertToolCallState(nextStates, toolCall.id, {
+          name: toolCall.name,
+          args: toolCall.args,
+          status: nextStates[toolCall.id]?.status ?? "queued"
+        })
+      }
+    }
+    if (message.role === "tool" && message.tool_call_id) {
+      nextStates = upsertToolCallState(nextStates, message.tool_call_id, {
+        name: message.name,
+        status: toolResultStatusFromMessage(message)
+      })
+    }
+  }
+  return nextStates
+}
+
 const ThreadContext = createContext<ThreadContextValue | null>(null)
 
 // Custom event types from the stream
@@ -904,6 +914,7 @@ interface CustomEventData {
   timestamp?: string
   turnId?: string
   messages?: LiveStreamMessage[]
+  assistantMessage?: LiveStreamMessage
   result?: AgentAutoCommitResult
 }
 
@@ -1401,11 +1412,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const currentIds = new Set(currentState.messages.map((message) => message.id))
           const newMessages = messagesToAppend.filter((message) => !currentIds.has(message.id))
           if (newMessages.length === 0) return prev
+          const nextToolCallStates = upsertToolCallStatesFromMessages(
+            currentState.toolCallStates,
+            newMessages
+          )
           const next = {
             ...prev,
             [threadId]: {
               ...currentState,
-              messages: [...currentState.messages, ...newMessages]
+              messages: [...currentState.messages, ...newMessages],
+              toolCallStates: nextToolCallStates
             }
           }
           threadStatesRef.current = next
@@ -1941,6 +1957,77 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     [parseErrorMessage, updateThreadState]
   )
 
+  const applyCoordinatorAssistantSnapshotMessage = useCallback(
+    (threadId: string, message: LiveStreamMessage | undefined) => {
+      if (!message || !hasMessageId(message)) return
+
+      const snapshotMessage = message as LiveStreamMessage & { id: string }
+      const messageId = snapshotMessage.id
+      const committedMessages = threadStatesRef.current[threadId]?.messages ?? []
+      if (committedMessages.some((committed) => committed.id === messageId)) {
+        updateThreadState(threadId, (state) => {
+          const updatedMessages = state.messages.map((committed) =>
+            committed.id === messageId
+              ? {
+                  ...committed,
+                  ...(typeof snapshotMessage.content === "string" && {
+                    content: snapshotMessage.content
+                  }),
+                  ...(snapshotMessage.tool_calls && { tool_calls: snapshotMessage.tool_calls })
+                }
+              : committed
+          )
+          const updatedMessage = updatedMessages.find((committed) => committed.id === messageId)
+          return {
+            messages: updatedMessages,
+            toolCallStates: updatedMessage
+              ? upsertToolCallStatesFromMessages(state.toolCallStates, [updatedMessage])
+              : state.toolCallStates
+          }
+        })
+        return
+      }
+
+      const accumulator = getOrCreateLiveStreamAccumulator(threadId)
+      if (!accumulator.active) {
+        accumulator.active = true
+        accumulator.baselineIds = getCurrentThreadMessageIds(threadId)
+        seedLiveStreamBaselineFromMessages(threadId, streamDataRef.current[threadId]?.messages)
+      }
+
+      const now = new Date()
+      accumulator.messageTimes[messageId] = {
+        start_at: accumulator.messageTimes[messageId]?.start_at ?? now,
+        end_at: now
+      }
+      accumulator.messages = mergeLiveStreamMessages(accumulator.messages, [
+        {
+          ...snapshotMessage,
+          id: messageId,
+          type: snapshotMessage.type ?? "ai",
+          content_priority: 1
+        }
+      ])
+
+      const currentStreamData = streamDataRef.current[threadId]
+      if (currentStreamData) {
+        streamDataRef.current[threadId] = {
+          ...currentStreamData,
+          liveMessages: liveMessagesWithTimes(accumulator)
+        }
+        notifyStreamSubscribers(threadId)
+      }
+    },
+    [
+      getCurrentThreadMessageIds,
+      getOrCreateLiveStreamAccumulator,
+      liveMessagesWithTimes,
+      notifyStreamSubscribers,
+      seedLiveStreamBaselineFromMessages,
+      updateThreadState
+    ]
+  )
+
   // Handle custom events from ThreadStreamHolder (interrupts, workspace updates, etc.)
   const handleCustomEvent = useCallback(
     (threadId: string, data: CustomEventData) => {
@@ -1952,6 +2039,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         subagentCount: Array.isArray(data.subagents) ? data.subagents.length : undefined
       })
       switch (data.type) {
+        case "coordinator_ai_snapshot_message":
+          applyCoordinatorAssistantSnapshotMessage(threadId, data.assistantMessage)
+          break
         case "interrupt":
           if (data.request) {
             console.log(
@@ -2347,6 +2437,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       }
     },
     [
+      applyCoordinatorAssistantSnapshotMessage,
       flushGoalSubturnComplete,
       getOrCreateLiveStreamAccumulator,
       notifyHookLogSubscribers,
@@ -2435,29 +2526,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             return { messages, toolCallStates: nextToolCallStates }
           })
         },
-        setTurnTimings: (turnTimings: TurnTiming[], options?: SetTurnTimingsOptions) => {
-          updateThreadState(threadId, () => ({ turnTimings }))
-          if (options?.persist === false) return
-
-          window.api.threads
-            .get(threadId)
-            .then((thread) => {
-              if (!thread) return
-              return window.api.threads.update(threadId, {
-                thread_values: {
-                  ...(thread.thread_values || {}),
-                  [TURN_TIMINGS_THREAD_VALUE_KEY]: turnTimings
-                }
-              })
-            })
-            .catch((error) => {
-              console.warn("[ThreadContext] Failed to persist turn timings:", error)
-            })
-        },
         setGoalUi: (goalUi: GoalUiState) => {
           updateThreadState(threadId, () => ({ goalUi }))
         },
         refreshGoalUi: (options = {}) => refreshGoalUi(threadId, options),
+        setActiveTurnStartTime: (startTime: number | null) => {
+          updateThreadState(threadId, () => ({ activeTurnStartTime: startTime }))
+        },
         setTodos: (todos: Todo[]) => {
           updateThreadState(threadId, () => ({ todos }))
         },
@@ -2612,7 +2687,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           )
           persistedMessageTimeOrder = getMessageTimeOrder(thread.thread_values)
           const metadata = thread.metadata || {}
-          actions.setTurnTimings(getTurnTimings(thread.thread_values), { persist: false })
           actions.setGitContext(getGitContextFromMetadata(metadata))
           if (metadata.workspacePath) {
             const workspacePath = metadata.workspacePath as string
@@ -2771,14 +2845,36 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 else if (msg.type === "tool") role = "tool"
               }
 
-              let content: Message["content"] = ""
               const visibleUserMessage = additionalKwargs?.cmb_visible_user_message
+              const checkpointContent = msg.content ?? msg.kwargs?.content
+              const isRawInternalGoalPrompt =
+                role === "user" &&
+                typeof checkpointContent === "string" &&
+                isInternalGoalPromptMessage({ role, content: checkpointContent })
+              const isVisibleGoalCommand =
+                typeof visibleUserMessage === "string" &&
+                /^\/goal(?:\s|$)/i.test(visibleUserMessage.trimStart())
+              const shouldUseVisibleGoalResumeAlias =
+                isRawInternalGoalPrompt &&
+                typeof visibleUserMessage === "string" &&
+                isGoalResumeCommandContent(visibleUserMessage) &&
+                !hasGoalResumeUserEvent(
+                  restoredGoalEvents,
+                  getInternalGoalPromptIdentity(checkpointContent)
+                )
+              const shouldKeepRawInternalGoalPrompt =
+                isRawInternalGoalPrompt &&
+                (visibleUserMessage === undefined ||
+                  visibleUserMessage === "" ||
+                  (isVisibleGoalCommand && !shouldUseVisibleGoalResumeAlias))
               const rawContent =
                 role === "user" &&
+                !shouldKeepRawInternalGoalPrompt &&
                 typeof visibleUserMessage === "string" &&
                 visibleUserMessage.length > 0
                   ? visibleUserMessage
-                  : (msg.content ?? msg.kwargs?.content)
+                  : checkpointContent
+              let content: Message["content"] = ""
               if (typeof rawContent === "string") content = rawContent
               else if (Array.isArray(rawContent)) content = rawContent as Message["content"]
 
@@ -2794,17 +2890,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               // indexes can shift across the final transcript.
               // Internal goal prompts have a separate order list because they are hidden
               // from the checkpoint transcript but still anchor restored /goal user bubbles.
-              const isInternalGoalPrompt =
-                role === "user" &&
-                typeof content === "string" &&
-                isInternalGoalPromptMessage({ role, content })
-              const currentInternalGoalPromptIndex = isInternalGoalPrompt
+              const usesInternalGoalPromptTiming = isRawInternalGoalPrompt
+              const currentInternalGoalPromptIndex = usesInternalGoalPromptTiming
                 ? internalGoalPromptIndex++
                 : -1
               const { startAt, endAt } = restoreRawCheckpointMessageTime({
                 messageId,
                 fallbackTime,
-                isInternalGoalPrompt,
+                isInternalGoalPrompt: usesInternalGoalPromptTiming,
                 internalGoalPromptIndex: currentInternalGoalPromptIndex,
                 persistedMessageTimes,
                 persistedInternalGoalMessageTimes,

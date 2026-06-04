@@ -1681,6 +1681,8 @@ const api = {
       }>,
     getDetail: (id: string): Promise<PluginDetail> =>
       ipcRenderer.invoke("plugins:getDetail", id) as Promise<PluginDetail>,
+    inspectZip: (buffer: ArrayBuffer): Promise<PluginDetail> =>
+      ipcRenderer.invoke("plugins:inspectZip", { buffer }) as Promise<PluginDetail>,
     listHooks: (): Promise<PluginHookMetadata[]> =>
       ipcRenderer.invoke("plugins:listHooks") as Promise<PluginHookMetadata[]>,
     setHookEnabled: (

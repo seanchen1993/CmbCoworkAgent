@@ -21,6 +21,12 @@ export function liveStreamMessageToStoreMessage(
       ? { tool_call_id: streamMessage.tool_call_id }
       : {}),
     ...(role === "tool" && streamMessage.name ? { name: streamMessage.name } : {}),
+    ...(role === "tool" && typeof streamMessage.status === "string"
+      ? { status: streamMessage.status }
+      : {}),
+    ...(role === "tool" && streamMessage.is_error !== undefined
+      ? { is_error: streamMessage.is_error }
+      : {}),
     created_at: timing?.start_at ?? new Date(),
     ...(timing?.start_at ? { start_at: timing.start_at } : {}),
     ...(timing?.end_at ? { end_at: timing.end_at } : {})

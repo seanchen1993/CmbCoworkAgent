@@ -5,6 +5,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { useThreadState } from "@/lib/thread-context"
 import { useAppStore } from "@/lib/store"
+import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
 import { getWorkerToolResultKey } from "@/lib/worker-tool-result-key"
 import type { Message } from "@/types"
 import { cn } from "@/lib/utils"
@@ -505,6 +506,11 @@ export function WorkerStreamPanel(): React.JSX.Element {
     }
     return result
   }, [messages])
+
+  const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
+    () => buildMessageBubbleTimingMeta(messages),
+    [messages]
+  )
   const toolResults = useMemo(() => buildToolResults(messages), [messages])
   const getScrollViewport = useCallback((): HTMLDivElement | null => {
     const root = scrollRef.current
@@ -679,6 +685,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
             {messages.map((message, index) => {
               const previousMessage = index > 0 ? messages[index - 1] : null
               const isLastMessage = index === messages.length - 1
+              const hasUserAfterHead = messages.slice(index + 1).some((m) => m.role === "user")
 
               return (
                 <MessageBubble
@@ -690,6 +697,9 @@ export function WorkerStreamPanel(): React.JSX.Element {
                   toolResults={toolResults}
                   threadId={workerFocusView.threadId}
                   isLoading={isRunning}
+                  hasUserAfterHead={hasUserAfterHead}
+                  assistantDurationMs={assistantDurationMsById.get(message.id)}
+                  userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
                 />
               )
             })}

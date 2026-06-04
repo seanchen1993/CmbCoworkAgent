@@ -12,6 +12,7 @@ import {
   stringifyMessageContentForReport
 } from "../src/renderer/src/lib/live-stream-messages.ts"
 import {
+  liveStreamMessageToStoreMessage,
   resolveLiveStreamMessageEndAt,
   shouldSkipLiveStreamAccumulatorMessage
 } from "../src/renderer/src/lib/live-stream-transcript.ts"
@@ -77,6 +78,71 @@ function testSameMessageKeepsPreviousUsefulFieldsWhenSnapshotIsSparse(): void {
   assertEqual(merged.length, 1, "same id should merge into one message")
   assertEqual(merged[0]?.content, "calling tool", "sparse snapshot should not blank content")
   assertEqual(merged[0]?.tool_calls?.length, 1, "sparse snapshot should not drop tool calls")
+}
+
+function testSameMessageClearsToolCallsWhenSnapshotExplicitlyHasNone(): void {
+  const merged = mergeLiveStreamMessages(
+    [
+      {
+        id: "assistant-1",
+        type: "ai",
+        content: "calling tool",
+        tool_calls: [{ id: "call-1", name: "read_file", args: { path: "a.ts" }, type: "tool_call" }]
+      }
+    ],
+    [
+      {
+        id: "assistant-1",
+        type: "ai",
+        content: "final pure text",
+        tool_calls: [],
+        content_priority: 1
+      }
+    ]
+  )
+
+  assertEqual(merged.length, 1, "same id should merge into one message")
+  assertEqual(merged[0]?.content, "final pure text", "replacement snapshot should update content")
+  assertEqual(
+    merged[0]?.tool_calls?.length ?? 0,
+    0,
+    "explicit empty tool_calls should clear stale tool cards"
+  )
+}
+
+function testHigherPrioritySnapshotContentSurvivesLaterReplay(): void {
+  const merged = mergeLiveStreamMessages(
+    [
+      {
+        id: "assistant-1",
+        type: "ai",
+        content: "final replacement answer",
+        content_priority: 1
+      }
+    ],
+    [
+      {
+        id: "assistant-1",
+        type: "ai",
+        content: "old streamed draft",
+        tool_calls: [
+          { id: "call-1", name: "read_file", args: { path: "a.ts" }, type: "tool_call" }
+        ]
+      }
+    ]
+  )
+
+  assertEqual(merged.length, 1, "same id should merge into one message")
+  assertEqual(
+    merged[0]?.content,
+    "final replacement answer",
+    "lower-priority stream replays should not overwrite replacement snapshot content"
+  )
+  assertEqual(
+    merged[0]?.tool_calls?.length,
+    1,
+    "lower-priority stream replays should still merge newly visible tool calls"
+  )
 }
 
 function testSameMessageKeepsContentBlocksWhenSnapshotArrayIsEmpty(): void {
@@ -213,6 +279,24 @@ function testLiveStreamMessageRoleMapsSystemAndTool(): void {
   assertEqual(liveStreamMessageRole("ai"), "assistant", "ai messages should map to assistant")
 }
 
+function testLiveToolMessageToStoreMessageKeepsFailureFields(): void {
+  const message = liveStreamMessageToStoreMessage({
+    id: "tool-result-1",
+    type: "tool",
+    content: "command failed",
+    tool_call_id: "call-1",
+    name: "execute_command",
+    status: "error",
+    is_error: true
+  })
+
+  assertEqual(message.role, "tool", "live tool messages should become tool store messages")
+  assertEqual(message.tool_call_id, "call-1", "tool call id should be preserved")
+  assertEqual(message.name, "execute_command", "tool name should be preserved")
+  assertEqual(message.status, "error", "tool status should be preserved")
+  assertEqual(message.is_error, true, "tool failure flag should be preserved")
+}
+
 function testGoalArtifactsHandleLiveAccumulatorTiming(): void {
   assertEqual(
     shouldSkipLiveStreamAccumulatorMessage({
@@ -331,6 +415,14 @@ const tests: Array<[string, () => void]> = [
     testSameMessageKeepsPreviousUsefulFieldsWhenSnapshotIsSparse
   ],
   [
+    "testSameMessageClearsToolCallsWhenSnapshotExplicitlyHasNone",
+    testSameMessageClearsToolCallsWhenSnapshotExplicitlyHasNone
+  ],
+  [
+    "testHigherPrioritySnapshotContentSurvivesLaterReplay",
+    testHigherPrioritySnapshotContentSurvivesLaterReplay
+  ],
+  [
     "testSameMessageKeepsContentBlocksWhenSnapshotArrayIsEmpty",
     testSameMessageKeepsContentBlocksWhenSnapshotArrayIsEmpty
   ],
@@ -348,6 +440,10 @@ const tests: Array<[string, () => void]> = [
     testStringifyMessageContentForReportUsesOnlyVisibleTextBlocks
   ],
   ["testLiveStreamMessageRoleMapsSystemAndTool", testLiveStreamMessageRoleMapsSystemAndTool],
+  [
+    "testLiveToolMessageToStoreMessageKeepsFailureFields",
+    testLiveToolMessageToStoreMessageKeepsFailureFields
+  ],
   ["testGoalArtifactsHandleLiveAccumulatorTiming", testGoalArtifactsHandleLiveAccumulatorTiming],
   [
     "testResolveLiveStreamMessageEndAtDoesNotMoveBackwards",
