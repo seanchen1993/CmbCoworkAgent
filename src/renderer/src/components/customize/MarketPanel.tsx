@@ -401,7 +401,7 @@ function MarketItemCard({
     >
       {/* Header: name + badges */}
       <div className="flex items-start justify-between mb-3">
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 flex flex-col">
           <div className="flex items-center gap-2 flex-wrap mb-1">
             {item.chinese_name ? (
               <h3 className="font-medium text-[15px] leading-snug text-[#141413]">
@@ -449,7 +449,7 @@ function MarketItemCard({
             )}
           </div>
           {item.description && (
-            <p className="text-sm text-[#87867f] leading-relaxed line-clamp-2 mt-2">
+            <p className="text-sm text-[#87867f] leading-relaxed line-clamp-2 mt-2 flex-1">
               {item.description}
             </p>
           )}
