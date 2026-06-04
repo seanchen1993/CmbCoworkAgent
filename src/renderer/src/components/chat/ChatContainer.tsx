@@ -149,6 +149,7 @@ import {
 } from "@/lib/submit-in-flight-lock"
 import { groupWelcomeSkills } from "./skill-grouping"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
+import { WorkspaceTaskCardControl } from "@/components/git/WorkspaceTaskCardControl"
 import { DurationShow } from "./DurationShow"
 
 type WelcomeSkillCard = {
@@ -5841,6 +5842,7 @@ export function ChatContainer({
               </div>
               <div className="flex min-w-0 items-center gap-2">
                 <GitBranchSwitcher workspacePath={workspacePath} />
+                <WorkspaceTaskCardControl workspacePath={workspacePath} />
               </div>
             </div>
           </div>

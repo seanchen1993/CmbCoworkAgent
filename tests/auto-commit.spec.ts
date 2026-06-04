@@ -15,6 +15,7 @@ import { existsSync } from "fs"
 import { tmpdir, homedir } from "os"
 import { join } from "path"
 import { promisify } from "util"
+import { normalizeWorkspacePathKey } from "../src/shared/workspace-path.ts"
 
 const execFileAsync = promisify(execFile)
 const CARD_NUMBER = "Z990880"
@@ -65,8 +66,15 @@ async function initRepo(cwd: string): Promise<void> {
 }
 
 const SETTINGS_FILE = join(homedir(), ".cmbcoworkagent", "agent-auto-commit-settings.json")
+const WORKSPACE_CARDS_FILE = join(
+  homedir(),
+  ".cmbcoworkagent",
+  "agent-auto-commit-workspace-cards.json"
+)
 let savedSettings: string | null = null
 let savedSettingsExisted = false
+let savedWorkspaceCards: string | null = null
+let savedWorkspaceCardsExisted = false
 
 function enabledSettings(
   messageStrategy: "prompt" | "diff" | "template" = "diff",
@@ -75,7 +83,6 @@ function enabledSettings(
   return {
     mode: "always",
     push: false,
-    cardNumber: CARD_NUMBER,
     messageStrategy,
     ...extra
   }
@@ -86,12 +93,45 @@ async function setSettings(settings: Record<string, unknown>): Promise<void> {
   await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2), "utf8")
 }
 
+function workspaceCardKey(workspacePath: string): string {
+  return normalizeWorkspacePathKey(workspacePath)
+}
+
+async function setWorkspaceCard(
+  workspacePath: string,
+  cardNumber: string = CARD_NUMBER
+): Promise<void> {
+  await mkdir(join(homedir(), ".cmbcoworkagent"), { recursive: true })
+  const key = workspaceCardKey(workspacePath)
+  await writeFile(
+    WORKSPACE_CARDS_FILE,
+    JSON.stringify(
+      {
+        [key]: {
+          workspacePath,
+          cardNumber,
+          updatedAt: "2026-06-04T00:00:00.000Z"
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  )
+}
+
 async function backupSettings(): Promise<void> {
   if (existsSync(SETTINGS_FILE)) {
     savedSettingsExisted = true
     savedSettings = await readFile(SETTINGS_FILE, "utf8")
   } else {
     savedSettingsExisted = false
+  }
+  if (existsSync(WORKSPACE_CARDS_FILE)) {
+    savedWorkspaceCardsExisted = true
+    savedWorkspaceCards = await readFile(WORKSPACE_CARDS_FILE, "utf8")
+  } else {
+    savedWorkspaceCardsExisted = false
   }
 }
 
@@ -100,6 +140,11 @@ async function restoreSettings(): Promise<void> {
     await writeFile(SETTINGS_FILE, savedSettings, "utf8")
   } else if (existsSync(SETTINGS_FILE)) {
     await rm(SETTINGS_FILE, { force: true })
+  }
+  if (savedWorkspaceCardsExisted && savedWorkspaceCards !== null) {
+    await writeFile(WORKSPACE_CARDS_FILE, savedWorkspaceCards, "utf8")
+  } else if (existsSync(WORKSPACE_CARDS_FILE)) {
+    await rm(WORKSPACE_CARDS_FILE, { force: true })
   }
 }
 
@@ -162,6 +207,7 @@ async function testAgentNewFileGetsCommitted(): Promise<void> {
   await withTempDir("ac-newfile", async (workspace) => {
     await initRepo(workspace)
     await setSettings(enabledSettings("diff"))
+    await setWorkspaceCard(workspace)
     const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
       await importAutoCommit()
 
@@ -192,6 +238,7 @@ async function testPreExistingDirtyPreserved(): Promise<void> {
     await writeFile(join(workspace, "user-edit.ts"), "user wrote this\n")
 
     await setSettings(enabledSettings())
+    await setWorkspaceCard(workspace)
     const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
       await importAutoCommit()
     const snap = await startAgentGitSnapshot("t-c5", workspace)
@@ -221,6 +268,7 @@ async function testPreExistingDirtyTouchedAndModifiedIncluded(): Promise<void> {
     await writeFile(join(workspace, "shared.ts"), "user content\n")
 
     await setSettings(enabledSettings())
+    await setWorkspaceCard(workspace)
     const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
       await importAutoCommit()
     const snap = await startAgentGitSnapshot("t-c6", workspace)
@@ -416,7 +464,88 @@ async function testMissingCardNumberSkipped(): Promise<void> {
     })
     assert(result.status === "skipped", `expected skipped, got ${result.status}`)
     assert(
-      result.reasons?.some((r) => r.includes("缺少卡片编号")) ?? false,
+      result.reasons?.some((r) => r.includes("未选择任务卡片")) ?? false,
+      `expected missing-card reason, got ${JSON.stringify(result.reasons)}`
+    )
+  })
+}
+
+async function testLegacyGlobalCardMigratesToWorkspace(): Promise<void> {
+  await withTempDir("ac-legacy-card", async (workspace) => {
+    await initRepo(workspace)
+    await setSettings({
+      mode: "always",
+      push: false,
+      messageStrategy: "diff",
+      cardNumber: CARD_NUMBER
+    })
+    if (existsSync(WORKSPACE_CARDS_FILE)) {
+      await rm(WORKSPACE_CARDS_FILE, { force: true })
+    }
+
+    const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
+      await importAutoCommit()
+    const snap = await startAgentGitSnapshot("t-c11-legacy", workspace)
+    await writeFile(join(workspace, "legacy.ts"), "legacy\n")
+    recordAgentTouchedFile("t-c11-legacy", workspace, "legacy.ts")
+
+    const result = await maybeAutoCommitAfterAgentRun({
+      threadId: "t-c11-legacy",
+      workspacePath: workspace,
+      snapshot: snap
+    })
+    assert(result.status === "committed", `expected committed, got ${result.status}`)
+    assert(
+      result.commitMessage === `${CARD_NUMBER} #comment fix:update legacy.ts #CMBDevClaw`,
+      `expected legacy card in commit message, got ${result.commitMessage}`
+    )
+
+    const migrated = JSON.parse(await readFile(WORKSPACE_CARDS_FILE, "utf8")) as Record<
+      string,
+      { cardNumber?: string }
+    >
+    assert(
+      migrated[workspaceCardKey(workspace)]?.cardNumber === CARD_NUMBER,
+      `expected workspace card migration, got ${JSON.stringify(migrated)}`
+    )
+  })
+}
+
+async function testClearedWorkspaceCardBlocksLegacy(): Promise<void> {
+  await withTempDir("ac-clear-legacy", async (workspace) => {
+    await initRepo(workspace)
+    await setSettings({
+      mode: "always",
+      push: false,
+      messageStrategy: "diff",
+      cardNumber: CARD_NUMBER
+    })
+    if (existsSync(WORKSPACE_CARDS_FILE)) {
+      await rm(WORKSPACE_CARDS_FILE, { force: true })
+    }
+
+    const storage = await import("../src/main/storage.ts")
+    // User picks a card for this workspace, then clears it.
+    storage.saveAgentAutoCommitWorkspaceCard(workspace, "M999-1")
+    storage.saveAgentAutoCommitWorkspaceCard(workspace, undefined)
+
+    // A deliberately cleared workspace must NOT fall back to the legacy global card.
+    const card = storage.getAgentAutoCommitWorkspaceCard(workspace)
+    assert(!card.cardNumber, `cleared workspace should report no card, got ${card.cardNumber}`)
+
+    const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
+      await importAutoCommit()
+    const snap = await startAgentGitSnapshot("t-c11c", workspace)
+    await writeFile(join(workspace, "cleared.ts"), "x\n")
+    recordAgentTouchedFile("t-c11c", workspace, "cleared.ts")
+    const result = await maybeAutoCommitAfterAgentRun({
+      threadId: "t-c11c",
+      workspacePath: workspace,
+      snapshot: snap
+    })
+    assert(result.status === "skipped", `expected skipped (no card), got ${result.status}`)
+    assert(
+      result.reasons?.some((r) => r.includes("未选择任务卡片")) ?? false,
       `expected missing-card reason, got ${JSON.stringify(result.reasons)}`
     )
   })
@@ -426,6 +555,7 @@ async function testPromptStrategyBusinessFormat(): Promise<void> {
   await withTempDir("ac-prompt", async (workspace) => {
     await initRepo(workspace)
     await setSettings(enabledSettings("prompt"))
+    await setWorkspaceCard(workspace)
     const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
       await importAutoCommit()
     const snap = await startAgentGitSnapshot("t-c12", workspace)
@@ -454,6 +584,7 @@ async function testTemplateMessageStrategy(): Promise<void> {
         template: "[{threadShort}] {fileCount} files: {summary}"
       })
     )
+    await setWorkspaceCard(workspace)
     const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
       await importAutoCommit()
     const snap = await startAgentGitSnapshot("abcdef0123456789", workspace)
@@ -479,6 +610,7 @@ async function testDiffStrategySingleFile(): Promise<void> {
   await withTempDir("ac-diff-1", async (workspace) => {
     await initRepo(workspace)
     await setSettings(enabledSettings("diff"))
+    await setWorkspaceCard(workspace)
     const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
       await importAutoCommit()
     const snap = await startAgentGitSnapshot("t-c14", workspace)
@@ -501,6 +633,7 @@ async function testDiffStrategyMultiFile(): Promise<void> {
   await withTempDir("ac-diff-N", async (workspace) => {
     await initRepo(workspace)
     await setSettings(enabledSettings("diff"))
+    await setWorkspaceCard(workspace)
     const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
       await importAutoCommit()
     const snap = await startAgentGitSnapshot("t-c15", workspace)
@@ -530,6 +663,7 @@ async function testAskModeUserCancels(): Promise<void> {
   await withTempDir("ac-ask-cancel", async (workspace) => {
     await initRepo(workspace)
     await setSettings({ ...enabledSettings("diff"), mode: "ask" })
+    await setWorkspaceCard(workspace)
     const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
       await importAutoCommit()
     const snap = await startAgentGitSnapshot("t-c16", workspace)
@@ -556,6 +690,7 @@ async function testAskModeUserConfirms(): Promise<void> {
   await withTempDir("ac-ask-ok", async (workspace) => {
     await initRepo(workspace)
     await setSettings({ ...enabledSettings("diff"), mode: "ask" })
+    await setWorkspaceCard(workspace)
     const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
       await importAutoCommit()
     const snap = await startAgentGitSnapshot("t-c17", workspace)
@@ -589,6 +724,7 @@ async function testLlmModifiedMetadataClearedAfterCommit(): Promise<void> {
     const threadId = `auto-commit-metadata-${Date.now()}`
     const db = await import("../src/main/db/index.ts")
     await db.initializeDatabase()
+    await setWorkspaceCard(workspace)
     db.createThread(threadId, {
       llmModifiedFiles: [join(workspace, "panel.ts")],
       llmFileHistory: { "panel.ts": ["dirty"] },
@@ -642,6 +778,7 @@ async function testNewDirtyFilesAllCommitted(): Promise<void> {
   await withTempDir("ac-new-all", async (workspace) => {
     await initRepo(workspace)
     await setSettings(enabledSettings("diff"))
+    await setWorkspaceCard(workspace)
     const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
       await importAutoCommit()
     const snap = await startAgentGitSnapshot("t-c19", workspace)
@@ -686,6 +823,7 @@ async function testSubdirectoryWorkspacePathspecs(): Promise<void> {
     await writeFile(join(workspace, renameOldRel), "public class OldFilter {}\n")
     await git(repo, ["add", "."])
     await git(repo, ["commit", "-q", "-m", "add gateway tracked files"])
+    await setWorkspaceCard(workspace)
 
     const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
       await importAutoCommit()
@@ -736,6 +874,7 @@ async function testPushSuccessAgainstBareRemote(): Promise<void> {
       await git(workspace, ["push", "-q", "-u", "origin", "main"])
 
       await setSettings(enabledSettings("diff", { push: true }))
+      await setWorkspaceCard(workspace)
       const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
         await importAutoCommit()
       const snap = await startAgentGitSnapshot("t-c20", workspace)
@@ -767,6 +906,7 @@ async function testPushFailureReportedButCommitKept(): Promise<void> {
     // No remote configured — `git push` should fail. The commit must remain locally.
     await initRepo(workspace)
     await setSettings(enabledSettings("diff", { push: true }))
+    await setWorkspaceCard(workspace)
     const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
       await importAutoCommit()
     const snap = await startAgentGitSnapshot("t-c21", workspace)
@@ -814,6 +954,10 @@ async function run(): Promise<void> {
     console.log("PASS C10b foreign staged new file aborts")
     await testMissingCardNumberSkipped()
     console.log("PASS C11 missing card number skipped")
+    await testLegacyGlobalCardMigratesToWorkspace()
+    console.log("PASS C11b legacy global card migrates to workspace")
+    await testClearedWorkspaceCardBlocksLegacy()
+    console.log("PASS C11c cleared workspace card does not fall back to legacy")
     await testPromptStrategyBusinessFormat()
     console.log("PASS C12 prompt summary uses business format")
     await testTemplateMessageStrategy()

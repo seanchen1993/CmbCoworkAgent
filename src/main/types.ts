@@ -5,6 +5,7 @@ export type {
   AgentAutoCommitMode,
   AgentAutoCommitResult,
   AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard,
   AgentAutoCommitStatus
 } from "../shared/auto-commit-types"
 

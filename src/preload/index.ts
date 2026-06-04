@@ -27,6 +27,7 @@ import type {
   ChatXConfig,
   HookLoggingConfig,
   AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard,
   UserInputRequest,
   UserInputResponse,
   ConfigurePreferredIdeRequest,
@@ -66,6 +67,7 @@ import type {
   TaskMmdSnapshot
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
+import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 
 interface LspDownloadProgress {
   percent: number
@@ -1493,7 +1495,21 @@ const api = {
     getSettings: (): Promise<AgentAutoCommitSettings> =>
       ipcRenderer.invoke("autoCommit:getSettings") as Promise<AgentAutoCommitSettings>,
     saveSettings: (updates: Partial<AgentAutoCommitSettings>): Promise<AgentAutoCommitSettings> =>
-      ipcRenderer.invoke("autoCommit:saveSettings", updates) as Promise<AgentAutoCommitSettings>
+      ipcRenderer.invoke("autoCommit:saveSettings", updates) as Promise<AgentAutoCommitSettings>,
+    getWorkspaceCard: (workspacePath: string): Promise<AgentAutoCommitWorkspaceCard> =>
+      ipcRenderer.invoke("autoCommit:getWorkspaceCard", workspacePath) as Promise<AgentAutoCommitWorkspaceCard>,
+    saveWorkspaceCard: (
+      workspacePath: string,
+      cardNumber?: string
+    ): Promise<AgentAutoCommitWorkspaceCard> =>
+      ipcRenderer.invoke("autoCommit:saveWorkspaceCard", {
+        workspacePath,
+        cardNumber
+      }) as Promise<AgentAutoCommitWorkspaceCard>
+  },
+  taskCards: {
+    list: (query?: TaskCardsQuery): Promise<TaskCardsListResult> =>
+      ipcRenderer.invoke("taskCards:list", query) as Promise<TaskCardsListResult>
   },
   heartbeat: {
     getConfig: (): Promise<HeartbeatConfig> =>

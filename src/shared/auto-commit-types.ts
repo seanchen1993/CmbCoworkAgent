@@ -5,8 +5,15 @@ export interface AgentAutoCommitSettings {
   mode: AgentAutoCommitMode
   push: boolean
   messageStrategy: AgentAutoCommitMessageStrategy
+  /** Deprecated: task cards are stored per workspace. Kept only for old settings files. */
   cardNumber?: string
   template?: string
+}
+
+export interface AgentAutoCommitWorkspaceCard {
+  workspacePath: string
+  cardNumber?: string
+  updatedAt?: string
 }
 
 export type AgentAutoCommitStatus =

@@ -84,7 +84,8 @@ import type {
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitMode,
   AgentAutoCommitResult,
-  AgentAutoCommitSettings
+  AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard
 } from "../../shared/auto-commit-types"
 import type {
   ManagedSavedCodeExecTool,
@@ -146,6 +147,7 @@ export type {
   AgentAutoCommitMode,
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard,
   AgentAutoCommitResult
 }
 
