@@ -246,7 +246,9 @@ export interface DashboardUserDetail {
   traces: DashboardTraceDetail[]
   tracePage: number
   tracePageSize: number
-  totalTraces: number
+  /** 当前视图模式下的翻页总数：thread → 会话数；trace → trace 总数。 */
+  total: number
+  traceViewMode?: DashboardTraceViewMode
   traceTriggerScope?: DashboardTraceTriggerScope
 }
 
