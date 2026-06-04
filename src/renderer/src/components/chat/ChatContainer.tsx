@@ -1589,7 +1589,6 @@ export function ChatContainer({
     : "normal"
   const [agentMode, setAgentMode] = useState<ChatAgentMode>(initialAgentMode)
   const agentModeHydratedRef = useRef(initialAgentMode === "coordinator")
-  const [messageTimes, setMessageTimes] = useState<MessageTimeMap>({})
   const chatReportUploadTimersRef = useRef<Record<string, number>>({})
   const chatReportRetryTimersRef = useRef<Record<string, number>>({})
   const chatReportRetryQueuesRef = useRef<
