@@ -328,19 +328,26 @@ export function ProjectModePanel({
     <div className="space-y-6">
       {/* 概览卡片（左）+ 代码采纳漏斗（右），与平台运营概览一致 */}
       <section>
-        <h2 className="mb-3 text-sm font-semibold text-foreground">项目运营概览</h2>
+        <h2 className="mb-1 text-sm font-semibold text-foreground">项目运营概览</h2>
+        <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
+          <span className="font-medium text-foreground">项目总数 / 功能总数</span>{" "}
+          为当前状态（项目快照实时统计，不随时间范围变化）；其余指标按
+          <span className="font-medium text-foreground">所选时间范围</span>统计。
+        </p>
         <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3">
           <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-3 xl:grid-cols-5">
             <StatCard
               icon={Boxes}
               label="项目总数"
               value={formatNumber(summary?.projectCount ?? 0)}
+              sub="当前状态"
               color="bg-blue-500"
             />
             <StatCard
               icon={Layers}
               label="功能总数"
               value={formatNumber(summary?.featureCount ?? 0)}
+              sub="当前状态"
               color="bg-indigo-500"
             />
             <StatCard
@@ -430,7 +437,10 @@ export function ProjectModePanel({
 
       {/* Adapter distribution */}
       <section>
-        <h2 className="mb-3 text-sm font-semibold text-foreground">插件列表</h2>
+        <h2 className="mb-1 text-sm font-semibold text-foreground">插件列表</h2>
+        <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
+          项目数为当前状态；对话数按所选时间范围统计。
+        </p>
         <div className="rounded-xl border border-border bg-card">
           {adapters.length === 0 ? (
             <div className="px-4 py-10 text-center text-sm text-muted-foreground">暂无数据</div>
@@ -473,7 +483,10 @@ export function ProjectModePanel({
 
       {/* Project list */}
       <section>
-        <h2 className="mb-3 text-sm font-semibold text-foreground">项目列表</h2>
+        <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
+        <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
+          项目、适配器、生命周期、兼容性、功能数为当前状态；对话数、采纳率及展开行的技能与采纳明细按所选时间范围统计。
+        </p>
         <div
           className={cn(
             "overflow-hidden rounded-xl border border-border bg-card",
