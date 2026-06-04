@@ -8,6 +8,16 @@ import { useState } from "react"
 import { Search, X, Info } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { hasMarketSkill, normalizeMarketSkillKey } from "../skill-market"
+import {
+  DEFAULT_SKILL_ADOPTION_SORT,
+  SKILL_ADOPTION_SORT_LABELS,
+  filterSkillAdoptionItems,
+  getSkillAdoptionSortValue,
+  sortSkillAdoptionItems,
+  type SkillAdoptionRankingItem,
+  type SkillAdoptionSortKey
+} from "../skill-adoption-ranking"
 
 function formatNumber(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -379,5 +389,357 @@ export function CodeAdoptionFunnel({
         </div>
       )}
     </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────
+// Skill ranking panel (usage / code-adoption tabs)
+// ─────────────────────────────────────────────────────────
+
+export interface SkillRankingDatum {
+  skill: string
+  count: number
+}
+
+function SkillUsageTooltip(): React.JSX.Element {
+  return (
+    <div className="space-y-1 text-[11px]">
+      <div className="font-medium text-foreground">Skill 使用统计说明</div>
+      <div className="text-muted-foreground">
+        当一次运行中读取到某个 Skill 的文件或目录时，会记为使用了该 Skill。
+      </div>
+      <div className="text-muted-foreground">若一条 trace 使用多个 Skill，会分别计入各自次数。</div>
+      <div className="text-muted-foreground">
+        展示名称会带 Skill 版本；若版本解析失败，默认显示为 v1.0.0。
+      </div>
+    </div>
+  )
+}
+
+type SkillRankingTab = "usage" | "adoption"
+
+function SkillRankingTabs({
+  activeTab,
+  onTabChange
+}: {
+  activeTab: SkillRankingTab
+  onTabChange: (tab: SkillRankingTab) => void
+}): React.JSX.Element {
+  return (
+    <div className="flex items-center rounded-md border border-border overflow-hidden">
+      <button
+        type="button"
+        className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
+          activeTab === "usage"
+            ? "bg-primary text-primary-foreground"
+            : "text-muted-foreground hover:bg-muted/50"
+        }`}
+        onClick={() => onTabChange("usage")}
+      >
+        使用排行
+      </button>
+      <button
+        type="button"
+        className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
+          activeTab === "adoption"
+            ? "bg-primary text-primary-foreground"
+            : "text-muted-foreground hover:bg-muted/50"
+        }`}
+        onClick={() => onTabChange("adoption")}
+      >
+        代码采纳
+      </button>
+    </div>
+  )
+}
+
+function hasPluginSkill(pluginSkillKeys: Set<string>, skillName: string): boolean {
+  const key = normalizeMarketSkillKey(skillName)
+  return Boolean(key && pluginSkillKeys.has(key))
+}
+
+function MarketSkillTag(): React.JSX.Element {
+  return (
+    <span className="shrink-0 rounded-sm border border-emerald-200 bg-emerald-50 px-1 py-px text-[9px] font-medium leading-3 text-emerald-700">
+      市场
+    </span>
+  )
+}
+
+function PluginSkillTag(): React.JSX.Element {
+  return (
+    <span className="shrink-0 rounded-sm border border-sky-200 bg-sky-50 px-1 py-px text-[9px] font-medium leading-3 text-sky-700">
+      Plugin
+    </span>
+  )
+}
+
+function formatNullablePercent(value: number | null): string {
+  return value === null ? "—" : formatPercent(value)
+}
+
+function formatSkillAdoptionSortValue(
+  item: SkillAdoptionRankingItem,
+  sortKey: SkillAdoptionSortKey
+): string {
+  const value = getSkillAdoptionSortValue(item, sortKey)
+  if (value === null) return "—"
+  if (
+    sortKey === "measuredAdoptionRate" ||
+    sortKey === "inclusiveAdoptionRate" ||
+    sortKey === "pushedAdoptionRate"
+  )
+    return formatPercent(value)
+  if (sortKey === "commitCount" || sortKey === "pushedCommitCount")
+    return `${formatNumber(value)} 次`
+  return `${formatNumber(value)} 行`
+}
+
+function SkillAdoptionRankingPanel({
+  bySkillAdoption,
+  activeTab,
+  onTabChange,
+  onSkillClick,
+  marketSkillKeys,
+  pluginSkillKeys
+}: {
+  bySkillAdoption: SkillAdoptionRankingItem[]
+  activeTab: SkillRankingTab
+  onTabChange: (tab: SkillRankingTab) => void
+  onSkillClick?: (skill: string) => void
+  marketSkillKeys: Set<string>
+  pluginSkillKeys: Set<string>
+}): React.JSX.Element {
+  const [query, setQuery] = useState("")
+  const [sortKey, setSortKey] = useState<SkillAdoptionSortKey>(DEFAULT_SKILL_ADOPTION_SORT)
+  const trimmedQuery = query.trim()
+  const sortedItems = sortSkillAdoptionItems(bySkillAdoption, sortKey)
+  const visibleItems = filterSkillAdoptionItems(sortedItems, trimmedQuery)
+  const maxValue = sortedItems.reduce((max, item) => {
+    const value = getSkillAdoptionSortValue(item, sortKey) ?? 0
+    return Math.max(max, value)
+  }, 0)
+  const totalAdoptedLines = bySkillAdoption.reduce((total, item) => total + item.adoptedLines, 0)
+  const statusLabel = trimmedQuery
+    ? `匹配 ${visibleItems.length} 项`
+    : `按 ${SKILL_ADOPTION_SORT_LABELS[sortKey]}`
+
+  return (
+    <div className="flex h-[340px] flex-col rounded-xl border border-border bg-card p-4">
+      <div className="mb-3 flex shrink-0 items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h3 className="text-xs font-medium text-muted-foreground">Skill 使用</h3>
+            <InfoHint content={<SkillUsageTooltip />} />
+            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+              {statusLabel}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <span>
+              <span className="font-semibold text-foreground">{bySkillAdoption.length}</span> 种
+            </span>
+            <span className="text-border">|</span>
+            <span>
+              共{" "}
+              <span className="font-semibold text-foreground">
+                {formatNumber(totalAdoptedLines)}
+              </span>{" "}
+              行采纳
+            </span>
+          </div>
+        </div>
+        <SkillRankingTabs activeTab={activeTab} onTabChange={onTabChange} />
+      </div>
+
+      <div className="mb-3 flex shrink-0 items-center gap-2">
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索 Skill 名称，不限 Top 20"
+            className="h-8 rounded-md border-border bg-background pl-8 pr-8 text-xs"
+          />
+          {trimmedQuery ? (
+            <button
+              type="button"
+              className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              onClick={() => setQuery("")}
+              aria-label="清空搜索"
+            >
+              <X className="size-3.5" />
+            </button>
+          ) : null}
+        </div>
+        <select
+          value={sortKey}
+          onChange={(event) => setSortKey(event.target.value as SkillAdoptionSortKey)}
+          className="h-8 shrink-0 rounded-md border border-border bg-background px-2 text-[11px] text-foreground"
+          aria-label="选择 Skill 代码采纳排序"
+        >
+          {(Object.keys(SKILL_ADOPTION_SORT_LABELS) as SkillAdoptionSortKey[]).map((key) => (
+            <option key={key} value={key}>
+              {SKILL_ADOPTION_SORT_LABELS[key]}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {bySkillAdoption.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">
+          暂无 Skill 代码采纳数据
+        </div>
+      ) : visibleItems.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">
+          未找到匹配的 Skill
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <div className="space-y-1.5">
+            {visibleItems.map((item) => {
+              const primaryValue = getSkillAdoptionSortValue(item, sortKey) ?? 0
+              const pct = maxValue > 0 ? (primaryValue / maxValue) * 100 : 0
+              const rank = sortedItems.findIndex((candidate) => candidate.skill === item.skill) + 1
+              const content = (
+                <>
+                  <span className="w-7 shrink-0 text-right text-[10px] text-muted-foreground">
+                    {rank}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="mb-0.5 flex items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <span
+                          title={item.skill}
+                          className="min-w-0 truncate text-xs text-foreground"
+                        >
+                          {highlightRankingName(item.skill, trimmedQuery)}
+                        </span>
+                        {hasMarketSkill(marketSkillKeys, item.skill) ? <MarketSkillTag /> : null}
+                        {hasPluginSkill(pluginSkillKeys, item.skill) ? <PluginSkillTag /> : null}
+                      </div>
+                      <span className="shrink-0 text-[11px] font-medium text-foreground">
+                        {formatSkillAdoptionSortValue(item, sortKey)}
+                      </span>
+                    </div>
+                    <div className="mb-1 truncate text-[10px] text-muted-foreground">
+                      已Commit {formatNullablePercent(item.measuredAdoptionRate)}
+                      <span className="mx-1 text-border">|</span>
+                      含未提交 {formatNullablePercent(item.inclusiveAdoptionRate)}
+                      <span className="mx-1 text-border">|</span>已 Push{" "}
+                      {formatNullablePercent(item.pushedAdoptionRate)}
+                      <span className="mx-1 text-border">|</span>
+                      采纳 {formatNumber(item.adoptedLines)} 行
+                      <span className="mx-1 text-border">|</span>
+                      提交 {formatNumber(item.commitCount)} 次
+                      <span className="mx-1 text-border">|</span>
+                      Push {formatNumber(item.pushedCommitCount)} 次
+                    </div>
+                    <div className="h-1 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-cyan-500"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  </div>
+                </>
+              )
+
+              if (onSkillClick) {
+                return (
+                  <button
+                    key={item.skill}
+                    type="button"
+                    className="flex w-full cursor-pointer items-center gap-2 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-muted/50 hover:text-primary focus:outline-none focus:ring-2 focus:ring-ring"
+                    onClick={() => onSkillClick(item.skill)}
+                  >
+                    {content}
+                  </button>
+                )
+              }
+
+              return (
+                <div key={item.skill} className="flex items-center gap-2">
+                  {content}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Skill ranking panel with 使用排行 / 代码采纳 tabs, market/plugin tags and a
+ * usage-stats tooltip. Decoupled from any specific dashboard data shape so it can
+ * be shared by the platform overview and the project-mode overview.
+ */
+export function SkillRankingPanel({
+  bySkill,
+  bySkillAll,
+  totalSkills,
+  totalSkillCalls,
+  bySkillAdoption,
+  onSkillClick,
+  marketSkillKeys,
+  pluginSkillKeys
+}: {
+  bySkill: SkillRankingDatum[]
+  bySkillAll: SkillRankingDatum[]
+  totalSkills: number
+  totalSkillCalls: number
+  bySkillAdoption: SkillAdoptionRankingItem[]
+  onSkillClick?: (skill: string) => void
+  marketSkillKeys: Set<string>
+  pluginSkillKeys: Set<string>
+}): React.JSX.Element {
+  const [activeTab, setActiveTab] = useState<SkillRankingTab>("usage")
+  if (activeTab === "adoption") {
+    return (
+      <SkillAdoptionRankingPanel
+        bySkillAdoption={bySkillAdoption}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        onSkillClick={onSkillClick}
+        marketSkillKeys={marketSkillKeys}
+        pluginSkillKeys={pluginSkillKeys}
+      />
+    )
+  }
+
+  const defaultItems: RankingItem[] = bySkill.map((item) => ({
+    name: item.skill,
+    count: item.count
+  }))
+  const searchItems: RankingItem[] = (bySkillAll.length > 0 ? bySkillAll : bySkill).map((item) => ({
+    name: item.skill,
+    count: item.count
+  }))
+  const totalKinds = searchItems.length > 0 ? searchItems.length : totalSkills
+  const totalCalls = searchItems.length > 0 ? sumRankingCounts(searchItems) : totalSkillCalls
+
+  return (
+    <SearchableRankingPanel
+      title="Skill 使用"
+      totalKinds={totalKinds}
+      totalCalls={totalCalls}
+      defaultItems={defaultItems}
+      searchItems={searchItems}
+      searchPlaceholder="搜索 Skill 名称，不限 Top 20"
+      emptyLabel="暂无 Skill 数据"
+      emptySearchLabel="未找到匹配的 Skill"
+      barColorClassName="bg-blue-500"
+      onItemClick={onSkillClick}
+      headerActions={<SkillRankingTabs activeTab={activeTab} onTabChange={setActiveTab} />}
+      titleTooltipContent={<SkillUsageTooltip />}
+      renderNameAddon={(name) => (
+        <>
+          {hasMarketSkill(marketSkillKeys, name) ? <MarketSkillTag /> : null}
+          {hasPluginSkill(pluginSkillKeys, name) ? <PluginSkillTag /> : null}
+        </>
+      )}
+    />
   )
 }

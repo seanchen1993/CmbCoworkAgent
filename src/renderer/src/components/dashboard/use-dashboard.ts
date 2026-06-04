@@ -304,6 +304,7 @@ export interface DashboardProjectModeData {
   }
   adapters: DashboardProjectModeAdapter[]
   topSkills: DashboardProjectModeSkillCount[]
+  bySkillAdoption: SkillAdoptionRankingItem[]
   projects: DashboardProjectModeProject[]
 }
 

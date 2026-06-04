@@ -3171,6 +3171,9 @@ export function DashboardView(): React.JSX.Element {
                 loading={projectModeLoading}
                 error={projectModeError}
                 onOpenTraces={handleProjectOpenTraces}
+                onSkillClick={handleSkillClick}
+                marketSkillKeys={marketSkillKeys}
+                pluginSkillKeys={pluginSkillKeys}
               />
             </div>
           ) : (

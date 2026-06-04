@@ -331,6 +331,11 @@ interface DashboardProjectModeSkillCount {
   count: number
 }
 
+interface DashboardProjectModeSkillAdoption extends DashboardCodeStats {
+  skill: string
+  commitCount: number
+}
+
 interface DashboardProjectModeProject {
   projectId: string
   name: string
@@ -371,6 +376,7 @@ interface DashboardProjectModeData {
   }
   adapters: DashboardProjectModeAdapter[]
   topSkills: DashboardProjectModeSkillCount[]
+  bySkillAdoption: DashboardProjectModeSkillAdoption[]
   projects: DashboardProjectModeProject[]
 }
 

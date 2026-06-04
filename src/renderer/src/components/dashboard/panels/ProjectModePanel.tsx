@@ -11,7 +11,6 @@ import {
   Loader2,
   AlertCircle,
   Plug,
-  CircleAlert,
   Code2,
   Gauge
 } from "lucide-react"
@@ -19,9 +18,8 @@ import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import {
   CodeAdoptionFunnel,
-  SearchableRankingPanel,
-  type CodeAdoptionFunnelData,
-  type RankingItem
+  SkillRankingPanel,
+  type CodeAdoptionFunnelData
 } from "./dashboard-shared"
 import type {
   DashboardProjectModeData,
@@ -97,21 +95,6 @@ function lifecycleLabel(status?: string): string {
   }
 }
 
-function CompatibilityBadge({
-  compatible,
-  status
-}: {
-  compatible?: boolean
-  status?: string
-}): React.JSX.Element {
-  if (compatible === undefined) return <span className="text-muted-foreground">—</span>
-  return (
-    <Badge variant={compatible ? "nominal" : "warning"} className="normal-case tracking-normal">
-      {compatible ? "兼容" : status || "不兼容"}
-    </Badge>
-  )
-}
-
 function ProjectRow({
   project,
   expanded,
@@ -148,12 +131,6 @@ function ProjectRow({
                     已归档
                   </Badge>
                 )}
-                {project.hasError && (
-                  <CircleAlert
-                    className="size-3.5 shrink-0 text-status-critical"
-                    aria-label="探测异常"
-                  />
-                )}
               </div>
               {project.systemName && (
                 <div className="truncate text-[10px] text-muted-foreground">
@@ -181,12 +158,6 @@ function ProjectRow({
         <td className="px-3 py-2 text-muted-foreground">
           {lifecycleLabel(project.lifecycleStatus)}
         </td>
-        <td className="px-3 py-2">
-          <CompatibilityBadge
-            compatible={project.compatible}
-            status={project.compatibilityStatus}
-          />
-        </td>
         <td className="px-3 py-2 text-right tabular-nums">{formatNumber(project.featureCount)}</td>
         <td className="px-3 py-2 text-right font-medium tabular-nums">
           {formatNumber(project.conversationCount)}
@@ -210,7 +181,7 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={8} className="px-3 py-3">
+          <td colSpan={7} className="px-3 py-3">
             <div className="space-y-3">
               {/* 常用技能 + 采纳明细 */}
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
@@ -244,9 +215,9 @@ function ProjectRow({
                 </div>
               </div>
 
-              {/* 功能状态 */}
+              {/* 特性状态 */}
               {project.features.length === 0 ? (
-                <div className="text-xs text-muted-foreground">该项目暂无功能记录</div>
+                <div className="text-xs text-muted-foreground">该项目暂无特性记录</div>
               ) : (
                 <div className="space-y-2">
                   {project.features.map((feature) => (
@@ -298,12 +269,18 @@ export function ProjectModePanel({
   data,
   loading,
   error,
-  onOpenTraces
+  onOpenTraces,
+  onSkillClick,
+  marketSkillKeys = new Set(),
+  pluginSkillKeys = new Set()
 }: {
   data: DashboardProjectModeData | null
   loading: boolean
   error: string | null
   onOpenTraces: (project: DashboardProjectModeProject) => void
+  onSkillClick?: (skill: string) => void
+  marketSkillKeys?: Set<string>
+  pluginSkillKeys?: Set<string>
 }): React.JSX.Element {
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
@@ -328,11 +305,11 @@ export function ProjectModePanel({
   const adapters = data?.adapters ?? []
   const projects = data?.projects ?? []
   const funnelData: CodeAdoptionFunnelData = summary?.codeStats ?? EMPTY_FUNNEL_DATA
-  const skillItems: RankingItem[] = (data?.topSkills ?? []).map((item) => ({
-    name: item.skill,
-    count: item.count
-  }))
-  const archivedCount = projects.filter((p) => p.lifecycleStatus === "archived").length
+  const topSkills = data?.topSkills ?? []
+  const bySkillAdoption = data?.bySkillAdoption ?? []
+  const archivedProjects = projects.filter((p) => p.lifecycleStatus === "archived")
+  const archivedCount = archivedProjects.length
+  const archivedFeatureCount = archivedProjects.reduce((sum, p) => sum + p.featureCount, 0)
 
   return (
     <div className="space-y-6">
@@ -340,7 +317,7 @@ export function ProjectModePanel({
       <section>
         <h2 className="mb-1 text-sm font-semibold text-foreground">项目运营概览</h2>
         <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-          <span className="font-medium text-foreground">项目总数 / 功能总数</span>{" "}
+          <span className="font-medium text-foreground">项目总数 / 特性总数</span>{" "}
           为当前状态（项目快照实时统计，不随时间范围变化）；其余指标按
           <span className="font-medium text-foreground">所选时间范围</span>统计。
         </p>
@@ -355,9 +332,13 @@ export function ProjectModePanel({
             />
             <StatCard
               icon={Layers}
-              label="功能总数"
+              label="特性总数"
               value={formatNumber(summary?.featureCount ?? 0)}
-              sub="当前状态"
+              sub={
+                archivedFeatureCount > 0
+                  ? `当前状态 · 含 ${archivedFeatureCount} 已归档`
+                  : "当前状态"
+              }
               color="bg-indigo-500"
             />
             <StatCard
@@ -429,19 +410,67 @@ export function ProjectModePanel({
         </div>
       </section>
 
-      {/* Skill 使用排行，与平台运营概览同款 */}
+      {/* Project list */}
+      <section>
+        <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
+        <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
+          项目、适配器、生命周期、特性数为当前状态；对话数、采纳率及展开行的技能与采纳明细按所选时间范围统计。
+          {archivedCount > 0 ? ` 含 ${archivedCount} 个已归档项目（置灰显示）。` : ""}
+        </p>
+        <div
+          className={cn(
+            "overflow-hidden rounded-xl border border-border bg-card",
+            loading && "opacity-70"
+          )}
+        >
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border bg-muted/30 text-muted-foreground">
+                <th className="px-3 py-2 text-left font-medium">项目</th>
+                <th className="px-3 py-2 text-left font-medium">适配器</th>
+                <th className="px-3 py-2 text-left font-medium">生命周期</th>
+                <th className="px-3 py-2 text-right font-medium">特性数</th>
+                <th className="px-3 py-2 text-right font-medium">对话数</th>
+                <th className="px-3 py-2 text-right font-medium">采纳率</th>
+                <th className="px-3 py-2 text-right font-medium">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {projects.map((project) => (
+                <ProjectRow
+                  key={project.projectId}
+                  project={project}
+                  expanded={expandedId === project.projectId}
+                  onToggle={() =>
+                    setExpandedId((prev) => (prev === project.projectId ? null : project.projectId))
+                  }
+                  onOpenTraces={() => onOpenTraces(project)}
+                />
+              ))}
+              {projects.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-3 py-10 text-center text-muted-foreground">
+                    暂无项目模式数据
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* Skill 使用排行 + 代码采纳，与平台运营概览同款 */}
       <section>
         <h2 className="mb-3 text-sm font-semibold text-foreground">技能使用</h2>
-        <SearchableRankingPanel
-          title="Skill 使用"
-          totalKinds={summary?.distinctSkillCount ?? 0}
-          totalCalls={summary?.skillCallCount ?? 0}
-          defaultItems={skillItems}
-          searchItems={skillItems}
-          searchPlaceholder="搜索 Skill 名称"
-          emptyLabel="暂无 Skill 数据"
-          emptySearchLabel="未找到匹配的 Skill"
-          barColorClassName="bg-blue-500"
+        <SkillRankingPanel
+          bySkill={topSkills}
+          bySkillAll={topSkills}
+          totalSkills={summary?.distinctSkillCount ?? 0}
+          totalSkillCalls={summary?.skillCallCount ?? 0}
+          bySkillAdoption={bySkillAdoption}
+          onSkillClick={onSkillClick}
+          marketSkillKeys={marketSkillKeys}
+          pluginSkillKeys={pluginSkillKeys}
         />
       </section>
 
@@ -488,56 +517,6 @@ export function ProjectModePanel({
               ))}
             </div>
           )}
-        </div>
-      </section>
-
-      {/* Project list */}
-      <section>
-        <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
-        <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-          项目、适配器、生命周期、兼容性、功能数为当前状态；对话数、采纳率及展开行的技能与采纳明细按所选时间范围统计。
-          {archivedCount > 0 ? ` 含 ${archivedCount} 个已归档项目（置灰显示）。` : ""}
-        </p>
-        <div
-          className={cn(
-            "overflow-hidden rounded-xl border border-border bg-card",
-            loading && "opacity-70"
-          )}
-        >
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-border bg-muted/30 text-muted-foreground">
-                <th className="px-3 py-2 text-left font-medium">项目</th>
-                <th className="px-3 py-2 text-left font-medium">适配器</th>
-                <th className="px-3 py-2 text-left font-medium">生命周期</th>
-                <th className="px-3 py-2 text-left font-medium">兼容性</th>
-                <th className="px-3 py-2 text-right font-medium">功能数</th>
-                <th className="px-3 py-2 text-right font-medium">对话数</th>
-                <th className="px-3 py-2 text-right font-medium">采纳率</th>
-                <th className="px-3 py-2 text-right font-medium">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {projects.map((project) => (
-                <ProjectRow
-                  key={project.projectId}
-                  project={project}
-                  expanded={expandedId === project.projectId}
-                  onToggle={() =>
-                    setExpandedId((prev) => (prev === project.projectId ? null : project.projectId))
-                  }
-                  onOpenTraces={() => onOpenTraces(project)}
-                />
-              ))}
-              {projects.length === 0 && (
-                <tr>
-                  <td colSpan={8} className="px-3 py-10 text-center text-muted-foreground">
-                    暂无项目模式数据
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
         </div>
       </section>
     </div>
