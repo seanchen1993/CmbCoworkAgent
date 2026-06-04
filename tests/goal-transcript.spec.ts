@@ -9,7 +9,10 @@ import {
   buildRestoredCheckpointTranscript,
   buildCheckpointTranscriptForDisplay,
   formatGoalEventMessage,
+  getInternalGoalPromptIdentity,
   goalNoticeEventsToGoalUiEvents,
+  hasGoalResumeUserEvent,
+  isGoalResumeCommandContent,
   isGoalTranscriptArtifact,
   isVisibleCheckpointTranscriptMessage,
   mergeGoalUserEventsIntoTranscript
@@ -488,6 +491,89 @@ function testGoalResumeUserMessageUsesCheckpointPositionAndEventTime(): void {
   assertEqual(visible[0]?.content, "/goal resume", "continuation prompt should show /goal resume")
 }
 
+function testGoalResumeVisibleAliasFallbackWithoutEvent(): void {
+  const rawCheckpointMessages = [
+    message("visible-resume", "user", "/goal resume", new Date("2026-05-22T10:00:00.000Z")),
+    message("assistant-resumed", "assistant", "继续检查。", new Date("2026-05-22T10:00:01.000Z"))
+  ]
+  const visibleCheckpointMessages = buildCheckpointTranscriptForDisplay(rawCheckpointMessages)
+
+  const visible = buildRestoredCheckpointTranscript(rawCheckpointMessages, visibleCheckpointMessages, [])
+
+  assertArrayEqual(
+    visible.map((item) => item.id),
+    ["visible-resume", "assistant-resumed"],
+    "explicit visible /goal resume aliases should survive restore when goal events are unavailable"
+  )
+  assertEqual(visible[0]?.content, "/goal resume", "visible fallback should keep the user command")
+}
+
+function testGoalResumeEventDetection(): void {
+  const resumeEvents = goalNoticeEventsToGoalUiEvents("thread-1", [
+    {
+      event_id: 30,
+      goal_id: "goal-1",
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal resume`,
+      created_at: "2026-05-22T10:00:00.000Z"
+    }
+  ])
+  const nonResumeEvents = goalNoticeEventsToGoalUiEvents("thread-1", [
+    {
+      event_id: 31,
+      goal_id: "goal-1",
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal status`,
+      created_at: "2026-05-22T10:00:00.000Z"
+    }
+  ])
+
+  assert(isGoalResumeCommandContent("/goal resume"), "plain resume command should be detected")
+  assert(
+    !isGoalResumeCommandContent("/goal resume now"),
+    "non-exact resume commands should not be treated as the restore alias"
+  )
+  assert(hasGoalResumeUserEvent(resumeEvents), "persisted resume user events should be detected")
+  assert(
+    hasGoalResumeUserEvent(resumeEvents, { goalId: "goal-1" }),
+    "matching goal resume user events should be detected"
+  )
+  assert(
+    !hasGoalResumeUserEvent(resumeEvents, { goalId: "other-goal" }),
+    "resume user events from another goal should not match a scoped prompt"
+  )
+  assert(
+    !hasGoalResumeUserEvent(nonResumeEvents),
+    "non-resume goal user events should not block visible resume fallback"
+  )
+}
+
+function testGoalResumeVisibleAliasFallbackIgnoresUnrelatedOldEvent(): void {
+  const currentPrompt = buildGoalContinuationPrompt(
+    goalSnapshot({
+      goalId: "new-goal",
+      activeWindowId: "new-window",
+      objective: "继续新目标",
+      completionCondition: "继续新目标",
+      turnsUsed: 1,
+      lastVerdict: "continue",
+      lastReason: "继续。"
+    })
+  )
+  const events = goalNoticeEventsToGoalUiEvents("thread-1", [
+    {
+      event_id: 32,
+      goal_id: "old-goal",
+      active_window_id: "old-window",
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal resume`,
+      created_at: "2026-05-22T09:00:00.000Z"
+    }
+  ])
+
+  assert(
+    !hasGoalResumeUserEvent(events, getInternalGoalPromptIdentity(currentPrompt)),
+    "old goal resume events should not suppress the current checkpoint visible alias"
+  )
+}
+
 function testGoalResumePromptDoesNotMatchWrongPersistedGoalEvent(): void {
   const rawCheckpointMessages = [
     message(
@@ -742,6 +828,9 @@ function run(): void {
     testMatchedGoalPromptDoesNotOverwriteEventTimeWithFallbackNow,
     testGoalStartPromptDoesNotMatchWrongPersistedGoalEvent,
     testGoalResumeUserMessageUsesCheckpointPositionAndEventTime,
+    testGoalResumeVisibleAliasFallbackWithoutEvent,
+    testGoalResumeEventDetection,
+    testGoalResumeVisibleAliasFallbackIgnoresUnrelatedOldEvent,
     testGoalResumePromptDoesNotMatchWrongPersistedGoalEvent,
     testGoalResumePromptDoesNotMatchWrongActiveWindowEvent,
     testUnmatchedGoalContinuationPromptStaysHidden,

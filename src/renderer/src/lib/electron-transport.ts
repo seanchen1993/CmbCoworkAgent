@@ -114,6 +114,11 @@ export type TransformedValuesMessage = {
   name?: string
 }
 
+type MainAssistantSnapshotUpdate =
+  | { kind: "skip" }
+  | { kind: "delta"; content: string }
+  | { kind: "replace"; content: string }
+
 /**
  * Metadata accompanying streamed messages from LangGraph.
  * These fields are not exported from the SDK as they are internal runtime metadata.
@@ -1505,6 +1510,25 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
   }
 
+  private createCoordinatorAssistantSnapshotEvent(input: {
+    id: string
+    content: string
+    toolCalls?: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>
+  }): StreamEvent {
+    return {
+      event: "custom",
+      data: {
+        type: "coordinator_ai_snapshot_message",
+        assistantMessage: {
+          id: input.id,
+          type: "ai",
+          content: input.content,
+          ...(input.toolCalls !== undefined && { tool_calls: input.toolCalls })
+        }
+      }
+    }
+  }
+
   private createWorkerLiveFallbackMessageId(workerThreadId: string): string {
     const next = (this.workerLiveMessageSequenceByThread.get(workerThreadId) ?? 0) + 1
     this.workerLiveMessageSequenceByThread.set(workerThreadId, next)
@@ -1582,28 +1606,69 @@ export class ElectronIPCTransport implements UseStreamTransport {
     return merged.slice(existing.length)
   }
 
-  private prepareMainAssistantSnapshotContent(
+  private prepareMainAssistantSnapshotUpdate(
     messageId: string,
     snapshot: string
-  ): string | undefined {
-    if (!snapshot) return undefined
+  ): MainAssistantSnapshotUpdate {
+    if (!snapshot) return { kind: "skip" }
     const existing = this.mainAssistantTextByMessageId.get(messageId) ?? ""
     if (!existing) {
       this.mainAssistantTextByMessageId.set(messageId, snapshot)
       pruneMapToLimit(this.mainAssistantTextByMessageId, MAX_TRACKED_EMITTED_MESSAGES)
-      return snapshot
+      return { kind: "delta", content: snapshot }
     }
-    if (snapshot === existing || existing.endsWith(snapshot)) return undefined
+    if (snapshot === existing) return { kind: "skip" }
     if (snapshot.startsWith(existing)) {
+      const suffix = snapshot.slice(existing.length)
+      const replayTail = this.extractMainAssistantReplayTail(existing, suffix)
+      if (replayTail !== undefined) {
+        if (replayTail.length === 0) return { kind: "skip" }
+        const nextText = `${existing}${replayTail}`
+        this.mainAssistantTextByMessageId.set(messageId, nextText)
+        pruneMapToLimit(this.mainAssistantTextByMessageId, MAX_TRACKED_EMITTED_MESSAGES)
+        return { kind: "delta", content: replayTail }
+      }
       this.mainAssistantTextByMessageId.set(messageId, snapshot)
-      return snapshot.slice(existing.length)
+      pruneMapToLimit(this.mainAssistantTextByMessageId, MAX_TRACKED_EMITTED_MESSAGES)
+      return { kind: "delta", content: suffix }
     }
 
-    const merged = this.mergeWorkerAssistantTextChunk(existing, snapshot)
-    if (merged === existing) return undefined
-    this.mainAssistantTextByMessageId.set(messageId, merged)
+    // Values-mode AI messages are complete snapshots, not deltas. If the final
+    // provider state rewrites, wraps, or shortens already-streamed text, replace
+    // the live message rather than dropping the snapshot or appending it twice.
+    this.mainAssistantTextByMessageId.set(messageId, snapshot)
     pruneMapToLimit(this.mainAssistantTextByMessageId, MAX_TRACKED_EMITTED_MESSAGES)
-    return merged.slice(existing.length)
+    return { kind: "replace", content: snapshot }
+  }
+
+  private canSafelyApplyMainAssistantSnapshot(
+    messageId: string | undefined,
+    snapshot: string
+  ): boolean {
+    if (!messageId || !snapshot) return false
+    const existing = this.mainAssistantTextByMessageId.get(messageId)
+    if (!existing) return false
+    if (snapshot === existing) return true
+    // Very short assistant prefixes such as "好的" are common across distinct
+    // messages in the same turn. Only treat a growing values snapshot as the
+    // same live message when the existing text is specific enough to anchor it.
+    return existing.length >= 16 && snapshot.startsWith(existing)
+  }
+
+  private snapshotReplaysMainAssistantText(
+    messageId: string | undefined,
+    snapshot: string
+  ): boolean {
+    if (!messageId || !snapshot) return false
+    const existing = this.mainAssistantTextByMessageId.get(messageId)
+    return !!existing && (snapshot.includes(existing) || existing.includes(snapshot))
+  }
+
+  private extractMainAssistantReplayTail(existing: string, suffix: string): string | undefined {
+    const trimmedStartLength = suffix.length - suffix.trimStart().length
+    const replayStart = trimmedStartLength
+    if (!suffix.startsWith(existing, replayStart)) return undefined
+    return suffix.slice(replayStart + existing.length)
   }
 
   private createStableFallbackMessageId(input: {
@@ -1670,6 +1735,46 @@ export class ElectronIPCTransport implements UseStreamTransport {
     for (let index = currentTurnStart; index < messages.length; index += 1) {
       if (this.isSerializedAIMessage(messages[index])) latestCurrentTurnAiIndex = index
     }
+    const reusableCurrentMessageId =
+      this.currentMessageId && this.hasEmittedMessage(this.currentMessageId)
+        ? this.currentMessageId
+        : undefined
+    const reusableCurrentMessageText = reusableCurrentMessageId
+      ? (this.mainAssistantTextByMessageId.get(reusableCurrentMessageId) ?? "")
+      : ""
+    let currentMessageValuesIndex = -1
+    if (reusableCurrentMessageId) {
+      let candidateIndex = -1
+      let sawToolAfterCandidate = false
+      for (let index = currentTurnStart; index < messages.length; index += 1) {
+        const message = messages[index]
+        if (candidateIndex >= 0 && this.isSerializedToolMessage(message)) {
+          sawToolAfterCandidate = true
+        }
+        if (!this.isSerializedAIMessage(message)) continue
+        const content = this.extractContent(message.kwargs?.content)
+        if (content === reusableCurrentMessageText) {
+          if (candidateIndex < 0) candidateIndex = index
+          continue
+        }
+        if (reusableCurrentMessageText && content.startsWith(reusableCurrentMessageText)) {
+          if (sawToolAfterCandidate) continue
+          candidateIndex = index
+          continue
+        }
+        if (this.canSafelyApplyMainAssistantSnapshot(reusableCurrentMessageId, content)) {
+          if (sawToolAfterCandidate) continue
+          candidateIndex = index
+        }
+      }
+      currentMessageValuesIndex = candidateIndex
+      if (currentMessageValuesIndex < 0 && latestCurrentTurnAiIndex >= 0) {
+        const latestContent = this.extractContent(messages[latestCurrentTurnAiIndex]?.kwargs?.content)
+        if (this.snapshotReplaysMainAssistantText(reusableCurrentMessageId, latestContent)) {
+          currentMessageValuesIndex = latestCurrentTurnAiIndex
+        }
+      }
+    }
 
     const fallbackIndexes: Record<"ai" | "tool" | "system" | "human", number> = {
       ai: 0,
@@ -1678,6 +1783,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       human: 0
     }
 
+    let sawToolAfterCurrentMessageCandidate = false
     for (let index = 0; index < messages.length; index += 1) {
       const message = messages[index]
       const kwargs = message.kwargs || {}
@@ -1691,6 +1797,13 @@ export class ElectronIPCTransport implements UseStreamTransport {
             : "ai"
       const fallbackIndex = fallbackIndexes[fallbackType]++
       if (index < currentTurnStart) continue
+      if (
+        currentMessageValuesIndex >= 0 &&
+        index > currentMessageValuesIndex &&
+        this.isSerializedToolMessage(message)
+      ) {
+        sawToolAfterCurrentMessageCandidate = true
+      }
 
       if (this.isSerializedAIMessage(message)) {
         const content = this.extractContent(kwargs.content)
@@ -1698,38 +1811,68 @@ export class ElectronIPCTransport implements UseStreamTransport {
           this.filterVisibleMainToolCalls(kwargs.tool_calls, true)
         )
         if (!content && visibleToolCalls.length === 0) continue
+        if (
+          reusableCurrentMessageText &&
+          index !== currentMessageValuesIndex &&
+          content === reusableCurrentMessageText &&
+          !sawToolAfterCurrentMessageCandidate &&
+          visibleToolCalls.length === 0
+        ) {
+          continue
+        }
 
-        const reusableCurrentMessageId =
-          index === latestCurrentTurnAiIndex &&
-          this.currentMessageId &&
-          this.hasEmittedMessage(this.currentMessageId)
-            ? this.currentMessageId
-            : undefined
-        const msgId =
-          kwargs.id ||
-          reusableCurrentMessageId ||
-          buildStableValuesMessageId({
-            index: fallbackIndex,
-            type: "ai",
-            className,
-            content,
-            toolCalls: visibleToolCalls
-          })
-        const contentDelta = this.prepareMainAssistantSnapshotContent(msgId, content)
-        if (contentDelta === undefined && visibleToolCalls.length === 0) continue
+        const reusableCurrentMessageIdForIndex =
+          index === currentMessageValuesIndex ? reusableCurrentMessageId : undefined
+        const providerMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
+        const shouldReuseCurrentMessageId =
+          this.canSafelyApplyMainAssistantSnapshot(reusableCurrentMessageIdForIndex, content)
+        let msgId =
+          shouldReuseCurrentMessageId && reusableCurrentMessageIdForIndex
+            ? reusableCurrentMessageIdForIndex
+            : providerMessageId ||
+              reusableCurrentMessageIdForIndex ||
+              buildStableValuesMessageId({
+                index: fallbackIndex,
+                type: "ai",
+                className,
+                content,
+                toolCalls: visibleToolCalls
+              })
+        if (
+          providerMessageId &&
+          reusableCurrentMessageIdForIndex &&
+          msgId === providerMessageId &&
+          content &&
+          !this.canSafelyApplyMainAssistantSnapshot(providerMessageId, content) &&
+          this.snapshotReplaysMainAssistantText(reusableCurrentMessageIdForIndex, content)
+        ) {
+          msgId = reusableCurrentMessageIdForIndex
+        }
+        const snapshotUpdate = this.prepareMainAssistantSnapshotUpdate(msgId, content)
+        if (snapshotUpdate.kind === "skip" && visibleToolCalls.length === 0) continue
         this.rememberEmittedMessage(msgId)
-        events.push({
-          event: "messages",
-          data: [
-            {
+        if (snapshotUpdate.kind === "replace") {
+          events.push(
+            this.createCoordinatorAssistantSnapshotEvent({
               id: msgId,
-              type: "ai",
-              content: contentDelta ?? "",
-              ...(visibleToolCalls.length && { tool_calls: visibleToolCalls })
-            },
-            { langgraph_node: "agent" }
-          ]
-        })
+              content: snapshotUpdate.content,
+              toolCalls: visibleToolCalls
+            })
+          )
+        } else {
+          events.push({
+            event: "messages",
+            data: [
+              {
+                id: msgId,
+                type: "ai",
+                content: snapshotUpdate.kind === "delta" ? snapshotUpdate.content : "",
+                ...(visibleToolCalls.length && { tool_calls: visibleToolCalls })
+              },
+              { langgraph_node: "agent" }
+            ]
+          })
+        }
 
         if (visibleToolCalls.length) {
           events.push(...this.processCompletedToolCalls(visibleToolCalls))

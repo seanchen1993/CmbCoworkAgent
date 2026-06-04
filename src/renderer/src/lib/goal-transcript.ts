@@ -98,10 +98,47 @@ function extractXmlBlock(content: string, tag: string): string | null {
   return match ? unescapeXmlText(match[1].trim()) : null
 }
 
+export function isGoalResumeCommandContent(content: string): boolean {
+  const { commandText } = splitGoalTransportPayload(content)
+  return commandText.trim().toLowerCase() === "/goal resume"
+}
+
 function isGoalResumeCommandMessage(message: Message): boolean {
   if (message.role !== "user" || typeof message.content !== "string") return false
-  const { commandText } = splitGoalTransportPayload(message.content)
-  return commandText.trim().toLowerCase() === "/goal resume"
+  return isGoalResumeCommandContent(message.content)
+}
+
+export type GoalPromptIdentity = {
+  goalId?: string | null
+  activeWindowId?: string | null
+}
+
+export function getInternalGoalPromptIdentity(content: string): GoalPromptIdentity {
+  return {
+    goalId: extractXmlBlock(content, "goal_id"),
+    activeWindowId: extractXmlBlock(content, "active_window_id")
+  }
+}
+
+export function hasGoalResumeUserEvent(
+  events: ReadonlyArray<
+    Pick<GoalEvent, "message"> & Partial<Pick<GoalEvent, "goal_id" | "active_window_id">>
+  >,
+  identity: GoalPromptIdentity = {}
+): boolean {
+  return events.some(
+    (event) => {
+      if (!isGoalUserEvent(event)) return false
+      if (!isGoalResumeCommandContent(formatGoalEventMessage(event.message))) return false
+      if (identity.activeWindowId) {
+        return event.active_window_id === identity.activeWindowId
+      }
+      if (identity.goalId) {
+        return event.goal_id === identity.goalId
+      }
+      return true
+    }
+  )
 }
 
 function isGoalSetCommandMessage(message: Message): boolean {
