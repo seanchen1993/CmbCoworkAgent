@@ -27,6 +27,7 @@ import {
 } from "./dashboard-shared"
 import type {
   DashboardProjectModeData,
+  DashboardProjectModeAdapter,
   DashboardProjectModeProject,
   DashboardProjectModeSkillCount,
   DashboardProjectModeToolUsage
@@ -120,6 +121,14 @@ function ProjectRow({
   onToggle: () => void
   onOpenTraces: () => void
 }): React.JSX.Element {
+  const codeStats = project.codeStats
+  const adoptionLineLabel = codeStats
+    ? `${formatNumber(codeStats.adoptedLines)} / ${formatNumber(codeStats.effectiveGeneratedLines)} 行`
+    : "—"
+  const pushedAdoptionLineLabel = codeStats
+    ? `${formatNumber(codeStats.pushedAdoptedLines)} / ${formatNumber(codeStats.pushedEffectiveGeneratedLines)} 行`
+    : "—"
+
   return (
     <>
       <tr
@@ -168,7 +177,14 @@ function ProjectRow({
           {formatNumber(project.conversationCount)}
         </td>
         <td className="px-3 py-2 text-right tabular-nums">
-          {formatPercent(project.codeStats?.measuredAdoptionRate)}
+          <div className="font-medium">{formatPercent(codeStats?.measuredAdoptionRate)}</div>
+          <div className="mt-0.5 text-[10px] text-muted-foreground">{adoptionLineLabel}</div>
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          <div className="font-medium">{formatPercent(codeStats?.pushedAdoptionRate)}</div>
+          <div className="mt-0.5 text-[10px] text-muted-foreground">
+            {pushedAdoptionLineLabel}
+          </div>
         </td>
         <td className="px-3 py-2 text-right">
           <button
@@ -186,7 +202,7 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={7} className="px-3 py-3">
+          <td colSpan={8} className="px-3 py-3">
             <div className="space-y-3">
               {/* 常用技能 + 采纳明细 */}
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
@@ -202,19 +218,28 @@ function ProjectRow({
                   <span>
                     生成行数{" "}
                     <span className="font-medium text-foreground">
-                      {formatNumber(project.codeStats?.effectiveGeneratedLines ?? 0)}
+                      {formatNumber(codeStats?.effectiveGeneratedLines ?? 0)}
                     </span>
                   </span>
                   <span>
                     采纳行数{" "}
                     <span className="font-medium text-foreground">
-                      {formatNumber(project.codeStats?.adoptedLines ?? 0)}
+                      {formatNumber(codeStats?.adoptedLines ?? 0)}
                     </span>
                   </span>
                   <span>
-                    采纳率{" "}
+                    已Commit采纳率{" "}
                     <span className="font-medium text-foreground">
-                      {formatPercent(project.codeStats?.measuredAdoptionRate)}
+                      {formatPercent(codeStats?.measuredAdoptionRate)}
+                    </span>
+                  </span>
+                  <span>
+                    已Push采纳率{" "}
+                    <span className="font-medium text-foreground">
+                      {formatPercent(codeStats?.pushedAdoptionRate)}
+                    </span>
+                    <span className="ml-1 text-muted-foreground/80">
+                      ({pushedAdoptionLineLabel})
                     </span>
                   </span>
                 </div>
@@ -271,6 +296,7 @@ function SkillChips({ skills }: { skills: DashboardProjectModeSkillCount[] }): R
 }
 
 const PROJECT_PAGE_SIZE = 10
+const ADAPTER_PAGE_SIZE = 10
 
 type ProjectListTab = "active" | "archived"
 
@@ -331,7 +357,7 @@ function ProjectListSection({
     <section>
       <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-        项目、插件、生命周期、特性数为当前状态；对话数、采纳率及展开行的技能与采纳明细按所选时间范围统计。
+        项目、插件、项目状态、特性数为当前状态；对话数、已Commit/已Push采纳率及展开行的技能与采纳明细按所选时间范围统计。
       </p>
 
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -383,10 +409,11 @@ function ProjectListSection({
             <tr className="border-b border-border bg-muted/30 text-muted-foreground">
               <th className="px-3 py-2 text-left font-medium">项目</th>
               <th className="px-3 py-2 text-left font-medium">插件</th>
-              <th className="px-3 py-2 text-left font-medium">生命周期</th>
+              <th className="px-3 py-2 text-left font-medium">项目状态</th>
               <th className="px-3 py-2 text-right font-medium">特性数</th>
               <th className="px-3 py-2 text-right font-medium">对话数</th>
-              <th className="px-3 py-2 text-right font-medium">采纳率</th>
+              <th className="px-3 py-2 text-right font-medium">已Commit采纳率</th>
+              <th className="px-3 py-2 text-right font-medium">已Push采纳率</th>
               <th className="px-3 py-2 text-right font-medium">操作</th>
             </tr>
           </thead>
@@ -404,7 +431,7 @@ function ProjectListSection({
             ))}
             {pageItems.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={8} className="px-3 py-10 text-center text-muted-foreground">
                   {trimmed
                     ? "未找到匹配的项目"
                     : tab === "archived"
@@ -440,6 +467,106 @@ function ProjectListSection({
               </button>
             </div>
           </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function AdapterListSection({
+  adapters
+}: {
+  adapters: DashboardProjectModeAdapter[]
+}): React.JSX.Element {
+  const [page, setPage] = useState(1)
+  const sortedAdapters = [...adapters].sort(
+    (a, b) =>
+      b.projectCount - a.projectCount ||
+      b.conversationCount - a.conversationCount ||
+      a.name.localeCompare(b.name) ||
+      (a.version ?? "").localeCompare(b.version ?? "")
+  )
+  const totalPages = Math.max(1, Math.ceil(sortedAdapters.length / ADAPTER_PAGE_SIZE))
+  const currentPage = Math.min(page, totalPages)
+  const pageItems = sortedAdapters.slice(
+    (currentPage - 1) * ADAPTER_PAGE_SIZE,
+    currentPage * ADAPTER_PAGE_SIZE
+  )
+
+  return (
+    <section>
+      <h2 className="mb-1 text-sm font-semibold text-foreground">插件列表</h2>
+      <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
+        按项目数降序排列；项目数为当前状态，对话数按所选时间范围统计。
+      </p>
+      <div className="rounded-xl border border-border bg-card">
+        {sortedAdapters.length === 0 ? (
+          <div className="px-4 py-10 text-center text-sm text-muted-foreground">暂无数据</div>
+        ) : (
+          <>
+            <div className="divide-y divide-border">
+              {pageItems.map((adapter) => (
+                <div
+                  key={`${adapter.name}@${adapter.version ?? ""}`}
+                  className="flex items-center justify-between gap-3 px-4 py-3 text-sm"
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <Plug className="size-3.5 shrink-0 text-muted-foreground" />
+                    <span className="truncate font-medium text-foreground">{adapter.name}</span>
+                    {adapter.version && (
+                      <Badge variant="outline" className="normal-case tracking-normal">
+                        {adapter.version}
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-4 text-xs text-muted-foreground">
+                    <span>
+                      项目{" "}
+                      <span className="font-medium text-foreground">
+                        {formatNumber(adapter.projectCount)}
+                      </span>
+                    </span>
+                    <span>
+                      特性{" "}
+                      <span className="font-medium text-foreground">
+                        {formatNumber(adapter.featureCount)}
+                      </span>
+                    </span>
+                    <span>
+                      对话{" "}
+                      <span className="font-medium text-foreground">
+                        {formatNumber(adapter.conversationCount)}
+                      </span>
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center justify-between gap-3 border-t border-border px-3 py-2 text-xs text-muted-foreground">
+              <span>共 {formatNumber(sortedAdapters.length)} 个</span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="rounded-md border border-border px-2 py-1 transition-colors hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={currentPage <= 1}
+                  onClick={() => setPage(currentPage - 1)}
+                >
+                  上一页
+                </button>
+                <span>
+                  第 {currentPage} / {totalPages} 页
+                </span>
+                <button
+                  type="button"
+                  className="rounded-md border border-border px-2 py-1 transition-colors hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={currentPage >= totalPages}
+                  onClick={() => setPage(currentPage + 1)}
+                >
+                  下一页
+                </button>
+              </div>
+            </div>
+          </>
         )}
       </div>
     </section>
@@ -619,56 +746,7 @@ export function ProjectModePanel({
       </section>
 
       {/* Adapter distribution */}
-      <section>
-        <h2 className="mb-1 text-sm font-semibold text-foreground">插件列表</h2>
-        <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-          项目数为当前状态；对话数按所选时间范围统计。
-        </p>
-        <div className="rounded-xl border border-border bg-card">
-          {adapters.length === 0 ? (
-            <div className="px-4 py-10 text-center text-sm text-muted-foreground">暂无数据</div>
-          ) : (
-            <div className="divide-y divide-border">
-              {adapters.map((adapter) => (
-                <div
-                  key={`${adapter.name}@${adapter.version ?? ""}`}
-                  className="flex items-center justify-between gap-3 px-4 py-3 text-sm"
-                >
-                  <div className="flex min-w-0 items-center gap-2">
-                    <Plug className="size-3.5 shrink-0 text-muted-foreground" />
-                    <span className="truncate font-medium text-foreground">{adapter.name}</span>
-                    {adapter.version && (
-                      <Badge variant="outline" className="normal-case tracking-normal">
-                        {adapter.version}
-                      </Badge>
-                    )}
-                  </div>
-                  <div className="flex shrink-0 items-center gap-4 text-xs text-muted-foreground">
-                    <span>
-                      项目{" "}
-                      <span className="font-medium text-foreground">
-                        {formatNumber(adapter.projectCount)}
-                      </span>
-                    </span>
-                    <span>
-                      特性{" "}
-                      <span className="font-medium text-foreground">
-                        {formatNumber(adapter.featureCount)}
-                      </span>
-                    </span>
-                    <span>
-                      对话{" "}
-                      <span className="font-medium text-foreground">
-                        {formatNumber(adapter.conversationCount)}
-                      </span>
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </section>
+      <AdapterListSection adapters={adapters} />
     </div>
   )
 }

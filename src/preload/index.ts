@@ -2312,7 +2312,16 @@ const api = {
     projectModeTraces: (
       projectId: string,
       range: { from: string; to: string },
-      options?: { limit?: number; triggerScope?: "active" | "all" }
+      options?: {
+        limit?: number
+        page?: number
+        pageSize?: number
+        tracePage?: number
+        tracePageSize?: number
+        mode?: "thread" | "trace"
+        viewMode?: "thread" | "trace"
+        triggerScope?: "active" | "all"
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeTraces", projectId, range, options),
     overview: (
@@ -2355,6 +2364,8 @@ const api = {
         traceLimit?: number
         tracePage?: number
         tracePageSize?: number
+        mode?: "thread" | "trace"
+        viewMode?: "thread" | "trace"
         triggerScope?: "active" | "all"
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>

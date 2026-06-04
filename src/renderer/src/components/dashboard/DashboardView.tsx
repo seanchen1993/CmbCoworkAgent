@@ -43,6 +43,7 @@ import {
   type DashboardUserListData,
   type DashboardUserListItem,
   type DashboardProjectModeProject,
+  type DashboardProjectModeTracesData,
   type DashboardTraceDetail,
   type Granularity,
   type TimeRange
@@ -158,9 +159,7 @@ function TimeControlBar({
   onNavigate,
   onCustomRange,
   onRefresh,
-  onExport,
   loading,
-  exporting,
   orgFilter
 }: {
   granularity: Granularity
@@ -169,9 +168,7 @@ function TimeControlBar({
   onNavigate: (dir: "prev" | "next") => void
   onCustomRange: (from: string, to: string) => void
   onRefresh: () => void
-  onExport: () => void
   loading: boolean
-  exporting: boolean
   orgFilter?: ReactNode
 }) {
   const [showDatePicker, setShowDatePicker] = useState(false)
@@ -264,22 +261,8 @@ function TimeControlBar({
       {/* 室筛选：紧跟日期控件之后 */}
       {orgFilter}
 
-      {/* Spacer + Export + Refresh */}
+      {/* Spacer + Refresh */}
       <div className="flex-1" />
-      <Button
-        variant="ghost"
-        size="sm"
-        className="gap-1.5 text-xs"
-        onClick={onExport}
-        disabled={exporting || loading}
-      >
-        {exporting ? (
-          <Loader2 className="size-3.5 animate-spin" />
-        ) : (
-          <Download className="size-3.5" />
-        )}
-        导出Excel
-      </Button>
       <Button
         variant="ghost"
         size="sm"
@@ -474,6 +457,8 @@ const USER_LIST_EXPORT_PAGE_SIZE = 100
 const USER_LIST_EXPORT_MAX_PAGES = 100
 const USER_TRACE_PAGE_SIZE = 10
 const SKILL_TRACE_PAGE_SIZE = 10
+const PROJECT_TRACE_PAGE_SIZE = 10
+const PROJECT_TRACE_TRIGGER_SCOPE: DashboardTraceTriggerScope = "active"
 
 type DashboardSubPage =
   | { kind: "main" }
@@ -1927,7 +1912,12 @@ export function DashboardView(): React.JSX.Element {
   >(undefined)
   const [projectTraceProject, setProjectTraceProject] =
     useState<DashboardProjectModeProject | null>(null)
-  const [projectTraces, setProjectTraces] = useState<DashboardTraceDetail[]>([])
+  const [projectTraceData, setProjectTraceData] = useState<DashboardProjectModeTracesData | null>(
+    null
+  )
+  const [projectTracePage, setProjectTracePage] = useState(1)
+  const [projectTraceViewMode, setProjectTraceViewMode] =
+    useState<DashboardTraceViewMode>("thread")
   const [projectTracesLoading, setProjectTracesLoading] = useState(false)
   const [projectTracesError, setProjectTracesError] = useState<string | null>(null)
   const [commitDialogOpen, setCommitDialogOpen] = useState(false)
@@ -2407,25 +2397,63 @@ export function DashboardView(): React.JSX.Element {
   ])
 
   const handleProjectOpenTraces = useCallback(
-    async (project: DashboardProjectModeProject) => {
+    (project: DashboardProjectModeProject) => {
       setProjectTraceProject(project)
-      setProjectTraces([])
+      setProjectTraceData(null)
       setProjectTracesError(null)
+      setProjectTracePage(1)
+      setProjectTraceViewMode("thread")
+    },
+    []
+  )
+
+  useEffect(() => {
+    if (!projectTraceProject) return
+    let cancelled = false
+    const currentProject = projectTraceProject
+
+    async function loadProjectTraces(): Promise<void> {
       setProjectTracesLoading(true)
+      setProjectTracesError(null)
       try {
-        const res = await window.api.dashboard.projectModeTraces(project.projectId, range, {
-          limit: 50
+        const res = await window.api.dashboard.projectModeTraces(currentProject.projectId, range, {
+          tracePage: projectTracePage,
+          tracePageSize: PROJECT_TRACE_PAGE_SIZE,
+          mode: projectTraceViewMode,
+          triggerScope: PROJECT_TRACE_TRIGGER_SCOPE
         })
         if (!res.success) throw new Error(res.error ?? "获取项目对话失败")
-        setProjectTraces((res.data as DashboardTraceDetail[]) ?? [])
+        const rawData = res.data
+        const data = Array.isArray(rawData)
+          ? {
+              traces: rawData as DashboardTraceDetail[],
+              tracePage: projectTracePage,
+              tracePageSize: PROJECT_TRACE_PAGE_SIZE,
+              total: rawData.length,
+              traceViewMode: projectTraceViewMode,
+              traceTriggerScope: PROJECT_TRACE_TRIGGER_SCOPE
+            }
+          : rawData ?? {
+              traces: [],
+              tracePage: projectTracePage,
+              tracePageSize: PROJECT_TRACE_PAGE_SIZE,
+              total: 0,
+              traceViewMode: projectTraceViewMode,
+              traceTriggerScope: PROJECT_TRACE_TRIGGER_SCOPE
+            }
+        if (!cancelled) setProjectTraceData(data)
       } catch (e) {
-        setProjectTracesError(e instanceof Error ? e.message : String(e))
+        if (!cancelled) setProjectTracesError(e instanceof Error ? e.message : String(e))
       } finally {
-        setProjectTracesLoading(false)
+        if (!cancelled) setProjectTracesLoading(false)
       }
-    },
-    [range]
-  )
+    }
+
+    void loadProjectTraces()
+    return () => {
+      cancelled = true
+    }
+  }, [projectTracePage, projectTraceProject, projectTraceViewMode, range])
 
   useEffect(() => {
     let cancelled = false
@@ -2708,6 +2736,24 @@ export function DashboardView(): React.JSX.Element {
     },
     []
   )
+
+  const handleProjectTracePrevious = useCallback(() => {
+    setProjectTracePage((prev) => Math.max(1, prev - 1))
+  }, [])
+
+  const handleProjectTraceNext = useCallback(() => {
+    if (!projectTraceData) return
+    setProjectTracePage((prev) => {
+      const pageSize = projectTraceData.tracePageSize || PROJECT_TRACE_PAGE_SIZE
+      return prev * pageSize < projectTraceData.total ? prev + 1 : prev
+    })
+  }, [projectTraceData])
+
+  const handleProjectTraceViewModeChange = useCallback((mode: DashboardTraceViewMode) => {
+    setProjectTraceData(null)
+    setProjectTraceViewMode(mode)
+    setProjectTracePage(1)
+  }, [])
 
   const subPageDetailSapId = subPage.kind === "user-detail" ? subPage.sapId : null
 
@@ -3098,6 +3144,23 @@ export function DashboardView(): React.JSX.Element {
     skillUploaderProfiles
   ])
 
+  const projectTraces = projectTraceData?.traces ?? []
+  const projectTracePageSize = projectTraceData?.tracePageSize ?? PROJECT_TRACE_PAGE_SIZE
+  const projectTraceTotal = projectTraceData?.total ?? 0
+  const canProjectTracePrevious = projectTracePage > 1 && !projectTracesLoading
+  const canProjectTraceNext =
+    Boolean(projectTraceData) &&
+    projectTracePage * projectTracePageSize < projectTraceTotal &&
+    !projectTracesLoading
+  const projectTraceTitle =
+    projectTraceViewMode === "thread"
+      ? `项目会话（第 ${projectTracePage} 页）`
+      : `项目 Trace（第 ${projectTracePage} 页）`
+  const projectTraceSubtitle =
+    projectTraceViewMode === "thread"
+      ? `共 ${formatNumber(projectTraceTotal)} 个会话，选择记录定位到对话`
+      : `共 ${formatNumber(projectTraceTotal)} 条，选择记录定位到对话`
+
   return (
     <div className="flex flex-col h-full">
       <TimeControlBar
@@ -3107,9 +3170,7 @@ export function DashboardView(): React.JSX.Element {
         onNavigate={navigate}
         onCustomRange={setCustomRange}
         onRefresh={handleRefresh}
-        onExport={handleExport}
         loading={loading}
-        exporting={exporting}
         orgFilter={
           subPage.kind === "main" ? (
             <OrgFilterBar
@@ -3217,7 +3278,23 @@ export function DashboardView(): React.JSX.Element {
             <div className="space-y-6 p-6">
               {/* Overview */}
               <section>
-                <h2 className="mb-3 text-sm font-semibold text-foreground">使用概览</h2>
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <h2 className="text-sm font-semibold text-foreground">使用概览</h2>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5 text-xs"
+                    onClick={handleExport}
+                    disabled={exporting || loading}
+                  >
+                    {exporting ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Download className="size-3.5" />
+                    )}
+                    导出Excel
+                  </Button>
+                </div>
                 <OverviewPanel
                   data={overview}
                   loading={loading}
@@ -3333,7 +3410,10 @@ export function DashboardView(): React.JSX.Element {
         onOpenChange={(open) => {
           if (!open) {
             setProjectTraceProject(null)
-            setProjectTraces([])
+            setProjectTraceData(null)
+            setProjectTracePage(1)
+            setProjectTraceViewMode("thread")
+            setProjectTracesLoading(false)
             setProjectTracesError(null)
           }
         }}
@@ -3344,7 +3424,7 @@ export function DashboardView(): React.JSX.Element {
               项目对话 · {projectTraceProject?.name ?? "-"}
             </DialogTitle>
             <p className="mt-1 text-[11px] text-muted-foreground">
-              该项目模式下的最近对话（最多 50 条），选择记录定位到会话
+              该项目模式下的对话记录，选择记录定位到会话
             </p>
           </DialogHeader>
           <div className="min-h-0 flex-1">
@@ -3352,8 +3432,34 @@ export function DashboardView(): React.JSX.Element {
               traces={projectTraces}
               loading={projectTracesLoading}
               error={projectTracesError}
-              title="项目模式 Trace"
-              subtitle="选择记录查看对话还原"
+              title={projectTraceTitle}
+              subtitle={projectTraceSubtitle}
+              viewMode={projectTraceViewMode}
+              onViewModeChange={handleProjectTraceViewModeChange}
+              headerRight={
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={handleProjectTracePrevious}
+                    disabled={!canProjectTracePrevious}
+                  >
+                    上一页
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="gap-1"
+                    onClick={handleProjectTraceNext}
+                    disabled={!canProjectTraceNext}
+                  >
+                    下一页
+                    <ChevronRight className="size-3.5" />
+                  </Button>
+                </div>
+              }
               emptyText="该项目在当前时间范围内没有对话"
               showCodeStats={false}
               className="h-full"

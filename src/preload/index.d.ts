@@ -397,7 +397,23 @@ interface DashboardProjectModeData {
 
 interface DashboardProjectModeTracesOptions {
   limit?: number
+  page?: number
+  pageSize?: number
+  tracePage?: number
+  tracePageSize?: number
+  mode?: DashboardTraceViewMode
+  viewMode?: DashboardTraceViewMode
   triggerScope?: DashboardTraceTriggerScope
+}
+
+interface DashboardProjectModeTracesData {
+  traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  /** 当前视图模式下的翻页总数：thread → 会话数；trace → trace 总数。 */
+  total: number
+  traceViewMode: DashboardTraceViewMode
+  traceTriggerScope: DashboardTraceTriggerScope
 }
 
 interface CustomAPI {
@@ -1451,7 +1467,7 @@ interface CustomAPI {
       projectId: string,
       range: { from: string; to: string },
       options?: DashboardProjectModeTracesOptions
-    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+    ) => Promise<{ success: boolean; data?: DashboardProjectModeTracesData; error?: string }>
     overview: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",

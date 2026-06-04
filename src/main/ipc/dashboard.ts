@@ -5758,11 +5758,61 @@ function makeMockProjectMode(range: TimeRange): DashboardProjectModeData {
   }
 }
 
-function makeMockProjectModeTraces(projectId: string, range: TimeRange): DashboardTraceDetail[] {
-  return makeMockSkillRecentTraces("项目模式", range, 8).map((trace, index) => ({
+function makeMockProjectModeTraces(
+  projectId: string,
+  range: TimeRange,
+  options?: ProjectModeTracesOptions
+): DashboardProjectModeTracesData {
+  const traceViewMode = normalizeTraceViewMode(options?.viewMode ?? options?.mode)
+  const tracePageSize = clampLimit(
+    options?.tracePageSize ?? options?.pageSize ?? options?.limit,
+    10,
+    50
+  )
+  const tracePage = clampLimit(options?.tracePage ?? options?.page, 1, 1000)
+  const traceTriggerScope = normalizeTraceTriggerScope(options?.triggerScope)
+  const traces = makeMockSkillRecentTraces("项目模式", range, 10).map((trace, index) => ({
     ...trace,
     traceId: `${projectId}-${trace.traceId}-${index}`
   }))
+
+  if (traceViewMode === "trace") {
+    const from = (tracePage - 1) * tracePageSize
+    return {
+      traces: traces.slice(from, from + tracePageSize),
+      tracePage,
+      tracePageSize,
+      total: traces.length,
+      traceViewMode,
+      traceTriggerScope
+    }
+  }
+
+  const grouped = new Map<string, DashboardTraceDetail[]>()
+  for (const trace of traces) {
+    const threadId = trace.threadId || "unknown-thread"
+    grouped.set(threadId, [...(grouped.get(threadId) ?? []), trace])
+  }
+  const groups = [...grouped.entries()]
+    .map(([threadId, threadTraces]) => {
+      const sorted = [...threadTraces].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+      const latestStartedAt = sorted.reduce(
+        (latest, trace) => (trace.startedAt > latest ? trace.startedAt : latest),
+        sorted[0]?.startedAt ?? ""
+      )
+      return { threadId, latestStartedAt, traces: sorted }
+    })
+    .sort((a, b) => b.latestStartedAt.localeCompare(a.latestStartedAt))
+  const from = (tracePage - 1) * tracePageSize
+
+  return {
+    traces: groups.slice(from, from + tracePageSize).flatMap((group) => group.traces),
+    tracePage,
+    tracePageSize,
+    total: groups.length,
+    traceViewMode,
+    traceTriggerScope
+  }
 }
 
 function makeMockProductivity(range: TimeRange): unknown {
@@ -6363,6 +6413,15 @@ interface DashboardProjectModeData {
   projects: ProjectModeProjectView[]
 }
 
+interface DashboardProjectModeTracesData {
+  traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  total: number
+  traceViewMode: TraceViewMode
+  traceTriggerScope: TraceTriggerScope
+}
+
 /** Time-range filter over the trace index, plus an `exists harnessProjectId` clause. */
 function projectModeTraceFilters(
   range: TimeRange,
@@ -6848,9 +6907,10 @@ async function fetchProjectMode(
   }
   const adapterList = [...adapters.values()].sort(
     (a, b) =>
-      b.conversationCount - a.conversationCount ||
       b.projectCount - a.projectCount ||
-      a.name.localeCompare(b.name)
+      b.conversationCount - a.conversationCount ||
+      a.name.localeCompare(b.name) ||
+      (a.version ?? "").localeCompare(b.version ?? "")
   )
 
   return {
@@ -6875,38 +6935,86 @@ async function fetchProjectMode(
 
 interface ProjectModeTracesOptions {
   limit?: number
+  page?: number
+  pageSize?: number
+  tracePage?: number
+  tracePageSize?: number
+  mode?: TraceViewMode
+  viewMode?: TraceViewMode
   triggerScope?: TraceTriggerScope
 }
 
-/** Recent project-mode traces for a single project (drill-down list). */
+/** Project-mode traces for a single project (thread/trace pagination). */
 async function fetchProjectModeTraces(
   projectId: string,
   range: TimeRange,
   options?: ProjectModeTracesOptions
-): Promise<DashboardTraceDetail[]> {
+): Promise<DashboardProjectModeTracesData> {
   const access = requireDashboardAccess()
   const normalizedProjectId = projectId.trim()
   if (!normalizedProjectId) throw new Error("projectId is required")
-  const limit = clampLimit(options?.limit, 50, 100)
+  const traceViewMode = normalizeTraceViewMode(options?.viewMode ?? options?.mode)
+  const tracePageSize = clampLimit(
+    options?.tracePageSize ?? options?.pageSize ?? options?.limit,
+    10,
+    50
+  )
+  const tracePage = clampLimit(options?.tracePage ?? options?.page, 1, 1000)
   const triggerScope = normalizeTraceTriggerScope(options?.triggerScope)
   const traceAccessFilter = buildTraceAccessFilter(access)
+  const baseFilter = [
+    timeRangeFilter("startedAt", range),
+    { term: { harnessProjectId: normalizedProjectId } },
+    ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
+  ]
+
+  if (traceViewMode === "thread") {
+    const body = {
+      size: 0,
+      query: {
+        bool: { filter: baseFilter }
+      },
+      aggs: {
+        thread_list: {
+          filter: traceAccessFilter ?? { match_all: {} },
+          aggs: threadListAgg(threadListBucketsNeeded(tracePage, tracePageSize))
+        }
+      }
+    }
+    const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+    const aggs = asRecord((raw as unknown as Record<string, unknown>).aggregations)
+    const parsed = parseThreadListContainer(asRecord(aggs.thread_list), tracePage, tracePageSize)
+    return {
+      traces: parsed.traces,
+      tracePage,
+      tracePageSize,
+      total: parsed.totalThreads,
+      traceViewMode,
+      traceTriggerScope: triggerScope
+    }
+  }
+
   const body = {
-    size: limit,
+    track_total_hits: true,
+    from: (tracePage - 1) * tracePageSize,
+    size: tracePageSize,
     sort: [{ startedAt: { order: "desc" } }],
     query: {
-      bool: {
-        filter: [
-          timeRangeFilter("startedAt", range),
-          { term: { harnessProjectId: normalizedProjectId } },
-          ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
-        ]
-      }
+      bool: { filter: baseFilter }
     },
     ...(traceAccessFilter ? { post_filter: traceAccessFilter } : {}),
     _source: { includes: dashboardTraceSourceIncludes() }
   }
   const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
-  return (raw.hits?.hits ?? []).map(normalizeTraceDetail)
+  const hits = raw.hits?.hits ?? []
+  return {
+    traces: hits.map(normalizeTraceDetail),
+    tracePage,
+    tracePageSize,
+    total: getTotalHits(raw, hits.length),
+    traceViewMode,
+    traceTriggerScope: triggerScope
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -6935,7 +7043,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     "dashboard:projectModeTraces",
     async (_, projectId: string, range: TimeRange, options?: ProjectModeTracesOptions) => {
       if (import.meta.env.DEV)
-        return { success: true, data: makeMockProjectModeTraces(projectId, range) }
+        return { success: true, data: makeMockProjectModeTraces(projectId, range, options) }
       try {
         return { success: true, data: await fetchProjectModeTraces(projectId, range, options) }
       } catch (e) {

@@ -321,6 +321,27 @@ export interface DashboardProjectModeData {
   projects: DashboardProjectModeProject[]
 }
 
+export interface DashboardProjectModeTracesOptions {
+  limit?: number
+  page?: number
+  pageSize?: number
+  tracePage?: number
+  tracePageSize?: number
+  mode?: DashboardTraceViewMode
+  viewMode?: DashboardTraceViewMode
+  triggerScope?: DashboardTraceTriggerScope
+}
+
+export interface DashboardProjectModeTracesData {
+  traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  /** 当前视图模式下的翻页总数：thread → 会话数；trace → trace 总数。 */
+  total: number
+  traceViewMode: DashboardTraceViewMode
+  traceTriggerScope: DashboardTraceTriggerScope
+}
+
 export interface ProductivityData {
   commitTrend: Array<{ time: string; count: number; from: string; to: string }>
   totalInsertions: number
