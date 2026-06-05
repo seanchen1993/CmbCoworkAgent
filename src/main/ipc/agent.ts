@@ -180,7 +180,11 @@ import {
 } from "../harness-board/service"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
-import { makeHookResultCallback, makeHookSkippedCallback } from "../hooks/result-callback"
+import {
+  makeHookResultCallback,
+  makeHookSkippedCallback,
+  makeCoordinatorWorkerHookResultCallback
+} from "../hooks/result-callback"
 import type { ScopeSkipCallback } from "../hooks/scope"
 import { notifyHooksChanged } from "../hooks/notifications"
 import type {
@@ -3874,6 +3878,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+      const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
+        window,
+        threadId,
+        turnState.turnId
+      )
       let stopHookFired = false
       const onHookSkippedFactory = (event: HookEvent): ScopeSkipCallback =>
         makeHookSkippedCallback(window, channel, event, turnState.turnId)
@@ -4500,6 +4509,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillUseTracker,
               ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
+              onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -5246,6 +5256,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             skillUseTracker,
             ...harnessAgentContext,
             onFileMutation: autoCommit.onFileMutation,
+            onCoordinatorWorkerHookResult,
             onCoordinatorWorkerEvent,
             onCoordinatorNotificationAction
           })
@@ -5351,6 +5362,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillUseTracker,
               ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
+              onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -6061,6 +6073,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       }
       const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+      const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
+        window,
+        threadId,
+        turnState.turnId
+      )
       const onHookSkippedFactory = (event: HookEvent): ScopeSkipCallback =>
         makeHookSkippedCallback(window, channel, event, turnState.turnId)
 
@@ -6274,6 +6291,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillUseTracker,
               ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
+              onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -6431,6 +6449,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillUseTracker,
               ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
+              onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -6766,6 +6785,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     }
     const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+    const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
+      window,
+      threadId,
+      turnState.turnId
+    )
     const onHookSkippedFactory = (event: HookEvent): ScopeSkipCallback =>
       makeHookSkippedCallback(window, channel, event, turnState.turnId)
 
@@ -6970,6 +6994,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillUseTracker,
               ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
+              onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -7124,6 +7149,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillUseTracker,
               ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
+              onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })

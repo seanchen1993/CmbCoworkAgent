@@ -304,6 +304,10 @@ export interface HookLogEntry {
   skipReason?: string
   timestamp: Date
   turnId?: string
+  workerId?: string
+  workerThreadId?: string
+  workerTurn?: number
+  parentThreadId?: string
 }
 
 /**
@@ -913,6 +917,9 @@ interface CustomEventData {
   skipReason?: string
   timestamp?: string
   turnId?: string
+  workerId?: string
+  workerTurn?: number
+  parentThreadId?: string
   messages?: LiveStreamMessage[]
   assistantMessage?: LiveStreamMessage
   result?: AgentAutoCommitResult
@@ -2330,7 +2337,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             stdinPayload: data.stdinPayload,
             skipReason: data.skipReason,
             timestamp: data.timestamp ? new Date(data.timestamp) : new Date(),
-            turnId: data.turnId
+            turnId: data.turnId,
+            workerId: data.workerId,
+            workerThreadId: data.workerThreadId,
+            workerTurn: data.workerTurn,
+            parentThreadId: data.parentThreadId
           }
           // Prefer the explicit turn id from main. Falling back to the latest
           // bucket keeps legacy/background events visible, but normal chat
@@ -2344,13 +2355,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           //   1. entry.turnId matches an existing bucket → append.
           //   2. entry.turnId set but no matching bucket → create a new
           //      "earlier hook event" bucket (subject to ring trim).
-          //   3. entry.turnId missing → create / append to a dedicated
+          //   3. worker hook without entry.turnId → create / append to a
+          //      worker-scoped placeholder bucket.
+          //   4. entry.turnId missing → create / append to a dedicated
           //      background-events bucket. Older code routed these to
           //      `buckets[last]` which polluted whichever user turn happened
           //      to be most recent (e.g. SessionStart firing after a new
           //      conversation began would inflate the previous chip).
           const buckets = hookLogBucketsRef.current[threadId] ?? []
           const BACKGROUND_BUCKET_ID = "__background__"
+          const workerBucketId = entry.workerThreadId
+            ? `__worker__:${entry.workerThreadId}:${entry.workerTurn ?? "unknown"}`
+            : ""
           const trim = (list: HookLogBucket[]): HookLogBucket[] => {
             if (list.length > HOOK_LOG_BUCKET_RING_SIZE) {
               list.splice(0, list.length - HOOK_LOG_BUCKET_RING_SIZE)
@@ -2373,6 +2389,36 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 {
                   turnId: entry.turnId,
                   turnPreview: "(较早的 Hook 事件)",
+                  isPlaceholder: true,
+                  startedAt: new Date(),
+                  entries: [entry]
+                }
+              ])
+            }
+          } else if (workerBucketId) {
+            const workerIdx = buckets.findIndex((bucket) => bucket.turnId === workerBucketId)
+            if (workerIdx >= 0) {
+              const target = buckets[workerIdx]
+              nextBuckets = [
+                ...buckets.slice(0, workerIdx),
+                { ...target, entries: [...target.entries, entry] },
+                ...buckets.slice(workerIdx + 1)
+              ]
+            } else {
+              const workerThreadId = entry.workerThreadId ?? ""
+              const workerLabel =
+                entry.workerId ??
+                (workerThreadId.includes("__worker__")
+                  ? workerThreadId.split("__worker__").pop()
+                  : workerThreadId)
+              nextBuckets = trim([
+                ...buckets,
+                {
+                  turnId: workerBucketId,
+                  turnPreview:
+                    typeof entry.workerTurn === "number"
+                      ? `(Worker ${workerLabel} 第 ${entry.workerTurn} 轮 Hook)`
+                      : `(Worker ${workerLabel} Hook)`,
                   isPlaceholder: true,
                   startedAt: new Date(),
                   entries: [entry]
@@ -3060,6 +3106,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   // Track passive scheduler/heartbeat stream listeners per thread
   const schedulerListenerCleanups = useRef<Record<string, () => void>>({})
   const heartbeatListenerCleanups = useRef<Record<string, () => void>>({})
+  // Track durable coordinator-worker hook listeners per thread. These survive
+  // past a run so async worker hook records (which fire after the run stream
+  // closes) still reach the hook-log buckets.
+  const coordinatorWorkerHookListenerCleanups = useRef<Record<string, () => void>>({})
   // Track approval listeners per thread (registered globally, not per-component)
   const approvalListenerCleanups = useRef<Record<string, Array<() => void>>>({})
   // Track request_user_input listeners per thread.
@@ -3302,6 +3352,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         schedulerListenerCleanups.current[threadId] = schedulerCleanup
       }
 
+      // Durable listener for coordinator-worker hook records. Worker hooks are
+      // delivered on a thread-scoped channel (not the run stream) so they
+      // survive async worker execution; route them through handleCustomEvent,
+      // which buckets `hook_executed` envelopes into the per-turn hook log.
+      const coordinatorWorkerHookCleanup = window.api.agent.onCoordinatorWorkerHook(
+        threadId,
+        (envelope) => handleCustomEvent(threadId, envelope as CustomEventData)
+      )
+      coordinatorWorkerHookListenerCleanups.current[threadId] = coordinatorWorkerHookCleanup
+
       const cancelledApprovalRequestIds = new Set<string>()
 
       // Register global approval listeners for this thread (not tied to ChatContainer mount)
@@ -3427,7 +3487,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
       userInputListenerCleanups.current[threadId] = [cleanupUserInput, cleanupUserInputCancel]
     },
-    [loadThreadHistory, processSchedulerEvent, updateThreadState]
+    [loadThreadHistory, processSchedulerEvent, updateThreadState, handleCustomEvent]
   )
 
   useEffect(() => {
@@ -3474,6 +3534,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     delete schedulerListenerCleanups.current[threadId]
     heartbeatListenerCleanups.current[threadId]?.()
     delete heartbeatListenerCleanups.current[threadId]
+    coordinatorWorkerHookListenerCleanups.current[threadId]?.()
+    delete coordinatorWorkerHookListenerCleanups.current[threadId]
     approvalListenerCleanups.current[threadId]?.forEach((c) => c())
     delete approvalListenerCleanups.current[threadId]
     userInputListenerCleanups.current[threadId]?.forEach((c) => c())

@@ -314,6 +314,23 @@ const api = {
         ipcRenderer.removeListener(channel, handler)
       }
     },
+    onCoordinatorWorkerHook: (
+      threadId: string,
+      callback: (envelope: unknown) => void
+    ): (() => void) => {
+      // Durable per-thread channel for coordinator-worker hook records. Unlike
+      // the run stream, this survives past the spawning turn so async worker
+      // hooks still reach the renderer. Payload is the raw hook envelope
+      // (`type: "hook_executed"`), fed straight into handleCustomEvent.
+      const channel = `agent:coordinator-worker-hook:${threadId}`
+      const handler = (_: unknown, data: unknown): void => {
+        callback(data)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
     setCoordinatorWorkerStreamFocus: (
       threadId: string,
       workerThreadId: string | null,

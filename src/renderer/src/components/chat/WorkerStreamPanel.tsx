@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
 import { ArrowLeft, Loader2, Workflow } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
+import { HookLogChip, HookLogModal } from "./HookLogViews"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
-import { useThreadState } from "@/lib/thread-context"
+import { useThreadContext, useThreadState, type HookLogBucket } from "@/lib/thread-context"
 import { useAppStore } from "@/lib/store"
 import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
 import { getWorkerToolResultKey } from "@/lib/worker-tool-result-key"
@@ -12,6 +13,7 @@ import { cn } from "@/lib/utils"
 
 const MAX_WORKER_SIGNATURE_CHARS = 512
 const MAX_WORKER_HISTORY_MESSAGES = 500
+const EMPTY_WORKER_HOOK_LOG_BUCKETS: HookLogBucket[] = []
 
 type SerializedCheckpointMessage = {
   id?: string | string[]
@@ -304,6 +306,103 @@ function buildToolResults(
   return results
 }
 
+function workerMessagePreview(message: Message): string {
+  const content = message.content
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content
+            .map((block) => {
+              if (typeof block.text === "string") return block.text
+              if (typeof block.content === "string") return block.content
+              return ""
+            })
+            .join(" ")
+        : ""
+  return text.trim().slice(0, 120)
+}
+
+function buildWorkerHookLogBuckets(
+  messages: Message[],
+  hookLogBuckets: HookLogBucket[],
+  workerThreadId: string | undefined
+): {
+  bucketById: Map<string, HookLogBucket>
+  bucketByMessageId: Map<string, HookLogBucket>
+  detachedBuckets: HookLogBucket[]
+  totalEntryCount: number
+} {
+  const bucketById = new Map<string, HookLogBucket>()
+  const bucketByMessageId = new Map<string, HookLogBucket>()
+  const detachedBuckets: HookLogBucket[] = []
+  if (!workerThreadId) {
+    return { bucketById, bucketByMessageId, detachedBuckets, totalEntryCount: 0 }
+  }
+
+  const userMessages = messages.filter((message) => message.role === "user")
+  const userMessageByTurn = new Map<number, Message>()
+  userMessages.forEach((message, index) => userMessageByTurn.set(index + 1, message))
+
+  const upsertBucket = (bucket: HookLogBucket): HookLogBucket => {
+    const existing = bucketById.get(bucket.turnId)
+    if (!existing) {
+      bucketById.set(bucket.turnId, bucket)
+      if (bucketByMessageId.has(bucket.turnId)) {
+        bucketByMessageId.set(bucket.turnId, bucket)
+      } else if (bucket.isPlaceholder) {
+        detachedBuckets.push(bucket)
+      }
+      return bucket
+    }
+    const next = { ...existing, entries: [...existing.entries, ...bucket.entries] }
+    bucketById.set(next.turnId, next)
+    if (bucketByMessageId.has(next.turnId)) {
+      bucketByMessageId.set(next.turnId, next)
+    } else {
+      const index = detachedBuckets.findIndex((item) => item.turnId === next.turnId)
+      if (index >= 0) detachedBuckets[index] = next
+    }
+    return next
+  }
+
+  let totalEntryCount = 0
+  for (const sourceBucket of hookLogBuckets) {
+    for (const entry of sourceBucket.entries) {
+      if (entry.workerThreadId !== workerThreadId) continue
+      totalEntryCount += 1
+      const workerTurn =
+        typeof entry.workerTurn === "number" && Number.isFinite(entry.workerTurn)
+          ? entry.workerTurn
+          : undefined
+      const targetMessage = workerTurn ? userMessageByTurn.get(workerTurn) : undefined
+      if (targetMessage) {
+        const existing = bucketByMessageId.get(targetMessage.id)
+        const bucket: HookLogBucket = {
+          turnId: targetMessage.id,
+          turnPreview: workerMessagePreview(targetMessage),
+          startedAt: existing?.startedAt ?? entry.timestamp,
+          entries: [entry]
+        }
+        if (!existing) bucketByMessageId.set(targetMessage.id, bucket)
+        upsertBucket(bucket)
+        continue
+      }
+
+      const turnLabel = workerTurn ? `第 ${workerTurn} 轮` : "未匹配轮次"
+      upsertBucket({
+        turnId: `worker-hook:${workerThreadId}:${workerTurn ?? "unknown"}`,
+        turnPreview: `(Worker ${turnLabel} Hook)`,
+        isPlaceholder: true,
+        startedAt: entry.timestamp,
+        entries: [entry]
+      })
+    }
+  }
+
+  return { bucketById, bucketByMessageId, detachedBuckets, totalEntryCount }
+}
+
 function messageContentLength(content: Message["content"] | undefined): number {
   if (typeof content === "string") return content.length
   if (!Array.isArray(content)) return 0
@@ -413,10 +512,12 @@ export function WorkerStreamPanel(): React.JSX.Element {
   const workerFocusView = useAppStore((state) => state.workerFocusView)
   const workerFocusMessages = useAppStore((state) => state.workerFocusMessages)
   const closeWorkerFocusView = useAppStore((state) => state.closeWorkerFocusView)
+  const threadContext = useThreadContext()
   const [historyMessages, setHistoryMessages] = useState<Message[]>([])
   const [truncatedHistoryCount, setTruncatedHistoryCount] = useState(0)
   const [loadingHistory, setLoadingHistory] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
+  const [openHookLogBucketId, setOpenHookLogBucketId] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const thinkingCycleRef = useRef(-1)
   const wasRunningRef = useRef(false)
@@ -431,6 +532,23 @@ export function WorkerStreamPanel(): React.JSX.Element {
     (worker) => worker.worker_id === workerFocusView?.workerId
   )
   const isRunning = currentWorker?.status === "running"
+  const focusedParentThreadId = workerFocusView?.threadId ?? null
+  const parentHookLogBuckets = useSyncExternalStore(
+    useCallback(
+      (callback) =>
+        focusedParentThreadId
+          ? threadContext.subscribeToHookLogs(focusedParentThreadId, callback)
+          : () => undefined,
+      [focusedParentThreadId, threadContext]
+    ),
+    useCallback(
+      () =>
+        focusedParentThreadId
+          ? threadContext.getHookLogBuckets(focusedParentThreadId)
+          : EMPTY_WORKER_HOOK_LOG_BUCKETS,
+      [focusedParentThreadId, threadContext]
+    )
+  )
 
   useEffect(() => {
     const workerThreadId = workerFocusView?.workerThreadId
@@ -491,6 +609,18 @@ export function WorkerStreamPanel(): React.JSX.Element {
     () => mergeMessages(historyMessages, workerFocusMessages),
     [historyMessages, workerFocusMessages]
   )
+  const workerHookLogs = useMemo(
+    () =>
+      buildWorkerHookLogBuckets(
+        messages,
+        parentHookLogBuckets,
+        workerFocusView?.workerThreadId
+      ),
+    [messages, parentHookLogBuckets, workerFocusView?.workerThreadId]
+  )
+  const openHookLogBucket = openHookLogBucketId
+    ? (workerHookLogs.bucketById.get(openHookLogBucketId) ?? null)
+    : null
   const showAssistantMetaByIndex = useMemo(() => {
     const result = new Array<boolean>(messages.length)
     let nextNonToolMessage: Message | null = null
@@ -557,14 +687,25 @@ export function WorkerStreamPanel(): React.JSX.Element {
       lastMessage?.tool_calls?.length ?? 0,
       toolResults.size,
       workerFocusMessages.length,
+      workerHookLogs.totalEntryCount,
       isRunning ? "running" : "idle"
     ].join(":")
-  }, [messages, toolResults.size, workerFocusMessages.length, isRunning])
+  }, [
+    messages,
+    toolResults.size,
+    workerFocusMessages.length,
+    workerHookLogs.totalEntryCount,
+    isRunning
+  ])
 
   useEffect(() => {
     isAtBottomRef.current = true
     return scrollToBottom()
   }, [scrollToBottom, workerFocusView?.workerThreadId])
+
+  useEffect(() => {
+    setOpenHookLogBucketId(null)
+  }, [workerFocusView?.workerThreadId])
 
   useEffect(() => {
     if (loadingHistory) return
@@ -682,25 +823,48 @@ export function WorkerStreamPanel(): React.JSX.Element {
                 checkpoint 消息；更早的 {truncatedHistoryCount} 条历史未在面板加载。
               </div>
             )}
+            {workerHookLogs.detachedBuckets.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {workerHookLogs.detachedBuckets.map((bucket) => (
+                  <HookLogChip
+                    key={bucket.turnId}
+                    bucket={bucket}
+                    onClick={() => setOpenHookLogBucketId(bucket.turnId)}
+                  />
+                ))}
+              </div>
+            )}
             {messages.map((message, index) => {
+              if (message.role === "tool") return null
               const previousMessage = index > 0 ? messages[index - 1] : null
               const isLastMessage = index === messages.length - 1
               const hasUserAfterHead = messages.slice(index + 1).some((m) => m.role === "user")
+              const hookLogBucketForTurn =
+                message.role === "user" ? workerHookLogs.bucketByMessageId.get(message.id) : null
 
               return (
-                <MessageBubble
-                  key={message.id}
-                  message={message}
-                  previousMessage={previousMessage}
-                  isStreaming={isRunning && isLastMessage}
-                  showAssistantMeta={showAssistantMetaByIndex[index] ?? true}
-                  toolResults={toolResults}
-                  threadId={workerFocusView.threadId}
-                  isLoading={isRunning}
-                  hasUserAfterHead={hasUserAfterHead}
-                  assistantDurationMs={assistantDurationMsById.get(message.id)}
-                  userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
-                />
+                <div key={message.id}>
+                  <MessageBubble
+                    message={message}
+                    previousMessage={previousMessage}
+                    isStreaming={isRunning && isLastMessage}
+                    showAssistantMeta={showAssistantMetaByIndex[index] ?? true}
+                    toolResults={toolResults}
+                    threadId={workerFocusView.threadId}
+                    isLoading={isRunning}
+                    hasUserAfterHead={hasUserAfterHead}
+                    assistantDurationMs={assistantDurationMsById.get(message.id)}
+                    userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
+                  />
+                  {hookLogBucketForTurn && hookLogBucketForTurn.entries.length > 0 && (
+                    <div className="mt-1 flex justify-end pr-2">
+                      <HookLogChip
+                        bucket={hookLogBucketForTurn}
+                        onClick={() => setOpenHookLogBucketId(hookLogBucketForTurn.turnId)}
+                      />
+                    </div>
+                  )}
+                </div>
               )
             })}
             {isRunning && (
@@ -717,6 +881,14 @@ export function WorkerStreamPanel(): React.JSX.Element {
           </div>
         </div>
       </ScrollArea>
+      <HookLogModal
+        bucket={openHookLogBucket}
+        open={openHookLogBucketId !== null}
+        previewLabel="Worker 指令"
+        onOpenChange={(open) => {
+          if (!open) setOpenHookLogBucketId(null)
+        }}
+      />
     </div>
   )
 }

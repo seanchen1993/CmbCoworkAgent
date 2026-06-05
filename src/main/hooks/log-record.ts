@@ -92,6 +92,11 @@ export interface HookExecutedEnvelope {
   timestamp: string
   /** Renderer user message id that owns this hook event, when this is a chat turn. */
   turnId?: string
+  /** Coordinator-worker identity, when the hook fired inside an async worker. */
+  workerId?: string
+  workerThreadId?: string
+  workerTurn?: number
+  parentThreadId?: string
 }
 
 export type ScopedHook = HookConfig & {
@@ -99,6 +104,10 @@ export type ScopedHook = HookConfig & {
   pluginName?: string
   skillName?: string
   skillPath?: string
+  workerId?: string
+  workerThreadId?: string
+  workerTurn?: number
+  parentThreadId?: string
 }
 
 function buildLabel(hook: HookConfig, diagnostic: boolean): string {
@@ -143,7 +152,11 @@ function buildExecutedEnvelope(
     ),
     systemMessage: result.systemMessage,
     timestamp: new Date().toISOString(),
-    turnId: options.turnId
+    turnId: options.turnId,
+    workerId: hook.workerId,
+    workerThreadId: hook.workerThreadId,
+    workerTurn: hook.workerTurn,
+    parentThreadId: hook.parentThreadId
   }
   if (diagnostic) {
     envelope.command = hook.type === "prompt" ? hook.prompt : hook.command
@@ -186,7 +199,11 @@ function buildSkippedEnvelope(
     cwd: hook.hookSourceRoot,
     skipReason: reason,
     timestamp: new Date().toISOString(),
-    turnId
+    turnId,
+    workerId: hook.workerId,
+    workerThreadId: hook.workerThreadId,
+    workerTurn: hook.workerTurn,
+    parentThreadId: hook.parentThreadId
   }
 }
 

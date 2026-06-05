@@ -1,7 +1,8 @@
 import {
   getEnabledPluginHookMetadata,
   getEnabledSkillHookMetadata,
-  getEnabledHooks
+  getEnabledHooks,
+  getEnabledPluginSkillSourceMetadata
 } from "../storage"
 import { hookMatchesRunCriteria, type HookContext } from "./runner"
 import type { HookConfig, HookEvent } from "./types"
@@ -205,6 +206,27 @@ export function createInheritedHookScope(parent: HookScopeController): HookScope
   const child = createHookScope()
   mergeHookScopeSnapshot(child, parent.snapshot())
   return child
+}
+
+/**
+ * Resolve which enabled plugin owns a given skill path by matching it against
+ * each plugin's skill-source roots. Returns the owning pluginId, or undefined
+ * for a standalone / workspace skill.
+ *
+ * Used so a coordinator can activate a plugin's scope when the user
+ * slash-selects one of its skills — without that pluginId, only the skill scope
+ * would activate and the plugin's own (plugin-scoped) hooks would stay gated.
+ */
+export function resolvePluginIdForSkillPath(
+  skillPath: string | undefined | null
+): string | undefined {
+  const key = normalizePathKey(skillPath)
+  if (!key) return undefined
+  for (const source of getEnabledPluginSkillSourceMetadata()) {
+    const root = normalizePathKey(source.pluginRoot)
+    if (root && (key === root || key.startsWith(`${root}/`))) return source.pluginId
+  }
+  return undefined
 }
 
 export interface ScopedHookCandidates {

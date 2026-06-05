@@ -148,6 +148,12 @@ export async function isFeatureGateEnabled(
   name: FeatureGateKey,
   options: FeatureGateCheckOptions = {}
 ): Promise<FeatureGateCheckResult> {
+  // TODO(temporary): 本地 dev 没有配置 VITE_UPDATE_SERVER_URL，远程 feature gate 拉不到，
+  // 导致项目模式等开关本地用不了。dev 模式下临时全部放开，发布前移除。
+  if (import.meta.env.DEV) {
+    return { enabled: true, reason: "dev-mode-override" }
+  }
+
   const baseUrl = getUpdateServerUrl()
   if (!baseUrl) return { enabled: false, reason: "update-server-url-missing" }
 

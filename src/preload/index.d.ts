@@ -377,6 +377,10 @@ interface CustomAPI {
         workerTurn?: number
       }) => void
     ) => () => void
+    onCoordinatorWorkerHook: (
+      threadId: string,
+      callback: (envelope: unknown) => void
+    ) => () => void
     setCoordinatorWorkerStreamFocus: (
       threadId: string,
       workerThreadId: string | null,
