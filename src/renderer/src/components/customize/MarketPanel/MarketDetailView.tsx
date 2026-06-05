@@ -130,27 +130,25 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
 
           <div className="xl:order-2 order-1 space-y-3 xl:sticky xl:top-4 w-full h-full overflow-y-auto pr-1">
             <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.04)_0px_4px_16px]">
-              {activeTab !== "skill" && (
-                <div className="space-y-1.5">
-                  {selectedItem.chinese_name ? (
-                    <h3 className="text-base font-medium leading-snug text-[#141413]">
-                      {selectedItem.chinese_name}
-                      <span className="ml-2 text-[#87867f] font-normal text-sm">
-                        ({selectedItem.name})
-                      </span>
-                    </h3>
-                  ) : (
-                    <h3 className="text-base font-medium leading-snug text-[#141413]">
-                      {selectedItem.name}
-                    </h3>
-                  )}
-                  {selectedItem.description && (
-                    <p className="text-sm text-[#87867f] leading-relaxed whitespace-pre-wrap break-words">
-                      {selectedItem.description}
-                    </p>
-                  )}
-                </div>
-              )}
+              <div className="space-y-1.5">
+                {selectedItem.chinese_name ? (
+                  <h3 className="text-base font-medium leading-snug text-[#141413]">
+                    {selectedItem.chinese_name}
+                    <span className="ml-2 text-[#87867f] font-normal text-sm">
+                      ({selectedItem.name})
+                    </span>
+                  </h3>
+                ) : (
+                  <h3 className="text-base font-medium leading-snug text-[#141413]">
+                    {selectedItem.name}
+                  </h3>
+                )}
+                {selectedItem.description && (
+                  <p className="text-sm text-[#87867f] leading-relaxed whitespace-pre-wrap break-words">
+                    {selectedItem.description}
+                  </p>
+                )}
+              </div>
 
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
                 {selectedItem.category && (
