@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import {
   Search,
   ShoppingBag,
@@ -11,10 +11,8 @@ import {
   Zap,
   Tag,
   Star,
-  GitBranch,
   User,
   Edit,
-  Calendar,
   FileText,
   X,
   BarChart3,
@@ -488,21 +486,21 @@ function MarketItemCard({
       {/* Footer: metadata + actions */}
       <div className="mt-auto flex items-center justify-between flex-wrap gap-2 pt-3 border-t border-[#f0eee6]">
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-[#87867f]">
-          <div className="flex items-center gap-1">
-            <Calendar className="size-3 shrink-0" />
-            <span>{new Date(item.created_at).toLocaleDateString("zh-CN")}</span>
-          </div>
-          {item.version && (
-            <div className="flex items-center gap-1">
-              <GitBranch className="size-3 shrink-0" />
-              <span>
-                {updateAvailable && installedVersion
-                  ? `${formatMarketVersionLabel(installedVersion)} -> `
-                  : ""}
-                {formatMarketVersionLabel(item.version)}
-              </span>
-            </div>
-          )}
+          {/*<div className="flex items-center gap-1">*/}
+          {/*  <Calendar className="size-3 shrink-0" />*/}
+          {/*  <span>{new Date(item.created_at).toLocaleDateString("zh-CN")}</span>*/}
+          {/*</div>*/}
+          {/*{item.version && (*/}
+          {/*  <div className="flex items-center gap-1">*/}
+          {/*    <GitBranch className="size-3 shrink-0" />*/}
+          {/*    <span>*/}
+          {/*      {updateAvailable && installedVersion*/}
+          {/*        ? `${formatMarketVersionLabel(installedVersion)} -> `*/}
+          {/*        : ""}*/}
+          {/*      {formatMarketVersionLabel(item.version)}*/}
+          {/*    </span>*/}
+          {/*  </div>*/}
+          {/*)}*/}
           {item.user_id ? (
             <div className="flex items-center gap-1">
               <User className="size-3 shrink-0" />
@@ -660,6 +658,12 @@ function MarketItemCard({
 type DetailViewMode = "list" | "detail"
 type SkillPreviewKind = "text" | "html" | "image" | "pdf"
 
+interface MarketListScrollState {
+  activeTab: MarketItemType
+  viewportTop: number
+  cardListTop: number
+}
+
 interface PluginDetailData {
   skills: string[]
   mcpServers: string[]
@@ -756,6 +760,15 @@ export function MarketPanel(): React.JSX.Element {
   const [uploadedSkillNames, setUploadedSkillNames] = useState<Set<string>>(() =>
     readUploadedSkillNamesFromStorage()
   )
+  const listScrollAreaRef = useRef<HTMLDivElement | null>(null)
+  const listCardContainerRef = useRef<HTMLDivElement | null>(null)
+  const savedListScrollRef = useRef<MarketListScrollState>({
+    activeTab: "skill",
+    viewportTop: 0,
+    cardListTop: 0
+  })
+  const hasSavedListScrollRef = useRef(false)
+  const shouldRestoreListScrollRef = useRef(false)
   const installedSkillsRef = useRef<string[]>([])
   const installedMcpsRef = useRef<string[]>([])
   const installedPluginsRef = useRef<string[]>([])
@@ -817,6 +830,30 @@ export function MarketPanel(): React.JSX.Element {
   const setSearchQueryForTab = useCallback((tab: MarketItemType, query: string) => {
     setSearchQueries((prev) => (prev[tab] === query ? prev : { ...prev, [tab]: query }))
   }, [])
+
+  const getScrollAreaViewport = useCallback((root: HTMLDivElement | null): HTMLDivElement | null => {
+    if (!root) return null
+    if (root.matches("[data-radix-scroll-area-viewport]")) return root
+    return root.querySelector("[data-radix-scroll-area-viewport]") as HTMLDivElement | null
+  }, [])
+
+  const captureListScrollPosition = useCallback(() => {
+    savedListScrollRef.current = {
+      activeTab,
+      viewportTop: getScrollAreaViewport(listScrollAreaRef.current)?.scrollTop ?? 0,
+      cardListTop: listCardContainerRef.current?.scrollTop ?? 0
+    }
+    hasSavedListScrollRef.current = true
+  }, [activeTab, getScrollAreaViewport])
+
+  const restoreListScrollPosition = useCallback(() => {
+    const savedPosition = savedListScrollRef.current
+    if (!hasSavedListScrollRef.current || savedPosition.activeTab !== activeTab) return
+
+    const viewport = getScrollAreaViewport(listScrollAreaRef.current)
+    if (viewport) viewport.scrollTop = savedPosition.viewportTop
+    if (listCardContainerRef.current) listCardContainerRef.current.scrollTop = savedPosition.cardListTop
+  }, [activeTab, getScrollAreaViewport])
 
   const resetDetailState = () => {
     setDetailError(null)
@@ -1477,6 +1514,8 @@ export function MarketPanel(): React.JSX.Element {
   useEffect(() => {
     const previousActiveTab = previousActiveTabRef.current
     previousActiveTabRef.current = activeTab
+    hasSavedListScrollRef.current = false
+    shouldRestoreListScrollRef.current = false
     setDetailMode("list")
     setSelectedItemKey(null)
     setSelectedItemSnapshot(null)
@@ -1809,6 +1848,9 @@ export function MarketPanel(): React.JSX.Element {
   }, [activeTab, loading, marketCategoryStats, pendingInitialCategoryFilter])
 
   const openItemDetail = async (item: MarketItem) => {
+    if (detailMode === "list") {
+      captureListScrollPosition()
+    }
     setSelectedItemKey(getItemKey(item))
     setSelectedItemSnapshot(item)
     setDetailMode("detail")
@@ -1852,11 +1894,32 @@ export function MarketPanel(): React.JSX.Element {
   ])
 
   const backToList = () => {
+    shouldRestoreListScrollRef.current =
+      hasSavedListScrollRef.current && savedListScrollRef.current.activeTab === activeTab
     setDetailMode("list")
     setSelectedItemKey(null)
     setSelectedItemSnapshot(null)
     resetDetailState()
   }
+
+  useLayoutEffect(() => {
+    if (detailMode !== "list" || !shouldRestoreListScrollRef.current) return
+
+    let firstFrame = 0
+    let secondFrame = 0
+    firstFrame = window.requestAnimationFrame(() => {
+      restoreListScrollPosition()
+      secondFrame = window.requestAnimationFrame(() => {
+        restoreListScrollPosition()
+        shouldRestoreListScrollRef.current = false
+      })
+    })
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame)
+      window.cancelAnimationFrame(secondFrame)
+    }
+  }, [detailMode, restoreListScrollPosition])
 
   const handleDelete = (item: MarketItem) => {
     setDeleteDialog({ open: true, item })
@@ -2364,7 +2427,7 @@ export function MarketPanel(): React.JSX.Element {
 
           <div className="flex-1 overflow-hidden">
             <TabsContent value={activeTab} className="mt-0 h-full">
-              <ScrollArea className="h-full">
+              <ScrollArea className="h-full" ref={listScrollAreaRef}>
                 <div className="p-4 space-y-3">
                   {activeTab !== ORG_SKILL_MARKET_TYPE && (
                     <div className="flex items-center gap-2">
@@ -2461,7 +2524,6 @@ export function MarketPanel(): React.JSX.Element {
                       onUninstall={handleUninstall}
                       initialDetailName={pendingOrgSkillDetailName}
                       onInitialDetailReady={(item) => {
-                        console.log(item, "hehe...")
                         void openItemDetailRef.current(item)
                       }}
                       onInitialDetailConsumed={() => setPendingOrgSkillDetailName(null)}
@@ -2591,6 +2653,7 @@ export function MarketPanel(): React.JSX.Element {
                         ) : (
                           <div
                             key="market-card-results"
+                            ref={listCardContainerRef}
                             className="grid max-h-[calc(100vh-330px)] grid-cols-1 gap-3 overflow-y-auto pr-1 2xl:grid-cols-2"
                           >
                             {visibleMarketData.map((item) => (

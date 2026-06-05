@@ -5,7 +5,6 @@ import {
   Check,
   CheckCircle,
   FileText,
-  GitBranch,
   Search,
   Sparkles,
   Tag,
@@ -151,17 +150,22 @@ function OrgSkillCard({
                 <h3 className="text-[15px] font-medium text-[#141413] leading-snug truncate">
                   {item.chinese_name || item.name}
                 </h3>
-                <div className=" text-[12px] text-[#87867f] truncate">{item.name}</div>
+                <div className=" text-[12px] text-[#87867f] truncate">({item.name})</div>
                 {item.category && (
                   <span className="inline-flex items-center gap-1 text-xs text-gray-500">
                     <Tag className="size-3" />
                     {getCategoryFilterName(item.category)}
                   </span>
                 )}
+                <span className="inline-flex items-center gap-1  text-xs text-gray-500 ml-2">
+            <Calendar className="size-3" />
+            更新于 {new Date(updatedAt).toLocaleDateString("zh-CN")}
+          </span>
               </div>
             </div>
             {item.installed && (
-              <span className="inline-flex items-center gap-1 rounded-full border border-[#c4e8d1] bg-[#edf7f0] px-2 py-0.5 text-[11px] font-medium text-[#2e7d4f] shrink-0">
+              <span
+                className="inline-flex items-center gap-1 rounded-full border border-[#c4e8d1] bg-[#edf7f0] px-2 py-0.5 text-[11px] font-medium text-[#2e7d4f] shrink-0">
                 <CheckCircle className="size-3" />
                 已安装
               </span>
@@ -177,15 +181,11 @@ function OrgSkillCard({
       {/*box bottom*/}
       <div className={"mt-auto flex items-center justify-between border-t border-[#f0eee6] pt-1 mt-4"}>
         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-[#87867f]">
-          {item.version && (
-            <span className="inline-flex items-center gap-1">
-              <GitBranch className="size-3" />v{item.version}
-            </span>
-          )}
-          <span className="inline-flex items-center gap-1">
-            <Calendar className="size-3" />
-            更新于 {new Date(updatedAt).toLocaleDateString("zh-CN")}
-          </span>
+          {/*{item.version && (*/}
+          {/*  <span className="inline-flex items-center gap-1">*/}
+          {/*    <GitBranch className="size-3" />v{item.version}*/}
+          {/*  </span>*/}
+          {/*)}*/}
           {(item.user_id || item.managerName || item.managerDepartment) && (
             <span className="flex min-w-0 items-start gap-1">
               <User className="mt-0.5 size-3 shrink-0" />

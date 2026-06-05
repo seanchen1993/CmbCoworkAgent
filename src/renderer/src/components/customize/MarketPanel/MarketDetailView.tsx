@@ -144,7 +144,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                   </h3>
                 )}
                 {selectedItem.description && (
-                  <p className="text-sm text-[#87867f] leading-relaxed whitespace-pre-wrap break-words">
+                  <p className="my-4 text-xs text-[#87867f] leading-relaxed whitespace-pre-wrap break-words">
                     {selectedItem.description}
                   </p>
                 )}
