@@ -7,6 +7,7 @@ interface ImportMetaEnv {
   readonly VITE_CONSOLE_LOG_DEFAULT_ON?: string
   readonly VITE_PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL?: string
   readonly VITE_OPEN_ASSISTANT_HUB_GATEWAY_URL?: string
+  readonly VITE_JUMP_RECORD_SKILL_URL?: string
 }
 
 interface ImportMeta {

@@ -11,6 +11,7 @@ import {
   GitBranch,
   Plus,
   Power,
+  Radio,
   Search,
   Sparkles,
   Store,
@@ -1400,6 +1401,7 @@ function SkillsGuide(): React.JSX.Element {
 export function SkillsPanel(): React.JSX.Element {
   const { setShowCustomizeView, setMarketInitialSkillCategory, setMarketInitialSkillSearchQuery } =
     useAppStore()
+  const recordSkillUrl = import.meta.env.VITE_JUMP_RECORD_SKILL_URL?.trim() || ""
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [expandedSkills, setExpandedSkills] = useState<Set<string>>(new Set())
   const [expandedDirNodes, setExpandedDirNodes] = useState<Set<string>>(new Set())
@@ -1882,6 +1884,18 @@ export function SkillsPanel(): React.JSX.Element {
     [setMarketInitialSkillCategory, setMarketInitialSkillSearchQuery, setShowCustomizeView]
   )
 
+  const handleOpenRecordSkill = useCallback(() => {
+    if (!recordSkillUrl) {
+      toast.error("未配置录制技能跳转地址")
+      return
+    }
+
+    void window.electron.openExternal(recordSkillUrl).catch((error) => {
+      console.error("[SkillsPanel] Failed to open record skill url:", error)
+      toast.error("打开录制技能页面失败")
+    })
+  }, [recordSkillUrl])
+
   return (
     <div className="contents">
       <div className="w-[330px] shrink-0 border-r border-border flex flex-col">
@@ -1908,27 +1922,45 @@ export function SkillsPanel(): React.JSX.Element {
               </button>
             )}
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-1.5">
+              <Button
+                variant="outline"
+                size="sm"
+                className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-emerald-300/55 bg-emerald-500/[0.08] px-2 text-xs font-medium text-emerald-700 shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-emerald-400/70 hover:bg-emerald-500/[0.16] hover:shadow-md dark:text-emerald-300"
+                onClick={() => setUploadDialogOpen(true)}
+                aria-label="上传技能"
+              >
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-emerald-400/10 to-emerald-400/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+                />
+                <span className="relative flex size-4 items-center justify-center rounded-full bg-emerald-500/15 ring-1 ring-emerald-500/25 transition-transform duration-200 group-hover:scale-105">
+                  <Plus className="size-2.5" />
+                </span>
+                <span className="relative">上传技能</span>
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-amber-300/55 bg-amber-500/[0.08] px-2 text-xs font-medium text-amber-700 shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-amber-400/70 hover:bg-amber-500/[0.16] hover:shadow-md dark:text-amber-300"
+                onClick={handleOpenRecordSkill}
+                aria-label="录制技能"
+              >
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-amber-400/10 to-amber-400/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+                />
+                <span className="relative flex size-4 items-center justify-center rounded-full bg-amber-500/15 ring-1 ring-amber-500/25 transition-transform duration-200 group-hover:scale-105">
+                  <Radio className="size-2.5" />
+                </span>
+                <span className="relative">录制技能</span>
+              </Button>
+            </div>
             <Button
               variant="outline"
               size="sm"
-              className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-emerald-300/55 bg-emerald-500/[0.08] px-2 text-xs font-medium text-emerald-700 shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-emerald-400/70 hover:bg-emerald-500/[0.16] hover:shadow-md dark:text-emerald-300"
-              onClick={() => setUploadDialogOpen(true)}
-              aria-label="上传技能"
-            >
-              <span
-                aria-hidden="true"
-                className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-emerald-400/10 to-emerald-400/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
-              />
-              <span className="relative flex size-4 items-center justify-center rounded-full bg-emerald-500/15 ring-1 ring-emerald-500/25 transition-transform duration-200 group-hover:scale-105">
-                <Plus className="size-2.5" />
-              </span>
-              <span className="relative">上传技能</span>
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-primary/40 bg-primary/[0.08] px-2.5 text-xs font-medium text-primary shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-primary/60 hover:bg-primary/[0.18] hover:shadow-md"
+              className="mt-2 cursor-pointer group relative h-7 w-full overflow-hidden rounded-md border-primary/40 bg-primary/[0.08] px-2.5 text-xs font-medium text-primary shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-primary/60 hover:bg-primary/[0.18] hover:shadow-md"
               onClick={() => openMarketWithSkillSearch("")}
             >
               <span
