@@ -4,8 +4,8 @@ import {
   Layers,
   Activity,
   MessagesSquare,
-  Wrench,
-  Cpu,
+  ArrowDownToLine,
+  ArrowUpFromLine,
   ChevronDown,
   ChevronRight,
   Loader2,
@@ -30,7 +30,8 @@ import type {
   DashboardProjectModeAdapter,
   DashboardProjectModeProject,
   DashboardProjectModeSkillCount,
-  DashboardProjectModeToolUsage
+  DashboardProjectModeToolUsage,
+  DashboardCodeStats
 } from "../use-dashboard"
 
 const EMPTY_FUNNEL_DATA: CodeAdoptionFunnelData = {
@@ -429,6 +430,12 @@ function ProjectListSection({
                 onOpenTraces={() => onOpenTraces(project)}
               />
             ))}
+            {pageItems.length > 0 &&
+              Array.from({ length: PROJECT_PAGE_SIZE - pageItems.length }).map((_, i) => (
+                <tr key={`filler-${i}`} aria-hidden className="border-b border-border/50">
+                  <td colSpan={8} className="h-[49px]" />
+                </tr>
+              ))}
             {pageItems.length === 0 && (
               <tr>
                 <td colSpan={8} className="px-3 py-10 text-center text-muted-foreground">
@@ -473,13 +480,86 @@ function ProjectListSection({
   )
 }
 
+type AdapterListMode = "byName" | "byVersion"
+
+function adoptionRate(adopted: number, generated: number): number | null {
+  return generated > 0 ? adopted / generated : null
+}
+
+/** 合并同名插件不同版本的代码采纳明细，按行数累加后重算采纳率。 */
+function mergeCodeStats(
+  items: Array<DashboardCodeStats | null | undefined>
+): DashboardCodeStats | null {
+  const valid = items.filter((s): s is DashboardCodeStats => Boolean(s))
+  if (valid.length === 0) return null
+  const sum = (pick: (s: DashboardCodeStats) => number): number =>
+    valid.reduce((acc, s) => acc + pick(s), 0)
+  const generatedLines = sum((s) => s.generatedLines)
+  const deletedLines = sum((s) => s.deletedLines)
+  const effectiveGeneratedLines = sum((s) => s.effectiveGeneratedLines)
+  const measuredGeneratedLines = sum((s) => s.measuredGeneratedLines)
+  const unmeasuredGeneratedLines = sum((s) => s.unmeasuredGeneratedLines)
+  const inclusiveEffectiveGeneratedLines = sum((s) => s.inclusiveEffectiveGeneratedLines)
+  const adoptedLines = sum((s) => s.adoptedLines)
+  const pushedMeasuredGeneratedLines = sum((s) => s.pushedMeasuredGeneratedLines)
+  const pushedEffectiveGeneratedLines = sum((s) => s.pushedEffectiveGeneratedLines)
+  const pushedAdoptedLines = sum((s) => s.pushedAdoptedLines)
+  const pushedCommitCount = sum((s) => s.pushedCommitCount)
+  const measuredAdoptionRate = adoptionRate(adoptedLines, effectiveGeneratedLines)
+  return {
+    generatedLines,
+    deletedLines,
+    effectiveGeneratedLines,
+    measuredGeneratedLines,
+    unmeasuredGeneratedLines,
+    inclusiveEffectiveGeneratedLines,
+    adoptedLines,
+    pushedMeasuredGeneratedLines,
+    pushedEffectiveGeneratedLines,
+    pushedAdoptedLines,
+    pushedCommitCount,
+    measuredAdoptionRate,
+    inclusiveAdoptionRate: adoptionRate(adoptedLines, inclusiveEffectiveGeneratedLines),
+    pushedAdoptionRate: adoptionRate(pushedAdoptedLines, pushedEffectiveGeneratedLines),
+    adoptionRate: measuredAdoptionRate
+  }
+}
+
+/** 按插件名聚合：累加项目/特性/对话数，合并代码采纳明细。 */
+function aggregateAdaptersByName(
+  adapters: DashboardProjectModeAdapter[]
+): DashboardProjectModeAdapter[] {
+  const map = new Map<string, DashboardProjectModeAdapter[]>()
+  for (const adapter of adapters) {
+    const list = map.get(adapter.name)
+    if (list) list.push(adapter)
+    else map.set(adapter.name, [adapter])
+  }
+  const result: DashboardProjectModeAdapter[] = []
+  for (const [name, group] of map) {
+    result.push({
+      name,
+      version: undefined,
+      projectCount: group.reduce((acc, a) => acc + a.projectCount, 0),
+      featureCount: group.reduce((acc, a) => acc + a.featureCount, 0),
+      conversationCount: group.reduce((acc, a) => acc + a.conversationCount, 0),
+      codeStats: mergeCodeStats(group.map((a) => a.codeStats))
+    })
+  }
+  return result
+}
+
 function AdapterListSection({
   adapters
 }: {
   adapters: DashboardProjectModeAdapter[]
 }): React.JSX.Element {
   const [page, setPage] = useState(1)
-  const sortedAdapters = [...adapters].sort(
+  const [mode, setMode] = useState<AdapterListMode>("byName")
+  const versionCount = adapters.length
+  const aggregatedByName = aggregateAdaptersByName(adapters)
+  const baseList = mode === "byName" ? aggregatedByName : adapters
+  const sortedAdapters = [...baseList].sort(
     (a, b) =>
       b.projectCount - a.projectCount ||
       b.conversationCount - a.conversationCount ||
@@ -493,12 +573,38 @@ function AdapterListSection({
     currentPage * ADAPTER_PAGE_SIZE
   )
 
+  const modeTabs: Array<{ id: AdapterListMode; label: string; count: number }> = [
+    { id: "byName", label: "按插件", count: aggregatedByName.length },
+    { id: "byVersion", label: "按版本", count: versionCount }
+  ]
+
   return (
     <section>
       <h2 className="mb-1 text-sm font-semibold text-foreground">插件列表</h2>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-        按项目数降序排列；项目数为当前状态，对话数、已Commit/已Push采纳率按所选时间范围统计。
+        {mode === "byName"
+          ? "按插件名聚合同名插件的多个版本；按项目数降序排列，项目数为当前状态，对话数、已Commit/已Push采纳率按所选时间范围统计。"
+          : "按插件版本展开；按项目数降序排列，项目数为当前状态，对话数、已Commit/已Push采纳率按所选时间范围统计。"}
       </p>
+      <div className="mb-3 flex items-center overflow-hidden rounded-md border border-border w-fit">
+        {modeTabs.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className={`px-3 py-1 text-xs font-medium transition-colors ${
+              mode === t.id
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:bg-muted/50"
+            }`}
+            onClick={() => {
+              setMode(t.id)
+              setPage(1)
+            }}
+          >
+            {t.label} ({t.count})
+          </button>
+        ))}
+      </div>
       <div className="rounded-xl border border-border bg-card">
         {sortedAdapters.length === 0 ? (
           <div className="px-4 py-10 text-center text-sm text-muted-foreground">暂无数据</div>
@@ -674,15 +780,15 @@ export function ProjectModePanel({
               color="bg-violet-500"
             />
             <StatCard
-              icon={Wrench}
-              label="工具调用"
-              value={formatNumber(summary?.totalToolCalls ?? 0)}
+              icon={ArrowDownToLine}
+              label="输入 Token"
+              value={formatCompact(summary?.totalInputTokens ?? 0)}
               color="bg-amber-500"
             />
             <StatCard
-              icon={Cpu}
-              label="Token"
-              value={formatCompact(summary?.totalTokens ?? 0)}
+              icon={ArrowUpFromLine}
+              label="输出 Token"
+              value={formatCompact(summary?.totalOutputTokens ?? 0)}
               color="bg-rose-500"
             />
             <StatCard

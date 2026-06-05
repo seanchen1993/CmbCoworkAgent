@@ -384,6 +384,8 @@ interface DashboardProjectModeData {
     activeProjectCount: number
     conversationCount: number
     totalToolCalls: number
+    totalInputTokens: number
+    totalOutputTokens: number
     totalTokens: number
     skillCallCount: number
     distinctSkillCount: number

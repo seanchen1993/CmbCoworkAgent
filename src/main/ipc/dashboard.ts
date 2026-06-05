@@ -5640,6 +5640,8 @@ function makeMockProjectMode(range: TimeRange): DashboardProjectModeData {
       activeProjectCount,
       conversationCount,
       totalToolCalls: 1842,
+      totalInputTokens: 7_200_000,
+      totalOutputTokens: 2_450_000,
       totalTokens: 9_650_000,
       skillCallCount: 312,
       distinctSkillCount: 14,
@@ -6432,6 +6434,8 @@ interface DashboardProjectModeData {
     activeProjectCount: number
     conversationCount: number
     totalToolCalls: number
+    totalInputTokens: number
+    totalOutputTokens: number
     totalTokens: number
     skillCallCount: number
     distinctSkillCount: number
@@ -6571,6 +6575,8 @@ async function fetchProjectModeUsage(
   conversationCount: number
   activeProjectCount: number
   totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
   totalTokens: number
   skillCallCount: number
   distinctSkillCount: number
@@ -6676,6 +6682,8 @@ async function fetchProjectModeUsage(
     conversationCount: asNumber(asRecord(aggs.conversation_count).value),
     activeProjectCount: asNumber(asRecord(aggs.active_projects).value),
     totalToolCalls: asNumber(asRecord(aggs.total_tool_calls).value),
+    totalInputTokens,
+    totalOutputTokens,
     totalTokens,
     skillCallCount: asNumber(asRecord(aggs.total_skill_calls).value),
     distinctSkillCount: asNumber(asRecord(aggs.distinct_skills).value),
@@ -6933,6 +6941,8 @@ async function fetchProjectMode(
       activeProjectCount: usage.activeProjectCount,
       conversationCount: usage.conversationCount,
       totalToolCalls: usage.totalToolCalls,
+      totalInputTokens: usage.totalInputTokens,
+      totalOutputTokens: usage.totalOutputTokens,
       totalTokens: usage.totalTokens,
       skillCallCount: usage.skillCallCount,
       distinctSkillCount: usage.distinctSkillCount,
