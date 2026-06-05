@@ -18,10 +18,12 @@ import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { MarketItem, MarketItemType } from "../../../api/market"
+import { buildOrgSkillSubscribeUrl } from "../../../api/org-skill-market"
 import type { DashboardTraceDetail } from "../../dashboard/use-dashboard"
 import type { UploaderProfile } from "./MarketUploaderProfile"
 import { renderUploaderProfile } from "./MarketUploaderProfile"
 import { MarketUpdateBadge, UpdateVersionTooltip } from "./MarketUpdateBadge"
+import { toast } from "sonner"
 
 type SkillUserUsage = {
   sapId: string
@@ -86,6 +88,17 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
     onDelete,
     onOpenSkillTraceDialog
   } = props
+
+  const subscribeUrl =
+    activeTab === "orgSkill" ? buildOrgSkillSubscribeUrl(selectedItem) : null
+
+  const handleOpenSubscribe = () => {
+    if (!subscribeUrl) {
+      toast.error("当前技能缺少订阅地址信息")
+      return
+    }
+    void window.electron.openExternal(subscribeUrl)
+  }
 
   const renderSkillTraceEntry = () => {
     if (activeTab !== "skill") return null
@@ -221,6 +234,17 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
               </div>
 
               <div className="grid grid-cols-2 gap-2 pt-1">
+                {activeTab === "orgSkill" && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-1.5 text-xs rounded-lg cursor-pointer text-[#3766a6] border-[#ccdcf5] bg-[#edf4ff] hover:bg-[#dceaff]"
+                    onClick={handleOpenSubscribe}
+                  >
+                    <Sparkles className="size-3" />
+                    跳转去订阅
+                  </Button>
+                )}
                 {selectedItem.installed ? (
                   activeTab === "orgSkill" ? (
                     <span className="text-xs bg-[#edf7f0] border border-[#c4e8d1] text-[#2e7d4f] px-3 py-2 rounded-lg inline-flex items-center gap-1.5">

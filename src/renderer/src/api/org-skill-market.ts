@@ -92,6 +92,12 @@ interface OrgSkillLabelsResponse {
   body: OrgSkillLabel[] | null
 }
 
+interface OrgSkillDownloadResponse {
+  returnCode?: string
+  errorMsg?: string | null
+  body?: unknown
+}
+
 const MOCK_ORG_SKILL_ITEMS: OrgSkillApiItem[] = [
   {
     id: 10001,
@@ -167,6 +173,8 @@ const ORG_SKILL_GATEWAY_URL = String(
   import.meta.env.VITE_OPEN_ASSISTANT_HUB_GATEWAY_URL ||
     "http://open-assistant-hub-gateway.paasoa.cmbchina.cn"
 ).replace(/\/+$/, "")
+
+const ORG_SKILL_CLAWPARTNER_URL = import.meta.env.VITE_ZZJ_WEB_URL.replace(/\/+$/, "")
 
 const ORG_SKILL_ENDPOINTS = {
   page: (pageNum: number, pageSize: number, labelIds: string[] = [], keyword = "") => {
@@ -405,6 +413,13 @@ function mapOrgSkillItem(item: OrgSkillApiItem): MarketItem {
   }
 }
 
+export function buildOrgSkillSubscribeUrl(item: Pick<MarketItem, "name" | "orgSkillId">): string | null {
+  const slug = String(item.name || "").trim()
+  const skillId = item.orgSkillId
+  if (!slug || !skillId) return null
+  return `${ORG_SKILL_CLAWPARTNER_URL}/skill-detail/${encodeURIComponent(slug)}/${encodeURIComponent(String(skillId))}`
+}
+
 function getOrgSkillErrorMessageFromBody(body: unknown): string | null {
   if (!body || typeof body !== "object") return null
 
@@ -447,6 +462,32 @@ async function readOrgSkillErrorMessage(response: Response): Promise<string> {
 async function throwOrgSkillError(response: Response): Promise<never> {
   const message = await readOrgSkillErrorMessage(response)
   throw new Error(message)
+}
+
+function getOrgSkillDownloadErrorMessage(payload: OrgSkillDownloadResponse | null): string | null {
+  if (!payload?.returnCode || payload.returnCode === "SUC0000") return null
+  return payload.errorMsg?.trim() || "组织级技能下载失败"
+}
+
+function tryParseOrgSkillDownloadPayload(buffer: ArrayBuffer, contentType: string): OrgSkillDownloadResponse | null {
+  const decoder = new TextDecoder("utf-8")
+  const text = decoder.decode(buffer).trim()
+  if (!text) return null
+
+  const likelyJson =
+    contentType.includes("application/json") ||
+    contentType.includes("text/json") ||
+    (!contentType && (text.startsWith("{") || text.startsWith("["))) ||
+    text.startsWith("{") ||
+    text.startsWith("[")
+  if (!likelyJson) return null
+
+  try {
+    const parsed = JSON.parse(text) as OrgSkillDownloadResponse
+    return parsed && typeof parsed === "object" ? parsed : null
+  } catch {
+    return null
+  }
 }
 
 async function getYstIdToken(): Promise<string> {
@@ -522,7 +563,15 @@ export const orgSkillMarketApi = {
       await throwOrgSkillError(response)
     }
 
-    const blob = await response.blob()
+    const buffer = await response.arrayBuffer()
+    const contentType = response.headers.get("content-type") || ""
+    const payload = tryParseOrgSkillDownloadPayload(buffer, contentType)
+    const downloadError = getOrgSkillDownloadErrorMessage(payload)
+    if (downloadError) {
+      throw new Error(downloadError)
+    }
+
+    const blob = new Blob([buffer], { type: contentType || "application/octet-stream" })
     const contentDisposition = response.headers.get("Content-Disposition")
     const filename =
       contentDisposition?.match(/filename\*?=(?:UTF-8''|")?([^";]+)/)?.[1] ||

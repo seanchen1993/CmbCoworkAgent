@@ -2083,11 +2083,16 @@ export function MarketPanel(): React.JSX.Element {
         }
       } else {
         console.error("Download failed:", response.error)
+        if (response.error) {
+          toast.error(response.error)
+        }
         setError(response.error || "下载失败")
       }
     } catch (error) {
       console.error("Failed to download item:", error)
-      setError(error instanceof Error ? error.message : "下载失败")
+      const errorMessage = error instanceof Error ? error.message : "下载失败"
+      toast.error(errorMessage)
+      setError(errorMessage)
     } finally {
       // Remove from downloading set
       setDownloadingItems((prev) => {
@@ -2413,10 +2418,25 @@ export function MarketPanel(): React.JSX.Element {
                 ) : (
                   <Puzzle className="mt-0.5 size-4 shrink-0 text-[#8b7bb8]" />
                 )}
-                <div className="min-w-0">
-                  <p className="text-sm font-medium leading-snug text-[#141413]">
-                    {activeTabIntro.title}
-                  </p>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-medium leading-snug text-[#141413]">
+                      {activeTabIntro.title}
+                    </p>
+                    {activeTab === ORG_SKILL_MARKET_TYPE ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 shrink-0 px-3 gap-1 text-xs text-[#3766a6] border-[#ccdcf5] bg-[#edf4ff] hover:bg-[#dceaff] rounded-lg"
+                        onClick={() => {
+                          const url = `${import.meta.env.VITE_ZZJ_WEB_URL.replace(/\/+$/, "")}/skill-market`
+                          void window.electron.openExternal(url)
+                        }}
+                      >
+                        跳转
+                      </Button>
+                    ) : null}
+                  </div>
                   <p className="mt-1 text-xs leading-relaxed text-[#5e5d59]">
                     {activeTabIntro.description}
                   </p>
