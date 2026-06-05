@@ -2309,6 +2309,17 @@ const api = {
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMode", range, granularity, opts),
+    projectModeProjects: (
+      range: { from: string; to: string },
+      options?: {
+        upperOrgLv1?: string | string[] | null
+        status?: "active" | "archived" | null
+        page?: number
+        pageSize?: number
+        keyword?: string | null
+      }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeProjects", range, options),
     projectModeTraces: (
       projectId: string,
       range: { from: string; to: string },
@@ -2321,6 +2332,7 @@ const api = {
         mode?: "thread" | "trace"
         viewMode?: "thread" | "trace"
         triggerScope?: "active" | "all"
+        featureSlug?: string
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeTraces", projectId, range, options),

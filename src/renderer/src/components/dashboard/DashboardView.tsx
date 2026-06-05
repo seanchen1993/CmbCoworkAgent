@@ -42,6 +42,7 @@ import {
   type DashboardUserDetail,
   type DashboardUserListData,
   type DashboardUserListItem,
+  type DashboardProjectModeFeature,
   type DashboardProjectModeProject,
   type DashboardProjectModeTracesData,
   type DashboardTraceDetail,
@@ -86,6 +87,8 @@ const GRANULARITY_OPTIONS: { value: Granularity; label: string }[] = [
   { value: "month", label: "月" },
   { value: "custom", label: "自定义" }
 ]
+const CUSTOM_RANGE_MAX_DAYS = 31
+const MS_PER_DAY = 24 * 60 * 60 * 1000
 
 type SkillUploaderExportInfo = {
   sapId: string
@@ -112,6 +115,17 @@ function formatRangeLabel(from: string, to: string, granularity: Granularity): s
   }
   // month
   return `${f.getFullYear()}-${pad(f.getMonth() + 1)}`
+}
+
+function formatDateInputValue(date: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, "0")
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
+function addDaysToDateInput(value: string, days: number): string {
+  const date = new Date(value + "T00:00:00")
+  date.setDate(date.getDate() + days)
+  return formatDateInputValue(date)
 }
 
 function resolveSkillUploaderExportInfo(
@@ -174,15 +188,31 @@ function TimeControlBar({
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [customFrom, setCustomFrom] = useState("")
   const [customTo, setCustomTo] = useState("")
+  const [customRangeError, setCustomRangeError] = useState("")
+  const customToMax = customFrom ? addDaysToDateInput(customFrom, CUSTOM_RANGE_MAX_DAYS - 1) : ""
 
   const handleCustomConfirm = (): void => {
-    if (customFrom && customTo) {
-      onCustomRange(
-        new Date(customFrom + "T00:00:00").toISOString(),
-        new Date(customTo + "T23:59:59.999").toISOString()
-      )
-      setShowDatePicker(false)
+    if (!customFrom || !customTo) return
+
+    const fromDate = new Date(customFrom + "T00:00:00")
+    const toDate = new Date(customTo + "T00:00:00")
+    if (toDate < fromDate) {
+      setCustomRangeError("结束日期不能早于开始日期")
+      return
     }
+
+    const selectedDays = Math.floor((toDate.getTime() - fromDate.getTime()) / MS_PER_DAY) + 1
+    if (selectedDays > CUSTOM_RANGE_MAX_DAYS) {
+      setCustomRangeError(`自定义范围最多选择 ${CUSTOM_RANGE_MAX_DAYS} 天`)
+      return
+    }
+
+    setCustomRangeError("")
+    onCustomRange(
+      new Date(customFrom + "T00:00:00").toISOString(),
+      new Date(customTo + "T23:59:59.999").toISOString()
+    )
+    setShowDatePicker(false)
   }
 
   return (
@@ -229,23 +259,42 @@ function TimeControlBar({
 
       {/* Custom date picker */}
       {granularity === "custom" && showDatePicker && (
-        <div className="flex items-center gap-2">
-          <input
-            type="date"
-            value={customFrom}
-            onChange={(e) => setCustomFrom(e.target.value)}
-            className="h-7 px-2 text-xs border border-border rounded bg-background text-foreground"
-          />
-          <span className="text-xs text-muted-foreground">~</span>
-          <input
-            type="date"
-            value={customTo}
-            onChange={(e) => setCustomTo(e.target.value)}
-            className="h-7 px-2 text-xs border border-border rounded bg-background text-foreground"
-          />
-          <Button variant="outline" size="sm" className="h-7 text-xs" onClick={handleCustomConfirm}>
-            确认
-          </Button>
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <input
+              type="date"
+              value={customFrom}
+              max={customTo || undefined}
+              onChange={(e) => {
+                setCustomFrom(e.target.value)
+                setCustomRangeError("")
+              }}
+              className="h-7 px-2 text-xs border border-border rounded bg-background text-foreground"
+            />
+            <span className="text-xs text-muted-foreground">~</span>
+            <input
+              type="date"
+              value={customTo}
+              min={customFrom || undefined}
+              max={customToMax || undefined}
+              onChange={(e) => {
+                setCustomTo(e.target.value)
+                setCustomRangeError("")
+              }}
+              className="h-7 px-2 text-xs border border-border rounded bg-background text-foreground"
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs"
+              onClick={handleCustomConfirm}
+            >
+              确认
+            </Button>
+          </div>
+          {customRangeError ? (
+            <span className="text-[11px] leading-none text-destructive">{customRangeError}</span>
+          ) : null}
         </div>
       )}
 
@@ -944,7 +993,9 @@ function UserDetailPage({
   const canTracePrevious = tracePage > 1 && !loading
   const canTraceNext = Boolean(data) && tracePage * tracePageSize < total && !loading
   const traceTitle =
-    traceViewMode === "thread" ? `会话记录（第 ${tracePage} 页）` : `Trace 记录（第 ${tracePage} 页）`
+    traceViewMode === "thread"
+      ? `会话记录（第 ${tracePage} 页）`
+      : `Trace 记录（第 ${tracePage} 页）`
   const traceSubtitle =
     traceViewMode === "thread"
       ? `共 ${formatNumber(total)} 个会话，选择记录定位到对话`
@@ -1882,7 +1933,11 @@ export function DashboardView(): React.JSX.Element {
     projectMode,
     projectModeLoading,
     projectModeError,
+    projectModeProjectPages,
+    projectModeProjectPageLoading,
+    projectModeProjectPageError,
     fetchProjectMode,
+    fetchProjectModeProjectPage,
     changeGranularity,
     navigate,
     setCustomRange,
@@ -1912,12 +1967,13 @@ export function DashboardView(): React.JSX.Element {
   >(undefined)
   const [projectTraceProject, setProjectTraceProject] =
     useState<DashboardProjectModeProject | null>(null)
+  const [projectTraceFeature, setProjectTraceFeature] =
+    useState<DashboardProjectModeFeature | null>(null)
   const [projectTraceData, setProjectTraceData] = useState<DashboardProjectModeTracesData | null>(
     null
   )
   const [projectTracePage, setProjectTracePage] = useState(1)
-  const [projectTraceViewMode, setProjectTraceViewMode] =
-    useState<DashboardTraceViewMode>("thread")
+  const [projectTraceViewMode, setProjectTraceViewMode] = useState<DashboardTraceViewMode>("thread")
   const [projectTracesLoading, setProjectTracesLoading] = useState(false)
   const [projectTracesError, setProjectTracesError] = useState<string | null>(null)
   const [commitDialogOpen, setCommitDialogOpen] = useState(false)
@@ -2397,8 +2453,9 @@ export function DashboardView(): React.JSX.Element {
   ])
 
   const handleProjectOpenTraces = useCallback(
-    (project: DashboardProjectModeProject) => {
+    (project: DashboardProjectModeProject, feature?: DashboardProjectModeFeature) => {
       setProjectTraceProject(project)
+      setProjectTraceFeature(feature ?? null)
       setProjectTraceData(null)
       setProjectTracesError(null)
       setProjectTracePage(1)
@@ -2411,6 +2468,7 @@ export function DashboardView(): React.JSX.Element {
     if (!projectTraceProject) return
     let cancelled = false
     const currentProject = projectTraceProject
+    const currentFeature = projectTraceFeature
 
     async function loadProjectTraces(): Promise<void> {
       setProjectTracesLoading(true)
@@ -2420,7 +2478,8 @@ export function DashboardView(): React.JSX.Element {
           tracePage: projectTracePage,
           tracePageSize: PROJECT_TRACE_PAGE_SIZE,
           mode: projectTraceViewMode,
-          triggerScope: PROJECT_TRACE_TRIGGER_SCOPE
+          triggerScope: PROJECT_TRACE_TRIGGER_SCOPE,
+          ...(currentFeature?.slug ? { featureSlug: currentFeature.slug } : {})
         })
         if (!res.success) throw new Error(res.error ?? "获取项目对话失败")
         const rawData = res.data
@@ -2433,14 +2492,14 @@ export function DashboardView(): React.JSX.Element {
               traceViewMode: projectTraceViewMode,
               traceTriggerScope: PROJECT_TRACE_TRIGGER_SCOPE
             }
-          : rawData ?? {
+          : (rawData ?? {
               traces: [],
               tracePage: projectTracePage,
               tracePageSize: PROJECT_TRACE_PAGE_SIZE,
               total: 0,
               traceViewMode: projectTraceViewMode,
               traceTriggerScope: PROJECT_TRACE_TRIGGER_SCOPE
-            }
+            })
         if (!cancelled) setProjectTraceData(data)
       } catch (e) {
         if (!cancelled) setProjectTracesError(e instanceof Error ? e.message : String(e))
@@ -2453,7 +2512,7 @@ export function DashboardView(): React.JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [projectTracePage, projectTraceProject, projectTraceViewMode, range])
+  }, [projectTraceFeature, projectTracePage, projectTraceProject, projectTraceViewMode, range])
 
   useEffect(() => {
     let cancelled = false
@@ -2729,13 +2788,10 @@ export function DashboardView(): React.JSX.Element {
     setUserDetailTracePage(1)
   }, [])
 
-  const handleUserTraceTriggerScopeChange = useCallback(
-    (scope: DashboardTraceTriggerScope) => {
-      setUserDetailTraceTriggerScope(scope)
-      setUserDetailTracePage(1)
-    },
-    []
-  )
+  const handleUserTraceTriggerScopeChange = useCallback((scope: DashboardTraceTriggerScope) => {
+    setUserDetailTraceTriggerScope(scope)
+    setUserDetailTracePage(1)
+  }, [])
 
   const handleProjectTracePrevious = useCallback(() => {
     setProjectTracePage((prev) => Math.max(1, prev - 1))
@@ -3152,14 +3208,21 @@ export function DashboardView(): React.JSX.Element {
     Boolean(projectTraceData) &&
     projectTracePage * projectTracePageSize < projectTraceTotal &&
     !projectTracesLoading
+  const projectTraceScopeLabel = projectTraceFeature ? "特性" : "项目"
   const projectTraceTitle =
     projectTraceViewMode === "thread"
-      ? `项目会话（第 ${projectTracePage} 页）`
-      : `项目 Trace（第 ${projectTracePage} 页）`
+      ? `${projectTraceScopeLabel}会话（第 ${projectTracePage} 页）`
+      : `${projectTraceScopeLabel} Trace（第 ${projectTracePage} 页）`
   const projectTraceSubtitle =
     projectTraceViewMode === "thread"
       ? `共 ${formatNumber(projectTraceTotal)} 个会话，选择记录定位到对话`
       : `共 ${formatNumber(projectTraceTotal)} 条，选择记录定位到对话`
+  const projectTraceDialogTitle = projectTraceFeature
+    ? `特性对话 · ${projectTraceProject?.name ?? "-"} · ${projectTraceFeature.title}`
+    : `项目对话 · ${projectTraceProject?.name ?? "-"}`
+  const projectTraceDialogSubtitle = projectTraceFeature
+    ? "该特性在项目模式下的对话记录，选择记录定位到会话"
+    : "该项目模式下的对话记录，选择记录定位到会话"
 
   return (
     <div className="flex flex-col h-full">
@@ -3268,6 +3331,10 @@ export function DashboardView(): React.JSX.Element {
                 data={projectMode}
                 loading={projectModeLoading}
                 error={projectModeError}
+                projectPages={projectModeProjectPages}
+                projectPageLoading={projectModeProjectPageLoading}
+                projectPageError={projectModeProjectPageError}
+                onProjectPageChange={fetchProjectModeProjectPage}
                 onOpenTraces={handleProjectOpenTraces}
                 onSkillClick={handleSkillClick}
                 marketSkillKeys={marketSkillKeys}
@@ -3410,6 +3477,7 @@ export function DashboardView(): React.JSX.Element {
         onOpenChange={(open) => {
           if (!open) {
             setProjectTraceProject(null)
+            setProjectTraceFeature(null)
             setProjectTraceData(null)
             setProjectTracePage(1)
             setProjectTraceViewMode("thread")
@@ -3420,12 +3488,8 @@ export function DashboardView(): React.JSX.Element {
       >
         <DialogContent className="flex h-[80vh] max-w-[1080px] grid-rows-none flex-col gap-0 p-0">
           <DialogHeader className="border-b border-border px-5 py-4">
-            <DialogTitle className="truncate text-base">
-              项目对话 · {projectTraceProject?.name ?? "-"}
-            </DialogTitle>
-            <p className="mt-1 text-[11px] text-muted-foreground">
-              该项目模式下的对话记录，选择记录定位到会话
-            </p>
+            <DialogTitle className="truncate text-base">{projectTraceDialogTitle}</DialogTitle>
+            <p className="mt-1 text-[11px] text-muted-foreground">{projectTraceDialogSubtitle}</p>
           </DialogHeader>
           <div className="min-h-0 flex-1">
             <TraceExplorer
@@ -3460,7 +3524,7 @@ export function DashboardView(): React.JSX.Element {
                   </Button>
                 </div>
               }
-              emptyText="该项目在当前时间范围内没有对话"
+              emptyText={`该${projectTraceScopeLabel}在当前时间范围内没有对话`}
               showCodeStats={false}
               className="h-full"
             />

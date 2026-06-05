@@ -294,6 +294,34 @@ export interface DashboardProjectModeProject {
   codeStats: DashboardCodeStats | null
 }
 
+export type DashboardProjectModeProjectStatus = "active" | "archived"
+
+export interface DashboardProjectModeProjectCounts {
+  total: number
+  active: number
+  archived: number
+  totalFeatureCount: number
+  activeFeatureCount: number
+  archivedFeatureCount: number
+}
+
+export interface DashboardProjectModeProjectPageData {
+  projects: DashboardProjectModeProject[]
+  total: number
+  page: number
+  pageSize: number
+  status: DashboardProjectModeProjectStatus
+  keyword: string
+}
+
+export interface DashboardProjectModeProjectPageOptions {
+  upperOrgLv1?: string | string[] | null
+  status?: DashboardProjectModeProjectStatus | null
+  page?: number
+  pageSize?: number
+  keyword?: string | null
+}
+
 export interface DashboardProjectModeAdapter {
   name: string
   version?: string
@@ -321,6 +349,8 @@ export interface DashboardProjectModeData {
   topSkills: DashboardProjectModeSkillCount[]
   bySkillAdoption: SkillAdoptionRankingItem[]
   tools: DashboardProjectModeToolUsage
+  projectCounts: DashboardProjectModeProjectCounts
+  projectPage: DashboardProjectModeProjectPageData
   projects: DashboardProjectModeProject[]
 }
 
@@ -333,6 +363,7 @@ export interface DashboardProjectModeTracesOptions {
   mode?: DashboardTraceViewMode
   viewMode?: DashboardTraceViewMode
   triggerScope?: DashboardTraceTriggerScope
+  featureSlug?: string
 }
 
 export interface DashboardProjectModeTracesData {
@@ -1711,6 +1742,15 @@ export function useDashboard() {
   const [feedback, setFeedback] = useState<FeedbackData | null>(null)
   const [skillEval, setSkillEval] = useState<DashboardSkillEvalSummary | null>(null)
   const [projectMode, setProjectMode] = useState<DashboardProjectModeData | null>(null)
+  const [projectModeProjectPages, setProjectModeProjectPages] = useState<
+    Partial<Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>>
+  >({})
+  const [projectModeProjectPageLoading, setProjectModeProjectPageLoading] = useState<
+    Record<DashboardProjectModeProjectStatus, boolean>
+  >({ active: false, archived: false })
+  const [projectModeProjectPageError, setProjectModeProjectPageError] = useState<
+    Partial<Record<DashboardProjectModeProjectStatus, string>>
+  >({})
   const [projectModeLoading, setProjectModeLoading] = useState(false)
   const [projectModeError, setProjectModeError] = useState<string | null>(null)
   // 顶部全量组织（LV1）筛选可选项，随时间范围刷新。
@@ -1721,6 +1761,9 @@ export function useDashboard() {
   const skillEvalFetchIdRef = useRef(0)
   const orgOptionsFetchIdRef = useRef(0)
   const projectModeFetchIdRef = useRef(0)
+  const projectModeProjectPageFetchIdRef = useRef<
+    Record<DashboardProjectModeProjectStatus, number>
+  >({ active: 0, archived: 0 })
 
   const fetchAll = useCallback(async (r: TimeRange, g: Granularity, orgList: string[]) => {
     const id = ++fetchIdRef.current
@@ -1790,7 +1833,17 @@ export function useDashboard() {
       const result = await window.api.dashboard.projectMode(r, g, { upperOrgLv1: orgList })
       if (id !== projectModeFetchIdRef.current) return
       if (!result.success) throw new Error(result.error ?? "获取项目模式数据失败")
-      setProjectMode((result.data as DashboardProjectModeData) ?? null)
+      const nextProjectMode = (result.data as DashboardProjectModeData) ?? null
+      projectModeProjectPageFetchIdRef.current.active += 1
+      projectModeProjectPageFetchIdRef.current.archived += 1
+      setProjectMode(nextProjectMode)
+      setProjectModeProjectPages(
+        nextProjectMode?.projectPage
+          ? { [nextProjectMode.projectPage.status]: nextProjectMode.projectPage }
+          : {}
+      )
+      setProjectModeProjectPageError({})
+      setProjectModeProjectPageLoading({ active: false, archived: false })
     } catch (e) {
       if (id !== projectModeFetchIdRef.current) return
       setProjectModeError(e instanceof Error ? e.message : String(e))
@@ -1798,6 +1851,45 @@ export function useDashboard() {
       if (id === projectModeFetchIdRef.current) setProjectModeLoading(false)
     }
   }, [])
+
+  const fetchProjectModeProjectPage = useCallback(
+    async (
+      status: DashboardProjectModeProjectStatus,
+      page: number,
+      keyword: string,
+      pageSize: number
+    ) => {
+      const id = ++projectModeProjectPageFetchIdRef.current[status]
+      setProjectModeProjectPageLoading((current) => ({ ...current, [status]: true }))
+      setProjectModeProjectPageError((current) => ({ ...current, [status]: undefined }))
+
+      try {
+        const result = await window.api.dashboard.projectModeProjects(range, {
+          upperOrgLv1: selectedOrgLv1List,
+          status,
+          page,
+          pageSize,
+          keyword
+        })
+        if (id !== projectModeProjectPageFetchIdRef.current[status]) return
+        if (!result.success) throw new Error(result.error ?? "获取项目列表失败")
+        const pageData = result.data as DashboardProjectModeProjectPageData | undefined
+        if (!pageData) throw new Error("获取项目列表失败")
+        setProjectModeProjectPages((current) => ({ ...current, [status]: pageData }))
+      } catch (e) {
+        if (id !== projectModeProjectPageFetchIdRef.current[status]) return
+        setProjectModeProjectPageError((current) => ({
+          ...current,
+          [status]: e instanceof Error ? e.message : String(e)
+        }))
+      } finally {
+        if (id === projectModeProjectPageFetchIdRef.current[status]) {
+          setProjectModeProjectPageLoading((current) => ({ ...current, [status]: false }))
+        }
+      }
+    },
+    [range, selectedOrgLv1List]
+  )
 
   const fetchSkillEvalPage = useCallback(
     async (
@@ -2037,7 +2129,11 @@ export function useDashboard() {
     projectMode,
     projectModeLoading,
     projectModeError,
+    projectModeProjectPages,
+    projectModeProjectPageLoading,
+    projectModeProjectPageError,
     fetchProjectMode,
+    fetchProjectModeProjectPage,
     changeGranularity,
     navigate,
     setCustomRange,

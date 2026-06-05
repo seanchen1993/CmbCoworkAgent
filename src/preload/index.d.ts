@@ -368,6 +368,34 @@ interface DashboardProjectModeProject {
   codeStats: DashboardCodeStats | null
 }
 
+type DashboardProjectModeProjectStatus = "active" | "archived"
+
+interface DashboardProjectModeProjectCounts {
+  total: number
+  active: number
+  archived: number
+  totalFeatureCount: number
+  activeFeatureCount: number
+  archivedFeatureCount: number
+}
+
+interface DashboardProjectModeProjectPageData {
+  projects: DashboardProjectModeProject[]
+  total: number
+  page: number
+  pageSize: number
+  status: DashboardProjectModeProjectStatus
+  keyword: string
+}
+
+interface DashboardProjectModeProjectPageOptions {
+  upperOrgLv1?: string | string[] | null
+  status?: DashboardProjectModeProjectStatus | null
+  page?: number
+  pageSize?: number
+  keyword?: string | null
+}
+
 interface DashboardProjectModeAdapter {
   name: string
   version?: string
@@ -395,6 +423,8 @@ interface DashboardProjectModeData {
   topSkills: DashboardProjectModeSkillCount[]
   bySkillAdoption: DashboardProjectModeSkillAdoption[]
   tools: DashboardProjectModeToolUsage
+  projectCounts: DashboardProjectModeProjectCounts
+  projectPage: DashboardProjectModeProjectPageData
   projects: DashboardProjectModeProject[]
 }
 
@@ -407,6 +437,7 @@ interface DashboardProjectModeTracesOptions {
   mode?: DashboardTraceViewMode
   viewMode?: DashboardTraceViewMode
   triggerScope?: DashboardTraceTriggerScope
+  featureSlug?: string
 }
 
 interface DashboardProjectModeTracesData {
@@ -1466,6 +1497,10 @@ interface CustomAPI {
       granularity: "day" | "week" | "month" | "custom",
       opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: DashboardProjectModeData; error?: string }>
+    projectModeProjects: (
+      range: { from: string; to: string },
+      options?: DashboardProjectModeProjectPageOptions
+    ) => Promise<{ success: boolean; data?: DashboardProjectModeProjectPageData; error?: string }>
     projectModeTraces: (
       projectId: string,
       range: { from: string; to: string },

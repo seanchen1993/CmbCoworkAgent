@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import {
   Boxes,
   Layers,
@@ -28,7 +28,11 @@ import {
 import type {
   DashboardProjectModeData,
   DashboardProjectModeAdapter,
+  DashboardProjectModeFeature,
   DashboardProjectModeProject,
+  DashboardProjectModeProjectCounts,
+  DashboardProjectModeProjectPageData,
+  DashboardProjectModeProjectStatus,
   DashboardProjectModeSkillCount,
   DashboardProjectModeToolUsage,
   DashboardCodeStats
@@ -62,6 +66,10 @@ function formatCompact(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
   return String(Math.round(value))
+}
+
+function formatLineCount(value: number): string {
+  return formatCompact(value)
 }
 
 function formatPercent(value: number | null | undefined): string {
@@ -120,14 +128,14 @@ function ProjectRow({
   project: DashboardProjectModeProject
   expanded: boolean
   onToggle: () => void
-  onOpenTraces: () => void
+  onOpenTraces: (feature?: DashboardProjectModeFeature) => void
 }): React.JSX.Element {
   const codeStats = project.codeStats
   const adoptionLineLabel = codeStats
-    ? `${formatNumber(codeStats.adoptedLines)} / ${formatNumber(codeStats.effectiveGeneratedLines)} 行`
+    ? `${formatLineCount(codeStats.adoptedLines)} / ${formatLineCount(codeStats.effectiveGeneratedLines)} 行`
     : "—"
   const pushedAdoptionLineLabel = codeStats
-    ? `${formatNumber(codeStats.pushedAdoptedLines)} / ${formatNumber(codeStats.pushedEffectiveGeneratedLines)} 行`
+    ? `${formatLineCount(codeStats.pushedAdoptedLines)} / ${formatLineCount(codeStats.pushedEffectiveGeneratedLines)} 行`
     : "—"
 
   return (
@@ -183,20 +191,19 @@ function ProjectRow({
         </td>
         <td className="px-3 py-2 text-right tabular-nums">
           <div className="font-medium">{formatPercent(codeStats?.pushedAdoptionRate)}</div>
-          <div className="mt-0.5 text-[10px] text-muted-foreground">
-            {pushedAdoptionLineLabel}
-          </div>
+          <div className="mt-0.5 text-[10px] text-muted-foreground">{pushedAdoptionLineLabel}</div>
         </td>
         <td className="px-3 py-2 text-right">
           <button
             type="button"
-            className="text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+            className="inline-flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
             disabled={project.conversationCount === 0}
             onClick={(event) => {
               event.stopPropagation()
               onOpenTraces()
             }}
           >
+            <MessagesSquare className="size-3.5" />
             查看对话
           </button>
         </td>
@@ -219,13 +226,7 @@ function ProjectRow({
                   <span>
                     生成行数{" "}
                     <span className="font-medium text-foreground">
-                      {formatNumber(codeStats?.effectiveGeneratedLines ?? 0)}
-                    </span>
-                  </span>
-                  <span>
-                    采纳行数{" "}
-                    <span className="font-medium text-foreground">
-                      {formatNumber(codeStats?.adoptedLines ?? 0)}
+                      {formatLineCount(codeStats?.effectiveGeneratedLines ?? 0)}
                     </span>
                   </span>
                   <span>
@@ -233,6 +234,7 @@ function ProjectRow({
                     <span className="font-medium text-foreground">
                       {formatPercent(codeStats?.measuredAdoptionRate)}
                     </span>
+                    <span className="ml-1 text-muted-foreground/80">({adoptionLineLabel})</span>
                   </span>
                   <span>
                     已Push采纳率{" "}
@@ -253,25 +255,39 @@ function ProjectRow({
                 <div className="space-y-2">
                   {project.features.map((feature) => (
                     <div
-                      key={feature.slug}
-                      className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs"
+                      key={feature.slug || feature.title}
+                      className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs"
                     >
-                      <span className="font-medium text-foreground">{feature.title}</span>
-                      {feature.statusLabel && (
-                        <Badge variant="outline" className="normal-case tracking-normal">
-                          {feature.statusLabel}
-                        </Badge>
-                      )}
-                      {feature.currentNodeStatusLabel && (
-                        <span className="text-muted-foreground">
-                          当前节点：{feature.currentNodeStatusLabel}
-                        </span>
-                      )}
-                      {feature.summary && (
-                        <span className="truncate text-muted-foreground" title={feature.summary}>
-                          · {feature.summary}
-                        </span>
-                      )}
+                      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+                        <span className="font-medium text-foreground">{feature.title}</span>
+                        {feature.statusLabel && (
+                          <Badge variant="outline" className="normal-case tracking-normal">
+                            {feature.statusLabel}
+                          </Badge>
+                        )}
+                        {feature.currentNodeStatusLabel && (
+                          <span className="text-muted-foreground">
+                            当前节点：{feature.currentNodeStatusLabel}
+                          </span>
+                        )}
+                        {feature.summary && (
+                          <span className="truncate text-muted-foreground" title={feature.summary}>
+                            · {feature.summary}
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        className="ml-auto inline-flex shrink-0 items-center gap-1 text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+                        disabled={!feature.slug}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          onOpenTraces(feature)
+                        }}
+                      >
+                        <MessagesSquare className="size-3.5" />
+                        查看对话
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -302,56 +318,85 @@ const ADAPTER_PAGE_SIZE = 10
 type ProjectListTab = "active" | "archived"
 
 /**
- * 项目列表：进行中 / 已归档双 tab + 项目名搜索 + 客户端分页。
- * 项目快照随使用累积可能很多，因此默认只看「进行中」，并支持搜索定位与翻页。
+ * 项目列表：进行中 / 已归档双 tab + 项目名搜索 + 后端分页。
+ * 默认随项目模式总览返回「进行中」第一页，已归档 tab 首次切换时懒加载。
  */
 function ProjectListSection({
-  projects,
+  projectCounts,
+  projectPages,
+  pageLoading,
+  pageError,
   loading,
+  onPageChange,
   onOpenTraces
 }: {
-  projects: DashboardProjectModeProject[]
+  projectCounts?: DashboardProjectModeProjectCounts
+  projectPages: Partial<
+    Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>
+  >
+  pageLoading: Record<DashboardProjectModeProjectStatus, boolean>
+  pageError: Partial<Record<DashboardProjectModeProjectStatus, string>>
   loading: boolean
-  onOpenTraces: (project: DashboardProjectModeProject) => void
+  onPageChange: (
+    status: DashboardProjectModeProjectStatus,
+    page: number,
+    keyword: string,
+    pageSize: number
+  ) => void
+  onOpenTraces: (
+    project: DashboardProjectModeProject,
+    feature?: DashboardProjectModeFeature
+  ) => void
 }): React.JSX.Element {
   const [tab, setTab] = useState<ProjectListTab>("active")
   const [query, setQuery] = useState("")
-  const [page, setPage] = useState(1)
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
-  const activeProjects = projects.filter((p) => p.lifecycleStatus !== "archived")
-  const archivedProjects = projects.filter((p) => p.lifecycleStatus === "archived")
-  const tabProjects = tab === "archived" ? archivedProjects : activeProjects
+  const trimmed = query.trim()
+  const pageData = projectPages[tab]
+  const currentError = pageError[tab]
+  const tabCount =
+    tab === "archived" ? (projectCounts?.archived ?? 0) : (projectCounts?.active ?? 0)
+  const pageMatchesQuery = pageData?.keyword === trimmed
+  const pageItems = pageMatchesQuery ? (pageData?.projects ?? []) : []
+  const total = pageMatchesQuery ? (pageData?.total ?? 0) : 0
+  const totalPages = Math.max(1, Math.ceil(total / PROJECT_PAGE_SIZE))
+  const currentPage = Math.min(pageData?.page ?? 1, totalPages)
+  const effectiveLoading =
+    loading ||
+    pageLoading[tab] ||
+    (!pageData && tabCount > 0) ||
+    Boolean(pageData && !pageMatchesQuery)
 
-  const trimmed = query.trim().toLowerCase()
-  const filtered = trimmed
-    ? tabProjects.filter(
-        (p) =>
-          p.name.toLowerCase().includes(trimmed) ||
-          (p.systemName ?? "").toLowerCase().includes(trimmed)
-      )
-    : tabProjects
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PROJECT_PAGE_SIZE))
-  const currentPage = Math.min(page, totalPages)
-  const pageItems = filtered.slice(
-    (currentPage - 1) * PROJECT_PAGE_SIZE,
-    currentPage * PROJECT_PAGE_SIZE
-  )
+  useEffect(() => {
+    // keyword / pageSize 已匹配即视为同步；不再要求停在第 1 页，
+    // 否则用户翻到第 2 页后 pageData 变化会触发本 effect 把页码弹回第 1 页。
+    if (pageData && pageData.keyword === trimmed && pageData.pageSize === PROJECT_PAGE_SIZE) {
+      return
+    }
+    if (pageLoading[tab]) return
+    const timer = window.setTimeout(() => {
+      setExpandedId(null)
+      onPageChange(tab, 1, trimmed, PROJECT_PAGE_SIZE)
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [onPageChange, pageData, pageLoading, tab, trimmed])
 
   const switchTab = (next: ProjectListTab): void => {
     setTab(next)
-    setPage(1)
     setExpandedId(null)
   }
   const changeQuery = (value: string): void => {
     setQuery(value)
-    setPage(1)
+  }
+  const requestPage = (nextPage: number): void => {
+    setExpandedId(null)
+    onPageChange(tab, nextPage, trimmed, PROJECT_PAGE_SIZE)
   }
 
   const tabs: Array<{ id: ProjectListTab; label: string; count: number }> = [
-    { id: "active", label: "进行中", count: activeProjects.length },
-    { id: "archived", label: "已归档", count: archivedProjects.length }
+    { id: "active", label: "进行中", count: projectCounts?.active ?? 0 },
+    { id: "archived", label: "已归档", count: projectCounts?.archived ?? 0 }
   ]
 
   return (
@@ -402,7 +447,7 @@ function ProjectListSection({
       <div
         className={cn(
           "overflow-hidden rounded-xl border border-border bg-card",
-          loading && "opacity-70"
+          effectiveLoading && "opacity-70"
         )}
       >
         <table className="w-full text-xs">
@@ -427,16 +472,33 @@ function ProjectListSection({
                 onToggle={() =>
                   setExpandedId((prev) => (prev === project.projectId ? null : project.projectId))
                 }
-                onOpenTraces={() => onOpenTraces(project)}
+                onOpenTraces={(feature) => onOpenTraces(project, feature)}
               />
             ))}
+            {effectiveLoading && pageItems.length === 0 && (
+              <tr>
+                <td colSpan={8} className="px-3 py-10 text-center text-muted-foreground">
+                  <span className="inline-flex items-center gap-2">
+                    <Loader2 className="size-4 animate-spin" />
+                    加载项目中...
+                  </span>
+                </td>
+              </tr>
+            )}
+            {!effectiveLoading && currentError && (
+              <tr>
+                <td colSpan={8} className="px-3 py-10 text-center text-destructive">
+                  {currentError}
+                </td>
+              </tr>
+            )}
             {pageItems.length > 0 &&
               Array.from({ length: PROJECT_PAGE_SIZE - pageItems.length }).map((_, i) => (
                 <tr key={`filler-${i}`} aria-hidden className="border-b border-border/50">
                   <td colSpan={8} className="h-[49px]" />
                 </tr>
               ))}
-            {pageItems.length === 0 && (
+            {!effectiveLoading && !currentError && pageItems.length === 0 && (
               <tr>
                 <td colSpan={8} className="px-3 py-10 text-center text-muted-foreground">
                   {trimmed
@@ -449,15 +511,15 @@ function ProjectListSection({
             )}
           </tbody>
         </table>
-        {filtered.length > 0 && (
+        {!effectiveLoading && !currentError && total > 0 && (
           <div className="flex items-center justify-between gap-3 border-t border-border px-3 py-2 text-xs text-muted-foreground">
-            <span>共 {formatNumber(filtered.length)} 个</span>
+            <span>共 {formatNumber(total)} 个</span>
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 className="rounded-md border border-border px-2 py-1 transition-colors hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={currentPage <= 1}
-                onClick={() => setPage(currentPage - 1)}
+                onClick={() => requestPage(currentPage - 1)}
               >
                 上一页
               </button>
@@ -468,7 +530,7 @@ function ProjectListSection({
                 type="button"
                 className="rounded-md border border-border px-2 py-1 transition-colors hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={currentPage >= totalPages}
-                onClick={() => setPage(currentPage + 1)}
+                onClick={() => requestPage(currentPage + 1)}
               >
                 下一页
               </button>
@@ -695,6 +757,10 @@ export function ProjectModePanel({
   data,
   loading,
   error,
+  projectPages,
+  projectPageLoading,
+  projectPageError,
+  onProjectPageChange,
   onOpenTraces,
   onSkillClick,
   marketSkillKeys = new Set(),
@@ -703,7 +769,21 @@ export function ProjectModePanel({
   data: DashboardProjectModeData | null
   loading: boolean
   error: string | null
-  onOpenTraces: (project: DashboardProjectModeProject) => void
+  projectPages: Partial<
+    Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>
+  >
+  projectPageLoading: Record<DashboardProjectModeProjectStatus, boolean>
+  projectPageError: Partial<Record<DashboardProjectModeProjectStatus, string>>
+  onProjectPageChange: (
+    status: DashboardProjectModeProjectStatus,
+    page: number,
+    keyword: string,
+    pageSize: number
+  ) => void
+  onOpenTraces: (
+    project: DashboardProjectModeProject,
+    feature?: DashboardProjectModeFeature
+  ) => void
   onSkillClick?: (skill: string) => void
   marketSkillKeys?: Set<string>
   pluginSkillKeys?: Set<string>
@@ -727,14 +807,13 @@ export function ProjectModePanel({
 
   const summary = data?.summary
   const adapters = data?.adapters ?? []
-  const projects = data?.projects ?? []
   const funnelData: CodeAdoptionFunnelData = summary?.codeStats ?? EMPTY_FUNNEL_DATA
   const topSkills = data?.topSkills ?? []
   const bySkillAdoption = data?.bySkillAdoption ?? []
   const tools = data?.tools ?? EMPTY_TOOL_USAGE
-  const archivedProjects = projects.filter((p) => p.lifecycleStatus === "archived")
-  const archivedCount = archivedProjects.length
-  const archivedFeatureCount = archivedProjects.reduce((sum, p) => sum + p.featureCount, 0)
+  const projectCounts = data?.projectCounts
+  const archivedCount = projectCounts?.archived ?? 0
+  const archivedFeatureCount = projectCounts?.archivedFeatureCount ?? 0
 
   return (
     <div className="space-y-6">
@@ -794,7 +873,7 @@ export function ProjectModePanel({
             <StatCard
               icon={Code2}
               label="代码生成行数"
-              value={formatNumber(summary?.codeStats?.generatedLines ?? 0)}
+              value={formatLineCount(summary?.codeStats?.generatedLines ?? 0)}
               color="bg-sky-500"
             />
             <StatCard
@@ -803,7 +882,7 @@ export function ProjectModePanel({
               value={formatPercent(summary?.codeStats?.measuredAdoptionRate)}
               sub={
                 summary?.codeStats
-                  ? `${formatNumber(summary.codeStats.adoptedLines)} / ${formatNumber(summary.codeStats.effectiveGeneratedLines)} 行`
+                  ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.effectiveGeneratedLines)} 行`
                   : "暂无代码生成数据"
               }
               color="bg-indigo-500"
@@ -814,7 +893,7 @@ export function ProjectModePanel({
               value={formatPercent(summary?.codeStats?.pushedAdoptionRate)}
               sub={
                 summary?.codeStats
-                  ? `${formatNumber(summary.codeStats.pushedAdoptedLines)} / ${formatNumber(summary.codeStats.pushedEffectiveGeneratedLines)} 行`
+                  ? `${formatLineCount(summary.codeStats.pushedAdoptedLines)} / ${formatLineCount(summary.codeStats.pushedEffectiveGeneratedLines)} 行`
                   : "暂无已 Push 数据"
               }
               color="bg-teal-500"
@@ -825,7 +904,7 @@ export function ProjectModePanel({
               value={formatPercent(summary?.codeStats?.inclusiveAdoptionRate)}
               sub={
                 summary?.codeStats
-                  ? `${formatNumber(summary.codeStats.adoptedLines)} / ${formatNumber(summary.codeStats.inclusiveEffectiveGeneratedLines)} 行`
+                  ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.inclusiveEffectiveGeneratedLines)} 行`
                   : "暂无代码生成数据"
               }
               color="bg-cyan-500"
@@ -836,7 +915,15 @@ export function ProjectModePanel({
       </section>
 
       {/* Project list */}
-      <ProjectListSection projects={projects} loading={loading} onOpenTraces={onOpenTraces} />
+      <ProjectListSection
+        projectCounts={projectCounts}
+        projectPages={projectPages}
+        pageLoading={projectPageLoading}
+        pageError={projectPageError}
+        loading={loading}
+        onPageChange={onProjectPageChange}
+        onOpenTraces={onOpenTraces}
+      />
 
       {/* Skill / Tool 使用排行，与平台运营概览同款 */}
       <section>
