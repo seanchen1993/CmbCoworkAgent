@@ -235,6 +235,8 @@ export function CustomModelDialog({
   const [formError, setFormError] = useState<string | null>(null)
   const [tokenLimits, setTokenLimits] = useState<TokenLimits>(FALLBACK_LIMITS)
   const [allConfigs, setAllConfigs] = useState<CustomModelItem[]>([])
+  const [defaultModelId, setDefaultModelId] = useState("")
+  const [defaultModelDraftId, setDefaultModelDraftId] = useState("")
 
   useEffect(() => {
     let cancelled = false
@@ -250,12 +252,15 @@ export function CustomModelDialog({
       void Promise.all([
         window.api.models.getTokenLimits(),
         window.api.models.getCustomConfigs(),
-        window.api.models.getCustomConfig(normalizedSelectedId)
+        window.api.models.getCustomConfig(normalizedSelectedId),
+        window.api.models.getDefault()
       ])
-        .then(([limits, all, existing]) => {
+        .then(([limits, all, existing, savedDefaultModelId]) => {
           if (cancelled) return
           setTokenLimits(limits)
           setAllConfigs(all)
+          setDefaultModelId(savedDefaultModelId || "")
+          setDefaultModelDraftId(savedDefaultModelId || "")
 
           const resolvedExisting =
             existing ||
@@ -340,7 +345,14 @@ export function CustomModelDialog({
     setHasExisting(true)
     setHasExistingKey(picked.hasApiKey)
     setShowKey(false)
+    setDefaultModelDraftId(defaultModelId)
   }
+
+  const currentModelStorageId = config.id ? `custom:${config.id}` : ""
+  const isDefaultModel =
+    currentModelStorageId !== "" && currentModelStorageId === defaultModelDraftId
+  const isPersistedDefaultModel =
+    currentModelStorageId !== "" && currentModelStorageId === defaultModelId
 
   const maxTokensError = getMaxTokensError(config.maxTokensInput, tokenLimits)
   const maxOutputTokensError = getMaxOutputTokensError(config.maxOutputTokensInput, tokenLimits)
@@ -475,6 +487,16 @@ export function CustomModelDialog({
         interleavedThinking: config.interleavedThinking,
         tier: config.tier
       })
+      const savedModelId = `custom:${result.id}`
+      const nextDefaultModelId =
+        allConfigs.length === 0
+          ? savedModelId
+          : defaultModelDraftId === currentModelStorageId
+            ? savedModelId
+            : defaultModelDraftId
+      await window.api.models.setDefault(nextDefaultModelId)
+      setDefaultModelId(nextDefaultModelId)
+      setDefaultModelDraftId(nextDefaultModelId)
       const refreshed = await window.api.models.getCustomConfigs()
       setAllConfigs(refreshed)
       const updated = refreshed.find((item) => item.id === result.id)
@@ -497,7 +519,7 @@ export function CustomModelDialog({
         setHasExisting(true)
         setHasExistingKey(updated.hasApiKey)
       }
-      onModelSaved?.(`custom:${result.id}`)
+      onModelSaved?.(savedModelId)
       setFormError(null)
       onOpenChange(false)
     } catch (e) {
@@ -526,6 +548,12 @@ export function CustomModelDialog({
       setAllConfigs(refreshed)
       if (refreshed.length > 0) {
         const fallback = refreshed[0]
+        const fallbackModelId = `custom:${fallback.id}`
+        if (isPersistedDefaultModel) {
+          await window.api.models.setDefault(fallbackModelId)
+          setDefaultModelId(fallbackModelId)
+          setDefaultModelDraftId(fallbackModelId)
+        }
         setConfig({
           id: fallback.id,
           name: fallback.name,
@@ -545,8 +573,13 @@ export function CustomModelDialog({
         })
         setHasExisting(true)
         setHasExistingKey(fallback.hasApiKey)
-        onModelSaved?.(`custom:${fallback.id}`)
+        onModelSaved?.(fallbackModelId)
       } else {
+        if (isPersistedDefaultModel) {
+          await window.api.models.setDefault("")
+          setDefaultModelId("")
+          setDefaultModelDraftId("")
+        }
         setConfig({
           id: undefined,
           name: "",
@@ -606,6 +639,7 @@ export function CustomModelDialog({
                   })
                   setHasExisting(false)
                   setHasExistingKey(false)
+                  setDefaultModelDraftId(defaultModelId)
                   setFormError(null)
                   setTestResult(null)
                   setShowKey(false)
@@ -873,6 +907,48 @@ export function CustomModelDialog({
               <p className="text-xs leading-tight text-muted-foreground">
                 开启智能路由后，系统会根据任务复杂度自动选择对应档位的模型
               </p>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">默认使用</label>
+              <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
+                <div>
+                  <div className="text-sm text-foreground">{isDefaultModel ? "已设为默认" : "未设为默认"}</div>
+                  <p className="text-xs leading-tight text-muted-foreground">
+                    新开的会话会优先选择这个模型
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={isDefaultModel}
+                  disabled={!config.id}
+                  onClick={() => {
+                    if (!config.id) return
+                    setDefaultModelDraftId(isDefaultModel ? "" : `custom:${config.id}`)
+                  }}
+                  className={cn(
+                    "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors",
+                    !config.id
+                      ? "cursor-not-allowed bg-muted-foreground/20"
+                      : isDefaultModel
+                        ? "cursor-pointer bg-primary"
+                        : "cursor-pointer bg-muted-foreground/30"
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                      isDefaultModel ? "translate-x-4" : "translate-x-0"
+                    )}
+                  />
+                </button>
+              </div>
+              {!config.id && (
+                <p className="text-xs leading-tight text-muted-foreground">
+                  先保存模型配置，才能把它设为默认。
+                </p>
+              )}
             </div>
 
             <div className="space-y-1">

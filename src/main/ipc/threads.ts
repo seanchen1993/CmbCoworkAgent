@@ -29,6 +29,7 @@ import { generateTitle } from "../services/title-generator"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import { disposeAgentThreadState } from "./agent"
+import { getDefaultModel } from "./models"
 import type { Thread, ThreadUpdateParams, ThreadValuesMergeParams } from "../types"
 import { SqlGoalStore } from "../agent/goals/goal-store"
 import type { ThreadGoal } from "../agent/goals/types"
@@ -479,6 +480,14 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         existsSync(lastWorkspacePath)
       ) {
         nextMetadata.workspacePath = lastWorkspacePath
+      }
+    }
+
+    const hasModel = Object.prototype.hasOwnProperty.call(nextMetadata, "model")
+    if (!hasModel) {
+      const defaultModelId = getDefaultModel()
+      if (defaultModelId) {
+        nextMetadata.model = defaultModelId
       }
     }
 

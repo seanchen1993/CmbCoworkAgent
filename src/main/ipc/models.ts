@@ -2075,6 +2075,29 @@ function resolveDefaultModelId(): string {
   return customConfigs.length > 0 ? `custom:${customConfigs[0].id}` : ""
 }
 
+function normalizeConfiguredModelId(modelId: string): string {
+  const trimmed = modelId.trim()
+  if (!trimmed) return ""
+
+  const customConfigs = getCustomModelPublicConfigs()
+  const normalizedId = trimmed.startsWith("custom:") ? trimmed.slice("custom:".length) : trimmed
+
+  const matchedById = customConfigs.find((config) => config.id === normalizedId)
+  if (matchedById) return `custom:${matchedById.id}`
+
+  const matchedByModel = customConfigs.find(
+    (config) => config.model === trimmed || config.model === normalizedId
+  )
+  if (matchedByModel) return `custom:${matchedByModel.id}`
+
+  return ""
+}
+
+function getResolvedStoredDefaultModelId(): string {
+  const stored = store.get("defaultModel", "") as string
+  return normalizeConfiguredModelId(stored) || resolveDefaultModelId()
+}
+
 export function registerModelHandlers(ipcMain: IpcMain): void {
   // List available models (custom only)
   ipcMain.handle("models:list", async () => {
@@ -2139,13 +2162,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   // Get default model
   ipcMain.handle("models:getDefault", async () => {
-    const stored = store.get("defaultModel", "") as string
-    return stored || resolveDefaultModelId()
+    return getResolvedStoredDefaultModelId()
   })
 
   // Set default model
   ipcMain.handle("models:setDefault", async (_event, modelId: string) => {
-    store.set("defaultModel", modelId)
+    store.set("defaultModel", normalizeConfiguredModelId(modelId))
   })
 
   // List providers with whether any model has a key configured.
@@ -3466,6 +3488,5 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 }
 
 export function getDefaultModel(): string {
-  const stored = store.get("defaultModel", "") as string
-  return stored || resolveDefaultModelId()
+  return getResolvedStoredDefaultModelId()
 }
