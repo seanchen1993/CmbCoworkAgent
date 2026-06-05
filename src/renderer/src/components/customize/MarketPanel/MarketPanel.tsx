@@ -2596,6 +2596,7 @@ export function MarketPanel(): React.JSX.Element {
                                 isUpdating={updatingItems.has(item.id || item.name)}
                                 installedVersion={item.installedVersion}
                                 updateAvailable={item.updateAvailable}
+                                installDisabledReason={item.installDisabledReason}
                                 marketTypeLabel={getMarketTypeLabel(activeTab)}
                                 skillCallCount={
                                   activeTab === "skill"
