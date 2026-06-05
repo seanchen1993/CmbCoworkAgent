@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   Search,
   ShoppingBag,
@@ -19,7 +19,7 @@ import {
   X,
   BarChart3,
   Check,
-  ChevronDown
+  ChevronDown, ArrowLeft
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -2186,6 +2186,7 @@ export function MarketPanel(): React.JSX.Element {
             binaryMimeType={skillDetailBinaryMimeType}
             isDisabled={false}
             onToggleEnabled={() => undefined}
+            contentOnly={activeTab === "skill"}
             hideActions
           />
         </div>
@@ -2247,16 +2248,29 @@ export function MarketPanel(): React.JSX.Element {
       {/* Header */}
       <div className="px-5 py-4 border-b border-[#e8e6dc] bg-[#faf9f5]">
         <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2.5">
+          <div className="w-full flex items-center gap-2.5">
             <div className="size-8 rounded-xl bg-[#fdf3e7] border border-[#f5d9c4] flex items-center justify-center">
               <ShoppingBag className="size-4 text-[#c4956a]" />
             </div>
-            <div>
-              <h2 className="font-medium text-[15px] leading-tight text-[#141413]">
-                {detailMode === "detail" && selectedItem
-                  ? selectedItem.chinese_name || selectedItem.name
-                  : "应用市场"}
-              </h2>
+            <div className={'w-full '}>
+              <div className={'w-full flex justify-between items-center'}>
+                <h2 className="font-medium text-[15px] leading-tight text-[#141413]">
+                  {detailMode === "detail" && selectedItem
+                    ? selectedItem.chinese_name || selectedItem.name
+                    : "应用市场"}
+                </h2>
+               <span>
+                    {detailMode === "detail" && selectedItem && (<Button
+                      variant="outline"
+                      size="sm"
+                      onClick={backToList}
+                      className="h-8 px-3.5 gap-1.5 text-xs font-medium text-[#8b5e34] border-[#f2c99d] bg-[linear-gradient(135deg,#fff4e7_0%,#fde7cf_100%)] hover:bg-[linear-gradient(135deg,#ffedd8_0%,#f9d9b8_100%)] shadow-[0_6px_18px_rgba(196,149,106,0.22)] rounded-lg cursor-pointer"
+                    >
+                      <ArrowLeft className="size-3.5" />
+                      返回列表
+                    </Button>)}
+               </span>
+              </div>
               {detailMode === "list" && (
                 <p className="text-[11px] text-[#87867f] leading-tight mt-0.5">
                   发现并安装社区共享的工具资源
@@ -2266,7 +2280,6 @@ export function MarketPanel(): React.JSX.Element {
           </div>
         </div>
       </div>
-
       {detailMode === "detail" && selectedItem ? (
         <MarketDetailView
           activeTab={activeTab}
@@ -2288,7 +2301,6 @@ export function MarketPanel(): React.JSX.Element {
           getMarketTypeLabel={getMarketTypeLabel}
           formatMarketVersionLabel={formatMarketVersionLabel}
           isAutoOptimizedMarketItem={isAutoOptimizedMarketItem}
-          onBackToList={backToList}
           onUpdateInstall={handleUpdateInstall}
           onDownload={handleDownload}
           onUninstall={handleUninstall}

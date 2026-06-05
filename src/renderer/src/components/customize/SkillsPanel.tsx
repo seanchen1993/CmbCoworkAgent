@@ -2788,6 +2788,7 @@ export function SkillDetail(props: {
   hasMarketEntry?: boolean
   hideContentPreview?: boolean
   hideActions?: boolean
+  contentOnly?: boolean
 }): React.JSX.Element {
   const {
     skill,
@@ -2808,7 +2809,8 @@ export function SkillDetail(props: {
     isEdited = false,
     hasMarketEntry = false,
     hideContentPreview = false,
-    hideActions = false
+    hideActions = false,
+    contentOnly = false
   } = props
   const [isEditing, setIsEditing] = useState(false)
   const [draftContent, setDraftContent] = useState("")
@@ -2921,178 +2923,188 @@ export function SkillDetail(props: {
         }
       }}
     >
-      <div className="p-4 border-b border-border flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 min-w-0">
-            <h2 className="text-base font-semibold truncate min-w-0 flex-1">
-              {chineseName || skill.name}
-            </h2>
-            {!hideActions && onPublish && (
-              <Button
-                variant="default"
-                size="sm"
-                className={cn(publishButtonClassName, "group shrink-0")}
-                onClick={onPublish}
-              >
-                <span className="flex size-4 items-center justify-center rounded-full bg-white/20 ring-1 ring-white/30 transition-transform duration-200 group-hover:scale-105">
-                  <CloudUpload className="size-2.5" />
-                </span>
-                {publishLabel}
-              </Button>
-            )}
-          </div>
-          <div className="mt-1 flex items-center gap-1.5 flex-wrap">
-            {chineseName && <p className="text-xs text-muted-foreground truncate">{skill.name}</p>}
-            {isFeatured && (
-              <Badge
-                variant="outline"
-                className="h-5 gap-1 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
-              >
-                <Sparkles className="size-3 shrink-0" />
-                精品
-              </Badge>
-            )}
-            {hasMarketEntry && (
-              <Badge
-                variant="outline"
-                className="h-5 gap-1 px-2 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
-              >
-                <Store className="size-3 shrink-0" />
-                市场
-              </Badge>
-            )}
-            {isEdited && (
-              <Badge
-                variant="outline"
-                className="h-5 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
-              >
-                已编辑
-              </Badge>
-            )}
-            <TooltipProvider delayDuration={180}>
-              <Tooltip>
-                <TooltipTrigger asChild>
+      {!contentOnly && (
+        <>
+          <div className="p-4 border-b border-border flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 min-w-0">
+                <h2 className="text-base font-semibold truncate min-w-0 flex-1">
+                  {chineseName || skill.name}
+                </h2>
+                {!hideActions && onPublish && (
+                  <Button
+                    variant="default"
+                    size="sm"
+                    className={cn(publishButtonClassName, "group shrink-0")}
+                    onClick={onPublish}
+                  >
+                    <span className="flex size-4 items-center justify-center rounded-full bg-white/20 ring-1 ring-white/30 transition-transform duration-200 group-hover:scale-105">
+                      <CloudUpload className="size-2.5" />
+                    </span>
+                    {publishLabel}
+                  </Button>
+                )}
+              </div>
+              <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                {chineseName && (
+                  <p className="text-xs text-muted-foreground truncate">{skill.name}</p>
+                )}
+                {isFeatured && (
                   <Badge
                     variant="outline"
-                    className={cn(
-                      "h-5 gap-1 px-2 text-[10px] cursor-help",
-                      skillVersionMissingInFrontmatter
-                        ? "border-amber-200 text-amber-800 bg-amber-50"
-                        : "border-sky-200 text-sky-700 bg-sky-50"
-                    )}
+                    className="h-5 gap-1 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
                   >
-                    <GitBranch className="size-3 shrink-0" />
-                    {resolvedSkillVersion}
+                    <Sparkles className="size-3 shrink-0" />
+                    精品
                   </Badge>
-                </TooltipTrigger>
-                <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
-                  {skillVersionTooltip}
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-            {category && (
-              <Badge variant="outline" className="h-5 px-2 text-[10px]">
-                {category}
-              </Badge>
-            )}
-          </div>
-        </div>
-        {!hideActions && (
-          <div className="flex items-center gap-1.5 shrink-0">
-            {canEditCurrentFile && !isEditing && (
-              <Button variant="outline" size="sm" className="h-7 text-xs" onClick={handleStartEdit}>
-                编辑
-              </Button>
-            )}
-            {canEditCurrentFile && isEditing && (
-              <>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={handleCancelEdit}
-                  disabled={isSaving}
-                >
-                  取消
-                </Button>
-                <Button
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={() => void handleSaveEdit()}
-                  disabled={!isDirty || isSaving}
-                >
-                  {isSaving ? "保存中..." : "保存"}
-                </Button>
-              </>
-            )}
-            {onDelete && (
-              deleteDisabledReason ? (
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <span className="inline-flex cursor-not-allowed">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="pointer-events-none h-7 gap-1.5 text-xs text-muted-foreground opacity-55"
-                        disabled
-                        aria-disabled="true"
-                      >
-                        <Trash2 className="size-3" />
-                        删除
-                      </Button>
-                    </span>
-                  </PopoverTrigger>
-                  <PopoverContent
-                    className="w-auto max-w-56 px-3 py-2 text-xs"
-                    side="bottom"
-                    align="end"
+                )}
+                {hasMarketEntry && (
+                  <Badge
+                    variant="outline"
+                    className="h-5 gap-1 px-2 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
                   >
-                    {deleteDisabledReason}
-                  </PopoverContent>
-                </Popover>
-              ) : (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 gap-1.5 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
-                  onClick={onDelete}
-                >
-                  <Trash2 className="size-3" />
-                  删除
-                </Button>
-              )
-            )}
-            <Button
-              variant={isDisabled ? "outline" : "default"}
-              size="sm"
-              className="h-7 gap-1.5 text-xs"
-              onClick={onToggleEnabled}
-            >
-              <Power className="size-3" />
-              {isDisabled ? "已禁用" : "已启用"}
-            </Button>
-          </div>
-        )}
-      </div>
-
-      <div className="px-4 py-3 border-b border-border">
-        <div className="space-y-3">
-          <p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">
-            {description}
-          </p>
-          {skillVersionMissingInFrontmatter && (
-            <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-relaxed text-amber-900">
-              <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
-              <p>
-                当前没有在 <code className="rounded bg-amber-100 px-1">SKILL.md frontmatter</code>{" "}
-                里找到 <code className="rounded bg-amber-100 px-1">version</code>，系统当前按{" "}
-                <code className="rounded bg-amber-100 px-1">{DEFAULT_SKILL_VERSION}</code>{" "}
-                处理。建议补上 version，方便发布、追踪和版本识别。
-              </p>
+                    <Store className="size-3 shrink-0" />
+                    市场
+                  </Badge>
+                )}
+                {isEdited && (
+                  <Badge
+                    variant="outline"
+                    className="h-5 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+                  >
+                    已编辑
+                  </Badge>
+                )}
+                <TooltipProvider delayDuration={180}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Badge
+                        variant="outline"
+                        className={cn(
+                          "h-5 gap-1 px-2 text-[10px] cursor-help",
+                          skillVersionMissingInFrontmatter
+                            ? "border-amber-200 text-amber-800 bg-amber-50"
+                            : "border-sky-200 text-sky-700 bg-sky-50"
+                        )}
+                      >
+                        <GitBranch className="size-3 shrink-0" />
+                        {resolvedSkillVersion}
+                      </Badge>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
+                      {skillVersionTooltip}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+                {category && (
+                  <Badge variant="outline" className="h-5 px-2 text-[10px]">
+                    {category}
+                  </Badge>
+                )}
+              </div>
             </div>
-          )}
-        </div>
-      </div>
+            {!hideActions && (
+              <div className="flex items-center gap-1.5 shrink-0">
+                {canEditCurrentFile && !isEditing && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={handleStartEdit}
+                  >
+                    编辑
+                  </Button>
+                )}
+                {canEditCurrentFile && isEditing && (
+                  <>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={handleCancelEdit}
+                      disabled={isSaving}
+                    >
+                      取消
+                    </Button>
+                    <Button
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => void handleSaveEdit()}
+                      disabled={!isDirty || isSaving}
+                    >
+                      {isSaving ? "保存中..." : "保存"}
+                    </Button>
+                  </>
+                )}
+                {onDelete &&
+                  (deleteDisabledReason ? (
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <span className="inline-flex cursor-not-allowed">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="pointer-events-none h-7 gap-1.5 text-xs text-muted-foreground opacity-55"
+                            disabled
+                            aria-disabled="true"
+                          >
+                            <Trash2 className="size-3" />
+                            删除
+                          </Button>
+                        </span>
+                      </PopoverTrigger>
+                      <PopoverContent
+                        className="w-auto max-w-56 px-3 py-2 text-xs"
+                        side="bottom"
+                        align="end"
+                      >
+                        {deleteDisabledReason}
+                      </PopoverContent>
+                    </Popover>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 gap-1.5 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+                      onClick={onDelete}
+                    >
+                      <Trash2 className="size-3" />
+                      删除
+                    </Button>
+                  ))}
+                <Button
+                  variant={isDisabled ? "outline" : "default"}
+                  size="sm"
+                  className="h-7 gap-1.5 text-xs"
+                  onClick={onToggleEnabled}
+                >
+                  <Power className="size-3" />
+                  {isDisabled ? "已禁用" : "已启用"}
+                </Button>
+              </div>
+            )}
+          </div>
+
+          <div className="px-4 py-3 border-b border-border">
+            <div className="space-y-3">
+              <p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">
+                {description}
+              </p>
+              {skillVersionMissingInFrontmatter && (
+                <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-relaxed text-amber-900">
+                  <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
+                  <p>
+                    当前没有在 <code className="rounded bg-amber-100 px-1">SKILL.md frontmatter</code>{" "}
+                    里找到 <code className="rounded bg-amber-100 px-1">version</code>，系统当前按{" "}
+                    <code className="rounded bg-amber-100 px-1">{DEFAULT_SKILL_VERSION}</code>{" "}
+                    处理。建议补上 version，方便发布、追踪和版本识别。
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
 
       {hideContentPreview ? (
         <div className="flex-1 min-h-0 p-4">

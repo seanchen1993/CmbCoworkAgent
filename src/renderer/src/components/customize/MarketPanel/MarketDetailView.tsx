@@ -81,7 +81,6 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
     getMarketTypeLabel,
     formatMarketVersionLabel,
     isAutoOptimizedMarketItem,
-    onBackToList,
     onUpdateInstall,
     onDownload,
     onUninstall,
@@ -128,39 +127,32 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
   return (
     <ScrollArea className="flex-1">
       <div className="p-5 h-full">
-        <div className="mb-3 flex justify-end">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onBackToList}
-            className="h-8 px-3 gap-1.5 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] rounded-lg cursor-pointer"
-          >
-            <ArrowLeft className="size-3.5" />
-            返回列表
-          </Button>
-        </div>
         <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_380px] gap-5 items-start xl:h-full">
           <div className="space-y-3 xl:order-1 order-2">{detailFilePanel}</div>
 
           <div className="xl:order-2 order-1 space-y-3 xl:sticky xl:top-4 w-full h-full overflow-y-auto pr-1">
             <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.04)_0px_4px_16px]">
-              <div className="space-y-1.5">
-                {selectedItem.chinese_name ? (
-                  <h3 className="text-base font-medium leading-snug text-[#141413]">
-                    {selectedItem.chinese_name}
-                    <span className="ml-2 text-[#87867f] font-normal text-sm">
-                      ({selectedItem.name})
-                    </span>
-                  </h3>
-                ) : (
-                  <h3 className="text-base font-medium leading-snug text-[#141413]">
-                    {selectedItem.name}
-                  </h3>
-                )}
-                {selectedItem.description && (
-                  <p className="text-sm text-[#87867f] leading-relaxed">{selectedItem.description}</p>
-                )}
-              </div>
+              {activeTab !== "skill" && (
+                <div className="space-y-1.5">
+                  {selectedItem.chinese_name ? (
+                    <h3 className="text-base font-medium leading-snug text-[#141413]">
+                      {selectedItem.chinese_name}
+                      <span className="ml-2 text-[#87867f] font-normal text-sm">
+                        ({selectedItem.name})
+                      </span>
+                    </h3>
+                  ) : (
+                    <h3 className="text-base font-medium leading-snug text-[#141413]">
+                      {selectedItem.name}
+                    </h3>
+                  )}
+                  {selectedItem.description && (
+                    <p className="text-sm text-[#87867f] leading-relaxed whitespace-pre-wrap break-words">
+                      {selectedItem.description}
+                    </p>
+                  )}
+                </div>
+              )}
 
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
                 {selectedItem.category && (
