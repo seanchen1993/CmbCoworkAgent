@@ -228,10 +228,19 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                       已安装
                     </span>
                   ) : selectedItem.featured === "精品" ? (
-                    <span className="col-span-2 text-xs bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-3 py-2 rounded-lg inline-flex items-center gap-1.5">
-                      <Zap className="size-3" />
-                      自动保持最新
-                    </span>
+                    <TooltipProvider delayDuration={180}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="col-span-2 text-xs bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-3 py-2 rounded-lg inline-flex items-center gap-1.5">
+                            <Zap className="size-3" />
+                            自动保持最新
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
+                          这是一个精品技能。系统会自动为你安装并保持最新版本，无需手动安装或更新。
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   ) : selectedItem.installDisabledReason ? (
                     <TooltipProvider delayDuration={180}>
                       <Tooltip>
