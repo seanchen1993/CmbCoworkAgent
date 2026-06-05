@@ -140,7 +140,7 @@ function OrgSkillCard({
 
   return (
     <div
-      className="group rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 hover:border-[#d9d5c8] hover:bg-white transition-colors shadow-[rgba(0,0,0,0.03)_0px_2px_10px] cursor-pointer"
+      className="group flex h-full flex-col rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 hover:border-[#d9d5c8] hover:bg-white transition-colors shadow-[rgba(0,0,0,0.03)_0px_2px_10px] cursor-pointer"
       onClick={() => onOpenDetail(item)}
     >
       <div className="flex items-start justify-between gap-3">
@@ -168,15 +168,15 @@ function OrgSkillCard({
             )}
           </div>
           {item.description && (
-            <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-[#87867f]">
+            <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-[#87867f] mb-2">
               {item.description}
             </p>
           )}
         </div>
       </div>
       {/*box bottom*/}
-      <div className={"flex items-center justify-between  border-t border-[#f0eee6] pt-3 mt-2"}>
-        <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-[#87867f]">
+      <div className={"mt-auto flex items-center justify-between border-t border-[#f0eee6] pt-1 mt-4"}>
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-[#87867f]">
           {item.version && (
             <span className="inline-flex items-center gap-1">
               <GitBranch className="size-3" />v{item.version}

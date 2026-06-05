@@ -97,7 +97,7 @@ const MOCK_ORG_SKILL_ITEMS: OrgSkillApiItem[] = [
     id: 10001,
     slug: "org-policy-helper",
     name: "制度问答助手",
-    description: "聚合组织内部公开制度与流程说明，帮助用户快速定位适用条款、办理路径和注意事项。",
+    description: "聚合组织内部公开制度与流程说明，帮助用户快速定位适用条款、办理路径和注意事项。聚合组织内部公开制度与流程说明，帮助用户快速定位适用条款、办理路径和注意事项。",
     icon: "",
     sourceOrigin: "ORG",
     sourceOriginName: "组织发布",

@@ -395,7 +395,7 @@ function MarketItemCard({
 
   return (
     <div
-      className="group p-5 rounded-2xl border border-[#f0eee6] bg-[#faf9f5] hover:bg-white hover:border-[#e8e6dc] hover:shadow-[rgba(0,0,0,0.06)_0px_4px_20px] transition-all duration-200 cursor-pointer"
+      className="group flex h-full flex-col p-5 rounded-2xl border border-[#f0eee6] bg-[#faf9f5] hover:bg-white hover:border-[#e8e6dc] hover:shadow-[rgba(0,0,0,0.06)_0px_4px_20px] transition-all duration-200 cursor-pointer"
       onClick={() => onOpenDetail(item)}
     >
       {/* Header: name + badges */}
@@ -486,7 +486,7 @@ function MarketItemCard({
       {/*)}*/}
 
       {/* Footer: metadata + actions */}
-      <div className="flex items-center justify-between flex-wrap gap-2 pt-3 border-t border-[#f0eee6]">
+      <div className="mt-auto flex items-center justify-between flex-wrap gap-2 pt-3 border-t border-[#f0eee6]">
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-[#87867f]">
           <div className="flex items-center gap-1">
             <Calendar className="size-3 shrink-0" />
