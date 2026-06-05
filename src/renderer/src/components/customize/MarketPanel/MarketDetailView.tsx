@@ -1,6 +1,5 @@
 import type React from "react"
 import {
-  ArrowLeft,
   BarChart3,
   Calendar,
   CheckCircle,
@@ -51,7 +50,6 @@ interface MarketDetailViewProps {
   getMarketTypeLabel: (type: MarketItemType) => string
   formatMarketVersionLabel: (version?: string | null) => string
   isAutoOptimizedMarketItem: (item: MarketItem) => boolean
-  onBackToList: () => void
   onUpdateInstall: (item: MarketItem) => void
   onDownload: (item: MarketItem, downloadToLocal?: boolean) => void
   onUninstall: (item: MarketItem) => void
