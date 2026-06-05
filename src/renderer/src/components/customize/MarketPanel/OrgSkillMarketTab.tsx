@@ -187,9 +187,11 @@ function OrgSkillCard({
             更新于 {new Date(updatedAt).toLocaleDateString("zh-CN")}
           </span>
           {(item.user_id || item.managerName || item.managerDepartment) && (
-            <span className="inline-flex min-w-0 items-center gap-1">
-              <User className="size-3 shrink-0" />
-              {renderUploaderProfile(uploaderProfile, item.user_id || item.managerName)}
+            <span className="flex min-w-0 items-start gap-1">
+              <User className="mt-0.5 size-3 shrink-0" />
+              {renderUploaderProfile(uploaderProfile, item.user_id || item.managerName, {
+                multiline: true
+              })}
             </span>
           )}
         </div>

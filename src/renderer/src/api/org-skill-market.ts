@@ -106,7 +106,7 @@ const MOCK_ORG_SKILL_ITEMS: OrgSkillApiItem[] = [
       userId: "mock-user-001",
       ystId: "mock001",
       openId: "MOCK_OPEN_ID_001",
-      department: "第一/第二/示例组织/知识运营组"
+      department: "第一/第二/示例组织/知识运营组知识运营组知知识运营组知识运营组识运营组知识运营组知识运营组知识运营组"
     },
     belongsToSystems: [{ id: "MOCK.SYS.01", name: "示例技能平台" }],
     labels: [{ labelId: "mock-label-policy", labelName: "制度规范" }],
