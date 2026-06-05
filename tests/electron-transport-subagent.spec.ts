@@ -2249,6 +2249,627 @@ async function testCoordinatorAiFallbackEmitsOnlyGrowingValuesDelta(): Promise<v
   )
 }
 
+async function testCoordinatorValuesSnapshotWithProviderIdDoesNotReplayWrappedLiveText(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const liveText = "总结：firstDemo 是一个 Spring Boot 用户认证服务。"
+  const wrappedSnapshot = `项目研究已经完成。\n\n${liveText}\n\n## 项目概览\n\nfirstDemo 使用 JWT 和内存存储。`
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "live-ai-id", content: liveText }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the live answer"
+  )
+
+  const valuesModeEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "provider-final-ai-id", content: wrappedSnapshot })
+    ])
+  )
+  const messageEvents = valuesModeEvents.filter((event) => event.event === "messages")
+  const snapshotEvents = customEvents(valuesModeEvents, "coordinator_ai_snapshot_message")
+  const snapshotMessage = snapshotEvents[0]?.assistantMessage as
+    | { id?: string; content?: string }
+    | undefined
+
+  assert(messageEvents.length === 0, "wrapped values snapshot must not be appended as a delta")
+  assert(snapshotMessage?.id === "live-ai-id", "wrapped provider snapshot should replace live id")
+  assert(
+    snapshotMessage?.content === wrappedSnapshot,
+    "wrapped provider snapshot should preserve the full final values content"
+  )
+}
+
+async function testCoordinatorValuesSnapshotWithoutProviderIdDoesNotReplayWrappedLiveText(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const liveText = "总结：firstDemo 是一个 Spring Boot 用户认证服务。"
+  const wrappedSnapshot = `项目研究已经完成。\n\n${liveText}\n\n## 项目概览\n\nfirstDemo 使用 JWT 和内存存储。`
+
+  const messagesModeEvents = convertCoordinator(
+    transport,
+    streamMessageEvent(aiMessage({ content: liveText }))
+  ).filter((event) => event.event === "messages")
+  assert(messagesModeEvents.length === 1, "messages-mode AI should emit the live answer")
+
+  const valuesModeEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([humanMessage("分析项目"), aiMessage({ content: wrappedSnapshot })])
+  )
+  const messageEvents = valuesModeEvents.filter((event) => event.event === "messages")
+  const snapshotEvents = customEvents(valuesModeEvents, "coordinator_ai_snapshot_message")
+  const snapshotMessage = snapshotEvents[0]?.assistantMessage as
+    | { id?: string; content?: string }
+    | undefined
+
+  assert(messageEvents.length === 0, "wrapped values snapshot must not be appended as a delta")
+  assert(snapshotMessage?.content === wrappedSnapshot, "snapshot should preserve full final content")
+}
+
+async function testCoordinatorValuesSnapshotWithSameProviderIdDoesNotReplayWrappedLiveText(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const liveText = "总结：firstDemo 是一个 Spring Boot 用户认证服务。"
+  const wrappedSnapshot = `项目研究已经完成。\n\n${liveText}\n\n## 项目概览\n\nfirstDemo 使用 JWT 和内存存储。`
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "same-ai-id", content: liveText }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the live answer"
+  )
+
+  const valuesModeEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "same-ai-id", content: wrappedSnapshot })
+    ])
+  )
+  const messageEvents = valuesModeEvents.filter((event) => event.event === "messages")
+  const snapshotEvents = customEvents(valuesModeEvents, "coordinator_ai_snapshot_message")
+  const snapshotMessage = snapshotEvents[0]?.assistantMessage as
+    | { id?: string; content?: string }
+    | undefined
+
+  assert(messageEvents.length === 0, "wrapped values snapshot must not be appended as a delta")
+  assert(snapshotMessage?.id === "same-ai-id", "snapshot should keep the same provider id")
+  assert(snapshotMessage?.content === wrappedSnapshot, "snapshot should preserve full final content")
+}
+
+async function testCoordinatorValuesSnapshotDoesNotAppendRepeatedFullTextSuffix(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const liveText =
+    "总结：firstDemo 是一个 Spring Boot 用户认证服务，包含 JWT 认证、用户注册登录和内存存储。"
+  const repeatedSnapshot = `${liveText}\n\n${liveText}\n\n## 项目概览\n\nJava 17 + Spring Boot 3.4.5。`
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "same-ai-id", content: liveText }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the live answer"
+  )
+
+  const valuesModeEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "same-ai-id", content: repeatedSnapshot })
+    ])
+  ).filter((event) => event.event === "messages")
+
+  assert(valuesModeEvents.length === 1, "values snapshot should preserve new text after replay")
+  const valuesModeData = valuesModeEvents[0]?.data as Array<{ content?: string }>
+  assert(
+    valuesModeData?.[0]?.content === "\n\n## 项目概览\n\nJava 17 + Spring Boot 3.4.5。",
+    "values snapshot should append only the new tail after the repeated full text"
+  )
+}
+
+async function testCoordinatorValuesSnapshotKeepsSubsequentReplayGrowth(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const liveText =
+    "总结：firstDemo 是一个 Spring Boot 用户认证服务，包含 JWT 认证、用户注册登录和内存存储。"
+  const firstSnapshot = `${liveText}\n\n${liveText}\n\n结论 A：适合作为教学原型。`
+  const secondSnapshot = `${liveText}\n\n${liveText}\n\n结论 A：适合作为教学原型。\n结论 B：生产环境需要数据库。`
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "same-ai-id", content: liveText }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the live answer"
+  )
+
+  const firstValuesEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "same-ai-id", content: firstSnapshot })
+    ])
+  ).filter((event) => event.event === "messages")
+  assert(firstValuesEvents.length === 1, "first replay snapshot should emit conclusion A")
+
+  const secondValuesEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "same-ai-id", content: secondSnapshot })
+    ])
+  )
+  const replacement = customEvents(
+    secondValuesEvents,
+    "coordinator_ai_snapshot_message"
+  )[0]?.assistantMessage as { id?: string; content?: string } | undefined
+
+  assert(
+    replacement?.id === "same-ai-id" && replacement.content === secondSnapshot,
+    "subsequent replay growth should replace with the full latest snapshot instead of disappearing"
+  )
+}
+
+async function testCoordinatorValuesSnapshotKeepsPartialReplayPrefixTail(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const liveText =
+    "总结：firstDemo 是一个 Spring Boot 用户认证服务，包含 JWT 认证、用户注册登录和内存存储。"
+  const partialReplayTail =
+    "\n\n总结：firstDemo 是一个 Spring Boot 用户认证服务，新增最终结论：应补充数据库持久化。"
+  const finalSnapshot = `${liveText}${partialReplayTail}`
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "same-ai-id", content: liveText }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the live answer"
+  )
+
+  const valuesModeEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "same-ai-id", content: finalSnapshot })
+    ])
+  ).filter((event) => event.event === "messages")
+
+  assert(
+    valuesModeEvents.length === 1,
+    "partial replay prefix with new tail must still emit the final tail"
+  )
+  const valuesModeData = valuesModeEvents[0]?.data as Array<{ content?: string }>
+  assert(
+    valuesModeData?.[0]?.content === partialReplayTail,
+    "partial replay prefix should not be mistaken for a pure full-text replay"
+  )
+}
+
+async function testCoordinatorValuesSnapshotKeepsQuotedPriorTextInSuffix(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const liveText =
+    "总结：firstDemo 是一个 Spring Boot 用户认证服务，包含 JWT 认证、用户注册登录和内存存储。"
+  const quotedTail = `\n\n引用前文：${liveText}\n\n补充：生产环境需要数据库。`
+  const finalSnapshot = `${liveText}${quotedTail}`
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "same-ai-id", content: liveText }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the live answer"
+  )
+
+  const valuesModeEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "same-ai-id", content: finalSnapshot })
+    ])
+  ).filter((event) => event.event === "messages")
+
+  assert(valuesModeEvents.length === 1, "quoted prior text should still be emitted")
+  const valuesModeData = valuesModeEvents[0]?.data as Array<{ content?: string }>
+  assert(
+    valuesModeData?.[0]?.content === quotedTail,
+    "quoted prior text in the suffix should not be mistaken for a leading replay"
+  )
+}
+
+async function testCoordinatorValuesSnapshotDoesNotAppendAlternativeFullSnapshot(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const sharedPrefix =
+    "## firstDemo 项目分析报告\n\n### 项目定位\n\n这是一个基于 Spring Boot 3.4.5 + Java 17 的用户认证系统，提供完整的注册、登录、JWT 鉴权、用户资料管理、密码重置和邮箱验证功能。"
+  const liveText = `${sharedPrefix}\n\n### 当前流式版本\n\n- 已完成项目结构扫描\n- 正在整理模块说明\n- 旧版流式结尾`
+  const valuesSnapshot = `${sharedPrefix}\n\n### values 完整快照版本\n\n- 项目结构扫描完成\n- 模块说明已经归纳\n- 新版最终结尾`
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "same-ai-id", content: liveText }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the live answer"
+  )
+
+  const valuesModeEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "same-ai-id", content: valuesSnapshot })
+    ])
+  )
+  const messageEvents = valuesModeEvents.filter((event) => event.event === "messages")
+  const snapshotEvents = customEvents(valuesModeEvents, "coordinator_ai_snapshot_message")
+  const snapshotMessage = snapshotEvents[0]?.assistantMessage as
+    | { id?: string; content?: string }
+    | undefined
+
+  assert(messageEvents.length === 0, "replacement snapshot must not be appended as a delta")
+  assert(snapshotMessage?.id === "same-ai-id", "replacement snapshot should target same id")
+  assert(
+    snapshotMessage?.content === valuesSnapshot,
+    "replacement snapshot should preserve rewritten final content"
+  )
+}
+
+async function testCoordinatorValuesSnapshotWithReplayStillEmitsToolCalls(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "live-ai-id", content: "partial" }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the live answer"
+  )
+
+  const events = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({
+        id: "provider-final-ai-id",
+        content: "prefix partial suffix",
+        toolCalls: [{ id: "tool-1", name: "execute_command", args: { cmd: "pwd" } }]
+      })
+    ])
+  )
+  const snapshotEvents = customEvents(events, "coordinator_ai_snapshot_message")
+  const snapshotMessage = snapshotEvents[0]?.assistantMessage as
+    | { tool_calls?: Array<{ id?: string; name?: string }> }
+    | undefined
+  assert(
+    snapshotMessage?.tool_calls?.[0]?.name === "execute_command",
+    "replay replacement snapshots must still carry newly visible tool calls"
+  )
+}
+
+async function testCoordinatorValuesSnapshotContainingPriorTextStillEmits(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const liveText = "已完成检查清单：配置、接口、认证。"
+  const finalText = `最终结论如下。\n\n引用上一段清单：${liveText}\n\n补充风险：内存存储不适合生产。`
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "live-ai-id", content: liveText }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the live answer"
+  )
+
+  const events = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "provider-final-ai-id", content: finalText })
+    ])
+  )
+  const snapshotEvents = customEvents(events, "coordinator_ai_snapshot_message")
+  const snapshotMessage = snapshotEvents[0]?.assistantMessage as
+    | { id?: string; content?: string }
+    | undefined
+
+  assert(snapshotMessage?.id === "live-ai-id", "provider replay should target live message id")
+  assert(
+    snapshotMessage?.content === finalText,
+    "provider replay should preserve the full final snapshot instead of disappearing"
+  )
+}
+
+async function testCoordinatorValuesSnapshotKeepsUnrelatedProviderAssistant(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "first-ai-id", content: "我先检查项目结构。" }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the first assistant"
+  )
+
+  const valuesModeEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "second-ai-id", content: "检查完成，下面给出结论。" })
+    ])
+  ).filter((event) => event.event === "messages")
+
+  assert(valuesModeEvents.length === 1, "unrelated provider assistant should still be emitted")
+  const valuesModeData = valuesModeEvents[0]?.data as Array<{ id?: string; content?: string }>
+  assert(
+    valuesModeData?.[0]?.id === "second-ai-id" &&
+      valuesModeData?.[0]?.content === "检查完成，下面给出结论。",
+    "unrelated provider assistant should keep its own id and content"
+  )
+}
+
+async function testCoordinatorValuesSnapshotMatchesEarlierLiveAssistantBeforeNewAssistant(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const liveText = "我先检查项目结构。"
+  const newAssistantText = `引用上一条：${liveText}\n\n下面给出结论。`
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "live-ai-id", content: liveText }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the initial live assistant"
+  )
+
+  const valuesModeEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "provider-ai-1", content: liveText }),
+      aiMessage({ id: "provider-ai-2", content: newAssistantText })
+    ])
+  )
+  const messageEvents = valuesModeEvents.filter((event) => event.event === "messages")
+  const snapshotEvents = customEvents(valuesModeEvents, "coordinator_ai_snapshot_message")
+
+  assert(
+    snapshotEvents.length === 0,
+    "new provider assistant should not replace the earlier live assistant"
+  )
+  assert(
+    messageEvents.length === 1,
+    "values snapshot should skip the already-live assistant and emit only the new assistant"
+  )
+  const valuesModeData = messageEvents[0]?.data as Array<{ id?: string; content?: string }>
+  assert(
+    valuesModeData?.[0]?.id === "provider-ai-2" &&
+      valuesModeData?.[0]?.content === newAssistantText,
+    "values snapshot should keep the second provider assistant as a distinct message"
+  )
+}
+
+async function testCoordinatorValuesSnapshotKeepsPostToolAssistantSeparateAfterPreToolGrowth(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "live-ai-2", content: "好的" }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the short live assistant"
+  )
+
+  const valuesModeEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "provider-ai-1", content: "好的，我先检查项目结构。" }),
+      toolMessage({
+        id: "tool-1",
+        name: "execute_command",
+        toolCallId: "call-1",
+        content: "scan done"
+      }),
+      aiMessage({ id: "provider-ai-2", content: "好的，下面给出结论。" })
+    ])
+  )
+
+  const messageEvents = valuesModeEvents.filter((event) => event.event === "messages")
+  const snapshotEvents = customEvents(valuesModeEvents, "coordinator_ai_snapshot_message")
+  const aiMessages = messageEvents.flatMap((event) => event.data as Array<{ id?: string; content?: string }>)
+
+  assert(snapshotEvents.length === 0, "short prefix matches should not replace the live assistant")
+  assert(
+    aiMessages.some(
+      (message) => message.id === "live-ai-2" && message.content === "，我先检查项目结构。"
+    ),
+    "pre-tool assistant growth should extend the current live message"
+  )
+  assert(
+    aiMessages.some(
+      (message) => message.id === "provider-ai-2" && message.content === "好的，下面给出结论。"
+    ),
+    "post-tool assistant with the same generic prefix should stay as its own message"
+  )
+}
+
+async function testCoordinatorValuesSnapshotDoesNotLetEarlierExactShortReplayStealLiveAssistant(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "live-ai-2", content: "好的" }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the short live assistant"
+  )
+
+  const valuesModeEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "provider-ai-1", content: "好的" }),
+      toolMessage({
+        id: "tool-1",
+        name: "execute_command",
+        toolCallId: "call-1",
+        content: "scan done"
+      }),
+      aiMessage({ id: "provider-ai-2", content: "好的，下面给出结论。" })
+    ])
+  )
+
+  const messageEvents = valuesModeEvents.filter((event) => event.event === "messages")
+  const snapshotEvents = customEvents(valuesModeEvents, "coordinator_ai_snapshot_message")
+  const aiMessages = messageEvents.flatMap((event) => event.data as Array<{ id?: string; content?: string }>)
+
+  assert(snapshotEvents.length === 0, "exact short replay should not trigger replacement")
+  assert(
+    !aiMessages.some((message) => message.id === "provider-ai-1"),
+    "earlier exact replay of the short live assistant should be skipped"
+  )
+  assert(
+    aiMessages.some(
+      (message) => message.id === "provider-ai-2" && message.content === "好的，下面给出结论。"
+    ),
+    "later assistant after a tool boundary should stay as its own provider message"
+  )
+}
+
+async function testCoordinatorValuesSnapshotKeepsIdenticalPostToolAssistantSeparate(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const liveText = "好的"
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "live-ai", content: liveText }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the short live assistant"
+  )
+
+  const valuesModeEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "provider-ai-1", content: liveText }),
+      toolMessage({
+        id: "tool-1",
+        name: "execute_command",
+        toolCallId: "call-1",
+        content: "scan done"
+      }),
+      aiMessage({ id: "provider-ai-2", content: liveText })
+    ])
+  )
+
+  const messageEvents = valuesModeEvents.filter((event) => event.event === "messages")
+  const snapshotEvents = customEvents(valuesModeEvents, "coordinator_ai_snapshot_message")
+  const aiMessages = messageEvents.flatMap((event) => event.data as Array<{ id?: string; content?: string }>)
+
+  assert(snapshotEvents.length === 0, "exact same-text replay should not trigger replacement")
+  assert(
+    !aiMessages.some((message) => message.id === "provider-ai-1"),
+    "pre-tool exact replay of the live assistant should be skipped"
+  )
+  assert(
+    aiMessages.some((message) => message.id === "provider-ai-2" && message.content === liveText),
+    "post-tool assistant with identical text should remain a distinct provider message"
+  )
+}
+
+async function testCoordinatorValuesSnapshotDoesNotMergeAcrossToolBoundaryAfterExactReplay(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const liveText = "我先检查项目结构，然后总结关键模块。"
+  const finalText = `${liveText}\n\n下面给出结论。`
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "live-ai", content: liveText }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the live assistant"
+  )
+
+  const valuesModeEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "provider-ai-1", content: liveText }),
+      toolMessage({
+        id: "tool-1",
+        name: "execute_command",
+        toolCallId: "call-1",
+        content: "scan done"
+      }),
+      aiMessage({ id: "provider-ai-2", content: finalText })
+    ])
+  )
+
+  const messageEvents = valuesModeEvents.filter((event) => event.event === "messages")
+  const aiMessages = messageEvents.flatMap((event) => event.data as Array<{ id?: string; content?: string }>)
+
+  assert(
+    !aiMessages.some((message) => message.id === "provider-ai-1"),
+    "the exact replay before the tool should be skipped"
+  )
+  assert(
+    aiMessages.some((message) => message.id === "provider-ai-2" && message.content === finalText),
+    "the assistant after the tool boundary should remain a distinct provider message"
+  )
+  assert(
+    !aiMessages.some((message) => message.id === "live-ai" && message.content === "\n\n下面给出结论。"),
+    "the tool-after assistant must not be merged into the pre-tool live message"
+  )
+}
+
+async function testCoordinatorValuesSnapshotDoesNotMergeAcrossToolBoundaryAfterGrowth(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const liveText = "我先检查项目结构"
+  const preToolText = `${liveText}，然后总结关键模块。`
+  const postToolText = `${preToolText}\n\n下面给出结论。`
+
+  assert(
+    convertCoordinator(
+      transport,
+      streamMessageEvent(aiMessage({ id: "live-ai", content: liveText }))
+    ).filter((event) => event.event === "messages").length === 1,
+    "messages-mode AI should emit the live assistant"
+  )
+
+  const valuesModeEvents = convertCoordinator(
+    transport,
+    streamValuesEvent([
+      humanMessage("分析项目"),
+      aiMessage({ id: "provider-ai-1", content: preToolText }),
+      toolMessage({
+        id: "tool-1",
+        name: "execute_command",
+        toolCallId: "call-1",
+        content: "scan done"
+      }),
+      aiMessage({ id: "provider-ai-2", content: postToolText })
+    ])
+  )
+
+  const messageEvents = valuesModeEvents.filter((event) => event.event === "messages")
+  const aiMessages = messageEvents.flatMap((event) => event.data as Array<{ id?: string; content?: string }>)
+
+  assert(
+    aiMessages.some(
+      (message) => message.id === "live-ai" && message.content === "，然后总结关键模块。"
+    ),
+    "pre-tool growth should update the live assistant"
+  )
+  assert(
+    aiMessages.some((message) => message.id === "provider-ai-2" && message.content === postToolText),
+    "post-tool assistant after a growth candidate should remain a distinct provider message"
+  )
+  assert(
+    !aiMessages.some(
+      (message) => message.id === "live-ai" && message.content?.includes("下面给出结论")
+    ),
+    "post-tool assistant must not be merged into the pre-tool live message"
+  )
+}
+
 async function testValuesModeRegistersAndCompletesSubagents(): Promise<void> {
   const transport = new ElectronIPCTransport()
   const runningEvents = convert(
@@ -2334,6 +2955,40 @@ async function run(): Promise<void> {
   console.log("PASS electron transport dedupes AI fallback IDs across messages and values")
   await testCoordinatorAiFallbackEmitsOnlyGrowingValuesDelta()
   console.log("PASS electron transport emits only growing AI fallback deltas")
+  await testCoordinatorValuesSnapshotWithProviderIdDoesNotReplayWrappedLiveText()
+  console.log("PASS electron transport avoids replaying wrapped provider values snapshots")
+  await testCoordinatorValuesSnapshotWithoutProviderIdDoesNotReplayWrappedLiveText()
+  console.log("PASS electron transport avoids replaying wrapped fallback values snapshots")
+  await testCoordinatorValuesSnapshotWithSameProviderIdDoesNotReplayWrappedLiveText()
+  console.log("PASS electron transport avoids replaying wrapped same-id values snapshots")
+  await testCoordinatorValuesSnapshotDoesNotAppendRepeatedFullTextSuffix()
+  console.log("PASS electron transport avoids appending repeated full-text values suffixes")
+  await testCoordinatorValuesSnapshotKeepsSubsequentReplayGrowth()
+  console.log("PASS electron transport keeps subsequent replay growth")
+  await testCoordinatorValuesSnapshotKeepsPartialReplayPrefixTail()
+  console.log("PASS electron transport keeps partial replay prefix tails")
+  await testCoordinatorValuesSnapshotKeepsQuotedPriorTextInSuffix()
+  console.log("PASS electron transport keeps quoted prior text in suffixes")
+  await testCoordinatorValuesSnapshotDoesNotAppendAlternativeFullSnapshot()
+  console.log("PASS electron transport avoids appending alternative full values snapshots")
+  await testCoordinatorValuesSnapshotWithReplayStillEmitsToolCalls()
+  console.log("PASS electron transport keeps tool calls on replay replacement snapshots")
+  await testCoordinatorValuesSnapshotContainingPriorTextStillEmits()
+  console.log("PASS electron transport keeps provider snapshots that quote prior text")
+  await testCoordinatorValuesSnapshotKeepsUnrelatedProviderAssistant()
+  console.log("PASS electron transport keeps unrelated provider assistant snapshots")
+  await testCoordinatorValuesSnapshotMatchesEarlierLiveAssistantBeforeNewAssistant()
+  console.log("PASS electron transport matches earlier live assistant before new assistant")
+  await testCoordinatorValuesSnapshotKeepsPostToolAssistantSeparateAfterPreToolGrowth()
+  console.log("PASS electron transport keeps post-tool assistant separate after pre-tool growth")
+  await testCoordinatorValuesSnapshotDoesNotLetEarlierExactShortReplayStealLiveAssistant()
+  console.log("PASS electron transport ignores earlier exact short replay before live growth")
+  await testCoordinatorValuesSnapshotKeepsIdenticalPostToolAssistantSeparate()
+  console.log("PASS electron transport keeps identical post-tool assistant distinct")
+  await testCoordinatorValuesSnapshotDoesNotMergeAcrossToolBoundaryAfterExactReplay()
+  console.log("PASS electron transport keeps post-tool assistant distinct after exact replay")
+  await testCoordinatorValuesSnapshotDoesNotMergeAcrossToolBoundaryAfterGrowth()
+  console.log("PASS electron transport keeps post-tool assistant distinct after growth")
   await testValuesModeRegistersAndCompletesSubagents()
   console.log("PASS electron transport values-mode subagent lifecycle")
 }

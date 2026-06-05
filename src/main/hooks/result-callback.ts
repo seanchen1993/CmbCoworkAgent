@@ -28,6 +28,35 @@ export function makeHookResultCallback(
   }
 }
 
+/**
+ * Hook-result callback for coordinator workers.
+ *
+ * Workers run detached/async (CoordinatorWorkerManager background promise), so
+ * their hooks typically fire after the spawning turn's run stream has closed —
+ * at which point the run-scoped `agent:stream:${threadId}` listener is gone and
+ * `makeHookResultCallback`'s emit is dropped. Worker tool/stream activity avoids
+ * this by using a durable, thread-scoped channel; this callback does the same
+ * for hook records.
+ *
+ * The envelope is delivered raw (not wrapped in the `{type:"custom"}` stream
+ * shape) on `agent:coordinator-worker-hook:${parentThreadId}`; the renderer
+ * feeds it straight into `handleCustomEvent`, which dispatches on
+ * `envelope.type === "hook_executed"`.
+ */
+export function makeCoordinatorWorkerHookResultCallback(
+  window: BrowserWindow,
+  parentThreadId: string,
+  turnId?: string
+): HookResultCallback {
+  const channel = `agent:coordinator-worker-hook:${parentThreadId}`
+  return (event: HookEvent, hook: HookConfig, result: HookResult): void => {
+    const envelope = buildHookResultRecord(event, hook, result, turnId)
+    if (!envelope) return
+    if (window.isDestroyed() || window.webContents.isDestroyed()) return
+    window.webContents.send(channel, envelope)
+  }
+}
+
 export function makeBroadcastHookResultCallback(channel: string, turnId?: string): HookResultCallback {
   return (event: HookEvent, hook: HookConfig, result: HookResult): void => {
     const envelope = buildHookResultRecord(event, hook, result, turnId)

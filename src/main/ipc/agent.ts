@@ -69,6 +69,8 @@ import {
   appendSkillProposalWindowTurn,
   buildSkillProposalWindowContext,
   getRecentSkillUsageNames,
+  getThreadActiveSkills,
+  setThreadActiveSkills,
   snapshotSkillProposalWindow,
   isSkillProposalWindowContext,
   type SkillProposalWindowContext
@@ -178,7 +180,11 @@ import {
 } from "../harness-board/service"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
-import { makeHookResultCallback, makeHookSkippedCallback } from "../hooks/result-callback"
+import {
+  makeHookResultCallback,
+  makeHookSkippedCallback,
+  makeCoordinatorWorkerHookResultCallback
+} from "../hooks/result-callback"
 import type { ScopeSkipCallback } from "../hooks/scope"
 import { notifyHooksChanged } from "../hooks/notifications"
 import type {
@@ -3665,7 +3671,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const toolCallCounter = new ToolCallCounter()
       let assistantText = ""
       const fileWritePaths: string[] = []
-      const recentCompletedTurns = snapshotSkillProposalWindow(threadId).slice(-2)
       let drainedCoordinatorNotifications: CoordinatorTurnNotification[] = []
       let coordinatorNotificationsConsumed = false
       let coordinatorNotificationsDelivered = false
@@ -3673,18 +3678,26 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const consumedCoordinatorNotificationIds = new Set<string>()
       const trackedCoordinatorNotificationIds = new Set<string>()
 
+      // Code-gen skill attribution: a skill stays "active" for the rest of the
+      // thread once used and is attributed to all subsequent generated code —
+      // even in later turns that don't re-read its SKILL.md — until a later turn
+      // uses a *different* skill set, which supersedes it (no turn-distance cap).
+      // The sticky set lives in proposal-window.ts so it survives skill-evolution
+      // session resets. This feeds ONLY the adoption context (code_gen /
+      // code_adopt → commit 明细的关联 Skill); the trace's own usedSkills is set
+      // separately via tracer.setUsedSkills(currentRunSkills) and is unaffected.
       const computeCodeGenAttributionSkills = (currentRunSkills: string[]): string[] => {
-        const inheritedTurns =
-          currentRunSkills.length > 0 ? recentCompletedTurns.slice(-1) : recentCompletedTurns
-        return Array.from(
-          new Set([...currentRunSkills, ...inheritedTurns.flatMap((turn) => turn.usedSkills)])
-        )
+        if (currentRunSkills.length > 0) return currentRunSkills
+        return getThreadActiveSkills(threadId)
       }
 
       const syncUsedSkillsContext = (): void => {
         const currentRunSkills = skillUsageDetector.getUsedSkillNames()
         tracer.setUsedSkills(currentRunSkills)
         tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
+        // A non-empty current-run skill set becomes (supersedes) the thread's
+        // active skills; a skill-less run leaves the prior active set intact.
+        if (currentRunSkills.length > 0) setThreadActiveSkills(threadId, currentRunSkills)
         setAdoptionContext(threadId, {
           usedSkills: computeCodeGenAttributionSkills(currentRunSkills)
         })
@@ -3865,6 +3878,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+      const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
+        window,
+        threadId,
+        turnState.turnId
+      )
       let stopHookFired = false
       const onHookSkippedFactory = (event: HookEvent): ScopeSkipCallback =>
         makeHookSkippedCallback(window, channel, event, turnState.turnId)
@@ -4417,8 +4435,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const userHumanMessage = isCoordinatorNotificationTurn
           ? undefined
           : effectiveMessage === message
-            ? new HumanMessage(effectiveMessage)
+            ? new HumanMessage({
+                id: userMessageId,
+                content: effectiveMessage
+              })
             : new HumanMessage({
+                id: userMessageId,
                 content: effectiveMessage,
                 additional_kwargs: {
                   [COORDINATOR_AUGMENTED_USER_MESSAGE_KEY]: true,
@@ -4487,6 +4509,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillUseTracker,
               ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
+              onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -5233,6 +5256,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             skillUseTracker,
             ...harnessAgentContext,
             onFileMutation: autoCommit.onFileMutation,
+            onCoordinatorWorkerHookResult,
             onCoordinatorWorkerEvent,
             onCoordinatorNotificationAction
           })
@@ -5338,6 +5362,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillUseTracker,
               ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
+              onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -6048,6 +6073,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       }
       const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+      const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
+        window,
+        threadId,
+        turnState.turnId
+      )
       const onHookSkippedFactory = (event: HookEvent): ScopeSkipCallback =>
         makeHookSkippedCallback(window, channel, event, turnState.turnId)
 
@@ -6261,6 +6291,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillUseTracker,
               ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
+              onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -6418,6 +6449,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillUseTracker,
               ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
+              onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -6753,6 +6785,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     }
     const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+    const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
+      window,
+      threadId,
+      turnState.turnId
+    )
     const onHookSkippedFactory = (event: HookEvent): ScopeSkipCallback =>
       makeHookSkippedCallback(window, channel, event, turnState.turnId)
 
@@ -6957,6 +6994,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillUseTracker,
               ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
+              onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })
@@ -7111,6 +7149,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillUseTracker,
               ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation,
+              onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction
             })

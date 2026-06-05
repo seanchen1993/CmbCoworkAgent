@@ -290,55 +290,51 @@ export function MemoryPanel(): React.JSX.Element {
     <div className="flex flex-1 overflow-hidden isolate">
       <div className="w-[330px] shrink-0 border-r border-border flex flex-col">
         <div className="p-3 border-b border-border space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <h2 className="text-base font-bold">Memory</h2>
-            <div className="flex items-center gap-1.5">
-              <button
-                className={cn(
-                  "text-xs px-2 py-0.5 rounded-full border transition-colors",
-                  enabled
-                    ? "bg-green-500/10 border-green-500/30 text-green-500"
-                    : "bg-muted border-border text-muted-foreground"
-                )}
-                onClick={handleToggleEnabled}
-              >
-                记忆 {enabled ? "已启用" : "已禁用"}
-              </button>
-              <button
-                className={cn(
-                  "text-xs px-2 py-0.5 rounded-full border transition-colors",
-                  enabled && dreamEnabled
-                    ? "bg-purple-500/10 border-purple-500/30 text-purple-500"
-                    : "bg-muted border-border text-muted-foreground",
-                  !enabled && "cursor-not-allowed"
-                )}
-                onClick={handleToggleDreamEnabled}
-                disabled={!enabled}
-                title={
-                  enabled ? "控制自动 Dream 整合与手动 Dream 按钮" : "开启记忆后才能启用 Dream"
-                }
-              >
-                Dream {enabled && dreamEnabled ? "已启用" : "已禁用"}
-              </button>
-              <button
-                className={cn(
-                  "flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border transition-colors",
-                  dreamRunning || !enabled || !dreamEnabled
-                    ? "bg-muted border-border text-muted-foreground cursor-not-allowed"
-                    : "bg-purple-500/10 border-purple-500/30 text-purple-500 hover:bg-purple-500/20"
-                )}
-                onClick={handleDream}
-                disabled={dreamRunning || !enabled || !dreamEnabled}
-                title="对记忆进行 Dream 整合：合并重复条目、提炼模式、归档过期内容"
-              >
-                {dreamRunning ? (
-                  <Loader2 className="size-3 animate-spin" />
-                ) : (
-                  <Sparkles className="size-3" />
-                )}
-                {dreamRunning ? "整合中…" : "Dream"}
-              </button>
-            </div>
+          <h2 className="text-base font-bold">Memory</h2>
+          <div className="flex items-center gap-1.5">
+            <button
+              className={cn(
+                "shrink-0 text-xs px-2 py-0.5 rounded-full border transition-colors",
+                enabled
+                  ? "bg-green-500/10 border-green-500/30 text-green-500"
+                  : "bg-muted border-border text-muted-foreground"
+              )}
+              onClick={handleToggleEnabled}
+            >
+              记忆 {enabled ? "已启用" : "已禁用"}
+            </button>
+            <button
+              className={cn(
+                "shrink-0 text-xs px-2 py-0.5 rounded-full border transition-colors",
+                enabled && dreamEnabled
+                  ? "bg-purple-500/10 border-purple-500/30 text-purple-500"
+                  : "bg-muted border-border text-muted-foreground",
+                !enabled && "cursor-not-allowed"
+              )}
+              onClick={handleToggleDreamEnabled}
+              disabled={!enabled}
+              title={enabled ? "控制自动 Dream 整合与手动 Dream 按钮" : "开启记忆后才能启用 Dream"}
+            >
+              Dream {enabled && dreamEnabled ? "已启用" : "已禁用"}
+            </button>
+            <button
+              className={cn(
+                "ml-auto flex items-center gap-1 shrink-0 text-xs px-2 py-0.5 rounded-full border transition-colors",
+                dreamRunning || !enabled || !dreamEnabled
+                  ? "bg-muted border-border text-muted-foreground cursor-not-allowed"
+                  : "bg-purple-500/10 border-purple-500/30 text-purple-500 hover:bg-purple-500/20"
+              )}
+              onClick={handleDream}
+              disabled={dreamRunning || !enabled || !dreamEnabled}
+              title="对记忆进行 Dream 整合：合并重复条目、提炼模式、归档过期内容"
+            >
+              {dreamRunning ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <Sparkles className="size-3" />
+              )}
+              {dreamRunning ? "整合中…" : "Dream"}
+            </button>
           </div>
 
           {dreamResult && (

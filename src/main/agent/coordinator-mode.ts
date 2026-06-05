@@ -35,6 +35,7 @@ interface CoordinatorPromptOptions {
   shell: string
   timezone: string
   currentTime: string
+  projectModeAdapterInstructions?: string | null
   projectInstructions?: string | null
   turnContext?: string | null
   hasBrowserTool: boolean
@@ -437,6 +438,7 @@ Coordinator rules:
 export function buildCoordinatorSystemPrompt(options: CoordinatorPromptOptions): string {
   const coordinatorDir = getCoordinatorDir(options.threadId)
   const scratchpadDir = getCoordinatorScratchpadDir(options.threadId)
+  const projectModeAdapterInstructions = options.projectModeAdapterInstructions?.trim()
   const projectInstructions = options.projectInstructions?.trim()
   const turnContext = options.turnContext?.trim()
   const browserLine = options.hasBrowserTool
@@ -611,6 +613,8 @@ System environment:
 - Operating system: ${options.platform}
 - Default shell: ${options.shell}
 ${renderTimeContext(options)}
+
+${projectModeAdapterInstructions ? `## Project Mode Adapter Instructions\n\n${projectModeAdapterInstructions}\n` : ""}
 
 Verifier standard:
 - PASS means the requested behavior is implemented and checked by commands/tests/browser evidence.

@@ -48,7 +48,10 @@ import {
 import {
   buildRestoredCheckpointTranscript,
   formatGoalEventMessage,
+  getInternalGoalPromptIdentity,
   goalNoticeEventsToGoalUiEvents,
+  hasGoalResumeUserEvent,
+  isGoalResumeCommandContent,
   isVisibleCheckpointTranscriptMessage
 } from "./goal-transcript"
 import { mergeGoalUiEvents } from "./goal-ui-events"
@@ -301,6 +304,10 @@ export interface HookLogEntry {
   skipReason?: string
   timestamp: Date
   turnId?: string
+  workerId?: string
+  workerThreadId?: string
+  workerTurn?: number
+  parentThreadId?: string
 }
 
 /**
@@ -345,43 +352,11 @@ export interface ThreadGitContext {
   branch?: string | null
 }
 
-export interface TurnTiming {
-  duration: number
-  thread_id: string
-  user_id: string
-  sendTime?: number
-}
-
-interface SetTurnTimingsOptions {
-  persist?: boolean
-}
-
-const TURN_TIMINGS_THREAD_VALUE_KEY = "turnTimings"
-
-const isTurnTiming = (value: unknown): value is TurnTiming => {
-  return (
-    !!value &&
-    typeof value === "object" &&
-    typeof (value as { duration?: unknown }).duration === "number" &&
-    Number.isFinite((value as { duration?: number }).duration) &&
-    typeof (value as { thread_id?: unknown }).thread_id === "string" &&
-    typeof (value as { user_id?: unknown }).user_id === "string" &&
-    ((value as { sendTime?: unknown }).sendTime === undefined ||
-      (typeof (value as { sendTime?: unknown }).sendTime === "number" &&
-        Number.isFinite((value as { sendTime?: number }).sendTime)))
-  )
-}
-
-const getTurnTimings = (threadValues?: Record<string, unknown>): TurnTiming[] => {
-  const value = threadValues?.[TURN_TIMINGS_THREAD_VALUE_KEY]
-  return Array.isArray(value) ? value.filter(isTurnTiming) : []
-}
-
 // Per-thread state (persisted/restored from checkpoints)
 export interface ThreadState {
   messages: Message[]
-  turnTimings: TurnTiming[]
   goalUi: GoalUiState
+  activeTurnStartTime: number | null
   todos: Todo[]
   workspaceFiles: FileInfo[]
   workspacePath: string | null
@@ -459,9 +434,9 @@ interface StreamData {
 export interface ThreadActions {
   appendMessage: (message: Message) => void
   setMessages: (messages: Message[]) => void
-  setTurnTimings: (turnTimings: TurnTiming[], options?: SetTurnTimingsOptions) => void
   setGoalUi: (goalUi: GoalUiState) => void
   refreshGoalUi: (options?: { includeEvents?: boolean }) => Promise<void>
+  setActiveTurnStartTime: (startTime: number | null) => void
   setTodos: (todos: Todo[]) => void
   setWorkspaceFiles: (files: FileInfo[] | ((prev: FileInfo[]) => FileInfo[])) => void
   setWorkspacePath: (path: string | null) => void
@@ -512,8 +487,8 @@ interface ThreadContextValue {
 // Default thread state
 const createDefaultThreadState = (): ThreadState => ({
   messages: [],
-  turnTimings: [],
   goalUi: { goal: null, events: [], lastUpdated: null },
+  activeTurnStartTime: null,
   todos: [],
   workspaceFiles: [],
   workspacePath: null,
@@ -824,6 +799,45 @@ function upsertToolCallStateFromRequest(
   })
 }
 
+function toolResultStatusFromMessage(message: Message): ToolCallState["status"] {
+  switch (message.status) {
+    case "completed":
+    case "failed":
+    case "interrupted":
+    case "rejected":
+      return message.status
+    case "error":
+      return "failed"
+    default:
+      return message.is_error ? "failed" : "completed"
+  }
+}
+
+function upsertToolCallStatesFromMessages(
+  states: Record<string, ToolCallState>,
+  messages: Message[]
+): Record<string, ToolCallState> {
+  let nextStates = states
+  for (const message of messages) {
+    if (Array.isArray(message.tool_calls)) {
+      for (const toolCall of message.tool_calls) {
+        nextStates = upsertToolCallState(nextStates, toolCall.id, {
+          name: toolCall.name,
+          args: toolCall.args,
+          status: nextStates[toolCall.id]?.status ?? "queued"
+        })
+      }
+    }
+    if (message.role === "tool" && message.tool_call_id) {
+      nextStates = upsertToolCallState(nextStates, message.tool_call_id, {
+        name: message.name,
+        status: toolResultStatusFromMessage(message)
+      })
+    }
+  }
+  return nextStates
+}
+
 const ThreadContext = createContext<ThreadContextValue | null>(null)
 
 // Custom event types from the stream
@@ -903,7 +917,11 @@ interface CustomEventData {
   skipReason?: string
   timestamp?: string
   turnId?: string
+  workerId?: string
+  workerTurn?: number
+  parentThreadId?: string
   messages?: LiveStreamMessage[]
+  assistantMessage?: LiveStreamMessage
   result?: AgentAutoCommitResult
 }
 
@@ -1401,11 +1419,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const currentIds = new Set(currentState.messages.map((message) => message.id))
           const newMessages = messagesToAppend.filter((message) => !currentIds.has(message.id))
           if (newMessages.length === 0) return prev
+          const nextToolCallStates = upsertToolCallStatesFromMessages(
+            currentState.toolCallStates,
+            newMessages
+          )
           const next = {
             ...prev,
             [threadId]: {
               ...currentState,
-              messages: [...currentState.messages, ...newMessages]
+              messages: [...currentState.messages, ...newMessages],
+              toolCallStates: nextToolCallStates
             }
           }
           threadStatesRef.current = next
@@ -1941,6 +1964,77 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     [parseErrorMessage, updateThreadState]
   )
 
+  const applyCoordinatorAssistantSnapshotMessage = useCallback(
+    (threadId: string, message: LiveStreamMessage | undefined) => {
+      if (!message || !hasMessageId(message)) return
+
+      const snapshotMessage = message as LiveStreamMessage & { id: string }
+      const messageId = snapshotMessage.id
+      const committedMessages = threadStatesRef.current[threadId]?.messages ?? []
+      if (committedMessages.some((committed) => committed.id === messageId)) {
+        updateThreadState(threadId, (state) => {
+          const updatedMessages = state.messages.map((committed) =>
+            committed.id === messageId
+              ? {
+                  ...committed,
+                  ...(typeof snapshotMessage.content === "string" && {
+                    content: snapshotMessage.content
+                  }),
+                  ...(snapshotMessage.tool_calls && { tool_calls: snapshotMessage.tool_calls })
+                }
+              : committed
+          )
+          const updatedMessage = updatedMessages.find((committed) => committed.id === messageId)
+          return {
+            messages: updatedMessages,
+            toolCallStates: updatedMessage
+              ? upsertToolCallStatesFromMessages(state.toolCallStates, [updatedMessage])
+              : state.toolCallStates
+          }
+        })
+        return
+      }
+
+      const accumulator = getOrCreateLiveStreamAccumulator(threadId)
+      if (!accumulator.active) {
+        accumulator.active = true
+        accumulator.baselineIds = getCurrentThreadMessageIds(threadId)
+        seedLiveStreamBaselineFromMessages(threadId, streamDataRef.current[threadId]?.messages)
+      }
+
+      const now = new Date()
+      accumulator.messageTimes[messageId] = {
+        start_at: accumulator.messageTimes[messageId]?.start_at ?? now,
+        end_at: now
+      }
+      accumulator.messages = mergeLiveStreamMessages(accumulator.messages, [
+        {
+          ...snapshotMessage,
+          id: messageId,
+          type: snapshotMessage.type ?? "ai",
+          content_priority: 1
+        }
+      ])
+
+      const currentStreamData = streamDataRef.current[threadId]
+      if (currentStreamData) {
+        streamDataRef.current[threadId] = {
+          ...currentStreamData,
+          liveMessages: liveMessagesWithTimes(accumulator)
+        }
+        notifyStreamSubscribers(threadId)
+      }
+    },
+    [
+      getCurrentThreadMessageIds,
+      getOrCreateLiveStreamAccumulator,
+      liveMessagesWithTimes,
+      notifyStreamSubscribers,
+      seedLiveStreamBaselineFromMessages,
+      updateThreadState
+    ]
+  )
+
   // Handle custom events from ThreadStreamHolder (interrupts, workspace updates, etc.)
   const handleCustomEvent = useCallback(
     (threadId: string, data: CustomEventData) => {
@@ -1952,6 +2046,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         subagentCount: Array.isArray(data.subagents) ? data.subagents.length : undefined
       })
       switch (data.type) {
+        case "coordinator_ai_snapshot_message":
+          applyCoordinatorAssistantSnapshotMessage(threadId, data.assistantMessage)
+          break
         case "interrupt":
           if (data.request) {
             console.log(
@@ -2240,7 +2337,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             stdinPayload: data.stdinPayload,
             skipReason: data.skipReason,
             timestamp: data.timestamp ? new Date(data.timestamp) : new Date(),
-            turnId: data.turnId
+            turnId: data.turnId,
+            workerId: data.workerId,
+            workerThreadId: data.workerThreadId,
+            workerTurn: data.workerTurn,
+            parentThreadId: data.parentThreadId
           }
           // Prefer the explicit turn id from main. Falling back to the latest
           // bucket keeps legacy/background events visible, but normal chat
@@ -2254,13 +2355,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           //   1. entry.turnId matches an existing bucket → append.
           //   2. entry.turnId set but no matching bucket → create a new
           //      "earlier hook event" bucket (subject to ring trim).
-          //   3. entry.turnId missing → create / append to a dedicated
+          //   3. worker hook without entry.turnId → create / append to a
+          //      worker-scoped placeholder bucket.
+          //   4. entry.turnId missing → create / append to a dedicated
           //      background-events bucket. Older code routed these to
           //      `buckets[last]` which polluted whichever user turn happened
           //      to be most recent (e.g. SessionStart firing after a new
           //      conversation began would inflate the previous chip).
           const buckets = hookLogBucketsRef.current[threadId] ?? []
           const BACKGROUND_BUCKET_ID = "__background__"
+          const workerBucketId = entry.workerThreadId
+            ? `__worker__:${entry.workerThreadId}:${entry.workerTurn ?? "unknown"}`
+            : ""
           const trim = (list: HookLogBucket[]): HookLogBucket[] => {
             if (list.length > HOOK_LOG_BUCKET_RING_SIZE) {
               list.splice(0, list.length - HOOK_LOG_BUCKET_RING_SIZE)
@@ -2283,6 +2389,36 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 {
                   turnId: entry.turnId,
                   turnPreview: "(较早的 Hook 事件)",
+                  isPlaceholder: true,
+                  startedAt: new Date(),
+                  entries: [entry]
+                }
+              ])
+            }
+          } else if (workerBucketId) {
+            const workerIdx = buckets.findIndex((bucket) => bucket.turnId === workerBucketId)
+            if (workerIdx >= 0) {
+              const target = buckets[workerIdx]
+              nextBuckets = [
+                ...buckets.slice(0, workerIdx),
+                { ...target, entries: [...target.entries, entry] },
+                ...buckets.slice(workerIdx + 1)
+              ]
+            } else {
+              const workerThreadId = entry.workerThreadId ?? ""
+              const workerLabel =
+                entry.workerId ??
+                (workerThreadId.includes("__worker__")
+                  ? workerThreadId.split("__worker__").pop()
+                  : workerThreadId)
+              nextBuckets = trim([
+                ...buckets,
+                {
+                  turnId: workerBucketId,
+                  turnPreview:
+                    typeof entry.workerTurn === "number"
+                      ? `(Worker ${workerLabel} 第 ${entry.workerTurn} 轮 Hook)`
+                      : `(Worker ${workerLabel} Hook)`,
                   isPlaceholder: true,
                   startedAt: new Date(),
                   entries: [entry]
@@ -2347,6 +2483,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       }
     },
     [
+      applyCoordinatorAssistantSnapshotMessage,
       flushGoalSubturnComplete,
       getOrCreateLiveStreamAccumulator,
       notifyHookLogSubscribers,
@@ -2435,29 +2572,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             return { messages, toolCallStates: nextToolCallStates }
           })
         },
-        setTurnTimings: (turnTimings: TurnTiming[], options?: SetTurnTimingsOptions) => {
-          updateThreadState(threadId, () => ({ turnTimings }))
-          if (options?.persist === false) return
-
-          window.api.threads
-            .get(threadId)
-            .then((thread) => {
-              if (!thread) return
-              return window.api.threads.update(threadId, {
-                thread_values: {
-                  ...(thread.thread_values || {}),
-                  [TURN_TIMINGS_THREAD_VALUE_KEY]: turnTimings
-                }
-              })
-            })
-            .catch((error) => {
-              console.warn("[ThreadContext] Failed to persist turn timings:", error)
-            })
-        },
         setGoalUi: (goalUi: GoalUiState) => {
           updateThreadState(threadId, () => ({ goalUi }))
         },
         refreshGoalUi: (options = {}) => refreshGoalUi(threadId, options),
+        setActiveTurnStartTime: (startTime: number | null) => {
+          updateThreadState(threadId, () => ({ activeTurnStartTime: startTime }))
+        },
         setTodos: (todos: Todo[]) => {
           updateThreadState(threadId, () => ({ todos }))
         },
@@ -2612,7 +2733,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           )
           persistedMessageTimeOrder = getMessageTimeOrder(thread.thread_values)
           const metadata = thread.metadata || {}
-          actions.setTurnTimings(getTurnTimings(thread.thread_values), { persist: false })
           actions.setGitContext(getGitContextFromMetadata(metadata))
           if (metadata.workspacePath) {
             const workspacePath = metadata.workspacePath as string
@@ -2771,14 +2891,36 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 else if (msg.type === "tool") role = "tool"
               }
 
-              let content: Message["content"] = ""
               const visibleUserMessage = additionalKwargs?.cmb_visible_user_message
+              const checkpointContent = msg.content ?? msg.kwargs?.content
+              const isRawInternalGoalPrompt =
+                role === "user" &&
+                typeof checkpointContent === "string" &&
+                isInternalGoalPromptMessage({ role, content: checkpointContent })
+              const isVisibleGoalCommand =
+                typeof visibleUserMessage === "string" &&
+                /^\/goal(?:\s|$)/i.test(visibleUserMessage.trimStart())
+              const shouldUseVisibleGoalResumeAlias =
+                isRawInternalGoalPrompt &&
+                typeof visibleUserMessage === "string" &&
+                isGoalResumeCommandContent(visibleUserMessage) &&
+                !hasGoalResumeUserEvent(
+                  restoredGoalEvents,
+                  getInternalGoalPromptIdentity(checkpointContent)
+                )
+              const shouldKeepRawInternalGoalPrompt =
+                isRawInternalGoalPrompt &&
+                (visibleUserMessage === undefined ||
+                  visibleUserMessage === "" ||
+                  (isVisibleGoalCommand && !shouldUseVisibleGoalResumeAlias))
               const rawContent =
                 role === "user" &&
+                !shouldKeepRawInternalGoalPrompt &&
                 typeof visibleUserMessage === "string" &&
                 visibleUserMessage.length > 0
                   ? visibleUserMessage
-                  : (msg.content ?? msg.kwargs?.content)
+                  : checkpointContent
+              let content: Message["content"] = ""
               if (typeof rawContent === "string") content = rawContent
               else if (Array.isArray(rawContent)) content = rawContent as Message["content"]
 
@@ -2794,17 +2936,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               // indexes can shift across the final transcript.
               // Internal goal prompts have a separate order list because they are hidden
               // from the checkpoint transcript but still anchor restored /goal user bubbles.
-              const isInternalGoalPrompt =
-                role === "user" &&
-                typeof content === "string" &&
-                isInternalGoalPromptMessage({ role, content })
-              const currentInternalGoalPromptIndex = isInternalGoalPrompt
+              const usesInternalGoalPromptTiming = isRawInternalGoalPrompt
+              const currentInternalGoalPromptIndex = usesInternalGoalPromptTiming
                 ? internalGoalPromptIndex++
                 : -1
               const { startAt, endAt } = restoreRawCheckpointMessageTime({
                 messageId,
                 fallbackTime,
-                isInternalGoalPrompt,
+                isInternalGoalPrompt: usesInternalGoalPromptTiming,
                 internalGoalPromptIndex: currentInternalGoalPromptIndex,
                 persistedMessageTimes,
                 persistedInternalGoalMessageTimes,
@@ -2967,6 +3106,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   // Track passive scheduler/heartbeat stream listeners per thread
   const schedulerListenerCleanups = useRef<Record<string, () => void>>({})
   const heartbeatListenerCleanups = useRef<Record<string, () => void>>({})
+  // Track durable coordinator-worker hook listeners per thread. These survive
+  // past a run so async worker hook records (which fire after the run stream
+  // closes) still reach the hook-log buckets.
+  const coordinatorWorkerHookListenerCleanups = useRef<Record<string, () => void>>({})
   // Track approval listeners per thread (registered globally, not per-component)
   const approvalListenerCleanups = useRef<Record<string, Array<() => void>>>({})
   // Track request_user_input listeners per thread.
@@ -3209,6 +3352,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         schedulerListenerCleanups.current[threadId] = schedulerCleanup
       }
 
+      // Durable listener for coordinator-worker hook records. Worker hooks are
+      // delivered on a thread-scoped channel (not the run stream) so they
+      // survive async worker execution; route them through handleCustomEvent,
+      // which buckets `hook_executed` envelopes into the per-turn hook log.
+      const coordinatorWorkerHookCleanup = window.api.agent.onCoordinatorWorkerHook(
+        threadId,
+        (envelope) => handleCustomEvent(threadId, envelope as CustomEventData)
+      )
+      coordinatorWorkerHookListenerCleanups.current[threadId] = coordinatorWorkerHookCleanup
+
       const cancelledApprovalRequestIds = new Set<string>()
 
       // Register global approval listeners for this thread (not tied to ChatContainer mount)
@@ -3334,7 +3487,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
       userInputListenerCleanups.current[threadId] = [cleanupUserInput, cleanupUserInputCancel]
     },
-    [loadThreadHistory, processSchedulerEvent, updateThreadState]
+    [loadThreadHistory, processSchedulerEvent, updateThreadState, handleCustomEvent]
   )
 
   useEffect(() => {
@@ -3381,6 +3534,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     delete schedulerListenerCleanups.current[threadId]
     heartbeatListenerCleanups.current[threadId]?.()
     delete heartbeatListenerCleanups.current[threadId]
+    coordinatorWorkerHookListenerCleanups.current[threadId]?.()
+    delete coordinatorWorkerHookListenerCleanups.current[threadId]
     approvalListenerCleanups.current[threadId]?.forEach((c) => c())
     delete approvalListenerCleanups.current[threadId]
     userInputListenerCleanups.current[threadId]?.forEach((c) => c())

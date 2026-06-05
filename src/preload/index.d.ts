@@ -291,7 +291,9 @@ interface DashboardUserDetail {
   traces: DashboardTraceDetail[]
   tracePage: number
   tracePageSize: number
-  totalTraces: number
+  /** 当前视图模式下的翻页总数：thread → 会话数；trace → trace 总数。 */
+  total: number
+  traceViewMode?: DashboardTraceViewMode
   traceTriggerScope?: DashboardTraceTriggerScope
 }
 
@@ -314,6 +316,8 @@ interface DashboardUserDetailOptions {
   traceLimit?: number
   tracePage?: number
   tracePageSize?: number
+  mode?: DashboardTraceViewMode
+  viewMode?: DashboardTraceViewMode
   triggerScope?: DashboardTraceTriggerScope
 }
 
@@ -372,6 +376,10 @@ interface CustomAPI {
         data: unknown
         workerTurn?: number
       }) => void
+    ) => () => void
+    onCoordinatorWorkerHook: (
+      threadId: string,
+      callback: (envelope: unknown) => void
     ) => () => void
     setCoordinatorWorkerStreamFocus: (
       threadId: string,
