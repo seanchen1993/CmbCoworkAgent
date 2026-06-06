@@ -358,6 +358,7 @@ export interface PluginManifest {
   name: string
   version?: string
   description?: string
+  useScenario?: string
   author?: { name?: string; email?: string; url?: string } | string
   license?: string
   keywords?: string[]
@@ -372,6 +373,7 @@ export interface PluginMetadata {
   name: string
   version: string
   description: string
+  useScenario?: string
   author: string
   path: string
   enabled: boolean

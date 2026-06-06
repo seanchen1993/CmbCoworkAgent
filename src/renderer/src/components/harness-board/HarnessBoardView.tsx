@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { createPortal } from "react-dom"
 import {
   AlertCircle,
@@ -39,7 +39,10 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
+  SelectSeparator,
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select"
@@ -96,13 +99,16 @@ const harnessActionIconClassName =
 const harnessProjectCreateInputClassName =
   "bg-background text-foreground placeholder:text-muted-foreground/45"
 const harnessProjectCreateSelectClassName =
-  "bg-background text-foreground data-[placeholder]:text-muted-foreground/45"
+  "min-w-0 overflow-hidden bg-background text-foreground data-[placeholder]:text-muted-foreground/45 [&>span]:min-w-0 [&>span]:truncate"
 const harnessDialogContentClassName = "z-[60]"
-const harnessDialogSelectContentClassName = "z-[70]"
+const harnessDialogSelectContentClassName =
+  "z-[70] w-[var(--radix-select-trigger-width)] max-w-[calc(100vw-2rem)]"
 const harnessNamePattern = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
 const harnessNameRuleMessage = "仅支持中文、英文字母、数字、-、_"
 const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
 const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
+const OTHER_ADAPTER_SCENARIO = "其他类别"
+const ADAPTER_SELECT_PLACEHOLDER = "请选择已安装的 AUTOBIZDEVOPS 插件"
 
 const preventHarnessDialogOutsideClose: React.ComponentProps<typeof DialogContent>["onPointerDownOutside"] =
   (event) => {
@@ -193,6 +199,11 @@ interface GitPanelDiffState {
   changedFilesTotal?: number
   omittedFileCount?: number
   error?: string
+}
+
+interface AdapterScenarioGroup {
+  useScenario: string
+  adapters: HarnessAdapterRegistryItem[]
 }
 
 interface WorkspaceChangeGroup {
@@ -839,23 +850,105 @@ function findSelectedAdapter(
   return registry.find((adapter) => adapter.id === adapterId) ?? null
 }
 
+function normalizeAdapterUseScenario(value?: string): string {
+  const normalized = value?.trim()
+  return normalized || OTHER_ADAPTER_SCENARIO
+}
+
+function groupAdaptersByUseScenario(registry: HarnessAdapterRegistryItem[]): AdapterScenarioGroup[] {
+  const groups = new Map<string, HarnessAdapterRegistryItem[]>()
+  for (const adapter of registry) {
+    const useScenario = normalizeAdapterUseScenario(adapter.useScenario)
+    const adapters = groups.get(useScenario)
+    if (adapters) {
+      adapters.push(adapter)
+    } else {
+      groups.set(useScenario, [adapter])
+    }
+  }
+
+  return Array.from(groups.entries())
+    .map(([useScenario, adapters]) => ({ useScenario, adapters }))
+    .sort((left, right) => {
+      const leftIsOther = left.useScenario === OTHER_ADAPTER_SCENARIO
+      const rightIsOther = right.useScenario === OTHER_ADAPTER_SCENARIO
+      if (leftIsOther && rightIsOther) return 0
+      if (leftIsOther) return 1
+      if (rightIsOther) return -1
+      return left.useScenario.localeCompare(right.useScenario)
+    })
+}
+
+function formatAdapterSelectLabel(adapter: HarnessAdapterRegistryItem): string {
+  return adapter.version ? `${adapter.name} · ${adapter.version}` : adapter.name
+}
+
+function AdapterSelectedValue({
+  adapter
+}: {
+  adapter: HarnessAdapterRegistryItem | null
+}): React.JSX.Element {
+  return (
+    <SelectValue placeholder={ADAPTER_SELECT_PLACEHOLDER}>
+      {adapter ? (
+        <span className="block min-w-0 truncate text-left">
+          {formatAdapterSelectLabel(adapter)}
+        </span>
+      ) : undefined}
+    </SelectValue>
+  )
+}
+
 function AdapterSelectItem({ adapter }: { adapter: HarnessAdapterRegistryItem }): React.JSX.Element {
   const compatibilityMessage = boardCompatibilityMessage(adapter.boardCompatibility)
   return (
     <SelectItem
       key={adapter.id}
       value={adapter.id}
+      textValue={formatAdapterSelectLabel(adapter)}
       disabled={!adapter.boardCompatibility.compatible}
+      className="py-2 pl-4 pr-10"
     >
-      <span className="flex min-w-0 flex-col gap-0.5">
-        <span className="truncate">{adapter.name} · {adapter.version}</span>
+      <span className="flex min-w-0 max-w-[calc(var(--radix-select-trigger-width)-3rem)] flex-col gap-1">
+        <span className="truncate">
+          {formatAdapterSelectLabel(adapter)}
+        </span>
+        {adapter.description && (
+          <span
+            className="line-clamp-2 whitespace-normal break-words text-xs leading-5 text-muted-foreground"
+            title={adapter.description}
+          >
+            {adapter.description}
+          </span>
+        )}
         {compatibilityMessage && (
-          <span className="truncate text-[11px] text-status-warning">
+          <span className="line-clamp-2 whitespace-normal break-words text-xs leading-5 text-status-warning">
             {compatibilityMessage}
           </span>
         )}
       </span>
     </SelectItem>
+  )
+}
+
+function AdapterSelectGroups({ registry }: { registry: HarnessAdapterRegistryItem[] }): React.JSX.Element {
+  const groups = groupAdaptersByUseScenario(registry)
+  return (
+    <>
+      {groups.map((group, index) => (
+        <Fragment key={group.useScenario}>
+          <SelectGroup>
+            <SelectLabel className="px-2 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground">
+              {group.useScenario}
+            </SelectLabel>
+            {group.adapters.map((adapter) => (
+              <AdapterSelectItem key={adapter.id} adapter={adapter} />
+            ))}
+          </SelectGroup>
+          {index < groups.length - 1 && <SelectSeparator />}
+        </Fragment>
+      ))}
+    </>
   )
 }
 
@@ -903,12 +996,10 @@ function ProjectFormDialog({
                 onValueChange={(adapterId) => onChange({ ...form, adapterId, adapterType: "plugin" })}
               >
                 <SelectTrigger className={harnessProjectCreateSelectClassName}>
-                  <SelectValue placeholder="请选择已安装的 AUTOBIZDEVOPS 插件" />
+                  <AdapterSelectedValue adapter={selectedAdapter} />
                 </SelectTrigger>
                 <SelectContent className={harnessDialogSelectContentClassName}>
-                  {registry.map((adapter) => (
-                    <AdapterSelectItem key={adapter.id} adapter={adapter} />
-                  ))}
+                  <AdapterSelectGroups registry={registry} />
                 </SelectContent>
               </Select>
               {selectedAdapterMessage && (
@@ -1076,16 +1167,14 @@ function ProjectEditDialog({
             <div className="mb-3 text-sm font-semibold">选择 Plugin </div>
             <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
               <Select
-                value={selectedAdapterMessage ? "" : form.adapterId}
+                value={form.adapterId}
                 onValueChange={(adapterId) => onChange({ ...form, adapterId, adapterType: "plugin" })}
               >
                 <SelectTrigger className={harnessProjectCreateSelectClassName}>
-                  <SelectValue placeholder="请选择已安装的 AUTOBIZDEVOPS 插件" />
+                  <AdapterSelectedValue adapter={selectedAdapter} />
                 </SelectTrigger>
                 <SelectContent className={harnessDialogSelectContentClassName}>
-                  {registry.map((adapter) => (
-                    <AdapterSelectItem key={adapter.id} adapter={adapter} />
-                  ))}
+                  <AdapterSelectGroups registry={registry} />
                 </SelectContent>
               </Select>
               {selectedAdapterMessage && (

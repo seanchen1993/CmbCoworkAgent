@@ -295,12 +295,14 @@ function findPluginByAdapterName(adapter: HarnessAdapterSnapshot): PluginMetadat
 
 function pluginToHarnessAdapter(plugin: PluginMetadata): HarnessAdapterRegistryItem {
   const id = pluginAdapterId(plugin)
+  const useScenario = normalizeText(plugin.useScenario)
   return {
     id,
     name: normalizeText(plugin.name) || id,
     version: normalizeText(plugin.version),
     type: "plugin",
     description: normalizeText(plugin.description),
+    ...(useScenario ? { useScenario } : {}),
     boardCompatibility: evaluateBoardPluginCompatibility(plugin, normalizeText(plugin.name) || id)
   }
 }

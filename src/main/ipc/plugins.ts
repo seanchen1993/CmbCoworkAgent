@@ -249,6 +249,7 @@ async function installPluginFromDir(
       name: parsed.name,
       version: parsed.manifest?.version ?? "1.0.0",
       description: parsed.manifest?.description ?? "",
+      ...(parsed.manifest?.useScenario ? { useScenario: parsed.manifest.useScenario } : {}),
       author: formatAuthor(parsed.manifest?.author),
       path: destDir,
       enabled: true,
