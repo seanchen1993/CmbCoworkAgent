@@ -526,6 +526,7 @@ const DISLIKE_TYPE_OPTIONS = [
   { id: "other", label: "其他原因" }
 ] as const
 
+const DASHBOARD_ALLOWED_IDS_ENV = "VITE_DASHBOARD_ALLOWED_YST_IDS"
 const DASHBOARD_UNRESTRICTED_IDS_ENV = "VITE_DASHBOARD_UNRESTRICTED_YST_IDS"
 
 function splitEnvIds(value: string | undefined): Set<string> {
@@ -555,6 +556,10 @@ function deriveDashboardUpperOrgLv1(pathName?: string): string {
 
 function getDashboardUnrestrictedIds(): Set<string> {
   return splitEnvIds(import.meta.env[DASHBOARD_UNRESTRICTED_IDS_ENV] as string | undefined)
+}
+
+function getDashboardAllowedIds(): Set<string> {
+  return splitEnvIds(import.meta.env[DASHBOARD_ALLOWED_IDS_ENV] as string | undefined)
 }
 
 function getDashboardAccessContext(): DashboardAccessContext {
@@ -587,6 +592,21 @@ function requireDashboardAccess(): DashboardAccessContext {
   const access = getDashboardAccessContext()
   if (!access.loggedIn) throw new Error("请先登录后再查看运营面板")
   return access
+}
+
+function isDashboardProjectModeAllowed(): boolean {
+  if (import.meta.env.DEV) return true
+  const access = getDashboardAccessContext()
+  if (!access.loggedIn || !access.ystId) return false
+  return getDashboardAllowedIds().has(access.ystId)
+}
+
+function requireDashboardProjectModeAccess(): void {
+  const access = getDashboardAccessContext()
+  if (!access.loggedIn) throw new Error("请先登录后再查看项目运营面板")
+  if (!access.ystId || !getDashboardAllowedIds().has(access.ystId)) {
+    throw new Error("无项目运营面板访问权限")
+  }
 }
 
 function buildNoAccessFilter(): Record<string, unknown> {
@@ -7571,11 +7591,16 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     return getDashboardAccessContext().loggedIn
   })
 
+  _ipcMain.handle("dashboard:isProjectModeAllowed", async () => {
+    return isDashboardProjectModeAllowed()
+  })
+
   _ipcMain.handle(
     "dashboard:projectMode",
     async (_, range: TimeRange, _granularity: Granularity, opts?: OrgFilterOptions) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockProjectMode(range, opts) }
       try {
+        requireDashboardProjectModeAccess()
         return { success: true, data: await fetchProjectMode(range, opts) }
       } catch (e) {
         console.error("[Dashboard] projectMode error:", e)
@@ -7590,6 +7615,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       if (import.meta.env.DEV)
         return { success: true, data: makeMockProjectModeProjects(range, options) }
       try {
+        requireDashboardProjectModeAccess()
         return { success: true, data: await fetchProjectModeProjectPage(range, options) }
       } catch (e) {
         console.error("[Dashboard] projectModeProjects error:", e)
@@ -7604,6 +7630,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       if (import.meta.env.DEV)
         return { success: true, data: makeMockProjectModeTraces(projectId, range, options) }
       try {
+        requireDashboardProjectModeAccess()
         return { success: true, data: await fetchProjectModeTraces(projectId, range, options) }
       } catch (e) {
         console.error("[Dashboard] projectModeTraces error:", e)

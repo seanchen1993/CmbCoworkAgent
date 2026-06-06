@@ -1492,6 +1492,7 @@ interface CustomAPI {
   }
   dashboard: {
     isAllowed: () => Promise<boolean>
+    isProjectModeAllowed: () => Promise<boolean>
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",

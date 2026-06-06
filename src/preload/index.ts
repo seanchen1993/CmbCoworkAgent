@@ -2303,6 +2303,8 @@ const api = {
   },
   dashboard: {
     isAllowed: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAllowed"),
+    isProjectModeAllowed: (): Promise<boolean> =>
+      ipcRenderer.invoke("dashboard:isProjectModeAllowed"),
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",

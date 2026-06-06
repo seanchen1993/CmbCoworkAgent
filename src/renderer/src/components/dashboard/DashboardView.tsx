@@ -1156,14 +1156,16 @@ function UserDetailPage({
 
 function DashboardTabBar({
   activeTab,
-  onChange
+  onChange,
+  projectModeAllowed
 }: {
   activeTab: DashboardMainTab
   onChange: (tab: DashboardMainTab) => void
+  projectModeAllowed: boolean
 }): React.JSX.Element {
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
     { id: "overview", label: "平台运营概览" },
-    { id: "project-mode", label: "项目运营概览" },
+    ...(projectModeAllowed ? ([{ id: "project-mode", label: "项目运营概览" }] as const) : []),
     { id: "skill-eval", label: "技能评估" }
   ]
 
@@ -1951,6 +1953,7 @@ export function DashboardView(): React.JSX.Element {
 
   const [exporting, setExporting] = useState(false)
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
+  const [projectModeAllowed, setProjectModeAllowed] = useState(false)
   const [skillDialogOpen, setSkillDialogOpen] = useState(false)
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null)
   const [skillDetail, setSkillDetail] = useState<DashboardSkillDetail | null>(null)
@@ -1983,6 +1986,29 @@ export function DashboardView(): React.JSX.Element {
   const [commitDetailsLoading, setCommitDetailsLoading] = useState(false)
   const [commitDetailsError, setCommitDetailsError] = useState<string | null>(null)
   const [commitDepartmentValue, setCommitDepartmentValue] = useState("")
+
+  useEffect(() => {
+    let cancelled = false
+
+    window.api.dashboard
+      .isProjectModeAllowed()
+      .then((allowed) => {
+        if (cancelled) return
+        setProjectModeAllowed(allowed)
+        if (!allowed) {
+          setActiveMainTab((current) => (current === "project-mode" ? "overview" : current))
+        }
+      })
+      .catch(() => {
+        if (cancelled) return
+        setProjectModeAllowed(false)
+        setActiveMainTab((current) => (current === "project-mode" ? "overview" : current))
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
   const [commitDepartmentFilter, setCommitDepartmentFilter] = useState("")
   const [subPage, setSubPage] = useState<DashboardSubPage>({ kind: "main" })
   const [userList, setUserList] = useState<DashboardUserListData | null>(null)
@@ -2113,9 +2139,9 @@ export function DashboardView(): React.JSX.Element {
 
   // 项目模式 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选变化时重拉。
   useEffect(() => {
-    if (activeMainTab !== "project-mode") return
+    if (activeMainTab !== "project-mode" || !projectModeAllowed) return
     void fetchProjectMode(range, granularity, selectedOrgLv1List)
-  }, [activeMainTab, fetchProjectMode, range, granularity, selectedOrgLv1List])
+  }, [activeMainTab, fetchProjectMode, granularity, projectModeAllowed, range, selectedOrgLv1List])
 
   useEffect(() => {
     if (
@@ -3254,7 +3280,11 @@ export function DashboardView(): React.JSX.Element {
       )}
 
       {subPage.kind === "main" && (
-        <DashboardTabBar activeTab={activeMainTab} onChange={setActiveMainTab} />
+        <DashboardTabBar
+          activeTab={activeMainTab}
+          onChange={setActiveMainTab}
+          projectModeAllowed={projectModeAllowed}
+        />
       )}
 
       {subPage.kind === "user-list" ? (
@@ -3325,7 +3355,7 @@ export function DashboardView(): React.JSX.Element {
                 onSelectedSkillKeyChange={setSkillEvalSelectedSkillKey}
               />
             </div>
-          ) : activeMainTab === "project-mode" ? (
+          ) : activeMainTab === "project-mode" && projectModeAllowed ? (
             <div className="space-y-6 p-6">
               <ProjectModePanel
                 data={projectMode}
