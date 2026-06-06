@@ -56,35 +56,46 @@ export function AgentModeSwitcher({
     setOpen(false)
   }
 
+  const triggerTitle = disabled && disabledReason ? disabledReason : "选择执行模式"
+  const triggerButton = (
+    <Button
+      variant="ghost"
+      size="sm"
+      disabled={disabled}
+      className={cn(
+        "h-8 gap-1.5 rounded-full border px-2.5 text-xs shadow-sm transition-all",
+        mode === "coordinator"
+          ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300"
+          : "border-border bg-background/80 text-muted-foreground hover:bg-muted hover:text-foreground"
+      )}
+      title={triggerTitle}
+    >
+      <span
+        className={cn(
+          "grid size-5 place-items-center rounded-full",
+          mode === "coordinator"
+            ? "bg-emerald-500 text-white"
+            : "bg-muted text-muted-foreground"
+        )}
+      >
+        <ActiveIcon className="size-3.5" />
+      </span>
+      <span className="font-medium">{activeMode.shortLabel}</span>
+      <ChevronDown className="size-3 opacity-70" />
+    </Button>
+  )
+
+  if (disabled) {
+    return (
+      <span className="inline-flex cursor-not-allowed" title={triggerTitle}>
+        {triggerButton}
+      </span>
+    )
+  }
+
   return (
     <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={disabled}
-          className={cn(
-            "h-8 gap-1.5 rounded-full border px-2.5 text-xs shadow-sm transition-all",
-            mode === "coordinator"
-              ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300"
-              : "border-border bg-background/80 text-muted-foreground hover:bg-muted hover:text-foreground"
-          )}
-          title={disabled && disabledReason ? disabledReason : "选择执行模式"}
-        >
-          <span
-            className={cn(
-              "grid size-5 place-items-center rounded-full",
-              mode === "coordinator"
-                ? "bg-emerald-500 text-white"
-                : "bg-muted text-muted-foreground"
-            )}
-          >
-            <ActiveIcon className="size-3.5" />
-          </span>
-          <span className="font-medium">{activeMode.shortLabel}</span>
-          <ChevronDown className="size-3 opacity-70" />
-        </Button>
-      </PopoverTrigger>
+      <PopoverTrigger asChild>{triggerButton}</PopoverTrigger>
       <PopoverContent
         className="w-[360px] overflow-hidden border-border bg-background p-0 shadow-xl"
         align="start"

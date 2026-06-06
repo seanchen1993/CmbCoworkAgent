@@ -1670,6 +1670,10 @@ export function ChatContainer({
     () => getHarnessFeatureBinding(currentThread),
     [currentThread]
   )
+  const disableCoordinatorModeOption =
+    surface === "harness-project" ||
+    surface === "harness-feature-session" ||
+    Boolean(harnessFeatureBinding)
   const pendingHarnessNextActionVersion = useSyncExternalStore(
     subscribePendingHarnessNextActions,
     getPendingHarnessNextActionVersion,
@@ -2071,11 +2075,13 @@ export function ChatContainer({
     (worker) => worker.status === "running"
   )
   const isLoading = streamData.isLoading || scheduledTaskLoading
-  const agentModeSwitchDisabledReason = !canChangeAgentMode
-    ? "当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。"
-    : isLoading
-      ? "当前请求执行中，暂时不能切换执行模式。"
-      : undefined
+  const agentModeSwitchDisabledReason = disableCoordinatorModeOption
+    ? "项目模式暂不支持子代理协同模式"
+    : !canChangeAgentMode
+      ? "当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。"
+      : isLoading
+        ? "当前请求执行中，暂时不能切换执行模式。"
+        : undefined
 
   const handleAgentModeChange = useCallback(
     (nextMode: ChatAgentMode): void => {
@@ -5363,7 +5369,7 @@ export function ChatContainer({
                     <div className="w-px h-4 bg-border mx-1" />
                     <AgentModeSwitcher
                       mode={agentMode}
-                      disabled={isLoading || !canChangeAgentMode}
+                      disabled={disableCoordinatorModeOption || isLoading || !canChangeAgentMode}
                       disabledReason={agentModeSwitchDisabledReason}
                       onChange={handleAgentModeChange}
                     />
