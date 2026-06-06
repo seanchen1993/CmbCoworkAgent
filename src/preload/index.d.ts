@@ -1661,7 +1661,8 @@ interface CustomAPI {
       traces: DashboardTraceDetail[]
     }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     exportExcel: (
-      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
+      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
+      options?: { fileName?: string }
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
   }
   harnessBoard: {

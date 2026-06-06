@@ -43,7 +43,9 @@ import {
   type DashboardUserListData,
   type DashboardUserListItem,
   type DashboardProjectModeFeature,
+  type DashboardProjectModeData,
   type DashboardProjectModeProject,
+  type DashboardProjectModeProjectStatus,
   type DashboardProjectModeTracesData,
   type DashboardTraceDetail,
   type Granularity,
@@ -99,6 +101,12 @@ type SkillUploaderExportInfo = {
 type SkillUploaderProfile = UploaderProfileInfo & {
   upperOrgLv0?: string
   upperOrgLv1?: string
+}
+
+type DashboardExcelSheet = {
+  name: string
+  header: string[]
+  rows: (string | number)[][]
 }
 
 function formatRangeLabel(from: string, to: string, granularity: Granularity): string {
@@ -579,6 +587,78 @@ async function fetchAllActiveUsersForExport(range: TimeRange): Promise<Dashboard
   }
 
   return users
+}
+
+const PROJECT_MODE_EXPORT_PAGE_SIZE = 100
+const PROJECT_MODE_EXPORT_MAX_PAGES = 100
+
+function formatProjectModeCreatorDepartment(project: DashboardProjectModeProject): string {
+  if (project.creatorUpperOrgLv1 && project.creatorUpperOrgLv0) {
+    return `${project.creatorUpperOrgLv1}/${project.creatorUpperOrgLv0}`
+  }
+  if (project.creatorUpperOrgLv1) return project.creatorUpperOrgLv1
+  return project.creatorOrgName || "—"
+}
+
+function buildProjectModeCodeRows(
+  stats: DashboardProjectModeProject["codeStats"]
+): (string | number)[][] {
+  if (!stats) return []
+  return [
+    ["代码生成行数", stats.generatedLines],
+    ["代码删除行数", stats.deletedLines],
+    ["代码已测量原始生成行数", stats.measuredGeneratedLines],
+    ["代码已测量有效生成行数", stats.effectiveGeneratedLines],
+    ["代码未提交生成行数", stats.unmeasuredGeneratedLines],
+    ["代码含未提交分母行数", stats.inclusiveEffectiveGeneratedLines],
+    ["代码采纳行数", stats.adoptedLines],
+    ["代码采纳率（含未提交）", formatPercent(stats.inclusiveAdoptionRate)],
+    ["代码采纳率（已测量）", formatPercent(stats.measuredAdoptionRate)],
+    ["代码已 Push 原始生成行数", stats.pushedMeasuredGeneratedLines],
+    ["代码已 Push 有效生成行数", stats.pushedEffectiveGeneratedLines],
+    ["代码已 Push 采纳行数", stats.pushedAdoptedLines],
+    ["代码已 Push Commit 数", stats.pushedCommitCount],
+    ["代码采纳率（已 Push）", formatPercent(stats.pushedAdoptionRate)]
+  ]
+}
+
+function flattenProjectModeOrgRows(
+  items: DashboardProjectModeData["analytics"]["byOrg"],
+  parent = ""
+): (string | number)[][] {
+  return items.flatMap((item) => [
+    [parent ? `${parent}/${item.org}` : item.org, item.count],
+    ...flattenProjectModeOrgRows(item.children ?? [], parent ? `${parent}/${item.org}` : item.org)
+  ])
+}
+
+async function fetchAllProjectModeProjectsForExport(
+  range: TimeRange,
+  orgList: string[]
+): Promise<DashboardProjectModeProject[]> {
+  const projects: DashboardProjectModeProject[] = []
+
+  for (const status of ["active", "archived"] as DashboardProjectModeProjectStatus[]) {
+    for (let page = 1; page <= PROJECT_MODE_EXPORT_MAX_PAGES; page++) {
+      const result = await window.api.dashboard.projectModeProjects(range, {
+        upperOrgLv1: orgList,
+        status,
+        page,
+        pageSize: PROJECT_MODE_EXPORT_PAGE_SIZE,
+        keyword: null,
+        adapterName: null,
+        creatorKeyword: null,
+        creatorOrgKeyword: null
+      })
+      if (!result.success) throw new Error(result.error ?? "获取项目列表失败")
+      const pageData = result.data
+      if (!pageData) break
+      projects.push(...pageData.projects)
+      if (page * pageData.pageSize >= pageData.total) break
+    }
+  }
+
+  return projects
 }
 
 function outcomeLabel(outcome: string): string {
@@ -2958,7 +3038,7 @@ export function DashboardView(): React.JSX.Element {
     if (!overview && !modelStats && !userStats && !productivity) return
     setExporting(true)
     try {
-      const sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }> = []
+      const sheets: DashboardExcelSheet[] = []
 
       // 1. Overview summary
       if (overview) {
@@ -3206,7 +3286,9 @@ export function DashboardView(): React.JSX.Element {
 
       if (sheets.length === 0) return
 
-      const result = await window.api.dashboard.exportExcel(sheets)
+      const result = await window.api.dashboard.exportExcel(sheets, {
+        fileName: "平台运营概览数据"
+      })
       if (result.success) {
         console.log("[Dashboard] Exported to:", result.filePath)
       } else if (!result.canceled && result.error) {
@@ -3225,6 +3307,220 @@ export function DashboardView(): React.JSX.Element {
     marketSkillMap,
     skillUploaderProfiles
   ])
+
+  const handleProjectModeExport = useCallback(async () => {
+    if (!projectMode) return
+    setExporting(true)
+    try {
+      const sheets: DashboardExcelSheet[] = []
+      const summary = projectMode.summary
+      const codeStats = summary.codeStats
+      const projects = await fetchAllProjectModeProjectsForExport(range, selectedOrgLv1List)
+
+      sheets.push({
+        name: "项目运营概览",
+        header: ["指标", "值"],
+        rows: [
+          ["项目总数", summary.projectCount],
+          ["特性总数", summary.featureCount],
+          ["活跃项目数", summary.activeProjectCount],
+          ["项目对话数", summary.conversationCount],
+          ["输入 Token", summary.totalInputTokens],
+          ["输出 Token", summary.totalOutputTokens],
+          ["总 Token", summary.totalTokens],
+          ["Skill 种类数", summary.distinctSkillCount],
+          ["Skill 调用次数", summary.skillCallCount],
+          ["Tool 调用次数", summary.totalToolCalls],
+          ...buildProjectModeCodeRows(codeStats)
+        ]
+      })
+
+      if (projectMode.analytics.topUsers.length > 0) {
+        sheets.push({
+          name: "项目用户分析",
+          header: ["排名", "SAP ID", "YST ID", "用户名", "部门", "项目对话数"],
+          rows: projectMode.analytics.topUsers.map((user, index) => [
+            index + 1,
+            user.sapId,
+            user.ystId || "",
+            user.userName,
+            user.orgName || "—",
+            user.count
+          ])
+        })
+      }
+
+      if (projectMode.analytics.byOrg.length > 0) {
+        sheets.push({
+          name: "项目部门分布",
+          header: ["部门", "项目数"],
+          rows: flattenProjectModeOrgRows(projectMode.analytics.byOrg)
+        })
+      }
+
+      if (projectMode.analytics.byAdapter.length > 0) {
+        sheets.push({
+          name: "项目插件占比",
+          header: ["插件", "项目数"],
+          rows: projectMode.analytics.byAdapter.map((adapter) => [adapter.name, adapter.count])
+        })
+      }
+
+      if (projects.length > 0) {
+        sheets.push({
+          name: "项目列表",
+          header: [
+            "项目",
+            "系统",
+            "插件",
+            "插件版本",
+            "项目状态",
+            "创建人",
+            "创建人SAP",
+            "创建人YST",
+            "部门",
+            "特性数",
+            "对话数",
+            "已Commit采纳率",
+            "已Push采纳率",
+            "工作区"
+          ],
+          rows: projects.map((project) => [
+            project.name,
+            project.systemName || "",
+            project.adapterName || "",
+            project.adapterVersion || "",
+            project.lifecycleStatus || "",
+            project.creatorUserName || "",
+            project.creatorSapId || "",
+            project.creatorYstId || "",
+            formatProjectModeCreatorDepartment(project),
+            project.featureCount,
+            project.conversationCount,
+            formatPercent(project.codeStats?.measuredAdoptionRate ?? null),
+            formatPercent(project.codeStats?.pushedAdoptionRate ?? null),
+            project.workspacePath || ""
+          ])
+        })
+      }
+
+      if (projectMode.adapters.length > 0) {
+        sheets.push({
+          name: "项目插件统计",
+          header: ["插件", "版本", "项目数", "特性数", "对话数", "已Commit采纳率", "已Push采纳率"],
+          rows: projectMode.adapters.map((adapter) => [
+            adapter.name,
+            adapter.version || "",
+            adapter.projectCount,
+            adapter.featureCount,
+            adapter.conversationCount,
+            formatPercent(adapter.codeStats?.measuredAdoptionRate ?? null),
+            formatPercent(adapter.codeStats?.pushedAdoptionRate ?? null)
+          ])
+        })
+      }
+
+      if (projectMode.topSkills.length > 0) {
+        sheets.push({
+          name: "项目Skill使用排行",
+          header: [
+            "排名",
+            "Skill",
+            "调用次数",
+            "应用市场是否存在",
+            "Skill中文名称",
+            "上传用户ID",
+            "上传用户名称",
+            "上传用户完整机构",
+            "是否精品",
+            "是否认证"
+          ],
+          rows: projectMode.topSkills.map((skill, index) => {
+            const marketItem = getMarketSkillItem(marketSkillMap, skill.skill)
+            const uploaderInfo = resolveSkillUploaderExportInfo(marketItem, skillUploaderProfiles)
+            const existsInMarket = Boolean(marketItem)
+            return [
+              index + 1,
+              skill.skill,
+              skill.count,
+              existsInMarket ? "是" : "否",
+              existsInMarket ? marketItem?.chinese_name?.trim() || "" : "",
+              uploaderInfo.sapId,
+              uploaderInfo.userName,
+              uploaderInfo.orgName,
+              existsInMarket ? (marketItem?.featured === "精品" ? "是" : "否") : "",
+              existsInMarket ? (marketItem?.tag === "认证" ? "是" : "否") : ""
+            ]
+          })
+        })
+      }
+
+      if (projectMode.bySkillAdoption.length > 0) {
+        sheets.push({
+          name: "项目Skill采纳排行",
+          header: [
+            "Skill",
+            "已Commit采纳率",
+            "已Push采纳率",
+            "生成行数",
+            "有效生成行数",
+            "采纳行数",
+            "已Push有效生成行数",
+            "已Push采纳行数",
+            "已Push Commit数"
+          ],
+          rows: projectMode.bySkillAdoption.map((skill) => [
+            skill.skill,
+            formatPercent(skill.measuredAdoptionRate),
+            formatPercent(skill.pushedAdoptionRate),
+            skill.generatedLines,
+            skill.effectiveGeneratedLines,
+            skill.adoptedLines,
+            skill.pushedEffectiveGeneratedLines,
+            skill.pushedAdoptedLines,
+            skill.pushedCommitCount
+          ])
+        })
+      }
+
+      const exportFilteredTools =
+        projectMode.tools.byToolFilteredAll.length > 0
+          ? projectMode.tools.byToolFilteredAll
+          : projectMode.tools.byTool
+      if (exportFilteredTools.length > 0) {
+        sheets.push({
+          name: "项目Tool使用排行(已过滤)",
+          header: ["排名", "Tool", "调用次数"],
+          rows: exportFilteredTools.map((tool, index) => [index + 1, tool.tool, tool.count])
+        })
+      }
+
+      const exportAllTools =
+        projectMode.tools.byToolAllFull.length > 0
+          ? projectMode.tools.byToolAllFull
+          : projectMode.tools.byToolAll
+      if (exportAllTools.length > 0) {
+        sheets.push({
+          name: "项目Tool使用排行(全部)",
+          header: ["排名", "Tool", "调用次数"],
+          rows: exportAllTools.map((tool, index) => [index + 1, tool.tool, tool.count])
+        })
+      }
+
+      if (sheets.length === 0) return
+
+      const result = await window.api.dashboard.exportExcel(sheets, {
+        fileName: "项目运营概览数据"
+      })
+      if (result.success) {
+        console.log("[Dashboard] Project mode exported to:", result.filePath)
+      } else if (!result.canceled && result.error) {
+        console.error("[Dashboard] Project mode export failed:", result.error)
+      }
+    } finally {
+      setExporting(false)
+    }
+  }, [projectMode, range, selectedOrgLv1List, marketSkillMap, skillUploaderProfiles])
 
   const projectTraces = projectTraceData?.traces ?? []
   const projectTracePageSize = projectTraceData?.tracePageSize ?? PROJECT_TRACE_PAGE_SIZE
@@ -3361,6 +3657,22 @@ export function DashboardView(): React.JSX.Element {
                 data={projectMode}
                 loading={projectModeLoading}
                 error={projectModeError}
+                headerAction={
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5 text-xs"
+                    onClick={handleProjectModeExport}
+                    disabled={exporting || projectModeLoading || !projectMode}
+                  >
+                    {exporting ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Download className="size-3.5" />
+                    )}
+                    导出Excel
+                  </Button>
+                }
                 projectPages={projectModeProjectPages}
                 projectPageLoading={projectModeProjectPageLoading}
                 projectPageError={projectModeProjectPageError}

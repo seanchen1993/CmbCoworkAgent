@@ -8405,7 +8405,11 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:exportExcel",
-    async (_, sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>) => {
+    async (
+      _,
+      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
+      options?: { fileName?: string }
+    ) => {
       try {
         // Dynamic import xlsx to avoid bundling issues
         const XLSX = await import("xlsx")
@@ -8430,9 +8434,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         }
 
         const win = BrowserWindow.getFocusedWindow()
+        const exportName = safeExportFileName(options?.fileName || "运营面板数据")
         const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
           title: "导出运营面板数据",
-          defaultPath: `运营面板数据_${new Date().toISOString().slice(0, 10)}.xlsx`,
+          defaultPath: `${exportName}_${new Date().toISOString().slice(0, 10)}.xlsx`,
           filters: [{ name: "Excel", extensions: ["xlsx"] }]
         })
 

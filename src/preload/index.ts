@@ -2500,9 +2500,10 @@ const api = {
     }): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportSkillTraces", payload),
     exportExcel: (
-      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
+      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
+      options?: { fileName?: string }
     ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
-      ipcRenderer.invoke("dashboard:exportExcel", sheets)
+      ipcRenderer.invoke("dashboard:exportExcel", sheets, options)
   },
   harnessBoard: {
     registry: (): Promise<HarnessAdapterRegistryItem[]> =>

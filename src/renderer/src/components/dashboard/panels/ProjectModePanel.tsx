@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts"
 import {
   Boxes,
@@ -1102,6 +1102,7 @@ export function ProjectModePanel({
   data,
   loading,
   error,
+  headerAction,
   projectPages,
   projectPageLoading,
   projectPageError,
@@ -1114,6 +1115,7 @@ export function ProjectModePanel({
   data: DashboardProjectModeData | null
   loading: boolean
   error: string | null
+  headerAction?: ReactNode
   projectPages: Partial<
     Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>
   >
@@ -1175,7 +1177,10 @@ export function ProjectModePanel({
     <div className="space-y-6">
       {/* 概览卡片（左）+ 代码采纳漏斗（右），与平台运营概览一致 */}
       <section>
-        <h2 className="mb-1 text-sm font-semibold text-foreground">项目运营概览</h2>
+        <div className="mb-1 flex items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold text-foreground">项目运营概览</h2>
+          {headerAction ? <div className="shrink-0">{headerAction}</div> : null}
+        </div>
         <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
           <span className="font-medium text-foreground">项目总数 / 特性总数</span>{" "}
           为当前状态（项目快照实时统计，不随时间范围变化）；其余指标按
