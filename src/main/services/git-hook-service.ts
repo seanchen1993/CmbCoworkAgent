@@ -9,6 +9,7 @@ import { nowIsoLocal } from "../util/local-time"
 import { parseGitRemoteInfo } from "../utils/git-remote"
 import {
   hasPendingGenerationsForCommit,
+  isCodeFile,
   measureForCommit,
   type StagedSnapshot
 } from "./adoption-tracker"
@@ -30,6 +31,12 @@ const GIT_EXEC_TIMEOUT_MS = 10_000
 const GIT_PUSH_CHECK_TIMEOUT_MS = 20_000
 const MAX_HOOK_EVENT_AGE_MS = 24 * 60 * 60 * 1000
 const PUSH_RECHECK_INTERVAL_MS = 30_000
+// Commit reconciler — hook-independent backstop for external IDE/CLI commits whose
+// pre-commit/post-commit hooks never fired (e.g. IntelliJ IDEA 2026's local commit).
+// Bounded to the adoption attribution window so we never backfill ancient history.
+const COMMIT_RECONCILE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+const COMMIT_RECONCILE_MAX_COMMITS = 50
+const RECONCILE_STAGED_BLOB_MAX_BYTES = 8 * 1024 * 1024
 
 export type GitHookState =
   | "not_git"
@@ -121,6 +128,11 @@ const syncInFlight = new Set<string>()
 const syncPending = new Set<string>()
 const autoInstallLastCheckedAt = new Map<string, number>()
 const autoInstallInFlight = new Set<string>()
+// Commit reconciler state: repoKey → resolved HEAD-reflog path (cached so the
+// "nothing changed" gate is a single fs.stat, no git spawn), and repoKey → the
+// last-seen commit cursor (HEAD sha + reflog mtime) used to detect new commits.
+const reflogPathCache = new Map<string, string>()
+const repoCommitCursor = new Map<string, { headSha: string; reflogMtimeMs: number }>()
 let registeredSyncTimer: ReturnType<typeof setInterval> | null = null
 let registeredRepoWriteQueue: Promise<void> = Promise.resolve()
 
@@ -859,8 +871,17 @@ async function autoInstallGitHooksForRoot(gitRoot: string): Promise<void> {
   autoInstallInFlight.add(key)
   try {
     const status = await getGitHookStatus(normalizedRoot)
-    if (status.installed) {
+
+    // Register the repo whenever it is a git repository — independent of whether
+    // the shell hooks install successfully. The agent wrote code here, so the
+    // commit reconciler must sweep it even when hooks are blocked (an existing
+    // husky/lefthook setup, a `modified`/`error` hook state, etc.). Without this,
+    // the reconciler's coverage set would silently re-depend on hook installation.
+    if (status.state !== "not_git") {
       await registerGitHookRepo(normalizedRoot)
+    }
+
+    if (status.installed) {
       scheduleGitHookEventSync(normalizedRoot, 100)
       return
     }
@@ -875,7 +896,6 @@ async function autoInstallGitHooksForRoot(gitRoot: string): Promise<void> {
 
     const nextStatus = await installGitHooks(normalizedRoot)
     if (nextStatus.installed) {
-      await registerGitHookRepo(normalizedRoot)
       scheduleGitHookEventSync(normalizedRoot, 100)
     }
   } catch (e) {
@@ -1201,6 +1221,303 @@ async function processPushIntent(repoDir: string, fileName: string): Promise<voi
   })
 }
 
+// ─────────────────────────────────────────────────────────
+// Commit reconciler — hook-independent backstop
+//
+// External commits made through IDEs that bypass shell git hooks (notably
+// IntelliJ IDEA 2026, whose local commit no longer invokes pre-commit /
+// post-commit) never produce a `ready/` snapshot, so adoption for those commits
+// would be lost. This reconciler detects new commits directly from the repo and
+// measures adoption from the commit object itself — no hook required.
+//
+// It shares the per-repo `processed-commits.json` dedup with the hook path, and
+// `measureForCommit` is idempotent (sqlite `measured` flag), so the two can run
+// side by side without double-counting.
+//
+// Cost control: the common "no new commit" case is a single fs.stat on the HEAD
+// reflog (mtime gate). Real git work only happens when HEAD actually moved, and
+// blob content is fetched only for files that already have a pending gen row.
+// ─────────────────────────────────────────────────────────
+
+async function runGitBuffer(
+  cwd: string,
+  args: string[],
+  options?: { timeoutMs?: number }
+): Promise<Buffer> {
+  const { stdout } = await execFileAsync("git", args, {
+    cwd,
+    encoding: "buffer",
+    timeout: options?.timeoutMs ?? GIT_EXEC_TIMEOUT_MS,
+    maxBuffer: RECONCILE_STAGED_BLOB_MAX_BYTES,
+    env: { ...process.env, GIT_LFS_SKIP_SMUDGE: "1" }
+  })
+  return Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout as unknown as string)
+}
+
+async function getHeadSha(gitRoot: string): Promise<string> {
+  try {
+    const sha = await runGit(gitRoot, ["rev-parse", "HEAD"], { timeoutMs: GIT_EXEC_TIMEOUT_MS })
+    return /^[0-9a-f]{40}$/i.test(sha) ? sha : ""
+  } catch {
+    return ""
+  }
+}
+
+async function getReflogPath(gitRoot: string, key: string): Promise<string> {
+  const cached = reflogPathCache.get(key)
+  if (cached !== undefined) return cached
+  let resolved = ""
+  try {
+    const raw = await runGit(gitRoot, ["rev-parse", "--git-path", "logs/HEAD"])
+    if (raw) resolved = resolveGitPath(raw, gitRoot)
+  } catch {
+    resolved = ""
+  }
+  reflogPathCache.set(key, resolved)
+  return resolved
+}
+
+function commitCursorPath(gitRoot: string): string {
+  return join(getRepoEventsDir(gitRoot), "commit-cursor.json")
+}
+
+async function loadCommitCursor(
+  gitRoot: string,
+  key: string
+): Promise<{ headSha: string; reflogMtimeMs: number } | null> {
+  const cached = repoCommitCursor.get(key)
+  if (cached) return cached
+  const raw = await readJsonFile<{ headSha?: string; reflogMtimeMs?: number }>(
+    commitCursorPath(gitRoot)
+  )
+  if (!raw || typeof raw.headSha !== "string" || !/^[0-9a-f]{40}$/i.test(raw.headSha)) return null
+  const cursor = { headSha: raw.headSha, reflogMtimeMs: Number(raw.reflogMtimeMs) || 0 }
+  repoCommitCursor.set(key, cursor)
+  return cursor
+}
+
+async function saveCommitCursor(
+  gitRoot: string,
+  key: string,
+  headSha: string,
+  reflogMtimeMs: number
+): Promise<void> {
+  repoCommitCursor.set(key, { headSha, reflogMtimeMs })
+  try {
+    await ensureDir(getRepoEventsDir(gitRoot))
+    await writeFile(
+      commitCursorPath(gitRoot),
+      JSON.stringify(
+        { schemaVersion: 1, headSha, reflogMtimeMs, updatedAt: nowIsoLocal() },
+        null,
+        2
+      ),
+      "utf-8"
+    )
+  } catch {
+    // Cursor persistence is best-effort; the in-memory cursor still gates this run.
+  }
+}
+
+function parseNameStatusZ(buffer: string): Array<{ status: string; relPath: string }> {
+  const tokens = buffer.split("\0").filter(Boolean)
+  const entries: Array<{ status: string; relPath: string }> = []
+  for (let i = 0; i < tokens.length; ) {
+    const status = tokens[i]
+    if (!status || !/^[ACDMRTU]/.test(status)) {
+      i += 1
+      continue
+    }
+    const isRenameOrCopy = status.startsWith("R") || status.startsWith("C")
+    const relPath = isRenameOrCopy ? tokens[i + 2] : tokens[i + 1]
+    i += isRenameOrCopy ? 3 : 2
+    if (relPath) entries.push({ status, relPath })
+  }
+  return entries
+}
+
+async function listNewCommitsOnHead(
+  gitRoot: string,
+  lastSha: string,
+  headSha: string
+): Promise<string[]> {
+  const sinceIso = new Date(Date.now() - COMMIT_RECONCILE_MAX_AGE_MS).toISOString()
+  const useRange =
+    !!lastSha &&
+    /^[0-9a-f]{40}$/i.test(lastSha) &&
+    lastSha !== headSha &&
+    (await isAncestor(gitRoot, lastSha, headSha))
+  const args = [
+    "rev-list",
+    "--no-merges",
+    "--reverse",
+    `--max-count=${COMMIT_RECONCILE_MAX_COMMITS}`,
+    `--since=${sinceIso}`
+  ]
+  // When the stored cursor is a genuine ancestor of HEAD, scan only the new
+  // range; otherwise (branch switch, rebase, gc'd cursor) fall back to a capped
+  // recent-history scan. `processed-commits.json` keeps the fallback idempotent.
+  args.push(useRange ? `${lastSha}..${headSha}` : headSha)
+  try {
+    const out = await runGit(gitRoot, args, { timeoutMs: GIT_EXEC_TIMEOUT_MS })
+    return out
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((sha) => /^[0-9a-f]{40}$/i.test(sha))
+  } catch {
+    return []
+  }
+}
+
+async function reconcileOneCommit(
+  gitRoot: string,
+  repoDir: string,
+  commitSha: string,
+  processed: Set<string>
+): Promise<void> {
+  if (processed.has(commitSha)) return
+
+  let rawNameStatus = ""
+  try {
+    rawNameStatus = await runGit(
+      gitRoot,
+      [
+        "-c",
+        "core.quotepath=false",
+        "diff-tree",
+        "--no-commit-id",
+        "--name-status",
+        "-r",
+        "-z",
+        "--root",
+        commitSha
+      ],
+      { timeoutMs: GIT_EXEC_TIMEOUT_MS }
+    )
+  } catch {
+    return
+  }
+
+  const entries = parseNameStatusZ(rawNameStatus).filter((entry) =>
+    isCodeFile(resolvePath(gitRoot, entry.relPath))
+  )
+
+  // Cheap gate: does this commit touch any file with a pending agent generation?
+  // Only absolute paths are needed here — no blob content is fetched yet.
+  const probe: StagedSnapshot[] = entries.map((entry) => ({
+    absPath: resolvePath(gitRoot, entry.relPath),
+    stagedContent: null
+  }))
+  if (probe.length === 0 || !hasPendingGenerationsForCommit(probe)) {
+    processed.add(commitSha)
+    await saveProcessedCommitSet(repoDir, processed)
+    return
+  }
+
+  const snapshots: StagedSnapshot[] = []
+  for (const entry of entries) {
+    const absPath = resolvePath(gitRoot, entry.relPath)
+    if (entry.status.startsWith("D")) {
+      snapshots.push({ absPath, stagedContent: null })
+      continue
+    }
+    try {
+      const content = await runGitBuffer(gitRoot, ["show", `${commitSha}:${entry.relPath}`], {
+        timeoutMs: GIT_EXEC_TIMEOUT_MS
+      })
+      snapshots.push({ absPath, stagedContent: content })
+    } catch {
+      // Binary / too large / unreadable — skip this file, keep measuring the rest.
+    }
+  }
+
+  if (snapshots.length === 0) {
+    processed.add(commitSha)
+    await saveProcessedCommitSet(repoDir, processed)
+    return
+  }
+
+  measureForCommit(snapshots, commitSha)
+
+  const [stats, branch, remoteUrl] = await Promise.all([
+    getCommitStats(gitRoot, commitSha),
+    getCurrentBranch(gitRoot),
+    getRemoteUrl(gitRoot, "origin")
+  ])
+  const remoteInfo = parseGitRemoteInfo(remoteUrl)
+  trackEvent("git.commit.created", "git", {
+    repoPath: gitRoot,
+    branch,
+    commitSha,
+    filesChanged: stats.fileCount,
+    insertions: stats.additions,
+    deletions: stats.deletions,
+    triggeredBy: "external-reconcile",
+    remoteUrl,
+    repositoryName: remoteInfo?.repositoryName ?? "",
+    repositoryFullName: remoteInfo?.repositoryFullName ?? "",
+    repositoryHost: remoteInfo?.repositoryHost ?? "",
+    repositoryWebUrl: remoteInfo?.repositoryWebUrl ?? "",
+    usedSkills: [],
+    skillCount: 0
+  })
+
+  processed.add(commitSha)
+  await saveProcessedCommitSet(repoDir, processed)
+}
+
+async function reconcileCommitsForRepo(gitRoot: string): Promise<void> {
+  const key = normalizePathForKey(gitRoot)
+  const reflogPath = await getReflogPath(gitRoot, key)
+
+  let reflogMtimeMs = 0
+  if (reflogPath) {
+    try {
+      reflogMtimeMs = (await stat(reflogPath)).mtimeMs
+    } catch {
+      reflogMtimeMs = 0
+    }
+  }
+
+  const cursor = await loadCommitCursor(gitRoot, key)
+
+  // First time we ever see this repo: record a baseline and do NOT backfill
+  // history. Adoption for commits made before we started watching is out of
+  // scope (the pending-gen rows that would match them are recent anyway).
+  if (!cursor) {
+    const head = await getHeadSha(gitRoot)
+    if (head) await saveCommitCursor(gitRoot, key, head, reflogMtimeMs)
+    return
+  }
+
+  // Fast gate: when the HEAD reflog is available and untouched since the last
+  // sweep, nothing was committed — a single fs.stat, no git process.
+  if (reflogPath && reflogMtimeMs > 0 && reflogMtimeMs === cursor.reflogMtimeMs) return
+
+  const head = await getHeadSha(gitRoot)
+  if (!head) return
+  if (head === cursor.headSha) {
+    // Reflog moved (checkout / reset / fetch) but the HEAD commit is unchanged —
+    // just refresh the gate so we don't re-enter this branch every sweep.
+    if (reflogMtimeMs !== cursor.reflogMtimeMs) {
+      await saveCommitCursor(gitRoot, key, head, reflogMtimeMs)
+    }
+    return
+  }
+
+  const repoDir = getRepoEventsDir(gitRoot)
+  const processed = await getProcessedCommitSet(repoDir)
+  const newCommits = await listNewCommitsOnHead(gitRoot, cursor.headSha, head)
+  for (const sha of newCommits) {
+    try {
+      await reconcileOneCommit(gitRoot, repoDir, sha, processed)
+    } catch (e) {
+      console.warn("[GitHook] failed to reconcile commit:", sha, e)
+    }
+  }
+  await saveCommitCursor(gitRoot, key, head, reflogMtimeMs)
+}
+
 export async function syncGitHookEvents(workspacePath: string): Promise<GitHookSyncResult> {
   const context = await resolveGitContext(workspacePath)
   if (!context) return "unavailable"
@@ -1214,24 +1531,33 @@ export async function syncGitHookEvents(workspacePath: string): Promise<GitHookS
   syncInFlight.add(key)
 
   try {
-    if (!(await pathExists(repoDir))) return "synced"
+    if (await pathExists(repoDir)) {
+      const readyNames = await listDirectoryNames(join(repoDir, "ready"))
+      for (const name of readyNames) {
+        try {
+          await processReadyCommitSnapshot(repoDir, name)
+        } catch (e) {
+          console.warn("[GitHook] failed to process commit snapshot:", e)
+        }
+      }
 
-    const readyNames = await listDirectoryNames(join(repoDir, "ready"))
-    for (const name of readyNames) {
-      try {
-        await processReadyCommitSnapshot(repoDir, name)
-      } catch (e) {
-        console.warn("[GitHook] failed to process commit snapshot:", e)
+      const pushIntentFiles = await listJsonFiles(join(repoDir, "push-intents"))
+      for (const fileName of pushIntentFiles) {
+        try {
+          await processPushIntent(repoDir, fileName)
+        } catch (e) {
+          console.warn("[GitHook] failed to process push intent:", e)
+        }
       }
     }
 
-    const pushIntentFiles = await listJsonFiles(join(repoDir, "push-intents"))
-    for (const fileName of pushIntentFiles) {
-      try {
-        await processPushIntent(repoDir, fileName)
-      } catch (e) {
-        console.warn("[GitHook] failed to process push intent:", e)
-      }
+    // Hook-independent backstop: detect & measure external commits whose
+    // pre-commit/post-commit hooks never fired (e.g. IntelliJ IDEA 2026). This
+    // runs even when no events dir exists yet — that is exactly the gap it fills.
+    try {
+      await reconcileCommitsForRepo(context.gitRoot)
+    } catch (e) {
+      console.warn("[GitHook] failed to reconcile commits:", e)
     }
     return "synced"
   } finally {
