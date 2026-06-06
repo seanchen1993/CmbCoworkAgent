@@ -1881,8 +1881,8 @@ function buildNormalModeGuardMessage(state: NormalModeGuardState): string {
   const workerList = state.unresolvedWorkers
     .map((worker) => `${worker.worker_id}: ${worker.description}`)
     .join("; ")
-  const suffix = workerList ? `相关 worker：${workerList}` : "请先切回协同模式处理这些结果。"
-  return "仍有协同 worker 在运行或结果待处理，请先在协同模式处理完成后再切回普通模式。" + suffix
+  const suffix = workerList ? `相关 worker：${workerList}` : "请先切回 Agent Team 处理这些结果。"
+  return "仍有 Agent Team worker 在运行或结果待处理，请先处理完成后再切回 Solo Agent。" + suffix
 }
 
 function renderCoordinatorWorkerNotifications(
@@ -5926,7 +5926,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             safeSendToWindow(window, channel, {
               type: "error",
               error: "WORKSPACE_REQUIRED",
-              message: "该线程缺少工作区路径，无法安全切回普通模式。请先重新选择工作区后再切换。"
+              message: "该线程缺少工作区路径，无法安全切回 Solo Agent。请先重新选择工作区后再切换。"
             })
             return
           }

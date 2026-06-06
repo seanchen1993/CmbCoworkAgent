@@ -267,7 +267,7 @@ async function assertWorkspaceSwitchAllowed(
     .map((worker) => `${worker.worker_id}(${worker.role}/${worker.workload})`)
     .join(", ")
   throw new Error(
-    `当前线程仍有运行中或未处理通知的协同 worker，请先等待完成、处理通知或停止后台子代理后再切换工作区。相关 worker：${workerList}`
+    `当前线程仍有运行中或未处理通知的 Agent Team worker，请先等待完成、处理通知或停止后台子代理后再切换工作区。相关 worker：${workerList}`
   )
 }
 

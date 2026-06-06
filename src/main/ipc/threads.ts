@@ -134,7 +134,7 @@ async function assertCanPersistExplicitNormalMode(
     if (unresolvedWorkers.length === 0 && !hasPendingNotifications) {
       return
     }
-    throw new Error("该线程缺少工作区路径，无法安全切回普通模式。请先重新选择工作区后再切换。")
+    throw new Error("该线程缺少工作区路径，无法安全切回 Solo Agent。请先重新选择工作区后再切换。")
   }
 
   await coordinatorWorkerManager.restoreWorkersForThread({
@@ -154,8 +154,8 @@ async function assertCanPersistExplicitNormalMode(
     .map((worker) => `${worker.worker_id}: ${worker.description}`)
     .join("; ")
   throw new Error(
-    "仍有协同 worker 在运行或结果待处理，请先在协同模式处理完成后再切回普通模式。" +
-      (workerList ? `相关 worker：${workerList}` : "请先切回协同模式处理这些结果。")
+    "仍有 Agent Team worker 在运行或结果待处理，请先处理完成后再切回 Solo Agent。" +
+      (workerList ? `相关 worker：${workerList}` : "请先切回 Agent Team 处理这些结果。")
   )
 }
 

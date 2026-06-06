@@ -1743,8 +1743,7 @@ export function ChatContainer({
     ? (hookLogBucketByTurnId.get(openHookLogBucketId) ?? null)
     : null
 
-  // TODO(temporary): dev 下放开「线程已有消息就不能切模式」的限制，方便本地测试协同模式，发布前移除。
-  const canChangeAgentMode = import.meta.env.DEV || threadMessages.length === 0
+  const canChangeAgentMode = !historyLoading && threadMessages.length === 0
   const [savedToolNameInput, setSavedToolNameInput] = useState("")
   const [savedToolDescriptionInput, setSavedToolDescriptionInput] = useState("")
   const [saveToolMetadataLoading, setSaveToolMetadataLoading] = useState(false)
@@ -1791,17 +1790,22 @@ export function ChatContainer({
   )
   const isLoading = streamData.isLoading || scheduledTaskLoading
   const agentModeSwitchDisabledReason = !canChangeAgentMode
-    ? "当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。"
+    ? historyLoading
+      ? "会话历史加载中，暂时不能切换执行模式。"
+      : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
     : isLoading
-      ? "当前请求执行中，暂时不能切换执行模式。"
+      ? "当前请求执行中，结束后才能切换执行模式。"
       : undefined
 
   const handleAgentModeChange = useCallback(
     (nextMode: ChatAgentMode): void => {
       const previousMode = agentMode
       void (async () => {
-        // TODO(temporary): 同上，dev 下允许在已有消息的线程切模式，发布前移除。
-        if (!import.meta.env.DEV && threadMessages.length > 0) {
+        if (historyLoading) {
+          toast.error("会话历史加载中，暂时不能切换执行模式。")
+          return
+        }
+        if (threadMessages.length > 0) {
           toast.error("当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。")
           return
         }
@@ -1810,7 +1814,7 @@ export function ChatContainer({
             .isCoordinatorModeForced()
             .catch(() => false)
           if (isEnvironmentForcedCoordinator) {
-            toast.error("当前环境变量强制开启协同模式，不能切回普通模式")
+            toast.error("当前环境变量强制开启 Agent Team，不能切回 Solo Agent")
             return
           }
           const [workers, hasPendingNotifications] = await Promise.all([
@@ -1824,7 +1828,7 @@ export function ChatContainer({
           )
           if (hasRemoteUnresolvedWorkers || hasPendingNotifications) {
             toast.error(
-              "仍有协同 worker 在运行或结果待处理，请先在协同模式处理完成后再切回普通模式"
+              "仍有 Agent Team worker 在运行或结果待处理，请先处理完成后再切回 Solo Agent"
             )
             return
           }
@@ -1848,7 +1852,7 @@ export function ChatContainer({
         toast.error("Agent 模式保存失败，请重试")
       })
     },
-    [agentMode, threadId, threadMessages, updateThread]
+    [agentMode, historyLoading, threadId, threadMessages, updateThread]
   )
   const userInputScrollPadding = pendingUserInput
     ? Math.ceil((userInputDialogLayout?.height ?? 320) + 24)
@@ -5091,8 +5095,8 @@ export function ChatContainer({
                     <div className="w-px h-4 bg-border mx-1" />
                     <AgentModeSwitcher
                       mode={agentMode}
-                      disabled={isLoading || !canChangeAgentMode}
-                      disabledReason={agentModeSwitchDisabledReason}
+                      locked={isLoading || !canChangeAgentMode}
+                      lockedReason={agentModeSwitchDisabledReason}
                       onChange={handleAgentModeChange}
                     />
                     <div className="w-px h-4 bg-border mx-1" />

@@ -2,6 +2,8 @@ node_modules
 dist
 out
 .DS_Store
+*.swp
+.*.swp
 .eslintcache
 *.log*
 *.tsbuildinfo
