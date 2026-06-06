@@ -275,6 +275,32 @@ export interface DashboardProjectModeToolUsage {
   totalToolCalls: number
 }
 
+export interface DashboardProjectModeTopUser {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName: string
+  count: number
+}
+
+export interface DashboardProjectModeOrgDistributionItem {
+  key: string
+  org: string
+  count: number
+  children: DashboardProjectModeOrgDistributionItem[]
+}
+
+export interface DashboardProjectModeAdapterShareItem {
+  name: string
+  count: number
+}
+
+export interface DashboardProjectModeAnalytics {
+  topUsers: DashboardProjectModeTopUser[]
+  byOrg: DashboardProjectModeOrgDistributionItem[]
+  byAdapter: DashboardProjectModeAdapterShareItem[]
+}
+
 export interface DashboardProjectModeProject {
   projectId: string
   name: string
@@ -283,6 +309,12 @@ export interface DashboardProjectModeProject {
   workspacePath?: string
   adapterName?: string
   adapterVersion?: string
+  creatorSapId?: string
+  creatorYstId?: string
+  creatorUserName?: string
+  creatorOrgName?: string
+  creatorUpperOrgLv0?: string
+  creatorUpperOrgLv1?: string
   lifecycleStatus?: string
   compatible?: boolean
   compatibilityStatus?: string
@@ -312,6 +344,9 @@ export interface DashboardProjectModeProjectPageData {
   pageSize: number
   status: DashboardProjectModeProjectStatus
   keyword: string
+  adapterName: string
+  creatorKeyword: string
+  creatorOrgKeyword: string
 }
 
 export interface DashboardProjectModeProjectPageOptions {
@@ -320,6 +355,9 @@ export interface DashboardProjectModeProjectPageOptions {
   page?: number
   pageSize?: number
   keyword?: string | null
+  adapterName?: string | null
+  creatorKeyword?: string | null
+  creatorOrgKeyword?: string | null
 }
 
 export interface DashboardProjectModeAdapter {
@@ -349,6 +387,7 @@ export interface DashboardProjectModeData {
   topSkills: DashboardProjectModeSkillCount[]
   bySkillAdoption: SkillAdoptionRankingItem[]
   tools: DashboardProjectModeToolUsage
+  analytics: DashboardProjectModeAnalytics
   projectCounts: DashboardProjectModeProjectCounts
   projectPage: DashboardProjectModeProjectPageData
   projects: DashboardProjectModeProject[]
@@ -1857,7 +1896,10 @@ export function useDashboard() {
       status: DashboardProjectModeProjectStatus,
       page: number,
       keyword: string,
-      pageSize: number
+      pageSize: number,
+      adapterName: string,
+      creatorKeyword: string,
+      creatorOrgKeyword: string
     ) => {
       const id = ++projectModeProjectPageFetchIdRef.current[status]
       setProjectModeProjectPageLoading((current) => ({ ...current, [status]: true }))
@@ -1869,7 +1911,10 @@ export function useDashboard() {
           status,
           page,
           pageSize,
-          keyword
+          keyword,
+          adapterName,
+          creatorKeyword,
+          creatorOrgKeyword
         })
         if (id !== projectModeProjectPageFetchIdRef.current[status]) return
         if (!result.success) throw new Error(result.error ?? "获取项目列表失败")

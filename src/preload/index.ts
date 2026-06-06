@@ -2319,6 +2319,9 @@ const api = {
         page?: number
         pageSize?: number
         keyword?: string | null
+        adapterName?: string | null
+        creatorKeyword?: string | null
+        creatorOrgKeyword?: string | null
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeProjects", range, options),

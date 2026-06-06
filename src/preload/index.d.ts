@@ -349,6 +349,32 @@ interface DashboardProjectModeToolUsage {
   totalToolCalls: number
 }
 
+interface DashboardProjectModeTopUser {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName: string
+  count: number
+}
+
+interface DashboardProjectModeOrgDistributionItem {
+  key: string
+  org: string
+  count: number
+  children: DashboardProjectModeOrgDistributionItem[]
+}
+
+interface DashboardProjectModeAdapterShareItem {
+  name: string
+  count: number
+}
+
+interface DashboardProjectModeAnalytics {
+  topUsers: DashboardProjectModeTopUser[]
+  byOrg: DashboardProjectModeOrgDistributionItem[]
+  byAdapter: DashboardProjectModeAdapterShareItem[]
+}
+
 interface DashboardProjectModeProject {
   projectId: string
   name: string
@@ -357,6 +383,12 @@ interface DashboardProjectModeProject {
   workspacePath?: string
   adapterName?: string
   adapterVersion?: string
+  creatorSapId?: string
+  creatorYstId?: string
+  creatorUserName?: string
+  creatorOrgName?: string
+  creatorUpperOrgLv0?: string
+  creatorUpperOrgLv1?: string
   lifecycleStatus?: string
   compatible?: boolean
   compatibilityStatus?: string
@@ -386,6 +418,9 @@ interface DashboardProjectModeProjectPageData {
   pageSize: number
   status: DashboardProjectModeProjectStatus
   keyword: string
+  adapterName: string
+  creatorKeyword: string
+  creatorOrgKeyword: string
 }
 
 interface DashboardProjectModeProjectPageOptions {
@@ -394,6 +429,9 @@ interface DashboardProjectModeProjectPageOptions {
   page?: number
   pageSize?: number
   keyword?: string | null
+  adapterName?: string | null
+  creatorKeyword?: string | null
+  creatorOrgKeyword?: string | null
 }
 
 interface DashboardProjectModeAdapter {
@@ -423,6 +461,7 @@ interface DashboardProjectModeData {
   topSkills: DashboardProjectModeSkillCount[]
   bySkillAdoption: DashboardProjectModeSkillAdoption[]
   tools: DashboardProjectModeToolUsage
+  analytics: DashboardProjectModeAnalytics
   projectCounts: DashboardProjectModeProjectCounts
   projectPage: DashboardProjectModeProjectPageData
   projects: DashboardProjectModeProject[]

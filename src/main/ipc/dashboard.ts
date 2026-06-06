@@ -5746,6 +5746,45 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       ]
     })
   }
+  const mockCreators: Array<
+    Pick<
+      ProjectModeProjectView,
+      | "creatorSapId"
+      | "creatorYstId"
+      | "creatorUserName"
+      | "creatorOrgName"
+      | "creatorUpperOrgLv0"
+      | "creatorUpperOrgLv1"
+    >
+  > = [
+    {
+      creatorSapId: "10010001",
+      creatorYstId: "383331",
+      creatorUserName: "张三",
+      creatorOrgName: "测试 1 组",
+      creatorUpperOrgLv1: "测试 1 部",
+      creatorUpperOrgLv0: "测试 1 组"
+    },
+    {
+      creatorSapId: "10010002",
+      creatorYstId: "231855",
+      creatorUserName: "李四",
+      creatorOrgName: "开发三组",
+      creatorUpperOrgLv1: "开发二部",
+      creatorUpperOrgLv0: "开发三组"
+    },
+    {
+      creatorSapId: "10010003",
+      creatorYstId: "280631",
+      creatorUserName: "王五",
+      creatorOrgName: "平台一组",
+      creatorUpperOrgLv1: "平台三部",
+      creatorUpperOrgLv0: "平台一组"
+    }
+  ]
+  allProjects.forEach((project, index) => {
+    Object.assign(project, mockCreators[index % mockCreators.length])
+  })
   // 「室筛选」：按下标分配的室过滤项目列表，使 mock 下切换室也能真实改变数据。
   const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
   const projects = allProjects.filter((_, i) =>
@@ -5878,6 +5917,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       },
       aggScale
     ),
+    analytics: buildProjectModeMockAnalytics(projects),
     bySkillAdoption: deepScaleMockMetrics(
       [
         {
@@ -6573,6 +6613,32 @@ interface ProjectModeToolUsage {
   totalToolCalls: number
 }
 
+interface ProjectModeTopUser {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName: string
+  count: number
+}
+
+interface ProjectModeOrgDistributionItem {
+  key: string
+  org: string
+  count: number
+  children: ProjectModeOrgDistributionItem[]
+}
+
+interface ProjectModeAdapterShareItem {
+  name: string
+  count: number
+}
+
+interface ProjectModeAnalytics {
+  topUsers: ProjectModeTopUser[]
+  byOrg: ProjectModeOrgDistributionItem[]
+  byAdapter: ProjectModeAdapterShareItem[]
+}
+
 interface ProjectModeProjectView {
   projectId: string
   name: string
@@ -6581,6 +6647,12 @@ interface ProjectModeProjectView {
   workspacePath?: string
   adapterName?: string
   adapterVersion?: string
+  creatorSapId?: string
+  creatorYstId?: string
+  creatorUserName?: string
+  creatorOrgName?: string
+  creatorUpperOrgLv0?: string
+  creatorUpperOrgLv1?: string
   lifecycleStatus?: string
   compatible?: boolean
   compatibilityStatus?: string
@@ -6610,6 +6682,9 @@ interface ProjectModeProjectPageData {
   pageSize: number
   status: ProjectModeProjectStatus
   keyword: string
+  adapterName: string
+  creatorKeyword: string
+  creatorOrgKeyword: string
 }
 
 interface ProjectModeProjectPageOptions extends OrgFilterOptions {
@@ -6617,6 +6692,9 @@ interface ProjectModeProjectPageOptions extends OrgFilterOptions {
   page?: number
   pageSize?: number
   keyword?: string | null
+  adapterName?: string | null
+  creatorKeyword?: string | null
+  creatorOrgKeyword?: string | null
 }
 
 interface ProjectModeAdapterView {
@@ -6646,6 +6724,7 @@ interface DashboardProjectModeData {
   topSkills: ProjectModeSkillCount[]
   bySkillAdoption: DashboardSkillCodeAdoptionStats[]
   tools: ProjectModeToolUsage
+  analytics: ProjectModeAnalytics
   projectCounts: ProjectModeProjectCounts
   projectPage: ProjectModeProjectPageData
   projects: ProjectModeProjectView[]
@@ -6685,6 +6764,22 @@ function normalizeProjectModeKeyword(value?: string | null): string {
   return String(value ?? "").trim()
 }
 
+function normalizeProjectModeAdapterName(value?: string | null): string {
+  return String(value ?? "").trim()
+}
+
+function normalizeProjectModeCreatorKeyword(value?: string | null): string {
+  return String(value ?? "").trim()
+}
+
+function normalizeProjectModeCreatorOrgKeyword(value?: string | null): string {
+  return String(value ?? "").trim()
+}
+
+function isProjectModeNumericKeyword(value: string): boolean {
+  return /^\d+$/.test(value)
+}
+
 function projectMatchesStatus(
   project: ProjectModeProjectView,
   status: ProjectModeProjectStatus
@@ -6700,6 +6795,34 @@ function projectMatchesKeyword(project: ProjectModeProjectView, keyword: string)
   return (
     project.name.toLocaleLowerCase("zh-CN").includes(normalized) ||
     (project.systemName ?? "").toLocaleLowerCase("zh-CN").includes(normalized)
+  )
+}
+
+function projectMatchesAdapterName(project: ProjectModeProjectView, adapterName: string): boolean {
+  if (!adapterName) return true
+  return project.adapterName === adapterName
+}
+
+function projectMatchesCreatorKeyword(
+  project: ProjectModeProjectView,
+  creatorKeyword: string
+): boolean {
+  if (!creatorKeyword) return true
+  if (isProjectModeNumericKeyword(creatorKeyword)) {
+    return [project.creatorSapId, project.creatorYstId].some((value) => value === creatorKeyword)
+  }
+  const normalized = creatorKeyword.toLocaleLowerCase("zh-CN")
+  return (project.creatorUserName ?? "").toLocaleLowerCase("zh-CN").includes(normalized)
+}
+
+function projectMatchesCreatorOrgKeyword(
+  project: ProjectModeProjectView,
+  creatorOrgKeyword: string
+): boolean {
+  if (!creatorOrgKeyword) return true
+  const normalized = creatorOrgKeyword.toLocaleLowerCase("zh-CN")
+  return [project.creatorUpperOrgLv1, project.creatorUpperOrgLv0, project.creatorOrgName].some(
+    (value) => (value ?? "").toLocaleLowerCase("zh-CN").includes(normalized)
   )
 }
 
@@ -6737,6 +6860,81 @@ function buildProjectModeProjectCounts(
   }
 }
 
+function formatProjectModeOrgName(
+  orgName?: string,
+  upperOrgLv1?: string,
+  upperOrgLv0?: string
+): string {
+  if (upperOrgLv1 && upperOrgLv0) return `${upperOrgLv1}/${upperOrgLv0}`
+  if (upperOrgLv1) return upperOrgLv1
+  return orgName || "—"
+}
+
+function sortedProjectModeDistribution<
+  T extends { count: number; key?: string; org?: string; name?: string }
+>(items: T[]): T[] {
+  return items.sort((a, b) => {
+    const leftName = a.org ?? a.name ?? a.key ?? ""
+    const rightName = b.org ?? b.name ?? b.key ?? ""
+    return b.count - a.count || leftName.localeCompare(rightName, "zh-CN", { numeric: true })
+  })
+}
+
+function buildProjectModeMockAnalytics(projects: ProjectModeProjectView[]): ProjectModeAnalytics {
+  const userMap = new Map<string, ProjectModeTopUser>()
+  const orgMap = new Map<string, ProjectModeOrgDistributionItem>()
+  const adapterMap = new Map<string, ProjectModeAdapterShareItem>()
+
+  for (const project of projects) {
+    const sapId = project.creatorSapId || project.creatorYstId || "unknown"
+    const user = userMap.get(sapId) ?? {
+      sapId,
+      ystId: project.creatorYstId,
+      userName: project.creatorUserName || sapId,
+      orgName: formatProjectModeOrgName(
+        project.creatorOrgName,
+        project.creatorUpperOrgLv1,
+        project.creatorUpperOrgLv0
+      ),
+      count: 0
+    }
+    user.count += project.conversationCount
+    userMap.set(sapId, user)
+
+    const upperKey = project.creatorUpperOrgLv1 || project.creatorOrgName || "未知部门"
+    const lowerKey = project.creatorUpperOrgLv0 || project.creatorOrgName || upperKey
+    const upper = orgMap.get(upperKey) ?? {
+      key: upperKey,
+      org: upperKey,
+      count: 0,
+      children: []
+    }
+    upper.count += 1
+    let lower = upper.children.find((item) => item.key === lowerKey)
+    if (!lower) {
+      lower = { key: lowerKey, org: lowerKey, count: 0, children: [] }
+      upper.children.push(lower)
+    }
+    lower.count += 1
+    orgMap.set(upperKey, upper)
+
+    const adapterName = project.adapterName || "未知插件"
+    const adapter = adapterMap.get(adapterName) ?? { name: adapterName, count: 0 }
+    adapter.count += 1
+    adapterMap.set(adapterName, adapter)
+  }
+
+  for (const item of orgMap.values()) sortedProjectModeDistribution(item.children)
+
+  return {
+    topUsers: [...userMap.values()].sort(
+      (a, b) => b.count - a.count || a.userName.localeCompare(b.userName, "zh-CN")
+    ),
+    byOrg: sortedProjectModeDistribution([...orgMap.values()]),
+    byAdapter: sortedProjectModeDistribution([...adapterMap.values()])
+  }
+}
+
 function sliceProjectModeProjects(
   projects: ProjectModeProjectView[],
   options?: ProjectModeProjectPageOptions
@@ -6747,14 +6945,23 @@ function sliceProjectModeProjects(
   pageSize: number
   status: ProjectModeProjectStatus
   keyword: string
+  adapterName: string
+  creatorKeyword: string
+  creatorOrgKeyword: string
 } {
   const status = normalizeProjectModeProjectStatus(options?.status)
   const keyword = normalizeProjectModeKeyword(options?.keyword)
+  const adapterName = normalizeProjectModeAdapterName(options?.adapterName)
+  const creatorKeyword = normalizeProjectModeCreatorKeyword(options?.creatorKeyword)
+  const creatorOrgKeyword = normalizeProjectModeCreatorOrgKeyword(options?.creatorOrgKeyword)
   const page = clampLimit(options?.page, 1, 10_000)
   const pageSize = clampLimit(options?.pageSize, 10, 100)
   const filtered = projects
     .filter((project) => projectMatchesStatus(project, status))
     .filter((project) => projectMatchesKeyword(project, keyword))
+    .filter((project) => projectMatchesAdapterName(project, adapterName))
+    .filter((project) => projectMatchesCreatorKeyword(project, creatorKeyword))
+    .filter((project) => projectMatchesCreatorOrgKeyword(project, creatorOrgKeyword))
     .sort(compareProjectByName)
   const total = filtered.length
   const start = (page - 1) * pageSize
@@ -6764,13 +6971,17 @@ function sliceProjectModeProjects(
     page,
     pageSize,
     status,
-    keyword
+    keyword,
+    adapterName,
+    creatorKeyword,
+    creatorOrgKeyword
   }
 }
 
 /** Parse one harness.project.snapshot hit into a project view (no per-range usage yet). */
 function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | null {
-  const props = asRecord(asRecord(asRecord(hit)._source).properties)
+  const source = asRecord(asRecord(hit)._source)
+  const props = asRecord(source.properties)
   const projectId = asString(props.projectId)
   if (!projectId) return null
   const rawFeatures = Array.isArray(props.features) ? props.features : []
@@ -6793,6 +7004,14 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     workspacePath: asOptionalString(props.workspacePath),
     adapterName: asOptionalString(props.adapterName),
     adapterVersion: asOptionalString(props.adapterVersion),
+    creatorSapId: asOptionalString(props.creatorSapId) ?? asOptionalString(source.sapId),
+    creatorYstId: asOptionalString(props.creatorYstId) ?? asOptionalString(source.ystId),
+    creatorUserName: asOptionalString(props.creatorUserName) ?? asOptionalString(source.userName),
+    creatorOrgName: asOptionalString(props.creatorOrgName) ?? asOptionalString(source.orgName),
+    creatorUpperOrgLv0:
+      asOptionalString(props.creatorUpperOrgLv0) ?? asOptionalString(source.upperOrgLv0),
+    creatorUpperOrgLv1:
+      asOptionalString(props.creatorUpperOrgLv1) ?? asOptionalString(source.upperOrgLv1),
     lifecycleStatus: asOptionalString(props.lifecycleStatus),
     compatible: typeof props.compatible === "boolean" ? props.compatible : undefined,
     compatibilityStatus: asOptionalString(props.compatibilityStatus),
@@ -6827,6 +7046,58 @@ type ProjectModeSnapshotAggs = {
   featureCount: number
   counts: ProjectModeProjectCounts
   adapters: Map<string, ProjectModeSnapshotAdapterCount>
+  byOrg: ProjectModeOrgDistributionItem[]
+}
+
+function projectModeFirstNonEmptyFieldScript(
+  fields: string[],
+  missing = "未知部门"
+): Record<string, unknown> {
+  return {
+    source: `
+      for (def field : params.fields) {
+        if (doc.containsKey(field) && doc[field].size() > 0) {
+          def value = doc[field].value;
+          if (value != null && value.toString().length() > 0) {
+            return value;
+          }
+        }
+      }
+      return params.missing;
+    `,
+    params: { fields, missing }
+  }
+}
+
+function parseProjectModeOrgDistributionBuckets(raw: unknown): ProjectModeOrgDistributionItem[] {
+  if (!Array.isArray(raw)) return []
+  const items = raw
+    .map((bucket) => {
+      const b = asRecord(bucket)
+      const key = asString(b.key, "未知部门")
+      const childBuckets = asRecord(b.by_lower_org).buckets
+      return {
+        key,
+        org: key,
+        count: asNumber(asRecord(b.project_count).value, asNumber(b.doc_count)),
+        children: parseProjectModeOrgDistributionBuckets(childBuckets)
+      }
+    })
+    .filter((item) => item.key.trim())
+  return sortedProjectModeDistribution(items)
+}
+
+function buildProjectModeAdapterShare(
+  adapters: ProjectModeAdapterView[]
+): ProjectModeAdapterShareItem[] {
+  const map = new Map<string, ProjectModeAdapterShareItem>()
+  for (const adapter of adapters) {
+    const name = adapter.name || "未知插件"
+    const item = map.get(name) ?? { name, count: 0 }
+    item.count += adapter.projectCount
+    map.set(name, item)
+  }
+  return sortedProjectModeDistribution([...map.values()])
 }
 
 /**
@@ -6859,6 +7130,34 @@ async function fetchProjectModeSnapshotAggs(
           by_version: {
             terms: { field: "properties.adapterVersion", size: 50 },
             aggs: { project_count: projectCountAgg, feature_total: featureSumAgg }
+          }
+        }
+      },
+      by_creator_org: {
+        terms: {
+          script: projectModeFirstNonEmptyFieldScript([
+            "properties.creatorUpperOrgLv1",
+            "upperOrgLv1",
+            "properties.creatorOrgName",
+            "orgName"
+          ]),
+          size: 100,
+          order: { project_count: "desc" }
+        },
+        aggs: {
+          project_count: projectCountAgg,
+          by_lower_org: {
+            terms: {
+              script: projectModeFirstNonEmptyFieldScript([
+                "properties.creatorUpperOrgLv0",
+                "properties.creatorOrgName",
+                "upperOrgLv0",
+                "orgName"
+              ]),
+              size: 100,
+              order: { project_count: "desc" }
+            },
+            aggs: { project_count: projectCountAgg }
           }
         }
       }
@@ -6916,13 +7215,72 @@ async function fetchProjectModeSnapshotAggs(
       activeFeatureCount,
       archivedFeatureCount
     },
-    adapters
+    adapters,
+    byOrg: parseProjectModeOrgDistributionBuckets(asRecord(aggs.by_creator_org).buckets)
   }
 }
 
 /** Escape ES wildcard metacharacters in user keyword input. */
 function escapeEsWildcard(value: string): string {
   return value.replace(/([*?\\])/g, "\\$1")
+}
+
+function buildProjectModeExactFieldShould(
+  fields: string[],
+  value: string
+): Record<string, unknown>[] {
+  return fields.flatMap((field) => [
+    { term: { [field]: value } },
+    { term: { [`${field}.keyword`]: value } }
+  ])
+}
+
+function buildProjectModeFuzzyFieldShould(
+  fields: string[],
+  value: string
+): Record<string, unknown>[] {
+  const wildcardPattern = `*${escapeEsWildcard(value)}*`
+  return fields.flatMap((field) => [
+    { term: { [field]: value } },
+    { term: { [`${field}.keyword`]: value } },
+    { wildcard: { [field]: wildcardPattern } },
+    { wildcard: { [`${field}.keyword`]: wildcardPattern } }
+  ])
+}
+
+function buildProjectModeCreatorSearchFilter(
+  creatorKeyword: string
+): Record<string, unknown> | null {
+  if (!creatorKeyword) return null
+  const should = isProjectModeNumericKeyword(creatorKeyword)
+    ? buildProjectModeExactFieldShould(
+        ["properties.creatorSapId", "properties.creatorYstId", "sapId", "ystId"],
+        creatorKeyword
+      )
+    : buildProjectModeFuzzyFieldShould(["properties.creatorUserName", "userName"], creatorKeyword)
+  return { bool: { should, minimum_should_match: 1 } }
+}
+
+function buildProjectModeCreatorOrgSearchFilter(
+  creatorOrgKeyword: string
+): Record<string, unknown> | null {
+  if (!creatorOrgKeyword) return null
+  return {
+    bool: {
+      should: buildProjectModeFuzzyFieldShould(
+        [
+          "properties.creatorUpperOrgLv1",
+          "properties.creatorUpperOrgLv0",
+          "properties.creatorOrgName",
+          "upperOrgLv1",
+          "upperOrgLv0",
+          "orgName"
+        ],
+        creatorOrgKeyword
+      ),
+      minimum_should_match: 1
+    }
+  }
 }
 
 /**
@@ -6936,9 +7294,15 @@ async function fetchProjectModeProjectPageHits(options?: ProjectModeProjectPageO
   pageSize: number
   status: ProjectModeProjectStatus
   keyword: string
+  adapterName: string
+  creatorKeyword: string
+  creatorOrgKeyword: string
 }> {
   const status = normalizeProjectModeProjectStatus(options?.status)
   const keyword = normalizeProjectModeKeyword(options?.keyword)
+  const adapterName = normalizeProjectModeAdapterName(options?.adapterName)
+  const creatorKeyword = normalizeProjectModeCreatorKeyword(options?.creatorKeyword)
+  const creatorOrgKeyword = normalizeProjectModeCreatorOrgKeyword(options?.creatorOrgKeyword)
   const pageSize = clampLimit(options?.pageSize, 10, 100)
   const maxPage = Math.max(1, Math.floor(ES_MAX_RESULT_WINDOW / pageSize))
   const page = clampLimit(options?.page, 1, maxPage)
@@ -6963,6 +7327,11 @@ async function fetchProjectModeProjectPageHits(options?: ProjectModeProjectPageO
         }
       ]
     : []
+  const adapterFilter: Record<string, unknown>[] = adapterName
+    ? [{ term: { "properties.adapterName": adapterName } }]
+    : []
+  const creatorSearchFilter = buildProjectModeCreatorSearchFilter(creatorKeyword)
+  const creatorOrgSearchFilter = buildProjectModeCreatorOrgSearchFilter(creatorOrgKeyword)
 
   const body = {
     track_total_hits: false,
@@ -6970,13 +7339,31 @@ async function fetchProjectModeProjectPageHits(options?: ProjectModeProjectPageO
     size: pageSize,
     query: {
       bool: {
-        filter: [...projectModeSnapshotFilters(orgFilterClause), ...statusFilter, ...keywordFilter]
+        filter: [
+          ...projectModeSnapshotFilters(orgFilterClause),
+          ...statusFilter,
+          ...keywordFilter,
+          ...adapterFilter,
+          ...(creatorSearchFilter ? [creatorSearchFilter] : []),
+          ...(creatorOrgSearchFilter ? [creatorOrgSearchFilter] : [])
+        ]
       }
     },
     sort: [{ "properties.name": { order: "asc" } }, { "properties.projectId": { order: "asc" } }],
     collapse: { field: "properties.projectId" },
     aggs: { distinct_projects: { cardinality: { field: "properties.projectId" } } },
-    _source: { includes: ["eventTime", "properties"] }
+    _source: {
+      includes: [
+        "eventTime",
+        "userName",
+        "sapId",
+        "ystId",
+        "orgName",
+        "upperOrgLv0",
+        "upperOrgLv1",
+        "properties"
+      ]
+    }
   }
   const raw = (await esQuery(getEsIndex("event"), body)) as EsSearchResponse
   const hits = raw.hits?.hits ?? []
@@ -6987,7 +7374,17 @@ async function fetchProjectModeProjectPageHits(options?: ProjectModeProjectPageO
     asRecord(asRecord(raw.aggregations).distinct_projects).value,
     projects.length
   )
-  return { projects, total, page, pageSize, status, keyword }
+  return {
+    projects,
+    total,
+    page,
+    pageSize,
+    status,
+    keyword,
+    adapterName,
+    creatorKeyword,
+    creatorOrgKeyword
+  }
 }
 
 /** Upper bound on the project set forwarded to the code-adoption query (ES terms cap is 65536). */
@@ -7018,6 +7415,34 @@ function parseToolCountBuckets(raw: unknown): ProjectModeToolCount[] {
   return result
 }
 
+function parseProjectModeTopUserBuckets(raw: unknown): ProjectModeTopUser[] {
+  if (!Array.isArray(raw)) return []
+  const result: ProjectModeTopUser[] = []
+  for (const bucket of raw) {
+    const b = asRecord(bucket)
+    const latestHits = asRecord(asRecord(b.latest_user_info).hits).hits
+    const latestHit = Array.isArray(latestHits) ? asRecord(latestHits[0]) : {}
+    const source = asRecord(latestHit._source)
+    const sapId = asString(b.key, asString(source.sapId))
+    if (!sapId) continue
+    const ystId = asOptionalString(source.ystId)
+    const userName = asString(source.userName, sapId)
+    const orgName = formatProjectModeOrgName(
+      asOptionalString(source.orgName),
+      asOptionalString(source.upperOrgLv1),
+      asOptionalString(source.upperOrgLv0)
+    )
+    result.push({
+      sapId,
+      ...(ystId ? { ystId } : {}),
+      userName,
+      orgName,
+      count: asNumber(b.doc_count)
+    })
+  }
+  return result
+}
+
 /** Aggregate project-mode usage from the trace index over the selected range. */
 async function fetchProjectModeUsage(
   range: TimeRange,
@@ -7033,6 +7458,7 @@ async function fetchProjectModeUsage(
   distinctSkillCount: number
   topSkills: ProjectModeSkillCount[]
   tools: ProjectModeToolUsage
+  topUsers: ProjectModeTopUser[]
   adapters: Map<string, ProjectModeAdapterView>
 }> {
   const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
@@ -7049,6 +7475,20 @@ async function fetchProjectModeUsage(
       total_skill_calls: { value_count: { field: "usedSkills" } },
       distinct_skills: { cardinality: { field: "usedSkills" } },
       top_skills: { terms: { field: "usedSkills", size: 20 } },
+      top_users: {
+        terms: { field: "sapId", size: 10 },
+        aggs: {
+          latest_user_info: {
+            top_hits: {
+              size: 1,
+              sort: [{ startedAt: { order: "desc" } }],
+              _source: {
+                includes: ["sapId", "ystId", "userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+              }
+            }
+          }
+        }
+      },
       total_tools: { cardinality: { field: "toolNames" } },
       tool_call_count: { value_count: { field: "toolNames" } },
       by_tool: { terms: { field: "toolNames", size: 20, exclude: FILTERED_TOOL_EXCLUDES } },
@@ -7118,6 +7558,7 @@ async function fetchProjectModeUsage(
     skillCallCount: asNumber(asRecord(aggs.total_skill_calls).value),
     distinctSkillCount: asNumber(asRecord(aggs.distinct_skills).value),
     topSkills: parseSkillCountBuckets(asRecord(aggs.top_skills).buckets),
+    topUsers: parseProjectModeTopUserBuckets(asRecord(aggs.top_users).buckets),
     tools: {
       byTool: parseToolCountBuckets(asRecord(aggs.by_tool).buckets),
       byToolAll: parseToolCountBuckets(asRecord(aggs.by_tool_all).buckets),
@@ -7484,6 +7925,11 @@ async function fetchProjectMode(
     topSkills: usage.topSkills,
     bySkillAdoption: code.bySkill,
     tools: usage.tools,
+    analytics: {
+      topUsers: usage.topUsers,
+      byOrg: snap.byOrg,
+      byAdapter: buildProjectModeAdapterShare(adapterList)
+    },
     projectCounts: snap.counts,
     projectPage,
     projects: projectPage.projects

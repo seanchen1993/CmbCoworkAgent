@@ -4,7 +4,7 @@ import { basename, isAbsolute, join, relative, resolve } from "path"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import { v4 as uuid } from "uuid"
-import { getOpenworkDir, getPlugins } from "../storage"
+import { getOpenworkDir, getPlugins, getUserInfo } from "../storage"
 import type { PluginMetadata } from "../types"
 import type {
   HarnessAdapterRegistryItem,
@@ -19,6 +19,7 @@ import type {
   HarnessFeatureCreateResult,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
+  HarnessProjectCreatorMetadata,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
@@ -1124,6 +1125,7 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
   if (!harnessAdapter) return null
   const oldWorkspace = isObject(value.workspace) ? value.workspace : {}
   const lifecycle = isObject(value.lifecycle) ? value.lifecycle : {}
+  const creator = normalizeProjectCreator(value.creator)
   const adapterId = normalizeText(harnessAdapter.id)
   const adapterName = normalizeText(harnessAdapter.name)
   if (!adapterId || !adapterName || harnessAdapter.type !== "plugin") return null
@@ -1143,12 +1145,60 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
       version: normalizeText(harnessAdapter.version),
       type: "plugin"
     },
+    ...(creator ? { creator } : {}),
     lifecycle: {
       status: value.lifecycle && lifecycle.status === "archived" ? "archived" : "active",
       createAt: typeof lifecycle.createAt === "string" ? lifecycle.createAt : now,
       updateAt: typeof lifecycle.updateAt === "string" ? lifecycle.updateAt : undefined
     }
   }
+}
+
+function deriveCreatorOrgLevels(
+  pathName?: string
+): Pick<HarnessProjectCreatorMetadata, "upperOrgLv0" | "upperOrgLv1"> {
+  const parts =
+    typeof pathName === "string"
+      ? pathName
+          .split("/")
+          .map((part) => part.trim())
+          .filter(Boolean)
+      : []
+  const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
+  if (itDeptIndex < 0) return {}
+
+  const lowerParts = parts.slice(itDeptIndex + 1)
+  const startsWithTeam = lowerParts[0]?.includes("团队") ?? false
+  return startsWithTeam
+    ? { upperOrgLv0: lowerParts[2] ?? "", upperOrgLv1: lowerParts[1] ?? "" }
+    : { upperOrgLv0: lowerParts[3] ?? "", upperOrgLv1: lowerParts[2] ?? "" }
+}
+
+function normalizeProjectCreator(value: unknown): HarnessProjectCreatorMetadata | null {
+  if (!isObject(value)) return null
+  const creator: HarnessProjectCreatorMetadata = {
+    sapId: normalizeText(value.sapId),
+    ystId: normalizeText(value.ystId),
+    userName: normalizeText(value.userName),
+    orgName: normalizeText(value.orgName),
+    pathName: normalizeText(value.pathName),
+    upperOrgLv0: normalizeText(value.upperOrgLv0),
+    upperOrgLv1: normalizeText(value.upperOrgLv1)
+  }
+  return Object.values(creator).some((item) => item.trim()) ? creator : null
+}
+
+function getCurrentProjectCreator(): HarnessProjectCreatorMetadata | undefined {
+  const userInfo = getUserInfo()
+  const creator = normalizeProjectCreator({
+    sapId: userInfo?.sapId,
+    ystId: userInfo?.ystId,
+    userName: userInfo?.userName,
+    orgName: userInfo?.orgName,
+    pathName: userInfo?.pathName,
+    ...deriveCreatorOrgLevels(userInfo?.pathName)
+  })
+  return creator ?? undefined
 }
 
 function readProjectStore(): HarnessProjectStoreFile {
@@ -1191,6 +1241,7 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
       name: harnessAdapter.name,
       type: harnessAdapter.type
     },
+    creator: project.creator,
     boardCompatibility: evaluateBoardPluginCompatibility(plugin, harnessAdapter.name || harnessAdapter.id),
     lifecycle: {
       status: project.lifecycle.status
@@ -1448,6 +1499,7 @@ export function createHarnessProject(input: HarnessProjectCreateInput): HarnessP
     systemName: input.systemName.trim(),
     workspacePath: input.workspacePath.trim(),
     "harness-adapter": harnessAdapter,
+    creator: getCurrentProjectCreator(),
     lifecycle: {
       status: "active",
       createAt: new Date().toISOString()

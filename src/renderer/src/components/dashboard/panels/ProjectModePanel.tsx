@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts"
 import {
   Boxes,
   Layers,
@@ -6,6 +7,7 @@ import {
   MessagesSquare,
   ArrowDownToLine,
   ArrowUpFromLine,
+  ChevronLeft,
   ChevronDown,
   ChevronRight,
   Loader2,
@@ -18,6 +20,13 @@ import {
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from "@/components/ui/select"
 import { cn } from "@/lib/utils"
 import {
   CodeAdoptionFunnel,
@@ -28,7 +37,9 @@ import {
 import type {
   DashboardProjectModeData,
   DashboardProjectModeAdapter,
+  DashboardProjectModeAnalytics,
   DashboardProjectModeFeature,
+  DashboardProjectModeOrgDistributionItem,
   DashboardProjectModeProject,
   DashboardProjectModeProjectCounts,
   DashboardProjectModeProjectPageData,
@@ -58,6 +69,19 @@ const EMPTY_TOOL_USAGE: DashboardProjectModeToolUsage = {
   totalToolCalls: 0
 }
 
+const PROJECT_CHART_COLORS = [
+  "#3b82f6",
+  "#8b5cf6",
+  "#ec4899",
+  "#f59e0b",
+  "#10b981",
+  "#06b6d4",
+  "#f97316",
+  "#6366f1",
+  "#14b8a6",
+  "#e11d48"
+]
+
 function formatNumber(value: number): string {
   return Math.round(value).toLocaleString("zh-CN")
 }
@@ -70,6 +94,12 @@ function formatCompact(value: number): string {
 
 function formatLineCount(value: number): string {
   return formatCompact(value)
+}
+
+function formatPieLabel(name: unknown, percent?: number): string {
+  const label = String(name ?? "未知")
+  const shortLabel = label.length > 6 ? `${label.slice(0, 6)}...` : label
+  return `${shortLabel} ${((percent ?? 0) * 100).toFixed(0)}%`
 }
 
 function formatPercent(value: number | null | undefined): string {
@@ -104,6 +134,196 @@ function StatCard({
   )
 }
 
+function ProjectModePieCard({
+  title,
+  data,
+  nameKey,
+  helperText,
+  action,
+  onSliceClick
+}: {
+  title: string
+  data: Record<string, unknown>[]
+  nameKey: string
+  helperText?: string
+  action?: React.ReactNode
+  onSliceClick?: (entry: Record<string, unknown>) => void
+}): React.JSX.Element {
+  return (
+    <div className="rounded-xl border border-border bg-card p-4">
+      <div className="mb-3 flex min-h-[42px] items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
+          {helperText ? (
+            <p className="mt-1 text-[11px] leading-snug text-muted-foreground/80">{helperText}</p>
+          ) : null}
+        </div>
+        {action ? <div className="shrink-0">{action}</div> : null}
+      </div>
+      {data.length > 0 ? (
+        <ResponsiveContainer width="100%" height={240}>
+          <PieChart>
+            <Pie
+              data={data}
+              dataKey="count"
+              nameKey={nameKey}
+              cx="50%"
+              cy="50%"
+              outerRadius={76}
+              label={({ name, percent }) => formatPieLabel(name, percent)}
+              labelLine={false}
+              fontSize={9}
+              onClick={
+                onSliceClick
+                  ? (entry) => onSliceClick(entry as unknown as Record<string, unknown>)
+                  : undefined
+              }
+              style={onSliceClick ? { cursor: "pointer" } : undefined}
+            >
+              {data.map((_, index) => (
+                <Cell
+                  key={index}
+                  fill={PROJECT_CHART_COLORS[index % PROJECT_CHART_COLORS.length]}
+                />
+              ))}
+            </Pie>
+            <Tooltip
+              formatter={(value) => [formatNumber(Number(value) || 0), "项目数"]}
+              contentStyle={{
+                backgroundColor: "var(--color-card)",
+                border: "1px solid var(--color-border)",
+                borderRadius: 8,
+                fontSize: 12
+              }}
+            />
+          </PieChart>
+        </ResponsiveContainer>
+      ) : (
+        <div className="flex h-[240px] items-center justify-center text-xs text-muted-foreground">
+          暂无数据
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ProjectModeUserAnalysisCard({
+  users
+}: {
+  users: DashboardProjectModeAnalytics["topUsers"]
+}): React.JSX.Element {
+  return (
+    <div className="rounded-xl border border-border bg-card p-4">
+      <h3 className="mb-3 text-xs font-medium text-muted-foreground">用户分析</h3>
+      <div className="max-h-[260px] overflow-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-border text-muted-foreground">
+              <th className="px-2 py-2 text-left font-medium">#</th>
+              <th className="px-2 py-2 text-left font-medium">用户</th>
+              <th className="px-2 py-2 text-left font-medium">部门</th>
+              <th className="px-2 py-2 text-right font-medium">对话数</th>
+            </tr>
+          </thead>
+          <tbody>
+            {users.map((user, index) => (
+              <tr
+                key={user.sapId || user.ystId || `${user.userName}-${index}`}
+                className="border-b border-border/50 transition-colors hover:bg-muted/30"
+              >
+                <td className="px-2 py-1.5 text-muted-foreground">{index + 1}</td>
+                <td className="px-2 py-1.5 text-foreground">
+                  <div className="font-medium">{user.userName || user.sapId || "—"}</div>
+                  {user.sapId || user.ystId ? (
+                    <div className="font-mono text-[10px] text-muted-foreground">
+                      {user.sapId || user.ystId}
+                    </div>
+                  ) : null}
+                </td>
+                <td className="px-2 py-1.5 text-muted-foreground">{user.orgName || "—"}</td>
+                <td className="px-2 py-1.5 text-right font-medium text-foreground">
+                  {formatNumber(user.count)}
+                </td>
+              </tr>
+            ))}
+            {users.length === 0 && (
+              <tr>
+                <td colSpan={4} className="py-6 text-center text-muted-foreground">
+                  暂无数据
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function ProjectModeDepartmentChart({
+  items
+}: {
+  items: DashboardProjectModeOrgDistributionItem[]
+}): React.JSX.Element {
+  const [selectedKey, setSelectedKey] = useState("")
+  const selected = items.find((item) => item.key === selectedKey)
+  const data = selected ? selected.children : items
+  const canDrillDown = !selected
+
+  return (
+    <ProjectModePieCard
+      title={selected ? `${selected.org}下级分布` : "项目部门分布"}
+      data={data as unknown as Record<string, unknown>[]}
+      nameKey="org"
+      helperText={selected ? "按项目创建人下级部门统计项目数。" : "按项目创建人部门统计项目数。"}
+      action={
+        selected ? (
+          <button
+            type="button"
+            className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            onClick={() => setSelectedKey("")}
+          >
+            <ChevronLeft className="size-3.5" />
+            返回上级
+          </button>
+        ) : null
+      }
+      onSliceClick={
+        canDrillDown
+          ? (entry) => {
+              const key = typeof entry.key === "string" ? entry.key : ""
+              const target = items.find((item) => item.key === key)
+              if (target && target.children.length > 0) setSelectedKey(key)
+            }
+          : undefined
+      }
+    />
+  )
+}
+
+function ProjectModeAnalyticsSection({
+  analytics
+}: {
+  analytics?: DashboardProjectModeAnalytics | null
+}): React.JSX.Element {
+  const data = analytics ?? { topUsers: [], byOrg: [], byAdapter: [] }
+  return (
+    <section>
+      <h2 className="mb-3 text-sm font-semibold text-foreground">项目分析</h2>
+      <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
+        <ProjectModeUserAnalysisCard users={data.topUsers} />
+        <ProjectModeDepartmentChart items={data.byOrg} />
+        <ProjectModePieCard
+          title="插件占比"
+          data={data.byAdapter as unknown as Record<string, unknown>[]}
+          nameKey="name"
+          helperText="按项目数统计，已合并不同插件版本。"
+        />
+      </div>
+    </section>
+  )
+}
+
 function lifecycleLabel(status?: string): string {
   switch (status) {
     case "active":
@@ -117,6 +337,14 @@ function lifecycleLabel(status?: string): string {
     default:
       return status || "—"
   }
+}
+
+function formatProjectCreatorDepartment(project: DashboardProjectModeProject): string {
+  if (project.creatorUpperOrgLv1 && project.creatorUpperOrgLv0) {
+    return `${project.creatorUpperOrgLv1}/${project.creatorUpperOrgLv0}`
+  }
+  if (project.creatorUpperOrgLv1) return project.creatorUpperOrgLv1
+  return project.creatorOrgName || "—"
 }
 
 function ProjectRow({
@@ -137,6 +365,9 @@ function ProjectRow({
   const pushedAdoptionLineLabel = codeStats
     ? `${formatLineCount(codeStats.pushedAdoptedLines)} / ${formatLineCount(codeStats.pushedEffectiveGeneratedLines)} 行`
     : "—"
+  const creatorName = project.creatorUserName || project.creatorSapId || project.creatorYstId || "—"
+  const creatorId = project.creatorSapId || project.creatorYstId || ""
+  const creatorDepartment = formatProjectCreatorDepartment(project)
 
   return (
     <>
@@ -193,6 +424,13 @@ function ProjectRow({
           <div className="font-medium">{formatPercent(codeStats?.pushedAdoptionRate)}</div>
           <div className="mt-0.5 text-[10px] text-muted-foreground">{pushedAdoptionLineLabel}</div>
         </td>
+        <td className="px-3 py-2">
+          <div className="font-medium text-foreground">{creatorName}</div>
+          {creatorId && creatorId !== creatorName ? (
+            <div className="font-mono text-[10px] text-muted-foreground">{creatorId}</div>
+          ) : null}
+        </td>
+        <td className="px-3 py-2 text-muted-foreground">{creatorDepartment}</td>
         <td className="px-3 py-2 text-right">
           <button
             type="button"
@@ -210,7 +448,7 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={8} className="px-3 py-3">
+          <td colSpan={10} className="px-3 py-3">
             <div className="space-y-3">
               {/* 常用技能 + 采纳明细 */}
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
@@ -314,8 +552,43 @@ function SkillChips({ skills }: { skills: DashboardProjectModeSkillCount[] }): R
 
 const PROJECT_PAGE_SIZE = 10
 const ADAPTER_PAGE_SIZE = 10
+const ALL_ADAPTERS_VALUE = "__all_adapters__"
 
 type ProjectListTab = "active" | "archived"
+
+function ProjectListSearchInput({
+  value,
+  onChange,
+  placeholder,
+  className
+}: {
+  value: string
+  onChange: (value: string) => void
+  placeholder: string
+  className?: string
+}): React.JSX.Element {
+  return (
+    <div className={cn("relative w-full", className)}>
+      <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+      <Input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="h-8 rounded-md border-border bg-background pl-8 pr-8 text-xs"
+      />
+      {value ? (
+        <button
+          type="button"
+          className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          onClick={() => onChange("")}
+          aria-label={`清空${placeholder}`}
+        >
+          <X className="size-3.5" />
+        </button>
+      ) : null}
+    </div>
+  )
+}
 
 /**
  * 项目列表：进行中 / 已归档双 tab + 项目名搜索 + 后端分页。
@@ -324,6 +597,7 @@ type ProjectListTab = "active" | "archived"
 function ProjectListSection({
   projectCounts,
   projectPages,
+  adapterOptions,
   pageLoading,
   pageError,
   loading,
@@ -334,6 +608,7 @@ function ProjectListSection({
   projectPages: Partial<
     Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>
   >
+  adapterOptions: string[]
   pageLoading: Record<DashboardProjectModeProjectStatus, boolean>
   pageError: Partial<Record<DashboardProjectModeProjectStatus, string>>
   loading: boolean
@@ -341,7 +616,10 @@ function ProjectListSection({
     status: DashboardProjectModeProjectStatus,
     page: number,
     keyword: string,
-    pageSize: number
+    pageSize: number,
+    adapterName: string,
+    creatorKeyword: string,
+    creatorOrgKeyword: string
   ) => void
   onOpenTraces: (
     project: DashboardProjectModeProject,
@@ -350,37 +628,81 @@ function ProjectListSection({
 }): React.JSX.Element {
   const [tab, setTab] = useState<ProjectListTab>("active")
   const [query, setQuery] = useState("")
+  const [creatorQuery, setCreatorQuery] = useState("")
+  const [departmentQuery, setDepartmentQuery] = useState("")
+  const [adapterName, setAdapterName] = useState("")
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
   const trimmed = query.trim()
+  const creatorKeyword = creatorQuery.trim()
+  const creatorOrgKeyword = departmentQuery.trim()
+  const rawSelectedAdapter = adapterName.trim()
+  const selectedAdapter = adapterOptions.includes(rawSelectedAdapter) ? rawSelectedAdapter : ""
   const pageData = projectPages[tab]
   const currentError = pageError[tab]
   const tabCount =
     tab === "archived" ? (projectCounts?.archived ?? 0) : (projectCounts?.active ?? 0)
   const pageMatchesQuery = pageData?.keyword === trimmed
-  const pageItems = pageMatchesQuery ? (pageData?.projects ?? []) : []
-  const total = pageMatchesQuery ? (pageData?.total ?? 0) : 0
+  const pageMatchesAdapter = (pageData?.adapterName ?? "") === selectedAdapter
+  const pageMatchesCreator = (pageData?.creatorKeyword ?? "") === creatorKeyword
+  const pageMatchesCreatorOrg = (pageData?.creatorOrgKeyword ?? "") === creatorOrgKeyword
+  const pageMatchesFilter =
+    pageMatchesQuery && pageMatchesAdapter && pageMatchesCreator && pageMatchesCreatorOrg
+  const pageItems = pageMatchesFilter ? (pageData?.projects ?? []) : []
+  const total = pageMatchesFilter ? (pageData?.total ?? 0) : 0
   const totalPages = Math.max(1, Math.ceil(total / PROJECT_PAGE_SIZE))
   const currentPage = Math.min(pageData?.page ?? 1, totalPages)
   const effectiveLoading =
     loading ||
     pageLoading[tab] ||
     (!pageData && tabCount > 0) ||
-    Boolean(pageData && !pageMatchesQuery)
+    Boolean(pageData && !pageMatchesFilter)
+  const hasTextFilter = Boolean(trimmed || creatorKeyword || creatorOrgKeyword)
+  const emptyText = hasTextFilter
+    ? "未找到匹配的项目"
+    : selectedAdapter
+      ? "暂无该插件的项目"
+      : tab === "archived"
+        ? "暂无已归档项目"
+        : "暂无进行中项目"
 
   useEffect(() => {
-    // keyword / pageSize 已匹配即视为同步；不再要求停在第 1 页，
+    // keyword / adapter / creator / department / pageSize 已匹配即视为同步；不再要求停在第 1 页，
     // 否则用户翻到第 2 页后 pageData 变化会触发本 effect 把页码弹回第 1 页。
-    if (pageData && pageData.keyword === trimmed && pageData.pageSize === PROJECT_PAGE_SIZE) {
+    if (
+      pageData &&
+      pageData.keyword === trimmed &&
+      (pageData.adapterName ?? "") === selectedAdapter &&
+      (pageData.creatorKeyword ?? "") === creatorKeyword &&
+      (pageData.creatorOrgKeyword ?? "") === creatorOrgKeyword &&
+      pageData.pageSize === PROJECT_PAGE_SIZE
+    ) {
       return
     }
     if (pageLoading[tab]) return
     const timer = window.setTimeout(() => {
       setExpandedId(null)
-      onPageChange(tab, 1, trimmed, PROJECT_PAGE_SIZE)
+      onPageChange(
+        tab,
+        1,
+        trimmed,
+        PROJECT_PAGE_SIZE,
+        selectedAdapter,
+        creatorKeyword,
+        creatorOrgKeyword
+      )
     }, 250)
     return () => window.clearTimeout(timer)
-  }, [onPageChange, pageData, pageLoading, tab, trimmed])
+  }, [
+    creatorKeyword,
+    creatorOrgKeyword,
+    onPageChange,
+    pageData,
+    pageLoading,
+    selectedAdapter,
+    tab,
+    trimmed
+  ])
 
   const switchTab = (next: ProjectListTab): void => {
     setTab(next)
@@ -389,9 +711,20 @@ function ProjectListSection({
   const changeQuery = (value: string): void => {
     setQuery(value)
   }
+  const changeAdapterName = (value: string): void => {
+    setAdapterName(value === ALL_ADAPTERS_VALUE ? "" : value)
+  }
   const requestPage = (nextPage: number): void => {
     setExpandedId(null)
-    onPageChange(tab, nextPage, trimmed, PROJECT_PAGE_SIZE)
+    onPageChange(
+      tab,
+      nextPage,
+      trimmed,
+      PROJECT_PAGE_SIZE,
+      selectedAdapter,
+      creatorKeyword,
+      creatorOrgKeyword
+    )
   }
 
   const tabs: Array<{ id: ProjectListTab; label: string; count: number }> = [
@@ -406,8 +739,8 @@ function ProjectListSection({
         项目、插件、项目状态、特性数为当前状态；对话数、已Commit/已Push采纳率及展开行的技能与采纳明细按所选时间范围统计。
       </p>
 
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center overflow-hidden rounded-md border border-border">
+      <div className="mb-3 flex items-center gap-2 overflow-x-auto px-1 py-1">
+        <div className="flex shrink-0 items-center overflow-hidden rounded-md border border-border">
           {tabs.map((t) => (
             <button
               key={t.id}
@@ -423,24 +756,38 @@ function ProjectListSection({
             </button>
           ))}
         </div>
-        <div className="relative w-full max-w-[240px]">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-          <Input
+        <Select value={selectedAdapter || ALL_ADAPTERS_VALUE} onValueChange={changeAdapterName}>
+          <SelectTrigger className="h-8 w-[180px] shrink-0 rounded-md border-border bg-background text-xs">
+            <SelectValue placeholder="按插件筛选" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL_ADAPTERS_VALUE}>全部插件</SelectItem>
+            {adapterOptions.map((name) => (
+              <SelectItem key={name} value={name}>
+                {name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <ProjectListSearchInput
             value={query}
-            onChange={(event) => changeQuery(event.target.value)}
+            onChange={changeQuery}
             placeholder="搜索项目名称"
-            className="h-8 rounded-md border-border bg-background pl-8 pr-8 text-xs"
+            className="w-[220px] shrink-0"
           />
-          {query ? (
-            <button
-              type="button"
-              className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              onClick={() => changeQuery("")}
-              aria-label="清空搜索"
-            >
-              <X className="size-3.5" />
-            </button>
-          ) : null}
+          <ProjectListSearchInput
+            value={creatorQuery}
+            onChange={setCreatorQuery}
+            placeholder="搜索创建人"
+            className="w-[180px] shrink-0"
+          />
+          <ProjectListSearchInput
+            value={departmentQuery}
+            onChange={setDepartmentQuery}
+            placeholder="搜索部门"
+            className="w-[180px] shrink-0"
+          />
         </div>
       </div>
 
@@ -460,6 +807,8 @@ function ProjectListSection({
               <th className="px-3 py-2 text-right font-medium">对话数</th>
               <th className="px-3 py-2 text-right font-medium">已Commit采纳率</th>
               <th className="px-3 py-2 text-right font-medium">已Push采纳率</th>
+              <th className="px-3 py-2 text-left font-medium">创建人</th>
+              <th className="px-3 py-2 text-left font-medium">部门</th>
               <th className="px-3 py-2 text-right font-medium">操作</th>
             </tr>
           </thead>
@@ -477,7 +826,7 @@ function ProjectListSection({
             ))}
             {effectiveLoading && pageItems.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={10} className="px-3 py-10 text-center text-muted-foreground">
                   <span className="inline-flex items-center gap-2">
                     <Loader2 className="size-4 animate-spin" />
                     加载项目中...
@@ -487,7 +836,7 @@ function ProjectListSection({
             )}
             {!effectiveLoading && currentError && (
               <tr>
-                <td colSpan={8} className="px-3 py-10 text-center text-destructive">
+                <td colSpan={10} className="px-3 py-10 text-center text-destructive">
                   {currentError}
                 </td>
               </tr>
@@ -495,17 +844,13 @@ function ProjectListSection({
             {pageItems.length > 0 &&
               Array.from({ length: PROJECT_PAGE_SIZE - pageItems.length }).map((_, i) => (
                 <tr key={`filler-${i}`} aria-hidden className="border-b border-border/50">
-                  <td colSpan={8} className="h-[49px]" />
+                  <td colSpan={10} className="h-[49px]" />
                 </tr>
               ))}
             {!effectiveLoading && !currentError && pageItems.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-3 py-10 text-center text-muted-foreground">
-                  {trimmed
-                    ? "未找到匹配的项目"
-                    : tab === "archived"
-                      ? "暂无已归档项目"
-                      : "暂无进行中项目"}
+                <td colSpan={10} className="px-3 py-10 text-center text-muted-foreground">
+                  {emptyText}
                 </td>
               </tr>
             )}
@@ -778,7 +1123,10 @@ export function ProjectModePanel({
     status: DashboardProjectModeProjectStatus,
     page: number,
     keyword: string,
-    pageSize: number
+    pageSize: number,
+    adapterName: string,
+    creatorKeyword: string,
+    creatorOrgKeyword: string
   ) => void
   onOpenTraces: (
     project: DashboardProjectModeProject,
@@ -788,6 +1136,15 @@ export function ProjectModePanel({
   marketSkillKeys?: Set<string>
   pluginSkillKeys?: Set<string>
 }): React.JSX.Element {
+  const adapters = useMemo(() => data?.adapters ?? [], [data?.adapters])
+  const adapterOptions = useMemo(
+    () =>
+      Array.from(new Set(adapters.map((adapter) => adapter.name.trim()).filter(Boolean))).sort(
+        (a, b) => a.localeCompare(b, "zh-CN", { numeric: true })
+      ),
+    [adapters]
+  )
+
   if (loading && !data) {
     return (
       <div className="flex h-64 items-center justify-center">
@@ -806,7 +1163,6 @@ export function ProjectModePanel({
   }
 
   const summary = data?.summary
-  const adapters = data?.adapters ?? []
   const funnelData: CodeAdoptionFunnelData = summary?.codeStats ?? EMPTY_FUNNEL_DATA
   const topSkills = data?.topSkills ?? []
   const bySkillAdoption = data?.bySkillAdoption ?? []
@@ -918,12 +1274,15 @@ export function ProjectModePanel({
       <ProjectListSection
         projectCounts={projectCounts}
         projectPages={projectPages}
+        adapterOptions={adapterOptions}
         pageLoading={projectPageLoading}
         pageError={projectPageError}
         loading={loading}
         onPageChange={onProjectPageChange}
         onOpenTraces={onOpenTraces}
       />
+
+      <ProjectModeAnalyticsSection analytics={data?.analytics} />
 
       {/* Skill / Tool 使用排行，与平台运营概览同款 */}
       <section>
