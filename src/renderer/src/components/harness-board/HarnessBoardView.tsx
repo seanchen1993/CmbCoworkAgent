@@ -8,6 +8,8 @@ import {
   ChevronRight,
   CheckCircle2,
   Circle,
+  CircleDashed,
+  CircleHelp,
   FileText,
   FolderOpen,
   GitBranch,
@@ -22,6 +24,7 @@ import {
   RefreshCw,
   Search,
   ShieldAlert,
+  SkipForward,
   Workflow
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -72,6 +75,7 @@ import type {
   HarnessProjectListItem,
   HarnessProjectMetadataUpdateInput,
   HarnessFeatureSummary,
+  HarnessNodeStatus,
   HarnessRunDetailViewModel,
   HarnessRunNode,
   HarnessSessionBinding,
@@ -90,6 +94,18 @@ const harnessPageHeaderClassName =
 const harnessPageHeaderContentClassName =
   "flex h-full items-start justify-between gap-4"
 const harnessPageHeaderActionsClassName = "flex shrink-0 items-center gap-2"
+
+const NODE_STATUS_LABELS: Record<HarnessNodeStatus, string> = {
+  not_started: "未开始",
+  in_progress: "进行中",
+  done: "已完成",
+  blocked: "阻断",
+  warning: "警告",
+  error: "错误",
+  skipped: "跳过",
+  archived: "已归档",
+  unknown: "未知"
+}
 const harnessDetailRefreshButtonClassName = "w-[84px] gap-2"
 const harnessDetailPrimaryButtonClassName = "w-[112px] gap-2"
 const harnessActionOverlayClassName =
@@ -700,6 +716,9 @@ function StatusPill({ status, tooltip }: { status: HarnessStatus; tooltip?: stri
 }
 
 function statusIcon(status: HarnessStatus): React.JSX.Element {
+  if (status.uiKind === "pending") {
+    return <CircleDashed className="size-4 text-muted-foreground" />
+  }
   if (status.uiKind === "done" || status.uiKind === "ok") {
     return <CheckCircle2 className="size-4 text-status-nominal" />
   }
@@ -711,6 +730,15 @@ function statusIcon(status: HarnessStatus): React.JSX.Element {
   }
   if (status.uiKind === "error") {
     return <AlertCircle className="size-4 text-status-critical" />
+  }
+  if (status.uiKind === "skipped") {
+    return <SkipForward className="size-4 text-muted-foreground" />
+  }
+  if (status.uiKind === "archived") {
+    return <Archive className="size-4 text-muted-foreground" />
+  }
+  if (status.uiKind === "unknown") {
+    return <CircleHelp className="size-4 text-muted-foreground" />
   }
   return <Circle className="size-4 text-muted-foreground" />
 }
@@ -731,6 +759,10 @@ function currentNodeLabelFromNodes(
   currentNodeId: string
 ): string {
   return (nodes.find((node) => node.id === currentNodeId)?.label ?? currentNodeId) || "未知"
+}
+
+function currentNodeStatusLabel(run: HarnessFeatureSummary): string {
+  return run.currentNodeStatusLabel?.trim() || NODE_STATUS_LABELS[run.currentNodeStatus] || "未知"
 }
 
 function ProgressBar({
@@ -1459,6 +1491,7 @@ function FeatureCard({
   const progressIndex = progressIndexFromCurrentNodeId(workflowNodes, run.currentNodeId)
   const totalNodes = workflowNodes.length
   const currentNodeLabel = currentNodeLabelFromNodes(workflowNodes, run.currentNodeId)
+  const nodeStatusLabel = currentNodeStatusLabel(run)
 
   return (
     <button
@@ -1475,7 +1508,7 @@ function FeatureCard({
       </div>
       <ProgressBar progressIndex={progressIndex} totalNodes={totalNodes} />
       <div className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
-        <span className="truncate">{currentNodeLabel}</span>
+        <span className="truncate">{currentNodeLabel} · {nodeStatusLabel}</span>
         <span className="shrink-0">
           {progressIndex}/{totalNodes}
         </span>
@@ -2547,9 +2580,14 @@ function FeatureDetailPage({
               : "border-border bg-background hover:border-primary/45"
           )}
         >
-          <div className="flex min-w-0 items-center gap-1.5">
-            {statusIcon(node.status)}
-            <span className="truncate text-sm font-medium">{node.label}</span>
+          <div className="flex min-w-0 items-start gap-1.5">
+            <span className="mt-0.5 shrink-0">{statusIcon(node.status)}</span>
+            <span className="min-w-0">
+              <span className="block truncate text-sm font-medium">{node.label}</span>
+              <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+                {node.status.label}
+              </span>
+            </span>
           </div>
         </button>
       )

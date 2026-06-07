@@ -17,6 +17,7 @@ import type {
   HarnessEventStatus,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureStatus,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
   HarnessProjectDetailViewModel,
@@ -81,6 +82,20 @@ const HARNESS_NODE_STATUSES = new Set<HarnessNodeStatus>([
   "in_progress",
   "done",
   "blocked",
+  "warning",
+  "error",
+  "skipped",
+  "archived",
+  "unknown"
+])
+
+const HARNESS_FEATURE_STATUSES = new Set<HarnessFeatureStatus>([
+  "not_started",
+  "in_progress",
+  "done",
+  "blocked",
+  "warning",
+  "error",
   "skipped",
   "archived",
   "unknown"
@@ -91,6 +106,20 @@ const DEFAULT_NODE_STATUS_LABELS: Record<HarnessNodeStatus, string> = {
   in_progress: "进行中",
   done: "已完成",
   blocked: "阻断",
+  warning: "警告",
+  error: "错误",
+  skipped: "跳过",
+  archived: "已归档",
+  unknown: "未知"
+}
+
+const DEFAULT_FEATURE_STATUS_LABELS: Record<HarnessFeatureStatus, string> = {
+  not_started: "未开始",
+  in_progress: "进行中",
+  done: "已完成",
+  blocked: "阻断",
+  warning: "警告",
+  error: "错误",
   skipped: "跳过",
   archived: "已归档",
   unknown: "未知"
@@ -101,6 +130,20 @@ const NODE_STATUS_UI_KIND: Record<HarnessNodeStatus, HarnessStatus["uiKind"]> = 
   in_progress: "active",
   done: "done",
   blocked: "blocked",
+  warning: "warning",
+  error: "error",
+  skipped: "skipped",
+  archived: "archived",
+  unknown: "unknown"
+}
+
+const FEATURE_STATUS_UI_KIND: Record<HarnessFeatureStatus, HarnessStatus["uiKind"]> = {
+  not_started: "pending",
+  in_progress: "active",
+  done: "done",
+  blocked: "blocked",
+  warning: "warning",
+  error: "error",
   skipped: "skipped",
   archived: "archived",
   unknown: "unknown"
@@ -720,11 +763,35 @@ function normalizeNodeStatus(value: unknown): HarnessNodeStatus {
     : UNKNOWN_NODE_STATUS
 }
 
+function normalizeFeatureStatus(value: unknown): HarnessFeatureStatus | null {
+  const featureStatus = normalizeText(value)
+  return HARNESS_FEATURE_STATUSES.has(featureStatus as HarnessFeatureStatus)
+    ? (featureStatus as HarnessFeatureStatus)
+    : null
+}
+
 function statusFromNodeStatus(nodeStatus: HarnessNodeStatus, label?: string): HarnessStatus {
   return {
     label: label?.trim() || DEFAULT_NODE_STATUS_LABELS[nodeStatus],
     uiKind: NODE_STATUS_UI_KIND[nodeStatus]
   }
+}
+
+function statusFromFeatureStatus(featureStatus: HarnessFeatureStatus, label?: string): HarnessStatus {
+  return {
+    label: label?.trim() || DEFAULT_FEATURE_STATUS_LABELS[featureStatus],
+    uiKind: FEATURE_STATUS_UI_KIND[featureStatus]
+  }
+}
+
+function deriveFeatureStatusFromCurrentNode(
+  currentNodeStatus: HarnessNodeStatus,
+  currentNodeIndex: number,
+  workflowNodeCount: number
+): HarnessFeatureStatus {
+  if (currentNodeStatus !== "done") return currentNodeStatus
+  if (currentNodeIndex >= 0 && currentNodeIndex < workflowNodeCount - 1) return "in_progress"
+  return "done"
 }
 
 function normalizeArtifactType(value: unknown): HarnessArtifactType {
@@ -792,12 +859,14 @@ function normalizeProjectRun(value: unknown, workflow: HarnessWorkflow): Harness
   const currentNodeStatusLabel = normalizeText(value.currentNodeStatusLabel).trim()
   const currentNodeIndex = workflow.nodes.findIndex((node) => node.id === currentNodeId)
   const currentNodeDefinition = currentNodeIndex >= 0 ? workflow.nodes[currentNodeIndex] : undefined
-  const isFinalNode = currentNodeIndex >= 0 && currentNodeIndex === workflow.nodes.length - 1
-  // This is a feature-level summary status. Before the final node, the feature
-  // is still considered active even when the current node's own state is done.
-  const status = isFinalNode
-    ? statusFromNodeStatus(currentNodeStatus, currentNodeStatusLabel)
-    : { label: "进行中", uiKind: "active" as const }
+  const explicitFeatureStatus = normalizeFeatureStatus(value.featureStatus)
+  const featureStatus = explicitFeatureStatus ?? deriveFeatureStatusFromCurrentNode(
+    currentNodeStatus,
+    currentNodeIndex,
+    workflow.nodes.length
+  )
+  const featureStatusLabel = explicitFeatureStatus ? normalizeText(value.featureStatusLabel).trim() : ""
+  const status = statusFromFeatureStatus(featureStatus, featureStatusLabel)
   const currentNodeLabel = currentNodeDefinition?.label ?? currentNodeId
   const summaryText = currentNodeLabel ? `${currentNodeLabel} · ${status.label}` : status.label
 
@@ -807,6 +876,8 @@ function normalizeProjectRun(value: unknown, workflow: HarnessWorkflow): Harness
     slug,
     title: normalizeText(value.featureName) || slug,
     location: status.uiKind === "archived" ? "archived" : "active",
+    featureStatus,
+    ...(featureStatusLabel ? { featureStatusLabel } : {}),
     overallStatus: status,
     currentNodeId,
     currentNodeStatus,
@@ -1740,6 +1811,16 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
   const title = normalizeText(run.featureName) || featureSlug
   const currentNodeId = normalizeText(run.currentNodeId)
   const nodes = normalizeRunNodes(project, run.nodes, workflow)
+  const currentNodeIndex = workflow.nodes.findIndex((node) => node.id === currentNodeId)
+  const currentNodeStatus = nodes.find((node) => node.id === currentNodeId)?.nodeStatus ?? UNKNOWN_NODE_STATUS
+  const explicitFeatureStatus = normalizeFeatureStatus(run.featureStatus)
+  const featureStatus = explicitFeatureStatus ?? deriveFeatureStatusFromCurrentNode(
+    currentNodeStatus,
+    currentNodeIndex,
+    workflow.nodes.length
+  )
+  const featureStatusLabel = explicitFeatureStatus ? normalizeText(run.featureStatusLabel).trim() : ""
+  const overallStatus = statusFromFeatureStatus(featureStatus, featureStatusLabel)
   const hookLogRefs = normalizeHookLogRefs(project, run.hookLogRefs)
   const hookLogEntries = readHookLogRefs(project, hookLogRefs)
   const { nodes: nodesWithHookLogs, unmatchedHooks } = applyHookLogEntries(nodes, hookLogEntries)
@@ -1765,6 +1846,9 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
       source: {
         label: project["harness-adapter"].name
       },
+      featureStatus,
+      ...(featureStatusLabel ? { featureStatusLabel } : {}),
+      overallStatus,
       hookLogRefs,
       watchRefs: normalizeWatchRefs(project, run.watchRefs, makeWatchRefs(featureSlug)),
       currentNodeId,
