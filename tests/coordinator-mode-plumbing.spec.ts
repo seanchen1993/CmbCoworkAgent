@@ -532,13 +532,13 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    'approvalOperation(state.pendingApproval) === "prepare_save_code_exec_tool"',
-    "thread context recognizes code-exec prepare approvals as a two-step flow"
+    "nextQueue.push(request)",
+    "thread context enqueues every approval request through the same queue path"
   )
   assertIncludes(
     threadContext,
-    'approvalOperation(request) === "save_code_exec_tool"',
-    "thread context promotes the second code-exec save approval instead of hiding it in the queue"
+    "return removePendingApproval(queue, requestId)",
+    "thread context advances approval queue with the generic remove helper"
   )
   assertIncludes(
     threadContext,
@@ -2030,6 +2030,11 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     workerAccess,
     "...deferredExecutionToolNames",
     "worker access policy blocks deferred execution surfaces for constrained coordinator workers"
+  )
+  assertIncludes(
+    workerAccess,
+    '"save_code_exec_tool"',
+    "worker access policy blocks code-exec draft saving for constrained coordinator workers"
   )
   assertIncludes(
     workerAccess,

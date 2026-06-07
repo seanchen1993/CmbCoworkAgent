@@ -20,6 +20,7 @@ export interface SavedCodeExecTool {
   updatedAt: string
   codeHash: string
   dependencies: string[]
+  rewriteReady: boolean
   lastPreviewParams?: Record<string, unknown>
 }
 
@@ -31,6 +32,7 @@ export interface SavedCodeExecToolDraft {
   timeoutMs: number
   codeHash: string
   dependencies: string[]
+  rewriteReady?: boolean
   lastPreviewParams?: Record<string, unknown>
 }
 
@@ -91,10 +93,11 @@ function loadStore(): SavedCodeExecToolsFile {
           .map((entry) => {
             const timeoutMs = Number.isInteger(entry.timeoutMs) ? entry.timeoutMs : DEFAULT_TIMEOUT_MS
             const code = typeof entry.code === "string" ? entry.code : ""
+            const rewriteReady = entry.rewriteReady === true
 
             return {
               toolId: entry.toolId,
-              enabled: entry.enabled !== false,
+              enabled: rewriteReady && entry.enabled !== false,
               description: typeof entry.description === "string" ? entry.description : "",
               inputSchema: isRecord(entry.inputSchema) ? entry.inputSchema : {},
               code,
@@ -108,6 +111,7 @@ function loadStore(): SavedCodeExecToolsFile {
               dependencies: Array.isArray(entry.dependencies)
                 ? entry.dependencies.filter((dependency): dependency is string => typeof dependency === "string")
                 : [],
+              rewriteReady,
               lastPreviewParams: isRecord(entry.lastPreviewParams) ? entry.lastPreviewParams : undefined
             }
           })
@@ -307,6 +311,7 @@ export function buildSavedCodeExecToolDraft(input: {
   code: string
   timeoutMs?: number
   dependencies: string[]
+  rewriteReady?: boolean
   lastPreviewParams?: Record<string, unknown>
 }): SavedCodeExecToolDraft {
   const store = loadStore()
@@ -323,6 +328,7 @@ export function buildSavedCodeExecToolDraft(input: {
     timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     codeHash,
     dependencies: input.dependencies,
+    rewriteReady: input.rewriteReady === true,
     lastPreviewParams: input.lastPreviewParams
   }
 }
@@ -346,6 +352,7 @@ export function persistSavedCodeExecTool(draft: SavedCodeExecToolDraft): SavedCo
     updatedAt: now,
     codeHash: draft.codeHash,
     dependencies: draft.dependencies,
+    rewriteReady: draft.rewriteReady === true,
     lastPreviewParams: draft.lastPreviewParams
   }
 
@@ -406,9 +413,12 @@ export function replaceSavedCodeExecTool(
     throw new Error(`已有相同代码的工具: ${codeHashConflict.toolId}`)
   }
 
-  store.entries[index] = nextEntry
+  store.entries[index] = {
+    ...nextEntry,
+    enabled: nextEntry.rewriteReady === true && nextEntry.enabled !== false
+  }
   saveStore(store)
-  return nextEntry
+  return store.entries[index]
 }
 
 export function deleteSavedCodeExecTool(toolId: string): void {
@@ -428,6 +438,10 @@ export function setSavedCodeExecToolEnabled(toolId: string, enabled: boolean): S
   }
 
   const current = store.entries[index]
+  if (enabled && current.rewriteReady !== true) {
+    throw new Error("请先使用 AI 改写并试运行成功后启用")
+  }
+
   const nextEntry: SavedCodeExecTool = {
     ...current,
     enabled,

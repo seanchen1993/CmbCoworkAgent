@@ -256,7 +256,6 @@ type ToolConcurrencyTier = "exclusive" | "shared" | "bypass"
  */
 const EXCLUSIVE_TOOL_NAMES = new Set([
   "code_exec",
-  "prepare_save_code_exec_tool",
   "save_code_exec_tool",
   "browser_playwright",
   "manage_scheduler",

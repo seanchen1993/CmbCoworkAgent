@@ -33,10 +33,15 @@ const TOOL_NAME_PATTERN = /^[A-Za-z0-9_-]+$/
 const TIMEOUT_MIN = 1_000
 const TIMEOUT_MAX = 120_000
 
-function getToolStatusBadgeClass(enabled: boolean): string {
-  return enabled
+function getToolStatusBadgeClass(tool: ManagedSavedCodeExecTool): string {
+  return tool.enabled
     ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
     : "border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+}
+
+function getToolStatusLabel(tool: ManagedSavedCodeExecTool): string {
+  if (tool.enabled) return "已启用"
+  return tool.rewriteReady === true ? "已关闭" : "待改写"
 }
 
 function getToolToggleButtonClass(enabled: boolean): string {
@@ -207,10 +212,6 @@ export function CodeExecToolsPanel(): React.JSX.Element {
     setLastSuccessfulPreview(null)
   }, [selectedToolId])
 
-  useEffect(() => {
-    setActionError(null)
-  }, [selectedToolId])
-
   const dirty = selectedTool ? isToolDirty(selectedTool, editor) : false
   const timeoutValidation = editor ? parseTimeoutText(editor.timeoutMs) : null
   const codeChanged = selectedTool && editor ? selectedTool.code !== editor.code : false
@@ -224,11 +225,13 @@ export function CodeExecToolsPanel(): React.JSX.Element {
         )
       : null
   const saveBlockedByPreview = Boolean(codeChanged && !matchedPreview)
+  const enableBlockedByRewrite = Boolean(
+    selectedTool && !selectedTool.enabled && selectedTool.rewriteReady !== true
+  )
   const visibleActionMessage =
     actionMessage &&
     !actionMessage.includes("已启用") &&
-    !actionMessage.includes("已关闭") &&
-    !actionMessage.includes("工具已保存")
+    !actionMessage.includes("已关闭")
       ? actionMessage
       : null
 
@@ -328,6 +331,7 @@ export function CodeExecToolsPanel(): React.JSX.Element {
       })
 
       await loadTools(updated.toolId)
+      setActionMessage("工具已保存")
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "保存失败")
     } finally {
@@ -354,8 +358,19 @@ export function CodeExecToolsPanel(): React.JSX.Element {
     }
   }, [loadTools, selectedTool])
 
+  const handleSelectTool = useCallback((toolId: string) => {
+    setSelectedToolId(toolId)
+    setActionError(null)
+    setActionMessage(null)
+  }, [])
+
   const handleToggleToolEnabled = useCallback(async () => {
     if (!selectedTool) return
+    if (!selectedTool.enabled && selectedTool.rewriteReady !== true) {
+      setActionError("请先使用 AI 改写并试运行成功后启用")
+      setActionMessage(null)
+      return
+    }
 
     setActionError(null)
     setActionMessage(null)
@@ -434,17 +449,17 @@ export function CodeExecToolsPanel(): React.JSX.Element {
                     !tool.enabled && "opacity-70",
                     selectedTool?.toolId === tool.toolId ? "bg-muted/70" : "hover:bg-muted/50"
                   )}
-                  onClick={() => setSelectedToolId(tool.toolId)}
+                  onClick={() => handleSelectTool(tool.toolId)}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <span className="truncate text-sm font-medium">{tool.toolName}</span>
                     <span
                       className={cn(
                         "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-                        getToolStatusBadgeClass(tool.enabled)
+                        getToolStatusBadgeClass(tool)
                       )}
                     >
-                      {tool.enabled ? "已启用" : "已关闭"}
+                      {getToolStatusLabel(tool)}
                     </span>
                   </div>
                   <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
@@ -485,7 +500,8 @@ export function CodeExecToolsPanel(): React.JSX.Element {
                   size="sm"
                   onClick={handleToggleToolEnabled}
                   className={getToolToggleButtonClass(selectedTool.enabled)}
-                  disabled={deleting || saving || running || dirty}
+                  disabled={deleting || saving || running || dirty || enableBlockedByRewrite}
+                  title={enableBlockedByRewrite ? "请先使用 AI 改写并试运行成功后启用" : undefined}
                 >
                   {selectedTool.enabled ? "关闭" : "启用"}
                 </Button>
@@ -509,6 +525,11 @@ export function CodeExecToolsPanel(): React.JSX.Element {
             {visibleActionMessage && (
               <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400">
                 {visibleActionMessage}
+              </div>
+            )}
+            {selectedTool.rewriteReady !== true && (
+              <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
+                请先使用 AI 改写并试运行成功后启用
               </div>
             )}
 

@@ -1476,7 +1476,6 @@ async function fetchOverview(
     "invoke_deferred_tool",
     // 内置代码执行辅助
     "code_exec",
-    "prepare_save_code_exec_tool",
     "save_code_exec_tool",
     // 内置任务管理
     "write_todos"
@@ -4726,7 +4725,6 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "run_tests", doc_count: 112 },
           { key: "search_code", doc_count: 98 },
           { key: "code_exec", doc_count: 92 },
-          { key: "prepare_save_code_exec_tool", doc_count: 81 },
           { key: "notify", doc_count: 76 },
           { key: "query_logs", doc_count: 68 },
           { key: "schema_check", doc_count: 59 },

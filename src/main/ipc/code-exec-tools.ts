@@ -213,6 +213,7 @@ export function registerCodeExecToolsHandlers(ipcMain: IpcMain): void {
       const updated = replaceSavedCodeExecTool(current.toolId, {
         ...current,
         toolId: nextToolId,
+        enabled: codeChanged ? false : current.enabled,
         description: payload.description.trim(),
         code: payload.code,
         timeoutMs,
@@ -220,6 +221,7 @@ export function registerCodeExecToolsHandlers(ipcMain: IpcMain): void {
         codeHash: computeSavedCodeExecToolHash(payload.code, timeoutMs),
         dependencies,
         inputSchema,
+        rewriteReady: codeChanged ? false : current.rewriteReady,
         lastPreviewParams: payload.previewParams ?? current.lastPreviewParams
       })
 
