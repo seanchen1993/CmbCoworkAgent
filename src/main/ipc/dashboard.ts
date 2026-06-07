@@ -200,6 +200,8 @@ interface DashboardCommitDetail {
   deletions: number
   triggeredBy?: string
   threadId?: string
+  /** 产生该 commit 代码的会话列表（优先取自采纳事件，可为多个）。 */
+  threadIds: string[]
   usedSkills: string[]
   skillCount: number
   codeGeneratedLines: number
@@ -214,6 +216,12 @@ interface CommitAdoptionSummary {
   effectiveGeneratedLines: number
   adoptedLines: number
   adoptionRate: number | null
+  /**
+   * 产生该 commit 代码的会话 threadId 列表，取自 `code_adopt` 事件（即代码生成时
+   * 所在的真实会话），而非 commit 事件自带的 threadId。一个 commit 的代码可能来自
+   * 多个会话，这里保留全部。
+   */
+  threadIds: string[]
 }
 
 interface DashboardSkillDetail {
@@ -1383,6 +1391,7 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
     deletions: asNumber(properties.deletions),
     triggeredBy: asOptionalString(properties.triggeredBy),
     threadId: asOptionalString(properties.threadId),
+    threadIds: [],
     usedSkills,
     skillCount: asNumber(properties.skillCount, usedSkills.length),
     codeGeneratedLines: 0,
@@ -1429,6 +1438,8 @@ async function fetchCommitAdoptionMap(
         terms: { field: "properties.commitSha", size: normalizedCommitShas.length },
         aggs: {
           by_skill: { terms: { field: "properties.usedSkills", size: 50 } },
+          // 该 commit 的代码可能来自多个会话，保留全部关联会话。
+          by_thread: { terms: { field: "properties.threadId", size: 50 } },
           generated_lines: { sum: { field: "properties.generatedLineCount" } },
           effective_generated_lines: effectiveGeneratedLinesSumAgg(),
           adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
@@ -1454,12 +1465,17 @@ async function fetchCommitAdoptionMap(
     const generatedLines = asNumber(asRecord(record.generated_lines).value)
     const effectiveGeneratedLines = asNumber(asRecord(record.effective_generated_lines).value)
     const adoptedLines = asNumber(asRecord(record.adopted_lines).value)
+    const threadBuckets = asRecord(record.by_thread).buckets
+    const threadIds = Array.isArray(threadBuckets)
+      ? normalizeSkillList(threadBuckets.map((threadBucket) => asString(asRecord(threadBucket).key)))
+      : []
     result.set(commitSha, {
       usedSkills: skills,
       generatedLines,
       effectiveGeneratedLines,
       adoptedLines,
-      adoptionRate: effectiveGeneratedLines > 0 ? adoptedLines / effectiveGeneratedLines : null
+      adoptionRate: effectiveGeneratedLines > 0 ? adoptedLines / effectiveGeneratedLines : null,
+      threadIds
     })
   }
   return result
@@ -4399,8 +4415,19 @@ async function fetchCommitDetails(
     items: items.map((item) => {
       const adoption = item.commitSha ? adoptionMap.get(item.commitSha) : undefined
       const adoptedSkills = adoption?.usedSkills ?? []
+      const adoptionThreadIds = adoption?.threadIds ?? []
+      // 关联会话优先取自采纳事件（代码生成时所在的真实会话，可为多个）；
+      // 采纳事件缺失时回退到 commit 自带 threadId。
+      const threadIds =
+        adoptionThreadIds.length > 0
+          ? adoptionThreadIds
+          : item.threadId
+            ? [item.threadId]
+            : []
       return {
         ...item,
+        threadId: threadIds[0] ?? item.threadId,
+        threadIds,
         usedSkills: adoptedSkills,
         skillCount: adoptedSkills.length,
         codeGeneratedLines: adoption?.generatedLines ?? 0,
@@ -6411,10 +6438,17 @@ function makeMockThreadTraces(threadId: string): DashboardTraceDetail[] {
     from: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
     to: new Date(now).toISOString()
   }
-  const all = makeMockSkillRecentTraces("auto-code-workflow-v1.0.0", range, 10)
-  const matched = all.filter((trace) => trace.threadId === threadId)
-  const list = matched.length > 0 ? matched : all
-  return [...list].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+  const base = makeMockSkillRecentTraces("auto-code-workflow-v1.0.0", range, 10)
+  // 真实环境 threadTraces(id) 只返回该会话的 trace；mock 同样把若干条 trace 归到
+  // 同一个 threadId，保证按 threadId 分组时恰好是「单个会话」。
+  const seed = Array.from(threadId).reduce((acc, char) => acc + char.charCodeAt(0), 0)
+  const count = Math.min(base.length, 2 + (seed % 3))
+  return base.slice(0, count).map((trace, index) => ({
+    ...trace,
+    threadId,
+    traceId: `${threadId}-${index}`,
+    startedAt: new Date(now - (count - index) * 12 * 60 * 1000).toISOString()
+  }))
 }
 
 function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
@@ -6490,6 +6524,11 @@ function makeMockCommitDetails(
     const pushed = index % 3 !== 1
     const repoName = `cmb-${index % 3}`
     const commitSha = `mock${String(index + 1).padStart(36, "0")}`
+    // 每 3 条造一个「跨多会话」的 commit，方便验证多会话展示。
+    const threadIds =
+      index % 3 === 0
+        ? [`mock-thread-${(index % 5) + 1}`, `mock-thread-${((index + 2) % 5) + 1}`]
+        : [`mock-thread-${(index % 5) + 1}`]
     return {
       eventId: `mock-commit-event-${index + 1}`,
       eventTime: eventTime.toISOString(),
@@ -6515,7 +6554,8 @@ function makeMockCommitDetails(
       insertions: 18 + index * 7,
       deletions: 4 + index * 3,
       triggeredBy: index % 4 === 0 ? "auto-push" : "manual",
-      threadId: `mock-thread-${(index % 5) + 1}`,
+      threadId: threadIds[0],
+      threadIds,
       usedSkills: index % 2 === 0 ? ["代码审查-v1.0.0"] : ["需求分析-v1.0.0", "接口设计-v1.0.0"],
       skillCount: index % 2 === 0 ? 1 : 2,
       codeGeneratedLines: 30 + index * 2,

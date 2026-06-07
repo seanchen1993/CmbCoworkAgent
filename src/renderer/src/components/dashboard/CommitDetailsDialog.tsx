@@ -1,4 +1,5 @@
-import { ChevronLeft, ChevronRight, ExternalLink, GitCommit, Info, Loader2, Search, X } from "lucide-react"
+import { useEffect, useMemo, useState } from "react"
+import { CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, GitCommit, Info, Loader2, MessagesSquare, Search, X } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -10,7 +11,8 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import type { DashboardCommitDetail, DashboardCommitDetailsData } from "./use-dashboard"
+import { TraceExplorer } from "./TraceHistoryDialog"
+import type { DashboardCommitDetail, DashboardCommitDetailsData, DashboardTraceDetail } from "./use-dashboard"
 
 function HeaderHint({ hint }: { hint: string }): React.JSX.Element {
   return (
@@ -90,10 +92,12 @@ function SkillChips({ skills }: { skills: string[] }): React.JSX.Element {
 
 function CommitRow({
   item,
-  onOpenExternal
+  onOpenExternal,
+  onViewThread
 }: {
   item: DashboardCommitDetail
   onOpenExternal: (url: string) => void
+  onViewThread: (item: DashboardCommitDetail) => void
 }): React.JSX.Element {
   const externalUrl = item.pushed ? (item.commitUrl || item.repositoryWebUrl || "") : ""
   const displayRepo = repoName(item)
@@ -158,10 +162,135 @@ function CommitRow({
         <span className="ml-2 text-emerald-600 dark:text-emerald-400">+{item.insertions}</span>
         <span className="ml-1 text-rose-600 dark:text-rose-400">-{item.deletions}</span>
       </td>
-      <td className="max-w-[110px] px-3 py-2 text-[11px] font-mono text-muted-foreground">
-        <span className="block truncate" title={item.threadId}>{item.threadId || "-"}</span>
+      <td className="max-w-[130px] px-3 py-2 text-xs">
+        {item.threadIds.length > 0 ? (
+          <button
+            type="button"
+            className="inline-flex max-w-full items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[11px] text-foreground/80 transition-colors hover:border-blue-500/40 hover:bg-blue-500/10 hover:text-blue-600 dark:hover:text-blue-300"
+            title={`查看会话记录 · ${item.threadIds.join(", ")}`}
+            onClick={() => onViewThread(item)}
+          >
+            <MessagesSquare className="size-3 shrink-0" />
+            <span className="truncate">查看会话</span>
+            {item.threadIds.length > 1 ? (
+              <span className="shrink-0 rounded-full bg-muted px-1.5 text-[10px] text-muted-foreground">
+                {item.threadIds.length}
+              </span>
+            ) : null}
+          </button>
+        ) : (
+          <span className="text-xs text-muted-foreground">-</span>
+        )}
       </td>
     </tr>
+  )
+}
+
+function CommitAdoptionSummaryBar({ commit }: { commit: DashboardCommitDetail }): React.JSX.Element {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-border bg-muted/10 px-5 py-2 text-[11px] text-muted-foreground">
+      <span className="inline-flex items-center gap-1 font-medium text-foreground">
+        <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+        采纳 {formatLines(commit.codeAdoptedLines)} 行
+      </span>
+      <span>有效生成 {formatLines(commit.codeEffectiveGeneratedLines)} 行</span>
+      <span>
+        采纳率 <span className="font-medium text-foreground">{formatPercent(commit.codeAdoptionRate)}</span>
+      </span>
+      <span className="ml-auto">关联 {commit.threadIds.length} 个会话</span>
+    </div>
+  )
+}
+
+function ThreadConversationDialog({
+  commit,
+  onOpenChange
+}: {
+  commit: DashboardCommitDetail | null
+  onOpenChange: (open: boolean) => void
+}): React.JSX.Element {
+  const threadIds = useMemo(() => commit?.threadIds ?? [], [commit])
+  const threadKey = threadIds.join("|")
+  const [traces, setTraces] = useState<DashboardTraceDetail[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (threadIds.length === 0) {
+      setTraces([])
+      setError(null)
+      return
+    }
+    const api = window.api?.dashboard
+    if (!api || typeof api.threadTraces !== "function") {
+      setError("当前环境不支持加载会话记录")
+      return
+    }
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    Promise.all(
+      threadIds.map(async (id) => {
+        try {
+          const res = await api.threadTraces(id)
+          return res?.success && Array.isArray(res.data) ? (res.data as DashboardTraceDetail[]) : []
+        } catch {
+          return []
+        }
+      })
+    )
+      .then((lists) => {
+        if (!cancelled) setTraces(lists.flat())
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+    // threadKey 是 threadIds 的稳定字符串表示，避免数组引用变化导致的重复请求。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadKey])
+
+  // 已按 threadId 分好的 trace 供 TraceExplorer 选中会话时复用，避免重复网络请求。
+  const tracesByThread = useMemo(() => {
+    const map = new Map<string, DashboardTraceDetail[]>()
+    for (const trace of traces) {
+      const id = trace.threadId || "unknown-thread"
+      map.set(id, [...(map.get(id) ?? []), trace])
+    }
+    return map
+  }, [traces])
+
+  return (
+    <Dialog open={Boolean(commit)} onOpenChange={onOpenChange}>
+      <DialogContent className="flex h-[80vh] max-w-[1000px] flex-col gap-0 p-0">
+        <DialogHeader className="border-b border-border px-5 py-4">
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <MessagesSquare className="size-4 text-muted-foreground" />
+            会话记录
+          </DialogTitle>
+          <DialogDescription className="truncate">
+            {commit?.userName ? `${commit.userName} · ` : ""}
+            {commit?.repositoryName || commit?.branch || ""}
+          </DialogDescription>
+        </DialogHeader>
+        {commit ? <CommitAdoptionSummaryBar commit={commit} /> : null}
+        <TraceExplorer
+          traces={traces}
+          loading={loading}
+          error={error}
+          showCodeStats={false}
+          defaultViewMode="thread"
+          showViewModeToggle={false}
+          loadThreadTraces={async (id) => tracesByThread.get(id) ?? []}
+          title="关联会话"
+          subtitle="选择会话查看对话还原"
+          emptyText="该 commit 暂无可还原的会话记录"
+          className="min-h-0 flex-1"
+        />
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -328,6 +457,7 @@ export function CommitDetailsDialog({
   const toIndex = Math.min(total, page * pageSize)
   const canPrev = page > 1 && !loading
   const canNext = page < pageCount && !loading
+  const [threadCommit, setThreadCommit] = useState<DashboardCommitDetail | null>(null)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -416,12 +546,17 @@ export function CommitDetailsDialog({
                           <HeaderHint hint="git 提交的变更行数" />
                         </span>
                       </th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">Thread</th>
+                      <th className="whitespace-nowrap px-3 py-2 font-medium">对话记录</th>
                     </tr>
                   </thead>
                   <tbody>
                     {items.map((item) => (
-                      <CommitRow key={item.eventId} item={item} onOpenExternal={onOpenExternal} />
+                      <CommitRow
+                        key={item.eventId}
+                        item={item}
+                        onOpenExternal={onOpenExternal}
+                        onViewThread={setThreadCommit}
+                      />
                     ))}
                   </tbody>
                 </table>
@@ -430,6 +565,12 @@ export function CommitDetailsDialog({
           </div>
         )}
       </DialogContent>
+      <ThreadConversationDialog
+        commit={threadCommit}
+        onOpenChange={(next) => {
+          if (!next) setThreadCommit(null)
+        }}
+      />
     </Dialog>
   )
 }

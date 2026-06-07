@@ -160,6 +160,8 @@ export interface DashboardCommitDetail {
   deletions: number
   triggeredBy?: string
   threadId?: string
+  /** 产生该 commit 代码的会话列表（优先取自采纳事件，可为多个）。 */
+  threadIds: string[]
   usedSkills: string[]
   skillCount: number
   codeGeneratedLines: number

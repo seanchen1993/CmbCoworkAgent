@@ -189,6 +189,7 @@ interface DashboardCommitDetail {
   deletions: number
   triggeredBy?: string
   threadId?: string
+  threadIds: string[]
   usedSkills: string[]
   skillCount: number
   codeGeneratedLines: number
