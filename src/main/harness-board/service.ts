@@ -63,6 +63,14 @@ interface ConfiguredHarnessInvocation {
   }
 }
 
+type HarnessInvocationSuccessLogMode = "full" | "summary" | "none"
+
+interface HarnessInvocationLogOptions {
+  configKey: HarnessInspectCommandConfigKey
+  detail?: string
+  successResult?: HarnessInvocationSuccessLogMode
+}
+
 interface HarnessHookLogEntry {
   nodeId: string
   hook: HarnessRunNode["hooks"][number]
@@ -477,6 +485,80 @@ function formatAdapterError(error: unknown, label = "Harness adapter"): string {
   return `${label} ${exitInfo}: ${suffix}`
 }
 
+function formatHarnessCommandToken(value: string): string {
+  if (!value) return "\"\""
+  return /^[A-Za-z0-9_/:=.,@%+-]+$/.test(value) ? value : (JSON.stringify(value) ?? "\"\"")
+}
+
+function formatHarnessCommand(invocation: ConfiguredHarnessInvocation["invocation"]): string {
+  return [invocation.executable, ...invocation.args].map(formatHarnessCommandToken).join(" ")
+}
+
+function formatHarnessLogOutput(value: unknown): string {
+  const output = toTrimmedOutput(value)
+  return output || "(empty)"
+}
+
+function harnessCommandLogOptions(
+  mode: HarnessInspectCommandName,
+  detail?: string
+): HarnessInvocationLogOptions {
+  const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
+  const successResult: HarnessInvocationSuccessLogMode =
+    mode === "createProject" || mode === "createFeature" ? "full" : "summary"
+  return {
+    configKey,
+    ...(detail ? { detail } : {}),
+    successResult
+  }
+}
+
+function logHarnessInvocationStart(
+  configured: ConfiguredHarnessInvocation,
+  options: HarnessInvocationLogOptions
+): void {
+  const detail = options.detail ? ` ${options.detail}` : ""
+  console.log(`[HarnessBoard] [${options.configKey}] Running${detail}: ${formatHarnessCommand(configured.invocation)}`)
+  console.log(`[HarnessBoard] [${options.configKey}] CWD: ${configured.cwd}`)
+}
+
+function logHarnessInvocationSuccess(
+  stdoutBuffer: Buffer,
+  options: HarnessInvocationLogOptions
+): void {
+  if (options.successResult === "none") return
+  if (options.successResult === "full") {
+    console.log(`[HarnessBoard] [${options.configKey}] Result:\n${formatHarnessLogOutput(stdoutBuffer)}`)
+    return
+  }
+  console.log(`[HarnessBoard] [${options.configKey}] success`)
+}
+
+function logHarnessInvocationFailure(
+  configured: ConfiguredHarnessInvocation,
+  options: HarnessInvocationLogOptions,
+  error: unknown
+): void {
+  const maybeError = error as { stdout?: unknown; stderr?: unknown }
+  console.error(`[HarnessBoard] [${options.configKey}] Failed: ${formatAdapterError(error)}`)
+  console.error(`[HarnessBoard] [${options.configKey}] Command: ${formatHarnessCommand(configured.invocation)}`)
+  console.error(`[HarnessBoard] [${options.configKey}] CWD: ${configured.cwd}`)
+  console.error(`[HarnessBoard] [${options.configKey}] stdout:\n${formatHarnessLogOutput(maybeError.stdout)}`)
+  console.error(`[HarnessBoard] [${options.configKey}] stderr:\n${formatHarnessLogOutput(maybeError.stderr)}`)
+}
+
+function logHarnessStatusResultFailure(
+  configured: ConfiguredHarnessInvocation,
+  configKey: HarnessInspectCommandConfigKey,
+  stdoutBuffer: Buffer,
+  errorMessage: string
+): void {
+  console.error(`[HarnessBoard] [${configKey}] Failed after command completed: ${errorMessage}`)
+  console.error(`[HarnessBoard] [${configKey}] Command: ${formatHarnessCommand(configured.invocation)}`)
+  console.error(`[HarnessBoard] [${configKey}] CWD: ${configured.cwd}`)
+  console.error(`[HarnessBoard] [${configKey}] Result:\n${formatHarnessLogOutput(stdoutBuffer)}`)
+}
+
 function tokenizeInspectCommand(command: string): string[] {
   const tokens: string[] = []
   let current = ""
@@ -690,9 +772,14 @@ function buildConfiguredHarnessInvocation(
   return configured
 }
 
-function runHarnessInvocation({ cwd, invocation }: ConfiguredHarnessInvocation): Buffer {
+function runHarnessInvocation(
+  configured: ConfiguredHarnessInvocation,
+  logOptions?: HarnessInvocationLogOptions
+): Buffer {
+  const { cwd, invocation } = configured
+  if (logOptions) logHarnessInvocationStart(configured, logOptions)
   try {
-    return execFileSync(invocation.executable, invocation.args, {
+    const stdoutBuffer = execFileSync(invocation.executable, invocation.args, {
       cwd,
       encoding: "buffer",
       env: {
@@ -703,7 +790,10 @@ function runHarnessInvocation({ cwd, invocation }: ConfiguredHarnessInvocation):
       maxBuffer: HARNESS_ADAPTER_MAX_BUFFER,
       timeout: HARNESS_ADAPTER_TIMEOUT_MS
     })
+    if (logOptions) logHarnessInvocationSuccess(stdoutBuffer, logOptions)
+    return stdoutBuffer
   } catch (error) {
+    if (logOptions) logHarnessInvocationFailure(configured, logOptions, error)
     throw new Error(formatAdapterError(error))
   }
 }
@@ -713,7 +803,10 @@ function runConfiguredHarnessCommand(
   mode: HarnessInspectCommandName,
   feature?: string
 ): Buffer {
-  return runHarnessInvocation(buildConfiguredHarnessInvocation(project, mode, feature))
+  return runHarnessInvocation(
+    buildConfiguredHarnessInvocation(project, mode, feature),
+    harnessCommandLogOptions(mode)
+  )
 }
 
 function runInspectAdapter(
@@ -722,21 +815,13 @@ function runInspectAdapter(
   feature?: string
 ): Record<string, unknown> {
   const invocation = buildConfiguredHarnessInvocation(project, mode, feature)
-  const cmdLine = [invocation.invocation.executable, ...invocation.invocation.args].join(" ")
-
-  if (mode === "project") {
-    console.log(`[HarnessBoard] [project_status] Running: ${cmdLine}`)
-  }
-
-  const stdoutBuffer = runHarnessInvocation(invocation)
+  const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
+  const stdoutBuffer = runHarnessInvocation(invocation, harnessCommandLogOptions(mode))
 
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
 
-  if (mode === "project") {
-    console.log(`[HarnessBoard] [project_status] Result bytes: ${stdoutBuffer.length}`)
-  }
-
   if (!raw) {
+    logHarnessStatusResultFailure(invocation, configKey, stdoutBuffer, "Inspect adapter returned empty output")
     throw new Error("Inspect adapter returned empty output")
   }
 
@@ -748,6 +833,12 @@ function runInspectAdapter(
     return parsed
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
+    logHarnessStatusResultFailure(
+      invocation,
+      configKey,
+      stdoutBuffer,
+      `Inspect adapter returned invalid JSON: ${message}`
+    )
     throw new Error(`Inspect adapter returned invalid JSON: ${message}`)
   }
 }
@@ -1402,7 +1493,7 @@ function initializeHarnessProject(project: HarnessProjectMetadata): void {
     const configured = buildConfiguredHarnessInvocation(project, "createProject")
 
     mkdirSync(projectPath, { recursive: true })
-    runHarnessInvocation(configured)
+    runHarnessInvocation(configured, harnessCommandLogOptions("createProject"))
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
     if (raw.includes("已存在")) {
@@ -1663,20 +1754,22 @@ function runInspectAdapterBatch(
     configuredCommand, firstProject, mode, cwd, undefined, projectCodes
   )
 
-  const cmdLine = [executable, ...args].join(" ")
-  console.log(`[HarnessBoard] [project_status] Running ${projects.length} project(s): ${cmdLine}`)
-
-  const stdoutBuffer = runHarnessInvocation({
+  const configured: ConfiguredHarnessInvocation = {
     cwd,
     invocation: {
       executable,
       args
     }
-  })
+  }
+  const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
+  const stdoutBuffer = runHarnessInvocation(
+    configured,
+    harnessCommandLogOptions(mode, `${projects.length} project(s)`)
+  )
 
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
-  console.log(`[HarnessBoard] [project_status] Result bytes: ${stdoutBuffer.length}`)
   if (!raw) {
+    logHarnessStatusResultFailure(configured, configKey, stdoutBuffer, "Inspect adapter returned empty output")
     throw new Error("Inspect adapter returned empty output")
   }
 
@@ -1688,6 +1781,12 @@ function runInspectAdapterBatch(
     return parsed
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
+    logHarnessStatusResultFailure(
+      configured,
+      configKey,
+      stdoutBuffer,
+      `Inspect adapter returned invalid JSON: ${message}`
+    )
     throw new Error(`Inspect adapter returned invalid JSON: ${message}`)
   }
 }
