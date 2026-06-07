@@ -3795,16 +3795,11 @@ export function HarnessBoardView({
       if (creatingSidebarSessionKey) return
       setCreatingSidebarSessionKey(key)
       try {
-        const matchingRunDetail =
-          runDetail &&
-          runDetail.project.projectId === project.projectId &&
-          runDetail.run.slug === slug
-            ? runDetail
-            : null
+        const latestRunDetail = await window.api.harnessBoard.getRunDetail(project.projectId, slug)
         const thread = await createHarnessSession({
           projectId: project.projectId,
           slug,
-          nextAction: matchingRunDetail ? getRunNextAction(matchingRunDetail) : undefined,
+          nextAction: getRunNextAction(latestRunDetail),
           sessions,
           threadsById,
           threadStates: allThreadStates,
@@ -3817,6 +3812,9 @@ export function HarnessBoardView({
         )
         setSelectedProjectId(project.projectId)
         setSelectedFeature({ projectId: project.projectId, slug, activeSessionThreadId: thread.thread_id })
+        setRunDetail((currentDetail) =>
+          areHarnessValuesEqual(currentDetail, latestRunDetail) ? currentDetail : latestRunDetail
+        )
         setIsViewingSession(true)
         markRead(thread.thread_id)
         await selectThread(thread.thread_id, { preserveView: true })
@@ -3831,7 +3829,6 @@ export function HarnessBoardView({
       createThread,
       creatingSidebarSessionKey,
       markRead,
-      runDetail,
       selectThread,
       threadsById
     ]
