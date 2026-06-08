@@ -42,6 +42,8 @@ import type {
   ManagedSavedCodeExecTool,
   SavedCodeExecPreviewPayload,
   SavedCodeExecPreviewResult,
+  SavedCodeExecRewritePayload,
+  SavedCodeExecRewriteResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
 import type {
@@ -2317,6 +2319,8 @@ const api = {
       params: Record<string, unknown>
     ): Promise<ManagedSavedCodeExecTool> =>
       ipcRenderer.invoke("codeExecTools:setLastPreviewParams", { id, params }),
+    rewrite: (payload: SavedCodeExecRewritePayload): Promise<SavedCodeExecRewriteResult> =>
+      ipcRenderer.invoke("codeExecTools:rewrite", payload),
     update: (payload: SavedCodeExecToolUpdatePayload): Promise<ManagedSavedCodeExecTool> =>
       ipcRenderer.invoke("codeExecTools:update", payload),
     delete: (id: string): Promise<void> => ipcRenderer.invoke("codeExecTools:delete", id),

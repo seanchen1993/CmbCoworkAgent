@@ -256,7 +256,6 @@ type ToolConcurrencyTier = "exclusive" | "shared" | "bypass"
  */
 const EXCLUSIVE_TOOL_NAMES = new Set([
   "code_exec",
-  "prepare_save_code_exec_tool",
   "save_code_exec_tool",
   "browser_playwright",
   "manage_scheduler",
@@ -2657,7 +2656,10 @@ The workspace root is: ${workspacePath}`
     )
   } else {
     allMcpTools = await capabilityService.listTools()
-    codeExecRouteEnabled = codeExecEnabled && allMcpTools.length > 0
+    // Disable ad hoc code_exec authoring in Agent Team and project mode. Saved tools remain
+    // available through the deferred-tool bridge when code exec is enabled.
+    codeExecRouteEnabled =
+      codeExecEnabled && allMcpTools.length > 0 && !isCoordinatorMode && !Boolean(featureId)
     eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
     lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
     mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata)
