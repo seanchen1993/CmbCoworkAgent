@@ -2417,6 +2417,7 @@ const api = {
         mode?: "thread" | "trace"
         viewMode?: "thread" | "trace"
         triggerScope?: "active" | "all"
+        projectMode?: boolean
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userDetail", sapId, range, options),
