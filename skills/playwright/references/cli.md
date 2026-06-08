@@ -3,7 +3,7 @@
 Use the wrapper script unless the CLI is already installed globally:
 
 ```bash
-export PROJECT_HOME="${PROJECT_HOME:-$HOME/.cmbcoworkagent}"
+export PROJECT_HOME="${CMB_COWORK_AGENT_HOME:-$HOME/.cmbcoworkagent}"
 export PWCLI="$PROJECT_HOME/skills/playwright/scripts/playwright_cli.sh"
 "$PWCLI" --help
 ```

@@ -1,6 +1,6 @@
 ---
-name: "playwright"
-description: "Use when the task requires automating a real browser from the terminal (navigation, form filling, snapshots, screenshots, data extraction, UI-flow debugging) via `playwright-cli` or the bundled wrapper script."
+name: playwright
+description: Use when the task requires automating a real browser from the terminal (navigation, form filling, snapshots, screenshots, data extraction, UI-flow debugging) via `playwright-cli` or the bundled wrapper script.
 ---
 
 
@@ -34,7 +34,7 @@ Once `npx` is present, proceed with the wrapper script. A global install of `pla
 ## Skill path (set once)
 
 ```bash
-export PROJECT_HOME="${PROJECT_HOME:-$HOME/.cmbcoworkagent}"
+export PROJECT_HOME="${CMB_COWORK_AGENT_HOME:-$HOME/.cmbcoworkagent}"
 export PWCLI="$PROJECT_HOME/skills/playwright/scripts/playwright_cli.sh"
 ```
 
