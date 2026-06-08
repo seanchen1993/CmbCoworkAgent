@@ -509,6 +509,7 @@ interface DashboardSkillEvalOptions {
   skillName?: string
   skillVersion?: string
   skillNames?: string[]
+  upperOrgLv1?: string | string[] | null
   defaultRecentToLatestSkill?: boolean
   recentOnly?: boolean
   listOnly?: boolean
@@ -930,6 +931,7 @@ function normalizeSkillEvalOptions(value?: DashboardSkillEvalOptions): {
   skillVersion: string | undefined
   skillNames: string[]
   skillNamesProvided: boolean
+  upperOrgLv1List: string[]
   defaultRecentToLatestSkill: boolean
   recentOnly: boolean
   listOnly: boolean
@@ -954,6 +956,7 @@ function normalizeSkillEvalOptions(value?: DashboardSkillEvalOptions): {
     skillVersion: skillName ? skillVersion || undefined : undefined,
     skillNames,
     skillNamesProvided: Array.isArray(value?.skillNames),
+    upperOrgLv1List: normalizeUpperOrgLv1List(value?.upperOrgLv1),
     defaultRecentToLatestSkill: value?.defaultRecentToLatestSkill === true,
     recentOnly: value?.recentOnly === true,
     listOnly: value?.listOnly === true,
@@ -2314,6 +2317,7 @@ async function fetchSkillEvalSummary(
     skillVersion,
     skillNames,
     skillNamesProvided,
+    upperOrgLv1List,
     defaultRecentToLatestSkill,
     recentOnly,
     listOnly,
@@ -2349,7 +2353,12 @@ async function fetchSkillEvalSummary(
   // statsOnly is intentionally handled before recentOnly; if both flags are
   // present, the lightweight stats-only path wins and does not fetch recent runs.
   if (statsOnly && explicitRecentFilter) {
-    const statsResult = await fetchSkillEvalStatRecords(range, explicitRecentFilter, sampleLimit)
+    const statsResult = await fetchSkillEvalStatRecords(
+      range,
+      explicitRecentFilter,
+      upperOrgLv1List,
+      sampleLimit
+    )
     const statsRuns = skillEvalStoredRecordsToDashboardRuns(
       statsResult.records,
       undefined,
@@ -2373,8 +2382,15 @@ async function fetchSkillEvalSummary(
 
   if (recentOnly && explicitRecentFilter) {
     const [statsResult, recentResult] = await Promise.all([
-      fetchSkillEvalStatRecords(range, explicitRecentFilter, sampleLimit),
-      fetchSkillEvalRecordPage(range, explicitRecentFilter, recentFrom, recentPageSize, true)
+      fetchSkillEvalStatRecords(range, explicitRecentFilter, upperOrgLv1List, sampleLimit),
+      fetchSkillEvalRecordPage(
+        range,
+        explicitRecentFilter,
+        upperOrgLv1List,
+        recentFrom,
+        recentPageSize,
+        true
+      )
     ])
     const statsRuns = skillEvalStoredRecordsToDashboardRuns(
       statsResult.records,
@@ -2401,6 +2417,7 @@ async function fetchSkillEvalSummary(
     const skillList = await fetchSkillEvalRecordSkillList(
       range,
       skillNamesFilter,
+      upperOrgLv1List,
       allowedSkillNames,
       skillPage,
       skillPageSize,
@@ -2417,8 +2434,15 @@ async function fetchSkillEvalSummary(
     }
     recentSkillFilter = getFirstSkillFilterFromSummaries(skillList.skills) ?? skillNamesFilter
     const [statsResult, recentResult] = await Promise.all([
-      fetchSkillEvalStatRecords(range, recentSkillFilter, sampleLimit),
-      fetchSkillEvalRecordPage(range, recentSkillFilter, recentFrom, recentPageSize, true)
+      fetchSkillEvalStatRecords(range, recentSkillFilter, upperOrgLv1List, sampleLimit),
+      fetchSkillEvalRecordPage(
+        range,
+        recentSkillFilter,
+        upperOrgLv1List,
+        recentFrom,
+        recentPageSize,
+        true
+      )
     ])
     const focusedSampleRuns = skillEvalStoredRecordsToDashboardRuns(
       statsResult.records,
@@ -2451,6 +2475,7 @@ async function fetchSkillEvalSummary(
     ? fetchSkillEvalRecordSkillList(
         range,
         skillNamesFilter,
+        upperOrgLv1List,
         allowedSkillNames,
         skillPage,
         skillPageSize,
@@ -2469,8 +2494,15 @@ async function fetchSkillEvalSummary(
   }
 
   const [statsResult, recentResult, skillList] = await Promise.all([
-    fetchSkillEvalStatRecords(range, recentSkillFilter, sampleLimit),
-    fetchSkillEvalRecordPage(range, recentSkillFilter, recentFrom, recentPageSize, true),
+    fetchSkillEvalStatRecords(range, recentSkillFilter, upperOrgLv1List, sampleLimit),
+    fetchSkillEvalRecordPage(
+      range,
+      recentSkillFilter,
+      upperOrgLv1List,
+      recentFrom,
+      recentPageSize,
+      true
+    ),
     skillListPromise ?? Promise.resolve(undefined)
   ])
   const sampleRuns = skillEvalStoredRecordsToDashboardRuns(
@@ -2594,9 +2626,12 @@ function skillEvalRecordSourceIncludes(): string[] {
 
 function skillEvalRecordQuery(
   range: TimeRange,
-  skillFilter?: SkillEvalFilter
+  skillFilter?: SkillEvalFilter,
+  upperOrgLv1List: string[] = []
 ): Record<string, unknown> {
   const filter: Record<string, unknown>[] = [timeRangeFilter("startedAt", range)]
+  const orgFilterClause = buildUpperOrgLv1ListFilter(upperOrgLv1List)
+  if (orgFilterClause) filter.push(orgFilterClause)
   if (isSkillEvalExactFilter(skillFilter)) {
     filter.push(
       buildSkillEvalRecordExactSkillFilter(skillFilter.skillName, skillFilter.skillVersion)
@@ -2865,6 +2900,7 @@ function parseTraceSkillEvalEvidence(value: unknown): TraceSkillEvalRecord["evid
 async function fetchSkillEvalRecordPage(
   range: TimeRange,
   skillFilter: SkillEvalFilter | undefined,
+  upperOrgLv1List: string[],
   from: number,
   size: number,
   includeTraceDetails: boolean
@@ -2878,7 +2914,7 @@ async function fetchSkillEvalRecordPage(
     from: 0,
     size: scanSize,
     sort: [{ startedAt: { order: "desc" } }, { id: { order: "desc", unmapped_type: "keyword" } }],
-    query: skillEvalRecordQuery(range, skillFilter),
+    query: skillEvalRecordQuery(range, skillFilter, upperOrgLv1List),
     _source: { includes: skillEvalRecordSourceIncludes() },
     aggs: {
       task_count: {
@@ -2916,9 +2952,10 @@ async function fetchSkillEvalRecordPage(
 async function fetchSkillEvalStatRecords(
   range: TimeRange,
   skillFilter: SkillEvalFilter | undefined,
+  upperOrgLv1List: string[],
   recordLimit = SKILL_EVAL_STATS_TRACE_LIMIT
 ): Promise<SkillEvalStatRecordResult> {
-  const cached = getCachedSkillEvalStatRecords(range, skillFilter, recordLimit)
+  const cached = getCachedSkillEvalStatRecords(range, skillFilter, upperOrgLv1List, recordLimit)
   if (cached) return cached
 
   const records: TraceSkillEvalRecord[] = []
@@ -2932,7 +2969,7 @@ async function fetchSkillEvalStatRecords(
       track_total_hits: loadedHits === 0,
       size: Math.min(SKILL_EVAL_STATS_PAGE_SIZE, maxRecords - records.length),
       sort: [{ startedAt: { order: "desc" } }, { id: { order: "desc", unmapped_type: "keyword" } }],
-      query: skillEvalRecordQuery(range, skillFilter),
+      query: skillEvalRecordQuery(range, skillFilter, upperOrgLv1List),
       _source: { includes: skillEvalRecordSourceIncludes() }
     }
     if (searchAfter) body.search_after = searchAfter
@@ -2960,7 +2997,7 @@ async function fetchSkillEvalStatRecords(
   }
 
   const result = { records, totalRecordHits }
-  setCachedSkillEvalStatRecords(range, skillFilter, recordLimit, result)
+  setCachedSkillEvalStatRecords(range, skillFilter, upperOrgLv1List, recordLimit, result)
   return result
 }
 
@@ -2972,9 +3009,10 @@ const skillEvalStatRecordCache = new Map<
 function getCachedSkillEvalStatRecords(
   range: TimeRange,
   skillFilter: SkillEvalFilter | undefined,
+  upperOrgLv1List: string[],
   recordLimit: number
 ): SkillEvalStatRecordResult | undefined {
-  const key = skillEvalStatRecordCacheKey(range, skillFilter, recordLimit)
+  const key = skillEvalStatRecordCacheKey(range, skillFilter, upperOrgLv1List, recordLimit)
   const cached = skillEvalStatRecordCache.get(key)
   if (!cached) return undefined
   if (cached.expiresAt <= Date.now()) {
@@ -2989,10 +3027,11 @@ function getCachedSkillEvalStatRecords(
 function setCachedSkillEvalStatRecords(
   range: TimeRange,
   skillFilter: SkillEvalFilter | undefined,
+  upperOrgLv1List: string[],
   recordLimit: number,
   result: SkillEvalStatRecordResult
 ): void {
-  const key = skillEvalStatRecordCacheKey(range, skillFilter, recordLimit)
+  const key = skillEvalStatRecordCacheKey(range, skillFilter, upperOrgLv1List, recordLimit)
   skillEvalStatRecordCache.set(key, {
     expiresAt: Date.now() + SKILL_EVAL_STAT_CACHE_TTL_MS,
     result
@@ -3007,13 +3046,16 @@ function setCachedSkillEvalStatRecords(
 function skillEvalStatRecordCacheKey(
   range: TimeRange,
   skillFilter: SkillEvalFilter | undefined,
+  upperOrgLv1List: string[],
   recordLimit: number
 ): string {
+  const sortedOrgList = [...upperOrgLv1List].sort()
   return [
     range.from,
     range.to,
     Math.max(1, recordLimit),
-    skillEvalFilterCacheKey(skillFilter)
+    skillEvalFilterCacheKey(skillFilter),
+    sortedOrgList.join("\u0002")
   ].join("\u0001")
 }
 
@@ -3146,7 +3188,8 @@ function fallbackTraceDetailFromSkillEvalRecord(
 
 async function fetchSkillEvalRecordSkillList(
   range: TimeRange,
-  skillFilter?: SkillEvalFilter,
+  skillFilter: SkillEvalFilter | undefined,
+  upperOrgLv1List: string[],
   allowedSkillNames?: Set<string>,
   page = 1,
   pageSize = 10,
@@ -3164,7 +3207,7 @@ async function fetchSkillEvalRecordSkillList(
   const body = {
     track_total_hits: true,
     size: 0,
-    query: skillEvalRecordQuery(range, skillFilter),
+    query: skillEvalRecordQuery(range, skillFilter, upperOrgLv1List),
     aggs: {
       ...(!allowedSkillNames && !skillSearch
         ? { skill_count: { cardinality: { field: "rawSkillName" } } }

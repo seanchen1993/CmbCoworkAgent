@@ -14,6 +14,7 @@ import {
   ChevronDown,
   Check,
   Download,
+  ExternalLink,
   Search,
   X,
   User,
@@ -71,6 +72,8 @@ type UserInfoLite = {
   sapId?: string
   ystId?: string
 }
+
+const SKILL_EVAL_DOC_URL = "https://doc.cmbchina.com/f/v?id=_41lRJE"
 
 // ─────────────────────────────────────────────────────────
 // Time control bar
@@ -158,6 +161,7 @@ function TimeControlBar({
   onExport,
   loading,
   exporting,
+  exportVisible = true,
   orgFilter
 }: {
   granularity: Granularity
@@ -169,6 +173,7 @@ function TimeControlBar({
   onExport: () => void
   loading: boolean
   exporting: boolean
+  exportVisible?: boolean
   orgFilter?: ReactNode
 }) {
   const [showDatePicker, setShowDatePicker] = useState(false)
@@ -263,20 +268,22 @@ function TimeControlBar({
 
       {/* Spacer + Export + Refresh */}
       <div className="flex-1" />
-      <Button
-        variant="ghost"
-        size="sm"
-        className="gap-1.5 text-xs"
-        onClick={onExport}
-        disabled={exporting || loading}
-      >
-        {exporting ? (
-          <Loader2 className="size-3.5 animate-spin" />
-        ) : (
-          <Download className="size-3.5" />
-        )}
-        导出Excel
-      </Button>
+      {exportVisible && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="gap-1.5 text-xs"
+          onClick={onExport}
+          disabled={exporting || loading}
+        >
+          {exporting ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <Download className="size-3.5" />
+          )}
+          导出Excel
+        </Button>
+      )}
       <Button
         variant="ghost"
         size="sm"
@@ -1117,10 +1124,12 @@ function UserDetailPage({
 
 function DashboardTabBar({
   activeTab,
-  onChange
+  onChange,
+  rightContent
 }: {
   activeTab: DashboardMainTab
   onChange: (tab: DashboardMainTab) => void
+  rightContent?: ReactNode
 }): React.JSX.Element {
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
     { id: "overview", label: "经营概览" },
@@ -1143,6 +1152,7 @@ function DashboardTabBar({
           {tab.label}
         </button>
       ))}
+      {rightContent ? <div className="ml-auto flex items-center pb-2">{rightContent}</div> : null}
     </div>
   )
 }
@@ -1988,6 +1998,7 @@ export function DashboardView(): React.JSX.Element {
     [myUploadedSkillNames]
   )
   const skillEvalSearchQuery = debouncedSkillEvalSearch.trim()
+  const skillEvalOrgScopeKey = selectedOrgLv1List.join("\u0001")
   const skillEvalScopeKey = skillEvalMineOnly
     ? `mine:${myUploadedSkillNamesKey}:${skillEvalSearchQuery}`
     : `all:${skillEvalSearchQuery}`
@@ -2024,7 +2035,7 @@ export function DashboardView(): React.JSX.Element {
   useEffect(() => {
     setSkillEvalSelectedSkillKey(undefined)
     clearSkillEval()
-  }, [clearSkillEval, range.from, range.to, skillEvalScopeKey])
+  }, [clearSkillEval, range.from, range.to, skillEvalScopeKey, skillEvalOrgScopeKey])
 
   useEffect(() => {
     if (skillEvalSelectedSkillKey === undefined || skillEvalSelectedSkillKey === null || !skillEval)
@@ -2748,6 +2759,10 @@ export function DashboardView(): React.JSX.Element {
     void window.electron.openExternal(url)
   }, [])
 
+  const handleSkillEvalDocOpen = useCallback(() => {
+    void window.electron.openExternal(SKILL_EVAL_DOC_URL)
+  }, [])
+
   const handleCommitTotalClick = useCallback(() => {
     setCommitDepartmentValue("")
     setCommitDepartmentFilter("")
@@ -3059,6 +3074,7 @@ export function DashboardView(): React.JSX.Element {
         onExport={handleExport}
         loading={loading}
         exporting={exporting}
+        exportVisible={activeMainTab !== "skill-eval"}
         orgFilter={
           subPage.kind === "main" ? (
             <OrgFilterBar
@@ -3079,7 +3095,24 @@ export function DashboardView(): React.JSX.Element {
       )}
 
       {subPage.kind === "main" && (
-        <DashboardTabBar activeTab={activeMainTab} onChange={setActiveMainTab} />
+        <DashboardTabBar
+          activeTab={activeMainTab}
+          onChange={setActiveMainTab}
+          rightContent={
+            activeMainTab === "skill-eval" ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="gap-1.5 text-xs text-primary hover:text-primary"
+                onClick={handleSkillEvalDocOpen}
+              >
+                <ExternalLink className="size-3.5" />
+                了解技能评估与自进化
+              </Button>
+            ) : null
+          }
+        />
       )}
 
       {subPage.kind === "user-list" ? (
