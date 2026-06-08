@@ -6623,7 +6623,6 @@ const FILTERED_TOOL_EXCLUDES = [
   "invoke_deferred_tool",
   // 内置代码执行辅助
   "code_exec",
-  "prepare_save_code_exec_tool",
   "save_code_exec_tool",
   // 内置任务管理
   "write_todos"
