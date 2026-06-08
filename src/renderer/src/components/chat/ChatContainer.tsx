@@ -3205,7 +3205,9 @@ export function ChatContainer({
         }
       }
 
-      if (threadError) {
+      // Reset both the error message and its structured detail at turn start so
+      // no stale diagnostics linger into the new turn.
+      if (threadError || errorDetail) {
         clearError()
       }
 

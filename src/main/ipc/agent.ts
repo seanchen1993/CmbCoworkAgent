@@ -2567,6 +2567,15 @@ function getCompletedTaskTitle(threadTitle: string | undefined, message: string)
 const lastFetchErrorByChannel = new Map<string, FetchErrorInfo>()
 
 /**
+ * Live reference to the current turn's failover attempts, keyed by channel.
+ * The handlers register their (const, mutated-in-place) `failoverAttempts` array
+ * here so the catch block can surface the failover chain in the error detail
+ * without hoisting the array across the large try/catch scope. Cleared at turn
+ * entry and after consumption.
+ */
+const lastFailoverByChannel = new Map<string, FailoverAttempt[]>()
+
+/**
  * Build ModelRetryHooks that forward retry status to the renderer as custom
  * stream events on the given channel. Used to display the inline "retrying…"
  * indicator in the chat view.
@@ -2615,14 +2624,17 @@ function emitErrorDetail(
   window: BrowserWindow,
   channel: string,
   error: unknown,
-  extras?: { failover?: FailoverAttempt[]; model?: string }
+  extras?: { model?: string }
 ): ApiErrorDetail {
   const fetchDetail = lastFetchErrorByChannel.get(channel)
   lastFetchErrorByChannel.delete(channel)
+  const attempts = lastFailoverByChannel.get(channel) ?? []
+  lastFailoverByChannel.delete(channel)
   const detail = extractErrorDetail(error, fetchDetail)
-  const failover = (extras?.failover ?? [])
-    .filter((a) => a.modelId !== extras?.model)
-    .map((a) => ({ modelId: a.modelId, reason: extractErrorDetail(a.error).reason }))
+  const failover = attempts.map((a) => ({
+    modelId: a.modelId,
+    reason: extractErrorDetail(a.error).reason
+  }))
   safeSendToWindow(window, channel, {
     type: "custom",
     data: {
@@ -3290,9 +3302,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     async (event, { threadId, message }: { threadId: string; message: string }) => {
       const window = BrowserWindow.fromWebContents(event.sender)
       const channel = `agent:stream:${threadId}`
-      // Drop any fetch-error captured by a previous turn so it can't be
-      // misattributed to this run's error detail.
+      // Drop any fetch-error / failover record captured by a previous turn so it
+      // can't be misattributed to this run's error detail.
       lastFetchErrorByChannel.delete(channel)
+      lastFailoverByChannel.delete(channel)
       const goalCommand = parseGoalSlashCommand(message)
       const result = handleGoalNonStartingControlCommand({
         threadId,
@@ -4528,6 +4541,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           invokeRoutingResult?.layer !== "pinned"
         )
         const failoverAttempts: FailoverAttempt[] = []
+        // Expose this turn's attempts to the catch handler (same array ref).
+        lastFailoverByChannel.set(channel, failoverAttempts)
         const coordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
         usedModelId = effectiveModelId
         const isFirstAttempt = true
@@ -5951,6 +5966,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     ) => {
       const channel = `agent:stream:${threadId}`
       lastFetchErrorByChannel.delete(channel)
+      lastFailoverByChannel.delete(channel)
       const window = BrowserWindow.fromWebContents(event.sender)
 
       console.log("[Agent] Received resume request:", { threadId, command, modelId })
@@ -6316,6 +6332,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           resumeRoutingResult?.layer !== "pinned"
         )
         const resumeFailoverAttempts: FailoverAttempt[] = []
+        lastFailoverByChannel.set(channel, resumeFailoverAttempts)
         const resumeCoordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
         let resumeUsedModelId = effectiveResumeModelId
         let resumeStream: AsyncIterable<unknown> | null = null
@@ -6691,6 +6708,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   ipcMain.on("agent:interrupt", async (event, { threadId, decision }: AgentInterruptParams) => {
     const channel = `agent:stream:${threadId}`
     lastFetchErrorByChannel.delete(channel)
+    lastFailoverByChannel.delete(channel)
     const window = BrowserWindow.fromWebContents(event.sender)
     const boundaryGoal = goalManager.getActive(threadId)
     const boundaryGoalId = boundaryGoal?.goalId ?? null
@@ -7021,6 +7039,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           interruptRoutingResult?.layer !== "pinned"
         )
         const intFailoverAttempts: FailoverAttempt[] = []
+        lastFailoverByChannel.set(channel, intFailoverAttempts)
         const interruptCoordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
         let intUsedModelId = effectiveInterruptModelId
         let intStream: AsyncIterable<unknown> | null = null
