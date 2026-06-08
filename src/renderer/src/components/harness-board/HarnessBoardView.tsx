@@ -83,6 +83,7 @@ import type {
   HarnessBoardCompatibility,
   HarnessStatus,
   HarnessWorkflowNextAction,
+  HarnessWorkflow,
   Thread
 } from "@/types"
 import { HARNESS_SOURCE } from "../../../../shared/harness-board-types"
@@ -471,6 +472,14 @@ function createUnboundRunDetail(
     },
     sessions
   }
+}
+
+function workflowForProjectRun(
+  detail: HarnessProjectDetailViewModel,
+  run: HarnessFeatureSummary
+): HarnessWorkflow {
+  const workflowId = run.workflowId?.trim()
+  return workflowId ? detail.dynamicWorkflows?.[workflowId] ?? detail.workflow : detail.workflow
 }
 
 function featureSessionKey(projectId: string, slug: string, threadId: string): string {
@@ -2352,7 +2361,7 @@ function ProjectDetailPage({
                       <FeatureCard
                         key={run.slug}
                         run={run}
-                        workflowNodes={detail.workflow.nodes}
+                        workflowNodes={workflowForProjectRun(detail, run).nodes}
                         onOpen={() => onOpenFeature(project.projectId, run.slug)}
                       />
                     ))}

@@ -941,11 +941,17 @@ function normalizeWatchRefs(
   return normalized.length > 0 ? normalized : fallback
 }
 
-function normalizeProjectRun(value: unknown, workflow: HarnessWorkflow): HarnessFeatureSummary | null {
+function normalizeProjectRun(
+  value: unknown,
+  defaultWorkflow: HarnessWorkflow,
+  dynamicWorkflows: Record<string, HarnessWorkflow>
+): HarnessFeatureSummary | null {
   if (!isObject(value)) return null
   const slug = normalizeText(value.featureId) || normalizeText(value.featureName)
   if (!slug) return null
 
+  const workflowId = normalizeText(value.workflowId).trim()
+  const workflow = workflowId ? dynamicWorkflows[workflowId] ?? defaultWorkflow : defaultWorkflow
   const currentNodeId = normalizeText(value.currentNodeId) || "unknown"
   const currentNodeStatus = normalizeNodeStatus(value.currentNodeStatus)
   const currentNodeStatusLabel = normalizeText(value.currentNodeStatusLabel).trim()
@@ -971,6 +977,7 @@ function normalizeProjectRun(value: unknown, workflow: HarnessWorkflow): Harness
     featureStatus,
     ...(featureStatusLabel ? { featureStatusLabel } : {}),
     overallStatus: status,
+    ...(workflowId ? { workflowId } : {}),
     currentNodeId,
     currentNodeStatus,
     ...(currentNodeStatusLabel ? { currentNodeStatusLabel } : {}),
@@ -981,10 +988,14 @@ function normalizeProjectRun(value: unknown, workflow: HarnessWorkflow): Harness
   }
 }
 
-function normalizeProjectRuns(snapshot: Record<string, unknown>, workflow: HarnessWorkflow): HarnessFeatureSummary[] {
+function normalizeProjectRuns(
+  snapshot: Record<string, unknown>,
+  workflow: HarnessWorkflow,
+  dynamicWorkflows: Record<string, HarnessWorkflow>
+): HarnessFeatureSummary[] {
   if (!Array.isArray(snapshot.runs)) return []
   return snapshot.runs
-    .map((run) => normalizeProjectRun(run, workflow))
+    .map((run) => normalizeProjectRun(run, workflow, dynamicWorkflows))
     .filter((run): run is HarnessFeatureSummary => run !== null)
 }
 
@@ -1088,6 +1099,17 @@ function normalizeWorkflow(value: unknown): HarnessWorkflow {
           .filter((node): node is HarnessWorkflow["nodes"][number] => node !== null)
       : []
   }
+}
+
+function normalizeDynamicWorkflows(value: unknown): Record<string, HarnessWorkflow> {
+  if (!isObject(value)) return {}
+  const dynamicWorkflows: Record<string, HarnessWorkflow> = {}
+  for (const [key, workflow] of Object.entries(value)) {
+    const workflowId = normalizeText(key).trim()
+    if (!workflowId) continue
+    dynamicWorkflows[workflowId] = normalizeWorkflow(workflow)
+  }
+  return dynamicWorkflows
 }
 
 function workflowArtifactDefinitions(workflow: HarnessWorkflow): Map<string, Map<string, HarnessWorkflowArtifactDefinition>> {
@@ -1505,6 +1527,7 @@ function makeProjectDetailViewModel(
   project: HarnessProjectMetadata,
   data: {
     workflow: HarnessWorkflow
+    dynamicWorkflows?: Record<string, HarnessWorkflow>
     runs: HarnessFeatureSummary[]
     watchRefs: HarnessWatchRef[]
     projectState: HarnessStatus
@@ -1527,6 +1550,7 @@ function makeProjectDetailViewModel(
     },
     projectState: data.projectState,
     workflow: data.workflow,
+    dynamicWorkflows: data.dynamicWorkflows ?? {},
     runs: data.runs,
     watchRefs: data.watchRefs,
     loading: false,
@@ -1913,6 +1937,7 @@ export function getHarnessProjectDetails(
     try {
       const snapshot = runInspectAdapterBatch(group.projects, "project", group.cwd)
       const workflow = normalizeWorkflow(snapshot.workflow)
+      const dynamicWorkflows = normalizeDynamicWorkflows(snapshot.dynamicWorkflows)
       if (!isObject(snapshot.projects)) {
         throw new Error("Inspect adapter returned invalid batch JSON: projects is not an object")
       }
@@ -1930,9 +1955,10 @@ export function getHarnessProjectDetails(
         }
 
         const fallbackWatchRefs = makeWatchRefs()
-        const runs = normalizeProjectRuns(projectData, workflow)
+        const runs = normalizeProjectRuns(projectData, workflow, dynamicWorkflows)
         result[project.projectId] = makeProjectDetailViewModel(project, {
           workflow,
+          dynamicWorkflows,
           runs,
           watchRefs: normalizeWatchRefs(project, projectData.watchRefs, fallbackWatchRefs),
           projectState: projectAdapterLoadedStatus(project),
