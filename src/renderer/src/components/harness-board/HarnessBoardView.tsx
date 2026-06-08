@@ -65,7 +65,7 @@ import {
   useThreadContext
 } from "@/lib/thread-context"
 import { toast } from "sonner"
-import { marketApi, type MarketItem } from "../../api/market"
+import type { MarketPluginItem } from "../../api/market-plugins"
 import type {
   HarnessArtifact,
   HarnessArtifactType,
@@ -127,7 +127,8 @@ const harnessNameRuleMessage = "仅支持中文、英文字母、数字、-、_"
 const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
 const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
 const OTHER_ADAPTER_SCENARIO = "其他类别"
-const ADAPTER_SELECT_PLACEHOLDER = "请选择已安装的 AUTOBIZDEVOPS 插件"
+const ADAPTER_SELECT_PLACEHOLDER = "请选择已安装的支持项目模式的插件"
+const PROJECT_STATUS_POLL_INTERVAL_MS = 10000
 
 const preventHarnessDialogOutsideClose: React.ComponentProps<typeof DialogContent>["onPointerDownOutside"] =
   (event) => {
@@ -902,8 +903,8 @@ function normalizeAdapterMarketName(value?: string): string {
   return value?.trim() || ""
 }
 
-function buildMarketPluginMap(items: MarketItem[]): Map<string, MarketItem> {
-  const map = new Map<string, MarketItem>()
+function buildMarketPluginMap(items: MarketPluginItem[]): Map<string, MarketPluginItem> {
+  const map = new Map<string, MarketPluginItem>()
   for (const item of items) {
     const name = normalizeAdapterMarketName(item.name)
     if (name) map.set(name, item)
@@ -922,7 +923,7 @@ function buildInstalledPluginMap(items: PluginMetadata[]): Map<string, PluginMet
 
 function applyMarketAdapterDisplayData(
   registry: HarnessAdapterRegistryItem[],
-  marketPlugins: MarketItem[],
+  marketPlugins: MarketPluginItem[],
   installedPlugins: PluginMetadata[]
 ): HarnessAdapterRegistryItem[] {
   const marketByName = buildMarketPluginMap(marketPlugins)
@@ -951,9 +952,10 @@ function applyMarketAdapterDisplayData(
   })
 }
 
-async function loadHarnessMarketPlugins(): Promise<MarketItem[]> {
+async function loadHarnessMarketPlugins(): Promise<MarketPluginItem[]> {
   try {
-    const response = await marketApi.getPlugins({ allowMockOnError: false, silent: true })
+    const { getMarketPlugins } = await import("../../api/market-plugins")
+    const response = await getMarketPlugins()
     return response.success && response.data ? response.data : []
   } catch {
     return []
@@ -966,6 +968,14 @@ async function loadHarnessInstalledPlugins(): Promise<PluginMetadata[]> {
   } catch {
     return []
   }
+}
+
+function scheduleHarnessAdapterDisplayRefresh(task: () => void): void {
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(task, { timeout: 1000 })
+    return
+  }
+  window.setTimeout(task, 0)
 }
 
 function groupAdaptersByUseScenario(registry: HarnessAdapterRegistryItem[]): AdapterScenarioGroup[] {
@@ -1020,7 +1030,7 @@ function AdapterSelectItem({ adapter }: { adapter: HarnessAdapterRegistryItem })
       value={adapter.id}
       textValue={formatAdapterSelectLabel(adapter)}
       disabled={!adapter.boardCompatibility.compatible}
-      className="py-2 pl-4 pr-10"
+      className="group py-2 pl-4 pr-10"
     >
       <span className="flex min-w-0 max-w-[calc(var(--radix-select-trigger-width)-3rem)] flex-col gap-1">
         <span className="truncate">
@@ -1028,7 +1038,7 @@ function AdapterSelectItem({ adapter }: { adapter: HarnessAdapterRegistryItem })
         </span>
         {adapter.description && (
           <span
-            className="line-clamp-2 whitespace-normal break-words text-xs leading-5 text-muted-foreground"
+            className="line-clamp-2 whitespace-normal break-words text-xs leading-5 text-muted-foreground group-focus:text-accent-foreground group-data-[state=checked]:text-accent-foreground group-data-[highlighted]:text-accent-foreground"
             title={adapter.description}
           >
             {adapter.description}
@@ -1102,7 +1112,7 @@ function ProjectFormDialog({
         </DialogHeader>
         <div className="grid gap-4 py-1">
           <section className="rounded-md border border-border bg-muted/30 p-3">
-            <div className="mb-3 text-sm font-semibold">选择 Plugin </div>
+            <div className="mb-3 text-sm font-semibold">选择插件</div>
             <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
               <Select
                 value={form.adapterId}
@@ -1196,7 +1206,7 @@ function ProjectFormDialog({
                   <Input
                     value={form.workspacePath}
                     readOnly
-                    placeholder="请选择 AUTOBIZDEVOPS 插件工作区路径"
+                    placeholder="请选择插件工作区路径"
                     className={harnessProjectCreateInputClassName}
                   />
                   <Button
@@ -1277,7 +1287,7 @@ function ProjectEditDialog({
         </DialogHeader>
         <div className="grid gap-4 py-1">
           <section className="rounded-md border border-border bg-muted/30 p-3">
-            <div className="mb-3 text-sm font-semibold">选择 Plugin </div>
+            <div className="mb-3 text-sm font-semibold">选择插件</div>
             <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
               <Select
                 value={form.adapterId}
@@ -1390,7 +1400,7 @@ function ProjectEditDialog({
                   value={form.workspacePath}
                   readOnly
                   aria-readonly="true"
-                  placeholder="请选择 AUTOBIZDEVOPS 插件工作区路径"
+                  placeholder="请选择插件工作区路径"
                   className="bg-muted text-muted-foreground"
                 />
               </div>
@@ -3254,12 +3264,6 @@ export function HarnessBoardView({
       if (requestId !== loadProjectsRequestIdRef.current) return
       setProjects(items)
       setAdapterRegistry(applyMarketAdapterDisplayData(registry, [], []))
-      void Promise.all([loadHarnessMarketPlugins(), loadHarnessInstalledPlugins()]).then(
-        ([marketPlugins, installedPlugins]) => {
-          if (requestId !== loadProjectsRequestIdRef.current) return
-          setAdapterRegistry(applyMarketAdapterDisplayData(registry, marketPlugins, installedPlugins))
-        }
-      )
       const allProjectIds = items.map((item) => item.projectId)
       if (allProjectIds.length > 0) {
         const details = await window.api.harnessBoard.getProjectDetails(allProjectIds)
@@ -3269,6 +3273,15 @@ export function HarnessBoardView({
       setSelectedProjectId((current) =>
         current && items.some((item) => item.projectId === current) ? current : null
       )
+      scheduleHarnessAdapterDisplayRefresh(() => {
+        if (requestId !== loadProjectsRequestIdRef.current) return
+        void Promise.all([loadHarnessMarketPlugins(), loadHarnessInstalledPlugins()]).then(
+          ([marketPlugins, installedPlugins]) => {
+            if (requestId !== loadProjectsRequestIdRef.current) return
+            setAdapterRegistry(applyMarketAdapterDisplayData(registry, marketPlugins, installedPlugins))
+          }
+        )
+      })
     } catch (error) {
       if (requestId !== loadProjectsRequestIdRef.current) return
       setLoadError(cleanIpcError(error))
@@ -3304,7 +3317,7 @@ export function HarnessBoardView({
   useEffect(() => {
     const timer = window.setInterval(() => {
       void refreshProjectDetailsInBackground()
-    }, 5000)
+    }, PROJECT_STATUS_POLL_INTERVAL_MS)
 
     return () => window.clearInterval(timer)
   }, [refreshProjectDetailsInBackground])
@@ -3326,7 +3339,7 @@ export function HarnessBoardView({
     if (!selectedProjectId || selectedFeature) return
     const timer = window.setInterval(() => {
       void refreshSelectedProjectDetailInBackground()
-    }, 5000)
+    }, PROJECT_STATUS_POLL_INTERVAL_MS)
 
     return () => window.clearInterval(timer)
   }, [refreshSelectedProjectDetailInBackground, selectedFeature, selectedProjectId])
