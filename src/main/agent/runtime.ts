@@ -106,6 +106,8 @@ import {
 import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
   createHookScope,
+  createInheritedHookScope,
+  resolvePluginIdForSkillPath,
   extractPluginIdFromProviderKey,
   resolveEnabledHooksForRun,
   type ScopeSkipCallback,
@@ -2182,6 +2184,14 @@ export interface CreateAgentRuntimeOptions {
   maxRetryAttempts?: number
   /** Callback invoked after each hook executes — used to emit results to the renderer. */
   onHookResult?: HookResultCallback
+  /**
+   * Hook-result sink for coordinator workers. Workers run detached/async so
+   * their hooks must be delivered on a durable channel rather than the spawning
+   * turn's run stream (which `onHookResult` targets and which closes when the
+   * turn ends). When set, coordinator workers use this instead of `onHookResult`
+   * for all hook records; falls back to `onHookResult` when unset.
+   */
+  onCoordinatorWorkerHookResult?: HookResultCallback
   /** Coordinator async worker updates for renderer/UI observability. */
   onCoordinatorWorkerEvent?: (event: {
     worker: CoordinatorWorkerSnapshot
@@ -2232,6 +2242,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     agentMode = "normal",
     disableSubagents = false,
     onHookResult,
+    onCoordinatorWorkerHookResult,
     onCoordinatorWorkerEvent,
     onCoordinatorNotificationAction,
     hookTurnId,
@@ -2259,6 +2270,18 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Workspace path:", workspacePath)
   console.log("[Runtime] Agent mode:", agentMode)
   const hookScope = providedHookScope ?? createHookScope()
+  // Coordinator mode: the coordinator never "uses" a skill itself (it has no
+  // filesystem/tools and only delegates to workers), so a user's explicit
+  // slash-selected skill would otherwise never activate any scope. Treat that
+  // explicit selection as a main-agent activation here — activating the skill
+  // (and its owning plugin, when it has one) on the coordinator's hookScope so
+  // every worker spawned this turn inherits it via createInheritedHookScope.
+  // Only the explicit slash selection counts, not auto-routed skills.
+  if (isCoordinatorMode && options.coordinatorExplicitSelectedSkill) {
+    const sel = options.coordinatorExplicitSelectedSkill
+    const ownerPluginId = resolvePluginIdForSkillPath(sel.skillPath)
+    hookScope.activateSkill(sel.skillName, ownerPluginId, sel.skillPath)
+  }
   const resolveHooksForContext = (event: HookEvent, context: HookContext) =>
     resolveEnabledHooksForRun(
       workspacePath,
@@ -2819,7 +2842,20 @@ The workspace root is: ${workspacePath}`
     console.log("[Runtime] Added code_exec prompt")
   }
 
-  const coordinatorProjectInstructions = [agentsPrompt.prompt, extraSystemPrompt]
+  const coordinatorWorkingDirAppendix = workingDirPromptAppendix?.trim()
+  const coordinatorProjectInstructions = [
+    agentsPrompt.prompt,
+    extraSystemPrompt
+  ]
+    .filter(Boolean)
+    .join("\n\n")
+  const coordinatorWorkerProjectInstructions = [
+    agentsPrompt.prompt,
+    coordinatorWorkingDirAppendix
+      ? `### Project Mode Adapter Instructions\n\n${coordinatorWorkingDirAppendix}`
+      : "",
+    extraSystemPrompt
+  ]
     .filter(Boolean)
     .join("\n\n")
 
@@ -2856,7 +2892,7 @@ The workspace root is: ${workspacePath}`
 
   const coordinatorWorkerRunner: CoordinatorWorkerRunner = async (workerInput) => {
     const workerSubagent = buildCoordinatorWorkerSubagents(
-      coordinatorProjectInstructions || undefined,
+      coordinatorWorkerProjectInstructions || undefined,
       undefined,
       threadId,
       timeContext
@@ -2926,6 +2962,43 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       LocalSandbox.cancelBackgroundTasks(workerInput.workerThreadId)
     }
     workerInput.abortSignal.addEventListener("abort", cancelWorkerBackgroundTasks, { once: true })
+    // Workers run detached/async; route their hook records through the durable
+    // worker-hook sink so they survive past the spawning turn's run stream
+    // (which `onHookResult` targets). Falls back to `onHookResult` when no
+    // durable sink was provided.
+    const baseWorkerOnHookResult = onCoordinatorWorkerHookResult ?? onHookResult
+    const workerOnHookResult: HookResultCallback | undefined = baseWorkerOnHookResult
+      ? (event, hook, result) => {
+          const hookWithWorkerContext = {
+            ...hook,
+            parentThreadId: workerInput.parentThreadId,
+            workerId: workerInput.workerId,
+            workerThreadId: workerInput.workerThreadId,
+            workerTurn: workerInput.workerTurn
+          } as typeof hook & {
+            parentThreadId: string
+            workerId: string
+            workerThreadId: string
+            workerTurn: number
+          }
+          baseWorkerOnHookResult(event, hookWithWorkerContext, result)
+        }
+      : undefined
+    // Coordinator harness identity inherited by every worker runtime below, so
+    // worker hooks AND execute child-process env match the main session (both
+    // derive from these LocalSandbox/runtime options). SESSION_ID intentionally
+    // stays the worker thread id and is not part of this bundle.
+    const workerHarnessContext = {
+      systemId,
+      pluginRoot,
+      pluginId,
+      pluginName,
+      pluginWorkspace,
+      featureId,
+      projectCode,
+      pluginOutputDir,
+      hookTurnId
+    }
 
     try {
       if (workerInput.abortSignal.aborted) {
@@ -2935,7 +3008,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         prompt: workerInput.prompt,
         sessionId: workerInput.workerThreadId,
         workspacePath,
-        onHookResult,
+        onHookResult: workerOnHookResult,
         metadata: {
           coordinatorWorkerId: workerInput.workerId,
           coordinatorWorkerRole: workerInput.role,
@@ -3024,6 +3097,17 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       let workerStream: AsyncIterable<unknown> | null = null
       let usedWorkerModelId = workerRoutingResult?.resolvedModelId ?? modelId
 
+      // Inherit the coordinator's plugin/skill activation scope so plugin- and
+      // skill-scoped hooks (e.g. a plugin's edit_file PreToolUse) fire inside
+      // the worker the same way they see the parent's activations in a task-tool
+      // subagent. Workers can run in parallel, so we snapshot the coordinator
+      // scope at spawn time into a fresh per-worker scope rather than sharing the
+      // mutable instance — that keeps concurrent workers from cross-contaminating
+      // each other's activations while still seeing what was active when they
+      // launched. Trade-off: activations a worker makes during its run stay local
+      // to that worker and are not reflected back to the coordinator.
+      const workerHookScope = createInheritedHookScope(hookScope)
+
       for (const candidateId of workerOrderedChain) {
         if (workerInput.abortSignal.aborted) break
         try {
@@ -3046,7 +3130,9 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             abortSignal: workerInput.abortSignal,
             retryHooks,
             maxRetryAttempts,
-            onHookResult
+            hookScope: workerHookScope,
+            ...workerHarnessContext,
+            onHookResult: workerOnHookResult
           })
 
           workerStream = await workerAgent.stream(
@@ -3113,7 +3199,9 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             abortSignal: workerInput.abortSignal,
             retryHooks,
             maxRetryAttempts,
-            onHookResult
+            hookScope: workerHookScope,
+            ...workerHarnessContext,
+            onHookResult: workerOnHookResult
           })
           activeWorkerStream = await workerAgent.stream(null, streamConfig)
           usedWorkerModelId = nextCandidate
@@ -3161,7 +3249,9 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             abortSignal: workerInput.abortSignal,
             retryHooks,
             maxRetryAttempts,
-            onHookResult
+            hookScope: workerHookScope,
+            ...workerHarnessContext,
+            onHookResult: workerOnHookResult
           })
           const handoffStream = await handoffAgent.stream(
             {
@@ -3212,7 +3302,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           workerStopHookFailure = message
           console.warn("[CoordinatorWorker][StopHook]", message)
         },
-        onHookResult
+        onHookResult: workerOnHookResult
       })
       if (!stopPassed) {
         throw new Error(workerStopHookFailure ?? "Stop hook blocked worker completion.")
@@ -3361,6 +3451,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       shell,
       timezone: timeContext.timezone,
       currentTime: timeContext.currentTime,
+      projectModeAdapterInstructions: coordinatorWorkingDirAppendix,
       projectInstructions: coordinatorProjectInstructions,
       turnContext: coordinatorTurnPrompt,
       hasBrowserTool: hasNamedTool("browser_playwright"),

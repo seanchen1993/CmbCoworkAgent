@@ -160,6 +160,8 @@ export interface DashboardCommitDetail {
   deletions: number
   triggeredBy?: string
   threadId?: string
+  /** 产生该 commit 代码的会话列表（优先取自采纳事件，可为多个）。 */
+  threadIds: string[]
   usedSkills: string[]
   skillCount: number
   codeGeneratedLines: number
@@ -246,8 +248,173 @@ export interface DashboardUserDetail {
   traces: DashboardTraceDetail[]
   tracePage: number
   tracePageSize: number
-  totalTraces: number
+  /** 当前视图模式下的翻页总数：thread → 会话数；trace → trace 总数。 */
+  total: number
+  traceViewMode?: DashboardTraceViewMode
   traceTriggerScope?: DashboardTraceTriggerScope
+}
+
+export interface DashboardProjectModeFeature {
+  slug: string
+  title: string
+  location?: string
+  statusLabel?: string
+  currentNodeStatusLabel?: string
+  summary?: string
+}
+
+export interface DashboardProjectModeSkillCount {
+  skill: string
+  count: number
+}
+
+export interface DashboardProjectModeToolUsage {
+  byTool: Array<{ tool: string; count: number }>
+  byToolAll: Array<{ tool: string; count: number }>
+  byToolFilteredAll: Array<{ tool: string; count: number }>
+  byToolAllFull: Array<{ tool: string; count: number }>
+  totalTools: number
+  totalToolCalls: number
+}
+
+export interface DashboardProjectModeTopUser {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName: string
+  count: number
+}
+
+export interface DashboardProjectModeOrgDistributionItem {
+  key: string
+  org: string
+  count: number
+  children: DashboardProjectModeOrgDistributionItem[]
+}
+
+export interface DashboardProjectModeAdapterShareItem {
+  name: string
+  count: number
+}
+
+export interface DashboardProjectModeAnalytics {
+  topUsers: DashboardProjectModeTopUser[]
+  byOrg: DashboardProjectModeOrgDistributionItem[]
+  byAdapter: DashboardProjectModeAdapterShareItem[]
+}
+
+export interface DashboardProjectModeProject {
+  projectId: string
+  name: string
+  description?: string
+  systemName?: string
+  workspacePath?: string
+  adapterName?: string
+  adapterVersion?: string
+  creatorSapId?: string
+  creatorYstId?: string
+  creatorUserName?: string
+  creatorOrgName?: string
+  creatorUpperOrgLv0?: string
+  creatorUpperOrgLv1?: string
+  lifecycleStatus?: string
+  compatible?: boolean
+  compatibilityStatus?: string
+  featureCount: number
+  conversationCount: number
+  hasError: boolean
+  features: DashboardProjectModeFeature[]
+  topSkills: DashboardProjectModeSkillCount[]
+  codeStats: DashboardCodeStats | null
+}
+
+export type DashboardProjectModeProjectStatus = "active" | "archived"
+
+export interface DashboardProjectModeProjectCounts {
+  total: number
+  active: number
+  archived: number
+  totalFeatureCount: number
+  activeFeatureCount: number
+  archivedFeatureCount: number
+}
+
+export interface DashboardProjectModeProjectPageData {
+  projects: DashboardProjectModeProject[]
+  total: number
+  page: number
+  pageSize: number
+  status: DashboardProjectModeProjectStatus
+  keyword: string
+  adapterName: string
+  creatorKeyword: string
+  creatorOrgKeyword: string
+}
+
+export interface DashboardProjectModeProjectPageOptions {
+  upperOrgLv1?: string | string[] | null
+  status?: DashboardProjectModeProjectStatus | null
+  page?: number
+  pageSize?: number
+  keyword?: string | null
+  adapterName?: string | null
+  creatorKeyword?: string | null
+  creatorOrgKeyword?: string | null
+}
+
+export interface DashboardProjectModeAdapter {
+  name: string
+  version?: string
+  projectCount: number
+  featureCount: number
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+}
+
+export interface DashboardProjectModeData {
+  summary: {
+    projectCount: number
+    featureCount: number
+    activeProjectCount: number
+    conversationCount: number
+    totalToolCalls: number
+    totalInputTokens: number
+    totalOutputTokens: number
+    totalTokens: number
+    skillCallCount: number
+    distinctSkillCount: number
+    codeStats: DashboardCodeStats | null
+  }
+  adapters: DashboardProjectModeAdapter[]
+  topSkills: DashboardProjectModeSkillCount[]
+  bySkillAdoption: SkillAdoptionRankingItem[]
+  tools: DashboardProjectModeToolUsage
+  analytics: DashboardProjectModeAnalytics
+  projectCounts: DashboardProjectModeProjectCounts
+  projectPage: DashboardProjectModeProjectPageData
+  projects: DashboardProjectModeProject[]
+}
+
+export interface DashboardProjectModeTracesOptions {
+  limit?: number
+  page?: number
+  pageSize?: number
+  tracePage?: number
+  tracePageSize?: number
+  mode?: DashboardTraceViewMode
+  viewMode?: DashboardTraceViewMode
+  triggerScope?: DashboardTraceTriggerScope
+  featureSlug?: string
+}
+
+export interface DashboardProjectModeTracesData {
+  traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  /** 当前视图模式下的翻页总数：thread → 会话数；trace → trace 总数。 */
+  total: number
+  traceViewMode: DashboardTraceViewMode
+  traceTriggerScope: DashboardTraceTriggerScope
 }
 
 export interface ProductivityData {
@@ -1615,6 +1782,18 @@ export function useDashboard() {
   const [productivity, setProductivity] = useState<ProductivityData | null>(null)
   const [feedback, setFeedback] = useState<FeedbackData | null>(null)
   const [skillEval, setSkillEval] = useState<DashboardSkillEvalSummary | null>(null)
+  const [projectMode, setProjectMode] = useState<DashboardProjectModeData | null>(null)
+  const [projectModeProjectPages, setProjectModeProjectPages] = useState<
+    Partial<Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>>
+  >({})
+  const [projectModeProjectPageLoading, setProjectModeProjectPageLoading] = useState<
+    Record<DashboardProjectModeProjectStatus, boolean>
+  >({ active: false, archived: false })
+  const [projectModeProjectPageError, setProjectModeProjectPageError] = useState<
+    Partial<Record<DashboardProjectModeProjectStatus, string>>
+  >({})
+  const [projectModeLoading, setProjectModeLoading] = useState(false)
+  const [projectModeError, setProjectModeError] = useState<string | null>(null)
   // 顶部全量组织（LV1）筛选可选项，随时间范围刷新。
   const [orgOptions, setOrgOptions] = useState<string[]>([])
 
@@ -1622,6 +1801,10 @@ export function useDashboard() {
   const userStatsFetchIdRef = useRef(0)
   const skillEvalFetchIdRef = useRef(0)
   const orgOptionsFetchIdRef = useRef(0)
+  const projectModeFetchIdRef = useRef(0)
+  const projectModeProjectPageFetchIdRef = useRef<
+    Record<DashboardProjectModeProjectStatus, number>
+  >({ active: 0, archived: 0 })
 
   const fetchAll = useCallback(async (r: TimeRange, g: Granularity, orgList: string[]) => {
     const id = ++fetchIdRef.current
@@ -1680,6 +1863,79 @@ export function useDashboard() {
       }
     },
     []
+  )
+
+  const fetchProjectMode = useCallback(async (r: TimeRange, g: Granularity, orgList: string[]) => {
+    const id = ++projectModeFetchIdRef.current
+    setProjectModeLoading(true)
+    setProjectModeError(null)
+
+    try {
+      const result = await window.api.dashboard.projectMode(r, g, { upperOrgLv1: orgList })
+      if (id !== projectModeFetchIdRef.current) return
+      if (!result.success) throw new Error(result.error ?? "获取项目模式数据失败")
+      const nextProjectMode = (result.data as DashboardProjectModeData) ?? null
+      projectModeProjectPageFetchIdRef.current.active += 1
+      projectModeProjectPageFetchIdRef.current.archived += 1
+      setProjectMode(nextProjectMode)
+      setProjectModeProjectPages(
+        nextProjectMode?.projectPage
+          ? { [nextProjectMode.projectPage.status]: nextProjectMode.projectPage }
+          : {}
+      )
+      setProjectModeProjectPageError({})
+      setProjectModeProjectPageLoading({ active: false, archived: false })
+    } catch (e) {
+      if (id !== projectModeFetchIdRef.current) return
+      setProjectModeError(e instanceof Error ? e.message : String(e))
+    } finally {
+      if (id === projectModeFetchIdRef.current) setProjectModeLoading(false)
+    }
+  }, [])
+
+  const fetchProjectModeProjectPage = useCallback(
+    async (
+      status: DashboardProjectModeProjectStatus,
+      page: number,
+      keyword: string,
+      pageSize: number,
+      adapterName: string,
+      creatorKeyword: string,
+      creatorOrgKeyword: string
+    ) => {
+      const id = ++projectModeProjectPageFetchIdRef.current[status]
+      setProjectModeProjectPageLoading((current) => ({ ...current, [status]: true }))
+      setProjectModeProjectPageError((current) => ({ ...current, [status]: undefined }))
+
+      try {
+        const result = await window.api.dashboard.projectModeProjects(range, {
+          upperOrgLv1: selectedOrgLv1List,
+          status,
+          page,
+          pageSize,
+          keyword,
+          adapterName,
+          creatorKeyword,
+          creatorOrgKeyword
+        })
+        if (id !== projectModeProjectPageFetchIdRef.current[status]) return
+        if (!result.success) throw new Error(result.error ?? "获取项目列表失败")
+        const pageData = result.data as DashboardProjectModeProjectPageData | undefined
+        if (!pageData) throw new Error("获取项目列表失败")
+        setProjectModeProjectPages((current) => ({ ...current, [status]: pageData }))
+      } catch (e) {
+        if (id !== projectModeProjectPageFetchIdRef.current[status]) return
+        setProjectModeProjectPageError((current) => ({
+          ...current,
+          [status]: e instanceof Error ? e.message : String(e)
+        }))
+      } finally {
+        if (id === projectModeProjectPageFetchIdRef.current[status]) {
+          setProjectModeProjectPageLoading((current) => ({ ...current, [status]: false }))
+        }
+      }
+    },
+    [range, selectedOrgLv1List]
   )
 
   const fetchSkillEvalPage = useCallback(
@@ -1898,7 +2154,6 @@ export function useDashboard() {
     [fetchUserStatsOnly, range, granularity]
   )
 
-
   const resetUserOrgDrilldown = useCallback(() => {
     setSelectedOrgLv1List([])
   }, [])
@@ -1918,6 +2173,14 @@ export function useDashboard() {
     productivity,
     feedback,
     skillEval,
+    projectMode,
+    projectModeLoading,
+    projectModeError,
+    projectModeProjectPages,
+    projectModeProjectPageLoading,
+    projectModeProjectPageError,
+    fetchProjectMode,
+    fetchProjectModeProjectPage,
     changeGranularity,
     navigate,
     setCustomRange,

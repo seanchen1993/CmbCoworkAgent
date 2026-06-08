@@ -1,7 +1,7 @@
 import type { ReactNode } from "react"
 import { Zap } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import type { MarketItemType } from "../../api/market"
+import type { MarketItemType } from "../../../api/market"
 
 const INSTALLED_VERSION_RECORDS_KEY = "marketplace_installed_version_records"
 

@@ -1,4 +1,4 @@
-import type { MarketApiResponse, MarketItem, MarketItemType } from "../../api/market"
+import type { MarketApiResponse, MarketItem, MarketItemType } from "../../../api/market"
 
 const MOCK_CREATED_AT = "2026-01-01T00:00:00.000Z"
 
@@ -6,8 +6,8 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
   orgSkill: [],
   skill: [
     {
-      name: "代码审查",
-      chinese_name: "代码审查",
+      name: "pinchtab",
+      chinese_name: "代码审查pinchtab",
       category: "研发类场景/应用类研发",
       tag: "认证",
       featured: "精品",
@@ -43,7 +43,11 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       user_id: "10001",
       guidance: "用于 mock Dashboard 代码采纳排行中的市场命中展示。",
       ip: "127.0.0.1",
-      description: "接口字段、契约和联调方案设计技能。",
+      description: `接口字段、契约和联调方案设计技能。
+      接口字段、契约和联调方案设计技能。
+      接口字段、契约和联调方案设计技能。
+      接口字段、契约和联调方案设计技能。
+      接口字段、契约和联调方案设计技能。`,
       filename: "接口设计-v1.0.0.zip",
       created_at: MOCK_CREATED_AT
     },

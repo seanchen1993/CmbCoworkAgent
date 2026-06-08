@@ -76,6 +76,12 @@ export interface GenIndexRow {
   trace_id: string | null
   model_id: string | null
   model_name: string | null
+  /** Harness Board project this generation belongs to (project-mode only), or null. */
+  harness_project_id: string | null
+  harness_feature_slug: string | null
+  /** Adapter plugin bound to the project at gen time, so adoption can be sliced by plugin version. */
+  harness_adapter_name: string | null
+  harness_adapter_version: string | null
 }
 
 // ─────────────────────────────────────────────────────────
@@ -113,7 +119,11 @@ export async function initializeAdoptionIndex(): Promise<void> {
         thread_id TEXT,
         trace_id TEXT,
         model_id TEXT,
-        model_name TEXT
+        model_name TEXT,
+        harness_project_id TEXT,
+        harness_feature_slug TEXT,
+        harness_adapter_name TEXT,
+        harness_adapter_version TEXT
       )
     `)
 
@@ -126,7 +136,11 @@ export async function initializeAdoptionIndex(): Promise<void> {
       "trace_id TEXT",
       "model_id TEXT",
       "model_name TEXT",
-      "old_line_hashes BLOB"
+      "old_line_hashes BLOB",
+      "harness_project_id TEXT",
+      "harness_feature_slug TEXT",
+      "harness_adapter_name TEXT",
+      "harness_adapter_version TEXT"
     ]) {
       try {
         db.run(`ALTER TABLE gen_events ADD COLUMN ${col}`)
@@ -182,8 +196,9 @@ export function insertGenEvent(row: GenIndexRow): void {
     db.run(
       `INSERT OR REPLACE INTO gen_events
        (event_id, file_path, content_fingerprint, shard_file, shard_offset, line_hashes, old_line_hashes, created_at, measured,
-        used_skills, thread_id, trace_id, model_id, model_name)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        used_skills, thread_id, trace_id, model_id, model_name,
+        harness_project_id, harness_feature_slug, harness_adapter_name, harness_adapter_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.event_id,
         row.file_path,
@@ -198,7 +213,11 @@ export function insertGenEvent(row: GenIndexRow): void {
         row.thread_id,
         row.trace_id,
         row.model_id,
-        row.model_name
+        row.model_name,
+        row.harness_project_id,
+        row.harness_feature_slug,
+        row.harness_adapter_name,
+        row.harness_adapter_version
       ]
     )
     scheduleSave()
@@ -216,7 +235,8 @@ export function findPendingGensForFile(filePath: string, minCreatedAt: number): 
   const stmt = db.prepare(
     `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
             line_hashes, old_line_hashes, created_at, measured,
-            used_skills, thread_id, trace_id, model_id, model_name
+            used_skills, thread_id, trace_id, model_id, model_name,
+            harness_project_id, harness_feature_slug, harness_adapter_name, harness_adapter_version
        FROM gen_events
       WHERE file_path = ? AND measured = 0 AND created_at >= ?
       ORDER BY created_at DESC`

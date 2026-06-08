@@ -1,5 +1,5 @@
 import React, { useState } from "react"
-import { Upload, Copy, Check, ChevronDown, ChevronRight, ExternalLink } from "lucide-react"
+import { Upload, Copy, Check, ChevronDown, ChevronRight, ExternalLink, AlertCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -13,6 +13,8 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
+
+const DEFAULT_MARKET_VERSION = "v1.0.0"
 
 interface UserInfoLite {
   sapId?: string
@@ -32,6 +34,7 @@ interface UniversalUploadDialogProps {
     name: string,
     description: string,
     category: string,
+    version: string,
     guidance?: string,
     chineseName?: string,
     userId?: string
@@ -41,6 +44,7 @@ interface UniversalUploadDialogProps {
     name: string
     description: string
     category: string
+    version?: string
     guidance?: string
     chinese_name?: string
     user_id?: string
@@ -90,11 +94,23 @@ export function UniversalUploadDialog({
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
   const [category, setCategory] = useState<string>(DEFAULT_SCENE_CATEGORY)
+  const [version, setVersion] = useState(DEFAULT_MARKET_VERSION)
   const [guidance, setGuidance] = useState("")
   const [chineseName, setChineseName] = useState("")
   const [userId, setUserId] = useState<string | undefined>(undefined)
   const [nameFromFile, setNameFromFile] = useState(false) // name 是否来自文件解析（锁定）
+  const [versionFromSkillFile, setVersionFromSkillFile] = useState(false)
+  const [versionFoundInSkillFrontmatter, setVersionFoundInSkillFrontmatter] = useState(false)
   const [submitReasonOpen, setSubmitReasonOpen] = useState(false)
+
+  const isSkillResource = resourceType === "skill"
+  const isVersionReadonly = isSkillResource
+
+  const resetVersionState = React.useCallback(() => {
+    setVersion(DEFAULT_MARKET_VERSION)
+    setVersionFromSkillFile(false)
+    setVersionFoundInSkillFrontmatter(false)
+  }, [])
 
   const loadCurrentUserId = React.useCallback(async () => {
     try {
@@ -112,14 +128,18 @@ export function UniversalUploadDialog({
       setName(existingItem.name || "")
       setDescription(existingItem.description || "")
       setCategory(existingItem.category || DEFAULT_SCENE_CATEGORY)
+      setVersion(existingItem.version || DEFAULT_MARKET_VERSION)
       setGuidance(existingItem.guidance || "")
       setChineseName(existingItem.chinese_name || "")
       setNameFromFile(false)
+      setVersionFromSkillFile(false)
+      setVersionFoundInSkillFrontmatter(false)
     } else if (open) {
       // Reset form for new upload
       setName("")
       setDescription("")
       setCategory(DEFAULT_SCENE_CATEGORY)
+      resetVersionState()
       setGuidance("")
       setChineseName("")
       setNameFromFile(false)
@@ -127,7 +147,7 @@ export function UniversalUploadDialog({
     if (open) {
       void loadCurrentUserId()
     }
-  }, [isUpdate, existingItem, open, loadCurrentUserId])
+  }, [isUpdate, existingItem, open, loadCurrentUserId, resetVersionState])
 
   const getAcceptedTypes = () => {
     switch (resourceType) {
@@ -190,6 +210,10 @@ export function UniversalUploadDialog({
     setFile(selectedFile)
     setError(null)
     setNameFromFile(false)
+    if (resourceType !== "skill") {
+      setVersionFromSkillFile(false)
+      setVersionFoundInSkillFrontmatter(false)
+    }
 
     // 对 skill 的 .md / .zip 文件，尝试从文件内容中提取 name
     if (resourceType === "skill") {
@@ -200,17 +224,32 @@ export function UniversalUploadDialog({
           const result = (await window.electron.ipcRenderer.invoke("skills:parseNameFromFile", {
             buffer,
             fileName: selectedFile.name
-          })) as { success: boolean; name?: string; error?: string }
+          })) as {
+            success: boolean
+            name?: string
+            version?: string
+            versionFoundInFrontmatter?: boolean
+            error?: string
+          }
 
           if (result.success && result.name) {
             setName(result.name)
             setNameFromFile(true)
+            setVersion(result.version || DEFAULT_MARKET_VERSION)
+            setVersionFromSkillFile(true)
+            setVersionFoundInSkillFrontmatter(Boolean(result.versionFoundInFrontmatter))
             return
           } else {
             setError(result.error || "无法从文件中提取 name，请手动填写")
+            setVersion(DEFAULT_MARKET_VERSION)
+            setVersionFromSkillFile(false)
+            setVersionFoundInSkillFrontmatter(false)
           }
         } catch (e) {
           setError(e instanceof Error ? e.message : "解析文件失败，请手动填写名称")
+          setVersion(DEFAULT_MARKET_VERSION)
+          setVersionFromSkillFile(false)
+          setVersionFoundInSkillFrontmatter(false)
         }
       }
     }
@@ -248,6 +287,11 @@ export function UniversalUploadDialog({
       return
     }
 
+    if (!version.trim()) {
+      setError("请填写版本号")
+      return
+    }
+
     if (!guidance.trim()) {
       setError("请填写使用指引")
       return
@@ -273,6 +317,7 @@ export function UniversalUploadDialog({
         name.trim(),
         description.trim(),
         category,
+        version.trim(),
         guidance.trim(),
         chineseName.trim(),
         normalizedUserId
@@ -286,6 +331,7 @@ export function UniversalUploadDialog({
         setName("")
         setDescription("")
         setCategory(DEFAULT_SCENE_CATEGORY)
+        resetVersionState()
         setGuidance("")
         setChineseName("")
         setUserId(undefined)
@@ -328,11 +374,14 @@ export function UniversalUploadDialog({
         setName("")
         setDescription("")
         setCategory(DEFAULT_SCENE_CATEGORY)
+        resetVersionState()
         setGuidance("")
         setChineseName("")
         setError(null)
         setShowJsonTemplate(false)
         setNameFromFile(false)
+        setVersionFromSkillFile(false)
+        setVersionFoundInSkillFrontmatter(false)
       }
     }
   }
@@ -374,6 +423,7 @@ export function UniversalUploadDialog({
     !!chineseName.trim() &&
     !!description.trim() &&
     !!category.trim() &&
+    !!version.trim() &&
     !!guidance.trim()
 
   const getSubmitDisabledReason = () => {
@@ -383,6 +433,7 @@ export function UniversalUploadDialog({
     if (!chineseName.trim()) return "请填写中文名称"
     if (!description.trim()) return "请填写描述"
     if (!category.trim()) return "请选择场景"
+    if (!version.trim()) return "请填写版本号"
     if (!guidance.trim()) return "请填写使用指引"
     return undefined
   }
@@ -468,7 +519,7 @@ export function UniversalUploadDialog({
           <DialogDescription>{descriptionOverride || getFileTypeDescription()}</DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 max-h-[50vh] overflow-auto">
+        <div className="space-y-4 max-h-[50vh] overflow-auto p-2">
           {/* Plugin Template */}
           {resourceType === "plugin" && PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL && (
             <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
@@ -649,6 +700,54 @@ export function UniversalUploadDialog({
               rows={3}
               className="w-full p-2 text-sm border rounded-md focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"
             />
+          </div>
+
+          <div className="space-y-2">
+            <label htmlFor="version" className="block text-sm font-medium">
+              版本号 *
+            </label>
+            <Input
+              id="version"
+              placeholder="输入版本号，例如 v1.0.0"
+              value={version}
+              onChange={(e) => setVersion(e.target.value)}
+              disabled={uploading || isVersionReadonly}
+              className={isVersionReadonly ? "bg-muted" : ""}
+              required
+            />
+            {isSkillResource ? (
+              <div className="space-y-2">
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Skill 版本不再由上传弹窗维护，系统会直接读取技能文档 frontmatter 中的{" "}
+                  <code className="bg-muted px-1 rounded">version</code>；如果文档里没有，就按{" "}
+                  <code className="bg-muted px-1 rounded">{DEFAULT_MARKET_VERSION}</code>{" "}
+                  处理，所以这里不允许手动修改。
+                  {versionFromSkillFile
+                    ? versionFoundInSkillFrontmatter
+                      ? " 当前显示的是从技能文档解析出的版本。"
+                      : ""
+                    : " 当前显示的是默认版本。"}
+                </p>
+                {versionFromSkillFile && !versionFoundInSkillFrontmatter && (
+                  <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-900">
+                    <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
+                    <p>
+                      当前没有从你的 <code className="rounded bg-amber-100 px-1">md / SKILL.md</code>{" "}
+                      里找到 <code className="rounded bg-amber-100 px-1">version</code>，所以展示的是默认版本{" "}
+                      <code className="rounded bg-amber-100 px-1">
+                        {DEFAULT_MARKET_VERSION}
+                      </code>
+                      。
+                    </p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                MCP 和 Plugin 的版本由发布人维护，默认从{" "}
+                <code className="bg-muted px-1 rounded">{DEFAULT_MARKET_VERSION}</code> 开始。
+              </p>
+            )}
           </div>
 
           {/* Category Select */}

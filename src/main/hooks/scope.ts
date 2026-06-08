@@ -1,7 +1,8 @@
 import {
   getEnabledPluginHookMetadata,
   getEnabledSkillHookMetadata,
-  getEnabledHooks
+  getEnabledHooks,
+  getEnabledPluginSkillSourceMetadata
 } from "../storage"
 import { hookMatchesRunCriteria, type HookContext } from "./runner"
 import type { HookConfig, HookEvent } from "./types"
@@ -184,6 +185,48 @@ export function mergeHookScopeSnapshot(
     target.activateSkill(skillName)
   }
   target.activatePersistentHookKeys(snapshot.persistentHookKeys ?? [])
+}
+
+/**
+ * Build a fresh child scope that inherits a point-in-time copy of `parent`'s
+ * plugin/skill activations. Used when spawning a runtime that should see the
+ * parent's hook scope (e.g. a coordinator worker inheriting the coordinator's
+ * activations), so the child sees what the parent had active the same way a
+ * task-tool subagent does — but isolated, since unlike a subagent (which shares
+ * the parent's mutable scope instance) workers can run in parallel.
+ *
+ * The child is a deep, independent copy: it is seeded from `parent.snapshot()`
+ * but backed by its own Sets, so later activations on either side never leak
+ * into the other. This makes it safe to hand to concurrently-running children
+ * without cross-contamination. The flip side is that activations the child
+ * makes during its run stay local — they are never reflected back to the
+ * parent or visible to sibling children.
+ */
+export function createInheritedHookScope(parent: HookScopeController): HookScopeController {
+  const child = createHookScope()
+  mergeHookScopeSnapshot(child, parent.snapshot())
+  return child
+}
+
+/**
+ * Resolve which enabled plugin owns a given skill path by matching it against
+ * each plugin's skill-source roots. Returns the owning pluginId, or undefined
+ * for a standalone / workspace skill.
+ *
+ * Used so a coordinator can activate a plugin's scope when the user
+ * slash-selects one of its skills — without that pluginId, only the skill scope
+ * would activate and the plugin's own (plugin-scoped) hooks would stay gated.
+ */
+export function resolvePluginIdForSkillPath(
+  skillPath: string | undefined | null
+): string | undefined {
+  const key = normalizePathKey(skillPath)
+  if (!key) return undefined
+  for (const source of getEnabledPluginSkillSourceMetadata()) {
+    const root = normalizePathKey(source.pluginRoot)
+    if (root && (key === root || key.startsWith(`${root}/`))) return source.pluginId
+  }
+  return undefined
 }
 
 export interface ScopedHookCandidates {

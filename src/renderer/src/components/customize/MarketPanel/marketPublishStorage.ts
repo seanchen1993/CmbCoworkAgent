@@ -1,4 +1,4 @@
-import type { MarketItemType } from "../../api/market"
+import type { MarketItemType } from "../../../api/market"
 
 export function readUploadedItemNamesFromStorage(type: MarketItemType): Set<string> {
   try {

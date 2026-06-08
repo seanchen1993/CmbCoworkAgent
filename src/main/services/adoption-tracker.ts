@@ -159,6 +159,15 @@ export interface AdoptionContext {
    * `primarySkill` field has been removed because it was merely `usedSkills[0]`).
    */
   usedSkills?: string[]
+  /**
+   * Harness Board attribution (project-mode conversations only). Carried onto
+   * the emitted code_gen/code_adopt events so the dashboard can slice adoption
+   * rates by project / plugin directly, without a traceId → project join.
+   */
+  harnessProjectId?: string
+  harnessFeatureSlug?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
 }
 
 export interface RecordGenInput {
@@ -777,7 +786,11 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       thread_id: input.threadId || null,
       trace_id: ctx.traceId ?? null,
       model_id: ctx.modelId ?? null,
-      model_name: ctx.modelName ?? null
+      model_name: ctx.modelName ?? null,
+      harness_project_id: ctx.harnessProjectId ?? null,
+      harness_feature_slug: ctx.harnessFeatureSlug ?? null,
+      harness_adapter_name: ctx.harnessAdapterName ?? null,
+      harness_adapter_version: ctx.harnessAdapterVersion ?? null
     })
 
     // ── Cloud event (metadata only) ─────────────────────
@@ -794,6 +807,10 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       usedSkills,
       modelId: ctx.modelId ?? null,
       modelName: ctx.modelName ?? null,
+      harnessProjectId: ctx.harnessProjectId ?? null,
+      harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
+      harnessAdapterName: ctx.harnessAdapterName ?? null,
+      harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
       // note: filePath / content / fingerprint intentionally withheld
       createdAt: new Date(createdAt).toISOString(),
       relativeHint: relPath.split("/").slice(-1)[0] // leaf filename only, not a full path
@@ -840,6 +857,10 @@ function emitSkippedLargeAtGen(args: {
     usedSkills,
     modelId: ctx.modelId ?? null,
     modelName: ctx.modelName ?? null,
+    harnessProjectId: ctx.harnessProjectId ?? null,
+    harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
+    harnessAdapterName: ctx.harnessAdapterName ?? null,
+    harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
     createdAt: new Date(createdAt).toISOString(),
     relativeHint: relPath.split("/").slice(-1)[0]
   })
@@ -865,7 +886,11 @@ function emitSkippedLargeAtGen(args: {
     // uniformly — otherwise these rows look like they have no skill.
     usedSkills,
     modelId: ctx.modelId ?? null,
-    modelName: ctx.modelName ?? null
+    modelName: ctx.modelName ?? null,
+    harnessProjectId: ctx.harnessProjectId ?? null,
+    harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
+    harnessAdapterName: ctx.harnessAdapterName ?? null,
+    harnessAdapterVersion: ctx.harnessAdapterVersion ?? null
   })
 }
 
@@ -1028,7 +1053,11 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         commitSha: opts?.commitSha ?? null,
         usedSkills,
         modelId: pending.model_id ?? null,
-        modelName: pending.model_name ?? null
+        modelName: pending.model_name ?? null,
+        harnessProjectId: pending.harness_project_id ?? null,
+        harnessFeatureSlug: pending.harness_feature_slug ?? null,
+        harnessAdapterName: pending.harness_adapter_name ?? null,
+        harnessAdapterVersion: pending.harness_adapter_version ?? null
       })
 
       console.log(

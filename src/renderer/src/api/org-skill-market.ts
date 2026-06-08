@@ -92,12 +92,18 @@ interface OrgSkillLabelsResponse {
   body: OrgSkillLabel[] | null
 }
 
+interface OrgSkillDownloadResponse {
+  returnCode?: string
+  errorMsg?: string | null
+  body?: unknown
+}
+
 const MOCK_ORG_SKILL_ITEMS: OrgSkillApiItem[] = [
   {
     id: 10001,
     slug: "org-policy-helper",
     name: "制度问答助手",
-    description: "聚合组织内部公开制度与流程说明，帮助用户快速定位适用条款、办理路径和注意事项。",
+    description: "聚合组织内部公开制度与流程说明，帮助用户快速定位适用条款、办理路径和注意事项。聚合组织内部公开制度与流程说明，帮助用户快速定位适用条款、办理路径和注意事项。",
     icon: "",
     sourceOrigin: "ORG",
     sourceOriginName: "组织发布",
@@ -106,7 +112,7 @@ const MOCK_ORG_SKILL_ITEMS: OrgSkillApiItem[] = [
       userId: "mock-user-001",
       ystId: "mock001",
       openId: "MOCK_OPEN_ID_001",
-      department: "第一/第二/示例组织/知识运营组"
+      department: "第一/第二/示例组织/知识运营组知识运营组知知识运营组知识运营组识运营组知识运营组知识运营组知识运营组"
     },
     belongsToSystems: [{ id: "MOCK.SYS.01", name: "示例技能平台" }],
     labels: [{ labelId: "mock-label-policy", labelName: "制度规范" }],
@@ -168,6 +174,8 @@ const ORG_SKILL_GATEWAY_URL = String(
     "http://open-assistant-hub-gateway.paasoa.cmbchina.cn"
 ).replace(/\/+$/, "")
 
+const ORG_SKILL_CLAWPARTNER_URL = import.meta.env.VITE_ZZJ_WEB_URL.replace(/\/+$/, "")
+
 const ORG_SKILL_ENDPOINTS = {
   page: (pageNum: number, pageSize: number, labelIds: string[] = [], keyword = "") => {
     const labelIdsParam = labelIds
@@ -176,7 +184,7 @@ const ORG_SKILL_ENDPOINTS = {
       .map(encodeURIComponent)
       .join(",")
     const normalizedKeyword = keyword.trim()
-    const queryParts = [`pageNum=${pageNum}`, `pageSize=${pageSize}`]
+    const queryParts = [`pageNum=${pageNum}`, `pageSize=${pageSize}`, `queryAll=true`, 'queryType=null']
     if (labelIdsParam) queryParts.push(`labelIds=${labelIdsParam}`)
     if (normalizedKeyword) queryParts.push(`keyword=${encodeURIComponent(normalizedKeyword)}`)
     return `${ORG_SKILL_GATEWAY_URL}/gw/mgr/open-api/skill/page?${queryParts.join("&")}`
@@ -405,6 +413,13 @@ function mapOrgSkillItem(item: OrgSkillApiItem): MarketItem {
   }
 }
 
+export function buildOrgSkillSubscribeUrl(item: Pick<MarketItem, "name" | "orgSkillId">): string | null {
+  const slug = String(item.name || "").trim()
+  const skillId = item.orgSkillId
+  if (!slug || !skillId) return null
+  return `${ORG_SKILL_CLAWPARTNER_URL}/skill-detail/${encodeURIComponent(slug)}/${encodeURIComponent(String(skillId))}`
+}
+
 function getOrgSkillErrorMessageFromBody(body: unknown): string | null {
   if (!body || typeof body !== "object") return null
 
@@ -447,6 +462,32 @@ async function readOrgSkillErrorMessage(response: Response): Promise<string> {
 async function throwOrgSkillError(response: Response): Promise<never> {
   const message = await readOrgSkillErrorMessage(response)
   throw new Error(message)
+}
+
+function getOrgSkillDownloadErrorMessage(payload: OrgSkillDownloadResponse | null): string | null {
+  if (!payload?.returnCode || payload.returnCode === "SUC0000") return null
+  return payload.errorMsg?.trim() || "组织级技能下载失败"
+}
+
+function tryParseOrgSkillDownloadPayload(buffer: ArrayBuffer, contentType: string): OrgSkillDownloadResponse | null {
+  const decoder = new TextDecoder("utf-8")
+  const text = decoder.decode(buffer).trim()
+  if (!text) return null
+
+  const likelyJson =
+    contentType.includes("application/json") ||
+    contentType.includes("text/json") ||
+    (!contentType && (text.startsWith("{") || text.startsWith("["))) ||
+    text.startsWith("{") ||
+    text.startsWith("[")
+  if (!likelyJson) return null
+
+  try {
+    const parsed = JSON.parse(text) as OrgSkillDownloadResponse
+    return parsed && typeof parsed === "object" ? parsed : null
+  } catch {
+    return null
+  }
 }
 
 async function getYstIdToken(): Promise<string> {
@@ -522,7 +563,15 @@ export const orgSkillMarketApi = {
       await throwOrgSkillError(response)
     }
 
-    const blob = await response.blob()
+    const buffer = await response.arrayBuffer()
+    const contentType = response.headers.get("content-type") || ""
+    const payload = tryParseOrgSkillDownloadPayload(buffer, contentType)
+    const downloadError = getOrgSkillDownloadErrorMessage(payload)
+    if (downloadError) {
+      throw new Error(downloadError)
+    }
+
+    const blob = new Blob([buffer], { type: contentType || "application/octet-stream" })
     const contentDisposition = response.headers.get("Content-Disposition")
     const filename =
       contentDisposition?.match(/filename\*?=(?:UTF-8''|")?([^";]+)/)?.[1] ||

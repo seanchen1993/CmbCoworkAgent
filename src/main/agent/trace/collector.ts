@@ -298,11 +298,30 @@ export class TraceCollector {
         triggerSource: this.triggerSource
       }
     })
-    // Publish context to adoption tracker (side-effect only)
+    // Publish context to adoption tracker (side-effect only). Project-mode
+    // conversations also carry their harness project / adapter so emitted
+    // code_gen/code_adopt events can be sliced by project / plugin directly.
     try {
+      let harnessAdapter: { name?: string; version?: string } = {}
+      if (this.harnessFeature) {
+        try {
+          const adapter = getHarnessProjectAdapterSnapshot(this.harnessFeature.projectId)
+          if (adapter) harnessAdapter = { name: adapter.name, version: adapter.version }
+        } catch {
+          // best-effort: leave adapter fields absent on resolution failure
+        }
+      }
       setAdoptionContext(this.threadId, {
         traceId: this.traceId,
-        modelId: this.modelId
+        modelId: this.modelId,
+        ...(this.harnessFeature
+          ? {
+              harnessProjectId: this.harnessFeature.projectId,
+              harnessFeatureSlug: this.harnessFeature.slug,
+              harnessAdapterName: harnessAdapter.name,
+              harnessAdapterVersion: harnessAdapter.version
+            }
+          : {})
       })
     } catch {
       // never block trace setup
@@ -353,19 +372,22 @@ export class TraceCollector {
     }
   }
 
-  /** Set which skills were actually used for this run. */
+  /**
+   * Set which skills were actually used for this run (feeds the trace document's
+   * own `usedSkills`).
+   *
+   * NOTE: this intentionally does NOT write the adoption context's usedSkills.
+   * Code-gen skill attribution is sticky across the thread and is owned solely
+   * by the caller (ipc/agent.ts `syncUsedSkillsContext`), which writes the
+   * adoption context with the thread's active skill set right after this call.
+   * Writing current-run skills here would only be a value the caller overwrites,
+   * and risks bypassing the sticky attribution if ever called on its own.
+   */
   setUsedSkills(skills: string[]): void {
     this.usedSkills = [...skills]
     const root = this.getNode(this.rootNodeId)
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), usedSkills: [...skills] }
-    }
-    try {
-      setAdoptionContext(this.threadId, {
-        usedSkills: [...skills]
-      })
-    } catch {
-      // ignore
     }
   }
 

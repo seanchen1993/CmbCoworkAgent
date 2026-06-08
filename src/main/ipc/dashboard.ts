@@ -27,8 +27,10 @@ import {
   effectiveGeneratedLinesSumAgg,
   makeDashboardCodeStats,
   normalizeCodeStatsFromAggs,
+  normalizeCodeStatsFromContainer,
   normalizeSkillCodeAdoptionBuckets,
-  type DashboardCodeStats
+  type DashboardCodeStats,
+  type DashboardSkillCodeAdoptionStats
 } from "./dashboard-code-stats"
 
 // ─────────────────────────────────────────────────────────
@@ -198,6 +200,8 @@ interface DashboardCommitDetail {
   deletions: number
   triggeredBy?: string
   threadId?: string
+  /** 产生该 commit 代码的会话列表（优先取自采纳事件，可为多个）。 */
+  threadIds: string[]
   usedSkills: string[]
   skillCount: number
   codeGeneratedLines: number
@@ -212,6 +216,12 @@ interface CommitAdoptionSummary {
   effectiveGeneratedLines: number
   adoptedLines: number
   adoptionRate: number | null
+  /**
+   * 产生该 commit 代码的会话 threadId 列表，取自 `code_adopt` 事件（即代码生成时
+   * 所在的真实会话），而非 commit 事件自带的 threadId。一个 commit 的代码可能来自
+   * 多个会话，这里保留全部。
+   */
+  threadIds: string[]
 }
 
 interface DashboardSkillDetail {
@@ -412,7 +422,9 @@ interface DashboardUserDetail {
   traces: DashboardTraceDetail[]
   tracePage: number
   tracePageSize: number
-  totalTraces: number
+  /** 当前视图模式下的翻页总数：thread → 会话数；trace → trace 总数。 */
+  total: number
+  traceViewMode?: TraceViewMode
   traceTriggerScope?: TraceTriggerScope
 }
 
@@ -454,6 +466,8 @@ interface UserDetailOptions {
   traceLimit?: number
   tracePage?: number
   tracePageSize?: number
+  mode?: TraceViewMode
+  viewMode?: TraceViewMode
   triggerScope?: TraceTriggerScope
 }
 
@@ -520,6 +534,7 @@ const DISLIKE_TYPE_OPTIONS = [
   { id: "other", label: "其他原因" }
 ] as const
 
+const DASHBOARD_ALLOWED_IDS_ENV = "VITE_DASHBOARD_ALLOWED_YST_IDS"
 const DASHBOARD_UNRESTRICTED_IDS_ENV = "VITE_DASHBOARD_UNRESTRICTED_YST_IDS"
 
 function splitEnvIds(value: string | undefined): Set<string> {
@@ -549,6 +564,10 @@ function deriveDashboardUpperOrgLv1(pathName?: string): string {
 
 function getDashboardUnrestrictedIds(): Set<string> {
   return splitEnvIds(import.meta.env[DASHBOARD_UNRESTRICTED_IDS_ENV] as string | undefined)
+}
+
+function getDashboardAllowedIds(): Set<string> {
+  return splitEnvIds(import.meta.env[DASHBOARD_ALLOWED_IDS_ENV] as string | undefined)
 }
 
 function getDashboardAccessContext(): DashboardAccessContext {
@@ -581,6 +600,21 @@ function requireDashboardAccess(): DashboardAccessContext {
   const access = getDashboardAccessContext()
   if (!access.loggedIn) throw new Error("请先登录后再查看运营面板")
   return access
+}
+
+function isDashboardProjectModeAllowed(): boolean {
+  if (import.meta.env.DEV) return true
+  const access = getDashboardAccessContext()
+  if (!access.loggedIn || !access.ystId) return false
+  return getDashboardAllowedIds().has(access.ystId)
+}
+
+function requireDashboardProjectModeAccess(): void {
+  const access = getDashboardAccessContext()
+  if (!access.loggedIn) throw new Error("请先登录后再查看项目运营面板")
+  if (!access.ystId || !getDashboardAllowedIds().has(access.ystId)) {
+    throw new Error("无项目运营面板访问权限")
+  }
 }
 
 function buildNoAccessFilter(): Record<string, unknown> {
@@ -1357,6 +1391,7 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
     deletions: asNumber(properties.deletions),
     triggeredBy: asOptionalString(properties.triggeredBy),
     threadId: asOptionalString(properties.threadId),
+    threadIds: [],
     usedSkills,
     skillCount: asNumber(properties.skillCount, usedSkills.length),
     codeGeneratedLines: 0,
@@ -1371,12 +1406,20 @@ function normalizeSkillList(skills: string[]): string[] {
 }
 
 async function fetchCommitAdoptionMap(
-  commitShas: string[],
-  range: TimeRange
+  commitShas: string[]
 ): Promise<Map<string, CommitAdoptionSummary>> {
   const normalizedCommitShas = normalizeSkillList(commitShas).slice(0, 100)
   if (normalizedCommitShas.length === 0) return new Map()
 
+  // NOTE: deliberately NO time-range filter here. The `commitSha` terms clause is
+  // already a precise, globally-unique selector for the exact commits in the
+  // visible (eventTime-filtered) list. A `code_adopt` event is timestamped at
+  // *commit* time but carries `generatedAt` = the *generation* time, which can
+  // predate the commit by up to the attribution window (≈7 days). Filtering by
+  // `generatedAt` within the commit-list range would drop adoption rows for any
+  // commit whose code was generated before the window started — making the
+  // commit show up in the list with an empty 采纳率. Matching on commitSha alone
+  // is both correct and safe.
   const body = {
     size: 0,
     query: {
@@ -1386,7 +1429,6 @@ async function fetchCommitAdoptionMap(
           { exists: { field: "properties.adoptedLineCount" } },
           { exists: { field: "properties.generatedLineCount" } },
           { exists: { field: "properties.effectiveGeneratedLineCount" } },
-          timeRangeFilter("properties.generatedAt", range),
           { terms: { "properties.commitSha": normalizedCommitShas } }
         ]
       }
@@ -1396,6 +1438,8 @@ async function fetchCommitAdoptionMap(
         terms: { field: "properties.commitSha", size: normalizedCommitShas.length },
         aggs: {
           by_skill: { terms: { field: "properties.usedSkills", size: 50 } },
+          // 该 commit 的代码可能来自多个会话，保留全部关联会话。
+          by_thread: { terms: { field: "properties.threadId", size: 50 } },
           generated_lines: { sum: { field: "properties.generatedLineCount" } },
           effective_generated_lines: effectiveGeneratedLinesSumAgg(),
           adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
@@ -1421,12 +1465,17 @@ async function fetchCommitAdoptionMap(
     const generatedLines = asNumber(asRecord(record.generated_lines).value)
     const effectiveGeneratedLines = asNumber(asRecord(record.effective_generated_lines).value)
     const adoptedLines = asNumber(asRecord(record.adopted_lines).value)
+    const threadBuckets = asRecord(record.by_thread).buckets
+    const threadIds = Array.isArray(threadBuckets)
+      ? normalizeSkillList(threadBuckets.map((threadBucket) => asString(asRecord(threadBucket).key)))
+      : []
     result.set(commitSha, {
       usedSkills: skills,
       generatedLines,
       effectiveGeneratedLines,
       adoptedLines,
-      adoptionRate: effectiveGeneratedLines > 0 ? adoptedLines / effectiveGeneratedLines : null
+      adoptionRate: effectiveGeneratedLines > 0 ? adoptedLines / effectiveGeneratedLines : null,
+      threadIds
     })
   }
   return result
@@ -1447,29 +1496,7 @@ async function fetchOverview(
   const interval = getCalendarInterval(granularity, range.from, range.to)
   const rankingTopSize = 20
   const rankingSearchSize = 1000
-  const filteredToolExcludes = [
-    // Claude Code 内置文件 / 系统工具
-    "execute",
-    "read_file",
-    "write_file",
-    "glob",
-    "grep",
-    "list_directory",
-    "task",
-    "task_output",
-    "ls",
-    "edit_file",
-    // 工具搜索 / 元工具
-    "search_tool",
-    "inspect_tool",
-    "invoke_deferred_tool",
-    // 内置代码执行辅助
-    "code_exec",
-    "prepare_save_code_exec_tool",
-    "save_code_exec_tool",
-    // 内置任务管理
-    "write_todos"
-  ]
+  const filteredToolExcludes = FILTERED_TOOL_EXCLUDES
   const traceBody = {
     size: 0,
     query: {
@@ -1817,7 +1844,9 @@ async function fetchUserStats(
   void granularity
   const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
   // 统计指标不做组织级数据权限过滤，仅保留用户主动选择的组织（LV1）多选维度。
-  const queryFilters = [timeRangeFilter("startedAt", range), buildChatTriggeredTraceFilter()]
+  // 统计指标计入全部触发来源（含定时任务/心跳等后台触发，均视为真人参与）。
+  // triggerSource 仅用于 trace 分析页的「主动触发/全部」切换，不在统计口径里过滤。
+  const queryFilters = [timeRangeFilter("startedAt", range)]
   const orgFilterClause = buildUpperOrgLv1ListFilter(selectedOrgs)
   if (orgFilterClause) {
     queryFilters.push(orgFilterClause)
@@ -1933,11 +1962,8 @@ async function fetchUserList(
   const aggregationSize = Math.min(offset + pageSize, 10_000)
   const shardSize = Math.min(Math.max(aggregationSize * 3, 100), 50_000)
   // 用户列表属于统计/目录数据，不做组织级数据权限过滤，仅保留用户主动选择的组织维度。
-  const filters = [
-    timeRangeFilter("startedAt", range),
-    buildChatTriggeredTraceFilter(),
-    buildNonEmptySapIdFilter()
-  ]
+  // 统计口径计入全部触发来源；triggerSource 仅用于 trace 分析页切换，不在此过滤。
+  const filters = [timeRangeFilter("startedAt", range), buildNonEmptySapIdFilter()]
   if (upperOrgLv1 !== null) {
     filters.push(buildOrgLevelMatchFilter(upperOrgLv1))
   }
@@ -2020,6 +2046,70 @@ function normalizeTermsBucketList(
   })
 }
 
+// ── 会话（thread）列表分页：用户页 / 技能页 thread 视图共用同一套逻辑 ──
+// 会话按最近活跃时间倒序取桶后切片分页；该上限同时约束 terms 桶数与可翻到的
+// 最深页（page * pageSize ≤ 上限）。单用户 / 单技能的会话量有界，300 足够。
+const MAX_THREAD_LIST_BUCKETS = 300
+// 每个会话在列表里展开渲染的 trace 数上限。会话内 trace 通常很少；超大会话的
+// 完整还原由「Thread 对话还原」抽屉（fetchThreadTraces）负责，列表无需全量。
+const THREAD_LIST_TRACES_PER_THREAD = 50
+
+/** 当前页所需的 terms 桶数（取到第 page 页末尾，封顶 MAX_THREAD_LIST_BUCKETS）。 */
+function threadListBucketsNeeded(page: number, pageSize: number): number {
+  return Math.min(page * pageSize, MAX_THREAD_LIST_BUCKETS)
+}
+
+/**
+ * 「按会话分页」的聚合定义：按 threadId 分桶（按最近活跃倒序）、每桶回带该会话
+ * 的 trace（升序、最多 THREAD_LIST_TRACES_PER_THREAD 条）。用户页与技能页 thread
+ * 视图共用，保证两边口径完全一致。
+ */
+function threadListAgg(bucketsNeeded: number): Record<string, unknown> {
+  return {
+    total_threads: { cardinality: { field: "threadId" } },
+    by_thread: {
+      terms: {
+        field: "threadId",
+        size: bucketsNeeded,
+        order: { latest_started_at: "desc" }
+      },
+      aggs: {
+        latest_started_at: { max: { field: "startedAt" } },
+        traces: {
+          top_hits: {
+            size: THREAD_LIST_TRACES_PER_THREAD,
+            sort: [{ startedAt: { order: "asc" } }],
+            _source: { includes: dashboardTraceSourceIncludes() }
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * 解析 threadListAgg 的结果容器（含 total_threads + by_thread），按当前页切片，
+ * 并把当页每个会话的全部 trace 摊平返回，交给客户端按 thread 归组（每组完整、不跨页）。
+ */
+function parseThreadListContainer(
+  container: Record<string, unknown>,
+  page: number,
+  pageSize: number
+): { traces: DashboardTraceDetail[]; totalThreads: number } {
+  const totalThreads = Math.min(
+    asNumber(asRecord(container.total_threads).value),
+    MAX_THREAD_LIST_BUCKETS
+  )
+  const buckets = asRecord(container.by_thread).buckets
+  const fromBucket = (page - 1) * pageSize
+  const selected = Array.isArray(buckets) ? buckets.slice(fromBucket, fromBucket + pageSize) : []
+  const traces = selected.flatMap((bucket) => {
+    const hits = asRecord(asRecord(asRecord(bucket).traces).hits).hits
+    return Array.isArray(hits) ? hits.map((hit) => normalizeTraceDetail(hit as EsSearchHit)) : []
+  })
+  return { traces, totalThreads }
+}
+
 async function fetchUserDetail(
   sapId: string,
   range: TimeRange,
@@ -2028,51 +2118,70 @@ async function fetchUserDetail(
   const access = requireDashboardAccess()
   const normalizedSapId = sapId.trim()
   if (!normalizedSapId) throw new Error("sapId is required")
+  const traceViewMode = normalizeTraceViewMode(options?.viewMode ?? options?.mode)
   const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
   const tracePage = clampLimit(options?.tracePage, 1, 1000)
   const triggerScope = normalizeTraceTriggerScope(options?.triggerScope)
-  // 统计指标（聚合）按该用户全量计算，不做组织级权限过滤；
-  // 组织级权限仅通过 post_filter 作用于返回的 trace 聊天明细命中，避免跨组织读取对话内容。
+  // 统计指标（顶层聚合）按该用户全量计算，不做组织级权限过滤；
+  // 组织级权限作用于返回的会话/trace 明细（thread 模式经 thread_list 的 filter 聚合，
+  // trace 模式经 post_filter），避免跨组织读取对话内容。
   const traceAccessFilter = buildTraceAccessFilter(access)
-  const body = {
-    track_total_hits: true,
-    from: (tracePage - 1) * tracePageSize,
-    size: tracePageSize,
-    sort: [{ startedAt: { order: "desc" } }],
-    query: {
-      bool: {
-        filter: [
-          timeRangeFilter("startedAt", range),
-          { term: { sapId: normalizedSapId } },
-          ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
-        ]
+  const baseFilter = [
+    timeRangeFilter("startedAt", range),
+    { term: { sapId: normalizedSapId } },
+    ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
+  ]
+  // 两种视图共用的全量统计聚合（与列表口径隔离）。
+  const statsAggs: Record<string, unknown> = {
+    latest_user_info: {
+      top_hits: {
+        size: 1,
+        sort: [{ startedAt: { order: "desc" } }],
+        _source: {
+          includes: ["sapId", "ystId", "userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+        }
       }
     },
-    ...(traceAccessFilter ? { post_filter: traceAccessFilter } : {}),
-    aggs: {
-      latest_user_info: {
-        top_hits: {
-          size: 1,
-          sort: [{ startedAt: { order: "desc" } }],
-          _source: {
-            includes: ["sapId", "ystId", "userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+    total_calls: { value_count: { field: "traceId" } },
+    avg_duration: { avg: { field: "durationMs" } },
+    total_tool_calls: { sum: { field: "totalToolCalls" } },
+    total_input_tokens: { sum: { field: "totalInputTokens" } },
+    total_output_tokens: { sum: { field: "totalOutputTokens" } },
+    total_tokens: { sum: { field: "totalTokens" } },
+    by_skill: { terms: { field: "usedSkills", size: 10 } },
+    by_model: { terms: { field: "modelName", size: 10 } },
+    by_outcome: { terms: { field: "outcome", size: 10 } }
+  }
+
+  // 列表：
+  // - thread 视图：按会话分页，每页返回若干「完整会话」（与技能页共用 threadListAgg）。
+  // - trace 视图：按 trace 时间（startedAt 倒序）直接分页，一条 trace 一行。
+  const body =
+    traceViewMode === "thread"
+      ? {
+          size: 0,
+          query: { bool: { filter: baseFilter } },
+          aggs: {
+            ...statsAggs,
+            thread_list: {
+              filter: traceAccessFilter ?? { match_all: {} },
+              aggs: threadListAgg(threadListBucketsNeeded(tracePage, tracePageSize))
+            }
           }
         }
-      },
-      total_calls: { value_count: { field: "traceId" } },
-      avg_duration: { avg: { field: "durationMs" } },
-      total_tool_calls: { sum: { field: "totalToolCalls" } },
-      total_input_tokens: { sum: { field: "totalInputTokens" } },
-      total_output_tokens: { sum: { field: "totalOutputTokens" } },
-      total_tokens: { sum: { field: "totalTokens" } },
-      by_skill: { terms: { field: "usedSkills", size: 10 } },
-      by_model: { terms: { field: "modelName", size: 10 } },
-      by_outcome: { terms: { field: "outcome", size: 10 } }
-    },
-    _source: {
-      includes: dashboardTraceSourceIncludes()
-    }
-  }
+      : {
+          // trace 视图：按 trace 时间（startedAt 倒序）直接分页，一条 trace 一行。
+          // 用顶层 hits + post_filter：支持深翻页（max_result_window），且 post_filter
+          // 只裁剪命中列表与 hits.total（统计聚合仍为全量），与组织数据权限语义一致。
+          track_total_hits: true,
+          from: (tracePage - 1) * tracePageSize,
+          size: tracePageSize,
+          sort: [{ startedAt: { order: "desc" } }],
+          query: { bool: { filter: baseFilter } },
+          ...(traceAccessFilter ? { post_filter: traceAccessFilter } : {}),
+          aggs: statsAggs,
+          _source: { includes: dashboardTraceSourceIncludes() }
+        }
 
   const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
   const rawRecord = asRecord(raw)
@@ -2084,9 +2193,22 @@ async function fetchUserDetail(
     asRecord(aggs.total_tokens).value,
     totalInputTokens + totalOutputTokens
   )
-  // 统计指标：调用次数取自聚合（全量）；trace 列表分页用 post_filter 后的命中总数。
+  // 统计指标：调用次数取自全量聚合。
   const totalCalls = asNumber(asRecord(aggs.total_calls).value)
-  const totalTraces = getTotalHits(raw, raw.hits?.hits?.length ?? 0)
+
+  // 列表与翻页总数（按当前视图模式）：
+  // thread → 会话数；trace → 受权限过滤的 trace 总数（post_filter 后的 hits.total）。
+  let traces: DashboardTraceDetail[]
+  let total: number
+  if (traceViewMode === "thread") {
+    const parsed = parseThreadListContainer(asRecord(aggs.thread_list), tracePage, tracePageSize)
+    traces = parsed.traces
+    total = parsed.totalThreads
+  } else {
+    const hits = raw.hits?.hits ?? []
+    traces = hits.map(normalizeTraceDetail)
+    total = getTotalHits(raw, hits.length)
+  }
 
   return {
     sapId: asString(userInfo.sapId, normalizedSapId),
@@ -2113,10 +2235,11 @@ async function fetchUserDetail(
       asRecord(aggs.by_outcome).buckets,
       "outcome"
     ) as DashboardUserDetail["byOutcome"],
-    traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
+    traces,
     tracePage,
     tracePageSize,
-    totalTraces,
+    total,
+    traceViewMode,
     traceTriggerScope: triggerScope
   }
 }
@@ -2137,13 +2260,13 @@ async function fetchSkillUsageSummary(
     const filters = Object.fromEntries(
       normalizedSkillNames.map((skillName) => [skillName, buildSkillUsageWildcardFilter(skillName)])
     )
+    // 统计口径计入全部触发来源；triggerSource 仅用于 trace 分析页切换，不在此过滤。
     const body = {
       size: 0,
       query: {
         bool: {
           filter: [
             timeRangeFilter("startedAt", range),
-            buildChatTriggeredTraceFilter(),
             ...(traceAccessFilter ? [traceAccessFilter] : [])
           ]
         }
@@ -2166,13 +2289,13 @@ async function fetchSkillUsageSummary(
   }
 
   // 模式 B：兼容旧调用方，保留 terms 聚合结构。
+  // 统计口径计入全部触发来源；triggerSource 仅用于 trace 分析页切换，不在此过滤。
   const body = {
     size: 0,
     query: {
       bool: {
         filter: [
           timeRangeFilter("startedAt", range),
-          buildChatTriggeredTraceFilter(),
           ...(traceAccessFilter ? [traceAccessFilter] : [])
         ]
       }
@@ -3606,11 +3729,11 @@ async function fetchSkillUserStats(
   const skillFilter = buildSkillUsageWildcardFilter(skillName)
   const body = {
     size: 0,
+    // 统计口径计入全部触发来源；triggerSource 仅用于 trace 分析页切换，不在此过滤。
     query: {
       bool: {
         must: [
           timeRangeFilter("startedAt", range),
-          buildChatTriggeredTraceFilter(),
           ...(traceAccessFilter ? [traceAccessFilter] : []),
           { exists: { field: "ystId" } },
           { bool: { must_not: { term: { ystId: "" } } } }
@@ -3638,7 +3761,6 @@ async function fetchSkillUserStats(
               bool: {
                 must: [
                   timeRangeFilter("startedAt", range),
-                  buildChatTriggeredTraceFilter(),
                   ...(traceAccessFilter ? [traceAccessFilter] : []),
                   skillFilter,
                   buildEmptyYstIdFilter()
@@ -4059,52 +4181,21 @@ async function fetchSkillRecentTraces(
   const sourceIncludes = dashboardTraceSourceIncludes()
 
   if (normalizedMode === "thread") {
-    const maxThreadBuckets = 30
-    const requestedBuckets = Math.min(currentPage * size, maxThreadBuckets)
-    const fromBucket = (currentPage - 1) * size
-    const tracesPerThread = 5
+    // 与用户页 thread 视图共用同一套「按会话分页 + 完整会话」逻辑：每页 size 个完整会话，
+    // 每会话最多 THREAD_LIST_TRACES_PER_THREAD 条，封顶 MAX_THREAD_LIST_BUCKETS 个会话。
     const body = {
       size: 0,
       query: {
         bool: { filter: filters }
       },
-      aggs: {
-        total_threads: { cardinality: { field: "threadId" } },
-        by_thread: {
-          terms: {
-            field: "threadId",
-            size: requestedBuckets,
-            order: { latest_started_at: "desc" }
-          },
-          aggs: {
-            latest_started_at: { max: { field: "startedAt" } },
-            latest_traces: {
-              top_hits: {
-                size: tracesPerThread,
-                sort: [{ startedAt: { order: "desc" } }],
-                _source: { includes: sourceIncludes }
-              }
-            }
-          }
-        }
-      }
+      aggs: threadListAgg(threadListBucketsNeeded(currentPage, size))
     }
     const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
     const aggs = asRecord((raw as unknown as Record<string, unknown>).aggregations)
-    const buckets = asRecord(aggs.by_thread).buckets
-    const selectedBuckets = Array.isArray(buckets)
-      ? buckets.slice(fromBucket, fromBucket + size)
-      : []
-    const traces = selectedBuckets.flatMap((bucket) => {
-      const latestHits = asRecord(asRecord(bucket).latest_traces)
-      const rawHits = asRecord(latestHits.hits).hits
-      return Array.isArray(rawHits)
-        ? rawHits.map((hit) => normalizeTraceDetail(hit as EsSearchHit))
-        : []
-    })
+    const { traces, totalThreads } = parseThreadListContainer(aggs, currentPage, size)
     return {
       traces,
-      total: Math.min(asNumber(asRecord(aggs.total_threads).value), maxThreadBuckets),
+      total: totalThreads,
       page: currentPage,
       pageSize: size,
       mode: normalizedMode
@@ -4314,8 +4405,7 @@ async function fetchCommitDetails(
   const hits = raw.hits?.hits ?? []
   const items = hits.map(normalizeCommitDetail)
   const adoptionMap = await fetchCommitAdoptionMap(
-    items.map((item) => item.commitSha ?? "").filter(Boolean),
-    range
+    items.map((item) => item.commitSha ?? "").filter(Boolean)
   )
   return {
     total: getTotalHits(raw, hits.length),
@@ -4325,8 +4415,19 @@ async function fetchCommitDetails(
     items: items.map((item) => {
       const adoption = item.commitSha ? adoptionMap.get(item.commitSha) : undefined
       const adoptedSkills = adoption?.usedSkills ?? []
+      const adoptionThreadIds = adoption?.threadIds ?? []
+      // 关联会话优先取自采纳事件（代码生成时所在的真实会话，可为多个）；
+      // 采纳事件缺失时回退到 commit 自带 threadId。
+      const threadIds =
+        adoptionThreadIds.length > 0
+          ? adoptionThreadIds
+          : item.threadId
+            ? [item.threadId]
+            : []
       return {
         ...item,
+        threadId: threadIds[0] ?? item.threadId,
+        threadIds,
         usedSkills: adoptedSkills,
         skillCount: adoptedSkills.length,
         codeGeneratedLines: adoption?.generatedLines ?? 0,
@@ -4346,7 +4447,96 @@ function makeMockOrgOptions(): string[] {
   return ["测试 1 部", "开发二部", "平台三部", DASHBOARD_UNCLASSIFIED_ORG]
 }
 
-function makeMockOverview(range: TimeRange): unknown {
+function getMockOrgScale(opts?: OrgFilterOptions): number {
+  const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
+  if (selectedOrgs.length === 0) return 1
+
+  const weights = new Map<string, number>([
+    ["测试 1 部", 0.62],
+    ["开发二部", 0.22],
+    ["平台三部", 0.16],
+    [DASHBOARD_UNCLASSIFIED_ORG, 0.04]
+  ])
+  return Math.min(
+    1,
+    selectedOrgs.reduce((sum, org) => sum + (weights.get(org) ?? 0), 0)
+  )
+}
+
+function scaleMockMetricNumber(value: number, scale: number): number {
+  if (!Number.isFinite(value) || scale >= 0.999) return value
+  if (scale <= 0) return 0
+  return Math.max(1, Math.round(value * scale))
+}
+
+function shouldScaleMockMetric(key: string, path: string[]): boolean {
+  if (key === "doc_count") return true
+  if (key !== "value") return false
+  const parentKey = path[path.length - 1] ?? ""
+  return !/rate/i.test(parentKey)
+}
+
+function scaleMockDashboardValue(value: unknown, scale: number, path: string[] = []): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item, index) =>
+      scaleMockDashboardValue(item, scale, [...path, String(index)])
+    )
+  }
+  if (value === null || typeof value !== "object") return value
+
+  const result: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    result[key] =
+      typeof child === "number" && shouldScaleMockMetric(key, path)
+        ? scaleMockMetricNumber(child, scale)
+        : scaleMockDashboardValue(child, scale, [...path, key])
+  }
+  return result
+}
+
+function scaleMockDashboardResponse<T>(response: T, opts?: OrgFilterOptions): T {
+  const scale = getMockOrgScale(opts)
+  if (scale >= 0.999) return response
+  return scaleMockDashboardValue(response, scale) as T
+}
+
+/**
+ * 深度缩放任意已解析对象里的计数型数字（跳过 *rate 比率字段），用于项目模式 mock
+ * 这类返回结构与原始 ES 桶不同（字段为 conversationCount/tokens 等）的聚合块。
+ */
+function deepScaleMockMetrics<T>(value: T, scale: number): T {
+  if (scale >= 0.999) return value
+  if (Array.isArray(value)) {
+    return value.map((item) => deepScaleMockMetrics(item, scale)) as unknown as T
+  }
+  if (value === null || typeof value !== "object") return value
+  const out: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    out[key] =
+      typeof child === "number" && !/rate/i.test(key)
+        ? scaleMockMetricNumber(child, scale)
+        : deepScaleMockMetrics(child, scale)
+  }
+  return out as T
+}
+
+/**
+ * 给 DEV mock 项目按下标确定性地分配一个 LV1 室，使「室筛选」在 mock 下也能
+ * 真实改变项目列表（与生产快照按 upperOrgLv1 过滤的语义一致）。
+ */
+function mockProjectOrgAt(index: number): string {
+  const orgs = makeMockOrgOptions()
+  return orgs[index % orgs.length]
+}
+
+function mockProjectMatchesOrg(org: string, selectedOrgs: string[]): boolean {
+  if (selectedOrgs.length === 0) return true
+  return selectedOrgs.some((sel) =>
+    sel === DASHBOARD_UNCLASSIFIED_ORG ? org === DASHBOARD_UNCLASSIFIED_ORG : sel === org
+  )
+}
+
+function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
   const from = new Date(range.from)
   const to = new Date(range.to)
   const diffMs = to.getTime() - from.getTime()
@@ -4386,328 +4576,334 @@ function makeMockOverview(range: TimeRange): unknown {
     users: { value: Math.floor(5 + Math.random() * 20) }
   }))
 
-  return {
-    aggregations: {
-      total_calls: { value: 1247 },
-      active_users: { value: 38 },
-      avg_duration: { value: 4320 },
-      total_input_tokens: { value: 2_340_000 },
-      total_output_tokens: { value: 890_000 },
-      total_skills: { value: 20 },
-      total_tools: { value: 27 },
-      total_skill_calls: { value: 2022 },
-      total_tool_calls: { value: 6538 },
-      code_generated_lines: { value: 4820 },
-      code_deleted_lines: { value: 930 },
-      code_measured_generated_lines: { value: 3900 },
-      code_effective_generated_lines: { value: 3720 },
-      code_unmeasured_generated_lines: { value: 920 },
-      code_inclusive_effective_generated_lines: { value: 4640 },
-      code_adopted_lines: { value: 2860 },
-      code_pushed_measured_generated_lines: { value: 2500 },
-      code_pushed_effective_generated_lines: { value: 2360 },
-      code_pushed_adopted_lines: { value: 1880 },
-      code_pushed_commit_count: { value: 21 },
-      by_skill: {
-        buckets: [
-          { key: "代码审查", doc_count: 312 },
-          { key: "需求分析", doc_count: 278 },
-          { key: "文档生成", doc_count: 245 },
-          { key: "单元测试", doc_count: 198 },
-          { key: "SQL优化", doc_count: 167 },
-          { key: "plugin-release-note-v1.0.0", doc_count: 156 },
-          { key: "接口设计", doc_count: 143 },
-          { key: "日志分析", doc_count: 121 },
-          { key: "数据清洗", doc_count: 98 },
-          { key: "性能诊断", doc_count: 87 },
-          { key: "安全扫描", doc_count: 62 },
-          { key: "代码重构", doc_count: 54 },
-          { key: "异常排查", doc_count: 49 },
-          { key: "接口联调", doc_count: 44 },
-          { key: "依赖升级", doc_count: 38 },
-          { key: "配置检查", doc_count: 33 },
-          { key: "发布诊断", doc_count: 29 },
-          { key: "性能优化", doc_count: 24 },
-          { key: "埋点分析", doc_count: 18 },
-          { key: "前端走查", doc_count: 13 },
-          { key: "脚本生成", doc_count: 9 }
-        ]
-      },
-      by_skill_all: {
-        buckets: [
-          { key: "代码审查", doc_count: 312 },
-          { key: "需求分析", doc_count: 278 },
-          { key: "文档生成", doc_count: 245 },
-          { key: "单元测试", doc_count: 198 },
-          { key: "SQL优化", doc_count: 167 },
-          { key: "plugin-release-note-v1.0.0", doc_count: 156 },
-          { key: "接口设计", doc_count: 143 },
-          { key: "日志分析", doc_count: 121 },
-          { key: "数据清洗", doc_count: 98 },
-          { key: "性能诊断", doc_count: 87 },
-          { key: "安全扫描", doc_count: 62 },
-          { key: "代码重构", doc_count: 54 },
-          { key: "异常排查", doc_count: 49 },
-          { key: "接口联调", doc_count: 44 },
-          { key: "依赖升级", doc_count: 38 },
-          { key: "配置检查", doc_count: 33 },
-          { key: "发布诊断", doc_count: 29 },
-          { key: "性能优化", doc_count: 24 },
-          { key: "埋点分析", doc_count: 18 },
-          { key: "前端走查", doc_count: 13 },
-          { key: "脚本生成", doc_count: 9 },
-          { key: "冒烟测试", doc_count: 8 },
-          { key: "链路排查", doc_count: 7 },
-          { key: "Schema 校验", doc_count: 6 },
-          { key: "接口 Mock", doc_count: 5 },
-          { key: "灰度检查", doc_count: 4 }
-        ]
-      },
-      code_by_skill_adoption: {
-        buckets: [
-          {
-            key: "代码审查",
-            generated_lines: { value: 850 },
-            measured_generated_lines: { value: 760 },
-            effective_generated_lines: { value: 700 },
-            unmeasured_generated_lines: { value: 90 },
-            inclusive_effective_generated_lines: { value: 790 },
-            adopted_lines: { value: 511 },
-            measured_adoption_rate: { value: 511 / 700 },
-            inclusive_adoption_rate: { value: 511 / 790 },
-            pushed_measured_generated_lines: { value: 520 },
-            pushed_effective_generated_lines: { value: 490 },
-            pushed_adopted_lines: { value: 380 },
-            pushed_adoption_rate: { value: 380 / 490 },
-            pushed_commit_count: { value: 8 },
-            commit_count: { value: 18 }
-          },
-          {
-            key: "单元测试",
-            generated_lines: { value: 620 },
-            measured_generated_lines: { value: 620 },
-            effective_generated_lines: { value: 560 },
-            unmeasured_generated_lines: { value: 0 },
-            inclusive_effective_generated_lines: { value: 560 },
-            adopted_lines: { value: 470 },
-            measured_adoption_rate: { value: 470 / 560 },
-            inclusive_adoption_rate: { value: 470 / 560 },
-            pushed_measured_generated_lines: { value: 420 },
-            pushed_effective_generated_lines: { value: 380 },
-            pushed_adopted_lines: { value: 340 },
-            pushed_adoption_rate: { value: 340 / 380 },
-            pushed_commit_count: { value: 6 },
-            commit_count: { value: 12 }
-          },
-          {
-            key: "SQL优化",
-            generated_lines: { value: 460 },
-            measured_generated_lines: { value: 360 },
-            effective_generated_lines: { value: 330 },
-            unmeasured_generated_lines: { value: 100 },
-            inclusive_effective_generated_lines: { value: 430 },
-            adopted_lines: { value: 260 },
-            measured_adoption_rate: { value: 260 / 330 },
-            inclusive_adoption_rate: { value: 260 / 430 },
-            pushed_measured_generated_lines: { value: 200 },
-            pushed_effective_generated_lines: { value: 180 },
-            pushed_adopted_lines: { value: 140 },
-            pushed_adoption_rate: { value: 140 / 180 },
-            pushed_commit_count: { value: 3 },
-            commit_count: { value: 7 }
-          },
-          {
-            key: "plugin-release-note-v1.0.0",
-            generated_lines: { value: 410 },
-            measured_generated_lines: { value: 360 },
-            effective_generated_lines: { value: 340 },
-            unmeasured_generated_lines: { value: 50 },
-            inclusive_effective_generated_lines: { value: 390 },
-            adopted_lines: { value: 255 },
-            measured_adoption_rate: { value: 255 / 340 },
-            inclusive_adoption_rate: { value: 255 / 390 },
-            pushed_measured_generated_lines: { value: 260 },
-            pushed_effective_generated_lines: { value: 245 },
-            pushed_adopted_lines: { value: 180 },
-            pushed_adoption_rate: { value: 180 / 245 },
-            pushed_commit_count: { value: 4 },
-            commit_count: { value: 9 }
-          },
-          {
-            key: "接口设计",
-            generated_lines: { value: 380 },
-            measured_generated_lines: { value: 0 },
-            effective_generated_lines: { value: 0 },
-            unmeasured_generated_lines: { value: 380 },
-            inclusive_effective_generated_lines: { value: 380 },
-            adopted_lines: { value: 0 },
-            measured_adoption_rate: { value: null },
-            inclusive_adoption_rate: { value: 0 },
-            pushed_measured_generated_lines: { value: 0 },
-            pushed_effective_generated_lines: { value: 0 },
-            pushed_adopted_lines: { value: 0 },
-            pushed_adoption_rate: { value: null },
-            pushed_commit_count: { value: 0 },
-            commit_count: { value: 0 }
-          }
-        ]
-      },
-      by_tool: {
-        buckets: [
-          { key: "git_workflow", doc_count: 412 },
-          { key: "browser_playwright", doc_count: 356 },
-          { key: "manage_skill", doc_count: 298 },
-          { key: "manage_scheduler", doc_count: 241 },
-          { key: "web_search", doc_count: 198 },
-          { key: "db_query", doc_count: 163 },
-          { key: "create_pr", doc_count: 134 },
-          { key: "run_tests", doc_count: 112 },
-          { key: "search_code", doc_count: 98 },
-          { key: "notify", doc_count: 76 },
-          { key: "query_logs", doc_count: 68 },
-          { key: "schema_check", doc_count: 59 },
-          { key: "open_preview", doc_count: 53 },
-          { key: "analyze_diff", doc_count: 47 },
-          { key: "format_code", doc_count: 42 },
-          { key: "lint_fix", doc_count: 36 },
-          { key: "dependency_audit", doc_count: 31 },
-          { key: "deploy_check", doc_count: 26 },
-          { key: "trace_lookup", doc_count: 19 },
-          { key: "ticket_update", doc_count: 12 }
-        ]
-      },
-      by_tool_filtered_all: {
-        buckets: [
-          { key: "git_workflow", doc_count: 412 },
-          { key: "browser_playwright", doc_count: 356 },
-          { key: "manage_skill", doc_count: 298 },
-          { key: "manage_scheduler", doc_count: 241 },
-          { key: "web_search", doc_count: 198 },
-          { key: "db_query", doc_count: 163 },
-          { key: "create_pr", doc_count: 134 },
-          { key: "run_tests", doc_count: 112 },
-          { key: "search_code", doc_count: 98 },
-          { key: "notify", doc_count: 76 },
-          { key: "query_logs", doc_count: 68 },
-          { key: "schema_check", doc_count: 59 },
-          { key: "open_preview", doc_count: 53 },
-          { key: "analyze_diff", doc_count: 47 },
-          { key: "format_code", doc_count: 42 },
-          { key: "lint_fix", doc_count: 36 },
-          { key: "dependency_audit", doc_count: 31 },
-          { key: "deploy_check", doc_count: 26 },
-          { key: "trace_lookup", doc_count: 19 },
-          { key: "ticket_update", doc_count: 12 },
-          { key: "mcp_sqlQuery", doc_count: 11 },
-          { key: "browser_visualDiff", doc_count: 9 },
-          { key: "workflow_template", doc_count: 7 }
-        ]
-      },
-      by_tool_all: {
-        buckets: [
-          { key: "read_file", doc_count: 1823 },
-          { key: "write_file", doc_count: 1245 },
-          { key: "execute", doc_count: 987 },
-          { key: "grep", doc_count: 876 },
-          { key: "glob", doc_count: 654 },
-          { key: "git_workflow", doc_count: 412 },
-          { key: "browser_playwright", doc_count: 356 },
-          { key: "manage_skill", doc_count: 298 },
-          { key: "edit_file", doc_count: 267 },
-          { key: "manage_scheduler", doc_count: 241 },
-          { key: "web_search", doc_count: 198 },
-          { key: "list_directory", doc_count: 187 },
-          { key: "db_query", doc_count: 163 },
-          { key: "task", doc_count: 156 },
-          { key: "task_output", doc_count: 148 },
-          { key: "create_pr", doc_count: 134 },
-          { key: "search_tool", doc_count: 128 },
-          { key: "run_tests", doc_count: 112 },
-          { key: "search_code", doc_count: 98 },
-          { key: "code_exec", doc_count: 92 }
-        ]
-      },
-      by_tool_all_full: {
-        buckets: [
-          { key: "read_file", doc_count: 1823 },
-          { key: "write_file", doc_count: 1245 },
-          { key: "execute", doc_count: 987 },
-          { key: "grep", doc_count: 876 },
-          { key: "glob", doc_count: 654 },
-          { key: "git_workflow", doc_count: 412 },
-          { key: "browser_playwright", doc_count: 356 },
-          { key: "manage_skill", doc_count: 298 },
-          { key: "edit_file", doc_count: 267 },
-          { key: "manage_scheduler", doc_count: 241 },
-          { key: "web_search", doc_count: 198 },
-          { key: "list_directory", doc_count: 187 },
-          { key: "db_query", doc_count: 163 },
-          { key: "task", doc_count: 156 },
-          { key: "task_output", doc_count: 148 },
-          { key: "create_pr", doc_count: 134 },
-          { key: "search_tool", doc_count: 128 },
-          { key: "run_tests", doc_count: 112 },
-          { key: "search_code", doc_count: 98 },
-          { key: "code_exec", doc_count: 92 },
-          { key: "prepare_save_code_exec_tool", doc_count: 81 },
-          { key: "notify", doc_count: 76 },
-          { key: "query_logs", doc_count: 68 },
-          { key: "schema_check", doc_count: 59 },
-          { key: "open_preview", doc_count: 53 }
-        ]
-      },
-      trend: { buckets: trend }
-    }
-  }
+  return scaleMockDashboardResponse(
+    {
+      aggregations: {
+        total_calls: { value: 1247 },
+        active_users: { value: 38 },
+        avg_duration: { value: 4320 },
+        total_input_tokens: { value: 2_340_000 },
+        total_output_tokens: { value: 890_000 },
+        total_skills: { value: 20 },
+        total_tools: { value: 27 },
+        total_skill_calls: { value: 2022 },
+        total_tool_calls: { value: 6538 },
+        code_generated_lines: { value: 4820 },
+        code_deleted_lines: { value: 930 },
+        code_measured_generated_lines: { value: 3900 },
+        code_effective_generated_lines: { value: 3720 },
+        code_unmeasured_generated_lines: { value: 920 },
+        code_inclusive_effective_generated_lines: { value: 4640 },
+        code_adopted_lines: { value: 2860 },
+        code_pushed_measured_generated_lines: { value: 2500 },
+        code_pushed_effective_generated_lines: { value: 2360 },
+        code_pushed_adopted_lines: { value: 1880 },
+        code_pushed_commit_count: { value: 21 },
+        by_skill: {
+          buckets: [
+            { key: "代码审查", doc_count: 312 },
+            { key: "需求分析", doc_count: 278 },
+            { key: "文档生成", doc_count: 245 },
+            { key: "单元测试", doc_count: 198 },
+            { key: "SQL优化", doc_count: 167 },
+            { key: "plugin-release-note-v1.0.0", doc_count: 156 },
+            { key: "接口设计", doc_count: 143 },
+            { key: "日志分析", doc_count: 121 },
+            { key: "数据清洗", doc_count: 98 },
+            { key: "性能诊断", doc_count: 87 },
+            { key: "安全扫描", doc_count: 62 },
+            { key: "代码重构", doc_count: 54 },
+            { key: "异常排查", doc_count: 49 },
+            { key: "接口联调", doc_count: 44 },
+            { key: "依赖升级", doc_count: 38 },
+            { key: "配置检查", doc_count: 33 },
+            { key: "发布诊断", doc_count: 29 },
+            { key: "性能优化", doc_count: 24 },
+            { key: "埋点分析", doc_count: 18 },
+            { key: "前端走查", doc_count: 13 },
+            { key: "脚本生成", doc_count: 9 }
+          ]
+        },
+        by_skill_all: {
+          buckets: [
+            { key: "代码审查", doc_count: 312 },
+            { key: "需求分析", doc_count: 278 },
+            { key: "文档生成", doc_count: 245 },
+            { key: "单元测试", doc_count: 198 },
+            { key: "SQL优化", doc_count: 167 },
+            { key: "plugin-release-note-v1.0.0", doc_count: 156 },
+            { key: "接口设计", doc_count: 143 },
+            { key: "日志分析", doc_count: 121 },
+            { key: "数据清洗", doc_count: 98 },
+            { key: "性能诊断", doc_count: 87 },
+            { key: "安全扫描", doc_count: 62 },
+            { key: "代码重构", doc_count: 54 },
+            { key: "异常排查", doc_count: 49 },
+            { key: "接口联调", doc_count: 44 },
+            { key: "依赖升级", doc_count: 38 },
+            { key: "配置检查", doc_count: 33 },
+            { key: "发布诊断", doc_count: 29 },
+            { key: "性能优化", doc_count: 24 },
+            { key: "埋点分析", doc_count: 18 },
+            { key: "前端走查", doc_count: 13 },
+            { key: "脚本生成", doc_count: 9 },
+            { key: "冒烟测试", doc_count: 8 },
+            { key: "链路排查", doc_count: 7 },
+            { key: "Schema 校验", doc_count: 6 },
+            { key: "接口 Mock", doc_count: 5 },
+            { key: "灰度检查", doc_count: 4 }
+          ]
+        },
+        code_by_skill_adoption: {
+          buckets: [
+            {
+              key: "代码审查",
+              generated_lines: { value: 850 },
+              measured_generated_lines: { value: 760 },
+              effective_generated_lines: { value: 700 },
+              unmeasured_generated_lines: { value: 90 },
+              inclusive_effective_generated_lines: { value: 790 },
+              adopted_lines: { value: 511 },
+              measured_adoption_rate: { value: 511 / 700 },
+              inclusive_adoption_rate: { value: 511 / 790 },
+              pushed_measured_generated_lines: { value: 520 },
+              pushed_effective_generated_lines: { value: 490 },
+              pushed_adopted_lines: { value: 380 },
+              pushed_adoption_rate: { value: 380 / 490 },
+              pushed_commit_count: { value: 8 },
+              commit_count: { value: 18 }
+            },
+            {
+              key: "单元测试",
+              generated_lines: { value: 620 },
+              measured_generated_lines: { value: 620 },
+              effective_generated_lines: { value: 560 },
+              unmeasured_generated_lines: { value: 0 },
+              inclusive_effective_generated_lines: { value: 560 },
+              adopted_lines: { value: 470 },
+              measured_adoption_rate: { value: 470 / 560 },
+              inclusive_adoption_rate: { value: 470 / 560 },
+              pushed_measured_generated_lines: { value: 420 },
+              pushed_effective_generated_lines: { value: 380 },
+              pushed_adopted_lines: { value: 340 },
+              pushed_adoption_rate: { value: 340 / 380 },
+              pushed_commit_count: { value: 6 },
+              commit_count: { value: 12 }
+            },
+            {
+              key: "SQL优化",
+              generated_lines: { value: 460 },
+              measured_generated_lines: { value: 360 },
+              effective_generated_lines: { value: 330 },
+              unmeasured_generated_lines: { value: 100 },
+              inclusive_effective_generated_lines: { value: 430 },
+              adopted_lines: { value: 260 },
+              measured_adoption_rate: { value: 260 / 330 },
+              inclusive_adoption_rate: { value: 260 / 430 },
+              pushed_measured_generated_lines: { value: 200 },
+              pushed_effective_generated_lines: { value: 180 },
+              pushed_adopted_lines: { value: 140 },
+              pushed_adoption_rate: { value: 140 / 180 },
+              pushed_commit_count: { value: 3 },
+              commit_count: { value: 7 }
+            },
+            {
+              key: "plugin-release-note-v1.0.0",
+              generated_lines: { value: 410 },
+              measured_generated_lines: { value: 360 },
+              effective_generated_lines: { value: 340 },
+              unmeasured_generated_lines: { value: 50 },
+              inclusive_effective_generated_lines: { value: 390 },
+              adopted_lines: { value: 255 },
+              measured_adoption_rate: { value: 255 / 340 },
+              inclusive_adoption_rate: { value: 255 / 390 },
+              pushed_measured_generated_lines: { value: 260 },
+              pushed_effective_generated_lines: { value: 245 },
+              pushed_adopted_lines: { value: 180 },
+              pushed_adoption_rate: { value: 180 / 245 },
+              pushed_commit_count: { value: 4 },
+              commit_count: { value: 9 }
+            },
+            {
+              key: "接口设计",
+              generated_lines: { value: 380 },
+              measured_generated_lines: { value: 0 },
+              effective_generated_lines: { value: 0 },
+              unmeasured_generated_lines: { value: 380 },
+              inclusive_effective_generated_lines: { value: 380 },
+              adopted_lines: { value: 0 },
+              measured_adoption_rate: { value: null },
+              inclusive_adoption_rate: { value: 0 },
+              pushed_measured_generated_lines: { value: 0 },
+              pushed_effective_generated_lines: { value: 0 },
+              pushed_adopted_lines: { value: 0 },
+              pushed_adoption_rate: { value: null },
+              pushed_commit_count: { value: 0 },
+              commit_count: { value: 0 }
+            }
+          ]
+        },
+        by_tool: {
+          buckets: [
+            { key: "git_workflow", doc_count: 412 },
+            { key: "browser_playwright", doc_count: 356 },
+            { key: "manage_skill", doc_count: 298 },
+            { key: "manage_scheduler", doc_count: 241 },
+            { key: "web_search", doc_count: 198 },
+            { key: "db_query", doc_count: 163 },
+            { key: "create_pr", doc_count: 134 },
+            { key: "run_tests", doc_count: 112 },
+            { key: "search_code", doc_count: 98 },
+            { key: "notify", doc_count: 76 },
+            { key: "query_logs", doc_count: 68 },
+            { key: "schema_check", doc_count: 59 },
+            { key: "open_preview", doc_count: 53 },
+            { key: "analyze_diff", doc_count: 47 },
+            { key: "format_code", doc_count: 42 },
+            { key: "lint_fix", doc_count: 36 },
+            { key: "dependency_audit", doc_count: 31 },
+            { key: "deploy_check", doc_count: 26 },
+            { key: "trace_lookup", doc_count: 19 },
+            { key: "ticket_update", doc_count: 12 }
+          ]
+        },
+        by_tool_filtered_all: {
+          buckets: [
+            { key: "git_workflow", doc_count: 412 },
+            { key: "browser_playwright", doc_count: 356 },
+            { key: "manage_skill", doc_count: 298 },
+            { key: "manage_scheduler", doc_count: 241 },
+            { key: "web_search", doc_count: 198 },
+            { key: "db_query", doc_count: 163 },
+            { key: "create_pr", doc_count: 134 },
+            { key: "run_tests", doc_count: 112 },
+            { key: "search_code", doc_count: 98 },
+            { key: "notify", doc_count: 76 },
+            { key: "query_logs", doc_count: 68 },
+            { key: "schema_check", doc_count: 59 },
+            { key: "open_preview", doc_count: 53 },
+            { key: "analyze_diff", doc_count: 47 },
+            { key: "format_code", doc_count: 42 },
+            { key: "lint_fix", doc_count: 36 },
+            { key: "dependency_audit", doc_count: 31 },
+            { key: "deploy_check", doc_count: 26 },
+            { key: "trace_lookup", doc_count: 19 },
+            { key: "ticket_update", doc_count: 12 },
+            { key: "mcp_sqlQuery", doc_count: 11 },
+            { key: "browser_visualDiff", doc_count: 9 },
+            { key: "workflow_template", doc_count: 7 }
+          ]
+        },
+        by_tool_all: {
+          buckets: [
+            { key: "read_file", doc_count: 1823 },
+            { key: "write_file", doc_count: 1245 },
+            { key: "execute", doc_count: 987 },
+            { key: "grep", doc_count: 876 },
+            { key: "glob", doc_count: 654 },
+            { key: "git_workflow", doc_count: 412 },
+            { key: "browser_playwright", doc_count: 356 },
+            { key: "manage_skill", doc_count: 298 },
+            { key: "edit_file", doc_count: 267 },
+            { key: "manage_scheduler", doc_count: 241 },
+            { key: "web_search", doc_count: 198 },
+            { key: "list_directory", doc_count: 187 },
+            { key: "db_query", doc_count: 163 },
+            { key: "task", doc_count: 156 },
+            { key: "task_output", doc_count: 148 },
+            { key: "create_pr", doc_count: 134 },
+            { key: "search_tool", doc_count: 128 },
+            { key: "run_tests", doc_count: 112 },
+            { key: "search_code", doc_count: 98 },
+            { key: "code_exec", doc_count: 92 }
+          ]
+        },
+        by_tool_all_full: {
+          buckets: [
+            { key: "read_file", doc_count: 1823 },
+            { key: "write_file", doc_count: 1245 },
+            { key: "execute", doc_count: 987 },
+            { key: "grep", doc_count: 876 },
+            { key: "glob", doc_count: 654 },
+            { key: "git_workflow", doc_count: 412 },
+            { key: "browser_playwright", doc_count: 356 },
+            { key: "manage_skill", doc_count: 298 },
+            { key: "edit_file", doc_count: 267 },
+            { key: "manage_scheduler", doc_count: 241 },
+            { key: "web_search", doc_count: 198 },
+            { key: "list_directory", doc_count: 187 },
+            { key: "db_query", doc_count: 163 },
+            { key: "task", doc_count: 156 },
+            { key: "task_output", doc_count: 148 },
+            { key: "create_pr", doc_count: 134 },
+            { key: "search_tool", doc_count: 128 },
+            { key: "run_tests", doc_count: 112 },
+            { key: "search_code", doc_count: 98 },
+            { key: "code_exec", doc_count: 92 },
+            { key: "prepare_save_code_exec_tool", doc_count: 81 },
+            { key: "notify", doc_count: 76 },
+            { key: "query_logs", doc_count: 68 },
+            { key: "schema_check", doc_count: 59 },
+            { key: "open_preview", doc_count: 53 }
+          ]
+        },
+        trend: { buckets: trend }
+      }
+    },
+    opts
+  )
 }
 
-function makeMockModelStats(): unknown {
-  return {
-    aggregations: {
-      by_model: {
-        buckets: [
-          {
-            key: "claude-sonnet-4-6",
-            doc_count: 620,
-            success_count: { doc_count: 578 },
-            avg_duration: { value: 3800 },
-            total_input_tokens: { value: 1_200_000 },
-            total_output_tokens: { value: 430_000 }
-          },
-          {
-            key: "claude-opus-4-6",
-            doc_count: 280,
-            success_count: { doc_count: 265 },
-            avg_duration: { value: 8200 },
-            total_input_tokens: { value: 780_000 },
-            total_output_tokens: { value: 310_000 }
-          },
-          {
-            key: "claude-haiku-4-5",
-            doc_count: 347,
-            success_count: { doc_count: 259 },
-            avg_duration: { value: 1100 },
-            total_input_tokens: { value: 360_000 },
-            total_output_tokens: { value: 150_000 }
-          }
-        ]
-      },
-      by_tier: {
-        buckets: [
-          { key: "high", doc_count: 280 },
-          { key: "medium", doc_count: 620 },
-          { key: "low", doc_count: 347 }
-        ]
-      },
-      by_layer: {
-        buckets: [
-          { key: "user_explicit", doc_count: 210 },
-          { key: "skill_override", doc_count: 390 },
-          { key: "auto_routing", doc_count: 647 }
-        ]
+function makeMockModelStats(opts?: OrgFilterOptions): unknown {
+  return scaleMockDashboardResponse(
+    {
+      aggregations: {
+        by_model: {
+          buckets: [
+            {
+              key: "claude-sonnet-4-6",
+              doc_count: 620,
+              success_count: { doc_count: 578 },
+              avg_duration: { value: 3800 },
+              total_input_tokens: { value: 1_200_000 },
+              total_output_tokens: { value: 430_000 }
+            },
+            {
+              key: "claude-opus-4-6",
+              doc_count: 280,
+              success_count: { doc_count: 265 },
+              avg_duration: { value: 8200 },
+              total_input_tokens: { value: 780_000 },
+              total_output_tokens: { value: 310_000 }
+            },
+            {
+              key: "claude-haiku-4-5",
+              doc_count: 347,
+              success_count: { doc_count: 259 },
+              avg_duration: { value: 1100 },
+              total_input_tokens: { value: 360_000 },
+              total_output_tokens: { value: 150_000 }
+            }
+          ]
+        },
+        by_tier: {
+          buckets: [
+            { key: "high", doc_count: 280 },
+            { key: "medium", doc_count: 620 },
+            { key: "low", doc_count: 347 }
+          ]
+        },
+        by_layer: {
+          buckets: [
+            { key: "user_explicit", doc_count: 210 },
+            { key: "skill_override", doc_count: 390 },
+            { key: "auto_routing", doc_count: 647 }
+          ]
+        }
       }
-    }
-  }
+    },
+    opts
+  )
 }
 
 function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
@@ -4716,6 +4912,7 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
   const diffMs = to.getTime() - from.getTime()
   const diffDays = diffMs / (1000 * 60 * 60 * 24)
   const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
+  const hasSelectedOrgs = selectedOrgs.length > 0
   const selectedUpperOrgLv1 = selectedOrgs.length === 1 ? selectedOrgs[0] : null
 
   const trendBuckets: Date[] = []
@@ -4738,23 +4935,24 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
     users: { value: Math.floor(3 + Math.random() * 15) }
   }))
 
+  const allLv1OrgBuckets = [
+    { key: "测试 1 部", doc_count: 748, unique_users: { value: 60 } },
+    { key: "开发二部", doc_count: 245, unique_users: { value: 20 } },
+    { key: "平台三部", doc_count: 189, unique_users: { value: 15 } }
+  ]
   const byOrgBuckets =
-    selectedUpperOrgLv1 === null
+    selectedUpperOrgLv1 === "测试 1 部"
       ? [
-          { key: "测试 1 部", doc_count: 748, unique_users: { value: 60 } },
-          { key: "开发二部", doc_count: 245, unique_users: { value: 20 } },
-          { key: "平台三部", doc_count: 189, unique_users: { value: 15 } }
+          { key: "测试 1 组", doc_count: 430, unique_users: { value: 36 } },
+          { key: "测试 2 组", doc_count: 318, unique_users: { value: 24 } }
         ]
-      : selectedUpperOrgLv1 === "测试 1 部"
-        ? [
-            { key: "测试 1 组", doc_count: 430, unique_users: { value: 36 } },
-            { key: "测试 2 组", doc_count: 318, unique_users: { value: 24 } }
-          ]
-        : selectedUpperOrgLv1 === "开发二部"
-          ? [{ key: "开发三组", doc_count: 245, unique_users: { value: 20 } }]
-          : selectedUpperOrgLv1 === "平台三部"
-            ? [{ key: "平台一组", doc_count: 189, unique_users: { value: 15 } }]
-            : []
+      : selectedUpperOrgLv1 === "开发二部"
+        ? [{ key: "开发三组", doc_count: 245, unique_users: { value: 20 } }]
+        : selectedUpperOrgLv1 === "平台三部"
+          ? [{ key: "平台一组", doc_count: 189, unique_users: { value: 15 } }]
+          : hasSelectedOrgs
+            ? allLv1OrgBuckets.filter((bucket) => selectedOrgs.includes(bucket.key))
+            : allLv1OrgBuckets
 
   const makeOrgAgg = (buckets: typeof byOrgBuckets): Record<string, unknown> => {
     const docCount = buckets.reduce((sum, bucket) => sum + bucket.doc_count, 0)
@@ -4885,38 +5083,35 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
       }
     }
   ]
-  const topUserBuckets =
-    selectedUpperOrgLv1 === null
-      ? allTopUserBuckets
-      : allTopUserBuckets.filter(
-          (bucket) =>
-            bucket.latest_user_info.hits.hits[0]._source.upperOrgLv1 === selectedUpperOrgLv1
-        )
+  const topUserBuckets = !hasSelectedOrgs
+    ? allTopUserBuckets
+    : allTopUserBuckets.filter((bucket) =>
+        selectedOrgs.includes(bucket.latest_user_info.hits.hits[0]._source.upperOrgLv1)
+      )
 
-  const byVersionBuckets =
-    selectedUpperOrgLv1 === null
-      ? [
-          { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
-          { key: "1.2.5", doc_count: 298, unique_users: { value: 62 } },
-          { key: "1.2.0", doc_count: 187, unique_users: { value: 41 } },
-          { key: "1.1.x", doc_count: 143, unique_users: { value: 28 } },
-          { key: "1.0.x", doc_count: 107, unique_users: { value: 19 } }
-        ]
-      : [
-          {
-            key: "1.3.0",
-            doc_count: Math.max(12, byOrgBuckets[0]?.doc_count ?? 0),
-            unique_users: { value: Math.max(3, topUserBuckets.length) }
-          },
-          {
-            key: "1.2.5",
-            doc_count: Math.max(
-              6,
-              Math.floor((byOrgBuckets[1]?.doc_count ?? byOrgBuckets[0]?.doc_count ?? 0) * 0.4)
-            ),
-            unique_users: { value: Math.max(1, Math.ceil(topUserBuckets.length / 2)) }
-          }
-        ]
+  const byVersionBuckets = !hasSelectedOrgs
+    ? [
+        { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
+        { key: "1.2.5", doc_count: 298, unique_users: { value: 62 } },
+        { key: "1.2.0", doc_count: 187, unique_users: { value: 41 } },
+        { key: "1.1.x", doc_count: 143, unique_users: { value: 28 } },
+        { key: "1.0.x", doc_count: 107, unique_users: { value: 19 } }
+      ]
+    : [
+        {
+          key: "1.3.0",
+          doc_count: Math.max(12, byOrgBuckets[0]?.doc_count ?? 0),
+          unique_users: { value: Math.max(3, topUserBuckets.length) }
+        },
+        {
+          key: "1.2.5",
+          doc_count: Math.max(
+            6,
+            Math.floor((byOrgBuckets[1]?.doc_count ?? byOrgBuckets[0]?.doc_count ?? 0) * 0.4)
+          ),
+          unique_users: { value: Math.max(1, Math.ceil(topUserBuckets.length / 2)) }
+        }
+      ]
 
   return {
     aggregations: {
@@ -5288,28 +5483,66 @@ function makeMockUserDetail(
 ): DashboardUserDetail {
   const index = Math.max(0, Number(sapId.slice(-3)) - 1)
   const user = makeMockDashboardUser(Number.isFinite(index) ? index : 0)
+  const traceViewMode = normalizeTraceViewMode(options?.viewMode ?? options?.mode)
   const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
   const tracePage = clampLimit(options?.tracePage, 1, 1000)
-  const totalTraces = user.count
-  const startIndex = (tracePage - 1) * tracePageSize
   const baseTraces = makeMockSkillRecentTraces("代码审查", range, 10)
-  const traces = Array.from(
-    { length: Math.max(0, Math.min(tracePageSize, totalTraces - startIndex)) },
-    (_, traceIndex) => {
-      const trace = baseTraces[traceIndex % baseTraces.length]
-      const mockIndex = startIndex + traceIndex
-      return {
-        ...trace,
-        traceId: `${trace.traceId}-page-${tracePage}-${traceIndex}`,
-        sapId,
-        ystId: user.ystId,
-        userName: user.userName,
-        orgName: user.orgName,
-        userIp: `10.0.1.${20 + (mockIndex % 200)}`,
-        startedAt: new Date(new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000).toISOString()
-      }
-    }
+  // 列表按会话（thread）分页：每页 tracePageSize 个完整会话，每个会话内含若干 trace。
+  const tracesPerThread = 3
+  const totalThreads = Math.min(
+    MAX_THREAD_LIST_BUCKETS,
+    Math.max(1, Math.floor(user.count / tracesPerThread))
   )
+  let traces: DashboardTraceDetail[]
+  let total: number
+  if (traceViewMode === "trace") {
+    // trace 视图：按时间倒序的扁平 trace 分页。
+    total = user.count
+    const startIndex = (tracePage - 1) * tracePageSize
+    traces = Array.from(
+      { length: Math.max(0, Math.min(tracePageSize, total - startIndex)) },
+      (_, traceIndex) => {
+        const mockIndex = startIndex + traceIndex
+        const trace = baseTraces[mockIndex % baseTraces.length]
+        return {
+          ...trace,
+          traceId: `mock-trace-${sapId}-${mockIndex}`,
+          threadId: `mock-thread-${sapId}-${Math.floor(mockIndex / tracesPerThread)}`,
+          sapId,
+          ystId: user.ystId,
+          userName: user.userName,
+          orgName: user.orgName,
+          userIp: `10.0.1.${20 + (mockIndex % 200)}`,
+          startedAt: new Date(
+            new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000
+          ).toISOString()
+        }
+      }
+    )
+  } else {
+    total = totalThreads
+    const startThread = (tracePage - 1) * tracePageSize
+    const threadCountThisPage = Math.max(0, Math.min(tracePageSize, totalThreads - startThread))
+    traces = Array.from({ length: threadCountThisPage }).flatMap((_, threadIndex) => {
+      const threadOrdinal = startThread + threadIndex
+      const threadId = `mock-thread-${sapId}-${threadOrdinal}`
+      const threadStartMs = new Date(range.to).getTime() - threadOrdinal * 3 * 60 * 60 * 1000
+      return Array.from({ length: tracesPerThread }, (_, traceIndex) => {
+        const trace = baseTraces[(threadOrdinal + traceIndex) % baseTraces.length]
+        return {
+          ...trace,
+          traceId: `${threadId}-${traceIndex}`,
+          threadId,
+          sapId,
+          ystId: user.ystId,
+          userName: user.userName,
+          orgName: user.orgName,
+          userIp: `10.0.1.${20 + (threadOrdinal % 200)}`,
+          startedAt: new Date(threadStartMs + traceIndex * 8 * 60 * 1000).toISOString()
+        }
+      })
+    })
+  }
   return {
     sapId,
     ystId: user.ystId,
@@ -5341,12 +5574,505 @@ function makeMockUserDetail(
     traces,
     tracePage,
     tracePageSize,
-    totalTraces,
+    total,
+    traceViewMode,
     traceTriggerScope: normalizeTraceTriggerScope(options?.triggerScope)
   }
 }
 
-function makeMockProductivity(range: TimeRange): unknown {
+function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): DashboardProjectModeData {
+  const allProjects: ProjectModeProjectView[] = [
+    {
+      projectId: "proj-cmb-cowork",
+      name: "CmbCowork Agent",
+      description: "桌面 AI Agent 主项目",
+      systemName: "智能研发平台",
+      workspacePath: "/Users/demo/projects/cmbCowork",
+      adapterName: "claude-code",
+      adapterVersion: "1.4.2",
+      lifecycleStatus: "active",
+      compatible: true,
+      compatibilityStatus: "compatible",
+      featureCount: 3,
+      conversationCount: 128,
+      hasError: false,
+      topSkills: [
+        { skill: "代码审查", count: 40 },
+        { skill: "单元测试", count: 25 },
+        { skill: "SQL优化", count: 12 }
+      ],
+      codeStats: makeDashboardCodeStats({
+        generatedLines: 5200,
+        deletedLines: 800,
+        measuredGeneratedLines: 4800,
+        effectiveGeneratedLines: 4200,
+        adoptedLines: 3100,
+        pushedMeasuredGeneratedLines: 4000,
+        pushedEffectiveGeneratedLines: 3600,
+        pushedAdoptedLines: 2700,
+        pushedCommitCount: 42
+      }),
+      features: [
+        {
+          slug: "harness-board",
+          title: "运营看板",
+          location: "src/main/harness-board",
+          statusLabel: "进行中",
+          currentNodeStatusLabel: "实现中",
+          summary: "新增项目模式看板 tab"
+        },
+        {
+          slug: "code-adoption",
+          title: "代码采纳追踪",
+          location: "src/main/services",
+          statusLabel: "已完成",
+          currentNodeStatusLabel: "已合并",
+          summary: "采纳率统计上线"
+        },
+        {
+          slug: "skill-eval",
+          title: "技能评估",
+          location: "src/main/agent/skill-eval",
+          statusLabel: "待评审",
+          currentNodeStatusLabel: "评审中",
+          summary: "离线 trace 评估流水线"
+        }
+      ]
+    },
+    {
+      projectId: "proj-payment-core",
+      name: "支付核心系统",
+      description: "支付清结算重构",
+      systemName: "支付平台",
+      workspacePath: "/Users/demo/projects/payment-core",
+      adapterName: "claude-code",
+      adapterVersion: "1.4.0",
+      lifecycleStatus: "active",
+      compatible: false,
+      compatibilityStatus: "outdated",
+      featureCount: 2,
+      conversationCount: 47,
+      hasError: false,
+      topSkills: [
+        { skill: "代码审查", count: 18 },
+        { skill: "重构助手", count: 9 }
+      ],
+      codeStats: makeDashboardCodeStats({
+        generatedLines: 2100,
+        deletedLines: 300,
+        measuredGeneratedLines: 1900,
+        effectiveGeneratedLines: 1700,
+        adoptedLines: 900,
+        pushedMeasuredGeneratedLines: 1500,
+        pushedEffectiveGeneratedLines: 1300,
+        pushedAdoptedLines: 700,
+        pushedCommitCount: 11
+      }),
+      features: [
+        {
+          slug: "settlement",
+          title: "清结算重构",
+          statusLabel: "进行中",
+          currentNodeStatusLabel: "开发中",
+          summary: "拆分清算与结算链路"
+        },
+        {
+          slug: "refund",
+          title: "退款流程",
+          statusLabel: "阻塞",
+          currentNodeStatusLabel: "等待依赖",
+          summary: "依赖账务系统接口"
+        }
+      ]
+    },
+    {
+      projectId: "proj-risk-engine",
+      name: "风控引擎",
+      systemName: "风险管理平台",
+      adapterName: "codex",
+      adapterVersion: "0.9.1",
+      lifecycleStatus: "paused",
+      compatible: true,
+      compatibilityStatus: "compatible",
+      featureCount: 1,
+      conversationCount: 0,
+      hasError: true,
+      topSkills: [],
+      codeStats: null,
+      features: [
+        {
+          slug: "rule-dsl",
+          title: "规则 DSL",
+          statusLabel: "暂停",
+          currentNodeStatusLabel: "—",
+          summary: "探测进程返回异常"
+        }
+      ]
+    },
+    {
+      projectId: "proj-legacy-portal",
+      name: "门户旧版迁移",
+      description: "旧门户下线",
+      systemName: "统一门户",
+      adapterName: "claude-code",
+      adapterVersion: "1.3.5",
+      lifecycleStatus: "archived",
+      compatible: true,
+      compatibilityStatus: "compatible",
+      featureCount: 1,
+      conversationCount: 12,
+      hasError: false,
+      topSkills: [{ skill: "代码审查", count: 6 }],
+      codeStats: makeDashboardCodeStats({
+        generatedLines: 900,
+        deletedLines: 1500,
+        measuredGeneratedLines: 850,
+        effectiveGeneratedLines: 700,
+        adoptedLines: 520,
+        pushedMeasuredGeneratedLines: 700,
+        pushedEffectiveGeneratedLines: 600,
+        pushedAdoptedLines: 450,
+        pushedCommitCount: 8
+      }),
+      features: [
+        {
+          slug: "portal-migrate",
+          title: "门户迁移",
+          statusLabel: "已归档",
+          currentNodeStatusLabel: "已下线",
+          summary: "迁移完成并归档"
+        }
+      ]
+    }
+  ]
+  void range
+  // 额外填充若干进行中项目，便于在 DEV 模式演示项目列表的分页/搜索交互。
+  for (let i = 1; i <= 12; i++) {
+    allProjects.push({
+      projectId: `proj-demo-${i}`,
+      name: `示例项目 ${i}`,
+      systemName: "示例平台",
+      adapterName: "claude-code",
+      adapterVersion: "1.4.2",
+      lifecycleStatus: "active",
+      compatible: true,
+      compatibilityStatus: "compatible",
+      featureCount: (i % 3) + 1,
+      conversationCount: (i * 7) % 90,
+      hasError: false,
+      topSkills: [{ skill: "代码审查", count: (i * 3) % 20 }],
+      codeStats: null,
+      features: [
+        {
+          slug: `demo-${i}-feature`,
+          title: `示例特性 ${i}`,
+          statusLabel: "进行中",
+          currentNodeStatusLabel: "开发中",
+          summary: "演示用占位特性"
+        }
+      ]
+    })
+  }
+  const mockCreators: Array<
+    Pick<
+      ProjectModeProjectView,
+      | "creatorSapId"
+      | "creatorYstId"
+      | "creatorUserName"
+      | "creatorOrgName"
+      | "creatorUpperOrgLv0"
+      | "creatorUpperOrgLv1"
+    >
+  > = [
+    {
+      creatorSapId: "10010001",
+      creatorYstId: "383331",
+      creatorUserName: "张三",
+      creatorOrgName: "测试 1 组",
+      creatorUpperOrgLv1: "测试 1 部",
+      creatorUpperOrgLv0: "测试 1 组"
+    },
+    {
+      creatorSapId: "10010002",
+      creatorYstId: "231855",
+      creatorUserName: "李四",
+      creatorOrgName: "开发三组",
+      creatorUpperOrgLv1: "开发二部",
+      creatorUpperOrgLv0: "开发三组"
+    },
+    {
+      creatorSapId: "10010003",
+      creatorYstId: "280631",
+      creatorUserName: "王五",
+      creatorOrgName: "平台一组",
+      creatorUpperOrgLv1: "平台三部",
+      creatorUpperOrgLv0: "平台一组"
+    }
+  ]
+  allProjects.forEach((project, index) => {
+    Object.assign(project, mockCreators[index % mockCreators.length])
+  })
+  // 「室筛选」：按下标分配的室过滤项目列表，使 mock 下切换室也能真实改变数据。
+  const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
+  const projects = allProjects.filter((_, i) =>
+    mockProjectMatchesOrg(mockProjectOrgAt(i), selectedOrgs)
+  )
+  // 聚合块（token/工具/技能/采纳明细等）按室权重缩放，与其它面板口径一致。
+  const aggScale = getMockOrgScale(opts)
+  const featureCount = projects.reduce((sum, p) => sum + p.featureCount, 0)
+  const conversationCount = projects.reduce((sum, p) => sum + p.conversationCount, 0)
+  const activeProjectCount = projects.filter((p) => p.conversationCount > 0).length
+  const projectCounts = buildProjectModeProjectCounts(projects)
+  const projectPage = makeMockProjectModeProjectPage(projects, {
+    status: "active",
+    page: 1,
+    pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
+    keyword: ""
+  })
+  return {
+    summary: {
+      projectCount: projects.length,
+      featureCount,
+      activeProjectCount,
+      conversationCount,
+      totalToolCalls: scaleMockMetricNumber(1842, aggScale),
+      totalInputTokens: scaleMockMetricNumber(7_200_000, aggScale),
+      totalOutputTokens: scaleMockMetricNumber(2_450_000, aggScale),
+      totalTokens: scaleMockMetricNumber(9_650_000, aggScale),
+      skillCallCount: scaleMockMetricNumber(312, aggScale),
+      distinctSkillCount: 14,
+      codeStats: makeDashboardCodeStats({
+        generatedLines: scaleMockMetricNumber(7300, aggScale),
+        deletedLines: scaleMockMetricNumber(1100, aggScale),
+        measuredGeneratedLines: scaleMockMetricNumber(6700, aggScale),
+        effectiveGeneratedLines: scaleMockMetricNumber(5900, aggScale),
+        adoptedLines: scaleMockMetricNumber(4000, aggScale),
+        pushedMeasuredGeneratedLines: scaleMockMetricNumber(5500, aggScale),
+        pushedEffectiveGeneratedLines: scaleMockMetricNumber(4900, aggScale),
+        pushedAdoptedLines: scaleMockMetricNumber(3400, aggScale),
+        pushedCommitCount: scaleMockMetricNumber(53, aggScale)
+      })
+    },
+    adapters: deepScaleMockMetrics(
+      [
+        {
+          name: "claude-code",
+          version: "1.4.2",
+          projectCount: 1,
+          featureCount: 3,
+          conversationCount: 128,
+          codeStats: makeDashboardCodeStats({
+            generatedLines: 5200,
+            deletedLines: 800,
+            measuredGeneratedLines: 4800,
+            effectiveGeneratedLines: 4200,
+            adoptedLines: 3100,
+            pushedMeasuredGeneratedLines: 4000,
+            pushedEffectiveGeneratedLines: 3600,
+            pushedAdoptedLines: 2700,
+            pushedCommitCount: 42
+          })
+        },
+        {
+          name: "claude-code",
+          version: "1.4.0",
+          projectCount: 1,
+          featureCount: 2,
+          conversationCount: 47,
+          codeStats: makeDashboardCodeStats({
+            generatedLines: 1800,
+            deletedLines: 200,
+            measuredGeneratedLines: 1600,
+            effectiveGeneratedLines: 1400,
+            adoptedLines: 900,
+            pushedMeasuredGeneratedLines: 1200,
+            pushedEffectiveGeneratedLines: 1000,
+            pushedAdoptedLines: 650,
+            pushedCommitCount: 14
+          })
+        },
+        {
+          name: "codex",
+          version: "0.9.1",
+          projectCount: 1,
+          featureCount: 1,
+          conversationCount: 0,
+          codeStats: null
+        }
+      ],
+      aggScale
+    ),
+    topSkills: deepScaleMockMetrics(
+      [
+        { skill: "代码审查", count: 58 },
+        { skill: "单元测试", count: 31 },
+        { skill: "重构助手", count: 22 },
+        { skill: "SQL优化", count: 15 }
+      ],
+      aggScale
+    ),
+    tools: deepScaleMockMetrics(
+      {
+        byTool: [
+          { tool: "git_workflow", count: 142 },
+          { tool: "manage_skill", count: 88 },
+          { tool: "manage_scheduler", count: 61 },
+          { tool: "db_query", count: 44 },
+          { tool: "create_pr", count: 33 }
+        ],
+        byToolAll: [
+          { tool: "git_workflow", count: 142 },
+          { tool: "execute", count: 120 },
+          { tool: "read_file", count: 96 },
+          { tool: "manage_skill", count: 88 }
+        ],
+        byToolFilteredAll: [
+          { tool: "git_workflow", count: 142 },
+          { tool: "manage_skill", count: 88 },
+          { tool: "manage_scheduler", count: 61 },
+          { tool: "db_query", count: 44 },
+          { tool: "create_pr", count: 33 }
+        ],
+        byToolAllFull: [
+          { tool: "git_workflow", count: 142 },
+          { tool: "execute", count: 120 },
+          { tool: "read_file", count: 96 },
+          { tool: "manage_skill", count: 88 }
+        ],
+        totalTools: 23,
+        totalToolCalls: 1842
+      },
+      aggScale
+    ),
+    analytics: buildProjectModeMockAnalytics(projects),
+    bySkillAdoption: deepScaleMockMetrics(
+      [
+        {
+          skill: "代码审查",
+          commitCount: 24,
+          ...makeDashboardCodeStats({
+            generatedLines: 3200,
+            deletedLines: 400,
+            measuredGeneratedLines: 3000,
+            effectiveGeneratedLines: 2600,
+            adoptedLines: 2000,
+            pushedMeasuredGeneratedLines: 2400,
+            pushedEffectiveGeneratedLines: 2100,
+            pushedAdoptedLines: 1600,
+            pushedCommitCount: 20
+          })
+        },
+        {
+          skill: "单元测试",
+          commitCount: 12,
+          ...makeDashboardCodeStats({
+            generatedLines: 1800,
+            deletedLines: 200,
+            measuredGeneratedLines: 1700,
+            effectiveGeneratedLines: 1500,
+            adoptedLines: 800,
+            pushedMeasuredGeneratedLines: 1200,
+            pushedEffectiveGeneratedLines: 1050,
+            pushedAdoptedLines: 600,
+            pushedCommitCount: 9
+          })
+        },
+        {
+          skill: "重构助手",
+          commitCount: 7,
+          ...makeDashboardCodeStats({
+            generatedLines: 1100,
+            deletedLines: 900,
+            measuredGeneratedLines: 1000,
+            effectiveGeneratedLines: 820,
+            adoptedLines: 500,
+            pushedMeasuredGeneratedLines: 760,
+            pushedEffectiveGeneratedLines: 640,
+            pushedAdoptedLines: 380,
+            pushedCommitCount: 6
+          })
+        }
+      ],
+      aggScale
+    ),
+    projectCounts,
+    projectPage,
+    projects
+  }
+}
+
+function makeMockProjectModeProjectPage(
+  projects: ProjectModeProjectView[],
+  options?: ProjectModeProjectPageOptions
+): ProjectModeProjectPageData {
+  return sliceProjectModeProjects(projects, options)
+}
+
+function makeMockProjectModeProjects(
+  range: TimeRange,
+  options?: ProjectModeProjectPageOptions
+): ProjectModeProjectPageData {
+  return makeMockProjectModeProjectPage(makeMockProjectMode(range, options).projects, options)
+}
+
+function makeMockProjectModeTraces(
+  projectId: string,
+  range: TimeRange,
+  options?: ProjectModeTracesOptions
+): DashboardProjectModeTracesData {
+  const traceViewMode = normalizeTraceViewMode(options?.viewMode ?? options?.mode)
+  const tracePageSize = clampLimit(
+    options?.tracePageSize ?? options?.pageSize ?? options?.limit,
+    10,
+    50
+  )
+  const tracePage = clampLimit(options?.tracePage ?? options?.page, 1, 1000)
+  const traceTriggerScope = normalizeTraceTriggerScope(options?.triggerScope)
+  const traces = makeMockSkillRecentTraces("项目模式", range, 10).map((trace, index) => ({
+    ...trace,
+    traceId: `${projectId}-${trace.traceId}-${index}`
+  }))
+
+  if (traceViewMode === "trace") {
+    const from = (tracePage - 1) * tracePageSize
+    return {
+      traces: traces.slice(from, from + tracePageSize),
+      tracePage,
+      tracePageSize,
+      total: traces.length,
+      traceViewMode,
+      traceTriggerScope
+    }
+  }
+
+  const grouped = new Map<string, DashboardTraceDetail[]>()
+  for (const trace of traces) {
+    const threadId = trace.threadId || "unknown-thread"
+    grouped.set(threadId, [...(grouped.get(threadId) ?? []), trace])
+  }
+  const groups = [...grouped.entries()]
+    .map(([threadId, threadTraces]) => {
+      const sorted = [...threadTraces].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+      const latestStartedAt = sorted.reduce(
+        (latest, trace) => (trace.startedAt > latest ? trace.startedAt : latest),
+        sorted[0]?.startedAt ?? ""
+      )
+      return { threadId, latestStartedAt, traces: sorted }
+    })
+    .sort((a, b) => b.latestStartedAt.localeCompare(a.latestStartedAt))
+  const from = (tracePage - 1) * tracePageSize
+
+  return {
+    traces: groups.slice(from, from + tracePageSize).flatMap((group) => group.traces),
+    tracePage,
+    tracePageSize,
+    total: groups.length,
+    traceViewMode,
+    traceTriggerScope
+  }
+}
+
+function makeMockProductivity(range: TimeRange, opts?: OrgFilterOptions): unknown {
   const from = new Date(range.from)
   const to = new Date(range.to)
   const diffMs = to.getTime() - from.getTime()
@@ -5371,20 +6097,27 @@ function makeMockProductivity(range: TimeRange): unknown {
     doc_count: Math.floor(2 + Math.random() * 12)
   }))
 
-  return {
-    aggregations: {
-      commit_trend: { buckets: trend },
-      // Agent 生成 / 删除的代码行数（来自 code_gen 事件），非 git commit 原始行数
-      total_insertions: { value: 9240 },
-      total_deletions: { value: 2180 },
-      total_files_changed: { value: 892 },
-      total_commits: { value: 187 },
-      active_users: { value: 24 }
-    }
-  }
+  return scaleMockDashboardResponse(
+    {
+      aggregations: {
+        commit_trend: { buckets: trend },
+        // Agent 生成 / 删除的代码行数（来自 code_gen 事件），非 git commit 原始行数
+        total_insertions: { value: 9240 },
+        total_deletions: { value: 2180 },
+        total_files_changed: { value: 892 },
+        total_commits: { value: 187 },
+        active_users: { value: 24 }
+      }
+    },
+    opts
+  )
 }
 
-function makeMockFeedback(range: TimeRange, granularity: Granularity): unknown {
+function makeMockFeedback(
+  range: TimeRange,
+  granularity: Granularity,
+  opts?: OrgFilterOptions
+): unknown {
   const interval = getCalendarInterval(granularity, range.from, range.to)
   const from = new Date(range.from)
   const to = new Date(range.to)
@@ -5468,30 +6201,33 @@ function makeMockFeedback(range: TimeRange, granularity: Granularity): unknown {
     }
   ]
 
-  return {
-    aggregations: {
-      total_likes: {
-        doc_count: 386,
-        unique_users: { value: 132 }
-      },
-      total_dislikes: {
-        doc_count: 255,
-        unique_users: { value: 96 }
-      },
-      dislike_by_type: { buckets: dislikeByType },
-      trend: { buckets: trend },
-      recent_dislike_comments: {
-        doc_count: recentComments.length,
-        latest: {
-          hits: {
-            hits: recentComments.map((item) => ({
-              _source: item
-            }))
+  return scaleMockDashboardResponse(
+    {
+      aggregations: {
+        total_likes: {
+          doc_count: 386,
+          unique_users: { value: 132 }
+        },
+        total_dislikes: {
+          doc_count: 255,
+          unique_users: { value: 96 }
+        },
+        dislike_by_type: { buckets: dislikeByType },
+        trend: { buckets: trend },
+        recent_dislike_comments: {
+          doc_count: recentComments.length,
+          latest: {
+            hits: {
+              hits: recentComments.map((item) => ({
+                _source: item
+              }))
+            }
           }
         }
       }
-    }
-  }
+    },
+    opts
+  )
 }
 
 function makeMockAgentTrace(skill: string, range: TimeRange, index: number): AgentTrace {
@@ -5702,10 +6438,17 @@ function makeMockThreadTraces(threadId: string): DashboardTraceDetail[] {
     from: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
     to: new Date(now).toISOString()
   }
-  const all = makeMockSkillRecentTraces("auto-code-workflow-v1.0.0", range, 10)
-  const matched = all.filter((trace) => trace.threadId === threadId)
-  const list = matched.length > 0 ? matched : all
-  return [...list].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+  const base = makeMockSkillRecentTraces("auto-code-workflow-v1.0.0", range, 10)
+  // 真实环境 threadTraces(id) 只返回该会话的 trace；mock 同样把若干条 trace 归到
+  // 同一个 threadId，保证按 threadId 分组时恰好是「单个会话」。
+  const seed = Array.from(threadId).reduce((acc, char) => acc + char.charCodeAt(0), 0)
+  const count = Math.min(base.length, 2 + (seed % 3))
+  return base.slice(0, count).map((trace, index) => ({
+    ...trace,
+    threadId,
+    traceId: `${threadId}-${index}`,
+    startedAt: new Date(now - (count - index) * 12 * 60 * 1000).toISOString()
+  }))
 }
 
 function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
@@ -5781,6 +6524,11 @@ function makeMockCommitDetails(
     const pushed = index % 3 !== 1
     const repoName = `cmb-${index % 3}`
     const commitSha = `mock${String(index + 1).padStart(36, "0")}`
+    // 每 3 条造一个「跨多会话」的 commit，方便验证多会话展示。
+    const threadIds =
+      index % 3 === 0
+        ? [`mock-thread-${(index % 5) + 1}`, `mock-thread-${((index + 2) % 5) + 1}`]
+        : [`mock-thread-${(index % 5) + 1}`]
     return {
       eventId: `mock-commit-event-${index + 1}`,
       eventTime: eventTime.toISOString(),
@@ -5806,7 +6554,8 @@ function makeMockCommitDetails(
       insertions: 18 + index * 7,
       deletions: 4 + index * 3,
       triggeredBy: index % 4 === 0 ? "auto-push" : "manual",
-      threadId: `mock-thread-${(index % 5) + 1}`,
+      threadId: threadIds[0],
+      threadIds,
       usedSkills: index % 2 === 0 ? ["代码审查-v1.0.0"] : ["需求分析-v1.0.0", "接口设计-v1.0.0"],
       skillCount: index % 2 === 0 ? 1 : 2,
       codeGeneratedLines: 30 + index * 2,
@@ -5839,6 +6588,1487 @@ function makeMockCommitDetails(
 }
 
 // ─────────────────────────────────────────────────────────
+// Project Mode (Harness Board) dashboard
+// ─────────────────────────────────────────────────────────
+
+/** Event name written by HarnessStatusReporter for project snapshots. */
+const HARNESS_PROJECT_SNAPSHOT_EVENT = "harness.project.snapshot"
+
+/**
+ * ES 默认 index.max_result_window。基于 from+size 的深翻页一旦 from+size 超过它就会
+ * 报 "Result window is too large"，所以翻页深度必须按 pageSize 钳制在此窗口内。
+ */
+const ES_MAX_RESULT_WINDOW = 10000
+
+/** Built-in file/system/meta tools excluded from the "已过滤" tool ranking. */
+const FILTERED_TOOL_EXCLUDES = [
+  // Claude Code 内置文件 / 系统工具
+  "execute",
+  "read_file",
+  "write_file",
+  "glob",
+  "grep",
+  "list_directory",
+  "task",
+  "task_output",
+  "ls",
+  "edit_file",
+  // 工具搜索 / 元工具
+  "search_tool",
+  "inspect_tool",
+  "invoke_deferred_tool",
+  // 内置代码执行辅助
+  "code_exec",
+  "prepare_save_code_exec_tool",
+  "save_code_exec_tool",
+  // 内置任务管理
+  "write_todos"
+]
+
+interface ProjectModeFeatureView {
+  slug: string
+  title: string
+  location?: string
+  statusLabel?: string
+  currentNodeStatusLabel?: string
+  summary?: string
+}
+
+interface ProjectModeSkillCount {
+  skill: string
+  count: number
+}
+
+interface ProjectModeToolCount {
+  tool: string
+  count: number
+}
+
+interface ProjectModeToolUsage {
+  byTool: ProjectModeToolCount[]
+  byToolAll: ProjectModeToolCount[]
+  byToolFilteredAll: ProjectModeToolCount[]
+  byToolAllFull: ProjectModeToolCount[]
+  totalTools: number
+  totalToolCalls: number
+}
+
+interface ProjectModeTopUser {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName: string
+  count: number
+}
+
+interface ProjectModeOrgDistributionItem {
+  key: string
+  org: string
+  count: number
+  children: ProjectModeOrgDistributionItem[]
+}
+
+interface ProjectModeAdapterShareItem {
+  name: string
+  count: number
+}
+
+interface ProjectModeAnalytics {
+  topUsers: ProjectModeTopUser[]
+  byOrg: ProjectModeOrgDistributionItem[]
+  byAdapter: ProjectModeAdapterShareItem[]
+}
+
+interface ProjectModeProjectView {
+  projectId: string
+  name: string
+  description?: string
+  systemName?: string
+  workspacePath?: string
+  adapterName?: string
+  adapterVersion?: string
+  creatorSapId?: string
+  creatorYstId?: string
+  creatorUserName?: string
+  creatorOrgName?: string
+  creatorUpperOrgLv0?: string
+  creatorUpperOrgLv1?: string
+  lifecycleStatus?: string
+  compatible?: boolean
+  compatibilityStatus?: string
+  featureCount: number
+  conversationCount: number
+  hasError: boolean
+  features: ProjectModeFeatureView[]
+  topSkills: ProjectModeSkillCount[]
+  codeStats: DashboardCodeStats | null
+}
+
+type ProjectModeProjectStatus = "active" | "archived"
+
+interface ProjectModeProjectCounts {
+  total: number
+  active: number
+  archived: number
+  totalFeatureCount: number
+  activeFeatureCount: number
+  archivedFeatureCount: number
+}
+
+interface ProjectModeProjectPageData {
+  projects: ProjectModeProjectView[]
+  total: number
+  page: number
+  pageSize: number
+  status: ProjectModeProjectStatus
+  keyword: string
+  adapterName: string
+  creatorKeyword: string
+  creatorOrgKeyword: string
+}
+
+interface ProjectModeProjectPageOptions extends OrgFilterOptions {
+  status?: ProjectModeProjectStatus | null
+  page?: number
+  pageSize?: number
+  keyword?: string | null
+  adapterName?: string | null
+  creatorKeyword?: string | null
+  creatorOrgKeyword?: string | null
+}
+
+interface ProjectModeAdapterView {
+  name: string
+  version?: string
+  projectCount: number
+  featureCount: number
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+}
+
+interface DashboardProjectModeData {
+  summary: {
+    projectCount: number
+    featureCount: number
+    activeProjectCount: number
+    conversationCount: number
+    totalToolCalls: number
+    totalInputTokens: number
+    totalOutputTokens: number
+    totalTokens: number
+    skillCallCount: number
+    distinctSkillCount: number
+    codeStats: DashboardCodeStats | null
+  }
+  adapters: ProjectModeAdapterView[]
+  topSkills: ProjectModeSkillCount[]
+  bySkillAdoption: DashboardSkillCodeAdoptionStats[]
+  tools: ProjectModeToolUsage
+  analytics: ProjectModeAnalytics
+  projectCounts: ProjectModeProjectCounts
+  projectPage: ProjectModeProjectPageData
+  projects: ProjectModeProjectView[]
+}
+
+interface DashboardProjectModeTracesData {
+  traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  total: number
+  traceViewMode: TraceViewMode
+  traceTriggerScope: TraceTriggerScope
+}
+
+/** Time-range filter over the trace index, plus an `exists harnessProjectId` clause. */
+function projectModeTraceFilters(
+  range: TimeRange,
+  orgFilterClause: Record<string, unknown> | null
+): Record<string, unknown>[] {
+  return [
+    timeRangeFilter("startedAt", range),
+    { exists: { field: "harnessProjectId" } },
+    ...(orgFilterClause ? [orgFilterClause] : [])
+  ]
+}
+
+/** Build the `name@version` key used to merge adapter rows across snapshot + usage. */
+function adapterKey(name: string, version?: string): string {
+  return `${name}@@${version ?? ""}`
+}
+
+function normalizeProjectModeProjectStatus(value?: string | null): ProjectModeProjectStatus {
+  return value === "archived" ? "archived" : "active"
+}
+
+function normalizeProjectModeKeyword(value?: string | null): string {
+  return String(value ?? "").trim()
+}
+
+function normalizeProjectModeAdapterName(value?: string | null): string {
+  return String(value ?? "").trim()
+}
+
+function normalizeProjectModeCreatorKeyword(value?: string | null): string {
+  return String(value ?? "").trim()
+}
+
+function normalizeProjectModeCreatorOrgKeyword(value?: string | null): string {
+  return String(value ?? "").trim()
+}
+
+function isProjectModeNumericKeyword(value: string): boolean {
+  return /^\d+$/.test(value)
+}
+
+function projectMatchesStatus(
+  project: ProjectModeProjectView,
+  status: ProjectModeProjectStatus
+): boolean {
+  return status === "archived"
+    ? project.lifecycleStatus === "archived"
+    : project.lifecycleStatus !== "archived"
+}
+
+function projectMatchesKeyword(project: ProjectModeProjectView, keyword: string): boolean {
+  if (!keyword) return true
+  const normalized = keyword.toLocaleLowerCase("zh-CN")
+  return (
+    project.name.toLocaleLowerCase("zh-CN").includes(normalized) ||
+    (project.systemName ?? "").toLocaleLowerCase("zh-CN").includes(normalized)
+  )
+}
+
+function projectMatchesAdapterName(project: ProjectModeProjectView, adapterName: string): boolean {
+  if (!adapterName) return true
+  return project.adapterName === adapterName
+}
+
+function projectMatchesCreatorKeyword(
+  project: ProjectModeProjectView,
+  creatorKeyword: string
+): boolean {
+  if (!creatorKeyword) return true
+  if (isProjectModeNumericKeyword(creatorKeyword)) {
+    return [project.creatorSapId, project.creatorYstId].some((value) => value === creatorKeyword)
+  }
+  const normalized = creatorKeyword.toLocaleLowerCase("zh-CN")
+  return (project.creatorUserName ?? "").toLocaleLowerCase("zh-CN").includes(normalized)
+}
+
+function projectMatchesCreatorOrgKeyword(
+  project: ProjectModeProjectView,
+  creatorOrgKeyword: string
+): boolean {
+  if (!creatorOrgKeyword) return true
+  const normalized = creatorOrgKeyword.toLocaleLowerCase("zh-CN")
+  return [project.creatorUpperOrgLv1, project.creatorUpperOrgLv0, project.creatorOrgName].some(
+    (value) => (value ?? "").toLocaleLowerCase("zh-CN").includes(normalized)
+  )
+}
+
+function compareProjectByName(a: ProjectModeProjectView, b: ProjectModeProjectView): number {
+  return (
+    a.name.localeCompare(b.name, "zh-CN", { numeric: true }) ||
+    (a.systemName ?? "").localeCompare(b.systemName ?? "", "zh-CN", { numeric: true }) ||
+    a.projectId.localeCompare(b.projectId)
+  )
+}
+
+function buildProjectModeProjectCounts(
+  projects: ProjectModeProjectView[]
+): ProjectModeProjectCounts {
+  let active = 0
+  let archived = 0
+  let activeFeatureCount = 0
+  let archivedFeatureCount = 0
+  for (const project of projects) {
+    if (project.lifecycleStatus === "archived") {
+      archived += 1
+      archivedFeatureCount += project.featureCount
+    } else {
+      active += 1
+      activeFeatureCount += project.featureCount
+    }
+  }
+  return {
+    total: projects.length,
+    active,
+    archived,
+    totalFeatureCount: activeFeatureCount + archivedFeatureCount,
+    activeFeatureCount,
+    archivedFeatureCount
+  }
+}
+
+function formatProjectModeOrgName(
+  orgName?: string,
+  upperOrgLv1?: string,
+  upperOrgLv0?: string
+): string {
+  if (upperOrgLv1 && upperOrgLv0) return `${upperOrgLv1}/${upperOrgLv0}`
+  if (upperOrgLv1) return upperOrgLv1
+  return orgName || "—"
+}
+
+function sortedProjectModeDistribution<
+  T extends { count: number; key?: string; org?: string; name?: string }
+>(items: T[]): T[] {
+  return items.sort((a, b) => {
+    const leftName = a.org ?? a.name ?? a.key ?? ""
+    const rightName = b.org ?? b.name ?? b.key ?? ""
+    return b.count - a.count || leftName.localeCompare(rightName, "zh-CN", { numeric: true })
+  })
+}
+
+function buildProjectModeMockAnalytics(projects: ProjectModeProjectView[]): ProjectModeAnalytics {
+  const userMap = new Map<string, ProjectModeTopUser>()
+  const orgMap = new Map<string, ProjectModeOrgDistributionItem>()
+  const adapterMap = new Map<string, ProjectModeAdapterShareItem>()
+
+  for (const project of projects) {
+    const sapId = project.creatorSapId || project.creatorYstId || "unknown"
+    const user = userMap.get(sapId) ?? {
+      sapId,
+      ystId: project.creatorYstId,
+      userName: project.creatorUserName || sapId,
+      orgName: formatProjectModeOrgName(
+        project.creatorOrgName,
+        project.creatorUpperOrgLv1,
+        project.creatorUpperOrgLv0
+      ),
+      count: 0
+    }
+    user.count += project.conversationCount
+    userMap.set(sapId, user)
+
+    const upperKey = project.creatorUpperOrgLv1 || project.creatorOrgName || "未知部门"
+    const lowerKey = project.creatorUpperOrgLv0 || project.creatorOrgName || upperKey
+    const upper = orgMap.get(upperKey) ?? {
+      key: upperKey,
+      org: upperKey,
+      count: 0,
+      children: []
+    }
+    upper.count += 1
+    let lower = upper.children.find((item) => item.key === lowerKey)
+    if (!lower) {
+      lower = { key: lowerKey, org: lowerKey, count: 0, children: [] }
+      upper.children.push(lower)
+    }
+    lower.count += 1
+    orgMap.set(upperKey, upper)
+
+    const adapterName = project.adapterName || "未知插件"
+    const adapter = adapterMap.get(adapterName) ?? { name: adapterName, count: 0 }
+    adapter.count += 1
+    adapterMap.set(adapterName, adapter)
+  }
+
+  for (const item of orgMap.values()) sortedProjectModeDistribution(item.children)
+
+  return {
+    topUsers: [...userMap.values()].sort(
+      (a, b) => b.count - a.count || a.userName.localeCompare(b.userName, "zh-CN")
+    ),
+    byOrg: sortedProjectModeDistribution([...orgMap.values()]),
+    byAdapter: sortedProjectModeDistribution([...adapterMap.values()])
+  }
+}
+
+function sliceProjectModeProjects(
+  projects: ProjectModeProjectView[],
+  options?: ProjectModeProjectPageOptions
+): {
+  projects: ProjectModeProjectView[]
+  total: number
+  page: number
+  pageSize: number
+  status: ProjectModeProjectStatus
+  keyword: string
+  adapterName: string
+  creatorKeyword: string
+  creatorOrgKeyword: string
+} {
+  const status = normalizeProjectModeProjectStatus(options?.status)
+  const keyword = normalizeProjectModeKeyword(options?.keyword)
+  const adapterName = normalizeProjectModeAdapterName(options?.adapterName)
+  const creatorKeyword = normalizeProjectModeCreatorKeyword(options?.creatorKeyword)
+  const creatorOrgKeyword = normalizeProjectModeCreatorOrgKeyword(options?.creatorOrgKeyword)
+  const page = clampLimit(options?.page, 1, 10_000)
+  const pageSize = clampLimit(options?.pageSize, 10, 100)
+  const filtered = projects
+    .filter((project) => projectMatchesStatus(project, status))
+    .filter((project) => projectMatchesKeyword(project, keyword))
+    .filter((project) => projectMatchesAdapterName(project, adapterName))
+    .filter((project) => projectMatchesCreatorKeyword(project, creatorKeyword))
+    .filter((project) => projectMatchesCreatorOrgKeyword(project, creatorOrgKeyword))
+    .sort(compareProjectByName)
+  const total = filtered.length
+  const start = (page - 1) * pageSize
+  return {
+    projects: filtered.slice(start, start + pageSize),
+    total,
+    page,
+    pageSize,
+    status,
+    keyword,
+    adapterName,
+    creatorKeyword,
+    creatorOrgKeyword
+  }
+}
+
+/** Parse one harness.project.snapshot hit into a project view (no per-range usage yet). */
+function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | null {
+  const source = asRecord(asRecord(hit)._source)
+  const props = asRecord(source.properties)
+  const projectId = asString(props.projectId)
+  if (!projectId) return null
+  const rawFeatures = Array.isArray(props.features) ? props.features : []
+  const features: ProjectModeFeatureView[] = rawFeatures.map((entry) => {
+    const f = asRecord(entry)
+    return {
+      slug: asString(f.slug),
+      title: asString(f.title, asString(f.slug)),
+      location: asOptionalString(f.location),
+      statusLabel: asOptionalString(f.overallStatusLabel),
+      currentNodeStatusLabel: asOptionalString(f.currentNodeStatusLabel),
+      summary: asOptionalString(f.summary)
+    }
+  })
+  return {
+    projectId,
+    name: asString(props.name, projectId),
+    description: asOptionalString(props.description),
+    systemName: asOptionalString(props.systemName),
+    workspacePath: asOptionalString(props.workspacePath),
+    adapterName: asOptionalString(props.adapterName),
+    adapterVersion: asOptionalString(props.adapterVersion),
+    creatorSapId: asOptionalString(props.creatorSapId) ?? asOptionalString(source.sapId),
+    creatorYstId: asOptionalString(props.creatorYstId) ?? asOptionalString(source.ystId),
+    creatorUserName: asOptionalString(props.creatorUserName) ?? asOptionalString(source.userName),
+    creatorOrgName: asOptionalString(props.creatorOrgName) ?? asOptionalString(source.orgName),
+    creatorUpperOrgLv0:
+      asOptionalString(props.creatorUpperOrgLv0) ?? asOptionalString(source.upperOrgLv0),
+    creatorUpperOrgLv1:
+      asOptionalString(props.creatorUpperOrgLv1) ?? asOptionalString(source.upperOrgLv1),
+    lifecycleStatus: asOptionalString(props.lifecycleStatus),
+    compatible: typeof props.compatible === "boolean" ? props.compatible : undefined,
+    compatibilityStatus: asOptionalString(props.compatibilityStatus),
+    featureCount: asNumber(props.featureCount, features.length),
+    conversationCount: 0,
+    hasError: typeof props.error === "string" && props.error.length > 0,
+    features,
+    topSkills: [],
+    codeStats: null
+  }
+}
+
+/** Snapshot-index filter: snapshot event + optional LV1 org（快照顶层带 upperOrgLv1）。 */
+function projectModeSnapshotFilters(
+  orgFilterClause: Record<string, unknown> | null
+): Record<string, unknown>[] {
+  return [
+    { term: { eventName: HARNESS_PROJECT_SNAPSHOT_EVENT } },
+    ...(orgFilterClause ? [orgFilterClause] : [])
+  ]
+}
+
+type ProjectModeSnapshotAdapterCount = {
+  name: string
+  version?: string
+  projectCount: number
+  featureCount: number
+}
+
+type ProjectModeSnapshotAggs = {
+  projectCount: number
+  featureCount: number
+  counts: ProjectModeProjectCounts
+  adapters: Map<string, ProjectModeSnapshotAdapterCount>
+  byOrg: ProjectModeOrgDistributionItem[]
+}
+
+function projectModeFirstNonEmptyFieldScript(
+  fields: string[],
+  missing = "未知部门"
+): Record<string, unknown> {
+  return {
+    source: `
+      for (def field : params.fields) {
+        if (doc.containsKey(field) && doc[field].size() > 0) {
+          def value = doc[field].value;
+          if (value != null && value.toString().length() > 0) {
+            return value;
+          }
+        }
+      }
+      return params.missing;
+    `,
+    params: { fields, missing }
+  }
+}
+
+function parseProjectModeOrgDistributionBuckets(raw: unknown): ProjectModeOrgDistributionItem[] {
+  if (!Array.isArray(raw)) return []
+  const items = raw
+    .map((bucket) => {
+      const b = asRecord(bucket)
+      const key = asString(b.key, "未知部门")
+      const childBuckets = asRecord(b.by_lower_org).buckets
+      return {
+        key,
+        org: key,
+        count: asNumber(asRecord(b.project_count).value, asNumber(b.doc_count)),
+        children: parseProjectModeOrgDistributionBuckets(childBuckets)
+      }
+    })
+    .filter((item) => item.key.trim())
+  return sortedProjectModeDistribution(items)
+}
+
+function buildProjectModeAdapterShare(
+  adapters: ProjectModeAdapterView[]
+): ProjectModeAdapterShareItem[] {
+  const map = new Map<string, ProjectModeAdapterShareItem>()
+  for (const adapter of adapters) {
+    const name = adapter.name || "未知插件"
+    const item = map.get(name) ?? { name, count: 0 }
+    item.count += adapter.projectCount
+    map.set(name, item)
+  }
+  return sortedProjectModeDistribution([...map.values()])
+}
+
+/**
+ * 总览所需的快照口径全部用 size:0 聚合，不再回拉项目文档：项目总数 / 特性总数、
+ * 进行中·已归档拆分、各插件(name→version)的项目数与特性数。快照为确定性 _id upsert
+ * （每项目一条），故 cardinality / sum 即为去重后的口径。
+ */
+async function fetchProjectModeSnapshotAggs(
+  opts?: OrgFilterOptions
+): Promise<ProjectModeSnapshotAggs> {
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
+  const projectCountAgg = { cardinality: { field: "properties.projectId" } }
+  const featureSumAgg = { sum: { field: "properties.featureCount" } }
+  const body = {
+    size: 0,
+    track_total_hits: false,
+    query: { bool: { filter: projectModeSnapshotFilters(orgFilterClause) } },
+    aggs: {
+      project_count: projectCountAgg,
+      feature_total: featureSumAgg,
+      archived: {
+        filter: { term: { "properties.lifecycleStatus": "archived" } },
+        aggs: { project_count: projectCountAgg, feature_total: featureSumAgg }
+      },
+      by_adapter: {
+        terms: { field: "properties.adapterName", size: 200 },
+        aggs: {
+          project_count: projectCountAgg,
+          feature_total: featureSumAgg,
+          by_version: {
+            terms: { field: "properties.adapterVersion", size: 50 },
+            aggs: { project_count: projectCountAgg, feature_total: featureSumAgg }
+          }
+        }
+      },
+      by_creator_org: {
+        terms: {
+          script: projectModeFirstNonEmptyFieldScript([
+            "properties.creatorUpperOrgLv1",
+            "upperOrgLv1",
+            "properties.creatorOrgName",
+            "orgName"
+          ]),
+          size: 100,
+          order: { project_count: "desc" }
+        },
+        aggs: {
+          project_count: projectCountAgg,
+          by_lower_org: {
+            terms: {
+              script: projectModeFirstNonEmptyFieldScript([
+                "properties.creatorUpperOrgLv0",
+                "properties.creatorOrgName",
+                "upperOrgLv0",
+                "orgName"
+              ]),
+              size: 100,
+              order: { project_count: "desc" }
+            },
+            aggs: { project_count: projectCountAgg }
+          }
+        }
+      }
+    }
+  }
+  const raw = (await esQuery(getEsIndex("event"), body)) as EsSearchResponse
+  const aggs = asRecord(raw.aggregations)
+  const projectCount = asNumber(asRecord(aggs.project_count).value)
+  const featureCount = asNumber(asRecord(aggs.feature_total).value)
+  const archived = asRecord(aggs.archived)
+  const archivedCount = asNumber(asRecord(archived.project_count).value)
+  const archivedFeatureCount = asNumber(asRecord(archived.feature_total).value)
+  const activeCount = Math.max(0, projectCount - archivedCount)
+  const activeFeatureCount = Math.max(0, featureCount - archivedFeatureCount)
+
+  const adapters = new Map<string, ProjectModeSnapshotAdapterCount>()
+  const adapterBuckets = asRecord(aggs.by_adapter).buckets
+  if (Array.isArray(adapterBuckets)) {
+    for (const bucket of adapterBuckets) {
+      const b = asRecord(bucket)
+      const name = asString(b.key)
+      if (!name) continue
+      const versions = asRecord(b.by_version).buckets
+      const versionList = Array.isArray(versions) ? versions : []
+      if (versionList.length === 0) {
+        adapters.set(adapterKey(name), {
+          name,
+          version: undefined,
+          projectCount: asNumber(asRecord(b.project_count).value),
+          featureCount: asNumber(asRecord(b.feature_total).value)
+        })
+        continue
+      }
+      for (const vb of versionList) {
+        const v = asRecord(vb)
+        const version = asOptionalString(v.key)
+        adapters.set(adapterKey(name, version), {
+          name,
+          version,
+          projectCount: asNumber(asRecord(v.project_count).value),
+          featureCount: asNumber(asRecord(v.feature_total).value)
+        })
+      }
+    }
+  }
+
+  return {
+    projectCount,
+    featureCount,
+    counts: {
+      total: projectCount,
+      active: activeCount,
+      archived: archivedCount,
+      totalFeatureCount: featureCount,
+      activeFeatureCount,
+      archivedFeatureCount
+    },
+    adapters,
+    byOrg: parseProjectModeOrgDistributionBuckets(asRecord(aggs.by_creator_org).buckets)
+  }
+}
+
+/** Escape ES wildcard metacharacters in user keyword input. */
+function escapeEsWildcard(value: string): string {
+  return value.replace(/([*?\\])/g, "\\$1")
+}
+
+function buildProjectModeExactFieldShould(
+  fields: string[],
+  value: string
+): Record<string, unknown>[] {
+  return fields.flatMap((field) => [
+    { term: { [field]: value } },
+    { term: { [`${field}.keyword`]: value } }
+  ])
+}
+
+function buildProjectModeFuzzyFieldShould(
+  fields: string[],
+  value: string
+): Record<string, unknown>[] {
+  const wildcardPattern = `*${escapeEsWildcard(value)}*`
+  return fields.flatMap((field) => [
+    { term: { [field]: value } },
+    { term: { [`${field}.keyword`]: value } },
+    { wildcard: { [field]: wildcardPattern } },
+    { wildcard: { [`${field}.keyword`]: wildcardPattern } }
+  ])
+}
+
+function buildProjectModeCreatorSearchFilter(
+  creatorKeyword: string
+): Record<string, unknown> | null {
+  if (!creatorKeyword) return null
+  const should = isProjectModeNumericKeyword(creatorKeyword)
+    ? buildProjectModeExactFieldShould(
+        ["properties.creatorSapId", "properties.creatorYstId", "sapId", "ystId"],
+        creatorKeyword
+      )
+    : buildProjectModeFuzzyFieldShould(["properties.creatorUserName", "userName"], creatorKeyword)
+  return { bool: { should, minimum_should_match: 1 } }
+}
+
+function buildProjectModeCreatorOrgSearchFilter(
+  creatorOrgKeyword: string
+): Record<string, unknown> | null {
+  if (!creatorOrgKeyword) return null
+  return {
+    bool: {
+      should: buildProjectModeFuzzyFieldShould(
+        [
+          "properties.creatorUpperOrgLv1",
+          "properties.creatorUpperOrgLv0",
+          "properties.creatorOrgName",
+          "upperOrgLv1",
+          "upperOrgLv0",
+          "orgName"
+        ],
+        creatorOrgKeyword
+      ),
+      minimum_should_match: 1
+    }
+  }
+}
+
+/**
+ * 列表分页交给 ES：状态(term) + 关键词(wildcard，按 keyword 原值匹配) + 名称排序 + from/size，
+ * collapse(projectId) 兜底去重；total 用 cardinality 取去重后的项目数。返回的项目尚未带本期指标。
+ */
+async function fetchProjectModeProjectPageHits(options?: ProjectModeProjectPageOptions): Promise<{
+  projects: ProjectModeProjectView[]
+  total: number
+  page: number
+  pageSize: number
+  status: ProjectModeProjectStatus
+  keyword: string
+  adapterName: string
+  creatorKeyword: string
+  creatorOrgKeyword: string
+}> {
+  const status = normalizeProjectModeProjectStatus(options?.status)
+  const keyword = normalizeProjectModeKeyword(options?.keyword)
+  const adapterName = normalizeProjectModeAdapterName(options?.adapterName)
+  const creatorKeyword = normalizeProjectModeCreatorKeyword(options?.creatorKeyword)
+  const creatorOrgKeyword = normalizeProjectModeCreatorOrgKeyword(options?.creatorOrgKeyword)
+  const pageSize = clampLimit(options?.pageSize, 10, 100)
+  const maxPage = Math.max(1, Math.floor(ES_MAX_RESULT_WINDOW / pageSize))
+  const page = clampLimit(options?.page, 1, maxPage)
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(options?.upperOrgLv1))
+
+  const statusFilter: Record<string, unknown>[] =
+    status === "archived"
+      ? [{ term: { "properties.lifecycleStatus": "archived" } }]
+      : [{ bool: { must_not: { term: { "properties.lifecycleStatus": "archived" } } } }]
+  const keywordFilter: Record<string, unknown>[] = keyword
+    ? [
+        {
+          bool: {
+            should: [
+              { wildcard: { "properties.name": { value: `*${escapeEsWildcard(keyword)}*` } } },
+              {
+                wildcard: { "properties.systemName": { value: `*${escapeEsWildcard(keyword)}*` } }
+              }
+            ],
+            minimum_should_match: 1
+          }
+        }
+      ]
+    : []
+  const adapterFilter: Record<string, unknown>[] = adapterName
+    ? [{ term: { "properties.adapterName": adapterName } }]
+    : []
+  const creatorSearchFilter = buildProjectModeCreatorSearchFilter(creatorKeyword)
+  const creatorOrgSearchFilter = buildProjectModeCreatorOrgSearchFilter(creatorOrgKeyword)
+
+  const body = {
+    track_total_hits: false,
+    from: (page - 1) * pageSize,
+    size: pageSize,
+    query: {
+      bool: {
+        filter: [
+          ...projectModeSnapshotFilters(orgFilterClause),
+          ...statusFilter,
+          ...keywordFilter,
+          ...adapterFilter,
+          ...(creatorSearchFilter ? [creatorSearchFilter] : []),
+          ...(creatorOrgSearchFilter ? [creatorOrgSearchFilter] : [])
+        ]
+      }
+    },
+    sort: [{ "properties.name": { order: "asc" } }, { "properties.projectId": { order: "asc" } }],
+    collapse: { field: "properties.projectId" },
+    aggs: { distinct_projects: { cardinality: { field: "properties.projectId" } } },
+    _source: {
+      includes: [
+        "eventTime",
+        "userName",
+        "sapId",
+        "ystId",
+        "orgName",
+        "upperOrgLv0",
+        "upperOrgLv1",
+        "properties"
+      ]
+    }
+  }
+  const raw = (await esQuery(getEsIndex("event"), body)) as EsSearchResponse
+  const hits = raw.hits?.hits ?? []
+  const projects = hits
+    .map((hit) => parseProjectModeSnapshotHit(hit))
+    .filter((project): project is ProjectModeProjectView => project !== null)
+  const total = asNumber(
+    asRecord(asRecord(raw.aggregations).distinct_projects).value,
+    projects.length
+  )
+  return {
+    projects,
+    total,
+    page,
+    pageSize,
+    status,
+    keyword,
+    adapterName,
+    creatorKeyword,
+    creatorOrgKeyword
+  }
+}
+
+/** Upper bound on the project set forwarded to the code-adoption query (ES terms cap is 65536). */
+const PROJECT_MODE_PROJECT_ID_LIMIT = 5000
+const PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE = 10
+
+/** Convert a `terms usedSkills` bucket list into a {skill,count}[] ranking. */
+function parseSkillCountBuckets(raw: unknown): ProjectModeSkillCount[] {
+  if (!Array.isArray(raw)) return []
+  const result: ProjectModeSkillCount[] = []
+  for (const bucket of raw) {
+    const b = asRecord(bucket)
+    const skill = asString(b.key)
+    if (skill) result.push({ skill, count: asNumber(b.doc_count) })
+  }
+  return result
+}
+
+/** Convert a `terms toolNames` bucket list into a {tool,count}[] ranking. */
+function parseToolCountBuckets(raw: unknown): ProjectModeToolCount[] {
+  if (!Array.isArray(raw)) return []
+  const result: ProjectModeToolCount[] = []
+  for (const bucket of raw) {
+    const b = asRecord(bucket)
+    const tool = asString(b.key)
+    if (tool) result.push({ tool, count: asNumber(b.doc_count) })
+  }
+  return result
+}
+
+function parseProjectModeTopUserBuckets(raw: unknown): ProjectModeTopUser[] {
+  if (!Array.isArray(raw)) return []
+  const result: ProjectModeTopUser[] = []
+  for (const bucket of raw) {
+    const b = asRecord(bucket)
+    const latestHits = asRecord(asRecord(b.latest_user_info).hits).hits
+    const latestHit = Array.isArray(latestHits) ? asRecord(latestHits[0]) : {}
+    const source = asRecord(latestHit._source)
+    const sapId = asString(b.key, asString(source.sapId))
+    if (!sapId) continue
+    const ystId = asOptionalString(source.ystId)
+    const userName = asString(source.userName, sapId)
+    const orgName = formatProjectModeOrgName(
+      asOptionalString(source.orgName),
+      asOptionalString(source.upperOrgLv1),
+      asOptionalString(source.upperOrgLv0)
+    )
+    result.push({
+      sapId,
+      ...(ystId ? { ystId } : {}),
+      userName,
+      orgName,
+      count: asNumber(b.doc_count)
+    })
+  }
+  return result
+}
+
+/** Aggregate project-mode usage from the trace index over the selected range. */
+async function fetchProjectModeUsage(
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<{
+  conversationCount: number
+  activeProjectCount: number
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  skillCallCount: number
+  distinctSkillCount: number
+  topSkills: ProjectModeSkillCount[]
+  tools: ProjectModeToolUsage
+  topUsers: ProjectModeTopUser[]
+  adapters: Map<string, ProjectModeAdapterView>
+}> {
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
+  const body = {
+    size: 0,
+    query: { bool: { filter: projectModeTraceFilters(range, orgFilterClause) } },
+    aggs: {
+      conversation_count: { value_count: { field: "traceId" } },
+      active_projects: { cardinality: { field: "harnessProjectId" } },
+      total_tool_calls: { sum: { field: "totalToolCalls" } },
+      total_input_tokens: { sum: { field: "totalInputTokens" } },
+      total_output_tokens: { sum: { field: "totalOutputTokens" } },
+      total_tokens: { sum: { field: "totalTokens" } },
+      total_skill_calls: { value_count: { field: "usedSkills" } },
+      distinct_skills: { cardinality: { field: "usedSkills" } },
+      top_skills: { terms: { field: "usedSkills", size: 20 } },
+      top_users: {
+        terms: { field: "sapId", size: 10 },
+        aggs: {
+          latest_user_info: {
+            top_hits: {
+              size: 1,
+              sort: [{ startedAt: { order: "desc" } }],
+              _source: {
+                includes: ["sapId", "ystId", "userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+              }
+            }
+          }
+        }
+      },
+      total_tools: { cardinality: { field: "toolNames" } },
+      tool_call_count: { value_count: { field: "toolNames" } },
+      by_tool: { terms: { field: "toolNames", size: 20, exclude: FILTERED_TOOL_EXCLUDES } },
+      by_tool_filtered_all: {
+        terms: { field: "toolNames", size: 1000, exclude: FILTERED_TOOL_EXCLUDES }
+      },
+      by_tool_all: { terms: { field: "toolNames", size: 20 } },
+      by_tool_all_full: { terms: { field: "toolNames", size: 1000 } },
+      by_adapter: {
+        terms: { field: "harnessAdapterName", size: 200 },
+        aggs: { by_version: { terms: { field: "harnessAdapterVersion", size: 50 } } }
+      }
+    }
+  }
+  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  const aggs = asRecord(raw.aggregations)
+
+  const totalInputTokens = asNumber(asRecord(aggs.total_input_tokens).value)
+  const totalOutputTokens = asNumber(asRecord(aggs.total_output_tokens).value)
+  const totalTokens = asNumber(
+    asRecord(aggs.total_tokens).value,
+    totalInputTokens + totalOutputTokens
+  )
+
+  const adapters = new Map<string, ProjectModeAdapterView>()
+  const adapterBuckets = asRecord(aggs.by_adapter).buckets
+  if (Array.isArray(adapterBuckets)) {
+    for (const bucket of adapterBuckets) {
+      const b = asRecord(bucket)
+      const name = asString(b.key)
+      if (!name) continue
+      const rawVersions = asRecord(b.by_version).buckets
+      const versions = Array.isArray(rawVersions) ? rawVersions : []
+      if (versions.length === 0) {
+        adapters.set(adapterKey(name), {
+          name,
+          version: undefined,
+          projectCount: 0,
+          featureCount: 0,
+          conversationCount: asNumber(b.doc_count),
+          codeStats: null
+        })
+        continue
+      }
+      for (const vb of versions) {
+        const v = asRecord(vb)
+        const version = asOptionalString(v.key)
+        adapters.set(adapterKey(name, version), {
+          name,
+          version,
+          projectCount: 0,
+          featureCount: 0,
+          conversationCount: asNumber(v.doc_count),
+          codeStats: null
+        })
+      }
+    }
+  }
+
+  return {
+    conversationCount: asNumber(asRecord(aggs.conversation_count).value),
+    activeProjectCount: asNumber(asRecord(aggs.active_projects).value),
+    totalToolCalls: asNumber(asRecord(aggs.total_tool_calls).value),
+    totalInputTokens,
+    totalOutputTokens,
+    totalTokens,
+    skillCallCount: asNumber(asRecord(aggs.total_skill_calls).value),
+    distinctSkillCount: asNumber(asRecord(aggs.distinct_skills).value),
+    topSkills: parseSkillCountBuckets(asRecord(aggs.top_skills).buckets),
+    topUsers: parseProjectModeTopUserBuckets(asRecord(aggs.top_users).buckets),
+    tools: {
+      byTool: parseToolCountBuckets(asRecord(aggs.by_tool).buckets),
+      byToolAll: parseToolCountBuckets(asRecord(aggs.by_tool_all).buckets),
+      byToolFilteredAll: parseToolCountBuckets(asRecord(aggs.by_tool_filtered_all).buckets),
+      byToolAllFull: parseToolCountBuckets(asRecord(aggs.by_tool_all_full).buckets),
+      totalTools: asNumber(asRecord(aggs.total_tools).value),
+      totalToolCalls: asNumber(asRecord(aggs.tool_call_count).value)
+    },
+    adapters
+  }
+}
+
+async function fetchProjectModePageUsage(
+  projectIds: string[],
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<{
+  perProject: Map<string, number>
+  perProjectSkills: Map<string, ProjectModeSkillCount[]>
+}> {
+  const perProject = new Map<string, number>()
+  const perProjectSkills = new Map<string, ProjectModeSkillCount[]>()
+  if (projectIds.length === 0) return { perProject, perProjectSkills }
+
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          ...projectModeTraceFilters(range, orgFilterClause),
+          { terms: { harnessProjectId: projectIds } }
+        ]
+      }
+    },
+    aggs: {
+      by_project: {
+        terms: { field: "harnessProjectId", size: Math.max(1, projectIds.length) },
+        aggs: {
+          skills: { terms: { field: "usedSkills", size: 10 } }
+        }
+      }
+    }
+  }
+  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  const buckets = asRecord(asRecord(raw.aggregations).by_project).buckets
+  if (!Array.isArray(buckets)) return { perProject, perProjectSkills }
+
+  for (const bucket of buckets) {
+    const b = asRecord(bucket)
+    const key = asString(b.key)
+    if (!key) continue
+    perProject.set(key, asNumber(b.doc_count))
+    perProjectSkills.set(key, parseSkillCountBuckets(asRecord(b.skills).buckets))
+  }
+
+  return { perProject, perProjectSkills }
+}
+
+/**
+ * Code-adoption stats for project mode.
+ *
+ * `code_gen` / `code_adopt` events carry top-level `upperOrgLv1` (buildEvent) plus
+ * `properties.harnessProjectId` and the bound adapter, so adoption can be aggregated
+ * directly by project / adapter / skill in one query — no traceId → project join and
+ * no per-trace fan-out cap. The aggregate path passes the org clause via `extraFilters`
+ * (filtering code events by org directly, no project-id enumeration); the per-page path
+ * passes `projectIds` to scope to exactly the displayed projects.
+ */
+function buildProjectModeCodeAggs(
+  projectIds: string[] | null,
+  range: TimeRange,
+  extraFilters: Record<string, unknown>[] = []
+): {
+  codeGenFilters: Record<string, unknown>[]
+  codeAdoptFilters: Record<string, unknown>[]
+  perBucketAggs: Record<string, unknown>
+} {
+  const projectFilters = projectIds
+    ? [{ terms: { "properties.harnessProjectId": projectIds } }]
+    : []
+  const codeGenFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_gen" } },
+    timeRangeFilter("eventTime", range),
+    ...projectFilters,
+    ...extraFilters
+  ]
+  const codeAdoptFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_adopt" } },
+    { exists: { field: "properties.adoptedLineCount" } },
+    { exists: { field: "properties.generatedLineCount" } },
+    { exists: { field: "properties.effectiveGeneratedLineCount" } },
+    timeRangeFilter("properties.generatedAt", range),
+    ...projectFilters,
+    ...extraFilters
+  ]
+  const codeAdoptPushedFilters: Record<string, unknown>[] = [
+    ...codeAdoptFilters,
+    { term: { "properties.pushed": true } }
+  ]
+  const perBucketAggs = {
+    code_gen: {
+      filter: { bool: { filter: codeGenFilters } },
+      aggs: {
+        generated_lines: { sum: { field: "properties.lineCount" } },
+        deleted_lines: { sum: { field: "properties.deletedLineCount" } }
+      }
+    },
+    code_adopt_measured: {
+      filter: { bool: { filter: codeAdoptFilters } },
+      aggs: {
+        measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+        effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+        adopted_lines: { sum: { field: "properties.adoptedLineCount" } },
+        commit_count: { cardinality: { field: "properties.commitSha" } }
+      }
+    },
+    code_adopt_pushed: {
+      filter: { bool: { filter: codeAdoptPushedFilters } },
+      aggs: codeAdoptPushedAggs()
+    }
+  }
+  return { codeGenFilters, codeAdoptFilters, perBucketAggs }
+}
+
+/** Map a `terms` bucket list (project / skill) keyed by `key` → per-bucket code stats. */
+function parseCodeStatsBucketsByKey(buckets: unknown): Map<string, DashboardCodeStats> {
+  const map = new Map<string, DashboardCodeStats>()
+  if (!Array.isArray(buckets)) return map
+  for (const bucket of buckets) {
+    const b = asRecord(bucket)
+    const key = asString(b.key)
+    if (!key) continue
+    map.set(key, normalizeCodeStatsFromContainer(b))
+  }
+  return map
+}
+
+/**
+ * Map the nested `harnessAdapterName → harnessAdapterVersion` bucket tree → code
+ * stats keyed by `adapterKey(name, version)`. Mirrors the usage-side adapter
+ * merge: read version-level stats when versions exist, else the name-level bucket.
+ */
+function parseAdapterCodeStatsBuckets(buckets: unknown): Map<string, DashboardCodeStats> {
+  const map = new Map<string, DashboardCodeStats>()
+  if (!Array.isArray(buckets)) return map
+  for (const bucket of buckets) {
+    const b = asRecord(bucket)
+    const name = asString(b.key)
+    if (!name) continue
+    const rawVersions = asRecord(b.by_version).buckets
+    const versions = Array.isArray(rawVersions) ? rawVersions : []
+    if (versions.length === 0) {
+      map.set(adapterKey(name), normalizeCodeStatsFromContainer(b))
+      continue
+    }
+    for (const vb of versions) {
+      const v = asRecord(vb)
+      const version = asOptionalString(v.key)
+      map.set(adapterKey(name, version), normalizeCodeStatsFromContainer(v))
+    }
+  }
+  return map
+}
+
+/**
+ * Code-adoption stats for project mode. Keep the page payload unchanged, but
+ * split the ES DSL by aggregation dimension so one request no longer has to
+ * hold overall + project + adapter + skill bucket trees at the same time.
+ */
+type ProjectModeCodeStatsResult = {
+  overall: DashboardCodeStats
+  byProject: Map<string, DashboardCodeStats>
+  byAdapter: Map<string, DashboardCodeStats>
+  bySkill: DashboardSkillCodeAdoptionStats[]
+}
+
+async function fetchProjectModeCodeAggs(
+  projectIds: string[] | null,
+  range: TimeRange,
+  buildAggs: (
+    perBucketAggs: Record<string, unknown>,
+    scopedProjectIds: string[]
+  ) => Record<string, unknown>,
+  extraFilters: Record<string, unknown>[] = []
+): Promise<unknown | null> {
+  if (projectIds && projectIds.length === 0) return null
+  const scopedProjectIds = projectIds?.slice(0, PROJECT_MODE_PROJECT_ID_LIMIT) ?? []
+  const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
+    projectIds ? scopedProjectIds : null,
+    range,
+    extraFilters
+  )
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
+        minimum_should_match: 1
+      }
+    },
+    aggs: buildAggs(perBucketAggs, scopedProjectIds)
+  }
+  return esQuery(getEsIndex("event"), body)
+}
+
+async function fetchProjectModeAggregateCodeStats(
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<ProjectModeCodeStatsResult> {
+  // code 事件自带顶层 upperOrgLv1，直接按室过滤即可，无需先枚举项目 id 再用 terms 圈定。
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
+  const extraFilters = orgFilterClause ? [orgFilterClause] : []
+
+  const [overallRaw, adapterRaw, skillRaw] = await Promise.all([
+    fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, extraFilters),
+    fetchProjectModeCodeAggs(
+      null,
+      range,
+      (perBucketAggs) => ({
+        by_adapter: {
+          terms: { field: "properties.harnessAdapterName", size: 200 },
+          aggs: {
+            ...perBucketAggs,
+            by_version: {
+              terms: { field: "properties.harnessAdapterVersion", size: 50 },
+              aggs: perBucketAggs
+            }
+          }
+        }
+      }),
+      extraFilters
+    ),
+    fetchProjectModeCodeAggs(
+      null,
+      range,
+      (perBucketAggs) => ({
+        by_skill: {
+          terms: { field: "properties.usedSkills", size: 1000 },
+          aggs: perBucketAggs
+        }
+      }),
+      extraFilters
+    )
+  ])
+
+  const adapterAggs = asRecord(asRecord(adapterRaw).aggregations)
+  const skillAggs = asRecord(asRecord(skillRaw).aggregations)
+  return {
+    overall: normalizeCodeStatsFromAggs(overallRaw),
+    byProject: new Map<string, DashboardCodeStats>(),
+    byAdapter: parseAdapterCodeStatsBuckets(asRecord(adapterAggs.by_adapter).buckets),
+    bySkill: normalizeSkillCodeAdoptionBuckets({ aggregations: skillAggs }, "by_skill")
+  }
+}
+
+async function fetchProjectModeProjectCodeStats(
+  projectIds: string[],
+  range: TimeRange
+): Promise<Map<string, DashboardCodeStats>> {
+  if (projectIds.length === 0) return new Map<string, DashboardCodeStats>()
+
+  const raw = await fetchProjectModeCodeAggs(
+    projectIds,
+    range,
+    (perBucketAggs, scopedProjectIds) => ({
+      by_project: {
+        terms: { field: "properties.harnessProjectId", size: Math.max(1, scopedProjectIds.length) },
+        aggs: perBucketAggs
+      }
+    })
+  )
+  const projectAggs = asRecord(asRecord(raw).aggregations)
+  return parseCodeStatsBucketsByKey(asRecord(projectAggs.by_project).buckets)
+}
+
+/** One list page: ES-paginated snapshot projects enriched with this-range usage / code. */
+async function fetchProjectModeProjectPage(
+  range: TimeRange,
+  options?: ProjectModeProjectPageOptions
+): Promise<ProjectModeProjectPageData> {
+  requireDashboardAccess()
+  const sliced = await fetchProjectModeProjectPageHits(options)
+  const projectIds = sliced.projects.map((project) => project.projectId)
+  const usage = await fetchProjectModePageUsage(projectIds, range, options)
+  const codeByProject = await fetchProjectModeProjectCodeStats([...usage.perProject.keys()], range)
+  return {
+    ...sliced,
+    projects: sliced.projects.map((project) => ({
+      ...project,
+      conversationCount: usage.perProject.get(project.projectId) ?? 0,
+      topSkills: usage.perProjectSkills.get(project.projectId) ?? [],
+      codeStats: codeByProject.get(project.projectId) ?? null
+    }))
+  }
+}
+
+/** Overview payload: snapshot aggregates + trace usage + code adoption + first list page. */
+async function fetchProjectMode(
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<DashboardProjectModeData> {
+  requireDashboardAccess()
+  // 总览与列表解耦：快照口径走 size:0 聚合、不回拉文档；列表第一页走 ES 分页。四条并行。
+  const [snap, usage, code, projectPage] = await Promise.all([
+    fetchProjectModeSnapshotAggs(opts),
+    fetchProjectModeUsage(range, opts),
+    fetchProjectModeAggregateCodeStats(range, opts),
+    fetchProjectModeProjectPage(range, {
+      ...opts,
+      status: "active",
+      page: 1,
+      pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
+      keyword: ""
+    })
+  ])
+
+  // Adapter rows: usage carries conversation counts, snapshot aggs carry project /
+  // feature counts, code aggs carry adoption — union by adapterKey.
+  const adapters = new Map<string, ProjectModeAdapterView>()
+  for (const [key, view] of usage.adapters) adapters.set(key, { ...view })
+  for (const [key, snapAdapter] of snap.adapters) {
+    const existing = adapters.get(key)
+    if (existing) {
+      existing.projectCount += snapAdapter.projectCount
+      existing.featureCount += snapAdapter.featureCount
+    } else {
+      adapters.set(key, {
+        name: snapAdapter.name,
+        version: snapAdapter.version,
+        projectCount: snapAdapter.projectCount,
+        featureCount: snapAdapter.featureCount,
+        conversationCount: 0,
+        codeStats: null
+      })
+    }
+  }
+  for (const [key, adapter] of adapters) {
+    adapter.codeStats = code.byAdapter.get(key) ?? null
+  }
+  const adapterList = [...adapters.values()].sort(
+    (a, b) =>
+      b.projectCount - a.projectCount ||
+      b.conversationCount - a.conversationCount ||
+      a.name.localeCompare(b.name) ||
+      (a.version ?? "").localeCompare(b.version ?? "")
+  )
+
+  return {
+    summary: {
+      projectCount: snap.projectCount,
+      featureCount: snap.featureCount,
+      activeProjectCount: usage.activeProjectCount,
+      conversationCount: usage.conversationCount,
+      totalToolCalls: usage.totalToolCalls,
+      totalInputTokens: usage.totalInputTokens,
+      totalOutputTokens: usage.totalOutputTokens,
+      totalTokens: usage.totalTokens,
+      skillCallCount: usage.skillCallCount,
+      distinctSkillCount: usage.distinctSkillCount,
+      codeStats: code.overall
+    },
+    adapters: adapterList,
+    topSkills: usage.topSkills,
+    bySkillAdoption: code.bySkill,
+    tools: usage.tools,
+    analytics: {
+      topUsers: usage.topUsers,
+      byOrg: snap.byOrg,
+      byAdapter: buildProjectModeAdapterShare(adapterList)
+    },
+    projectCounts: snap.counts,
+    projectPage,
+    projects: projectPage.projects
+  }
+}
+
+interface ProjectModeTracesOptions {
+  limit?: number
+  page?: number
+  pageSize?: number
+  tracePage?: number
+  tracePageSize?: number
+  mode?: TraceViewMode
+  viewMode?: TraceViewMode
+  triggerScope?: TraceTriggerScope
+  featureSlug?: string
+}
+
+/** Project-mode traces for a single project (thread/trace pagination). */
+async function fetchProjectModeTraces(
+  projectId: string,
+  range: TimeRange,
+  options?: ProjectModeTracesOptions
+): Promise<DashboardProjectModeTracesData> {
+  const access = requireDashboardAccess()
+  const normalizedProjectId = projectId.trim()
+  if (!normalizedProjectId) throw new Error("projectId is required")
+  const normalizedFeatureSlug = options?.featureSlug?.trim()
+  const traceViewMode = normalizeTraceViewMode(options?.viewMode ?? options?.mode)
+  const tracePageSize = clampLimit(
+    options?.tracePageSize ?? options?.pageSize ?? options?.limit,
+    10,
+    50
+  )
+  // 深翻页用 from+size，必须保证 from+size ≤ max_result_window，否则 ES 直接报错。
+  // 按 pageSize 动态收紧页数上限（pageSize=50 → 最多 200 页），避免运营面板翻到深页时 500。
+  const maxTracePage = Math.max(1, Math.floor(ES_MAX_RESULT_WINDOW / tracePageSize))
+  const tracePage = clampLimit(options?.tracePage ?? options?.page, 1, maxTracePage)
+  const triggerScope = normalizeTraceTriggerScope(options?.triggerScope)
+  const traceAccessFilter = buildTraceAccessFilter(access)
+  const baseFilter = [
+    timeRangeFilter("startedAt", range),
+    { term: { harnessProjectId: normalizedProjectId } },
+    ...(normalizedFeatureSlug ? [{ term: { harnessFeatureSlug: normalizedFeatureSlug } }] : []),
+    ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
+  ]
+
+  if (traceViewMode === "thread") {
+    const body = {
+      size: 0,
+      query: {
+        bool: { filter: baseFilter }
+      },
+      aggs: {
+        thread_list: {
+          filter: traceAccessFilter ?? { match_all: {} },
+          aggs: threadListAgg(threadListBucketsNeeded(tracePage, tracePageSize))
+        }
+      }
+    }
+    const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+    const aggs = asRecord((raw as unknown as Record<string, unknown>).aggregations)
+    const parsed = parseThreadListContainer(asRecord(aggs.thread_list), tracePage, tracePageSize)
+    return {
+      traces: parsed.traces,
+      tracePage,
+      tracePageSize,
+      total: parsed.totalThreads,
+      traceViewMode,
+      traceTriggerScope: triggerScope
+    }
+  }
+
+  const body = {
+    track_total_hits: ES_MAX_RESULT_WINDOW,
+    from: (tracePage - 1) * tracePageSize,
+    size: tracePageSize,
+    sort: [{ startedAt: { order: "desc" } }],
+    query: {
+      bool: { filter: baseFilter }
+    },
+    ...(traceAccessFilter ? { post_filter: traceAccessFilter } : {}),
+    _source: { includes: dashboardTraceSourceIncludes() }
+  }
+  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  const hits = raw.hits?.hits ?? []
+  return {
+    traces: hits.map(normalizeTraceDetail),
+    tracePage,
+    tracePageSize,
+    // from+size 只能触达前 max_result_window 条，故按相同上限收口 total，
+    // 让前端算出的总页数与实际可翻到的深度一致。
+    total: Math.min(getTotalHits(raw, hits.length), ES_MAX_RESULT_WINDOW),
+    traceViewMode,
+    traceTriggerScope: triggerScope
+  }
+}
+
+// ─────────────────────────────────────────────────────────
 // IPC Registration
 // ─────────────────────────────────────────────────────────
 
@@ -5847,10 +8077,58 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     return getDashboardAccessContext().loggedIn
   })
 
+  _ipcMain.handle("dashboard:isProjectModeAllowed", async () => {
+    return isDashboardProjectModeAllowed()
+  })
+
+  _ipcMain.handle(
+    "dashboard:projectMode",
+    async (_, range: TimeRange, _granularity: Granularity, opts?: OrgFilterOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockProjectMode(range, opts) }
+      try {
+        requireDashboardProjectModeAccess()
+        return { success: true, data: await fetchProjectMode(range, opts) }
+      } catch (e) {
+        console.error("[Dashboard] projectMode error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:projectModeProjects",
+    async (_, range: TimeRange, options?: ProjectModeProjectPageOptions) => {
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockProjectModeProjects(range, options) }
+      try {
+        requireDashboardProjectModeAccess()
+        return { success: true, data: await fetchProjectModeProjectPage(range, options) }
+      } catch (e) {
+        console.error("[Dashboard] projectModeProjects error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:projectModeTraces",
+    async (_, projectId: string, range: TimeRange, options?: ProjectModeTracesOptions) => {
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockProjectModeTraces(projectId, range, options) }
+      try {
+        requireDashboardProjectModeAccess()
+        return { success: true, data: await fetchProjectModeTraces(projectId, range, options) }
+      } catch (e) {
+        console.error("[Dashboard] projectModeTraces error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
   _ipcMain.handle(
     "dashboard:overview",
     async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockOverview(range) }
+      if (import.meta.env.DEV) return { success: true, data: makeMockOverview(range, opts) }
       try {
         return { success: true, data: await fetchOverview(range, granularity, opts) }
       } catch (e) {
@@ -5863,7 +8141,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:modelStats",
     async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockModelStats() }
+      if (import.meta.env.DEV) return { success: true, data: makeMockModelStats(opts) }
       try {
         return { success: true, data: await fetchModelStats(range, granularity, opts) }
       } catch (e) {
@@ -6002,7 +8280,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:productivity",
     async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockProductivity(range) }
+      if (import.meta.env.DEV) return { success: true, data: makeMockProductivity(range, opts) }
       try {
         return { success: true, data: await fetchProductivity(range, granularity, opts) }
       } catch (e) {
@@ -6015,7 +8293,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:feedback",
     async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockFeedback(range, granularity) }
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockFeedback(range, granularity, opts) }
       try {
         return { success: true, data: await fetchFeedback(range, granularity, opts) }
       } catch (e) {
@@ -6166,7 +8445,11 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:exportExcel",
-    async (_, sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>) => {
+    async (
+      _,
+      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
+      options?: { fileName?: string }
+    ) => {
       try {
         // Dynamic import xlsx to avoid bundling issues
         const XLSX = await import("xlsx")
@@ -6191,9 +8474,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         }
 
         const win = BrowserWindow.getFocusedWindow()
+        const exportName = safeExportFileName(options?.fileName || "运营面板数据")
         const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
           title: "导出运营面板数据",
-          defaultPath: `运营面板数据_${new Date().toISOString().slice(0, 10)}.xlsx`,
+          defaultPath: `${exportName}_${new Date().toISOString().slice(0, 10)}.xlsx`,
           filters: [{ name: "Excel", extensions: ["xlsx"] }]
         })
 

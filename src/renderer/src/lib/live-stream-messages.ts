@@ -7,7 +7,9 @@ export interface LiveStreamMessage {
   tool_calls?: Message["tool_calls"]
   tool_call_id?: string
   name?: string
+  status?: string
   is_error?: boolean
+  content_priority?: number
   start_at?: Date
   end_at?: Date
 }
@@ -26,16 +28,18 @@ export function mergeLiveStreamMessages(
   for (const message of incoming) {
     if (!hasLiveStreamMessageId(message)) continue
     const existing = merged.get(message.id)
+    const existingContentPriority = existing?.content_priority ?? 0
+    const incomingContentPriority = message.content_priority ?? 0
+    const hasToolCallsField = Object.prototype.hasOwnProperty.call(message, "tool_calls")
+    const shouldUseIncomingContent =
+      hasUsefulStreamContent(message.content) &&
+      incomingContentPriority >= existingContentPriority
     merged.set(message.id, {
       ...existing,
       ...message,
-      content: hasUsefulStreamContent(message.content)
-        ? message.content
-        : (existing?.content ?? message.content),
-      tool_calls:
-        message.tool_calls && message.tool_calls.length > 0
-          ? message.tool_calls
-          : existing?.tool_calls,
+      content: shouldUseIncomingContent ? message.content : (existing?.content ?? message.content),
+      content_priority: Math.max(existingContentPriority, incomingContentPriority),
+      tool_calls: hasToolCallsField ? message.tool_calls : existing?.tool_calls,
       tool_call_id: message.tool_call_id ?? existing?.tool_call_id,
       name: message.name ?? existing?.name
     })

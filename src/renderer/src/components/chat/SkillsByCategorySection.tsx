@@ -171,7 +171,8 @@ export function SkillsByCategorySection({
           name: item.name,
           description: item.description || "",
           path: item.filename || item.name,
-          source: "user"
+          source: "user",
+          version: "v1.0.0"
         },
         label: item.chinese_name || item.name,
         marketItem: item,
@@ -203,7 +204,8 @@ export function SkillsByCategorySection({
           name,
           description,
           path: `skills/${name}`,
-          source: "project" as const
+          source: "project" as const,
+          version: "v1.0.0"
         }
 
         return {

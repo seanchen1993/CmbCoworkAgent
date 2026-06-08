@@ -1,5 +1,5 @@
 import type React from "react"
-import type { MarketItem } from "../../api/market"
+import type { MarketItem } from "../../../api/market"
 
 export interface UploaderProfile {
   sapId: string

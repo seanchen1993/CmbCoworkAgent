@@ -267,7 +267,7 @@ async function assertWorkspaceSwitchAllowed(
     .map((worker) => `${worker.worker_id}(${worker.role}/${worker.workload})`)
     .join(", ")
   throw new Error(
-    `当前线程仍有运行中或未处理通知的协同 worker，请先等待完成、处理通知或停止后台子代理后再切换工作区。相关 worker：${workerList}`
+    `当前线程仍有运行中或未处理通知的 Agent Team worker，请先等待完成、处理通知或停止后台子代理后再切换工作区。相关 worker：${workerList}`
   )
 }
 
@@ -2075,6 +2075,29 @@ function resolveDefaultModelId(): string {
   return customConfigs.length > 0 ? `custom:${customConfigs[0].id}` : ""
 }
 
+function normalizeConfiguredModelId(modelId: string): string {
+  const trimmed = modelId.trim()
+  if (!trimmed) return ""
+
+  const customConfigs = getCustomModelPublicConfigs()
+  const normalizedId = trimmed.startsWith("custom:") ? trimmed.slice("custom:".length) : trimmed
+
+  const matchedById = customConfigs.find((config) => config.id === normalizedId)
+  if (matchedById) return `custom:${matchedById.id}`
+
+  const matchedByModel = customConfigs.find(
+    (config) => config.model === trimmed || config.model === normalizedId
+  )
+  if (matchedByModel) return `custom:${matchedByModel.id}`
+
+  return ""
+}
+
+function getResolvedStoredDefaultModelId(): string {
+  const stored = store.get("defaultModel", "") as string
+  return normalizeConfiguredModelId(stored) || resolveDefaultModelId()
+}
+
 export function registerModelHandlers(ipcMain: IpcMain): void {
   // List available models (custom only)
   ipcMain.handle("models:list", async () => {
@@ -2139,13 +2162,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   // Get default model
   ipcMain.handle("models:getDefault", async () => {
-    const stored = store.get("defaultModel", "") as string
-    return stored || resolveDefaultModelId()
+    return getResolvedStoredDefaultModelId()
   })
 
   // Set default model
   ipcMain.handle("models:setDefault", async (_event, modelId: string) => {
-    store.set("defaultModel", modelId)
+    store.set("defaultModel", normalizeConfiguredModelId(modelId))
   })
 
   // List providers with whether any model has a key configured.
@@ -3466,6 +3488,5 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 }
 
 export function getDefaultModel(): string {
-  const stored = store.get("defaultModel", "") as string
-  return stored || resolveDefaultModelId()
+  return getResolvedStoredDefaultModelId()
 }

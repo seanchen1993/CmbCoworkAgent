@@ -263,13 +263,56 @@ function upsertSimpleYamlField(raw: string | null, key: string, value: string): 
   return lines.join("\n").trimEnd()
 }
 
-export function ensureSkillEvolverMarker(content: string): string {
+/**
+ * 计算下一个补丁版本（与后端 patching.py `_next_version` 对齐）：
+ * - 标准语义版本 vX.Y.Z -> vX.Y.(Z+1)
+ * - 缺省 / 非标准 -> v1.0.1
+ */
+export function nextSkillVersion(current?: string | null): string {
+  const raw = String(current ?? "").trim()
+  const match = raw.match(/^v?(\d+)\.(\d+)\.(\d+)$/)
+  if (match) return `v${match[1]}.${match[2]}.${Number(match[3]) + 1}`
+  return "v1.0.1"
+}
+
+/** 读取一段 SKILL.md frontmatter 的 version 字段。 */
+export function readSkillVersion(content: string): string | null {
+  const { raw } = splitFrontmatter(content)
+  if (!raw) return null
+  for (const line of raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")) {
+    const colon = line.indexOf(":")
+    if (colon > 0 && line.slice(0, colon).trim().toLowerCase() === "version") {
+      return line.slice(colon + 1).trim() || null
+    }
+  }
+  return null
+}
+
+/** 从一组 bundle 文件中读取 SKILL.md 的源版本（用于派生 source+1）。 */
+export function readSkillBundleVersion(files: TextBundleFile[]): string | null {
+  const skill = files.find((file) => normalizeTextBundlePath(file.path) === "SKILL.md")
+  return skill ? readSkillVersion(skill.content) : null
+}
+
+/**
+ * 写入 Trace Evolver 托管的 SKILL.md frontmatter 字段：
+ * - 始终写入 `evolved-by` 标识
+ * - 当传入有效的 `bumpFromVersion`（源版本）时，把 `version` 写成 source+1。
+ *   注意必须从「源版本」而非当前版本 bump，否则多次保存会持续累加。
+ */
+export function ensureSkillEvolverMarker(content: string, bumpFromVersion?: string | null): string {
   const { raw, body } = splitFrontmatter(content)
-  const frontmatter = upsertSimpleYamlField(raw, SKILL_EVOLVER_MARKER_KEY, SKILL_EVOLVER_MARKER_VALUE)
+  let frontmatter = upsertSimpleYamlField(raw, SKILL_EVOLVER_MARKER_KEY, SKILL_EVOLVER_MARKER_VALUE)
+  if (bumpFromVersion) {
+    frontmatter = upsertSimpleYamlField(frontmatter, "version", nextSkillVersion(bumpFromVersion))
+  }
   return `---\n${frontmatter}\n---\n\n${body.replace(/^\n+/, "")}`.replace(/\s*$/, "\n")
 }
 
-export function ensureTextBundleEvolverMarker(files: TextBundleFile[]): TextBundleFile[] {
+export function ensureTextBundleEvolverMarker(
+  files: TextBundleFile[],
+  bumpFromVersion?: string | null
+): TextBundleFile[] {
   const normalized = files
     .filter((file) => isSafeTextBundlePath(file.path))
     .map((file) => ({ path: normalizeTextBundlePath(file.path), content: file.content }))
@@ -278,7 +321,9 @@ export function ensureTextBundleEvolverMarker(files: TextBundleFile[]): TextBund
     throw new Error("候选 bundle 缺少 SKILL.md")
   }
   return normalized.map((file, index) => (
-    index === skillIndex ? { ...file, content: ensureSkillEvolverMarker(file.content) } : file
+    index === skillIndex
+      ? { ...file, content: ensureSkillEvolverMarker(file.content, bumpFromVersion) }
+      : file
   ))
 }
 

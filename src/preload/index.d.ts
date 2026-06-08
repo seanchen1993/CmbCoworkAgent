@@ -191,6 +191,7 @@ interface DashboardCommitDetail {
   deletions: number
   triggeredBy?: string
   threadId?: string
+  threadIds: string[]
   usedSkills: string[]
   skillCount: number
   codeGeneratedLines: number
@@ -293,7 +294,9 @@ interface DashboardUserDetail {
   traces: DashboardTraceDetail[]
   tracePage: number
   tracePageSize: number
-  totalTraces: number
+  /** 当前视图模式下的翻页总数：thread → 会话数；trace → trace 总数。 */
+  total: number
+  traceViewMode?: DashboardTraceViewMode
   traceTriggerScope?: DashboardTraceTriggerScope
 }
 
@@ -316,7 +319,177 @@ interface DashboardUserDetailOptions {
   traceLimit?: number
   tracePage?: number
   tracePageSize?: number
+  mode?: DashboardTraceViewMode
+  viewMode?: DashboardTraceViewMode
   triggerScope?: DashboardTraceTriggerScope
+}
+
+interface DashboardProjectModeFeature {
+  slug: string
+  title: string
+  location?: string
+  statusLabel?: string
+  currentNodeStatusLabel?: string
+  summary?: string
+}
+
+interface DashboardProjectModeSkillCount {
+  skill: string
+  count: number
+}
+
+interface DashboardProjectModeSkillAdoption extends DashboardCodeStats {
+  skill: string
+  commitCount: number
+}
+
+interface DashboardProjectModeToolUsage {
+  byTool: Array<{ tool: string; count: number }>
+  byToolAll: Array<{ tool: string; count: number }>
+  byToolFilteredAll: Array<{ tool: string; count: number }>
+  byToolAllFull: Array<{ tool: string; count: number }>
+  totalTools: number
+  totalToolCalls: number
+}
+
+interface DashboardProjectModeTopUser {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName: string
+  count: number
+}
+
+interface DashboardProjectModeOrgDistributionItem {
+  key: string
+  org: string
+  count: number
+  children: DashboardProjectModeOrgDistributionItem[]
+}
+
+interface DashboardProjectModeAdapterShareItem {
+  name: string
+  count: number
+}
+
+interface DashboardProjectModeAnalytics {
+  topUsers: DashboardProjectModeTopUser[]
+  byOrg: DashboardProjectModeOrgDistributionItem[]
+  byAdapter: DashboardProjectModeAdapterShareItem[]
+}
+
+interface DashboardProjectModeProject {
+  projectId: string
+  name: string
+  description?: string
+  systemName?: string
+  workspacePath?: string
+  adapterName?: string
+  adapterVersion?: string
+  creatorSapId?: string
+  creatorYstId?: string
+  creatorUserName?: string
+  creatorOrgName?: string
+  creatorUpperOrgLv0?: string
+  creatorUpperOrgLv1?: string
+  lifecycleStatus?: string
+  compatible?: boolean
+  compatibilityStatus?: string
+  featureCount: number
+  conversationCount: number
+  hasError: boolean
+  features: DashboardProjectModeFeature[]
+  topSkills: DashboardProjectModeSkillCount[]
+  codeStats: DashboardCodeStats | null
+}
+
+type DashboardProjectModeProjectStatus = "active" | "archived"
+
+interface DashboardProjectModeProjectCounts {
+  total: number
+  active: number
+  archived: number
+  totalFeatureCount: number
+  activeFeatureCount: number
+  archivedFeatureCount: number
+}
+
+interface DashboardProjectModeProjectPageData {
+  projects: DashboardProjectModeProject[]
+  total: number
+  page: number
+  pageSize: number
+  status: DashboardProjectModeProjectStatus
+  keyword: string
+  adapterName: string
+  creatorKeyword: string
+  creatorOrgKeyword: string
+}
+
+interface DashboardProjectModeProjectPageOptions {
+  upperOrgLv1?: string | string[] | null
+  status?: DashboardProjectModeProjectStatus | null
+  page?: number
+  pageSize?: number
+  keyword?: string | null
+  adapterName?: string | null
+  creatorKeyword?: string | null
+  creatorOrgKeyword?: string | null
+}
+
+interface DashboardProjectModeAdapter {
+  name: string
+  version?: string
+  projectCount: number
+  featureCount: number
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+}
+
+interface DashboardProjectModeData {
+  summary: {
+    projectCount: number
+    featureCount: number
+    activeProjectCount: number
+    conversationCount: number
+    totalToolCalls: number
+    totalInputTokens: number
+    totalOutputTokens: number
+    totalTokens: number
+    skillCallCount: number
+    distinctSkillCount: number
+    codeStats: DashboardCodeStats | null
+  }
+  adapters: DashboardProjectModeAdapter[]
+  topSkills: DashboardProjectModeSkillCount[]
+  bySkillAdoption: DashboardProjectModeSkillAdoption[]
+  tools: DashboardProjectModeToolUsage
+  analytics: DashboardProjectModeAnalytics
+  projectCounts: DashboardProjectModeProjectCounts
+  projectPage: DashboardProjectModeProjectPageData
+  projects: DashboardProjectModeProject[]
+}
+
+interface DashboardProjectModeTracesOptions {
+  limit?: number
+  page?: number
+  pageSize?: number
+  tracePage?: number
+  tracePageSize?: number
+  mode?: DashboardTraceViewMode
+  viewMode?: DashboardTraceViewMode
+  triggerScope?: DashboardTraceTriggerScope
+  featureSlug?: string
+}
+
+interface DashboardProjectModeTracesData {
+  traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  /** 当前视图模式下的翻页总数：thread → 会话数；trace → trace 总数。 */
+  total: number
+  traceViewMode: DashboardTraceViewMode
+  traceTriggerScope: DashboardTraceTriggerScope
 }
 
 interface CustomAPI {
@@ -375,6 +548,10 @@ interface CustomAPI {
         workerTurn?: number
       }) => void
     ) => () => void
+    onCoordinatorWorkerHook: (
+      threadId: string,
+      callback: (envelope: unknown) => void
+    ) => () => void
     setCoordinatorWorkerStreamFocus: (
       threadId: string,
       workerThreadId: string | null,
@@ -398,7 +575,10 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     getHistory: (threadId: string) => Promise<unknown[]>
     getLatestCheckpoint: (threadId: string) => Promise<unknown | null>
-    getGoalEvents: (threadId: string, options?: { restore?: boolean; limit?: number }) => Promise<
+    getGoalEvents: (
+      threadId: string,
+      options?: { restore?: boolean; limit?: number }
+    ) => Promise<
       Array<{
         event_id: number
         thread_id: string
@@ -1366,6 +1546,21 @@ interface CustomAPI {
   }
   dashboard: {
     isAllowed: () => Promise<boolean>
+    isProjectModeAllowed: () => Promise<boolean>
+    projectMode: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{ success: boolean; data?: DashboardProjectModeData; error?: string }>
+    projectModeProjects: (
+      range: { from: string; to: string },
+      options?: DashboardProjectModeProjectPageOptions
+    ) => Promise<{ success: boolean; data?: DashboardProjectModeProjectPageData; error?: string }>
+    projectModeTraces: (
+      projectId: string,
+      range: { from: string; to: string },
+      options?: DashboardProjectModeTracesOptions
+    ) => Promise<{ success: boolean; data?: DashboardProjectModeTracesData; error?: string }>
     overview: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -1376,9 +1571,10 @@ interface CustomAPI {
       granularity: "day" | "week" | "month" | "custom",
       opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
-    orgOptions: (
-      range: { from: string; to: string }
-    ) => Promise<{ success: boolean; data?: string[]; error?: string }>
+    orgOptions: (range: {
+      from: string
+      to: string
+    }) => Promise<{ success: boolean; data?: string[]; error?: string }>
     userStats: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -1446,7 +1642,16 @@ interface CustomAPI {
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
-      options?: number | { page?: number; pageSize?: number; limit?: number; mode?: DashboardTraceViewMode; viewMode?: DashboardTraceViewMode; triggerScope?: DashboardTraceTriggerScope }
+      options?:
+        | number
+        | {
+            page?: number
+            pageSize?: number
+            limit?: number
+            mode?: DashboardTraceViewMode
+            viewMode?: DashboardTraceViewMode
+            triggerScope?: DashboardTraceTriggerScope
+          }
     ) => Promise<{ success: boolean; data?: DashboardSkillDetail; error?: string }>
     commitDetails: (
       range: { from: string; to: string },
@@ -1471,7 +1676,8 @@ interface CustomAPI {
       traces: DashboardTraceDetail[]
     }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     exportExcel: (
-      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
+      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
+      options?: { fileName?: string }
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
   }
   harnessBoard: {
