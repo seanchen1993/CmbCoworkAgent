@@ -16,6 +16,8 @@ src/renderer/.vite/
 .playwright-browsers/
 __pycache__/
 *.pyc
+# One-off intranet backfill script — carries ES credentials, copy by hand, never commit.
+scripts/backfill_code_adoption_harness.py
 .trace-evolver-state/
 *.egg-info/
 trace_evolver_service/

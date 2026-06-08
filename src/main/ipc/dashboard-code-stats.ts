@@ -103,7 +103,10 @@ export function effectiveGeneratedLinesSumAgg(): Record<string, unknown> {
   }
 }
 
-function normalizeCodeStatsFromContainer(raw: unknown, prefix: string[] = []): DashboardCodeStats {
+export function normalizeCodeStatsFromContainer(
+  raw: unknown,
+  prefix: string[] = []
+): DashboardCodeStats {
   const generatedLines = getAggNumber(raw, [...prefix, "code_gen", "generated_lines", "value"])
   const deletedLines = getAggNumber(raw, [...prefix, "code_gen", "deleted_lines", "value"])
   const measuredGeneratedLines = getAggNumber(raw, [
@@ -148,8 +151,11 @@ export function normalizeCodeStatsFromAggs(raw: unknown): DashboardCodeStats {
   return normalizeCodeStatsFromContainer(raw, ["aggregations"])
 }
 
-export function normalizeSkillCodeAdoptionBuckets(raw: unknown): DashboardSkillCodeAdoptionStats[] {
-  return getAggArray(raw, ["aggregations", "by_skill_adoption", "buckets"])
+export function normalizeSkillCodeAdoptionBuckets(
+  raw: unknown,
+  aggKey = "by_skill_adoption"
+): DashboardSkillCodeAdoptionStats[] {
+  return getAggArray(raw, ["aggregations", aggKey, "buckets"])
     .map((bucket): DashboardSkillCodeAdoptionStats | null => {
       if (!bucket || typeof bucket !== "object" || Array.isArray(bucket)) return null
       const record = bucket as Record<string, unknown>

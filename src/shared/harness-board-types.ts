@@ -56,6 +56,16 @@ export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
   boardCompatibility: HarnessBoardCompatibility
 }
 
+export interface HarnessProjectCreatorMetadata {
+  sapId?: string
+  ystId?: string
+  userName?: string
+  orgName?: string
+  pathName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+}
+
 export interface HarnessProjectMetadata {
   projectId: string
   name: string
@@ -65,6 +75,7 @@ export interface HarnessProjectMetadata {
   systemName: string
   workspacePath: string
   "harness-adapter": HarnessAdapterSnapshot
+  creator?: HarnessProjectCreatorMetadata
   lifecycle: {
     status: "active" | "archived"
     createAt: string
@@ -119,6 +130,7 @@ export interface HarnessProjectListItem {
     name: string
     type: HarnessAdapterType
   }
+  creator?: HarnessProjectCreatorMetadata
   boardCompatibility: HarnessBoardCompatibility
   lifecycle: {
     status: "active" | "archived"

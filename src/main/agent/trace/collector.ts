@@ -298,11 +298,30 @@ export class TraceCollector {
         triggerSource: this.triggerSource
       }
     })
-    // Publish context to adoption tracker (side-effect only)
+    // Publish context to adoption tracker (side-effect only). Project-mode
+    // conversations also carry their harness project / adapter so emitted
+    // code_gen/code_adopt events can be sliced by project / plugin directly.
     try {
+      let harnessAdapter: { name?: string; version?: string } = {}
+      if (this.harnessFeature) {
+        try {
+          const adapter = getHarnessProjectAdapterSnapshot(this.harnessFeature.projectId)
+          if (adapter) harnessAdapter = { name: adapter.name, version: adapter.version }
+        } catch {
+          // best-effort: leave adapter fields absent on resolution failure
+        }
+      }
       setAdoptionContext(this.threadId, {
         traceId: this.traceId,
-        modelId: this.modelId
+        modelId: this.modelId,
+        ...(this.harnessFeature
+          ? {
+              harnessProjectId: this.harnessFeature.projectId,
+              harnessFeatureSlug: this.harnessFeature.slug,
+              harnessAdapterName: harnessAdapter.name,
+              harnessAdapterVersion: harnessAdapter.version
+            }
+          : {})
       })
     } catch {
       // never block trace setup

@@ -286,7 +286,9 @@ const api = {
       }) as Promise<unknown[]>
     },
     unbindCoordinatorWorkers: (threadId: string): Promise<void> => {
-      return ipcRenderer.invoke("agent:coordinator-workers-unsubscribe", { threadId }) as Promise<void>
+      return ipcRenderer.invoke("agent:coordinator-workers-unsubscribe", {
+        threadId
+      }) as Promise<void>
     },
     hasCoordinatorWorkerNotifications: (threadId: string): Promise<boolean> => {
       return ipcRenderer.invoke("agent:coordinator-worker-notifications-pending", {
@@ -1107,7 +1109,9 @@ const api = {
     select: (): Promise<{ canceled: boolean; filePaths: string[] }> => {
       return ipcRenderer.invoke("file:select")
     },
-    selectDirectory: (options?: { title?: string }): Promise<{ canceled: boolean; filePaths: string[] }> => {
+    selectDirectory: (options?: {
+      title?: string
+    }): Promise<{ canceled: boolean; filePaths: string[] }> => {
       return ipcRenderer.invoke("file:selectDirectory", options)
     },
     supportedExtensions: (): Promise<string[]> => {
@@ -1495,7 +1499,10 @@ const api = {
     getDirectorySize: (threadId: string): Promise<number> =>
       ipcRenderer.invoke("taskMmd:getDirectorySize", threadId) as Promise<number>,
     getCompileModelInfo: (threadId: string): Promise<TaskMmdCompileModelInfo> =>
-      ipcRenderer.invoke("taskMmd:getCompileModelInfo", threadId) as Promise<TaskMmdCompileModelInfo>,
+      ipcRenderer.invoke(
+        "taskMmd:getCompileModelInfo",
+        threadId
+      ) as Promise<TaskMmdCompileModelInfo>,
     onChanged: (callback: (payload: { threadId?: string }) => void): (() => void) => {
       const handler = (_: unknown, payload: { threadId?: string }): void => {
         callback(payload ?? {})
@@ -1845,10 +1852,7 @@ const api = {
     sendResponse: (response: UserInputResponse): void => {
       ipcRenderer.send("userInput:response", response)
     },
-    onRequest: (
-      threadId: string,
-      callback: (request: UserInputRequest) => void
-    ): (() => void) => {
+    onRequest: (threadId: string, callback: (request: UserInputRequest) => void): (() => void) => {
       const channel = `userInput:request:${threadId}`
       const handler = (_: unknown, request: UserInputRequest): void => {
         ipcRenderer.send("userInput:ack", {
@@ -2311,10 +2315,49 @@ const api = {
     isEnabled: (
       name: FeatureGateKey,
       options?: FeatureGateCheckOptions
-    ): Promise<FeatureGateCheckResult> => ipcRenderer.invoke("featureGates:isEnabled", name, options)
+    ): Promise<FeatureGateCheckResult> =>
+      ipcRenderer.invoke("featureGates:isEnabled", name, options)
   },
   dashboard: {
     isAllowed: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAllowed"),
+    isProjectModeAllowed: (): Promise<boolean> =>
+      ipcRenderer.invoke("dashboard:isProjectModeAllowed"),
+    projectMode: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectMode", range, granularity, opts),
+    projectModeProjects: (
+      range: { from: string; to: string },
+      options?: {
+        upperOrgLv1?: string | string[] | null
+        status?: "active" | "archived" | null
+        page?: number
+        pageSize?: number
+        keyword?: string | null
+        adapterName?: string | null
+        creatorKeyword?: string | null
+        creatorOrgKeyword?: string | null
+      }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeProjects", range, options),
+    projectModeTraces: (
+      projectId: string,
+      range: { from: string; to: string },
+      options?: {
+        limit?: number
+        page?: number
+        pageSize?: number
+        tracePage?: number
+        tracePageSize?: number
+        mode?: "thread" | "trace"
+        viewMode?: "thread" | "trace"
+        triggerScope?: "active" | "all"
+        featureSlug?: string
+      }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeTraces", projectId, range, options),
     overview: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -2327,9 +2370,10 @@ const api = {
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:modelStats", range, granularity, opts),
-    orgOptions: (
-      range: { from: string; to: string }
-    ): Promise<{ success: boolean; data?: string[]; error?: string }> =>
+    orgOptions: (range: {
+      from: string
+      to: string
+    }): Promise<{ success: boolean; data?: string[]; error?: string }> =>
       ipcRenderer.invoke("dashboard:orgOptions", range),
     userStats: (
       range: { from: string; to: string },
@@ -2350,7 +2394,14 @@ const api = {
     userDetail: (
       sapId: string,
       range: { from: string; to: string },
-      options?: { traceLimit?: number; tracePage?: number; tracePageSize?: number; triggerScope?: "active" | "all" }
+      options?: {
+        traceLimit?: number
+        tracePage?: number
+        tracePageSize?: number
+        mode?: "thread" | "trace"
+        viewMode?: "thread" | "trace"
+        triggerScope?: "active" | "all"
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userDetail", sapId, range, options),
     skillUsageSummary: (
@@ -2433,12 +2484,27 @@ const api = {
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
-      options?: number | { page?: number; pageSize?: number; limit?: number; mode?: "thread" | "trace"; viewMode?: "thread" | "trace"; triggerScope?: "active" | "all" }
+      options?:
+        | number
+        | {
+            page?: number
+            pageSize?: number
+            limit?: number
+            mode?: "thread" | "trace"
+            viewMode?: "thread" | "trace"
+            triggerScope?: "active" | "all"
+          }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillDetail", skill, range, options),
     commitDetails: (
       range: { from: string; to: string },
-      options?: { page?: number; pageSize?: number; pushedOnly?: boolean; upperOrgLv1?: string | null; orgLv1List?: string[] }
+      options?: {
+        page?: number
+        pageSize?: number
+        pushedOnly?: boolean
+        upperOrgLv1?: string | null
+        orgLv1List?: string[]
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:commitDetails", range, options),
     exportSkillTraces: (payload: {
@@ -2451,9 +2517,10 @@ const api = {
     }): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportSkillTraces", payload),
     exportExcel: (
-      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
+      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
+      options?: { fileName?: string }
     ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
-      ipcRenderer.invoke("dashboard:exportExcel", sheets)
+      ipcRenderer.invoke("dashboard:exportExcel", sheets, options)
   },
   harnessBoard: {
     registry: (): Promise<HarnessAdapterRegistryItem[]> =>
@@ -2463,27 +2530,48 @@ const api = {
     createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>
       ipcRenderer.invoke("harnessBoard:createProject", input) as Promise<HarnessProjectMetadata>,
     createFeature: (input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> =>
-      ipcRenderer.invoke("harnessBoard:createFeature", input) as Promise<HarnessFeatureCreateResult>,
+      ipcRenderer.invoke(
+        "harnessBoard:createFeature",
+        input
+      ) as Promise<HarnessFeatureCreateResult>,
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput
     ): Promise<HarnessProjectMetadata> =>
-      ipcRenderer.invoke("harnessBoard:updateProject", { projectId, input }) as Promise<HarnessProjectMetadata>,
+      ipcRenderer.invoke("harnessBoard:updateProject", {
+        projectId,
+        input
+      }) as Promise<HarnessProjectMetadata>,
     archiveProject: (projectId: string): Promise<HarnessProjectMetadata> =>
-      ipcRenderer.invoke("harnessBoard:archiveProject", projectId) as Promise<HarnessProjectMetadata>,
+      ipcRenderer.invoke(
+        "harnessBoard:archiveProject",
+        projectId
+      ) as Promise<HarnessProjectMetadata>,
     getProjectDetail: (projectId: string): Promise<HarnessProjectDetailViewModel> =>
-      ipcRenderer.invoke("harnessBoard:getProjectDetail", projectId) as Promise<HarnessProjectDetailViewModel>,
+      ipcRenderer.invoke(
+        "harnessBoard:getProjectDetail",
+        projectId
+      ) as Promise<HarnessProjectDetailViewModel>,
     getProjectDetails: (
       projectIds: string[],
       options?: { watchRefs?: boolean }
     ): Promise<Record<string, HarnessProjectDetailViewModel>> =>
-      ipcRenderer.invoke("harnessBoard:getProjectDetails", { projectIds, watchRefs: options?.watchRefs !== false }) as Promise<Record<string, HarnessProjectDetailViewModel>>,
+      ipcRenderer.invoke("harnessBoard:getProjectDetails", {
+        projectIds,
+        watchRefs: options?.watchRefs !== false
+      }) as Promise<Record<string, HarnessProjectDetailViewModel>>,
     getRunDetail: (projectId: string, slug: string): Promise<HarnessRunDetailViewModel> =>
-      ipcRenderer.invoke("harnessBoard:getRunDetail", { projectId, slug }) as Promise<HarnessRunDetailViewModel>,
+      ipcRenderer.invoke("harnessBoard:getRunDetail", {
+        projectId,
+        slug
+      }) as Promise<HarnessRunDetailViewModel>,
     getDialogTips: (projectId: string, slug: string): Promise<string | null> =>
-      ipcRenderer.invoke("harnessBoard:getDialogTips", { projectId, slug }) as Promise<string | null>,
+      ipcRenderer.invoke("harnessBoard:getDialogTips", { projectId, slug }) as Promise<
+        string | null
+      >,
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void): (() => void) => {
-      const handler = (_event: unknown, payload: HarnessWatchRefChangedEvent): void => callback(payload)
+      const handler = (_event: unknown, payload: HarnessWatchRefChangedEvent): void =>
+        callback(payload)
       ipcRenderer.on("harnessBoard:watchRefsChanged", handler)
       return () => ipcRenderer.removeListener("harnessBoard:watchRefsChanged", handler)
     }
