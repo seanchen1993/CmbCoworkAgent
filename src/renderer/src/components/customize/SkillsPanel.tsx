@@ -1,6 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import ReactMarkdown from "react-markdown"
-import remarkGfm from "remark-gfm"
 import {
   AlertCircle,
   ChevronDown,
@@ -23,6 +21,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
+import { MarkdownPreview } from "@/components/ui/MarkdownPreview"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
@@ -3196,9 +3195,12 @@ export function SkillDetail(props: {
                   {content}
                 </pre>
               ) : (
-                <div className="streaming-markdown text-sm leading-relaxed">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewContent ?? ""}</ReactMarkdown>
-                </div>
+                <MarkdownPreview
+                  content={previewContent ?? ""}
+                  path={selectedFilePath ?? undefined}
+                  showHeader={false}
+                  whiteBackground
+                />
               )}
             </div>
           </div>
