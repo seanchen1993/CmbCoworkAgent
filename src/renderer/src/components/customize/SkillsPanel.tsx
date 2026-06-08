@@ -21,7 +21,6 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
-import { MarkdownPreview } from "@/components/ui/MarkdownPreview"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
@@ -42,6 +41,8 @@ import { UniversalUploadDialog } from "./MarketPanel/UniversalUploadDialog"
 import { toast } from "sonner"
 import { marketInstalledVersionStorage } from "./MarketPanel/MarketUpdateBadge"
 import { marketInstalledSourceStorage } from "./MarketPanel/market-installed-source-storage"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 
 type FilePreviewKind = "text" | "html" | "image" | "pdf"
 type FileTreeNode = {
@@ -3195,12 +3196,9 @@ export function SkillDetail(props: {
                   {content}
                 </pre>
               ) : (
-                <MarkdownPreview
-                  content={previewContent ?? ""}
-                  path={selectedFilePath ?? undefined}
-                  showHeader={false}
-                  whiteBackground
-                />
+                <div className="streaming-markdown text-sm leading-relaxed">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewContent ?? ""}</ReactMarkdown>
+                </div>
               )}
             </div>
           </div>
