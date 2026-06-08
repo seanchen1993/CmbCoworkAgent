@@ -49,6 +49,7 @@ import {
 import { trackCloudEvolutionCandidateAccepted } from "@/lib/cloud-evolution-events"
 import type { SkillMetadata } from "@/types"
 import { SkillEvolutionReviewPanel } from "./SkillEvolutionReviewPanel"
+import { useMyUploadedSkills } from "../../lib/use-my-uploaded-skills"
 import { SkillBundleMergeEditor } from "./SkillBundleMergeEditor"
 
 interface SkillCandidate {
@@ -1437,11 +1438,15 @@ export function EvolutionPanel(): React.JSX.Element {
     setPendingEvolution
   } = useAppStore()
 
+  const { ownedSkillKeys, ownedSkillCount } = useMyUploadedSkills()
   const localPendingCandidateCount = candidates.filter((c) => c.status === "pending").length
   const cloudPendingUpdateCount = cloudEvolutionUpdates.filter((candidate) => candidate.local_adoption_status !== "adopted").length
   const cloudAdoptedUpdateCount = cloudEvolutionUpdates.length - cloudPendingUpdateCount
   const pendingCount = localPendingCandidateCount + cloudPendingUpdateCount
-  const showEvolutionReview = import.meta.env.DEV || canReviewEvolution(reviewUserInfo)
+  // 白名单审批员看全部候选；应用市场技能创建者可看到自己上传技能的候选。
+  const isEvolutionAdmin = import.meta.env.DEV || canReviewEvolution(reviewUserInfo)
+  const showEvolutionReview = isEvolutionAdmin || ownedSkillCount > 0
+  const reviewMode: "admin" | "creator" = isEvolutionAdmin ? "admin" : "creator"
 
   const loadTraces = useCallback(async () => {
     setTracesLoading(true)
@@ -2158,7 +2163,7 @@ export function EvolutionPanel(): React.JSX.Element {
                 <ShieldCheck className="size-3.5" />
                 进化审批
                 <span className="ml-1 rounded-full bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
-                  Admin
+                  {isEvolutionAdmin ? "Admin" : "我的"}
                 </span>
               </>
             )}
@@ -2247,7 +2252,7 @@ export function EvolutionPanel(): React.JSX.Element {
 
       {tab === "review" ? (
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          <SkillEvolutionReviewPanel />
+          <SkillEvolutionReviewPanel mode={reviewMode} ownedSkillKeys={ownedSkillKeys} />
         </div>
       ) : (
         <ScrollArea className="flex-1">
