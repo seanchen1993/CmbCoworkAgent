@@ -65,6 +65,7 @@ import {
   useThreadContext
 } from "@/lib/thread-context"
 import { toast } from "sonner"
+import { marketApi, type MarketItem } from "../../api/market"
 import type {
   HarnessArtifact,
   HarnessArtifactType,
@@ -84,6 +85,7 @@ import type {
   HarnessStatus,
   HarnessWorkflowNextAction,
   HarnessWorkflow,
+  PluginMetadata,
   Thread
 } from "@/types"
 import { HARNESS_SOURCE } from "../../../../shared/harness-board-types"
@@ -894,6 +896,76 @@ function findSelectedAdapter(
 function normalizeAdapterUseScenario(value?: string): string {
   const normalized = value?.trim()
   return normalized || OTHER_ADAPTER_SCENARIO
+}
+
+function normalizeAdapterMarketName(value?: string): string {
+  return value?.trim() || ""
+}
+
+function buildMarketPluginMap(items: MarketItem[]): Map<string, MarketItem> {
+  const map = new Map<string, MarketItem>()
+  for (const item of items) {
+    const name = normalizeAdapterMarketName(item.name)
+    if (name) map.set(name, item)
+  }
+  return map
+}
+
+function buildInstalledPluginMap(items: PluginMetadata[]): Map<string, PluginMetadata> {
+  const map = new Map<string, PluginMetadata>()
+  for (const item of items) {
+    const name = normalizeAdapterMarketName(item.name)
+    if (name) map.set(name, item)
+  }
+  return map
+}
+
+function applyMarketAdapterDisplayData(
+  registry: HarnessAdapterRegistryItem[],
+  marketPlugins: MarketItem[],
+  installedPlugins: PluginMetadata[]
+): HarnessAdapterRegistryItem[] {
+  const marketByName = buildMarketPluginMap(marketPlugins)
+  const installedByName = buildInstalledPluginMap(installedPlugins)
+
+  return registry.map((adapter) => {
+    const fallback: HarnessAdapterRegistryItem = {
+      ...adapter,
+      version: "",
+      description: "",
+      useScenario: OTHER_ADAPTER_SCENARIO
+    }
+    const adapterName = normalizeAdapterMarketName(adapter.name)
+    const installedPlugin = adapterName ? installedByName.get(adapterName) : undefined
+    if (installedPlugin?.origin !== "market") return fallback
+
+    const marketPlugin = adapterName ? marketByName.get(adapterName) : undefined
+    if (!marketPlugin) return fallback
+
+    return {
+      ...fallback,
+      version: marketPlugin.version?.trim() || "",
+      description: marketPlugin.description?.trim() || "",
+      useScenario: normalizeAdapterUseScenario(marketPlugin.category)
+    }
+  })
+}
+
+async function loadHarnessMarketPlugins(): Promise<MarketItem[]> {
+  try {
+    const response = await marketApi.getPlugins({ allowMockOnError: false, silent: true })
+    return response.success && response.data ? response.data : []
+  } catch {
+    return []
+  }
+}
+
+async function loadHarnessInstalledPlugins(): Promise<PluginMetadata[]> {
+  try {
+    return await window.api.plugins.list()
+  } catch {
+    return []
+  }
 }
 
 function groupAdaptersByUseScenario(registry: HarnessAdapterRegistryItem[]): AdapterScenarioGroup[] {
@@ -3098,6 +3170,7 @@ export function HarnessBoardView({
   const projectDetailsRefreshInFlightRef = useRef(false)
   const selectedProjectRefreshInFlightRef = useRef(false)
   const skipRunDetailLoadForSessionRef = useRef<string | null>(null)
+  const loadProjectsRequestIdRef = useRef(0)
   projectsRef.current = projects
   selectedProjectIdRef.current = selectedProjectId
   selectedFeatureRef.current = selectedFeature
@@ -3170,6 +3243,7 @@ export function HarnessBoardView({
   }, [])
 
   const loadProjects = useCallback(async () => {
+    const requestId = ++loadProjectsRequestIdRef.current
     setLoadingProjects(true)
     setLoadError(null)
     try {
@@ -3177,20 +3251,31 @@ export function HarnessBoardView({
         window.api.harnessBoard.listProjects(),
         window.api.harnessBoard.registry()
       ])
+      if (requestId !== loadProjectsRequestIdRef.current) return
       setProjects(items)
-      setAdapterRegistry(registry)
+      setAdapterRegistry(applyMarketAdapterDisplayData(registry, [], []))
+      void Promise.all([loadHarnessMarketPlugins(), loadHarnessInstalledPlugins()]).then(
+        ([marketPlugins, installedPlugins]) => {
+          if (requestId !== loadProjectsRequestIdRef.current) return
+          setAdapterRegistry(applyMarketAdapterDisplayData(registry, marketPlugins, installedPlugins))
+        }
+      )
       const allProjectIds = items.map((item) => item.projectId)
       if (allProjectIds.length > 0) {
         const details = await window.api.harnessBoard.getProjectDetails(allProjectIds)
+        if (requestId !== loadProjectsRequestIdRef.current) return
         setDetailsByProjectId((current) => mergeProjectDetailsIfChanged(current, details))
       }
       setSelectedProjectId((current) =>
         current && items.some((item) => item.projectId === current) ? current : null
       )
     } catch (error) {
+      if (requestId !== loadProjectsRequestIdRef.current) return
       setLoadError(cleanIpcError(error))
     } finally {
-      setLoadingProjects(false)
+      if (requestId === loadProjectsRequestIdRef.current) {
+        setLoadingProjects(false)
+      }
     }
   }, [])
 
