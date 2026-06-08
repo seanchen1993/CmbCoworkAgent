@@ -7,6 +7,7 @@ import {
   FileText,
   GitBranch,
   Lightbulb,
+  Plus,
   Sparkles,
   Star,
   Tag,
@@ -285,7 +286,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                                   disabled
                                   aria-disabled="true"
                                 >
-                                  <Zap className="size-3" />
+                                  <Plus className="size-3" />
                                   无需安装
                                 </Button>
                               </span>
@@ -308,7 +309,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                             onClick={() => onUpdateInstall(selectedItem)}
                             disabled={updatingItems.has(getItemKey(selectedItem))}
                           >
-                            <Zap className="size-3" />
+                            <Plus className="size-3" />
                             更新安装
                           </Button>
                         </UpdateVersionTooltip>
@@ -320,7 +321,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                           onClick={() => onUpdateInstall(selectedItem)}
                           disabled={updatingItems.has(getItemKey(selectedItem))}
                         >
-                          <Zap className="size-3" />
+                          <Plus className="size-3" />
                           重新安装
                         </Button>
                       )
@@ -335,7 +336,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                                 disabled
                                 aria-disabled="true"
                               >
-                                <Zap className="size-3" />
+                                <Plus className="size-3" />
                                 无需安装
                               </Button>
                             </span>
@@ -352,7 +353,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                         onClick={() => onDownload(selectedItem, false)}
                         disabled={downloadingItems.has(getItemKey(selectedItem))}
                       >
-                        <Zap className="size-3" />
+                        <Plus className="size-3" />
                         安装
                       </Button>
                     )}

@@ -4,7 +4,6 @@ import {
   Calendar,
   Check,
   CheckCircle,
-  FileText,
   Search,
   Sparkles,
   Tag,
@@ -196,18 +195,6 @@ function OrgSkillCard({
             <div className="size-4 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin" />
           ) : (
             <>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 px-3 gap-1 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] rounded-lg"
-                onClick={(event) => {
-                  event.stopPropagation()
-                  void onOpenDetail(item)
-                }}
-              >
-                <FileText className="size-3" />
-                详情
-              </Button>
               {item.installed ? (
                 <Button
                   variant="outline"
