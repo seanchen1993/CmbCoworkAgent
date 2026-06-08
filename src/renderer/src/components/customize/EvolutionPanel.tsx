@@ -1438,16 +1438,17 @@ export function EvolutionPanel(): React.JSX.Element {
     setPendingEvolution
   } = useAppStore()
 
-  const { ownedSkillKeys, ownedSkillCount } = useMyUploadedSkills()
+  const { ownedSkillKeys } = useMyUploadedSkills()
   const localPendingCandidateCount = candidates.filter((c) => c.status === "pending").length
   const cloudPendingUpdateCount = cloudEvolutionUpdates.filter((candidate) => candidate.local_adoption_status !== "adopted").length
   const cloudAdoptedUpdateCount = cloudEvolutionUpdates.length - cloudPendingUpdateCount
   const pendingCount = localPendingCandidateCount + cloudPendingUpdateCount
   // 审批员身份决定 Admin 标签 + admin 模式（可见全部候选）。
   // DEV 默认按 Admin 走，方便本地调试；生产环境严格按白名单。
-  // 非白名单的技能创建者则进入 creator 模式，仅可见自己上传技能的候选。
+  // 非白名单用户进入 creator 模式，仅可见自己上传技能的候选。
   const isReviewAdmin = import.meta.env.DEV || canReviewEvolution(reviewUserInfo)
-  const showEvolutionReview = isReviewAdmin || ownedSkillCount > 0
+  // 审批 tab 对所有人常驻显示；没有自己技能的候选时展示空状态即可。
+  const showEvolutionReview = true
   const reviewMode: "admin" | "creator" = isReviewAdmin ? "admin" : "creator"
 
   const loadTraces = useCallback(async () => {

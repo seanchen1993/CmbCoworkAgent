@@ -390,7 +390,7 @@ export function SkillEvolutionReviewPanel({
             {visibleItems.length === 0 && (
               <div className="rounded-xl border border-dashed border-[#d8d3c2] p-5 text-sm text-[#7b7970]">
                 {isCreatorMode
-                  ? "你上传的技能暂无优化候选。Trace Evolver 分析出新版本后会出现在这里。"
+                  ? "暂无你技能的优化候选。把技能上传到应用市场后，云端自进化跑出的优化版本会出现在这里。"
                   : "暂无待审批候选。Trace Evolver 跑完后会出现在这里。"}
               </div>
             )}
