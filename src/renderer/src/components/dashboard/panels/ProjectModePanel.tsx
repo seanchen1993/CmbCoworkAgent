@@ -102,6 +102,27 @@ function formatPieLabel(name: unknown, percent?: number): string {
   return `${shortLabel} ${((percent ?? 0) * 100).toFixed(0)}%`
 }
 
+function ProjectModePieTooltip({
+  active,
+  payload
+}: {
+  active?: boolean
+  payload?: { name?: unknown; value?: unknown }[]
+}): React.JSX.Element | null {
+  if (!active || !payload || payload.length === 0) return null
+  const item = payload[0]
+  return (
+    <div className="rounded-lg border border-border bg-card px-3 py-2 text-xs shadow-sm">
+      <div className="max-w-[220px] break-words font-medium text-foreground">
+        {String(item.name ?? "未知")}
+      </div>
+      <div className="mt-0.5 text-muted-foreground">
+        项目数：{formatNumber(Number(item.value) || 0)}
+      </div>
+    </div>
+  )
+}
+
 function formatPercent(value: number | null | undefined): string {
   if (value === null || value === undefined) return "—"
   return `${(value * 100).toFixed(1)}%`
@@ -187,15 +208,7 @@ function ProjectModePieCard({
                 />
               ))}
             </Pie>
-            <Tooltip
-              formatter={(value) => [formatNumber(Number(value) || 0), "项目数"]}
-              contentStyle={{
-                backgroundColor: "var(--color-card)",
-                border: "1px solid var(--color-border)",
-                borderRadius: 8,
-                fontSize: 12
-              }}
-            />
+            <Tooltip content={<ProjectModePieTooltip />} />
           </PieChart>
         </ResponsiveContainer>
       ) : (
@@ -208,9 +221,11 @@ function ProjectModePieCard({
 }
 
 function ProjectModeUserAnalysisCard({
-  users
+  users,
+  onUserClick
 }: {
   users: DashboardProjectModeAnalytics["topUsers"]
+  onUserClick?: (sapId: string) => void
 }): React.JSX.Element {
   return (
     <div className="rounded-xl border border-border bg-card p-4">
@@ -226,10 +241,15 @@ function ProjectModeUserAnalysisCard({
             </tr>
           </thead>
           <tbody>
-            {users.map((user, index) => (
+            {users.map((user, index) => {
+              const canClick = Boolean(onUserClick && user.sapId)
+              return (
               <tr
                 key={user.sapId || user.ystId || `${user.userName}-${index}`}
-                className="border-b border-border/50 transition-colors hover:bg-muted/30"
+                className={`border-b border-border/50 transition-colors hover:bg-muted/30 ${
+                  canClick ? "cursor-pointer" : ""
+                }`}
+                onClick={canClick ? () => onUserClick?.(user.sapId) : undefined}
               >
                 <td className="px-2 py-1.5 text-muted-foreground">{index + 1}</td>
                 <td className="px-2 py-1.5 text-foreground">
@@ -245,7 +265,8 @@ function ProjectModeUserAnalysisCard({
                   {formatNumber(user.count)}
                 </td>
               </tr>
-            ))}
+              )
+            })}
             {users.length === 0 && (
               <tr>
                 <td colSpan={4} className="py-6 text-center text-muted-foreground">
@@ -302,16 +323,18 @@ function ProjectModeDepartmentChart({
 }
 
 function ProjectModeAnalyticsSection({
-  analytics
+  analytics,
+  onUserClick
 }: {
   analytics?: DashboardProjectModeAnalytics | null
+  onUserClick?: (sapId: string) => void
 }): React.JSX.Element {
   const data = analytics ?? { topUsers: [], byOrg: [], byAdapter: [] }
   return (
     <section>
       <h2 className="mb-3 text-sm font-semibold text-foreground">项目分析</h2>
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
-        <ProjectModeUserAnalysisCard users={data.topUsers} />
+        <ProjectModeUserAnalysisCard users={data.topUsers} onUserClick={onUserClick} />
         <ProjectModeDepartmentChart items={data.byOrg} />
         <ProjectModePieCard
           title="插件占比"
@@ -1109,6 +1132,7 @@ export function ProjectModePanel({
   onProjectPageChange,
   onOpenTraces,
   onSkillClick,
+  onUserClick,
   marketSkillKeys = new Set(),
   pluginSkillKeys = new Set()
 }: {
@@ -1135,6 +1159,7 @@ export function ProjectModePanel({
     feature?: DashboardProjectModeFeature
   ) => void
   onSkillClick?: (skill: string) => void
+  onUserClick?: (sapId: string) => void
   marketSkillKeys?: Set<string>
   pluginSkillKeys?: Set<string>
 }): React.JSX.Element {
@@ -1287,7 +1312,7 @@ export function ProjectModePanel({
         onOpenTraces={onOpenTraces}
       />
 
-      <ProjectModeAnalyticsSection analytics={data?.analytics} />
+      <ProjectModeAnalyticsSection analytics={data?.analytics} onUserClick={onUserClick} />
 
       {/* Skill / Tool 使用排行，与平台运营概览同款 */}
       <section>

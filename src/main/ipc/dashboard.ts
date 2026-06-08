@@ -469,6 +469,8 @@ interface UserDetailOptions {
   mode?: TraceViewMode
   viewMode?: TraceViewMode
   triggerScope?: TraceTriggerScope
+  // 仅统计项目模式（存在 harnessProjectId）下的 trace，用于「项目运营概览」入口。
+  projectMode?: boolean
 }
 
 type TraceViewMode = "thread" | "trace"
@@ -2129,7 +2131,9 @@ async function fetchUserDetail(
   const baseFilter = [
     timeRangeFilter("startedAt", range),
     { term: { sapId: normalizedSapId } },
-    ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
+    ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : []),
+    // 项目运营概览入口：仅统计项目模式（带 harnessProjectId）的 trace。
+    ...(options?.projectMode ? [{ exists: { field: "harnessProjectId" } }] : [])
   ]
   // 两种视图共用的全量统计聚合（与列表口径隔离）。
   const statsAggs: Record<string, unknown> = {
@@ -6619,7 +6623,6 @@ const FILTERED_TOOL_EXCLUDES = [
   "invoke_deferred_tool",
   // 内置代码执行辅助
   "code_exec",
-  "prepare_save_code_exec_tool",
   "save_code_exec_tool",
   // 内置任务管理
   "write_todos"

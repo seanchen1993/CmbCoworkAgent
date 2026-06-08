@@ -630,16 +630,6 @@ function getPendingApprovalId(request: HITLRequest): string {
   return request.id
 }
 
-function getPendingApprovalOperation(request: HITLRequest | null | undefined): string | null {
-  const approval = request as unknown as Record<string, unknown> | null | undefined
-  const operation = approval?.operation
-  return typeof operation === "string" ? operation : null
-}
-
-function approvalOperation(request: HITLRequest | null | undefined): string | null {
-  return getPendingApprovalOperation(request)
-}
-
 function buildPendingApprovalState(
   queue: HITLRequest[]
 ): Pick<ThreadState, "pendingApprovals" | "pendingApproval" | "approvalQueue"> {
@@ -653,14 +643,6 @@ function buildPendingApprovalState(
 function enqueuePendingApproval(queue: HITLRequest[], request: HITLRequest): HITLRequest[] {
   const requestId = getPendingApprovalId(request)
   const nextQueue = queue.filter((item) => getPendingApprovalId(item) !== requestId)
-  const state = buildPendingApprovalState(nextQueue)
-  if (
-    nextQueue.length === 1 &&
-    approvalOperation(state.pendingApproval) === "prepare_save_code_exec_tool" &&
-    approvalOperation(request) === "save_code_exec_tool"
-  ) {
-    return [request]
-  }
   nextQueue.push(request)
   return nextQueue
 }
@@ -702,7 +684,6 @@ function normalizeApprovalPayload(request: unknown): HITLRequest & Record<string
     savedToolName: req.savedToolName,
     savedToolId: req.savedToolId,
     savedToolDescription: req.savedToolDescription,
-    savedToolMetadataError: req.savedToolMetadataError,
     _orchestratorRequestId: req.id,
     _retryReason: req.retry_reason,
     _approvalTypes: req.allowed_approval_types

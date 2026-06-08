@@ -612,7 +612,6 @@ export interface ApprovalRequest extends HITLRequest {
     | "write_file"
     | "edit_file"
     | "code_exec"
-    | "prepare_save_code_exec_tool"
     | "save_code_exec_tool"
   command?: string // shell command (for execute operations)
   filePath?: string // target file path (for write_file/edit_file operations)
@@ -622,7 +621,6 @@ export interface ApprovalRequest extends HITLRequest {
   savedToolName?: string // proposed saved tool name before slug normalization
   savedToolId?: string // proposed saved tool ID
   savedToolDescription?: string // proposed saved tool description
-  savedToolMetadataError?: string // metadata generation failure message for manual fallback
   cwd: string
   reason?: string // why approval is needed
   retry_reason?: string // sandbox-failure retry context
