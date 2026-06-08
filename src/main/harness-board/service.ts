@@ -1881,6 +1881,16 @@ function makeProjectErrorDetail(
   })
 }
 
+function makeArchivedProjectDetail(project: HarnessProjectMetadata): HarnessProjectDetailViewModel {
+  return makeProjectDetailViewModel(project, {
+    workflow: normalizeWorkflow(null),
+    runs: [],
+    watchRefs: [],
+    projectState: { label: "已归档", uiKind: "archived" },
+    error: null
+  })
+}
+
 function projectAdapterLoadedStatus(project: HarnessProjectMetadata): HarnessStatus {
   const adapterName = normalizeText(project["harness-adapter"].name) || "插件"
   return okStatus("inspected", `${adapterName} 已加载`)
@@ -1899,6 +1909,11 @@ export function getHarnessProjectDetails(
   }>()
 
   for (const project of projects) {
+    if (project.lifecycle.status === "archived") {
+      result[project.projectId] = makeArchivedProjectDetail(project)
+      continue
+    }
+
     const plugin = findAdapterPlugin(project)
     const adapter = project["harness-adapter"]
     const compatibility = evaluateBoardPluginCompatibility(plugin, adapter.name || adapter.id)
