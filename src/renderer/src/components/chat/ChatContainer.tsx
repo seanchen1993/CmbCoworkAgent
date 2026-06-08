@@ -43,7 +43,8 @@ import {
   CheckCircle2,
   PauseCircle,
   PlayCircle,
-  Trash2
+  Trash2,
+  Copy
 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -63,7 +64,8 @@ import {
   useCurrentThread,
   useThreadStream,
   useThreadContext,
-  type HookLogBucket
+  type HookLogBucket,
+  type ApiErrorDetailState
 } from "@/lib/thread-context"
 import {
   filterCoordinatorNoiseMessages,
@@ -1237,6 +1239,153 @@ function DialogTipsMarkdown({ content }: { content: string }): React.JSX.Element
   )
 }
 
+/**
+ * Error card shown when a turn fails. Renders a friendly summary (status label +
+ * real reason + hint) with an expandable "显示详情" section carrying the
+ * diagnostics needed to locate the cause: status code, error code, request id
+ * (copyable), failover chain, and the raw response body.
+ */
+function ChatErrorCard({
+  error,
+  detail,
+  onDismiss
+}: {
+  error: string
+  detail: ApiErrorDetailState | null
+  onDismiss: () => void
+}): React.JSX.Element {
+  const [showDetails, setShowDetails] = useState(false)
+
+  const title = detail?.statusLabel
+    ? `${detail.statusLabel}${detail.status ? `（${detail.status}）` : ""}`
+    : "代理出错"
+  const reason = (detail?.reason || error || "").trim()
+  const hint = detail?.hint
+  const hasDetails = Boolean(
+    detail &&
+      (detail.status != null ||
+        detail.requestId ||
+        detail.code ||
+        detail.model ||
+        (detail.failover && detail.failover.length > 0) ||
+        detail.rawBody)
+  )
+
+  const copy = (text: string): void => {
+    navigator.clipboard?.writeText(text).then(
+      () => toast.success("已复制"),
+      () => toast.error("复制失败")
+    )
+  }
+
+  return (
+    <div className="flex items-start gap-3 rounded-md border border-destructive/50 bg-destructive/10 p-4">
+      <AlertCircle className="size-5 text-destructive shrink-0 mt-0.5" />
+      <div className="flex-1 min-w-0">
+        <div className="font-medium text-destructive text-sm">{title}</div>
+        {reason && (
+          <div className="text-sm text-muted-foreground mt-1 break-words whitespace-pre-wrap">
+            {reason}
+          </div>
+        )}
+        {hint && <div className="text-xs text-muted-foreground/90 mt-1">{hint}</div>}
+
+        {hasDetails && (
+          <>
+            <button
+              onClick={() => setShowDetails((v) => !v)}
+              className="mt-2 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              {showDetails ? (
+                <ChevronUp className="size-3" />
+              ) : (
+                <ChevronDown className="size-3" />
+              )}
+              {showDetails ? "隐藏详情" : "显示详情"}
+            </button>
+
+            {showDetails && (
+              <div className="mt-2 space-y-1.5 rounded border border-border/60 bg-background/40 p-2 text-xs text-muted-foreground">
+                {detail?.status != null && (
+                  <div className="flex gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">状态码</span>
+                    <span className="font-mono">{detail.status}</span>
+                  </div>
+                )}
+                {detail?.code && (
+                  <div className="flex gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">错误码</span>
+                    <span className="font-mono break-all">{detail.code}</span>
+                  </div>
+                )}
+                {detail?.requestId && (
+                  <div className="flex items-center gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">请求 ID</span>
+                    <span className="font-mono break-all flex-1 min-w-0">{detail.requestId}</span>
+                    <button
+                      onClick={() => copy(detail.requestId!)}
+                      className="shrink-0 rounded p-0.5 hover:bg-muted transition-colors"
+                      aria-label="Copy request id"
+                    >
+                      <Copy className="size-3" />
+                    </button>
+                  </div>
+                )}
+                {detail?.model && (
+                  <div className="flex gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">模型</span>
+                    <span className="font-mono break-all">{detail.model}</span>
+                  </div>
+                )}
+                {detail?.failover && detail.failover.length > 0 && (
+                  <div className="flex gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">故障转移</span>
+                    <ul className="flex-1 min-w-0 space-y-0.5">
+                      {detail.failover.map((f, i) => (
+                        <li key={`${f.modelId}-${i}`} className="break-words">
+                          <span className="font-mono">{f.modelId}</span>：{f.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {detail?.rawBody && (
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-muted-foreground/70">原始响应</span>
+                      <button
+                        onClick={() => copy(detail.rawBody!)}
+                        className="rounded p-0.5 hover:bg-muted transition-colors"
+                        aria-label="Copy raw response body"
+                      >
+                        <Copy className="size-3" />
+                      </button>
+                    </div>
+                    <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-1.5 font-mono text-[11px]">
+                      {detail.rawBody}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        )}
+
+        <div className="text-xs text-muted-foreground mt-2">
+          你可以尝试发送新消息继续对话。
+        </div>
+      </div>
+      <button
+        onClick={onDismiss}
+        className="shrink-0 rounded p-1 hover:bg-destructive/20 transition-colors"
+        aria-label="Dismiss error"
+      >
+        <X className="size-4 text-muted-foreground" />
+      </button>
+    </div>
+  )
+}
+
 export function ChatContainer({
   threadId,
   showGitChangeNotice = false,
@@ -1683,6 +1832,7 @@ export function ChatContainer({
     pendingUserInput,
     todos,
     error: threadError,
+    errorDetail,
     hookInterruption,
     workspacePath,
     tokenUsage,
@@ -4640,25 +4790,11 @@ export function ChatContainer({
             )}
             {/* Error state */}
             {threadError && !isLoading && (
-              <div className="flex items-start gap-3 rounded-md border border-destructive/50 bg-destructive/10 p-4">
-                <AlertCircle className="size-5 text-destructive shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  <div className="font-medium text-destructive text-sm">代理出错</div>
-                  <div className="text-sm text-muted-foreground mt-1 break-words">
-                    {threadError}
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-2">
-                    你可以尝试发送新消息继续对话。
-                  </div>
-                </div>
-                <button
-                  onClick={handleDismissError}
-                  className="shrink-0 rounded p-1 hover:bg-destructive/20 transition-colors"
-                  aria-label="Dismiss error"
-                >
-                  <X className="size-4 text-muted-foreground" />
-                </button>
-              </div>
+              <ChatErrorCard
+                error={threadError}
+                detail={errorDetail}
+                onDismiss={handleDismissError}
+              />
             )}
                 </div>
               </div>
