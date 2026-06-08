@@ -522,8 +522,8 @@ export function CommitDetailsDialog({
               onDepartmentSearch={onDepartmentSearch}
               onClearDepartment={onClearDepartment}
             />
-            <ScrollArea className="min-h-0 flex-1">
-              <div className="overflow-x-auto">
+            <ScrollArea className="min-h-0 flex-1" orientation="both">
+              <div className="min-w-max">
                 <table className="min-w-[1060px] w-full text-left">
                   <thead className="sticky top-0 z-10 bg-background">
                     <tr className="border-b border-border text-[11px] text-muted-foreground">
