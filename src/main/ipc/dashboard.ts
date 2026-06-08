@@ -8095,7 +8095,9 @@ async function fetchProjectModeTraces(
   }
 
   const body = {
-    track_total_hits: ES_MAX_RESULT_WINDOW,
+    // 与用户/技能详情的 trace 查询保持一致用布尔值；total 在下方用 Math.min 收口到
+    // max_result_window，无需把数值塞进 track_total_hits（部分 ES 网关会因此 400）。
+    track_total_hits: true,
     from: (tracePage - 1) * tracePageSize,
     size: tracePageSize,
     sort: [{ startedAt: { order: "desc" } }],
