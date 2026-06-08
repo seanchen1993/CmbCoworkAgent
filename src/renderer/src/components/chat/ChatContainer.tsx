@@ -74,6 +74,7 @@ import {
 import { isCoordinatorModeMetadata } from "@/lib/coordinator-mode-helpers"
 import { ModelSwitcher } from "./ModelSwitcher"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
+import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
@@ -5247,9 +5248,9 @@ export function ChatContainer({
                 />
               </div>
             </div>
-            {/*chat container bottom panel — moved inside input box above */}
+            {/*chat container bottom panel */}
             <div className={"flex items-center justify-between"}>
-              <div className={"flex items-center space-x-4"}>
+              <div className={"flex items-center gap-2"}>
                 {yoloMode && (
                   <button
                     type="button"
@@ -5261,6 +5262,9 @@ export function ChatContainer({
                     YOLO
                   </button>
                 )}
+                <SandboxModeSwitcher
+                  onOpenSettings={() => setShowCustomizeView(true, "sandbox")}
+                />
                 {tokenUsage && (
                   <ContextUsageIndicator
                     tokenUsage={tokenUsage}
