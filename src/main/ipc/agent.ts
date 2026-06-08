@@ -5851,13 +5851,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onHookResult
             ).catch((e: unknown) => console.warn("[Hooks] StopFailure hook error:", e))
           }
-          // Push structured detail (status / real reason from body / request-id)
-          // before the plain error event so the UI card can render diagnostics.
-          emitErrorDetail(window, channel, error, { model: usedModelId })
           safeSendToWindow(window, channel, {
             type: "error",
             error: errMsg
           })
+          // Sent AFTER the error event: handleError clears any stale detail on the
+          // error event, then this re-populates it with this turn's diagnostics
+          // (status / real reason from body / request-id).
+          emitErrorDetail(window, channel, error, { model: usedModelId })
           notifyIfBackground("❌ 任务失败", errMsg)
           if (!isCoordinatorNotificationTurn && isOnlineSkillEvolutionEnabled()) {
             appendTurnToProposalWindow("error", errMsg)
@@ -6629,11 +6630,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             boundaryGoalId,
             boundaryGoalActiveWindowId
           )
-          emitErrorDetail(window, channel, error)
           safeSendToWindow(window, channel, {
             type: "error",
             error: error instanceof Error ? error.message : "Unknown error"
           })
+          emitErrorDetail(window, channel, error)
         }
         turnStateShouldDispose = true
       } finally {
@@ -7343,11 +7344,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           boundaryGoalId,
           boundaryGoalActiveWindowId
         )
-        emitErrorDetail(window, channel, error)
         safeSendToWindow(window, channel, {
           type: "error",
           error: error instanceof Error ? error.message : "Unknown error"
         })
+        emitErrorDetail(window, channel, error)
       }
       turnStateShouldDispose = true
     } finally {

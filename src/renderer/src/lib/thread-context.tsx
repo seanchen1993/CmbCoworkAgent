@@ -1968,7 +1968,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     (threadId: string, error: Error) => {
       console.error("[ThreadContext] Stream error:", { threadId, error })
       const userFriendlyMessage = parseErrorMessage(error)
-      updateThreadState(threadId, () => ({ error: userFriendlyMessage, modelRetry: null }))
+      // Clear any stale errorDetail: an `error_detail` custom event (when present)
+      // is emitted right AFTER this error event and will re-populate it. Plain
+      // errors with no detail must not keep showing a previous turn's diagnostics.
+      updateThreadState(threadId, () => ({
+        error: userFriendlyMessage,
+        errorDetail: null,
+        modelRetry: null
+      }))
     },
     [parseErrorMessage, updateThreadState]
   )

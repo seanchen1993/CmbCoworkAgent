@@ -85,7 +85,12 @@ const NETWORK_MESSAGE_TOKENS = [
 export function classifyApiError(error: unknown): ApiErrorCode {
   if (!error) return "unknown"
 
-  const status = getStatusCode(error) ?? statusFromMessage(error)
+  // NOTE: intentionally only use the status carried on the error object here —
+  // NOT statusFromMessage(). classifyApiError is also called on arbitrary tool
+  // output (see hooks/tool-failure.ts), where a 4xx/5xx-looking number in the
+  // text would be misread as a gateway code. extractErrorDetail() does the
+  // message-based parsing for genuine API errors.
+  const status = getStatusCode(error)
   // Dictionary first: covers custom gateway codes (432/433/480/481/485/…) so the
   // coarse bucket matches the spec instead of falling through to "unknown".
   const dictInfo = getStatusInfo(status)
