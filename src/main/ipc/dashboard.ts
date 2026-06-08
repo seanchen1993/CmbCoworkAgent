@@ -4746,7 +4746,6 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
         by_tool: {
           buckets: [
             { key: "git_workflow", doc_count: 412 },
-            { key: "browser_playwright", doc_count: 356 },
             { key: "manage_skill", doc_count: 298 },
             { key: "manage_scheduler", doc_count: 241 },
             { key: "web_search", doc_count: 198 },
@@ -4770,7 +4769,6 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
         by_tool_filtered_all: {
           buckets: [
             { key: "git_workflow", doc_count: 412 },
-            { key: "browser_playwright", doc_count: 356 },
             { key: "manage_skill", doc_count: 298 },
             { key: "manage_scheduler", doc_count: 241 },
             { key: "web_search", doc_count: 198 },
@@ -4802,7 +4800,6 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
             { key: "grep", doc_count: 876 },
             { key: "glob", doc_count: 654 },
             { key: "git_workflow", doc_count: 412 },
-            { key: "browser_playwright", doc_count: 356 },
             { key: "manage_skill", doc_count: 298 },
             { key: "edit_file", doc_count: 267 },
             { key: "manage_scheduler", doc_count: 241 },
@@ -4826,7 +4823,6 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
             { key: "grep", doc_count: 876 },
             { key: "glob", doc_count: 654 },
             { key: "git_workflow", doc_count: 412 },
-            { key: "browser_playwright", doc_count: 356 },
             { key: "manage_skill", doc_count: 298 },
             { key: "edit_file", doc_count: 267 },
             { key: "manage_scheduler", doc_count: 241 },

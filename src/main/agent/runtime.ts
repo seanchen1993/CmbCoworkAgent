@@ -79,7 +79,6 @@ import { createMemorySearchTool, createMemoryGetTool } from "../memory/tools"
 import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import { getThread } from "../db/index"
-import { createPlaywrightTool } from "./tools/playwright-tool"
 import { createRequestUserInputTool } from "./tools/user-input-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
@@ -258,7 +257,6 @@ const EXCLUSIVE_TOOL_NAMES = new Set([
   "code_exec",
   "prepare_save_code_exec_tool",
   "save_code_exec_tool",
-  "browser_playwright",
   "manage_scheduler",
   "manage_skill",
   "task",
@@ -2573,8 +2571,6 @@ ${subagentShellGuidance}
 - edit_file: edit a file in the filesystem
 - glob: find files matching a pattern (e.g., "**/*.py")
 - grep: search for literal text within files (NOT regex). Do NOT use "|", ".*" or other regex syntax — call grep once per term instead.
-- Browser strategy: for browser tasks, first follow any matching enabled skill; only if no relevant skill is available, use browser_playwright.
-- browser_playwright: built-in browser automation and page interaction tool powered by project-local Playwright (fallback when no matching browser skill exists).
 - request_user_input: Only use in Plan mode, or when explicitly requested by the user or an active Skill/Plugin. Otherwise do not call this tool.
 The workspace root is: ${workspacePath}`
 
@@ -2721,8 +2717,6 @@ The workspace root is: ${workspacePath}`
   if (!options.noSkillEvolutionTool) {
     extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
   }
-
-  extraTools.push(createPlaywrightTool(workspacePath))
 
   // Conditionally inject Java LSP tool
   try {
@@ -2908,13 +2902,13 @@ The workspace root is: ${workspacePath}`
     const scratchpadDir = getCoordinatorScratchpadDir(workerInput.parentThreadId)
     const workerAccessPrompt = (() => {
       if (workerInput.workload === "read_only") {
-        return "Access limits: read-only worker. You can inspect files and search, but write_file, edit_file, execute, task_output, browser_playwright, deferred tools, and eager MCP tools are unavailable. Do not claim to have run commands."
+        return "Access limits: read-only worker. You can inspect files and search, but write_file, edit_file, execute, task_output, deferred tools, and eager MCP tools are unavailable. Do not claim to have run commands."
       }
       if (workerInput.workload === "verify") {
-        return "Access limits: verifier worker. You can inspect files, run validation commands, and use browser_playwright for UI/runtime verification when available, but write_file, edit_file, deferred tools, and eager MCP tools are unavailable. Do not create, modify, or delete files in the project workspace. If a temporary script or harness is necessary, write it only under /tmp or $TMPDIR and clean it up."
+        return "Access limits: verifier worker. You can inspect files and run validation commands, but write_file, edit_file, deferred tools, and eager MCP tools are unavailable. Do not create, modify, or delete files in the project workspace. If a temporary script or harness is necessary, write it only under /tmp or $TMPDIR and clean it up."
       }
       if (workerInput.ownedFiles.length > 0) {
-        return `Access limits: scoped write worker. write_file and edit_file are limited to owned_files (${workerInput.ownedFiles.join(", ")}). execute, task_output, browser_playwright, deferred tools, and eager MCP tools are unavailable, so do not claim to have run shell/browser checks. File edits may still require explicit user approval; if write_file or edit_file is denied/blocked, do not loop the same call and instead report the blocking file/action back to the coordinator.`
+        return `Access limits: scoped write worker. write_file and edit_file are limited to owned_files (${workerInput.ownedFiles.join(", ")}). execute, task_output, deferred tools, and eager MCP tools are unavailable, so do not claim to have run shell/browser checks. File edits may still require explicit user approval; if write_file or edit_file is denied/blocked, do not loop the same call and instead report the blocking file/action back to the coordinator.`
       }
       return "Access limits: write worker. You may edit workspace files as needed for the assigned implementation. File edits may still require explicit user approval; if write_file or edit_file is denied/blocked, do not loop the same call and instead report the blocking file/action back to the coordinator."
     })()
@@ -3454,7 +3448,6 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       projectModeAdapterInstructions: coordinatorWorkingDirAppendix,
       projectInstructions: coordinatorProjectInstructions,
       turnContext: coordinatorTurnPrompt,
-      hasBrowserTool: hasNamedTool("browser_playwright"),
       hasCodeExecTool,
       deferredToolIds
     })

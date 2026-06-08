@@ -364,7 +364,6 @@ async function testConstrainedWorkerFinalToolSurface(): Promise<void> {
     fakeTool("inspect_tool"),
     fakeTool("invoke_deferred_tool"),
     fakeTool("code_exec"),
-    fakeTool("browser_playwright"),
     fakeTool("read_file"),
     fakeTool("execute")
   ]
@@ -378,7 +377,6 @@ async function testConstrainedWorkerFinalToolSurface(): Promise<void> {
   assertNoTool(readOnlyTools, "inspect_tool", "read_only final tools")
   assertNoTool(readOnlyTools, "invoke_deferred_tool", "read_only final tools")
   assertNoTool(readOnlyTools, "code_exec", "read_only final tools")
-  assertNoTool(readOnlyTools, "browser_playwright", "read_only final tools")
   assertNoTool(readOnlyTools, "execute", "read_only final tools")
   assertHasTool(readOnlyTools, "read_file", "read_only final tools")
 
@@ -391,7 +389,6 @@ async function testConstrainedWorkerFinalToolSurface(): Promise<void> {
   assertNoTool(verifyTools, "inspect_tool", "verify final tools")
   assertNoTool(verifyTools, "invoke_deferred_tool", "verify final tools")
   assertNoTool(verifyTools, "code_exec", "verify final tools")
-  assertHasTool(verifyTools, "browser_playwright", "verify final tools")
   assertHasTool(verifyTools, "execute", "verify final tools")
   assertHasTool(verifyTools, "read_file", "verify final tools")
 
@@ -404,7 +401,6 @@ async function testConstrainedWorkerFinalToolSurface(): Promise<void> {
   assertNoTool(scopedWriteTools, "inspect_tool", "scoped write final tools")
   assertNoTool(scopedWriteTools, "invoke_deferred_tool", "scoped write final tools")
   assertNoTool(scopedWriteTools, "code_exec", "scoped write final tools")
-  assertNoTool(scopedWriteTools, "browser_playwright", "scoped write final tools")
   assertNoTool(scopedWriteTools, "execute", "scoped write final tools")
   assertHasTool(scopedWriteTools, "read_file", "scoped write final tools")
 
@@ -415,7 +411,6 @@ async function testConstrainedWorkerFinalToolSurface(): Promise<void> {
   })
   assertHasTool(unrestrictedWriteTools, "search_tool", "whole-workspace write final tools")
   assertHasTool(unrestrictedWriteTools, "code_exec", "whole-workspace write final tools")
-  assertHasTool(unrestrictedWriteTools, "browser_playwright", "whole-workspace write final tools")
 }
 
 async function run(): Promise<void> {

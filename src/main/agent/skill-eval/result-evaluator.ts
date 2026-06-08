@@ -88,7 +88,6 @@ const ARTIFACT_TOOL_NAMES = new Set([
   "write_file",
   "edit_file",
   "apply_patch",
-  "browser_playwright",
   "prepare_save_code_exec_tool",
   "save_code_exec_tool"
 ])

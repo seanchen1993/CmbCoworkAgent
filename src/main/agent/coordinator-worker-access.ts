@@ -24,7 +24,6 @@ const deferredExecutionToolNames = new Set([
   "invoke_deferred_tool"
 ])
 const deferredDiscoveryToolNames = new Set(["search_tool", "inspect_tool"])
-const externalSideEffectToolNames = new Set(["browser_playwright"])
 const ownedFileGuardToolNames = new Set(["write_file", "edit_file"])
 
 function blockedToolNamesForAccess(
@@ -36,19 +35,13 @@ function blockedToolNamesForAccess(
     : deferredExecutionToolNames
 
   if (access.workload === "read_only") {
-    return new Set([
-      ...directWriteToolNames,
-      "execute",
-      "task_output",
-      ...deferredToolNames,
-      ...externalSideEffectToolNames
-    ])
+    return new Set([...directWriteToolNames, "execute", "task_output", ...deferredToolNames])
   }
   if (access.workload === "verify") {
     return new Set([...directWriteToolNames, ...deferredToolNames])
   }
   if ((access.ownedFiles ?? []).length > 0) {
-    return new Set(["execute", "task_output", ...deferredToolNames, ...externalSideEffectToolNames])
+    return new Set(["execute", "task_output", ...deferredToolNames])
   }
   return new Set()
 }

@@ -1831,13 +1831,8 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "browser_playwright, deferred tools, and eager MCP tools are unavailable",
-    "runtime tells read-only workers that browser/deferred/eager MCP tools are unavailable"
-  )
-  assertIncludes(
-    runtime,
-    "run validation commands, and use browser_playwright",
-    "runtime tells verifier workers browser verification is available when the tool exists"
+    "task_output, deferred tools, and eager MCP tools are unavailable",
+    "runtime tells read-only workers that deferred and eager MCP tools are unavailable"
   )
   assertIncludes(
     runtime,
