@@ -14,6 +14,7 @@ const TASK_CARDS_TIMEOUT_MS = 15_000
 const TASK_CARDS_CACHE_LIMIT = 8
 const TASK_CARDS_MAX_PAGES = 10
 const TASK_CARDS_TOTAL_TIMEOUT_MS = 45_000
+const TASK_CARDS_ERROR_BODY_LOG_LIMIT = 800
 
 const MOCK_TASK_CARDS: TaskCardItem[] = [
   {
@@ -190,6 +191,7 @@ interface TaskCardsCacheEntry {
 }
 
 const taskCardsCache = new Map<string, TaskCardsCacheEntry>()
+let taskCardsRequestSequence = 0
 
 function normalizeQuery(query?: TaskCardsQuery): NormalizedTaskCardsQuery {
   const pageSize =
@@ -226,6 +228,31 @@ function createHttpsTaskCardsUrl(endpoint: string): URL {
     throw new Error("任务卡接口必须使用 HTTPS，已拒绝通过明文 HTTP 传输登录令牌")
   }
   return url
+}
+
+function nextTaskCardsRequestId(): string {
+  taskCardsRequestSequence = (taskCardsRequestSequence + 1) % 100_000
+  return `task-cards-${Date.now()}-${taskCardsRequestSequence}`
+}
+
+function getTaskCardsRequestHeaders(): Record<string, string> {
+  return {
+    Authorization: "Bearer <redacted>",
+    Accept: "application/json"
+  }
+}
+
+function getTaskCardsResponseHeaders(response: Response): Record<string, string> {
+  const headers: Record<string, string> = {}
+  response.headers.forEach((value, key) => {
+    headers[key] = value
+  })
+  return headers
+}
+
+function truncateForLog(value: string): string {
+  if (value.length <= TASK_CARDS_ERROR_BODY_LOG_LIMIT) return value
+  return `${value.slice(0, TASK_CARDS_ERROR_BODY_LOG_LIMIT)}...<truncated>`
 }
 
 function buildCacheKey(query: NormalizedTaskCardsQuery, userKey: string, endpoint: string): string {
@@ -311,36 +338,106 @@ async function fetchTaskCardsPage(
   accessToken: string,
   query: NormalizedTaskCardsQuery
 ): Promise<TaskCardsListResult> {
+  const requestId = nextTaskCardsRequestId()
   const url = createHttpsTaskCardsUrl(endpoint)
   url.searchParams.set("pageSize", String(query.pageSize))
   url.searchParams.set("pageNum", String(query.pageNum))
   url.searchParams.set("includeArchived", query.includeArchived ? "true" : "false")
 
+  const requestTaskCards = async (method: "GET" | "POST"): Promise<Response> => {
+    const startedAt = Date.now()
+    console.info("[TaskCards] request:start", {
+      requestId,
+      method,
+      url: url.toString(),
+      query: {
+        pageSize: query.pageSize,
+        pageNum: query.pageNum,
+        includeArchived: query.includeArchived
+      },
+      headers: getTaskCardsRequestHeaders(),
+      body: null
+    })
+    return fetch(url.toString(), {
+      method,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json"
+      },
+      signal: controller.signal
+    }).then((response) => {
+      console.info("[TaskCards] request:response", {
+        requestId,
+        method,
+        status: response.status,
+        statusText: response.statusText,
+        durationMs: Date.now() - startedAt,
+        headers: getTaskCardsResponseHeaders(response)
+      })
+      return response
+    })
+  }
+
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), TASK_CARDS_TIMEOUT_MS)
 
   try {
-    const response = await fetch(url.toString(), {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({}),
-      signal: controller.signal
-    })
+    let response = await requestTaskCards("POST")
+    let methodFallbackUsed = false
+    if (response.status === 405) {
+      methodFallbackUsed = true
+      console.warn("[TaskCards] request:method-not-allowed-fallback", {
+        requestId,
+        fromMethod: "POST",
+        toMethod: "GET",
+        status: response.status,
+        allow: response.headers.get("allow") || undefined
+      })
+      response = await requestTaskCards("GET")
+    }
 
     if (!response.ok) {
-      return emptyResult(query, `任务卡接口请求失败：HTTP ${response.status}`)
+      const responseText = await response.text().catch(() => "")
+      console.warn("[TaskCards] request:failed", {
+        requestId,
+        status: response.status,
+        statusText: response.statusText,
+        methodFallbackUsed,
+        headers: getTaskCardsResponseHeaders(response),
+        bodyPreview: responseText ? truncateForLog(responseText) : ""
+      })
+      const methodHint =
+        response.status === 405
+          ? methodFallbackUsed
+            ? "（POST/GET 均被当前网关拒绝，请确认接口路由允许的方法）"
+            : "（当前网关不允许该请求方法）"
+          : ""
+      return emptyResult(query, `任务卡接口请求失败：HTTP ${response.status}${methodHint}`)
     }
 
     const payload = (await response.json()) as unknown
-    return normalizeTaskCardsPayload(payload, {
+    const result = normalizeTaskCardsPayload(payload, {
       pageSize: query.pageSize,
       pageNum: query.pageNum
     })
+    console.info("[TaskCards] request:parsed", {
+      requestId,
+      success: result.success,
+      total: result.total,
+      cards: result.cards.length,
+      pageSize: result.pageSize,
+      pageNum: result.pageNum,
+      error: result.error
+    })
+    return result
   } catch (error) {
     const aborted = error instanceof Error && error.name === "AbortError"
+    console.error("[TaskCards] request:error", {
+      requestId,
+      aborted,
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined
+    })
     return emptyResult(
       query,
       error instanceof Error && !aborted
