@@ -1389,6 +1389,10 @@ export function ChatContainer({
     () => getHarnessFeatureBinding(currentThread),
     [currentThread]
   )
+  const disableCoordinatorModeOption =
+    surface === "harness-project" ||
+    surface === "harness-feature-session" ||
+    Boolean(harnessFeatureBinding)
   const pendingHarnessNextActionVersion = useSyncExternalStore(
     subscribePendingHarnessNextActions,
     getPendingHarnessNextActionVersion,
@@ -1450,6 +1454,9 @@ export function ChatContainer({
 
   const resolveAgentMode = useCallback(
     async (metadata: Record<string, unknown>): Promise<ChatAgentMode> => {
+      if (disableCoordinatorModeOption) {
+        return "normal"
+      }
       if (isCoordinatorModeMetadata(metadata)) {
         return "coordinator"
       }
@@ -1461,7 +1468,7 @@ export function ChatContainer({
         })
       return environmentForcedCoordinator ? "coordinator" : "normal"
     },
-    []
+    [disableCoordinatorModeOption]
   )
 
   const loadResolvedAgentMode = useCallback(async (): Promise<ChatAgentMode> => {
@@ -1478,9 +1485,10 @@ export function ChatContainer({
   useEffect(() => {
     let cancelled = false
     const currentThread = threads.find((thread) => thread.thread_id === threadId)
-    const metadataDerivedMode: ChatAgentMode = isCoordinatorModeMetadata(currentThread?.metadata)
-      ? "coordinator"
-      : "normal"
+    const metadataDerivedMode: ChatAgentMode =
+      !disableCoordinatorModeOption && isCoordinatorModeMetadata(currentThread?.metadata)
+        ? "coordinator"
+        : "normal"
     setAgentMode(metadataDerivedMode)
     agentModeHydratedRef.current = metadataDerivedMode === "coordinator"
 
@@ -1496,7 +1504,7 @@ export function ChatContainer({
     return () => {
       cancelled = true
     }
-  }, [threadId, threads, loadResolvedAgentMode])
+  }, [threadId, threads, loadResolvedAgentMode, disableCoordinatorModeOption])
 
   const allSkillsRef = useRef<MarketItem[]>([])
   const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
@@ -1757,18 +1765,24 @@ export function ChatContainer({
     (worker) => worker.status === "running"
   )
   const isLoading = streamData.isLoading || scheduledTaskLoading
-  const agentModeSwitchDisabledReason = !canChangeAgentMode
-    ? historyLoading
-      ? "会话历史加载中，暂时不能切换执行模式。"
-      : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
-    : isLoading
-      ? "当前请求执行中，结束后才能切换执行模式。"
-      : undefined
+  const agentModeSwitchDisabledReason = disableCoordinatorModeOption
+    ? "项目模式暂不支持子代理协同模式，只能使用 Solo Agent。"
+    : !canChangeAgentMode
+      ? historyLoading
+        ? "会话历史加载中，暂时不能切换执行模式。"
+        : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
+      : isLoading
+        ? "当前请求执行中，结束后才能切换执行模式。"
+        : undefined
 
   const handleAgentModeChange = useCallback(
     (nextMode: ChatAgentMode): void => {
       const previousMode = agentMode
       void (async () => {
+        if (disableCoordinatorModeOption && nextMode === "coordinator") {
+          toast.error("项目模式暂不支持子代理协同模式，只能使用 Solo Agent。")
+          return
+        }
         if (historyLoading) {
           toast.error("会话历史加载中，暂时不能切换执行模式。")
           return
@@ -1777,7 +1791,7 @@ export function ChatContainer({
           toast.error("当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。")
           return
         }
-        if (nextMode === "normal") {
+        if (nextMode === "normal" && !disableCoordinatorModeOption) {
           const isEnvironmentForcedCoordinator = await window.api.agent
             .isCoordinatorModeForced()
             .catch(() => false)
@@ -1820,7 +1834,14 @@ export function ChatContainer({
         toast.error("Agent 模式保存失败，请重试")
       })
     },
-    [agentMode, historyLoading, threadId, threadMessages, updateThread]
+    [
+      agentMode,
+      disableCoordinatorModeOption,
+      historyLoading,
+      threadId,
+      threadMessages,
+      updateThread
+    ]
   )
   const userInputScrollPadding = pendingUserInput
     ? Math.ceil((userInputDialogLayout?.height ?? 320) + 24)
@@ -3136,10 +3157,14 @@ export function ChatContainer({
         displayContent = `用户输入的普通文本：\n\n${displayContent}`
       }
 
-      const coordinatorPrefixed = /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(
-        fullMessage
-      )
-      let submitAgentMode: ChatAgentMode = coordinatorPrefixed ? "coordinator" : agentMode
+      const coordinatorPrefixed =
+        !disableCoordinatorModeOption &&
+        /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(fullMessage)
+      let submitAgentMode: ChatAgentMode = disableCoordinatorModeOption
+        ? "normal"
+        : coordinatorPrefixed
+          ? "coordinator"
+          : agentMode
       if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
         submitAgentMode = await loadResolvedAgentMode().catch((error) => {
           console.warn("[ChatContainer] Failed to resolve submit agent mode:", error)
@@ -3150,7 +3175,10 @@ export function ChatContainer({
           setAgentMode(submitAgentMode)
         }
       }
-      if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
+      if (disableCoordinatorModeOption && agentMode !== "normal") {
+        agentModeHydratedRef.current = true
+        setAgentMode("normal")
+      } else if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
         agentModeHydratedRef.current = true
         setAgentMode("coordinator")
       }
@@ -4986,8 +5014,8 @@ export function ChatContainer({
                     <ModelSwitcher threadId={threadId} />
                     <div className="w-px h-4 bg-border mx-1" />
                     <AgentModeSwitcher
-                      mode={agentMode}
-                      locked={isLoading || !canChangeAgentMode}
+                      mode={disableCoordinatorModeOption ? "normal" : agentMode}
+                      locked={disableCoordinatorModeOption || isLoading || !canChangeAgentMode}
                       lockedReason={agentModeSwitchDisabledReason}
                       onChange={handleAgentModeChange}
                     />

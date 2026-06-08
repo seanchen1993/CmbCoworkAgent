@@ -365,6 +365,7 @@ export class LocalSandbox
   private readonly workingDir: string
   private readonly windowsSandbox: WindowsSandboxMode
   private readonly pluginOutputDir?: string
+  private readonly pluginRoot?: string
   private readonly systemId?: string
   private readonly pluginWorkspace?: string
   private readonly featureId?: string
@@ -1561,6 +1562,7 @@ export class LocalSandbox
     this.workingDir = options.rootDir ?? process.cwd()
     this.windowsSandbox = options.windowsSandbox ?? "none"
     this.pluginOutputDir = options.pluginOutputDir
+    this.pluginRoot = pluginRoot || undefined
     this.systemId = systemId || undefined
     this.pluginWorkspace = pluginWorkspace || undefined
     this.featureId = featureId || undefined
@@ -5037,6 +5039,18 @@ export class LocalSandbox
     return command
   }
 
+  private isProjectPluginHookCommand(command: string): boolean {
+    if (!this.pluginRoot) return false
+
+    const hooksRoot = path.win32
+      .normalize(path.win32.join(this.pluginRoot, "hooks"))
+      .replace(/\\+$/, "")
+      .replace(/\\+/g, "\\")
+      .toLowerCase()
+    const normalizedCommand = command.replace(/\//g, "\\").replace(/\\+/g, "\\").toLowerCase()
+    return normalizedCommand.includes(`${hooksRoot}\\`)
+  }
+
   private async executeRawUnserialized(
     command: string,
     sandboxModeOverride?: string,
@@ -5050,6 +5064,16 @@ export class LocalSandbox
     )
 
     if (process.platform === "win32" && effectiveSandboxMode !== "none") {
+      const shouldBypassSandboxForProjectPluginHook = this.isProjectPluginHookCommand(command)
+      if (this.pluginRoot) {
+        console.log(
+          `[HarnessMode][LocalSandbox] project plugin hook sandbox bypass check: allowed=${shouldBypassSandboxForProjectPluginHook} mode=${effectiveSandboxMode} pluginRoot="${this.pluginRoot}"`
+        )
+      }
+      if (shouldBypassSandboxForProjectPluginHook) {
+        return this.executeRawUnserialized(command, "none", timeoutMs, overrideAbortSignal)
+      }
+
       // Commands that need to escape the Windows sandbox (e.g. `git pull` writing .git,
       // `npm run build` spawning esbuild via piped stdio) are no longer auto-routed here.
       // The orchestrator inspects the post-run output, asks the user for permission, and

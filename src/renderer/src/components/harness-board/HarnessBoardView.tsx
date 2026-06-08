@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { createPortal } from "react-dom"
 import {
   AlertCircle,
@@ -8,6 +8,8 @@ import {
   ChevronRight,
   CheckCircle2,
   Circle,
+  CircleDashed,
+  CircleHelp,
   FileText,
   FolderOpen,
   GitBranch,
@@ -22,6 +24,7 @@ import {
   RefreshCw,
   Search,
   ShieldAlert,
+  SkipForward,
   Workflow
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -39,7 +42,10 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
+  SelectSeparator,
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select"
@@ -69,6 +75,7 @@ import type {
   HarnessProjectListItem,
   HarnessProjectMetadataUpdateInput,
   HarnessFeatureSummary,
+  HarnessNodeStatus,
   HarnessRunDetailViewModel,
   HarnessRunNode,
   HarnessSessionBinding,
@@ -87,6 +94,18 @@ const harnessPageHeaderClassName =
 const harnessPageHeaderContentClassName =
   "flex h-full items-start justify-between gap-4"
 const harnessPageHeaderActionsClassName = "flex shrink-0 items-center gap-2"
+
+const NODE_STATUS_LABELS: Record<HarnessNodeStatus, string> = {
+  not_started: "未开始",
+  in_progress: "进行中",
+  done: "已完成",
+  blocked: "阻断",
+  warning: "警告",
+  error: "错误",
+  skipped: "跳过",
+  archived: "已归档",
+  unknown: "未知"
+}
 const harnessDetailRefreshButtonClassName = "w-[84px] gap-2"
 const harnessDetailPrimaryButtonClassName = "w-[112px] gap-2"
 const harnessActionOverlayClassName =
@@ -96,13 +115,16 @@ const harnessActionIconClassName =
 const harnessProjectCreateInputClassName =
   "bg-background text-foreground placeholder:text-muted-foreground/45"
 const harnessProjectCreateSelectClassName =
-  "bg-background text-foreground data-[placeholder]:text-muted-foreground/45"
+  "min-w-0 overflow-hidden bg-background text-foreground data-[placeholder]:text-muted-foreground/45 [&>span]:min-w-0 [&>span]:truncate"
 const harnessDialogContentClassName = "z-[60]"
-const harnessDialogSelectContentClassName = "z-[70]"
+const harnessDialogSelectContentClassName =
+  "z-[70] w-[var(--radix-select-trigger-width)] max-w-[calc(100vw-2rem)]"
 const harnessNamePattern = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
 const harnessNameRuleMessage = "仅支持中文、英文字母、数字、-、_"
 const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
 const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
+const OTHER_ADAPTER_SCENARIO = "其他类别"
+const ADAPTER_SELECT_PLACEHOLDER = "请选择已安装的 AUTOBIZDEVOPS 插件"
 
 const preventHarnessDialogOutsideClose: React.ComponentProps<typeof DialogContent>["onPointerDownOutside"] =
   (event) => {
@@ -193,6 +215,11 @@ interface GitPanelDiffState {
   changedFilesTotal?: number
   omittedFileCount?: number
   error?: string
+}
+
+interface AdapterScenarioGroup {
+  useScenario: string
+  adapters: HarnessAdapterRegistryItem[]
 }
 
 interface WorkspaceChangeGroup {
@@ -689,6 +716,9 @@ function StatusPill({ status, tooltip }: { status: HarnessStatus; tooltip?: stri
 }
 
 function statusIcon(status: HarnessStatus): React.JSX.Element {
+  if (status.uiKind === "pending") {
+    return <CircleDashed className="size-4 text-muted-foreground" />
+  }
   if (status.uiKind === "done" || status.uiKind === "ok") {
     return <CheckCircle2 className="size-4 text-status-nominal" />
   }
@@ -700,6 +730,15 @@ function statusIcon(status: HarnessStatus): React.JSX.Element {
   }
   if (status.uiKind === "error") {
     return <AlertCircle className="size-4 text-status-critical" />
+  }
+  if (status.uiKind === "skipped") {
+    return <SkipForward className="size-4 text-muted-foreground" />
+  }
+  if (status.uiKind === "archived") {
+    return <Archive className="size-4 text-muted-foreground" />
+  }
+  if (status.uiKind === "unknown") {
+    return <CircleHelp className="size-4 text-muted-foreground" />
   }
   return <Circle className="size-4 text-muted-foreground" />
 }
@@ -720,6 +759,10 @@ function currentNodeLabelFromNodes(
   currentNodeId: string
 ): string {
   return (nodes.find((node) => node.id === currentNodeId)?.label ?? currentNodeId) || "未知"
+}
+
+function currentNodeStatusLabel(run: HarnessFeatureSummary): string {
+  return run.currentNodeStatusLabel?.trim() || NODE_STATUS_LABELS[run.currentNodeStatus] || "未知"
 }
 
 function ProgressBar({
@@ -839,23 +882,105 @@ function findSelectedAdapter(
   return registry.find((adapter) => adapter.id === adapterId) ?? null
 }
 
+function normalizeAdapterUseScenario(value?: string): string {
+  const normalized = value?.trim()
+  return normalized || OTHER_ADAPTER_SCENARIO
+}
+
+function groupAdaptersByUseScenario(registry: HarnessAdapterRegistryItem[]): AdapterScenarioGroup[] {
+  const groups = new Map<string, HarnessAdapterRegistryItem[]>()
+  for (const adapter of registry) {
+    const useScenario = normalizeAdapterUseScenario(adapter.useScenario)
+    const adapters = groups.get(useScenario)
+    if (adapters) {
+      adapters.push(adapter)
+    } else {
+      groups.set(useScenario, [adapter])
+    }
+  }
+
+  return Array.from(groups.entries())
+    .map(([useScenario, adapters]) => ({ useScenario, adapters }))
+    .sort((left, right) => {
+      const leftIsOther = left.useScenario === OTHER_ADAPTER_SCENARIO
+      const rightIsOther = right.useScenario === OTHER_ADAPTER_SCENARIO
+      if (leftIsOther && rightIsOther) return 0
+      if (leftIsOther) return 1
+      if (rightIsOther) return -1
+      return left.useScenario.localeCompare(right.useScenario)
+    })
+}
+
+function formatAdapterSelectLabel(adapter: HarnessAdapterRegistryItem): string {
+  return adapter.version ? `${adapter.name} · ${adapter.version}` : adapter.name
+}
+
+function AdapterSelectedValue({
+  adapter
+}: {
+  adapter: HarnessAdapterRegistryItem | null
+}): React.JSX.Element {
+  return (
+    <SelectValue placeholder={ADAPTER_SELECT_PLACEHOLDER}>
+      {adapter ? (
+        <span className="block min-w-0 truncate text-left">
+          {formatAdapterSelectLabel(adapter)}
+        </span>
+      ) : undefined}
+    </SelectValue>
+  )
+}
+
 function AdapterSelectItem({ adapter }: { adapter: HarnessAdapterRegistryItem }): React.JSX.Element {
   const compatibilityMessage = boardCompatibilityMessage(adapter.boardCompatibility)
   return (
     <SelectItem
       key={adapter.id}
       value={adapter.id}
+      textValue={formatAdapterSelectLabel(adapter)}
       disabled={!adapter.boardCompatibility.compatible}
+      className="py-2 pl-4 pr-10"
     >
-      <span className="flex min-w-0 flex-col gap-0.5">
-        <span className="truncate">{adapter.name} · {adapter.version}</span>
+      <span className="flex min-w-0 max-w-[calc(var(--radix-select-trigger-width)-3rem)] flex-col gap-1">
+        <span className="truncate">
+          {formatAdapterSelectLabel(adapter)}
+        </span>
+        {adapter.description && (
+          <span
+            className="line-clamp-2 whitespace-normal break-words text-xs leading-5 text-muted-foreground"
+            title={adapter.description}
+          >
+            {adapter.description}
+          </span>
+        )}
         {compatibilityMessage && (
-          <span className="truncate text-[11px] text-status-warning">
+          <span className="line-clamp-2 whitespace-normal break-words text-xs leading-5 text-status-warning">
             {compatibilityMessage}
           </span>
         )}
       </span>
     </SelectItem>
+  )
+}
+
+function AdapterSelectGroups({ registry }: { registry: HarnessAdapterRegistryItem[] }): React.JSX.Element {
+  const groups = groupAdaptersByUseScenario(registry)
+  return (
+    <>
+      {groups.map((group, index) => (
+        <Fragment key={group.useScenario}>
+          <SelectGroup>
+            <SelectLabel className="px-2 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground">
+              {group.useScenario}
+            </SelectLabel>
+            {group.adapters.map((adapter) => (
+              <AdapterSelectItem key={adapter.id} adapter={adapter} />
+            ))}
+          </SelectGroup>
+          {index < groups.length - 1 && <SelectSeparator />}
+        </Fragment>
+      ))}
+    </>
   )
 }
 
@@ -903,12 +1028,10 @@ function ProjectFormDialog({
                 onValueChange={(adapterId) => onChange({ ...form, adapterId, adapterType: "plugin" })}
               >
                 <SelectTrigger className={harnessProjectCreateSelectClassName}>
-                  <SelectValue placeholder="请选择已安装的 AUTOBIZDEVOPS 插件" />
+                  <AdapterSelectedValue adapter={selectedAdapter} />
                 </SelectTrigger>
                 <SelectContent className={harnessDialogSelectContentClassName}>
-                  {registry.map((adapter) => (
-                    <AdapterSelectItem key={adapter.id} adapter={adapter} />
-                  ))}
+                  <AdapterSelectGroups registry={registry} />
                 </SelectContent>
               </Select>
               {selectedAdapterMessage && (
@@ -1076,16 +1199,14 @@ function ProjectEditDialog({
             <div className="mb-3 text-sm font-semibold">选择 Plugin </div>
             <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
               <Select
-                value={selectedAdapterMessage ? "" : form.adapterId}
+                value={form.adapterId}
                 onValueChange={(adapterId) => onChange({ ...form, adapterId, adapterType: "plugin" })}
               >
                 <SelectTrigger className={harnessProjectCreateSelectClassName}>
-                  <SelectValue placeholder="请选择已安装的 AUTOBIZDEVOPS 插件" />
+                  <AdapterSelectedValue adapter={selectedAdapter} />
                 </SelectTrigger>
                 <SelectContent className={harnessDialogSelectContentClassName}>
-                  {registry.map((adapter) => (
-                    <AdapterSelectItem key={adapter.id} adapter={adapter} />
-                  ))}
+                  <AdapterSelectGroups registry={registry} />
                 </SelectContent>
               </Select>
               {selectedAdapterMessage && (
@@ -1370,6 +1491,7 @@ function FeatureCard({
   const progressIndex = progressIndexFromCurrentNodeId(workflowNodes, run.currentNodeId)
   const totalNodes = workflowNodes.length
   const currentNodeLabel = currentNodeLabelFromNodes(workflowNodes, run.currentNodeId)
+  const nodeStatusLabel = currentNodeStatusLabel(run)
 
   return (
     <button
@@ -1386,7 +1508,7 @@ function FeatureCard({
       </div>
       <ProgressBar progressIndex={progressIndex} totalNodes={totalNodes} />
       <div className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
-        <span className="truncate">{currentNodeLabel}</span>
+        <span className="truncate">{currentNodeLabel} · {nodeStatusLabel}</span>
         <span className="shrink-0">
           {progressIndex}/{totalNodes}
         </span>
@@ -2458,9 +2580,14 @@ function FeatureDetailPage({
               : "border-border bg-background hover:border-primary/45"
           )}
         >
-          <div className="flex min-w-0 items-center gap-1.5">
-            {statusIcon(node.status)}
-            <span className="truncate text-sm font-medium">{node.label}</span>
+          <div className="flex min-w-0 items-start gap-1.5">
+            <span className="mt-0.5 shrink-0">{statusIcon(node.status)}</span>
+            <span className="min-w-0">
+              <span className="block truncate text-sm font-medium">{node.label}</span>
+              <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+                {node.status.label}
+              </span>
+            </span>
           </div>
         </button>
       )
@@ -3668,16 +3795,11 @@ export function HarnessBoardView({
       if (creatingSidebarSessionKey) return
       setCreatingSidebarSessionKey(key)
       try {
-        const matchingRunDetail =
-          runDetail &&
-          runDetail.project.projectId === project.projectId &&
-          runDetail.run.slug === slug
-            ? runDetail
-            : null
+        const latestRunDetail = await window.api.harnessBoard.getRunDetail(project.projectId, slug)
         const thread = await createHarnessSession({
           projectId: project.projectId,
           slug,
-          nextAction: matchingRunDetail ? getRunNextAction(matchingRunDetail) : undefined,
+          nextAction: getRunNextAction(latestRunDetail),
           sessions,
           threadsById,
           threadStates: allThreadStates,
@@ -3690,6 +3812,9 @@ export function HarnessBoardView({
         )
         setSelectedProjectId(project.projectId)
         setSelectedFeature({ projectId: project.projectId, slug, activeSessionThreadId: thread.thread_id })
+        setRunDetail((currentDetail) =>
+          areHarnessValuesEqual(currentDetail, latestRunDetail) ? currentDetail : latestRunDetail
+        )
         setIsViewingSession(true)
         markRead(thread.thread_id)
         await selectThread(thread.thread_id, { preserveView: true })
@@ -3704,7 +3829,6 @@ export function HarnessBoardView({
       createThread,
       creatingSidebarSessionKey,
       markRead,
-      runDetail,
       selectThread,
       threadsById
     ]
