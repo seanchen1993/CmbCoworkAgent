@@ -8,7 +8,7 @@ import type {
 import { normalizeTaskCardsPayload } from "../../shared/task-card-types"
 
 const DEFAULT_TASK_CARDS_ENDPOINT =
-  "https://devops-kanban.paas.cmbchina.cn/api-market/api-market/v2/rest/tasks/by-assignee"
+  "https://devops-kanban.paas.cmbchina.cn/api-market/v2/rest/tasks/by-assignee"
 const TASK_CARDS_CACHE_TTL_MS = 90_000
 const TASK_CARDS_TIMEOUT_MS = 15_000
 const TASK_CARDS_CACHE_LIMIT = 8
