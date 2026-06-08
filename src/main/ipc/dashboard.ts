@@ -7815,7 +7815,12 @@ async function fetchProjectModeAggregateCodeStats(
 ): Promise<ProjectModeCodeStatsResult> {
   // code 事件自带顶层 upperOrgLv1，直接按室过滤即可，无需先枚举项目 id 再用 terms 圈定。
   const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
-  const extraFilters = orgFilterClause ? [orgFilterClause] : []
+  // 仅统计项目模式：code 事件需带 properties.harnessProjectId（与 trace 侧 exists harnessProjectId 对齐），
+  // 否则会把平台全量代码事件也算进来，导致与「平台运营概览」数值一致。
+  const extraFilters = [
+    ...(orgFilterClause ? [orgFilterClause] : []),
+    { exists: { field: "properties.harnessProjectId" } }
+  ]
 
   const [overallRaw, adapterRaw, skillRaw] = await Promise.all([
     fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, extraFilters),
