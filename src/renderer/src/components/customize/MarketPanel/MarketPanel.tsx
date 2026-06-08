@@ -2540,7 +2540,6 @@ export function MarketPanel(): React.JSX.Element {
                       reloadToken={reloadToken}
                       downloadingItems={downloadingItems}
                       onOpenDetail={openItemDetail}
-                      onDownload={handleDownload}
                       onUninstall={handleUninstall}
                       initialDetailName={pendingOrgSkillDetailName}
                       onInitialDetailReady={(item) => {

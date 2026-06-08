@@ -10,11 +10,9 @@ import {
   Tag,
   Trash2,
   User,
-  X,
-  Zap
+  X
 } from "lucide-react"
 import {
-  buildOrgSkillSubscribeUrl,
   getMockOrgSkillLabels,
   getMockOrgSkillMarketResponse,
   orgSkillMarketApi,
@@ -27,7 +25,6 @@ import { Input } from "@/components/ui/input"
 import { buildMarketInstalledFlags } from "./MarketUpdateBadge"
 import { TabsTrigger } from "@/components/ui/tabs"
 import { getOrgSkillUploaderProfile, renderUploaderProfile } from "./MarketUploaderProfile"
-import { toast } from "sonner"
 
 export const ORG_SKILL_MARKET_TYPE = "orgSkill" as const
 const ORG_SKILL_PAGE_SIZE = 10
@@ -70,7 +67,6 @@ interface OrgSkillMarketContentProps {
   downloadingItems: Set<string>
   initialDetailName?: string | null
   onOpenDetail: (item: MarketItem) => void | Promise<void>
-  onDownload: (item: MarketItem, downloadToLocal?: boolean) => void | Promise<void>
   onUninstall: (item: MarketItem) => void | Promise<void>
   onInitialDetailReady?: (item: MarketItem) => void
   onInitialDetailConsumed?: () => void
@@ -127,27 +123,15 @@ function OrgSkillCard({
   item,
   isDownloading,
   onOpenDetail,
-  onDownload,
   onUninstall
 }: {
   item: MarketItem
   isDownloading: boolean
   onOpenDetail: (item: MarketItem) => void | Promise<void>
-  onDownload: (item: MarketItem, downloadToLocal?: boolean) => void | Promise<void>
   onUninstall: (item: MarketItem) => void | Promise<void>
 }): React.JSX.Element {
   const uploaderProfile = getOrgSkillUploaderProfile(item)
   const updatedAt = item.updated_at || item.created_at
-  const subscribeUrl = buildOrgSkillSubscribeUrl(item)
-
-  const handleOpenSubscribe = (event: React.MouseEvent<HTMLButtonElement>) => {
-    event.stopPropagation()
-    if (!subscribeUrl) {
-      toast.error("当前技能缺少订阅地址信息")
-      return
-    }
-    void window.electron.openExternal(subscribeUrl)
-  }
 
   return (
     <div
@@ -223,14 +207,6 @@ function OrgSkillCard({
               >
                 <FileText className="size-3" />
                 详情
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 px-3 gap-1 text-xs text-[#3766a6] border-[#ccdcf5] bg-[#edf4ff] hover:bg-[#dceaff] rounded-lg"
-                onClick={handleOpenSubscribe}
-              >
-                跳转去订阅
               </Button>
               {item.installed ? (
                 <Button
@@ -344,7 +320,6 @@ export function OrgSkillMarketContent({
   downloadingItems,
   initialDetailName,
   onOpenDetail,
-  onDownload,
   onUninstall,
   onInitialDetailReady,
   onInitialDetailConsumed
@@ -626,7 +601,6 @@ export function OrgSkillMarketContent({
                   item={item}
                   isDownloading={downloadingItems.has(getOrgSkillItemKey(item))}
                   onOpenDetail={onOpenDetail}
-                  onDownload={onDownload}
                   onUninstall={onUninstall}
                 />
               ))}
