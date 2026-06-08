@@ -1443,10 +1443,11 @@ export function EvolutionPanel(): React.JSX.Element {
   const cloudPendingUpdateCount = cloudEvolutionUpdates.filter((candidate) => candidate.local_adoption_status !== "adopted").length
   const cloudAdoptedUpdateCount = cloudEvolutionUpdates.length - cloudPendingUpdateCount
   const pendingCount = localPendingCandidateCount + cloudPendingUpdateCount
-  // 白名单审批员看全部候选；应用市场技能创建者可看到自己上传技能的候选。
-  const isEvolutionAdmin = import.meta.env.DEV || canReviewEvolution(reviewUserInfo)
-  const showEvolutionReview = isEvolutionAdmin || ownedSkillCount > 0
-  const reviewMode: "admin" | "creator" = isEvolutionAdmin ? "admin" : "creator"
+  // 仅真实白名单用户才是审批员（决定 Admin 标签 + 可见全部候选）。
+  // DEV 只放开 tab 可见性，方便开发，不等于 Admin。
+  const isReviewAdmin = canReviewEvolution(reviewUserInfo)
+  const showEvolutionReview = import.meta.env.DEV || isReviewAdmin || ownedSkillCount > 0
+  const reviewMode: "admin" | "creator" = isReviewAdmin ? "admin" : "creator"
 
   const loadTraces = useCallback(async () => {
     setTracesLoading(true)
@@ -2162,9 +2163,15 @@ export function EvolutionPanel(): React.JSX.Element {
               <>
                 <ShieldCheck className="size-3.5" />
                 进化审批
-                <span className="ml-1 rounded-full bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
-                  {isEvolutionAdmin ? "Admin" : "我的"}
-                </span>
+                {isReviewAdmin ? (
+                  <span className="ml-1 rounded-full bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+                    Admin
+                  </span>
+                ) : (
+                  <span className="ml-1 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                    我的
+                  </span>
+                )}
               </>
             )}
           </button>
