@@ -520,7 +520,13 @@ const PROJECT_TRACE_TRIGGER_SCOPE: DashboardTraceTriggerScope = "active"
 type DashboardSubPage =
   | { kind: "main" }
   | { kind: "user-list" }
-  | { kind: "user-detail"; sapId: string; backTo: "main" | "user-list" }
+  | {
+      kind: "user-detail"
+      sapId: string
+      backTo: "main" | "user-list"
+      // true: 入口来自「项目运营概览」，Trace 分析只统计项目模式数据。
+      projectMode?: boolean
+    }
 
 type DashboardMainTab = "overview" | "skill-eval" | "project-mode"
 
@@ -1049,6 +1055,7 @@ function UserDetailPage({
   tracePage,
   traceViewMode,
   traceTriggerScope,
+  projectMode = false,
   onBack,
   onTracePrevious,
   onTraceNext,
@@ -1061,6 +1068,7 @@ function UserDetailPage({
   tracePage: number
   traceViewMode: DashboardTraceViewMode
   traceTriggerScope: DashboardTraceTriggerScope
+  projectMode?: boolean
   onBack: () => void
   onTracePrevious: () => void
   onTraceNext: () => void
@@ -1089,7 +1097,14 @@ function UserDetailPage({
           返回
         </Button>
         <div>
-          <h2 className="text-sm font-semibold text-foreground">用户 Trace 分析</h2>
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+            用户 Trace 分析
+            {projectMode ? (
+              <span className="rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                仅项目模式
+              </span>
+            ) : null}
+          </h2>
           <p className="text-xs text-muted-foreground">
             {data ? `${data.userName || data.sapId} · ${data.sapId}` : "加载用户信息中"}
           </p>
@@ -2752,7 +2767,8 @@ export function DashboardView(): React.JSX.Element {
       sapId: string,
       tracePage = 1,
       viewMode: DashboardTraceViewMode = "thread",
-      triggerScope: DashboardTraceTriggerScope = "active"
+      triggerScope: DashboardTraceTriggerScope = "active",
+      projectMode = false
     ) => {
       setUserDetailLoading(true)
       setUserDetailError(null)
@@ -2761,7 +2777,8 @@ export function DashboardView(): React.JSX.Element {
           tracePage,
           tracePageSize: USER_TRACE_PAGE_SIZE,
           mode: viewMode,
-          triggerScope
+          triggerScope,
+          projectMode
         })
         if (!result.success) throw new Error(result.error ?? "获取用户详情失败")
         setUserDetail(result.data ?? null)
@@ -2788,11 +2805,16 @@ export function DashboardView(): React.JSX.Element {
   }, [selectedOrgLv1List])
 
   const openUserDetail = useCallback(
-    (sapId: string, backTo?: "main" | "user-list") => {
+    (sapId: string, backTo?: "main" | "user-list", projectMode = false) => {
       const normalizedSapId = sapId.trim()
       if (!normalizedSapId) return
       const fallbackBackTo = subPage.kind === "user-list" ? "user-list" : "main"
-      setSubPage({ kind: "user-detail", sapId: normalizedSapId, backTo: backTo ?? fallbackBackTo })
+      setSubPage({
+        kind: "user-detail",
+        sapId: normalizedSapId,
+        backTo: backTo ?? fallbackBackTo,
+        projectMode
+      })
       setUserDetail(null)
       setUserDetailTracePage(1)
       setUserDetailTraceViewMode("thread")
@@ -2918,6 +2940,8 @@ export function DashboardView(): React.JSX.Element {
   }, [])
 
   const subPageDetailSapId = subPage.kind === "user-detail" ? subPage.sapId : null
+  const subPageDetailProjectMode =
+    subPage.kind === "user-detail" ? Boolean(subPage.projectMode) : false
 
   useEffect(() => {
     if (subPage.kind === "user-list") {
@@ -2930,13 +2954,15 @@ export function DashboardView(): React.JSX.Element {
         subPageDetailSapId,
         userDetailTracePage,
         userDetailTraceViewMode,
-        userDetailTraceTriggerScope
+        userDetailTraceTriggerScope,
+        subPageDetailProjectMode
       )
     }
   }, [
     range,
     subPage.kind,
     subPageDetailSapId,
+    subPageDetailProjectMode,
     loadUserList,
     loadUserDetail,
     userList,
@@ -3623,6 +3649,7 @@ export function DashboardView(): React.JSX.Element {
             tracePage={userDetailTracePage}
             traceViewMode={userDetail?.traceViewMode ?? userDetailTraceViewMode}
             traceTriggerScope={userDetail?.traceTriggerScope ?? userDetailTraceTriggerScope}
+            projectMode={subPage.kind === "user-detail" ? Boolean(subPage.projectMode) : false}
             onBack={handleUserDetailBack}
             onTracePrevious={handleUserTracePrevious}
             onTraceNext={handleUserTraceNext}
@@ -3679,6 +3706,7 @@ export function DashboardView(): React.JSX.Element {
                 onProjectPageChange={fetchProjectModeProjectPage}
                 onOpenTraces={handleProjectOpenTraces}
                 onSkillClick={handleSkillClick}
+                onUserClick={(sapId) => openUserDetail(sapId, "main", true)}
                 marketSkillKeys={marketSkillKeys}
                 pluginSkillKeys={pluginSkillKeys}
               />

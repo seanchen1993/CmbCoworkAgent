@@ -320,6 +320,7 @@ interface DashboardUserDetailOptions {
   mode?: DashboardTraceViewMode
   viewMode?: DashboardTraceViewMode
   triggerScope?: DashboardTraceTriggerScope
+  projectMode?: boolean
 }
 
 interface DashboardProjectModeFeature {
