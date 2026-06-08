@@ -28,6 +28,7 @@ import {
   SelectValue
 } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
+import { marketApi } from "@/api/market"
 import {
   CodeAdoptionFunnel,
   SkillRankingPanel,
@@ -979,6 +980,63 @@ function aggregateAdaptersByName(
   return result
 }
 
+/** 插件市场补充信息：场景（category）、负责人、负责人部门，均来自市场 API。 */
+interface PluginMarketInfo {
+  useScenario: string
+  managerName: string
+  managerDepartment: string
+}
+
+const OTHER_ADAPTER_SCENARIO = "其他类别"
+
+/** DEV mock：本地市场 API 不可达，按 makeMockProjectMode 的插件名提供示例市场信息，便于联调展示。 */
+const DEV_MOCK_PLUGIN_MARKET_INFO: Record<string, PluginMarketInfo> = {
+  "claude-code": {
+    useScenario: "研发类场景/应用类研发",
+    managerName: "张三",
+    managerDepartment: "信息研发部/架构组"
+  },
+  codex: {
+    useScenario: "通用场景",
+    managerName: "李四",
+    managerDepartment: "零售金融部/渠道研发组"
+  }
+}
+
+/** 拉取一次市场插件信息，按插件名建立 name → {场景, 负责人, 部门} 映射。市场不可用时静默降级为空。 */
+function usePluginMarketInfo(): Map<string, PluginMarketInfo> {
+  const [infoMap, setInfoMap] = useState<Map<string, PluginMarketInfo>>(new Map())
+  useEffect(() => {
+    let cancelled = false
+    // DEV：市场 API 通常不可达，直接使用 mock，无需发请求。
+    if (import.meta.env.DEV) {
+      setInfoMap(new Map(Object.entries(DEV_MOCK_PLUGIN_MARKET_INFO)))
+      return
+    }
+    void marketApi
+      .getPlugins({ allowMockOnError: false, silent: true })
+      .then((res) => {
+        if (cancelled || !res.success || !res.data) return
+        const next = new Map<string, PluginMarketInfo>()
+        for (const item of res.data) {
+          const name = item.name?.trim()
+          if (!name) continue
+          next.set(name, {
+            useScenario: item.category?.trim() || OTHER_ADAPTER_SCENARIO,
+            managerName: item.managerName?.trim() || "",
+            managerDepartment: item.managerDepartment?.trim() || ""
+          })
+        }
+        setInfoMap(next)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  return infoMap
+}
+
 function AdapterListSection({
   adapters
 }: {
@@ -986,6 +1044,7 @@ function AdapterListSection({
 }): React.JSX.Element {
   const [page, setPage] = useState(1)
   const [mode, setMode] = useState<AdapterListMode>("byName")
+  const marketInfo = usePluginMarketInfo()
   const versionCount = adapters.length
   const aggregatedByName = aggregateAdaptersByName(adapters)
   const baseList = mode === "byName" ? aggregatedByName : adapters
@@ -1041,19 +1100,32 @@ function AdapterListSection({
         ) : (
           <>
             <div className="divide-y divide-border">
-              {pageItems.map((adapter) => (
+              {pageItems.map((adapter) => {
+                const info = marketInfo.get(adapter.name)
+                return (
                 <div
                   key={`${adapter.name}@${adapter.version ?? ""}`}
                   className="flex items-center justify-between gap-3 px-4 py-3 text-sm"
                 >
-                  <div className="flex min-w-0 items-center gap-2">
-                    <Plug className="size-3.5 shrink-0 text-muted-foreground" />
-                    <span className="truncate font-medium text-foreground">{adapter.name}</span>
-                    {adapter.version && (
-                      <Badge variant="outline" className="normal-case tracking-normal">
-                        {adapter.version}
-                      </Badge>
-                    )}
+                  <div className="flex min-w-0 flex-col gap-1">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <Plug className="size-3.5 shrink-0 text-muted-foreground" />
+                      <span className="truncate font-medium text-foreground">{adapter.name}</span>
+                      {adapter.version && (
+                        <Badge variant="outline" className="normal-case tracking-normal">
+                          {adapter.version}
+                        </Badge>
+                      )}
+                      {info?.useScenario && (
+                        <Badge variant="secondary" className="shrink-0 normal-case tracking-normal">
+                          {info.useScenario}
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 pl-5 text-[11px] text-muted-foreground">
+                      <span>负责人：{info?.managerName || "—"}</span>
+                      <span>部门：{info?.managerDepartment || "—"}</span>
+                    </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-4 text-xs text-muted-foreground">
                     <span>
@@ -1088,7 +1160,8 @@ function AdapterListSection({
                     </span>
                   </div>
                 </div>
-              ))}
+                )
+              })}
             </div>
             <div className="flex items-center justify-between gap-3 border-t border-border px-3 py-2 text-xs text-muted-foreground">
               <span>共 {formatNumber(sortedAdapters.length)} 个</span>
