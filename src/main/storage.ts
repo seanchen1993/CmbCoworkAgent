@@ -20,7 +20,8 @@ import {
   type HookSourceType,
   type HookUpsert
 } from "./hooks/types"
-import type { AgentAutoCommitSettings } from "./types"
+import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "./types"
+import { normalizeWorkspacePathKey } from "../shared/workspace-path"
 import { readdir, rm, mkdir } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
@@ -364,6 +365,10 @@ export function setDreamEnabled(enabled: boolean): void {
 // ── Agent auto-commit settings ───────────────────────────────────────────────
 
 const AGENT_AUTO_COMMIT_SETTINGS_FILE = join(OPENWORK_DIR, "agent-auto-commit-settings.json")
+const AGENT_AUTO_COMMIT_WORKSPACE_CARDS_FILE = join(
+  OPENWORK_DIR,
+  "agent-auto-commit-workspace-cards.json"
+)
 
 const DEFAULT_AGENT_AUTO_COMMIT_SETTINGS: AgentAutoCommitSettings = {
   mode: "off",
@@ -399,6 +404,57 @@ function normalizeAgentAutoCommitSettings(input: unknown): AgentAutoCommitSettin
   }
 }
 
+function normalizeWorkspaceCardEntry(
+  value: unknown,
+  fallbackPath: string
+): AgentAutoCommitWorkspaceCard | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const workspacePath =
+    typeof raw.workspacePath === "string" && raw.workspacePath.trim()
+      ? raw.workspacePath.trim()
+      : fallbackPath
+  const cardNumber =
+    typeof raw.cardNumber === "string" && raw.cardNumber.trim() ? raw.cardNumber.trim() : undefined
+  const updatedAt =
+    typeof raw.updatedAt === "string" && raw.updatedAt.trim() ? raw.updatedAt.trim() : undefined
+  return {
+    workspacePath,
+    ...(cardNumber ? { cardNumber } : {}),
+    ...(updatedAt ? { updatedAt } : {})
+  }
+}
+
+function readAgentAutoCommitWorkspaceCards(): Record<string, AgentAutoCommitWorkspaceCard> {
+  getOpenworkDir()
+  if (!existsSync(AGENT_AUTO_COMMIT_WORKSPACE_CARDS_FILE)) return {}
+  try {
+    const raw = JSON.parse(readFileSync(AGENT_AUTO_COMMIT_WORKSPACE_CARDS_FILE, "utf-8")) as unknown
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
+    const entries = raw as Record<string, unknown>
+    const cards: Record<string, AgentAutoCommitWorkspaceCard> = {}
+    for (const [key, value] of Object.entries(entries)) {
+      const card = normalizeWorkspaceCardEntry(value, key)
+      if (!card?.workspacePath) continue
+      cards[normalizeWorkspacePathKey(card.workspacePath)] = card
+    }
+    return cards
+  } catch {
+    return {}
+  }
+}
+
+function writeAgentAutoCommitWorkspaceCards(
+  cards: Record<string, AgentAutoCommitWorkspaceCard>
+): void {
+  getOpenworkDir()
+  writeFileSync(AGENT_AUTO_COMMIT_WORKSPACE_CARDS_FILE, JSON.stringify(cards, null, 2))
+}
+
+function getLegacyAgentAutoCommitCardNumber(): string | undefined {
+  return getAgentAutoCommitSettings().cardNumber?.trim()
+}
+
 export function getAgentAutoCommitSettings(): AgentAutoCommitSettings {
   getOpenworkDir()
   if (!existsSync(AGENT_AUTO_COMMIT_SETTINGS_FILE)) {
@@ -421,11 +477,86 @@ export function saveAgentAutoCommitSettings(
     ...getAgentAutoCommitSettings(),
     ...updates
   })
-  if (next.mode !== "off" && !next.cardNumber?.trim()) {
-    throw new Error("开启自动提交前需要填写卡片编号")
+  const persisted: AgentAutoCommitSettings = {
+    mode: next.mode,
+    push: next.push,
+    messageStrategy: next.messageStrategy,
+    // Preserve the legacy global cardNumber so it stays available as the migration
+    // fallback for workspaces that have not been configured yet (see
+    // getAgentAutoCommitWorkspaceCard). Renderer saves never set this field.
+    ...(next.cardNumber ? { cardNumber: next.cardNumber } : {}),
+    ...(next.template ? { template: next.template } : {})
   }
-  writeFileSync(AGENT_AUTO_COMMIT_SETTINGS_FILE, JSON.stringify(next, null, 2))
+  writeFileSync(AGENT_AUTO_COMMIT_SETTINGS_FILE, JSON.stringify(persisted, null, 2))
+  return persisted
+}
+
+export function getAgentAutoCommitWorkspaceCard(
+  workspacePath: string
+): AgentAutoCommitWorkspaceCard {
+  const trimmedPath = workspacePath.trim()
+  if (!trimmedPath) {
+    return { workspacePath: "" }
+  }
+  const key = normalizeWorkspacePathKey(trimmedPath)
+  const cards = readAgentAutoCommitWorkspaceCards()
+  const existing = cards[key]
+  // Any explicit record for this workspace wins — including a "cleared" record
+  // with no cardNumber. This is what lets the user clear a workspace card and have
+  // it stay cleared instead of leaking the legacy global card back in on reload.
+  if (existing) return existing
+
+  // Read-only legacy fallback: only when the workspace has never been configured.
+  // Surface the old global card as a soft default without persisting; it becomes a
+  // real per-workspace entry once a card is explicitly saved or committed. This
+  // keeps the getter side-effect-free and avoids stamping the legacy card onto every
+  // workspace the user happens to open.
+  const legacyCardNumber = getLegacyAgentAutoCommitCardNumber()
+  if (legacyCardNumber) {
+    return { workspacePath: trimmedPath, cardNumber: legacyCardNumber }
+  }
+  return { workspacePath: trimmedPath }
+}
+
+export function saveAgentAutoCommitWorkspaceCard(
+  workspacePath: string,
+  cardNumber: string | undefined
+): AgentAutoCommitWorkspaceCard {
+  const trimmedPath = workspacePath.trim()
+  if (!trimmedPath) {
+    throw new Error("缺少工作区路径，无法保存任务卡片")
+  }
+  const key = normalizeWorkspacePathKey(trimmedPath)
+  const cards = readAgentAutoCommitWorkspaceCards()
+  const trimmedCard = cardNumber?.trim()
+  if (!trimmedCard) {
+    // Persist an explicit "cleared" record (no cardNumber) rather than deleting the
+    // entry, so getAgentAutoCommitWorkspaceCard does not fall back to the legacy
+    // global card for a workspace the user deliberately emptied.
+    const cleared: AgentAutoCommitWorkspaceCard = {
+      workspacePath: trimmedPath,
+      updatedAt: new Date().toISOString()
+    }
+    cards[key] = cleared
+    writeAgentAutoCommitWorkspaceCards(cards)
+    return cleared
+  }
+
+  const next: AgentAutoCommitWorkspaceCard = {
+    workspacePath: trimmedPath,
+    cardNumber: trimmedCard,
+    updatedAt: new Date().toISOString()
+  }
+  cards[key] = next
+  writeAgentAutoCommitWorkspaceCards(cards)
   return next
+}
+
+export function getAgentAutoCommitCardNumberForWorkspace(
+  workspacePath: string | undefined
+): string | undefined {
+  if (!workspacePath?.trim()) return undefined
+  return getAgentAutoCommitWorkspaceCard(workspacePath).cardNumber
 }
 
 // ── Code exec settings ──
@@ -446,7 +577,7 @@ function readCodeExecSettings(): CodeExecSettings {
 }
 
 export function isCodeExecEnabled(): boolean {
-  return readCodeExecSettings().enabled !== false
+  return readCodeExecSettings().enabled === true
 }
 
 export function setCodeExecEnabled(enabled: boolean): void {

@@ -26,6 +26,7 @@ import type {
   PluginMetadata,
   SkillHookMetadata,
   AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard,
   UserInputRequest,
   UserInputResponse,
   ConfigurePreferredIdeRequest,
@@ -40,6 +41,8 @@ import type {
   ManagedSavedCodeExecTool,
   SavedCodeExecPreviewPayload,
   SavedCodeExecPreviewResult,
+  SavedCodeExecRewritePayload,
+  SavedCodeExecRewriteResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
 import type { CoordinatorWorkerSnapshot } from "../main/agent/coordinator-worker-manager"
@@ -66,6 +69,7 @@ import type {
   TaskMmdSnapshot
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
+import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -216,6 +220,7 @@ interface DashboardSkillEvalOptions {
   skillName?: string
   skillVersion?: string
   skillNames?: string[]
+  upperOrgLv1?: string | string[] | null
   defaultRecentToLatestSkill?: boolean
   recentOnly?: boolean
   listOnly?: boolean
@@ -546,6 +551,10 @@ interface CustomAPI {
         data: unknown
         workerTurn?: number
       }) => void
+    ) => () => void
+    onCoordinatorWorkerHook: (
+      threadId: string,
+      callback: (envelope: unknown) => void
     ) => () => void
     setCoordinatorWorkerStreamFocus: (
       threadId: string,
@@ -1066,6 +1075,14 @@ interface CustomAPI {
   autoCommit: {
     getSettings: () => Promise<AgentAutoCommitSettings>
     saveSettings: (updates: Partial<AgentAutoCommitSettings>) => Promise<AgentAutoCommitSettings>
+    getWorkspaceCard: (workspacePath: string) => Promise<AgentAutoCommitWorkspaceCard>
+    saveWorkspaceCard: (
+      workspacePath: string,
+      cardNumber?: string
+    ) => Promise<AgentAutoCommitWorkspaceCard>
+  }
+  taskCards: {
+    list: (query?: TaskCardsQuery) => Promise<TaskCardsListResult>
   }
   lsp: {
     getConfig: () => Promise<LspConfig>
@@ -1517,6 +1534,7 @@ interface CustomAPI {
       id: string,
       params: Record<string, unknown>
     ) => Promise<ManagedSavedCodeExecTool>
+    rewrite: (payload: SavedCodeExecRewritePayload) => Promise<SavedCodeExecRewriteResult>
     update: (payload: SavedCodeExecToolUpdatePayload) => Promise<ManagedSavedCodeExecTool>
     delete: (id: string) => Promise<void>
     runPreview: (payload: SavedCodeExecPreviewPayload) => Promise<SavedCodeExecPreviewResult>

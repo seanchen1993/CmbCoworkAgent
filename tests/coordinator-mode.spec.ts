@@ -152,6 +152,7 @@ async function testPromptContracts(): Promise<void> {
     platform: "macOS",
     shell: "zsh",
     ...timeContext,
+    projectModeAdapterInstructions: "ADAPTER_RULE",
     projectInstructions: "PROJECT_RULE",
     turnContext: "TURN_CONTEXT_RULE",
     hasBrowserTool: true,
@@ -245,6 +246,16 @@ async function testPromptContracts(): Promise<void> {
   assertIncludes(prompt, "concrete evidence", "coordinator prompt")
   assertIncludes(prompt, "Current time: 2026-04-28T16:30:00+08:00", "coordinator prompt")
   assertIncludes(prompt, "Do not invent dates or timestamps", "coordinator prompt")
+  assertIncludes(prompt, "## Project Mode Adapter Instructions", "coordinator prompt")
+  assertIncludes(prompt, "ADAPTER_RULE", "coordinator prompt")
+  assert(
+    prompt.indexOf("ADAPTER_RULE") > prompt.indexOf("System environment:"),
+    "coordinator prompt should place adapter instructions after system environment"
+  )
+  assert(
+    prompt.indexOf("ADAPTER_RULE") < prompt.indexOf("Verifier standard:"),
+    "coordinator prompt should place adapter instructions before verifier/project sections"
+  )
   assertIncludes(prompt, "browser_playwright", "coordinator prompt")
   assertIncludes(prompt, "github.search", "coordinator prompt")
   assertIncludes(prompt, "PROJECT_RULE", "coordinator prompt")

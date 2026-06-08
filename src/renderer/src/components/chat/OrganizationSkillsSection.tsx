@@ -101,7 +101,8 @@ export function OrganizationSkillsSection({
           name: item.name,
           description: item.description || "",
           path: item.filename || item.name,
-          source: "user"
+          source: "user",
+          version: "v1.0.0"
         },
         label: item.chinese_name || item.name,
         marketItem: item,

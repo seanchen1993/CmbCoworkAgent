@@ -1,4 +1,4 @@
-import type { MarketItemType } from "../../api/market"
+import type { MarketItemType } from "../../../api/market"
 
 /**
  * 记录“某个资源是从哪个市场入口安装”的本地缓存 key。

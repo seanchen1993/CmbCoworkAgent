@@ -5,34 +5,34 @@ import {
   Check,
   CheckCircle,
   FileText,
-  GitBranch,
   Search,
   Sparkles,
   Tag,
   Trash2,
   User,
-  X,
-  Zap
+  X
 } from "lucide-react"
 import {
+  buildOrgSkillSubscribeUrl,
   getMockOrgSkillLabels,
   getMockOrgSkillMarketResponse,
   orgSkillMarketApi,
   type OrgSkillLabel
-} from "../../api/org-skill-market"
-import { USE_MARKET_MOCK_ON_ERROR } from "../../api/market-flags"
-import type { MarketApiResponse, MarketItem } from "../../api/market"
+} from "../../../api/org-skill-market"
+import { USE_MARKET_MOCK_ON_ERROR } from "../../../api/market-flags"
+import type { MarketApiResponse, MarketItem } from "../../../api/market"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { buildMarketInstalledFlags } from "./MarketUpdateBadge"
 import { TabsTrigger } from "@/components/ui/tabs"
 import { getOrgSkillUploaderProfile, renderUploaderProfile } from "./MarketUploaderProfile"
+import { toast } from "sonner"
 
 export const ORG_SKILL_MARKET_TYPE = "orgSkill" as const
 const ORG_SKILL_PAGE_SIZE = 10
 
 export const orgSkillTabIntro = {
-  title: "组织级技能来自技能开放平台",
+  title: "组织级技能来自-Skills市场",
   description:
     "这里展示组织发布和平台内置的技能，安装后会进入本地 Skills，与普通技能保持一致的调用体验。"
 }
@@ -126,7 +126,6 @@ function OrgSkillCard({
   item,
   isDownloading,
   onOpenDetail,
-  onDownload,
   onUninstall
 }: {
   item: MarketItem
@@ -137,10 +136,20 @@ function OrgSkillCard({
 }): React.JSX.Element {
   const uploaderProfile = getOrgSkillUploaderProfile(item)
   const updatedAt = item.updated_at || item.created_at
+  const subscribeUrl = buildOrgSkillSubscribeUrl(item)
+
+  const handleOpenSubscribe = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation()
+    if (!subscribeUrl) {
+      toast.error("当前技能缺少订阅地址信息")
+      return
+    }
+    void window.electron.openExternal(subscribeUrl)
+  }
 
   return (
     <div
-      className="group rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 hover:border-[#d9d5c8] hover:bg-white transition-colors shadow-[rgba(0,0,0,0.03)_0px_2px_10px] cursor-pointer"
+      className="group flex h-full flex-col rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 hover:border-[#d9d5c8] hover:bg-white transition-colors shadow-[rgba(0,0,0,0.03)_0px_2px_10px] cursor-pointer"
       onClick={() => onOpenDetail(item)}
     >
       <div className="flex items-start justify-between gap-3">
@@ -151,45 +160,48 @@ function OrgSkillCard({
                 <h3 className="text-[15px] font-medium text-[#141413] leading-snug truncate">
                   {item.chinese_name || item.name}
                 </h3>
-                <div className=" text-[12px] text-[#87867f] truncate">{item.name}</div>
+                <div className=" text-[12px] text-[#87867f] truncate">({item.name})</div>
                 {item.category && (
                   <span className="inline-flex items-center gap-1 text-xs text-gray-500">
                     <Tag className="size-3" />
                     {getCategoryFilterName(item.category)}
                   </span>
                 )}
+                <span className="inline-flex items-center gap-1  text-xs text-gray-500 ml-2">
+            <Calendar className="size-3" />
+            更新于 {new Date(updatedAt).toLocaleDateString("zh-CN")}
+          </span>
               </div>
             </div>
             {item.installed && (
-              <span className="inline-flex items-center gap-1 rounded-full border border-[#c4e8d1] bg-[#edf7f0] px-2 py-0.5 text-[11px] font-medium text-[#2e7d4f] shrink-0">
+              <span
+                className="inline-flex items-center gap-1 rounded-full border border-[#c4e8d1] bg-[#edf7f0] px-2 py-0.5 text-[11px] font-medium text-[#2e7d4f] shrink-0">
                 <CheckCircle className="size-3" />
                 已安装
               </span>
             )}
           </div>
           {item.description && (
-            <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-[#87867f]">
+            <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-[#87867f] mb-2">
               {item.description}
             </p>
           )}
         </div>
       </div>
       {/*box bottom*/}
-      <div className={"flex items-center justify-between  border-t border-[#f0eee6] pt-3 mt-2"}>
-        <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-[#87867f]">
-          {item.version && (
-            <span className="inline-flex items-center gap-1">
-              <GitBranch className="size-3" />v{item.version}
-            </span>
-          )}
-          <span className="inline-flex items-center gap-1">
-            <Calendar className="size-3" />
-            更新于 {new Date(updatedAt).toLocaleDateString("zh-CN")}
-          </span>
+      <div className={"mt-auto flex items-center justify-between border-t border-[#f0eee6] pt-1 mt-4"}>
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-[#87867f]">
+          {/*{item.version && (*/}
+          {/*  <span className="inline-flex items-center gap-1">*/}
+          {/*    <GitBranch className="size-3" />v{item.version}*/}
+          {/*  </span>*/}
+          {/*)}*/}
           {(item.user_id || item.managerName || item.managerDepartment) && (
-            <span className="inline-flex min-w-0 items-center gap-1">
-              <User className="size-3 shrink-0" />
-              {renderUploaderProfile(uploaderProfile, item.user_id || item.managerName)}
+            <span className="flex min-w-0 items-start gap-1">
+              <User className="mt-0.5 size-3 shrink-0" />
+              {renderUploaderProfile(uploaderProfile, item.user_id || item.managerName, {
+                multiline: true
+              })}
             </span>
           )}
         </div>
@@ -210,6 +222,14 @@ function OrgSkillCard({
                 <FileText className="size-3" />
                 详情
               </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-3 gap-1 text-xs text-[#3766a6] border-[#ccdcf5] bg-[#edf4ff] hover:bg-[#dceaff] rounded-lg"
+                onClick={handleOpenSubscribe}
+              >
+                跳转去订阅
+              </Button>
               {item.installed ? (
                 <Button
                   variant="outline"
@@ -224,19 +244,7 @@ function OrgSkillCard({
                   <Trash2 className="size-3" />
                   卸载
                 </Button>
-              ) : (
-                <Button
-                  size="sm"
-                  className="h-7 px-3 gap-1 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 rounded-lg"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    void onDownload(item, false)
-                  }}
-                >
-                  <Zap className="size-3" />
-                  安装
-                </Button>
-              )}
+              ) : null}
             </>
           )}
         </div>

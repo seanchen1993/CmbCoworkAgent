@@ -89,18 +89,23 @@ async function testRendererSendsAgentMode(): Promise<void> {
   assertIncludes(switcher, 'value: "coordinator"', "AgentModeSwitcher exposes coordinator mode")
   assertIncludes(
     switcher,
-    "选择这次任务是快速直达，还是走多角色协同",
+    "Solo Agent 快速直达；Agent Team 多代理编排",
     "AgentModeSwitcher explains coordinator-only flow"
   )
   assertIncludes(switcher, "setOpen(false)", "AgentModeSwitcher closes after selection")
+  assertMatches(
+    switcher,
+    /<Button\b[\s\S]*?\btype="button"/,
+    "AgentModeSwitcher trigger never submits the chat form"
+  )
   assertIncludes(
     switcher,
-    "适合日常问答、小范围修改和快速排查",
+    "适合日常问答、明确小改动、快速排查与验证",
     "AgentModeSwitcher explains normal mode"
   )
   assertIncludes(
     switcher,
-    "适合完整开发任务、文档产出和需要独立验证的改动",
+    "适合复杂开发、深度排查、文档产出和高可信交付",
     "AgentModeSwitcher explains coordinator mode"
   )
 
@@ -144,8 +149,13 @@ async function testRendererSendsAgentMode(): Promise<void> {
   assertIncludes(chat, "agent_mode: submitAgentMode", "ChatContainer stream config")
   assertIncludes(
     chat,
-    "const canChangeAgentMode = threadMessages.length === 0",
-    "ChatContainer only allows mode switching before the thread has messages"
+    "const canChangeAgentMode = !historyLoading && threadMessages.length === 0",
+    "ChatContainer locks mode switching while history is loading or after the thread has messages"
+  )
+  assertIncludes(
+    chat,
+    "会话历史加载中，暂时不能切换执行模式。",
+    "ChatContainer blocks mode switching while restoring history"
   )
   assertIncludes(
     chat,
@@ -154,8 +164,8 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    "disabled={isLoading || !canChangeAgentMode}",
-    "ChatContainer disables mode switching while running or after the thread has messages"
+    "locked={isLoading || !canChangeAgentMode}",
+    "ChatContainer locks mode switching while running or after the thread has messages"
   )
 
   const threadContextSource = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
@@ -238,7 +248,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    "当前环境变量强制开启协同模式，不能切回普通模式",
+    "当前环境变量强制开启 Agent Team，不能切回 Solo Agent",
     "ChatContainer blocks switching back to normal when coordinator mode is forced by environment"
   )
 
@@ -522,13 +532,13 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    'approvalOperation(state.pendingApproval) === "prepare_save_code_exec_tool"',
-    "thread context recognizes code-exec prepare approvals as a two-step flow"
+    "nextQueue.push(request)",
+    "thread context enqueues every approval request through the same queue path"
   )
   assertIncludes(
     threadContext,
-    'approvalOperation(request) === "save_code_exec_tool"',
-    "thread context promotes the second code-exec save approval instead of hiding it in the queue"
+    "return removePendingApproval(queue, requestId)",
+    "thread context advances approval queue with the generic remove helper"
   )
   assertIncludes(
     threadContext,
@@ -2020,6 +2030,11 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     workerAccess,
     "...deferredExecutionToolNames",
     "worker access policy blocks deferred execution surfaces for constrained coordinator workers"
+  )
+  assertIncludes(
+    workerAccess,
+    '"save_code_exec_tool"',
+    "worker access policy blocks code-exec draft saving for constrained coordinator workers"
   )
   assertIncludes(
     workerAccess,

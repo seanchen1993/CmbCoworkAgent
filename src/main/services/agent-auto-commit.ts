@@ -10,7 +10,9 @@ import type {
   AgentAutoCommitSettings
 } from "../types"
 import {
-  getAgentAutoCommitSettings
+  getAgentAutoCommitCardNumberForWorkspace,
+  getAgentAutoCommitSettings,
+  saveAgentAutoCommitWorkspaceCard
 } from "../storage"
 import { trackEvent } from "./event-reporter"
 import { getTracesDir } from "../agent/trace/collector"
@@ -397,13 +399,14 @@ function buildDiffSummary(candidateFiles: string[]): string {
 
 function buildCommitMessage(
   settings: AgentAutoCommitSettings,
+  cardNumber: string | undefined,
   threadId: string,
   userPrompt: string | undefined,
   candidateFiles: string[]
 ): { message?: string; reason?: string } {
-  const cardNumber = settings.cardNumber?.trim()
-  if (!cardNumber) {
-    return { reason: "自动提交缺少卡片编号，请先在设置中填写卡片编号" }
+  const taskCard = cardNumber?.trim()
+  if (!taskCard) {
+    return { reason: "当前工作区未选择任务卡片，请先在分支旁选择任务卡片" }
   }
 
   const summary = cleanSummary(userPrompt)
@@ -425,7 +428,7 @@ function buildCommitMessage(
     messageSummary = diffSummary
   }
 
-  return { message: `${cardNumber} #comment fix:${messageSummary} #CMBDevClaw` }
+  return { message: `${taskCard} #comment fix:${messageSummary} #CMBDevClaw` }
 }
 
 async function getUnmergedFiles(worktreePath: string): Promise<string[]> {
@@ -702,7 +705,14 @@ export async function maybeAutoCommitAfterAgentRun({
       return { status: "skipped", reasons, skippedFiles, warnings }
     }
 
-    const commitMessageResult = buildCommitMessage(settings, threadId, userPrompt, candidateFiles)
+    const workspaceCardNumber = getAgentAutoCommitCardNumberForWorkspace(workspacePath)
+    const commitMessageResult = buildCommitMessage(
+      settings,
+      workspaceCardNumber,
+      threadId,
+      userPrompt,
+      candidateFiles
+    )
     if (!commitMessageResult.message) {
       return {
         status: "skipped",
@@ -740,6 +750,11 @@ export async function maybeAutoCommitAfterAgentRun({
       await runGit(workspacePath, ["add", "--", ...candidateFiles])
       await runGit(workspacePath, ["commit", "-m", commitMessage])
       const commitHash = await getHead(workspacePath)
+      // Persist the card actually committed with, so the legacy global card
+      // migrates to this workspace and the UI/next run reuse it directly.
+      if (workspaceCardNumber?.trim()) {
+        saveAgentAutoCommitWorkspaceCard(workspacePath, workspaceCardNumber.trim())
+      }
       await clearLlmModifiedMetadata(threadId)
       notifyWorkspaceFilesChanged(threadId, workspacePath)
       trackAutoCommit(threadId, workspacePath, candidateFiles)

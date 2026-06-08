@@ -50,6 +50,7 @@ export interface CoordinatorWorkerRunInput {
   parentThreadId: string
   workerId: string
   workerThreadId: string
+  workerTurn: number
   role: CoordinatorWorkerRole
   workload: CoordinatorWorkerWorkload
   // Compatibility path for pre-V2 scoped writer records and direct manager callers.
@@ -2418,6 +2419,7 @@ export class CoordinatorWorkerManager {
     record.abortController = abortController
     record.runVersion += 1
     const runVersion = record.runVersion
+    const workerTurn = record.turns
 
     if (parentSignal?.aborted) {
       const timestamp = nowIso()
@@ -2449,6 +2451,7 @@ export class CoordinatorWorkerManager {
           parentThreadId: record.parentThreadId,
           workerId: record.workerId,
           workerThreadId: record.workerThreadId,
+          workerTurn,
           role: record.role,
           workload: record.workload,
           ownedFiles: record.ownedFiles,

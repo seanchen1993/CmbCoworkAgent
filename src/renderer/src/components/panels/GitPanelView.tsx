@@ -28,6 +28,7 @@ import { GitPushDialog } from "./GitPushDialog"
 import { insertLog } from "../../../js/mmjUtils"
 import type { ThreadGitContext } from "@/lib/thread-context"
 import type { GitCommitHistoryRecord } from "../../../../shared/git-commit-history"
+import { useWorkspaceTaskCard } from "@/components/git/use-workspace-task-card"
 
 const GIT_BRANCH_REFRESH_EVENT = "cmb:git-branch-switched"
 const COMMIT_TYPE_VALUES = new Set<string>([
@@ -173,7 +174,12 @@ export function GitPanelView({
   const [running, setRunning] = useState<"commit" | "push" | "reject" | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [submitAction, setSubmitAction] = useState<"commit" | "push" | null>(null)
-  const [cardNumber, setCardNumber] = useState("")
+  const {
+    cardNumber,
+    handleCardNumberChange,
+    setCardNumberLocal,
+    persistNow: persistWorkspaceCard
+  } = useWorkspaceTaskCard(workspacePath)
   const [commitType, setCommitType] = useState<CommitType>("fix")
   const [commitMessage, setCommitMessage] = useState("")
   const [commitHistory, setCommitHistory] = useState<GitCommitHistoryRecord[]>([])
@@ -326,13 +332,20 @@ export function GitPanelView({
     })
   }, [diffState?.files])
 
-  const applyCommitHistoryRecord = useCallback((record: GitCommitHistoryRecord): void => {
-    setCardNumber(record.cardNumber)
-    if (COMMIT_TYPE_VALUES.has(record.commitType)) {
-      setCommitType(record.commitType as CommitType)
-    }
-    setCommitMessage(record.commitMessage)
-  }, [])
+  const applyCommitHistoryRecord = useCallback(
+    (record: GitCommitHistoryRecord): void => {
+      // Prefill the card from history only when the workspace has none yet, and
+      // keep it local — it is persisted on a successful commit, not on dialog open.
+      if (!cardNumber.trim() && record.cardNumber.trim()) {
+        setCardNumberLocal(record.cardNumber)
+      }
+      if (COMMIT_TYPE_VALUES.has(record.commitType)) {
+        setCommitType(record.commitType as CommitType)
+      }
+      setCommitMessage(record.commitMessage)
+    },
+    [cardNumber, setCardNumberLocal]
+  )
 
   useEffect(() => {
     if (submitAction !== "commit" || !threadId) return
@@ -436,12 +449,12 @@ export function GitPanelView({
       }
 
       if (action === "commit" && !cardNumber.trim()) {
-        showToast("cardNumber 不能为空", "error")
+        showToast("请选择任务卡片", "error")
         return
       }
 
       if (action === "commit" && !commitMessage.trim()) {
-        showToast("commitMessage 不能为空", "error")
+        showToast("请输入提交说明", "error")
         return
       }
 
@@ -467,13 +480,14 @@ export function GitPanelView({
             })
           showToast("提交成功", "success")
           insertLog("commit成功")
+          // Remember the card actually committed with for this workspace.
+          persistWorkspaceCard(cardNumber.trim())
         } else {
           const result = await window.api.workspace.pushWorktree(threadId)
           if (!result.success) throw new Error(result.error || "推送失败")
           showToast("推送成功", "success")
           insertLog("push成功")
         }
-        setCardNumber("")
         setCommitMessage("")
         setSubmitAction(null)
         await refresh({ meta: true, diff: true })
@@ -494,7 +508,8 @@ export function GitPanelView({
       diffState?.files,
       selectedFilePaths,
       refresh,
-      showToast
+      showToast,
+      persistWorkspaceCard
     ]
   )
 
@@ -1045,10 +1060,11 @@ export function GitPanelView({
         commitType={commitType}
         commitMessage={commitMessage}
         commitHistory={commitHistory}
+        preferredTaskText={branchName}
         onOpenChange={(open) => {
           if (!open) setSubmitAction(null)
         }}
-        onCardNumberChange={setCardNumber}
+        onCardNumberChange={handleCardNumberChange}
         onCommitTypeChange={setCommitType}
         onCommitMessageChange={setCommitMessage}
         onHistorySelect={applyCommitHistoryRecord}

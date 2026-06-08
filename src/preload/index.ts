@@ -27,6 +27,7 @@ import type {
   ChatXConfig,
   HookLoggingConfig,
   AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard,
   UserInputRequest,
   UserInputResponse,
   ConfigurePreferredIdeRequest,
@@ -41,6 +42,8 @@ import type {
   ManagedSavedCodeExecTool,
   SavedCodeExecPreviewPayload,
   SavedCodeExecPreviewResult,
+  SavedCodeExecRewritePayload,
+  SavedCodeExecRewriteResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
 import type {
@@ -66,6 +69,7 @@ import type {
   TaskMmdSnapshot
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
+import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 
 interface LspDownloadProgress {
   percent: number
@@ -309,6 +313,23 @@ const api = {
         _: unknown,
         data: { type: "stream"; mode: "messages" | "values"; data: unknown; workerTurn?: number }
       ): void => {
+        callback(data)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
+    onCoordinatorWorkerHook: (
+      threadId: string,
+      callback: (envelope: unknown) => void
+    ): (() => void) => {
+      // Durable per-thread channel for coordinator-worker hook records. Unlike
+      // the run stream, this survives past the spawning turn so async worker
+      // hooks still reach the renderer. Payload is the raw hook envelope
+      // (`type: "hook_executed"`), fed straight into handleCustomEvent.
+      const channel = `agent:coordinator-worker-hook:${threadId}`
+      const handler = (_: unknown, data: unknown): void => {
         callback(data)
       }
       ipcRenderer.on(channel, handler)
@@ -1500,7 +1521,21 @@ const api = {
     getSettings: (): Promise<AgentAutoCommitSettings> =>
       ipcRenderer.invoke("autoCommit:getSettings") as Promise<AgentAutoCommitSettings>,
     saveSettings: (updates: Partial<AgentAutoCommitSettings>): Promise<AgentAutoCommitSettings> =>
-      ipcRenderer.invoke("autoCommit:saveSettings", updates) as Promise<AgentAutoCommitSettings>
+      ipcRenderer.invoke("autoCommit:saveSettings", updates) as Promise<AgentAutoCommitSettings>,
+    getWorkspaceCard: (workspacePath: string): Promise<AgentAutoCommitWorkspaceCard> =>
+      ipcRenderer.invoke("autoCommit:getWorkspaceCard", workspacePath) as Promise<AgentAutoCommitWorkspaceCard>,
+    saveWorkspaceCard: (
+      workspacePath: string,
+      cardNumber?: string
+    ): Promise<AgentAutoCommitWorkspaceCard> =>
+      ipcRenderer.invoke("autoCommit:saveWorkspaceCard", {
+        workspacePath,
+        cardNumber
+      }) as Promise<AgentAutoCommitWorkspaceCard>
+  },
+  taskCards: {
+    list: (query?: TaskCardsQuery): Promise<TaskCardsListResult> =>
+      ipcRenderer.invoke("taskCards:list", query) as Promise<TaskCardsListResult>
   },
   heartbeat: {
     getConfig: (): Promise<HeartbeatConfig> =>
@@ -2284,6 +2319,8 @@ const api = {
       params: Record<string, unknown>
     ): Promise<ManagedSavedCodeExecTool> =>
       ipcRenderer.invoke("codeExecTools:setLastPreviewParams", { id, params }),
+    rewrite: (payload: SavedCodeExecRewritePayload): Promise<SavedCodeExecRewriteResult> =>
+      ipcRenderer.invoke("codeExecTools:rewrite", payload),
     update: (payload: SavedCodeExecToolUpdatePayload): Promise<ManagedSavedCodeExecTool> =>
       ipcRenderer.invoke("codeExecTools:update", payload),
     delete: (id: string): Promise<void> => ipcRenderer.invoke("codeExecTools:delete", id),
@@ -2413,6 +2450,7 @@ const api = {
         skillName?: string
         skillVersion?: string
         skillNames?: string[]
+        upperOrgLv1?: string | string[] | null
         defaultRecentToLatestSkill?: boolean
         recentOnly?: boolean
         listOnly?: boolean

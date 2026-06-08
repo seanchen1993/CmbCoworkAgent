@@ -611,6 +611,7 @@ export interface DashboardSkillEvalOptions {
   skillName?: string
   skillVersion?: string
   skillNames?: string[]
+  upperOrgLv1?: string | string[] | null
   defaultRecentToLatestSkill?: boolean
   recentOnly?: boolean
   listOnly?: boolean
@@ -1751,6 +1752,7 @@ async function loadSkillEvalSummarySafely(
       ...(options.skillName ? { skillName: options.skillName } : {}),
       ...(options.skillVersion ? { skillVersion: options.skillVersion } : {}),
       ...(options.skillNames ? { skillNames: options.skillNames } : {}),
+      ...(options.upperOrgLv1 !== undefined ? { upperOrgLv1: options.upperOrgLv1 } : {}),
       ...(options.defaultRecentToLatestSkill ? { defaultRecentToLatestSkill: true } : {}),
       ...(options.recentOnly ? { recentOnly: true } : {}),
       ...(options.listOnly ? { listOnly: true } : {}),
@@ -1963,6 +1965,7 @@ export function useDashboard() {
           recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE,
           skillPage: filter?.skillPage ?? 1,
           skillPageSize: SKILL_EVAL_SKILL_PAGE_SIZE,
+          ...(selectedOrgLv1List.length > 0 ? { upperOrgLv1: selectedOrgLv1List } : {}),
           ...(filter?.skillSearch ? { skillSearch: filter.skillSearch } : {}),
           ...(filter?.skillName ? { skillName: filter.skillName } : {}),
           ...(filter?.skillVersion ? { skillVersion: filter.skillVersion } : {}),
@@ -2080,7 +2083,7 @@ export function useDashboard() {
         if (id === skillEvalFetchIdRef.current) setSkillEvalLoading(false)
       }
     },
-    [range]
+    [range, selectedOrgLv1List]
   )
 
   // Auto-fetch on range / granularity / 室筛选 change

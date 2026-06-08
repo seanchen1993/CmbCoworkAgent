@@ -235,6 +235,8 @@ export function CustomModelDialog({
   const [formError, setFormError] = useState<string | null>(null)
   const [tokenLimits, setTokenLimits] = useState<TokenLimits>(FALLBACK_LIMITS)
   const [allConfigs, setAllConfigs] = useState<CustomModelItem[]>([])
+  const [defaultModelId, setDefaultModelId] = useState("")
+  const [defaultModelDraftId, setDefaultModelDraftId] = useState("")
 
   useEffect(() => {
     let cancelled = false
@@ -250,12 +252,15 @@ export function CustomModelDialog({
       void Promise.all([
         window.api.models.getTokenLimits(),
         window.api.models.getCustomConfigs(),
-        window.api.models.getCustomConfig(normalizedSelectedId)
+        window.api.models.getCustomConfig(normalizedSelectedId),
+        window.api.models.getDefault()
       ])
-        .then(([limits, all, existing]) => {
+        .then(([limits, all, existing, savedDefaultModelId]) => {
           if (cancelled) return
           setTokenLimits(limits)
           setAllConfigs(all)
+          setDefaultModelId(savedDefaultModelId || "")
+          setDefaultModelDraftId(savedDefaultModelId || "")
 
           const resolvedExisting =
             existing ||
@@ -340,7 +345,14 @@ export function CustomModelDialog({
     setHasExisting(true)
     setHasExistingKey(picked.hasApiKey)
     setShowKey(false)
+    setDefaultModelDraftId(defaultModelId)
   }
+
+  const currentModelStorageId = config.id ? `custom:${config.id}` : ""
+  const isDefaultModel =
+    currentModelStorageId !== "" && currentModelStorageId === defaultModelDraftId
+  const isPersistedDefaultModel =
+    currentModelStorageId !== "" && currentModelStorageId === defaultModelId
 
   const maxTokensError = getMaxTokensError(config.maxTokensInput, tokenLimits)
   const maxOutputTokensError = getMaxOutputTokensError(config.maxOutputTokensInput, tokenLimits)
@@ -475,6 +487,16 @@ export function CustomModelDialog({
         interleavedThinking: config.interleavedThinking,
         tier: config.tier
       })
+      const savedModelId = `custom:${result.id}`
+      const nextDefaultModelId =
+        allConfigs.length === 0
+          ? savedModelId
+          : defaultModelDraftId === currentModelStorageId
+            ? savedModelId
+            : defaultModelDraftId
+      await window.api.models.setDefault(nextDefaultModelId)
+      setDefaultModelId(nextDefaultModelId)
+      setDefaultModelDraftId(nextDefaultModelId)
       const refreshed = await window.api.models.getCustomConfigs()
       setAllConfigs(refreshed)
       const updated = refreshed.find((item) => item.id === result.id)
@@ -497,7 +519,7 @@ export function CustomModelDialog({
         setHasExisting(true)
         setHasExistingKey(updated.hasApiKey)
       }
-      onModelSaved?.(`custom:${result.id}`)
+      onModelSaved?.(savedModelId)
       setFormError(null)
       onOpenChange(false)
     } catch (e) {
@@ -526,6 +548,12 @@ export function CustomModelDialog({
       setAllConfigs(refreshed)
       if (refreshed.length > 0) {
         const fallback = refreshed[0]
+        const fallbackModelId = `custom:${fallback.id}`
+        if (isPersistedDefaultModel) {
+          await window.api.models.setDefault(fallbackModelId)
+          setDefaultModelId(fallbackModelId)
+          setDefaultModelDraftId(fallbackModelId)
+        }
         setConfig({
           id: fallback.id,
           name: fallback.name,
@@ -545,8 +573,13 @@ export function CustomModelDialog({
         })
         setHasExisting(true)
         setHasExistingKey(fallback.hasApiKey)
-        onModelSaved?.(`custom:${fallback.id}`)
+        onModelSaved?.(fallbackModelId)
       } else {
+        if (isPersistedDefaultModel) {
+          await window.api.models.setDefault("")
+          setDefaultModelId("")
+          setDefaultModelDraftId("")
+        }
         setConfig({
           id: undefined,
           name: "",
@@ -574,13 +607,13 @@ export function CustomModelDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[760px] gap-3 p-4">
+      <DialogContent className="sm:max-w-[760px] max-h-[85vh] flex flex-col gap-3 p-4">
         <DialogHeader className="space-y-1">
           <DialogTitle>编辑模型配置</DialogTitle>
           <DialogDescription>配置兼容 OpenAI 接口格式的模型服务。</DialogDescription>
         </DialogHeader>
 
-        <div className="grid grid-cols-[220px_1fr] gap-4">
+        <div className="min-h-0 flex-1 grid grid-cols-[220px_1fr] gap-4">
           <div className="rounded-md border border-border p-2">
             <div className="mb-1.5 flex items-center justify-between">
               <div className="text-xs font-medium text-muted-foreground">模型列表</div>
@@ -606,6 +639,7 @@ export function CustomModelDialog({
                   })
                   setHasExisting(false)
                   setHasExistingKey(false)
+                  setDefaultModelDraftId(defaultModelId)
                   setFormError(null)
                   setTestResult(null)
                   setShowKey(false)
@@ -640,308 +674,356 @@ export function CustomModelDialog({
             </div>
           </div>
 
-          <div className="space-y-3">
-            <div className="space-y-1">
-              <label className="text-xs font-medium text-muted-foreground">显示名称</label>
-              <Input
-                className="h-8"
-                value={config.name}
-                onChange={(e) => setConfig((c) => ({ ...c, name: e.target.value }))}
-                placeholder="例如：DeepSeek Chat（生产）"
-                autoFocus
-              />
-              {duplicateNameError && (
-                <p className="text-xs text-destructive">{duplicateNameError}</p>
-              )}
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-xs font-medium text-muted-foreground">
-                接口地址（Base URL）
-              </label>
-              <Input
-                className="h-8"
-                value={config.baseUrl}
-                onChange={(e) => {
-                  setConfig((c) => ({ ...c, baseUrl: e.target.value }))
-                  setTestResult(null)
-                }}
-                placeholder="https://api.example.com/v1"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-xs font-medium text-muted-foreground">模型名称（Model）</label>
-              <Input
-                className="h-8"
-                value={config.model}
-                onChange={(e) => {
-                  const nextModel = e.target.value
-                  setConfig((c) => {
-                    const currentDefault = defaultInterleavedThinkingForModel(c.model)
-                    const nextDefault = defaultInterleavedThinkingForModel(nextModel)
-                    const currentSamplingDefault = defaultSamplingForModel(c.model, tokenLimits)
-                    const nextSamplingDefault = defaultSamplingForModel(nextModel, tokenLimits)
-                    const shouldUseNextSamplingDefault =
-                      !c.id &&
-                      c.temperatureInput === currentSamplingDefault.temperatureInput &&
-                      c.topPInput === currentSamplingDefault.topPInput &&
-                      c.topKInput === currentSamplingDefault.topKInput
-
-                    return {
-                      ...c,
-                      model: nextModel,
-                      ...(shouldUseNextSamplingDefault ? nextSamplingDefault : {}),
-                      interleavedThinking:
-                        c.interleavedThinking === currentDefault
-                          ? nextDefault
-                          : c.interleavedThinking
-                    }
-                  })
-                  setTestResult(null)
-                }}
-                placeholder="gpt-4o, deepseek-chat, ..."
-              />
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-xs font-medium text-muted-foreground">
-                最大 Token（上下文窗口）
-              </label>
-              <Input
-                className="h-8"
-                type="number"
-                value={config.maxTokensInput}
-                onChange={(e) => {
-                  setConfig((c) => ({
-                    ...c,
-                    maxTokensInput: e.target.value
-                  }))
-                  setTestResult(null)
-                }}
-                placeholder={String(tokenLimits.defaultMaxTokens)}
-                min={tokenLimits.minMaxTokens}
-                max={tokenLimits.maxMaxTokens}
-              />
-              {maxTokensError && <p className="text-xs text-destructive">{maxTokensError}</p>}
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
+          <div className="min-h-0 flex flex-col">
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-y-contain pr-1">
               <div className="space-y-1">
-                <ParameterLabel explanation="限制单次回复最多生成的 Token 数。数值越大越能输出长答案；超过模型或服务限制时请求可能失败。">
-                  max_tokens（最大 Tokens）
-                </ParameterLabel>
+                <label className="text-xs font-medium text-muted-foreground">显示名称</label>
                 <Input
                   className="h-8"
-                  type="number"
-                  value={config.maxOutputTokensInput}
-                  onChange={(e) => {
-                    setConfig((c) => ({
-                      ...c,
-                      maxOutputTokensInput: e.target.value
-                    }))
-                    setTestResult(null)
-                  }}
-                  placeholder={String(tokenLimits.defaultMaxOutputTokens)}
-                  min={tokenLimits.minMaxOutputTokens}
-                  max={tokenLimits.maxMaxOutputTokens}
+                  value={config.name}
+                  onChange={(e) => setConfig((c) => ({ ...c, name: e.target.value }))}
+                  placeholder="例如：DeepSeek Chat（生产）"
+                  autoFocus
                 />
-                {maxOutputTokensError && (
-                  <p className="text-xs text-destructive">{maxOutputTokensError}</p>
+                {duplicateNameError && (
+                  <p className="text-xs text-destructive">{duplicateNameError}</p>
                 )}
               </div>
 
               <div className="space-y-1">
-                <ParameterLabel explanation="控制回答的随机性。数值越低越稳定、可复现，适合代码和事实类任务；数值越高越发散，适合创意写作。">
-                  Temperature
-                </ParameterLabel>
+                <label className="text-xs font-medium text-muted-foreground">
+                  接口地址（Base URL）
+                </label>
                 <Input
                   className="h-8"
-                  type="number"
-                  value={config.temperatureInput}
+                  value={config.baseUrl}
                   onChange={(e) => {
-                    setConfig((c) => ({
-                      ...c,
-                      temperatureInput: e.target.value
-                    }))
+                    setConfig((c) => ({ ...c, baseUrl: e.target.value }))
                     setTestResult(null)
                   }}
-                  placeholder={String(tokenLimits.defaultTemperature)}
-                  min={0}
-                  max={tokenLimits.maxTemperature}
-                  step="any"
+                  placeholder="https://api.example.com/v1"
                 />
-                {temperatureError && <p className="text-xs text-destructive">{temperatureError}</p>}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <ParameterLabel explanation="按累计概率筛选候选词。数值越低越保守，越高越开放；通常和 Temperature 二选一微调即可。">
-                  top_p
-                </ParameterLabel>
-                <Input
-                  className="h-8"
-                  type="number"
-                  value={config.topPInput}
-                  onChange={(e) => {
-                    setConfig((c) => ({
-                      ...c,
-                      topPInput: e.target.value
-                    }))
-                    setTestResult(null)
-                  }}
-                  placeholder={String(tokenLimits.defaultTopP)}
-                  min={0}
-                  max={tokenLimits.maxTopP}
-                  step="any"
-                />
-                {topPError && <p className="text-xs text-destructive">{topPError}</p>}
               </div>
 
               <div className="space-y-1">
-                <ParameterLabel explanation="每一步只从概率最高的 K 个候选词中采样。数值越小越稳定，越大越多样。">
-                  top_k
-                </ParameterLabel>
+                <label className="text-xs font-medium text-muted-foreground">模型名称（Model）</label>
+                <Input
+                  className="h-8"
+                  value={config.model}
+                  onChange={(e) => {
+                    const nextModel = e.target.value
+                    setConfig((c) => {
+                      const currentDefault = defaultInterleavedThinkingForModel(c.model)
+                      const nextDefault = defaultInterleavedThinkingForModel(nextModel)
+                      const currentSamplingDefault = defaultSamplingForModel(c.model, tokenLimits)
+                      const nextSamplingDefault = defaultSamplingForModel(nextModel, tokenLimits)
+                      const shouldUseNextSamplingDefault =
+                        !c.id &&
+                        c.temperatureInput === currentSamplingDefault.temperatureInput &&
+                        c.topPInput === currentSamplingDefault.topPInput &&
+                        c.topKInput === currentSamplingDefault.topKInput
+
+                      return {
+                        ...c,
+                        model: nextModel,
+                        ...(shouldUseNextSamplingDefault ? nextSamplingDefault : {}),
+                        interleavedThinking:
+                          c.interleavedThinking === currentDefault
+                            ? nextDefault
+                            : c.interleavedThinking
+                      }
+                    })
+                    setTestResult(null)
+                  }}
+                  placeholder="gpt-4o, deepseek-chat, ..."
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-muted-foreground">
+                  最大 Token（上下文窗口）
+                </label>
                 <Input
                   className="h-8"
                   type="number"
-                  value={config.topKInput}
+                  value={config.maxTokensInput}
                   onChange={(e) => {
                     setConfig((c) => ({
                       ...c,
-                      topKInput: e.target.value
+                      maxTokensInput: e.target.value
                     }))
                     setTestResult(null)
                   }}
-                  placeholder={String(tokenLimits.defaultTopK)}
-                  min={tokenLimits.minTopK}
-                  max={tokenLimits.maxTopK}
+                  placeholder={String(tokenLimits.defaultMaxTokens)}
+                  min={tokenLimits.minMaxTokens}
+                  max={tokenLimits.maxMaxTokens}
                 />
-                {topKError && <p className="text-xs text-destructive">{topKError}</p>}
+                {maxTokensError && <p className="text-xs text-destructive">{maxTokensError}</p>}
               </div>
-            </div>
 
-            <div className="space-y-1">
-              <label className="text-xs font-medium text-muted-foreground">交错思考</label>
-              <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
-                <div>
-                  <div className="text-sm text-foreground">
-                    {config.interleavedThinking ? "已开启" : "已关闭"}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={config.interleavedThinking}
-                  onClick={() =>
-                    setConfig((c) => ({ ...c, interleavedThinking: !c.interleavedThinking }))
-                  }
-                  className={cn(
-                    "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
-                    config.interleavedThinking ? "bg-primary" : "bg-muted-foreground/30"
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
-                      config.interleavedThinking ? "translate-x-4" : "translate-x-0"
-                    )}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <ParameterLabel explanation="限制单次回复最多生成的 Token 数。数值越大越能输出长答案；超过模型或服务限制时请求可能失败。">
+                    max_tokens（最大 Tokens）
+                  </ParameterLabel>
+                  <Input
+                    className="h-8"
+                    type="number"
+                    value={config.maxOutputTokensInput}
+                    onChange={(e) => {
+                      setConfig((c) => ({
+                        ...c,
+                        maxOutputTokensInput: e.target.value
+                      }))
+                      setTestResult(null)
+                    }}
+                    placeholder={String(tokenLimits.defaultMaxOutputTokens)}
+                    min={tokenLimits.minMaxOutputTokens}
+                    max={tokenLimits.maxMaxOutputTokens}
                   />
-                </button>
-              </div>
-            </div>
+                  {maxOutputTokensError && (
+                    <p className="text-xs text-destructive">{maxOutputTokensError}</p>
+                  )}
+                </div>
 
-            <div className="space-y-1">
-              <label className="text-xs font-medium text-muted-foreground">智能路由档位</label>
-              <div className="flex gap-2">
-                {(["premium", "economy"] as const).map((t) => (
+                <div className="space-y-1">
+                  <ParameterLabel explanation="控制回答的随机性。数值越低越稳定、可复现，适合代码和事实类任务；数值越高越发散，适合创意写作。">
+                    Temperature
+                  </ParameterLabel>
+                  <Input
+                    className="h-8"
+                    type="number"
+                    value={config.temperatureInput}
+                    onChange={(e) => {
+                      setConfig((c) => ({
+                        ...c,
+                        temperatureInput: e.target.value
+                      }))
+                      setTestResult(null)
+                    }}
+                    placeholder={String(tokenLimits.defaultTemperature)}
+                    min={0}
+                    max={tokenLimits.maxTemperature}
+                    step="any"
+                  />
+                  {temperatureError && (
+                    <p className="text-xs text-destructive">{temperatureError}</p>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <ParameterLabel explanation="按累计概率筛选候选词。数值越低越保守，越高越开放；通常和 Temperature 二选一微调即可。">
+                    top_p
+                  </ParameterLabel>
+                  <Input
+                    className="h-8"
+                    type="number"
+                    value={config.topPInput}
+                    onChange={(e) => {
+                      setConfig((c) => ({
+                        ...c,
+                        topPInput: e.target.value
+                      }))
+                      setTestResult(null)
+                    }}
+                    placeholder={String(tokenLimits.defaultTopP)}
+                    min={0}
+                    max={tokenLimits.maxTopP}
+                    step="any"
+                  />
+                  {topPError && <p className="text-xs text-destructive">{topPError}</p>}
+                </div>
+
+                <div className="space-y-1">
+                  <ParameterLabel explanation="每一步只从概率最高的 K 个候选词中采样。数值越小越稳定，越大越多样。">
+                    top_k
+                  </ParameterLabel>
+                  <Input
+                    className="h-8"
+                    type="number"
+                    value={config.topKInput}
+                    onChange={(e) => {
+                      setConfig((c) => ({
+                        ...c,
+                        topKInput: e.target.value
+                      }))
+                      setTestResult(null)
+                    }}
+                    placeholder={String(tokenLimits.defaultTopK)}
+                    min={tokenLimits.minTopK}
+                    max={tokenLimits.maxTopK}
+                  />
+                  {topKError && <p className="text-xs text-destructive">{topKError}</p>}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-muted-foreground">交错思考</label>
+                <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
+                  <div>
+                    <div className="text-sm text-foreground">
+                      {config.interleavedThinking ? "已开启" : "已关闭"}
+                    </div>
+                  </div>
                   <button
-                    key={t}
                     type="button"
-                    onClick={() => setConfig((c) => ({ ...c, tier: t }))}
-                    className={`flex-1 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
-                      config.tier === t
-                        ? "border-primary bg-primary/10 text-primary"
-                        : "border-border text-muted-foreground hover:bg-muted"
+                    role="switch"
+                    aria-checked={config.interleavedThinking}
+                    onClick={() =>
+                      setConfig((c) => ({ ...c, interleavedThinking: !c.interleavedThinking }))
+                    }
+                    className={cn(
+                      "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
+                      config.interleavedThinking ? "bg-primary" : "bg-muted-foreground/30"
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                        config.interleavedThinking ? "translate-x-4" : "translate-x-0"
+                      )}
+                    />
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-muted-foreground">智能路由档位</label>
+                <div className="flex gap-2">
+                  {(["premium", "economy"] as const).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setConfig((c) => ({ ...c, tier: t }))}
+                      className={`flex-1 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+                        config.tier === t
+                          ? "border-primary bg-primary/10 text-primary"
+                          : "border-border text-muted-foreground hover:bg-muted"
+                      }`}
+                    >
+                      {t === "premium" ? "⚡ 强力 — 复杂任务" : "🌿 经济 — 简单任务"}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs leading-tight text-muted-foreground">
+                  开启智能路由后，系统会根据任务复杂度自动选择对应档位的模型
+                </p>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-muted-foreground">默认使用</label>
+                <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
+                  <div>
+                    <div className="text-sm text-foreground">
+                      {isDefaultModel ? "已设为默认" : "未设为默认"}
+                    </div>
+                    <p className="text-xs leading-tight text-muted-foreground">
+                      新开的会话会优先选择这个模型
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={isDefaultModel}
+                    disabled={!config.id}
+                    onClick={() => {
+                      if (!config.id) return
+                      setDefaultModelDraftId(isDefaultModel ? "" : `custom:${config.id}`)
+                    }}
+                    className={cn(
+                      "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors",
+                      !config.id
+                        ? "cursor-not-allowed bg-muted-foreground/20"
+                        : isDefaultModel
+                          ? "cursor-pointer bg-primary"
+                          : "cursor-pointer bg-muted-foreground/30"
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                        isDefaultModel ? "translate-x-4" : "translate-x-0"
+                      )}
+                    />
+                  </button>
+                </div>
+                {!config.id && (
+                  <p className="text-xs leading-tight text-muted-foreground">
+                    先保存模型配置，才能把它设为默认。
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-muted-foreground">API 密钥</label>
+                <div className="relative">
+                  <Input
+                    className="h-8 pr-10"
+                    type={showKey ? "text" : "password"}
+                    value={config.apiKey}
+                    onChange={(e) => {
+                      setConfig((c) => ({ ...c, apiKey: e.target.value }))
+                      setTestResult(null)
+                    }}
+                    placeholder={hasExisting ? "••••••••••••••••" : "sk-..."}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (canToggleKeyVisibility) setShowKey(!showKey)
+                    }}
+                    disabled={!canToggleKeyVisibility}
+                    title={canToggleKeyVisibility ? "显示或隐藏密钥" : "请输入密钥后再切换显示"}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                  </button>
+                </div>
+                <div className="flex items-center gap-2">
+                  <p className="text-xs leading-tight text-muted-foreground">
+                    密钥仅作用于当前模型（按模型 ID 独立保存）。
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="ml-auto shrink-0 h-6 px-2 text-xs border-blue-500/50 text-blue-600 hover:bg-blue-500/10 hover:text-blue-700"
+                    onClick={handleTest}
+                    disabled={!canTest || testing || saving || deleting}
+                  >
+                    {testing ? (
+                      <Loader2 className="size-3 animate-spin" />
+                    ) : (
+                      <Zap className="size-3" />
+                    )}
+                    测试连接
+                  </Button>
+                </div>
+                {testResult && (
+                  <div
+                    className={`rounded-md border px-3 py-2 text-xs ${
+                      testResult.success
+                        ? "border-green-500/40 bg-green-500/10 text-green-700 dark:text-green-400"
+                        : "border-destructive/40 bg-destructive/10 text-destructive"
                     }`}
                   >
-                    {t === "premium" ? "⚡ 强力 — 复杂任务" : "🌿 经济 — 简单任务"}
-                  </button>
-                ))}
+                    {testResult.success
+                      ? `连接成功${testResult.latencyMs != null ? `（延迟 ${testResult.latencyMs} ms）` : ""}`
+                      : `连接失败：${testResult.error || "未知错误"}`}
+                  </div>
+                )}
               </div>
-              <p className="text-xs leading-tight text-muted-foreground">
-                开启智能路由后，系统会根据任务复杂度自动选择对应档位的模型
-              </p>
-            </div>
 
-            <div className="space-y-1">
-              <label className="text-xs font-medium text-muted-foreground">API 密钥</label>
-              <div className="relative">
-                <Input
-                  className="h-8 pr-10"
-                  type={showKey ? "text" : "password"}
-                  value={config.apiKey}
-                  onChange={(e) => {
-                    setConfig((c) => ({ ...c, apiKey: e.target.value }))
-                    setTestResult(null)
-                  }}
-                  placeholder={hasExisting ? "••••••••••••••••" : "sk-..."}
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (canToggleKeyVisibility) setShowKey(!showKey)
-                  }}
-                  disabled={!canToggleKeyVisibility}
-                  title={canToggleKeyVisibility ? "显示或隐藏密钥" : "请输入密钥后再切换显示"}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                </button>
-              </div>
-              <div className="flex items-center gap-2">
-                <p className="text-xs leading-tight text-muted-foreground">
-                  密钥仅作用于当前模型（按模型 ID 独立保存）。
-                </p>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="ml-auto shrink-0 h-6 px-2 text-xs border-blue-500/50 text-blue-600 hover:bg-blue-500/10 hover:text-blue-700"
-                  onClick={handleTest}
-                  disabled={!canTest || testing || saving || deleting}
-                >
-                  {testing ? (
-                    <Loader2 className="size-3 animate-spin" />
-                  ) : (
-                    <Zap className="size-3" />
-                  )}
-                  测试连接
-                </Button>
-              </div>
-              {testResult && (
-                <div
-                  className={`rounded-md border px-3 py-2 text-xs ${
-                    testResult.success
-                      ? "border-green-500/40 bg-green-500/10 text-green-700 dark:text-green-400"
-                      : "border-destructive/40 bg-destructive/10 text-destructive"
-                  }`}
-                >
-                  {testResult.success
-                    ? `连接成功${testResult.latencyMs != null ? `（延迟 ${testResult.latencyMs} ms）` : ""}`
-                    : `连接失败：${testResult.error || "未知错误"}`}
+              {formError && (
+                <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  {formError}
                 </div>
               )}
             </div>
 
-            {formError && (
-              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                {formError}
-              </div>
-            )}
-
-            <div className="flex justify-between pt-1">
+            <div className="flex justify-between pt-3">
               {hasExisting ? (
                 <Button
                   type="button"

@@ -84,7 +84,8 @@ import type {
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitMode,
   AgentAutoCommitResult,
-  AgentAutoCommitSettings
+  AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard
 } from "../../shared/auto-commit-types"
 import type {
   ManagedSavedCodeExecTool,
@@ -96,6 +97,7 @@ import type {
   HarnessArtifactStatus,
   HarnessArtifactType,
   HarnessEventStatus,
+  HarnessFeatureStatus,
   HarnessHookLogView,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
@@ -146,6 +148,7 @@ export type {
   AgentAutoCommitMode,
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard,
   AgentAutoCommitResult
 }
 
@@ -156,6 +159,7 @@ export type {
   HarnessArtifactStatus,
   HarnessArtifactType,
   HarnessEventStatus,
+  HarnessFeatureStatus,
   HarnessHookLogView,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
@@ -339,6 +343,8 @@ export interface SkillMetadata {
   relativePath?: string
   pluginId?: string
   pluginName?: string
+  /** Skill version from SKILL.md frontmatter, defaults to "v1.0.0" */
+  version: string
   license?: string | null
   compatibility?: string | null
   metadata?: Record<string, string>

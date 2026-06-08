@@ -43,20 +43,14 @@ import {
   CheckCircle2,
   PauseCircle,
   PlayCircle,
-  Trash2
+  Trash2,
+  Copy
 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle
-} from "@/components/ui/dialog"
 import { useAppStore } from "@/lib/store"
 import {
   consumePendingHarnessNextAction,
@@ -71,7 +65,7 @@ import {
   useThreadStream,
   useThreadContext,
   type HookLogBucket,
-  type HookLogEntry
+  type ApiErrorDetailState
 } from "@/lib/thread-context"
 import {
   filterCoordinatorNoiseMessages,
@@ -80,6 +74,7 @@ import {
 import { isCoordinatorModeMetadata } from "@/lib/coordinator-mode-helpers"
 import { ModelSwitcher } from "./ModelSwitcher"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
+import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
@@ -104,7 +99,7 @@ import {
   isMarketVersionDifferent,
   marketInstalledVersionStorage,
   MarketUpdateBadge
-} from "@/components/customize/MarketUpdateBadge"
+} from "@/components/customize/MarketPanel/MarketUpdateBadge"
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
@@ -149,7 +144,9 @@ import {
 } from "@/lib/submit-in-flight-lock"
 import { groupWelcomeSkills } from "./skill-grouping"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
+import { WorkspaceTaskCardControl } from "@/components/git/WorkspaceTaskCardControl"
 import { ProcessingDuration } from "./ProcessingDuration"
+import { HookLogChip, HookLogModal } from "./HookLogViews"
 
 type WelcomeSkillCard = {
   skill: SkillMetadata
@@ -883,281 +880,6 @@ function WelcomeSkillTreeList(props: {
   )
 }
 
-/** Status descriptor for an executed log row. */
-function entryStatus(log: HookLogEntry): { ok: boolean; text: string } {
-  if (log.kind === "skipped") {
-    return { ok: false, text: "skipped" }
-  }
-  const ok =
-    !log.blocked && log.continue !== false && log.decision !== "block" && log.exitCode === 0
-  if (ok) return { ok: true, text: "✓" }
-  if (log.continue === false) return { ok: false, text: "终止" }
-  if (log.decision === "block") return { ok: false, text: "修订" }
-  if (log.blocked) return { ok: false, text: "✗ 拦截" }
-  if (log.exitCode === null) return { ok: false, text: "✗ 超时" }
-  return { ok: false, text: `✗ exit=${log.exitCode}` }
-}
-
-function formatSkipReason(reason: string | undefined): string {
-  switch (reason) {
-    case "plugin-not-active":
-      return "skipped — 插件未激活（scope 未包含 pluginId）"
-    case "skill-name-only-shadowed":
-      return "skipped — 同名 skill 被路径作用域屏蔽"
-    case "skill-not-in-scope":
-      return "skipped — skill 未激活"
-    default:
-      return reason ? `skipped — ${reason}` : "skipped"
-  }
-}
-
-/** Small inline pill rendered right under a user message. */
-function HookLogChip({
-  bucket,
-  onClick
-}: {
-  bucket: HookLogBucket
-  onClick: () => void
-}): React.JSX.Element {
-  // Count categories separately so the chip label can't mislead the user into
-  // thinking "Hook 7" means 7 hooks ran when 5 of them were scope-filtered.
-  let executedCount = 0
-  let skippedCount = 0
-  let issueCount = 0
-  for (const l of bucket.entries) {
-    if (l.kind === "skipped") {
-      skippedCount += 1
-      continue
-    }
-    executedCount += 1
-    if (!entryStatus(l).ok) issueCount += 1
-  }
-  // Diagnostic mode with no plugins active can produce buckets where every
-  // entry is "skipped". Showing "Hook 0 · skip 5" reads as a bug; surface the
-  // skip count as the primary label instead so the chip stays honest.
-  const onlySkipped = executedCount === 0 && skippedCount > 0
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-mono transition-colors",
-        issueCount > 0
-          ? "border-amber-400/60 bg-amber-50/60 text-amber-700 hover:bg-amber-100/70 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-300"
-          : "border-border/60 bg-muted/40 text-muted-foreground hover:bg-muted"
-      )}
-      title="点击查看本轮 Hook 执行详情"
-    >
-      <span>⚙</span>
-      {onlySkipped ? (
-        <span>Hook skip {skippedCount}</span>
-      ) : (
-        <>
-          <span>Hook {executedCount}</span>
-          {skippedCount > 0 && (
-            <span className="text-muted-foreground/70">· skip {skippedCount}</span>
-          )}
-        </>
-      )}
-      {issueCount > 0 && (
-        <span className="rounded-full bg-amber-500/20 px-1 text-[10px] text-amber-700 dark:text-amber-300">
-          ⚠{issueCount}
-        </span>
-      )}
-    </button>
-  )
-}
-
-function HookLogEntryRow({ log }: { log: HookLogEntry }): React.JSX.Element {
-  const [expanded, setExpanded] = React.useState(false)
-  const status = entryStatus(log)
-  const showCopy = (): void => {
-    try {
-      void navigator.clipboard.writeText(JSON.stringify(log, null, 2))
-      toast.success("已复制为 JSON")
-    } catch {
-      toast.error("复制失败")
-    }
-  }
-  return (
-    <div className="px-3 py-2 text-xs font-mono">
-      <button
-        type="button"
-        className="flex w-full items-center gap-2 text-left"
-        onClick={() => setExpanded((v) => !v)}
-      >
-        <span className={status.ok ? "text-green-600 dark:text-green-400" : "text-red-500"}>
-          {status.text}
-        </span>
-        <span className="text-foreground/80 font-semibold shrink-0">
-          [{log.event}
-          {log.toolSuffix}]
-        </span>
-        {log.pluginName && (
-          <span className="text-[10px] text-blue-600/70 dark:text-blue-400/70 shrink-0">
-            plugin: {log.pluginName}
-          </span>
-        )}
-        {log.skillName && (
-          <span className="text-[10px] text-purple-600/70 dark:text-purple-400/70 shrink-0">
-            skill: {log.skillName}
-          </span>
-        )}
-        <span className="text-muted-foreground truncate flex-1">
-          {log.hookType}: {log.label}
-        </span>
-        {typeof log.durationMs === "number" && log.kind === "executed" && (
-          <span className="text-[10px] text-muted-foreground/70 shrink-0">{log.durationMs}ms</span>
-        )}
-        <span className="text-[10px] text-muted-foreground/60 shrink-0">
-          {log.timestamp.toLocaleTimeString()}
-        </span>
-        <span className="text-muted-foreground/60 shrink-0">{expanded ? "▲" : "▼"}</span>
-      </button>
-      {expanded && (
-        <div className="pl-4 mt-1.5 space-y-1.5">
-          {log.kind === "skipped" && (
-            <div className="text-[11px] text-muted-foreground italic">
-              {formatSkipReason(log.skipReason)}
-            </div>
-          )}
-          {(log.reason || log.stopReason) && (
-            <LogBlock
-              label={log.stopReason ? "stopReason" : "reason"}
-              text={log.stopReason || log.reason || ""}
-              tone="amber"
-            />
-          )}
-          {log.stdout && <LogBlock label="stdout" text={log.stdout} tone="neutral" />}
-          {log.stderr && <LogBlock label="stderr" text={log.stderr} tone="red" />}
-          {log.additionalContext && (
-            <LogBlock label="additionalContext" text={log.additionalContext} tone="blue" />
-          )}
-          {log.systemMessage && (
-            <LogBlock label="systemMessage" text={log.systemMessage} tone="blue" />
-          )}
-          {log.stdinPayload && (
-            <LogBlock label="stdin (诊断)" text={log.stdinPayload} tone="neutral" />
-          )}
-          {log.command && <LogBlock label="command" text={log.command} tone="neutral" />}
-          {log.cwd && <LogBlock label="cwd" text={log.cwd} tone="neutral" />}
-          {log.hookSourcePath && (
-            <LogBlock label="hookSourcePath" text={log.hookSourcePath} tone="neutral" />
-          )}
-          <div className="flex items-center gap-2 pt-1">
-            <button
-              type="button"
-              onClick={showCopy}
-              className="text-[11px] text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
-            >
-              复制 JSON
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function LogBlock({
-  label,
-  text,
-  tone
-}: {
-  label: string
-  text: string
-  tone: "amber" | "red" | "blue" | "neutral"
-}): React.JSX.Element {
-  const toneClass =
-    tone === "amber"
-      ? "border-amber-300/40 bg-amber-50/40 text-amber-700/90 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300/90"
-      : tone === "red"
-        ? "border-red-300/40 bg-red-50/40 text-red-500/80 dark:border-red-500/30 dark:bg-red-500/10"
-        : tone === "blue"
-          ? "border-blue-300/40 bg-blue-50/40 text-blue-600/90 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300/90"
-          : "border-border/40 bg-background/70 text-muted-foreground"
-  return (
-    <div className="space-y-1">
-      <div className="text-[10px] uppercase tracking-wide text-muted-foreground/70">{label}</div>
-      <div
-        className={cn(
-          "max-h-48 overflow-auto rounded-md border px-2 py-1 whitespace-pre-wrap break-all",
-          toneClass
-        )}
-      >
-        {text}
-      </div>
-    </div>
-  )
-}
-
-/** Modal that shows a single turn's bucket of hook executions. */
-function HookLogModal({
-  bucket,
-  open,
-  onOpenChange
-}: {
-  bucket: HookLogBucket | null
-  open: boolean
-  onOpenChange: (open: boolean) => void
-}): React.JSX.Element {
-  // Memoized so re-rendering the modal while the bucket grows doesn't reshuffle
-  // collapsed/expanded child state.
-  const entries = bucket?.entries ?? []
-  const exportJsonl = React.useCallback((): void => {
-    if (!bucket) return
-    const text = entries.map((e) => JSON.stringify(e)).join("\n")
-    const blob = new Blob([text], { type: "application/jsonl" })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.href = url
-    a.download = `hook-logs-${bucket.turnId}.jsonl`
-    a.click()
-    URL.revokeObjectURL(url)
-  }, [bucket, entries])
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[80vh] flex flex-col p-0">
-        <DialogHeader className="px-5 pt-5 pb-3 border-b border-border/60">
-          <DialogTitle className="flex items-center gap-2 text-base">
-            <span>Hook 执行记录</span>
-            <span className="text-xs font-normal text-muted-foreground">
-              · 此轮 {entries.length} 次
-            </span>
-          </DialogTitle>
-          {bucket?.turnPreview && (
-            <DialogDescription className="line-clamp-2 text-xs">
-              用户消息：{bucket.turnPreview}
-            </DialogDescription>
-          )}
-        </DialogHeader>
-        <div className="flex items-center gap-2 px-5 py-2 border-b border-border/40 text-xs">
-          <button
-            type="button"
-            onClick={exportJsonl}
-            disabled={entries.length === 0}
-            className="text-muted-foreground hover:text-foreground underline-offset-2 hover:underline disabled:opacity-40 disabled:no-underline"
-          >
-            导出为 .jsonl
-          </button>
-          <span className="ml-auto text-[11px] text-muted-foreground/70">
-            调试日志写到 stderr；stdout 输出 JSON 会被当作 Hook 返回值解析
-          </span>
-        </div>
-        <div className="flex-1 overflow-auto divide-y divide-border/30">
-          {entries.length === 0 ? (
-            <div className="px-5 py-6 text-center text-xs text-muted-foreground">
-              本轮暂无 Hook 执行记录
-            </div>
-          ) : (
-            entries.map((log) => <HookLogEntryRow key={log.id} log={log} />)
-          )}
-        </div>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
 interface AgentStreamValues {
   todos?: Array<{ id?: string; content?: string; status?: string }>
 }
@@ -1518,6 +1240,153 @@ function DialogTipsMarkdown({ content }: { content: string }): React.JSX.Element
   )
 }
 
+/**
+ * Error card shown when a turn fails. Renders a friendly summary (status label +
+ * real reason + hint) with an expandable "显示详情" section carrying the
+ * diagnostics needed to locate the cause: status code, error code, request id
+ * (copyable), failover chain, and the raw response body.
+ */
+function ChatErrorCard({
+  error,
+  detail,
+  onDismiss
+}: {
+  error: string
+  detail: ApiErrorDetailState | null
+  onDismiss: () => void
+}): React.JSX.Element {
+  const [showDetails, setShowDetails] = useState(false)
+
+  const title = detail?.statusLabel
+    ? `${detail.statusLabel}${detail.status ? `（${detail.status}）` : ""}`
+    : "代理出错"
+  const reason = (detail?.reason || error || "").trim()
+  const hint = detail?.hint
+  const hasDetails = Boolean(
+    detail &&
+      (detail.status != null ||
+        detail.requestId ||
+        detail.code ||
+        detail.model ||
+        (detail.failover && detail.failover.length > 0) ||
+        detail.rawBody)
+  )
+
+  const copy = (text: string): void => {
+    navigator.clipboard?.writeText(text).then(
+      () => toast.success("已复制"),
+      () => toast.error("复制失败")
+    )
+  }
+
+  return (
+    <div className="flex items-start gap-3 rounded-md border border-destructive/50 bg-destructive/10 p-4">
+      <AlertCircle className="size-5 text-destructive shrink-0 mt-0.5" />
+      <div className="flex-1 min-w-0">
+        <div className="font-medium text-destructive text-sm">{title}</div>
+        {reason && (
+          <div className="text-sm text-muted-foreground mt-1 break-words whitespace-pre-wrap">
+            {reason}
+          </div>
+        )}
+        {hint && <div className="text-xs text-muted-foreground/90 mt-1">{hint}</div>}
+
+        {hasDetails && (
+          <>
+            <button
+              onClick={() => setShowDetails((v) => !v)}
+              className="mt-2 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              {showDetails ? (
+                <ChevronUp className="size-3" />
+              ) : (
+                <ChevronDown className="size-3" />
+              )}
+              {showDetails ? "隐藏详情" : "显示详情"}
+            </button>
+
+            {showDetails && (
+              <div className="mt-2 space-y-1.5 rounded border border-border/60 bg-background/40 p-2 text-xs text-muted-foreground">
+                {detail?.status != null && (
+                  <div className="flex gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">状态码</span>
+                    <span className="font-mono">{detail.status}</span>
+                  </div>
+                )}
+                {detail?.code && (
+                  <div className="flex gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">错误码</span>
+                    <span className="font-mono break-all">{detail.code}</span>
+                  </div>
+                )}
+                {detail?.requestId && (
+                  <div className="flex items-center gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">请求 ID</span>
+                    <span className="font-mono break-all flex-1 min-w-0">{detail.requestId}</span>
+                    <button
+                      onClick={() => copy(detail.requestId!)}
+                      className="shrink-0 rounded p-0.5 hover:bg-muted transition-colors"
+                      aria-label="Copy request id"
+                    >
+                      <Copy className="size-3" />
+                    </button>
+                  </div>
+                )}
+                {detail?.model && (
+                  <div className="flex gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">模型</span>
+                    <span className="font-mono break-all">{detail.model}</span>
+                  </div>
+                )}
+                {detail?.failover && detail.failover.length > 0 && (
+                  <div className="flex gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">故障转移</span>
+                    <ul className="flex-1 min-w-0 space-y-0.5">
+                      {detail.failover.map((f, i) => (
+                        <li key={`${f.modelId}-${i}`} className="break-words">
+                          <span className="font-mono">{f.modelId}</span>：{f.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {detail?.rawBody && (
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-muted-foreground/70">原始响应</span>
+                      <button
+                        onClick={() => copy(detail.rawBody!)}
+                        className="rounded p-0.5 hover:bg-muted transition-colors"
+                        aria-label="Copy raw response body"
+                      >
+                        <Copy className="size-3" />
+                      </button>
+                    </div>
+                    <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-1.5 font-mono text-[11px]">
+                      {detail.rawBody}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        )}
+
+        <div className="text-xs text-muted-foreground mt-2">
+          你可以尝试发送新消息继续对话。
+        </div>
+      </div>
+      <button
+        onClick={onDismiss}
+        className="shrink-0 rounded p-1 hover:bg-destructive/20 transition-colors"
+        aria-label="Dismiss error"
+      >
+        <X className="size-4 text-muted-foreground" />
+      </button>
+    </div>
+  )
+}
+
 export function ChatContainer({
   threadId,
   showGitChangeNotice = false,
@@ -1670,6 +1539,10 @@ export function ChatContainer({
     () => getHarnessFeatureBinding(currentThread),
     [currentThread]
   )
+  const disableCoordinatorModeOption =
+    surface === "harness-project" ||
+    surface === "harness-feature-session" ||
+    Boolean(harnessFeatureBinding)
   const pendingHarnessNextActionVersion = useSyncExternalStore(
     subscribePendingHarnessNextActions,
     getPendingHarnessNextActionVersion,
@@ -1731,6 +1604,9 @@ export function ChatContainer({
 
   const resolveAgentMode = useCallback(
     async (metadata: Record<string, unknown>): Promise<ChatAgentMode> => {
+      if (disableCoordinatorModeOption) {
+        return "normal"
+      }
       if (isCoordinatorModeMetadata(metadata)) {
         return "coordinator"
       }
@@ -1742,7 +1618,7 @@ export function ChatContainer({
         })
       return environmentForcedCoordinator ? "coordinator" : "normal"
     },
-    []
+    [disableCoordinatorModeOption]
   )
 
   const loadResolvedAgentMode = useCallback(async (): Promise<ChatAgentMode> => {
@@ -1759,9 +1635,10 @@ export function ChatContainer({
   useEffect(() => {
     let cancelled = false
     const currentThread = threads.find((thread) => thread.thread_id === threadId)
-    const metadataDerivedMode: ChatAgentMode = isCoordinatorModeMetadata(currentThread?.metadata)
-      ? "coordinator"
-      : "normal"
+    const metadataDerivedMode: ChatAgentMode =
+      !disableCoordinatorModeOption && isCoordinatorModeMetadata(currentThread?.metadata)
+        ? "coordinator"
+        : "normal"
     setAgentMode(metadataDerivedMode)
     agentModeHydratedRef.current = metadataDerivedMode === "coordinator"
 
@@ -1777,7 +1654,7 @@ export function ChatContainer({
     return () => {
       cancelled = true
     }
-  }, [threadId, threads, loadResolvedAgentMode])
+  }, [threadId, threads, loadResolvedAgentMode, disableCoordinatorModeOption])
 
   const allSkillsRef = useRef<MarketItem[]>([])
   const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
@@ -1956,6 +1833,7 @@ export function ChatContainer({
     pendingUserInput,
     todos,
     error: threadError,
+    errorDetail,
     hookInterruption,
     workspacePath,
     tokenUsage,
@@ -2025,16 +1903,8 @@ export function ChatContainer({
     ? (hookLogBucketByTurnId.get(openHookLogBucketId) ?? null)
     : null
 
-  const canChangeAgentMode = threadMessages.length === 0
-  const [savedToolNameInput, setSavedToolNameInput] = useState("")
-  const [savedToolDescriptionInput, setSavedToolDescriptionInput] = useState("")
-  const [saveToolMetadataLoading, setSaveToolMetadataLoading] = useState(false)
-  const [saveToolMetadataLoadingThreadId, setSaveToolMetadataLoadingThreadId] = useState<
-    string | null
-  >(null)
+  const canChangeAgentMode = !historyLoading && threadMessages.length === 0
   const queuedApprovalCount = Math.max(0, pendingApprovals.length - 1)
-  const showSaveToolMetadataLoading =
-    saveToolMetadataLoading && saveToolMetadataLoadingThreadId === threadId
 
   useEffect(() => {
     if (!goalUi.goal) {
@@ -2042,55 +1912,42 @@ export function ChatContainer({
     }
   }, [goalUi.goal])
 
-  useEffect(() => {
-    const approval = pendingApproval as unknown as Record<string, unknown> | null
-    if (approval?.operation === "save_code_exec_tool") {
-      setSaveToolMetadataLoading(false)
-      setSaveToolMetadataLoadingThreadId(null)
-      setSavedToolNameInput(
-        String(
-          approval.savedToolName ||
-            approval.savedToolId ||
-            pendingApproval?.tool_call?.args?.toolId ||
-            ""
-        )
-      )
-      setSavedToolDescriptionInput(String(approval.savedToolDescription || ""))
-      return
-    }
-
-    if (pendingApproval && approval?.operation !== "prepare_save_code_exec_tool") {
-      setSaveToolMetadataLoading(false)
-      setSaveToolMetadataLoadingThreadId(null)
-    }
-
-    setSavedToolNameInput("")
-    setSavedToolDescriptionInput("")
-  }, [pendingApproval])
   const hasRunningCoordinatorWorker = coordinatorWorkers.some(
     (worker) => worker.status === "running"
   )
   const isLoading = streamData.isLoading || scheduledTaskLoading
-  const agentModeSwitchDisabledReason = !canChangeAgentMode
-    ? "当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。"
-    : isLoading
-      ? "当前请求执行中，暂时不能切换执行模式。"
-      : undefined
+  const agentModeSwitchDisabledReason = disableCoordinatorModeOption
+    ? "项目模式暂不支持子代理协同模式，只能使用 Solo Agent。"
+    : !canChangeAgentMode
+      ? historyLoading
+        ? "会话历史加载中，暂时不能切换执行模式。"
+        : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
+      : isLoading
+        ? "当前请求执行中，结束后才能切换执行模式。"
+        : undefined
 
   const handleAgentModeChange = useCallback(
     (nextMode: ChatAgentMode): void => {
       const previousMode = agentMode
       void (async () => {
+        if (disableCoordinatorModeOption && nextMode === "coordinator") {
+          toast.error("项目模式暂不支持子代理协同模式，只能使用 Solo Agent。")
+          return
+        }
+        if (historyLoading) {
+          toast.error("会话历史加载中，暂时不能切换执行模式。")
+          return
+        }
         if (threadMessages.length > 0) {
           toast.error("当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。")
           return
         }
-        if (nextMode === "normal") {
+        if (nextMode === "normal" && !disableCoordinatorModeOption) {
           const isEnvironmentForcedCoordinator = await window.api.agent
             .isCoordinatorModeForced()
             .catch(() => false)
           if (isEnvironmentForcedCoordinator) {
-            toast.error("当前环境变量强制开启协同模式，不能切回普通模式")
+            toast.error("当前环境变量强制开启 Agent Team，不能切回 Solo Agent")
             return
           }
           const [workers, hasPendingNotifications] = await Promise.all([
@@ -2104,7 +1961,7 @@ export function ChatContainer({
           )
           if (hasRemoteUnresolvedWorkers || hasPendingNotifications) {
             toast.error(
-              "仍有协同 worker 在运行或结果待处理，请先在协同模式处理完成后再切回普通模式"
+              "仍有 Agent Team worker 在运行或结果待处理，请先处理完成后再切回 Solo Agent"
             )
             return
           }
@@ -2128,7 +1985,14 @@ export function ChatContainer({
         toast.error("Agent 模式保存失败，请重试")
       })
     },
-    [agentMode, threadId, threadMessages, updateThread]
+    [
+      agentMode,
+      disableCoordinatorModeOption,
+      historyLoading,
+      threadId,
+      threadMessages,
+      updateThread
+    ]
   )
   const userInputScrollPadding = pendingUserInput
     ? Math.ceil((userInputDialogLayout?.height ?? 320) + 24)
@@ -2493,33 +2357,12 @@ export function ChatContainer({
       // Check if this is an orchestrator-sourced approval (has requestId)
       const approvalAny = pendingApproval as unknown as Record<string, unknown>
       if (approvalAny._orchestratorRequestId) {
-        const operation = approvalAny.operation as string | undefined
-        const keepPrepareApprovalForSaveMetadata =
-          operation === "prepare_save_code_exec_tool" && decision === "approve"
-        if (keepPrepareApprovalForSaveMetadata) {
-          setSaveToolMetadataLoading(true)
-          setSaveToolMetadataLoadingThreadId(threadId)
-        } else {
-          setSaveToolMetadataLoading(false)
-          setSaveToolMetadataLoadingThreadId(null)
-        }
-
         // Send decision to main process via the orchestrator's IPC channel
         window.api.sandbox.sendApprovalDecision({
           requestId: approvalAny._orchestratorRequestId as string,
           type: decision === "edit" ? "reject" : decision,
-          tool_call_id: pendingApproval.tool_call?.id || "",
-          ...(approvalAny.operation === "save_code_exec_tool" && decision === "approve"
-            ? { savedToolName: savedToolNameInput }
-            : {}),
-          ...(approvalAny.operation === "save_code_exec_tool" && decision === "approve"
-            ? { savedToolDescription: savedToolDescriptionInput }
-            : {})
+          tool_call_id: pendingApproval.tool_call?.id || ""
         })
-        if (!keepPrepareApprovalForSaveMetadata) {
-          setSaveToolMetadataLoading(false)
-          setSaveToolMetadataLoadingThreadId(null)
-        }
         setToolCallState(pendingApproval.tool_call?.id || "", {
           status:
             decision === "approve" ||
@@ -2528,9 +2371,7 @@ export function ChatContainer({
               ? "running"
               : "rejected"
         })
-        if (!keepPrepareApprovalForSaveMetadata) {
-          removePendingApproval(pendingApproval.id)
-        }
+        removePendingApproval(pendingApproval.id)
         return
       }
 
@@ -2576,8 +2417,6 @@ export function ChatContainer({
       pendingApproval,
       setToolCallState,
       removePendingApproval,
-      savedToolDescriptionInput,
-      savedToolNameInput,
       stream,
       threadId
     ]
@@ -2677,6 +2516,15 @@ export function ChatContainer({
     })
     return filterCoordinatorNoiseMessages(cleanedMessages)
   }, [threadMessages, streamData.liveMessages])
+
+  const detachedHookLogBuckets = useMemo(() => {
+    const userMessageIds = new Set(
+      displayMessages.filter((message) => message.role === "user").map((message) => message.id)
+    )
+    return hookLogBuckets.filter(
+      (bucket) => bucket.entries.length > 0 && !userMessageIds.has(bucket.turnId)
+    )
+  }, [displayMessages, hookLogBuckets])
 
   const lastContentMessageId = useMemo(() => {
     for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
@@ -3208,7 +3056,6 @@ export function ChatContainer({
                 tool_call_id: pendingApproval.tool_call?.id || ""
               })
             }
-            setSaveToolMetadataLoading(false)
             setPendingApproval(null)
           }
         } catch (error) {
@@ -3227,7 +3074,6 @@ export function ChatContainer({
       isLoading,
       pendingApproval,
       refreshGoalUi,
-      setSaveToolMetadataLoading,
       setError,
       setPendingApproval,
       showGoalControlNotice,
@@ -3315,7 +3161,6 @@ export function ChatContainer({
               tool_call_id: approval.tool_call?.id || ""
             })
           }
-          setSaveToolMetadataLoading(false)
           setPendingApproval(null)
         }
       } finally {
@@ -3361,7 +3206,9 @@ export function ChatContainer({
         }
       }
 
-      if (threadError) {
+      // Reset both the error message and its structured detail at turn start so
+      // no stale diagnostics linger into the new turn.
+      if (threadError || errorDetail) {
         clearError()
       }
 
@@ -3463,10 +3310,14 @@ export function ChatContainer({
         displayContent = `用户输入的普通文本：\n\n${displayContent}`
       }
 
-      const coordinatorPrefixed = /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(
-        fullMessage
-      )
-      let submitAgentMode: ChatAgentMode = coordinatorPrefixed ? "coordinator" : agentMode
+      const coordinatorPrefixed =
+        !disableCoordinatorModeOption &&
+        /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(fullMessage)
+      let submitAgentMode: ChatAgentMode = disableCoordinatorModeOption
+        ? "normal"
+        : coordinatorPrefixed
+          ? "coordinator"
+          : agentMode
       if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
         submitAgentMode = await loadResolvedAgentMode().catch((error) => {
           console.warn("[ChatContainer] Failed to resolve submit agent mode:", error)
@@ -3477,7 +3328,10 @@ export function ChatContainer({
           setAgentMode(submitAgentMode)
         }
       }
-      if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
+      if (disableCoordinatorModeOption && agentMode !== "normal") {
+        agentModeHydratedRef.current = true
+        setAgentMode("normal")
+      } else if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
         agentModeHydratedRef.current = true
         setAgentMode("coordinator")
       }
@@ -4848,22 +4702,21 @@ export function ChatContainer({
             {/*
               Hook log chips now live under each user message above. The modal
               is mounted once at component scope below so it's not bound to a
-              specific message render. The background-events bucket (no turn
-              id) has no user message to attach to, so render its chip here.
+              specific message render. Buckets without a visible user message
+              (session lifecycle, worker auto-turns, older placeholders) render
+              their chips here.
             */}
-            {hookLogConfig.enabled &&
-              (() => {
-                const bg = hookLogBucketByTurnId.get("__background__")
-                if (!bg || bg.entries.length === 0) return null
-                return (
-                  <div className="flex justify-start mt-1">
-                    <HookLogChip
-                      bucket={bg}
-                      onClick={() => setOpenHookLogBucketId("__background__")}
-                    />
-                  </div>
-                )
-              })()}
+            {hookLogConfig.enabled && detachedHookLogBuckets.length > 0 && (
+              <div className="flex flex-wrap justify-start gap-2 mt-1">
+                {detachedHookLogBuckets.map((bucket) => (
+                  <HookLogChip
+                    key={bucket.turnId}
+                    bucket={bucket}
+                    onClick={() => setOpenHookLogBucketId(bucket.turnId)}
+                  />
+                ))}
+              </div>
+            )}
 
             {/* Orchestrator standalone approval bar moved outside ScrollArea — see below */}
             {/* Model retry indicator — shown when the fetch layer is retrying a transient error */}
@@ -4940,55 +4793,27 @@ export function ChatContainer({
             )}
             {/* Error state */}
             {threadError && !isLoading && (
-              <div className="flex items-start gap-3 rounded-md border border-destructive/50 bg-destructive/10 p-4">
-                <AlertCircle className="size-5 text-destructive shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  <div className="font-medium text-destructive text-sm">代理出错</div>
-                  <div className="text-sm text-muted-foreground mt-1 break-words">
-                    {threadError}
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-2">
-                    你可以尝试发送新消息继续对话。
-                  </div>
-                </div>
-                <button
-                  onClick={handleDismissError}
-                  className="shrink-0 rounded p-1 hover:bg-destructive/20 transition-colors"
-                  aria-label="Dismiss error"
-                >
-                  <X className="size-4 text-muted-foreground" />
-                </button>
-              </div>
+              <ChatErrorCard
+                error={threadError}
+                detail={errorDetail}
+                onDismiss={handleDismissError}
+              />
             )}
                 </div>
               </div>
             </ScrollArea>
             {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
-            {(showSaveToolMetadataLoading ||
-              (pendingApproval &&
-                Boolean(
-                  (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId
-                ))) && (
+            {pendingApproval &&
+              Boolean(
+                (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId
+              ) && (
               <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>
-          {showSaveToolMetadataLoading && (
-            <div className="max-w-3xl mx-auto mb-2 flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-700 shadow-sm dark:text-emerald-300">
-              <Loader2 className="size-3.5 animate-spin" />
-              正在改写脚本并生成工具信息...
-            </div>
-          )}
-          {pendingApproval &&
-            Boolean(
-              (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId
-            ) &&
-            (() => {
+          {(() => {
               const approval = pendingApproval as unknown as Record<string, unknown>
               const operation = approval.operation
               const isFileApproval = operation === "write_file" || operation === "edit_file"
               const isCodeExecApproval = operation === "code_exec"
-              const isPrepareSaveCodeExecToolApproval = operation === "prepare_save_code_exec_tool"
               const isSaveCodeExecToolApproval = operation === "save_code_exec_tool"
-              const isManualSaveCodeExecToolApproval =
-                isSaveCodeExecToolApproval && Boolean(approval.savedToolMetadataError)
               const approvalParams =
                 approval.params ?? pendingApproval.tool_call?.args?.params ?? {}
               const hasApprovalParams =
@@ -4996,9 +4821,6 @@ export function ChatContainer({
                 typeof approvalParams === "object" &&
                 !Array.isArray(approvalParams) &&
                 Object.keys(approvalParams as Record<string, unknown>).length > 0
-              const isSaveToolApprovalInvalid =
-                isSaveCodeExecToolApproval &&
-                (!savedToolNameInput.trim() || !savedToolDescriptionInput.trim())
               const approvalTypes = Array.isArray(approval._approvalTypes)
                 ? (approval._approvalTypes as Array<
                     "approve" | "approve_session" | "approve_permanent" | "reject"
@@ -5010,9 +4832,7 @@ export function ChatContainer({
                   className={`max-w-3xl mx-auto rounded-lg border-2 p-4 space-y-3 ${
                     isFileApproval
                       ? "border-blue-500/50 bg-blue-500/5"
-                      : isCodeExecApproval ||
-                          isPrepareSaveCodeExecToolApproval ||
-                          isSaveCodeExecToolApproval
+                      : isCodeExecApproval || isSaveCodeExecToolApproval
                         ? "border-emerald-500/50 bg-emerald-500/5"
                         : "border-amber-500/50 bg-amber-500/5"
                   }`}
@@ -5022,8 +4842,6 @@ export function ChatContainer({
                       <FilePenLine className="size-4 text-blue-500" />
                     ) : isCodeExecApproval ? (
                       <Code2 className="size-4 text-emerald-500" />
-                    ) : isPrepareSaveCodeExecToolApproval ? (
-                      <Wrench className="size-4 text-emerald-500" />
                     ) : isSaveCodeExecToolApproval ? (
                       <Wrench className="size-4 text-emerald-500" />
                     ) : (
@@ -5036,11 +4854,9 @@ export function ChatContainer({
                           ? "编辑文件需要审批"
                           : isCodeExecApproval
                             ? "编程式工具调用"
-                            : isPrepareSaveCodeExecToolApproval
-                              ? "改写脚本以注册为工具，便于复用"
-                              : isSaveCodeExecToolApproval
-                                ? "注册工具需要确认"
-                                : "命令需要审批"}
+                            : isSaveCodeExecToolApproval
+                              ? "编程式工具调用"
+                              : "命令需要审批"}
                     </span>
                     {queuedApprovalCount > 0 && (
                       <span className="text-xs text-muted-foreground">
@@ -5048,27 +4864,21 @@ export function ChatContainer({
                       </span>
                     )}
                   </div>
-                  {isCodeExecApproval ||
-                  isPrepareSaveCodeExecToolApproval ||
-                  isSaveCodeExecToolApproval ? (
+                  {isCodeExecApproval || isSaveCodeExecToolApproval ? (
                     <>
                       {isSaveCodeExecToolApproval && (
                         <div className="grid gap-2 md:grid-cols-2">
                           <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
                             <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                              工具名称
+                              工具 ID
                             </div>
-                            <div className="font-mono break-all">{savedToolNameInput || "-"}</div>
-                          </div>
-                          <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
-                            <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                              工具描述
+                            <div className="font-mono break-all">
+                              {String(
+                                approval.savedToolId ||
+                                  pendingApproval.tool_call?.args?.toolId ||
+                                  "-"
+                              )}
                             </div>
-                            <textarea
-                              className="min-h-12 w-full resize-y rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary"
-                              value={savedToolDescriptionInput}
-                              onChange={(event) => setSavedToolDescriptionInput(event.target.value)}
-                            />
                           </div>
                         </div>
                       )}
@@ -5107,11 +4917,9 @@ export function ChatContainer({
                       {String(approval._retryReason)}
                     </div>
                   )}
-                  {(Boolean(approval.reason) || isManualSaveCodeExecToolApproval) && (
+                  {Boolean(approval.reason) && (
                     <div className="text-xs text-muted-foreground">
-                      {isManualSaveCodeExecToolApproval
-                        ? `原因：工具注册失败（${String(approval.savedToolMetadataError)}）`
-                        : `原因：${String(approval.reason)}`}
+                      {`原因：${String(approval.reason)}`}
                     </div>
                   )}
                   <div className="flex items-center gap-2">
@@ -5132,60 +4940,43 @@ export function ChatContainer({
                       </>
                     ) : (
                       <>
-                        {isPrepareSaveCodeExecToolApproval && showSaveToolMetadataLoading ? (
-                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                            <Loader2 className="size-4 animate-spin" />
-                            正在生成工具信息，请稍候...
-                          </div>
-                        ) : (
-                          <>
-                            {approvalTypes.includes("approve") && (
-                              <button
-                                className={cn(
-                                  "rounded-md px-4 py-2 text-sm font-semibold shadow-sm transition-colors",
-                                  isSaveToolApprovalInvalid
-                                    ? "bg-primary/50 text-primary-foreground/80 cursor-not-allowed"
-                                    : "bg-primary text-primary-foreground hover:bg-primary/90"
-                                )}
-                                onClick={() => handleApprovalDecision("approve")}
-                                disabled={isSaveToolApprovalInvalid}
-                              >
-                                {isFileApproval
-                                  ? "允许"
-                                  : isCodeExecApproval
-                                    ? "执行脚本"
-                                    : isPrepareSaveCodeExecToolApproval
-                                      ? "允许"
-                                      : isSaveCodeExecToolApproval
-                                        ? "保存"
-                                        : "运行"}
-                              </button>
-                            )}
-                            {approvalTypes.includes("approve_session") && (
-                              <button
-                                className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700"
-                                onClick={() => handleApprovalDecision("approve_session")}
-                              >
-                                本会话允许
-                              </button>
-                            )}
-                            {approvalTypes.includes("approve_permanent") && (
-                              <button
-                                className="rounded-md bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-green-700"
-                                onClick={() => handleApprovalDecision("approve_permanent")}
-                              >
-                                始终允许
-                              </button>
-                            )}
-                            {approvalTypes.includes("reject") && (
-                              <button
-                                className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/15"
-                                onClick={() => handleApprovalDecision("reject")}
-                              >
-                                拒绝
-                              </button>
-                            )}
-                          </>
+                        {approvalTypes.includes("approve") && (
+                          <button
+                            className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
+                            onClick={() => handleApprovalDecision("approve")}
+                          >
+                            {isFileApproval
+                              ? "允许"
+                              : isCodeExecApproval
+                                ? "执行脚本"
+                                : isSaveCodeExecToolApproval
+                                  ? "保存草稿"
+                                  : "运行"}
+                          </button>
+                        )}
+                        {approvalTypes.includes("approve_session") && (
+                          <button
+                            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700"
+                            onClick={() => handleApprovalDecision("approve_session")}
+                          >
+                            本会话允许
+                          </button>
+                        )}
+                        {approvalTypes.includes("approve_permanent") && (
+                          <button
+                            className="rounded-md bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-green-700"
+                            onClick={() => handleApprovalDecision("approve_permanent")}
+                          >
+                            始终允许
+                          </button>
+                        )}
+                        {approvalTypes.includes("reject") && (
+                          <button
+                            className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/15"
+                            onClick={() => handleApprovalDecision("reject")}
+                          >
+                            拒绝
+                          </button>
                         )}
                       </>
                     )}
@@ -5362,9 +5153,9 @@ export function ChatContainer({
                     <ModelSwitcher threadId={threadId} />
                     <div className="w-px h-4 bg-border mx-1" />
                     <AgentModeSwitcher
-                      mode={agentMode}
-                      disabled={isLoading || !canChangeAgentMode}
-                      disabledReason={agentModeSwitchDisabledReason}
+                      mode={disableCoordinatorModeOption ? "normal" : agentMode}
+                      locked={disableCoordinatorModeOption || isLoading || !canChangeAgentMode}
+                      lockedReason={agentModeSwitchDisabledReason}
                       onChange={handleAgentModeChange}
                     />
                     <div className="w-px h-4 bg-border mx-1" />
@@ -5457,9 +5248,9 @@ export function ChatContainer({
                 />
               </div>
             </div>
-            {/*chat container bottom panel — moved inside input box above */}
+            {/*chat container bottom panel */}
             <div className={"flex items-center justify-between"}>
-              <div className={"flex items-center space-x-4"}>
+              <div className={"flex items-center gap-2"}>
                 {yoloMode && (
                   <button
                     type="button"
@@ -5471,6 +5262,9 @@ export function ChatContainer({
                     YOLO
                   </button>
                 )}
+                <SandboxModeSwitcher
+                  onOpenSettings={() => setShowCustomizeView(true, "sandbox")}
+                />
                 {tokenUsage && (
                   <ContextUsageIndicator
                     tokenUsage={tokenUsage}
@@ -5481,6 +5275,7 @@ export function ChatContainer({
               </div>
               <div className="flex min-w-0 items-center gap-2">
                 <GitBranchSwitcher workspacePath={workspacePath} />
+                <WorkspaceTaskCardControl workspacePath={workspacePath} />
               </div>
             </div>
           </div>

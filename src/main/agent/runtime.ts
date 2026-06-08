@@ -106,6 +106,8 @@ import {
 import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
   createHookScope,
+  createInheritedHookScope,
+  resolvePluginIdForSkillPath,
   extractPluginIdFromProviderKey,
   resolveEnabledHooksForRun,
   type ScopeSkipCallback,
@@ -254,7 +256,6 @@ type ToolConcurrencyTier = "exclusive" | "shared" | "bypass"
  */
 const EXCLUSIVE_TOOL_NAMES = new Set([
   "code_exec",
-  "prepare_save_code_exec_tool",
   "save_code_exec_tool",
   "browser_playwright",
   "manage_scheduler",
@@ -1727,12 +1728,27 @@ export interface ModelRetryInfo {
   delayMs: number
 }
 
+/** Raw error response captured at the fetch layer, before the SDK parses it. */
+export interface FetchErrorInfo {
+  /** HTTP status of the failing response (485, 432, …). */
+  status: number
+  /** Upstream request id (x-request-id), when present. */
+  requestId?: string
+  /** Raw response body text — the only schema-independent source of the real
+   *  reason. Surfaced even when the SDK drops a non-OpenAI error envelope. */
+  rawBody?: string
+}
+
 /** Hooks invoked by the retrying fetch wrapper so the UI can display/clear status. */
 export interface ModelRetryHooks {
   onRetry?: (info: ModelRetryInfo) => void
   /** Called when a retry attempt succeeds (fetch returns a non-retryable response).
    *  The UI should clear the retry indicator immediately on this callback. */
   onRetrySuccess?: () => void
+  /** Called when a non-retryable error HTTP response (>= 400) is about to be
+   *  handed back to the SDK. Carries the raw body so the upper layer can show
+   *  the real reason regardless of the body schema. */
+  onFetchError?: (info: FetchErrorInfo) => void
 }
 
 /**
@@ -1758,6 +1774,23 @@ function createRetryingFetch(
   return async (input, init) => {
     const parentSignal = (init?.signal ?? undefined) as AbortSignal | undefined
     let lastError: unknown = undefined
+
+    // Capture the raw error body before the SDK consumes it. The OpenAI SDK only
+    // preserves a body that matches the `{error:{…}}` envelope, so for custom
+    // gateway codes (480/485/…) or non-OpenAI bodies this clone is the only place
+    // the real reason survives. Called both for non-retryable statuses and when
+    // the retry budget is exhausted on a retryable status (432/433/429/5xx).
+    const captureFetchError = async (res: Response): Promise<void> => {
+      if (res.status < 400 || !hooks?.onFetchError) return
+      const requestId = res.headers.get("x-request-id") ?? undefined
+      try {
+        const rawBody = await res.clone().text()
+        hooks.onFetchError({ status: res.status, requestId, rawBody })
+      } catch {
+        // Body capture is best-effort — never block the real response.
+        hooks.onFetchError({ status: res.status, requestId })
+      }
+    }
 
     for (let attempt = 1; attempt <= totalAttempts; attempt++) {
       if (parentSignal?.aborted) throw new DOMException("Aborted", "AbortError")
@@ -1792,6 +1825,7 @@ function createRetryingFetch(
 
         // Success or non-retryable error — return as-is.
         if (!isRetryableStatus(res.status)) {
+          await captureFetchError(res)
           // If this is a successful retry (not the first attempt), notify the UI
           // so the retry indicator can be cleared immediately.
           if (attempt > 1) hooks?.onRetrySuccess?.()
@@ -1799,7 +1833,12 @@ function createRetryingFetch(
         }
 
         // Retryable HTTP status.
-        if (attempt >= totalAttempts) return res // exhausted — return so caller sees the real status
+        if (attempt >= totalAttempts) {
+          // Retry budget exhausted — capture the body so the real reason still
+          // reaches the UI, then return so the caller sees the real status.
+          await captureFetchError(res)
+          return res
+        }
 
         // Drain body to free the connection before retrying.
         try {
@@ -2182,6 +2221,14 @@ export interface CreateAgentRuntimeOptions {
   maxRetryAttempts?: number
   /** Callback invoked after each hook executes — used to emit results to the renderer. */
   onHookResult?: HookResultCallback
+  /**
+   * Hook-result sink for coordinator workers. Workers run detached/async so
+   * their hooks must be delivered on a durable channel rather than the spawning
+   * turn's run stream (which `onHookResult` targets and which closes when the
+   * turn ends). When set, coordinator workers use this instead of `onHookResult`
+   * for all hook records; falls back to `onHookResult` when unset.
+   */
+  onCoordinatorWorkerHookResult?: HookResultCallback
   /** Coordinator async worker updates for renderer/UI observability. */
   onCoordinatorWorkerEvent?: (event: {
     worker: CoordinatorWorkerSnapshot
@@ -2232,6 +2279,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     agentMode = "normal",
     disableSubagents = false,
     onHookResult,
+    onCoordinatorWorkerHookResult,
     onCoordinatorWorkerEvent,
     onCoordinatorNotificationAction,
     hookTurnId,
@@ -2259,6 +2307,18 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Workspace path:", workspacePath)
   console.log("[Runtime] Agent mode:", agentMode)
   const hookScope = providedHookScope ?? createHookScope()
+  // Coordinator mode: the coordinator never "uses" a skill itself (it has no
+  // filesystem/tools and only delegates to workers), so a user's explicit
+  // slash-selected skill would otherwise never activate any scope. Treat that
+  // explicit selection as a main-agent activation here — activating the skill
+  // (and its owning plugin, when it has one) on the coordinator's hookScope so
+  // every worker spawned this turn inherits it via createInheritedHookScope.
+  // Only the explicit slash selection counts, not auto-routed skills.
+  if (isCoordinatorMode && options.coordinatorExplicitSelectedSkill) {
+    const sel = options.coordinatorExplicitSelectedSkill
+    const ownerPluginId = resolvePluginIdForSkillPath(sel.skillPath)
+    hookScope.activateSkill(sel.skillName, ownerPluginId, sel.skillPath)
+  }
   const resolveHooksForContext = (event: HookEvent, context: HookContext) =>
     resolveEnabledHooksForRun(
       workspacePath,
@@ -2634,7 +2694,10 @@ The workspace root is: ${workspacePath}`
     )
   } else {
     allMcpTools = await capabilityService.listTools()
-    codeExecRouteEnabled = codeExecEnabled && allMcpTools.length > 0
+    // Disable ad hoc code_exec authoring in Agent Team and project mode. Saved tools remain
+    // available through the deferred-tool bridge when code exec is enabled.
+    codeExecRouteEnabled =
+      codeExecEnabled && allMcpTools.length > 0 && !isCoordinatorMode && !Boolean(featureId)
     eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
     lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
     mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata)
@@ -2819,7 +2882,20 @@ The workspace root is: ${workspacePath}`
     console.log("[Runtime] Added code_exec prompt")
   }
 
-  const coordinatorProjectInstructions = [agentsPrompt.prompt, extraSystemPrompt]
+  const coordinatorWorkingDirAppendix = workingDirPromptAppendix?.trim()
+  const coordinatorProjectInstructions = [
+    agentsPrompt.prompt,
+    extraSystemPrompt
+  ]
+    .filter(Boolean)
+    .join("\n\n")
+  const coordinatorWorkerProjectInstructions = [
+    agentsPrompt.prompt,
+    coordinatorWorkingDirAppendix
+      ? `### Project Mode Adapter Instructions\n\n${coordinatorWorkingDirAppendix}`
+      : "",
+    extraSystemPrompt
+  ]
     .filter(Boolean)
     .join("\n\n")
 
@@ -2856,7 +2932,7 @@ The workspace root is: ${workspacePath}`
 
   const coordinatorWorkerRunner: CoordinatorWorkerRunner = async (workerInput) => {
     const workerSubagent = buildCoordinatorWorkerSubagents(
-      coordinatorProjectInstructions || undefined,
+      coordinatorWorkerProjectInstructions || undefined,
       undefined,
       threadId,
       timeContext
@@ -2926,6 +3002,43 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       LocalSandbox.cancelBackgroundTasks(workerInput.workerThreadId)
     }
     workerInput.abortSignal.addEventListener("abort", cancelWorkerBackgroundTasks, { once: true })
+    // Workers run detached/async; route their hook records through the durable
+    // worker-hook sink so they survive past the spawning turn's run stream
+    // (which `onHookResult` targets). Falls back to `onHookResult` when no
+    // durable sink was provided.
+    const baseWorkerOnHookResult = onCoordinatorWorkerHookResult ?? onHookResult
+    const workerOnHookResult: HookResultCallback | undefined = baseWorkerOnHookResult
+      ? (event, hook, result) => {
+          const hookWithWorkerContext = {
+            ...hook,
+            parentThreadId: workerInput.parentThreadId,
+            workerId: workerInput.workerId,
+            workerThreadId: workerInput.workerThreadId,
+            workerTurn: workerInput.workerTurn
+          } as typeof hook & {
+            parentThreadId: string
+            workerId: string
+            workerThreadId: string
+            workerTurn: number
+          }
+          baseWorkerOnHookResult(event, hookWithWorkerContext, result)
+        }
+      : undefined
+    // Coordinator harness identity inherited by every worker runtime below, so
+    // worker hooks AND execute child-process env match the main session (both
+    // derive from these LocalSandbox/runtime options). SESSION_ID intentionally
+    // stays the worker thread id and is not part of this bundle.
+    const workerHarnessContext = {
+      systemId,
+      pluginRoot,
+      pluginId,
+      pluginName,
+      pluginWorkspace,
+      featureId,
+      projectCode,
+      pluginOutputDir,
+      hookTurnId
+    }
 
     try {
       if (workerInput.abortSignal.aborted) {
@@ -2935,7 +3048,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         prompt: workerInput.prompt,
         sessionId: workerInput.workerThreadId,
         workspacePath,
-        onHookResult,
+        onHookResult: workerOnHookResult,
         metadata: {
           coordinatorWorkerId: workerInput.workerId,
           coordinatorWorkerRole: workerInput.role,
@@ -3024,6 +3137,17 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       let workerStream: AsyncIterable<unknown> | null = null
       let usedWorkerModelId = workerRoutingResult?.resolvedModelId ?? modelId
 
+      // Inherit the coordinator's plugin/skill activation scope so plugin- and
+      // skill-scoped hooks (e.g. a plugin's edit_file PreToolUse) fire inside
+      // the worker the same way they see the parent's activations in a task-tool
+      // subagent. Workers can run in parallel, so we snapshot the coordinator
+      // scope at spawn time into a fresh per-worker scope rather than sharing the
+      // mutable instance — that keeps concurrent workers from cross-contaminating
+      // each other's activations while still seeing what was active when they
+      // launched. Trade-off: activations a worker makes during its run stay local
+      // to that worker and are not reflected back to the coordinator.
+      const workerHookScope = createInheritedHookScope(hookScope)
+
       for (const candidateId of workerOrderedChain) {
         if (workerInput.abortSignal.aborted) break
         try {
@@ -3046,7 +3170,9 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             abortSignal: workerInput.abortSignal,
             retryHooks,
             maxRetryAttempts,
-            onHookResult
+            hookScope: workerHookScope,
+            ...workerHarnessContext,
+            onHookResult: workerOnHookResult
           })
 
           workerStream = await workerAgent.stream(
@@ -3113,7 +3239,9 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             abortSignal: workerInput.abortSignal,
             retryHooks,
             maxRetryAttempts,
-            onHookResult
+            hookScope: workerHookScope,
+            ...workerHarnessContext,
+            onHookResult: workerOnHookResult
           })
           activeWorkerStream = await workerAgent.stream(null, streamConfig)
           usedWorkerModelId = nextCandidate
@@ -3161,7 +3289,9 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             abortSignal: workerInput.abortSignal,
             retryHooks,
             maxRetryAttempts,
-            onHookResult
+            hookScope: workerHookScope,
+            ...workerHarnessContext,
+            onHookResult: workerOnHookResult
           })
           const handoffStream = await handoffAgent.stream(
             {
@@ -3212,7 +3342,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           workerStopHookFailure = message
           console.warn("[CoordinatorWorker][StopHook]", message)
         },
-        onHookResult
+        onHookResult: workerOnHookResult
       })
       if (!stopPassed) {
         throw new Error(workerStopHookFailure ?? "Stop hook blocked worker completion.")
@@ -3361,6 +3491,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       shell,
       timezone: timeContext.timezone,
       currentTime: timeContext.currentTime,
+      projectModeAdapterInstructions: coordinatorWorkingDirAppendix,
       projectInstructions: coordinatorProjectInstructions,
       turnContext: coordinatorTurnPrompt,
       hasBrowserTool: hasNamedTool("browser_playwright"),
