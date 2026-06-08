@@ -446,7 +446,7 @@ function readCodeExecSettings(): CodeExecSettings {
 }
 
 export function isCodeExecEnabled(): boolean {
-  return readCodeExecSettings().enabled !== false
+  return readCodeExecSettings().enabled === true
 }
 
 export function setCodeExecEnabled(enabled: boolean): void {

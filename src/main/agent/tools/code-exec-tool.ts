@@ -53,6 +53,15 @@ function mapDecisionToReview(
   }
 }
 
+function createSavedCodeExecDraftToolName(): string {
+  const suffix = randomUUID().replace(/-/g, "").slice(0, 3)
+  return `${SAVED_CODE_EXEC_DRAFT_TOOL_NAME}_${suffix}`
+}
+
+function getToolNameFromSavedToolId(toolId: string): string {
+  return toolId.replace(/^saved__?/, "").trim() || SAVED_CODE_EXEC_DRAFT_TOOL_NAME
+}
+
 async function requestCodeExecApproval(
   context: CodeExecToolContext,
   input: CodeExecToolInput
@@ -124,7 +133,7 @@ function buildSavedToolDraftFromSuccessfulRun(input: CodeExecToolInput, result: 
       : promotion.dependencies.filter((dependency) => dependency !== "unknown")
 
   return buildSavedCodeExecToolDraft({
-    toolName: SAVED_CODE_EXEC_DRAFT_TOOL_NAME,
+    toolName: createSavedCodeExecDraftToolName(),
     description: SAVED_CODE_EXEC_DRAFT_DESCRIPTION,
     inputSchema: promotion.status === "ready" ? promotion.inputSchema : EMPTY_INPUT_SCHEMA,
     code: input.code,
@@ -150,6 +159,7 @@ function maybePromoteCodeExecAsTool(
   void (async () => {
     try {
       const draft = buildSavedToolDraftFromSuccessfulRun(input, result)
+      const savedToolName = getToolNameFromSavedToolId(draft.toolId)
       const approval = await context.requestApproval?.({
         id: randomUUID(),
         tool_call: {
@@ -161,11 +171,12 @@ function maybePromoteCodeExecAsTool(
         operation: "save_code_exec_tool",
         code: input.code,
         timeoutMs: DEFAULT_TIMEOUT_MS,
-        savedToolName: SAVED_CODE_EXEC_DRAFT_TOOL_NAME,
+        savedToolName,
         savedToolId: draft.toolId,
         savedToolDescription: SAVED_CODE_EXEC_DRAFT_DESCRIPTION,
         cwd: context.workspacePath,
-        reason: "保存为草稿后可在自定义-编程式工具调用面板查看，完成 AI 改写和试运行后可启用",
+        reason:
+          "将本次执行的脚本保存为草稿，在自定义-编程式工具调用完成改写和试运行后即可作为工具使用。",
         allowed_decisions: ["approve", "reject"],
         allowed_approval_types: ["approve", "reject"]
       })

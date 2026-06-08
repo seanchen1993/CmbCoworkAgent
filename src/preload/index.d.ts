@@ -40,6 +40,8 @@ import type {
   ManagedSavedCodeExecTool,
   SavedCodeExecPreviewPayload,
   SavedCodeExecPreviewResult,
+  SavedCodeExecRewritePayload,
+  SavedCodeExecRewriteResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
 import type { CoordinatorWorkerSnapshot } from "../main/agent/coordinator-worker-manager"
@@ -1348,6 +1350,7 @@ interface CustomAPI {
       id: string,
       params: Record<string, unknown>
     ) => Promise<ManagedSavedCodeExecTool>
+    rewrite: (payload: SavedCodeExecRewritePayload) => Promise<SavedCodeExecRewriteResult>
     update: (payload: SavedCodeExecToolUpdatePayload) => Promise<ManagedSavedCodeExecTool>
     delete: (id: string) => Promise<void>
     runPreview: (payload: SavedCodeExecPreviewPayload) => Promise<SavedCodeExecPreviewResult>

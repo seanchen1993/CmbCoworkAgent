@@ -4687,7 +4687,7 @@ export function ChatContainer({
                           : isCodeExecApproval
                             ? "编程式工具调用"
                             : isSaveCodeExecToolApproval
-                              ? "保存脚本草稿需要确认"
+                              ? "编程式工具调用"
                               : "命令需要审批"}
                     </span>
                     {queuedApprovalCount > 0 && (
@@ -4702,7 +4702,7 @@ export function ChatContainer({
                         <div className="grid gap-2 md:grid-cols-2">
                           <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
                             <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                              草稿 ID
+                              工具 ID
                             </div>
                             <div className="font-mono break-all">
                               {String(
@@ -4711,12 +4711,6 @@ export function ChatContainer({
                                   "-"
                               )}
                             </div>
-                          </div>
-                          <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
-                            <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                              状态
-                            </div>
-                            <div>保存为草稿，需在面板完成 AI 改写和试运行后启用</div>
                           </div>
                         </div>
                       )}

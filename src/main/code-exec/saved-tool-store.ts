@@ -273,7 +273,7 @@ export function resolveSavedCodeExecToolId(
     (entry) => entry.toolId === candidate && entry.toolId !== options?.currentToolId
   )
   if (conflict) {
-    throw new Error(`工具 ID 已存在: ${candidate}`)
+    throw new Error(`已存在重复的工具: ${candidate}`)
   }
 
   return candidate
@@ -403,7 +403,7 @@ export function replaceSavedCodeExecTool(
     (entry, entryIndex) => entryIndex !== index && entry.toolId === nextEntry.toolId
   )
   if (toolIdConflict) {
-    throw new Error(`工具 ID 已存在: ${nextEntry.toolId}`)
+    throw new Error(`已存在重复的工具: ${nextEntry.toolId}`)
   }
 
   const codeHashConflict = store.entries.find(
@@ -439,7 +439,7 @@ export function setSavedCodeExecToolEnabled(toolId: string, enabled: boolean): S
 
   const current = store.entries[index]
   if (enabled && current.rewriteReady !== true) {
-    throw new Error("请先使用 AI 改写并试运行成功后启用")
+    throw new Error("请先使用大模型改写并试运行成功后启用")
   }
 
   const nextEntry: SavedCodeExecTool = {

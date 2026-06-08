@@ -1,6 +1,7 @@
 import type { IpcMain } from "electron"
 import { CODE_EXEC_DEFAULT_TIMEOUT_MS } from "../code-exec/constants"
 import { analyzeCodeExecForSavedToolPromotion } from "../code-exec/saved-tool-promotion"
+import { generateSavedToolRewrite } from "../code-exec/saved-tool-rewrite"
 import {
   computeSavedCodeExecToolHash,
   deleteSavedCodeExecTool,
@@ -38,6 +39,8 @@ export interface SavedCodeExecToolUpdatePayload {
   timeoutMs?: number
   previewParams?: Record<string, unknown>
   previewOutput?: string
+  inputSchema?: Record<string, unknown>
+  rewriteReady?: boolean
 }
 
 export interface SavedCodeExecPreviewPayload {
@@ -48,6 +51,20 @@ export interface SavedCodeExecPreviewPayload {
 
 export interface SavedCodeExecPreviewResult extends CodeExecResult {
   parsedOutput?: unknown
+}
+
+export interface SavedCodeExecRewritePayload {
+  id: string
+  code?: string
+  modelId?: string
+}
+
+export interface SavedCodeExecRewriteResult {
+  toolName: string
+  description: string
+  code: string
+  inputSchema: Record<string, unknown>
+  params: Record<string, unknown>
 }
 
 export interface CodeExecToolSettings {
@@ -86,6 +103,12 @@ function validateToolUpdatePayload(payload: SavedCodeExecToolUpdatePayload): voi
   if (payload.previewParams !== undefined && !isRecord(payload.previewParams)) {
     throw new Error("previewParams 必须是对象")
   }
+  if (payload.inputSchema !== undefined && !isRecord(payload.inputSchema)) {
+    throw new Error("inputSchema 必须是对象")
+  }
+  if (payload.rewriteReady !== undefined && typeof payload.rewriteReady !== "boolean") {
+    throw new Error("rewriteReady 必须是布尔值")
+  }
   validateTimeout(payload.timeoutMs)
 }
 
@@ -104,6 +127,19 @@ function toManagedSavedCodeExecTool(tool: SavedCodeExecTool): ManagedSavedCodeEx
     ...tool,
     toolName: getSavedCodeExecToolName(tool.toolId)
   }
+}
+
+function buildDefaultParamsFromInputSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  const properties = isRecord(schema.properties) ? schema.properties : {}
+  const params: Record<string, unknown> = {}
+
+  Object.entries(properties).forEach(([key, value]) => {
+    if (isRecord(value) && Object.prototype.hasOwnProperty.call(value, "default")) {
+      params[key] = value.default
+    }
+  })
+
+  return params
 }
 
 async function runCodeExecPreview(
@@ -176,6 +212,44 @@ export function registerCodeExecToolsHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle(
+    "codeExecTools:rewrite",
+    async (_event, payload: SavedCodeExecRewritePayload): Promise<SavedCodeExecRewriteResult> => {
+      if (!payload.id?.trim()) {
+        throw new Error("工具 ID 不能为空")
+      }
+
+      const current = getSavedCodeExecTool(payload.id, { includeDisabled: true })
+      if (!current) {
+        throw new Error(`工具不存在: ${payload.id}`)
+      }
+
+      const code = typeof payload.code === "string" ? payload.code : current.code
+      if (!code.trim()) {
+        throw new Error("code 不能为空")
+      }
+
+      const rewriteResult = await generateSavedToolRewrite({
+        modelId: payload.modelId,
+        code,
+        mcpCalls: parseCodeExecDependencies(code).map((toolId) => ({ toolId, args: {} }))
+      })
+
+      if (!rewriteResult.rewrite) {
+        throw new Error(rewriteResult.error || "AI 改写失败")
+      }
+
+      const rewrite = rewriteResult.rewrite
+      return {
+        toolName: rewrite.toolName,
+        description: rewrite.description,
+        code: rewrite.rewrittenCode,
+        inputSchema: rewrite.inputSchema,
+        params: buildDefaultParamsFromInputSchema(rewrite.inputSchema)
+      }
+    }
+  )
+
+  ipcMain.handle(
     "codeExecTools:update",
     async (_event, payload: SavedCodeExecToolUpdatePayload): Promise<ManagedSavedCodeExecTool> => {
       validateToolUpdatePayload(payload)
@@ -191,14 +265,14 @@ export function registerCodeExecToolsHandlers(ipcMain: IpcMain): void {
       })
       const codeChanged = payload.code !== current.code
 
-      let inputSchema = current.inputSchema
+      let inputSchema = payload.inputSchema ?? current.inputSchema
       let dependencies = parseCodeExecDependencies(payload.code)
 
       if (codeChanged && typeof payload.previewOutput !== "string") {
         throw new Error("代码已修改，请先试运行成功后再保存")
       }
 
-      if (codeChanged && typeof payload.previewOutput === "string") {
+      if (codeChanged && typeof payload.previewOutput === "string" && payload.inputSchema === undefined) {
         const promotion = analyzeCodeExecForSavedToolPromotion({
           code: payload.code,
           params: payload.previewParams
@@ -209,6 +283,11 @@ export function registerCodeExecToolsHandlers(ipcMain: IpcMain): void {
           dependencies = promotion.dependencies
         }
       }
+
+      const rewriteReady =
+        payload.rewriteReady === true && typeof payload.previewOutput === "string"
+          ? true
+          : current.rewriteReady
 
       const updated = replaceSavedCodeExecTool(current.toolId, {
         ...current,
@@ -221,7 +300,7 @@ export function registerCodeExecToolsHandlers(ipcMain: IpcMain): void {
         codeHash: computeSavedCodeExecToolHash(payload.code, timeoutMs),
         dependencies,
         inputSchema,
-        rewriteReady: codeChanged ? false : current.rewriteReady,
+        rewriteReady,
         lastPreviewParams: payload.previewParams ?? current.lastPreviewParams
       })
 
