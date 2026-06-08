@@ -1444,9 +1444,9 @@ export function EvolutionPanel(): React.JSX.Element {
   const cloudAdoptedUpdateCount = cloudEvolutionUpdates.length - cloudPendingUpdateCount
   const pendingCount = localPendingCandidateCount + cloudPendingUpdateCount
   // 仅真实白名单用户才是审批员（决定 Admin 标签 + 可见全部候选）。
-  // DEV 只放开 tab 可见性，方便开发，不等于 Admin。
+  // DEV 不再特殊放开，与生产一致：审批 tab 仅对白名单用户或技能创建者可见。
   const isReviewAdmin = canReviewEvolution(reviewUserInfo)
-  const showEvolutionReview = import.meta.env.DEV || isReviewAdmin || ownedSkillCount > 0
+  const showEvolutionReview = isReviewAdmin || ownedSkillCount > 0
   const reviewMode: "admin" | "creator" = isReviewAdmin ? "admin" : "creator"
 
   const loadTraces = useCallback(async () => {
