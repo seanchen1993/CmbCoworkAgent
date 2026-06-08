@@ -220,6 +220,7 @@ interface DashboardSkillEvalOptions {
   skillName?: string
   skillVersion?: string
   skillNames?: string[]
+  upperOrgLv1?: string | string[] | null
   defaultRecentToLatestSkill?: boolean
   recentOnly?: boolean
   listOnly?: boolean
