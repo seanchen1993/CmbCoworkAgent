@@ -88,6 +88,7 @@ function toFeatureSnapshot(feature: HarnessFeatureSummary): Record<string, unkno
     location: feature.location,
     overallStatusLabel: feature.overallStatus?.label,
     overallStatusUiKind: feature.overallStatus?.uiKind,
+    workflowId: feature.workflowId,
     currentNodeId: feature.currentNodeId,
     currentNodeStatus: feature.currentNodeStatus,
     currentNodeStatusLabel: feature.currentNodeStatusLabel,
@@ -136,6 +137,7 @@ function buildProjectDoc(
     compatibilityStatus: project.boardCompatibility?.status,
     featureCount: features.length,
     features,
+    dynamicWorkflows: detail?.dynamicWorkflows ?? {},
     ...(detail?.error ? { error: detail.error } : {})
   })
 

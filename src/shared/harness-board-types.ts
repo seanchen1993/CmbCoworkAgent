@@ -187,6 +187,7 @@ export interface HarnessFeatureSummary {
    * otherwise the framework derives it from the current node and workflow.
    */
   overallStatus: HarnessStatus
+  workflowId?: string
   currentNodeId: string
   currentNodeStatus: HarnessNodeStatus
   currentNodeStatusLabel?: string
@@ -212,6 +213,7 @@ export interface HarnessProjectDetailViewModel {
   }
   projectState?: HarnessStatus
   workflow: HarnessWorkflow
+  dynamicWorkflows: Record<string, HarnessWorkflow>
   runs: HarnessFeatureSummary[]
   watchRefs: HarnessWatchRef[]
   loading: boolean
