@@ -372,8 +372,9 @@ export const marketApi = {
     }
   },
 
-  async getPlugins(): Promise<MarketApiResponse> {
+  async getPlugins(options?: { allowMockOnError?: boolean; silent?: boolean }): Promise<MarketApiResponse> {
     const cacheKey = "plugins"
+    const allowMockOnError = options?.allowMockOnError ?? USE_MARKET_MOCK_ON_ERROR
 
     // Check cache first
     // const cachedData = getCachedData(cacheKey)
@@ -392,6 +393,9 @@ export const marketApi = {
       })
 
       if (!response.ok) {
+        if (options?.silent) {
+          throw new Error(`HTTP error! status: ${response.status}`)
+        }
         await throwMarketError(response)
       }
 
@@ -414,7 +418,7 @@ export const marketApi = {
       return result
     } catch (error) {
       console.error("Error fetching plugins:", error)
-      if (USE_MARKET_MOCK_ON_ERROR) {
+      if (allowMockOnError) {
         return getMockMarketResponse("plugin", error)
       }
       return {
