@@ -24,6 +24,16 @@ interface UserInfoLite {
   pathName?: string
 }
 
+export interface GeneratedMarketFileBuildContext {
+  name: string
+  description: string
+  category: string
+  version: string
+  guidance: string
+  chineseName: string
+  userId?: string
+}
+
 interface UniversalUploadDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -51,7 +61,9 @@ interface UniversalUploadDialogProps {
   }
   generatedFile?: {
     label?: string
-    build: () => Promise<{ success: boolean; file?: File; error?: string }>
+    build: (
+      context: GeneratedMarketFileBuildContext
+    ) => Promise<{ success: boolean; file?: File; error?: string }>
   }
   lockName?: boolean
   titleOverride?: string
@@ -301,9 +313,18 @@ export function UniversalUploadDialog({
     setUploading(true)
 
     try {
+      const uploadContext: GeneratedMarketFileBuildContext = {
+        name: name.trim(),
+        description: description.trim(),
+        category,
+        version: version.trim(),
+        guidance: guidance.trim(),
+        chineseName: chineseName.trim(),
+        userId: userId?.trim() || undefined
+      }
       let uploadFile = file
       if (generatedFile) {
-        const generated = await generatedFile.build()
+        const generated = await generatedFile.build(uploadContext)
         if (!generated.success || !generated.file) {
           setError(generated.error || "生成上传文件失败")
           return
@@ -311,16 +332,15 @@ export function UniversalUploadDialog({
         uploadFile = generated.file
       }
 
-      const normalizedUserId = userId?.trim() || undefined
       const result = await onUpload(
         uploadFile,
-        name.trim(),
-        description.trim(),
-        category,
-        version.trim(),
-        guidance.trim(),
-        chineseName.trim(),
-        normalizedUserId
+        uploadContext.name,
+        uploadContext.description,
+        uploadContext.category,
+        uploadContext.version,
+        uploadContext.guidance,
+        uploadContext.chineseName,
+        uploadContext.userId
       )
 
       if (result.success) {

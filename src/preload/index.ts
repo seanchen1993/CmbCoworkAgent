@@ -1681,9 +1681,10 @@ const api = {
     install: (
       buffer: ArrayBuffer,
       fileName: string,
-      origin?: "market" | "local"
+      origin?: "market" | "local",
+      version?: string
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin }) as Promise<{
+      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version }) as Promise<{
         success: boolean
         pluginName?: string
         error?: string
@@ -1695,9 +1696,10 @@ const api = {
         error?: string
       }>,
     exportForMarket: (
-      id: string
+      id: string,
+      options?: { version?: string | null }
     ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }> =>
-      ipcRenderer.invoke("plugins:exportForMarket", id) as Promise<{
+      ipcRenderer.invoke("plugins:exportForMarket", { id, version: options?.version }) as Promise<{
         success: boolean
         fileName?: string
         buffer?: ArrayBuffer
