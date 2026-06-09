@@ -3,21 +3,21 @@
 Use the wrapper script unless the CLI is already installed globally:
 
 ```bash
-export APP_DIR="/path/to/resources/app.asar"
-export PWCLI="$APP_DIR/out/skills/playwright/scripts/playwright_cli.sh"
+export APP_UNPACKED_DIR="/path/to/resources/app.asar.unpacked"
+export PWCLI="$APP_UNPACKED_DIR/out/skills/playwright/scripts/playwright_cli.sh"
 "$PWCLI" --help
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:APP_DIR = "D:\path\to\resources\app.asar"
-$env:PWCLI = "$env:APP_DIR\out\skills\playwright\scripts\playwright_cli.cmd"
+$env:APP_UNPACKED_DIR = "D:\path\to\resources\app.asar.unpacked"
+$env:PWCLI = "$env:APP_UNPACKED_DIR\out\skills\playwright\scripts\playwright_cli.cmd"
 & $env:PWCLI --help
 ```
 
-After packaging, set `APP_DIR` to Electron `app.getAppPath()`. In this repository's packaged
-layout, the wrapper lives under `out/skills/playwright/scripts/` relative to `APP_DIR`.
+After packaging, shell-executable wrappers must come from
+`resources/app.asar.unpacked/out/skills/playwright/scripts/`, not `resources/app.asar/...`.
 
 Optional convenience alias:
 

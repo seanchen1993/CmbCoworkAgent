@@ -81,6 +81,7 @@
     ],
     "asarUnpack": [
       "out/main/pty-host.js",
+      "out/skills/playwright/scripts/**",
       "node_modules/.bin/claude*",
       "node_modules/node-pty/**",
       "node_modules/@anthropic-ai/claude-code/**"

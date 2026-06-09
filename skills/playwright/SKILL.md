@@ -11,6 +11,9 @@ Treat this skill as CLI-first automation. Do not pivot to `@playwright/test` unl
 
 On Windows, do not invoke the bundled `.sh` wrapper directly. Use the bundled `.cmd` wrapper or call
 `npx --yes --package @playwright/cli playwright-cli ...` directly.
+When the app is packaged, do not point shell commands at `resources/app.asar/...`: OS shells cannot
+execute scripts directly from inside `app.asar`. Use the unpacked sibling path under
+`resources/app.asar.unpacked/...` instead.
 
 ## Prerequisite check (required)
 
@@ -37,20 +40,22 @@ Once `npx` is present, proceed with the wrapper script. A global install of `pla
 ## Wrapper path (set once)
 
 ```bash
-export APP_DIR="/path/to/resources/app.asar"
-export PWCLI="$APP_DIR/out/skills/playwright/scripts/playwright_cli.sh"
+export APP_UNPACKED_DIR="/path/to/resources/app.asar.unpacked"
+export PWCLI="$APP_UNPACKED_DIR/out/skills/playwright/scripts/playwright_cli.sh"
 ```
 
 Windows:
 
 ```powershell
-$env:APP_DIR = "D:\path\to\resources\app.asar"
-$env:PWCLI = "$env:APP_DIR\out\skills\playwright\scripts\playwright_cli.cmd"
+$env:APP_UNPACKED_DIR = "D:\path\to\resources\app.asar.unpacked"
+$env:PWCLI = "$env:APP_UNPACKED_DIR\out\skills\playwright\scripts\playwright_cli.cmd"
 ```
 
-After packaging, set `APP_DIR` to Electron `app.getAppPath()`. In this repository's packaged
-layout, the wrapper lives under `out/skills/playwright/scripts/` relative to `APP_DIR`.
+After packaging, Electron `app.getAppPath()` points at `resources/app.asar`, but shell-executable
+wrappers must come from `resources/app.asar.unpacked/out/skills/playwright/scripts/`.
 Use `playwright_cli.sh` on Unix-like shells and `playwright_cli.cmd` on Windows.
+If the unpacked wrapper is unavailable, fall back to calling
+`npx --yes --package @playwright/cli playwright-cli ...` directly.
 
 ## Quick start
 
