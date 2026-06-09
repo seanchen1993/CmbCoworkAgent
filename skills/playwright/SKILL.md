@@ -34,7 +34,7 @@ Once `npx` is present, proceed with the wrapper script. A global install of `pla
 ## Skill path (set once)
 
 ```bash
-export PROJECT_HOME="${CMB_COWORK_AGENT_HOME:-$HOME/.cmbcoworkagent}"
+export $PROJECT_HOME="/path/to/resources/app.asar"
 export PWCLI="$PROJECT_HOME/skills/playwright/scripts/playwright_cli.sh"
 ```
 
