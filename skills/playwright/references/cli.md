@@ -3,12 +3,21 @@
 Use the wrapper script unless the CLI is already installed globally:
 
 ```bash
-export $PROJECT_HOME="/path/to/resources/app.asar"
-export PWCLI="$PROJECT_HOME/skills/playwright/scripts/playwright_cli.sh"
+export APP_DIR="/path/to/resources/app.asar"
+export PWCLI="$APP_DIR/out/skills/playwright/scripts/playwright_cli.sh"
 "$PWCLI" --help
 ```
 
-This install keeps the skill under `$PROJECT_HOME/skills`.
+Windows PowerShell:
+
+```powershell
+$env:APP_DIR = "D:\path\to\resources\app.asar"
+$env:PWCLI = "$env:APP_DIR\out\skills\playwright\scripts\playwright_cli.cmd"
+& $env:PWCLI --help
+```
+
+After packaging, set `APP_DIR` to Electron `app.getAppPath()`. In this repository's packaged
+layout, the wrapper lives under `out/skills/playwright/scripts/` relative to `APP_DIR`.
 
 Optional convenience alias:
 

@@ -9,6 +9,9 @@ description: Use when the task requires automating a real browser from the termi
 Drive a real browser from the terminal using `playwright-cli`. Prefer the bundled wrapper script so the CLI works even when it is not globally installed.
 Treat this skill as CLI-first automation. Do not pivot to `@playwright/test` unless the user explicitly asks for test files.
 
+On Windows, do not invoke the bundled `.sh` wrapper directly. Use the bundled `.cmd` wrapper or call
+`npx --yes --package @playwright/cli playwright-cli ...` directly.
+
 ## Prerequisite check (required)
 
 Before proposing commands, check whether `npx` is available (the wrapper depends on it):
@@ -31,14 +34,23 @@ playwright-cli --help
 
 Once `npx` is present, proceed with the wrapper script. A global install of `playwright-cli` is optional.
 
-## Skill path (set once)
+## Wrapper path (set once)
 
 ```bash
-export $PROJECT_HOME="/path/to/resources/app.asar"
-export PWCLI="$PROJECT_HOME/skills/playwright/scripts/playwright_cli.sh"
+export APP_DIR="/path/to/resources/app.asar"
+export PWCLI="$APP_DIR/out/skills/playwright/scripts/playwright_cli.sh"
 ```
 
-This install keeps the skill under `$PROJECT_HOME/skills`.
+Windows:
+
+```powershell
+$env:APP_DIR = "D:\path\to\resources\app.asar"
+$env:PWCLI = "$env:APP_DIR\out\skills\playwright\scripts\playwright_cli.cmd"
+```
+
+After packaging, set `APP_DIR` to Electron `app.getAppPath()`. In this repository's packaged
+layout, the wrapper lives under `out/skills/playwright/scripts/` relative to `APP_DIR`.
+Use `playwright_cli.sh` on Unix-like shells and `playwright_cli.cmd` on Windows.
 
 ## Quick start
 
@@ -53,11 +65,17 @@ Use the wrapper script:
 "$PWCLI" screenshot
 ```
 
-If the user prefers a global install, this is also valid:
+On Windows PowerShell, the equivalent form is:
+
+```powershell
+& $env:PWCLI open https://playwright.dev --headed
+& $env:PWCLI snapshot
+```
+
+If the user prefers a direct command instead of the wrapper, this is also valid:
 
 ```bash
-npm install -g @playwright/cli@latest
-playwright-cli --help
+npx --yes --package @playwright/cli playwright-cli --help
 ```
 
 ## Core workflow
@@ -121,13 +139,14 @@ Refs can go stale. When a command fails due to a missing ref, snapshot again.
 
 ## Wrapper script
 
-The wrapper script uses `npx --package @playwright/cli playwright-cli` so the CLI can run without a global install:
+The bundled wrappers use `npx --package @playwright/cli playwright-cli` so the CLI can run
+without a global install:
 
 ```bash
 "$PWCLI" --help
 ```
 
-Prefer the wrapper unless the repository already standardizes on a global install.
+Prefer the wrapper unless the repository already standardizes on a direct `npx` invocation.
 
 ## References
 
