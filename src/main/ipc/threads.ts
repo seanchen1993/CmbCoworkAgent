@@ -439,7 +439,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       thread_id: row.thread_id,
       created_at: new Date(row.created_at),
       updated_at: new Date(row.updated_at),
-      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+      metadata: parseJsonObject(row.metadata),
       status: row.status as Thread["status"],
       title: row.title
     }))
@@ -453,9 +453,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       thread_id: row.thread_id,
       created_at: new Date(row.created_at),
       updated_at: new Date(row.updated_at),
-      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+      metadata: parseJsonObject(row.metadata),
       status: row.status as Thread["status"],
-      thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
+      thread_values: parseJsonObject(row.thread_values),
       title: row.title
     }
   })
@@ -501,9 +501,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       thread_id: thread.thread_id,
       created_at: new Date(thread.created_at),
       updated_at: new Date(thread.updated_at),
-      metadata: thread.metadata ? JSON.parse(thread.metadata) : undefined,
+      metadata: parseJsonObject(thread.metadata),
       status: thread.status as Thread["status"],
-      thread_values: thread.thread_values ? JSON.parse(thread.thread_values) : undefined,
+      thread_values: parseJsonObject(thread.thread_values),
       title
     } as Thread
   })
@@ -514,9 +514,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
     if (updates.metadata !== undefined) {
       const currentThread = getThread(threadId)
-      const currentMetadata = currentThread?.metadata
-        ? (JSON.parse(currentThread.metadata) as Record<string, unknown>)
-        : {}
+      const currentMetadata = parseJsonObject(currentThread?.metadata) ?? {}
       await assertCanPersistExplicitNormalMode(
         threadId,
         currentMetadata,
@@ -537,9 +535,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       thread_id: row.thread_id,
       created_at: new Date(row.created_at),
       updated_at: new Date(row.updated_at),
-      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+      metadata: parseJsonObject(row.metadata),
       status: row.status as Thread["status"],
-      thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
+      thread_values: parseJsonObject(row.thread_values),
       title: row.title
     }
   })
@@ -554,9 +552,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         thread_id: row.thread_id,
         created_at: new Date(row.created_at),
         updated_at: new Date(row.updated_at),
-        metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+        metadata: parseJsonObject(row.metadata),
         status: row.status as Thread["status"],
-        thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
+        thread_values: parseJsonObject(row.thread_values),
         title: row.title
       }
     }
