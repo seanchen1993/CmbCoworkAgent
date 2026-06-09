@@ -77,7 +77,7 @@ import { ProjectModePanel } from "./panels/ProjectModePanel"
 import { ModelPanel } from "./panels/ModelPanel"
 import { UserPanel } from "./panels/UserPanel"
 import { ProductivityPanel } from "./panels/ProductivityPanel"
-import { FeedbackPanel } from "./panels/FeedbackPanel"
+import { AdvancedFeaturesPanel } from "./panels/AdvancedFeaturesPanel"
 import { TraceExplorer, TraceHistoryDialog, TraceTriggerScopeToggle } from "./TraceHistoryDialog"
 import { CommitDetailsDialog } from "./CommitDetailsDialog"
 import { UncommittedCodeDialog } from "./UncommittedCodeDialog"
@@ -2393,7 +2393,7 @@ export function DashboardView(): React.JSX.Element {
     modelStats,
     userStats,
     productivity,
-    feedback,
+    advancedFeatures,
     skillEval,
     projectMode,
     projectModeLoading,
@@ -4480,10 +4480,10 @@ export function DashboardView(): React.JSX.Element {
                 <ModelPanel data={modelStats} loading={loading} />
               </section>
 
-              {/* Feedback */}
+              {/* Advanced Features */}
               <section>
-                <h2 className="mb-3 text-sm font-semibold text-foreground">点赞 / 点踩反馈</h2>
-                <FeedbackPanel data={feedback} loading={loading} />
+                <h2 className="mb-3 text-sm font-semibold text-foreground">高级特性运营</h2>
+                <AdvancedFeaturesPanel data={advancedFeatures} loading={loading} />
               </section>
             </div>
           )}

@@ -5095,6 +5095,382 @@ async function fetchFeedback(
   return esQuery(getEsIndex("event"), body)
 }
 
+// ─────────────────────────────────────────────────────────
+// Advanced features (operations) — replaces the like/dislike feedback module.
+//
+// Two-tier model (core usage + value result) for 8 advanced capabilities.
+// Event-side metrics come from the `event` index by `eventName`
+// (heartbeat.run.completed / memory.write.applied / skill.evolution.* /
+// chatx.message.processed / hook.executed / git.auto_commit.attempted).
+// Tool-call-based metrics (memory_search/get, java_lsp, code_exec, deferred
+// tools) and post-evolution skill usage are REUSED from the `trace` index
+// (`toolNames`, `evolvedSkills`) instead of double-emitting events for things
+// traces already record.
+// ─────────────────────────────────────────────────────────
+
+type AdvFeatureTone = "good" | "bad" | "warn" | "neutral"
+
+interface AdvFeatureItem {
+  label: string
+  count: number
+  tone: AdvFeatureTone
+}
+
+interface AdvFeatureCard {
+  key: string
+  label: string
+  value: number
+  valueLabel: string
+  hint: string
+  items: AdvFeatureItem[]
+}
+
+interface AdvancedFeaturesResult {
+  cards: AdvFeatureCard[]
+  source: "es" | "mock"
+}
+
+interface AdvFeatureMetrics {
+  hbActionable: number
+  hbSilent: number
+  hbError: number
+  hbCancelled: number
+  memSearch: number
+  memGet: number
+  memWrite: number
+  lsp: number
+  evoCandidates: number
+  evoEmpty: number
+  evoRunError: number
+  evoAccepted: number
+  evoRejected: number
+  evoCloud: number
+  evolvedTraces: number
+  evolvedUsages: number
+  chatxReplied: number
+  chatxCancelled: number
+  chatxError: number
+  hookTotal: number
+  hookBlocked: number
+  codeExec: number
+  deferredTool: number
+  acCommitted: number
+  acSkipped: number
+  acCancelled: number
+  acFailed: number
+  acNeedsConfirm: number
+}
+
+function advAggDocCount(agg: unknown): number {
+  if (!agg || typeof agg !== "object") return 0
+  const v = (agg as Record<string, unknown>).doc_count
+  return typeof v === "number" ? v : 0
+}
+
+function advAggValue(agg: unknown): number {
+  if (!agg || typeof agg !== "object") return 0
+  const v = (agg as Record<string, unknown>).value
+  return typeof v === "number" ? v : 0
+}
+
+function advTermBuckets(agg: unknown): Array<{ key: string; doc_count: number }> {
+  if (!agg || typeof agg !== "object") return []
+  const buckets = (agg as Record<string, unknown>).buckets
+  if (!Array.isArray(buckets)) return []
+  return buckets.map((b) => ({
+    key: String((b as Record<string, unknown>).key ?? ""),
+    doc_count: Number((b as Record<string, unknown>).doc_count ?? 0)
+  }))
+}
+
+function advBucketCount(buckets: Array<{ key: string; doc_count: number }>, key: string): number {
+  return buckets.find((b) => b.key === key)?.doc_count ?? 0
+}
+
+function assembleAdvancedFeatureCards(
+  m: AdvFeatureMetrics,
+  source: "es" | "mock"
+): AdvancedFeaturesResult {
+  const hbTotal = m.hbActionable + m.hbSilent + m.hbError + m.hbCancelled
+  const memTotal = m.memSearch + m.memGet + m.memWrite
+  const evoRun = m.evoCandidates + m.evoEmpty + m.evoRunError
+  const chatxTotal = m.chatxReplied + m.chatxCancelled + m.chatxError
+  const progTotal = m.codeExec + m.deferredTool
+  const acTotal = m.acCommitted + m.acSkipped + m.acCancelled + m.acFailed + m.acNeedsConfirm
+
+  return {
+    source,
+    cards: [
+      {
+        key: "heartbeat",
+        label: "心跳监控",
+        value: hbTotal,
+        valueLabel: "实际执行次数",
+        hint: `有可执行产出 ${m.hbActionable} 次`,
+        items: [
+          { label: "有产出", count: m.hbActionable, tone: "good" },
+          { label: "静默", count: m.hbSilent, tone: "neutral" },
+          { label: "失败", count: m.hbError, tone: "bad" },
+          { label: "取消", count: m.hbCancelled, tone: "warn" }
+        ]
+      },
+      {
+        key: "memory",
+        label: "记忆管理",
+        value: memTotal,
+        valueLabel: "记忆操作次数",
+        hint: `记忆写入 ${m.memWrite} 次`,
+        items: [
+          { label: "搜索", count: m.memSearch, tone: "neutral" },
+          { label: "读取", count: m.memGet, tone: "neutral" },
+          { label: "写入", count: m.memWrite, tone: "good" }
+        ]
+      },
+      {
+        key: "lsp",
+        label: "Java LSP",
+        value: m.lsp,
+        valueLabel: "代码理解调用",
+        hint: "Agent 用 LSP 精确理解代码",
+        items: []
+      },
+      {
+        key: "optimizer",
+        label: "自优化",
+        value: evoRun,
+        valueLabel: "优化运行次数",
+        hint: `采纳 ${m.evoAccepted} · 拒绝 ${m.evoRejected}`,
+        items: [
+          { label: "有候选", count: m.evoCandidates, tone: "good" },
+          { label: "无候选", count: m.evoEmpty, tone: "neutral" },
+          { label: "采纳", count: m.evoAccepted, tone: "good" },
+          { label: "拒绝", count: m.evoRejected, tone: "warn" },
+          { label: "云端安装", count: m.evoCloud, tone: "good" }
+        ]
+      },
+      {
+        key: "evolvedUsage",
+        label: "进化技能使用",
+        value: m.evolvedTraces,
+        valueLabel: "使用会话数",
+        hint: `累计使用 ${m.evolvedUsages} 次`,
+        items: [
+          { label: "使用会话", count: m.evolvedTraces, tone: "good" },
+          { label: "使用次数", count: m.evolvedUsages, tone: "neutral" }
+        ]
+      },
+      {
+        key: "chatx",
+        label: "机器人 ChatX",
+        value: chatxTotal,
+        valueLabel: "处理消息数",
+        hint: `成功回复 ${m.chatxReplied} 条`,
+        items: [
+          { label: "已回复", count: m.chatxReplied, tone: "good" },
+          { label: "取消", count: m.chatxCancelled, tone: "warn" },
+          { label: "错误", count: m.chatxError, tone: "bad" }
+        ]
+      },
+      {
+        key: "hooks",
+        label: "钩子 Hooks",
+        value: m.hookTotal,
+        valueLabel: "执行次数",
+        hint: `拦截风险 ${m.hookBlocked} 次`,
+        items: [
+          { label: "执行", count: m.hookTotal, tone: "neutral" },
+          { label: "拦截", count: m.hookBlocked, tone: "good" }
+        ]
+      },
+      {
+        key: "programmatic",
+        label: "编程式工具",
+        value: progTotal,
+        valueLabel: "工具执行次数",
+        hint: `code_exec ${m.codeExec} · 延迟工具 ${m.deferredTool}`,
+        items: [
+          { label: "code_exec", count: m.codeExec, tone: "neutral" },
+          { label: "延迟工具", count: m.deferredTool, tone: "neutral" }
+        ]
+      },
+      {
+        key: "autoCommit",
+        label: "自动提交",
+        value: acTotal,
+        valueLabel: "提交尝试次数",
+        hint: `成功 ${m.acCommitted} · 失败 ${m.acFailed}`,
+        items: [
+          { label: "成功", count: m.acCommitted, tone: "good" },
+          { label: "跳过", count: m.acSkipped, tone: "neutral" },
+          { label: "取消", count: m.acCancelled, tone: "warn" },
+          { label: "失败", count: m.acFailed, tone: "bad" }
+        ]
+      }
+    ]
+  }
+}
+
+async function fetchAdvancedFeatures(
+  range: TimeRange,
+  _granularity: Granularity,
+  opts?: OrgFilterOptions
+): Promise<AdvancedFeaturesResult> {
+  requireDashboardAccess()
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
+  const orgFilter = orgFilterClause ? [orgFilterClause] : []
+
+  const eventBody = {
+    size: 0,
+    query: {
+      bool: { filter: [timeRangeFilter("eventTime", range), ...orgFilter] }
+    },
+    aggs: {
+      heartbeat: {
+        filter: { term: { eventName: "heartbeat.run.completed" } },
+        aggs: { by_outcome: { terms: { field: "properties.outcome", size: 10 } } }
+      },
+      memory_write: { filter: { term: { eventName: "memory.write.applied" } } },
+      evo_run: {
+        filter: { term: { eventName: "skill.evolution.run" } },
+        aggs: { by_outcome: { terms: { field: "properties.outcome", size: 10 } } }
+      },
+      evo_accepted: { filter: { term: { eventName: "skill.evolution.accepted" } } },
+      evo_rejected: { filter: { term: { eventName: "skill.evolution.rejected" } } },
+      evo_cloud: { filter: { term: { eventName: "skill.evolution.cloud.accepted" } } },
+      chatx: {
+        filter: { term: { eventName: "chatx.message.processed" } },
+        aggs: { by_outcome: { terms: { field: "properties.outcome", size: 10 } } }
+      },
+      hooks: {
+        filter: { term: { eventName: "hook.executed" } },
+        aggs: { blocked: { filter: { term: { "properties.blocked": true } } } }
+      },
+      auto_commit: {
+        filter: { term: { eventName: "git.auto_commit.attempted" } },
+        aggs: { by_outcome: { terms: { field: "properties.outcome", size: 10 } } }
+      }
+    }
+  }
+
+  const traceBody = {
+    size: 0,
+    query: {
+      bool: { filter: [timeRangeFilter("startedAt", range), ...orgFilter] }
+    },
+    aggs: {
+      by_tool: {
+        terms: {
+          field: "toolNames",
+          include: ["memory_search", "memory_get", "java_lsp", "code_exec", "invoke_deferred_tool"],
+          size: 10
+        }
+      },
+      evolved_traces: { filter: { exists: { field: "evolvedSkills" } } },
+      evolved_usages: { value_count: { field: "evolvedSkills" } }
+    }
+  }
+
+  const [eventResRaw, traceResRaw] = await Promise.all([
+    esQuery(getEsIndex("event"), eventBody),
+    esQuery(getEsIndex("trace"), traceBody)
+  ])
+
+  const eAggs =
+    ((eventResRaw as Record<string, unknown>)?.aggregations as Record<string, unknown>) ?? {}
+  const tAggs =
+    ((traceResRaw as Record<string, unknown>)?.aggregations as Record<string, unknown>) ?? {}
+
+  const hbOutcome = advTermBuckets(
+    (eAggs.heartbeat as Record<string, unknown> | undefined)?.by_outcome
+  )
+  const evoOutcome = advTermBuckets(
+    (eAggs.evo_run as Record<string, unknown> | undefined)?.by_outcome
+  )
+  const chatxOutcome = advTermBuckets(
+    (eAggs.chatx as Record<string, unknown> | undefined)?.by_outcome
+  )
+  const acOutcome = advTermBuckets(
+    (eAggs.auto_commit as Record<string, unknown> | undefined)?.by_outcome
+  )
+  const toolBuckets = advTermBuckets(tAggs.by_tool)
+
+  const metrics: AdvFeatureMetrics = {
+    hbActionable: advBucketCount(hbOutcome, "actionable"),
+    hbSilent: advBucketCount(hbOutcome, "silent"),
+    hbError: advBucketCount(hbOutcome, "error"),
+    hbCancelled: advBucketCount(hbOutcome, "cancelled"),
+    memSearch: advBucketCount(toolBuckets, "memory_search"),
+    memGet: advBucketCount(toolBuckets, "memory_get"),
+    memWrite: advAggDocCount(eAggs.memory_write),
+    lsp: advBucketCount(toolBuckets, "java_lsp"),
+    evoCandidates: advBucketCount(evoOutcome, "candidates"),
+    evoEmpty: advBucketCount(evoOutcome, "empty"),
+    evoRunError: advBucketCount(evoOutcome, "error"),
+    evoAccepted: advAggDocCount(eAggs.evo_accepted),
+    evoRejected: advAggDocCount(eAggs.evo_rejected),
+    evoCloud: advAggDocCount(eAggs.evo_cloud),
+    evolvedTraces: advAggDocCount(tAggs.evolved_traces),
+    evolvedUsages: advAggValue(tAggs.evolved_usages),
+    chatxReplied: advBucketCount(chatxOutcome, "replied"),
+    chatxCancelled: advBucketCount(chatxOutcome, "cancelled"),
+    chatxError: advBucketCount(chatxOutcome, "error"),
+    hookTotal: advAggDocCount(eAggs.hooks),
+    hookBlocked: advAggDocCount((eAggs.hooks as Record<string, unknown> | undefined)?.blocked),
+    codeExec: advBucketCount(toolBuckets, "code_exec"),
+    deferredTool: advBucketCount(toolBuckets, "invoke_deferred_tool"),
+    acCommitted: advBucketCount(acOutcome, "committed"),
+    acSkipped: advBucketCount(acOutcome, "skipped"),
+    acCancelled: advBucketCount(acOutcome, "cancelled"),
+    acFailed: advBucketCount(acOutcome, "failed"),
+    acNeedsConfirm: advBucketCount(acOutcome, "needs_confirmation")
+  }
+
+  return assembleAdvancedFeatureCards(metrics, "es")
+}
+
+function makeMockAdvancedFeatures(range: TimeRange): AdvancedFeaturesResult {
+  const days = Math.max(
+    1,
+    Math.round(
+      (new Date(range.to).getTime() - new Date(range.from).getTime()) / (24 * 60 * 60 * 1000)
+    )
+  )
+  const k = (perDay: number): number => Math.round(perDay * days)
+
+  const metrics: AdvFeatureMetrics = {
+    hbActionable: k(6),
+    hbSilent: k(30),
+    hbError: k(1),
+    hbCancelled: k(1),
+    memSearch: k(40),
+    memGet: k(22),
+    memWrite: k(8),
+    lsp: k(18),
+    evoCandidates: k(3),
+    evoEmpty: k(5),
+    evoRunError: k(1),
+    evoAccepted: k(2),
+    evoRejected: k(1),
+    evoCloud: k(1),
+    evolvedTraces: k(9),
+    evolvedUsages: k(14),
+    chatxReplied: k(12),
+    chatxCancelled: k(2),
+    chatxError: k(1),
+    hookTotal: k(140),
+    hookBlocked: k(12),
+    codeExec: k(9),
+    deferredTool: k(6),
+    acCommitted: k(11),
+    acSkipped: k(7),
+    acCancelled: k(2),
+    acFailed: k(1),
+    acNeedsConfirm: 0
+  }
+
+  return assembleAdvancedFeatureCards(metrics, "mock")
+}
+
 async function fetchSkillRecentTraces(
   skill: string,
   range: TimeRange,
@@ -10350,6 +10726,20 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchFeedback(range, granularity, opts) }
       } catch (e) {
         console.error("[Dashboard] feedback error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:advancedFeatures",
+    async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockAdvancedFeatures(range) }
+      try {
+        return { success: true, data: await fetchAdvancedFeatures(range, granularity, opts) }
+      } catch (e) {
+        console.error("[Dashboard] advancedFeatures error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

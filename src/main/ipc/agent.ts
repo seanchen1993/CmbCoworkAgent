@@ -2102,6 +2102,25 @@ async function finalizeAutoCommit({
     snapshot,
     confirm: (preview) => confirmAutoCommit(window, preview)
   })
+  // Telemetry: the existing `git.commit.created` (triggeredBy=agent-auto) only
+  // fires on success. Emit an attempt event so skip / user-cancel / fail are also
+  // visible. "disabled" (mode off) means auto-commit never engaged — don't count.
+  if (result.status !== "disabled") {
+    try {
+      const userCancelled =
+        result.status === "skipped" &&
+        (result.reasons?.some((r) => r.includes("用户取消")) ?? false)
+      trackEvent("git.auto_commit.attempted", "git", {
+        outcome: userCancelled ? "cancelled" : result.status,
+        fileCount: result.committedFiles?.length ?? 0,
+        pushed: result.pushed,
+        pushFailed: !!result.pushError,
+        threadId
+      })
+    } catch (e) {
+      console.warn("[event] failed to emit git.auto_commit.attempted:", e)
+    }
+  }
   sendAutoCommitResult(window, channel, result)
 }
 

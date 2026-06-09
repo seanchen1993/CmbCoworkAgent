@@ -11,6 +11,7 @@ import { joinHookText } from "./text"
 import { mergeUpdatedInput } from "./updated-input"
 import { getCustomModelConfigs, getHookLoggingConfig, getUserInfo } from "../storage"
 import { persistHookResultRecord } from "./log-record"
+import { trackEvent } from "../services/event-reporter"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -1280,6 +1281,27 @@ function recordHookResult(
   context: HookContext,
   onHookResult?: HookResultCallback
 ): void {
+  // Operational telemetry: emit unconditionally (independent of the hook-logging
+  // switch that gates persistHookResultRecord), so we always know hooks really
+  // ran and whether one blocked a risky operation. Payload kept minimal because
+  // this is the chokepoint for every hook on every event (incl. per-tool-call
+  // PostToolUse). Skip the async "pending" placeholder — its real result is
+  // recorded separately when the background run completes — so each execution
+  // emits exactly once.
+  if (result.asyncStatus !== "pending") {
+    try {
+      trackEvent("hook.executed", "hook", {
+        event,
+        hookType: hook.type ?? "command",
+        blocked: isBlockingResult(result),
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        source: hook.hookSourceType ?? "global"
+      })
+    } catch (e) {
+      console.warn("[event] failed to emit hook.executed:", e)
+    }
+  }
   persistHookResultRecord(event, hook, result, context.turnId)
   onHookResult?.(event, hook, result)
 }

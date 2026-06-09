@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 import { basename, join } from "path"
 import { getMemoryStore } from "./store"
 import { notifyMemoryChanged } from "./events"
+import { trackEvent } from "../services/event-reporter"
 import {
   scanMemoryFiles,
   regenerateManifest,
@@ -477,6 +478,22 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
       `[Memory] Applied ${creates} create, ${updates} update, ${skips} skip; ` +
         `manifest ${manifestWritten ? (memoryMd ? "rewritten by LLM" : "bootstrapped") : "unchanged"}`
     )
+
+    // Telemetry: background memory writes (summarizer) aren't tool calls, so they
+    // never appear in any conversation trace — emit a dedicated event when
+    // something was actually written.
+    if (touched.length > 0 || manifestWritten) {
+      try {
+        trackEvent("memory.write.applied", "memory", {
+          creates,
+          updates,
+          skips,
+          manifestWritten
+        })
+      } catch (e) {
+        console.warn("[event] failed to emit memory.write.applied:", e)
+      }
+    }
   } catch (e) {
     console.warn("[Memory] Failed to summarize:", e instanceof Error ? e.message : e)
   } finally {

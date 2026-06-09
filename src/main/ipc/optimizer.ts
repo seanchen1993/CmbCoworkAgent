@@ -230,6 +230,16 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         } catch (e) {
           const errMsg = e instanceof Error ? e.message : String(e)
           notifyRenderer("optimizer:streamEnd", { success: false, error: errMsg })
+          try {
+            trackEvent("skill.evolution.run", "skill", {
+              candidatesCount: 0,
+              tracesAnalyzed: 0,
+              mode: runMode,
+              outcome: "error"
+            })
+          } catch (err) {
+            console.warn("[event] failed to emit skill.evolution.run:", err)
+          }
           return {
             startedAt: new Date().toISOString(),
             endedAt: new Date().toISOString(),
@@ -241,6 +251,18 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
 
         notifyRenderer("optimizer:streamEnd", { success: true })
         const selectedMerged = mergePendingCandidates(runResult.candidates)
+        // Count every completed run (incl. no-candidate) so "运行但无候选" attempts
+        // aren't lost when only `created` is observed.
+        try {
+          trackEvent("skill.evolution.run", "skill", {
+            candidatesCount: runResult.candidates.length,
+            tracesAnalyzed: runResult.tracesAnalyzed,
+            mode: runMode,
+            outcome: runResult.candidates.length > 0 ? "candidates" : "empty"
+          })
+        } catch (e) {
+          console.warn("[event] failed to emit skill.evolution.run:", e)
+        }
         if (runResult.candidates.length > 0) {
           try {
             trackEvent("skill.evolution.created", "skill", {
@@ -273,6 +295,16 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e)
         notifyRenderer("optimizer:streamEnd", { success: false, error: errMsg })
+        try {
+          trackEvent("skill.evolution.run", "skill", {
+            candidatesCount: 0,
+            tracesAnalyzed: 0,
+            mode: runMode,
+            outcome: "error"
+          })
+        } catch (err) {
+          console.warn("[event] failed to emit skill.evolution.run:", err)
+        }
         return {
           startedAt: new Date().toISOString(),
           endedAt: new Date().toISOString(),
@@ -284,6 +316,18 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
 
       notifyRenderer("optimizer:streamEnd", { success: true })
       result.candidates = mergePendingCandidates(result.candidates)
+      // Count every completed run (incl. no-candidate) so "运行但无候选" attempts
+      // aren't lost when only `created` is observed.
+      try {
+        trackEvent("skill.evolution.run", "skill", {
+          candidatesCount: result.candidates.length,
+          tracesAnalyzed: result.tracesAnalyzed,
+          mode: runMode,
+          outcome: result.candidates.length > 0 ? "candidates" : "empty"
+        })
+      } catch (e) {
+        console.warn("[event] failed to emit skill.evolution.run:", e)
+      }
       if (result.candidates.length > 0) {
         try {
           trackEvent("skill.evolution.created", "skill", {
@@ -342,6 +386,18 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
     async (_event, { candidateId }: { candidateId: string }): Promise<{ success: boolean }> => {
       const candidate = updateCandidateStatus(candidateId, "rejected")
       console.log(`[Optimizer] Rejected candidate: ${candidateId}`)
+      if (candidate) {
+        try {
+          trackEvent("skill.evolution.rejected", "skill", {
+            candidateId,
+            skillId: candidate.skillId,
+            skillName: candidate.name,
+            action: candidate.action
+          })
+        } catch (e) {
+          console.warn("[event] failed to emit skill.evolution.rejected:", e)
+        }
+      }
       return { success: !!candidate }
     }
   )

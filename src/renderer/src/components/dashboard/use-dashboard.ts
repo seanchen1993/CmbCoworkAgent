@@ -510,30 +510,29 @@ export interface ProductivityData {
   avgCommitsPerUser: number
 }
 
-export interface FeedbackData {
-  totalLikes: number
-  totalDislikes: number
-  totalLikeUsers: number
-  totalDislikeUsers: number
-  totalFeedbacks: number
-  likeRate: number
-  dislikeRate: number
-  byDislikeType: Array<{
-    type: string
-    label: string
-    count: number
-  }>
-  trend: Array<{
-    time: string
-    likes: number
-    dislikes: number
-  }>
-  recentComments: Array<{
-    time: string
-    type: string
-    typeLabel: string
-    text: string
-  }>
+export type AdvancedFeatureTone = "good" | "bad" | "warn" | "neutral"
+
+export interface AdvancedFeatureItem {
+  label: string
+  count: number
+  tone: AdvancedFeatureTone
+}
+
+export interface AdvancedFeatureCard {
+  key: string
+  label: string
+  /** Core-usage count headlined on the card. */
+  value: number
+  valueLabel: string
+  /** One-line value-result summary. */
+  hint: string
+  /** Outcome / value breakdown. */
+  items: AdvancedFeatureItem[]
+}
+
+export interface AdvancedFeaturesData {
+  cards: AdvancedFeatureCard[]
+  source: "es" | "mock"
 }
 
 export interface DashboardSkillEvalRun {
@@ -1368,79 +1367,6 @@ function parseProductivity(raw: any, granularity: Granularity, range: TimeRange)
   }
 }
 
-const DISLIKE_TYPE_LABELS: Record<string, string> = {
-  slow: "太慢了",
-  not_helpful: "内容不相关",
-  inaccurate: "信息不准确",
-  unclear: "表述不清楚",
-  unsafe: "包含不安全内容",
-  other: "其他原因"
-}
-
-function formatCommentTime(isoStr: string): string {
-  const d = new Date(isoStr)
-  if (isNaN(d.getTime())) return isoStr
-  const mm = String(d.getMonth() + 1).padStart(2, "0")
-  const dd = String(d.getDate()).padStart(2, "0")
-  const hh = String(d.getHours()).padStart(2, "0")
-  const min = String(d.getMinutes()).padStart(2, "0")
-  return `${mm}-${dd} ${hh}:${min}`
-}
-
-function parseFeedback(raw: any, granularity: Granularity): FeedbackData {
-  const aggs = raw?.aggregations ?? {}
-  const totalLikes = aggs.total_likes?.doc_count ?? 0
-  const totalDislikes = aggs.total_dislikes?.doc_count ?? 0
-  const totalLikeUsers = aggs.total_likes?.unique_users?.value ?? 0
-  const totalDislikeUsers = aggs.total_dislikes?.unique_users?.value ?? 0
-  const totalFeedbacks = totalLikes + totalDislikes
-
-  const dislikeBuckets = aggs.dislike_by_type?.buckets ?? {}
-  const byDislikeType: FeedbackData["byDislikeType"] = Object.entries(dislikeBuckets)
-    .map(([type, value]) => ({
-      type,
-      label: DISLIKE_TYPE_LABELS[type] ?? type,
-      count: (value as { doc_count?: number }).doc_count ?? 0
-    }))
-    .sort((a, b) => b.count - a.count)
-
-  const trend: FeedbackData["trend"] = (aggs.trend?.buckets ?? []).map((b: any) => ({
-    time: formatTrendTime(b.key_as_string ?? new Date(b.key).toISOString(), granularity),
-    likes: b.likes?.doc_count ?? 0,
-    dislikes: b.dislikes?.doc_count ?? 0
-  }))
-
-  const recentCommentsHits = aggs.recent_dislike_comments?.latest?.hits?.hits ?? []
-  const recentComments: FeedbackData["recentComments"] = recentCommentsHits
-    .map((hit: any) => {
-      const source = hit?._source ?? {}
-      const properties = source.properties ?? {}
-      const text = String(properties.dislikeText ?? "").trim()
-      const type = String(properties.dislikeType ?? properties.feedbackId ?? "other")
-      const typeLabel = String(properties.dislikeTypeLabel ?? DISLIKE_TYPE_LABELS[type] ?? type)
-      return {
-        time: formatCommentTime(String(source.eventTime ?? "")),
-        type,
-        typeLabel,
-        text
-      }
-    })
-    .filter((item: { text: string }) => Boolean(item.text))
-
-  return {
-    totalLikes,
-    totalDislikes,
-    totalLikeUsers,
-    totalDislikeUsers,
-    totalFeedbacks,
-    likeRate: totalFeedbacks > 0 ? totalLikes / totalFeedbacks : 0,
-    dislikeRate: totalFeedbacks > 0 ? totalDislikes / totalFeedbacks : 0,
-    byDislikeType,
-    trend,
-    recentComments
-  }
-}
-
 function numberValue(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) return value
   if (typeof value === "string" && value.trim()) {
@@ -1448,6 +1374,36 @@ function numberValue(value: unknown): number {
     if (Number.isFinite(parsed)) return parsed
   }
   return 0
+}
+
+// Backend (fetchAdvancedFeatures / makeMockAdvancedFeatures) already returns the
+// final structured shape, so this is a defensive validator rather than a parser.
+function parseAdvancedFeatures(raw: unknown): AdvancedFeaturesData {
+  const root = (raw ?? {}) as Record<string, unknown>
+  const rawCards = Array.isArray(root.cards) ? root.cards : []
+  const validTones = new Set<AdvancedFeatureTone>(["good", "bad", "warn", "neutral"])
+  const cards: AdvancedFeatureCard[] = rawCards.map((entry) => {
+    const card = (entry ?? {}) as Record<string, unknown>
+    const rawItems = Array.isArray(card.items) ? card.items : []
+    const items: AdvancedFeatureItem[] = rawItems.map((it) => {
+      const item = (it ?? {}) as Record<string, unknown>
+      const tone = item.tone as AdvancedFeatureTone
+      return {
+        label: String(item.label ?? ""),
+        count: numberValue(item.count),
+        tone: validTones.has(tone) ? tone : "neutral"
+      }
+    })
+    return {
+      key: String(card.key ?? ""),
+      label: String(card.label ?? ""),
+      value: numberValue(card.value),
+      valueLabel: String(card.valueLabel ?? ""),
+      hint: String(card.hint ?? ""),
+      items
+    }
+  })
+  return { cards, source: root.source === "es" ? "es" : "mock" }
 }
 
 function parseSkillEvalChecks(raw: any): DashboardSkillEvalRun["checks"] {
@@ -1878,7 +1834,7 @@ export function useDashboard() {
   const [modelStats, setModelStats] = useState<ModelStatsData | null>(null)
   const [userStats, setUserStats] = useState<UserStatsData | null>(null)
   const [productivity, setProductivity] = useState<ProductivityData | null>(null)
-  const [feedback, setFeedback] = useState<FeedbackData | null>(null)
+  const [advancedFeatures, setAdvancedFeatures] = useState<AdvancedFeaturesData | null>(null)
   const [skillEval, setSkillEval] = useState<DashboardSkillEvalSummary | null>(null)
   const [projectMode, setProjectMode] = useState<DashboardProjectModeData | null>(null)
   const [projectModeProjectPages, setProjectModeProjectPages] = useState<
@@ -1911,12 +1867,12 @@ export function useDashboard() {
 
     const orgOpts = { upperOrgLv1: orgList }
     try {
-      const [ovRes, msRes, usRes, prRes, fbRes] = await Promise.all([
+      const [ovRes, msRes, usRes, prRes, afRes] = await Promise.all([
         window.api.dashboard.overview(r, g, orgOpts),
         window.api.dashboard.modelStats(r, g, orgOpts),
         window.api.dashboard.userStats(r, g, orgOpts),
         window.api.dashboard.productivity(r, g, orgOpts),
-        window.api.dashboard.feedback(r, g, orgOpts)
+        window.api.dashboard.advancedFeatures(r, g, orgOpts)
       ])
 
       // Stale check
@@ -1926,14 +1882,14 @@ export function useDashboard() {
       if (!msRes.success) throw new Error(msRes.error ?? "获取模型数据失败")
       if (!usRes.success) throw new Error(usRes.error ?? "获取用户数据失败")
       if (!prRes.success) throw new Error(prRes.error ?? "获取生产力数据失败")
-      if (!fbRes.success) throw new Error(fbRes.error ?? "获取反馈数据失败")
+      if (!afRes.success) throw new Error(afRes.error ?? "获取高级特性数据失败")
 
       setOverview(parseOverview(ovRes.data, g))
       setModelStats(parseModelStats(msRes.data))
       setProductivity(parseProductivity(prRes.data, g, r))
       // 仅选中单个组织时 userStats 进入 LV0 下钻视图，否则按 LV1 展示。
       setUserStats(parseUserStats(usRes.data, orgList.length === 1 ? orgList[0] : null))
-      setFeedback(parseFeedback(fbRes.data, g))
+      setAdvancedFeatures(parseAdvancedFeatures(afRes.data))
     } catch (e) {
       if (id !== fetchIdRef.current) return
       setError(e instanceof Error ? e.message : String(e))
@@ -2283,7 +2239,7 @@ export function useDashboard() {
     modelStats,
     userStats,
     productivity,
-    feedback,
+    advancedFeatures,
     skillEval,
     projectMode,
     projectModeLoading,

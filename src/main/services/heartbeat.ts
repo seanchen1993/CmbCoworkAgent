@@ -10,6 +10,7 @@ import {
 } from "../db"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyIfBackground } from "./notify"
+import { trackEvent } from "./event-reporter"
 
 /** Fixed thread ID for heartbeat (aligns with Nanobot session_key="heartbeat"). Resets won't orphan it. */
 const HEARTBEAT_THREAD_ID = "heartbeat"
@@ -235,6 +236,9 @@ async function executeHeartbeat(): Promise<void> {
   abortController = new AbortController()
   notifyRenderer("heartbeat:changed")
 
+  // Telemetry: only real runs (past the empty/skip gates) are timed & counted.
+  const runStartedAt = Date.now()
+
   const threadId = HEARTBEAT_THREAD_ID
 
   // Ensure thread exists in DB and metadata stays current
@@ -336,6 +340,15 @@ async function executeHeartbeat(): Promise<void> {
         lastRunError: null
       })
       console.log("[Heartbeat] Completed, HEARTBEAT_OK (silent, no action needed)")
+      try {
+        trackEvent("heartbeat.run.completed", "heartbeat", {
+          outcome: "silent",
+          durationMs: Date.now() - runStartedAt,
+          replyChars: fullReply.length
+        })
+      } catch (e) {
+        console.warn("[event] failed to emit heartbeat.run.completed:", e)
+      }
     } else {
       saveHeartbeatConfig({
         lastRunAt: new Date().toISOString(),
@@ -344,6 +357,15 @@ async function executeHeartbeat(): Promise<void> {
       })
       notifyIfBackground("💓 Heartbeat", stripped.text.trim() || "检查完成，有需要关注的内容")
       console.log("[Heartbeat] Completed with actionable output")
+      try {
+        trackEvent("heartbeat.run.completed", "heartbeat", {
+          outcome: "actionable",
+          durationMs: Date.now() - runStartedAt,
+          replyChars: fullReply.length
+        })
+      } catch (e) {
+        console.warn("[event] failed to emit heartbeat.run.completed:", e)
+      }
     }
   } catch (error) {
     const isAbort = error instanceof Error && (error.name === "AbortError" || error.message.includes("aborted"))
@@ -356,6 +378,14 @@ async function executeHeartbeat(): Promise<void> {
     })
     if (!isAbort) notifyIfBackground("❌ Heartbeat", message)
     console.error("[Heartbeat] Error:", message)
+    try {
+      trackEvent("heartbeat.run.completed", "heartbeat", {
+        outcome: isAbort ? "cancelled" : "error",
+        durationMs: Date.now() - runStartedAt
+      })
+    } catch (e) {
+      console.warn("[event] failed to emit heartbeat.run.completed:", e)
+    }
   } finally {
     running = false
     abortController = null
