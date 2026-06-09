@@ -170,6 +170,7 @@ function parseJsonObject(raw: string | null | undefined): Record<string, unknown
       ? (parsed as Record<string, unknown>)
       : undefined
   } catch {
+    console.log('Failed to parse JSON object:', raw)
     return undefined
   }
 }
