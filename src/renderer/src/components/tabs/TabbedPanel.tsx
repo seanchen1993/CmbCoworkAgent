@@ -14,6 +14,7 @@ interface TabbedPanelProps {
   hideWelcomeSkillTabs?: boolean
   onRequestOpenGitPanel?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
+  onHarnessSessionCreated?: (threadId: string) => void
 }
 
 export function TabbedPanel({
@@ -23,7 +24,8 @@ export function TabbedPanel({
   chatSurface = "default",
   hideWelcomeSkillTabs = false,
   onRequestOpenGitPanel,
-  onThreadGitStatusChange
+  onThreadGitStatusChange,
+  onHarnessSessionCreated
 }: TabbedPanelProps): React.JSX.Element {
   const { activeTab, openFiles, pendingApproval, setActiveTab } = useCurrentThread(threadId)
   const lastAutoFocusedApprovalIdRef = useRef<string | null>(null)
@@ -64,6 +66,7 @@ export function TabbedPanel({
             hideWelcomeSkillTabs={hideWelcomeSkillTabs}
             onOpenGitPanel={onRequestOpenGitPanel}
             onThreadGitStatusChange={onThreadGitStatusChange}
+            onHarnessSessionCreated={onHarnessSessionCreated}
           />
         ) : activeFile ? (
           <div className="flex flex-1 min-h-0 flex-col overflow-hidden">

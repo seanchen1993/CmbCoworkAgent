@@ -34,6 +34,7 @@ import type {
   HarnessWorkflowArtifactDefinition,
   HarnessWorkflowNextAction
 } from "../../shared/harness-board-types"
+import { stopHarnessWatchRefs } from "./watch-ref-watcher"
 
 interface HarnessProjectStoreFile {
   version: 1
@@ -1761,6 +1762,7 @@ export function updateHarnessProjectMetadata(
         throw new Error(`重命名失败：目标目录已存在 ${newPath}`)
       }
       try {
+        stopHarnessWatchRefs(`project:${projectId}`)
         renameSync(oldPath, newPath)
       } catch (e) {
         throw new Error(`重命名项目目录失败：${e instanceof Error ? e.message : String(e)}`)

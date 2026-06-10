@@ -197,6 +197,7 @@ export function ThreadListItem({
   isLoading,
   hasPendingApproval,
   hasPendingUserInput,
+  hasContextReminder,
   scheduledTaskLoading,
   isSelected,
   isEditing,
@@ -217,6 +218,7 @@ export function ThreadListItem({
   isLoading: boolean
   hasPendingApproval: boolean
   hasPendingUserInput: boolean
+  hasContextReminder: boolean
   scheduledTaskLoading: boolean
   isExporting: boolean
   isSelected: boolean
@@ -313,7 +315,11 @@ export function ThreadListItem({
               </div>
             )}
           </div>
-          {isUnread && !isRunning && <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />}
+          {hasContextReminder && !isRunning ? (
+            <span className="size-2 rounded-full bg-status-warning shrink-0" />
+          ) : (
+            isUnread && !isRunning && <span className="size-2 rounded-full bg-blue-500 shrink-0" />
+          )}
           <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
             <span className="absolute right-0 text-[10px] text-muted-foreground transition-opacity group-hover:opacity-0">
               {formatCompactTime(thread.updated_at)}
@@ -1061,6 +1067,9 @@ export function ThreadSidebar(): React.JSX.Element {
             const unreadCount = project.threads.filter((thread) =>
               unreadIds.has(thread.thread_id)
             ).length
+            const hasContextReminderThread = project.threads.some((thread) =>
+              Boolean(allThreadStates[thread.thread_id]?.contextReminder?.pending)
+            )
             const hasRunningThread = project.threads.some((thread) => {
               const threadState = allThreadStates[thread.thread_id]
               return (
@@ -1113,8 +1122,12 @@ export function ThreadSidebar(): React.JSX.Element {
                               {project.name}
                             </span>
                           </button>
-                          {unreadCount > 0 && (
-                            <span className="size-2 rounded-full bg-blue-500 shrink-0" />
+                          {hasContextReminderThread ? (
+                            <span className="size-2 rounded-full bg-status-warning shrink-0" />
+                          ) : (
+                            unreadCount > 0 && (
+                              <span className="size-2 rounded-full bg-blue-500 shrink-0" />
+                            )
                           )}
                           <span className="relative ml-auto flex h-6 w-28 shrink-0 items-center justify-end overflow-hidden">
                             <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
@@ -1243,6 +1256,7 @@ export function ThreadSidebar(): React.JSX.Element {
                       const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
                       const hasPendingApproval = Boolean(threadState?.pendingApproval)
                       const hasPendingUserInput = Boolean(threadState?.pendingUserInput)
+                      const hasContextReminder = Boolean(threadState?.contextReminder?.pending)
 
                       return (
                         <ThreadListItem
@@ -1251,6 +1265,7 @@ export function ThreadSidebar(): React.JSX.Element {
                           isLoading={isLoading}
                           hasPendingApproval={hasPendingApproval}
                           hasPendingUserInput={hasPendingUserInput}
+                          hasContextReminder={hasContextReminder}
                           scheduledTaskLoading={scheduledTaskLoading}
                           isExporting={exportingThreadId === thread.thread_id}
                           isSelected={currentThreadId === thread.thread_id}

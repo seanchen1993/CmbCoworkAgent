@@ -53,10 +53,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TabbedPanel } from "@/components/tabs"
 import { ThreadListItem } from "@/components/sidebar/ThreadSidebar"
-import {
-  normalizeHarnessNextAction,
-  setPendingHarnessNextAction
-} from "@/lib/harness-next-action"
+import { createHarnessFeatureThread } from "@/lib/harness-feature-thread"
+import { getHarnessRunNextAction } from "@/lib/harness-run-next-action"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import {
@@ -257,20 +255,6 @@ interface HarnessFeatureThreadMetadata {
   projectId: string
   slug: string
   source: string
-}
-
-function getRunNextAction(
-  detail: HarnessRunDetailViewModel | null | undefined
-): HarnessWorkflowNextAction | undefined {
-  if (!detail) return undefined
-  const currentNodeId = detail.run.currentNodeId
-  const nodeStatus = detail.run.nodes.find((node) => node.id === currentNodeId)?.nodeStatus
-  if (!currentNodeId || !nodeStatus) return undefined
-  const workflowNode = detail.workflow.nodes.find((node) => node.id === currentNodeId)
-  const state =
-    workflowNode?.states?.find((item) => item.nodeStatus === nodeStatus) ??
-    detail.workflow.states?.find((item) => item.nodeStatus === nodeStatus)
-  return normalizeHarnessNextAction(state?.nextAction)
 }
 
 interface HarnessSessionIndex {
@@ -538,16 +522,7 @@ interface CreateHarnessSessionParams {
 async function createHarnessSession(params: CreateHarnessSessionParams): Promise<Thread> {
   const { projectId, slug, nextAction, sessions, threadsById, threadStates, createThread } = params
   const workspacePath = await getLatestSessionWorkspacePath(sessions, threadsById, threadStates)
-  const normalizedNextAction = normalizeHarnessNextAction(nextAction)
-  const thread = await createThread(
-    {
-      workspacePath,
-      harnessFeature: { projectId, slug, source: HARNESS_SOURCE }
-    },
-    { preserveView: true }
-  )
-  if (normalizedNextAction) setPendingHarnessNextAction(thread.thread_id, normalizedNextAction)
-  return thread
+  return createHarnessFeatureThread({ projectId, slug, workspacePath, nextAction, createThread })
 }
 
 function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boolean {
@@ -1973,11 +1948,13 @@ function StageArtifactPanel({
 function FeatureConversationPanel({
   threadId,
   hasPendingGitDiffNotice,
+  onHarnessSessionCreated,
   onRequestOpenGitPanel,
   onThreadGitStatusChange
 }: {
   threadId: string | null
   hasPendingGitDiffNotice?: boolean
+  onHarnessSessionCreated?: (threadId: string) => void
   onRequestOpenGitPanel?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
 }): React.JSX.Element {
@@ -1993,6 +1970,7 @@ function FeatureConversationPanel({
             hideWelcomeSkillTabs
             onRequestOpenGitPanel={onRequestOpenGitPanel}
             onThreadGitStatusChange={onThreadGitStatusChange}
+            onHarnessSessionCreated={onHarnessSessionCreated}
           />
         </div>
       ) : (
@@ -2624,7 +2602,7 @@ function FeatureDetailPage({
       const thread = await createHarnessSession({
         projectId: detail.project.projectId,
         slug: detail.run.slug,
-        nextAction: getRunNextAction(detail),
+        nextAction: getHarnessRunNextAction(detail),
         sessions: detail.sessions,
         threadsById,
         threadStates: allThreadStates,
@@ -2648,6 +2626,14 @@ function FeatureDetailPage({
     threadsById,
     unbound
   ])
+
+  const handleContextReminderSessionCreated = useCallback((threadId: string): void => {
+    if (!threadId) return
+    setSelectedSessionState({ detailKey, threadId })
+    onActiveSessionChange?.(threadId)
+    setActiveDetailTab("session")
+    onSessionViewChange?.(true)
+  }, [detailKey, onActiveSessionChange, onSessionViewChange])
 
   const renderStageNodeStrip = (): React.JSX.Element | null => {
     if (!detail) return null
@@ -2838,6 +2824,7 @@ function FeatureDetailPage({
           <FeatureConversationPanel
             threadId={activeSessionThreadIdForView}
             hasPendingGitDiffNotice={hasPendingGitDiffNotice}
+            onHarnessSessionCreated={handleContextReminderSessionCreated}
             onRequestOpenGitPanel={onRequestOpenGitPanel}
             onThreadGitStatusChange={onThreadGitStatusChange}
           />
@@ -3065,6 +3052,7 @@ function ProjectFeatureSidebar({
                         const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
                         const hasPendingApproval = Boolean(threadState?.pendingApproval)
                         const hasPendingUserInput = Boolean(threadState?.pendingUserInput)
+                        const hasContextReminder = Boolean(threadState?.contextReminder?.pending)
 
                         return (
                           <ThreadListItem
@@ -3072,6 +3060,7 @@ function ProjectFeatureSidebar({
                             thread={thread}
                             isLoading={isLoading}
                             hasPendingApproval={hasPendingApproval}
+                            hasContextReminder={hasContextReminder}
                             scheduledTaskLoading={scheduledTaskLoading}
                             isExporting={exportingThreadId === thread.thread_id}
                             isSelected={highlightThreadId === thread.thread_id}
@@ -3906,7 +3895,7 @@ export function HarnessBoardView({
         const thread = await createHarnessSession({
           projectId: project.projectId,
           slug,
-          nextAction: getRunNextAction(latestRunDetail),
+          nextAction: getHarnessRunNextAction(latestRunDetail),
           sessions,
           threadsById,
           threadStates: allThreadStates,

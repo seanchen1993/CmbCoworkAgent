@@ -89,6 +89,10 @@ import { ChatScrollNavigator } from "./ChatScrollNavigator"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
+import {
+  ContextReminderController,
+  isContextReminderPending
+} from "./ContextReminderController"
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
 import {
@@ -914,6 +918,7 @@ interface ChatContainerProps {
   hideWelcomeSkillTabs?: boolean
   onOpenGitPanel?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
+  onHarnessSessionCreated?: (threadId: string) => void
 }
 
 interface SkillIntentBannerRequest {
@@ -1243,7 +1248,8 @@ export function ChatContainer({
   surface = "default",
   hideWelcomeSkillTabs = false,
   onOpenGitPanel,
-  onThreadGitStatusChange
+  onThreadGitStatusChange,
+  onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
@@ -1375,6 +1381,7 @@ export function ChatContainer({
   const {
     threads,
     models,
+    createThread,
     updateThread,
     generateTitleForFirstMessage,
     setShowCustomizeView,
@@ -1686,6 +1693,7 @@ export function ChatContainer({
     hookInterruption,
     workspacePath,
     tokenUsage,
+    contextReminder,
     currentModel,
     draftInput: input,
     draftSkill: selectedSkill,
@@ -1707,6 +1715,7 @@ export function ChatContainer({
     setError,
     clearError,
     clearHookInterruption,
+    setContextReminder,
     setDraftInput: setInput,
     setDraftSkill: setSelectedSkill
   } = useCurrentThread(threadId)
@@ -1765,6 +1774,7 @@ export function ChatContainer({
     (worker) => worker.status === "running"
   )
   const isLoading = streamData.isLoading || scheduledTaskLoading
+  const isHarnessContextReminderEnabled = surface === "harness-project" && Boolean(harnessFeatureBinding)
   const agentModeSwitchDisabledReason = disableCoordinatorModeOption
     ? "项目模式暂不支持子代理协同模式，只能使用 Solo Agent。"
     : !canChangeAgentMode
@@ -2657,7 +2667,14 @@ export function ChatContainer({
     hasPendingTransportPayload: hasPendingGoalTransportPayload,
     goalControlAllowedWhileLoading
   })
+  const contextReminderPending = isContextReminderPending(
+    isHarnessContextReminderEnabled,
+    contextReminder
+  )
+  const effectiveInputDisabled = inputDisabled || contextReminderPending
+  const effectiveComposerControlsDisabled = composerControlsDisabled || contextReminderPending
   const inputPlaceholder = useMemo(() => {
+    if (contextReminderPending) return "请先处理上下文提醒"
     const goal = goalUi.goal
     if (isLoading) {
       if (streamData.isLoading && !scheduledTaskLoading && hasActiveGoalRunning) {
@@ -2679,6 +2696,7 @@ export function ChatContainer({
     return "输入新问题，或用 /goal <目标> 开始新的长期任务"
   }, [
     attachments.length,
+    contextReminderPending,
     goalUi.goal,
     hasActiveGoalRunning,
     goalControlAllowedWhileLoading,
@@ -2944,6 +2962,7 @@ export function ChatContainer({
     // future invoker (hotkey, programmatic call) can't accidentally ship the
     // literal "/xxx" text as a message.
     if (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) return
+    if (contextReminderPending) return
     if (
       (!trimmedInput && attachments.length === 0 && !selectedSkill) ||
       historyLoading ||
@@ -3317,7 +3336,7 @@ export function ChatContainer({
   }
 
   const handleInsertNewline = useCallback((): void => {
-    if (inputDisabled) return
+    if (effectiveInputDisabled) return
 
     const textarea = inputRef.current
     const selectionStart = textarea?.selectionStart ?? input.length
@@ -3332,7 +3351,7 @@ export function ChatContainer({
       target.focus()
       target.setSelectionRange(nextCursor, nextCursor)
     })
-  }, [input, inputDisabled, setInput])
+  }, [effectiveInputDisabled, input, setInput])
 
   // Auto-resize textarea based on content
   const adjustTextareaHeight = (): void => {
@@ -4847,6 +4866,25 @@ export function ChatContainer({
             })()}
               </div>
             )}
+            <ContextReminderController
+              enabled={isHarnessContextReminderEnabled}
+              isLoading={isLoading}
+              historyLoading={historyLoading}
+              hasPendingApproval={Boolean(pendingApproval)}
+              hasQueuedApprovals={approvalQueue.length > 0}
+              hasPendingUserInput={Boolean(pendingUserInput)}
+              tokenUsage={tokenUsage}
+              currentModel={currentModel}
+              modelContextLimit={modelContextLimit}
+              contextReminder={contextReminder}
+              setContextReminder={setContextReminder}
+              harnessFeatureBinding={harnessFeatureBinding}
+              workspacePath={workspacePath}
+              currentThreadMetadata={currentThread?.metadata}
+              createThread={createThread}
+              reserveRightSpace={reserveRightSpace}
+              onHarnessSessionCreated={onHarnessSessionCreated}
+            />
             {goalUi.goal && (
               <div className={cn("px-4 pb-1", reserveRightSpace && "md:pr-20")}>
                 <GoalStatusPanel
@@ -4983,7 +5021,7 @@ export function ChatContainer({
                   }}
                   onKeyDown={handleKeyDown}
                   placeholder={inputPlaceholder}
-                  disabled={inputDisabled}
+                  disabled={effectiveInputDisabled}
                   className={cn(
                     "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
                     "p-4 text-sm placeholder:text-muted-foreground",
@@ -4999,7 +5037,7 @@ export function ChatContainer({
                     <button
                       type="button"
                       disabled={
-                        composerControlsDisabled ||
+                        effectiveComposerControlsDisabled ||
                         attachmentLoading ||
                         attachments.length >= MAX_ATTACHMENTS ||
                         totalAttachmentChars >= MAX_TOTAL_CHARS
@@ -5031,7 +5069,7 @@ export function ChatContainer({
                         <TooltipTrigger asChild>
                           <button
                             type="button"
-                            disabled={inputDisabled}
+                            disabled={effectiveInputDisabled}
                             onClick={handleInsertNewline}
                             aria-label="换行"
                             className="cursor-pointer flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -5090,7 +5128,7 @@ export function ChatContainer({
                         <button
                           type="submit"
                           disabled={
-                            inputDisabled ||
+                            effectiveInputDisabled ||
                             (!input.trim() && attachments.length === 0 && !selectedSkill) ||
                             (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(input))
                           }

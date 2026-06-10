@@ -352,6 +352,22 @@ export interface ThreadGitContext {
   branch?: string | null
 }
 
+export interface ContextReminderState {
+  pending: boolean
+  shownCount: number
+  completedTurnCount: number
+  lastPromptCompletedTurnCount: number
+}
+
+function createDefaultContextReminderState(): ContextReminderState {
+  return {
+    pending: false,
+    shownCount: 0,
+    completedTurnCount: 0,
+    lastPromptCompletedTurnCount: 0
+  }
+}
+
 // Per-thread state (persisted/restored from checkpoints)
 export interface ThreadState {
   messages: Message[]
@@ -377,6 +393,7 @@ export interface ThreadState {
   activeTab: "agent" | string
   fileContents: Record<string, string>
   tokenUsage: TokenUsage | null
+  contextReminder: ContextReminderState
   draftInput: string
   /**
    * Skill chip the user has selected for the next send. Kept alongside
@@ -456,6 +473,11 @@ export interface ThreadActions {
   closeFile: (path: string) => void
   setActiveTab: (tab: "agent" | string) => void
   setFileContents: (path: string, content: string) => void
+  setContextReminder: (
+    update:
+      | ContextReminderState
+      | ((prev: ContextReminderState) => ContextReminderState)
+  ) => void
   setDraftInput: (input: string) => void
   setDraftSkill: (skill: SkillMetadata | null) => void
 }
@@ -509,6 +531,7 @@ const createDefaultThreadState = (): ThreadState => ({
   activeTab: "agent",
   fileContents: {},
   tokenUsage: null,
+  contextReminder: createDefaultContextReminderState(),
   draftInput: "",
   draftSkill: null,
   scheduledTaskLoading: false,
@@ -2673,6 +2696,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         setFileContents: (path: string, content: string) => {
           updateThreadState(threadId, (state) => ({
             fileContents: { ...state.fileContents, [path]: content }
+          }))
+        },
+        setContextReminder: (
+          update:
+            | ContextReminderState
+            | ((prev: ContextReminderState) => ContextReminderState)
+        ) => {
+          updateThreadState(threadId, (state) => ({
+            contextReminder:
+              typeof update === "function"
+                ? update(state.contextReminder ?? createDefaultContextReminderState())
+                : update
           }))
         },
         setDraftInput: (input: string) => {
