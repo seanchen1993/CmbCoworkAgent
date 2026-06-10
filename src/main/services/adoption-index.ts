@@ -229,19 +229,33 @@ export function insertGenEvent(row: GenIndexRow): void {
 /**
  * Find all unmeasured gen events for a file within the retention window,
  * newest first. Returns an empty array when none exists.
+ *
+ * `maxCreatedAt` (optional) is an inclusive upper bound on the generation time.
+ * Commit-driven measurement passes the commit's creation time here so a
+ * generation that happened *after* the commit (e.g. the next turn editing the
+ * same file before it is committed again) is never attributed to that commit.
+ * Without it, an out-of-order re-measure of an old commit — notably the commit
+ * reconciler / hook sync running long after the commit — would vacuum unrelated
+ * later generations into the old commit, inflating its generated-line
+ * denominator and consuming gens the real commit should have claimed.
  */
-export function findPendingGensForFile(filePath: string, minCreatedAt: number): GenIndexRow[] {
+export function findPendingGensForFile(
+  filePath: string,
+  minCreatedAt: number,
+  maxCreatedAt?: number
+): GenIndexRow[] {
   if (!db) return []
+  const hasMax = typeof maxCreatedAt === "number" && Number.isFinite(maxCreatedAt)
   const stmt = db.prepare(
     `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
             line_hashes, old_line_hashes, created_at, measured,
             used_skills, thread_id, trace_id, model_id, model_name,
             harness_project_id, harness_feature_slug, harness_adapter_name, harness_adapter_version
        FROM gen_events
-      WHERE file_path = ? AND measured = 0 AND created_at >= ?
+      WHERE file_path = ? AND measured = 0 AND created_at >= ?${hasMax ? " AND created_at <= ?" : ""}
       ORDER BY created_at DESC`
   )
-  stmt.bind([filePath, minCreatedAt])
+  stmt.bind(hasMax ? [filePath, minCreatedAt, maxCreatedAt as number] : [filePath, minCreatedAt])
   try {
     const rows: GenIndexRow[] = []
     while (stmt.step()) {

@@ -71,13 +71,21 @@ function isCommitCommand(command: string): boolean {
 interface StagedCapture {
   workingDir: string
   snapshots: StagedSnapshot[]
+  /**
+   * Wall-clock time of the staged capture (epoch ms). The capture runs before
+   * `git commit`, so it is an exact upper bound on which generations can be part
+   * of the commit — passed to adoption measurement to keep later (post-capture)
+   * generations from being attributed to this commit.
+   */
+  captureTimeMs: number
 }
 
 async function captureStagedSnapshotsForCommand(command: string): Promise<StagedCapture | null> {
   try {
     const parsed = parseGitCommand(command)
     const workingDir = parsed.workingDirFromFlag || (await getCurrentWorkingDirectory())
-    return { workingDir, snapshots: captureAdoptionStagedSnapshots(workingDir) }
+    const captureTimeMs = Date.now()
+    return { workingDir, captureTimeMs, snapshots: captureAdoptionStagedSnapshots(workingDir) }
   } catch (e) {
     console.warn("[Git] adoption pre-commit capture skipped:", e)
     return null
@@ -1158,7 +1166,7 @@ export function registerGitHandlers(): void {
           console.log(
             `[Git] triggering post-commit measurement: commitSha=${sha ?? "unknown"} snapshots=${stagedCapture.snapshots.length}`
           )
-          measureForCommit(stagedCapture.snapshots, sha)
+          measureForCommit(stagedCapture.snapshots, sha, stagedCapture.captureTimeMs)
         } catch (e) {
           console.warn("[Git] adoption post-commit measurement skipped:", e)
         }

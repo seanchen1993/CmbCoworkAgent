@@ -59,6 +59,12 @@ import {
 // also doubled as the L2 timer window — L2 has been removed, this is now purely
 // "how long do we keep a baseline around for commit-time attribution".)
 const GEN_ATTRIBUTION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+// Slack added to a commit's creation time when using it as an upper bound on
+// eligible gen rows. Covers git's 1-second committer-time granularity (a gen
+// written in the same wall-clock second as the commit must not be floored out)
+// plus minor clock jitter, while staying far below the multi-second gap to any
+// *subsequent* (post-commit) generation we want to exclude.
+const COMMIT_ATTRIBUTION_TOLERANCE_MS = 2 * 1000
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000 // shard rotation / retention / VACUUM cadence
 const SHARD_SIZE_LIMIT_BYTES = 10 * 1024 * 1024 // 10 MB per shard
 const SHARD_MAX_AGE_MS = 30 * 60 * 1000 // rotate every 30 min
@@ -899,10 +905,28 @@ interface MeasureOpts {
   currentContent?: string | Buffer
   commitSha?: string
   /**
+   * Commit creation time (epoch ms). Used as an inclusive upper bound (plus a
+   * small tolerance) on eligible gen rows so generations made *after* this
+   * commit are never attributed to it. Critical for out-of-order re-measures
+   * (commit reconciler / hook sync) that run long after the commit, when newer
+   * uncommitted gens for the same file may exist. Omit to disable the bound.
+   */
+  commitTimeMs?: number
+  /**
    * When true, short-circuit to `verdict: deleted` without reading the worktree
    * or comparing hashes. Used by the commit path for files staged as deletions.
    */
   stagedDeleted?: boolean
+}
+
+/**
+ * Inclusive upper bound on eligible gen `created_at`, derived from a commit's
+ * creation time plus tolerance. Returns undefined when no commit time is known
+ * (preserving the legacy "no upper bound" behaviour).
+ */
+function resolveMaxGenCreatedAt(commitTimeMs?: number): number | undefined {
+  if (typeof commitTimeMs !== "number" || !Number.isFinite(commitTimeMs)) return undefined
+  return commitTimeMs + COMMIT_ATTRIBUTION_TOLERANCE_MS
 }
 
 /**
@@ -929,9 +953,10 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
   try {
     absPath = resolvePath(filePath)
     const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
-    const pendingRows = findPendingGensForFile(absPath, minCreated)
+    const maxCreated = resolveMaxGenCreatedAt(opts?.commitTimeMs)
+    const pendingRows = findPendingGensForFile(absPath, minCreated, maxCreated)
     console.log(
-      `[AdoptionTracker] doMeasureFile: absPath=${absPath} pendingGens=${pendingRows.length} commitSha=${opts?.commitSha ?? "none"} stagedDeleted=${opts?.stagedDeleted ?? false}`
+      `[AdoptionTracker] doMeasureFile: absPath=${absPath} pendingGens=${pendingRows.length} commitSha=${opts?.commitSha ?? "none"} commitTimeMs=${opts?.commitTimeMs ?? "none"} stagedDeleted=${opts?.stagedDeleted ?? false}`
     )
     if (pendingRows.length === 0) return
 
@@ -1276,33 +1301,46 @@ export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnaps
  * is the only signal we treat as adoption. Deletions surface via a null
  * stagedContent (→ `verdict: deleted`).
  */
-export function measureForCommit(snapshots: StagedSnapshot[], commitSha?: string): void {
+export function measureForCommit(
+  snapshots: StagedSnapshot[],
+  commitSha?: string,
+  commitTimeMs?: number
+): void {
   if (!initialized) {
     console.warn("[AdoptionTracker] measureForCommit skipped — tracker not initialized")
     return
   }
   console.log(
-    `[AdoptionTracker] measureForCommit: snapshotCount=${snapshots.length} commitSha=${commitSha ?? "unknown"}`
+    `[AdoptionTracker] measureForCommit: snapshotCount=${snapshots.length} commitSha=${commitSha ?? "unknown"} commitTimeMs=${commitTimeMs ?? "none"}`
   )
   for (const snap of snapshots) {
     if (!isCodeFile(snap.absPath)) continue
     if (snap.stagedContent === null) {
-      measureFile(snap.absPath, { stagedDeleted: true, commitSha })
+      measureFile(snap.absPath, { stagedDeleted: true, commitSha, commitTimeMs })
       continue
     }
     measureFile(snap.absPath, {
       currentContent: snap.stagedContent,
-      commitSha
+      commitSha,
+      commitTimeMs
     })
   }
 }
 
-export function hasPendingGenerationsForCommit(snapshots: StagedSnapshot[]): boolean {
+export function hasPendingGenerationsForCommit(
+  snapshots: StagedSnapshot[],
+  commitTimeMs?: number
+): boolean {
   if (!initialized) return false
   const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
+  // Mirror the upper bound used at measure time so the "should I measure this
+  // commit?" gate and the measurement itself agree — otherwise the reconciler
+  // would re-process (and re-emit git.commit.created for) commits whose only
+  // pending gens are newer than the commit and would be skipped anyway.
+  const maxCreated = resolveMaxGenCreatedAt(commitTimeMs)
   for (const snap of snapshots) {
     if (!isCodeFile(snap.absPath)) continue
-    if (findPendingGensForFile(snap.absPath, minCreated).length > 0) return true
+    if (findPendingGensForFile(snap.absPath, minCreated, maxCreated).length > 0) return true
   }
   return false
 }
