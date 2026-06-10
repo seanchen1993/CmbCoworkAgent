@@ -395,6 +395,7 @@ export interface ThreadState {
   tokenUsage: TokenUsage | null
   contextReminder: ContextReminderState
   draftInput: string
+  harnessNextActionDialogTips: string | null
   /**
    * Skill chip the user has selected for the next send. Kept alongside
    * draftInput so the chip survives view switches (chat → customize → back),
@@ -479,6 +480,7 @@ export interface ThreadActions {
       | ((prev: ContextReminderState) => ContextReminderState)
   ) => void
   setDraftInput: (input: string) => void
+  setHarnessNextActionDialogTips: (tips: string | null) => void
   setDraftSkill: (skill: SkillMetadata | null) => void
 }
 
@@ -533,6 +535,7 @@ const createDefaultThreadState = (): ThreadState => ({
   tokenUsage: null,
   contextReminder: createDefaultContextReminderState(),
   draftInput: "",
+  harnessNextActionDialogTips: null,
   draftSkill: null,
   scheduledTaskLoading: false,
   historyLoading: false,
@@ -2712,6 +2715,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         },
         setDraftInput: (input: string) => {
           updateThreadState(threadId, () => ({ draftInput: input }))
+        },
+        setHarnessNextActionDialogTips: (tips: string | null) => {
+          const normalizedTips = tips?.trim() || null
+          updateThreadState(threadId, () => ({ harnessNextActionDialogTips: normalizedTips }))
         },
         setDraftSkill: (skill: SkillMetadata | null) => {
           updateThreadState(threadId, () => ({ draftSkill: skill }))

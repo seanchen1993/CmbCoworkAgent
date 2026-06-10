@@ -1409,55 +1409,7 @@ export function ChatContainer({
     () => getPendingHarnessNextAction(threadId),
     [pendingHarnessNextActionVersion, threadId]
   )
-  const [transientHarnessDialogTips, setTransientHarnessDialogTips] = useState<{
-    threadId: string
-    tips: string
-  } | null>(null)
   const pendingHarnessDialogTips = pendingHarnessNextAction?.dialogTips?.trim() || null
-  const transientHarnessDialogTipsForThread =
-    transientHarnessDialogTips?.threadId === threadId ? transientHarnessDialogTips.tips : null
-  const [harnessDialogTips, setHarnessDialogTips] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!threadId || !pendingHarnessDialogTips) return
-    setTransientHarnessDialogTips({ threadId, tips: pendingHarnessDialogTips })
-  }, [pendingHarnessDialogTips, threadId])
-
-  useEffect(() => {
-    if (!shouldShowHarnessDialogTips || !harnessFeatureBinding) {
-      setHarnessDialogTips(null)
-      return
-    }
-
-    const nextActionDialogTips =
-      pendingHarnessDialogTips ?? transientHarnessDialogTipsForThread?.trim()
-    if (nextActionDialogTips) {
-      setHarnessDialogTips(nextActionDialogTips)
-      return
-    }
-
-    let cancelled = false
-    setHarnessDialogTips(null)
-    window.api.harnessBoard
-      .getDialogTips(harnessFeatureBinding.projectId, harnessFeatureBinding.slug)
-      .then((tips) => {
-        if (!cancelled) setHarnessDialogTips(tips?.trim() || null)
-      })
-      .catch((error) => {
-        console.warn("[ChatContainer] Failed to load harness dialog tips:", error)
-        if (!cancelled) setHarnessDialogTips(null)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [
-    harnessFeatureBinding?.projectId,
-    harnessFeatureBinding?.slug,
-    pendingHarnessDialogTips,
-    transientHarnessDialogTipsForThread,
-    shouldShowHarnessDialogTips
-  ])
 
   const resolveAgentMode = useCallback(
     async (metadata: Record<string, unknown>): Promise<ChatAgentMode> => {
@@ -1696,6 +1648,7 @@ export function ChatContainer({
     contextReminder,
     currentModel,
     draftInput: input,
+    harnessNextActionDialogTips,
     draftSkill: selectedSkill,
     coordinatorWorkers,
     scheduledTaskLoading,
@@ -1717,8 +1670,54 @@ export function ChatContainer({
     clearHookInterruption,
     setContextReminder,
     setDraftInput: setInput,
+    setHarnessNextActionDialogTips,
     setDraftSkill: setSelectedSkill
   } = useCurrentThread(threadId)
+
+  const storedHarnessNextActionDialogTips = harnessNextActionDialogTips?.trim() || null
+  const harnessDialogTipsProjectId = harnessFeatureBinding?.projectId ?? null
+  const harnessDialogTipsSlug = harnessFeatureBinding?.slug ?? null
+  const [harnessDialogTips, setHarnessDialogTips] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!pendingHarnessDialogTips) return
+    setHarnessNextActionDialogTips(pendingHarnessDialogTips)
+  }, [pendingHarnessDialogTips, setHarnessNextActionDialogTips])
+
+  useEffect(() => {
+    if (!shouldShowHarnessDialogTips || !harnessDialogTipsProjectId || !harnessDialogTipsSlug) {
+      setHarnessDialogTips(null)
+      return
+    }
+
+    const nextActionDialogTips = pendingHarnessDialogTips ?? storedHarnessNextActionDialogTips
+    if (nextActionDialogTips) {
+      setHarnessDialogTips(nextActionDialogTips)
+      return
+    }
+
+    let cancelled = false
+    setHarnessDialogTips(null)
+    window.api.harnessBoard
+      .getDialogTips(harnessDialogTipsProjectId, harnessDialogTipsSlug)
+      .then((tips) => {
+        if (!cancelled) setHarnessDialogTips(tips?.trim() || null)
+      })
+      .catch((error) => {
+        console.warn("[ChatContainer] Failed to load harness dialog tips:", error)
+        if (!cancelled) setHarnessDialogTips(null)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    harnessDialogTipsProjectId,
+    harnessDialogTipsSlug,
+    pendingHarnessDialogTips,
+    shouldShowHarnessDialogTips,
+    storedHarnessNextActionDialogTips
+  ])
 
   // Hook logs live in an external store so updates don't re-render the full provider tree.
   // Per-turn buckets are keyed by the user message id that opened the turn,
