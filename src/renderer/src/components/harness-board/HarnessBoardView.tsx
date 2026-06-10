@@ -176,6 +176,7 @@ function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataU
     adapterType: "plugin",
     name: "",
     projectCode: "",
+    projectDir: "",
     description: "",
     systemId: "",
     systemName: "",
@@ -285,6 +286,10 @@ function resolveWorkspaceFilePath(filePath: string, workspacePath: string): stri
 
   const workspaceRoot = workspacePath.replace(/\\/g, "/").replace(/\/+$/, "")
   return `${workspaceRoot}/${input.replace(/^\/+/, "")}`
+}
+
+function resolveProjectRootPath(project: Pick<HarnessProjectListItem, "workspacePath" | "projectDir">): string {
+  return resolveWorkspaceFilePath(project.projectDir, project.workspacePath)
 }
 
 async function openPathInFileManager(targetPath: string, fallbackError: string): Promise<void> {
@@ -444,6 +449,7 @@ function createUnboundRunDetail(
       projectId: detail.project.projectId,
       name: detail.project.name,
       projectCode: detail.project.projectCode,
+      projectDir: detail.project.projectDir,
       systemId: detail.project.systemId,
       workspacePath: detail.project.workspacePath,
       projectRootPath: detail.project.projectRootPath
@@ -538,6 +544,7 @@ function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boole
     form.adapterType,
     form.name,
     form.projectCode,
+    form.projectDir,
     form.description,
     form.systemId,
     form.systemName,
@@ -551,7 +558,11 @@ function getHarnessNameError(label: string, value: string): string | null {
 }
 
 function getProjectMetadataNameError(form: HarnessProjectMetadataUpdateInput): string | null {
-  return getHarnessNameError("项目名称", form.name) ?? getHarnessNameError("项目编号", form.projectCode)
+  return (
+    getHarnessNameError("项目名称", form.name) ??
+    getHarnessNameError("项目编号", form.projectCode) ??
+    getHarnessNameError("项目文件夹", form.projectDir)
+  )
 }
 
 function metadataNameInvalid(form: HarnessProjectMetadataUpdateInput): boolean {
@@ -564,6 +575,7 @@ function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectM
     adapterType: project.harnessAdapter.type,
     name: project.name,
     projectCode: project.projectCode,
+    projectDir: project.projectDir,
     description: project.description,
     systemId: project.systemId,
     systemName: project.systemName,
@@ -844,7 +856,7 @@ function ProjectWorkspacePathTip(): React.JSX.Element {
           </button>
         </TooltipTrigger>
         <TooltipContent side="top" className="z-[70] max-w-72">
-          本项目的插件产物将统一在该路径管理。非代码仓库路径
+          项目产物路径，非代码仓库
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -1079,8 +1091,13 @@ function ProjectFormDialog({
 }): React.JSX.Element {
   const projectNameError = getHarnessNameError("项目名称", form.name)
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
+  const projectDirError = getHarnessNameError("项目文件夹", form.projectDir)
   const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
   const selectedAdapterMessage = boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
+  const projectRootPath = form.workspacePath.trim()
+  const projectDir = form.projectDir.trim()
+  const projectCreatePathHint =
+    projectRootPath && projectDir ? `将在 ${projectRootPath} 下创建文件夹: ${projectDir} ` : ""
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -1119,9 +1136,15 @@ function ProjectFormDialog({
                 项目名称 *
                 <Input
                   value={form.name}
-                  onChange={(event) =>
-                    onChange({ ...form, name: sanitizeHarnessNameInput(event.target.value) })
-                  }
+                  onChange={(event) => {
+                    const name = sanitizeHarnessNameInput(event.target.value)
+                    const shouldSyncProjectDir = !form.projectDir || form.projectDir === form.name
+                    onChange({
+                      ...form,
+                      name,
+                      projectDir: shouldSyncProjectDir ? name : form.projectDir
+                    })
+                  }}
                   placeholder="请输入"
                   className={harnessProjectCreateInputClassName}
                   aria-invalid={projectNameError ? true : undefined}
@@ -1178,16 +1201,22 @@ function ProjectFormDialog({
                   className={harnessProjectCreateInputClassName}
                 />
               </label>
-              <div className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
+            </div>
+          </section>
+
+          <section className="rounded-md border border-border bg-muted/30 p-3">
+            <div className="mb-3 text-sm font-semibold">工作区配置</div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 <div className="flex items-center gap-1.5">
-                  <span>项目工作区 *</span>
+                  <span>项目根路径 *</span>
                   <ProjectWorkspacePathTip />
                 </div>
                 <div className="flex min-w-0 gap-2">
                   <Input
                     value={form.workspacePath}
                     readOnly
-                    placeholder="请选择插件工作区路径"
+                    placeholder="请选择项目根路径"
                     className={harnessProjectCreateInputClassName}
                   />
                   <Button
@@ -1201,7 +1230,25 @@ function ProjectFormDialog({
                   </Button>
                 </div>
               </div>
+              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                项目文件夹 *
+                <Input
+                  value={form.projectDir}
+                  onChange={(event) =>
+                    onChange({ ...form, projectDir: sanitizeHarnessNameInput(event.target.value) })
+                  }
+                  placeholder="请输入"
+                  className={harnessProjectCreateInputClassName}
+                  aria-invalid={projectDirError ? true : undefined}
+                />
+                {projectDirError && <span className="text-status-critical">{projectDirError}</span>}
+              </label>
             </div>
+            {projectCreatePathHint && (
+              <div className="mt-3 truncate text-xs text-muted-foreground" title={projectCreatePathHint}>
+                {projectCreatePathHint}
+              </div>
+            )}
           </section>
 
           {error && (
@@ -1254,6 +1301,7 @@ function ProjectEditDialog({
 }): React.JSX.Element {
   const projectNameError = getHarnessNameError("项目名称", form.name)
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
+  const projectDirError = getHarnessNameError("项目文件夹", form.projectDir)
   const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
   const selectedAdapterMessage = boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
 
@@ -1304,25 +1352,7 @@ function ProjectEditDialog({
                 {projectNameError && <span className="text-status-critical">{projectNameError}</span>}
               </label>
               <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                <div className="flex items-center gap-1.5">
-                  <label htmlFor="harness-edit-project-code">项目编号 *</label>
-                  <TooltipProvider delayDuration={150}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          aria-label="项目编号修改提示"
-                          className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        >
-                          <Info className="size-3.5" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent side="top" className="z-[70] max-w-72">
-                        请勿在技能会话运行期间修改项目编号，以免造成产物路径错误
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
+                <label htmlFor="harness-edit-project-code">项目编号 *</label>
                 <Input
                   id="harness-edit-project-code"
                   value={form.projectCode}
@@ -1372,18 +1402,55 @@ function ProjectEditDialog({
                   className={harnessProjectCreateInputClassName}
                 />
               </label>
-              <div className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
+            </div>
+          </section>
+
+          <section className="rounded-md border border-border bg-muted/30 p-3">
+            <div className="mb-3 text-sm font-semibold">工作区配置</div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 <div className="flex items-center gap-1.5">
-                  <span>项目工作区 *</span>
+                  <span>项目根目录 *</span>
                   <ProjectWorkspacePathTip />
                 </div>
                 <Input
                   value={form.workspacePath}
                   readOnly
                   aria-readonly="true"
-                  placeholder="请选择插件工作区路径"
+                  placeholder="请选择项目根路径"
                   className="bg-muted text-muted-foreground"
                 />
+              </div>
+              <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                <div className="flex items-center gap-1.5">
+                  <label htmlFor="harness-edit-project-dir">项目文件夹 *</label>
+                  <TooltipProvider delayDuration={150}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label="项目文件夹修改提示"
+                          className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <Info className="size-3.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="z-[70] max-w-72">
+                        项目文件夹创建后不可修改
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
+                <Input
+                  id="harness-edit-project-dir"
+                  value={form.projectDir}
+                  readOnly
+                  aria-readonly="true"
+                  placeholder="项目文件夹"
+                  className="bg-muted text-muted-foreground"
+                  aria-invalid={projectDirError ? true : undefined}
+                />
+                {projectDirError && <span className="text-status-critical">{projectDirError}</span>}
               </div>
             </div>
           </section>
@@ -1641,6 +1708,7 @@ function ProjectCard({
   const detailError = detail?.error?.trim()
   const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
   const pluginCompatibilityStatus = boardCompatibilityStatus(project.boardCompatibility)
+  const projectRootPath = resolveProjectRootPath(project)
 
   return (
     <article
@@ -1734,12 +1802,12 @@ function ProjectCard({
                 </strong>
               </div>
               <div className="min-w-0 text-xs text-muted-foreground">
-                工作区
+                项目文件夹
                 <strong
                   className="mt-1 block truncate text-sm text-foreground"
-                  title={project.workspacePath}
+                  title={projectRootPath}
                 >
-                  {getWorkspaceName(project.workspacePath)}
+                  {getWorkspaceName(projectRootPath)}
                 </strong>
               </div>
             </div>
@@ -2317,9 +2385,10 @@ function ProjectDetailPage({
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
   const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
+  const projectRootPath = resolveProjectRootPath(project)
   const openProjectWorkspaceInFileManager = useCallback((): void => {
-    void openPathInFileManager(project.workspacePath, "无法打开项目工作区")
-  }, [project.workspacePath])
+    void openPathInFileManager(projectRootPath, "无法打开项目工作区")
+  }, [projectRootPath])
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
@@ -2407,10 +2476,10 @@ function ProjectDetailPage({
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-xs text-muted-foreground">工作区</dt>
+                    <dt className="text-xs text-muted-foreground">项目文件夹</dt>
                     <dd className="mt-1 flex min-w-0 items-center gap-1.5">
-                      <span className="min-w-0 flex-1 truncate font-medium" title={project.workspacePath}>
-                        {getWorkspaceName(project.workspacePath)}
+                      <span className="min-w-0 flex-1 truncate font-medium" title={projectRootPath}>
+                        {getWorkspaceName(projectRootPath)}
                       </span>
                       <Button
                         type="button"
@@ -3522,6 +3591,7 @@ export function HarnessBoardView({
           project.name,
           project.description,
           project.projectCode,
+          project.projectDir,
           project.systemId,
           project.systemName,
           project.harnessAdapter.name,

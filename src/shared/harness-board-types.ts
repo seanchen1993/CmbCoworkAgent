@@ -85,6 +85,7 @@ export interface HarnessProjectMetadata {
   name: string
   description: string
   projectCode: string
+  projectDir: string
   systemId: string
   systemName: string
   workspacePath: string
@@ -102,6 +103,7 @@ export interface HarnessProjectCreateInput {
   adapterType: HarnessAdapterType
   name: string
   projectCode: string
+  projectDir: string
   description: string
   systemId: string
   systemName: string
@@ -125,6 +127,7 @@ export interface HarnessProjectMetadataUpdateInput {
   adapterType: HarnessAdapterType
   name: string
   projectCode: string
+  projectDir: string
   description: string
   systemId: string
   systemName: string
@@ -136,6 +139,7 @@ export interface HarnessProjectListItem {
   name: string
   description: string
   projectCode: string
+  projectDir: string
   systemId: string
   systemName: string
   workspacePath: string
@@ -202,6 +206,7 @@ export interface HarnessProjectDetailViewModel {
     projectId: string
     name: string
     projectCode: string
+    projectDir: string
     systemId: string
     systemName: string
     workspacePath: string
@@ -336,6 +341,7 @@ export interface HarnessRunDetailViewModel {
     projectId: string
     name: string
     projectCode: string
+    projectDir: string
     systemId: string
     workspacePath: string
     projectRootPath: string

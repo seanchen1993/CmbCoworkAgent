@@ -1,5 +1,5 @@
 import { execFileSync } from "child_process"
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
@@ -34,7 +34,6 @@ import type {
   HarnessWorkflowArtifactDefinition,
   HarnessWorkflowNextAction
 } from "../../shared/harness-board-types"
-import { stopHarnessWatchRefs } from "./watch-ref-watcher"
 
 interface HarnessProjectStoreFile {
   version: 1
@@ -629,15 +628,17 @@ function replaceHarnessConfigPlaceholders(
   cwd: string,
   feature?: string
 ): string {
+  const projectDir = projectDirectoryName(project)
   const replacements: Record<string, string> = {
     pluginWorkspace: project.workspacePath,
-    project: project.projectCode,
+    project: projectDir,
+    projectDir,
     projectCode: project.projectCode,
     feature: feature ?? "",
     pluginPath: cwd,
     mode
   }
-  return value.replace(/\$\{(pluginWorkspace|project|projectCode|feature|pluginPath|mode)\}/g, (_, key: string) => {
+  return value.replace(/\$\{(pluginWorkspace|project|projectDir|projectCode|feature|pluginPath|mode)\}/g, (_, key: string) => {
     return replacements[key] ?? ""
   })
 }
@@ -648,11 +649,11 @@ function parseInspectCommand(
   mode: HarnessInspectCommandName,
   cwd: string,
   feature?: string,
-  projectCodes?: string[]
+  projectDirs?: string[]
 ): { executable: string; args: string[] } {
   const tokens = tokenizeInspectCommand(command.trim()).flatMap((token) =>
-    token === "${projectCodes...}" && projectCodes
-      ? projectCodes
+    (token === "${projectCodes...}" || token === "${projectDirs...}") && projectDirs
+      ? projectDirs
       : [replaceHarnessConfigPlaceholders(token, project, mode, cwd, feature)]
   )
   const [executable, ...args] = tokens
@@ -691,11 +692,20 @@ function readBoardConfigInspectCommand(cwd: string, mode: HarnessInspectCommandN
   return readBoardConfigPlatformText(cwd, HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode])
 }
 
+function projectDirectoryName(project: Pick<HarnessProjectMetadata, "projectDir" | "projectCode">): string {
+  return normalizeText(project.projectDir).trim() || normalizeText(project.projectCode).trim()
+}
+
 function projectDirectoryPath(project: HarnessProjectMetadata): string {
   const workspacePath = resolve(project.workspacePath)
-  const projectPath = resolve(workspacePath, project.projectCode)
-  if (projectPath === workspacePath || !isInsideDirectory(workspacePath, projectPath)) {
-    throw new Error(`Project code resolves outside workspace: ${project.projectCode}`)
+  const projectDir = projectDirectoryName(project)
+  const projectPath = resolve(workspacePath, projectDir)
+  if (
+    projectPath === workspacePath ||
+    basename(projectPath) !== projectDir ||
+    !isInsideDirectory(workspacePath, projectPath)
+  ) {
+    throw new Error(`Project dir resolves outside workspace: ${projectDir}`)
   }
   return projectPath
 }
@@ -731,7 +741,7 @@ function resolveProjectScopedPath(
 }
 
 function projectDirectoryMissingMessage(project: HarnessProjectMetadata): string {
-  return `请确认项目「${project.projectCode}」的工作区「${project.workspacePath}」下是否有对应特性。`
+  return `请确认项目「${project.projectCode}」的工作区「${project.workspacePath}」下存在项目文件夹「${projectDirectoryName(project)}」。`
 }
 
 function isProjectMissingError(message: string): boolean {
@@ -1315,6 +1325,8 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
   const creator = normalizeProjectCreator(value.creator)
   const adapterId = normalizeText(harnessAdapter.id)
   const adapterName = normalizeText(harnessAdapter.name)
+  const projectCode = normalizeText(value.projectCode)
+  const projectDir = normalizeText(value.projectDir) || projectCode
   if (!adapterId || !adapterName || harnessAdapter.type !== "plugin") return null
   const now = new Date().toISOString()
 
@@ -1322,7 +1334,8 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
     projectId: value.projectId,
     name: value.name,
     description: normalizeText(value.description),
-    projectCode: normalizeText(value.projectCode),
+    projectCode,
+    projectDir,
     systemId: normalizeText(value.systemId),
     systemName: normalizeText(value.systemName),
     workspacePath: normalizeText(value.workspacePath) || normalizeText(oldWorkspace.path),
@@ -1420,6 +1433,7 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     name: project.name,
     description: project.description,
     projectCode: project.projectCode,
+    projectDir: projectDirectoryName(project),
     systemId: project.systemId,
     systemName: project.systemName,
     workspacePath: project.workspacePath,
@@ -1450,6 +1464,7 @@ function validateCreateInput(input: HarnessProjectCreateInput): void {
     input.adapterType,
     input.name,
     input.projectCode,
+    input.projectDir,
     input.description,
     input.systemId,
     input.systemName,
@@ -1460,6 +1475,7 @@ function validateCreateInput(input: HarnessProjectCreateInput): void {
   }
   validateHarnessName(input.name, "项目名称")
   validateHarnessName(input.projectCode, "项目编号")
+  validateHarnessName(input.projectDir, "项目文件夹")
 }
 
 function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput): void {
@@ -1468,6 +1484,7 @@ function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput):
     input.adapterType,
     input.name,
     input.projectCode,
+    input.projectDir,
     input.description,
     input.systemId,
     input.systemName,
@@ -1478,6 +1495,7 @@ function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput):
   }
   validateHarnessName(input.name, "项目名称")
   validateHarnessName(input.projectCode, "项目编号")
+  validateHarnessName(input.projectDir, "项目文件夹")
 }
 
 function validateHarnessName(value: unknown, label: string): void {
@@ -1493,6 +1511,25 @@ function validateProjectCodeUnique(code: string, store: HarnessProjectStoreFile,
   )
   if (duplicate) {
     throw new Error(`项目编号：${trimmed} 已被使用，请更换`)
+  }
+}
+
+function validateProjectDirUnique(
+  projectDir: string,
+  workspacePath: string,
+  store: HarnessProjectStoreFile,
+  excludeProjectId?: string
+): void {
+  const trimmedProjectDir = projectDir.trim()
+  const resolvedWorkspacePath = resolve(workspacePath)
+  const duplicate = store.projects.find(
+    (item) =>
+      resolve(item.workspacePath) === resolvedWorkspacePath &&
+      projectDirectoryName(item) === trimmedProjectDir &&
+      item.projectId !== excludeProjectId
+  )
+  if (duplicate) {
+    throw new Error(`项目根路径下已有文件夹：${trimmedProjectDir}`)
   }
 }
 
@@ -1540,6 +1577,7 @@ function makeProjectDetailViewModel(
       projectId: project.projectId,
       name: project.name,
       projectCode: project.projectCode,
+      projectDir: projectDirectoryName(project),
       systemId: project.systemId,
       systemName: project.systemName,
       workspacePath: project.workspacePath,
@@ -1573,7 +1611,7 @@ function initializeHarnessProject(project: HarnessProjectMetadata): void {
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
     if (raw.includes("已存在")) {
-      throw new Error("该项目编号已在所选工作区存在")
+      throw new Error("该项目文件夹已在所选工作区存在")
     }
     throw new Error(`创建项目失败：${raw}`)
   }
@@ -1678,12 +1716,14 @@ export function createHarnessProject(input: HarnessProjectCreateInput): HarnessP
   validateCreateInput(input)
   const store = readProjectStore()
   validateProjectCodeUnique(input.projectCode, store)
+  validateProjectDirUnique(input.projectDir, input.workspacePath, store)
   const harnessAdapter = resolveHarnessAdapter(input.adapterId, input.adapterType)
   const project: HarnessProjectMetadata = {
     projectId: uuid(),
     name: input.name.trim(),
     description: input.description.trim(),
     projectCode: input.projectCode.trim(),
+    projectDir: input.projectDir.trim(),
     systemId: input.systemId.trim(),
     systemName: input.systemName.trim(),
     workspacePath: input.workspacePath.trim(),
@@ -1752,28 +1792,17 @@ export function updateHarnessProjectMetadata(
   if (requestedWorkspacePath !== existingWorkspacePath) {
     throw new Error("项目工作区路径不允许修改")
   }
-  const newCode = input.projectCode.trim()
-  const codeChanged = existing.projectCode !== newCode
-  if (codeChanged) {
-    const oldPath = resolve(existing.workspacePath, existing.projectCode)
-    const newPath = resolve(existing.workspacePath, newCode)
-    if (existsSync(oldPath)) {
-      if (existsSync(newPath)) {
-        throw new Error(`重命名失败：目标目录已存在 ${newPath}`)
-      }
-      try {
-        stopHarnessWatchRefs(`project:${projectId}`)
-        renameSync(oldPath, newPath)
-      } catch (e) {
-        throw new Error(`重命名项目目录失败：${e instanceof Error ? e.message : String(e)}`)
-      }
-    }
+  const existingProjectDir = projectDirectoryName(existing)
+  const requestedProjectDir = input.projectDir.trim()
+  if (requestedProjectDir !== existingProjectDir) {
+    throw new Error("项目文件夹不允许修改")
   }
   const updated: HarnessProjectMetadata = {
     ...existing,
     name: input.name.trim(),
     description: input.description.trim(),
     projectCode: input.projectCode.trim(),
+    projectDir: existingProjectDir,
     systemId: input.systemId.trim(),
     systemName: input.systemName.trim(),
     workspacePath: existing.workspacePath,
@@ -1827,9 +1856,9 @@ function runInspectAdapterBatch(
     throw new Error(`插件未配置 inspectCommands.${process.platform}.${configKey}，请检查插件设置`)
   }
 
-  const projectCodes = projects.map((p) => p.projectCode)
+  const projectDirs = projects.map((project) => projectDirectoryName(project))
   const { executable, args } = parseInspectCommand(
-    configuredCommand, firstProject, mode, cwd, undefined, projectCodes
+    configuredCommand, firstProject, mode, cwd, undefined, projectDirs
   )
 
   const configured: ConfiguredHarnessInvocation = {
@@ -1961,12 +1990,13 @@ export function getHarnessProjectDetails(
       const projectsDict = snapshot.projects as Record<string, unknown>
 
       for (const project of group.projects) {
-        const projectData = projectsDict[project.projectCode]
+        const projectDir = projectDirectoryName(project)
+        const projectData = projectsDict[projectDir]
         if (!isObject(projectData)) {
           result[project.projectId] = makeProjectErrorDetail(
             project,
             "Inspect 读取失败",
-            `读取项目状态失败：Inspect adapter 未返回项目 ${project.projectCode} 的状态`
+            `读取项目状态失败：Inspect adapter 未返回项目文件夹 ${projectDir} 的状态`
           )
           continue
         }
@@ -2023,6 +2053,7 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
       projectId: project.projectId,
       name: project.name,
       projectCode: project.projectCode,
+      projectDir: projectDirectoryName(project),
       systemId: project.systemId,
       workspacePath: project.workspacePath,
       projectRootPath: projectDirectoryPath(project)
