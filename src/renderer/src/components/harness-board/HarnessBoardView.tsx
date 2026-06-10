@@ -1715,7 +1715,7 @@ function ProjectCard({
       role="button"
       tabIndex={0}
       className={cn(
-        "w-[420px] flex-none cursor-pointer overflow-hidden rounded-md border border-border border-t-[3px] shadow-sm transition-all hover:border-primary/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        "h-full w-full min-w-0 cursor-pointer overflow-hidden rounded-md border border-border border-t-[3px] shadow-sm transition-all hover:border-primary/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         archived ? "border-t-muted-foreground/50 bg-muted/20" : "border-t-status-info bg-background"
       )}
       onClick={() => onOpenProject(project.projectId)}
@@ -1853,8 +1853,8 @@ function SystemSection({
         </div>
         <div className="shrink-0 text-sm text-muted-foreground">{group.projects.length} 个项目</div>
       </div>
-      <div className="-mx-1 overflow-x-auto pb-2">
-        <div className="flex w-max gap-4 px-1">
+      <div className="-mx-1 pb-1">
+        <div className="grid gap-4 px-1 md:grid-cols-2 2xl:grid-cols-3">
           {group.projects.map((project) => (
             <ProjectCard
               key={project.projectId}

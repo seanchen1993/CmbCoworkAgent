@@ -1507,10 +1507,13 @@ function validateHarnessName(value: unknown, label: string): void {
 function validateProjectCodeUnique(code: string, store: HarnessProjectStoreFile, excludeProjectId?: string): void {
   const trimmed = code.trim()
   const duplicate = store.projects.find(
-    (item) => item.projectCode === trimmed && item.projectId !== excludeProjectId
+    (item) =>
+      item.lifecycle.status !== "archived" &&
+      item.projectCode === trimmed &&
+      item.projectId !== excludeProjectId
   )
   if (duplicate) {
-    throw new Error(`项目编号：${trimmed} 已被使用，请更换`)
+    throw new Error(`已有项目使用项目编号：${trimmed} ，请更换`)
   }
 }
 
