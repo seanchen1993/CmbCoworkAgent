@@ -115,7 +115,7 @@ import {
 } from "@/features/slash-commands/useSlashCommands"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
-import { mergeChatSkills } from "@/features/slash-commands/skill-merge"
+import { mergeChatSkills, selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
@@ -1410,6 +1410,10 @@ export function ChatContainer({
   const [skillsLoading, setSkillsLoading] = useState(true)
   const [skillsHarnessProjectId, setSkillsHarnessProjectId] = useState<string | null>(null)
   const [skillsLoadTargetProjectId, setSkillsLoadTargetProjectId] = useState<string | null>(null)
+  const [skillsHarnessPreferredPlugin, setSkillsHarnessPreferredPlugin] = useState<{
+    id?: string
+    name?: string
+  } | null>(null)
   const [showAllProgrammingSkills, setShowAllProgrammingSkills] = useState(false)
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
@@ -1695,9 +1699,9 @@ export function ChatContainer({
         (s) => s.source === "project" || s.source === "user"
       )
 
-      // In harness mode, resolve the project's bound plugin name so that
-      // duplicate-named skills from other plugins are hidden in favour of
-      // the project's own plugin.
+      // In harness mode, resolve the project's bound plugin name so same-name
+      // plugin rows can prefer the project's own plugin. Standalone-vs-plugin
+      // duplicates remain visible and are disambiguated in the slash popover.
       let preferredPlugin: { id?: string; name?: string } | null = null
       if (binding && typeof window.api.harnessBoard?.listProjects === "function") {
         try {
@@ -1714,15 +1718,17 @@ export function ChatContainer({
         }
       }
 
-      // In harness mode the bound plugin's skills win over same-name skills,
-      // matching project-scoped slash command behaviour.
+      // Keep same-name standalone/plugin rows visible; in harness mode only
+      // same-name plugin rows are collapsed toward the bound plugin.
       const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet, preferredPlugin)
       setSkills([...merged].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
       setSkillsHarnessProjectId(targetProjectId)
+      setSkillsHarnessPreferredPlugin(preferredPlugin)
     } catch (error) {
       console.error("[ChatContainer] Failed to load skills:", error)
       setSkills([])
       setSkillsHarnessProjectId(null)
+      setSkillsHarnessPreferredPlugin(null)
     } finally {
       setSkillsLoading(false)
     }
@@ -2755,11 +2761,11 @@ export function ChatContainer({
       if (skillsLoading) return
       if (skillsLoadTargetProjectId !== harnessFeatureBinding.projectId) return
       if (skillsHarnessProjectId === harnessFeatureBinding.projectId) {
-        const normalizedSlashSkill = normalizeSkillId(slashSkill)
-        nextSkill =
-          enabledSkillsForSlash.find(
-            (skill) => normalizeSkillId(skill.name) === normalizedSlashSkill
-          ) ?? null
+        nextSkill = selectSkillForSlashName(
+          enabledSkillsForSlash,
+          slashSkill,
+          skillsHarnessPreferredPlugin
+        )
       }
     }
 
@@ -2775,6 +2781,7 @@ export function ChatContainer({
     selectedSkill,
     setInput,
     setSelectedSkill,
+    skillsHarnessPreferredPlugin,
     skillsHarnessProjectId,
     skillsLoadTargetProjectId,
     skillsLoading,

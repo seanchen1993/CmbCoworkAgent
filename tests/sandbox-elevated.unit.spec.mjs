@@ -559,7 +559,7 @@ test("sandbox preemptive routing has been removed in favour of the prompt-then-r
   )
   assert.doesNotMatch(
     rawExecutionSection,
-    /executeRawUnserialized\(command, "none"/,
+    /executeRawUnserialized\(command, "none", timeoutMs, overrideAbortSignal\)/,
     "executeRawUnserialized must not preemptively re-route to host token — the orchestrator owns that decision after asking the user"
   )
   assert.doesNotMatch(
@@ -643,12 +643,12 @@ test("orchestrator wraps every sandbox failure in Codex's single retry-without-s
   )
   assert.match(
     orchestratorSection,
-    /safety\.level === "safe"[\s\S]*rawExecute\(command, sandboxMode\)[\s\S]*maybeRetryOutsideSandbox\(command, cwd, sandboxMode, result\)/,
+    /safety\.level === "safe"[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(command, cwd, sandboxMode, result\)/,
     "safe commands should also be eligible for Codex-style sandbox bypass prompts after sandbox failure"
   )
   assert.match(
     orchestratorSection,
-    /this\.yoloMode[\s\S]*rawExecute\(command, sandboxMode\)[\s\S]*maybeRetryOutsideSandbox\(command, cwd, sandboxMode, result\)/,
+    /this\.yoloMode[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(command, cwd, sandboxMode, result\)/,
     "YOLO mode should skip only the initial command approval; sandbox escape must still require the retry approval prompt"
   )
   assert.match(
@@ -673,7 +673,7 @@ test("orchestrator wraps every sandbox failure in Codex's single retry-without-s
   )
   assert.match(
     bypassSection,
-    /rawExecute\(command, "none"\)/,
+    /rawExecute\(command, "none", cwd\)/,
     "approval should hand the command to rawExecute with mode=none (host token)"
   )
   assert.match(
@@ -797,13 +797,13 @@ test("isLikelySandboxDenied keyword check matches real failure outputs and rejec
 test("background execute() routes results through the orchestrator's bypass check", () => {
   const backgroundSection = sectionBetween(
     localSandboxSource,
-    "async executeBackground(command: string)",
+    "async executeBackground(command: string, cwd?: string)",
     "  /**\r\n   * Retrieve a background task's"
   )
 
   assert.match(
     backgroundSection,
-    /this\.orchestrator[\s\S]*maybeRetryOutsideSandbox\(command, this\.workingDir, this\.windowsSandbox, rawResult\)/,
+    /this\.orchestrator[\s\S]*maybeRetryOutsideSandbox\(effectiveCommand, effectiveCwd, this\.windowsSandbox, rawResult\)/,
     "executeBackground must hand the raw result to the orchestrator's bypass check before marking the task complete — otherwise backgrounded `npm run build` skips the approval prompt"
   )
   assert.match(
@@ -1171,6 +1171,55 @@ test("Windows command execution uses shell-compatible sandbox arguments and UTF-
   )
 })
 
+test("Windows sandbox keeps workspace root separate from command cwd", () => {
+  const executionCwdPreambleSection = sectionBetween(
+    localSandboxSource,
+    "private static withWindowsExecutionCwdPreamble(",
+    "  private isProjectPluginHookCommand("
+  )
+  const executeWindowsSection = sectionBetween(
+    localSandboxSource,
+    "private async executeInWindowsSandbox(",
+    "  private executeOnce("
+  )
+
+  assert.match(
+    executionCwdPreambleSection,
+    /Set-Location -LiteralPath \$\{powershellSingleQuote\(executionCwd\)\} -ErrorAction Stop; \$\{command\}/,
+    "PowerShell cwd preamble should fail fast when the requested execution cwd is missing"
+  )
+  assert.match(
+    executeWindowsSection,
+    /const executionCwd = this\.resolveExecutionCwd\(cwd\)[\s\S]*const sandboxWorkspaceRoot = path\.resolve\(this\.workingDir\)/,
+    "Windows sandbox should track command cwd separately from the sandbox workspace root"
+  )
+  assert.match(
+    executeWindowsSection,
+    /new Set\(\[\.\.\.executionPlan\.writableRoots, executionCwd\]/,
+    "skill cwd should be passed as an additional writable root instead of replacing the workspace"
+  )
+  assert.match(
+    executeWindowsSection,
+    /prewarmElevatedWorkspaceRoots\(sandboxWorkspaceRoot, sandboxWritableRoots\)/,
+    "elevated prewarm should prepare the real workspace plus extra writable roots"
+  )
+  assert.match(
+    executeWindowsSection,
+    /aclDirs\.push\(sandboxWorkspaceRoot, executionCwd\)/,
+    "unelevated ACL grants should cover both workspace root and command cwd"
+  )
+  assert.match(
+    executeWindowsSection,
+    /withWindowsExecutionCwdPreamble\([\s\S]*executionCwd,[\s\S]*sandboxWorkspaceRoot/,
+    "the shell command should cd into the requested command cwd inside the sandbox"
+  )
+  assert.match(
+    executeWindowsSection,
+    /spawn\(this\.codexExePath, sandboxArgs, \{[\s\S]*cwd: sandboxWorkspaceRoot/,
+    "codex sandbox process should still be launched from the real workspace root"
+  )
+})
+
 test("PowerShell safe-command parsing stays conservative without helper processes", () => {
   const parserSection = sectionBetween(
     windowsSafeCommandsSource,
@@ -1214,7 +1263,7 @@ test("PowerShell safe-command parsing stays conservative without helper processe
 test("sandbox execute safety checks do not synchronously spawn helper processes", () => {
   const executeSection = sectionBetween(
     localSandboxSource,
-    "  async execute(command: string): Promise<ExecuteResponse> {",
+    "  async execute(command: string, cwd?: string): Promise<ExecuteResponse> {",
     "  /**\r\n   * Raw command execution"
   )
   const policySection = sectionBetween(

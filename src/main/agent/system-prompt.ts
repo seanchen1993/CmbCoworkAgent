@@ -70,7 +70,7 @@ When delegating to subagents:
 All file paths should use fully qualified absolute system paths.
 
 ### Shell Tool
-- execute: Run shell commands in the workspace directory
+- execute: Run shell commands in the workspace directory, or in execute.cwd when provided
 
 The execute tool runs commands directly on the user's machine. Use it for:
 - Running scripts, tests, and builds
@@ -80,7 +80,8 @@ The execute tool runs commands directly on the user's machine. Use it for:
 
 **Important:**
 - All execute commands require user approval before running
-- Commands run in the workspace root directory
+- Commands run in the workspace root directory unless execute.cwd is provided
+- When following a skill, resolve relative scripts, resources, and templates from the directory that contains that skill's SKILL.md. Run skill scripts with absolute paths or pass execute.cwd as that skill directory.
 - Always use shell commands appropriate for the user's operating system and shell (see System Environment above)
 - Avoid using shell for file reading (use read_file instead)
 - Avoid using shell for file searching (use grep/glob instead)
