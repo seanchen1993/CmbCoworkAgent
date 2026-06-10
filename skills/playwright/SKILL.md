@@ -1,23 +1,21 @@
 ---
 name: playwright
-description: Use when the task requires automating a real browser from the terminal (navigation, form filling, snapshots, screenshots, data extraction, UI-flow debugging) via `playwright-cli` or the bundled wrapper script.
+description: Use when the task requires automating a real browser from the terminal (navigation, form filling, snapshots, screenshots, data extraction, UI-flow debugging) via direct `npx --yes --package @playwright/cli playwright-cli ...` commands.
 ---
 
 
 # Playwright CLI Skill
 
-Drive a real browser from the terminal using `playwright-cli`. Prefer the bundled wrapper script so the CLI works even when it is not globally installed.
+Drive a real browser from the terminal using `playwright-cli` through direct `npx` commands.
 Treat this skill as CLI-first automation. Do not pivot to `@playwright/test` unless the user explicitly asks for test files.
 
-On Windows, do not invoke the bundled `.sh` wrapper directly. Use the bundled `.cmd` wrapper or call
-`npx --yes --package @playwright/cli playwright-cli ...` directly.
-When the app is packaged, do not point shell commands at `resources/app.asar/...`: OS shells cannot
-execute scripts directly from inside `app.asar`. Use the unpacked sibling path under
-`resources/app.asar.unpacked/...` instead.
+Do not ask the user to set helper variables such as `PWCLI`, `APP_UNPACKED_DIR`, or
+`PLAYWRIGHT_CLI_SESSION` just to use this skill. Default to a directly executable command.
+On Windows PowerShell, keep using the direct `npx` form instead of shell wrapper indirection.
 
 ## Prerequisite check (required)
 
-Before proposing commands, check whether `npx` is available (the wrapper depends on it):
+Before proposing commands, check whether `npx` is available:
 
 ```bash
 command -v npx >/dev/null 2>&1
@@ -35,49 +33,30 @@ npm install -g @playwright/cli@latest
 playwright-cli --help
 ```
 
-Once `npx` is present, proceed with the wrapper script. A global install of `playwright-cli` is optional.
-
-## Wrapper path (set once)
-
-```bash
-export APP_UNPACKED_DIR="/path/to/resources/app.asar.unpacked"
-export PWCLI="$APP_UNPACKED_DIR/out/skills/playwright/scripts/playwright_cli.sh"
-```
-
-Windows:
-
-```powershell
-$env:APP_UNPACKED_DIR = "D:\path\to\resources\app.asar.unpacked"
-$env:PWCLI = "$env:APP_UNPACKED_DIR\out\skills\playwright\scripts\playwright_cli.cmd"
-```
-
-After packaging, Electron `app.getAppPath()` points at `resources/app.asar`, but shell-executable
-wrappers must come from `resources/app.asar.unpacked/out/skills/playwright/scripts/`.
-Use `playwright_cli.sh` on Unix-like shells and `playwright_cli.cmd` on Windows.
-If the unpacked wrapper is unavailable, fall back to calling
-`npx --yes --package @playwright/cli playwright-cli ...` directly.
+Once `npx` is present, use direct `npx --yes --package @playwright/cli playwright-cli ...`
+commands. A global install of `playwright-cli` is optional.
 
 ## Quick start
 
-Use the wrapper script:
+Use direct commands:
 
 ```bash
-"$PWCLI" open https://playwright.dev --headed
-"$PWCLI" snapshot
-"$PWCLI" click e15
-"$PWCLI" type "Playwright"
-"$PWCLI" press Enter
-"$PWCLI" screenshot
+npx --yes --package @playwright/cli playwright-cli open https://playwright.dev --headed
+npx --yes --package @playwright/cli playwright-cli snapshot
+npx --yes --package @playwright/cli playwright-cli click e15
+npx --yes --package @playwright/cli playwright-cli type "Playwright"
+npx --yes --package @playwright/cli playwright-cli press Enter
+npx --yes --package @playwright/cli playwright-cli screenshot
 ```
 
 On Windows PowerShell, the equivalent form is:
 
 ```powershell
-& $env:PWCLI open https://playwright.dev --headed
-& $env:PWCLI snapshot
+npx --yes --package @playwright/cli playwright-cli open https://playwright.dev --headed
+npx --yes --package @playwright/cli playwright-cli snapshot
 ```
 
-If the user prefers a direct command instead of the wrapper, this is also valid:
+This is also the preferred one-line sanity check:
 
 ```bash
 npx --yes --package @playwright/cli playwright-cli --help
@@ -94,10 +73,10 @@ npx --yes --package @playwright/cli playwright-cli --help
 Minimal loop:
 
 ```bash
-"$PWCLI" open https://example.com
-"$PWCLI" snapshot
-"$PWCLI" click e3
-"$PWCLI" snapshot
+npx --yes --package @playwright/cli playwright-cli open https://example.com
+npx --yes --package @playwright/cli playwright-cli snapshot
+npx --yes --package @playwright/cli playwright-cli click e3
+npx --yes --package @playwright/cli playwright-cli snapshot
 ```
 
 ## When to snapshot again
@@ -116,42 +95,41 @@ Refs can go stale. When a command fails due to a missing ref, snapshot again.
 ### Form fill and submit
 
 ```bash
-"$PWCLI" open https://example.com/form
-"$PWCLI" snapshot
-"$PWCLI" fill e1 "user@example.com"
-"$PWCLI" fill e2 "password123"
-"$PWCLI" click e3
-"$PWCLI" snapshot
+npx --yes --package @playwright/cli playwright-cli open https://example.com/form
+npx --yes --package @playwright/cli playwright-cli snapshot
+npx --yes --package @playwright/cli playwright-cli fill e1 "user@example.com"
+npx --yes --package @playwright/cli playwright-cli fill e2 "password123"
+npx --yes --package @playwright/cli playwright-cli click e3
+npx --yes --package @playwright/cli playwright-cli snapshot
 ```
 
 ### Debug a UI flow with traces
 
 ```bash
-"$PWCLI" open https://example.com --headed
-"$PWCLI" tracing-start
+npx --yes --package @playwright/cli playwright-cli open https://example.com --headed
+npx --yes --package @playwright/cli playwright-cli tracing-start
 # ...interactions...
-"$PWCLI" tracing-stop
+npx --yes --package @playwright/cli playwright-cli tracing-stop
 ```
 
 ### Multi-tab work
 
 ```bash
-"$PWCLI" tab-new https://example.com
-"$PWCLI" tab-list
-"$PWCLI" tab-select 0
-"$PWCLI" snapshot
+npx --yes --package @playwright/cli playwright-cli tab-new https://example.com
+npx --yes --package @playwright/cli playwright-cli tab-list
+npx --yes --package @playwright/cli playwright-cli tab-select 0
+npx --yes --package @playwright/cli playwright-cli snapshot
 ```
 
-## Wrapper script
+## Command style
 
-The bundled wrappers use `npx --package @playwright/cli playwright-cli` so the CLI can run
-without a global install:
+Always prefer the fully spelled-out direct command:
 
 ```bash
-"$PWCLI" --help
+npx --yes --package @playwright/cli playwright-cli --help
 ```
 
-Prefer the wrapper unless the repository already standardizes on a direct `npx` invocation.
+Do not introduce wrapper variables or shell aliases unless the user explicitly asks for them.
 
 ## References
 
@@ -165,6 +143,7 @@ Open only what you need:
 - Always snapshot before referencing element ids like `e12`.
 - Re-snapshot when refs seem stale.
 - Prefer explicit commands over `eval` and `run-code` unless needed.
+- On Windows, emit PowerShell-safe direct `npx` commands instead of `$env:...` wrapper setup.
 - When you do not have a fresh snapshot, use placeholder refs like `eX` and say why; do not bypass refs with `run-code`.
 - Use `--headed` when a visual check will help.
 - When capturing artifacts in this repo, use `output/playwright/` and avoid introducing new top-level artifact folders.

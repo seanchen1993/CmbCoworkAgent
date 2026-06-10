@@ -1,37 +1,36 @@
 # Playwright CLI Workflows
 
-Use the wrapper script and snapshot often.
-Assume `PWCLI` is set and `pwcli` is an alias for `"$PWCLI"`.
+Use direct `npx` commands and snapshot often.
 In this repo, run commands from `output/playwright/<label>/` to keep artifacts contained.
 
 ## Standard interaction loop
 
 ```bash
-pwcli open https://example.com
-pwcli snapshot
-pwcli click e3
-pwcli snapshot
+npx --yes --package @playwright/cli playwright-cli open https://example.com
+npx --yes --package @playwright/cli playwright-cli snapshot
+npx --yes --package @playwright/cli playwright-cli click e3
+npx --yes --package @playwright/cli playwright-cli snapshot
 ```
 
 ## Form submission
 
 ```bash
-pwcli open https://example.com/form --headed
-pwcli snapshot
-pwcli fill e1 "user@example.com"
-pwcli fill e2 "password123"
-pwcli click e3
-pwcli snapshot
-pwcli screenshot
+npx --yes --package @playwright/cli playwright-cli open https://example.com/form --headed
+npx --yes --package @playwright/cli playwright-cli snapshot
+npx --yes --package @playwright/cli playwright-cli fill e1 "user@example.com"
+npx --yes --package @playwright/cli playwright-cli fill e2 "password123"
+npx --yes --package @playwright/cli playwright-cli click e3
+npx --yes --package @playwright/cli playwright-cli snapshot
+npx --yes --package @playwright/cli playwright-cli screenshot
 ```
 
 ## Data extraction
 
 ```bash
-pwcli open https://example.com
-pwcli snapshot
-pwcli eval "document.title"
-pwcli eval "el => el.textContent" e12
+npx --yes --package @playwright/cli playwright-cli open https://example.com
+npx --yes --package @playwright/cli playwright-cli snapshot
+npx --yes --package @playwright/cli playwright-cli eval "document.title"
+npx --yes --package @playwright/cli playwright-cli eval "el => el.textContent" e12
 ```
 
 ## Debugging and inspection
@@ -39,17 +38,17 @@ pwcli eval "el => el.textContent" e12
 Capture console messages and network activity after reproducing an issue:
 
 ```bash
-pwcli console warning
-pwcli network
+npx --yes --package @playwright/cli playwright-cli console warning
+npx --yes --package @playwright/cli playwright-cli network
 ```
 
 Record a trace around a suspicious flow:
 
 ```bash
-pwcli tracing-start
+npx --yes --package @playwright/cli playwright-cli tracing-start
 # reproduce the issue
-pwcli tracing-stop
-pwcli screenshot
+npx --yes --package @playwright/cli playwright-cli tracing-stop
+npx --yes --package @playwright/cli playwright-cli screenshot
 ```
 
 ## Sessions
@@ -57,16 +56,9 @@ pwcli screenshot
 Use sessions to isolate work across projects:
 
 ```bash
-pwcli --session marketing open https://example.com
-pwcli --session marketing snapshot
-pwcli --session checkout open https://example.com/checkout
-```
-
-Or set the session once:
-
-```bash
-export PLAYWRIGHT_CLI_SESSION=checkout
-pwcli open https://example.com/checkout
+npx --yes --package @playwright/cli playwright-cli --session marketing open https://example.com
+npx --yes --package @playwright/cli playwright-cli --session marketing snapshot
+npx --yes --package @playwright/cli playwright-cli --session checkout open https://example.com/checkout
 ```
 
 ## Configuration file
@@ -90,6 +82,6 @@ Minimal example:
 
 ## Troubleshooting
 
-- If an element ref fails, run `pwcli snapshot` again and retry.
+- If an element ref fails, run `npx --yes --package @playwright/cli playwright-cli snapshot` again and retry.
 - If the page looks wrong, re-open with `--headed` and resize the window.
 - If a flow depends on prior state, use a named `--session`.

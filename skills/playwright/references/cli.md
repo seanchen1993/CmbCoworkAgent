@@ -1,111 +1,100 @@
 # Playwright CLI Reference
 
-Use the wrapper script unless the CLI is already installed globally:
+Use direct `npx` commands:
 
 ```bash
-export APP_UNPACKED_DIR="/path/to/resources/app.asar.unpacked"
-export PWCLI="$APP_UNPACKED_DIR/out/skills/playwright/scripts/playwright_cli.sh"
-"$PWCLI" --help
+npx --yes --package @playwright/cli playwright-cli --help
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:APP_UNPACKED_DIR = "D:\path\to\resources\app.asar.unpacked"
-$env:PWCLI = "$env:APP_UNPACKED_DIR\out\skills\playwright\scripts\playwright_cli.cmd"
-& $env:PWCLI --help
+npx --yes --package @playwright/cli playwright-cli --help
 ```
 
-After packaging, shell-executable wrappers must come from
-`resources/app.asar.unpacked/out/skills/playwright/scripts/`, not `resources/app.asar/...`.
-
-Optional convenience alias:
-
-```bash
-alias pwcli="$PWCLI"
-```
+Do not require `PWCLI`, `APP_UNPACKED_DIR`, or similar helper variables for normal use.
 
 ## Core
 
 ```bash
-pwcli open https://example.com
-pwcli close
-pwcli snapshot
-pwcli click e3
-pwcli dblclick e7
-pwcli type "search terms"
-pwcli press Enter
-pwcli fill e5 "user@example.com"
-pwcli drag e2 e8
-pwcli hover e4
-pwcli select e9 "option-value"
-pwcli upload ./document.pdf
-pwcli check e12
-pwcli uncheck e12
-pwcli eval "document.title"
-pwcli eval "el => el.textContent" e5
-pwcli dialog-accept
-pwcli dialog-accept "confirmation text"
-pwcli dialog-dismiss
-pwcli resize 1920 1080
+npx --yes --package @playwright/cli playwright-cli open https://example.com
+npx --yes --package @playwright/cli playwright-cli close
+npx --yes --package @playwright/cli playwright-cli snapshot
+npx --yes --package @playwright/cli playwright-cli click e3
+npx --yes --package @playwright/cli playwright-cli dblclick e7
+npx --yes --package @playwright/cli playwright-cli type "search terms"
+npx --yes --package @playwright/cli playwright-cli press Enter
+npx --yes --package @playwright/cli playwright-cli fill e5 "user@example.com"
+npx --yes --package @playwright/cli playwright-cli drag e2 e8
+npx --yes --package @playwright/cli playwright-cli hover e4
+npx --yes --package @playwright/cli playwright-cli select e9 "option-value"
+npx --yes --package @playwright/cli playwright-cli upload ./document.pdf
+npx --yes --package @playwright/cli playwright-cli check e12
+npx --yes --package @playwright/cli playwright-cli uncheck e12
+npx --yes --package @playwright/cli playwright-cli eval "document.title"
+npx --yes --package @playwright/cli playwright-cli eval "el => el.textContent" e5
+npx --yes --package @playwright/cli playwright-cli dialog-accept
+npx --yes --package @playwright/cli playwright-cli dialog-accept "confirmation text"
+npx --yes --package @playwright/cli playwright-cli dialog-dismiss
+npx --yes --package @playwright/cli playwright-cli resize 1920 1080
 ```
 
 ## Navigation
 
 ```bash
-pwcli go-back
-pwcli go-forward
-pwcli reload
+npx --yes --package @playwright/cli playwright-cli go-back
+npx --yes --package @playwright/cli playwright-cli go-forward
+npx --yes --package @playwright/cli playwright-cli reload
 ```
 
 ## Keyboard
 
 ```bash
-pwcli press Enter
-pwcli press ArrowDown
-pwcli keydown Shift
-pwcli keyup Shift
+npx --yes --package @playwright/cli playwright-cli press Enter
+npx --yes --package @playwright/cli playwright-cli press ArrowDown
+npx --yes --package @playwright/cli playwright-cli keydown Shift
+npx --yes --package @playwright/cli playwright-cli keyup Shift
 ```
 
 ## Mouse
 
 ```bash
-pwcli mousemove 150 300
-pwcli mousedown
-pwcli mousedown right
-pwcli mouseup
-pwcli mouseup right
-pwcli mousewheel 0 100
+npx --yes --package @playwright/cli playwright-cli mousemove 150 300
+npx --yes --package @playwright/cli playwright-cli mousedown
+npx --yes --package @playwright/cli playwright-cli mousedown right
+npx --yes --package @playwright/cli playwright-cli mouseup
+npx --yes --package @playwright/cli playwright-cli mouseup right
+npx --yes --package @playwright/cli playwright-cli mousewheel 0 100
 ```
 
 ## Save as
 
 ```bash
-pwcli screenshot
-pwcli screenshot e5
-pwcli pdf
+npx --yes --package @playwright/cli playwright-cli screenshot
+npx --yes --package @playwright/cli playwright-cli screenshot e5
+npx --yes --package @playwright/cli playwright-cli pdf
 ```
 
 ## Tabs
 
 ```bash
-pwcli tab-list
-pwcli tab-new
-pwcli tab-new https://example.com/page
-pwcli tab-close
-pwcli tab-close 2
-pwcli tab-select 0
+npx --yes --package @playwright/cli playwright-cli tab-list
+npx --yes --package @playwright/cli playwright-cli tab-new
+npx --yes --package @playwright/cli playwright-cli tab-new https://example.com/page
+npx --yes --package @playwright/cli playwright-cli tab-close
+npx --yes --package @playwright/cli playwright-cli tab-close 2
+npx --yes --package @playwright/cli playwright-cli tab-select 0
 ```
 
 ## DevTools
 
 ```bash
-pwcli console
-pwcli console warning
-pwcli network
-pwcli run-code "await page.waitForTimeout(1000)"
-pwcli tracing-start
-pwcli tracing-stop
+npx --yes --package @playwright/cli playwright-cli console
+npx --yes --package @playwright/cli playwright-cli console warning
+npx --yes --package @playwright/cli playwright-cli network
+npx --yes --package @playwright/cli playwright-cli run-code "await page.waitForTimeout(1000)"
+npx --yes --package @playwright/cli playwright-cli tracing-start
+npx --yes --package @playwright/cli playwright-cli tracing-stop
 ```
 
 ## Sessions
@@ -113,13 +102,6 @@ pwcli tracing-stop
 Use a named session to isolate work:
 
 ```bash
-pwcli --session todo open https://demo.playwright.dev/todomvc
-pwcli --session todo snapshot
-```
-
-Or set an environment variable once:
-
-```bash
-export PLAYWRIGHT_CLI_SESSION=todo
-pwcli open https://demo.playwright.dev/todomvc
+npx --yes --package @playwright/cli playwright-cli --session todo open https://demo.playwright.dev/todomvc
+npx --yes --package @playwright/cli playwright-cli --session todo snapshot
 ```
