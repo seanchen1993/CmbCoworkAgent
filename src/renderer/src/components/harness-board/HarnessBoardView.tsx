@@ -25,7 +25,8 @@ import {
   Search,
   ShieldAlert,
   SkipForward,
-  Workflow
+  Workflow,
+  Zap
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -63,7 +64,13 @@ import {
   useThreadContext
 } from "@/lib/thread-context"
 import { toast } from "sonner"
-import type { MarketPluginItem } from "../../api/market-plugins"
+import { marketApi, type MarketItem } from "../../api/market"
+import { UpdateVersionTooltip } from "@/components/customize/MarketPanel/MarketUpdateBadge"
+import {
+  getMarketPluginUpdateInfo,
+  installMarketPluginUpdate,
+  type MarketPluginUpdateInfo
+} from "@/components/customize/MarketPanel/market-plugin-update"
 import type {
   HarnessArtifact,
   HarnessArtifactType,
@@ -878,8 +885,8 @@ function normalizeAdapterMarketName(value?: string): string {
   return value?.trim() || ""
 }
 
-function buildMarketPluginMap(items: MarketPluginItem[]): Map<string, MarketPluginItem> {
-  const map = new Map<string, MarketPluginItem>()
+function buildMarketPluginMap(items: MarketItem[]): Map<string, MarketItem> {
+  const map = new Map<string, MarketItem>()
   for (const item of items) {
     const name = normalizeAdapterMarketName(item.name)
     if (name) map.set(name, item)
@@ -898,7 +905,7 @@ function buildInstalledPluginMap(items: PluginMetadata[]): Map<string, PluginMet
 
 function applyMarketAdapterDisplayData(
   registry: HarnessAdapterRegistryItem[],
-  marketPlugins: MarketPluginItem[],
+  marketPlugins: MarketItem[],
   installedPlugins: PluginMetadata[]
 ): HarnessAdapterRegistryItem[] {
   const marketByName = buildMarketPluginMap(marketPlugins)
@@ -927,10 +934,9 @@ function applyMarketAdapterDisplayData(
   })
 }
 
-async function loadHarnessMarketPlugins(): Promise<MarketPluginItem[]> {
+async function loadHarnessMarketPlugins(): Promise<MarketItem[]> {
   try {
-    const { getMarketPlugins } = await import("../../api/market-plugins")
-    const response = await getMarketPlugins()
+    const response = await marketApi.getPlugins({ allowMockOnError: false, silent: true })
     return response.success && response.data ? response.data : []
   } catch {
     return []
@@ -1611,16 +1617,22 @@ function ProjectCard({
   detail,
   loading,
   archiving,
+  pluginUpdateInfo,
+  updatingPlugin,
   onEditProject,
   onArchiveProject,
+  onUpdatePlugin,
   onOpenProject
 }: {
   project: HarnessProjectListItem
   detail?: HarnessProjectDetailViewModel
   loading: boolean
   archiving: boolean
+  pluginUpdateInfo?: MarketPluginUpdateInfo | null
+  updatingPlugin: boolean
   onEditProject: (project: HarnessProjectListItem) => void
   onArchiveProject: (project: HarnessProjectListItem) => void
+  onUpdatePlugin: (project: HarnessProjectListItem, updateInfo: MarketPluginUpdateInfo) => void
   onOpenProject: (projectId: string) => void
 }): React.JSX.Element {
   const runs = detail?.runs ?? []
@@ -1656,16 +1668,45 @@ function ProjectCard({
               {project.description}
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <span className="rounded border border-border bg-muted px-2 py-1 text-[11px] text-muted-foreground">
-              {project.harnessAdapter.name}
-            </span>
-            <ProjectActionMenu
-              project={project}
-              archiving={archiving}
-              onEdit={() => onEditProject(project)}
-              onArchive={() => onArchiveProject(project)}
-            />
+          <div className="flex shrink-0 flex-col items-end gap-1.5">
+            <div className="flex items-center gap-1">
+              <span className="rounded border border-border bg-muted px-2 py-1 text-[11px] text-muted-foreground">
+                {project.harnessAdapter.name}
+              </span>
+              <ProjectActionMenu
+                project={project}
+                archiving={archiving}
+                onEdit={() => onEditProject(project)}
+                onArchive={() => onArchiveProject(project)}
+              />
+            </div>
+            {pluginUpdateInfo && (
+              <UpdateVersionTooltip
+                typeLabel="插件"
+                installedVersion={pluginUpdateInfo.installedVersion}
+                currentVersion={pluginUpdateInfo.currentVersion}
+              >
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="market-update-bounce h-7 px-3 gap-1 text-xs cursor-pointer rounded-lg text-[#0f766e] border-[#78d7cb] bg-[#e5fbf7] hover:bg-[#d4f7f0] disabled:cursor-not-allowed disabled:opacity-70"
+                  disabled={updatingPlugin}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onUpdatePlugin(project, pluginUpdateInfo)
+                  }}
+                  onKeyDown={(event) => event.stopPropagation()}
+                >
+                  {updatingPlugin ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : (
+                    <Zap className="size-3" />
+                  )}
+                  {updatingPlugin ? "更新中" : "可更新"}
+                </Button>
+              </UpdateVersionTooltip>
+            )}
           </div>
         </div>
 
@@ -1714,16 +1755,25 @@ function SystemSection({
   detailsByProjectId,
   loadingDetailIds,
   archivingProjectId,
+  pluginUpdateInfoByProjectId,
+  updatingPluginProjectIds,
   onEditProject,
   onArchiveProject,
+  onUpdateProjectPlugin,
   onOpenProject
 }: {
   group: SystemGroup
   detailsByProjectId: Record<string, HarnessProjectDetailViewModel>
   loadingDetailIds: Set<string>
   archivingProjectId: string | null
+  pluginUpdateInfoByProjectId: Map<string, MarketPluginUpdateInfo>
+  updatingPluginProjectIds: Set<string>
   onEditProject: (project: HarnessProjectListItem) => void
   onArchiveProject: (project: HarnessProjectListItem) => void
+  onUpdateProjectPlugin: (
+    project: HarnessProjectListItem,
+    updateInfo: MarketPluginUpdateInfo
+  ) => void
   onOpenProject: (projectId: string) => void
 }): React.JSX.Element {
   return (
@@ -1744,8 +1794,11 @@ function SystemSection({
               detail={detailsByProjectId[project.projectId]}
               loading={loadingDetailIds.has(project.projectId)}
               archiving={archivingProjectId === project.projectId}
+              pluginUpdateInfo={pluginUpdateInfoByProjectId.get(project.projectId)}
+              updatingPlugin={updatingPluginProjectIds.has(project.projectId)}
               onEditProject={onEditProject}
               onArchiveProject={onArchiveProject}
+              onUpdatePlugin={onUpdateProjectPlugin}
               onOpenProject={onOpenProject}
             />
           ))}
@@ -3116,6 +3169,7 @@ export function HarnessBoardView({
   const [isViewingSession, setIsViewingSession] = useState(false)
   const [runDetail, setRunDetail] = useState<HarnessRunDetailViewModel | null>(null)
   const [adapterRegistry, setAdapterRegistry] = useState<HarnessAdapterRegistryItem[]>([])
+  const [marketPluginItems, setMarketPluginItems] = useState<MarketItem[]>([])
   const [query, setQuery] = useState("")
   const [loadingProjects, setLoadingProjects] = useState(true)
   const [loadingRun, setLoadingRun] = useState(false)
@@ -3134,6 +3188,7 @@ export function HarnessBoardView({
   const [featureName, setFeatureName] = useState("")
   const [featureError, setFeatureError] = useState<string | null>(null)
   const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
+  const [updatingPluginProjectIds, setUpdatingPluginProjectIds] = useState<Set<string>>(new Set())
   const [loadError, setLoadError] = useState<string | null>(null)
   const {
     threads,
@@ -3141,7 +3196,9 @@ export function HarnessBoardView({
     createThread,
     selectThread,
     updateThread,
-    deleteThread
+    deleteThread,
+    pluginVersion,
+    bumpPluginVersion
   } = useAppStore()
   const { cleanupThread } = useThreadContext()
   const allThreadStates = useAllThreadStates()
@@ -3267,6 +3324,7 @@ export function HarnessBoardView({
         void Promise.all([loadHarnessMarketPlugins(), loadHarnessInstalledPlugins()]).then(
           ([marketPlugins, installedPlugins]) => {
             if (requestId !== loadProjectsRequestIdRef.current) return
+            setMarketPluginItems(marketPlugins)
             setAdapterRegistry(applyMarketAdapterDisplayData(registry, marketPlugins, installedPlugins))
           }
         )
@@ -3283,7 +3341,7 @@ export function HarnessBoardView({
 
   useEffect(() => {
     void loadProjects()
-  }, [loadProjects])
+  }, [loadProjects, pluginVersion])
 
   const refreshProjectDetailsInBackground = useCallback(async () => {
     if (selectedProjectIdRef.current || selectedFeatureRef.current) return
@@ -3726,6 +3784,20 @@ export function HarnessBoardView({
   const selectedProject =
     selectedProjectId ? projects.find((project) => project.projectId === selectedProjectId) ?? null : null
   const selectedProjectDetail = selectedProjectId ? detailsByProjectId[selectedProjectId] : undefined
+  const projectPluginUpdateInfoById = useMemo(() => {
+    const marketPluginByName = buildMarketPluginMap(marketPluginItems)
+    const next = new Map<string, MarketPluginUpdateInfo>()
+
+    for (const project of projects) {
+      const marketPlugin = marketPluginByName.get(normalizeAdapterMarketName(project.harnessAdapter.name))
+      const updateInfo = getMarketPluginUpdateInfo(marketPlugin)
+      if (updateInfo) {
+        next.set(project.projectId, updateInfo)
+      }
+    }
+
+    return next
+  }, [marketPluginItems, pluginVersion, projects])
 
   const openProjectDetail = useCallback(
     (projectId: string): void => {
@@ -3736,6 +3808,32 @@ export function HarnessBoardView({
       }
     },
     [detailsByProjectId, loadProjectDetail, loadingDetailIds]
+  )
+
+  const handleUpdateProjectPlugin = useCallback(
+    async (project: HarnessProjectListItem, updateInfo: MarketPluginUpdateInfo): Promise<void> => {
+      if (updatingPluginProjectIds.has(project.projectId)) return
+
+      setUpdatingPluginProjectIds((current) => new Set(current).add(project.projectId))
+      try {
+        const response = await installMarketPluginUpdate(updateInfo.item)
+        if (response.success) {
+          toast.success(`已为您更新并安装「${updateInfo.itemName}」到插件，请新开一个会话试试效果。`)
+          bumpPluginVersion()
+        } else {
+          toast.error(response.error || "更新安装失败")
+        }
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "更新安装失败")
+      } finally {
+        setUpdatingPluginProjectIds((current) => {
+          const next = new Set(current)
+          next.delete(project.projectId)
+          return next
+        })
+      }
+    },
+    [bumpPluginVersion, updatingPluginProjectIds]
   )
 
   const openFeatureDetail = useCallback(
@@ -4202,8 +4300,13 @@ export function HarnessBoardView({
                     detailsByProjectId={detailsByProjectId}
                     loadingDetailIds={loadingDetailIds}
                     archivingProjectId={archivingProjectId}
+                    pluginUpdateInfoByProjectId={projectPluginUpdateInfoById}
+                    updatingPluginProjectIds={updatingPluginProjectIds}
                     onEditProject={handleEditProject}
                     onArchiveProject={(project) => void handleArchiveProject(project)}
+                    onUpdateProjectPlugin={(project, updateInfo) =>
+                      void handleUpdateProjectPlugin(project, updateInfo)
+                    }
                     onOpenProject={openProjectDetail}
                   />
                 ))
@@ -4234,8 +4337,13 @@ export function HarnessBoardView({
                         detailsByProjectId={detailsByProjectId}
                         loadingDetailIds={loadingDetailIds}
                         archivingProjectId={archivingProjectId}
+                        pluginUpdateInfoByProjectId={projectPluginUpdateInfoById}
+                        updatingPluginProjectIds={updatingPluginProjectIds}
                         onEditProject={handleEditProject}
                         onArchiveProject={(project) => void handleArchiveProject(project)}
+                        onUpdateProjectPlugin={(project, updateInfo) =>
+                          void handleUpdateProjectPlugin(project, updateInfo)
+                        }
                         onOpenProject={openProjectDetail}
                       />
                     ))

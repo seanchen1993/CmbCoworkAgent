@@ -68,6 +68,11 @@ import {
   MarketItemType
 } from "../../../api/market"
 import { USE_MARKET_MOCK_ON_ERROR } from "../../../api/market-flags"
+import {
+  deleteInstalledMarketPlugin,
+  findInstalledPluginForMarketItem,
+  installMarketPluginUpdate
+} from "./market-plugin-update"
 import { getMarketMockResponse } from "./MarketMockData"
 import {
   formatTopUserOrgName,
@@ -1126,28 +1131,6 @@ export function MarketPanel(): React.JSX.Element {
     }
   }
 
-  const findInstalledPluginForMarketItem = (
-    pluginsMetadata: PluginMetadata[],
-    item: MarketItem
-  ): PluginMetadata | undefined => {
-    const candidates = new Set(
-      [item.name, item.id, item.chinese_name].map((value) => value?.trim()).filter(Boolean)
-    )
-    return pluginsMetadata.find(
-      (plugin) =>
-        candidates.has(plugin.name) ||
-        candidates.has(plugin.id) ||
-        (item.filename ? plugin.path.includes(item.filename) : false)
-    )
-  }
-
-  const deleteInstalledPlugin = async (plugin: PluginMetadata) => {
-    const result = await window.api.plugins.delete(plugin.id)
-    if (!result.success) {
-      throw new Error(result.error || "Plugin 卸载失败")
-    }
-  }
-
   // 在组件��载时获取已安装的skills、MCPs和Plugins列表
   useEffect(() => {
     loadInstalledSkills()
@@ -1305,6 +1288,24 @@ export function MarketPanel(): React.JSX.Element {
         return
       }
 
+      if (activeTab === "plugin") {
+        const response = await installMarketPluginUpdate(item)
+
+        if (response.success) {
+          console.log(`Successfully updated and installed ${item.name}`)
+          toast.success(
+            `已为您更新并安装「${item.name}」到${getMarketTypeLabel(activeTab)}，请新开一个会话试试效果。`
+          )
+          await loadInstalledPlugins()
+          bumpPluginVersion()
+          triggerReload()
+        } else {
+          console.error("Update install failed:", response.error)
+          setError(response.error || "更新安装失败")
+        }
+        return
+      }
+
       // 根据类型处理已有的安装项目
       if (activeTab === "skill" && window.api?.skills?.delete) {
         try {
@@ -1331,18 +1332,6 @@ export function MarketPanel(): React.JSX.Element {
           }
         } catch (deleteError) {
           console.warn("Failed to delete existing mcp, continuing with install:", deleteError)
-        }
-      } else if (activeTab === "plugin") {
-        try {
-          const pluginsMetadata = await window.api.plugins.list()
-          const existingPlugin = findInstalledPluginForMarketItem(pluginsMetadata, item)
-
-          if (existingPlugin) {
-            console.log(`Deleting existing plugin: ${existingPlugin.id}`)
-            await deleteInstalledPlugin(existingPlugin)
-          }
-        } catch (deleteError) {
-          console.warn("Failed to delete existing plugin, continuing with install:", deleteError)
         }
       }
 
@@ -1963,7 +1952,7 @@ export function MarketPanel(): React.JSX.Element {
         const pluginsMetadata = await window.api.plugins.list()
         const existingPlugin = findInstalledPluginForMarketItem(pluginsMetadata, item)
         if (existingPlugin) {
-          await deleteInstalledPlugin(existingPlugin)
+          await deleteInstalledMarketPlugin(existingPlugin)
         }
         marketInstalledVersionStorage.removeVersion(itemName, activeTab)
         await loadInstalledPlugins()
