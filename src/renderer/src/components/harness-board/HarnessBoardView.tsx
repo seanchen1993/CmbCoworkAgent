@@ -1663,18 +1663,12 @@ function ProjectBadgeRow({
   project: HarnessProjectListItem
   children?: ReactNode
 }): React.JSX.Element {
-  const archived = project.lifecycle.status === "archived"
   return (
     <div className="flex min-w-0 items-center gap-2">
       {children}
       <span className="shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
         {project.projectCode}
       </span>
-      {archived && (
-        <span className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
-          已归档
-        </span>
-      )}
     </div>
   )
 }
@@ -1708,6 +1702,7 @@ function ProjectCard({
   const detailError = detail?.error?.trim()
   const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
   const pluginCompatibilityStatus = boardCompatibilityStatus(project.boardCompatibility)
+  const archivedStatus: HarnessStatus = { label: "已归档", uiKind: "archived" }
   const projectRootPath = resolveProjectRootPath(project)
 
   return (
@@ -1779,7 +1774,14 @@ function ProjectCard({
         </div>
 
         <div className="mt-4 border-t border-border pt-3">
-          {pluginCompatibilityMessage ? (
+          {archived ? (
+            <div className="flex min-h-[44px] flex-wrap items-center gap-2">
+              {pluginCompatibilityMessage && (
+                <StatusPill status={pluginCompatibilityStatus} tooltip={pluginCompatibilityMessage} />
+              )}
+              <StatusPill status={archivedStatus} />
+            </div>
+          ) : pluginCompatibilityMessage ? (
             <div className="flex min-h-[44px] items-center">
               <StatusPill status={pluginCompatibilityStatus} tooltip={pluginCompatibilityMessage} />
             </div>
