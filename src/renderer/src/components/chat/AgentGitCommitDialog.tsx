@@ -83,11 +83,19 @@ function parseUnifiedDiffRows(diff: string): DiffRow[] {
   return rows
 }
 
-/** GitHub-style wrapping unified diff — no horizontal scroll, vertical scroll only. */
+function basename(filePath: string): string {
+  const parts = filePath.split("/")
+  return parts[parts.length - 1] || filePath
+}
+
+/**
+ * GitHub-style wrapping unified diff for a single file — no horizontal scroll, fills its
+ * container and scrolls vertically. The parent supplies height + border.
+ */
 function UnifiedDiffView({ diff }: { diff: string }): React.JSX.Element {
   const rows = useMemo(() => parseUnifiedDiffRows(diff), [diff])
   return (
-    <div className="max-h-72 overflow-y-auto overflow-x-hidden rounded-lg border border-border/70 bg-background-secondary font-mono text-[11px] leading-5">
+    <div className="h-full overflow-y-auto overflow-x-hidden bg-background-secondary font-mono text-[11px] leading-5">
       {rows.map((row, index) => {
         if (row.type === "file") {
           return (
@@ -194,7 +202,8 @@ export function AgentGitCommitDialog({
   // Starts true so the first paint shows "加载中"; the fetch's finally clears it. The
   // dialog is remounted per commit (keyed on the approval id), so this re-initializes.
   const [diffLoading, setDiffLoading] = useState(true)
-  const [showDiffDetails, setShowDiffDetails] = useState(false)
+  // Master-detail: which file's diff is shown on the right. null → fall back to first file.
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) return
@@ -220,9 +229,9 @@ export function AgentGitCommitDialog({
     }
   }, [open, threadId])
 
-  const combinedDiff = useMemo(
-    () => (diff?.files ?? []).map((f) => f.diff).filter(Boolean).join("\n"),
-    [diff]
+  const selectedFile = useMemo(
+    () => diff?.files.find((f) => f.path === selectedFilePath) ?? diff?.files[0],
+    [diff, selectedFilePath]
   )
 
   const cardValue = cardNumber.trim()
@@ -261,7 +270,7 @@ export function AgentGitCommitDialog({
         if (!next && !running) onCancel()
       }}
     >
-      <DialogContent className="sm:max-w-lg rounded-2xl border border-border bg-background p-0 shadow-xl flex max-h-[85vh] flex-col overflow-hidden">
+      <DialogContent className="sm:max-w-2xl rounded-2xl border border-border bg-background p-0 shadow-xl flex max-h-[85vh] flex-col overflow-hidden">
         <div className="flex shrink-0 items-center gap-2 px-5 py-4 border-b border-border/70">
           <GitCommitHorizontal className="size-4 text-status-info" />
           <div className="text-[16px] font-semibold">Agent 请求提交</div>
@@ -294,42 +303,56 @@ export function AgentGitCommitDialog({
 
         {diff && diff.files.length > 0 && (
           <div className="mx-4 mt-3 space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="text-xs font-medium text-foreground">
-                变更文件（{diff.files.length}）
-              </div>
-              {combinedDiff && (
-                <button
-                  type="button"
-                  className="text-[11px] text-status-info hover:underline"
-                  onClick={() => setShowDiffDetails((v) => !v)}
-                >
-                  {showDiffDetails ? "隐藏改动详情" : "查看改动详情"}
-                </button>
-              )}
+            <div className="text-xs font-medium text-foreground">
+              变更文件（{diff.files.length}）
             </div>
-            <div className="rounded-lg border border-border/70 divide-y divide-border/60 overflow-hidden max-h-40 overflow-y-auto">
-              {diff.files.map((file) => (
-                <div
-                  key={file.path}
-                  className="flex items-center justify-between gap-2 px-2.5 py-1.5 text-xs"
-                >
-                  <span className="truncate font-mono text-foreground" title={file.path}>
-                    {file.path}
-                  </span>
-                  <span className="shrink-0 font-medium">
-                    <span className="text-emerald-600 dark:text-emerald-400">+{file.additions}</span>
-                    <span className="ml-1 text-rose-600 dark:text-rose-400">-{file.deletions}</span>
-                  </span>
-                </div>
-              ))}
+            <div className="flex h-64 overflow-hidden rounded-lg border border-border/70">
+              {/* Left: file list (select one to view its diff). */}
+              <div className="w-44 shrink-0 overflow-y-auto border-r border-border/60 bg-muted/20">
+                {diff.files.map((file) => {
+                  const active = file.path === selectedFile?.path
+                  return (
+                    <button
+                      key={file.path}
+                      type="button"
+                      onClick={() => setSelectedFilePath(file.path)}
+                      title={file.path}
+                      className={cn(
+                        "flex w-full items-center justify-between gap-1.5 px-2 py-1.5 text-left text-[11px] transition-colors",
+                        active
+                          ? "bg-primary/10 text-primary"
+                          : "text-foreground hover:bg-muted/60"
+                      )}
+                    >
+                      <span className="truncate font-mono">{basename(file.path)}</span>
+                      <span className="shrink-0 font-medium">
+                        <span className="text-emerald-600 dark:text-emerald-400">
+                          +{file.additions}
+                        </span>
+                        <span className="ml-0.5 text-rose-600 dark:text-rose-400">
+                          -{file.deletions}
+                        </span>
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+              {/* Right: selected file's diff only. */}
+              <div className="min-w-0 flex-1">
+                {selectedFile?.diff ? (
+                  <UnifiedDiffView diff={selectedFile.diff} />
+                ) : (
+                  <div className="flex h-full items-center justify-center px-4 text-center text-[11px] text-muted-foreground">
+                    {selectedFile ? "该文件无文本改动（可能为二进制或体积过大）" : "选择左侧文件查看改动"}
+                  </div>
+                )}
+              </div>
             </div>
             {diff.omittedFileCount > 0 && (
               <div className="text-[11px] text-muted-foreground">
                 另有 {diff.omittedFileCount} 个文件因体积过大未展示明细
               </div>
             )}
-            {showDiffDetails && combinedDiff && <UnifiedDiffView diff={combinedDiff} />}
           </div>
         )}
 
