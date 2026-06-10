@@ -2418,7 +2418,7 @@ export function MarketPanel(): React.JSX.Element {
                         size="sm"
                         className="h-7 shrink-0 px-3 gap-1 text-xs text-[#3766a6] border-[#ccdcf5] bg-[#edf4ff] hover:bg-[#dceaff] rounded-lg"
                         onClick={() => {
-                          const url = `${import.meta.env.VITE_ZZJ_WEB_URL.replace(/\/+$/, "")}/skill-market`
+                          const url = `${import.meta.env.VITE_ZZJ_WEB_URL?.replace(/\/+$/, "")}/skill-market`
                           void window.electron.openExternal(url)
                         }}
                       >

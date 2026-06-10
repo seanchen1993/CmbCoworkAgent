@@ -513,7 +513,7 @@ export const marketApi = {
       try {
         const arrayBuffer = await blob.arrayBuffer()
         if (typeof window.api?.plugins?.install === "function") {
-          const installResult = await window.api.plugins.install(arrayBuffer, filename, "market")
+          const installResult = await window.api.plugins.install(arrayBuffer, filename, "market", item?.version)
           return {
             success: installResult.success,
             error: installResult.error

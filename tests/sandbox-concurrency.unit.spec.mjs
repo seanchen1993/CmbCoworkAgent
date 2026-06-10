@@ -112,6 +112,16 @@ test("local sandbox keeps risky commands exclusive while limiting read-only comm
   )
   assert.match(
     executeRawSection,
+    /const sandboxWorkspaceRoot = path\.resolve\(this\.workingDir\)[\s\S]*buildSerializedExecutionKey\(this\.runId, sandboxWorkspaceRoot, effectiveSandboxMode\)/,
+    "foreground Windows sandbox commands should serialize by workspace root, not by execution cwd"
+  )
+  assert.doesNotMatch(
+    executeRawSection,
+    /buildSerializedExecutionKey\(this\.runId, effectiveCwd, effectiveSandboxMode\)/,
+    "skill execution cwd must not split the foreground exclusive queue"
+  )
+  assert.match(
+    executeRawSection,
     /commandConcurrency === "parallel_safe"[\s\S]*runParallelSafeExecution[\s\S]*runSerializedExecution/,
     "executeRaw should route only parallel-safe commands around the exclusive queue"
   )

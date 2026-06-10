@@ -1264,17 +1264,6 @@ export function ProjectModePanel({
             />
             <StatCard
               icon={Gauge}
-              label="已Commit采纳率"
-              value={formatPercent(summary?.codeStats?.measuredAdoptionRate)}
-              sub={
-                summary?.codeStats
-                  ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.effectiveGeneratedLines)} 行`
-                  : "暂无代码生成数据"
-              }
-              color="bg-indigo-500"
-            />
-            <StatCard
-              icon={Gauge}
               label="已 Push 采纳率"
               value={formatPercent(summary?.codeStats?.pushedAdoptionRate)}
               sub={
@@ -1283,6 +1272,17 @@ export function ProjectModePanel({
                   : "暂无已 Push 数据"
               }
               color="bg-teal-500"
+            />
+            <StatCard
+              icon={Gauge}
+              label="已Commit采纳率"
+              value={formatPercent(summary?.codeStats?.measuredAdoptionRate)}
+              sub={
+                summary?.codeStats
+                  ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.effectiveGeneratedLines)} 行`
+                  : "暂无代码生成数据"
+              }
+              color="bg-indigo-500"
             />
             <StatCard
               icon={Gauge}

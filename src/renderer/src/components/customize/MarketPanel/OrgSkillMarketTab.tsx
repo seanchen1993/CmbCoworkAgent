@@ -10,8 +10,7 @@ import {
   Tag,
   Trash2,
   User,
-  X,
-  Zap
+  X
 } from "lucide-react"
 import {
   buildOrgSkillSubscribeUrl,
@@ -127,7 +126,6 @@ function OrgSkillCard({
   item,
   isDownloading,
   onOpenDetail,
-  onDownload,
   onUninstall
 }: {
   item: MarketItem

@@ -50,7 +50,7 @@ import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "
 import { isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
-import { getRightPanelSkillPath } from "@/components/panels/skill-tree-path"
+import { getRightPanelSkillPathSegments } from "@/components/panels/skill-tree-path"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
@@ -2941,6 +2941,7 @@ function formatCompactElapsed(ms: number): string {
 type RightPanelSkillTreeNode = {
   key: string
   label: string
+  title?: string
   skill?: SkillMetadata
   children: RightPanelSkillTreeNode[]
 }
@@ -2952,25 +2953,34 @@ function buildRightPanelSkillTree(skills: SkillMetadata[]): RightPanelSkillTreeN
   const getIndex = (node: RightPanelSkillTreeNode): Map<string, RightPanelSkillTreeNode> => {
     let index = indexByNode.get(node)
     if (!index) {
-      index = new Map(node.children.map((child) => [normalizeSkillId(child.label), child]))
+      index = new Map(node.children.map((child) => [child.key, child]))
       indexByNode.set(node, index)
     }
     return index
   }
 
   for (const skill of skills) {
-    const segments = getRightPanelSkillPath(skill).split("/").filter(Boolean)
-    const fallbackSegments = segments.length > 0 ? segments : [skill.name]
+    const segments = getRightPanelSkillPathSegments(skill)
+    const fallbackSegments =
+      segments.length > 0
+        ? segments
+        : [{ key: skill.name, label: skill.name }]
     let current = root
 
     for (const segment of fallbackSegments) {
-      const normalized = normalizeSkillId(segment)
+      const normalized = normalizeSkillId(segment.key || segment.label)
       const childIndex = getIndex(current)
-      let child = childIndex.get(normalized)
+      const nodeKey = `${current.key}/${normalized}`
+      let child = childIndex.get(nodeKey)
       if (!child) {
-        child = { key: `${current.key}/${normalized}`, label: segment, children: [] }
+        child = {
+          key: nodeKey,
+          label: segment.label,
+          title: segment.title,
+          children: []
+        }
         current.children.push(child)
-        childIndex.set(normalized, child)
+        childIndex.set(nodeKey, child)
       }
       current = child
     }
@@ -3111,14 +3121,16 @@ function SkillsContent({
                       </Badge>
                     )}
                   </div>
-                  {node.skill.pluginName && (
+                  {(node.skill.pluginName || node.skill.pluginId) && (
                     <div className="mt-1 flex min-w-0 items-center gap-1">
                       <Badge
                         variant="outline"
                         className="min-w-0 max-w-full text-[10px] h-4 px-1.5 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
-                        title={`来自插件：${node.skill.pluginName}`}
+                        title={`来自插件：${node.skill.pluginName ?? node.skill.pluginId}`}
                       >
-                        <span className="truncate">插件 · {node.skill.pluginName}</span>
+                        <span className="truncate">
+                          插件 · {node.skill.pluginName ?? node.skill.pluginId}
+                        </span>
                       </Badge>
                     </div>
                   )}
@@ -3132,6 +3144,7 @@ function SkillsContent({
                 <button
                   className="flex min-h-9 w-full items-center gap-2 rounded-sm border border-dashed border-border/70 bg-muted/20 px-3 py-2 text-left text-xs text-muted-foreground hover:bg-muted/35"
                   onClick={() => toggleTreeNode(node.key)}
+                  title={node.title ?? node.label}
                 >
                   {childrenExpanded ? (
                     <ChevronDown className="size-3 shrink-0" />

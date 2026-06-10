@@ -35,6 +35,7 @@ import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/cor
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { LocalSandbox, type SkillHookContextProvider } from "./local-sandbox"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
+import { combineSkillMiddlewareSources } from "./skill-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
@@ -1076,13 +1077,23 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     const executeIdx = mw.tools?.findIndex((t: any) => t.name === "execute") ?? -1
     if (executeIdx >= 0) {
       const oldExecute = mw.tools![executeIdx]
+      const formatExecuteResponse = (result: import("deepagents").ExecuteResponse): string => {
+        const parts = [result.output]
+        if (result.exitCode !== null) {
+          const status = result.exitCode === 0 ? "succeeded" : "failed"
+          parts.push(`\n[Command ${status} with exit code ${result.exitCode}]`)
+        }
+        if (result.truncated) parts.push("\n[Output was truncated due to size limits]")
+        return parts.join("")
+      }
       const customExecute = lcTool(
-        async (input: { command: string; run_in_background?: boolean }): Promise<string> => {
+        async (input: { command: string; cwd?: string; run_in_background?: boolean }): Promise<string> => {
+          const sandbox = filesystemBackend as LocalSandbox
           if (input.run_in_background) {
-            const taskId = await (filesystemBackend as LocalSandbox).executeBackground(
-              input.command
-            )
-            return `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
+            return sandbox.executeBackground(input.command, input.cwd)
+          }
+          if (input.cwd?.trim()) {
+            return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
           }
           // Delegate to original execute handler for foreground execution
           const result = await (oldExecute as any).invoke(input)
@@ -1098,6 +1109,12 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
           description: (oldExecute as any).description,
           schema: z.object({
             command: z.string().describe("The shell command to execute"),
+            cwd: z
+              .string()
+              .optional()
+              .describe(
+                "Optional working directory for the command. Use the skill directory when running scripts or resources referenced by a SKILL.md."
+              ),
             run_in_background: z
               .boolean()
               .optional()
@@ -1728,12 +1745,27 @@ export interface ModelRetryInfo {
   delayMs: number
 }
 
+/** Raw error response captured at the fetch layer, before the SDK parses it. */
+export interface FetchErrorInfo {
+  /** HTTP status of the failing response (485, 432, …). */
+  status: number
+  /** Upstream request id (x-request-id), when present. */
+  requestId?: string
+  /** Raw response body text — the only schema-independent source of the real
+   *  reason. Surfaced even when the SDK drops a non-OpenAI error envelope. */
+  rawBody?: string
+}
+
 /** Hooks invoked by the retrying fetch wrapper so the UI can display/clear status. */
 export interface ModelRetryHooks {
   onRetry?: (info: ModelRetryInfo) => void
   /** Called when a retry attempt succeeds (fetch returns a non-retryable response).
    *  The UI should clear the retry indicator immediately on this callback. */
   onRetrySuccess?: () => void
+  /** Called when a non-retryable error HTTP response (>= 400) is about to be
+   *  handed back to the SDK. Carries the raw body so the upper layer can show
+   *  the real reason regardless of the body schema. */
+  onFetchError?: (info: FetchErrorInfo) => void
 }
 
 /**
@@ -1759,6 +1791,23 @@ function createRetryingFetch(
   return async (input, init) => {
     const parentSignal = (init?.signal ?? undefined) as AbortSignal | undefined
     let lastError: unknown = undefined
+
+    // Capture the raw error body before the SDK consumes it. The OpenAI SDK only
+    // preserves a body that matches the `{error:{…}}` envelope, so for custom
+    // gateway codes (480/485/…) or non-OpenAI bodies this clone is the only place
+    // the real reason survives. Called both for non-retryable statuses and when
+    // the retry budget is exhausted on a retryable status (432/433/429/5xx).
+    const captureFetchError = async (res: Response): Promise<void> => {
+      if (res.status < 400 || !hooks?.onFetchError) return
+      const requestId = res.headers.get("x-request-id") ?? undefined
+      try {
+        const rawBody = await res.clone().text()
+        hooks.onFetchError({ status: res.status, requestId, rawBody })
+      } catch {
+        // Body capture is best-effort — never block the real response.
+        hooks.onFetchError({ status: res.status, requestId })
+      }
+    }
 
     for (let attempt = 1; attempt <= totalAttempts; attempt++) {
       if (parentSignal?.aborted) throw new DOMException("Aborted", "AbortError")
@@ -1793,6 +1842,7 @@ function createRetryingFetch(
 
         // Success or non-retryable error — return as-is.
         if (!isRetryableStatus(res.status)) {
+          await captureFetchError(res)
           // If this is a successful retry (not the first attempt), notify the UI
           // so the retry indicator can be cleared immediately.
           if (attempt > 1) hooks?.onRetrySuccess?.()
@@ -1800,7 +1850,12 @@ function createRetryingFetch(
         }
 
         // Retryable HTTP status.
-        if (attempt >= totalAttempts) return res // exhausted — return so caller sees the real status
+        if (attempt >= totalAttempts) {
+          // Retry budget exhausted — capture the body so the real reason still
+          // reaches the UI, then return so the caller sees the real status.
+          await captureFetchError(res)
+          return res
+        }
 
         // Drain body to free the connection before retrying.
         try {
@@ -2497,9 +2552,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
 
   const rawExecute = (
     command: string,
-    sandboxMode?: string
+    sandboxMode?: string,
+    cwd?: string
   ): Promise<import("deepagents").ExecuteResponse> => {
-    return backend.executeRaw(command, sandboxMode)
+    return backend.executeRaw(command, sandboxMode, undefined, undefined, { cwd })
   }
 
   const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, yoloMode)
@@ -2596,7 +2652,7 @@ The workspace root is: ${workspacePath}`
   console.log("[Runtime] Plugin skills sources:", pluginSkillsSources)
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
-  const allSkillsSources = [...skillsSources, ...pluginSkillsSources]
+  const allSkillsSources = combineSkillMiddlewareSources(skillsSources, pluginSkillsSources)
   const skillLifecycleSources = [...skillLifecycleRootSources, ...pluginSkillSourceMetadata]
   backend.setHiddenSkillDirs(getDisabledSkillDirs())
   backend.setSkillLifecycleRegistry(

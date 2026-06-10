@@ -33,6 +33,7 @@ import type { PluginMetadata, PluginManifest } from "@/types"
 import { marketApi, type MarketItem } from "../../api/market"
 import {
   MarketPublishDialog,
+  type MarketPublishFileBuildContext,
   type MarketPublishTarget
 } from "./MarketPanel/MarketPublishDialog"
 import { PluginFileEditorDialog } from "./PluginFileEditorDialog"
@@ -673,10 +674,12 @@ export function PluginsPanel(): React.JSX.Element {
   )
 
   const buildPluginMarketFile = useCallback(
-    async (target: MarketPublishTarget) => {
+    async (target: MarketPublishTarget, context: MarketPublishFileBuildContext) => {
       const plugin = plugins.find((item) => item.name === target.name)
       if (!plugin) return { success: false, error: "Plugin 不存在" }
-      const exported = await window.api.plugins.exportForMarket(plugin.id)
+      const exported = await window.api.plugins.exportForMarket(plugin.id, {
+        version: context.version
+      })
       if (!exported.success || !exported.buffer) {
         return { success: false, error: exported.error || "导出 Plugin 失败" }
       }

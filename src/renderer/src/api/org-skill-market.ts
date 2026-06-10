@@ -171,10 +171,10 @@ const MOCK_ORG_SKILL_ITEMS: OrgSkillApiItem[] = [
 
 const ORG_SKILL_GATEWAY_URL = String(
   import.meta.env.VITE_OPEN_ASSISTANT_HUB_GATEWAY_URL ||
-    "http://open-assistant-hub-gateway.paasoa.cmbchina.cn"
+    ""
 ).replace(/\/+$/, "")
 
-const ORG_SKILL_CLAWPARTNER_URL = import.meta.env.VITE_ZZJ_WEB_URL.replace(/\/+$/, "")
+const ORG_SKILL_CLAWPARTNER_URL =String( import.meta.env.VITE_ZZJ_WEB_URL || '').replace(/\/+$/, "")
 
 const ORG_SKILL_ENDPOINTS = {
   page: (pageNum: number, pageSize: number, labelIds: string[] = [], keyword = "") => {

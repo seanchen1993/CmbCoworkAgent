@@ -90,6 +90,10 @@ function repoKey(repo: string): string {
   return createHash("sha1").update(repo.trim().replace(/\\/g, "/").toLowerCase()).digest("hex")
 }
 
+function normalizePathForAssert(value: string): string {
+  return value.trim().replace(/\\/g, "/").toLowerCase()
+}
+
 function repoEventsDir(repo: string): string {
   return join(homedir(), ".cmbcoworkagent", "git-hooks", "events", repoKey(repo))
 }
@@ -174,7 +178,10 @@ async function testExternalCommandCommitWithoutCodeGenIsSkipped(): Promise<void>
 
     const head = await git(repo, ["rev-parse", "HEAD"])
     const snapshot = await readReadySnapshot(repo)
-    assert(snapshot.meta.gitRoot === repo, `snapshot gitRoot should be repo, got ${snapshot.meta.gitRoot}`)
+    assert(
+      normalizePathForAssert(snapshot.meta.gitRoot || "") === normalizePathForAssert(repo),
+      `snapshot gitRoot should be repo, got ${snapshot.meta.gitRoot}`
+    )
     assert(snapshot.meta.commitSha === head, `snapshot commitSha should be HEAD, got ${snapshot.meta.commitSha}`)
     assert(snapshot.meta.files?.length === 1, `expected one collected file, got ${snapshot.meta.files?.length}`)
     assert(snapshot.meta.files?.[0]?.relPath === "external.ts", "external.ts should be collected")

@@ -5,7 +5,10 @@
  *   npx tsx tests/slash-skill-merge.spec.ts
  */
 
-import { mergeChatSkills } from "../src/renderer/src/features/slash-commands/skill-merge.ts"
+import {
+  mergeChatSkills,
+  selectSkillForSlashName
+} from "../src/renderer/src/features/slash-commands/skill-merge.ts"
 import type { SkillMetadata } from "../src/renderer/src/types.ts"
 
 function assert(cond: unknown, msg: string): void {
@@ -48,8 +51,63 @@ function run(): void {
 
   const withEnabledLocal = mergeChatSkills([enabledSameName], [pluginSameName], new Set())
   assert(
-    names(withEnabledLocal).join(",") === "local:same-name",
-    `enabled local skill should keep precedence over same-name plugin skill: ${names(withEnabledLocal)}`
+    names(withEnabledLocal).join(",") === "local:same-name,plugin:same-name",
+    `enabled local and same-name plugin skill should both remain visible: ${names(withEnabledLocal)}`
+  )
+
+  const preferredPluginDoesNotShadowLocal = mergeChatSkills(
+    [enabledSameName],
+    [pluginSameName],
+    new Set(),
+    { id: "demo", name: "Demo Plugin" }
+  )
+  assert(
+    names(preferredPluginDoesNotShadowLocal).join(",") === "local:same-name,plugin:same-name",
+    `preferred plugin should be shown alongside same-name standalone skill: ${names(preferredPluginDoesNotShadowLocal)}`
+  )
+
+  const otherPluginSameName = skill({
+    id: "plugin:other/same-name",
+    name: "same-name",
+    source: "user",
+    pluginId: "other"
+  })
+  const sameNameAcrossPlugins = mergeChatSkills(
+    [],
+    [pluginSameName, otherPluginSameName],
+    new Set()
+  )
+  assert(
+    names(sameNameAcrossPlugins).join(",") === "plugin:same-name,plugin:same-name",
+    `same-name plugin skills should both remain visible without a preference: ${names(sameNameAcrossPlugins)}`
+  )
+
+  const preferredPluginWinsAmongPlugins = mergeChatSkills(
+    [],
+    [otherPluginSameName, pluginSameName],
+    new Set(),
+    { id: "demo", name: "Demo Plugin" }
+  )
+  assert(
+    preferredPluginWinsAmongPlugins.length === 1 &&
+      preferredPluginWinsAmongPlugins[0].pluginId === "demo",
+    `preferred plugin should only dedupe same-name plugin rows: ${names(preferredPluginWinsAmongPlugins)}`
+  )
+
+  const autoSelected = selectSkillForSlashName(
+    [enabledSameName, pluginSameName],
+    "same-name",
+    { id: "demo", name: "Demo Plugin" }
+  )
+  assert(
+    autoSelected?.pluginId === "demo",
+    `harness nextAction should prefer bound plugin skill over same-name local skill: ${autoSelected?.id}`
+  )
+
+  const manualFallback = selectSkillForSlashName([enabledSameName, pluginSameName], "same-name")
+  assert(
+    manualFallback === enabledSameName,
+    `without a preferred plugin, slash skill selection should keep list order: ${manualFallback?.id}`
   )
 
   const disabledUnique = skill({ id: "unique-local", name: "unique-local", source: "project" })
@@ -59,7 +117,7 @@ function run(): void {
     `disabled local skill should not enter slash skills: ${names(withUniqueDisabledLocal)}`
   )
 
-  console.log("PASS slash skill merge hides disabled local skills without shadowing plugin skills")
+  console.log("PASS slash skill merge keeps cross-source duplicate skills visible")
 }
 
 run()
