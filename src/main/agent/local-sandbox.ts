@@ -38,7 +38,7 @@ import * as chardet from "jschardet"
 import micromatch from "micromatch"
 import { replace } from "./replace"
 import type { ToolOrchestrator } from "./tool-orchestrator"
-import { assessCommandSafety, classifyCommandConcurrency } from "./exec-policy"
+import { assessCommandSafety, classifyCommandConcurrency, isGitCommitCommand } from "./exec-policy"
 import {
   areElevatedRootsPreparedAsync,
   isElevatedSetupComplete,
@@ -4812,6 +4812,18 @@ export class LocalSandbox
     })
     if (safety.level === "forbidden") {
       return `Command forbidden: ${safety.reason}`
+    }
+
+    // A git commit must always go through the interactive task-card dialog, which only
+    // the foreground orchestrator path drives. Backgrounding it would silently skip card
+    // selection, so run it synchronously through the orchestrator and return the outcome.
+    if (this.orchestrator && isGitCommitCommand(effectiveCommand)) {
+      const result = await this.orchestrator.execute(
+        effectiveCommand,
+        effectiveCwd,
+        this.windowsSandbox
+      )
+      return result.output || (result.exitCode === 0 ? "提交成功" : "提交失败")
     }
 
     const taskId = randomUUID().slice(0, 8)

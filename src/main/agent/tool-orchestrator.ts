@@ -12,7 +12,14 @@
 import { randomUUID } from "crypto"
 import path from "path"
 import { ApprovalStore } from "./approval-store"
-import { assessCommandSafety, derivePermanentApprovalPattern } from "./exec-policy"
+import {
+  assessCommandSafety,
+  derivePermanentApprovalPattern,
+  extractGitCommitMessage,
+  isChainedShellCommand,
+  isForcePushCommand,
+  isGitCommitCommand
+} from "./exec-policy"
 import { LocalSandbox } from "./local-sandbox"
 import type {
   ApprovalRequest,
@@ -78,9 +85,32 @@ export class ToolOrchestrator {
         }
       }
 
+      // 2.5 git commit → route through the task-card commit dialog instead of a plain
+      // approval. The renderer collects the task card + message, performs the commit via
+      // workspace:commitWorktree (the same path as the Git Panel), and reports the result
+      // back. This applies even in YOLO mode: a commit must always carry a task card and
+      // the CMB message format, so it is the one operation YOLO still prompts for.
+      if (isGitCommitCommand(command)) {
+        // The dialog only performs the commit; a chained command (e.g.
+        // `git commit -m x && git push`) would have its tail silently dropped. Refuse it
+        // and tell the agent to run the commit on its own.
+        if (isChainedShellCommand(command)) {
+          return {
+            output:
+              "检测到 `git commit` 与其他命令串联执行，提交对话框只会执行提交本身，其余命令会被丢弃。" +
+              "请单独执行 `git commit`（会弹出任务卡片对话框完成提交），再单独执行其余命令（如 git push）。",
+            exitCode: 1,
+            truncated: false
+          }
+        }
+        return this.requestCardCommit(command, cwd)
+      }
+
       // 3. YOLO mode: skip the initial command approval for safe + needs_approval
       // commands, but still require explicit approval before escaping the sandbox.
-      if (this.yoloMode) {
+      // History-rewriting force pushes are the exception — they always prompt, even in
+      // YOLO, so an unattended run can't destroy remote history.
+      if (this.yoloMode && !isForcePushCommand(command)) {
         const result = await this.rawExecute(command, sandboxMode, cwd)
         return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result)
       }
@@ -151,6 +181,50 @@ export class ToolOrchestrator {
         }
         throw err
       }
+    }
+  }
+
+  /**
+   * Handle a `git commit` the agent issued by popping the task-card commit dialog in the
+   * renderer. The renderer is the single owner of the actual commit (it calls
+   * workspace:commitWorktree, exactly like the Git Panel), so this method only requests
+   * the interactive flow and translates its outcome into an ExecuteResponse for the agent.
+   * We never run the raw `git commit` ourselves — that keeps the CMB commit-message format
+   * (`<card> #comment <type>:<msg> #CMBDevClaw`) enforced in one place.
+   */
+  private async requestCardCommit(command: string, cwd: string): Promise<ExecuteResponse> {
+    const suggestedCommitMessage = extractGitCommitMessage(command)
+    console.log(`[Orchestrator] git commit → task-card dialog (cwd=${cwd})`)
+    const decision = await this.requestApproval({
+      id: randomUUID(),
+      tool_call: { id: randomUUID(), name: "execute", args: { command } },
+      safety_level: "needs_approval",
+      operation: "git_commit",
+      command,
+      cwd,
+      suggestedCommitMessage,
+      reason: "Git 提交需要选择任务卡片并确认",
+      allowed_decisions: ["approve", "reject"],
+      allowed_approval_types: ["approve", "reject"]
+    })
+
+    if (decision.type !== "approve") {
+      return {
+        output: "用户取消了本次提交（未选择任务卡片或已取消提交对话框）。",
+        exitCode: 1,
+        truncated: false
+      }
+    }
+
+    const result = decision.commitResult
+    if (result?.success) {
+      const detail = result.commitMessage ? `：${result.commitMessage}` : ""
+      return { output: `提交成功${detail}`, exitCode: 0, truncated: false }
+    }
+    return {
+      output: `提交失败：${result?.error || "未知错误"}`,
+      exitCode: 1,
+      truncated: false
     }
   }
 

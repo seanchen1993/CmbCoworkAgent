@@ -133,9 +133,10 @@ interface ForbiddenPattern {
 }
 
 const FORBIDDEN_PATTERNS: ForbiddenPattern[] = [
-  { pattern: /\bgit\s+commit\b/i, reason: "LLM cannot run git commit; use Git Panel user approval flow" },
-  { pattern: /\bgit\s+push\b/i, reason: "LLM cannot run git push; use Git Panel user approval flow" },
-  { pattern: /\bgit\s+merge\b/i, reason: "LLM cannot run git merge in this workflow" },
+  // NOTE: git commit/push/merge are intentionally NOT forbidden. The agent may run
+  // them; `git commit` is intercepted by ToolOrchestrator (see isGitCommitCommand)
+  // and routed through the task-card commit dialog, while push/merge fall through to
+  // the normal needs_approval flow. Force-push remains gated via DANGEROUS_INDICATORS.
   // Unix
   { pattern: /\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?\/\s*$/, reason: "rm -rf / is extremely dangerous" },
   { pattern: /\bmkfs\b/, reason: "mkfs formats disk partitions" },
@@ -335,6 +336,68 @@ export function classifyCommandConcurrency(command: string): CommandConcurrencyC
 
 function containsDirectGitSubmitCommand(command: string): boolean {
   return /\bgit\s+(add|commit|push|merge)\b/i.test(command)
+}
+
+/**
+ * Replace single/double-quoted spans with a space so that shell operators or the
+ * literal text "git commit" appearing *inside* a string argument (e.g. a commit
+ * message or an `echo` payload) are not mistaken for real commands / chaining.
+ */
+function stripQuotedSpans(command: string): string {
+  return command.replace(/"[^"]*"/g, " ").replace(/'[^']*'/g, " ")
+}
+
+// Matches a `git commit` invocation, tolerating leading global options such as
+// `git -C <path> commit` or `git -c key=val commit`. The negative lookahead keeps
+// plumbing/look-alikes such as `git commit-tree` or `git committer` from matching.
+const GIT_COMMIT_PATTERN =
+  /\bgit\s+(?:-[A-Za-z]\s+\S+\s+|--[A-Za-z][A-Za-z-]*(?:=\S+)?\s+|-[A-Za-z]+\s+)*commit(?![A-Za-z-])/i
+
+/** True when the command is (or contains) a real `git commit` invocation. */
+export function isGitCommitCommand(command: string): boolean {
+  return GIT_COMMIT_PATTERN.test(stripQuotedSpans(command.trim()))
+}
+
+/**
+ * True when the command chains multiple shell statements (`&&`, `||`, `;`, `|`, `&`)
+ * outside of quoted spans. Used to refuse intercepting a `git commit` that is glued to
+ * other commands — the commit dialog only performs the commit, so the rest of the chain
+ * would otherwise be silently dropped.
+ */
+export function isChainedShellCommand(command: string): boolean {
+  return /\|\||&&|[;&|]/.test(stripQuotedSpans(command))
+}
+
+/**
+ * True for a history-rewriting force push. These stay gated behind an approval prompt
+ * even in YOLO mode, since an unattended `git push --force` can destroy remote history.
+ */
+export function isForcePushCommand(command: string): boolean {
+  const stripped = stripQuotedSpans(command)
+  if (!/\bgit\s+push\b/i.test(stripped)) return false
+  return /(?:^|\s)(?:--force(?:-with-lease|-if-includes)?\b|-f\b)/i.test(stripped)
+}
+
+/**
+ * Best-effort extraction of the commit message the agent passed via `-m`/`--message`.
+ * Used to pre-fill the task-card commit dialog. Returns undefined when no message arg
+ * is present (e.g. `git commit` with an editor) or the command can't be tokenized.
+ */
+export function extractGitCommitMessage(command: string): string | undefined {
+  const tokens = tokenizeCommand(command)
+  if (!tokens) return undefined
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]
+    if (token === "-m" || token === "--message") {
+      const next = tokens[i + 1]
+      if (typeof next === "string" && next) return next
+    }
+    if (token.startsWith("--message=")) return token.slice("--message=".length) || undefined
+    if (token.startsWith("-m") && token.length > 2 && !token.startsWith("--")) {
+      return token.slice(2) || undefined
+    }
+  }
+  return undefined
 }
 
 export function derivePermanentApprovalPattern(command: string): string | null {

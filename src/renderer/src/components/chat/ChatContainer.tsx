@@ -92,6 +92,7 @@ import { ChatScrollNavigator } from "./ChatScrollNavigator"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
+import { AgentGitCommitDialog, type AgentCommitOutcome } from "./AgentGitCommitDialog"
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
 import {
@@ -2427,6 +2428,56 @@ export function ChatContainer({
       threadId
     ]
   )
+
+  // The pending git_commit approval (agent ran `git commit` → task-card dialog), if any.
+  const agentCommitApproval = useMemo(() => {
+    const approval = pendingApproval as unknown as
+      | (Record<string, unknown> & {
+          id?: string
+          operation?: string
+          suggestedCommitMessage?: string
+        })
+      | null
+    return approval?.operation === "git_commit" ? approval : null
+  }, [pendingApproval])
+
+  // The renderer already performed the commit via commitWorktree; resolve the agent's
+  // approval with the outcome so the orchestrator returns the result to the agent.
+  const handleAgentCommitCommitted = useCallback(
+    (outcome: AgentCommitOutcome): void => {
+      if (!pendingApproval) return
+      const requestId = (pendingApproval as unknown as Record<string, unknown>)
+        ._orchestratorRequestId as string | undefined
+      const toolCallId = pendingApproval.tool_call?.id || ""
+      if (requestId) {
+        window.api.sandbox.sendApprovalDecision({
+          requestId,
+          type: "approve",
+          tool_call_id: toolCallId,
+          commitResult: outcome
+        })
+      }
+      setToolCallState(toolCallId, { status: "running" })
+      removePendingApproval(pendingApproval.id)
+    },
+    [pendingApproval, setToolCallState, removePendingApproval]
+  )
+
+  const handleAgentCommitCancel = useCallback((): void => {
+    if (!pendingApproval) return
+    const requestId = (pendingApproval as unknown as Record<string, unknown>)
+      ._orchestratorRequestId as string | undefined
+    const toolCallId = pendingApproval.tool_call?.id || ""
+    if (requestId) {
+      window.api.sandbox.sendApprovalDecision({
+        requestId,
+        type: "reject",
+        tool_call_id: toolCallId
+      })
+    }
+    setToolCallState(toolCallId, { status: "rejected" })
+    removePendingApproval(pendingApproval.id)
+  }, [pendingApproval, setToolCallState, removePendingApproval])
 
   const handleUserInputSubmit = useCallback(
     (response: UserInputResponse): void => {
@@ -5252,6 +5303,15 @@ export function ChatContainer({
                   request={pendingUserInput}
                   onSubmit={handleUserInputSubmit}
                   onLayoutChange={handleUserInputDialogLayoutChange}
+                />
+                <AgentGitCommitDialog
+                  key={agentCommitApproval?.id ?? "agent-commit-idle"}
+                  open={Boolean(agentCommitApproval)}
+                  threadId={threadId}
+                  workspacePath={workspacePath}
+                  suggestedMessage={agentCommitApproval?.suggestedCommitMessage}
+                  onCommitted={handleAgentCommitCommitted}
+                  onCancel={handleAgentCommitCancel}
                 />
               </div>
             </div>

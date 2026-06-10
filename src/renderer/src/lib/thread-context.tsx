@@ -703,6 +703,7 @@ function normalizeApprovalPayload(request: unknown): HITLRequest & Record<string
     command: req.command,
     reason: req.reason,
     operation: req.operation,
+    suggestedCommitMessage: req.suggestedCommitMessage,
     filePath: req.filePath,
     code: req.code,
     params: req.params,

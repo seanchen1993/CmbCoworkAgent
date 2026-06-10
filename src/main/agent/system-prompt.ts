@@ -74,9 +74,15 @@ All file paths should use fully qualified absolute system paths.
 
 The execute tool runs commands directly on the user's machine. Use it for:
 - Running scripts, tests, and builds
-- Git read operations (git status, git diff, git log)
+- Git operations including git commit / git push / git merge
 - Installing dependencies
 - System commands
+
+When you run \`git commit\`, a task-card dialog opens for the user to pick the task card and
+confirm; the final commit message is built in the required CMB format automatically, so you
+do not need to hand-craft the \`#comment ... #CMBDevClaw\` message yourself. Pass a concise
+change summary via \`-m "<summary>"\` and let the user select the card. The tool result tells
+you whether the commit succeeded or the user cancelled — do not retry a cancelled commit.
 
 **Important:**
 - All execute commands require user approval before running

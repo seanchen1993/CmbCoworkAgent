@@ -1277,6 +1277,7 @@ interface CustomAPI {
       tool_call_id: string
       savedToolName?: string
       savedToolDescription?: string
+      commitResult?: { success: boolean; commitMessage?: string; error?: string }
     }) => void
     onApprovalRequest: (threadId: string, callback: (request: unknown) => void) => () => void
     onApprovalTimeout: (
