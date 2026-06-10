@@ -11,7 +11,6 @@ import {
 } from "@/components/ui/select"
 import { TaskCardPicker } from "@/components/git/TaskCardPicker"
 import { useWorkspaceTaskCard } from "@/components/git/use-workspace-task-card"
-import { DiffDisplay } from "./DiffDisplay"
 import { cn } from "@/lib/utils"
 import type { TaskCardItem } from "../../../../shared/task-card-types"
 
@@ -41,6 +40,102 @@ function parseSuggestedMessage(raw?: string): { type?: CommitType; message: stri
     return { type: parsedType, message: match[2].trim() }
   }
   return { message: text }
+}
+
+type DiffRowType = "file" | "hunk" | "add" | "del" | "context"
+interface DiffRow {
+  type: DiffRowType
+  text: string
+}
+
+/** Drop git metadata lines that add noise without informing the reviewer. */
+const DIFF_METADATA_LINE =
+  /^(index |--- |\+\+\+ |new file mode|deleted file mode|old mode|new mode|similarity index|dissimilarity index|rename (from|to)|copy (from|to)|GIT binary patch|Binary files)/
+
+/**
+ * Parse a unified diff into display rows. File-header lines collapse into a single
+ * filename row, metadata is dropped, and +/- markers are stripped (the gutter shows them),
+ * so the body can wrap freely instead of forcing a wide horizontal scroll.
+ */
+function parseUnifiedDiffRows(diff: string): DiffRow[] {
+  const rows: DiffRow[] = []
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("diff --git")) {
+      const match = raw.match(/ b\/(.+)$/)
+      rows.push({ type: "file", text: match ? match[1] : raw.replace(/^diff --git\s+/, "") })
+      continue
+    }
+    if (DIFF_METADATA_LINE.test(raw)) continue
+    if (raw.startsWith("@@")) {
+      rows.push({ type: "hunk", text: raw })
+      continue
+    }
+    if (raw.startsWith("+")) {
+      rows.push({ type: "add", text: raw.slice(1) })
+      continue
+    }
+    if (raw.startsWith("-")) {
+      rows.push({ type: "del", text: raw.slice(1) })
+      continue
+    }
+    rows.push({ type: "context", text: raw.startsWith(" ") ? raw.slice(1) : raw })
+  }
+  return rows
+}
+
+/** GitHub-style wrapping unified diff — no horizontal scroll, vertical scroll only. */
+function UnifiedDiffView({ diff }: { diff: string }): React.JSX.Element {
+  const rows = useMemo(() => parseUnifiedDiffRows(diff), [diff])
+  return (
+    <div className="max-h-72 overflow-y-auto overflow-x-hidden rounded-lg border border-border/70 bg-background-secondary font-mono text-[11px] leading-5">
+      {rows.map((row, index) => {
+        if (row.type === "file") {
+          return (
+            <div
+              key={index}
+              className="break-all border-t border-border/60 bg-muted/60 px-2 py-1 font-medium text-foreground first:border-t-0"
+            >
+              {row.text}
+            </div>
+          )
+        }
+        if (row.type === "hunk") {
+          return (
+            <div key={index} className="break-all bg-muted/30 px-2 py-0.5 text-muted-foreground">
+              {row.text}
+            </div>
+          )
+        }
+        const sign = row.type === "add" ? "+" : row.type === "del" ? "-" : " "
+        return (
+          <div
+            key={index}
+            className={cn(
+              "flex gap-2 px-2",
+              row.type === "add" && "bg-emerald-500/10",
+              row.type === "del" && "bg-rose-500/10"
+            )}
+          >
+            <span
+              className={cn(
+                "w-3 shrink-0 select-none text-right",
+                row.type === "add"
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : row.type === "del"
+                    ? "text-rose-600 dark:text-rose-400"
+                    : "text-muted-foreground/40"
+              )}
+            >
+              {sign}
+            </span>
+            <span className="min-w-0 flex-1 whitespace-pre-wrap break-all">
+              {row.text || " "}
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 export interface AgentCommitOutcome {
@@ -234,11 +329,7 @@ export function AgentGitCommitDialog({
                 另有 {diff.omittedFileCount} 个文件因体积过大未展示明细
               </div>
             )}
-            {showDiffDetails && combinedDiff && (
-              <div className="rounded-lg border border-border/70 overflow-hidden">
-                <DiffDisplay diff={combinedDiff} />
-              </div>
-            )}
+            {showDiffDetails && combinedDiff && <UnifiedDiffView diff={combinedDiff} />}
           </div>
         )}
 
