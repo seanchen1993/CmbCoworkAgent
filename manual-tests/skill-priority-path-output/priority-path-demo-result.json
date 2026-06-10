@@ -1,0 +1,9 @@
+{
+  "source": "standalone-skill",
+  "cwd": "C:\\Users\\87624\\.cmbcoworkagent\\skills\\priority-path-demo",
+  "cwdBasename": "priority-path-demo",
+  "scriptDir": "C:\\Users\\87624\\.cmbcoworkagent\\skills\\priority-path-demo\\scripts",
+  "relativeReadOk": true,
+  "template": "standalone template loaded",
+  "outputPath": "C:\\ai\\CmbCoworkAgent\\manual-tests\\skill-priority-path-output\\priority-path-demo-result.json"
+}

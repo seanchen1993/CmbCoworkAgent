@@ -13,9 +13,9 @@ function normalizePluginId(value: string | undefined | null): string {
   return normalizeSkillId(value)
 }
 
-type PreferredPlugin = string | { id?: string | null; name?: string | null }
+export type PreferredPlugin = string | { id?: string | null; name?: string | null }
 
-function isPreferredPluginSkill(skill: SkillMetadata, preferredPlugin?: PreferredPlugin | null): boolean {
+export function isPreferredPluginSkill(skill: SkillMetadata, preferredPlugin?: PreferredPlugin | null): boolean {
   if (!preferredPlugin) return false
   if (typeof preferredPlugin === "string") {
     return normalizePluginName(skill.pluginName) === normalizePluginName(preferredPlugin)
@@ -28,15 +28,29 @@ function isPreferredPluginSkill(skill: SkillMetadata, preferredPlugin?: Preferre
   )
 }
 
+export function selectSkillForSlashName(
+  skills: SkillMetadata[],
+  slashSkill: string,
+  preferredPlugin?: PreferredPlugin | null
+): SkillMetadata | null {
+  const normalizedSlashSkill = normalizeSkillName(slashSkill)
+  if (!normalizedSlashSkill) return null
+  const matches = skills.filter((skill) => normalizeSkillName(skill.name) === normalizedSlashSkill)
+  if (matches.length === 0) return null
+  return matches.find((skill) => isPreferredPluginSkill(skill, preferredPlugin)) ?? matches[0]
+}
+
 /**
  * Merge built-in/custom skills with plugin skills for chat surfaces.
  *
- * In ordinary chat, enabled first-party skills keep precedence over same-name
- * plugin skills, but disabled first-party skills must not shadow plugin skills.
+ * Slash/chat surfaces must keep same-name skills from different sources visible
+ * so users can explicitly choose the standalone skill or the plugin-owned skill.
+ * The selected skill is later serialized with its absolute SKILL.md path, so
+ * runtime routing does not have to guess by name.
  *
- * When `preferredPlugin` is set, duplicate-named skills are deduplicated in
- * favour of the preferred plugin. This is used in harness mode to prioritise
- * skills from the project's bound plugin.
+ * When `preferredPlugin` is set, duplicate plugin skills are deduplicated in
+ * favour of the preferred plugin. Standalone skills are still shown alongside
+ * plugin skills with the same name.
  */
 export function mergeChatSkills(
   localSkills: SkillMetadata[],
@@ -49,39 +63,20 @@ export function mergeChatSkills(
       ? normalizePluginName(preferredPlugin)
       : normalizePluginId(preferredPlugin?.id) || normalizePluginName(preferredPlugin?.name)
   )
-  const preferredPluginNames = new Set(
-    pluginSkills
-      .filter((skill) => isPreferredPluginSkill(skill, preferredPlugin))
-      .map((skill) => normalizeSkillName(skill.name))
-      .filter(Boolean)
-  )
-  const visibleLocalSkills = hasPreferredPlugin
-    ? localSkills.filter((skill) => !preferredPluginNames.has(normalizeSkillName(skill.name)))
-    : localSkills
+  const visibleLocalSkills = localSkills
   const enabledVisibleLocalSkills = visibleLocalSkills.filter(
     (skill) => !isSkillDisabled(skill, disabledSkillIds)
   )
-  const enabledLocalNames = new Set(
-    enabledVisibleLocalSkills
-      .map((skill) => normalizeSkillName(skill.name))
-      .filter(Boolean)
-  )
 
-  // Without a preferred plugin (conversation mode), only filter out plugin
-  // skills whose names are already covered by enabled local skills. Plugins
-  // may have duplicate-named skills and both should appear in the popover.
+  // Conversation mode: list every enabled standalone skill and every enabled
+  // plugin skill. Same-name rows are disambiguated by source labels in the UI.
   if (!hasPreferredPlugin) {
-    return [
-      ...enabledVisibleLocalSkills,
-      ...pluginSkills.filter(
-        (pluginSkill) => !enabledLocalNames.has(normalizeSkillName(pluginSkill.name))
-      )
-    ]
+    return [...enabledVisibleLocalSkills, ...pluginSkills]
   }
 
-  // Harness mode: inter-plugin deduplication. The preferred plugin's skill
-  // wins over same-named skills from other plugins.
-  const seenNames = new Set(enabledLocalNames)
+  // Harness mode: keep the bound plugin's row when multiple plugins provide
+  // the same skill name, but do not collapse standalone-vs-plugin collisions.
+  const seenNames = new Set<string>()
   const dedupedPlugins: SkillMetadata[] = []
 
   for (const skill of pluginSkills) {

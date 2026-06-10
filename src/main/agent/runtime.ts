@@ -35,6 +35,7 @@ import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/cor
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { LocalSandbox, type SkillHookContextProvider } from "./local-sandbox"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
+import { combineSkillMiddlewareSources } from "./skill-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
@@ -1076,13 +1077,23 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     const executeIdx = mw.tools?.findIndex((t: any) => t.name === "execute") ?? -1
     if (executeIdx >= 0) {
       const oldExecute = mw.tools![executeIdx]
+      const formatExecuteResponse = (result: import("deepagents").ExecuteResponse): string => {
+        const parts = [result.output]
+        if (result.exitCode !== null) {
+          const status = result.exitCode === 0 ? "succeeded" : "failed"
+          parts.push(`\n[Command ${status} with exit code ${result.exitCode}]`)
+        }
+        if (result.truncated) parts.push("\n[Output was truncated due to size limits]")
+        return parts.join("")
+      }
       const customExecute = lcTool(
-        async (input: { command: string; run_in_background?: boolean }): Promise<string> => {
+        async (input: { command: string; cwd?: string; run_in_background?: boolean }): Promise<string> => {
+          const sandbox = filesystemBackend as LocalSandbox
           if (input.run_in_background) {
-            const taskId = await (filesystemBackend as LocalSandbox).executeBackground(
-              input.command
-            )
-            return `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
+            return sandbox.executeBackground(input.command, input.cwd)
+          }
+          if (input.cwd?.trim()) {
+            return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
           }
           // Delegate to original execute handler for foreground execution
           const result = await (oldExecute as any).invoke(input)
@@ -1098,6 +1109,12 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
           description: (oldExecute as any).description,
           schema: z.object({
             command: z.string().describe("The shell command to execute"),
+            cwd: z
+              .string()
+              .optional()
+              .describe(
+                "Optional working directory for the command. Use the skill directory when running scripts or resources referenced by a SKILL.md."
+              ),
             run_in_background: z
               .boolean()
               .optional()
@@ -2535,9 +2552,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
 
   const rawExecute = (
     command: string,
-    sandboxMode?: string
+    sandboxMode?: string,
+    cwd?: string
   ): Promise<import("deepagents").ExecuteResponse> => {
-    return backend.executeRaw(command, sandboxMode)
+    return backend.executeRaw(command, sandboxMode, undefined, undefined, { cwd })
   }
 
   const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, yoloMode)
@@ -2634,7 +2652,7 @@ The workspace root is: ${workspacePath}`
   console.log("[Runtime] Plugin skills sources:", pluginSkillsSources)
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
-  const allSkillsSources = [...skillsSources, ...pluginSkillsSources]
+  const allSkillsSources = combineSkillMiddlewareSources(skillsSources, pluginSkillsSources)
   const skillLifecycleSources = [...skillLifecycleRootSources, ...pluginSkillSourceMetadata]
   backend.setHiddenSkillDirs(getDisabledSkillDirs())
   backend.setSkillLifecycleRegistry(

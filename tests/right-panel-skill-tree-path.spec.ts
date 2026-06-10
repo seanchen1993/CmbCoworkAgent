@@ -5,7 +5,10 @@
  *   npx tsx tests/right-panel-skill-tree-path.spec.ts
  */
 
-import { getRightPanelSkillPath } from "../src/renderer/src/components/panels/skill-tree-path.ts"
+import {
+  getRightPanelSkillPath,
+  getRightPanelSkillPathSegments
+} from "../src/renderer/src/components/panels/skill-tree-path.ts"
 import type { SkillMetadata } from "../src/renderer/src/types.ts"
 
 function assert(cond: unknown, msg: string): void {
@@ -86,6 +89,51 @@ function testPluginIdPreferredOverName(): void {
   console.log("PASS pluginId preferred over pluginName for scope")
 }
 
+function testPluginDisplayStaysFlat(): void {
+  const segments = getRightPanelSkillPathSegments(
+    skill({
+      name: "review",
+      pluginId: "ee736d3f-opaque-id",
+      pluginName: "Friendly Review Plugin",
+      relativePath: "review"
+    })
+  )
+  assert(segments.length === 1, `plugin source should not add a tree folder, got ${segments.length}`)
+  assert(
+    segments[0].key === "review::plugin:ee736d3f-opaque-id",
+    `plugin skill key should keep stable plugin identity, got ${JSON.stringify(segments[0])}`
+  )
+  assert(
+    segments[0].label === "review",
+    `plugin skill label should stay as the skill name, got ${JSON.stringify(segments[0])}`
+  )
+  assert(
+    segments[0].title?.includes("Friendly Review Plugin"),
+    `plugin source should be available as metadata, got ${JSON.stringify(segments[0])}`
+  )
+  console.log("PASS plugin skill tree segment stays flat and carries source metadata")
+}
+
+function testPluginNestedSkillStillFolds(): void {
+  const segments = getRightPanelSkillPathSegments(
+    skill({
+      name: "review",
+      pluginId: "plugin-a",
+      pluginName: "Plugin A",
+      relativePath: "category/review"
+    })
+  )
+  assert(segments.length === 2, `nested plugin skill should keep nested path, got ${segments.length}`)
+  assert(segments[0].key === "category", `parent segment mismatch: ${JSON.stringify(segments[0])}`)
+  assert(segments[0].label === "category", `parent label mismatch: ${JSON.stringify(segments[0])}`)
+  assert(
+    segments[1].key === "review::plugin:plugin-a",
+    `leaf should carry plugin identity without adding a plugin folder: ${JSON.stringify(segments[1])}`
+  )
+  assert(segments[1].label === "review", `leaf label mismatch: ${JSON.stringify(segments[1])}`)
+  console.log("PASS nested plugin skill keeps its own folder hierarchy only")
+}
+
 function testPluginNameFallbackSanitised(): void {
   // Only when pluginId is missing do we fall back to pluginName — and even
   // then any internal slashes must be neutralised so the tree builder doesn't
@@ -138,5 +186,7 @@ function testPluginWithoutRelativePath(): void {
 testNonPluginPath()
 testPluginPathNamespacedById()
 testPluginIdPreferredOverName()
+testPluginDisplayStaysFlat()
+testPluginNestedSkillStillFolds()
 testPluginNameFallbackSanitised()
 testPluginWithoutRelativePath()

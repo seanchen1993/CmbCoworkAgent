@@ -23,7 +23,11 @@ import type {
 import type { ExecuteResponse } from "deepagents"
 
 /** Raw execution function signature (no approval logic). */
-export type RawExecuteFn = (command: string, sandboxMode?: string) => Promise<ExecuteResponse>
+export type RawExecuteFn = (
+  command: string,
+  sandboxMode?: string,
+  cwd?: string
+) => Promise<ExecuteResponse>
 
 /** Function to request interactive approval from the user (renderer). */
 export type RequestApprovalFn = (req: ApprovalRequest) => Promise<ApprovalDecision>
@@ -77,14 +81,14 @@ export class ToolOrchestrator {
       // 3. YOLO mode: skip the initial command approval for safe + needs_approval
       // commands, but still require explicit approval before escaping the sandbox.
       if (this.yoloMode) {
-        const result = await this.rawExecute(command, sandboxMode)
+        const result = await this.rawExecute(command, sandboxMode, cwd)
         return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result)
       }
 
       // 4. Safe commands → execute directly
       if (safety.level === "safe") {
         console.log("[Orchestrator] safe → rawExecute")
-        const result = await this.rawExecute(command, sandboxMode)
+        const result = await this.rawExecute(command, sandboxMode, cwd)
         return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result)
       }
 
@@ -134,7 +138,7 @@ export class ToolOrchestrator {
       // 6. Execute (with sandbox), then offer a one-shot bypass prompt if the failure
       // looks sandbox-induced.
       try {
-        const result = await this.rawExecute(command, sandboxMode)
+        const result = await this.rawExecute(command, sandboxMode, cwd)
         return await this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result)
       } catch (err) {
         // 7. Sandbox denial → block and inform user
@@ -217,7 +221,7 @@ export class ToolOrchestrator {
       return sandboxResult
     }
     console.warn(`[Orchestrator] sandbox bypass approved for "${command}" — retrying outside sandbox`)
-    return this.rawExecute(command, "none")
+    return this.rawExecute(command, "none", cwd)
   }
 
   /**
