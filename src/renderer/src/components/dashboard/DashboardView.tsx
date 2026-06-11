@@ -3,7 +3,23 @@
  *
  * Operations overview and skill evaluation dashboard.
  */
-import { memo, useState, useCallback, useEffect, useMemo, useRef, type ReactNode } from "react"
+import {
+  isValidElement,
+  memo,
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  type ReactNode
+} from "react"
+import ReactMarkdown, { type Components } from "react-markdown"
+import rehypeHighlight from "rehype-highlight"
+import rehypeKatex from "rehype-katex"
+import remarkBreaks from "remark-breaks"
+import remarkGfm from "remark-gfm"
+import remarkMath from "remark-math"
+import "katex/dist/katex.min.css"
 import {
   RefreshCw,
   Loader2,
@@ -21,7 +37,10 @@ import {
   Users,
   CircleAlert,
   Building2,
-  Info
+  Info,
+  Bot,
+  Send,
+  Database
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -50,6 +69,7 @@ import {
   type DashboardProjectModeTracesData,
   type DashboardTraceDetail,
   type Granularity,
+  type OverviewData,
   type TimeRange
 } from "./use-dashboard"
 import { OverviewPanel } from "./panels/OverviewPanel"
@@ -112,6 +132,24 @@ type DashboardExcelSheet = {
   rows: (string | number)[][]
 }
 
+type DashboardAnalysisScope = "platform" | "project"
+
+type DashboardAnalysisMessage = {
+  id: string
+  role: "user" | "assistant"
+  content: string
+}
+
+type DashboardAnalysisAgentResponse = {
+  success: boolean
+  data?: {
+    content?: string
+    modelName?: string
+    toolCallCount?: number
+  }
+  error?: string
+}
+
 function formatRangeLabel(from: string, to: string, granularity: Granularity): string {
   const f = new Date(from)
   const pad = (n: number): string => String(n).padStart(2, "0")
@@ -137,6 +175,351 @@ function addDaysToDateInput(value: string, days: number): string {
   const date = new Date(value + "T00:00:00")
   date.setDate(date.getDate() + days)
   return formatDateInputValue(date)
+}
+
+function summarizeCodeStatsForAnalysis(stats: DashboardProjectModeData["summary"]["codeStats"]) {
+  if (!stats) return null
+  return {
+    generatedLines: stats.generatedLines,
+    measuredGeneratedLines: stats.measuredGeneratedLines,
+    effectiveGeneratedLines: stats.effectiveGeneratedLines,
+    unmeasuredGeneratedLines: stats.unmeasuredGeneratedLines,
+    inclusiveEffectiveGeneratedLines: stats.inclusiveEffectiveGeneratedLines,
+    adoptedLines: stats.adoptedLines,
+    measuredAdoptionRate: stats.measuredAdoptionRate,
+    inclusiveAdoptionRate: stats.inclusiveAdoptionRate,
+    pushedEffectiveGeneratedLines: stats.pushedEffectiveGeneratedLines,
+    pushedAdoptedLines: stats.pushedAdoptedLines,
+    pushedAdoptionRate: stats.pushedAdoptionRate,
+    pushedCommitCount: stats.pushedCommitCount
+  }
+}
+
+function buildDashboardAnalysisPanelSnapshot({
+  scope,
+  overview,
+  projectMode
+}: {
+  scope: DashboardAnalysisScope
+  overview: OverviewData | null
+  projectMode: DashboardProjectModeData | null
+}): Record<string, unknown> {
+  if (scope === "project") {
+    const summary = projectMode?.summary
+    return {
+      scope,
+      summary: summary
+        ? {
+            projectCount: summary.projectCount,
+            featureCount: summary.featureCount,
+            activeProjectCount: summary.activeProjectCount,
+            conversationCount: summary.conversationCount,
+            totalToolCalls: summary.totalToolCalls,
+            totalInputTokens: summary.totalInputTokens,
+            totalOutputTokens: summary.totalOutputTokens,
+            totalTokens: summary.totalTokens,
+            skillCallCount: summary.skillCallCount,
+            distinctSkillCount: summary.distinctSkillCount,
+            codeStats: summarizeCodeStatsForAnalysis(summary.codeStats),
+            skillCodeStats: summarizeCodeStatsForAnalysis(summary.skillCodeStats ?? null)
+          }
+        : null,
+      topSkills: projectMode?.topSkills.slice(0, 10) ?? [],
+      topUsers: projectMode?.analytics.topUsers.slice(0, 10) ?? [],
+      topAdapters: projectMode?.analytics.byAdapter.slice(0, 10) ?? [],
+      topSkillAdoption: projectMode?.bySkillAdoption.slice(0, 10) ?? []
+    }
+  }
+
+  return {
+    scope,
+    summary: overview
+      ? {
+          totalCalls: overview.totalCalls,
+          activeUsers: overview.activeUsers,
+          avgDurationMs: overview.avgDurationMs,
+          inputTokens: overview.inputTokens,
+          outputTokens: overview.outputTokens,
+          totalSkills: overview.totalSkills,
+          totalSkillCalls: overview.totalSkillCalls,
+          totalTools: overview.totalTools,
+          totalToolCalls: overview.totalToolCalls,
+          codeGeneratedLines: overview.codeGeneratedLines,
+          codeMeasuredGeneratedLines: overview.codeMeasuredGeneratedLines,
+          codeEffectiveGeneratedLines: overview.codeEffectiveGeneratedLines,
+          codeUnmeasuredGeneratedLines: overview.codeUnmeasuredGeneratedLines,
+          codeInclusiveEffectiveGeneratedLines: overview.codeInclusiveEffectiveGeneratedLines,
+          codeAdoptedLines: overview.codeAdoptedLines,
+          codeMeasuredAdoptionRate: overview.codeMeasuredAdoptionRate,
+          codeInclusiveAdoptionRate: overview.codeInclusiveAdoptionRate,
+          codePushedEffectiveGeneratedLines: overview.codePushedEffectiveGeneratedLines,
+          codePushedAdoptedLines: overview.codePushedAdoptedLines,
+          codePushedAdoptionRate: overview.codePushedAdoptionRate,
+          codePushedCommitCount: overview.codePushedCommitCount
+        }
+      : null,
+    topSkills: overview?.bySkill.slice(0, 10) ?? [],
+    topTools: overview?.byTool.slice(0, 10) ?? [],
+    topSkillAdoption: overview?.bySkillAdoption.slice(0, 10) ?? [],
+    recentTrend: overview?.trend.slice(-10) ?? []
+  }
+}
+
+function normalizeDashboardMarkdown(content: string): string {
+  return content
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_, expr: string) => `\n$$\n${expr.trim()}\n$$\n`)
+    .replace(/\\\(([\s\S]*?)\\\)/g, (_, expr: string) => `$${expr.trim()}$`)
+}
+
+function getMarkdownLanguageLabel(className?: string): string | null {
+  const match = /language-([\w-]+)/.exec(className || "")
+  return match?.[1] ?? null
+}
+
+function getMarkdownNodeText(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node)
+  if (Array.isArray(node)) return node.map(getMarkdownNodeText).join("")
+  if (isValidElement<{ children?: ReactNode }>(node)) return getMarkdownNodeText(node.props.children)
+  return ""
+}
+
+function DashboardAnalysisMarkdown({ content }: { content: string }): React.JSX.Element {
+  const markdown = useMemo(() => normalizeDashboardMarkdown(content), [content])
+  const components = useMemo<Components>(
+    () => ({
+      table({ node: _node, children, ...props }) {
+        return (
+          <div className="streaming-markdown-table-wrap">
+            <table {...props}>{children}</table>
+          </div>
+        )
+      },
+      pre({ children }) {
+        return <>{children}</>
+      },
+      code({ node: _node, className, children, ...props }) {
+        const rawCode = getMarkdownNodeText(children)
+        const language = getMarkdownLanguageLabel(className)
+        const isBlock = !!language || rawCode.includes("\n")
+
+        if (isBlock) {
+          return (
+            <div className="streaming-markdown-code-block">
+              <div className="streaming-markdown-code-header">
+                <span className="streaming-markdown-code-language">{language || "text"}</span>
+              </div>
+              <pre className="streaming-markdown-code-pre">
+                <code className={className}>{children}</code>
+              </pre>
+            </div>
+          )
+        }
+
+        return (
+          <code className="streaming-markdown-inline-code" {...props}>
+            {children}
+          </code>
+        )
+      }
+    }),
+    []
+  )
+
+  return (
+    <div className="streaming-markdown !text-[13px] !leading-6">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
+        rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }], rehypeHighlight]}
+        components={components}
+      >
+        {markdown}
+      </ReactMarkdown>
+    </div>
+  )
+}
+
+function DashboardAnalysisDrawer({
+  open,
+  scope,
+  range,
+  upperOrgLv1,
+  panelSnapshot,
+  onClose
+}: {
+  open: boolean
+  scope: DashboardAnalysisScope
+  range: TimeRange
+  upperOrgLv1: string[]
+  panelSnapshot: Record<string, unknown>
+  onClose: () => void
+}): React.JSX.Element | null {
+  const scopeLabel = scope === "project" ? "项目运营概览" : "平台运营概览"
+  const [input, setInput] = useState("")
+  const [loading, setLoading] = useState(false)
+  const [messages, setMessages] = useState<DashboardAnalysisMessage[]>([
+    {
+      id: "welcome",
+      role: "assistant",
+      content:
+        "可以问我代码采纳率口径，或让我分析“生成了但没有提交”的人群。我是独立的运营指标分析 Agent，会使用默认模型并通过只读 ES DSL 安全门控查询数据。"
+    }
+  ])
+
+  const appendMessage = useCallback((message: Omit<DashboardAnalysisMessage, "id">) => {
+    setMessages((prev) => [
+      ...prev,
+      {
+        ...message,
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`
+      }
+    ])
+  }, [])
+
+  const runQuestion = useCallback(
+    async (question: string) => {
+      const normalized = question.trim()
+      if (!normalized || loading) return
+      appendMessage({ role: "user", content: normalized })
+      setInput("")
+
+      setLoading(true)
+      try {
+        const history = messages
+          .filter((message) => message.id !== "welcome")
+          .map((message) => ({ role: message.role, content: message.content }))
+        const result = (await window.api.dashboard.analysisAgent({
+          question: normalized,
+          messages: history,
+          context: {
+            scope,
+            range,
+            upperOrgLv1,
+            panelSnapshot
+          }
+        })) as DashboardAnalysisAgentResponse
+        appendMessage({
+          role: "assistant",
+          content: result.success
+            ? result.data?.content || "没有生成有效分析结果，请换个问题重试。"
+            : `分析失败：${result.error ?? "未知错误"}`
+        })
+      } catch (error) {
+        appendMessage({
+          role: "assistant",
+          content: `分析失败：${error instanceof Error ? error.message : String(error)}`
+        })
+      } finally {
+        setLoading(false)
+      }
+    },
+    [appendMessage, loading, messages, panelSnapshot, range, scope, upperOrgLv1]
+  )
+
+  if (!open) return null
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-background/40 backdrop-blur-[1px]">
+      <section className="flex h-full w-full max-w-[520px] flex-col border-l border-border bg-background shadow-2xl">
+        <header className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="grid size-8 place-items-center rounded-lg bg-primary text-primary-foreground">
+                <Bot className="size-4" />
+              </span>
+              <div>
+                <h2 className="text-sm font-semibold text-foreground">运营指标分析 Agent</h2>
+                <p className="text-[11px] text-muted-foreground">
+                  {scopeLabel} · {formatRangeLabel(range.from, range.to, "custom")}
+                </p>
+              </div>
+            </div>
+          </div>
+          <Button type="button" variant="ghost" size="sm" className="size-8 p-0" onClick={onClose}>
+            <X className="size-4" />
+          </Button>
+        </header>
+
+        <div className="border-b border-border px-4 py-3">
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="gap-1.5 text-xs"
+              disabled={loading}
+              onClick={() => void runQuestion("解释代码采纳率口径")}
+            >
+              <Info className="size-3.5" />
+              采纳率口径
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="gap-1.5 text-xs"
+              disabled={loading}
+              onClick={() => void runQuestion("为什么很多代码生成了却没有提交？这些代码是谁生成的？")}
+            >
+              <Database className="size-3.5" />
+              未提交人群
+            </Button>
+          </div>
+        </div>
+
+        <ScrollArea className="min-h-0 flex-1">
+          <div className="space-y-3 p-4">
+            {messages.map((message) => (
+              <div
+                key={message.id}
+                className={cn(
+                  "rounded-lg border px-3 py-2 text-xs leading-5",
+                  message.role === "user"
+                    ? "ml-8 border-primary/30 bg-primary/5 text-foreground"
+                    : "mr-8 border-border bg-muted/40 text-foreground"
+                )}
+              >
+                <div className="mb-1 text-[10px] font-medium text-muted-foreground">
+                  {message.role === "user" ? "你" : "Agent"}
+                </div>
+                {message.role === "assistant" ? (
+                  <DashboardAnalysisMarkdown content={message.content} />
+                ) : (
+                  <div className="whitespace-pre-wrap">{message.content}</div>
+                )}
+              </div>
+            ))}
+            {loading && (
+              <div className="mr-8 flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                <Loader2 className="size-3.5 animate-spin" />
+                正在调用独立 Agent 分析...
+              </div>
+            )}
+          </div>
+        </ScrollArea>
+
+        <form
+          className="border-t border-border p-3"
+          onSubmit={(event) => {
+            event.preventDefault()
+            void runQuestion(input)
+          }}
+        >
+          <div className="flex gap-2">
+            <textarea
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              placeholder="问：为什么很多代码生成了却没有提交？"
+              className="min-h-20 flex-1 resize-none rounded-lg border border-input bg-background px-3 py-2 text-xs leading-5 outline-none focus:border-primary"
+            />
+            <Button type="submit" size="sm" className="self-end gap-1.5" disabled={loading || !input.trim()}>
+              <Send className="size-3.5" />
+              发送
+            </Button>
+          </div>
+        </form>
+      </section>
+    </div>
+  )
 }
 
 function resolveSkillUploaderExportInfo(
@@ -2054,6 +2437,7 @@ export function DashboardView(): React.JSX.Element {
 
   const [exporting, setExporting] = useState(false)
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
+  const [analysisOpen, setAnalysisOpen] = useState(false)
   const [projectModeAllowed, setProjectModeAllowed] = useState(false)
   const [skillDialogOpen, setSkillDialogOpen] = useState(false)
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null)
@@ -3666,6 +4050,17 @@ export function DashboardView(): React.JSX.Element {
   const projectTraceDialogSubtitle = projectTraceFeature
     ? "该特性在项目模式下的对话记录，选择记录定位到会话"
     : "该项目模式下的对话记录，选择记录定位到会话"
+  const analysisScope: DashboardAnalysisScope =
+    activeMainTab === "project-mode" && projectModeAllowed ? "project" : "platform"
+  const analysisPanelSnapshot = useMemo(
+    () =>
+      buildDashboardAnalysisPanelSnapshot({
+        scope: analysisScope,
+        overview,
+        projectMode
+      }),
+    [analysisScope, overview, projectMode]
+  )
 
   return (
     <div className="flex flex-col h-full">
@@ -3712,6 +4107,18 @@ export function DashboardView(): React.JSX.Element {
               >
                 <ExternalLink className="size-3.5" />
                 了解技能评估与自进化
+              </Button>
+            ) : activeMainTab === "overview" || activeMainTab === "project-mode" ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-1.5 text-xs"
+                onClick={() => setAnalysisOpen(true)}
+                disabled={activeMainTab === "project-mode" && !projectModeAllowed}
+              >
+                <Bot className="size-3.5" />
+                指标分析
               </Button>
             ) : null
           }
@@ -4042,6 +4449,14 @@ export function DashboardView(): React.JSX.Element {
         onDepartmentSearch={handleFeatureCommitDepartmentSearch}
         onClearDepartment={handleFeatureCommitDepartmentClear}
         onOpenExternal={handleCommitExternalOpen}
+      />
+      <DashboardAnalysisDrawer
+        open={analysisOpen}
+        scope={analysisScope}
+        range={range}
+        upperOrgLv1={selectedOrgLv1List}
+        panelSnapshot={analysisPanelSnapshot}
+        onClose={() => setAnalysisOpen(false)}
       />
     </div>
   )

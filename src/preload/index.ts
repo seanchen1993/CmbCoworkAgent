@@ -2342,6 +2342,31 @@ const api = {
     isAllowed: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAllowed"),
     isProjectModeAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isProjectModeAllowed"),
+    esQuery: (input: {
+      indexAlias: "event" | "trace"
+      operation: "search" | "msearch" | "count" | "mapping" | "field_caps"
+      body?: unknown
+      context?: {
+        scope?: "platform" | "project"
+        upperOrgLv1?: string | string[] | null
+        projectId?: string | null
+        featureSlug?: string | null
+      }
+    }): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:esQuery", input),
+    analysisAgent: (input: {
+      question: string
+      messages?: Array<{ role: "user" | "assistant"; content: string }>
+      context?: {
+        scope?: "platform" | "project"
+        range?: { from: string; to: string }
+        upperOrgLv1?: string | string[] | null
+        projectId?: string | null
+        featureSlug?: string | null
+        panelSnapshot?: Record<string, unknown> | null
+      }
+    }): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:analysisAgent", input),
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",

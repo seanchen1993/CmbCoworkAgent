@@ -1597,6 +1597,29 @@ interface CustomAPI {
   dashboard: {
     isAllowed: () => Promise<boolean>
     isProjectModeAllowed: () => Promise<boolean>
+    esQuery: (input: {
+      indexAlias: "event" | "trace"
+      operation: "search" | "msearch" | "count" | "mapping" | "field_caps"
+      body?: unknown
+      context?: {
+        scope?: "platform" | "project"
+        upperOrgLv1?: string | string[] | null
+        projectId?: string | null
+        featureSlug?: string | null
+      }
+    }) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    analysisAgent: (input: {
+      question: string
+      messages?: Array<{ role: "user" | "assistant"; content: string }>
+      context?: {
+        scope?: "platform" | "project"
+        range?: { from: string; to: string }
+        upperOrgLv1?: string | string[] | null
+        projectId?: string | null
+        featureSlug?: string | null
+        panelSnapshot?: Record<string, unknown> | null
+      }
+    }) => Promise<{ success: boolean; data?: unknown; error?: string }>
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",

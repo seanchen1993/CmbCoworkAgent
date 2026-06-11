@@ -436,6 +436,8 @@ export interface DashboardProjectModeData {
     skillCallCount: number
     distinctSkillCount: number
     codeStats: DashboardCodeStats | null
+    /** 仅由 Skill 生成的代码整体采纳明细（code 事件带非空 usedSkills）。 */
+    skillCodeStats?: DashboardCodeStats | null
   }
   adapters: DashboardProjectModeAdapter[]
   topSkills: DashboardProjectModeSkillCount[]

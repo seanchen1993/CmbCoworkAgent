@@ -32,6 +32,15 @@ import {
   type DashboardCodeStats,
   type DashboardSkillCodeAdoptionStats
 } from "./dashboard-code-stats"
+import {
+  executeDashboardEsQuery,
+  type DashboardEsIndexAlias,
+  type DashboardEsQueryInput
+} from "../services/dashboard-es-query"
+import {
+  runDashboardAnalysisAgent,
+  type DashboardAnalysisAgentInput
+} from "../services/dashboard-analysis-agent"
 
 // ─────────────────────────────────────────────────────────
 // ES Configuration (from .env)
@@ -666,6 +675,42 @@ function buildTraceAccessFilter(access: DashboardAccessContext): Record<string, 
   if (access.unrestricted) return null
   if (!access.upperOrgLv1) return buildNoAccessFilter()
   return buildUpperOrgLv1Filter(access.upperOrgLv1)
+}
+
+function getDashboardEsIndexByAlias(): Record<DashboardEsIndexAlias, string> {
+  return {
+    event: getEsIndex("event"),
+    trace: getEsIndex("trace")
+  }
+}
+
+function dashboardEsField(indexAlias: DashboardEsIndexAlias, field: string): string {
+  return indexAlias === "event" ? `properties.${field}` : field
+}
+
+function buildDashboardEsQueryFilters(
+  input: DashboardEsQueryInput,
+  access: DashboardAccessContext
+): Record<string, unknown>[] {
+  const filters: Record<string, unknown>[] = []
+  appendOptionalFilter(filters, buildTraceAccessFilter(access))
+  appendOptionalFilter(
+    filters,
+    buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(input.context?.upperOrgLv1))
+  )
+
+  const projectId = input.context?.projectId?.trim() ?? ""
+  const featureSlug = input.context?.featureSlug?.trim() ?? ""
+  const projectScoped = input.context?.scope === "project" || Boolean(projectId || featureSlug)
+  if (projectScoped) {
+    requireDashboardProjectModeAccess()
+    const projectField = dashboardEsField(input.indexAlias, "harnessProjectId")
+    const featureField = dashboardEsField(input.indexAlias, "harnessFeatureSlug")
+    filters.push(projectId ? { term: { [projectField]: projectId } } : { exists: { field: projectField } })
+    if (featureSlug) filters.push({ term: { [featureField]: featureSlug } })
+  }
+
+  return filters
 }
 
 function appendOptionalFilter(
@@ -6132,6 +6177,18 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
         pushedEffectiveGeneratedLines: scaleMockMetricNumber(4900, aggScale),
         pushedAdoptedLines: scaleMockMetricNumber(3400, aggScale),
         pushedCommitCount: scaleMockMetricNumber(53, aggScale)
+      }),
+      // 由 Skill 生成的代码（整体的子集，约六成）。
+      skillCodeStats: makeDashboardCodeStats({
+        generatedLines: scaleMockMetricNumber(4600, aggScale),
+        deletedLines: scaleMockMetricNumber(700, aggScale),
+        measuredGeneratedLines: scaleMockMetricNumber(4200, aggScale),
+        effectiveGeneratedLines: scaleMockMetricNumber(3700, aggScale),
+        adoptedLines: scaleMockMetricNumber(2700, aggScale),
+        pushedMeasuredGeneratedLines: scaleMockMetricNumber(3500, aggScale),
+        pushedEffectiveGeneratedLines: scaleMockMetricNumber(3100, aggScale),
+        pushedAdoptedLines: scaleMockMetricNumber(2300, aggScale),
+        pushedCommitCount: scaleMockMetricNumber(34, aggScale)
       })
     },
     adapters: deepScaleMockMetrics(
@@ -7189,6 +7246,7 @@ interface DashboardProjectModeData {
     skillCallCount: number
     distinctSkillCount: number
     codeStats: DashboardCodeStats | null
+    skillCodeStats: DashboardCodeStats | null
   }
   adapters: ProjectModeAdapterView[]
   topSkills: ProjectModeSkillCount[]
@@ -8196,6 +8254,8 @@ function parseAdapterCodeStatsBuckets(buckets: unknown): Map<string, DashboardCo
  */
 type ProjectModeCodeStatsResult = {
   overall: DashboardCodeStats
+  /** 仅由 Skill 生成的代码（code 事件带非空 usedSkills）整体汇总。 */
+  skillOverall: DashboardCodeStats
   byProject: Map<string, DashboardCodeStats>
   byAdapter: Map<string, DashboardCodeStats>
   bySkill: DashboardSkillCodeAdoptionStats[]
@@ -8243,8 +8303,13 @@ async function fetchProjectModeAggregateCodeStats(
     { exists: { field: "properties.harnessProjectId" } }
   ]
 
-  const [overallRaw, adapterRaw, skillRaw] = await Promise.all([
+  // 「由 Skill 生成的代码」口径：在整体过滤上再叠加 usedSkills 非空（与 by_skill 不同，
+  // 这里用 filter 而非 terms，避免一段代码关联多个 skill 时被重复计数）。
+  const skillOnlyFilters = [...extraFilters, { exists: { field: "properties.usedSkills" } }]
+
+  const [overallRaw, skillOverallRaw, adapterRaw, skillRaw] = await Promise.all([
     fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, extraFilters),
+    fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, skillOnlyFilters),
     fetchProjectModeCodeAggs(
       null,
       range,
@@ -8279,6 +8344,7 @@ async function fetchProjectModeAggregateCodeStats(
   const skillAggs = asRecord(asRecord(skillRaw).aggregations)
   return {
     overall: normalizeCodeStatsFromAggs(overallRaw),
+    skillOverall: normalizeCodeStatsFromAggs(skillOverallRaw),
     byProject: new Map<string, DashboardCodeStats>(),
     byAdapter: parseAdapterCodeStatsBuckets(asRecord(adapterAggs.by_adapter).buckets),
     bySkill: normalizeSkillCodeAdoptionBuckets({ aggregations: skillAggs }, "by_skill")
@@ -8519,7 +8585,8 @@ async function fetchProjectMode(
       totalTokens: usage.totalTokens,
       skillCallCount: usage.skillCallCount,
       distinctSkillCount: usage.distinctSkillCount,
-      codeStats: code.overall
+      codeStats: code.overall,
+      skillCodeStats: code.skillOverall
     },
     adapters: adapterList,
     topSkills: usage.topSkills,
@@ -8641,6 +8708,51 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle("dashboard:isProjectModeAllowed", async () => {
     return isDashboardProjectModeAllowed()
+  })
+
+  _ipcMain.handle("dashboard:esQuery", async (_, input: DashboardEsQueryInput) => {
+    try {
+      const access = requireDashboardAccess()
+      const result = await executeDashboardEsQuery(input, {
+        nodes: getEsNodes(),
+        auth: getEsAuth(),
+        indexByAlias: getDashboardEsIndexByAlias(),
+        injectedFilters: buildDashboardEsQueryFilters(input, access),
+        access: {
+          sapId: access.sapId,
+          ystId: access.ystId,
+          unrestricted: access.unrestricted
+        }
+      })
+      return { success: true, data: result }
+    } catch (e) {
+      console.error("[Dashboard] esQuery error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
+  _ipcMain.handle("dashboard:analysisAgent", async (_, input: DashboardAnalysisAgentInput) => {
+    try {
+      const access = requireDashboardAccess()
+      const result = await runDashboardAnalysisAgent(input, {
+        executeQuery: (queryInput) =>
+          executeDashboardEsQuery(queryInput, {
+            nodes: getEsNodes(),
+            auth: getEsAuth(),
+            indexByAlias: getDashboardEsIndexByAlias(),
+            injectedFilters: buildDashboardEsQueryFilters(queryInput, access),
+            access: {
+              sapId: access.sapId,
+              ystId: access.ystId,
+              unrestricted: access.unrestricted
+            }
+          })
+      })
+      return { success: true, data: result }
+    } catch (e) {
+      console.error("[Dashboard] analysisAgent error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
   })
 
   _ipcMain.handle(
