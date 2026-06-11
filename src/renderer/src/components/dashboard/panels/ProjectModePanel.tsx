@@ -466,14 +466,14 @@ function FeatureCodeStatsLine({
         <InfoHint hint="Agent 原始生成行数扣除被Agent后续修改覆盖、回退或删除的行后，真正纳入采纳率分母的有效产出。" />
       </span>
       <span>
-        已Commit采纳率{" "}
+        提交率{" "}
         <span className="font-medium text-foreground">
           {formatPercent(codeStats.measuredAdoptionRate)}
         </span>
         <span className="ml-1 text-muted-foreground/80">({adoptedLabel})</span>
       </span>
       <span>
-        已Push采纳率{" "}
+        入库率{" "}
         <span className="font-medium text-foreground">
           {formatPercent(codeStats.pushedAdoptionRate)}
         </span>
@@ -924,7 +924,7 @@ function ProjectListSection({
     <section>
       <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-        项目、插件、项目状态、特性数为当前状态；对话数、Agent生成行数（原始生成行数）、已Commit/已Push采纳率，以及展开行的技能、各特性采纳明细与关联
+        项目、插件、项目状态、特性数为当前状态；对话数、Agent生成行数（原始生成行数）、提交率/入库率，以及展开行的技能、各特性采纳明细与关联
         Commit 按所选时间范围统计。
       </p>
 
@@ -1000,8 +1000,8 @@ function ProjectListSection({
               >
                 Agent生成行数
               </th>
-              <th className="px-3 py-2 text-right font-medium">已Commit采纳率</th>
-              <th className="px-3 py-2 text-right font-medium">已Push采纳率</th>
+              <th className="px-3 py-2 text-right font-medium">提交率</th>
+              <th className="px-3 py-2 text-right font-medium">入库率</th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
               <th className="px-3 py-2 text-left font-medium">部门</th>
               <th className="px-3 py-2 text-right font-medium">操作</th>
@@ -1245,8 +1245,8 @@ function AdapterListSection({
       <h2 className="mb-1 text-sm font-semibold text-foreground">插件列表</h2>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
         {mode === "byName"
-          ? "按插件名聚合同名插件的多个版本；按项目数降序排列，项目数为当前状态，对话数、已Commit/已Push采纳率按所选时间范围统计。"
-          : "按插件版本展开；按项目数降序排列，项目数为当前状态，对话数、已Commit/已Push采纳率按所选时间范围统计。"}
+          ? "按插件名聚合同名插件的多个版本；按项目数降序排列，项目数为当前状态，对话数、提交率/入库率按所选时间范围统计。"
+          : "按插件版本展开；按项目数降序排列，项目数为当前状态，对话数、提交率/入库率按所选时间范围统计。"}
       </p>
       <div className="mb-3 flex items-center overflow-hidden rounded-md border border-border w-fit">
         {modeTabs.map((t) => (
@@ -1323,13 +1323,13 @@ function AdapterListSection({
                         </span>
                       </span>
                       <span>
-                        已Commit采纳率{" "}
+                        提交率{" "}
                         <span className="font-medium text-foreground">
                           {formatPercent(adapter.codeStats?.measuredAdoptionRate)}
                         </span>
                       </span>
                       <span>
-                        已Push采纳率{" "}
+                        入库率{" "}
                         <span className="font-medium text-foreground">
                           {formatPercent(adapter.codeStats?.pushedAdoptionRate)}
                         </span>
