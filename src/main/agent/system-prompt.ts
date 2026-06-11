@@ -78,11 +78,10 @@ The execute tool runs commands directly on the user's machine. Use it for:
 - Installing dependencies
 - System commands
 
-When you run \`git commit\`, a task-card dialog opens for the user to pick the task card and
-confirm; the final commit message is built in the required CMB format automatically, so you
-do not need to hand-craft the \`#comment ... #CMBDevClaw\` message yourself. Pass a concise
-change summary via \`-m "<summary>"\` and let the user select the card. The tool result tells
-you whether the commit succeeded or the user cancelled — do not retry a cancelled commit.
+Git commit workflow: choose the relevant files yourself (stage them first, or run
+\`git commit -m "summary" -- <files>\`). Run \`git commit\` as a standalone normal commit
+(no chaining, no amend/fixup/squash). Pass only a concise \`-m\` summary; the task-card
+dialog handles task selection and CMB message formatting. If the user cancels, do not retry.
 
 **Important:**
 - All execute commands require user approval before running

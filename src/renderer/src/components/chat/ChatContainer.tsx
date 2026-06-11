@@ -2436,6 +2436,9 @@ export function ChatContainer({
           id?: string
           operation?: string
           suggestedCommitMessage?: string
+          suggestedCommitFilePaths?: string[]
+          suggestedCommitFileBasePath?: string
+          suggestedCommitFileSelectionSource?: "pathspec" | "staged"
         })
       | null
     return approval?.operation === "git_commit" ? approval : null
@@ -2446,17 +2449,27 @@ export function ChatContainer({
   const handleAgentCommitCommitted = useCallback(
     (outcome: AgentCommitOutcome): void => {
       if (!pendingApproval) return
-      const requestId = (pendingApproval as unknown as Record<string, unknown>)
-        ._orchestratorRequestId as string | undefined
+      const approvalRecord = pendingApproval as unknown as Record<string, unknown>
+      const requestId =
+        (approvalRecord._orchestratorRequestId as string | undefined) || pendingApproval.id
       const toolCallId = pendingApproval.tool_call?.id || ""
-      if (requestId) {
-        window.api.sandbox.sendApprovalDecision({
-          requestId,
-          type: "approve",
-          tool_call_id: toolCallId,
-          commitResult: outcome
+      if (!requestId) {
+        console.error("[AgentGitCommit] missing approval request id after commit", {
+          approvalId: pendingApproval.id,
+          toolCallId
         })
+        setToolCallState(toolCallId, {
+          status: "failed",
+          reason: "提交已执行，但审批回执缺少 requestId，无法通知 Agent。"
+        })
+        return
       }
+      window.api.sandbox.sendApprovalDecision({
+        requestId,
+        type: "approve",
+        tool_call_id: toolCallId,
+        commitResult: outcome
+      })
       setToolCallState(toolCallId, { status: "running" })
       removePendingApproval(pendingApproval.id)
     },
@@ -2465,16 +2478,26 @@ export function ChatContainer({
 
   const handleAgentCommitCancel = useCallback((): void => {
     if (!pendingApproval) return
-    const requestId = (pendingApproval as unknown as Record<string, unknown>)
-      ._orchestratorRequestId as string | undefined
+    const approvalRecord = pendingApproval as unknown as Record<string, unknown>
+    const requestId =
+      (approvalRecord._orchestratorRequestId as string | undefined) || pendingApproval.id
     const toolCallId = pendingApproval.tool_call?.id || ""
-    if (requestId) {
-      window.api.sandbox.sendApprovalDecision({
-        requestId,
-        type: "reject",
-        tool_call_id: toolCallId
+    if (!requestId) {
+      console.error("[AgentGitCommit] missing approval request id while cancelling", {
+        approvalId: pendingApproval.id,
+        toolCallId
       })
+      setToolCallState(toolCallId, {
+        status: "failed",
+        reason: "取消提交时缺少 requestId，无法通知 Agent。"
+      })
+      return
     }
+    window.api.sandbox.sendApprovalDecision({
+      requestId,
+      type: "reject",
+      tool_call_id: toolCallId
+    })
     setToolCallState(toolCallId, { status: "rejected" })
     removePendingApproval(pendingApproval.id)
   }, [pendingApproval, setToolCallState, removePendingApproval])
@@ -4864,7 +4887,8 @@ export function ChatContainer({
             {pendingApproval &&
               Boolean(
                 (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId
-              ) && (
+              ) &&
+              (pendingApproval as unknown as Record<string, unknown>).operation !== "git_commit" && (
               <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>
           {(() => {
               const approval = pendingApproval as unknown as Record<string, unknown>
@@ -5310,6 +5334,11 @@ export function ChatContainer({
                   threadId={threadId}
                   workspacePath={workspacePath}
                   suggestedMessage={agentCommitApproval?.suggestedCommitMessage}
+                  suggestedFilePaths={agentCommitApproval?.suggestedCommitFilePaths}
+                  suggestedFileBasePath={agentCommitApproval?.suggestedCommitFileBasePath}
+                  suggestedFileSelectionSource={
+                    agentCommitApproval?.suggestedCommitFileSelectionSource
+                  }
                   onCommitted={handleAgentCommitCommitted}
                   onCancel={handleAgentCommitCancel}
                 />

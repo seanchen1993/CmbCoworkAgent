@@ -47,6 +47,15 @@ interface DiffRow {
   type: DiffRowType
   text: string
 }
+type GitPanelFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+interface DiffFile {
+  path: string
+  previousPath?: string
+  status?: GitPanelFileStatus
+  additions: number
+  deletions: number
+  diff: string
+}
 
 /** Drop git metadata lines that add noise without informing the reviewer. */
 const DIFF_METADATA_LINE =
@@ -86,6 +95,143 @@ function parseUnifiedDiffRows(diff: string): DiffRow[] {
 function basename(filePath: string): string {
   const parts = filePath.split("/")
   return parts[parts.length - 1] || filePath
+}
+
+function normalizeCommitPath(filePath: string): string {
+  const normalized = filePath.trim().replace(/\\/g, "/")
+  if (normalized === ".") return normalized
+  return normalized.replace(/^\.\//, "").replace(/\/+$/, "")
+}
+
+function collapseFsPath(filePath: string): string {
+  const normalized = filePath.trim().replace(/\\/g, "/")
+  const driveMatch = normalized.match(/^([A-Za-z]:)(?:\/|$)/)
+  const root = driveMatch ? `${driveMatch[1]}/` : normalized.startsWith("/") ? "/" : ""
+  const rest = driveMatch ? normalized.slice(driveMatch[0].length) : normalized.replace(/^\/+/, "")
+  const segments: string[] = []
+  for (const part of rest.split("/")) {
+    if (!part || part === ".") continue
+    if (part === ".." && segments.length > 0 && segments[segments.length - 1] !== "..") {
+      segments.pop()
+      continue
+    }
+    if (part !== ".." || !root) segments.push(part)
+  }
+  const collapsed = `${root}${segments.join("/")}`
+  return collapsed || root.replace(/\/$/, "")
+}
+
+function isAbsoluteFsPath(filePath: string): boolean {
+  const normalized = filePath.trim().replace(/\\/g, "/")
+  return /^[A-Za-z]:\//.test(normalized) || normalized.startsWith("/")
+}
+
+function resolveFsPath(basePath: string, filePath: string): string {
+  if (isAbsoluteFsPath(filePath)) return collapseFsPath(filePath)
+  return collapseFsPath(`${basePath.replace(/\\/g, "/").replace(/\/+$/, "")}/${filePath}`)
+}
+
+function fsPathParts(filePath: string): { root: string; segments: string[] } {
+  const collapsed = collapseFsPath(filePath)
+  const driveMatch = collapsed.match(/^([A-Za-z]:)(?:\/|$)/)
+  const root = driveMatch ? driveMatch[1].toLowerCase() : collapsed.startsWith("/") ? "/" : ""
+  const rest = driveMatch ? collapsed.slice(driveMatch[0].length) : collapsed.replace(/^\/+/, "")
+  return { root, segments: rest.split("/").filter(Boolean) }
+}
+
+function relativePathWithin(basePath: string, targetPath: string): string | null {
+  const base = fsPathParts(basePath)
+  const target = fsPathParts(targetPath)
+  if (base.root !== target.root) return null
+  let common = 0
+  while (
+    common < base.segments.length &&
+    common < target.segments.length &&
+    base.segments[common].toLowerCase() === target.segments[common].toLowerCase()
+  ) {
+    common += 1
+  }
+  if (common < base.segments.length) return null
+  return target.segments.slice(common).join("/") || "."
+}
+
+function normalizeSuggestedCommitPath(
+  filePath: string,
+  basePath?: string,
+  workspacePath?: string | null
+): string {
+  const normalized = normalizeCommitPath(filePath)
+  if (!normalized) return ""
+  if (normalized.startsWith(":/")) return normalizeCommitPath(normalized.slice(2))
+  if (!workspacePath) return normalized
+  const absolutePath = isAbsoluteFsPath(normalized)
+    ? collapseFsPath(normalized)
+    : basePath
+      ? resolveFsPath(basePath, normalized)
+      : null
+  if (!absolutePath) return normalized
+  return normalizeCommitPath(relativePathWithin(workspacePath, absolutePath) ?? normalized)
+}
+
+function pathMatchesSelection(file: DiffFile, selectedPath: string): boolean {
+  const normalizedSelected = normalizeCommitPath(selectedPath)
+  if (!normalizedSelected) return false
+  if (normalizedSelected === ".") return true
+  const candidates = [file.path, file.previousPath]
+    .filter((item): item is string => Boolean(item))
+    .map(normalizeCommitPath)
+  return candidates.some(
+    (candidate) => candidate === normalizedSelected || candidate.startsWith(`${normalizedSelected}/`)
+  )
+}
+
+function isDiffFileSelected(file: DiffFile, selectedPaths: Set<string>): boolean {
+  for (const selectedPath of selectedPaths) {
+    if (pathMatchesSelection(file, selectedPath)) return true
+  }
+  return false
+}
+
+function pathsForDiffFile(file: DiffFile): string[] {
+  return [file.previousPath, file.path]
+    .filter((item): item is string => Boolean(item))
+    .map(normalizeCommitPath)
+    .filter(Boolean)
+}
+
+function buildInitialSelectedPaths(
+  files: DiffFile[],
+  suggestedFilePaths?: string[],
+  allChangedFiles?: string[],
+  options?: { suggestedBasePath?: string; workspacePath?: string | null }
+): Set<string> {
+  const suggested = Array.from(
+    new Set(
+      (suggestedFilePaths ?? [])
+        .map((filePath) =>
+          normalizeSuggestedCommitPath(filePath, options?.suggestedBasePath, options?.workspacePath)
+        )
+        .filter(Boolean)
+    )
+  )
+  if (suggested.length === 0) {
+    const fallbackFiles = allChangedFiles?.length
+      ? allChangedFiles
+      : files.map((file) => file.path)
+    return new Set(fallbackFiles.map(normalizeCommitPath).filter(Boolean))
+  }
+
+  const selected = new Set<string>()
+  for (const suggestedPath of suggested) {
+    let matched = false
+    for (const file of files) {
+      if (!pathMatchesSelection(file, suggestedPath)) continue
+      for (const filePath of pathsForDiffFile(file)) selected.add(filePath)
+      matched = true
+    }
+    if (!matched) selected.add(suggestedPath)
+  }
+  return selected
 }
 
 /**
@@ -159,6 +305,12 @@ interface AgentGitCommitDialogProps {
   workspacePath?: string | null
   /** Message the agent passed to `git commit -m`, used as the initial message. */
   suggestedMessage?: string
+  /** File paths the agent selected via commit pathspecs or existing staged files. */
+  suggestedFilePaths?: string[]
+  /** Base cwd for explicit pathspecs after applying git -C. */
+  suggestedFileBasePath?: string
+  /** Where suggestedFilePaths came from. */
+  suggestedFileSelectionSource?: "pathspec" | "staged"
   /** Called after the commit succeeds; the parent resolves the approval with the result. */
   onCommitted: (outcome: AgentCommitOutcome) => void
   /** Called when the user cancels; the parent rejects the approval. */
@@ -176,6 +328,9 @@ export function AgentGitCommitDialog({
   threadId,
   workspacePath,
   suggestedMessage,
+  suggestedFilePaths,
+  suggestedFileBasePath,
+  suggestedFileSelectionSource,
   onCommitted,
   onCancel
 }: AgentGitCommitDialogProps): React.JSX.Element {
@@ -183,43 +338,65 @@ export function AgentGitCommitDialog({
   // Seed type + message from the agent's suggestion. The parent remounts this dialog
   // (via a key tied to the approval id) for each new commit, so lazy initializers give
   // fresh state per commit without a state-resetting effect.
-  const [commitType, setCommitType] = useState<CommitType>(
-    () => parseSuggestedMessage(suggestedMessage).type ?? "fix"
-  )
-  const [commitMessage, setCommitMessage] = useState(
-    () => parseSuggestedMessage(suggestedMessage).message
-  )
+  // Parse the agent's suggestion once on mount (the dialog is remounted per commit via a
+  // key on the approval id, so this re-runs for each new commit).
+  const [initialSuggestion] = useState(() => parseSuggestedMessage(suggestedMessage))
+  const [initialSuggestedFilePaths] = useState(() => suggestedFilePaths ?? [])
+  const [initialSuggestedFileBasePath] = useState(() => suggestedFileBasePath)
+  const [initialFileSelectionSource] = useState(() => suggestedFileSelectionSource)
+  const [commitType, setCommitType] = useState<CommitType>(initialSuggestion.type ?? "fix")
+  const [commitMessage, setCommitMessage] = useState(initialSuggestion.message)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // Changed files + diffs for the thread workspace, so the user sees exactly what scope
-  // will be committed (commitWorktree commits the agent's tracked changes, not a
-  // hand-picked set). Mirrors the data the Git Panel shows.
+  // Changed files + diffs for the thread workspace, so the user can review and adjust the
+  // agent-selected commit scope. Mirrors the data the Git Panel shows.
   const [diff, setDiff] = useState<{
-    files: Array<{ path: string; additions: number; deletions: number; diff: string }>
+    files: DiffFile[]
+    changedFiles?: string[]
     totals: { fileCount: number; additions: number; deletions: number }
     omittedFileCount: number
   } | null>(null)
   // Starts true so the first paint shows "加载中"; the fetch's finally clears it. The
   // dialog is remounted per commit (keyed on the approval id), so this re-initializes.
   const [diffLoading, setDiffLoading] = useState(true)
+  const [diffError, setDiffError] = useState<string | null>(null)
   // Master-detail: which file's diff is shown on the right. null → fall back to first file.
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
+  const [selectedCommitPaths, setSelectedCommitPaths] = useState<Set<string>>(
+    () =>
+      buildInitialSelectedPaths([], initialSuggestedFilePaths, undefined, {
+        suggestedBasePath: initialSuggestedFileBasePath,
+        workspacePath
+      })
+  )
 
   useEffect(() => {
     if (!open) return
     let cancelled = false
+    setDiffError(null)
     window.api.workspace
       .getGitPanelDiffs(threadId)
       .then((res) => {
-        if (cancelled || !res.success) return
+        if (cancelled) return
+        if (!res.success) {
+          setDiffError(res.error || "加载 Git 文件变更失败")
+          return
+        }
         setDiff({
           files: res.files ?? [],
+          changedFiles: res.changedFiles ?? [],
           totals: res.totals,
           omittedFileCount: res.omittedFileCount ?? 0
         })
+        setSelectedCommitPaths(
+          buildInitialSelectedPaths(res.files ?? [], initialSuggestedFilePaths, res.changedFiles ?? [], {
+            suggestedBasePath: initialSuggestedFileBasePath,
+            workspacePath
+          })
+        )
       })
       .catch(() => {
-        /* best-effort: the commit itself still validates there are changes */
+        if (!cancelled) setDiffError("加载 Git 文件变更失败")
       })
       .finally(() => {
         if (!cancelled) setDiffLoading(false)
@@ -227,28 +404,65 @@ export function AgentGitCommitDialog({
     return () => {
       cancelled = true
     }
-  }, [open, threadId])
+  }, [open, threadId, initialSuggestedFilePaths, initialSuggestedFileBasePath, workspacePath])
 
   const selectedFile = useMemo(
     () => diff?.files.find((f) => f.path === selectedFilePath) ?? diff?.files[0],
     [diff, selectedFilePath]
   )
 
+  const selectedCommitFilePaths = useMemo(() => {
+    const selected = new Set<string>()
+    for (const filePath of selectedCommitPaths) {
+      const normalized = normalizeCommitPath(filePath)
+      if (normalized) selected.add(normalized)
+    }
+    for (const file of diff?.files ?? []) {
+      if (!isDiffFileSelected(file, selectedCommitPaths)) continue
+      for (const filePath of pathsForDiffFile(file)) selected.add(filePath)
+    }
+    return Array.from(selected)
+  }, [diff, selectedCommitPaths])
+
+  const selectedVisibleFileCount = useMemo(
+    () => (diff?.files ?? []).filter((file) => isDiffFileSelected(file, selectedCommitPaths)).length,
+    [diff, selectedCommitPaths]
+  )
+  const suggestedFilePathCount = useMemo(
+    () => initialSuggestedFilePaths.map(normalizeCommitPath).filter(Boolean).length,
+    [initialSuggestedFilePaths]
+  )
+  const selectionSourceLabel =
+    initialFileSelectionSource === "pathspec"
+      ? `Agent 指定了 ${suggestedFilePathCount} 个路径`
+      : initialFileSelectionSource === "staged"
+        ? `Agent 已暂存 ${suggestedFilePathCount} 个路径`
+        : "Agent 未指定文件，默认全选当前变更"
+
   const cardValue = cardNumber.trim()
   const messageValue = commitMessage.trim()
   const cardMissing = !cardValue
   const messageMissing = !messageValue
+  const fileSelectionPending = diffLoading
+  const fileSelectionFailed = Boolean(diffError)
+  const fileSelectionMissing =
+    !fileSelectionPending && !fileSelectionFailed && selectedCommitFilePaths.length === 0
+  const fileSelectionBlocked = fileSelectionPending || fileSelectionFailed || fileSelectionMissing
   const finalMessage = useMemo(
     () => (cardValue ? `${cardValue} #comment ${commitType}:${messageValue} #CMBDevClaw` : ""),
     [cardValue, commitType, messageValue]
   )
 
   const handleSubmit = async (): Promise<void> => {
-    if (running || cardMissing || messageMissing) return
+    if (running || cardMissing || messageMissing || fileSelectionBlocked) return
     setRunning(true)
     setError(null)
     try {
-      const result = await window.api.workspace.commitWorktree(threadId, finalMessage)
+      const result = await window.api.workspace.commitWorktree(
+        threadId,
+        finalMessage,
+        selectedCommitFilePaths
+      )
       if (!result.success) {
         setError(result.error || "提交失败")
         setRunning(false)
@@ -261,6 +475,31 @@ export function AgentGitCommitDialog({
       setError(e instanceof Error ? e.message : "提交失败")
       setRunning(false)
     }
+  }
+
+  const toggleCommitFile = (file: DiffFile): void => {
+    setSelectedCommitPaths((prev) => {
+      const next = new Set(prev)
+      const selected = isDiffFileSelected(file, prev)
+      for (const filePath of pathsForDiffFile(file)) {
+        if (selected) next.delete(filePath)
+        else next.add(filePath)
+      }
+      return next
+    })
+  }
+
+  const selectAllFiles = (): void => {
+    const allChangedFiles = diff?.changedFiles?.length
+      ? diff.changedFiles
+      : (diff?.files ?? []).map((file) => file.path)
+    setSelectedCommitPaths(
+      new Set(allChangedFiles.map((filePath) => normalizeCommitPath(filePath)).filter(Boolean))
+    )
+  }
+
+  const clearFileSelection = (): void => {
+    setSelectedCommitPaths(new Set())
   }
 
   return (
@@ -303,28 +542,62 @@ export function AgentGitCommitDialog({
 
         {diff && diff.files.length > 0 && (
           <div className="mx-4 mt-3 space-y-2">
-            <div className="text-xs font-medium text-foreground">
-              变更文件（{diff.files.length}）
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <div className="font-medium text-foreground">
+                提交文件（预览已选 {selectedVisibleFileCount}/{diff.files.length}，共{" "}
+                {selectedCommitFilePaths.length} 路径）
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="text-[11px] text-primary hover:underline"
+                  onClick={selectAllFiles}
+                >
+                  全选
+                </button>
+                <button
+                  type="button"
+                  className="text-[11px] text-muted-foreground hover:text-foreground hover:underline"
+                  onClick={clearFileSelection}
+                >
+                  清空
+                </button>
+              </div>
+            </div>
+            <div className="text-[11px] text-muted-foreground">
+              {selectionSourceLabel}
             </div>
             <div className="flex h-64 overflow-hidden rounded-lg border border-border/70">
               {/* Left: file list (select one to view its diff). */}
               <div className="w-44 shrink-0 overflow-y-auto border-r border-border/60 bg-muted/20">
                 {diff.files.map((file) => {
                   const active = file.path === selectedFile?.path
+                  const checked = isDiffFileSelected(file, selectedCommitPaths)
                   return (
-                    <button
+                    <div
                       key={file.path}
-                      type="button"
-                      onClick={() => setSelectedFilePath(file.path)}
                       title={file.path}
                       className={cn(
-                        "flex w-full items-center justify-between gap-1.5 px-2 py-1.5 text-left text-[11px] transition-colors",
+                        "flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[11px] transition-colors",
                         active
                           ? "bg-primary/10 text-primary"
                           : "text-foreground hover:bg-muted/60"
                       )}
                     >
-                      <span className="truncate font-mono">{basename(file.path)}</span>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleCommitFile(file)}
+                        className="size-3 shrink-0 accent-primary"
+                        aria-label={`选择提交 ${file.path}`}
+                      />
+                      <button
+                        type="button"
+                        className="min-w-0 flex-1 text-left"
+                        onClick={() => setSelectedFilePath(file.path)}
+                      >
+                        <span className="block truncate font-mono">{basename(file.path)}</span>
+                      </button>
                       <span className="shrink-0 font-medium">
                         <span className="text-emerald-600 dark:text-emerald-400">
                           +{file.additions}
@@ -333,7 +606,7 @@ export function AgentGitCommitDialog({
                           -{file.deletions}
                         </span>
                       </span>
-                    </button>
+                    </div>
                   )
                 })}
               </div>
@@ -449,6 +722,16 @@ export function AgentGitCommitDialog({
               {error}
             </div>
           )}
+          {diffError && (
+            <div className="rounded-lg border border-destructive/45 bg-destructive/10 p-3 text-sm text-destructive">
+              {diffError}，请取消后重试，避免在无法确认文件范围时提交
+            </div>
+          )}
+          {fileSelectionMissing && (
+            <div className="rounded-lg border border-destructive/45 bg-destructive/10 p-3 text-sm text-destructive">
+              请至少选择 1 个文件提交
+            </div>
+          )}
         </form>
         </div>
 
@@ -456,7 +739,7 @@ export function AgentGitCommitDialog({
           <Button
             type="button"
             className="w-full h-9"
-            disabled={running || cardMissing || messageMissing}
+            disabled={running || cardMissing || messageMissing || fileSelectionBlocked}
             onClick={() => void handleSubmit()}
           >
             {running ? (

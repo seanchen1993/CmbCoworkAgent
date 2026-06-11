@@ -79,6 +79,7 @@ interface GitPanelDiffStatePayload {
   isGitRepo?: boolean
   taskId: string
   files: GitPanelFileDiff[]
+  changedFiles?: string[]
   changedFilesTotal?: number
   omittedFileCount?: number
   totals: { additions: number; deletions: number; fileCount: number }
@@ -1794,6 +1795,7 @@ function normalizeSelectedChangedFileEntries(
   if (selectedFilePaths.length === 0) return []
 
   const changedSet = new Set(changedFiles.map(normalizeGitRelativePath))
+  const normalizedChangedFiles = changedFiles.map(normalizeGitRelativePath)
   const entryByPath = new Map<string, GitPanelChangedFile>()
   for (const entry of changedEntries) {
     entryByPath.set(normalizeGitRelativePath(entry.path), entry)
@@ -1806,13 +1808,19 @@ function normalizeSelectedChangedFileEntries(
     if (typeof selected !== "string" || !selected.trim()) continue
     for (const rel of toWorktreeRelativePath(worktreePath, selected)) {
       const normalized = normalizeGitRelativePath(rel)
-      if (changedSet.has(normalized)) {
-        const entry = entryByPath.get(normalized)
+      const normalizedPrefix = normalized.replace(/\/+$/, "")
+      const matchedPaths = changedSet.has(normalized)
+        ? [normalized]
+        : normalizedChangedFiles.filter(
+            (changedPath) => normalized === "." || changedPath.startsWith(`${normalizedPrefix}/`)
+          )
+      for (const matchedPath of matchedPaths) {
+        const entry = entryByPath.get(matchedPath)
         if (entry?.previousPath) {
           selectedSet.add(normalizeGitRelativePath(entry.previousPath))
           selectedSet.add(normalizeGitRelativePath(entry.path))
         } else {
-          selectedSet.add(normalized)
+          selectedSet.add(matchedPath)
         }
       }
     }
@@ -1892,6 +1900,7 @@ function createEmptyGitPanelDiffState(
     isGitRepo: false,
     taskId,
     files: [],
+    changedFiles: [],
     changedFilesTotal: 0,
     omittedFileCount: 0,
     totals: { additions: 0, deletions: 0, fileCount: 0 },
@@ -1977,6 +1986,7 @@ async function buildGitPanelDiffState(
     isGitRepo: true,
     taskId: threadId,
     files: state.files,
+    changedFiles: state.changedFiles,
     changedFilesTotal: state.changedFilesTotal,
     omittedFileCount: state.omittedFileCount,
     totals: state.totals,
@@ -2874,6 +2884,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         isGitRepo: meta.isGitRepo ?? diff.isGitRepo,
         taskId: threadId,
         files: diff.files,
+        changedFiles: diff.changedFiles,
         changedFilesTotal: diff.changedFilesTotal ?? meta.changedFilesTotal,
         omittedFileCount: diff.omittedFileCount,
         totals: diff.totals,
