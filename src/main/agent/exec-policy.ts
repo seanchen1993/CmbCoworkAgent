@@ -481,7 +481,11 @@ function getWrappedShellScript(tokens: string[]): string | null {
       const token = invocation[i]
       if (!token.startsWith("-")) break
       if (token === "--") break
-      if (token.includes("c")) return invocation[i + 1] || null
+      // Only a short-option cluster carrying `-c` reads the next arg as the script
+      // (e.g. `-c`, `-lc`, `-xc`). A long option that merely contains the letter c
+      // (e.g. `--check`, `--norc`) must NOT be mistaken for `-c`, otherwise a benign
+      // `bash --check '…'` would be wrongly forbidden.
+      if (/^-[A-Za-z]*c[A-Za-z]*$/.test(token)) return invocation[i + 1] || null
     }
     return null
   }
@@ -625,7 +629,10 @@ export function normalizeGitAddPrefixedGitCommitCommand(
   if (segments.length < 2) return null
 
   let effectiveCwd = cwd
-  const filePaths: string[] = []
+  // Each add's pathspecs are recorded together with the cwd they were issued from, so we can
+  // reject a chain whose adds span different directories (those pathspecs are relative to
+  // different bases and cannot be represented by the single basePath the dialog receives).
+  const collected: Array<{ cwd: string; pathspecs: string[] }> = []
   for (let i = 0; i < segments.length - 1; i++) {
     const segment = segments[i]
     const nextCwd = resolveShellCdTarget(effectiveCwd, segment)
@@ -639,7 +646,7 @@ export function normalizeGitAddPrefixedGitCommitCommand(
     const addPathspecs = extractGitAddPathspecs(segment)
     if (addPathspecs.length === 0) return null
     effectiveCwd = addCwd
-    filePaths.push(...addPathspecs)
+    collected.push({ cwd: addCwd, pathspecs: addPathspecs })
   }
 
   const commitCommand = segments[segments.length - 1]
@@ -647,7 +654,12 @@ export function normalizeGitAddPrefixedGitCommitCommand(
   const commitCwd = resolveGitCommandCwdForSubcommand(commitCommand, effectiveCwd, "commit")
   if (!commitCwd) return null
   if (path.resolve(commitCwd) !== path.resolve(effectiveCwd)) return null
-  return { command: commitCommand, cwd: commitCwd, filePaths: Array.from(new Set(filePaths)) }
+  // All adds must run at the same directory as the commit; otherwise the pathspecs would be
+  // resolved against the wrong base. Refuse so the orchestrator tells the agent to split it.
+  const resolvedCommitCwd = path.resolve(commitCwd)
+  if (collected.some((entry) => path.resolve(entry.cwd) !== resolvedCommitCwd)) return null
+  const filePaths = Array.from(new Set(collected.flatMap((entry) => entry.pathspecs)))
+  return { command: commitCommand, cwd: commitCwd, filePaths }
 }
 
 /**
@@ -844,8 +856,39 @@ export function extractGitCommitPathspecs(command: string): string[] {
  * fresh commit, so these must not be silently turned into a new commit.
  */
 export function isAmendOrFixupCommit(command: string): boolean {
-  if (!isGitCommitCommand(command)) return false
-  return /(?:^|\s)--(amend|fixup|squash)\b/i.test(stripQuotedSpans(command))
+  for (const segment of splitShellCommandSegments(command)) {
+    const tokens = tokenizeCommand(segment)
+    const gitTokens = tokens ? getGitInvocationTokens(tokens) : null
+    if (!gitTokens) continue
+    const subcommand = findGitSubcommand(gitTokens)
+    if (!subcommand || subcommand.subcommand !== "commit") continue
+
+    const args = gitTokens.slice(subcommand.index + 1)
+    let pathspecMode = false
+    for (let i = 0; i < args.length; i++) {
+      const token = args[i]
+      const lower = token.toLowerCase()
+      if (pathspecMode) continue
+      if (token === "--") {
+        pathspecMode = true
+        continue
+      }
+      // Real option (not the *value* of a preceding -m/-F/--message/...). Matching here
+      // keeps `git commit -m --amend` (where `--amend` is the message) from being misread
+      // as an amend.
+      if (/^--(amend|fixup|squash)(=.*)?$/.test(lower)) return true
+      // Skip value-bearing options so their value isn't scanned as an option.
+      const shortValueFlagIndex = shortCommitValueFlagIndex(token)
+      if (
+        GIT_COMMIT_LONG_OPTIONS_WITH_VALUE.has(lower) ||
+        GIT_COMMIT_SHORT_OPTIONS_WITH_VALUE.has(token) ||
+        (shortValueFlagIndex > 0 && token.slice(shortValueFlagIndex + 1).length === 0)
+      ) {
+        i += 1
+      }
+    }
+  }
+  return false
 }
 
 export function derivePermanentApprovalPattern(command: string): string | null {
