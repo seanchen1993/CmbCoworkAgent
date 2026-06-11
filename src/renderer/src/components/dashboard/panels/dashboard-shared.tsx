@@ -284,26 +284,69 @@ export interface CodeAdoptionFunnelData {
   inclusiveAdoptionRate: number | null
   measuredAdoptionRate: number | null
   pushedAdoptionRate: number | null
+  /** 已 Commit 关联的原始生成行数（未做有效性去重）；「Commit 提交」口径 tab 的第一层基数。 */
+  measuredGeneratedLines?: number
+}
+
+type FunnelSourceTab = "agent" | "commit"
+
+type FunnelStage = {
+  key: string
+  label: string
+  lines: number
+  adoptedLines: number
+  rate: number | null
+  color: string
+  /** 隐藏顶部采纳率百分比（用于「已提交」口径第一层，仅体现原始→有效收窄）。 */
+  hideRate?: boolean
+  /** 覆盖默认「生成 X / 采纳 Y」副标签。 */
+  metricText?: string
+  /** 覆盖默认 hover 提示。 */
+  titleText?: string
 }
 
 // 代码采纳漏斗：真·漏斗形状（梯形逐级收窄）。
 // 漏斗宽度 = 各级生成行数（全部生成 → 已 Commit → 已 Push），标签 = 各级采纳率（越靠后越高）。
+// enableSourceTabs：开启后可在「Agent 生成 / Commit 提交」两种第一层口径间切换。
 export function CodeAdoptionFunnel({
   data,
-  className
+  className,
+  enableSourceTabs = false
 }: {
   data: CodeAdoptionFunnelData
   className?: string
+  enableSourceTabs?: boolean
 }): React.JSX.Element {
-  const stages = [
-    {
-      key: "all",
-      label: "全部生成",
-      lines: data.inclusiveEffectiveGeneratedLines,
-      adoptedLines: data.adoptedLines,
-      rate: data.inclusiveAdoptionRate,
-      color: "#06b6d4"
-    },
+  const [sourceTab, setSourceTab] = useState<FunnelSourceTab>("commit")
+  const activeTab: FunnelSourceTab = enableSourceTabs ? sourceTab : "agent"
+
+  // 第一层随口径切换：Agent 生成 = 全部生成（含未提交的有效行）；
+  // Commit 提交 = 已 Commit 关联的「原始」生成行数（measuredGeneratedLines）。二、三层不变。
+  const measuredGeneratedLines = data.measuredGeneratedLines ?? 0
+  const firstStage: FunnelStage =
+    activeTab === "commit"
+      ? {
+          // 「已提交」口径第一层：体现「原始生成 → 有效生成」的收窄，不展示采纳率。
+          key: "all",
+          label: "Commit 原始生成",
+          lines: measuredGeneratedLines,
+          adoptedLines: data.adoptedLines,
+          rate: null,
+          color: "#06b6d4",
+          hideRate: true,
+          metricText: `原始 ${formatNumber(measuredGeneratedLines)} / 有效 ${formatNumber(data.effectiveGeneratedLines)}`,
+          titleText: `Commit 原始生成：原始 ${formatExactNumber(measuredGeneratedLines)} 行 · 有效 ${formatExactNumber(data.effectiveGeneratedLines)} 行`
+        }
+      : {
+          key: "all",
+          label: "全部生成",
+          lines: data.inclusiveEffectiveGeneratedLines,
+          adoptedLines: data.adoptedLines,
+          rate: data.inclusiveAdoptionRate,
+          color: "#06b6d4"
+        }
+  const stages: FunnelStage[] = [
+    firstStage,
     {
       key: "commit",
       label: "已 Commit",
@@ -334,9 +377,36 @@ export function CodeAdoptionFunnel({
     <div
       className={`flex h-full flex-col rounded-xl border border-border bg-card p-4 ${className ?? ""}`}
     >
-      <h3 className="text-xs font-semibold text-foreground">代码采纳漏斗</h3>
-      <p className="mb-2 mt-0.5 text-[10px] leading-tight text-muted-foreground">
-        漏斗按各级生成行数依次收窄，标签为各级采纳率
+      <div className="flex items-start justify-between gap-2">
+        <h3 className="text-xs font-semibold text-foreground">代码采纳漏斗</h3>
+        {enableSourceTabs ? (
+          <div className="flex shrink-0 items-center overflow-hidden rounded-md border border-border">
+            {(
+              [
+                { id: "commit", label: "已提交" },
+                { id: "agent", label: "全量生成" }
+              ] as Array<{ id: FunnelSourceTab; label: string }>
+            ).map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                  activeTab === t.id
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:bg-muted/50"
+                }`}
+                onClick={() => setSourceTab(t.id)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      <p className="mb-2 mt-1 text-[10px] leading-tight text-muted-foreground">
+        {activeTab === "commit"
+          ? "第一层为已 Commit 的原始 / 有效生成行数；已 Commit、已 Push 标签为采纳率"
+          : "漏斗按各级生成行数依次收窄，标签为各级采纳率"}
       </p>
       {!hasData ? (
         <div className="flex flex-1 items-center justify-center py-6 text-xs text-muted-foreground">
@@ -356,7 +426,10 @@ export function CodeAdoptionFunnel({
                   key={s.key}
                   className="relative"
                   style={{ height: BAND_H }}
-                  title={`${s.label}：生成 ${formatExactNumber(s.lines)} 行 · 采纳 ${formatExactNumber(s.adoptedLines)} 行 · 采纳率 ${formatPercent(s.rate)}`}
+                  title={
+                    s.titleText ??
+                    `${s.label}：生成 ${formatExactNumber(s.lines)} 行 · 采纳 ${formatExactNumber(s.adoptedLines)} 行 · 采纳率 ${formatPercent(s.rate)}`
+                  }
                 >
                   <div
                     className="absolute inset-0"
@@ -376,12 +449,14 @@ export function CodeAdoptionFunnel({
                     style={{ background: s.color }}
                   />
                   {s.label}
-                  <span className="font-semibold" style={{ color: s.color }}>
-                    {formatPercent(s.rate)}
-                  </span>
+                  {s.hideRate ? null : (
+                    <span className="font-semibold" style={{ color: s.color }}>
+                      {formatPercent(s.rate)}
+                    </span>
+                  )}
                 </div>
                 <div className="mt-0.5 whitespace-nowrap text-[10px] text-muted-foreground">
-                  生成 {formatNumber(s.lines)} / 采纳 {formatNumber(s.adoptedLines)}
+                  {s.metricText ?? `生成 ${formatNumber(s.lines)} / 采纳 ${formatNumber(s.adoptedLines)}`}
                 </div>
               </div>
             ))}

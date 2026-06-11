@@ -1342,6 +1342,7 @@ export function ProjectModePanel({
   }
 
   const summary = data?.summary
+  const skillCodeStats = summary?.skillCodeStats
   const funnelData: CodeAdoptionFunnelData = summary?.codeStats ?? EMPTY_FUNNEL_DATA
   const topSkills = data?.topSkills ?? []
   const bySkillAdoption = data?.bySkillAdoption ?? []
@@ -1448,7 +1449,57 @@ export function ProjectModePanel({
               color="bg-cyan-500"
             />
           </div>
-          <CodeAdoptionFunnel data={funnelData} />
+          <CodeAdoptionFunnel data={funnelData} enableSourceTabs />
+        </div>
+
+        {/* 由 Skill 生成的代码：整体口径的子集，单独一行展示生成行数与各级采纳率 */}
+        <div className="mt-3">
+          <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+            由 Skill 生成的代码
+            <InfoHint hint="仅统计调用了 Skill 的对话所生成的代码（code 事件带非空 usedSkills），是上方整体口径的子集。" />
+          </div>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            <StatCard
+              icon={Code2}
+              label="Skill 生成行数"
+              value={formatLineCount(skillCodeStats?.generatedLines ?? 0)}
+              sub="由 Skill 生成的原始行数"
+              color="bg-violet-500"
+            />
+            <StatCard
+              icon={Gauge}
+              label="已 Push 采纳率"
+              value={formatPercent(skillCodeStats?.pushedAdoptionRate)}
+              sub={
+                skillCodeStats
+                  ? `${formatLineCount(skillCodeStats.pushedAdoptedLines)} / ${formatLineCount(skillCodeStats.pushedEffectiveGeneratedLines)} 行`
+                  : "暂无已 Push 数据"
+              }
+              color="bg-teal-500"
+            />
+            <StatCard
+              icon={Gauge}
+              label="已Commit采纳率"
+              value={formatPercent(skillCodeStats?.measuredAdoptionRate)}
+              sub={
+                skillCodeStats
+                  ? `${formatLineCount(skillCodeStats.adoptedLines)} / ${formatLineCount(skillCodeStats.effectiveGeneratedLines)} 行`
+                  : "暂无代码生成数据"
+              }
+              color="bg-indigo-500"
+            />
+            <StatCard
+              icon={Gauge}
+              label="含未提交采纳率"
+              value={formatPercent(skillCodeStats?.inclusiveAdoptionRate)}
+              sub={
+                skillCodeStats
+                  ? `${formatLineCount(skillCodeStats.adoptedLines)} / ${formatLineCount(skillCodeStats.inclusiveEffectiveGeneratedLines)} 行`
+                  : "暂无代码生成数据"
+              }
+              color="bg-cyan-500"
+            />
+          </div>
         </div>
       </section>
 
