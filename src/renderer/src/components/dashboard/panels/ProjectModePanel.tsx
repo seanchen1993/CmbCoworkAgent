@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react"
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts"
+import { PieChart, Pie, Cell, Tooltip as RechartsTooltip, ResponsiveContainer } from "recharts"
 import {
   Boxes,
   Layers,
@@ -15,11 +15,14 @@ import {
   Plug,
   Code2,
   Gauge,
+  GitCommit,
+  Info,
   Search,
   X
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
   Select,
   SelectContent,
@@ -27,9 +30,16 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
+import { marketApi } from "@/api/market"
+import codeEfficiencyModel from "@/assets/code-efficiency-model.png"
 import {
   CodeAdoptionFunnel,
+  GeneratedLinesTooltip,
+  InclusiveAdoptionTooltip,
+  MeasuredAdoptionTooltip,
+  PushedAdoptionTooltip,
   SkillRankingPanel,
   ToolRankingPanel,
   type CodeAdoptionFunnelData
@@ -133,13 +143,15 @@ function StatCard({
   label,
   value,
   sub,
-  color
+  color,
+  hint
 }: {
   icon: React.ElementType
   label: string
   value: string
   sub?: string
   color: string
+  hint?: React.ReactNode
 }): React.JSX.Element {
   return (
     <div className="flex w-full items-center gap-3 rounded-xl border border-border bg-card px-4 py-3">
@@ -147,7 +159,10 @@ function StatCard({
         <Icon className="size-4 text-white" />
       </div>
       <div className="min-w-0">
-        <div className="truncate whitespace-nowrap text-[11px] text-muted-foreground">{label}</div>
+        <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+          <span className="truncate whitespace-nowrap">{label}</span>
+          {hint ? <InfoHint hint={hint} /> : null}
+        </div>
         <div className="text-lg font-bold leading-tight text-foreground">{value}</div>
         {sub && <div className="whitespace-nowrap text-[10px] text-muted-foreground">{sub}</div>}
       </div>
@@ -208,7 +223,7 @@ function ProjectModePieCard({
                 />
               ))}
             </Pie>
-            <Tooltip content={<ProjectModePieTooltip />} />
+            <RechartsTooltip content={<ProjectModePieTooltip />} />
           </PieChart>
         </ResponsiveContainer>
       ) : (
@@ -244,27 +259,27 @@ function ProjectModeUserAnalysisCard({
             {users.map((user, index) => {
               const canClick = Boolean(onUserClick && user.sapId)
               return (
-              <tr
-                key={user.sapId || user.ystId || `${user.userName}-${index}`}
-                className={`border-b border-border/50 transition-colors hover:bg-muted/30 ${
-                  canClick ? "cursor-pointer" : ""
-                }`}
-                onClick={canClick ? () => onUserClick?.(user.sapId) : undefined}
-              >
-                <td className="px-2 py-1.5 text-muted-foreground">{index + 1}</td>
-                <td className="px-2 py-1.5 text-foreground">
-                  <div className="font-medium">{user.userName || user.sapId || "—"}</div>
-                  {user.sapId || user.ystId ? (
-                    <div className="font-mono text-[10px] text-muted-foreground">
-                      {user.sapId || user.ystId}
-                    </div>
-                  ) : null}
-                </td>
-                <td className="px-2 py-1.5 text-muted-foreground">{user.orgName || "—"}</td>
-                <td className="px-2 py-1.5 text-right font-medium text-foreground">
-                  {formatNumber(user.count)}
-                </td>
-              </tr>
+                <tr
+                  key={user.sapId || user.ystId || `${user.userName}-${index}`}
+                  className={`border-b border-border/50 transition-colors hover:bg-muted/30 ${
+                    canClick ? "cursor-pointer" : ""
+                  }`}
+                  onClick={canClick ? () => onUserClick?.(user.sapId) : undefined}
+                >
+                  <td className="px-2 py-1.5 text-muted-foreground">{index + 1}</td>
+                  <td className="px-2 py-1.5 text-foreground">
+                    <div className="font-medium">{user.userName || user.sapId || "—"}</div>
+                    {user.sapId || user.ystId ? (
+                      <div className="font-mono text-[10px] text-muted-foreground">
+                        {user.sapId || user.ystId}
+                      </div>
+                    ) : null}
+                  </td>
+                  <td className="px-2 py-1.5 text-muted-foreground">{user.orgName || "—"}</td>
+                  <td className="px-2 py-1.5 text-right font-medium text-foreground">
+                    {formatNumber(user.count)}
+                  </td>
+                </tr>
               )
             })}
             {users.length === 0 && (
@@ -370,18 +385,122 @@ function formatProjectCreatorDepartment(project: DashboardProjectModeProject): s
   return project.creatorOrgName || "—"
 }
 
+/** 小 i 提示，hover 显示说明文案。 */
+function InfoHint({ hint }: { hint: React.ReactNode }): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex shrink-0 cursor-help align-middle">
+            <Info className="size-3 text-muted-foreground/70" aria-label="查看说明" />
+          </span>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-72">{hint}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+/** 小 i 按钮：点击弹出「生产效能代码指标」口径示意大图。 */
+function CodeEfficiencyModelInfo(): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <TooltipProvider delayDuration={150}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              className="inline-flex size-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground/70 transition-colors hover:text-foreground"
+              aria-label="查看口径说明大图"
+              onClick={() => setOpen(true)}
+            >
+              <Info className="size-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>点击查看口径说明示意图</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-5xl">
+          <DialogHeader>
+            <DialogTitle>生产效能代码指标 · 口径说明</DialogTitle>
+          </DialogHeader>
+          <div className="max-h-[80vh] overflow-auto">
+            <img
+              src={codeEfficiencyModel}
+              alt="生产效能代码指标口径说明示意图"
+              className="h-auto w-full"
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
+
+/** Per-feature code-adoption line: Agent生成行数 / 有效生成行数 / 已Commit·已Push 采纳率（含行数明细）。 */
+function FeatureCodeStatsLine({
+  codeStats
+}: {
+  codeStats?: DashboardCodeStats | null
+}): React.JSX.Element {
+  if (!codeStats) {
+    return <div className="text-[11px] text-muted-foreground/80">暂无代码生成数据</div>
+  }
+  const adoptedLabel = `${formatLineCount(codeStats.adoptedLines)} / ${formatLineCount(codeStats.effectiveGeneratedLines)} 行`
+  const pushedLabel = `${formatLineCount(codeStats.pushedAdoptedLines)} / ${formatLineCount(codeStats.pushedEffectiveGeneratedLines)} 行`
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+      <span>
+        Agent生成行数{" "}
+        <span className="font-medium text-foreground">
+          {formatLineCount(codeStats.generatedLines)}
+        </span>
+      </span>
+      <span className="inline-flex items-center gap-1">
+        有效生成行数{" "}
+        <span className="font-medium text-foreground">
+          {formatLineCount(codeStats.effectiveGeneratedLines)}
+        </span>
+        <InfoHint hint="Agent 原始生成行数扣除被Agent后续修改覆盖、回退或删除的行后，真正纳入采纳率分母的有效产出。" />
+      </span>
+      <span>
+        已Commit采纳率{" "}
+        <span className="font-medium text-foreground">
+          {formatPercent(codeStats.measuredAdoptionRate)}
+        </span>
+        <span className="ml-1 text-muted-foreground/80">({adoptedLabel})</span>
+      </span>
+      <span>
+        已Push采纳率{" "}
+        <span className="font-medium text-foreground">
+          {formatPercent(codeStats.pushedAdoptionRate)}
+        </span>
+        <span className="ml-1 text-muted-foreground/80">({pushedLabel})</span>
+      </span>
+    </div>
+  )
+}
+
 function ProjectRow({
   project,
   expanded,
   onToggle,
-  onOpenTraces
+  onOpenTraces,
+  onOpenFeatureCommits,
+  onOpenProjectCommits
 }: {
   project: DashboardProjectModeProject
   expanded: boolean
   onToggle: () => void
   onOpenTraces: (feature?: DashboardProjectModeFeature) => void
+  onOpenFeatureCommits: (feature: DashboardProjectModeFeature) => void
+  onOpenProjectCommits: (pushedOnly?: boolean) => void
 }): React.JSX.Element {
   const codeStats = project.codeStats
+  const hasCommitAdoption = Boolean(codeStats && codeStats.effectiveGeneratedLines > 0)
+  const hasPushedAdoption = Boolean(codeStats && codeStats.pushedEffectiveGeneratedLines > 0)
   const adoptionLineLabel = codeStats
     ? `${formatLineCount(codeStats.adoptedLines)} / ${formatLineCount(codeStats.effectiveGeneratedLines)} 行`
     : "—"
@@ -439,13 +558,58 @@ function ProjectRow({
         <td className="px-3 py-2 text-right font-medium tabular-nums">
           {formatNumber(project.conversationCount)}
         </td>
-        <td className="px-3 py-2 text-right tabular-nums">
-          <div className="font-medium">{formatPercent(codeStats?.measuredAdoptionRate)}</div>
-          <div className="mt-0.5 text-[10px] text-muted-foreground">{adoptionLineLabel}</div>
+        <td className="px-3 py-2 text-right font-medium tabular-nums">
+          {formatLineCount(codeStats?.generatedLines ?? 0)}
         </td>
         <td className="px-3 py-2 text-right tabular-nums">
-          <div className="font-medium">{formatPercent(codeStats?.pushedAdoptionRate)}</div>
-          <div className="mt-0.5 text-[10px] text-muted-foreground">{pushedAdoptionLineLabel}</div>
+          {hasCommitAdoption ? (
+            <button
+              type="button"
+              className="ml-auto block text-right transition-colors hover:text-primary"
+              title="查看采纳溯源：该项目关联的 commit 明细"
+              onClick={(event) => {
+                event.stopPropagation()
+                onOpenProjectCommits(false)
+              }}
+            >
+              <div className="font-medium underline-offset-2 hover:underline">
+                {formatPercent(codeStats?.measuredAdoptionRate)}
+              </div>
+              <div className="mt-0.5 text-[10px] text-muted-foreground">{adoptionLineLabel}</div>
+            </button>
+          ) : (
+            <>
+              <div className="font-medium">{formatPercent(codeStats?.measuredAdoptionRate)}</div>
+              <div className="mt-0.5 text-[10px] text-muted-foreground">{adoptionLineLabel}</div>
+            </>
+          )}
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          {hasPushedAdoption ? (
+            <button
+              type="button"
+              className="ml-auto block text-right transition-colors hover:text-primary"
+              title="查看采纳溯源：该项目已 Push 的 commit 明细"
+              onClick={(event) => {
+                event.stopPropagation()
+                onOpenProjectCommits(true)
+              }}
+            >
+              <div className="font-medium underline-offset-2 hover:underline">
+                {formatPercent(codeStats?.pushedAdoptionRate)}
+              </div>
+              <div className="mt-0.5 text-[10px] text-muted-foreground">
+                {pushedAdoptionLineLabel}
+              </div>
+            </button>
+          ) : (
+            <>
+              <div className="font-medium">{formatPercent(codeStats?.pushedAdoptionRate)}</div>
+              <div className="mt-0.5 text-[10px] text-muted-foreground">
+                {pushedAdoptionLineLabel}
+              </div>
+            </>
+          )}
         </td>
         <td className="px-3 py-2">
           <div className="font-medium text-foreground">{creatorName}</div>
@@ -471,45 +635,19 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={10} className="px-3 py-3">
+          <td colSpan={11} className="px-3 py-3">
             <div className="space-y-3">
-              {/* 常用技能 + 采纳明细 */}
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="text-muted-foreground">常用技能：</span>
-                  {project.topSkills.length === 0 ? (
-                    <span className="text-muted-foreground">—</span>
-                  ) : (
-                    <SkillChips skills={project.topSkills} />
-                  )}
-                </div>
-                <div className="flex items-center gap-3 text-muted-foreground">
-                  <span>
-                    生成行数{" "}
-                    <span className="font-medium text-foreground">
-                      {formatLineCount(codeStats?.effectiveGeneratedLines ?? 0)}
-                    </span>
-                  </span>
-                  <span>
-                    已Commit采纳率{" "}
-                    <span className="font-medium text-foreground">
-                      {formatPercent(codeStats?.measuredAdoptionRate)}
-                    </span>
-                    <span className="ml-1 text-muted-foreground/80">({adoptionLineLabel})</span>
-                  </span>
-                  <span>
-                    已Push采纳率{" "}
-                    <span className="font-medium text-foreground">
-                      {formatPercent(codeStats?.pushedAdoptionRate)}
-                    </span>
-                    <span className="ml-1 text-muted-foreground/80">
-                      ({pushedAdoptionLineLabel})
-                    </span>
-                  </span>
-                </div>
+              {/* 常用技能（生成行数 / 采纳率已下沉到各特性行） */}
+              <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                <span className="text-muted-foreground">常用技能：</span>
+                {project.topSkills.length === 0 ? (
+                  <span className="text-muted-foreground">—</span>
+                ) : (
+                  <SkillChips skills={project.topSkills} />
+                )}
               </div>
 
-              {/* 特性状态 */}
+              {/* 特性状态 + 各特性采纳明细 + 关联 commit */}
               {project.features.length === 0 ? (
                 <div className="text-xs text-muted-foreground">该项目暂无特性记录</div>
               ) : (
@@ -517,38 +655,58 @@ function ProjectRow({
                   {project.features.map((feature) => (
                     <div
                       key={feature.slug || feature.title}
-                      className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs"
+                      className="space-y-2 rounded-lg border border-border bg-card px-3 py-2 text-xs"
                     >
-                      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-                        <span className="font-medium text-foreground">{feature.title}</span>
-                        {feature.statusLabel && (
-                          <Badge variant="outline" className="normal-case tracking-normal">
-                            {feature.statusLabel}
-                          </Badge>
-                        )}
-                        {feature.currentNodeStatusLabel && (
-                          <span className="text-muted-foreground">
-                            当前节点：{feature.currentNodeStatusLabel}
-                          </span>
-                        )}
-                        {feature.summary && (
-                          <span className="truncate text-muted-foreground" title={feature.summary}>
-                            · {feature.summary}
-                          </span>
-                        )}
+                      <div className="flex items-center gap-2">
+                        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+                          <span className="font-medium text-foreground">{feature.title}</span>
+                          {feature.statusLabel && (
+                            <Badge variant="outline" className="normal-case tracking-normal">
+                              {feature.statusLabel}
+                            </Badge>
+                          )}
+                          {feature.currentNodeStatusLabel && (
+                            <span className="text-muted-foreground">
+                              当前节点：{feature.currentNodeStatusLabel}
+                            </span>
+                          )}
+                          {feature.summary && (
+                            <span
+                              className="truncate text-muted-foreground"
+                              title={feature.summary}
+                            >
+                              · {feature.summary}
+                            </span>
+                          )}
+                        </div>
+                        <div className="ml-auto flex shrink-0 items-center gap-3">
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+                            disabled={!feature.slug}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              onOpenFeatureCommits(feature)
+                            }}
+                          >
+                            <GitCommit className="size-3.5" />
+                            Commit 记录
+                          </button>
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+                            disabled={!feature.slug}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              onOpenTraces(feature)
+                            }}
+                          >
+                            <MessagesSquare className="size-3.5" />
+                            查看对话
+                          </button>
+                        </div>
                       </div>
-                      <button
-                        type="button"
-                        className="ml-auto inline-flex shrink-0 items-center gap-1 text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
-                        disabled={!feature.slug}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          onOpenTraces(feature)
-                        }}
-                      >
-                        <MessagesSquare className="size-3.5" />
-                        查看对话
-                      </button>
+                      <FeatureCodeStatsLine codeStats={feature.codeStats} />
                     </div>
                   ))}
                 </div>
@@ -625,7 +783,9 @@ function ProjectListSection({
   pageError,
   loading,
   onPageChange,
-  onOpenTraces
+  onOpenTraces,
+  onOpenFeatureCommits,
+  onOpenProjectCommits
 }: {
   projectCounts?: DashboardProjectModeProjectCounts
   projectPages: Partial<
@@ -648,6 +808,11 @@ function ProjectListSection({
     project: DashboardProjectModeProject,
     feature?: DashboardProjectModeFeature
   ) => void
+  onOpenFeatureCommits: (
+    project: DashboardProjectModeProject,
+    feature: DashboardProjectModeFeature
+  ) => void
+  onOpenProjectCommits: (project: DashboardProjectModeProject, pushedOnly?: boolean) => void
 }): React.JSX.Element {
   const [tab, setTab] = useState<ProjectListTab>("active")
   const [query, setQuery] = useState("")
@@ -759,7 +924,8 @@ function ProjectListSection({
     <section>
       <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-        项目、插件、项目状态、特性数为当前状态；对话数、已Commit/已Push采纳率及展开行的技能与采纳明细按所选时间范围统计。
+        项目、插件、项目状态、特性数为当前状态；对话数、Agent生成行数（原始生成行数）、已Commit/已Push采纳率，以及展开行的技能、各特性采纳明细与关联
+        Commit 按所选时间范围统计。
       </p>
 
       <div className="mb-3 flex items-center gap-2 overflow-x-auto px-1 py-1">
@@ -828,6 +994,12 @@ function ProjectListSection({
               <th className="px-3 py-2 text-left font-medium">项目状态</th>
               <th className="px-3 py-2 text-right font-medium">特性数</th>
               <th className="px-3 py-2 text-right font-medium">对话数</th>
+              <th
+                className="px-3 py-2 text-right font-medium"
+                title="Agent 原始生成行数（未经去重/抵消的原始产出）"
+              >
+                Agent生成行数
+              </th>
               <th className="px-3 py-2 text-right font-medium">已Commit采纳率</th>
               <th className="px-3 py-2 text-right font-medium">已Push采纳率</th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
@@ -845,11 +1017,13 @@ function ProjectListSection({
                   setExpandedId((prev) => (prev === project.projectId ? null : project.projectId))
                 }
                 onOpenTraces={(feature) => onOpenTraces(project, feature)}
+                onOpenFeatureCommits={(feature) => onOpenFeatureCommits(project, feature)}
+                onOpenProjectCommits={(pushedOnly) => onOpenProjectCommits(project, pushedOnly)}
               />
             ))}
             {effectiveLoading && pageItems.length === 0 && (
               <tr>
-                <td colSpan={10} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={11} className="px-3 py-10 text-center text-muted-foreground">
                   <span className="inline-flex items-center gap-2">
                     <Loader2 className="size-4 animate-spin" />
                     加载项目中...
@@ -859,7 +1033,7 @@ function ProjectListSection({
             )}
             {!effectiveLoading && currentError && (
               <tr>
-                <td colSpan={10} className="px-3 py-10 text-center text-destructive">
+                <td colSpan={11} className="px-3 py-10 text-center text-destructive">
                   {currentError}
                 </td>
               </tr>
@@ -867,12 +1041,12 @@ function ProjectListSection({
             {pageItems.length > 0 &&
               Array.from({ length: PROJECT_PAGE_SIZE - pageItems.length }).map((_, i) => (
                 <tr key={`filler-${i}`} aria-hidden className="border-b border-border/50">
-                  <td colSpan={10} className="h-[49px]" />
+                  <td colSpan={11} className="h-[49px]" />
                 </tr>
               ))}
             {!effectiveLoading && !currentError && pageItems.length === 0 && (
               <tr>
-                <td colSpan={10} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={11} className="px-3 py-10 text-center text-muted-foreground">
                   {emptyText}
                 </td>
               </tr>
@@ -979,6 +1153,63 @@ function aggregateAdaptersByName(
   return result
 }
 
+/** 插件市场补充信息：场景（category）、负责人、负责人部门，均来自市场 API。 */
+interface PluginMarketInfo {
+  useScenario: string
+  managerName: string
+  managerDepartment: string
+}
+
+const OTHER_ADAPTER_SCENARIO = "其他类别"
+
+/** DEV mock：本地市场 API 不可达，按 makeMockProjectMode 的插件名提供示例市场信息，便于联调展示。 */
+const DEV_MOCK_PLUGIN_MARKET_INFO: Record<string, PluginMarketInfo> = {
+  "claude-code": {
+    useScenario: "研发类场景/应用类研发",
+    managerName: "张三",
+    managerDepartment: "信息研发部/架构组"
+  },
+  codex: {
+    useScenario: "通用场景",
+    managerName: "李四",
+    managerDepartment: "零售金融部/渠道研发组"
+  }
+}
+
+/** 拉取一次市场插件信息，按插件名建立 name → {场景, 负责人, 部门} 映射。市场不可用时静默降级为空。 */
+function usePluginMarketInfo(): Map<string, PluginMarketInfo> {
+  const [infoMap, setInfoMap] = useState<Map<string, PluginMarketInfo>>(new Map())
+  useEffect(() => {
+    let cancelled = false
+    // DEV：市场 API 通常不可达，直接使用 mock，无需发请求。
+    if (import.meta.env.DEV) {
+      setInfoMap(new Map(Object.entries(DEV_MOCK_PLUGIN_MARKET_INFO)))
+      return
+    }
+    void marketApi
+      .getPlugins({ allowMockOnError: false, silent: true })
+      .then((res) => {
+        if (cancelled || !res.success || !res.data) return
+        const next = new Map<string, PluginMarketInfo>()
+        for (const item of res.data) {
+          const name = item.name?.trim()
+          if (!name) continue
+          next.set(name, {
+            useScenario: item.category?.trim() || OTHER_ADAPTER_SCENARIO,
+            managerName: item.managerName?.trim() || "",
+            managerDepartment: item.managerDepartment?.trim() || ""
+          })
+        }
+        setInfoMap(next)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  return infoMap
+}
+
 function AdapterListSection({
   adapters
 }: {
@@ -986,6 +1217,7 @@ function AdapterListSection({
 }): React.JSX.Element {
   const [page, setPage] = useState(1)
   const [mode, setMode] = useState<AdapterListMode>("byName")
+  const marketInfo = usePluginMarketInfo()
   const versionCount = adapters.length
   const aggregatedByName = aggregateAdaptersByName(adapters)
   const baseList = mode === "byName" ? aggregatedByName : adapters
@@ -1041,54 +1273,71 @@ function AdapterListSection({
         ) : (
           <>
             <div className="divide-y divide-border">
-              {pageItems.map((adapter) => (
-                <div
-                  key={`${adapter.name}@${adapter.version ?? ""}`}
-                  className="flex items-center justify-between gap-3 px-4 py-3 text-sm"
-                >
-                  <div className="flex min-w-0 items-center gap-2">
-                    <Plug className="size-3.5 shrink-0 text-muted-foreground" />
-                    <span className="truncate font-medium text-foreground">{adapter.name}</span>
-                    {adapter.version && (
-                      <Badge variant="outline" className="normal-case tracking-normal">
-                        {adapter.version}
-                      </Badge>
-                    )}
+              {pageItems.map((adapter) => {
+                const info = marketInfo.get(adapter.name)
+                return (
+                  <div
+                    key={`${adapter.name}@${adapter.version ?? ""}`}
+                    className="flex items-center justify-between gap-3 px-4 py-3 text-sm"
+                  >
+                    <div className="flex min-w-0 flex-col gap-1">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <Plug className="size-3.5 shrink-0 text-muted-foreground" />
+                        <span className="truncate font-medium text-foreground">{adapter.name}</span>
+                        {adapter.version && (
+                          <Badge variant="outline" className="normal-case tracking-normal">
+                            {adapter.version}
+                          </Badge>
+                        )}
+                        {info?.useScenario && (
+                          <Badge
+                            variant="secondary"
+                            className="shrink-0 normal-case tracking-normal"
+                          >
+                            {info.useScenario}
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 pl-5 text-[11px] text-muted-foreground">
+                        <span>负责人：{info?.managerName || "—"}</span>
+                        <span>部门：{info?.managerDepartment || "—"}</span>
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-4 text-xs text-muted-foreground">
+                      <span>
+                        项目{" "}
+                        <span className="font-medium text-foreground">
+                          {formatNumber(adapter.projectCount)}
+                        </span>
+                      </span>
+                      <span>
+                        特性{" "}
+                        <span className="font-medium text-foreground">
+                          {formatNumber(adapter.featureCount)}
+                        </span>
+                      </span>
+                      <span>
+                        对话{" "}
+                        <span className="font-medium text-foreground">
+                          {formatNumber(adapter.conversationCount)}
+                        </span>
+                      </span>
+                      <span>
+                        已Commit采纳率{" "}
+                        <span className="font-medium text-foreground">
+                          {formatPercent(adapter.codeStats?.measuredAdoptionRate)}
+                        </span>
+                      </span>
+                      <span>
+                        已Push采纳率{" "}
+                        <span className="font-medium text-foreground">
+                          {formatPercent(adapter.codeStats?.pushedAdoptionRate)}
+                        </span>
+                      </span>
+                    </div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-4 text-xs text-muted-foreground">
-                    <span>
-                      项目{" "}
-                      <span className="font-medium text-foreground">
-                        {formatNumber(adapter.projectCount)}
-                      </span>
-                    </span>
-                    <span>
-                      特性{" "}
-                      <span className="font-medium text-foreground">
-                        {formatNumber(adapter.featureCount)}
-                      </span>
-                    </span>
-                    <span>
-                      对话{" "}
-                      <span className="font-medium text-foreground">
-                        {formatNumber(adapter.conversationCount)}
-                      </span>
-                    </span>
-                    <span>
-                      已Commit采纳率{" "}
-                      <span className="font-medium text-foreground">
-                        {formatPercent(adapter.codeStats?.measuredAdoptionRate)}
-                      </span>
-                    </span>
-                    <span>
-                      已Push采纳率{" "}
-                      <span className="font-medium text-foreground">
-                        {formatPercent(adapter.codeStats?.pushedAdoptionRate)}
-                      </span>
-                    </span>
-                  </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
             <div className="flex items-center justify-between gap-3 border-t border-border px-3 py-2 text-xs text-muted-foreground">
               <span>共 {formatNumber(sortedAdapters.length)} 个</span>
@@ -1131,6 +1380,8 @@ export function ProjectModePanel({
   projectPageError,
   onProjectPageChange,
   onOpenTraces,
+  onOpenFeatureCommits,
+  onOpenProjectCommits,
   onSkillClick,
   onUserClick,
   marketSkillKeys = new Set(),
@@ -1158,6 +1409,11 @@ export function ProjectModePanel({
     project: DashboardProjectModeProject,
     feature?: DashboardProjectModeFeature
   ) => void
+  onOpenFeatureCommits: (
+    project: DashboardProjectModeProject,
+    feature: DashboardProjectModeFeature
+  ) => void
+  onOpenProjectCommits: (project: DashboardProjectModeProject, pushedOnly?: boolean) => void
   onSkillClick?: (skill: string) => void
   onUserClick?: (sapId: string) => void
   marketSkillKeys?: Set<string>
@@ -1190,7 +1446,9 @@ export function ProjectModePanel({
   }
 
   const summary = data?.summary
+  const skillCodeStats = summary?.skillCodeStats
   const funnelData: CodeAdoptionFunnelData = summary?.codeStats ?? EMPTY_FUNNEL_DATA
+  const skillFunnelData: CodeAdoptionFunnelData = skillCodeStats ?? EMPTY_FUNNEL_DATA
   const topSkills = data?.topSkills ?? []
   const bySkillAdoption = data?.bySkillAdoption ?? []
   const tools = data?.tools ?? EMPTY_TOOL_USAGE
@@ -1211,92 +1469,185 @@ export function ProjectModePanel({
           为当前状态（项目快照实时统计，不随时间范围变化）；其余指标按
           <span className="font-medium text-foreground">所选时间范围</span>统计。
         </p>
-        <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3">
-          <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-3 xl:grid-cols-5">
-            <StatCard
-              icon={Boxes}
-              label="项目总数"
-              value={formatNumber(summary?.projectCount ?? 0)}
-              sub={archivedCount > 0 ? `当前状态 · 含 ${archivedCount} 已归档` : "当前状态"}
-              color="bg-blue-500"
-            />
-            <StatCard
-              icon={Layers}
-              label="特性总数"
-              value={formatNumber(summary?.featureCount ?? 0)}
-              sub={
-                archivedFeatureCount > 0
-                  ? `当前状态 · 含 ${archivedFeatureCount} 已归档`
-                  : "当前状态"
-              }
-              color="bg-indigo-500"
-            />
-            <StatCard
-              icon={Activity}
-              label="活跃项目"
-              value={formatNumber(summary?.activeProjectCount ?? 0)}
-              sub="时间范围内有对话"
-              color="bg-emerald-500"
-            />
-            <StatCard
-              icon={MessagesSquare}
-              label="项目对话数"
-              value={formatNumber(summary?.conversationCount ?? 0)}
-              color="bg-violet-500"
-            />
-            <StatCard
-              icon={ArrowDownToLine}
-              label="输入 Token"
-              value={formatCompact(summary?.totalInputTokens ?? 0)}
-              color="bg-amber-500"
-            />
-            <StatCard
-              icon={ArrowUpFromLine}
-              label="输出 Token"
-              value={formatCompact(summary?.totalOutputTokens ?? 0)}
-              color="bg-rose-500"
-            />
-            <StatCard
-              icon={Code2}
-              label="代码生成行数"
-              value={formatLineCount(summary?.codeStats?.generatedLines ?? 0)}
-              color="bg-sky-500"
-            />
-            <StatCard
-              icon={Gauge}
-              label="已 Push 采纳率"
-              value={formatPercent(summary?.codeStats?.pushedAdoptionRate)}
-              sub={
-                summary?.codeStats
-                  ? `${formatLineCount(summary.codeStats.pushedAdoptedLines)} / ${formatLineCount(summary.codeStats.pushedEffectiveGeneratedLines)} 行`
-                  : "暂无已 Push 数据"
-              }
-              color="bg-teal-500"
-            />
-            <StatCard
-              icon={Gauge}
-              label="已Commit采纳率"
-              value={formatPercent(summary?.codeStats?.measuredAdoptionRate)}
-              sub={
-                summary?.codeStats
-                  ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.effectiveGeneratedLines)} 行`
-                  : "暂无代码生成数据"
-              }
-              color="bg-indigo-500"
-            />
-            <StatCard
-              icon={Gauge}
-              label="含未提交采纳率"
-              value={formatPercent(summary?.codeStats?.inclusiveAdoptionRate)}
-              sub={
-                summary?.codeStats
-                  ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.inclusiveEffectiveGeneratedLines)} 行`
-                  : "暂无代码生成数据"
-              }
-              color="bg-cyan-500"
-            />
+        <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-3 xl:grid-cols-6">
+          <StatCard
+            icon={Boxes}
+            label="项目总数"
+            value={formatNumber(summary?.projectCount ?? 0)}
+            sub={archivedCount > 0 ? `当前状态 · 含 ${archivedCount} 已归档` : "当前状态"}
+            color="bg-blue-500"
+          />
+          <StatCard
+            icon={Layers}
+            label="特性总数"
+            value={formatNumber(summary?.featureCount ?? 0)}
+            sub={
+              archivedFeatureCount > 0 ? `当前状态 · 含 ${archivedFeatureCount} 已归档` : "当前状态"
+            }
+            color="bg-indigo-500"
+          />
+          <StatCard
+            icon={Activity}
+            label="活跃项目"
+            value={formatNumber(summary?.activeProjectCount ?? 0)}
+            sub="时间范围内有对话"
+            color="bg-emerald-500"
+          />
+          <StatCard
+            icon={MessagesSquare}
+            label="项目对话数"
+            value={formatNumber(summary?.conversationCount ?? 0)}
+            color="bg-violet-500"
+          />
+          <StatCard
+            icon={ArrowDownToLine}
+            label="输入 Token"
+            value={formatCompact(summary?.totalInputTokens ?? 0)}
+            color="bg-amber-500"
+          />
+          <StatCard
+            icon={ArrowUpFromLine}
+            label="输出 Token"
+            value={formatCompact(summary?.totalOutputTokens ?? 0)}
+            color="bg-rose-500"
+          />
+        </div>
+      </section>
+
+      {/* 生成效能代码指标：项目模式总量 + AutoBizDevOps 约束生成，两个子模块各含卡片与独立漏斗 */}
+      <section className="space-y-5">
+        <div className="flex items-center gap-1.5">
+          <h2 className="text-sm font-semibold text-foreground">生产效能代码指标</h2>
+          <CodeEfficiencyModelInfo />
+        </div>
+
+        {/* 子模块一（项目模式总量）：含 Vibecoding 在内的整体口径 */}
+        <div>
+          <div className="mb-3 flex items-center gap-1.5">
+            <h3 className="text-xs font-semibold text-foreground">项目模式总量</h3>
+            <InfoHint hint="项目模式下产生的全部代码（含 Vibecoding 等未使用 Skill 的对话）。" />
           </div>
-          <CodeAdoptionFunnel data={funnelData} />
+          <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3">
+            <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-4">
+              <StatCard
+                icon={Code2}
+                label="代码生成行数"
+                value={formatLineCount(summary?.codeStats?.generatedLines ?? 0)}
+                color="bg-sky-500"
+                hint={<GeneratedLinesTooltip />}
+              />
+              <StatCard
+                icon={Gauge}
+                label="入库率"
+                value={formatPercent(summary?.codeStats?.pushedAdoptionRate)}
+                sub={
+                  summary?.codeStats
+                    ? `${formatLineCount(summary.codeStats.pushedAdoptedLines)} / ${formatLineCount(summary.codeStats.pushedEffectiveGeneratedLines)} 行`
+                    : "暂无已 Push 数据"
+                }
+                color="bg-teal-500"
+                hint={
+                  summary?.codeStats ? (
+                    <PushedAdoptionTooltip data={summary.codeStats} />
+                  ) : undefined
+                }
+              />
+              <StatCard
+                icon={Gauge}
+                label="提交率"
+                value={formatPercent(summary?.codeStats?.measuredAdoptionRate)}
+                sub={
+                  summary?.codeStats
+                    ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.effectiveGeneratedLines)} 行`
+                    : "暂无代码生成数据"
+                }
+                color="bg-indigo-500"
+                hint={
+                  summary?.codeStats ? (
+                    <MeasuredAdoptionTooltip data={summary.codeStats} />
+                  ) : undefined
+                }
+              />
+              <StatCard
+                icon={Gauge}
+                label="代码总量采纳率"
+                value={formatPercent(summary?.codeStats?.inclusiveAdoptionRate)}
+                sub={
+                  summary?.codeStats
+                    ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.inclusiveEffectiveGeneratedLines)} 行`
+                    : "暂无代码生成数据"
+                }
+                color="bg-cyan-500"
+                hint={
+                  summary?.codeStats ? (
+                    <InclusiveAdoptionTooltip data={summary.codeStats} />
+                  ) : undefined
+                }
+              />
+            </div>
+            <CodeAdoptionFunnel data={funnelData} />
+          </div>
+        </div>
+
+        {/* 子模块二（AutoBizDevOps 插件约束生成）：使用了 Skill 的子集 */}
+        <div>
+          <div className="mb-3 flex items-center gap-1.5">
+            <h3 className="text-xs font-semibold text-foreground">由 AutoBizDevOps 插件约束生成</h3>
+            <InfoHint hint="仅统计调用了 AutoBizDevOps 插件 Skill 的对话所生成的代码，是项目模式总量的子集。" />
+          </div>
+          <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3">
+            <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-4">
+              <StatCard
+                icon={Code2}
+                label="Skill 生成行数"
+                value={formatLineCount(skillCodeStats?.generatedLines ?? 0)}
+                sub="由 Skill 生成的原始行数"
+                color="bg-violet-500"
+                hint={<GeneratedLinesTooltip />}
+              />
+              <StatCard
+                icon={Gauge}
+                label="入库率"
+                value={formatPercent(skillCodeStats?.pushedAdoptionRate)}
+                sub={
+                  skillCodeStats
+                    ? `${formatLineCount(skillCodeStats.pushedAdoptedLines)} / ${formatLineCount(skillCodeStats.pushedEffectiveGeneratedLines)} 行`
+                    : "暂无已 Push 数据"
+                }
+                color="bg-teal-500"
+                hint={skillCodeStats ? <PushedAdoptionTooltip data={skillCodeStats} /> : undefined}
+              />
+              <StatCard
+                icon={Gauge}
+                label="提交率"
+                value={formatPercent(skillCodeStats?.measuredAdoptionRate)}
+                sub={
+                  skillCodeStats
+                    ? `${formatLineCount(skillCodeStats.adoptedLines)} / ${formatLineCount(skillCodeStats.effectiveGeneratedLines)} 行`
+                    : "暂无代码生成数据"
+                }
+                color="bg-indigo-500"
+                hint={
+                  skillCodeStats ? <MeasuredAdoptionTooltip data={skillCodeStats} /> : undefined
+                }
+              />
+              <StatCard
+                icon={Gauge}
+                label="代码总量采纳率"
+                value={formatPercent(skillCodeStats?.inclusiveAdoptionRate)}
+                sub={
+                  skillCodeStats
+                    ? `${formatLineCount(skillCodeStats.adoptedLines)} / ${formatLineCount(skillCodeStats.inclusiveEffectiveGeneratedLines)} 行`
+                    : "暂无代码生成数据"
+                }
+                color="bg-cyan-500"
+                hint={
+                  skillCodeStats ? <InclusiveAdoptionTooltip data={skillCodeStats} /> : undefined
+                }
+              />
+            </div>
+            <CodeAdoptionFunnel data={skillFunnelData} />
+          </div>
         </div>
       </section>
 
@@ -1310,6 +1661,8 @@ export function ProjectModePanel({
         loading={loading}
         onPageChange={onProjectPageChange}
         onOpenTraces={onOpenTraces}
+        onOpenFeatureCommits={onOpenFeatureCommits}
+        onOpenProjectCommits={onOpenProjectCommits}
       />
 
       <ProjectModeAnalyticsSection analytics={data?.analytics} onUserClick={onUserClick} />
