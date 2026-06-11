@@ -5,7 +5,10 @@
  *   npx tsx tests/dashboard-analysis-agent.spec.ts
  */
 
-import { mergeDashboardAnalysisToolContext } from "../src/main/services/dashboard-analysis-agent.ts"
+import {
+  buildDashboardToolRetryMessage,
+  mergeDashboardAnalysisToolContext
+} from "../src/main/services/dashboard-analysis-agent.ts"
 import type { DashboardEsQueryInput } from "../src/main/services/dashboard-es-query.ts"
 
 function assert(condition: unknown, message: string): void {
@@ -43,9 +46,19 @@ function testPanelContextOverridesToolContext(): void {
   )
 }
 
+function testToolRetryMessageGuidesJsonRepair(): void {
+  const message = buildDashboardToolRetryMessage(new Error("ES query body must be a JSON object"))
+  assert(message.includes("Please retry"), "retry message should ask the model to retry")
+  assert(message.includes("strict JSON object"), "retry message should mention strict JSON")
+  assert(message.includes("body must be a JSON object"), "retry message should mention body object")
+  assert(message.includes("not a string"), "retry message should reject stringified DSL")
+}
+
 function run(): void {
   testPanelContextOverridesToolContext()
   console.log("PASS dashboard analysis agent context guard")
+  testToolRetryMessageGuidesJsonRepair()
+  console.log("PASS dashboard analysis agent retry guidance")
 }
 
 run()

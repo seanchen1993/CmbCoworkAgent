@@ -43,6 +43,7 @@ export interface DashboardAnalysisToolCallSummary {
   bodyHash?: string
   elapsedMs?: number
   warnings?: string[]
+  error?: string
 }
 
 export interface DashboardAnalysisAgentResult {
@@ -180,6 +181,45 @@ function contentToText(content: AIMessage["content"]): string {
     .join("\n")
 }
 
+function describeDashboardAnalysisError(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === "string") return error
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
+  }
+}
+
+export function buildDashboardToolRetryMessage(error: unknown): string {
+  return [
+    `dashboard_es_query tool call failed: ${describeDashboardAnalysisError(error)}`,
+    "",
+    "Please retry with corrected tool arguments.",
+    "Requirements:",
+    "- The tool arguments must be a strict JSON object.",
+    "- indexAlias must be \"event\" or \"trace\".",
+    "- operation must be one of \"search\", \"msearch\", \"count\", \"mapping\", \"field_caps\".",
+    "- body must be a JSON object, not a string, Markdown code block, JavaScript object literal, or JSON with comments/trailing commas.",
+    "- Do not include URL, HTTP method, credentials, or index names."
+  ].join("\n")
+}
+
+function getInvalidToolCallRetryMessage(response: AIMessage): string | null {
+  const record = response as unknown as Record<string, unknown>
+  const invalidToolCalls = record.invalid_tool_calls
+  const additionalKwargs = record.additional_kwargs as Record<string, unknown> | undefined
+  const rawToolCalls = additionalKwargs?.tool_calls
+  const hasInvalidToolCall =
+    (Array.isArray(invalidToolCalls) && invalidToolCalls.length > 0) ||
+    (Array.isArray(rawToolCalls) && rawToolCalls.length > 0)
+
+  if (!hasInvalidToolCall) return null
+  return buildDashboardToolRetryMessage(
+    "The model produced an invalid tool call. The dashboard_es_query arguments were not valid strict JSON."
+  )
+}
+
 function buildContextPrompt(context?: DashboardAnalysisContext): string {
   const scopeLabel = context?.scope === "project" ? "项目运营概览" : "平台运营概览"
   const range = context?.range ? `${context.range.from} ~ ${context.range.to}` : "未指定"
@@ -205,6 +245,7 @@ function buildSystemPrompt(context?: DashboardAnalysisContext): string {
     "你是独立的运营指标分析 Agent，只负责分析平台运营概览和项目运营概览，不属于 CmbCoworkAgent，也不能访问文件、Shell、主 Agent 工具或用户工作区。",
     "",
     "你可以使用唯一工具 dashboard_es_query 查询运营 ES 数据。工具允许完整 Elasticsearch Query DSL body，但后端代码会强制只读操作、索引 alias、权限过滤、项目/组织过滤、size 限制和敏感字段脱敏。不要尝试 URL、HTTP method、credentials、任意 index、写入、更新、删除、reindex、bulk、cluster、cat、template 或 task API。",
+    "调用 dashboard_es_query 时，工具参数必须是严格 JSON object；body 也必须是 JSON object。不要把 DSL 写成字符串、Markdown 代码块、JavaScript 对象字面量、带注释 JSON、带尾逗号 JSON，或混入解释文字。",
     "",
     "指标口径：",
     "- 平台运营概览主要来自 trace alias 的会话聚合和 event alias 的代码采纳聚合；项目运营概览只统计带 harnessProjectId 的项目模式数据。",
@@ -299,9 +340,19 @@ export async function runDashboardAnalysisAgent(
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const response = (await model.invoke(messages)) as AIMessage
+    const calls = Array.isArray(response.tool_calls) ? response.tool_calls : []
+    const invalidToolCallRetryMessage = calls.length === 0 ? getInvalidToolCallRetryMessage(response) : null
+    if (invalidToolCallRetryMessage) {
+      messages.push(
+        new HumanMessage(
+          `${invalidToolCallRetryMessage}\n\nRetry by calling dashboard_es_query again with corrected JSON arguments.`
+        )
+      )
+      continue
+    }
+
     messages.push(response)
 
-    const calls = Array.isArray(response.tool_calls) ? response.tool_calls : []
     if (calls.length === 0) {
       const content = contentToText(response.content).trim()
       return {
@@ -315,15 +366,28 @@ export async function runDashboardAnalysisAgent(
 
     for (const call of calls) {
       const toolCallId = call.id || `dashboard_tool_${round}_${messages.length}`
-      const output =
-        call.name === "dashboard_es_query"
-          ? await dashboardQueryTool.invoke(call.args as DashboardEsQueryToolArgs)
-          : JSON.stringify({ error: `Unknown tool: ${call.name}` })
+      let output: string
+      let status: "success" | "error" = "success"
+      try {
+        output =
+          call.name === "dashboard_es_query"
+            ? String(await dashboardQueryTool.invoke(call.args as DashboardEsQueryToolArgs))
+            : JSON.stringify({ error: `Unknown tool: ${call.name}` })
+        if (call.name !== "dashboard_es_query") status = "error"
+      } catch (error) {
+        status = "error"
+        output = buildDashboardToolRetryMessage(error)
+        toolCalls.push({
+          name: call.name,
+          error: describeDashboardAnalysisError(error)
+        })
+      }
       messages.push(
         new ToolMessage({
-          content: String(output),
+          content: output,
           tool_call_id: toolCallId,
-          name: call.name
+          name: call.name,
+          status
         })
       )
     }
