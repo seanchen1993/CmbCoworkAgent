@@ -915,6 +915,20 @@ function buildInstalledPluginMap(items: PluginMetadata[]): Map<string, PluginMet
   return map
 }
 
+function readMarketTextField(
+  item: MarketItem,
+  fieldNames: string[]
+): string {
+  const record = item as unknown as Record<string, unknown>
+  for (const fieldName of fieldNames) {
+    const value = record[fieldName]
+    if (typeof value !== "string") continue
+    const trimmed = value.trim()
+    if (trimmed) return trimmed
+  }
+  return ""
+}
+
 function applyMarketAdapterDisplayData(
   registry: HarnessAdapterRegistryItem[],
   marketPlugins: MarketItem[],
@@ -924,14 +938,15 @@ function applyMarketAdapterDisplayData(
   const installedByName = buildInstalledPluginMap(installedPlugins)
 
   return registry.map((adapter) => {
+    const adapterName = normalizeAdapterMarketName(adapter.name)
+    const installedPlugin = adapterName ? installedByName.get(adapterName) : undefined
+    const installedVersion = installedPlugin?.version?.trim() || adapter.version?.trim() || ""
     const fallback: HarnessAdapterRegistryItem = {
       ...adapter,
-      version: "",
+      version: installedVersion,
       description: "",
       useScenario: OTHER_ADAPTER_SCENARIO
     }
-    const adapterName = normalizeAdapterMarketName(adapter.name)
-    const installedPlugin = adapterName ? installedByName.get(adapterName) : undefined
     if (installedPlugin?.origin !== "market") return fallback
 
     const marketPlugin = adapterName ? marketByName.get(adapterName) : undefined
@@ -939,9 +954,17 @@ function applyMarketAdapterDisplayData(
 
     return {
       ...fallback,
-      version: marketPlugin.version?.trim() || "",
+      version: installedVersion,
       description: marketPlugin.description?.trim() || "",
-      useScenario: normalizeAdapterUseScenario(marketPlugin.category)
+      useScenario: normalizeAdapterUseScenario(marketPlugin.category),
+      developerName: readMarketTextField(marketPlugin, ["developerName", "developer", "managerName"]),
+      organizationName: readMarketTextField(marketPlugin, [
+        "organizationName",
+        "organization",
+        "orgName",
+        "department",
+        "managerDepartment"
+      ])
     }
   })
 }
@@ -999,6 +1022,64 @@ function formatAdapterSelectLabel(adapter: HarnessAdapterRegistryItem): string {
   return adapter.version ? `${adapter.name} · ${adapter.version}` : adapter.name
 }
 
+function formatAdapterSelectText(adapter: HarnessAdapterRegistryItem): string {
+  return [
+    formatAdapterSelectLabel(adapter),
+    adapter.developerName,
+    adapter.organizationName
+  ].filter(Boolean).join(" ")
+}
+
+function AdapterPublisherInfo({
+  adapter,
+  className
+}: {
+  adapter: HarnessAdapterRegistryItem
+  className?: string
+}): React.JSX.Element | null {
+  if (!adapter.developerName && !adapter.organizationName) return null
+
+  return (
+    <span
+      className={cn(
+        "ml-auto flex min-w-0 max-w-[52%] shrink-0 items-center justify-end gap-1 text-[11px] font-normal text-muted-foreground",
+        className
+      )}
+    >
+      {adapter.developerName && (
+        <span className="min-w-0 truncate" title={`开发人员：${adapter.developerName}`}>
+          开发人员：{adapter.developerName}
+        </span>
+      )}
+      {adapter.developerName && adapter.organizationName && (
+        <span className="shrink-0 text-muted-foreground/50">/</span>
+      )}
+      {adapter.organizationName && (
+        <span className="min-w-0 truncate" title={`组织机构：${adapter.organizationName}`}>
+          组织机构：{adapter.organizationName}
+        </span>
+      )}
+    </span>
+  )
+}
+
+function AdapterOptionHeader({
+  adapter,
+  infoClassName
+}: {
+  adapter: HarnessAdapterRegistryItem
+  infoClassName?: string
+}): React.JSX.Element {
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      <span className="min-w-0 flex-1 truncate">
+        {formatAdapterSelectLabel(adapter)}
+      </span>
+      <AdapterPublisherInfo adapter={adapter} className={infoClassName} />
+    </span>
+  )
+}
+
 function AdapterSelectedValue({
   adapter
 }: {
@@ -1008,7 +1089,7 @@ function AdapterSelectedValue({
     <SelectValue placeholder={ADAPTER_SELECT_PLACEHOLDER}>
       {adapter ? (
         <span className="block min-w-0 truncate text-left">
-          {formatAdapterSelectLabel(adapter)}
+          <AdapterOptionHeader adapter={adapter} />
         </span>
       ) : undefined}
     </SelectValue>
@@ -1021,14 +1102,15 @@ function AdapterSelectItem({ adapter }: { adapter: HarnessAdapterRegistryItem })
     <SelectItem
       key={adapter.id}
       value={adapter.id}
-      textValue={formatAdapterSelectLabel(adapter)}
+      textValue={formatAdapterSelectText(adapter)}
       disabled={!adapter.boardCompatibility.compatible}
       className="group py-2 pl-4 pr-10"
     >
       <span className="flex min-w-0 max-w-[calc(var(--radix-select-trigger-width)-3rem)] flex-col gap-1">
-        <span className="truncate">
-          {formatAdapterSelectLabel(adapter)}
-        </span>
+        <AdapterOptionHeader
+          adapter={adapter}
+          infoClassName="group-focus:text-accent-foreground group-data-[state=checked]:text-accent-foreground group-data-[highlighted]:text-accent-foreground"
+        />
         {adapter.description && (
           <span
             className="line-clamp-2 whitespace-normal break-words text-xs leading-5 text-muted-foreground group-focus:text-accent-foreground group-data-[state=checked]:text-accent-foreground group-data-[highlighted]:text-accent-foreground"

@@ -67,6 +67,8 @@ export interface HarnessAdapterSnapshot {
 export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
   description: string
   useScenario?: string
+  developerName?: string
+  organizationName?: string
   boardCompatibility: HarnessBoardCompatibility
 }
 
