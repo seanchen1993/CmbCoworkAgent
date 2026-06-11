@@ -29,7 +29,7 @@
 
 import { appendFile, readdir, readFile, stat, unlink, rename } from "fs/promises"
 import { existsSync, mkdirSync } from "fs"
-import { extname, join, relative, resolve as resolvePath } from "path"
+import { dirname, extname, join, relative, resolve as resolvePath } from "path"
 import { randomUUID } from "crypto"
 import { execFileSync } from "child_process"
 import * as iconv from "iconv-lite"
@@ -41,6 +41,7 @@ import {
   closeAdoptionIndex,
   findPendingGensForFile,
   flushAdoptionIndex,
+  getGenRowByEventId,
   initializeAdoptionIndex,
   insertGenEvent,
   markMeasured,
@@ -74,7 +75,11 @@ const MAX_CONTEXT_ENTRIES = 32 // bound in-memory context size
 const STAGED_BLOB_MAX_BYTES = 8 * 1024 * 1024 // cap git show output per staged file
 
 // sqlite index safeguards — keep the on-disk file bounded even under abuse
-const INDEX_MEASURED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000 // already-measured rows: 3 days
+// Already-measured rows are kept for the full attribution window (7 days) so the
+// local line-level 溯源 reader can still recover stored per-line hashes for any
+// commit inside that window. (Was 3 days — bumped to align with
+// GEN_ATTRIBUTION_WINDOW_MS; INDEX_MAX_ROWS still caps total growth.)
+const INDEX_MEASURED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const INDEX_MAX_ROWS = 5000 // hard row cap (oldest measured dropped first)
 const INDEX_VACUUM_EVERY_N_SWEEPS = 12 // VACUUM cadence (12 × 5min = 1h)
 
@@ -1343,6 +1348,163 @@ export function hasPendingGenerationsForCommit(
     if (findPendingGensForFile(snap.absPath, minCreated, maxCreated).length > 0) return true
   }
   return false
+}
+
+// ─────────────────────────────────────────────────────────
+// Local line-level 溯源 (read-only)
+//
+// Reconstructs, on demand, which committed lines a past generation was credited
+// for. Content was never stored — only per-line FNV hashes (sqlite) — so we
+// re-read the committed blob via `git show <sha>:<path>` and intersect its line
+// hashes with the stored generation hashes. This recovers the *committed* text
+// of adopted lines; lines the agent generated but that never reached the commit
+// have no retrievable text (only a count). Only works for the current machine's
+// own recent (≤7d) commits whose sqlite row survives.
+// ─────────────────────────────────────────────────────────
+
+export interface LocalAdoptionLine {
+  lineNumber: number
+  text: string
+  /** True when this committed line matched a stored generated-line hash. */
+  adopted: boolean
+}
+
+export interface LocalGenAdoptionLines {
+  genEventId: string
+  available: boolean
+  /** Populated when available=false to explain the degradation. */
+  reason?: string
+  /** Repo-relative path of the committed file (best-effort). */
+  relPath?: string
+  /** Number of generated (net-new) lines recorded at gen time. */
+  generatedLineCount?: number
+  /** Committed lines that matched a stored generated-line hash. */
+  matchedLineCount?: number
+  /** True when the committed file exceeded the display cap and was truncated. */
+  truncated?: boolean
+  lines?: LocalAdoptionLine[]
+}
+
+const LOCAL_TRACE_MAX_GENS = 50
+const LOCAL_TRACE_MAX_LINES = 4000
+
+/**
+ * Walk the committed file's physical lines, marking each as adopted when its
+ * normalised hash is present in the stored generated-line multiset (consuming
+ * the count so multiplicity is respected — mirrors the commit-time measure).
+ */
+function matchCommittedLinesAgainstHashes(
+  committedText: string,
+  storedHashes: Uint32Array,
+  maxLines: number
+): { lines: LocalAdoptionLine[]; matchedLineCount: number; truncated: boolean } {
+  const counts = buildLineHashCounts(storedHashes)
+  const physical = committedText.split(/\r?\n/)
+  const limit = Math.min(physical.length, maxLines)
+  const lines: LocalAdoptionLine[] = []
+  let matchedLineCount = 0
+  for (let i = 0; i < limit; i++) {
+    const raw = physical[i]
+    const norm = normalizeLine(raw)
+    let adopted = false
+    if (norm.length > 0) {
+      const h = fnv1a32(norm)
+      const c = counts.get(h)
+      if (c && c > 0) {
+        counts.set(h, c - 1)
+        adopted = true
+        matchedLineCount++
+      }
+    }
+    lines.push({ lineNumber: i + 1, text: raw, adopted })
+  }
+  return { lines, matchedLineCount, truncated: physical.length > limit }
+}
+
+/**
+ * Reconstruct local line-level adoption for specific generations of a commit.
+ * Never throws — each gen degrades independently to `available: false` with a
+ * human-readable reason. Side-effect free.
+ */
+export async function readLocalCommitAdoptionLines(
+  commitSha: string,
+  genEventIds: string[]
+): Promise<LocalGenAdoptionLines[]> {
+  const sha = (commitSha ?? "").trim()
+  const ids = Array.isArray(genEventIds)
+    ? genEventIds
+        .filter((id): id is string => typeof id === "string" && id.length > 0)
+        .slice(0, LOCAL_TRACE_MAX_GENS)
+    : []
+  if (!sha || ids.length === 0) return []
+
+  const results: LocalGenAdoptionLines[] = []
+  for (const genEventId of ids) {
+    try {
+      const row = getGenRowByEventId(genEventId)
+      if (!row || !row.line_hashes || !row.file_path) {
+        results.push({
+          genEventId,
+          available: false,
+          reason: "本地无该生成记录或哈希已过期（仅当前机器近 7 天可逐行）"
+        })
+        continue
+      }
+      const absPath = row.file_path
+      let gitRoot: string
+      try {
+        gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+          encoding: "utf-8",
+          cwd: dirname(absPath),
+          timeout: 5000,
+          maxBuffer: 1024 * 1024
+        }).trim()
+      } catch {
+        results.push({ genEventId, available: false, reason: "无法定位本地 git 仓库" })
+        continue
+      }
+      const relPath = relative(gitRoot, absPath).replace(/\\/g, "/")
+      let blob: Buffer
+      try {
+        blob = execFileSync("git", ["show", `${sha}:${relPath}`], {
+          cwd: gitRoot,
+          timeout: 5000,
+          maxBuffer: STAGED_BLOB_MAX_BYTES
+        })
+      } catch {
+        results.push({
+          genEventId,
+          available: false,
+          relPath,
+          reason: "该文件在此 commit 中不存在（可能已删除或重命名）"
+        })
+        continue
+      }
+      const committedText = decodeCodeBuffer(blob)
+      const storedHashes = unpackLineHashes(row.line_hashes)
+      const { lines, matchedLineCount, truncated } = matchCommittedLinesAgainstHashes(
+        committedText,
+        storedHashes,
+        LOCAL_TRACE_MAX_LINES
+      )
+      results.push({
+        genEventId,
+        available: true,
+        relPath,
+        generatedLineCount: storedHashes.length,
+        matchedLineCount,
+        truncated,
+        lines
+      })
+    } catch (e) {
+      results.push({
+        genEventId,
+        available: false,
+        reason: e instanceof Error ? e.message : String(e)
+      })
+    }
+  }
+  return results
 }
 
 // ─────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react"
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts"
+import { PieChart, Pie, Cell, Tooltip as RechartsTooltip, ResponsiveContainer } from "recharts"
 import {
   Boxes,
   Layers,
@@ -15,11 +15,14 @@ import {
   Plug,
   Code2,
   Gauge,
+  GitCommit,
+  Info,
   Search,
   X
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
   Select,
   SelectContent,
@@ -209,7 +212,7 @@ function ProjectModePieCard({
                 />
               ))}
             </Pie>
-            <Tooltip content={<ProjectModePieTooltip />} />
+            <RechartsTooltip content={<ProjectModePieTooltip />} />
           </PieChart>
         </ResponsiveContainer>
       ) : (
@@ -371,16 +374,78 @@ function formatProjectCreatorDepartment(project: DashboardProjectModeProject): s
   return project.creatorOrgName || "—"
 }
 
+/** 小 i 提示，hover 显示说明文案。 */
+function InfoHint({ hint }: { hint: string }): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex shrink-0 cursor-help align-middle">
+            <Info className="size-3 text-muted-foreground/70" aria-label={hint} />
+          </span>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-64">{hint}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+/** Per-feature code-adoption line: Agent生成行数 / 有效生成行数 / 已Commit·已Push 采纳率（含行数明细）。 */
+function FeatureCodeStatsLine({
+  codeStats
+}: {
+  codeStats?: DashboardCodeStats | null
+}): React.JSX.Element {
+  if (!codeStats) {
+    return <div className="text-[11px] text-muted-foreground/80">暂无代码生成数据</div>
+  }
+  const adoptedLabel = `${formatLineCount(codeStats.adoptedLines)} / ${formatLineCount(codeStats.effectiveGeneratedLines)} 行`
+  const pushedLabel = `${formatLineCount(codeStats.pushedAdoptedLines)} / ${formatLineCount(codeStats.pushedEffectiveGeneratedLines)} 行`
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+      <span>
+        Agent生成行数{" "}
+        <span className="font-medium text-foreground">
+          {formatLineCount(codeStats.generatedLines)}
+        </span>
+      </span>
+      <span className="inline-flex items-center gap-1">
+        有效生成行数{" "}
+        <span className="font-medium text-foreground">
+          {formatLineCount(codeStats.effectiveGeneratedLines)}
+        </span>
+        <InfoHint hint="Agent 原始生成行数扣除被Agent后续修改覆盖、回退或删除的行后，真正纳入采纳率分母的有效产出。" />
+      </span>
+      <span>
+        已Commit采纳率{" "}
+        <span className="font-medium text-foreground">
+          {formatPercent(codeStats.measuredAdoptionRate)}
+        </span>
+        <span className="ml-1 text-muted-foreground/80">({adoptedLabel})</span>
+      </span>
+      <span>
+        已Push采纳率{" "}
+        <span className="font-medium text-foreground">
+          {formatPercent(codeStats.pushedAdoptionRate)}
+        </span>
+        <span className="ml-1 text-muted-foreground/80">({pushedLabel})</span>
+      </span>
+    </div>
+  )
+}
+
 function ProjectRow({
   project,
   expanded,
   onToggle,
-  onOpenTraces
+  onOpenTraces,
+  onOpenFeatureCommits
 }: {
   project: DashboardProjectModeProject
   expanded: boolean
   onToggle: () => void
   onOpenTraces: (feature?: DashboardProjectModeFeature) => void
+  onOpenFeatureCommits: (feature: DashboardProjectModeFeature) => void
 }): React.JSX.Element {
   const codeStats = project.codeStats
   const adoptionLineLabel = codeStats
@@ -440,6 +505,9 @@ function ProjectRow({
         <td className="px-3 py-2 text-right font-medium tabular-nums">
           {formatNumber(project.conversationCount)}
         </td>
+        <td className="px-3 py-2 text-right font-medium tabular-nums">
+          {formatLineCount(codeStats?.generatedLines ?? 0)}
+        </td>
         <td className="px-3 py-2 text-right tabular-nums">
           <div className="font-medium">{formatPercent(codeStats?.measuredAdoptionRate)}</div>
           <div className="mt-0.5 text-[10px] text-muted-foreground">{adoptionLineLabel}</div>
@@ -472,45 +540,19 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={10} className="px-3 py-3">
+          <td colSpan={11} className="px-3 py-3">
             <div className="space-y-3">
-              {/* 常用技能 + 采纳明细 */}
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="text-muted-foreground">常用技能：</span>
-                  {project.topSkills.length === 0 ? (
-                    <span className="text-muted-foreground">—</span>
-                  ) : (
-                    <SkillChips skills={project.topSkills} />
-                  )}
-                </div>
-                <div className="flex items-center gap-3 text-muted-foreground">
-                  <span>
-                    生成行数{" "}
-                    <span className="font-medium text-foreground">
-                      {formatLineCount(codeStats?.effectiveGeneratedLines ?? 0)}
-                    </span>
-                  </span>
-                  <span>
-                    已Commit采纳率{" "}
-                    <span className="font-medium text-foreground">
-                      {formatPercent(codeStats?.measuredAdoptionRate)}
-                    </span>
-                    <span className="ml-1 text-muted-foreground/80">({adoptionLineLabel})</span>
-                  </span>
-                  <span>
-                    已Push采纳率{" "}
-                    <span className="font-medium text-foreground">
-                      {formatPercent(codeStats?.pushedAdoptionRate)}
-                    </span>
-                    <span className="ml-1 text-muted-foreground/80">
-                      ({pushedAdoptionLineLabel})
-                    </span>
-                  </span>
-                </div>
+              {/* 常用技能（生成行数 / 采纳率已下沉到各特性行） */}
+              <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                <span className="text-muted-foreground">常用技能：</span>
+                {project.topSkills.length === 0 ? (
+                  <span className="text-muted-foreground">—</span>
+                ) : (
+                  <SkillChips skills={project.topSkills} />
+                )}
               </div>
 
-              {/* 特性状态 */}
+              {/* 特性状态 + 各特性采纳明细 + 关联 commit */}
               {project.features.length === 0 ? (
                 <div className="text-xs text-muted-foreground">该项目暂无特性记录</div>
               ) : (
@@ -518,38 +560,58 @@ function ProjectRow({
                   {project.features.map((feature) => (
                     <div
                       key={feature.slug || feature.title}
-                      className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs"
+                      className="space-y-2 rounded-lg border border-border bg-card px-3 py-2 text-xs"
                     >
-                      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-                        <span className="font-medium text-foreground">{feature.title}</span>
-                        {feature.statusLabel && (
-                          <Badge variant="outline" className="normal-case tracking-normal">
-                            {feature.statusLabel}
-                          </Badge>
-                        )}
-                        {feature.currentNodeStatusLabel && (
-                          <span className="text-muted-foreground">
-                            当前节点：{feature.currentNodeStatusLabel}
-                          </span>
-                        )}
-                        {feature.summary && (
-                          <span className="truncate text-muted-foreground" title={feature.summary}>
-                            · {feature.summary}
-                          </span>
-                        )}
+                      <div className="flex items-center gap-2">
+                        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+                          <span className="font-medium text-foreground">{feature.title}</span>
+                          {feature.statusLabel && (
+                            <Badge variant="outline" className="normal-case tracking-normal">
+                              {feature.statusLabel}
+                            </Badge>
+                          )}
+                          {feature.currentNodeStatusLabel && (
+                            <span className="text-muted-foreground">
+                              当前节点：{feature.currentNodeStatusLabel}
+                            </span>
+                          )}
+                          {feature.summary && (
+                            <span
+                              className="truncate text-muted-foreground"
+                              title={feature.summary}
+                            >
+                              · {feature.summary}
+                            </span>
+                          )}
+                        </div>
+                        <div className="ml-auto flex shrink-0 items-center gap-3">
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+                            disabled={!feature.slug}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              onOpenFeatureCommits(feature)
+                            }}
+                          >
+                            <GitCommit className="size-3.5" />
+                            Commit 记录
+                          </button>
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+                            disabled={!feature.slug}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              onOpenTraces(feature)
+                            }}
+                          >
+                            <MessagesSquare className="size-3.5" />
+                            查看对话
+                          </button>
+                        </div>
                       </div>
-                      <button
-                        type="button"
-                        className="ml-auto inline-flex shrink-0 items-center gap-1 text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
-                        disabled={!feature.slug}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          onOpenTraces(feature)
-                        }}
-                      >
-                        <MessagesSquare className="size-3.5" />
-                        查看对话
-                      </button>
+                      <FeatureCodeStatsLine codeStats={feature.codeStats} />
                     </div>
                   ))}
                 </div>
@@ -626,7 +688,8 @@ function ProjectListSection({
   pageError,
   loading,
   onPageChange,
-  onOpenTraces
+  onOpenTraces,
+  onOpenFeatureCommits
 }: {
   projectCounts?: DashboardProjectModeProjectCounts
   projectPages: Partial<
@@ -648,6 +711,10 @@ function ProjectListSection({
   onOpenTraces: (
     project: DashboardProjectModeProject,
     feature?: DashboardProjectModeFeature
+  ) => void
+  onOpenFeatureCommits: (
+    project: DashboardProjectModeProject,
+    feature: DashboardProjectModeFeature
   ) => void
 }): React.JSX.Element {
   const [tab, setTab] = useState<ProjectListTab>("active")
@@ -760,7 +827,7 @@ function ProjectListSection({
     <section>
       <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-        项目、插件、项目状态、特性数为当前状态；对话数、已Commit/已Push采纳率及展开行的技能与采纳明细按所选时间范围统计。
+        项目、插件、项目状态、特性数为当前状态；对话数、Agent生成行数（原始生成行数）、已Commit/已Push采纳率，以及展开行的技能、各特性采纳明细与关联 Commit 按所选时间范围统计。
       </p>
 
       <div className="mb-3 flex items-center gap-2 overflow-x-auto px-1 py-1">
@@ -829,6 +896,12 @@ function ProjectListSection({
               <th className="px-3 py-2 text-left font-medium">项目状态</th>
               <th className="px-3 py-2 text-right font-medium">特性数</th>
               <th className="px-3 py-2 text-right font-medium">对话数</th>
+              <th
+                className="px-3 py-2 text-right font-medium"
+                title="Agent 原始生成行数（未经去重/抵消的原始产出）"
+              >
+                Agent生成行数
+              </th>
               <th className="px-3 py-2 text-right font-medium">已Commit采纳率</th>
               <th className="px-3 py-2 text-right font-medium">已Push采纳率</th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
@@ -846,11 +919,12 @@ function ProjectListSection({
                   setExpandedId((prev) => (prev === project.projectId ? null : project.projectId))
                 }
                 onOpenTraces={(feature) => onOpenTraces(project, feature)}
+                onOpenFeatureCommits={(feature) => onOpenFeatureCommits(project, feature)}
               />
             ))}
             {effectiveLoading && pageItems.length === 0 && (
               <tr>
-                <td colSpan={10} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={11} className="px-3 py-10 text-center text-muted-foreground">
                   <span className="inline-flex items-center gap-2">
                     <Loader2 className="size-4 animate-spin" />
                     加载项目中...
@@ -860,7 +934,7 @@ function ProjectListSection({
             )}
             {!effectiveLoading && currentError && (
               <tr>
-                <td colSpan={10} className="px-3 py-10 text-center text-destructive">
+                <td colSpan={11} className="px-3 py-10 text-center text-destructive">
                   {currentError}
                 </td>
               </tr>
@@ -868,12 +942,12 @@ function ProjectListSection({
             {pageItems.length > 0 &&
               Array.from({ length: PROJECT_PAGE_SIZE - pageItems.length }).map((_, i) => (
                 <tr key={`filler-${i}`} aria-hidden className="border-b border-border/50">
-                  <td colSpan={10} className="h-[49px]" />
+                  <td colSpan={11} className="h-[49px]" />
                 </tr>
               ))}
             {!effectiveLoading && !currentError && pageItems.length === 0 && (
               <tr>
-                <td colSpan={10} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={11} className="px-3 py-10 text-center text-muted-foreground">
                   {emptyText}
                 </td>
               </tr>
@@ -1204,6 +1278,7 @@ export function ProjectModePanel({
   projectPageError,
   onProjectPageChange,
   onOpenTraces,
+  onOpenFeatureCommits,
   onSkillClick,
   onUserClick,
   marketSkillKeys = new Set(),
@@ -1230,6 +1305,10 @@ export function ProjectModePanel({
   onOpenTraces: (
     project: DashboardProjectModeProject,
     feature?: DashboardProjectModeFeature
+  ) => void
+  onOpenFeatureCommits: (
+    project: DashboardProjectModeProject,
+    feature: DashboardProjectModeFeature
   ) => void
   onSkillClick?: (skill: string) => void
   onUserClick?: (sapId: string) => void
@@ -1383,6 +1462,7 @@ export function ProjectModePanel({
         loading={loading}
         onPageChange={onProjectPageChange}
         onOpenTraces={onOpenTraces}
+        onOpenFeatureCommits={onOpenFeatureCommits}
       />
 
       <ProjectModeAnalyticsSection analytics={data?.analytics} onUserClick={onUserClick} />

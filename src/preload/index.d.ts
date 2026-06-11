@@ -210,6 +210,51 @@ interface DashboardCommitDetailsOptions {
   orgLv1List?: string[]
 }
 
+interface DashboardCommitAdoptionPair {
+  genEventId: string
+  file: string | null
+  tool: string | null
+  language: string | null
+  usedSkills: string[]
+  modelName: string | null
+  generatedAt: string | null
+  verdict: string | null
+  generatedLineCount: number | null
+  effectiveGeneratedLineCount: number | null
+  adoptedLineCount: number | null
+  measureSource: string | null
+  pushed: boolean
+  measuredAt: string | null
+  threadId: string | null
+}
+
+interface DashboardCommitAdoptionEvents {
+  commitSha: string
+  pairs: DashboardCommitAdoptionPair[]
+  reconciliation: {
+    sumEffective: number
+    sumAdopted: number
+    rate: number | null
+  }
+}
+
+interface LocalAdoptionLine {
+  lineNumber: number
+  text: string
+  adopted: boolean
+}
+
+interface LocalGenAdoptionLines {
+  genEventId: string
+  available: boolean
+  reason?: string
+  relPath?: string
+  generatedLineCount?: number
+  matchedLineCount?: number
+  truncated?: boolean
+  lines?: LocalAdoptionLine[]
+}
+
 interface DashboardSkillEvalOptions {
   limit?: number
   recentPage?: number
@@ -1566,6 +1611,22 @@ interface CustomAPI {
       range: { from: string; to: string },
       options?: DashboardProjectModeTracesOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeTracesData; error?: string }>
+    projectModeFeatureCommits: (
+      projectId: string,
+      featureSlug: string,
+      range: { from: string; to: string },
+      options?: DashboardCommitDetailsOptions
+    ) => Promise<{
+      success: boolean
+      data?: {
+        total: number
+        page: number
+        pageSize: number
+        pushedOnly: boolean
+        items: DashboardCommitDetail[]
+      }
+      error?: string
+    }>
     overview: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -1672,6 +1733,9 @@ interface CustomAPI {
       }
       error?: string
     }>
+    commitAdoptionEvents: (
+      commitSha: string
+    ) => Promise<{ success: boolean; data?: DashboardCommitAdoptionEvents; error?: string }>
     exportSkillTraces: (payload: {
       skill: string
       range: { from: string; to: string }
@@ -1684,6 +1748,12 @@ interface CustomAPI {
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
       options?: { fileName?: string }
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
+  }
+  adoption: {
+    commitLines: (
+      commitSha: string,
+      genEventIds: string[]
+    ) => Promise<{ success: boolean; data?: LocalGenAdoptionLines[]; error?: string }>
   }
   harnessBoard: {
     registry: () => Promise<HarnessAdapterRegistryItem[]>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, GitCommit, Info, Loader2, MessagesSquare, Search, X } from "lucide-react"
+import { CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, GitCommit, GitCompare, Info, Loader2, MessagesSquare, Search, X } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TraceExplorer } from "./TraceHistoryDialog"
+import { CommitAdoptionTraceDialog } from "./CommitAdoptionTraceDialog"
 import type { DashboardCommitDetail, DashboardCommitDetailsData, DashboardTraceDetail } from "./use-dashboard"
 
 function HeaderHint({ hint }: { hint: string }): React.JSX.Element {
@@ -93,11 +94,13 @@ function SkillChips({ skills }: { skills: string[] }): React.JSX.Element {
 function CommitRow({
   item,
   onOpenExternal,
-  onViewThread
+  onViewThread,
+  onViewTrace
 }: {
   item: DashboardCommitDetail
   onOpenExternal: (url: string) => void
   onViewThread: (item: DashboardCommitDetail) => void
+  onViewTrace: (item: DashboardCommitDetail) => void
 }): React.JSX.Element {
   const externalUrl = item.pushed ? (item.commitUrl || item.repositoryWebUrl || "") : ""
   const displayRepo = repoName(item)
@@ -150,12 +153,23 @@ function CommitRow({
         <SkillChips skills={item.usedSkills} />
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-xs">
-        <div className="font-medium tabular-nums text-foreground">
-          {formatPercent(item.codeAdoptionRate)}
-        </div>
-        <div className="text-[10px] text-muted-foreground">
-          {formatLines(item.codeAdoptedLines)} / {formatLines(item.codeEffectiveGeneratedLines)} 行
-        </div>
+        <button
+          type="button"
+          className="group/trace -mx-1 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-blue-500/10 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+          disabled={!item.commitSha}
+          title={item.commitSha ? "查看采纳溯源：该率对应的 gen / adopt 事件" : "无 commit 信息，无法溯源"}
+          onClick={() => onViewTrace(item)}
+        >
+          <div className="flex items-center gap-1 font-medium tabular-nums text-foreground">
+            {formatPercent(item.codeAdoptionRate)}
+            {item.commitSha ? (
+              <GitCompare className="size-3 text-muted-foreground opacity-0 transition-opacity group-hover/trace:opacity-100" />
+            ) : null}
+          </div>
+          <div className="text-[10px] text-muted-foreground">
+            {formatLines(item.codeAdoptedLines)} / {formatLines(item.codeEffectiveGeneratedLines)} 行
+          </div>
+        </button>
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-xs">
         <span className="text-muted-foreground">{item.filesChanged} 文件</span>
@@ -458,6 +472,7 @@ export function CommitDetailsDialog({
   const canPrev = page > 1 && !loading
   const canNext = page < pageCount && !loading
   const [threadCommit, setThreadCommit] = useState<DashboardCommitDetail | null>(null)
+  const [traceCommit, setTraceCommit] = useState<DashboardCommitDetail | null>(null)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -556,6 +571,7 @@ export function CommitDetailsDialog({
                         item={item}
                         onOpenExternal={onOpenExternal}
                         onViewThread={setThreadCommit}
+                        onViewTrace={setTraceCommit}
                       />
                     ))}
                   </tbody>
@@ -569,6 +585,16 @@ export function CommitDetailsDialog({
         commit={threadCommit}
         onOpenChange={(next) => {
           if (!next) setThreadCommit(null)
+        }}
+      />
+      <CommitAdoptionTraceDialog
+        commit={traceCommit}
+        onOpenChange={(next) => {
+          if (!next) setTraceCommit(null)
+        }}
+        onViewThread={(threadId) => {
+          // 复用既有会话还原弹窗（ThreadConversationDialog），按单个会话作用域打开。
+          if (traceCommit) setThreadCommit({ ...traceCommit, threadIds: [threadId] })
         }}
       />
     </Dialog>

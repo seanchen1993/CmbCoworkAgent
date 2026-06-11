@@ -224,6 +224,44 @@ interface CommitAdoptionSummary {
   threadIds: string[]
 }
 
+/**
+ * 单条 commit 的采纳「溯源」：一行 = 一个 `code_adopt` 事件，并按 `genEventId`
+ * 关联其 `code_gen` 元数据。gen 侧可能缺失（事件超出窗口/未上报）时为 null。
+ */
+interface CommitAdoptionEventPair {
+  genEventId: string
+  // gen 侧（云端 code_gen，仅元数据；缺失时为 null/空）
+  file: string | null // gen.relativeHint（叶子文件名，云端不含完整路径）
+  tool: string | null
+  language: string | null
+  usedSkills: string[]
+  modelName: string | null
+  generatedAt: string | null // gen.createdAt
+  // adopt 侧（code_adopt）
+  verdict: string | null
+  generatedLineCount: number | null
+  effectiveGeneratedLineCount: number | null
+  adoptedLineCount: number | null
+  measureSource: string | null
+  pushed: boolean
+  measuredAt: string | null
+  threadId: string | null
+}
+
+interface CommitAdoptionEvents {
+  commitSha: string
+  pairs: CommitAdoptionEventPair[]
+  /**
+   * 对账：sum 口径与面板 `fetchCommitAdoptionMap` 一致（仅累加三项行数齐全的 adopt
+   * 行），故 `rate` 与面板该 commit 采纳率构造上一致。
+   */
+  reconciliation: {
+    sumEffective: number
+    sumAdopted: number
+    rate: number | null
+  }
+}
+
 interface DashboardSkillDetail {
   stats: DashboardCodeStats
   traces: DashboardTraceDetail[]
@@ -1484,6 +1522,187 @@ async function fetchCommitAdoptionMap(
     })
   }
   return result
+}
+
+/** Join commit-detail rows with their per-commit adoption summary (skills, threads, adopted lines). */
+function attachCommitAdoption(
+  items: DashboardCommitDetail[],
+  adoptionMap: Map<string, CommitAdoptionSummary>
+): DashboardCommitDetail[] {
+  return items.map((item) => {
+    const adoption = item.commitSha ? adoptionMap.get(item.commitSha) : undefined
+    const adoptedSkills = adoption?.usedSkills ?? []
+    const adoptionThreadIds = adoption?.threadIds ?? []
+    // 关联会话优先取自采纳事件（代码生成时所在的真实会话，可为多个）；
+    // 采纳事件缺失时回退到 commit 自带 threadId。
+    const threadIds =
+      adoptionThreadIds.length > 0 ? adoptionThreadIds : item.threadId ? [item.threadId] : []
+    return {
+      ...item,
+      threadId: threadIds[0] ?? item.threadId,
+      threadIds,
+      usedSkills: adoptedSkills,
+      skillCount: adoptedSkills.length,
+      codeGeneratedLines: adoption?.generatedLines ?? 0,
+      codeEffectiveGeneratedLines: adoption?.effectiveGeneratedLines ?? 0,
+      codeAdoptedLines: adoption?.adoptedLines ?? 0,
+      codeAdoptionRate: adoption?.adoptionRate ?? null
+    }
+  })
+}
+
+/** Upper bound on adopt rows fetched for a single commit's 溯源 view. */
+const COMMIT_ADOPTION_EVENTS_LIMIT = 500
+/** ES terms clause cap when reverse-looking-up gen events by id. */
+const GEN_LOOKUP_BATCH = 1000
+
+/**
+ * 单条 commit 的采纳溯源：拉该 commit 全部 `code_adopt`，再用 `genEventId` 反查
+ * 配对 `code_gen` 元数据。每个 adopt 事件对应一行（含 verdict / 三项行数）。
+ *
+ * 刻意不加时间范围：`commitSha` 已是精确、全局唯一的选择子，而 `code_adopt` 以
+ * commit 时刻打点却携带可能早于窗口的 `generatedAt`（同 `fetchCommitAdoptionMap`）。
+ */
+async function fetchCommitAdoptionEvents(commitSha: string): Promise<CommitAdoptionEvents> {
+  requireDashboardAccess()
+  const sha = commitSha?.trim?.() ?? ""
+  const empty: CommitAdoptionEvents = {
+    commitSha: sha,
+    pairs: [],
+    reconciliation: { sumEffective: 0, sumAdopted: 0, rate: null }
+  }
+  if (!sha) return empty
+
+  // 1) 该 commit 的全部 code_adopt（一行 = 一次测量）。
+  const adoptBody = {
+    track_total_hits: false,
+    size: COMMIT_ADOPTION_EVENTS_LIMIT,
+    query: {
+      bool: {
+        filter: [{ term: { eventName: "code_adopt" } }, { term: { "properties.commitSha": sha } }]
+      }
+    },
+    _source: {
+      includes: [
+        "properties.genEventId",
+        "properties.verdict",
+        "properties.generatedLineCount",
+        "properties.effectiveGeneratedLineCount",
+        "properties.adoptedLineCount",
+        "properties.measureSource",
+        "properties.pushed",
+        "properties.measuredAt",
+        "properties.threadId"
+      ]
+    }
+  }
+  const adoptRaw = (await esQuery(getEsIndex("event"), adoptBody)) as EsSearchResponse
+  const adoptRows = (adoptRaw.hits?.hits ?? []).map((hit) =>
+    asRecord(asRecord(hit._source).properties)
+  )
+  if (adoptRows.length === 0) return empty
+
+  // 2) 反查配对 gen 的元数据（云端 code_gen 仅含叶子文件名/工具/技能等，无内容/路径）。
+  const genIds = Array.from(
+    new Set(adoptRows.map((row) => asString(row.genEventId)).filter(Boolean))
+  )
+  const genById = new Map<string, Record<string, unknown>>()
+  // gen 元数据仅为展示增强（文件叶子名/工具/技能）。若反查失败（如 properties.eventId
+  // 的 mapping 不支持精确 term），降级为「仅 adopt 行」，核心对账不受影响。
+  try {
+    for (let i = 0; i < genIds.length; i += GEN_LOOKUP_BATCH) {
+      const batch = genIds.slice(i, i + GEN_LOOKUP_BATCH)
+      const genBody = {
+        track_total_hits: false,
+        size: batch.length,
+        query: {
+          bool: {
+            filter: [
+              { term: { eventName: "code_gen" } },
+              { terms: { "properties.eventId": batch } }
+            ]
+          }
+        },
+        _source: {
+          includes: [
+            "properties.eventId",
+            "properties.relativeHint",
+            "properties.tool",
+            "properties.language",
+            "properties.usedSkills",
+            "properties.modelName",
+            "properties.createdAt"
+          ]
+        }
+      }
+      const genRaw = (await esQuery(getEsIndex("event"), genBody)) as EsSearchResponse
+      for (const hit of genRaw.hits?.hits ?? []) {
+        const props = asRecord(asRecord(hit._source).properties)
+        const id = asString(props.eventId)
+        if (id) genById.set(id, props)
+      }
+    }
+  } catch (e) {
+    console.warn("[Dashboard] commitAdoptionEvents gen lookup failed (adopt-only fallback):", e)
+  }
+
+  // 3) 配对成行 + 对账（sum 口径镜像 fetchCommitAdoptionMap：仅累加三项齐全的行）。
+  let sumEffective = 0
+  let sumAdopted = 0
+  const pairs: CommitAdoptionEventPair[] = adoptRows.map((adopt) => {
+    const genEventId = asString(adopt.genEventId)
+    const gen = genEventId ? genById.get(genEventId) : undefined
+    const generatedLineCount =
+      typeof adopt.generatedLineCount === "number" ? adopt.generatedLineCount : null
+    const effectiveGeneratedLineCount =
+      typeof adopt.effectiveGeneratedLineCount === "number"
+        ? adopt.effectiveGeneratedLineCount
+        : null
+    const adoptedLineCount =
+      typeof adopt.adoptedLineCount === "number" ? adopt.adoptedLineCount : null
+    if (
+      generatedLineCount !== null &&
+      effectiveGeneratedLineCount !== null &&
+      adoptedLineCount !== null
+    ) {
+      sumEffective += effectiveGeneratedLineCount
+      sumAdopted += adoptedLineCount
+    }
+    return {
+      genEventId,
+      file: gen ? (asOptionalString(gen.relativeHint) ?? null) : null,
+      tool: gen ? (asOptionalString(gen.tool) ?? null) : null,
+      language: gen ? (asOptionalString(gen.language) ?? null) : null,
+      usedSkills: gen ? normalizeSkillList(asStringArray(gen.usedSkills)) : [],
+      modelName: gen ? (asOptionalString(gen.modelName) ?? null) : null,
+      generatedAt: gen ? (asOptionalString(gen.createdAt) ?? null) : null,
+      verdict: asOptionalString(adopt.verdict) ?? null,
+      generatedLineCount,
+      effectiveGeneratedLineCount,
+      adoptedLineCount,
+      measureSource: asOptionalString(adopt.measureSource) ?? null,
+      pushed: adopt.pushed === true,
+      measuredAt: asOptionalString(adopt.measuredAt) ?? null,
+      threadId: asOptionalString(adopt.threadId) ?? null
+    }
+  })
+
+  // 新近的测量排在前（按测量时间，缺失回退生成时间）。
+  pairs.sort((a, b) => {
+    const ta = Date.parse(a.measuredAt ?? a.generatedAt ?? "") || 0
+    const tb = Date.parse(b.measuredAt ?? b.generatedAt ?? "") || 0
+    return tb - ta
+  })
+
+  return {
+    commitSha: sha,
+    pairs,
+    reconciliation: {
+      sumEffective,
+      sumAdopted,
+      rate: sumEffective > 0 ? sumAdopted / sumEffective : null
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -4381,6 +4600,36 @@ async function fetchSkillDetail(
   }
 }
 
+/** `_source` fields needed to render a Commit 明细 row (shared by commit-detail fetchers). */
+const COMMIT_DETAIL_SOURCE_INCLUDES = [
+  "eventId",
+  "eventTime",
+  "eventName",
+  "userName",
+  "userIp",
+  "sapId",
+  "ystId",
+  "orgName",
+  "upperOrgLv0",
+  "upperOrgLv1",
+  "properties.repoPath",
+  "properties.repositoryName",
+  "properties.repositoryFullName",
+  "properties.repositoryWebUrl",
+  "properties.commitSha",
+  "properties.commitUrl",
+  "properties.pushed",
+  "properties.pushedAt",
+  "properties.branch",
+  "properties.filesChanged",
+  "properties.insertions",
+  "properties.deletions",
+  "properties.triggeredBy",
+  "properties.threadId",
+  "properties.usedSkills",
+  "properties.skillCount"
+]
+
 async function fetchCommitDetails(
   range: TimeRange,
   options?: number | CommitDetailsOptions
@@ -4417,36 +4666,7 @@ async function fetchCommitDetails(
         filter: filters
       }
     },
-    _source: {
-      includes: [
-        "eventId",
-        "eventTime",
-        "eventName",
-        "userName",
-        "userIp",
-        "sapId",
-        "ystId",
-        "orgName",
-        "upperOrgLv0",
-        "upperOrgLv1",
-        "properties.repoPath",
-        "properties.repositoryName",
-        "properties.repositoryFullName",
-        "properties.repositoryWebUrl",
-        "properties.commitSha",
-        "properties.commitUrl",
-        "properties.pushed",
-        "properties.pushedAt",
-        "properties.branch",
-        "properties.filesChanged",
-        "properties.insertions",
-        "properties.deletions",
-        "properties.triggeredBy",
-        "properties.threadId",
-        "properties.usedSkills",
-        "properties.skillCount"
-      ]
-    }
+    _source: { includes: COMMIT_DETAIL_SOURCE_INCLUDES }
   }
   const raw = (await esQuery(getEsIndex("event"), body)) as EsSearchResponse
   const hits = raw.hits?.hits ?? []
@@ -4459,30 +4679,7 @@ async function fetchCommitDetails(
     page,
     pageSize,
     pushedOnly,
-    items: items.map((item) => {
-      const adoption = item.commitSha ? adoptionMap.get(item.commitSha) : undefined
-      const adoptedSkills = adoption?.usedSkills ?? []
-      const adoptionThreadIds = adoption?.threadIds ?? []
-      // 关联会话优先取自采纳事件（代码生成时所在的真实会话，可为多个）；
-      // 采纳事件缺失时回退到 commit 自带 threadId。
-      const threadIds =
-        adoptionThreadIds.length > 0
-          ? adoptionThreadIds
-          : item.threadId
-            ? [item.threadId]
-            : []
-      return {
-        ...item,
-        threadId: threadIds[0] ?? item.threadId,
-        threadIds,
-        usedSkills: adoptedSkills,
-        skillCount: adoptedSkills.length,
-        codeGeneratedLines: adoption?.generatedLines ?? 0,
-        codeEffectiveGeneratedLines: adoption?.effectiveGeneratedLines ?? 0,
-        codeAdoptedLines: adoption?.adoptedLines ?? 0,
-        codeAdoptionRate: adoption?.adoptionRate ?? null
-      }
-    })
+    items: attachCommitAdoption(items, adoptionMap)
   }
 }
 
@@ -5627,6 +5824,33 @@ function makeMockUserDetail(
   }
 }
 
+/** DEV mock helper: split a project's code stats across N features by descending weight. */
+function splitMockCodeStatsAcrossFeatures(
+  stats: DashboardCodeStats | null,
+  count: number
+): Array<DashboardCodeStats | null> {
+  if (!stats || count <= 0) {
+    return Array.from({ length: Math.max(0, count) }, () => null)
+  }
+  const weights = Array.from({ length: count }, (_, i) => count - i)
+  const weightSum = weights.reduce((acc, w) => acc + w, 0)
+  return weights.map((weight) => {
+    const frac = weight / weightSum
+    const scale = (value: number): number => Math.round(value * frac)
+    return makeDashboardCodeStats({
+      generatedLines: scale(stats.generatedLines),
+      deletedLines: scale(stats.deletedLines),
+      measuredGeneratedLines: scale(stats.measuredGeneratedLines),
+      effectiveGeneratedLines: scale(stats.effectiveGeneratedLines),
+      adoptedLines: scale(stats.adoptedLines),
+      pushedMeasuredGeneratedLines: scale(stats.pushedMeasuredGeneratedLines),
+      pushedEffectiveGeneratedLines: scale(stats.pushedEffectiveGeneratedLines),
+      pushedAdoptedLines: scale(stats.pushedAdoptedLines),
+      pushedCommitCount: scale(stats.pushedCommitCount)
+    })
+  })
+}
+
 function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): DashboardProjectModeData {
   const allProjects: ProjectModeProjectView[] = [
     {
@@ -5818,6 +6042,16 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
           summary: "演示用占位特性"
         }
       ]
+    })
+  }
+  // DEV：把项目级采纳明细按递减权重拆到各特性，让「下沉到 feature 级别」的采纳率/生成行数有 mock 数据可看。
+  for (const project of allProjects) {
+    const featureStats = splitMockCodeStatsAcrossFeatures(
+      project.codeStats,
+      project.features.length
+    )
+    project.features.forEach((feature, idx) => {
+      feature.codeStats = featureStats[idx]
     })
   }
   const mockCreators: Array<
@@ -6552,6 +6786,102 @@ function makeMockSkillDetail(
   }
 }
 
+function makeMockCommitAdoptionEvents(commitSha: string): CommitAdoptionEvents {
+  const now = Date.now()
+  const iso = (offsetMs: number): string => new Date(now - offsetMs).toISOString()
+  const pairs: CommitAdoptionEventPair[] = [
+    {
+      genEventId: "g_mock_committed",
+      file: "runtime.ts",
+      tool: "edit_file",
+      language: "ts",
+      usedSkills: ["代码审查-v1.0.0"],
+      modelName: "claude-opus-4-8",
+      generatedAt: iso(9 * 60 * 1000),
+      verdict: "committed",
+      generatedLineCount: 120,
+      effectiveGeneratedLineCount: 110,
+      adoptedLineCount: 88,
+      measureSource: "git_commit",
+      pushed: true,
+      measuredAt: iso(6 * 60 * 1000),
+      threadId: "mock-thread-1"
+    },
+    {
+      genEventId: "g_mock_deleted",
+      file: "scratch.ts",
+      tool: "write_file",
+      language: "ts",
+      usedSkills: [],
+      modelName: "claude-opus-4-8",
+      generatedAt: iso(8 * 60 * 1000),
+      verdict: "deleted",
+      generatedLineCount: 40,
+      effectiveGeneratedLineCount: 40,
+      adoptedLineCount: 0,
+      measureSource: "git_commit",
+      pushed: true,
+      measuredAt: iso(6 * 60 * 1000),
+      threadId: "mock-thread-1"
+    },
+    {
+      genEventId: "g_mock_large",
+      file: "generated-bundle.ts",
+      tool: "write_file",
+      language: "ts",
+      usedSkills: ["需求分析-v1.0.0"],
+      modelName: "claude-opus-4-8",
+      generatedAt: iso(7 * 60 * 1000),
+      verdict: "skipped_large",
+      generatedLineCount: 24000,
+      effectiveGeneratedLineCount: null,
+      adoptedLineCount: null,
+      measureSource: "git_commit",
+      pushed: true,
+      measuredAt: iso(6 * 60 * 1000),
+      threadId: "mock-thread-2"
+    },
+    {
+      genEventId: "g_mock_orphan",
+      file: null,
+      tool: null,
+      language: null,
+      usedSkills: [],
+      modelName: null,
+      generatedAt: null,
+      verdict: "committed",
+      generatedLineCount: 30,
+      effectiveGeneratedLineCount: 30,
+      adoptedLineCount: 21,
+      measureSource: "git_commit",
+      pushed: true,
+      measuredAt: iso(5 * 60 * 1000),
+      threadId: "mock-thread-2"
+    }
+  ]
+  let sumEffective = 0
+  let sumAdopted = 0
+  for (const pair of pairs) {
+    if (
+      pair.generatedLineCount !== null &&
+      pair.effectiveGeneratedLineCount !== null &&
+      pair.adoptedLineCount !== null
+    ) {
+      sumEffective += pair.effectiveGeneratedLineCount
+      sumAdopted += pair.adoptedLineCount
+    }
+  }
+  return {
+    commitSha,
+    pairs,
+    reconciliation: {
+      sumEffective,
+      sumAdopted,
+      rate: sumEffective > 0 ? sumAdopted / sumEffective : null
+    }
+  }
+}
+
 function makeMockCommitDetails(
   range: TimeRange,
   options?: number | CommitDetailsOptions
@@ -6634,6 +6964,58 @@ function makeMockCommitDetails(
   }
 }
 
+/** DEV mock for one feature's Commit 明细: a deterministic slice of the platform commit mock. */
+function makeMockProjectModeFeatureCommits(
+  projectId: string,
+  featureSlug: string,
+  range: TimeRange,
+  options?: number | CommitDetailsOptions
+): {
+  total: number
+  page: number
+  pageSize: number
+  pushedOnly: boolean
+  items: DashboardCommitDetail[]
+} {
+  const { page, pageSize, pushedOnly, upperOrgLv1 } = normalizeCommitDetailsOptions(options)
+  // 用 projectId+featureSlug 的哈希派生「条数 + 起始偏移」，让每个特性拿到各不相同（且互不重叠）
+  // 的 commit 窗口——真实后端按 harnessFeatureSlug 精确圈定，这里仅为 DEV 还原「每条 feature 只看自己的 commit」。
+  const seed = `${projectId}/${featureSlug}`
+  let hash = 0
+  for (let i = 0; i < seed.length; i += 1) hash = (hash * 31 + seed.charCodeAt(i)) >>> 0
+  const featureCommitCount = 4 + (hash % 9)
+  const pool = makeMockCommitDetails(range, {
+    page: 1,
+    pageSize: 1000,
+    pushedOnly: false,
+    upperOrgLv1: null
+  }).items
+  const offset = pool.length > 0 ? (hash * 7) % pool.length : 0
+  // 双倍拼接后再切片，避免窗口跨过数组末尾时长度不足。
+  const featureItems = [...pool, ...pool].slice(offset, offset + featureCommitCount)
+  const filtered = featureItems.filter((item) => {
+    if (pushedOnly && !item.pushed) return false
+    if (upperOrgLv1 !== null) {
+      const needle = upperOrgLv1.toLowerCase()
+      const matched = [item.upperOrgLv1, item.upperOrgLv0].some((value) =>
+        String(value || "")
+          .toLowerCase()
+          .includes(needle)
+      )
+      if (!matched) return false
+    }
+    return true
+  })
+  const start = (page - 1) * pageSize
+  return {
+    total: filtered.length,
+    page,
+    pageSize,
+    pushedOnly,
+    items: filtered.slice(start, start + pageSize)
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // Project Mode (Harness Board) dashboard
 // ─────────────────────────────────────────────────────────
@@ -6678,6 +7060,8 @@ interface ProjectModeFeatureView {
   statusLabel?: string
   currentNodeStatusLabel?: string
   summary?: string
+  /** This-range code adoption for the feature (sliced by harnessFeatureSlug); absent if no code data. */
+  codeStats?: DashboardCodeStats | null
 }
 
 interface ProjectModeSkillCount {
@@ -7079,7 +7463,8 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
       location: asOptionalString(f.location),
       statusLabel: asOptionalString(f.overallStatusLabel),
       currentNodeStatusLabel: asOptionalString(f.currentNodeStatusLabel),
-      summary: asOptionalString(f.summary)
+      summary: asOptionalString(f.summary),
+      codeStats: null
     }
   })
   return {
@@ -7476,6 +7861,13 @@ async function fetchProjectModeProjectPageHits(options?: ProjectModeProjectPageO
 /** Upper bound on the project set forwarded to the code-adoption query (ES terms cap is 65536). */
 const PROJECT_MODE_PROJECT_ID_LIMIT = 5000
 const PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE = 10
+/** Per-project cap on feature buckets returned by the nested feature code-stats agg. */
+const PROJECT_MODE_FEATURE_SLUG_LIMIT = 200
+
+/** Composite map key pairing a project id with one of its feature slugs. */
+function projectFeatureKey(projectId: string, featureSlug: string): string {
+  return JSON.stringify([projectId, featureSlug])
+}
 
 /** Convert a `terms usedSkills` bucket list into a {skill,count}[] ranking. */
 function parseSkillCountBuckets(raw: unknown): ProjectModeSkillCount[] {
@@ -7770,19 +8162,6 @@ function buildProjectModeCodeAggs(
   return { codeGenFilters, codeAdoptFilters, perBucketAggs }
 }
 
-/** Map a `terms` bucket list (project / skill) keyed by `key` → per-bucket code stats. */
-function parseCodeStatsBucketsByKey(buckets: unknown): Map<string, DashboardCodeStats> {
-  const map = new Map<string, DashboardCodeStats>()
-  if (!Array.isArray(buckets)) return map
-  for (const bucket of buckets) {
-    const b = asRecord(bucket)
-    const key = asString(b.key)
-    if (!key) continue
-    map.set(key, normalizeCodeStatsFromContainer(b))
-  }
-  return map
-}
-
 /**
  * Map the nested `harnessAdapterName → harnessAdapterVersion` bucket tree → code
  * stats keyed by `adapterKey(name, version)`. Mirrors the usage-side adapter
@@ -7909,21 +8288,56 @@ async function fetchProjectModeAggregateCodeStats(
 async function fetchProjectModeProjectCodeStats(
   projectIds: string[],
   range: TimeRange
-): Promise<Map<string, DashboardCodeStats>> {
-  if (projectIds.length === 0) return new Map<string, DashboardCodeStats>()
+): Promise<{
+  byProject: Map<string, DashboardCodeStats>
+  byFeature: Map<string, DashboardCodeStats>
+}> {
+  if (projectIds.length === 0) {
+    return { byProject: new Map<string, DashboardCodeStats>(), byFeature: new Map() }
+  }
 
+  // 同一个 perBucketAggs 既统计项目整体，又作为 by_feature 桶的子聚合按特性 slug 切片，
+  // 一次请求即可拿到项目 + 特性两个粒度的采纳明细（与 by_adapter→by_version 复用同理）。
   const raw = await fetchProjectModeCodeAggs(
     projectIds,
     range,
     (perBucketAggs, scopedProjectIds) => ({
       by_project: {
         terms: { field: "properties.harnessProjectId", size: Math.max(1, scopedProjectIds.length) },
-        aggs: perBucketAggs
+        aggs: {
+          ...perBucketAggs,
+          by_feature: {
+            terms: {
+              field: "properties.harnessFeatureSlug",
+              size: PROJECT_MODE_FEATURE_SLUG_LIMIT
+            },
+            aggs: perBucketAggs
+          }
+        }
       }
     })
   )
   const projectAggs = asRecord(asRecord(raw).aggregations)
-  return parseCodeStatsBucketsByKey(asRecord(projectAggs.by_project).buckets)
+  const projectBuckets = asRecord(projectAggs.by_project).buckets
+  const byProject = new Map<string, DashboardCodeStats>()
+  const byFeature = new Map<string, DashboardCodeStats>()
+  if (Array.isArray(projectBuckets)) {
+    for (const bucket of projectBuckets) {
+      const b = asRecord(bucket)
+      const projectId = asString(b.key)
+      if (!projectId) continue
+      byProject.set(projectId, normalizeCodeStatsFromContainer(b))
+      const featureBuckets = asRecord(b.by_feature).buckets
+      if (!Array.isArray(featureBuckets)) continue
+      for (const featureBucket of featureBuckets) {
+        const fb = asRecord(featureBucket)
+        const slug = asString(fb.key)
+        if (!slug) continue
+        byFeature.set(projectFeatureKey(projectId, slug), normalizeCodeStatsFromContainer(fb))
+      }
+    }
+  }
+  return { byProject, byFeature }
 }
 
 /** One list page: ES-paginated snapshot projects enriched with this-range usage / code. */
@@ -7935,15 +8349,110 @@ async function fetchProjectModeProjectPage(
   const sliced = await fetchProjectModeProjectPageHits(options)
   const projectIds = sliced.projects.map((project) => project.projectId)
   const usage = await fetchProjectModePageUsage(projectIds, range, options)
-  const codeByProject = await fetchProjectModeProjectCodeStats([...usage.perProject.keys()], range)
+  const code = await fetchProjectModeProjectCodeStats([...usage.perProject.keys()], range)
   return {
     ...sliced,
     projects: sliced.projects.map((project) => ({
       ...project,
       conversationCount: usage.perProject.get(project.projectId) ?? 0,
       topSkills: usage.perProjectSkills.get(project.projectId) ?? [],
-      codeStats: codeByProject.get(project.projectId) ?? null
+      codeStats: code.byProject.get(project.projectId) ?? null,
+      features: project.features.map((feature) => ({
+        ...feature,
+        codeStats: code.byFeature.get(projectFeatureKey(project.projectId, feature.slug)) ?? null
+      }))
     }))
+  }
+}
+
+/** Upper bound on the commit-sha set collected for one feature's commit list. */
+const PROJECT_MODE_FEATURE_COMMIT_SHA_LIMIT = 500
+
+/**
+ * Commit 明细 for a single project-mode feature.
+ *
+ * `git.commit.created` events carry no harness project/feature binding, so we
+ * first resolve the feature's commit SHAs from its `code_adopt` events (which do
+ * carry `harnessProjectId` + `harnessFeatureSlug` + `commitSha`), then page the
+ * matching commits and join adoption — reusing the platform Commit 明细 plumbing.
+ */
+async function fetchProjectModeFeatureCommits(
+  projectId: string,
+  featureSlug: string,
+  range: TimeRange,
+  options?: number | CommitDetailsOptions
+): Promise<{
+  total: number
+  page: number
+  pageSize: number
+  pushedOnly: boolean
+  items: DashboardCommitDetail[]
+}> {
+  requireDashboardProjectModeAccess()
+  const { page, pageSize, pushedOnly, upperOrgLv1, orgLv1List } =
+    normalizeCommitDetailsOptions(options)
+  const normalizedProjectId = projectId.trim()
+  const normalizedFeatureSlug = featureSlug.trim()
+  const empty = { total: 0, page, pageSize, pushedOnly, items: [] as DashboardCommitDetail[] }
+  if (!normalizedProjectId || !normalizedFeatureSlug) return empty
+
+  // 1) 该特性关联的 commit sha 集合：取自带 commitSha 的 code_adopt 事件。
+  //    按 generatedAt 落在所选时间范围内过滤，与特性级采纳明细（buildProjectModeCodeAggs）口径对齐。
+  const shaRaw = asRecord(
+    await esQuery(getEsIndex("event"), {
+      size: 0,
+      query: {
+        bool: {
+          filter: [
+            { term: { eventName: "code_adopt" } },
+            { term: { "properties.harnessProjectId": normalizedProjectId } },
+            { term: { "properties.harnessFeatureSlug": normalizedFeatureSlug } },
+            { exists: { field: "properties.commitSha" } },
+            timeRangeFilter("properties.generatedAt", range)
+          ]
+        }
+      },
+      aggs: {
+        by_commit: {
+          terms: { field: "properties.commitSha", size: PROJECT_MODE_FEATURE_COMMIT_SHA_LIMIT }
+        }
+      }
+    })
+  )
+  const shaBuckets = asRecord(asRecord(shaRaw.aggregations).by_commit).buckets
+  const commitShas = Array.isArray(shaBuckets)
+    ? shaBuckets.map((bucket) => asString(asRecord(bucket).key)).filter(Boolean)
+    : []
+  if (commitShas.length === 0) return empty
+
+  // 2) 拉取这些 sha 对应的 git.commit.created，并叠加 pushed / 部门 / 「室筛选」。
+  const filters: Record<string, unknown>[] = [
+    { term: { eventName: "git.commit.created" } },
+    { terms: { "properties.commitSha": commitShas } }
+  ]
+  if (pushedOnly) filters.push({ term: { "properties.pushed": true } })
+  appendOptionalFilter(filters, buildUpperOrgLv1ListFilter(orgLv1List))
+  if (upperOrgLv1 !== null) filters.push(buildOrgLevelMatchFilter(upperOrgLv1))
+
+  const raw = (await esQuery(getEsIndex("event"), {
+    track_total_hits: true,
+    from: (page - 1) * pageSize,
+    size: pageSize,
+    sort: [{ eventTime: { order: "desc" } }],
+    query: { bool: { filter: filters } },
+    _source: { includes: COMMIT_DETAIL_SOURCE_INCLUDES }
+  })) as EsSearchResponse
+  const hits = raw.hits?.hits ?? []
+  const items = hits.map(normalizeCommitDetail)
+  const adoptionMap = await fetchCommitAdoptionMap(
+    items.map((item) => item.commitSha ?? "").filter(Boolean)
+  )
+  return {
+    total: getTotalHits(raw, hits.length),
+    page,
+    pageSize,
+    pushedOnly,
+    items: attachCommitAdoption(items, adoptionMap)
   }
 }
 
@@ -8173,6 +8682,32 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchProjectModeTraces(projectId, range, options) }
       } catch (e) {
         console.error("[Dashboard] projectModeTraces error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:projectModeFeatureCommits",
+    async (
+      _,
+      projectId: string,
+      featureSlug: string,
+      range: TimeRange,
+      options?: number | CommitDetailsOptions
+    ) => {
+      if (import.meta.env.DEV)
+        return {
+          success: true,
+          data: makeMockProjectModeFeatureCommits(projectId, featureSlug, range, options)
+        }
+      try {
+        return {
+          success: true,
+          data: await fetchProjectModeFeatureCommits(projectId, featureSlug, range, options)
+        }
+      } catch (e) {
+        console.error("[Dashboard] projectModeFeatureCommits error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
@@ -8461,6 +8996,18 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       }
     }
   )
+
+  _ipcMain.handle("dashboard:commitAdoptionEvents", async (_, commitSha: string) => {
+    const sha = commitSha?.trim?.() ?? ""
+    if (!sha) return { success: false, error: "commitSha is required" }
+    if (import.meta.env.DEV) return { success: true, data: makeMockCommitAdoptionEvents(sha) }
+    try {
+      return { success: true, data: await fetchCommitAdoptionEvents(sha) }
+    } catch (e) {
+      console.error("[Dashboard] commitAdoptionEvents error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
 
   _ipcMain.handle("dashboard:exportSkillTraces", async (event, rawPayload: unknown) => {
     try {

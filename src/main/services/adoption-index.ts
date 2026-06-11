@@ -267,6 +267,32 @@ export function findPendingGensForFile(
   }
 }
 
+/**
+ * Fetch a single gen row by its `event_id` (primary key). Used by the local
+ * line-level 溯源 reader to recover the stored per-line hashes + absolute file
+ * path for a specific generation. Returns null when the row is absent (e.g.
+ * already pruned by retention, oversize baselines that skip the index, or a gen
+ * produced on another machine / by another user).
+ */
+export function getGenRowByEventId(eventId: string): GenIndexRow | null {
+  if (!db || !eventId) return null
+  const stmt = db.prepare(
+    `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
+            line_hashes, old_line_hashes, created_at, measured,
+            used_skills, thread_id, trace_id, model_id, model_name,
+            harness_project_id, harness_feature_slug, harness_adapter_name, harness_adapter_version
+       FROM gen_events
+      WHERE event_id = ?`
+  )
+  stmt.bind([eventId])
+  try {
+    if (!stmt.step()) return null
+    return stmt.getAsObject() as unknown as GenIndexRow
+  } finally {
+    stmt.free()
+  }
+}
+
 export function markMeasured(eventId: string): void {
   if (!db) return
   try {

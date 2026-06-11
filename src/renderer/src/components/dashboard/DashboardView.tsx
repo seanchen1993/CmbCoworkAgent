@@ -2111,6 +2111,17 @@ export function DashboardView(): React.JSX.Element {
     }
   }, [])
   const [commitDepartmentFilter, setCommitDepartmentFilter] = useState("")
+  // 项目模式·特性级关联 Commit 弹窗（复用 CommitDetailsDialog，独立于平台级 Commit 明细）。
+  const [featureCommitScope, setFeatureCommitScope] = useState<{
+    projectId: string
+    featureSlug: string
+    label: string
+  } | null>(null)
+  const [featureCommitData, setFeatureCommitData] = useState<DashboardCommitDetailsData | null>(null)
+  const [featureCommitLoading, setFeatureCommitLoading] = useState(false)
+  const [featureCommitError, setFeatureCommitError] = useState<string | null>(null)
+  const [featureCommitDeptValue, setFeatureCommitDeptValue] = useState("")
+  const [featureCommitDeptFilter, setFeatureCommitDeptFilter] = useState("")
   const [subPage, setSubPage] = useState<DashboardSubPage>({ kind: "main" })
   const [userList, setUserList] = useState<DashboardUserListData | null>(null)
   const [userListLoading, setUserListLoading] = useState(false)
@@ -3071,6 +3082,79 @@ export function DashboardView(): React.JSX.Element {
     [loadCommitDetails]
   )
 
+  const loadFeatureCommits = useCallback(
+    async (
+      scope: { projectId: string; featureSlug: string; label: string },
+      page = 1,
+      pushedOnly = false,
+      upperOrgLv1 = featureCommitDeptFilter
+    ) => {
+      setFeatureCommitData(null)
+      setFeatureCommitError(null)
+      setFeatureCommitLoading(true)
+      const normalizedDepartment = upperOrgLv1.trim()
+      try {
+        const result = await window.api.dashboard.projectModeFeatureCommits(
+          scope.projectId,
+          scope.featureSlug,
+          range,
+          {
+            page,
+            pageSize: 20,
+            pushedOnly,
+            upperOrgLv1: normalizedDepartment || null,
+            orgLv1List: selectedOrgLv1List
+          }
+        )
+        if (!result.success) throw new Error(result.error ?? "获取 Commit 明细失败")
+        setFeatureCommitData(
+          result.data ?? { total: 0, page, pageSize: 20, pushedOnly, items: [] }
+        )
+      } catch (e) {
+        setFeatureCommitError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setFeatureCommitLoading(false)
+      }
+    },
+    [featureCommitDeptFilter, range, selectedOrgLv1List]
+  )
+
+  const handleProjectOpenFeatureCommits = useCallback(
+    (project: DashboardProjectModeProject, feature: DashboardProjectModeFeature) => {
+      if (!feature.slug) return
+      const scope = {
+        projectId: project.projectId,
+        featureSlug: feature.slug,
+        label: `${project.name} · ${feature.title}`
+      }
+      setFeatureCommitDeptValue("")
+      setFeatureCommitDeptFilter("")
+      setFeatureCommitScope(scope)
+      void loadFeatureCommits(scope, 1, false, "")
+    },
+    [loadFeatureCommits]
+  )
+
+  const reloadFeatureCommits = useCallback(
+    (page: number, pushedOnly: boolean, upperOrgLv1 = featureCommitDeptFilter) => {
+      if (!featureCommitScope) return
+      void loadFeatureCommits(featureCommitScope, page, pushedOnly, upperOrgLv1)
+    },
+    [featureCommitDeptFilter, featureCommitScope, loadFeatureCommits]
+  )
+
+  const handleFeatureCommitDepartmentSearch = useCallback(() => {
+    const upperOrgLv1 = featureCommitDeptValue.trim()
+    setFeatureCommitDeptFilter(upperOrgLv1)
+    reloadFeatureCommits(1, featureCommitData?.pushedOnly ?? false, upperOrgLv1)
+  }, [featureCommitData?.pushedOnly, featureCommitDeptValue, reloadFeatureCommits])
+
+  const handleFeatureCommitDepartmentClear = useCallback(() => {
+    setFeatureCommitDeptValue("")
+    setFeatureCommitDeptFilter("")
+    reloadFeatureCommits(1, featureCommitData?.pushedOnly ?? false, "")
+  }, [featureCommitData?.pushedOnly, reloadFeatureCommits])
+
   const handleExport = useCallback(async () => {
     if (!overview && !modelStats && !userStats && !productivity) return
     setExporting(true)
@@ -3730,6 +3814,7 @@ export function DashboardView(): React.JSX.Element {
                 projectPageError={projectModeProjectPageError}
                 onProjectPageChange={fetchProjectModeProjectPage}
                 onOpenTraces={handleProjectOpenTraces}
+                onOpenFeatureCommits={handleProjectOpenFeatureCommits}
                 onSkillClick={handleSkillClick}
                 onUserClick={(sapId) => openUserDetail(sapId, "main", true)}
                 marketSkillKeys={marketSkillKeys}
@@ -3939,6 +4024,23 @@ export function DashboardView(): React.JSX.Element {
         onDepartmentValueChange={setCommitDepartmentValue}
         onDepartmentSearch={handleCommitDepartmentSearch}
         onClearDepartment={handleCommitDepartmentClear}
+        onOpenExternal={handleCommitExternalOpen}
+      />
+      <CommitDetailsDialog
+        open={Boolean(featureCommitScope)}
+        onOpenChange={(open) => {
+          if (!open) setFeatureCommitScope(null)
+        }}
+        scopeLabel={featureCommitScope?.label ?? ""}
+        data={featureCommitData}
+        loading={featureCommitLoading}
+        error={featureCommitError}
+        onPageChange={(page) => reloadFeatureCommits(page, featureCommitData?.pushedOnly ?? false)}
+        onPushedOnlyChange={(pushedOnly) => reloadFeatureCommits(1, pushedOnly)}
+        departmentValue={featureCommitDeptValue}
+        onDepartmentValueChange={setFeatureCommitDeptValue}
+        onDepartmentSearch={handleFeatureCommitDepartmentSearch}
+        onClearDepartment={handleFeatureCommitDepartmentClear}
         onOpenExternal={handleCommitExternalOpen}
       />
     </div>
