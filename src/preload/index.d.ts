@@ -810,7 +810,15 @@ interface CustomAPI {
       isWorktree: boolean
       isGitRepo?: boolean
       taskId: string
-      files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      files: Array<{
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+        diff: string
+        additions: number
+        deletions: number
+      }>
+      changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
       totals: { additions: number; deletions: number; fileCount: number }
@@ -840,7 +848,15 @@ interface CustomAPI {
       isWorktree: boolean
       isGitRepo?: boolean
       taskId: string
-      files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      files: Array<{
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+        diff: string
+        additions: number
+        deletions: number
+      }>
+      changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
       totals: { additions: number; deletions: number; fileCount: number }
@@ -1277,6 +1293,7 @@ interface CustomAPI {
       tool_call_id: string
       savedToolName?: string
       savedToolDescription?: string
+      commitResult?: { success: boolean; commitMessage?: string; error?: string }
     }) => void
     onApprovalRequest: (threadId: string, callback: (request: unknown) => void) => () => void
     onApprovalTimeout: (

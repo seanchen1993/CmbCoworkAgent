@@ -92,6 +92,7 @@ import { ChatScrollNavigator } from "./ChatScrollNavigator"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
+import { AgentGitCommitDialog, type AgentCommitOutcome } from "./AgentGitCommitDialog"
 import {
   ContextReminderController,
   isContextReminderPending
@@ -2436,6 +2437,79 @@ export function ChatContainer({
       threadId
     ]
   )
+
+  // The pending git_commit approval (agent ran `git commit` → task-card dialog), if any.
+  const agentCommitApproval = useMemo(() => {
+    const approval = pendingApproval as unknown as
+      | (Record<string, unknown> & {
+          id?: string
+          operation?: string
+          suggestedCommitMessage?: string
+          suggestedCommitFilePaths?: string[]
+          suggestedCommitFileBasePath?: string
+          suggestedCommitFileSelectionSource?: "pathspec" | "staged"
+        })
+      | null
+    return approval?.operation === "git_commit" ? approval : null
+  }, [pendingApproval])
+
+  // The renderer already performed the commit via commitWorktree; resolve the agent's
+  // approval with the outcome so the orchestrator returns the result to the agent.
+  const handleAgentCommitCommitted = useCallback(
+    (outcome: AgentCommitOutcome): void => {
+      if (!pendingApproval) return
+      const approvalRecord = pendingApproval as unknown as Record<string, unknown>
+      const requestId =
+        (approvalRecord._orchestratorRequestId as string | undefined) || pendingApproval.id
+      const toolCallId = pendingApproval.tool_call?.id || ""
+      if (!requestId) {
+        console.error("[AgentGitCommit] missing approval request id after commit", {
+          approvalId: pendingApproval.id,
+          toolCallId
+        })
+        setToolCallState(toolCallId, {
+          status: "failed",
+          reason: "提交已执行，但审批回执缺少 requestId，无法通知 Agent。"
+        })
+        return
+      }
+      window.api.sandbox.sendApprovalDecision({
+        requestId,
+        type: "approve",
+        tool_call_id: toolCallId,
+        commitResult: outcome
+      })
+      setToolCallState(toolCallId, { status: "running" })
+      removePendingApproval(pendingApproval.id)
+    },
+    [pendingApproval, setToolCallState, removePendingApproval]
+  )
+
+  const handleAgentCommitCancel = useCallback((): void => {
+    if (!pendingApproval) return
+    const approvalRecord = pendingApproval as unknown as Record<string, unknown>
+    const requestId =
+      (approvalRecord._orchestratorRequestId as string | undefined) || pendingApproval.id
+    const toolCallId = pendingApproval.tool_call?.id || ""
+    if (!requestId) {
+      console.error("[AgentGitCommit] missing approval request id while cancelling", {
+        approvalId: pendingApproval.id,
+        toolCallId
+      })
+      setToolCallState(toolCallId, {
+        status: "failed",
+        reason: "取消提交时缺少 requestId，无法通知 Agent。"
+      })
+      return
+    }
+    window.api.sandbox.sendApprovalDecision({
+      requestId,
+      type: "reject",
+      tool_call_id: toolCallId
+    })
+    setToolCallState(toolCallId, { status: "rejected" })
+    removePendingApproval(pendingApproval.id)
+  }, [pendingApproval, setToolCallState, removePendingApproval])
 
   const handleUserInputSubmit = useCallback(
     (response: UserInputResponse): void => {
@@ -4831,7 +4905,8 @@ export function ChatContainer({
             {pendingApproval &&
               Boolean(
                 (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId
-              ) && (
+              ) &&
+              (pendingApproval as unknown as Record<string, unknown>).operation !== "git_commit" && (
               <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>
           {(() => {
               const approval = pendingApproval as unknown as Record<string, unknown>
@@ -5289,6 +5364,20 @@ export function ChatContainer({
                   request={pendingUserInput}
                   onSubmit={handleUserInputSubmit}
                   onLayoutChange={handleUserInputDialogLayoutChange}
+                />
+                <AgentGitCommitDialog
+                  key={agentCommitApproval?.id ?? "agent-commit-idle"}
+                  open={Boolean(agentCommitApproval)}
+                  threadId={threadId}
+                  workspacePath={workspacePath}
+                  suggestedMessage={agentCommitApproval?.suggestedCommitMessage}
+                  suggestedFilePaths={agentCommitApproval?.suggestedCommitFilePaths}
+                  suggestedFileBasePath={agentCommitApproval?.suggestedCommitFileBasePath}
+                  suggestedFileSelectionSource={
+                    agentCommitApproval?.suggestedCommitFileSelectionSource
+                  }
+                  onCommitted={handleAgentCommitCommitted}
+                  onCancel={handleAgentCommitCancel}
                 />
               </div>
             </div>

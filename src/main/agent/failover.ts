@@ -1,6 +1,6 @@
 import { getCustomModelConfigs } from "../storage"
 
-// ─── PR-12 / PR-17 — minimal API error classifier ────────────────────────────
+// ─── PR-12 / PR-17 — minimal API error classifier ─────────────────────────────
 // Reuses the status-code + message-pattern primitives already powering
 // isRetryableApiError to emit a small enum that PostToolUseFailure and
 // StopFailure can put in their hook payloads. Project dialect: lacks CC's

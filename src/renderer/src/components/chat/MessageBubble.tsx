@@ -1041,6 +1041,11 @@ export function MessageBubble({
               // 如果工具需要审批，使用原来的ToolCallRenderer（批量时隐藏按钮）
               if (needsApproval) {
                 const isBatch = (pendingApproval?.pendingCount ?? 1) > 1
+                // git commit is approved through the dedicated task-card dialog, so the
+                // inline approve/reject buttons are hidden to avoid a second (card-less) path.
+                const isGitCommitApproval =
+                  (pendingApproval as unknown as { operation?: string } | null)?.operation ===
+                  "git_commit"
                 return (
                   <ToolCallRenderer
                     key={`${toolId}-${needsApproval ? "pending" : "done"}`}
@@ -1049,7 +1054,7 @@ export function MessageBubble({
                     isError={result?.is_error}
                     status={inferredStatus}
                     needsApproval={needsApproval}
-                    showApprovalButtons={!isBatch}
+                    showApprovalButtons={!isBatch && !isGitCommitApproval}
                     onApprovalDecision={onApprovalDecision}
                     approvalTypes={
                       (

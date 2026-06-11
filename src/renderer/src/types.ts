@@ -305,6 +305,13 @@ export interface HITLRequest {
   pendingCount?: number
   pendingToolCallIds?: string[]
   allowRuntimeRestoredCheckpointResume?: boolean
+  operation?: string
+  command?: string
+  reason?: string
+  suggestedCommitMessage?: string
+  suggestedCommitFilePaths?: string[]
+  suggestedCommitFileBasePath?: string
+  suggestedCommitFileSelectionSource?: "pathspec" | "staged"
 }
 
 export interface HITLDecision {
