@@ -20,9 +20,9 @@ const TRACE_COLSPAN = 7
 
 const VERDICT_META: Record<string, { label: string; cls: string; hint: string }> = {
   committed: {
-    label: "已采纳",
+    label: "已测量",
     cls: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-    hint: "提交版命中了部分生成行，采纳 = 命中的有效行数"
+    hint: "提交版已逐行测量，采纳 = 命中的有效行数（可能为 0）"
   },
   deleted: {
     label: "已删除",
@@ -203,6 +203,7 @@ function TracePairRow({
   onViewThread?: (threadId: string) => void
 }): React.JSX.Element {
   const rate = pairRate(pair)
+  const zeroAdopted = pair.adoptedLineCount === 0
   const orphan = !pair.file && !pair.generatedAt
   const canTrace = Boolean(commitSha && pair.genEventId)
   const threadId = pair.threadId
@@ -240,7 +241,11 @@ function TracePairRow({
 
   return (
     <>
-      <tr className="border-b border-border/60 align-top hover:bg-muted/20">
+      <tr
+        className={`border-b border-border/60 align-top hover:bg-muted/20 ${
+          zeroAdopted ? "bg-rose-500/[0.06]" : ""
+        }`}
+      >
         <td className="max-w-[200px] px-3 py-2">
           <div className="flex items-start gap-1.5">
             <button
@@ -283,7 +288,13 @@ function TracePairRow({
             <span className="mx-1 text-muted-foreground/60">→</span>
             有效 {formatLines(pair.effectiveGeneratedLineCount)}
             <span className="mx-1 text-muted-foreground/60">→</span>
-            <span className="font-medium text-emerald-600 dark:text-emerald-400">
+            <span
+              className={`font-medium ${
+                zeroAdopted
+                  ? "text-rose-600 dark:text-rose-400"
+                  : "text-emerald-600 dark:text-emerald-400"
+              }`}
+            >
               采纳 {formatLines(pair.adoptedLineCount)}
             </span>
           </div>

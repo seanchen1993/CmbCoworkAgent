@@ -19,8 +19,17 @@ import {
   ResponsiveContainer,
   Legend
 } from "recharts"
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { CodeAdoptionFunnel, SkillRankingPanel, ToolRankingPanel } from "./dashboard-shared"
+import {
+  CodeAdoptionFunnel,
+  GeneratedLinesTooltip,
+  InclusiveAdoptionTooltip,
+  InfoHint,
+  MeasuredAdoptionTooltip,
+  PushedAdoptionTooltip,
+  SkillRankingPanel,
+  ToolRankingPanel,
+  type CodeStatsTooltipData
+} from "./dashboard-shared"
 import type { OverviewData } from "../use-dashboard"
 
 function StatCard({
@@ -41,41 +50,46 @@ function StatCard({
   onClick?: () => void
 }) {
   const className = `flex w-full items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 text-left ${
-    onClick
-      ? "cursor-pointer transition-colors hover:bg-muted/30"
-      : tooltipContent
-        ? "cursor-help"
-        : ""
+    onClick ? "cursor-pointer transition-colors hover:bg-muted/30" : ""
   }`
-  const content = (
+  const labelRow = (
+    <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+      <span className="truncate whitespace-nowrap">{label}</span>
+      {tooltipContent ? <InfoHint content={tooltipContent} /> : null}
+    </div>
+  )
+  const iconBox = (
+    <div className={`flex size-9 items-center justify-center rounded-lg ${color}`}>
+      <Icon className="size-4 text-white" />
+    </div>
+  )
+  const body = (
     <>
-      <div className={`flex size-9 items-center justify-center rounded-lg ${color}`}>
-        <Icon className="size-4 text-white" />
-      </div>
-      <div className="min-w-0">
-        <div className="truncate whitespace-nowrap text-[11px] text-muted-foreground">{label}</div>
-        <div className="text-lg font-bold text-foreground leading-tight">{value}</div>
-        {sub && <div className="whitespace-nowrap text-[10px] text-muted-foreground">{sub}</div>}
-      </div>
+      <div className="text-lg font-bold text-foreground leading-tight">{value}</div>
+      {sub && <div className="whitespace-nowrap text-[10px] text-muted-foreground">{sub}</div>}
     </>
   )
-  const card = onClick ? (
-    <button type="button" className={className} onClick={onClick}>
-      {content}
-    </button>
-  ) : (
-    <div className={className}>{content}</div>
-  )
 
-  if (!tooltipContent) return card
+  if (onClick) {
+    return (
+      <button type="button" className={className} onClick={onClick}>
+        {iconBox}
+        <div className="min-w-0">
+          {labelRow}
+          {body}
+        </div>
+      </button>
+    )
+  }
 
   return (
-    <TooltipProvider delayDuration={150}>
-      <Tooltip>
-        <TooltipTrigger asChild>{card}</TooltipTrigger>
-        <TooltipContent className="max-w-64">{tooltipContent}</TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+    <div className={className}>
+      {iconBox}
+      <div className="min-w-0">
+        {labelRow}
+        {body}
+      </div>
+    </div>
   )
 }
 
@@ -95,136 +109,6 @@ function formatNumber(n: number): string {
 function formatPercent(value: number | null): string {
   if (value === null) return "—"
   return `${(value * 100).toFixed(2)}%`
-}
-
-function formatExactNumber(n: number): string {
-  return Math.round(n).toLocaleString("zh-CN")
-}
-
-function InclusiveAdoptionTooltip({ data }: { data: OverviewData }) {
-  return (
-    <div className="space-y-1.5">
-      <div className="text-[11px] font-medium text-foreground">含未提交采纳率</div>
-      <div className="space-y-1 text-[11px]">
-        <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">采纳行数</span>
-          <span className="font-medium text-foreground">
-            {formatExactNumber(data.codeAdoptedLines)} 行
-          </span>
-        </div>
-        <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">已测量有效生成行数</span>
-          <span className="font-medium text-foreground">
-            {formatExactNumber(data.codeEffectiveGeneratedLines)} 行
-          </span>
-        </div>
-        <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">未提交生成行数</span>
-          <span className="font-medium text-foreground">
-            {formatExactNumber(data.codeUnmeasuredGeneratedLines)} 行
-          </span>
-        </div>
-        <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">含未提交分母</span>
-          <span className="font-medium text-foreground">
-            {formatExactNumber(data.codeInclusiveEffectiveGeneratedLines)} 行
-          </span>
-        </div>
-      </div>
-      <div className="space-y-0.5 text-[10px] text-muted-foreground">
-        <div>采纳率 = 采纳行数 / (已测量有效生成行数 + 未提交生成行数)。</div>
-        <div>已测量有效生成行数已剔除被 agent 自己改写的中间稿部分。</div>
-      </div>
-    </div>
-  )
-}
-
-function MeasuredAdoptionTooltip({ data }: { data: OverviewData }) {
-  return (
-    <div className="space-y-1.5">
-      <div className="text-[11px] font-medium text-foreground">已Commit采纳率</div>
-      <div className="space-y-1 text-[11px]">
-        <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">采纳行数</span>
-          <span className="font-medium text-foreground">
-            {formatExactNumber(data.codeAdoptedLines)} 行
-          </span>
-        </div>
-        <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">已测量有效生成行数</span>
-          <span className="font-medium text-foreground">
-            {formatExactNumber(data.codeEffectiveGeneratedLines)} 行
-          </span>
-        </div>
-        <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">已测量原始生成行数</span>
-          <span className="font-medium text-foreground">
-            {formatExactNumber(data.codeMeasuredGeneratedLines)} 行
-          </span>
-        </div>
-      </div>
-      <div className="space-y-0.5 text-[10px] text-muted-foreground">
-        <div>采纳率 = 采纳行数 / 已测量有效生成行数。</div>
-        <div>已测量有效生成行数已剔除被 agent 自己改写的中间稿部分。</div>
-      </div>
-    </div>
-  )
-}
-
-function PushedAdoptionTooltip({ data }: { data: OverviewData }) {
-  return (
-    <div className="space-y-1.5">
-      <div className="text-[11px] font-medium text-foreground">已 Push 采纳率</div>
-      <div className="space-y-1 text-[11px]">
-        <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">已 Push 采纳行数</span>
-          <span className="font-medium text-foreground">
-            {formatExactNumber(data.codePushedAdoptedLines)} 行
-          </span>
-        </div>
-        <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">已 Push 有效生成行数</span>
-          <span className="font-medium text-foreground">
-            {formatExactNumber(data.codePushedEffectiveGeneratedLines)} 行
-          </span>
-        </div>
-        <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">已 Push 原始生成行数</span>
-          <span className="font-medium text-foreground">
-            {formatExactNumber(data.codePushedMeasuredGeneratedLines)} 行
-          </span>
-        </div>
-        <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">已 Push Commit 数</span>
-          <span className="font-medium text-foreground">
-            {formatExactNumber(data.codePushedCommitCount)} 次
-          </span>
-        </div>
-      </div>
-      <div className="space-y-0.5 text-[10px] text-muted-foreground">
-        <div>采纳率 = 已 Push 采纳行数 / 已 Push 有效生成行数。</div>
-        <div>仅统计通过应用成功 Push 后的 commit。</div>
-      </div>
-    </div>
-  )
-}
-
-function GeneratedLinesTooltip(): React.JSX.Element {
-  return (
-    <div className="space-y-1 text-[11px]">
-      <div className="font-medium text-foreground">代码生成行数说明</div>
-      <div className="text-muted-foreground">当前按 agent 写入或编辑的非空行统计。</div>
-      <div className="text-muted-foreground">空行和仅包含空白字符的行不会计入。</div>
-      <div className="text-muted-foreground">
-        该指标表示原始生成量，包含后续被 agent 自己改写的中间稿。
-      </div>
-      <div className="text-muted-foreground">
-        以下文件不纳入统计：非代码文件（如
-        Markdown、JSON、图片等）、锁文件（package-lock.json、pnpm-lock.yaml、yarn.lock）、压缩/构建产物（.min.js/.min.css、.map）、依赖与构建目录（node_modules、dist、build
-        等）。
-      </div>
-    </div>
-  )
 }
 
 export function OverviewPanel({
@@ -248,6 +132,17 @@ export function OverviewPanel({
   if (!data) return null
 
   const trendData = data.trend
+  const codeTooltipData: CodeStatsTooltipData = {
+    adoptedLines: data.codeAdoptedLines,
+    effectiveGeneratedLines: data.codeEffectiveGeneratedLines,
+    unmeasuredGeneratedLines: data.codeUnmeasuredGeneratedLines,
+    inclusiveEffectiveGeneratedLines: data.codeInclusiveEffectiveGeneratedLines,
+    measuredGeneratedLines: data.codeMeasuredGeneratedLines,
+    pushedAdoptedLines: data.codePushedAdoptedLines,
+    pushedEffectiveGeneratedLines: data.codePushedEffectiveGeneratedLines,
+    pushedMeasuredGeneratedLines: data.codePushedMeasuredGeneratedLines,
+    pushedCommitCount: data.codePushedCommitCount
+  }
 
   return (
     <div className="space-y-4">
@@ -301,7 +196,7 @@ export function OverviewPanel({
           />
           <StatCard
             icon={Gauge}
-            label="已 Push 采纳率"
+            label="入库率"
             value={formatPercent(data.codePushedAdoptionRate)}
             sub={
               data.codePushedAdoptionRate === null
@@ -309,11 +204,11 @@ export function OverviewPanel({
                 : `${formatNumber(data.codePushedAdoptedLines)} / ${formatNumber(data.codePushedEffectiveGeneratedLines)} 行`
             }
             color="bg-indigo-500"
-            tooltipContent={<PushedAdoptionTooltip data={data} />}
+            tooltipContent={<PushedAdoptionTooltip data={codeTooltipData} />}
           />
           <StatCard
             icon={Gauge}
-            label="已Commit采纳率"
+            label="提交率"
             value={formatPercent(data.codeMeasuredAdoptionRate)}
             sub={
               data.codeMeasuredAdoptionRate === null
@@ -321,11 +216,11 @@ export function OverviewPanel({
                 : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeEffectiveGeneratedLines)} 行`
             }
             color="bg-blue-500"
-            tooltipContent={<MeasuredAdoptionTooltip data={data} />}
+            tooltipContent={<MeasuredAdoptionTooltip data={codeTooltipData} />}
           />
           <StatCard
             icon={Gauge}
-            label="含未提交采纳率"
+            label="代码总量采纳率"
             value={formatPercent(data.codeInclusiveAdoptionRate)}
             sub={
               data.codeInclusiveAdoptionRate === null
@@ -333,7 +228,7 @@ export function OverviewPanel({
                 : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeInclusiveEffectiveGeneratedLines)} 行`
             }
             color="bg-cyan-500"
-            tooltipContent={<InclusiveAdoptionTooltip data={data} />}
+            tooltipContent={<InclusiveAdoptionTooltip data={codeTooltipData} />}
           />
         </div>
         <CodeAdoptionFunnel

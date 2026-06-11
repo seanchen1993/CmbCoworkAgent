@@ -65,7 +65,6 @@ import {
   type DashboardProjectModeFeature,
   type DashboardProjectModeData,
   type DashboardProjectModeProject,
-  type DashboardProjectModeProjectStatus,
   type DashboardProjectModeTracesData,
   type DashboardTraceDetail,
   type Granularity,
@@ -279,7 +278,8 @@ function getMarkdownLanguageLabel(className?: string): string | null {
 function getMarkdownNodeText(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node)
   if (Array.isArray(node)) return node.map(getMarkdownNodeText).join("")
-  if (isValidElement<{ children?: ReactNode }>(node)) return getMarkdownNodeText(node.props.children)
+  if (isValidElement<{ children?: ReactNode }>(node))
+    return getMarkdownNodeText(node.props.children)
   return ""
 }
 
@@ -458,7 +458,9 @@ function DashboardAnalysisDrawer({
               size="sm"
               className="gap-1.5 text-xs"
               disabled={loading}
-              onClick={() => void runQuestion("为什么很多代码生成了却没有提交？这些代码是谁生成的？")}
+              onClick={() =>
+                void runQuestion("为什么很多代码生成了却没有提交？这些代码是谁生成的？")
+              }
             >
               <Database className="size-3.5" />
               未提交人群
@@ -511,7 +513,12 @@ function DashboardAnalysisDrawer({
               placeholder="问：为什么很多代码生成了却没有提交？"
               className="min-h-20 flex-1 resize-none rounded-lg border border-input bg-background px-3 py-2 text-xs leading-5 outline-none focus:border-primary"
             />
-            <Button type="submit" size="sm" className="self-end gap-1.5" disabled={loading || !input.trim()}>
+            <Button
+              type="submit"
+              size="sm"
+              className="self-end gap-1.5"
+              disabled={loading || !input.trim()}
+            >
               <Send className="size-3.5" />
               发送
             </Button>
@@ -981,17 +988,6 @@ async function fetchAllActiveUsersForExport(range: TimeRange): Promise<Dashboard
   return users
 }
 
-const PROJECT_MODE_EXPORT_PAGE_SIZE = 100
-const PROJECT_MODE_EXPORT_MAX_PAGES = 100
-
-function formatProjectModeCreatorDepartment(project: DashboardProjectModeProject): string {
-  if (project.creatorUpperOrgLv1 && project.creatorUpperOrgLv0) {
-    return `${project.creatorUpperOrgLv1}/${project.creatorUpperOrgLv0}`
-  }
-  if (project.creatorUpperOrgLv1) return project.creatorUpperOrgLv1
-  return project.creatorOrgName || "—"
-}
-
 function buildProjectModeCodeRows(
   stats: DashboardProjectModeProject["codeStats"]
 ): (string | number)[][] {
@@ -1004,13 +1000,13 @@ function buildProjectModeCodeRows(
     ["代码未提交生成行数", stats.unmeasuredGeneratedLines],
     ["代码含未提交分母行数", stats.inclusiveEffectiveGeneratedLines],
     ["代码采纳行数", stats.adoptedLines],
-    ["代码采纳率（含未提交）", formatPercent(stats.inclusiveAdoptionRate)],
-    ["代码采纳率（已测量）", formatPercent(stats.measuredAdoptionRate)],
+    ["代码总量采纳率（含未提交）", formatPercent(stats.inclusiveAdoptionRate)],
+    ["提交率（已 Commit 采纳率）", formatPercent(stats.measuredAdoptionRate)],
     ["代码已 Push 原始生成行数", stats.pushedMeasuredGeneratedLines],
     ["代码已 Push 有效生成行数", stats.pushedEffectiveGeneratedLines],
     ["代码已 Push 采纳行数", stats.pushedAdoptedLines],
     ["代码已 Push Commit 数", stats.pushedCommitCount],
-    ["代码采纳率（已 Push）", formatPercent(stats.pushedAdoptionRate)]
+    ["入库率（已 Push 采纳率）", formatPercent(stats.pushedAdoptionRate)]
   ]
 }
 
@@ -1022,35 +1018,6 @@ function flattenProjectModeOrgRows(
     [parent ? `${parent}/${item.org}` : item.org, item.count],
     ...flattenProjectModeOrgRows(item.children ?? [], parent ? `${parent}/${item.org}` : item.org)
   ])
-}
-
-async function fetchAllProjectModeProjectsForExport(
-  range: TimeRange,
-  orgList: string[]
-): Promise<DashboardProjectModeProject[]> {
-  const projects: DashboardProjectModeProject[] = []
-
-  for (const status of ["active", "archived"] as DashboardProjectModeProjectStatus[]) {
-    for (let page = 1; page <= PROJECT_MODE_EXPORT_MAX_PAGES; page++) {
-      const result = await window.api.dashboard.projectModeProjects(range, {
-        upperOrgLv1: orgList,
-        status,
-        page,
-        pageSize: PROJECT_MODE_EXPORT_PAGE_SIZE,
-        keyword: null,
-        adapterName: null,
-        creatorKeyword: null,
-        creatorOrgKeyword: null
-      })
-      if (!result.success) throw new Error(result.error ?? "获取项目列表失败")
-      const pageData = result.data
-      if (!pageData) break
-      projects.push(...pageData.projects)
-      if (page * pageData.pageSize >= pageData.total) break
-    }
-  }
-
-  return projects
 }
 
 function outcomeLabel(outcome: string): string {
@@ -1446,7 +1413,8 @@ function UserDetailPage({
   onTracePrevious,
   onTraceNext,
   onTraceViewModeChange,
-  onTraceTriggerScopeChange
+  onTraceTriggerScopeChange,
+  loadThreadTraces
 }: {
   data: DashboardUserDetail | null
   loading: boolean
@@ -1460,6 +1428,7 @@ function UserDetailPage({
   onTraceNext: () => void
   onTraceViewModeChange: (mode: DashboardTraceViewMode) => void
   onTraceTriggerScopeChange: (scope: DashboardTraceTriggerScope) => void
+  loadThreadTraces?: (threadId: string) => Promise<DashboardTraceDetail[]>
 }): React.JSX.Element {
   const tracePageSize = data?.tracePageSize ?? USER_TRACE_PAGE_SIZE
   // 列表翻页总数按当前视图模式：thread → 会话数；trace → trace 总数。
@@ -1596,6 +1565,7 @@ function UserDetailPage({
               subtitle={traceSubtitle}
               viewMode={traceViewMode}
               onViewModeChange={onTraceViewModeChange}
+              loadThreadTraces={loadThreadTraces}
               headerRight={
                 <div className="flex items-center gap-2">
                   <TraceTriggerScopeToggle
@@ -2438,6 +2408,7 @@ export function DashboardView(): React.JSX.Element {
   const [exporting, setExporting] = useState(false)
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
   const [analysisOpen, setAnalysisOpen] = useState(false)
+  const [analysisAgentAllowed, setAnalysisAgentAllowed] = useState(false)
   const [projectModeAllowed, setProjectModeAllowed] = useState(false)
   const [skillDialogOpen, setSkillDialogOpen] = useState(false)
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null)
@@ -2494,6 +2465,27 @@ export function DashboardView(): React.JSX.Element {
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    window.api.dashboard
+      .isAnalysisAgentAllowed()
+      .then((allowed) => {
+        if (cancelled) return
+        setAnalysisAgentAllowed(allowed)
+        if (!allowed) setAnalysisOpen(false)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setAnalysisAgentAllowed(false)
+        setAnalysisOpen(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
   const [commitDepartmentFilter, setCommitDepartmentFilter] = useState("")
   // 项目模式·特性级关联 Commit 弹窗（复用 CommitDetailsDialog，独立于平台级 Commit 明细）。
   const [featureCommitScope, setFeatureCommitScope] = useState<{
@@ -2501,7 +2493,9 @@ export function DashboardView(): React.JSX.Element {
     featureSlug: string
     label: string
   } | null>(null)
-  const [featureCommitData, setFeatureCommitData] = useState<DashboardCommitDetailsData | null>(null)
+  const [featureCommitData, setFeatureCommitData] = useState<DashboardCommitDetailsData | null>(
+    null
+  )
   const [featureCommitLoading, setFeatureCommitLoading] = useState(false)
   const [featureCommitError, setFeatureCommitError] = useState<string | null>(null)
   const [featureCommitDeptValue, setFeatureCommitDeptValue] = useState("")
@@ -3341,6 +3335,14 @@ export function DashboardView(): React.JSX.Element {
     setProjectTracePage(1)
   }, [])
 
+  const loadProjectThreadTraces = useCallback(
+    async (threadId: string): Promise<DashboardTraceDetail[]> => {
+      const res = await window.api.dashboard.threadTraces(threadId, { scope: "project" })
+      return res.success && Array.isArray(res.data) ? res.data : []
+    },
+    []
+  )
+
   const subPageDetailSapId = subPage.kind === "user-detail" ? subPage.sapId : null
   const subPageDetailProjectMode =
     subPage.kind === "user-detail" ? Boolean(subPage.projectMode) : false
@@ -3478,22 +3480,28 @@ export function DashboardView(): React.JSX.Element {
       setFeatureCommitLoading(true)
       const normalizedDepartment = upperOrgLv1.trim()
       try {
-        const result = await window.api.dashboard.projectModeFeatureCommits(
-          scope.projectId,
-          scope.featureSlug,
-          range,
-          {
-            page,
-            pageSize: 20,
-            pushedOnly,
-            upperOrgLv1: normalizedDepartment || null,
-            orgLv1List: selectedOrgLv1List
-          }
-        )
+        // featureSlug 为空 = 项目级（聚合该项目全部特性的 commit）；否则按单特性圈定。
+        const commitOptions = {
+          page,
+          pageSize: 20,
+          pushedOnly,
+          upperOrgLv1: normalizedDepartment || null,
+          orgLv1List: selectedOrgLv1List
+        }
+        const result = scope.featureSlug
+          ? await window.api.dashboard.projectModeFeatureCommits(
+              scope.projectId,
+              scope.featureSlug,
+              range,
+              commitOptions
+            )
+          : await window.api.dashboard.projectModeProjectCommits(
+              scope.projectId,
+              range,
+              commitOptions
+            )
         if (!result.success) throw new Error(result.error ?? "获取 Commit 明细失败")
-        setFeatureCommitData(
-          result.data ?? { total: 0, page, pageSize: 20, pushedOnly, items: [] }
-        )
+        setFeatureCommitData(result.data ?? { total: 0, page, pageSize: 20, pushedOnly, items: [] })
       } catch (e) {
         setFeatureCommitError(e instanceof Error ? e.message : String(e))
       } finally {
@@ -3515,6 +3523,21 @@ export function DashboardView(): React.JSX.Element {
       setFeatureCommitDeptFilter("")
       setFeatureCommitScope(scope)
       void loadFeatureCommits(scope, 1, false, "")
+    },
+    [loadFeatureCommits]
+  )
+
+  const handleProjectOpenProjectCommits = useCallback(
+    (project: DashboardProjectModeProject, pushedOnly = false) => {
+      const scope = {
+        projectId: project.projectId,
+        featureSlug: "",
+        label: project.name
+      }
+      setFeatureCommitDeptValue("")
+      setFeatureCommitDeptFilter("")
+      setFeatureCommitScope(scope)
+      void loadFeatureCommits(scope, 1, pushedOnly, "")
     },
     [loadFeatureCommits]
   )
@@ -3563,13 +3586,13 @@ export function DashboardView(): React.JSX.Element {
             ["代码含未提交分母行数", overview.codeInclusiveEffectiveGeneratedLines],
             ["代码删除行数", overview.codeDeletedLines],
             ["代码采纳行数", overview.codeAdoptedLines],
-            ["代码采纳率（含未提交）", formatPercent(overview.codeInclusiveAdoptionRate)],
-            ["代码采纳率（已测量）", formatPercent(overview.codeMeasuredAdoptionRate)],
+            ["代码总量采纳率（含未提交）", formatPercent(overview.codeInclusiveAdoptionRate)],
+            ["提交率（已 Commit 采纳率）", formatPercent(overview.codeMeasuredAdoptionRate)],
             ["代码已 Push 原始生成行数", overview.codePushedMeasuredGeneratedLines],
             ["代码已 Push 有效生成行数", overview.codePushedEffectiveGeneratedLines],
             ["代码已 Push 采纳行数", overview.codePushedAdoptedLines],
             ["代码已 Push Commit 数", overview.codePushedCommitCount],
-            ["代码采纳率（已 Push）", formatPercent(overview.codePushedAdoptionRate)],
+            ["入库率（已 Push 采纳率）", formatPercent(overview.codePushedAdoptionRate)],
             ["Skill 种类数", overview.totalSkills],
             ["Skill 调用次数", overview.totalSkillCalls],
             ["Tool 种类数", overview.totalTools],
@@ -3820,7 +3843,6 @@ export function DashboardView(): React.JSX.Element {
       const sheets: DashboardExcelSheet[] = []
       const summary = projectMode.summary
       const codeStats = summary.codeStats
-      const projects = await fetchAllProjectModeProjectsForExport(range, selectedOrgLv1List)
 
       sheets.push({
         name: "项目运营概览",
@@ -3839,6 +3861,15 @@ export function DashboardView(): React.JSX.Element {
           ...buildProjectModeCodeRows(codeStats)
         ]
       })
+
+      const skillCodeStats = summary.skillCodeStats
+      if (skillCodeStats) {
+        sheets.push({
+          name: "AutoBizDevOps约束生成",
+          header: ["指标", "值"],
+          rows: buildProjectModeCodeRows(skillCodeStats)
+        })
+      }
 
       if (projectMode.analytics.topUsers.length > 0) {
         sheets.push({
@@ -3871,48 +3902,10 @@ export function DashboardView(): React.JSX.Element {
         })
       }
 
-      if (projects.length > 0) {
-        sheets.push({
-          name: "项目列表",
-          header: [
-            "项目",
-            "系统",
-            "插件",
-            "插件版本",
-            "项目状态",
-            "创建人",
-            "创建人SAP",
-            "创建人YST",
-            "部门",
-            "特性数",
-            "对话数",
-            "已Commit采纳率",
-            "已Push采纳率",
-            "工作区"
-          ],
-          rows: projects.map((project) => [
-            project.name,
-            project.systemName || "",
-            project.adapterName || "",
-            project.adapterVersion || "",
-            project.lifecycleStatus || "",
-            project.creatorUserName || "",
-            project.creatorSapId || "",
-            project.creatorYstId || "",
-            formatProjectModeCreatorDepartment(project),
-            project.featureCount,
-            project.conversationCount,
-            formatPercent(project.codeStats?.measuredAdoptionRate ?? null),
-            formatPercent(project.codeStats?.pushedAdoptionRate ?? null),
-            project.workspacePath || ""
-          ])
-        })
-      }
-
       if (projectMode.adapters.length > 0) {
         sheets.push({
           name: "项目插件统计",
-          header: ["插件", "版本", "项目数", "特性数", "对话数", "已Commit采纳率", "已Push采纳率"],
+          header: ["插件", "版本", "项目数", "特性数", "对话数", "提交率", "入库率"],
           rows: projectMode.adapters.map((adapter) => [
             adapter.name,
             adapter.version || "",
@@ -3965,8 +3958,8 @@ export function DashboardView(): React.JSX.Element {
           name: "项目Skill采纳排行",
           header: [
             "Skill",
-            "已Commit采纳率",
-            "已Push采纳率",
+            "提交率",
+            "入库率",
             "生成行数",
             "有效生成行数",
             "采纳行数",
@@ -4108,7 +4101,8 @@ export function DashboardView(): React.JSX.Element {
                 <ExternalLink className="size-3.5" />
                 了解技能评估与自进化
               </Button>
-            ) : activeMainTab === "overview" || activeMainTab === "project-mode" ? (
+            ) : analysisAgentAllowed &&
+              (activeMainTab === "overview" || activeMainTab === "project-mode") ? (
               <Button
                 type="button"
                 variant="outline"
@@ -4171,6 +4165,7 @@ export function DashboardView(): React.JSX.Element {
             onTraceNext={handleUserTraceNext}
             onTraceViewModeChange={handleUserTraceViewModeChange}
             onTraceTriggerScopeChange={handleUserTraceTriggerScopeChange}
+            loadThreadTraces={subPage.projectMode ? loadProjectThreadTraces : undefined}
           />
         </ScrollArea>
       ) : (
@@ -4222,6 +4217,7 @@ export function DashboardView(): React.JSX.Element {
                 onProjectPageChange={fetchProjectModeProjectPage}
                 onOpenTraces={handleProjectOpenTraces}
                 onOpenFeatureCommits={handleProjectOpenFeatureCommits}
+                onOpenProjectCommits={handleProjectOpenProjectCommits}
                 onSkillClick={handleSkillClick}
                 onUserClick={(sapId) => openUserDetail(sapId, "main", true)}
                 marketSkillKeys={marketSkillKeys}
@@ -4387,6 +4383,7 @@ export function DashboardView(): React.JSX.Element {
               subtitle={projectTraceSubtitle}
               viewMode={projectTraceViewMode}
               onViewModeChange={handleProjectTraceViewModeChange}
+              loadThreadTraces={loadProjectThreadTraces}
               headerRight={
                 <div className="flex items-center gap-2">
                   <Button
@@ -4439,6 +4436,7 @@ export function DashboardView(): React.JSX.Element {
           if (!open) setFeatureCommitScope(null)
         }}
         scopeLabel={featureCommitScope?.label ?? ""}
+        threadScope="project"
         data={featureCommitData}
         loading={featureCommitLoading}
         error={featureCommitError}
@@ -4451,7 +4449,7 @@ export function DashboardView(): React.JSX.Element {
         onOpenExternal={handleCommitExternalOpen}
       />
       <DashboardAnalysisDrawer
-        open={analysisOpen}
+        open={analysisAgentAllowed && analysisOpen}
         scope={analysisScope}
         range={range}
         upperOrgLv1={selectedOrgLv1List}

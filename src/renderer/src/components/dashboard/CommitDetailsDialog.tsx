@@ -218,9 +218,11 @@ function CommitAdoptionSummaryBar({ commit }: { commit: DashboardCommitDetail })
 
 function ThreadConversationDialog({
   commit,
+  threadScope = "platform",
   onOpenChange
 }: {
   commit: DashboardCommitDetail | null
+  threadScope?: "platform" | "project"
   onOpenChange: (open: boolean) => void
 }): React.JSX.Element {
   const threadIds = useMemo(() => commit?.threadIds ?? [], [commit])
@@ -246,7 +248,7 @@ function ThreadConversationDialog({
     Promise.all(
       threadIds.map(async (id) => {
         try {
-          const res = await api.threadTraces(id)
+          const res = await api.threadTraces(id, { scope: threadScope })
           return res?.success && Array.isArray(res.data) ? (res.data as DashboardTraceDetail[]) : []
         } catch {
           return []
@@ -264,7 +266,7 @@ function ThreadConversationDialog({
     }
     // threadKey 是 threadIds 的稳定字符串表示，避免数组引用变化导致的重复请求。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadKey])
+  }, [threadKey, threadScope])
 
   // 已按 threadId 分好的 trace 供 TraceExplorer 选中会话时复用，避免重复网络请求。
   const tracesByThread = useMemo(() => {
@@ -436,6 +438,7 @@ export function CommitDetailsDialog({
   open,
   onOpenChange,
   scopeLabel,
+  threadScope = "platform",
   data,
   loading,
   error,
@@ -450,6 +453,7 @@ export function CommitDetailsDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
   scopeLabel: string
+  threadScope?: "platform" | "project"
   data: DashboardCommitDetailsData | null
   loading: boolean
   error: string | null
@@ -552,7 +556,7 @@ export function CommitDetailsDialog({
                       <th className="whitespace-nowrap px-3 py-2 font-medium">
                         <span className="inline-flex items-center gap-1">
                           采纳率
-                          <HeaderHint hint="Agent 生成代码的采纳率" />
+                          <HeaderHint hint="Agent 生成代码的采纳率。点击下方的数字可进行采纳溯源。" />
                         </span>
                       </th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">
@@ -583,6 +587,7 @@ export function CommitDetailsDialog({
       </DialogContent>
       <ThreadConversationDialog
         commit={threadCommit}
+        threadScope={threadScope}
         onOpenChange={(next) => {
           if (!next) setThreadCommit(null)
         }}

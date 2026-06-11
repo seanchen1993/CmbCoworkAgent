@@ -597,10 +597,7 @@ interface CustomAPI {
         workerTurn?: number
       }) => void
     ) => () => void
-    onCoordinatorWorkerHook: (
-      threadId: string,
-      callback: (envelope: unknown) => void
-    ) => () => void
+    onCoordinatorWorkerHook: (threadId: string, callback: (envelope: unknown) => void) => () => void
     setCoordinatorWorkerStreamFocus: (
       threadId: string,
       workerThreadId: string | null,
@@ -1597,6 +1594,7 @@ interface CustomAPI {
   dashboard: {
     isAllowed: () => Promise<boolean>
     isProjectModeAllowed: () => Promise<boolean>
+    isAnalysisAgentAllowed: () => Promise<boolean>
     esQuery: (input: {
       indexAlias: "event" | "trace"
       operation: "search" | "msearch" | "count" | "mapping" | "field_caps"
@@ -1637,6 +1635,21 @@ interface CustomAPI {
     projectModeFeatureCommits: (
       projectId: string,
       featureSlug: string,
+      range: { from: string; to: string },
+      options?: DashboardCommitDetailsOptions
+    ) => Promise<{
+      success: boolean
+      data?: {
+        total: number
+        page: number
+        pageSize: number
+        pushedOnly: boolean
+        items: DashboardCommitDetail[]
+      }
+      error?: string
+    }>
+    projectModeProjectCommits: (
+      projectId: string,
       range: { from: string; to: string },
       options?: DashboardCommitDetailsOptions
     ) => Promise<{
@@ -1719,7 +1732,8 @@ interface CustomAPI {
       triggerScope?: DashboardTraceTriggerScope
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     threadTraces: (
-      threadId: string
+      threadId: string,
+      options?: { scope?: "platform" | "project" }
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     marketSkillRecentTraces: (
       skill: string,

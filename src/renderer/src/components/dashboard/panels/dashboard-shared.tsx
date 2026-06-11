@@ -58,6 +58,140 @@ export function InfoHint({ content }: { content: React.ReactNode }): React.JSX.E
 }
 
 // ─────────────────────────────────────────────────────────
+// 代码采纳 tooltip 说明（平台运营概览 / 项目运营概览 共用）
+// ─────────────────────────────────────────────────────────
+
+/** 代码采纳各级 tooltip 所需的行数明细（OverviewData 与 DashboardCodeStats 都可映射到此结构）。 */
+export interface CodeStatsTooltipData {
+  adoptedLines: number
+  effectiveGeneratedLines: number
+  unmeasuredGeneratedLines: number
+  inclusiveEffectiveGeneratedLines: number
+  measuredGeneratedLines: number
+  pushedAdoptedLines: number
+  pushedEffectiveGeneratedLines: number
+  pushedMeasuredGeneratedLines: number
+  pushedCommitCount: number
+}
+
+function TooltipRow({ label, value }: { label: string; value: string }): React.JSX.Element {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-medium text-foreground">{value}</span>
+    </div>
+  )
+}
+
+export function GeneratedLinesTooltip(): React.JSX.Element {
+  return (
+    <div className="space-y-1 text-[11px]">
+      <div className="font-medium text-foreground">代码生成行数说明</div>
+      <div className="text-muted-foreground">当前按 agent 写入或编辑的非空行统计。</div>
+      <div className="text-muted-foreground">空行和仅包含空白字符的行不会计入。</div>
+      <div className="text-muted-foreground">
+        该指标表示原始生成量，包含后续被 agent 自己改写的中间稿。
+      </div>
+      <div className="text-muted-foreground">
+        以下文件不纳入统计：非代码文件（如
+        Markdown、JSON、图片等）、锁文件（package-lock.json、pnpm-lock.yaml、yarn.lock）、压缩/构建产物（.min.js/.min.css、.map）、依赖与构建目录（node_modules、dist、build
+        等）。
+      </div>
+    </div>
+  )
+}
+
+export function PushedAdoptionTooltip({ data }: { data: CodeStatsTooltipData }): React.JSX.Element {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-medium text-foreground">入库率（已 Push 采纳率）</div>
+      <div className="space-y-1 text-[11px]">
+        <TooltipRow
+          label="已 Push 采纳行数"
+          value={`${formatExactNumber(data.pushedAdoptedLines)} 行`}
+        />
+        <TooltipRow
+          label="已 Push 有效生成行数"
+          value={`${formatExactNumber(data.pushedEffectiveGeneratedLines)} 行`}
+        />
+        <TooltipRow
+          label="已 Push 原始生成行数"
+          value={`${formatExactNumber(data.pushedMeasuredGeneratedLines)} 行`}
+        />
+        <TooltipRow
+          label="已 Push Commit 数"
+          value={`${formatExactNumber(data.pushedCommitCount)} 次`}
+        />
+      </div>
+      <div className="space-y-0.5 text-[10px] text-muted-foreground">
+        <div>采纳率 = 已 Push 采纳行数 / 已 Push 有效生成行数。</div>
+        <div>仅统计通过应用成功 Push 后的 commit。</div>
+      </div>
+    </div>
+  )
+}
+
+export function MeasuredAdoptionTooltip({
+  data
+}: {
+  data: CodeStatsTooltipData
+}): React.JSX.Element {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-medium text-foreground">提交率（已 Commit 采纳率）</div>
+      <div className="space-y-1 text-[11px]">
+        <TooltipRow label="采纳行数" value={`${formatExactNumber(data.adoptedLines)} 行`} />
+        <TooltipRow
+          label="已测量有效生成行数"
+          value={`${formatExactNumber(data.effectiveGeneratedLines)} 行`}
+        />
+        <TooltipRow
+          label="已测量原始生成行数"
+          value={`${formatExactNumber(data.measuredGeneratedLines)} 行`}
+        />
+      </div>
+      <div className="space-y-0.5 text-[10px] text-muted-foreground">
+        <div>采纳率 = 采纳行数 / 已测量有效生成行数。</div>
+        <div>已测量有效生成行数已剔除被 agent 自己改写的中间稿部分。</div>
+      </div>
+    </div>
+  )
+}
+
+export function InclusiveAdoptionTooltip({
+  data
+}: {
+  data: CodeStatsTooltipData
+}): React.JSX.Element {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-medium text-foreground">
+        代码总量采纳率（含未提交采纳率）
+      </div>
+      <div className="space-y-1 text-[11px]">
+        <TooltipRow label="采纳行数" value={`${formatExactNumber(data.adoptedLines)} 行`} />
+        <TooltipRow
+          label="已测量有效生成行数"
+          value={`${formatExactNumber(data.effectiveGeneratedLines)} 行`}
+        />
+        <TooltipRow
+          label="未提交生成行数"
+          value={`${formatExactNumber(data.unmeasuredGeneratedLines)} 行`}
+        />
+        <TooltipRow
+          label="含未提交分母"
+          value={`${formatExactNumber(data.inclusiveEffectiveGeneratedLines)} 行`}
+        />
+      </div>
+      <div className="space-y-0.5 text-[10px] text-muted-foreground">
+        <div>采纳率 = 采纳行数 / (已测量有效生成行数 + 未提交生成行数)。</div>
+        <div>已测量有效生成行数已剔除被 agent 自己改写的中间稿部分。</div>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────
 // Searchable ranking list (skill / tool usage)
 // ─────────────────────────────────────────────────────────
 
@@ -456,7 +590,8 @@ export function CodeAdoptionFunnel({
                   )}
                 </div>
                 <div className="mt-0.5 whitespace-nowrap text-[10px] text-muted-foreground">
-                  {s.metricText ?? `生成 ${formatNumber(s.lines)} / 采纳 ${formatNumber(s.adoptedLines)}`}
+                  {s.metricText ??
+                    `采纳 ${formatNumber(s.adoptedLines)} / 生成 ${formatNumber(s.lines)}`}
                 </div>
               </div>
             ))}
