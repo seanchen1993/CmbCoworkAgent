@@ -483,8 +483,12 @@ function workflowForProjectRun(
   detail: HarnessProjectDetailViewModel,
   run: HarnessFeatureSummary
 ): HarnessWorkflow {
-  const workflowId = run.workflowId?.trim()
-  return workflowId ? detail.dynamicWorkflows?.[workflowId] ?? detail.workflow : detail.workflow
+  if (run.nodeIds.length === 0) return detail.workflow
+  const nodesById = new Map(detail.workflow.nodes.map((node) => [node.id, node]))
+  const nodes = run.nodeIds
+    .map((nodeId) => nodesById.get(nodeId))
+    .filter((node): node is HarnessWorkflow["nodes"][number] => Boolean(node))
+  return { ...detail.workflow, nodes }
 }
 
 function featureSessionKey(projectId: string, slug: string, threadId: string): string {
