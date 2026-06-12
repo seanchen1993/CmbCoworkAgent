@@ -1622,7 +1622,7 @@ async function fetchCommitAdoptionMap(
   // already a precise, globally-unique selector for the exact commits in the
   // visible (eventTime-filtered) list. A `code_adopt` event is timestamped at
   // *commit* time but carries `generatedAt` = the *generation* time, which can
-  // predate the commit by up to the attribution window (≈7 days). Filtering by
+  // predate the commit by up to the attribution window (≈14 days). Filtering by
   // `generatedAt` within the commit-list range would drop adoption rows for any
   // commit whose code was generated before the window started — making the
   // commit show up in the list with an empty 采纳率. Matching on commitSha alone

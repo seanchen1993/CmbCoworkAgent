@@ -24,7 +24,7 @@
  *   ~/.cmbcoworkagent/adoption-index.sqlite
  *     └─ gen_events                ← lookup index for commit-time L3
  *
- *   Retention: 7 days / 100 MB hard cap.
+ *   Retention: 14 days / 100 MB hard cap.
  */
 
 import { appendFile, readdir, readFile, stat, unlink, rename } from "fs/promises"
@@ -59,7 +59,9 @@ import {
 // against a future git commit. Older rows are dropped by retention. (Previously
 // also doubled as the L2 timer window — L2 has been removed, this is now purely
 // "how long do we keep a baseline around for commit-time attribution".)
-const GEN_ATTRIBUTION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+// Bumped 7 → 14 days to catch slower-to-commit work; worst-case footprint is
+// still bounded by DISK_HARD_CAP_BYTES + INDEX_MAX_ROWS, not by the window.
+const GEN_ATTRIBUTION_WINDOW_MS = 14 * 24 * 60 * 60 * 1000
 // Slack added to a commit's creation time when using it as an upper bound on
 // eligible gen rows. Covers git's 1-second committer-time granularity (a gen
 // written in the same wall-clock second as the commit must not be floored out)
@@ -75,12 +77,15 @@ const MAX_CONTEXT_ENTRIES = 32 // bound in-memory context size
 const STAGED_BLOB_MAX_BYTES = 8 * 1024 * 1024 // cap git show output per staged file
 
 // sqlite index safeguards — keep the on-disk file bounded even under abuse
-// Already-measured rows are kept for the full attribution window (7 days) so the
+// Already-measured rows are kept for the full attribution window (14 days) so the
 // local line-level 溯源 reader can still recover stored per-line hashes for any
-// commit inside that window. (Was 3 days — bumped to align with
-// GEN_ATTRIBUTION_WINDOW_MS; INDEX_MAX_ROWS still caps total growth.)
-const INDEX_MEASURED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
-const INDEX_MAX_ROWS = 5000 // hard row cap (oldest measured dropped first)
+// commit inside that window. (Kept aligned with GEN_ATTRIBUTION_WINDOW_MS;
+// INDEX_MAX_ROWS still caps total growth.)
+const INDEX_MEASURED_RETENTION_MS = 14 * 24 * 60 * 60 * 1000
+// Row cap doubled (5000 → 10000) alongside the 7 → 14 day window so heavy users
+// get a window that is genuinely 14 days rather than being silently truncated by
+// the cap. 10000 rows is still a tiny sql.js file loaded fully into memory.
+const INDEX_MAX_ROWS = 10000 // hard row cap (oldest measured dropped first)
 const INDEX_VACUUM_EVERY_N_SWEEPS = 12 // VACUUM cadence (12 × 5min = 1h)
 
 const CODE_EXTENSIONS = new Set<string>([
@@ -605,7 +610,7 @@ async function enforceRetention(): Promise<void> {
   }
 
   // ── Index-side retention guards ─────────────────────────
-  // 1. Drop any row older than the 7-day window (safety net; normally empty).
+  // 1. Drop any row older than the 14-day window (safety net; normally empty).
   try {
     deleteOlderThan(cutoff)
   } catch {
@@ -1446,7 +1451,7 @@ export async function readLocalCommitAdoptionLines(
         results.push({
           genEventId,
           available: false,
-          reason: "本地无该生成记录或哈希已过期（仅当前机器近 7 天可逐行）"
+          reason: "本地无该生成记录或哈希已过期（仅当前机器近 14 天可逐行）"
         })
         continue
       }

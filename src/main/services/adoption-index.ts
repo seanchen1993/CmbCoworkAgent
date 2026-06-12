@@ -12,7 +12,7 @@
  *   - The JSONL shard files on disk remain the source of truth; this index
  *     is a fast query layer and can be rebuilt from JSONL if lost.
  *   - All methods are synchronous after init — sql.js runs in-process and
- *     the data volume (7-day window) is small enough that there's no need
+ *     the data volume (14-day window) is small enough that there's no need
  *     for async buffering.
  *   - Writes are debounced to disk (same pattern as db/index.ts) to avoid
  *     hot-loop IO when many gen events fire in quick succession.
@@ -322,7 +322,7 @@ export function deleteOlderThan(cutoff: number): number {
 /**
  * Remove already-measured rows older than `cutoff`. These rows have no further
  * use (findPendingGensForFile filters measured=0), so
- * we can evict them far more aggressively than the full 7-day window.
+ * we can evict them far more aggressively than the full 14-day window.
  */
 export function deleteMeasuredOlderThan(cutoff: number): void {
   if (!db) return

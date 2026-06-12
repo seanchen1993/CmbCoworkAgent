@@ -34,7 +34,7 @@ const PUSH_RECHECK_INTERVAL_MS = 30_000
 // Commit reconciler — hook-independent backstop for external IDE/CLI commits whose
 // pre-commit/post-commit hooks never fired (e.g. IntelliJ IDEA 2026's local commit).
 // Bounded to the adoption attribution window so we never backfill ancient history.
-const COMMIT_RECONCILE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+const COMMIT_RECONCILE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000
 const COMMIT_RECONCILE_MAX_COMMITS = 50
 const RECONCILE_STAGED_BLOB_MAX_BYTES = 8 * 1024 * 1024
 

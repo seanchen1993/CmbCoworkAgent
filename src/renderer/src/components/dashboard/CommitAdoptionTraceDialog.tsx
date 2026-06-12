@@ -152,7 +152,7 @@ function LocalLinesPanel({
       <div className="px-2 py-3 text-xs text-muted-foreground">
         {data?.reason ?? "本地无法逐行还原"}
         <div className="mt-1 text-[10px] text-muted-foreground/80">
-          逐行仅对当前机器近 7 天、且文件仍在该 commit 中的生成可用。
+          逐行仅对当前机器近 14 天、且文件仍在该 commit 中的生成可用。
         </div>
       </div>
     )
