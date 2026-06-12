@@ -15,20 +15,33 @@ On Windows PowerShell, keep using the direct `npx` form instead of shell wrapper
 
 ## Prerequisite check (required)
 
-Before proposing commands, check whether `npx` is available:
+Before proposing or running Playwright CLI commands, check Node.js first. Node.js must
+be version 20 or newer:
+
+```bash
+node --version
+node -e "const major = Number(process.versions.node.split('.')[0]); process.exit(major >= 20 ? 0 : 1)"
+```
+
+If `node` is missing or the detected major version is lower than 20, pause and tell
+the user they need to upgrade to Node.js 20 or newer before this skill can be used.
+Do not run `npx` or `playwright-cli` commands until Node.js 20+ is confirmed.
+
+After Node.js 20+ is confirmed, check whether `npx` is available:
 
 ```bash
 command -v npx >/dev/null 2>&1
 ```
 
-If it is not available, pause and ask the user to install Node.js/npm (which provides `npx`). Provide these steps verbatim:
+If `npx` is not available, pause and ask the user to install npm or reinstall
+Node.js/npm (which provides `npx`). Provide these steps verbatim:
 
 ```bash
-# Verify Node/npm are installed
+# Verify Node/npm are installed and Node.js is 20+
 node --version
 npm --version
 
-# If missing, install Node.js/npm, then:
+# If missing or Node.js is lower than 20, install/upgrade Node.js/npm, then:
 npm install -g @playwright/cli@latest
 playwright-cli --help
 ```

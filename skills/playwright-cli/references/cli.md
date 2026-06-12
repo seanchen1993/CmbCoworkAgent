@@ -3,12 +3,17 @@
 Use direct `npx` commands:
 
 ```bash
+node --version
 npx --yes --package @playwright/cli playwright-cli --help
 ```
+
+Node.js must be version 20 or newer before running `npx` or `playwright-cli`.
+If `node --version` reports a lower version, tell the user to upgrade Node.js first.
 
 Windows PowerShell:
 
 ```powershell
+node --version
 npx --yes --package @playwright/cli playwright-cli --help
 ```
 
