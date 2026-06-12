@@ -4,6 +4,7 @@ import {
   createHarnessFeature,
   createHarnessProject,
   buildHarnessFeatureDialogTips,
+  getHarnessDynamicWorkflowConfig,
   getHarnessProjectDetail,
   getHarnessProjectDetails,
   getHarnessRunDetail,
@@ -19,7 +20,8 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
-  HarnessAdapterRegistryItem
+  HarnessAdapterRegistryItem,
+  HarnessDynamicWorkflowConfig
 } from "../../shared/harness-board-types"
 import type {
   HarnessFeatureCreateInput,
@@ -48,6 +50,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     "harnessBoard:createFeature",
     async (_event, input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> => {
       return createHarnessFeature(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getDynamicWorkflowConfig",
+    async (_event, projectId: string): Promise<HarnessDynamicWorkflowConfig | null> => {
+      return getHarnessDynamicWorkflowConfig(projectId)
     }
   )
 

@@ -56,6 +56,7 @@ import type {
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
   HarnessAdapterRegistryItem,
+  HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent
 } from "../shared/harness-board-types"
 import type {
@@ -1709,6 +1710,7 @@ interface CustomAPI {
     listProjects: () => Promise<HarnessProjectListItem[]>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
     createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
+    getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput

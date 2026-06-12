@@ -115,6 +115,9 @@ export interface HarnessProjectCreateInput {
 export interface HarnessFeatureCreateInput {
   projectId: string
   feature: string
+  workflowTemplate?: string
+  workflowNodes?: string[]
+  workflowConfig?: HarnessDynamicWorkflowConfig
 }
 
 export interface HarnessFeatureCreateResult {
@@ -225,6 +228,27 @@ export interface HarnessProjectDetailViewModel {
   watchRefs: HarnessWatchRef[]
   loading: boolean
   error: string | null
+}
+
+export interface HarnessDynamicWorkflowTemplate {
+  id: string
+  templateType: string
+  label: string
+  description: string
+  nodes: string[]
+  requiredNodes: string[]
+}
+
+export interface HarnessDynamicWorkflowNode {
+  id: string
+  label: string
+  group?: string
+  description: string
+}
+
+export interface HarnessDynamicWorkflowConfig {
+  templates: HarnessDynamicWorkflowTemplate[]
+  nodes: HarnessDynamicWorkflowNode[]
 }
 
 export interface HarnessWorkflowNextAction {

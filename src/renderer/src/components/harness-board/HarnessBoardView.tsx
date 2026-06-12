@@ -74,6 +74,9 @@ import {
 import type {
   HarnessArtifact,
   HarnessArtifactType,
+  HarnessDynamicWorkflowConfig,
+  HarnessDynamicWorkflowNode,
+  HarnessDynamicWorkflowTemplate,
   HarnessEventStatus,
   HarnessHookLogView,
   HarnessProjectCreateInput,
@@ -134,6 +137,7 @@ const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
 const OTHER_ADAPTER_SCENARIO = "其他类别"
 const ADAPTER_SELECT_PLACEHOLDER = "请选择已安装的支持项目模式的插件"
 const PROJECT_STATUS_POLL_INTERVAL_MS = 10000
+const CUSTOM_WORKFLOW_TEMPLATE_ID = "custom"
 
 const preventHarnessDialogOutsideClose: React.ComponentProps<typeof DialogContent>["onPointerDownOutside"] =
   (event) => {
@@ -256,6 +260,7 @@ type ThreadWorkspaceStateMap = Record<
     scheduledTaskLoading?: boolean
     pendingApproval?: unknown
     pendingUserInput?: unknown
+    contextReminder?: { pending?: boolean }
   } | undefined
 >
 
@@ -1561,29 +1566,238 @@ function ProjectEditDialog({
   )
 }
 
+interface DynamicWorkflowNodeGroup {
+  key: string
+  label: string
+  nodes: HarnessDynamicWorkflowNode[]
+}
+
+function defaultWorkflowTemplateId(config: HarnessDynamicWorkflowConfig | null): string {
+  return config?.templates[0]?.id ?? ""
+}
+
+function isCustomWorkflowTemplate(template: HarnessDynamicWorkflowTemplate | null | undefined): boolean {
+  return template?.templateType === CUSTOM_WORKFLOW_TEMPLATE_ID
+}
+
+function selectedWorkflowTemplate(
+  config: HarnessDynamicWorkflowConfig | null,
+  templateId: string
+): HarnessDynamicWorkflowTemplate | null {
+  return config?.templates.find((template) => template.id === templateId) ?? null
+}
+
+function requiredWorkflowNodeIds(
+  config: HarnessDynamicWorkflowConfig | null,
+  templateId: string
+): Set<string> {
+  const template = selectedWorkflowTemplate(config, templateId)
+  return new Set(template && isCustomWorkflowTemplate(template) ? template.requiredNodes : [])
+}
+
+function ensureRequiredWorkflowNodes(
+  selectedNodeIds: Set<string>,
+  config: HarnessDynamicWorkflowConfig | null,
+  templateId: string
+): Set<string> {
+  const requiredNodeIds = requiredWorkflowNodeIds(config, templateId)
+  if (requiredNodeIds.size === 0) return selectedNodeIds
+
+  const next = new Set(selectedNodeIds)
+  for (const nodeId of requiredNodeIds) next.add(nodeId)
+  return next
+}
+
+function orderedSelectedWorkflowNodeIds(
+  config: HarnessDynamicWorkflowConfig | null,
+  selectedNodeIds: Set<string>
+): string[] {
+  return config?.nodes.filter((node) => selectedNodeIds.has(node.id)).map((node) => node.id) ?? []
+}
+
+function groupDynamicWorkflowNodes(nodes: HarnessDynamicWorkflowNode[]): DynamicWorkflowNodeGroup[] {
+  const groups: DynamicWorkflowNodeGroup[] = []
+  const groupsByKey = new Map<string, DynamicWorkflowNodeGroup>()
+  const ungroupedNodes: HarnessDynamicWorkflowNode[] = []
+
+  for (const node of nodes) {
+    const label = node.group?.trim()
+    if (!label) {
+      ungroupedNodes.push(node)
+      continue
+    }
+
+    const key = `group:${label}`
+    const existing = groupsByKey.get(key)
+    if (existing) {
+      existing.nodes.push(node)
+      continue
+    }
+
+    const group = { key, label, nodes: [node] }
+    groupsByKey.set(key, group)
+    groups.push(group)
+  }
+
+  if (groups.length > 0 && ungroupedNodes.length > 0) {
+    groups.push({ key: "ungrouped", label: "未分组", nodes: ungroupedNodes })
+  }
+  if (groups.length === 0 && ungroupedNodes.length > 0) {
+    groups.push({ key: "all", label: "节点", nodes: ungroupedNodes })
+  }
+
+  return groups
+}
+
+function WorkflowTemplateCard({
+  template,
+  selected,
+  onSelect
+}: {
+  template: HarnessDynamicWorkflowTemplate
+  selected: boolean
+  onSelect: (templateId: string) => void
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      className={cn(
+        "flex min-h-[56px] w-full cursor-pointer items-center rounded-md border px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        selected
+          ? "border-primary bg-primary/5 text-foreground shadow-sm"
+          : "border-border bg-background hover:border-primary/40 hover:bg-muted/30"
+      )}
+      onClick={() => onSelect(template.id)}
+    >
+      <span className="flex w-full min-w-0 items-start justify-between gap-2">
+        <span className="min-w-0 truncate text-sm font-semibold">{template.label}</span>
+        <CheckCircle2
+          className={cn(
+            "mt-0.5 size-4 shrink-0",
+            selected ? "text-primary" : "text-muted-foreground/30"
+          )}
+        />
+      </span>
+    </button>
+  )
+}
+
+function WorkflowNodeSelector({
+  config,
+  title,
+  readOnly,
+  requiredNodeIds,
+  selectedNodeIds,
+  onToggleNode
+}: {
+  config: HarnessDynamicWorkflowConfig
+  title: string
+  readOnly: boolean
+  requiredNodeIds: Set<string>
+  selectedNodeIds: Set<string>
+  onToggleNode: (nodeId: string, checked: boolean) => void
+}): React.JSX.Element {
+  const selectedCount = orderedSelectedWorkflowNodeIds(config, selectedNodeIds).length
+
+  return (
+    <div className="rounded-md border border-border bg-background">
+      <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
+        <span className="text-xs font-medium text-muted-foreground">{title}</span>
+        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+          {selectedCount}/{config.nodes.length}
+        </span>
+      </div>
+      <div className="max-h-56 overflow-y-auto px-3 py-2">
+        {groupDynamicWorkflowNodes(config.nodes).map((group) => (
+          <div key={group.key} className="space-y-1.5 py-1.5">
+            <div className="text-[11px] font-semibold text-muted-foreground/80">{group.label}</div>
+            <div className="grid gap-1">
+              {group.nodes.map((node) => {
+                const checked = selectedNodeIds.has(node.id)
+                const required = requiredNodeIds.has(node.id)
+                return (
+                  <label
+                    key={node.id}
+                    className={cn(
+                      "flex min-w-0 items-start gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors",
+                      readOnly || required ? "text-muted-foreground" : "cursor-pointer hover:bg-muted/60"
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={readOnly || required}
+                      className="mt-0.5 size-4 shrink-0 accent-primary disabled:cursor-not-allowed"
+                      onChange={(event) => onToggleNode(node.id, event.target.checked)}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span className="truncate text-foreground">{node.label}</span>
+                        {required && (
+                          <span className="shrink-0 text-[11px] text-muted-foreground">必选</span>
+                        )}
+                      </span>
+                      {node.description && (
+                        <span className="mt-0.5 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                          {node.description}
+                        </span>
+                      )}
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+          </div>
+        ))}
+        {config.nodes.length === 0 && (
+          <div className="py-5 text-center text-sm text-muted-foreground">暂无可选节点</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function FeatureCreateDialog({
   project,
   featureName,
+  workflowConfig,
+  workflowLoading,
+  workflowTemplate,
+  selectedWorkflowNodeIds,
   creating,
   error,
   onOpenChange,
   onChange,
+  onWorkflowTemplateChange,
+  onWorkflowNodeToggle,
   onSubmit
 }: {
   project: HarnessProjectListItem | null
   featureName: string
+  workflowConfig: HarnessDynamicWorkflowConfig | null
+  workflowLoading: boolean
+  workflowTemplate: string
+  selectedWorkflowNodeIds: Set<string>
   creating: boolean
   error: string | null
   onOpenChange: (open: boolean) => void
   onChange: (featureName: string) => void
+  onWorkflowTemplateChange: (templateId: string) => void
+  onWorkflowNodeToggle: (nodeId: string, checked: boolean) => void
   onSubmit: () => void
 }): React.JSX.Element {
   const featureNameError = getHarnessNameError("特性名称", featureName)
+  const selectedTemplate = selectedWorkflowTemplate(workflowConfig, workflowTemplate)
+  const customWorkflowSelected = isCustomWorkflowTemplate(selectedTemplate)
+  const customRequiredNodeIds = requiredWorkflowNodeIds(workflowConfig, workflowTemplate)
+  const selectedTemplateNodeIds = new Set(selectedTemplate?.nodes ?? [])
 
   return (
     <Dialog open={project !== null} onOpenChange={onOpenChange}>
       <DialogContent
-        className={cn(harnessDialogContentClassName, "max-w-md")}
+        className={cn(harnessDialogContentClassName, workflowConfig ? "max-w-2xl" : "max-w-md")}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
         <DialogHeader>
@@ -1608,6 +1822,36 @@ function FeatureCreateDialog({
             />
             {featureNameError && <span className="text-status-critical">{featureNameError}</span>}
           </label>
+          {!workflowLoading && workflowConfig && (
+            <section className="grid gap-3 rounded-md border border-border bg-muted/30 p-3">
+              <div className="text-sm font-semibold">选择要使用的工作流</div>
+              <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="选择要使用的工作流">
+                {workflowConfig.templates.map((template) => (
+                  <WorkflowTemplateCard
+                    key={template.id}
+                    template={template}
+                    selected={template.id === workflowTemplate}
+                    onSelect={onWorkflowTemplateChange}
+                  />
+                ))}
+              </div>
+              {selectedTemplate && (
+                <div className="rounded-md border border-border bg-background px-3 py-2 text-xs leading-5 text-muted-foreground">
+                  {selectedTemplate.description || "插件未提供流程说明。"}
+                </div>
+              )}
+              {selectedTemplate && (
+                <WorkflowNodeSelector
+                  config={workflowConfig}
+                  title={customWorkflowSelected ? "节点选择（自定义）" : "包含节点"}
+                  readOnly={!customWorkflowSelected}
+                  requiredNodeIds={customWorkflowSelected ? customRequiredNodeIds : new Set()}
+                  selectedNodeIds={customWorkflowSelected ? selectedWorkflowNodeIds : selectedTemplateNodeIds}
+                  onToggleNode={onWorkflowNodeToggle}
+                />
+              )}
+            </section>
+          )}
           {error && (
             <div className="rounded-md border border-status-critical/30 bg-status-critical/10 px-3 py-2 text-sm text-status-critical">
               {error}
@@ -1619,7 +1863,7 @@ function FeatureCreateDialog({
             </Button>
             <Button
               type="submit"
-              disabled={creating || !featureName.trim() || featureNameError !== null}
+              disabled={creating || workflowLoading || !featureName.trim() || featureNameError !== null}
               className="gap-2"
             >
               {creating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
@@ -3340,6 +3584,10 @@ export function HarnessBoardView({
   const [featureDialogProject, setFeatureDialogProject] = useState<HarnessProjectListItem | null>(null)
   const [featureName, setFeatureName] = useState("")
   const [featureError, setFeatureError] = useState<string | null>(null)
+  const [featureWorkflowConfig, setFeatureWorkflowConfig] = useState<HarnessDynamicWorkflowConfig | null>(null)
+  const [featureWorkflowLoading, setFeatureWorkflowLoading] = useState(false)
+  const [featureWorkflowTemplate, setFeatureWorkflowTemplate] = useState("")
+  const [selectedWorkflowNodeIds, setSelectedWorkflowNodeIds] = useState<Set<string>>(new Set())
   const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
   const [updatingPluginProjectIds, setUpdatingPluginProjectIds] = useState<Set<string>>(new Set())
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -3380,6 +3628,7 @@ export function HarnessBoardView({
   const selectedProjectRefreshInFlightRef = useRef(false)
   const skipRunDetailLoadForSessionRef = useRef<string | null>(null)
   const loadProjectsRequestIdRef = useRef(0)
+  const featureWorkflowRequestIdRef = useRef(0)
   projectsRef.current = projects
   selectedProjectIdRef.current = selectedProjectId
   selectedFeatureRef.current = selectedFeature
@@ -3839,21 +4088,76 @@ export function HarnessBoardView({
       toast.warning(compatibilityMessage)
       return
     }
+    const requestId = ++featureWorkflowRequestIdRef.current
     setFeatureDialogProject(project)
     setFeatureName("")
     setFeatureError(null)
+    setFeatureWorkflowConfig(null)
+    setFeatureWorkflowTemplate("")
+    setSelectedWorkflowNodeIds(new Set())
+    setFeatureWorkflowLoading(true)
+
+    void window.api.harnessBoard
+      .getDynamicWorkflowConfig(project.projectId)
+      .then((config) => {
+        if (requestId !== featureWorkflowRequestIdRef.current) return
+        const templateId = defaultWorkflowTemplateId(config)
+        setFeatureWorkflowConfig(config)
+        setFeatureWorkflowTemplate(templateId)
+        setSelectedWorkflowNodeIds(requiredWorkflowNodeIds(config, templateId))
+      })
+      .catch(() => {
+        if (requestId !== featureWorkflowRequestIdRef.current) return
+        setFeatureWorkflowConfig(null)
+        setFeatureWorkflowTemplate("")
+        setSelectedWorkflowNodeIds(new Set())
+      })
+      .finally(() => {
+        if (requestId === featureWorkflowRequestIdRef.current) {
+          setFeatureWorkflowLoading(false)
+        }
+      })
   }, [])
 
   const handleFeatureDialogOpenChange = useCallback(
     (open: boolean): void => {
       if (!open && !creatingFeatureProjectId) {
+        featureWorkflowRequestIdRef.current += 1
         setFeatureDialogProject(null)
         setFeatureName("")
         setFeatureError(null)
+        setFeatureWorkflowConfig(null)
+        setFeatureWorkflowLoading(false)
+        setFeatureWorkflowTemplate("")
+        setSelectedWorkflowNodeIds(new Set())
       }
     },
     [creatingFeatureProjectId]
   )
+
+  const handleWorkflowTemplateChange = useCallback((templateId: string): void => {
+    setFeatureWorkflowTemplate(templateId)
+    const template = selectedWorkflowTemplate(featureWorkflowConfig, templateId)
+    if (isCustomWorkflowTemplate(template)) {
+      setSelectedWorkflowNodeIds((current) =>
+        ensureRequiredWorkflowNodes(current, featureWorkflowConfig, templateId)
+      )
+    }
+  }, [featureWorkflowConfig])
+
+  const handleWorkflowNodeToggle = useCallback((nodeId: string, checked: boolean): void => {
+    setSelectedWorkflowNodeIds((current) => {
+      const requiredNodeIds = requiredWorkflowNodeIds(featureWorkflowConfig, featureWorkflowTemplate)
+      if (requiredNodeIds.has(nodeId)) return current
+      const next = new Set(current)
+      if (checked) {
+        next.add(nodeId)
+      } else {
+        next.delete(nodeId)
+      }
+      return next
+    })
+  }, [featureWorkflowConfig, featureWorkflowTemplate])
 
   const handleSubmitFeature = useCallback(async (): Promise<void> => {
     if (!featureDialogProject || creatingFeatureRef.current) return
@@ -3872,9 +4176,31 @@ export function HarnessBoardView({
     setCreatingFeatureProjectId(featureDialogProject.projectId)
     setFeatureError(null)
     try {
+      const selectedTemplate = selectedWorkflowTemplate(featureWorkflowConfig, featureWorkflowTemplate)
+      const customWorkflowSelected = isCustomWorkflowTemplate(selectedTemplate)
+      const workflowInput =
+        featureWorkflowConfig && featureWorkflowTemplate
+          ? {
+              workflowTemplate: featureWorkflowTemplate,
+              workflowConfig: featureWorkflowConfig,
+              ...(customWorkflowSelected
+                ? {
+                    workflowNodes: orderedSelectedWorkflowNodeIds(
+                      featureWorkflowConfig,
+                      ensureRequiredWorkflowNodes(
+                        selectedWorkflowNodeIds,
+                        featureWorkflowConfig,
+                        featureWorkflowTemplate
+                      )
+                    )
+                  }
+                : {})
+            }
+          : {}
       const result = await window.api.harnessBoard.createFeature({
         projectId: featureDialogProject.projectId,
-        feature
+        feature,
+        ...workflowInput
       })
 
       setFeatureDialogProject(null)
@@ -3895,6 +4221,9 @@ export function HarnessBoardView({
   }, [
     featureDialogProject,
     featureName,
+    featureWorkflowConfig,
+    featureWorkflowTemplate,
+    selectedWorkflowNodeIds,
     loadProjectDetail
   ])
 
@@ -4344,10 +4673,16 @@ export function HarnessBoardView({
         <FeatureCreateDialog
           project={featureDialogProject}
           featureName={featureName}
+          workflowConfig={featureWorkflowConfig}
+          workflowLoading={featureWorkflowLoading}
+          workflowTemplate={featureWorkflowTemplate}
+          selectedWorkflowNodeIds={selectedWorkflowNodeIds}
           creating={creatingFeatureProjectId !== null}
           error={featureError}
           onOpenChange={handleFeatureDialogOpenChange}
           onChange={setFeatureName}
+          onWorkflowTemplateChange={handleWorkflowTemplateChange}
+          onWorkflowNodeToggle={handleWorkflowNodeToggle}
           onSubmit={() => void handleSubmitFeature()}
         />
         <ProjectEditDialog
@@ -4512,10 +4847,16 @@ export function HarnessBoardView({
       <FeatureCreateDialog
         project={featureDialogProject}
         featureName={featureName}
+        workflowConfig={featureWorkflowConfig}
+        workflowLoading={featureWorkflowLoading}
+        workflowTemplate={featureWorkflowTemplate}
+        selectedWorkflowNodeIds={selectedWorkflowNodeIds}
         creating={creatingFeatureProjectId !== null}
         error={featureError}
         onOpenChange={handleFeatureDialogOpenChange}
         onChange={setFeatureName}
+        onWorkflowTemplateChange={handleWorkflowTemplateChange}
+        onWorkflowNodeToggle={handleWorkflowNodeToggle}
         onSubmit={() => void handleSubmitFeature()}
       />
       <ProjectFormDialog
