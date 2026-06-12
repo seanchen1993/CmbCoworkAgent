@@ -2157,7 +2157,7 @@ function SystemSection({
   loadingDetailIds,
   archivingProjectId,
   pluginUpdateInfoByProjectId,
-  updatingPluginProjectIds,
+  updatingPluginNames,
   onEditProject,
   onArchiveProject,
   onUpdateProjectPlugin,
@@ -2168,7 +2168,7 @@ function SystemSection({
   loadingDetailIds: Set<string>
   archivingProjectId: string | null
   pluginUpdateInfoByProjectId: Map<string, MarketPluginUpdateInfo>
-  updatingPluginProjectIds: Set<string>
+  updatingPluginNames: Set<string>
   onEditProject: (project: HarnessProjectListItem) => void
   onArchiveProject: (project: HarnessProjectListItem) => void
   onUpdateProjectPlugin: (
@@ -2196,7 +2196,7 @@ function SystemSection({
               loading={loadingDetailIds.has(project.projectId)}
               archiving={archivingProjectId === project.projectId}
               pluginUpdateInfo={pluginUpdateInfoByProjectId.get(project.projectId)}
-              updatingPlugin={updatingPluginProjectIds.has(project.projectId)}
+              updatingPlugin={updatingPluginNames.has(project.harnessAdapter.name)}
               onEditProject={onEditProject}
               onArchiveProject={onArchiveProject}
               onUpdatePlugin={onUpdateProjectPlugin}
@@ -3649,7 +3649,7 @@ export function HarnessBoardView({
   const [featureWorkflowTemplate, setFeatureWorkflowTemplate] = useState("")
   const [selectedWorkflowNodeIds, setSelectedWorkflowNodeIds] = useState<Set<string>>(new Set())
   const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
-  const [updatingPluginProjectIds, setUpdatingPluginProjectIds] = useState<Set<string>>(new Set())
+  const [updatingPluginNames, setUpdatingPluginNames] = useState<Set<string>>(new Set())
   const [loadError, setLoadError] = useState<string | null>(null)
   const {
     threads,
@@ -4355,9 +4355,10 @@ export function HarnessBoardView({
 
   const handleUpdateProjectPlugin = useCallback(
     async (project: HarnessProjectListItem, updateInfo: MarketPluginUpdateInfo): Promise<void> => {
-      if (updatingPluginProjectIds.has(project.projectId)) return
+      const pluginName = project.harnessAdapter.name
+      if (updatingPluginNames.has(pluginName)) return
 
-      setUpdatingPluginProjectIds((current) => new Set(current).add(project.projectId))
+      setUpdatingPluginNames((current) => new Set(current).add(pluginName))
       try {
         const response = await installMarketPluginUpdate(updateInfo.item)
         if (response.success) {
@@ -4369,14 +4370,14 @@ export function HarnessBoardView({
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "更新安装失败")
       } finally {
-        setUpdatingPluginProjectIds((current) => {
+        setUpdatingPluginNames((current) => {
           const next = new Set(current)
-          next.delete(project.projectId)
+          next.delete(pluginName)
           return next
         })
       }
     },
-    [bumpPluginVersion, updatingPluginProjectIds]
+    [bumpPluginVersion, updatingPluginNames]
   )
 
   const openFeatureDetail = useCallback(
@@ -4850,7 +4851,7 @@ export function HarnessBoardView({
                     loadingDetailIds={loadingDetailIds}
                     archivingProjectId={archivingProjectId}
                     pluginUpdateInfoByProjectId={projectPluginUpdateInfoById}
-                    updatingPluginProjectIds={updatingPluginProjectIds}
+                    updatingPluginNames={updatingPluginNames}
                     onEditProject={handleEditProject}
                     onArchiveProject={(project) => void handleArchiveProject(project)}
                     onUpdateProjectPlugin={(project, updateInfo) =>
@@ -4887,7 +4888,7 @@ export function HarnessBoardView({
                         loadingDetailIds={loadingDetailIds}
                         archivingProjectId={archivingProjectId}
                         pluginUpdateInfoByProjectId={projectPluginUpdateInfoById}
-                        updatingPluginProjectIds={updatingPluginProjectIds}
+                        updatingPluginNames={updatingPluginNames}
                         onEditProject={handleEditProject}
                         onArchiveProject={(project) => void handleArchiveProject(project)}
                         onUpdateProjectPlugin={(project, updateInfo) =>
