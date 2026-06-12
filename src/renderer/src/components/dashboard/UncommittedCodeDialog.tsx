@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import { ChevronLeft, Info, Loader2 } from "lucide-react"
+import { ChevronLeft, Info, Loader2, MessagesSquare } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -9,6 +9,8 @@ import {
 } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { TraceExplorer } from "./TraceHistoryDialog"
+import type { DashboardTraceDetail } from "./use-dashboard"
 
 // ── 类型（与主进程 dashboard.ts / preload d.ts 对齐）──────────────────
 interface UncommittedRankingItem {
@@ -115,12 +117,14 @@ function BreakdownTable({
   title,
   hint,
   rows,
-  emptyLabel
+  emptyLabel,
+  onRowClick
 }: {
   title: string
   hint?: string
   rows: UncommittedDetailBreakdown[]
   emptyLabel: string
+  onRowClick?: (row: UncommittedDetailBreakdown) => void
 }): React.JSX.Element {
   return (
     <div className="rounded-lg border border-border bg-card p-3">
@@ -132,16 +136,38 @@ function BreakdownTable({
         <div className="py-3 text-center text-[11px] text-muted-foreground">{emptyLabel}</div>
       ) : (
         <div className="space-y-1">
-          {rows.map((row) => (
-            <div key={row.key} className="flex items-center justify-between gap-2 text-[11px]">
+          {rows.map((row) => {
+            const label = (
               <span className="truncate text-foreground" title={row.key}>
                 {row.key}
               </span>
+            )
+            const metrics = (
               <span className="shrink-0 tabular-nums text-muted-foreground">
                 {formatLines(row.lines)} 行 · {row.gens} 次
               </span>
-            </div>
-          ))}
+            )
+            return onRowClick ? (
+              <button
+                key={row.key}
+                type="button"
+                className="flex w-full items-center justify-between gap-2 rounded-md px-1 py-0.5 text-left text-[11px] transition-colors hover:bg-blue-500/10"
+                title={`查看会话详情 · ${row.key}`}
+                onClick={() => onRowClick(row)}
+              >
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <MessagesSquare className="size-3 shrink-0 text-muted-foreground" />
+                  {label}
+                </span>
+                {metrics}
+              </button>
+            ) : (
+              <div key={row.key} className="flex items-center justify-between gap-2 text-[11px]">
+                {label}
+                {metrics}
+              </div>
+            )
+          })}
         </div>
       )}
     </div>
@@ -150,18 +176,113 @@ function BreakdownTable({
 
 const SAMPLE_PAGE_SIZE = 30
 
+function ThreadDetailDialog({
+  threadId,
+  threadScope,
+  onOpenChange
+}: {
+  threadId: string | null
+  threadScope: "platform" | "project"
+  onOpenChange: (open: boolean) => void
+}): React.JSX.Element {
+  const [traces, setTraces] = useState<DashboardTraceDetail[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!threadId) {
+      setTraces([])
+      setError(null)
+      return
+    }
+
+    const api = window.api?.dashboard
+    if (!api || typeof api.threadTraces !== "function") {
+      setError("当前环境不支持加载会话记录")
+      setTraces([])
+      return
+    }
+
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    setTraces([])
+    api
+      .threadTraces(threadId, { scope: threadScope })
+      .then((result) => {
+        if (cancelled) return
+        if (result.success) {
+          setTraces(Array.isArray(result.data) ? (result.data as DashboardTraceDetail[]) : [])
+        } else {
+          setError(result.error ?? "加载会话失败")
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [threadId, threadScope])
+
+  const loadThreadTraces = useCallback(
+    async (id: string): Promise<DashboardTraceDetail[]> => {
+      if (id === threadId) return traces
+      const res = await window.api.dashboard.threadTraces(id, { scope: threadScope })
+      return res.success && Array.isArray(res.data) ? (res.data as DashboardTraceDetail[]) : []
+    },
+    [threadId, threadScope, traces]
+  )
+
+  return (
+    <Dialog open={Boolean(threadId)} onOpenChange={onOpenChange}>
+      <DialogContent className="flex h-[80vh] max-w-[1000px] flex-col gap-0 p-0">
+        <DialogHeader className="border-b border-border px-5 py-4">
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <MessagesSquare className="size-4 text-muted-foreground" />
+            会话详情
+          </DialogTitle>
+          <DialogDescription className="truncate">
+            {threadId ? `Thread ${threadId}` : ""}
+          </DialogDescription>
+        </DialogHeader>
+        <TraceExplorer
+          traces={traces}
+          loading={loading}
+          error={error}
+          showCodeStats={false}
+          defaultViewMode="thread"
+          showViewModeToggle={false}
+          loadThreadTraces={loadThreadTraces}
+          title="对应会话"
+          subtitle="查看该会话的完整对话还原"
+          emptyText="该会话暂无可还原记录"
+          className="min-h-0 flex-1"
+        />
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function DetailView({
   detail,
   loading,
-  error
+  error,
+  threadScope
 }: {
   detail: UncommittedDetailData | null
   loading: boolean
   error: string | null
+  threadScope: "platform" | "project"
 }): React.JSX.Element {
   // 样本列表客户端分页：全量样本已随详情一次性返回，这里只控制可见条数。
   // 切换用户时由父组件通过 key 重挂载本组件来重置回第一页。
   const [visibleSamples, setVisibleSamples] = useState(SAMPLE_PAGE_SIZE)
+  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null)
 
   if (loading) {
     return (
@@ -228,6 +349,7 @@ function DetailView({
           hint="集中在少数会话通常意味着探索性/草稿会话，本就不打算提交。"
           rows={detail.byThread}
           emptyLabel="无会话信息"
+          onRowClick={(row) => setSelectedThreadId(row.key)}
         />
       </div>
 
@@ -280,6 +402,13 @@ function DetailView({
           </>
         )}
       </div>
+      <ThreadDetailDialog
+        threadId={selectedThreadId}
+        threadScope={threadScope}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) setSelectedThreadId(null)
+        }}
+      />
     </div>
   )
 }
@@ -415,6 +544,7 @@ export function UncommittedCodeDialog({
               detail={detail}
               loading={detailLoading}
               error={detailError}
+              threadScope={scope?.projectMode ? "project" : "platform"}
             />
           ) : rankingLoading ? (
             <div className="flex flex-1 items-center justify-center py-10 text-sm text-muted-foreground">
