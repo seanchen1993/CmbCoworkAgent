@@ -37,6 +37,7 @@ import type {
   TraceNode,
   TraceNodeStatus,
   TraceOutcome,
+  TraceRole,
   TraceTriggerSource,
   ITraceReporter,
   RoutingTrace
@@ -75,6 +76,14 @@ export function setTraceReporter(reporter: ITraceReporter): void {
 
 export function getTraceReporter(): ITraceReporter {
   return _reporter
+}
+
+export function reportTrace(trace: AgentTrace): void {
+  void Promise.resolve()
+    .then(() => _reporter.report(sanitizeTraceForCloudUpload(trace)))
+    .catch((e) => {
+      console.warn("[Tracer] Reporter.report() threw:", e)
+    })
 }
 
 // ─────────────────────────────────────────────────────────
@@ -249,6 +258,15 @@ export class TraceCollector {
   private routingTrace: RoutingTrace | undefined
   private readonly triggerSource: TraceTriggerSource
   private readonly harnessFeature: { projectId: string; slug: string } | undefined
+  private traceRole: TraceRole
+  private parentTraceId: string | undefined
+  private parentThreadId: string | undefined
+  private workerId: string | undefined
+  private workerThreadId: string | undefined
+  private workerTurn: number | undefined
+  private workerRole: string | undefined
+  private workerWorkload: string | undefined
+  private finishedPromise: Promise<AgentTrace> | undefined
 
   private steps: TraceStep[] = []
   private usedSkills: string[] = []
@@ -273,6 +291,14 @@ export class TraceCollector {
     options: {
       triggerSource?: TraceTriggerSource
       harnessFeature?: { projectId: string; slug: string }
+      traceRole?: TraceRole
+      parentTraceId?: string
+      parentThreadId?: string
+      workerId?: string
+      workerThreadId?: string
+      workerTurn?: number
+      workerRole?: string
+      workerWorkload?: string
     } = {}
   ) {
     this.traceId = uuid()
@@ -281,6 +307,14 @@ export class TraceCollector {
     this.modelId = modelId
     this.triggerSource = options.triggerSource ?? "chat"
     this.harnessFeature = options.harnessFeature
+    this.traceRole = options.traceRole ?? "standalone"
+    this.parentTraceId = options.parentTraceId
+    this.parentThreadId = options.parentThreadId
+    this.workerId = options.workerId
+    this.workerThreadId = options.workerThreadId
+    this.workerTurn = options.workerTurn
+    this.workerRole = options.workerRole
+    this.workerWorkload = options.workerWorkload
     this.startedAt = nowIsoLocal()
     this.rootNodeId = `trace:${this.traceId}`
     this.pushNode({
@@ -295,7 +329,15 @@ export class TraceCollector {
         traceId: this.traceId,
         threadId: this.threadId,
         modelId: this.modelId,
-        triggerSource: this.triggerSource
+        triggerSource: this.triggerSource,
+        traceRole: this.traceRole,
+        ...(this.parentTraceId ? { parentTraceId: this.parentTraceId } : {}),
+        ...(this.parentThreadId ? { parentThreadId: this.parentThreadId } : {}),
+        ...(this.workerId ? { workerId: this.workerId } : {}),
+        ...(this.workerThreadId ? { workerThreadId: this.workerThreadId } : {}),
+        ...(this.workerTurn !== undefined ? { workerTurn: this.workerTurn } : {}),
+        ...(this.workerRole ? { workerRole: this.workerRole } : {}),
+        ...(this.workerWorkload ? { workerWorkload: this.workerWorkload } : {})
       }
     })
     // Publish context to adoption tracker (side-effect only). Project-mode
@@ -325,6 +367,45 @@ export class TraceCollector {
       })
     } catch {
       // never block trace setup
+    }
+  }
+
+  getTraceId(): string {
+    return this.traceId
+  }
+
+  setTeamTraceMetadata(options: {
+    traceRole?: TraceRole
+    parentTraceId?: string
+    parentThreadId?: string
+    workerId?: string
+    workerThreadId?: string
+    workerTurn?: number
+    workerRole?: string
+    workerWorkload?: string
+  }): void {
+    if (options.traceRole) this.traceRole = options.traceRole
+    if (options.parentTraceId !== undefined) this.parentTraceId = options.parentTraceId
+    if (options.parentThreadId !== undefined) this.parentThreadId = options.parentThreadId
+    if (options.workerId !== undefined) this.workerId = options.workerId
+    if (options.workerThreadId !== undefined) this.workerThreadId = options.workerThreadId
+    if (options.workerTurn !== undefined) this.workerTurn = options.workerTurn
+    if (options.workerRole !== undefined) this.workerRole = options.workerRole
+    if (options.workerWorkload !== undefined) this.workerWorkload = options.workerWorkload
+
+    const root = this.getNode(this.rootNodeId)
+    if (root) {
+      root.metadata = {
+        ...(root.metadata ?? {}),
+        traceRole: this.traceRole,
+        ...(this.parentTraceId ? { parentTraceId: this.parentTraceId } : {}),
+        ...(this.parentThreadId ? { parentThreadId: this.parentThreadId } : {}),
+        ...(this.workerId ? { workerId: this.workerId } : {}),
+        ...(this.workerThreadId ? { workerThreadId: this.workerThreadId } : {}),
+        ...(this.workerTurn !== undefined ? { workerTurn: this.workerTurn } : {}),
+        ...(this.workerRole ? { workerRole: this.workerRole } : {}),
+        ...(this.workerWorkload ? { workerWorkload: this.workerWorkload } : {})
+      }
     }
   }
 
@@ -599,10 +680,35 @@ export class TraceCollector {
    * Finalize the trace, write to disk, and (optionally) report remotely.
    * Safe to call multiple times — only the first call takes effect.
    */
-  async finish(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
+  async finish(
+    outcome: TraceOutcome,
+    errorMessage?: string,
+    options: {
+      skipSkillEval?: boolean
+      deferReport?: boolean
+      skillEvalOverride?: TraceSkillEvalExtension
+    } = {}
+  ): Promise<AgentTrace> {
+    if (!this.finishedPromise) {
+      this.finishedPromise = this.finishOnce(outcome, errorMessage, options)
+    }
+    return this.finishedPromise
+  }
+
+  private async finishOnce(
+    outcome: TraceOutcome,
+    errorMessage?: string,
+    options: {
+      skipSkillEval?: boolean
+      deferReport?: boolean
+      skillEvalOverride?: TraceSkillEvalExtension
+    } = {}
+  ): Promise<AgentTrace> {
     const endedAt = nowIsoLocal()
     const durationMs = Date.now() - new Date(this.startedAt).getTime()
-    const totalToolCalls = this.steps.reduce((sum, s) => sum + s.toolCalls.length, 0)
+    const stepToolCalls = this.steps.reduce((sum, s) => sum + s.toolCalls.length, 0)
+    const nodeToolCalls = this.nodes.filter((node) => node.type === "tool").length
+    const totalToolCalls = stepToolCalls > 0 ? stepToolCalls : nodeToolCalls
 
     // Resolve skill versions and merge into "name-version" format
     let skillAuthorByRawName: Record<string, string | undefined> = {}
@@ -673,6 +779,14 @@ export class TraceCollector {
     const trace: AgentTrace = {
       traceId: this.traceId,
       threadId: this.threadId,
+      traceRole: this.traceRole,
+      ...(this.parentTraceId ? { parentTraceId: this.parentTraceId } : {}),
+      ...(this.parentThreadId ? { parentThreadId: this.parentThreadId } : {}),
+      ...(this.workerId ? { workerId: this.workerId } : {}),
+      ...(this.workerThreadId ? { workerThreadId: this.workerThreadId } : {}),
+      ...(this.workerTurn !== undefined ? { workerTurn: this.workerTurn } : {}),
+      ...(this.workerRole ? { workerRole: this.workerRole } : {}),
+      ...(this.workerWorkload ? { workerWorkload: this.workerWorkload } : {}),
       startedAt: this.startedAt,
       endedAt,
       durationMs,
@@ -714,32 +828,54 @@ export class TraceCollector {
             ...harnessAdapterFields
           }
         : {}),
-      ...(this.routingTrace ? { metadata: { routingTrace: this.routingTrace } } : {})
+      ...(this.routingTrace || this.traceRole !== "standalone"
+        ? {
+            metadata: {
+              ...(this.routingTrace ? { routingTrace: this.routingTrace } : {}),
+              ...(this.traceRole !== "standalone"
+                ? {
+                    teamTrace: {
+                      traceRole: this.traceRole,
+                      ...(this.parentTraceId ? { parentTraceId: this.parentTraceId } : {}),
+                      ...(this.parentThreadId ? { parentThreadId: this.parentThreadId } : {}),
+                      ...(this.workerId ? { workerId: this.workerId } : {}),
+                      ...(this.workerThreadId ? { workerThreadId: this.workerThreadId } : {}),
+                      ...(this.workerTurn !== undefined ? { workerTurn: this.workerTurn } : {}),
+                      ...(this.workerRole ? { workerRole: this.workerRole } : {}),
+                      ...(this.workerWorkload ? { workerWorkload: this.workerWorkload } : {})
+                    }
+                  }
+                : {})
+            }
+          }
+        : {})
     }
-    let skillEval: TraceSkillEvalExtension | undefined
-    try {
-      const windowTurn = appendSkillEvalWindowTurn({
-        traceId: trace.traceId,
-        threadId: trace.threadId,
-        startedAt: trace.startedAt,
-        endedAt: trace.endedAt,
-        usedSkills: usedSkillsWithVersions,
-        userMessage: trace.userMessage,
-        assistantText: getSkillEvalWindowAssistantText(trace),
-        outcome: trace.outcome
-      })
-      const evalRawSkillNames = windowTurn.evalSkillNames
-      const windowContextByRawName = getSkillEvalWindowContextByRawName(
-        trace.threadId,
-        evalRawSkillNames
-      )
-      skillEval = buildSkillEvalTraceExtension(trace, {
-        skillAuthorByRawName,
-        windowContextByRawName,
-        evalRawSkillNames
-      })
-    } catch (e) {
-      console.warn("[Tracer] buildSkillEvalTraceExtension failed:", e)
+    let skillEval: TraceSkillEvalExtension | undefined = options.skillEvalOverride
+    if (!skillEval && !options.skipSkillEval) {
+      try {
+        const windowTurn = appendSkillEvalWindowTurn({
+          traceId: trace.traceId,
+          threadId: trace.threadId,
+          startedAt: trace.startedAt,
+          endedAt: trace.endedAt,
+          usedSkills: usedSkillsWithVersions,
+          userMessage: trace.userMessage,
+          assistantText: getSkillEvalWindowAssistantText(trace),
+          outcome: trace.outcome
+        })
+        const evalRawSkillNames = windowTurn.evalSkillNames
+        const windowContextByRawName = getSkillEvalWindowContextByRawName(
+          trace.threadId,
+          evalRawSkillNames
+        )
+        skillEval = buildSkillEvalTraceExtension(trace, {
+          skillAuthorByRawName,
+          windowContextByRawName,
+          evalRawSkillNames
+        })
+      } catch (e) {
+        console.warn("[Tracer] buildSkillEvalTraceExtension failed:", e)
+      }
     }
     const traceWithEval: AgentTrace = skillEval ? { ...trace, skillEval } : trace
 
@@ -747,11 +883,7 @@ export class TraceCollector {
 
     // Fire-and-forget: trace upload is a side-channel operation and must
     // never block the main agent flow. Errors are logged and swallowed.
-    void Promise.resolve()
-      .then(() => _reporter.report(sanitizeTraceForCloudUpload(traceWithEval)))
-      .catch((e) => {
-        console.warn("[Tracer] Reporter.report() threw:", e)
-      })
+    if (!options.deferReport) reportTrace(traceWithEval)
 
     // Clear adoption context — subsequent write_file calls on this thread
     // will no longer carry this trace's attribution.
@@ -831,14 +963,24 @@ export class TraceCollector {
       root.output = {
         outcome,
         totalSteps: this.steps.length,
-        totalToolCalls: this.steps.reduce((sum, s) => sum + s.toolCalls.length, 0),
+        totalToolCalls:
+          this.steps.reduce((sum, s) => sum + s.toolCalls.length, 0) ||
+          this.nodes.filter((node) => node.type === "tool").length,
         ...(errorMessage ? { errorMessage } : {})
       }
       root.metadata = {
         ...(root.metadata ?? {}),
         usedSkills: [...resolvedUsedSkills],
         evolvedSkills: [...resolvedEvolvedSkills],
-        triggerSource: this.triggerSource
+        triggerSource: this.triggerSource,
+        traceRole: this.traceRole,
+        ...(this.parentTraceId ? { parentTraceId: this.parentTraceId } : {}),
+        ...(this.parentThreadId ? { parentThreadId: this.parentThreadId } : {}),
+        ...(this.workerId ? { workerId: this.workerId } : {}),
+        ...(this.workerThreadId ? { workerThreadId: this.workerThreadId } : {}),
+        ...(this.workerTurn !== undefined ? { workerTurn: this.workerTurn } : {}),
+        ...(this.workerRole ? { workerRole: this.workerRole } : {}),
+        ...(this.workerWorkload ? { workerWorkload: this.workerWorkload } : {})
       }
     }
 
@@ -930,6 +1072,17 @@ export function readRecentTraces(limit = 20): AgentTrace[] {
     all.push(...readThreadTraces(t))
   }
   return all.sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, limit)
+}
+
+export function readTracesByParentTraceId(parentTraceId: string): AgentTrace[] {
+  if (!parentTraceId) return []
+  const traces: AgentTrace[] = []
+  for (const threadId of listTracedThreads()) {
+    traces.push(
+      ...readThreadTraces(threadId).filter((trace) => trace.parentTraceId === parentTraceId)
+    )
+  }
+  return traces.sort((a, b) => a.startedAt.localeCompare(b.startedAt))
 }
 
 function findTraceLocation(traceId: string): { threadId: string; filePath: string } | null {

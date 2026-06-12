@@ -151,6 +151,8 @@ export interface RoutingTrace {
 
 export type TraceTriggerSource = RoutingTrace["taskSource"]
 
+export type TraceRole = "standalone" | "coordinator" | "worker"
+
 /** How the agent's run ended. */
 export type TraceOutcome =
   | "success" // Agent completed the task and said so
@@ -326,6 +328,22 @@ export interface AgentTrace {
   traceId: string
   /** Thread the trace belongs to */
   threadId: string
+  /** Role of this trace in an agent-team run. Missing values in older traces mean standalone. */
+  traceRole?: TraceRole
+  /** Parent coordinator trace id when this trace belongs to a worker. */
+  parentTraceId?: string
+  /** Parent coordinator thread id when this trace belongs to a worker. */
+  parentThreadId?: string
+  /** Async worker id when traceRole === "worker". */
+  workerId?: string
+  /** Async worker checkpoint thread id when traceRole === "worker". */
+  workerThreadId?: string
+  /** Worker turn number when traceRole === "worker". */
+  workerTurn?: number
+  /** Worker role label when traceRole === "worker". */
+  workerRole?: string
+  /** Worker access/workload label when traceRole === "worker". */
+  workerWorkload?: string
   /** ISO timestamp when the run started */
   startedAt: string
   /** ISO timestamp when the run ended */

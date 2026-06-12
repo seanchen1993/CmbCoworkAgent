@@ -58,6 +58,7 @@ export interface CoordinatorWorkerRunInput {
   ownedFiles: string[]
   description: string
   prompt: string
+  selectedSkill?: CoordinatorSelectedSkill
   workspacePath: string
   abortSignal: AbortSignal
   onProgress: (event: CoordinatorWorkerProgressEvent) => void
@@ -2457,6 +2458,7 @@ export class CoordinatorWorkerManager {
           ownedFiles: record.ownedFiles,
           description: record.description,
           prompt,
+          selectedSkill: record.selectedSkill,
           workspacePath: record.workspacePath,
           abortSignal: abortController.signal,
           onProgress: (event) => {

@@ -3864,6 +3864,8 @@ export function DashboardView(): React.JSX.Element {
             title={skillEvalTraceExplorerTraces.length > 1 ? "多轮执行步骤详情" : "执行步骤详情"}
             emptyText="该评估记录没有可展示的 trace 步骤"
             showCodeStats={false}
+            defaultViewMode="trace"
+            showViewModeToggle={false}
           />
         </DialogContent>
       </Dialog>

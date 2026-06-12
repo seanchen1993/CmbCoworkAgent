@@ -112,6 +112,14 @@ export interface DashboardTraceNode {
 export interface DashboardTraceDetail {
   traceId: string
   threadId: string
+  traceRole?: "standalone" | "coordinator" | "worker"
+  parentTraceId?: string
+  parentThreadId?: string
+  workerId?: string
+  workerThreadId?: string
+  workerTurn?: number
+  workerRole?: string
+  workerWorkload?: string
   startedAt: string
   endedAt?: string
   durationMs: number
@@ -1392,6 +1400,16 @@ function parseDashboardTraceDetail(raw: any): DashboardTraceDetail | undefined {
   return {
     traceId: String(raw.traceId ?? ""),
     threadId: String(raw.threadId ?? ""),
+    ...(raw.traceRole
+      ? { traceRole: String(raw.traceRole) as DashboardTraceDetail["traceRole"] }
+      : {}),
+    ...(raw.parentTraceId ? { parentTraceId: String(raw.parentTraceId) } : {}),
+    ...(raw.parentThreadId ? { parentThreadId: String(raw.parentThreadId) } : {}),
+    ...(raw.workerId ? { workerId: String(raw.workerId) } : {}),
+    ...(raw.workerThreadId ? { workerThreadId: String(raw.workerThreadId) } : {}),
+    ...(typeof raw.workerTurn === "number" ? { workerTurn: raw.workerTurn } : {}),
+    ...(raw.workerRole ? { workerRole: String(raw.workerRole) } : {}),
+    ...(raw.workerWorkload ? { workerWorkload: String(raw.workerWorkload) } : {}),
     startedAt: String(raw.startedAt ?? ""),
     endedAt: raw.endedAt ? String(raw.endedAt) : undefined,
     durationMs: numberValue(raw.durationMs),

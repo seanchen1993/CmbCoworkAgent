@@ -142,6 +142,14 @@ interface DashboardTraceNode {
 interface DashboardTraceDetail {
   traceId: string
   threadId: string
+  traceRole?: "standalone" | "coordinator" | "worker"
+  parentTraceId?: string
+  parentThreadId?: string
+  workerId?: string
+  workerThreadId?: string
+  workerTurn?: number
+  workerRole?: string
+  workerWorkload?: string
   startedAt: string
   endedAt?: string
   durationMs: number
@@ -552,10 +560,7 @@ interface CustomAPI {
         workerTurn?: number
       }) => void
     ) => () => void
-    onCoordinatorWorkerHook: (
-      threadId: string,
-      callback: (envelope: unknown) => void
-    ) => () => void
+    onCoordinatorWorkerHook: (threadId: string, callback: (envelope: unknown) => void) => () => void
     setCoordinatorWorkerStreamFocus: (
       threadId: string,
       workerThreadId: string | null,

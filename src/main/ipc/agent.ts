@@ -3739,6 +3739,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       let coordinatorNotificationsConsumed = false
       let coordinatorNotificationsDelivered = false
       let clearCoordinatorNotificationSelectedSkillsOnExit = false
+      let traceAgentMode: AgentMode = "normal"
       const consumedCoordinatorNotificationIds = new Set<string>()
       const trackedCoordinatorNotificationIds = new Set<string>()
 
@@ -3768,6 +3769,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       syncUsedSkillsContext()
+
+      const finishTrace = (
+        outcome: "success" | "error" | "cancelled" | "unknown",
+        reason?: string
+      ): Promise<unknown> =>
+        tracer.finish(outcome, reason, {
+          skipSkillEval: traceAgentMode === "coordinator"
+        })
 
       const sendHookNotice = (notice: string): void => {
         safeSendToWindow(window, channel, {
@@ -4023,7 +4032,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             error: "WORKSPACE_REQUIRED",
             message: "Please select a workspace folder before sending messages."
           })
-          await tracer.finish("error", "WORKSPACE_REQUIRED")
+          await finishTrace("error", "WORKSPACE_REQUIRED")
           return
         }
 
@@ -4045,7 +4054,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             threadId
           })
           safeSendToWindow(window, channel, { type: "done" })
-          await tracer.finish("success", "STALE_COORDINATOR_NOTIFICATION")
+          await finishTrace("success", "STALE_COORDINATOR_NOTIFICATION")
           return
         }
 
@@ -4086,7 +4095,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const reason = explicitSkillActivation.reason || "显式选择的技能被 Hook 拦截"
             pauseActiveGoalForRuntimeStop(reason)
             safeSendToWindow(window, channel, { type: "error", error: reason })
-            await tracer.finish("error", reason)
+            await finishTrace("error", reason)
             turnStateShouldDispose = true
             return
           }
@@ -4133,7 +4142,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
             pauseActiveGoalForRuntimeStop("UserPromptSubmit hook stopped the turn.")
             sendHookBlocked("UserPromptSubmit", promptSubmitResult, "消息被 Hook 策略拦截")
-            await tracer.finish("cancelled", "UserPromptSubmit hook stopped the turn")
+            await finishTrace("cancelled", "UserPromptSubmit hook stopped the turn")
             return
           }
           const updatedMessage =
@@ -4206,6 +4215,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const effectiveAgentMode: AgentMode = coordinatorForcedByRequest
           ? "coordinator"
           : (requestedMode ?? (coordinatorFromMetadata ? "coordinator" : metadataAgentMode))
+        traceAgentMode = effectiveAgentMode
+        tracer.setTeamTraceMetadata({
+          traceRole: effectiveAgentMode === "coordinator" ? "coordinator" : "standalone"
+        })
         if (
           isCoordinatorNotificationTurn &&
           hasExplicitNormalAgentMode &&
@@ -4217,7 +4230,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           sendCoordinatorWorkers(window, channel, coordinatorWorkerManager.readWorkers(threadId))
           safeSendToWindow(window, channel, { type: "done" })
-          await tracer.finish("success", "COORDINATOR_NOTIFICATION_SUPPRESSED_NORMAL_MODE")
+          await finishTrace("success", "COORDINATOR_NOTIFICATION_SUPPRESSED_NORMAL_MODE")
           return
         }
         const shouldPersistAgentMode =
@@ -4241,7 +4254,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               error: errorMessage
             })
             sendCoordinatorWorkers(window, channel, normalModeGuardState.workers)
-            await tracer.finish("error", "COORDINATOR_NORMAL_MODE_BLOCKED")
+            await finishTrace("error", "COORDINATOR_NORMAL_MODE_BLOCKED")
             return
           }
         }
@@ -4287,7 +4300,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               error: errorMessage
             })
             sendCoordinatorWorkers(window, channel, normalModeGuardState.workers)
-            await tracer.finish("error", "COORDINATOR_NORMAL_MODE_BLOCKED")
+            await finishTrace("error", "COORDINATOR_NORMAL_MODE_BLOCKED")
             return
           }
         }
@@ -4561,6 +4574,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorExplicitSelectedSkill,
               coordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning,
+              coordinatorParentTraceId: tracer.getTraceId(),
+              coordinatorParentThreadId: threadId,
+              coordinatorInheritedSkills: skillUsageDetector.getUsedSkillNames(),
               abortSignal: abortController.signal,
               enableRequestUserInput: true,
               noSkillEvolutionTool: true,
@@ -5308,6 +5324,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             coordinatorExplicitSelectedSkill,
             coordinatorNotificationSelectedSkills,
             coordinatorWorkerTurnPlanning,
+            coordinatorParentTraceId: tracer.getTraceId(),
+            coordinatorParentThreadId: threadId,
+            coordinatorInheritedSkills: skillUsageDetector.getUsedSkillNames(),
             abortSignal: abortController.signal,
             enableRequestUserInput: true,
             noSkillEvolutionTool: true,
@@ -5414,6 +5433,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorExplicitSelectedSkill,
               coordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning,
+              coordinatorParentTraceId: tracer.getTraceId(),
+              coordinatorParentThreadId: threadId,
+              coordinatorInheritedSkills: skillUsageDetector.getUsedSkillNames(),
               abortSignal: abortController.signal,
               enableRequestUserInput: true,
               noSkillEvolutionTool: true,
@@ -5480,7 +5502,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (completionOutcome === "failed") {
               clearCoordinatorNotificationSelectedSkillsOnExit = true
               pauseActiveGoalForRuntimeStop("Stop hook blocked completion.")
-              await tracer.finish("error", "Stop hook blocked completion")
+              await finishTrace("error", "Stop hook blocked completion")
               turnStateShouldDispose = true
               return
             }
@@ -5584,7 +5606,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
               pauseActiveGoalForRuntimeStop("UserPromptSubmit hook stopped goal continuation.")
               sendHookBlocked("UserPromptSubmit", promptSubmitResult, "Goal 续跑被 Hook 策略拦截")
-              await tracer.finish("cancelled", "UserPromptSubmit hook stopped goal continuation")
+              await finishTrace("cancelled", "UserPromptSubmit hook stopped goal continuation")
               turnStateShouldDispose = true
               return
             }
@@ -5647,7 +5669,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           // Finish trace
           syncUsedSkillsContext()
-          await tracer.finish(invokeFinalOutcome, invokeFinalReason)
+          await finishTrace(invokeFinalOutcome, invokeFinalReason)
 
           // Write routing feedback so next turn can use sticky/force logic
           if (invokeRoutingResult && invokeFinalOutcome === "success") {
@@ -5815,7 +5837,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           pauseActiveGoalForRuntimeStop(error.reason)
           sendHookHalt(window, channel, error)
           syncUsedSkillsContext()
-          tracer.finish("cancelled", error.reason).catch(() => {})
+          finishTrace("cancelled", error.reason).catch(() => {})
           if (invokeRoutingResult) {
             rememberRoutingFeedback(threadId, {
               resolvedTier: invokeRoutingResult.resolvedTier,
@@ -5881,7 +5903,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             resetSkillEvolutionSession(threadId)
           }
           syncUsedSkillsContext()
-          tracer.finish("error", errMsg).catch(() => {})
+          finishTrace("error", errMsg).catch(() => {})
           if (invokeRoutingResult) {
             rememberRoutingFeedback(threadId, {
               resolvedTier: invokeRoutingResult.resolvedTier,
@@ -5896,7 +5918,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         } else {
           pauseActiveGoalForRuntimeStop("Agent run was aborted.")
           syncUsedSkillsContext()
-          tracer.finish("cancelled").catch(() => {})
+          finishTrace("cancelled").catch(() => {})
           if (invokeRoutingResult) {
             rememberRoutingFeedback(threadId, {
               resolvedTier: invokeRoutingResult.resolvedTier,

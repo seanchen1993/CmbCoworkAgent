@@ -152,6 +152,14 @@ interface DashboardAllUserItem {
 interface DashboardTraceDetail {
   traceId: string
   threadId: string
+  traceRole?: AgentTrace["traceRole"]
+  parentTraceId?: string
+  parentThreadId?: string
+  workerId?: string
+  workerThreadId?: string
+  workerTurn?: number
+  workerRole?: string
+  workerWorkload?: string
   startedAt: string
   endedAt?: string
   durationMs: number
@@ -1008,6 +1016,14 @@ function skillEvalTraceSourceIncludes(): string[] {
     "modelId",
     "modelName",
     "outcome",
+    "traceRole",
+    "parentTraceId",
+    "parentThreadId",
+    "workerId",
+    "workerThreadId",
+    "workerTurn",
+    "workerRole",
+    "workerWorkload",
     "totalToolCalls",
     "totalInputTokens",
     "totalOutputTokens",
@@ -1083,6 +1099,15 @@ function asNumber(value: unknown, fallback = 0): number {
   return fallback
 }
 
+function asOptionalNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return undefined
+}
+
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === "string")
@@ -1147,6 +1172,14 @@ function dashboardTraceSourceIncludes(): string[] {
     "modelId",
     "modelName",
     "outcome",
+    "traceRole",
+    "parentTraceId",
+    "parentThreadId",
+    "workerId",
+    "workerThreadId",
+    "workerTurn",
+    "workerRole",
+    "workerWorkload",
     "totalToolCalls",
     "totalInputTokens",
     "totalOutputTokens",
@@ -1220,6 +1253,18 @@ function normalizeParsedTrace(
     ...trace,
     traceId: candidate.traceId || asString(source.traceId, hit._id ?? ""),
     threadId: candidate.threadId || asString(source.threadId),
+    traceRole:
+      candidate.traceRole ?? (asOptionalString(source.traceRole) as AgentTrace["traceRole"]),
+    parentTraceId: candidate.parentTraceId || asOptionalString(source.parentTraceId),
+    parentThreadId: candidate.parentThreadId || asOptionalString(source.parentThreadId),
+    workerId: candidate.workerId || asOptionalString(source.workerId),
+    workerThreadId: candidate.workerThreadId || asOptionalString(source.workerThreadId),
+    workerTurn:
+      typeof candidate.workerTurn === "number"
+        ? candidate.workerTurn
+        : asOptionalNumber(source.workerTurn),
+    workerRole: candidate.workerRole || asOptionalString(source.workerRole),
+    workerWorkload: candidate.workerWorkload || asOptionalString(source.workerWorkload),
     startedAt,
     endedAt,
     durationMs: asNumber(candidate.durationMs, asNumber(source.durationMs)),
@@ -1277,6 +1322,14 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
     return {
       traceId: trace.traceId || asString(source.traceId, hit._id ?? ""),
       threadId: trace.threadId || asString(source.threadId),
+      traceRole: trace.traceRole,
+      parentTraceId: trace.parentTraceId,
+      parentThreadId: trace.parentThreadId,
+      workerId: trace.workerId,
+      workerThreadId: trace.workerThreadId,
+      workerTurn: trace.workerTurn,
+      workerRole: trace.workerRole,
+      workerWorkload: trace.workerWorkload,
       startedAt: trace.startedAt || asString(source.startedAt),
       endedAt: trace.endedAt || asOptionalString(source.endedAt),
       durationMs: asNumber(trace.durationMs, asNumber(source.durationMs)),
@@ -1311,6 +1364,14 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
   return {
     traceId: asString(source.traceId, hit._id ?? ""),
     threadId: asString(source.threadId),
+    traceRole: asOptionalString(source.traceRole) as AgentTrace["traceRole"],
+    parentTraceId: asOptionalString(source.parentTraceId),
+    parentThreadId: asOptionalString(source.parentThreadId),
+    workerId: asOptionalString(source.workerId),
+    workerThreadId: asOptionalString(source.workerThreadId),
+    workerTurn: asOptionalNumber(source.workerTurn),
+    workerRole: asOptionalString(source.workerRole),
+    workerWorkload: asOptionalString(source.workerWorkload),
     startedAt: asString(source.startedAt),
     endedAt: asOptionalString(source.endedAt),
     durationMs: asNumber(source.durationMs),
@@ -1348,6 +1409,14 @@ function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
   return {
     traceId: trace.traceId,
     threadId: trace.threadId,
+    traceRole: trace.traceRole,
+    parentTraceId: trace.parentTraceId,
+    parentThreadId: trace.parentThreadId,
+    workerId: trace.workerId,
+    workerThreadId: trace.workerThreadId,
+    workerTurn: trace.workerTurn,
+    workerRole: trace.workerRole,
+    workerWorkload: trace.workerWorkload,
     startedAt: trace.startedAt,
     endedAt: trace.endedAt,
     durationMs: asNumber(trace.durationMs),
@@ -1472,7 +1541,9 @@ async function fetchCommitAdoptionMap(
     const adoptedLines = asNumber(asRecord(record.adopted_lines).value)
     const threadBuckets = asRecord(record.by_thread).buckets
     const threadIds = Array.isArray(threadBuckets)
-      ? normalizeSkillList(threadBuckets.map((threadBucket) => asString(asRecord(threadBucket).key)))
+      ? normalizeSkillList(
+          threadBuckets.map((threadBucket) => asString(asRecord(threadBucket).key))
+        )
       : []
     result.set(commitSha, {
       usedSkills: skills,
@@ -3369,6 +3440,27 @@ function compareSkillEvalRunsByStartedAtDesc(
   )
 }
 
+function dedupeSkillEvalTaskRunsByTrace(runs: DashboardSkillEvalRun[]): DashboardSkillEvalRun[] {
+  const byTrace = new Map<string, DashboardSkillEvalRun>()
+  for (const run of runs) {
+    const key = [run.traceId, run.rawSkillName].join(":")
+    const current = byTrace.get(key)
+    if (!current) {
+      byTrace.set(key, run)
+      continue
+    }
+    const currentEndedAt = Date.parse(current.endedAt || current.startedAt)
+    const nextEndedAt = Date.parse(run.endedAt || run.startedAt)
+    if (
+      nextEndedAt > currentEndedAt ||
+      (nextEndedAt === currentEndedAt && run.skillEvalTraceCount >= current.skillEvalTraceCount)
+    ) {
+      byTrace.set(key, run)
+    }
+  }
+  return [...byTrace.values()]
+}
+
 function aggregateSkillEvalTaskRuns(runs: DashboardSkillEvalRun[]): DashboardSkillEvalRun[] {
   const byTask = new Map<string, DashboardSkillEvalRun[]>()
   for (const run of runs) {
@@ -3379,7 +3471,7 @@ function aggregateSkillEvalTaskRuns(runs: DashboardSkillEvalRun[]): DashboardSki
   }
 
   return [...byTask.values()].map((taskRuns) => {
-    const sorted = [...taskRuns].sort(
+    const sorted = dedupeSkillEvalTaskRunsByTrace(taskRuns).sort(
       (a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime()
     )
     const first = sorted[0]
@@ -4466,11 +4558,7 @@ async function fetchCommitDetails(
       // 关联会话优先取自采纳事件（代码生成时所在的真实会话，可为多个）；
       // 采纳事件缺失时回退到 commit 自带 threadId。
       const threadIds =
-        adoptionThreadIds.length > 0
-          ? adoptionThreadIds
-          : item.threadId
-            ? [item.threadId]
-            : []
+        adoptionThreadIds.length > 0 ? adoptionThreadIds : item.threadId ? [item.threadId] : []
       return {
         ...item,
         threadId: threadIds[0] ?? item.threadId,

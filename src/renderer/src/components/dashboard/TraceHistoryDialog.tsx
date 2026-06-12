@@ -17,16 +17,15 @@ import {
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle
-} from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
-import { TraceConversation, TraceThreadConversation, buildTraceConversation } from "@/components/trace/TraceConversation"
+import {
+  TraceConversation,
+  TraceThreadConversation,
+  buildTraceConversation
+} from "@/components/trace/TraceConversation"
 import type {
   DashboardCodeStats,
   DashboardTraceDetail,
@@ -70,7 +69,9 @@ function GeneratedLinesTooltip(): React.JSX.Element {
       <div className="font-medium text-foreground">代码生成行数说明</div>
       <div className="text-muted-foreground">当前按 agent 写入或编辑的非空行统计。</div>
       <div className="text-muted-foreground">空行和仅包含空白字符的行不会计入。</div>
-      <div className="text-muted-foreground">该指标表示原始生成量，包含后续被 agent 自己改写的中间稿。</div>
+      <div className="text-muted-foreground">
+        该指标表示原始生成量，包含后续被 agent 自己改写的中间稿。
+      </div>
     </div>
   )
 }
@@ -80,8 +81,12 @@ function SkillAttributionTooltip(): React.JSX.Element {
     <div className="space-y-1 text-[11px]">
       <div className="font-medium text-foreground">Skill 归因说明</div>
       <div className="text-muted-foreground">代码生成优先归因到当前 run 实际命中的 Skill。</div>
-      <div className="text-muted-foreground">若当前 run 尚未命中 Skill，会回看最近 2 轮会话中的 Skill 共同归因。</div>
-      <div className="text-muted-foreground">若当前 run 已命中 Skill，还会补入上一轮会话中的 Skill 一并归因。</div>
+      <div className="text-muted-foreground">
+        若当前 run 尚未命中 Skill，会回看最近 2 轮会话中的 Skill 共同归因。
+      </div>
+      <div className="text-muted-foreground">
+        若当前 run 已命中 Skill，还会补入上一轮会话中的 Skill 一并归因。
+      </div>
     </div>
   )
 }
@@ -156,19 +161,27 @@ function InclusiveAdoptionTooltip({ stats }: { stats: DashboardCodeStats }): Rea
       <div className="space-y-1 text-[11px]">
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">采纳行数</span>
-          <span className="font-medium text-foreground">{fmtExactLines(stats.adoptedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {fmtExactLines(stats.adoptedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">已测量有效生成行数</span>
-          <span className="font-medium text-foreground">{fmtExactLines(stats.effectiveGeneratedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {fmtExactLines(stats.effectiveGeneratedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">未提交生成行数</span>
-          <span className="font-medium text-foreground">{fmtExactLines(stats.unmeasuredGeneratedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {fmtExactLines(stats.unmeasuredGeneratedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">含未提交分母</span>
-          <span className="font-medium text-foreground">{fmtExactLines(stats.inclusiveEffectiveGeneratedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {fmtExactLines(stats.inclusiveEffectiveGeneratedLines)} 行
+          </span>
         </div>
       </div>
       <div className="space-y-0.5 text-[10px] text-muted-foreground">
@@ -186,15 +199,21 @@ function MeasuredAdoptionTooltip({ stats }: { stats: DashboardCodeStats }): Reac
       <div className="space-y-1 text-[11px]">
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">采纳行数</span>
-          <span className="font-medium text-foreground">{fmtExactLines(stats.adoptedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {fmtExactLines(stats.adoptedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">已测量有效生成行数</span>
-          <span className="font-medium text-foreground">{fmtExactLines(stats.effectiveGeneratedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {fmtExactLines(stats.effectiveGeneratedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">已测量原始生成行数</span>
-          <span className="font-medium text-foreground">{fmtExactLines(stats.measuredGeneratedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {fmtExactLines(stats.measuredGeneratedLines)} 行
+          </span>
         </div>
       </div>
       <div className="space-y-0.5 text-[10px] text-muted-foreground">
@@ -212,19 +231,27 @@ function PushedAdoptionTooltip({ stats }: { stats: DashboardCodeStats }): React.
       <div className="space-y-1 text-[11px]">
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">已 Push 采纳行数</span>
-          <span className="font-medium text-foreground">{fmtExactLines(stats.pushedAdoptedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {fmtExactLines(stats.pushedAdoptedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">已 Push 有效生成行数</span>
-          <span className="font-medium text-foreground">{fmtExactLines(stats.pushedEffectiveGeneratedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {fmtExactLines(stats.pushedEffectiveGeneratedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">已 Push 原始生成行数</span>
-          <span className="font-medium text-foreground">{fmtExactLines(stats.pushedMeasuredGeneratedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {fmtExactLines(stats.pushedMeasuredGeneratedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">已 Push Commit 数</span>
-          <span className="font-medium text-foreground">{fmtExactLines(stats.pushedCommitCount)} 次</span>
+          <span className="font-medium text-foreground">
+            {fmtExactLines(stats.pushedCommitCount)} 次
+          </span>
         </div>
       </div>
       <div className="space-y-0.5 text-[10px] text-muted-foreground">
@@ -272,11 +299,7 @@ function SkillCodeStatsBar({ stats }: { stats: DashboardCodeStats | null }): Rea
           value={fmtLines(stats.generatedLines)}
           tooltipContent={<GeneratedLinesTooltip />}
         />
-        <SkillCodeStat
-          icon={CheckCircle2}
-          label="采纳行数"
-          value={fmtLines(stats.adoptedLines)}
-        />
+        <SkillCodeStat icon={CheckCircle2} label="采纳行数" value={fmtLines(stats.adoptedLines)} />
         <SkillCodeStat
           icon={Gauge}
           label="含未提交采纳率"
@@ -324,10 +347,19 @@ function outcomeLabel(outcome: string): string {
 }
 
 function outcomeClass(outcome: string): string {
-  if (outcome === "success") return "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30"
+  if (outcome === "success")
+    return "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30"
   if (outcome === "error") return "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30"
-  if (outcome === "unknown") return "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30"
+  if (outcome === "unknown")
+    return "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30"
   return "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400 border-zinc-500/20"
+}
+
+function traceRoleLabel(trace: DashboardTraceDetail): string {
+  if (trace.traceRole === "coordinator") return "Coordinator"
+  if (trace.traceRole === "worker")
+    return trace.workerRole ? `Worker · ${trace.workerRole}` : "Worker"
+  return ""
 }
 
 function TraceCard({
@@ -340,6 +372,7 @@ function TraceCard({
   onClick: () => void
 }): React.JSX.Element {
   const conversation = buildTraceConversation(trace)
+  const roleLabel = traceRoleLabel(trace)
   return (
     <button
       type="button"
@@ -353,9 +386,18 @@ function TraceCard({
         <Badge className={cn("border px-1.5 py-0 text-[10px]", outcomeClass(trace.outcome))}>
           {outcomeLabel(trace.outcome)}
         </Badge>
-        <span className="truncate text-[10px] font-mono text-muted-foreground/60">{trace.traceId.slice(0, 10)}</span>
+        {roleLabel && (
+          <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px]">
+            {roleLabel}
+          </Badge>
+        )}
+        <span className="truncate text-[10px] font-mono text-muted-foreground/60">
+          {trace.traceId.slice(0, 10)}
+        </span>
       </div>
-      <p className="line-clamp-3 text-xs leading-5 text-foreground/80">{trace.userMessage || "无用户输入记录"}</p>
+      <p className="line-clamp-3 text-xs leading-5 text-foreground/80">
+        {trace.userMessage || "无用户输入记录"}
+      </p>
       {conversation.assistantText && (
         <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
           答：{conversation.assistantText}
@@ -363,8 +405,14 @@ function TraceCard({
       )}
       <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground/60">
         <span>{formatTime(trace.startedAt)}</span>
-        <span className="inline-flex items-center gap-0.5"><Timer className="size-3" />{fmtDuration(trace.durationMs)}</span>
-        <span className="inline-flex items-center gap-0.5"><Wrench className="size-3" />{trace.totalToolCalls}</span>
+        <span className="inline-flex items-center gap-0.5">
+          <Timer className="size-3" />
+          {fmtDuration(trace.durationMs)}
+        </span>
+        <span className="inline-flex items-center gap-0.5">
+          <Wrench className="size-3" />
+          {trace.totalToolCalls}
+        </span>
         {trace.totalTokens > 0 && (
           <span className="inline-flex items-center gap-1">
             <Coins className="size-3" />
@@ -389,7 +437,10 @@ interface TraceThreadGroup {
   totalTokens: number
 }
 
-function summarizeThreadGroup(threadId: string, threadTraces: DashboardTraceDetail[]): TraceThreadGroup {
+function summarizeThreadGroup(
+  threadId: string,
+  threadTraces: DashboardTraceDetail[]
+): TraceThreadGroup {
   // thread 内部按时间升序：第一条卡片即该 thread 的首轮对话，符合自然阅读顺序。
   const sorted = [...threadTraces].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
   const latestStartedAt = sorted.reduce(
@@ -442,21 +493,28 @@ function TraceThreadGroupCard({
   }
 
   return (
-    <div className={cn(
-      "overflow-hidden rounded-lg border bg-card",
-      selectedInGroup ? "border-primary/50" : "border-border"
-    )}>
+    <div
+      className={cn(
+        "overflow-hidden rounded-lg border bg-card",
+        selectedInGroup ? "border-primary/50" : "border-border"
+      )}
+    >
       <div
         role="button"
         tabIndex={0}
         className="flex w-full items-start gap-2 border-b border-border/70 bg-muted/10 px-3 py-2 text-left transition-colors hover:bg-muted/20 cursor-pointer"
         onClick={handleSelectGroup}
-        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") handleSelectGroup() }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") handleSelectGroup()
+        }}
       >
         <button
           type="button"
           className="mt-0.5 shrink-0 text-muted-foreground hover:text-foreground"
-          onClick={(e) => { e.stopPropagation(); setOpen((v) => !v) }}
+          onClick={(e) => {
+            e.stopPropagation()
+            setOpen((v) => !v)
+          }}
           aria-label={open ? "折叠" : "展开"}
         >
           {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
@@ -472,9 +530,15 @@ function TraceThreadGroupCard({
           </div>
           <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground/60">
             <span>{formatTime(group.latestStartedAt)}</span>
-            <span className="inline-flex items-center gap-0.5"><Wrench className="size-3" />{group.totalToolCalls}</span>
+            <span className="inline-flex items-center gap-0.5">
+              <Wrench className="size-3" />
+              {group.totalToolCalls}
+            </span>
             {group.totalTokens > 0 && (
-              <span className="inline-flex items-center gap-0.5"><Coins className="size-3" />{fmtTokens(group.totalTokens)}</span>
+              <span className="inline-flex items-center gap-0.5">
+                <Coins className="size-3" />
+                {fmtTokens(group.totalTokens)}
+              </span>
             )}
             <span className="text-emerald-600">成功 {group.successCount}</span>
             {group.errorCount > 0 && <span className="text-red-500">错误 {group.errorCount}</span>}
@@ -507,10 +571,12 @@ function TraceViewModeToggle({
 }): React.JSX.Element {
   return (
     <div className="flex overflow-hidden rounded-md border border-border bg-background">
-      {([
-        ["thread", "Thread"],
-        ["trace", "Trace"]
-      ] as const).map(([mode, label]) => (
+      {(
+        [
+          ["thread", "Thread"],
+          ["trace", "Trace"]
+        ] as const
+      ).map(([mode, label]) => (
         <button
           key={mode}
           type="button"
@@ -538,10 +604,12 @@ export function TraceTriggerScopeToggle({
 }): React.JSX.Element {
   return (
     <div className="flex overflow-hidden rounded-md border border-border bg-background">
-      {([
-        ["active", "主动触发"],
-        ["all", "全部"]
-      ] as const).map(([scope, label]) => (
+      {(
+        [
+          ["active", "主动触发"],
+          ["all", "全部"]
+        ] as const
+      ).map(([scope, label]) => (
         <button
           key={scope}
           type="button"
@@ -596,7 +664,9 @@ export function TraceExplorer({
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null)
   const [localViewMode, setLocalViewMode] = useState<DashboardTraceViewMode>(defaultViewMode)
   // 按 threadId 缓存「完整 thread」拉取结果，避免重复请求。
-  const [threadTraceCache, setThreadTraceCache] = useState<Record<string, DashboardTraceDetail[]>>({})
+  const [threadTraceCache, setThreadTraceCache] = useState<Record<string, DashboardTraceDetail[]>>(
+    {}
+  )
   const [threadLoadingId, setThreadLoadingId] = useState<string | null>(null)
   const activeViewMode = viewMode ?? localViewMode
   const handleViewModeChange = (mode: DashboardTraceViewMode): void => {
@@ -605,16 +675,19 @@ export function TraceExplorer({
   }
 
   // 默认通过 IPC 拉取单个 thread 的完整 trace（不受时间窗 / skill / 触发方式裁剪）。
-  const defaultLoadThreadTraces = useCallback(async (threadId: string): Promise<DashboardTraceDetail[]> => {
-    const api = window.api?.dashboard
-    if (!api || typeof api.threadTraces !== "function") return []
-    try {
-      const res = await api.threadTraces(threadId)
-      return res?.success && Array.isArray(res.data) ? (res.data as DashboardTraceDetail[]) : []
-    } catch {
-      return []
-    }
-  }, [])
+  const defaultLoadThreadTraces = useCallback(
+    async (threadId: string): Promise<DashboardTraceDetail[]> => {
+      const api = window.api?.dashboard
+      if (!api || typeof api.threadTraces !== "function") return []
+      try {
+        const res = await api.threadTraces(threadId)
+        return res?.success && Array.isArray(res.data) ? (res.data as DashboardTraceDetail[]) : []
+      } catch {
+        return []
+      }
+    },
+    []
+  )
   const effectiveLoadThreadTraces = loadThreadTraces ?? defaultLoadThreadTraces
 
   // 概览分组（来自分页接口，每个 thread 仅含预览的若干条 trace）。
@@ -641,12 +714,16 @@ export function TraceExplorer({
   }, [traces, threadTraceCache])
 
   const selectedTrace =
-    (selectedTraceId ? tracesById.get(selectedTraceId) ?? null : null) ?? traces[0] ?? null
+    (selectedTraceId ? (tracesById.get(selectedTraceId) ?? null) : null) ?? traces[0] ?? null
   const selectedThreadGroup = useMemo(() => {
     if (!selectedTrace) return traceGroups[0] ?? null
-    return traceGroups.find((group) =>
-      group.traces.some((trace) => trace.traceId === selectedTrace.traceId)
-    ) ?? traceGroups[0] ?? null
+    return (
+      traceGroups.find((group) =>
+        group.traces.some((trace) => trace.traceId === selectedTrace.traceId)
+      ) ??
+      traceGroups[0] ??
+      null
+    )
   }, [selectedTrace, traceGroups])
 
   // thread 模式下选中某个 thread 时，懒加载其完整 trace 列表。
@@ -661,11 +738,14 @@ export function TraceExplorer({
       .then((full) => {
         if (cancelled) return
         setThreadTraceCache((prev) =>
-          prev[selectedThreadId] ? prev : { ...prev, [selectedThreadId]: Array.isArray(full) ? full : [] }
+          prev[selectedThreadId]
+            ? prev
+            : { ...prev, [selectedThreadId]: Array.isArray(full) ? full : [] }
         )
       })
       .finally(() => {
-        if (!cancelled) setThreadLoadingId((current) => (current === selectedThreadId ? null : current))
+        if (!cancelled)
+          setThreadLoadingId((current) => (current === selectedThreadId ? null : current))
       })
     return () => {
       cancelled = true
@@ -677,11 +757,17 @@ export function TraceExplorer({
   const metricStartedAt =
     metricMode === "thread" ? selectedThreadGroup?.latestStartedAt : selectedTrace?.startedAt
   const metricToolCalls =
-    metricMode === "thread" ? selectedThreadGroup?.totalToolCalls ?? 0 : selectedTrace?.totalToolCalls ?? 0
+    metricMode === "thread"
+      ? (selectedThreadGroup?.totalToolCalls ?? 0)
+      : (selectedTrace?.totalToolCalls ?? 0)
   const metricDurationMs =
-    metricMode === "thread" ? selectedThreadGroup?.totalDurationMs ?? 0 : selectedTrace?.durationMs ?? 0
+    metricMode === "thread"
+      ? (selectedThreadGroup?.totalDurationMs ?? 0)
+      : (selectedTrace?.durationMs ?? 0)
   const metricTokens =
-    metricMode === "thread" ? selectedThreadGroup?.totalTokens ?? 0 : selectedTrace?.totalTokens ?? 0
+    metricMode === "thread"
+      ? (selectedThreadGroup?.totalTokens ?? 0)
+      : (selectedTrace?.totalTokens ?? 0)
   if (loading) {
     return (
       <div className={cn("flex min-h-[360px] flex-1 items-center justify-center", className)}>
@@ -692,7 +778,12 @@ export function TraceExplorer({
 
   if (error) {
     return (
-      <div className={cn("flex min-h-[360px] flex-1 items-center justify-center px-6 text-sm text-destructive", className)}>
+      <div
+        className={cn(
+          "flex min-h-[360px] flex-1 items-center justify-center px-6 text-sm text-destructive",
+          className
+        )}
+      >
         {error}
       </div>
     )
@@ -745,21 +836,21 @@ export function TraceExplorer({
               <div className="space-y-2 p-3">
                 {activeViewMode === "thread"
                   ? traceGroups.map((group) => (
-                    <TraceThreadGroupCard
-                      key={group.threadId}
-                      group={group}
-                      selectedTraceId={selectedTrace?.traceId ?? null}
-                      onSelectTrace={setSelectedTraceId}
-                    />
-                  ))
+                      <TraceThreadGroupCard
+                        key={group.threadId}
+                        group={group}
+                        selectedTraceId={selectedTrace?.traceId ?? null}
+                        onSelectTrace={setSelectedTraceId}
+                      />
+                    ))
                   : traces.map((trace) => (
-                    <TraceCard
-                      key={trace.traceId}
-                      trace={trace}
-                      selected={selectedTrace?.traceId === trace.traceId}
-                      onClick={() => setSelectedTraceId(trace.traceId)}
-                    />
-                  ))}
+                      <TraceCard
+                        key={trace.traceId}
+                        trace={trace}
+                        selected={selectedTrace?.traceId === trace.traceId}
+                        onClick={() => setSelectedTraceId(trace.traceId)}
+                      />
+                    ))}
               </div>
             </ScrollArea>
           </div>
@@ -770,8 +861,12 @@ export function TraceExplorer({
                 <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
                   <Clock className="size-3.5 text-muted-foreground" />
                   <div className="min-w-0">
-                    <p className="text-[10px] text-muted-foreground">{metricMode === "thread" ? "最近时间" : "时间"}</p>
-                    <p className="truncate text-[12px] font-semibold">{formatTime(metricStartedAt ?? "")}</p>
+                    <p className="text-[10px] text-muted-foreground">
+                      {metricMode === "thread" ? "最近时间" : "时间"}
+                    </p>
+                    <p className="truncate text-[12px] font-semibold">
+                      {formatTime(metricStartedAt ?? "")}
+                    </p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
@@ -784,8 +879,12 @@ export function TraceExplorer({
                 <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
                   <Timer className="size-3.5 text-muted-foreground" />
                   <div className="min-w-0">
-                    <p className="text-[10px] text-muted-foreground">{metricMode === "thread" ? "总耗时" : "耗时"}</p>
-                    <p className="truncate text-[12px] font-semibold">{fmtDuration(metricDurationMs)}</p>
+                    <p className="text-[10px] text-muted-foreground">
+                      {metricMode === "thread" ? "总耗时" : "耗时"}
+                    </p>
+                    <p className="truncate text-[12px] font-semibold">
+                      {fmtDuration(metricDurationMs)}
+                    </p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 px-4 py-2.5">
@@ -881,9 +980,12 @@ export function TraceHistoryDialog({
         <DialogHeader className="border-b border-border px-5 py-4">
           <div className="flex items-center justify-between gap-4">
             <div className="min-w-0">
-              <DialogTitle className="truncate text-base">Skill 会话历史 · {skill ?? "-"}</DialogTitle>
+              <DialogTitle className="truncate text-base">
+                Skill 会话历史 · {skill ?? "-"}
+              </DialogTitle>
               <p className="mt-1 text-[11px] text-muted-foreground">
-                共 {displayTotalTraces.toLocaleString("zh-CN")} 条 · 第 {tracePage} / {totalPages} 页
+                共 {displayTotalTraces.toLocaleString("zh-CN")} 条 · 第 {tracePage} / {totalPages}{" "}
+                页
               </p>
             </div>
           </div>
@@ -913,10 +1015,20 @@ export function TraceHistoryDialog({
                 onClick={onExportPage}
                 disabled={exporting || loading || traces.length === 0}
               >
-                {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+                {exporting ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Download className="size-3.5" />
+                )}
                 导出本页
               </Button>
-              <Button type="button" variant="outline" size="sm" onClick={handlePrevious} disabled={!canPrevious}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handlePrevious}
+                disabled={!canPrevious}
+              >
                 <ChevronLeft className="size-3.5" />
                 上一页
               </Button>

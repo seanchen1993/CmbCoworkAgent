@@ -165,6 +165,7 @@ import {
 } from "./coordinator-worker-access"
 import {
   createWorkerValuesSnapshotContext,
+  extractTextFromUnknownContent,
   extractWorkerFinalText,
   extractWorkerUsage,
   isWorkerFinalTextDelta,
@@ -176,6 +177,18 @@ import {
 import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool } from "./read-file-tool"
+import {
+  TraceCollector,
+  readTraceById,
+  readTracesByParentTraceId,
+  reportTrace
+} from "./trace/collector"
+import type { AgentTrace, TraceChatMessage, TraceTokenUsage } from "./trace/types"
+import { buildTeamSkillEvalExtension } from "./trace/team-eval"
+import {
+  buildToolResultFallbackKey,
+  stableToolArgsDigest
+} from "./skill-evolution/tool-call-counter"
 
 function isAbortError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
@@ -1087,7 +1100,11 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         return parts.join("")
       }
       const customExecute = lcTool(
-        async (input: { command: string; cwd?: string; run_in_background?: boolean }): Promise<string> => {
+        async (input: {
+          command: string
+          cwd?: string
+          run_in_background?: boolean
+        }): Promise<string> => {
           const sandbox = filesystemBackend as LocalSandbox
           if (input.run_in_background) {
             return sandbox.executeBackground(input.command, input.cwd)
@@ -2044,6 +2061,317 @@ function observeWorkerSkillUsage(
   resolvedValuesContext.messages.forEach((message) => observeMessage(message))
 }
 
+interface WorkerTraceStreamState {
+  countedModelMsgIds: Set<string>
+  countedStepMsgIds: Set<string>
+  countedToolResultMsgIds: Set<string>
+  toolNodeByRef: Map<string, string>
+  toolNameByCallId: Map<string, string>
+}
+
+function createWorkerTraceStreamState(): WorkerTraceStreamState {
+  return {
+    countedModelMsgIds: new Set(),
+    countedStepMsgIds: new Set(),
+    countedToolResultMsgIds: new Set(),
+    toolNodeByRef: new Map(),
+    toolNameByCallId: new Map()
+  }
+}
+
+function workerTraceClassName(message: Record<string, unknown>): string {
+  const id = message.id
+  const serialized = Array.isArray(id) ? String(id[id.length - 1] ?? "") : ""
+  if (serialized) return serialized
+  const constructorName = (message as { constructor?: { name?: string } }).constructor?.name
+  if (constructorName && constructorName !== "Object") return constructorName
+  return typeof message.type === "string" ? message.type : ""
+}
+
+function workerTraceRole(
+  className: string,
+  kwargs: Record<string, unknown>
+): TraceChatMessage["role"] {
+  if (className.includes("Human")) return "user"
+  if (className.includes("AI")) return "assistant"
+  if (className.includes("System")) return "system"
+  if (className.includes("Tool")) return "tool"
+  if (kwargs.type === "human" || kwargs.type === "user") return "user"
+  if (kwargs.type === "ai" || kwargs.type === "assistant") return "assistant"
+  if (kwargs.type === "system") return "system"
+  if (kwargs.type === "tool") return "tool"
+  return "unknown"
+}
+
+function workerTraceToolCalls(message: Record<string, unknown>): unknown[] {
+  const kwargs = getWorkerStreamObject(message.kwargs) ?? {}
+  const directToolCalls = Array.isArray(kwargs.tool_calls)
+    ? kwargs.tool_calls
+    : Array.isArray(message.tool_calls)
+      ? message.tool_calls
+      : []
+  if (directToolCalls.length > 0) return directToolCalls
+
+  const additionalToolCalls = (
+    getWorkerStreamObject(kwargs.additional_kwargs) ??
+    getWorkerStreamObject(message.additional_kwargs)
+  )?.tool_calls
+  if (Array.isArray(additionalToolCalls) && additionalToolCalls.length > 0) {
+    return additionalToolCalls
+  }
+
+  return Array.isArray(kwargs.tool_call_chunks)
+    ? kwargs.tool_call_chunks
+    : Array.isArray(message.tool_call_chunks)
+      ? message.tool_call_chunks
+      : []
+}
+
+function workerTraceToolName(call: unknown): string {
+  const data = getWorkerStreamObject(call)
+  const directName = data?.name
+  if (typeof directName === "string" && directName.trim()) return directName.trim()
+  const functionName = getWorkerStreamObject(data?.function)?.name
+  if (typeof functionName === "string" && functionName.trim()) return functionName.trim()
+  return "unknown"
+}
+
+function workerTraceToolId(call: unknown): string {
+  const data = getWorkerStreamObject(call)
+  return typeof data?.id === "string" && data.id.trim() ? data.id.trim() : ""
+}
+
+function workerTraceToolArgs(call: unknown): Record<string, unknown> {
+  const data = getWorkerStreamObject(call)
+  if (!data) return {}
+  if (data.args && typeof data.args === "object" && !Array.isArray(data.args)) {
+    return data.args as Record<string, unknown>
+  }
+  const functionCall = getWorkerStreamObject(data.function)
+  const rawArgs = functionCall?.arguments
+  if (typeof rawArgs === "string") {
+    try {
+      const parsed = JSON.parse(rawArgs)
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : { value: parsed }
+    } catch {
+      return { value: rawArgs }
+    }
+  }
+  if (data.args !== undefined) return { value: data.args }
+  return {}
+}
+
+function workerTraceUsageToTraceUsage(
+  usage: CoordinatorWorkerTokenUsage | undefined
+): TraceTokenUsage | undefined {
+  if (!usage) return undefined
+  const result: TraceTokenUsage = {}
+  if (typeof usage.input_tokens === "number") result.inputTokens = usage.input_tokens
+  if (typeof usage.output_tokens === "number") result.outputTokens = usage.output_tokens
+  if (typeof usage.total_tokens === "number") result.totalTokens = usage.total_tokens
+  if (typeof usage.cache_read_tokens === "number") result.cacheReadTokens = usage.cache_read_tokens
+  if (typeof usage.cache_creation_tokens === "number") {
+    result.cacheCreationTokens = usage.cache_creation_tokens
+  }
+  return Object.keys(result).length > 0 ? result : undefined
+}
+
+function workerTraceInputMessages(messages: unknown[], endIndex: number): TraceChatMessage[] {
+  return messages
+    .slice(Math.max(0, endIndex - 12), endIndex)
+    .map((message) => {
+      const data = getWorkerStreamObject(message)
+      const kwargs = getWorkerStreamObject(data?.kwargs) ?? {}
+      const className = data ? workerTraceClassName(data) : ""
+      return {
+        role: workerTraceRole(className, kwargs),
+        content: extractTextFromUnknownContent(kwargs.content ?? data?.content),
+        ...(typeof kwargs.name === "string" ? { name: kwargs.name } : {}),
+        ...(typeof kwargs.tool_call_id === "string" ? { toolCallId: kwargs.tool_call_id } : {})
+      }
+    })
+    .filter((message) => message.content || message.role === "tool")
+}
+
+function recordWorkerTraceValuesChunk(
+  tracer: TraceCollector,
+  state: WorkerTraceStreamState,
+  payload: unknown,
+  currentTurnPrompt: string,
+  valuesContext?: WorkerValuesSnapshotContext
+): void {
+  const resolvedValuesContext =
+    valuesContext ?? createWorkerValuesSnapshotContext("values", payload, currentTurnPrompt)
+  if (!resolvedValuesContext) return
+
+  const messages = resolvedValuesContext.messages
+  for (let index = 0; index < messages.length; index++) {
+    const data = getWorkerStreamObject(messages[index])
+    if (!data) continue
+    const kwargs = getWorkerStreamObject(data.kwargs) ?? {}
+    const className = workerTraceClassName(data)
+    const role = workerTraceRole(className, kwargs)
+    const toolCalls = workerTraceToolCalls(data)
+    const rawAiMsgId = typeof kwargs.id === "string" ? kwargs.id : ""
+    const content = extractTextFromUnknownContent(kwargs.content ?? data.content)
+    const aiMsgKey =
+      rawAiMsgId || `worker-values:${index}:${stableToolArgsDigest(toolCalls)}:${content.length}`
+
+    if (role === "assistant") {
+      const outputToolCalls = toolCalls.map((call) => ({
+        name: workerTraceToolName(call),
+        args: workerTraceToolArgs(call)
+      }))
+      const responseMetadata =
+        getWorkerStreamObject(kwargs.response_metadata) ??
+        getWorkerStreamObject(data.response_metadata)
+      const apiModelName = responseMetadata?.model_name ?? responseMetadata?.model
+      if (typeof apiModelName === "string" && apiModelName) {
+        tracer.setModelName(apiModelName)
+      }
+
+      if (!state.countedModelMsgIds.has(aiMsgKey)) {
+        state.countedModelMsgIds.add(aiMsgKey)
+        const usageForTrace = workerTraceUsageToTraceUsage(
+          extractWorkerUsage("messages", [messages[index]])
+        )
+        const llmNodeId = tracer.beginLlmNode({
+          messageId: aiMsgKey,
+          input: workerTraceInputMessages(messages, index),
+          metadata: {
+            ...(rawAiMsgId ? { providerMessageId: rawAiMsgId } : {}),
+            toolCallCount: outputToolCalls.length
+          }
+        })
+        tracer.recordModelCall({
+          messageId: rawAiMsgId || aiMsgKey,
+          startedAt: new Date().toISOString(),
+          inputMessages: workerTraceInputMessages(messages, index),
+          outputMessage: {
+            role: "assistant",
+            content
+          },
+          toolCalls: outputToolCalls,
+          tokenUsage: usageForTrace
+        })
+        tracer.endLlmNode({
+          nodeId: llmNodeId,
+          output: content,
+          status: "success",
+          metadata: { tokenUsage: usageForTrace }
+        })
+      }
+
+      if (!state.countedStepMsgIds.has(aiMsgKey)) {
+        state.countedStepMsgIds.add(aiMsgKey)
+        tracer.beginStep()
+        for (const toolCall of outputToolCalls) {
+          tracer.recordToolCall(toolCall)
+        }
+        tracer.endStep(content)
+      }
+
+      toolCalls.forEach((call, toolIndex) => {
+        const toolCallId = workerTraceToolId(call)
+        const toolName = workerTraceToolName(call)
+        const args = workerTraceToolArgs(call)
+        if (toolCallId) state.toolNameByCallId.set(toolCallId, toolName)
+        const toolRef = toolCallId || `${aiMsgKey}:${toolIndex}:args:${stableToolArgsDigest(args)}`
+        if (state.toolNodeByRef.has(toolRef)) return
+        const toolNodeId = tracer.addToolNode({
+          name: toolName,
+          input: args,
+          llmMessageId: aiMsgKey,
+          toolCallId: toolCallId || undefined,
+          metadata: { index: toolIndex }
+        })
+        state.toolNodeByRef.set(toolRef, toolNodeId)
+      })
+      continue
+    }
+
+    if (role !== "tool") continue
+    const toolOutput = extractTextFromUnknownContent(kwargs.content ?? data.content)
+    const toolMsgId =
+      typeof kwargs.id === "string"
+        ? kwargs.id
+        : buildToolResultFallbackKey(kwargs.tool_call_id, index, toolOutput)
+    if (state.countedToolResultMsgIds.has(toolMsgId)) continue
+    state.countedToolResultMsgIds.add(toolMsgId)
+
+    const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
+    const parentId = toolCallId ? state.toolNodeByRef.get(toolCallId) : undefined
+    const additionalKwargs = getWorkerStreamObject(kwargs.additional_kwargs)
+    const isToolError =
+      kwargs.status === "error" ||
+      kwargs.is_error === true ||
+      additionalKwargs?.is_error === true ||
+      /^(error:|mcp tool error:|tool error:|failed:)/i.test(toolOutput.trim())
+    tracer.addToolResultNode({
+      parentId,
+      toolCallId: toolCallId || undefined,
+      output: toolOutput,
+      status: isToolError ? "error" : "success",
+      metadata: {
+        messageId: toolMsgId,
+        toolName:
+          (typeof kwargs.name === "string" && kwargs.name) ||
+          (toolCallId ? state.toolNameByCallId.get(toolCallId) : undefined)
+      }
+    })
+  }
+}
+
+function recordWorkerTraceStreamChunk(
+  tracer: TraceCollector | undefined,
+  state: WorkerTraceStreamState,
+  mode: string,
+  payload: unknown,
+  currentTurnPrompt: string,
+  valuesContext?: WorkerValuesSnapshotContext
+): void {
+  if (!tracer || mode !== "values") return
+  try {
+    recordWorkerTraceValuesChunk(tracer, state, payload, currentTurnPrompt, valuesContext)
+  } catch (error) {
+    console.warn("[CoordinatorWorker] Failed to record worker trace chunk:", error)
+  }
+}
+
+function uniqueWorkerTraceStrings(values: Array<string | undefined>): string[] {
+  return Array.from(new Set(values.filter((value): value is string => Boolean(value?.trim()))))
+}
+
+async function reportWorkerTeamSkillEval(workerTrace: AgentTrace, attempts = 3): Promise<boolean> {
+  const parentTraceId = workerTrace.parentTraceId
+  if (!parentTraceId) return false
+  const coordinatorTrace = readTraceById(parentTraceId)
+  if (!coordinatorTrace) {
+    if (attempts > 0) {
+      setTimeout(() => {
+        reportWorkerTeamSkillEval(workerTrace, attempts - 1).catch((error) =>
+          console.warn("[CoordinatorWorker] Delayed team eval report failed:", error)
+        )
+      }, 1_000)
+    }
+    return false
+  }
+
+  const workerTracesById = new Map<string, AgentTrace>()
+  for (const trace of readTracesByParentTraceId(parentTraceId)) {
+    workerTracesById.set(trace.traceId, trace)
+  }
+  workerTracesById.set(workerTrace.traceId, workerTrace)
+  const teamSkillEval = buildTeamSkillEvalExtension(coordinatorTrace, [
+    ...workerTracesById.values()
+  ])
+  if (!teamSkillEval) return false
+  reportTrace({ ...workerTrace, skillEval: teamSkillEval })
+  return true
+}
+
 async function runWorkerStopHooksWithRevision({
   sessionId,
   workspacePath,
@@ -2218,6 +2546,12 @@ export interface CreateAgentRuntimeOptions {
   coordinatorNotificationSelectedSkills?: Record<string, CoordinatorSelectedSkill | undefined>
   /** Shared per-turn worker planning counters, reused across failover runtime rebuilds. */
   coordinatorWorkerTurnPlanning?: CoordinatorWorkerTurnPlanningState
+  /** Coordinator trace id inherited by async workers for trace/eval aggregation. */
+  coordinatorParentTraceId?: string
+  /** Coordinator thread id inherited by async workers for trace/eval aggregation. */
+  coordinatorParentThreadId?: string
+  /** Skill names already active on the coordinator turn; workers inherit these for trace/eval. */
+  coordinatorInheritedSkills?: string[]
   /** Runtime mode. "normal" preserves the existing agent; "coordinator" enables async worker orchestration. */
   agentMode?: AgentMode
   /** Disable the synchronous deepagents task tool for leaf runtimes such as coordinator async workers. */
@@ -2292,6 +2626,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     retryHooks,
     maxRetryAttempts,
     coordinatorWorkerTurnPlanning,
+    coordinatorParentTraceId,
+    coordinatorParentThreadId,
+    coordinatorInheritedSkills,
     enableAgentsPrompt = true,
     agentMode = "normal",
     disableSubagents = false,
@@ -2901,10 +3238,7 @@ The workspace root is: ${workspacePath}`
   }
 
   const coordinatorWorkingDirAppendix = workingDirPromptAppendix?.trim()
-  const coordinatorProjectInstructions = [
-    agentsPrompt.prompt,
-    extraSystemPrompt
-  ]
+  const coordinatorProjectInstructions = [agentsPrompt.prompt, extraSystemPrompt]
     .filter(Boolean)
     .join("\n\n")
   const coordinatorWorkerProjectInstructions = [
@@ -3016,6 +3350,8 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     const seenWorkerToolCallKeys = new Set<string>()
     const workerToolNames = new Set<string>()
     const workerSkillUsageDetector = new SkillUsageDetector()
+    const workerTraceState = createWorkerTraceStreamState()
+    let workerTracer: TraceCollector | undefined
     const cancelWorkerBackgroundTasks = (): void => {
       LocalSandbox.cancelBackgroundTasks(workerInput.workerThreadId)
     }
@@ -3073,6 +3409,22 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
           coordinatorWorkerThreadId: workerInput.workerThreadId
         }
       })
+      workerTracer = new TraceCollector(
+        workerInput.workerThreadId,
+        effectiveWorkerPrompt,
+        modelId ?? "unknown",
+        {
+          triggerSource: "chat",
+          traceRole: "worker",
+          parentTraceId: coordinatorParentTraceId,
+          parentThreadId: coordinatorParentThreadId ?? workerInput.parentThreadId,
+          workerId: workerInput.workerId,
+          workerThreadId: workerInput.workerThreadId,
+          workerTurn: workerInput.workerTurn,
+          workerRole: workerInput.role,
+          workerWorkload: workerInput.workload
+        }
+      )
       const workerRoutingResult = await resolveModel({
         taskSource: "chat",
         message: effectiveWorkerPrompt,
@@ -3080,6 +3432,9 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         requestedModelId: modelId,
         routingMode: getGlobalRoutingMode()
       }).catch(() => null)
+      if (workerRoutingResult?.routingTrace) {
+        workerTracer.setRoutingTrace(workerRoutingResult.routingTrace)
+      }
       const workerOrderedChain = buildOrderedChain(
         workerRoutingResult?.resolvedModelId ?? modelId,
         workerRoutingResult?.fallbackChain,
@@ -3105,6 +3460,14 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
           }
           const valuesContext = createWorkerValuesSnapshotContext(mode, data, effectiveWorkerPrompt)
           observeWorkerSkillUsage(mode, data, workerSkillUsageDetector, valuesContext)
+          recordWorkerTraceStreamChunk(
+            workerTracer,
+            workerTraceState,
+            mode,
+            data,
+            effectiveWorkerPrompt,
+            valuesContext
+          )
           observeWorkerProgress(
             mode,
             data,
@@ -3198,6 +3561,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             streamConfig
           )
           usedWorkerModelId = candidateId
+          workerTracer.setModelId(candidateId)
           break
         } catch (error) {
           if (!isRetryableApiError(error)) throw error
@@ -3263,6 +3627,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
           })
           activeWorkerStream = await workerAgent.stream(null, streamConfig)
           usedWorkerModelId = nextCandidate
+          workerTracer.setModelId(nextCandidate)
         }
       }
 
@@ -3366,11 +3731,51 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         throw new Error(workerStopHookFailure ?? "Stop hook blocked worker completion.")
       }
 
+      const inheritedSkills = uniqueWorkerTraceStrings([
+        ...(coordinatorInheritedSkills ?? []),
+        workerInput.selectedSkill?.skillName,
+        ...workerSkillUsageDetector.getUsedSkillNames()
+      ])
+      workerTracer.setUsedSkills(inheritedSkills)
+      const workerTrace = await workerTracer.finish("success", undefined, {
+        skipSkillEval: true,
+        deferReport: true
+      })
+      const teamEvalReported = await reportWorkerTeamSkillEval(workerTrace).catch((error) => {
+        console.warn("[CoordinatorWorker] Team eval report failed:", error)
+        return false
+      })
+      if (!teamEvalReported) reportTrace(workerTrace)
+
       return {
         summary: summarizeWorkerText(finalText),
         rawText: finalText,
         tokenUsage
       }
+    } catch (error) {
+      if (workerTracer) {
+        const inheritedSkills = uniqueWorkerTraceStrings([
+          ...(coordinatorInheritedSkills ?? []),
+          workerInput.selectedSkill?.skillName,
+          ...workerSkillUsageDetector.getUsedSkillNames()
+        ])
+        workerTracer.setUsedSkills(inheritedSkills)
+        const outcome =
+          workerInput.abortSignal.aborted || isAbortError(error) ? "cancelled" : "error"
+        const message = error instanceof Error ? error.message : String(error)
+        const workerTrace = await workerTracer.finish(outcome, message, {
+          skipSkillEval: true,
+          deferReport: true
+        })
+        const teamEvalReported = await reportWorkerTeamSkillEval(workerTrace).catch(
+          (reportError) => {
+            console.warn("[CoordinatorWorker] Team eval report failed:", reportError)
+            return false
+          }
+        )
+        if (!teamEvalReported) reportTrace(workerTrace)
+      }
+      throw error
     } finally {
       workerInput.abortSignal.removeEventListener("abort", cancelWorkerBackgroundTasks)
       const cleanupResults = await Promise.allSettled([
