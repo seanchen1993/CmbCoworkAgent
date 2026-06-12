@@ -529,6 +529,8 @@ interface UncommittedScopeOptions {
   upperOrgLv1?: string | string[] | null
   /** 仅统计项目模式（带 properties.harnessProjectId）的生成。 */
   projectMode?: boolean
+  /** 仅统计由 Skill 生成的代码（properties.usedSkills 非空），对应「插件约束生成」漏斗。 */
+  usedSkillsOnly?: boolean
 }
 
 interface UncommittedRankingItem {
@@ -2449,6 +2451,8 @@ function uncommittedScopeFilters(options?: UncommittedScopeOptions): Record<stri
   const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(options?.upperOrgLv1))
   if (orgFilterClause) filters.push(orgFilterClause)
   if (options?.projectMode) filters.push({ exists: { field: "properties.harnessProjectId" } })
+  // 「由 Skill 生成」口径：usedSkills 非空，与项目概览 skillCodeStats 一致。
+  if (options?.usedSkillsOnly) filters.push({ exists: { field: "properties.usedSkills" } })
   return filters
 }
 

@@ -1747,12 +1747,20 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardUserDetail; error?: string }>
     uncommittedRanking: (
       range: { from: string; to: string },
-      options?: { upperOrgLv1?: string | string[] | null; projectMode?: boolean }
+      options?: {
+        upperOrgLv1?: string | string[] | null
+        projectMode?: boolean
+        usedSkillsOnly?: boolean
+      }
     ) => Promise<{ success: boolean; data?: DashboardUncommittedRankingData; error?: string }>
     uncommittedDetail: (
       sapId: string,
       range: { from: string; to: string },
-      options?: { upperOrgLv1?: string | string[] | null; projectMode?: boolean }
+      options?: {
+        upperOrgLv1?: string | string[] | null
+        projectMode?: boolean
+        usedSkillsOnly?: boolean
+      }
     ) => Promise<{ success: boolean; data?: DashboardUncommittedDetailData; error?: string }>
     skillUsageSummary: (
       range: { from: string; to: string },

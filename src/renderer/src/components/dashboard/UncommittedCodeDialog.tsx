@@ -68,6 +68,7 @@ interface UncommittedDetailData {
 interface UncommittedScope {
   upperOrgLv1?: string[]
   projectMode?: boolean
+  usedSkillsOnly?: boolean
 }
 
 // ── 工具函数 ────────────────────────────────────────────────────────
@@ -304,7 +305,11 @@ export function UncommittedCodeDialog({
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
 
-  const scopeOptions = { upperOrgLv1: scope?.upperOrgLv1 ?? null, projectMode: scope?.projectMode }
+  const scopeOptions = {
+    upperOrgLv1: scope?.upperOrgLv1 ?? null,
+    projectMode: scope?.projectMode,
+    usedSkillsOnly: scope?.usedSkillsOnly
+  }
 
   // 弹窗打开时加载榜单（A）。
   useEffect(() => {
@@ -335,7 +340,14 @@ export function UncommittedCodeDialog({
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, range.from, range.to, scope?.projectMode, (scope?.upperOrgLv1 ?? []).join("")])
+  }, [
+    open,
+    range.from,
+    range.to,
+    scope?.projectMode,
+    scope?.usedSkillsOnly,
+    (scope?.upperOrgLv1 ?? []).join("")
+  ])
 
   // 点击某用户 → 加载二级详情（B）。
   const openDetail = useCallback(
@@ -359,7 +371,13 @@ export function UncommittedCodeDialog({
         .finally(() => setDetailLoading(false))
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [range.from, range.to, scope?.projectMode, (scope?.upperOrgLv1 ?? []).join("")]
+    [
+      range.from,
+      range.to,
+      scope?.projectMode,
+      scope?.usedSkillsOnly,
+      (scope?.upperOrgLv1 ?? []).join("")
+    ]
   )
 
   return (
@@ -379,6 +397,11 @@ export function UncommittedCodeDialog({
             ) : null}
             <span className="font-semibold text-foreground">
               {selected ? `${selected.userName} · 未提交代码明细` : "生成但未提交分析"}
+              {scope?.usedSkillsOnly ? (
+                <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">
+                  · 仅 Skill 生成
+                </span>
+              ) : null}
             </span>
             <HeaderHint hint="第一层「全部生成 → 已 Commit」缺口的下钻。时间口径同外部事件筛选框；范围含当天时自动排除最近 2 小时的在途生成。榜单为聚合近似（生成行数 − 已测量行数）；点击某人进入二级详情，用 genEventId 精确反查其未提交的生成并按维度归因。" />
           </DialogTitle>

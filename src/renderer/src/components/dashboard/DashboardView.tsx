@@ -2446,6 +2446,8 @@ export function DashboardView(): React.JSX.Element {
   // 「全部生成」漏斗首层下钻：生成但未提交分析弹窗。projectMode 区分平台概览 / 项目概览口径。
   const [uncommittedOpen, setUncommittedOpen] = useState(false)
   const [uncommittedProjectMode, setUncommittedProjectMode] = useState(false)
+  // 仅 Skill 生成口径（对应「插件约束生成」漏斗下钻）。
+  const [uncommittedUsedSkillsOnly, setUncommittedUsedSkillsOnly] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -4228,6 +4230,16 @@ export function DashboardView(): React.JSX.Element {
                   analysisAgentAllowed
                     ? () => {
                         setUncommittedProjectMode(true)
+                        setUncommittedUsedSkillsOnly(false)
+                        setUncommittedOpen(true)
+                      }
+                    : undefined
+                }
+                onSkillFunnelFirstStageClick={
+                  analysisAgentAllowed
+                    ? () => {
+                        setUncommittedProjectMode(true)
+                        setUncommittedUsedSkillsOnly(true)
                         setUncommittedOpen(true)
                       }
                     : undefined
@@ -4266,6 +4278,7 @@ export function DashboardView(): React.JSX.Element {
                     analysisAgentAllowed
                       ? () => {
                           setUncommittedProjectMode(false)
+                          setUncommittedUsedSkillsOnly(false)
                           setUncommittedOpen(true)
                         }
                       : undefined
@@ -4439,7 +4452,11 @@ export function DashboardView(): React.JSX.Element {
         open={uncommittedOpen}
         onOpenChange={setUncommittedOpen}
         range={range}
-        scope={{ upperOrgLv1: selectedOrgLv1List, projectMode: uncommittedProjectMode }}
+        scope={{
+          upperOrgLv1: selectedOrgLv1List,
+          projectMode: uncommittedProjectMode,
+          usedSkillsOnly: uncommittedUsedSkillsOnly
+        }}
       />
       <CommitDetailsDialog
         open={commitDialogOpen}

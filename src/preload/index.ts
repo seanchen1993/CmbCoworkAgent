@@ -2488,13 +2488,21 @@ const api = {
       ipcRenderer.invoke("dashboard:userDetail", sapId, range, options),
     uncommittedRanking: (
       range: { from: string; to: string },
-      options?: { upperOrgLv1?: string | string[] | null; projectMode?: boolean }
+      options?: {
+        upperOrgLv1?: string | string[] | null
+        projectMode?: boolean
+        usedSkillsOnly?: boolean
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:uncommittedRanking", range, options),
     uncommittedDetail: (
       sapId: string,
       range: { from: string; to: string },
-      options?: { upperOrgLv1?: string | string[] | null; projectMode?: boolean }
+      options?: {
+        upperOrgLv1?: string | string[] | null
+        projectMode?: boolean
+        usedSkillsOnly?: boolean
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:uncommittedDetail", sapId, range, options),
     skillUsageSummary: (

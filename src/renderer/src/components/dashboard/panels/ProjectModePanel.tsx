@@ -1385,6 +1385,7 @@ export function ProjectModePanel({
   onSkillClick,
   onUserClick,
   onFunnelFirstStageClick,
+  onSkillFunnelFirstStageClick,
   marketSkillKeys = new Set(),
   pluginSkillKeys = new Set()
 }: {
@@ -1418,6 +1419,7 @@ export function ProjectModePanel({
   onSkillClick?: (skill: string) => void
   onUserClick?: (sapId: string) => void
   onFunnelFirstStageClick?: () => void
+  onSkillFunnelFirstStageClick?: () => void
   marketSkillKeys?: Set<string>
   pluginSkillKeys?: Set<string>
 }): React.JSX.Element {
@@ -1648,7 +1650,10 @@ export function ProjectModePanel({
                 }
               />
             </div>
-            <CodeAdoptionFunnel data={skillFunnelData} />
+            <CodeAdoptionFunnel
+              data={skillFunnelData}
+              onFirstStageClick={onSkillFunnelFirstStageClick}
+            />
           </div>
         </div>
       </section>
