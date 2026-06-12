@@ -44,6 +44,17 @@ describe("git submit commands are no longer forbidden", () => {
   it("does not forbid wrapped text that only mentions git commit", () => {
     expect(assessCommandSafety("bash -c 'echo git commit'", CWD).level).not.toBe("forbidden")
   })
+
+  it("still forbids short-option clusters carrying -c", () => {
+    expect(assessCommandSafety("bash -lc 'git commit -m x'", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("bash -xc 'git commit -m x'", CWD).level).toBe("forbidden")
+  })
+
+  it("does not treat a long option merely containing the letter c as -c", () => {
+    // `--check` / `--norc` are not `-c`; the script-bearing arg is absent, so nothing wrapped.
+    expect(assessCommandSafety("bash --check 'git commit -m x'", CWD).level).not.toBe("forbidden")
+    expect(assessCommandSafety("bash --norc 'git status'", CWD).level).not.toBe("forbidden")
+  })
 })
 
 describe("isGitCommitCommand", () => {
@@ -164,6 +175,27 @@ describe("normalizeGitAddPrefixedGitCommitCommand", () => {
     expect(
       normalizeGitAddPrefixedGitCommitCommand("git add src/a.ts && git commit -m x && git push", CWD)
     ).toBeNull()
+  })
+
+  it("rejects an add chain whose pathspecs span different directories", () => {
+    // `a.ts` is relative to CWD but `b.ts` to CWD/sub — a single basePath cannot represent
+    // both, so the chain must be refused rather than mis-resolving `a.ts` under `sub`.
+    expect(
+      normalizeGitAddPrefixedGitCommitCommand(
+        "git add a.ts && cd sub && git add b.ts && git commit -m x",
+        CWD
+      )
+    ).toBeNull()
+  })
+
+  it("still allows a single-directory add chain (adds and commit share one base)", () => {
+    expect(
+      normalizeGitAddPrefixedGitCommitCommand("git add a.ts && git add b.ts && git commit -m x", CWD)
+    ).toEqual({
+      command: "git commit -m x",
+      cwd: CWD,
+      filePaths: ["a.ts", "b.ts"]
+    })
   })
 })
 
@@ -292,5 +324,17 @@ describe("isAmendOrFixupCommit", () => {
     expect(isAmendOrFixupCommit('git commit -m "x"')).toBe(false)
     expect(isAmendOrFixupCommit('git commit -m "do not --amend here"')).toBe(false)
     expect(isAmendOrFixupCommit("git status")).toBe(false)
+  })
+
+  it("does not treat an unquoted --amend that is a value of -m/--message as an amend", () => {
+    // `--amend` here is the commit message value, not an option.
+    expect(isAmendOrFixupCommit("git commit -m --amend")).toBe(false)
+    expect(isAmendOrFixupCommit("git commit --message --amend")).toBe(false)
+    expect(isAmendOrFixupCommit("git commit -F --squash")).toBe(false)
+  })
+
+  it("still detects amend after value-bearing options", () => {
+    expect(isAmendOrFixupCommit('git commit -m "x" --amend')).toBe(true)
+    expect(isAmendOrFixupCommit("git -C src commit --amend")).toBe(true)
   })
 })

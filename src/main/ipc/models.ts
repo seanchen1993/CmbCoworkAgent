@@ -1314,6 +1314,61 @@ async function getPushabilitySnapshot(
   }
 }
 
+/**
+ * Commit SHAs a push of `branch` will publish, computed BEFORE the push runs.
+ *
+ * Robust against the two ways the upstream-based snapshot misses commits for
+ * adoption "pushed" marking:
+ *   - first push of a branch (no `@{upstream}`, no `refs/remotes/origin/<branch>`),
+ *     where `getPushabilitySnapshot` degrades to just the last commit;
+ *   - `git push -u` advancing the upstream ref mid-flight, which empties an
+ *     `@{upstream}..HEAD` range if it is read too late.
+ *
+ * `HEAD --not --remotes=origin` = commits reachable from HEAD but not already on
+ * any origin tracking ref = exactly the to-be-published set, independent of
+ * upstream config. Bounded to the adoption window and unioned with the snapshot
+ * as a safety net. Marking extra SHAs that carry no adoption events is a harmless
+ * ES no-op.
+ */
+async function collectPublishedCommitShas(
+  worktreePath: string,
+  branch: string,
+  baseCommit: string | null
+): Promise<string[]> {
+  const sinceIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+  const shas = new Set<string>()
+  try {
+    const out = await runGit(
+      worktreePath,
+      [
+        "rev-list",
+        "--no-merges",
+        "--max-count=1000",
+        `--since=${sinceIso}`,
+        "HEAD",
+        "--not",
+        "--remotes=origin"
+      ],
+      { silent: true }
+    )
+    for (const line of out.split("\n")) {
+      const sha = line.trim()
+      if (/^[0-9a-f]{40}$/i.test(sha)) shas.add(sha)
+    }
+  } catch {
+    // fall through to the upstream-based snapshot
+  }
+  try {
+    const snapshot = await getPushabilitySnapshot(worktreePath, branch, baseCommit, { silent: true })
+    for (const commit of snapshot.pendingCommits) {
+      if (/^[0-9a-f]{40}$/i.test(commit.hash)) shas.add(commit.hash)
+    }
+  } catch {
+    // snapshot is best-effort
+  }
+  return Array.from(shas)
+}
+
 function isPathspecNoMatchError(error: unknown): boolean {
   return getExecErrorText(error).toLowerCase().includes("pathspec")
 }
@@ -2991,6 +3046,10 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           "commit",
           `暂存分组：add=[${stagedPaths.existingPathspecs.join(", ")}] remove=[${stagedPaths.removedPathspecs.join(", ")}]`
         )
+        // Capture time is taken before the commit runs, so it is an exact upper
+        // bound on which generations can belong to this commit — passed to
+        // adoption measurement so later (post-capture) gens are not attributed here.
+        const adoptionCaptureTimeMs = Date.now()
         const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
         logGitStep(threadId, "commit", `commit message: ${message}`)
         if (Array.isArray(filePaths) && filePaths.length > 0) {
@@ -3007,7 +3066,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         // 提交后主动刷新 HEAD 短缓存，保证后续 push/telemetry 读取到最新提交。
         void getHeadCommitCached(worktreePath, { silent: true, forceRefresh: true }).catch(() => null)
         if (adoptionSnapshots.length > 0) {
-          measureForCommit(adoptionSnapshots, commitSha)
+          measureForCommit(adoptionSnapshots, commitSha, adoptionCaptureTimeMs)
         }
         const { getThread, updateThread } = await import("../db")
         const thread = getThread(threadId)
@@ -3074,17 +3133,19 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         // 若后续 push 失败，会把错误精确返回给用户处理（例如非 fast-forward）。
         steps.push({ step: "pull", status: "skipped", detail: "快速模式：跳过 pull --rebase" })
 
-        const pushedCommitsPromise = getPushabilitySnapshot(
+        // Capture the to-be-published commits BEFORE the push and await it, so
+        // `git push -u` advancing the upstream ref mid-flight can't empty the set
+        // and first pushes with no upstream are still resolved (via
+        // `--not --remotes=origin`). If this still returns empty, the
+        // hook-independent push reconciler marks them on a later sweep.
+        const pushedCommitShas = await collectPublishedCommitShas(
           worktreePath,
           branch,
-          context.worktreeBaseCommit,
-          { silent: true }
-        )
-          .then((snapshot) => snapshot.pendingCommits)
-          .catch((e) => {
-            console.warn("[GitPush] failed to capture push telemetry commit snapshot:", e)
-            return [] as Array<{ hash: string; message: string; date: string }>
-          })
+          context.worktreeBaseCommit
+        ).catch((e) => {
+          console.warn("[GitPush] failed to capture published commit SHAs:", e)
+          return [] as string[]
+        })
 
         // Step 2: Push
         try {
@@ -3114,7 +3175,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         // Operational telemetry and code-adoption marking run in the background so
         // the user sees push success as soon as git push itself completes.
         void (async () => {
-          const pushedCommits = await pushedCommitsPromise
           const pushOperationId = randomUUID()
           const pushedAt = nowIsoLocal()
           let remoteUrl = ""
@@ -3122,7 +3182,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             remoteUrl = (await runGit(worktreePath, ["remote", "get-url", "origin"], { silent: true })).trim()
           } catch { /* best-effort */ }
           const remoteInfo = parseGitRemoteInfo(remoteUrl)
-          const pushedCommitShas = pushedCommits.map((commit) => commit.hash)
           console.log(
             `[GitPush] scheduling code adoption push marking: commitCount=${pushedCommitShas.length} shas=${pushedCommitShas.join(",")} branch=${branch}`
           )

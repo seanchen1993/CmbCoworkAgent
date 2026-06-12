@@ -2459,11 +2459,13 @@ export function ChatContainer({
     (outcome: AgentCommitOutcome): void => {
       if (!pendingApproval) return
       const approvalRecord = pendingApproval as unknown as Record<string, unknown>
-      const requestId =
-        (approvalRecord._orchestratorRequestId as string | undefined) || pendingApproval.id
+      // Use only the orchestrator's request id — it is the key the main process resolves on.
+      // No fallback: if it is missing the back-end invariant is broken, and silently
+      // substituting another id could ACK the wrong request after the commit already ran.
+      const requestId = approvalRecord._orchestratorRequestId as string | undefined
       const toolCallId = pendingApproval.tool_call?.id || ""
       if (!requestId) {
-        console.error("[AgentGitCommit] missing approval request id after commit", {
+        console.error("[AgentGitCommit] missing _orchestratorRequestId after commit", {
           approvalId: pendingApproval.id,
           toolCallId
         })
@@ -2488,11 +2490,11 @@ export function ChatContainer({
   const handleAgentCommitCancel = useCallback((): void => {
     if (!pendingApproval) return
     const approvalRecord = pendingApproval as unknown as Record<string, unknown>
-    const requestId =
-      (approvalRecord._orchestratorRequestId as string | undefined) || pendingApproval.id
+    // Only the orchestrator's request id is a valid resolve key — see the commit path above.
+    const requestId = approvalRecord._orchestratorRequestId as string | undefined
     const toolCallId = pendingApproval.tool_call?.id || ""
     if (!requestId) {
-      console.error("[AgentGitCommit] missing approval request id while cancelling", {
+      console.error("[AgentGitCommit] missing _orchestratorRequestId while cancelling", {
         approvalId: pendingApproval.id,
         toolCallId
       })

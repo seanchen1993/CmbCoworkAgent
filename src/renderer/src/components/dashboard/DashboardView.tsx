@@ -3,7 +3,23 @@
  *
  * Operations overview and skill evaluation dashboard.
  */
-import { memo, useState, useCallback, useEffect, useMemo, useRef, type ReactNode } from "react"
+import {
+  isValidElement,
+  memo,
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  type ReactNode
+} from "react"
+import ReactMarkdown, { type Components } from "react-markdown"
+import rehypeHighlight from "rehype-highlight"
+import rehypeKatex from "rehype-katex"
+import remarkBreaks from "remark-breaks"
+import remarkGfm from "remark-gfm"
+import remarkMath from "remark-math"
+import "katex/dist/katex.min.css"
 import {
   RefreshCw,
   Loader2,
@@ -21,7 +37,10 @@ import {
   Users,
   CircleAlert,
   Building2,
-  Info
+  Info,
+  Bot,
+  Send,
+  Database
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -46,10 +65,10 @@ import {
   type DashboardProjectModeFeature,
   type DashboardProjectModeData,
   type DashboardProjectModeProject,
-  type DashboardProjectModeProjectStatus,
   type DashboardProjectModeTracesData,
   type DashboardTraceDetail,
   type Granularity,
+  type OverviewData,
   type TimeRange
 } from "./use-dashboard"
 import { OverviewPanel } from "./panels/OverviewPanel"
@@ -112,6 +131,24 @@ type DashboardExcelSheet = {
   rows: (string | number)[][]
 }
 
+type DashboardAnalysisScope = "platform" | "project"
+
+type DashboardAnalysisMessage = {
+  id: string
+  role: "user" | "assistant"
+  content: string
+}
+
+type DashboardAnalysisAgentResponse = {
+  success: boolean
+  data?: {
+    content?: string
+    modelName?: string
+    toolCallCount?: number
+  }
+  error?: string
+}
+
 function formatRangeLabel(from: string, to: string, granularity: Granularity): string {
   const f = new Date(from)
   const pad = (n: number): string => String(n).padStart(2, "0")
@@ -137,6 +174,359 @@ function addDaysToDateInput(value: string, days: number): string {
   const date = new Date(value + "T00:00:00")
   date.setDate(date.getDate() + days)
   return formatDateInputValue(date)
+}
+
+function summarizeCodeStatsForAnalysis(stats: DashboardProjectModeData["summary"]["codeStats"]) {
+  if (!stats) return null
+  return {
+    generatedLines: stats.generatedLines,
+    measuredGeneratedLines: stats.measuredGeneratedLines,
+    effectiveGeneratedLines: stats.effectiveGeneratedLines,
+    unmeasuredGeneratedLines: stats.unmeasuredGeneratedLines,
+    inclusiveEffectiveGeneratedLines: stats.inclusiveEffectiveGeneratedLines,
+    adoptedLines: stats.adoptedLines,
+    measuredAdoptionRate: stats.measuredAdoptionRate,
+    inclusiveAdoptionRate: stats.inclusiveAdoptionRate,
+    pushedEffectiveGeneratedLines: stats.pushedEffectiveGeneratedLines,
+    pushedAdoptedLines: stats.pushedAdoptedLines,
+    pushedAdoptionRate: stats.pushedAdoptionRate,
+    pushedCommitCount: stats.pushedCommitCount
+  }
+}
+
+function buildDashboardAnalysisPanelSnapshot({
+  scope,
+  overview,
+  projectMode
+}: {
+  scope: DashboardAnalysisScope
+  overview: OverviewData | null
+  projectMode: DashboardProjectModeData | null
+}): Record<string, unknown> {
+  if (scope === "project") {
+    const summary = projectMode?.summary
+    return {
+      scope,
+      summary: summary
+        ? {
+            projectCount: summary.projectCount,
+            featureCount: summary.featureCount,
+            activeProjectCount: summary.activeProjectCount,
+            conversationCount: summary.conversationCount,
+            totalToolCalls: summary.totalToolCalls,
+            totalInputTokens: summary.totalInputTokens,
+            totalOutputTokens: summary.totalOutputTokens,
+            totalTokens: summary.totalTokens,
+            skillCallCount: summary.skillCallCount,
+            distinctSkillCount: summary.distinctSkillCount,
+            codeStats: summarizeCodeStatsForAnalysis(summary.codeStats),
+            skillCodeStats: summarizeCodeStatsForAnalysis(summary.skillCodeStats ?? null)
+          }
+        : null,
+      topSkills: projectMode?.topSkills.slice(0, 10) ?? [],
+      topUsers: projectMode?.analytics.topUsers.slice(0, 10) ?? [],
+      topAdapters: projectMode?.analytics.byAdapter.slice(0, 10) ?? [],
+      topSkillAdoption: projectMode?.bySkillAdoption.slice(0, 10) ?? []
+    }
+  }
+
+  return {
+    scope,
+    summary: overview
+      ? {
+          totalCalls: overview.totalCalls,
+          activeUsers: overview.activeUsers,
+          avgDurationMs: overview.avgDurationMs,
+          inputTokens: overview.inputTokens,
+          outputTokens: overview.outputTokens,
+          totalSkills: overview.totalSkills,
+          totalSkillCalls: overview.totalSkillCalls,
+          totalTools: overview.totalTools,
+          totalToolCalls: overview.totalToolCalls,
+          codeGeneratedLines: overview.codeGeneratedLines,
+          codeMeasuredGeneratedLines: overview.codeMeasuredGeneratedLines,
+          codeEffectiveGeneratedLines: overview.codeEffectiveGeneratedLines,
+          codeUnmeasuredGeneratedLines: overview.codeUnmeasuredGeneratedLines,
+          codeInclusiveEffectiveGeneratedLines: overview.codeInclusiveEffectiveGeneratedLines,
+          codeAdoptedLines: overview.codeAdoptedLines,
+          codeMeasuredAdoptionRate: overview.codeMeasuredAdoptionRate,
+          codeInclusiveAdoptionRate: overview.codeInclusiveAdoptionRate,
+          codePushedEffectiveGeneratedLines: overview.codePushedEffectiveGeneratedLines,
+          codePushedAdoptedLines: overview.codePushedAdoptedLines,
+          codePushedAdoptionRate: overview.codePushedAdoptionRate,
+          codePushedCommitCount: overview.codePushedCommitCount
+        }
+      : null,
+    topSkills: overview?.bySkill.slice(0, 10) ?? [],
+    topTools: overview?.byTool.slice(0, 10) ?? [],
+    topSkillAdoption: overview?.bySkillAdoption.slice(0, 10) ?? [],
+    recentTrend: overview?.trend.slice(-10) ?? []
+  }
+}
+
+function normalizeDashboardMarkdown(content: string): string {
+  return content
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_, expr: string) => `\n$$\n${expr.trim()}\n$$\n`)
+    .replace(/\\\(([\s\S]*?)\\\)/g, (_, expr: string) => `$${expr.trim()}$`)
+}
+
+function getMarkdownLanguageLabel(className?: string): string | null {
+  const match = /language-([\w-]+)/.exec(className || "")
+  return match?.[1] ?? null
+}
+
+function getMarkdownNodeText(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node)
+  if (Array.isArray(node)) return node.map(getMarkdownNodeText).join("")
+  if (isValidElement<{ children?: ReactNode }>(node))
+    return getMarkdownNodeText(node.props.children)
+  return ""
+}
+
+function DashboardAnalysisMarkdown({ content }: { content: string }): React.JSX.Element {
+  const markdown = useMemo(() => normalizeDashboardMarkdown(content), [content])
+  const components = useMemo<Components>(
+    () => ({
+      table({ node: _node, children, ...props }) {
+        return (
+          <div className="streaming-markdown-table-wrap">
+            <table {...props}>{children}</table>
+          </div>
+        )
+      },
+      pre({ children }) {
+        return <>{children}</>
+      },
+      code({ node: _node, className, children, ...props }) {
+        const rawCode = getMarkdownNodeText(children)
+        const language = getMarkdownLanguageLabel(className)
+        const isBlock = !!language || rawCode.includes("\n")
+
+        if (isBlock) {
+          return (
+            <div className="streaming-markdown-code-block">
+              <div className="streaming-markdown-code-header">
+                <span className="streaming-markdown-code-language">{language || "text"}</span>
+              </div>
+              <pre className="streaming-markdown-code-pre">
+                <code className={className}>{children}</code>
+              </pre>
+            </div>
+          )
+        }
+
+        return (
+          <code className="streaming-markdown-inline-code" {...props}>
+            {children}
+          </code>
+        )
+      }
+    }),
+    []
+  )
+
+  return (
+    <div className="streaming-markdown !text-[13px] !leading-6">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
+        rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }], rehypeHighlight]}
+        components={components}
+      >
+        {markdown}
+      </ReactMarkdown>
+    </div>
+  )
+}
+
+function DashboardAnalysisDrawer({
+  open,
+  scope,
+  range,
+  upperOrgLv1,
+  panelSnapshot,
+  onClose
+}: {
+  open: boolean
+  scope: DashboardAnalysisScope
+  range: TimeRange
+  upperOrgLv1: string[]
+  panelSnapshot: Record<string, unknown>
+  onClose: () => void
+}): React.JSX.Element | null {
+  const scopeLabel = scope === "project" ? "项目运营概览" : "平台运营概览"
+  const [input, setInput] = useState("")
+  const [loading, setLoading] = useState(false)
+  const [messages, setMessages] = useState<DashboardAnalysisMessage[]>([
+    {
+      id: "welcome",
+      role: "assistant",
+      content:
+        "可以问我代码采纳率口径，或让我分析“生成了但没有提交”的人群。我是独立的运营指标分析 Agent，会使用默认模型并通过只读 ES DSL 安全门控查询数据。"
+    }
+  ])
+
+  const appendMessage = useCallback((message: Omit<DashboardAnalysisMessage, "id">) => {
+    setMessages((prev) => [
+      ...prev,
+      {
+        ...message,
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`
+      }
+    ])
+  }, [])
+
+  const runQuestion = useCallback(
+    async (question: string) => {
+      const normalized = question.trim()
+      if (!normalized || loading) return
+      appendMessage({ role: "user", content: normalized })
+      setInput("")
+
+      setLoading(true)
+      try {
+        const history = messages
+          .filter((message) => message.id !== "welcome")
+          .map((message) => ({ role: message.role, content: message.content }))
+        const result = (await window.api.dashboard.analysisAgent({
+          question: normalized,
+          messages: history,
+          context: {
+            scope,
+            range,
+            upperOrgLv1,
+            panelSnapshot
+          }
+        })) as DashboardAnalysisAgentResponse
+        appendMessage({
+          role: "assistant",
+          content: result.success
+            ? result.data?.content || "没有生成有效分析结果，请换个问题重试。"
+            : `分析失败：${result.error ?? "未知错误"}`
+        })
+      } catch (error) {
+        appendMessage({
+          role: "assistant",
+          content: `分析失败：${error instanceof Error ? error.message : String(error)}`
+        })
+      } finally {
+        setLoading(false)
+      }
+    },
+    [appendMessage, loading, messages, panelSnapshot, range, scope, upperOrgLv1]
+  )
+
+  if (!open) return null
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-background/40 backdrop-blur-[1px]">
+      <section className="flex h-full w-full max-w-[520px] flex-col border-l border-border bg-background shadow-2xl">
+        <header className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="grid size-8 place-items-center rounded-lg bg-primary text-primary-foreground">
+                <Bot className="size-4" />
+              </span>
+              <div>
+                <h2 className="text-sm font-semibold text-foreground">运营指标分析 Agent</h2>
+                <p className="text-[11px] text-muted-foreground">
+                  {scopeLabel} · {formatRangeLabel(range.from, range.to, "custom")}
+                </p>
+              </div>
+            </div>
+          </div>
+          <Button type="button" variant="ghost" size="sm" className="size-8 p-0" onClick={onClose}>
+            <X className="size-4" />
+          </Button>
+        </header>
+
+        <div className="border-b border-border px-4 py-3">
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="gap-1.5 text-xs"
+              disabled={loading}
+              onClick={() => void runQuestion("解释代码采纳率口径")}
+            >
+              <Info className="size-3.5" />
+              采纳率口径
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="gap-1.5 text-xs"
+              disabled={loading}
+              onClick={() =>
+                void runQuestion("为什么很多代码生成了却没有提交？这些代码是谁生成的？")
+              }
+            >
+              <Database className="size-3.5" />
+              未提交人群
+            </Button>
+          </div>
+        </div>
+
+        <ScrollArea className="min-h-0 flex-1">
+          <div className="space-y-3 p-4">
+            {messages.map((message) => (
+              <div
+                key={message.id}
+                className={cn(
+                  "rounded-lg border px-3 py-2 text-xs leading-5",
+                  message.role === "user"
+                    ? "ml-8 border-primary/30 bg-primary/5 text-foreground"
+                    : "mr-8 border-border bg-muted/40 text-foreground"
+                )}
+              >
+                <div className="mb-1 text-[10px] font-medium text-muted-foreground">
+                  {message.role === "user" ? "你" : "Agent"}
+                </div>
+                {message.role === "assistant" ? (
+                  <DashboardAnalysisMarkdown content={message.content} />
+                ) : (
+                  <div className="whitespace-pre-wrap">{message.content}</div>
+                )}
+              </div>
+            ))}
+            {loading && (
+              <div className="mr-8 flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                <Loader2 className="size-3.5 animate-spin" />
+                正在调用独立 Agent 分析...
+              </div>
+            )}
+          </div>
+        </ScrollArea>
+
+        <form
+          className="border-t border-border p-3"
+          onSubmit={(event) => {
+            event.preventDefault()
+            void runQuestion(input)
+          }}
+        >
+          <div className="flex gap-2">
+            <textarea
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              placeholder="问：为什么很多代码生成了却没有提交？"
+              className="min-h-20 flex-1 resize-none rounded-lg border border-input bg-background px-3 py-2 text-xs leading-5 outline-none focus:border-primary"
+            />
+            <Button
+              type="submit"
+              size="sm"
+              className="self-end gap-1.5"
+              disabled={loading || !input.trim()}
+            >
+              <Send className="size-3.5" />
+              发送
+            </Button>
+          </div>
+        </form>
+      </section>
+    </div>
+  )
 }
 
 function resolveSkillUploaderExportInfo(
@@ -598,17 +988,6 @@ async function fetchAllActiveUsersForExport(range: TimeRange): Promise<Dashboard
   return users
 }
 
-const PROJECT_MODE_EXPORT_PAGE_SIZE = 100
-const PROJECT_MODE_EXPORT_MAX_PAGES = 100
-
-function formatProjectModeCreatorDepartment(project: DashboardProjectModeProject): string {
-  if (project.creatorUpperOrgLv1 && project.creatorUpperOrgLv0) {
-    return `${project.creatorUpperOrgLv1}/${project.creatorUpperOrgLv0}`
-  }
-  if (project.creatorUpperOrgLv1) return project.creatorUpperOrgLv1
-  return project.creatorOrgName || "—"
-}
-
 function buildProjectModeCodeRows(
   stats: DashboardProjectModeProject["codeStats"]
 ): (string | number)[][] {
@@ -621,13 +1000,13 @@ function buildProjectModeCodeRows(
     ["代码未提交生成行数", stats.unmeasuredGeneratedLines],
     ["代码含未提交分母行数", stats.inclusiveEffectiveGeneratedLines],
     ["代码采纳行数", stats.adoptedLines],
-    ["代码采纳率（含未提交）", formatPercent(stats.inclusiveAdoptionRate)],
-    ["代码采纳率（已测量）", formatPercent(stats.measuredAdoptionRate)],
+    ["代码总量采纳率（含未提交）", formatPercent(stats.inclusiveAdoptionRate)],
+    ["提交率（已 Commit 采纳率）", formatPercent(stats.measuredAdoptionRate)],
     ["代码已 Push 原始生成行数", stats.pushedMeasuredGeneratedLines],
     ["代码已 Push 有效生成行数", stats.pushedEffectiveGeneratedLines],
     ["代码已 Push 采纳行数", stats.pushedAdoptedLines],
     ["代码已 Push Commit 数", stats.pushedCommitCount],
-    ["代码采纳率（已 Push）", formatPercent(stats.pushedAdoptionRate)]
+    ["入库率（已 Push 采纳率）", formatPercent(stats.pushedAdoptionRate)]
   ]
 }
 
@@ -639,35 +1018,6 @@ function flattenProjectModeOrgRows(
     [parent ? `${parent}/${item.org}` : item.org, item.count],
     ...flattenProjectModeOrgRows(item.children ?? [], parent ? `${parent}/${item.org}` : item.org)
   ])
-}
-
-async function fetchAllProjectModeProjectsForExport(
-  range: TimeRange,
-  orgList: string[]
-): Promise<DashboardProjectModeProject[]> {
-  const projects: DashboardProjectModeProject[] = []
-
-  for (const status of ["active", "archived"] as DashboardProjectModeProjectStatus[]) {
-    for (let page = 1; page <= PROJECT_MODE_EXPORT_MAX_PAGES; page++) {
-      const result = await window.api.dashboard.projectModeProjects(range, {
-        upperOrgLv1: orgList,
-        status,
-        page,
-        pageSize: PROJECT_MODE_EXPORT_PAGE_SIZE,
-        keyword: null,
-        adapterName: null,
-        creatorKeyword: null,
-        creatorOrgKeyword: null
-      })
-      if (!result.success) throw new Error(result.error ?? "获取项目列表失败")
-      const pageData = result.data
-      if (!pageData) break
-      projects.push(...pageData.projects)
-      if (page * pageData.pageSize >= pageData.total) break
-    }
-  }
-
-  return projects
 }
 
 function outcomeLabel(outcome: string): string {
@@ -1063,7 +1413,8 @@ function UserDetailPage({
   onTracePrevious,
   onTraceNext,
   onTraceViewModeChange,
-  onTraceTriggerScopeChange
+  onTraceTriggerScopeChange,
+  loadThreadTraces
 }: {
   data: DashboardUserDetail | null
   loading: boolean
@@ -1077,6 +1428,7 @@ function UserDetailPage({
   onTraceNext: () => void
   onTraceViewModeChange: (mode: DashboardTraceViewMode) => void
   onTraceTriggerScopeChange: (scope: DashboardTraceTriggerScope) => void
+  loadThreadTraces?: (threadId: string) => Promise<DashboardTraceDetail[]>
 }): React.JSX.Element {
   const tracePageSize = data?.tracePageSize ?? USER_TRACE_PAGE_SIZE
   // 列表翻页总数按当前视图模式：thread → 会话数；trace → trace 总数。
@@ -1213,6 +1565,7 @@ function UserDetailPage({
               subtitle={traceSubtitle}
               viewMode={traceViewMode}
               onViewModeChange={onTraceViewModeChange}
+              loadThreadTraces={loadThreadTraces}
               headerRight={
                 <div className="flex items-center gap-2">
                   <TraceTriggerScopeToggle
@@ -2054,6 +2407,8 @@ export function DashboardView(): React.JSX.Element {
 
   const [exporting, setExporting] = useState(false)
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
+  const [analysisOpen, setAnalysisOpen] = useState(false)
+  const [analysisAgentAllowed, setAnalysisAgentAllowed] = useState(false)
   const [projectModeAllowed, setProjectModeAllowed] = useState(false)
   const [skillDialogOpen, setSkillDialogOpen] = useState(false)
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null)
@@ -2110,7 +2465,41 @@ export function DashboardView(): React.JSX.Element {
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    window.api.dashboard
+      .isAnalysisAgentAllowed()
+      .then((allowed) => {
+        if (cancelled) return
+        setAnalysisAgentAllowed(allowed)
+        if (!allowed) setAnalysisOpen(false)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setAnalysisAgentAllowed(false)
+        setAnalysisOpen(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
   const [commitDepartmentFilter, setCommitDepartmentFilter] = useState("")
+  // 项目模式·特性级关联 Commit 弹窗（复用 CommitDetailsDialog，独立于平台级 Commit 明细）。
+  const [featureCommitScope, setFeatureCommitScope] = useState<{
+    projectId: string
+    featureSlug: string
+    label: string
+  } | null>(null)
+  const [featureCommitData, setFeatureCommitData] = useState<DashboardCommitDetailsData | null>(
+    null
+  )
+  const [featureCommitLoading, setFeatureCommitLoading] = useState(false)
+  const [featureCommitError, setFeatureCommitError] = useState<string | null>(null)
+  const [featureCommitDeptValue, setFeatureCommitDeptValue] = useState("")
+  const [featureCommitDeptFilter, setFeatureCommitDeptFilter] = useState("")
   const [subPage, setSubPage] = useState<DashboardSubPage>({ kind: "main" })
   const [userList, setUserList] = useState<DashboardUserListData | null>(null)
   const [userListLoading, setUserListLoading] = useState(false)
@@ -2946,6 +3335,14 @@ export function DashboardView(): React.JSX.Element {
     setProjectTracePage(1)
   }, [])
 
+  const loadProjectThreadTraces = useCallback(
+    async (threadId: string): Promise<DashboardTraceDetail[]> => {
+      const res = await window.api.dashboard.threadTraces(threadId, { scope: "project" })
+      return res.success && Array.isArray(res.data) ? res.data : []
+    },
+    []
+  )
+
   const subPageDetailSapId = subPage.kind === "user-detail" ? subPage.sapId : null
   const subPageDetailProjectMode =
     subPage.kind === "user-detail" ? Boolean(subPage.projectMode) : false
@@ -3071,6 +3468,100 @@ export function DashboardView(): React.JSX.Element {
     [loadCommitDetails]
   )
 
+  const loadFeatureCommits = useCallback(
+    async (
+      scope: { projectId: string; featureSlug: string; label: string },
+      page = 1,
+      pushedOnly = false,
+      upperOrgLv1 = featureCommitDeptFilter
+    ) => {
+      setFeatureCommitData(null)
+      setFeatureCommitError(null)
+      setFeatureCommitLoading(true)
+      const normalizedDepartment = upperOrgLv1.trim()
+      try {
+        // featureSlug 为空 = 项目级（聚合该项目全部特性的 commit）；否则按单特性圈定。
+        const commitOptions = {
+          page,
+          pageSize: 20,
+          pushedOnly,
+          upperOrgLv1: normalizedDepartment || null,
+          orgLv1List: selectedOrgLv1List
+        }
+        const result = scope.featureSlug
+          ? await window.api.dashboard.projectModeFeatureCommits(
+              scope.projectId,
+              scope.featureSlug,
+              range,
+              commitOptions
+            )
+          : await window.api.dashboard.projectModeProjectCommits(
+              scope.projectId,
+              range,
+              commitOptions
+            )
+        if (!result.success) throw new Error(result.error ?? "获取 Commit 明细失败")
+        setFeatureCommitData(result.data ?? { total: 0, page, pageSize: 20, pushedOnly, items: [] })
+      } catch (e) {
+        setFeatureCommitError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setFeatureCommitLoading(false)
+      }
+    },
+    [featureCommitDeptFilter, range, selectedOrgLv1List]
+  )
+
+  const handleProjectOpenFeatureCommits = useCallback(
+    (project: DashboardProjectModeProject, feature: DashboardProjectModeFeature) => {
+      if (!feature.slug) return
+      const scope = {
+        projectId: project.projectId,
+        featureSlug: feature.slug,
+        label: `${project.name} · ${feature.title}`
+      }
+      setFeatureCommitDeptValue("")
+      setFeatureCommitDeptFilter("")
+      setFeatureCommitScope(scope)
+      void loadFeatureCommits(scope, 1, false, "")
+    },
+    [loadFeatureCommits]
+  )
+
+  const handleProjectOpenProjectCommits = useCallback(
+    (project: DashboardProjectModeProject, pushedOnly = false) => {
+      const scope = {
+        projectId: project.projectId,
+        featureSlug: "",
+        label: project.name
+      }
+      setFeatureCommitDeptValue("")
+      setFeatureCommitDeptFilter("")
+      setFeatureCommitScope(scope)
+      void loadFeatureCommits(scope, 1, pushedOnly, "")
+    },
+    [loadFeatureCommits]
+  )
+
+  const reloadFeatureCommits = useCallback(
+    (page: number, pushedOnly: boolean, upperOrgLv1 = featureCommitDeptFilter) => {
+      if (!featureCommitScope) return
+      void loadFeatureCommits(featureCommitScope, page, pushedOnly, upperOrgLv1)
+    },
+    [featureCommitDeptFilter, featureCommitScope, loadFeatureCommits]
+  )
+
+  const handleFeatureCommitDepartmentSearch = useCallback(() => {
+    const upperOrgLv1 = featureCommitDeptValue.trim()
+    setFeatureCommitDeptFilter(upperOrgLv1)
+    reloadFeatureCommits(1, featureCommitData?.pushedOnly ?? false, upperOrgLv1)
+  }, [featureCommitData?.pushedOnly, featureCommitDeptValue, reloadFeatureCommits])
+
+  const handleFeatureCommitDepartmentClear = useCallback(() => {
+    setFeatureCommitDeptValue("")
+    setFeatureCommitDeptFilter("")
+    reloadFeatureCommits(1, featureCommitData?.pushedOnly ?? false, "")
+  }, [featureCommitData?.pushedOnly, reloadFeatureCommits])
+
   const handleExport = useCallback(async () => {
     if (!overview && !modelStats && !userStats && !productivity) return
     setExporting(true)
@@ -3095,13 +3586,13 @@ export function DashboardView(): React.JSX.Element {
             ["代码含未提交分母行数", overview.codeInclusiveEffectiveGeneratedLines],
             ["代码删除行数", overview.codeDeletedLines],
             ["代码采纳行数", overview.codeAdoptedLines],
-            ["代码采纳率（含未提交）", formatPercent(overview.codeInclusiveAdoptionRate)],
-            ["代码采纳率（已测量）", formatPercent(overview.codeMeasuredAdoptionRate)],
+            ["代码总量采纳率（含未提交）", formatPercent(overview.codeInclusiveAdoptionRate)],
+            ["提交率（已 Commit 采纳率）", formatPercent(overview.codeMeasuredAdoptionRate)],
             ["代码已 Push 原始生成行数", overview.codePushedMeasuredGeneratedLines],
             ["代码已 Push 有效生成行数", overview.codePushedEffectiveGeneratedLines],
             ["代码已 Push 采纳行数", overview.codePushedAdoptedLines],
             ["代码已 Push Commit 数", overview.codePushedCommitCount],
-            ["代码采纳率（已 Push）", formatPercent(overview.codePushedAdoptionRate)],
+            ["入库率（已 Push 采纳率）", formatPercent(overview.codePushedAdoptionRate)],
             ["Skill 种类数", overview.totalSkills],
             ["Skill 调用次数", overview.totalSkillCalls],
             ["Tool 种类数", overview.totalTools],
@@ -3352,7 +3843,6 @@ export function DashboardView(): React.JSX.Element {
       const sheets: DashboardExcelSheet[] = []
       const summary = projectMode.summary
       const codeStats = summary.codeStats
-      const projects = await fetchAllProjectModeProjectsForExport(range, selectedOrgLv1List)
 
       sheets.push({
         name: "项目运营概览",
@@ -3371,6 +3861,15 @@ export function DashboardView(): React.JSX.Element {
           ...buildProjectModeCodeRows(codeStats)
         ]
       })
+
+      const skillCodeStats = summary.skillCodeStats
+      if (skillCodeStats) {
+        sheets.push({
+          name: "AutoBizDevOps约束生成",
+          header: ["指标", "值"],
+          rows: buildProjectModeCodeRows(skillCodeStats)
+        })
+      }
 
       if (projectMode.analytics.topUsers.length > 0) {
         sheets.push({
@@ -3403,48 +3902,10 @@ export function DashboardView(): React.JSX.Element {
         })
       }
 
-      if (projects.length > 0) {
-        sheets.push({
-          name: "项目列表",
-          header: [
-            "项目",
-            "系统",
-            "插件",
-            "插件版本",
-            "项目状态",
-            "创建人",
-            "创建人SAP",
-            "创建人YST",
-            "部门",
-            "特性数",
-            "对话数",
-            "已Commit采纳率",
-            "已Push采纳率",
-            "工作区"
-          ],
-          rows: projects.map((project) => [
-            project.name,
-            project.systemName || "",
-            project.adapterName || "",
-            project.adapterVersion || "",
-            project.lifecycleStatus || "",
-            project.creatorUserName || "",
-            project.creatorSapId || "",
-            project.creatorYstId || "",
-            formatProjectModeCreatorDepartment(project),
-            project.featureCount,
-            project.conversationCount,
-            formatPercent(project.codeStats?.measuredAdoptionRate ?? null),
-            formatPercent(project.codeStats?.pushedAdoptionRate ?? null),
-            project.workspacePath || ""
-          ])
-        })
-      }
-
       if (projectMode.adapters.length > 0) {
         sheets.push({
           name: "项目插件统计",
-          header: ["插件", "版本", "项目数", "特性数", "对话数", "已Commit采纳率", "已Push采纳率"],
+          header: ["插件", "版本", "项目数", "特性数", "对话数", "提交率", "入库率"],
           rows: projectMode.adapters.map((adapter) => [
             adapter.name,
             adapter.version || "",
@@ -3497,8 +3958,8 @@ export function DashboardView(): React.JSX.Element {
           name: "项目Skill采纳排行",
           header: [
             "Skill",
-            "已Commit采纳率",
-            "已Push采纳率",
+            "提交率",
+            "入库率",
             "生成行数",
             "有效生成行数",
             "采纳行数",
@@ -3582,6 +4043,17 @@ export function DashboardView(): React.JSX.Element {
   const projectTraceDialogSubtitle = projectTraceFeature
     ? "该特性在项目模式下的对话记录，选择记录定位到会话"
     : "该项目模式下的对话记录，选择记录定位到会话"
+  const analysisScope: DashboardAnalysisScope =
+    activeMainTab === "project-mode" && projectModeAllowed ? "project" : "platform"
+  const analysisPanelSnapshot = useMemo(
+    () =>
+      buildDashboardAnalysisPanelSnapshot({
+        scope: analysisScope,
+        overview,
+        projectMode
+      }),
+    [analysisScope, overview, projectMode]
+  )
 
   return (
     <div className="flex flex-col h-full">
@@ -3628,6 +4100,19 @@ export function DashboardView(): React.JSX.Element {
               >
                 <ExternalLink className="size-3.5" />
                 了解技能评估与自进化
+              </Button>
+            ) : analysisAgentAllowed &&
+              (activeMainTab === "overview" || activeMainTab === "project-mode") ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-1.5 text-xs"
+                onClick={() => setAnalysisOpen(true)}
+                disabled={activeMainTab === "project-mode" && !projectModeAllowed}
+              >
+                <Bot className="size-3.5" />
+                指标分析
               </Button>
             ) : null
           }
@@ -3680,6 +4165,7 @@ export function DashboardView(): React.JSX.Element {
             onTraceNext={handleUserTraceNext}
             onTraceViewModeChange={handleUserTraceViewModeChange}
             onTraceTriggerScopeChange={handleUserTraceTriggerScopeChange}
+            loadThreadTraces={subPage.projectMode ? loadProjectThreadTraces : undefined}
           />
         </ScrollArea>
       ) : (
@@ -3730,6 +4216,8 @@ export function DashboardView(): React.JSX.Element {
                 projectPageError={projectModeProjectPageError}
                 onProjectPageChange={fetchProjectModeProjectPage}
                 onOpenTraces={handleProjectOpenTraces}
+                onOpenFeatureCommits={handleProjectOpenFeatureCommits}
+                onOpenProjectCommits={handleProjectOpenProjectCommits}
                 onSkillClick={handleSkillClick}
                 onUserClick={(sapId) => openUserDetail(sapId, "main", true)}
                 marketSkillKeys={marketSkillKeys}
@@ -3895,6 +4383,7 @@ export function DashboardView(): React.JSX.Element {
               subtitle={projectTraceSubtitle}
               viewMode={projectTraceViewMode}
               onViewModeChange={handleProjectTraceViewModeChange}
+              loadThreadTraces={loadProjectThreadTraces}
               headerRight={
                 <div className="flex items-center gap-2">
                   <Button
@@ -3940,6 +4429,32 @@ export function DashboardView(): React.JSX.Element {
         onDepartmentSearch={handleCommitDepartmentSearch}
         onClearDepartment={handleCommitDepartmentClear}
         onOpenExternal={handleCommitExternalOpen}
+      />
+      <CommitDetailsDialog
+        open={Boolean(featureCommitScope)}
+        onOpenChange={(open) => {
+          if (!open) setFeatureCommitScope(null)
+        }}
+        scopeLabel={featureCommitScope?.label ?? ""}
+        threadScope="project"
+        data={featureCommitData}
+        loading={featureCommitLoading}
+        error={featureCommitError}
+        onPageChange={(page) => reloadFeatureCommits(page, featureCommitData?.pushedOnly ?? false)}
+        onPushedOnlyChange={(pushedOnly) => reloadFeatureCommits(1, pushedOnly)}
+        departmentValue={featureCommitDeptValue}
+        onDepartmentValueChange={setFeatureCommitDeptValue}
+        onDepartmentSearch={handleFeatureCommitDepartmentSearch}
+        onClearDepartment={handleFeatureCommitDepartmentClear}
+        onOpenExternal={handleCommitExternalOpen}
+      />
+      <DashboardAnalysisDrawer
+        open={analysisAgentAllowed && analysisOpen}
+        scope={analysisScope}
+        range={range}
+        upperOrgLv1={selectedOrgLv1List}
+        panelSnapshot={analysisPanelSnapshot}
+        onClose={() => setAnalysisOpen(false)}
       />
     </div>
   )

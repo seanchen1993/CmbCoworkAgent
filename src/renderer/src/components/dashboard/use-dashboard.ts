@@ -178,6 +178,56 @@ export interface DashboardCommitDetailsData {
   items: DashboardCommitDetail[]
 }
 
+/** 一行采纳溯源：一个 `code_adopt` 事件 + 按 genEventId 关联的 `code_gen` 元数据。 */
+export interface DashboardCommitAdoptionPair {
+  genEventId: string
+  /** gen.relativeHint —— 叶子文件名（云端事件不含完整路径）。 */
+  file: string | null
+  tool: string | null
+  language: string | null
+  usedSkills: string[]
+  modelName: string | null
+  generatedAt: string | null
+  verdict: string | null
+  generatedLineCount: number | null
+  effectiveGeneratedLineCount: number | null
+  adoptedLineCount: number | null
+  measureSource: string | null
+  pushed: boolean
+  measuredAt: string | null
+  threadId: string | null
+}
+
+export interface DashboardCommitAdoptionEvents {
+  commitSha: string
+  pairs: DashboardCommitAdoptionPair[]
+  /** Σ采纳 / Σ有效；口径与面板该 commit 采纳率一致。 */
+  reconciliation: {
+    sumEffective: number
+    sumAdopted: number
+    rate: number | null
+  }
+}
+
+/** 本地逐行溯源中的一行（提交版文本 + 是否命中生成行哈希）。 */
+export interface DashboardLocalAdoptionLine {
+  lineNumber: number
+  text: string
+  adopted: boolean
+}
+
+/** 单条 gen 的本地逐行结果；available=false 时附降级原因。 */
+export interface DashboardLocalGenAdoptionLines {
+  genEventId: string
+  available: boolean
+  reason?: string
+  relPath?: string
+  generatedLineCount?: number
+  matchedLineCount?: number
+  truncated?: boolean
+  lines?: DashboardLocalAdoptionLine[]
+}
+
 export interface DashboardCodeStats {
   generatedLines: number
   deletedLines: number
@@ -261,6 +311,8 @@ export interface DashboardProjectModeFeature {
   statusLabel?: string
   currentNodeStatusLabel?: string
   summary?: string
+  /** This-range code adoption sliced to this feature; absent/null if no code data. */
+  codeStats?: DashboardCodeStats | null
 }
 
 export interface DashboardProjectModeSkillCount {
@@ -384,6 +436,8 @@ export interface DashboardProjectModeData {
     skillCallCount: number
     distinctSkillCount: number
     codeStats: DashboardCodeStats | null
+    /** 仅由 Skill 生成的代码整体采纳明细（code 事件带非空 usedSkills）。 */
+    skillCodeStats?: DashboardCodeStats | null
   }
   adapters: DashboardProjectModeAdapter[]
   topSkills: DashboardProjectModeSkillCount[]
