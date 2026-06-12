@@ -4,7 +4,8 @@ Use direct `npx` commands and snapshot often.
 In this repo, run commands from `output/playwright/<label>/` to keep artifacts contained.
 Before starting, verify Node.js is installed and `node --version` reports version 20
 or newer. If it is lower than 20, ask the user to upgrade Node.js before using this
-skill.
+skill. This is a blocking failure: do not continue to `npx`, `playwright-cli`, or
+any workflow step until Node.js 20+ is available.
 
 ## Standard interaction loop
 

@@ -1,19 +1,31 @@
 # Playwright CLI Reference
 
-Use direct `npx` commands:
+Check Node.js first:
 
 ```bash
 node --version
-npx --yes --package @playwright/cli playwright-cli --help
 ```
 
-Node.js must be version 20 or newer before running `npx` or `playwright-cli`.
-If `node --version` reports a lower version, tell the user to upgrade Node.js first.
+If the reported major version is lower than 20, stop there and tell the user to
+upgrade Node.js before using this skill. Do not run `npx`, `playwright-cli`, or even
+`playwright-cli --help` on Node.js 18 or 19.
+
+Only after Node.js 20+ is confirmed, use direct `npx` commands:
+
+```bash
+npx --yes --package @playwright/cli playwright-cli --help
+```
 
 Windows PowerShell:
 
 ```powershell
 node --version
+```
+
+If the reported major version is lower than 20, stop there and tell the user to
+upgrade Node.js first.
+
+```powershell
 npx --yes --package @playwright/cli playwright-cli --help
 ```
 

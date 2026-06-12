@@ -25,7 +25,9 @@ node -e "const major = Number(process.versions.node.split('.')[0]); process.exit
 
 If `node` is missing or the detected major version is lower than 20, pause and tell
 the user they need to upgrade to Node.js 20 or newer before this skill can be used.
-Do not run `npx` or `playwright-cli` commands until Node.js 20+ is confirmed.
+This is a hard stop. Do not run `npx`, `playwright-cli`, `playwright-cli --help`, or
+any other Playwright CLI command until Node.js 20+ is confirmed. The only allowed
+next step is to tell the user to upgrade Node.js.
 
 After Node.js 20+ is confirmed, check whether `npx` is available:
 
@@ -46,8 +48,9 @@ npm install -g @playwright/cli@latest
 playwright-cli --help
 ```
 
-Once `npx` is present, use direct `npx --yes --package @playwright/cli playwright-cli ...`
-commands. A global install of `playwright-cli` is optional.
+Once both Node.js 20+ and `npx` are confirmed, use direct
+`npx --yes --package @playwright/cli playwright-cli ...` commands. A global install of
+`playwright-cli` is optional.
 
 ## Quick start
 
@@ -69,7 +72,7 @@ npx --yes --package @playwright/cli playwright-cli open https://playwright.dev -
 npx --yes --package @playwright/cli playwright-cli snapshot
 ```
 
-This is also the preferred one-line sanity check:
+Only after Node.js 20+ is confirmed, this is the preferred one-line sanity check:
 
 ```bash
 npx --yes --package @playwright/cli playwright-cli --help
@@ -153,6 +156,8 @@ Open only what you need:
 
 ## Guardrails
 
+- Node.js `<20` is a blocking prerequisite failure. Stop immediately and instruct the
+  user to upgrade; do not probe further with `npx` or `playwright-cli`.
 - Always snapshot before referencing element ids like `e12`.
 - Re-snapshot when refs seem stale.
 - Prefer explicit commands over `eval` and `run-code` unless needed.
