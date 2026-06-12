@@ -1384,6 +1384,8 @@ export function ProjectModePanel({
   onOpenProjectCommits,
   onSkillClick,
   onUserClick,
+  onFunnelFirstStageClick,
+  onSkillFunnelFirstStageClick,
   marketSkillKeys = new Set(),
   pluginSkillKeys = new Set()
 }: {
@@ -1416,6 +1418,8 @@ export function ProjectModePanel({
   onOpenProjectCommits: (project: DashboardProjectModeProject, pushedOnly?: boolean) => void
   onSkillClick?: (skill: string) => void
   onUserClick?: (sapId: string) => void
+  onFunnelFirstStageClick?: () => void
+  onSkillFunnelFirstStageClick?: () => void
   marketSkillKeys?: Set<string>
   pluginSkillKeys?: Set<string>
 }): React.JSX.Element {
@@ -1585,7 +1589,7 @@ export function ProjectModePanel({
                 }
               />
             </div>
-            <CodeAdoptionFunnel data={funnelData} />
+            <CodeAdoptionFunnel data={funnelData} onFirstStageClick={onFunnelFirstStageClick} />
           </div>
         </div>
 
@@ -1646,7 +1650,10 @@ export function ProjectModePanel({
                 }
               />
             </div>
-            <CodeAdoptionFunnel data={skillFunnelData} />
+            <CodeAdoptionFunnel
+              data={skillFunnelData}
+              onFirstStageClick={onSkillFunnelFirstStageClick}
+            />
           </div>
         </div>
       </section>

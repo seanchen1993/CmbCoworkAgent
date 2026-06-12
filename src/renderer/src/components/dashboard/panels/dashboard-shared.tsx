@@ -445,11 +445,14 @@ type FunnelStage = {
 export function CodeAdoptionFunnel({
   data,
   className,
-  enableSourceTabs = false
+  enableSourceTabs = false,
+  onFirstStageClick
 }: {
   data: CodeAdoptionFunnelData
   className?: string
   enableSourceTabs?: boolean
+  /** 点击首层「全部生成」下钻：分析「生成了但没提交」的人与原因。 */
+  onFirstStageClick?: () => void
 }): React.JSX.Element {
   const [sourceTab, setSourceTab] = useState<FunnelSourceTab>("commit")
   const activeTab: FunnelSourceTab = enableSourceTabs ? sourceTab : "agent"
@@ -555,18 +558,34 @@ export function CodeAdoptionFunnel({
               const next = stages[i + 1]
               const botHalf = next ? halfWidthOf(next.lines) : topHalf * 0.5
               const clip = `polygon(${50 - topHalf}% 0, ${50 + topHalf}% 0, ${50 + botHalf}% 100%, ${50 - botHalf}% 100%)`
+              const clickable = i === 0 && Boolean(onFirstStageClick)
               return (
                 <div
                   key={s.key}
-                  className="relative"
+                  className={`relative ${clickable ? "cursor-pointer" : ""}`}
                   style={{ height: BAND_H }}
+                  role={clickable ? "button" : undefined}
+                  tabIndex={clickable ? 0 : undefined}
+                  onClick={clickable ? onFirstStageClick : undefined}
+                  onKeyDown={
+                    clickable
+                      ? (e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault()
+                            onFirstStageClick?.()
+                          }
+                        }
+                      : undefined
+                  }
                   title={
-                    s.titleText ??
-                    `${s.label}：生成 ${formatExactNumber(s.lines)} 行 · 采纳 ${formatExactNumber(s.adoptedLines)} 行 · 采纳率 ${formatPercent(s.rate)}`
+                    clickable
+                      ? "点击分析「生成了但没提交」的人与原因"
+                      : (s.titleText ??
+                        `${s.label}：生成 ${formatExactNumber(s.lines)} 行 · 采纳 ${formatExactNumber(s.adoptedLines)} 行 · 采纳率 ${formatPercent(s.rate)}`)
                   }
                 >
                   <div
-                    className="absolute inset-0"
+                    className={`absolute inset-0 transition-opacity ${clickable ? "hover:opacity-80" : ""}`}
                     style={{ clipPath: clip, background: s.color }}
                   />
                 </div>
@@ -575,26 +594,51 @@ export function CodeAdoptionFunnel({
           </div>
           {/* 右侧标签：百分比移到此处（带颜色），自身宽度紧贴右边 */}
           <div className="flex shrink-0 flex-col">
-            {stages.map((s) => (
-              <div key={s.key} className="flex flex-col justify-center" style={{ height: BAND_H }}>
-                <div className="flex items-center gap-1.5 whitespace-nowrap text-[11px] font-medium text-foreground">
-                  <span
-                    className="inline-block size-2 shrink-0 rounded-sm"
-                    style={{ background: s.color }}
-                  />
-                  {s.label}
-                  {s.hideRate ? null : (
-                    <span className="font-semibold" style={{ color: s.color }}>
-                      {formatPercent(s.rate)}
-                    </span>
-                  )}
+            {stages.map((s, i) => {
+              const clickable = i === 0 && Boolean(onFirstStageClick)
+              return (
+                <div
+                  key={s.key}
+                  className="flex flex-col justify-center"
+                  style={{ height: BAND_H }}
+                >
+                  <div
+                    className={`flex items-center gap-1.5 whitespace-nowrap text-[11px] font-medium text-foreground ${
+                      clickable ? "cursor-pointer hover:underline" : ""
+                    }`}
+                    role={clickable ? "button" : undefined}
+                    tabIndex={clickable ? 0 : undefined}
+                    onClick={clickable ? onFirstStageClick : undefined}
+                    onKeyDown={
+                      clickable
+                        ? (e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault()
+                              onFirstStageClick?.()
+                            }
+                          }
+                        : undefined
+                    }
+                    title={clickable ? "点击分析「生成了但没提交」的人与原因" : undefined}
+                  >
+                    <span
+                      className="inline-block size-2 shrink-0 rounded-sm"
+                      style={{ background: s.color }}
+                    />
+                    {s.label}
+                    {s.hideRate ? null : (
+                      <span className="font-semibold" style={{ color: s.color }}>
+                        {formatPercent(s.rate)}
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-0.5 whitespace-nowrap text-[10px] text-muted-foreground">
+                    {s.metricText ??
+                      `采纳 ${formatNumber(s.adoptedLines)} / 生成 ${formatNumber(s.lines)}`}
+                  </div>
                 </div>
-                <div className="mt-0.5 whitespace-nowrap text-[10px] text-muted-foreground">
-                  {s.metricText ??
-                    `采纳 ${formatNumber(s.adoptedLines)} / 生成 ${formatNumber(s.lines)}`}
-                </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}
