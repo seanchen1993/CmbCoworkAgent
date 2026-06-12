@@ -323,6 +323,60 @@ interface DashboardUserListData {
   totalActiveUsers: number
 }
 
+interface DashboardUncommittedRankingItem {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  generatedLines: number
+  measuredGeneratedLines: number
+  uncommittedLines: number
+  uncommittedRate: number | null
+}
+
+interface DashboardUncommittedRankingData {
+  items: DashboardUncommittedRankingItem[]
+  totalGeneratedLines: number
+  totalMeasuredGeneratedLines: number
+  totalUncommittedLines: number
+  limit: number
+}
+
+interface DashboardUncommittedDetailBreakdown {
+  key: string
+  gens: number
+  lines: number
+}
+
+interface DashboardUncommittedDetailSample {
+  eventId: string
+  eventTime: string
+  tool?: string
+  language?: string
+  lineCount: number
+  fileHint?: string
+  threadId?: string
+  harnessProjectId?: string
+  harnessFeatureSlug?: string
+  modelName?: string
+}
+
+interface DashboardUncommittedDetailData {
+  sapId: string
+  userName: string
+  scannedGens: number
+  scanCapped: boolean
+  uncommittedGens: number
+  uncommittedLines: number
+  byTool: DashboardUncommittedDetailBreakdown[]
+  byLanguage: DashboardUncommittedDetailBreakdown[]
+  byProject: DashboardUncommittedDetailBreakdown[]
+  byThread: DashboardUncommittedDetailBreakdown[]
+  samples: DashboardUncommittedDetailSample[]
+}
+
 interface DashboardUserDetail {
   sapId: string
   ystId?: string
@@ -1691,6 +1745,15 @@ interface CustomAPI {
       range: { from: string; to: string },
       options?: DashboardUserDetailOptions
     ) => Promise<{ success: boolean; data?: DashboardUserDetail; error?: string }>
+    uncommittedRanking: (
+      range: { from: string; to: string },
+      options?: { upperOrgLv1?: string | string[] | null; projectMode?: boolean }
+    ) => Promise<{ success: boolean; data?: DashboardUncommittedRankingData; error?: string }>
+    uncommittedDetail: (
+      sapId: string,
+      range: { from: string; to: string },
+      options?: { upperOrgLv1?: string | string[] | null; projectMode?: boolean }
+    ) => Promise<{ success: boolean; data?: DashboardUncommittedDetailData; error?: string }>
     skillUsageSummary: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",

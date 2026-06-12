@@ -2486,6 +2486,17 @@ const api = {
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userDetail", sapId, range, options),
+    uncommittedRanking: (
+      range: { from: string; to: string },
+      options?: { upperOrgLv1?: string | string[] | null; projectMode?: boolean }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:uncommittedRanking", range, options),
+    uncommittedDetail: (
+      sapId: string,
+      range: { from: string; to: string },
+      options?: { upperOrgLv1?: string | string[] | null; projectMode?: boolean }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:uncommittedDetail", sapId, range, options),
     skillUsageSummary: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",

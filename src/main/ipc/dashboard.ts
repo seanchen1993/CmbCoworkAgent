@@ -520,6 +520,77 @@ interface UserDetailOptions {
   projectMode?: boolean
 }
 
+// ── 「全部生成」漏斗首层下钻：生成但未提交分析 ────────────────────────
+// 口径：code_gen 行数（Agent 生成）对比 code_adopt 已测量行数（最终进 commit 的有效生成）。
+// 二者差额 = 「生成了但没进 commit」的近似量。方案 A 按用户聚合做榜单；方案 B 对
+// 选中用户用 genEventId anti-join 精确定位其未提交的那批生成，并按 tool/语言/项目/会话
+// 归类，作为「为什么没提交」的证据。
+interface UncommittedScopeOptions {
+  upperOrgLv1?: string | string[] | null
+  /** 仅统计项目模式（带 properties.harnessProjectId）的生成。 */
+  projectMode?: boolean
+}
+
+interface UncommittedRankingItem {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  /** code_gen 生成行数（lineCount 求和）。 */
+  generatedLines: number
+  /** code_adopt 已测量的原始生成行数（generatedLineCount 求和），与漏斗「已 Commit」同口径。 */
+  measuredGeneratedLines: number
+  /** 生成但未进 commit 的行数 = max(0, generated − measured)，等于漏斗 unmeasuredGeneratedLines。 */
+  uncommittedLines: number
+  /** uncommittedLines / generatedLines。 */
+  uncommittedRate: number | null
+}
+
+interface UncommittedRankingData {
+  items: UncommittedRankingItem[]
+  totalGeneratedLines: number
+  totalMeasuredGeneratedLines: number
+  totalUncommittedLines: number
+  limit: number
+}
+
+interface UncommittedDetailBreakdown {
+  key: string
+  gens: number
+  lines: number
+}
+
+interface UncommittedDetailSample {
+  eventId: string
+  eventTime: string
+  tool?: string
+  language?: string
+  lineCount: number
+  fileHint?: string
+  threadId?: string
+  harnessProjectId?: string
+  harnessFeatureSlug?: string
+  modelName?: string
+}
+
+interface UncommittedDetailData {
+  sapId: string
+  userName: string
+  /** 实际扫描到的 code_gen 数（受 scanCap 限制时为采样）。 */
+  scannedGens: number
+  /** 扫描是否被 scanCap 截断（true 表示明细基于「最近 N 次生成」的采样）。 */
+  scanCapped: boolean
+  uncommittedGens: number
+  uncommittedLines: number
+  byTool: UncommittedDetailBreakdown[]
+  byLanguage: UncommittedDetailBreakdown[]
+  byProject: UncommittedDetailBreakdown[]
+  byThread: UncommittedDetailBreakdown[]
+  samples: UncommittedDetailSample[]
+}
+
 type TraceViewMode = "thread" | "trace"
 type TraceTriggerScope = "active" | "all"
 
@@ -2346,6 +2417,370 @@ async function fetchUserList(
     pageSize,
     ...(hasMoreBuckets && nextOffset < 10_000 ? { nextAfterKey: { offset: nextOffset } } : {}),
     totalActiveUsers
+  }
+}
+
+// ── 生成但未提交分析（漏斗首层下钻）─────────────────────────────────
+// 榜单返回的用户上限。terms 桶数取得更大，便于在内存里按「未提交行数」重排。
+const UNCOMMITTED_RANKING_LIMIT = 50
+// 方案 B 单用户扫描的 code_gen 上限；超过则明细退化为「最近 N 次生成」采样。
+const UNCOMMITTED_DETAIL_SCAN_CAP = 2000
+// anti-join 时 terms 查询单批 genEventId 数上限。
+const UNCOMMITTED_ANTIJOIN_BATCH = 1000
+// 方案 A composite 全量遍历的单页用户数。
+const UNCOMMITTED_COMPOSITE_PAGE = 1000
+// 安全上限：最多翻 200 页（20 万用户），防止异常情况下无限翻页。
+const UNCOMMITTED_COMPOSITE_MAX_PAGES = 200
+// 排除最近 N 毫秒内的「在途生成」：刚生成还没来得及 commit，不应算作未提交。
+const UNCOMMITTED_SETTLE_MS = 2 * 60 * 60 * 1000
+
+/**
+ * 把生成时间范围的上界收敛到 min(range.to, now − settle)，得到「已结算」的查询范围。
+ * 只有当所选范围延伸到最近 2 小时内（即包含当天到现在）时才会被裁剪；上界本就在
+ * 2 小时之前的历史范围保持不变，与外部事件筛选框一致。
+ */
+function uncommittedSettledRange(range: TimeRange): TimeRange {
+  const settle = new Date(Date.now() - UNCOMMITTED_SETTLE_MS).toISOString()
+  return { from: range.from, to: range.to < settle ? range.to : settle }
+}
+
+function uncommittedScopeFilters(options?: UncommittedScopeOptions): Record<string, unknown>[] {
+  const filters: Record<string, unknown>[] = []
+  const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(options?.upperOrgLv1))
+  if (orgFilterClause) filters.push(orgFilterClause)
+  if (options?.projectMode) filters.push({ exists: { field: "properties.harnessProjectId" } })
+  return filters
+}
+
+/**
+ * 方案 A：按用户聚合「生成但未提交」榜单（聚合近似）。
+ *
+ * 用 composite 聚合按 sapId 全量分页遍历，每个用户桶里用 filter 子聚合分别算
+ * code_gen 生成量与 code_adopt 已测量量，内存里求差值。composite 无 300 桶上限，
+ * 覆盖窗口内全部生成者。仍是近似口径——聚合级集合差，而非逐 genEventId 的精确
+ * 反连接（精确口径见 fetchUncommittedDetail）。
+ *
+ * 时间口径与外部「事件筛选框」(range) 完全一致：code_gen 按 eventTime、code_adopt
+ * 按 properties.generatedAt，与漏斗/概览同字段、同上下界。「已测量」口径与漏斗一致：
+ * adoptedLineCount / generatedLineCount / effectiveGeneratedLineCount 都存在才算已测量；
+ * 求和 generatedLineCount（原始生成行数），使「生成 − 已测量」严格等于漏斗的
+ * unmeasuredGeneratedLines（见 dashboard-code-stats.ts）。
+ */
+async function fetchUncommittedRanking(
+  range: TimeRange,
+  options?: UncommittedScopeOptions
+): Promise<UncommittedRankingData> {
+  // 与「运营指标分析 Agent」同一权限门槛：仅 VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS 名单可用。
+  requireDashboardAnalysisAgentAccess()
+  const scopeFilters = uncommittedScopeFilters(options)
+  // 上界排除最近 2 小时的在途生成；纯历史范围不受影响（见 uncommittedSettledRange）。
+  const settledRange = uncommittedSettledRange(range)
+
+  // 两类事件各自的过滤（用各自的时间字段）。同时用于「顶层 should 限定 composite
+  // 只对窗口内有 gen 或 adopt 的用户建桶」+「桶内 filter 子聚合分别求和」。
+  const genEventFilter = {
+    bool: {
+      filter: [{ term: { eventName: "code_gen" } }, timeRangeFilter("eventTime", settledRange)]
+    }
+  }
+  const adoptEventFilter = {
+    bool: {
+      filter: [
+        { term: { eventName: "code_adopt" } },
+        timeRangeFilter("properties.generatedAt", settledRange),
+        { exists: { field: "properties.adoptedLineCount" } },
+        { exists: { field: "properties.generatedLineCount" } },
+        { exists: { field: "properties.effectiveGeneratedLineCount" } }
+      ]
+    }
+  }
+
+  const items: UncommittedRankingItem[] = []
+  let totalGeneratedLines = 0
+  let totalMeasuredGeneratedLines = 0
+  let totalUncommittedLines = 0
+  let afterKey: Record<string, string> | undefined
+  let pages = 0
+
+  do {
+    const body = {
+      size: 0,
+      track_total_hits: false,
+      query: {
+        bool: {
+          filter: [buildNonEmptySapIdFilter(), ...scopeFilters],
+          should: [genEventFilter, adoptEventFilter],
+          minimum_should_match: 1
+        }
+      },
+      aggs: {
+        by_sap: {
+          composite: {
+            size: UNCOMMITTED_COMPOSITE_PAGE,
+            sources: [{ sapId: { terms: { field: "sapId" } } }],
+            ...(afterKey ? { after: afterKey } : {})
+          },
+          aggs: {
+            gen: {
+              filter: genEventFilter,
+              aggs: { gen_lines: { sum: { field: "properties.lineCount" } } }
+            },
+            adopt: {
+              filter: adoptEventFilter,
+              aggs: { measured_gen_lines: { sum: { field: "properties.generatedLineCount" } } }
+            },
+            latest_user_info: {
+              top_hits: {
+                size: 1,
+                sort: [{ eventTime: { order: "desc" } }],
+                _source: {
+                  includes: ["sapId", "ystId", "userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const raw = asRecord(await esQuery(getEsIndex("event"), body))
+    const bySap = asRecord(asRecord(raw.aggregations).by_sap)
+    const buckets = Array.isArray(bySap.buckets) ? (bySap.buckets as unknown[]) : []
+    for (const rawBucket of buckets) {
+      const bucket = asRecord(rawBucket)
+      const sapId = asString(asRecord(bucket.key).sapId)
+      if (!sapId) continue
+      const generatedLines = asNumber(asRecord(asRecord(bucket.gen).gen_lines).value)
+      const measuredGeneratedLines = asNumber(
+        asRecord(asRecord(bucket.adopt).measured_gen_lines).value
+      )
+      totalGeneratedLines += generatedLines
+      totalMeasuredGeneratedLines += measuredGeneratedLines
+      // 窗口内没有生成的用户不计入未提交榜（其 adopt 若有也是窗口外生成的归因）。
+      if (generatedLines <= 0) continue
+      const uncommittedLines = Math.max(0, generatedLines - measuredGeneratedLines)
+      totalUncommittedLines += uncommittedLines
+      const source = getLatestHitSource(bucket, "latest_user_info")
+      items.push({
+        sapId,
+        ystId: asOptionalString(source.ystId),
+        userName: asString(source.userName, sapId),
+        orgName: asOptionalString(source.orgName),
+        upperOrgLv0: asOptionalString(source.upperOrgLv0),
+        upperOrgLv1: asOptionalString(source.upperOrgLv1),
+        generatedLines,
+        measuredGeneratedLines,
+        uncommittedLines,
+        uncommittedRate: generatedLines > 0 ? uncommittedLines / generatedLines : null
+      })
+    }
+
+    const nextAfter = asRecord(bySap).after_key
+    afterKey =
+      nextAfter && typeof nextAfter === "object" ? (nextAfter as Record<string, string>) : undefined
+    pages += 1
+  } while (afterKey && pages < UNCOMMITTED_COMPOSITE_MAX_PAGES)
+
+  items.sort((a, b) => b.uncommittedLines - a.uncommittedLines)
+
+  return {
+    items: items.slice(0, UNCOMMITTED_RANKING_LIMIT),
+    totalGeneratedLines,
+    totalMeasuredGeneratedLines,
+    totalUncommittedLines,
+    limit: UNCOMMITTED_RANKING_LIMIT
+  }
+}
+
+function pushBreakdown(
+  map: Map<string, { gens: number; lines: number }>,
+  key: string,
+  lines: number
+): void {
+  const entry = map.get(key) ?? { gens: 0, lines: 0 }
+  entry.gens += 1
+  entry.lines += lines
+  map.set(key, entry)
+}
+
+function breakdownToSortedList(
+  map: Map<string, { gens: number; lines: number }>,
+  limit: number
+): UncommittedDetailBreakdown[] {
+  return Array.from(map.entries())
+    .map(([key, value]) => ({ key, gens: value.gens, lines: value.lines }))
+    .sort((a, b) => b.lines - a.lines)
+    .slice(0, limit)
+}
+
+/**
+ * 方案 B：对单个用户用 genEventId 做 anti-join，精确定位「生成了但没进 commit」
+ * 的那批 code_gen，并按 tool/语言/项目/会话归类作为「为什么」的证据。
+ *
+ * 性能：只扫描该用户最近 UNCOMMITTED_DETAIL_SCAN_CAP 条 code_gen（一次降序查询），
+ * 再用一批 terms 反查 code_adopt.genEventId 是否存在。扫描被截断时返回 scanCapped=true，
+ * 明细按「最近 N 次生成」采样口径解读。
+ */
+async function fetchUncommittedDetail(
+  sapId: string,
+  range: TimeRange,
+  options?: UncommittedScopeOptions
+): Promise<UncommittedDetailData> {
+  // 与「运营指标分析 Agent」同一权限门槛。
+  requireDashboardAnalysisAgentAccess()
+  const normalizedSapId = sapId.trim()
+  if (!normalizedSapId) throw new Error("sapId is required")
+  const scopeFilters = uncommittedScopeFilters(options)
+  // 与榜单口径一致：上界排除最近 2 小时的在途生成。
+  const settledRange = uncommittedSettledRange(range)
+
+  // 1) 扫描该用户最近的 code_gen（降序，单次查询，封顶 scanCap）。时间口径同外部筛选框。
+  const genBody = {
+    size: UNCOMMITTED_DETAIL_SCAN_CAP,
+    track_total_hits: true,
+    query: {
+      bool: {
+        filter: [
+          { term: { eventName: "code_gen" } },
+          { term: { sapId: normalizedSapId } },
+          timeRangeFilter("eventTime", settledRange),
+          ...scopeFilters
+        ]
+      }
+    },
+    sort: [{ eventTime: { order: "desc" } }],
+    _source: {
+      includes: [
+        "eventTime",
+        "userName",
+        "properties.eventId",
+        "properties.tool",
+        "properties.language",
+        "properties.lineCount",
+        "properties.threadId",
+        "properties.harnessProjectId",
+        "properties.harnessFeatureSlug",
+        "properties.modelName",
+        "properties.relativeHint"
+      ]
+    }
+  }
+
+  const genRaw = asRecord(await esQuery(getEsIndex("event"), genBody))
+  const hitsWrapper = asRecord(genRaw.hits)
+  const hits = Array.isArray(hitsWrapper.hits) ? (hitsWrapper.hits as unknown[]) : []
+  const totalValue = asRecord(hitsWrapper.total).value
+  const totalGens = typeof totalValue === "number" ? totalValue : asNumber(hitsWrapper.total)
+  const scanCapped = totalGens > hits.length
+
+  interface ScannedGen {
+    eventId: string
+    eventTime: string
+    tool?: string
+    language?: string
+    lineCount: number
+    threadId?: string
+    harnessProjectId?: string
+    harnessFeatureSlug?: string
+    modelName?: string
+    fileHint?: string
+    userName?: string
+  }
+
+  const scanned: ScannedGen[] = []
+  for (const raw of hits) {
+    const source = asRecord(asRecord(raw)._source)
+    const props = asRecord(source.properties)
+    const eventId = asString(props.eventId)
+    if (!eventId) continue
+    scanned.push({
+      eventId,
+      eventTime: asString(source.eventTime),
+      tool: asOptionalString(props.tool),
+      language: asOptionalString(props.language),
+      lineCount: asNumber(props.lineCount),
+      threadId: asOptionalString(props.threadId),
+      harnessProjectId: asOptionalString(props.harnessProjectId),
+      harnessFeatureSlug: asOptionalString(props.harnessFeatureSlug),
+      modelName: asOptionalString(props.modelName),
+      fileHint: asOptionalString(props.relativeHint),
+      userName: asOptionalString(source.userName)
+    })
+  }
+
+  // 2) anti-join：批量反查哪些 genEventId 已有 code_adopt（即已被测量/提交）。
+  const adoptedIds = new Set<string>()
+  for (let i = 0; i < scanned.length; i += UNCOMMITTED_ANTIJOIN_BATCH) {
+    const batch = scanned.slice(i, i + UNCOMMITTED_ANTIJOIN_BATCH).map((gen) => gen.eventId)
+    if (batch.length === 0) continue
+    const adoptBody = {
+      size: batch.length,
+      track_total_hits: false,
+      query: {
+        bool: {
+          filter: [
+            { term: { eventName: "code_adopt" } },
+            { terms: { "properties.genEventId": batch } }
+          ]
+        }
+      },
+      _source: { includes: ["properties.genEventId"] }
+    }
+    const adoptRaw = asRecord(await esQuery(getEsIndex("event"), adoptBody))
+    const adoptHits = asRecord(adoptRaw.hits).hits
+    if (Array.isArray(adoptHits)) {
+      for (const raw of adoptHits) {
+        const genId = asString(asRecord(asRecord(asRecord(raw)._source).properties).genEventId)
+        if (genId) adoptedIds.add(genId)
+      }
+    }
+  }
+
+  // 3) 差集 = 未提交的生成；按维度归类。
+  const uncommitted = scanned.filter((gen) => !adoptedIds.has(gen.eventId))
+  const byTool = new Map<string, { gens: number; lines: number }>()
+  const byLanguage = new Map<string, { gens: number; lines: number }>()
+  const byProject = new Map<string, { gens: number; lines: number }>()
+  const byThread = new Map<string, { gens: number; lines: number }>()
+  let uncommittedLines = 0
+  for (const gen of uncommitted) {
+    uncommittedLines += gen.lineCount
+    pushBreakdown(byTool, gen.tool || "未知工具", gen.lineCount)
+    pushBreakdown(byLanguage, gen.language || "未知语言", gen.lineCount)
+    pushBreakdown(
+      byProject,
+      gen.harnessFeatureSlug || gen.harnessProjectId || "非项目模式",
+      gen.lineCount
+    )
+    if (gen.threadId) pushBreakdown(byThread, gen.threadId, gen.lineCount)
+  }
+
+  // 返回全部未提交样本（≤ scanCap），由前端客户端分页；不额外发查询。
+  const samples: UncommittedDetailSample[] = uncommitted.map((gen) => ({
+    eventId: gen.eventId,
+    eventTime: gen.eventTime,
+    tool: gen.tool,
+    language: gen.language,
+    lineCount: gen.lineCount,
+    fileHint: gen.fileHint,
+    threadId: gen.threadId,
+    harnessProjectId: gen.harnessProjectId,
+    harnessFeatureSlug: gen.harnessFeatureSlug,
+    modelName: gen.modelName
+  }))
+
+  return {
+    sapId: normalizedSapId,
+    userName: scanned.find((gen) => gen.userName)?.userName ?? normalizedSapId,
+    scannedGens: scanned.length,
+    scanCapped,
+    uncommittedGens: uncommitted.length,
+    uncommittedLines,
+    byTool: breakdownToSortedList(byTool, 10),
+    byLanguage: breakdownToSortedList(byLanguage, 10),
+    byProject: breakdownToSortedList(byProject, 10),
+    byThread: breakdownToSortedList(byThread, 10),
+    samples
   }
 }
 
@@ -5781,6 +6216,75 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
   }
 }
 
+function makeMockUncommittedRanking(): UncommittedRankingData {
+  const items: UncommittedRankingItem[] = Array.from({ length: 12 }, (_, index) => {
+    const user = makeMockDashboardUser(index)
+    const generatedLines = 1800 - index * 110
+    const measuredGeneratedLines = Math.round(generatedLines * (0.4 + index * 0.03))
+    const uncommittedLines = Math.max(0, generatedLines - measuredGeneratedLines)
+    return {
+      sapId: user.sapId,
+      ystId: user.sapId,
+      userName: user.userName,
+      orgName: user.orgName,
+      upperOrgLv0: user.upperOrgLv0,
+      upperOrgLv1: user.upperOrgLv1,
+      generatedLines,
+      measuredGeneratedLines,
+      uncommittedLines,
+      uncommittedRate: generatedLines > 0 ? uncommittedLines / generatedLines : null
+    }
+  }).sort((a, b) => b.uncommittedLines - a.uncommittedLines)
+  return {
+    items,
+    totalGeneratedLines: items.reduce((sum, item) => sum + item.generatedLines, 0),
+    totalMeasuredGeneratedLines: items.reduce((sum, item) => sum + item.measuredGeneratedLines, 0),
+    totalUncommittedLines: items.reduce((sum, item) => sum + item.uncommittedLines, 0),
+    limit: UNCOMMITTED_RANKING_LIMIT
+  }
+}
+
+function makeMockUncommittedDetail(sapId: string): UncommittedDetailData {
+  const tools = ["write_file", "str_replace", "edit_file"]
+  const langs = ["ts", "tsx", "py", "md", "json"]
+  const samples: UncommittedDetailSample[] = Array.from({ length: 48 }, (_, index) => ({
+    eventId: `mock_gen_${sapId}_${index}`,
+    eventTime: new Date(Date.now() - index * 3_600_000).toISOString(),
+    tool: tools[index % tools.length],
+    language: langs[index % langs.length],
+    lineCount: 40 + (index % 5) * 25,
+    fileHint: `module-${index % 6}.${langs[index % langs.length]}`,
+    threadId: `thread_${index % 4}`,
+    harnessFeatureSlug: index % 3 === 0 ? `feature-${index % 3}` : undefined,
+    modelName: "claude-opus-4-8"
+  }))
+  const byTool = new Map<string, { gens: number; lines: number }>()
+  const byLanguage = new Map<string, { gens: number; lines: number }>()
+  const byProject = new Map<string, { gens: number; lines: number }>()
+  const byThread = new Map<string, { gens: number; lines: number }>()
+  let uncommittedLines = 0
+  for (const sample of samples) {
+    uncommittedLines += sample.lineCount
+    pushBreakdown(byTool, sample.tool || "未知工具", sample.lineCount)
+    pushBreakdown(byLanguage, sample.language || "未知语言", sample.lineCount)
+    pushBreakdown(byProject, sample.harnessFeatureSlug || "非项目模式", sample.lineCount)
+    if (sample.threadId) pushBreakdown(byThread, sample.threadId, sample.lineCount)
+  }
+  return {
+    sapId,
+    userName: sapId,
+    scannedGens: 240,
+    scanCapped: false,
+    uncommittedGens: samples.length,
+    uncommittedLines,
+    byTool: breakdownToSortedList(byTool, 10),
+    byLanguage: breakdownToSortedList(byLanguage, 10),
+    byProject: breakdownToSortedList(byProject, 10),
+    byThread: breakdownToSortedList(byThread, 10),
+    samples
+  }
+}
+
 function makeMockUserList(_range: TimeRange, options?: UserListOptions): DashboardUserListData {
   const { pageSize, afterKey, keyword, upperOrgLv1 } = normalizeUserListOptions(options)
   const normalizedKeyword = keyword.toLowerCase()
@@ -9131,6 +9635,38 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchUserDetail(normalizedSapId, range, options) }
       } catch (e) {
         console.error("[Dashboard] userDetail error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:uncommittedRanking",
+    async (_, range: TimeRange, options?: UncommittedScopeOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockUncommittedRanking() }
+      try {
+        return { success: true, data: await fetchUncommittedRanking(range, options) }
+      } catch (e) {
+        console.error("[Dashboard] uncommittedRanking error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:uncommittedDetail",
+    async (_, sapId: string, range: TimeRange, options?: UncommittedScopeOptions) => {
+      const normalizedSapId = sapId?.trim?.() ?? ""
+      if (!normalizedSapId) return { success: false, error: "sapId is required" }
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockUncommittedDetail(normalizedSapId) }
+      try {
+        return {
+          success: true,
+          data: await fetchUncommittedDetail(normalizedSapId, range, options)
+        }
+      } catch (e) {
+        console.error("[Dashboard] uncommittedDetail error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

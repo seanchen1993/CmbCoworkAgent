@@ -79,6 +79,7 @@ import { ProductivityPanel } from "./panels/ProductivityPanel"
 import { FeedbackPanel } from "./panels/FeedbackPanel"
 import { TraceExplorer, TraceHistoryDialog, TraceTriggerScopeToggle } from "./TraceHistoryDialog"
 import { CommitDetailsDialog } from "./CommitDetailsDialog"
+import { UncommittedCodeDialog } from "./UncommittedCodeDialog"
 import { marketApi, type MarketItem } from "../../api/market"
 import {
   buildMarketSkillKeySet,
@@ -2442,6 +2443,9 @@ export function DashboardView(): React.JSX.Element {
   const [commitDetailsLoading, setCommitDetailsLoading] = useState(false)
   const [commitDetailsError, setCommitDetailsError] = useState<string | null>(null)
   const [commitDepartmentValue, setCommitDepartmentValue] = useState("")
+  // 「全部生成」漏斗首层下钻：生成但未提交分析弹窗。projectMode 区分平台概览 / 项目概览口径。
+  const [uncommittedOpen, setUncommittedOpen] = useState(false)
+  const [uncommittedProjectMode, setUncommittedProjectMode] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -4220,6 +4224,14 @@ export function DashboardView(): React.JSX.Element {
                 onOpenProjectCommits={handleProjectOpenProjectCommits}
                 onSkillClick={handleSkillClick}
                 onUserClick={(sapId) => openUserDetail(sapId, "main", true)}
+                onFunnelFirstStageClick={
+                  analysisAgentAllowed
+                    ? () => {
+                        setUncommittedProjectMode(true)
+                        setUncommittedOpen(true)
+                      }
+                    : undefined
+                }
                 marketSkillKeys={marketSkillKeys}
                 pluginSkillKeys={pluginSkillKeys}
               />
@@ -4250,6 +4262,14 @@ export function DashboardView(): React.JSX.Element {
                   loading={loading}
                   onSkillClick={handleSkillClick}
                   onActiveUsersClick={openUserList}
+                  onFunnelFirstStageClick={
+                    analysisAgentAllowed
+                      ? () => {
+                          setUncommittedProjectMode(false)
+                          setUncommittedOpen(true)
+                        }
+                      : undefined
+                  }
                   marketSkillKeys={marketSkillKeys}
                   pluginSkillKeys={pluginSkillKeys}
                 />
@@ -4415,6 +4435,12 @@ export function DashboardView(): React.JSX.Element {
           </div>
         </DialogContent>
       </Dialog>
+      <UncommittedCodeDialog
+        open={uncommittedOpen}
+        onOpenChange={setUncommittedOpen}
+        range={range}
+        scope={{ upperOrgLv1: selectedOrgLv1List, projectMode: uncommittedProjectMode }}
+      />
       <CommitDetailsDialog
         open={commitDialogOpen}
         onOpenChange={setCommitDialogOpen}
