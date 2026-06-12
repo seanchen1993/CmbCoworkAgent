@@ -932,6 +932,27 @@ function runHarnessJsonInvocation(
   }
 }
 
+function assertSkipNodeInvocationResult(
+  configured: ConfiguredHarnessInvocation,
+  stdoutBuffer: Buffer
+): void {
+  const raw = decodeAdapterBuffer(stdoutBuffer).trim()
+  if (!raw) return
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw) as unknown
+  } catch {
+    return
+  }
+
+  if (!isObject(parsed) || parsed.ok !== false) return
+
+  const message = normalizeText(parsed.message).trim() || "插件返回跳过节点失败"
+  logHarnessStatusResultFailure(configured, "skip_node", stdoutBuffer, message)
+  throw new Error(message)
+}
+
 function uniqueStringsInOrder(values: unknown): string[] {
   if (!Array.isArray(values)) return []
   const seen = new Set<string>()
@@ -2032,7 +2053,10 @@ export function skipHarnessRunNode(input: HarnessSkipNodeInput): HarnessSkipNode
       feature: slug,
       nodeId
     })
-    runHarnessInvocation(configured, harnessCommandLogOptions("skipNode"))
+    const logOptions = { ...harnessCommandLogOptions("skipNode"), successResult: "none" as const }
+    const stdoutBuffer = runHarnessInvocation(configured, logOptions)
+    assertSkipNodeInvocationResult(configured, stdoutBuffer)
+    logHarnessInvocationSuccess(stdoutBuffer, harnessCommandLogOptions("skipNode"))
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
     throw new Error(`跳过节点失败：${raw}`)
