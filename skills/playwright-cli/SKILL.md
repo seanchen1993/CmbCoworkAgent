@@ -1,5 +1,5 @@
 ---
-name: playwright
+name: playwright-cli
 description: Use when the task requires automating a real browser from the terminal (navigation, form filling, snapshots, screenshots, data extraction, UI-flow debugging) via direct `npx --yes --package @playwright/cli playwright-cli ...` commands.
 ---
 
