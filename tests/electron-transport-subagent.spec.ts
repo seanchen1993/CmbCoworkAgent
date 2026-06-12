@@ -2916,6 +2916,56 @@ async function testValuesModeRegistersAndCompletesSubagents(): Promise<void> {
   )
 }
 
+async function testSubagentThinkingStreamingAccumulation(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  // Register the subagent via a main-flow task tool call.
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-1",
+        toolCalls: [
+          { id: "task-1", name: "task", args: { subagent_type: "implementer", description: "think" } }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const ns = "agent:tools:task-1"
+  const feed = (content: string): SdkEvent[] =>
+    convert(
+      transport,
+      streamMessageEvent(aiMessageChunk({ id: "subagent-ai-1", content }), {
+        langgraph_checkpoint_ns: ns
+      })
+    )
+
+  // Stream "hello" + " " + "world" as separate delta chunks; the whitespace chunk
+  // must not be dropped (otherwise the text glues into "helloworld").
+  feed("hello")
+  feed(" ")
+  const lastEvents = feed("world")
+
+  const assistantLogs = customEvents(lastEvents, "subagent_log_entry").filter(
+    (data) => asRecord(data.entry).kind === "assistant"
+  )
+  assert(assistantLogs.length > 0, "subagent thinking should emit an assistant log entry")
+  const entry = asRecord(assistantLogs[assistantLogs.length - 1].entry)
+  assert(
+    entry.content === "hello world",
+    `streamed thinking should accumulate with spaces, got ${JSON.stringify(entry.content)}`
+  )
+  assert(
+    entry.subagentToolCallId === "task-1",
+    "thinking entry should be attributed to the owning subagent"
+  )
+  assert(
+    messageEvents(lastEvents).length === 0,
+    "subagent thinking must not leak into the main chat stream"
+  )
+}
+
 async function run(): Promise<void> {
   await testSubagentInternalsAreHiddenButObservable()
   console.log("PASS electron transport hides subagent internals")
@@ -2991,6 +3041,8 @@ async function run(): Promise<void> {
   console.log("PASS electron transport keeps post-tool assistant distinct after growth")
   await testValuesModeRegistersAndCompletesSubagents()
   console.log("PASS electron transport values-mode subagent lifecycle")
+  await testSubagentThinkingStreamingAccumulation()
+  console.log("PASS electron transport accumulates streamed subagent thinking")
 }
 
 run().catch((error: Error) => {

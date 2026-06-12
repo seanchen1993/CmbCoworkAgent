@@ -306,6 +306,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
   private subagentLogSequence = 0
 
+  // Accumulates a subagent's streamed assistant (thinking) text per message id so
+  // successive AIMessageChunk deltas coalesce into one growing log entry instead
+  // of flooding the subagent log with per-token fragments.
+  private subagentAssistantAccum: Map<string, string> = new Map()
+
   // Coordinator worker status checks are analogous to Claude Code TaskOutput:
   // useful as a fallback, but too noisy for the main chat transcript.
   private quietCoordinatorToolCallIds: Set<string> = new Set()
@@ -350,6 +355,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.subagentToolLogEntryIds.clear()
     this.subagentToolCallCount = 0
     this.subagentLogSequence = 0
+    this.subagentAssistantAccum.clear()
     this.quietCoordinatorToolCallIds.clear()
     this.emittedMessageIds.clear()
     this.mainAssistantTextByMessageId.clear()
@@ -949,7 +955,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
       if (isAIMessage) {
         if (isFromSubagent) {
-          // Keep subagent internals hidden, but expose aggregate tool activity.
+          // Subagent internals stay out of the main conversation, but we surface
+          // them in the subagent activity log: aggregate tool count, tool-call
+          // titles, and (Phase 2, A1') the subagent's streamed thinking text.
           events.push(...this.processSubagentToolCalls(kwargs.tool_calls, kwargs.tool_call_chunks))
           events.push(
             ...this.createSubagentAssistantLogEvents(
@@ -958,6 +966,42 @@ export class ElectronIPCTransport implements UseStreamTransport {
               kwargs.tool_call_chunks
             )
           )
+
+          // Surface the subagent's streamed assistant (thinking) text. Accumulate
+          // the RAW content (do not trim per chunk, or inter-chunk spaces/newlines
+          // would be lost and words/paragraphs would run together); coalesce
+          // delta/cumulative chunks per message id into one growing log entry.
+          const thinkingChunk = this.extractContent(kwargs.content)
+          const thinkingAccumKey = (kwargs.id as string) || checkpointNs || "subagent-thinking"
+          const prevThinking = this.subagentAssistantAccum.get(thinkingAccumKey) ?? ""
+          // Skip only LEADING whitespace-only chunks (before any content exists).
+          // Once content exists, whitespace deltas separate words/paragraphs and
+          // must be accumulated, otherwise "hello"+" "+"world" → "helloworld".
+          if (thinkingChunk.length > 0 && (prevThinking !== "" || thinkingChunk.trim())) {
+            let full =
+              thinkingChunk.startsWith(prevThinking) && thinkingChunk.length >= prevThinking.length
+                ? thinkingChunk
+                : prevThinking + thinkingChunk
+            // Bound stored thinking to keep memory in check; the displayed content
+            // is truncated to the log limit anyway, so the head is what matters.
+            if (full.length > 16000) full = full.slice(0, 16000)
+            this.subagentAssistantAccum.set(thinkingAccumKey, full)
+            // Only emit a UI event when there is visible (non-whitespace) content,
+            // so pure-whitespace deltas accumulate without flooding the stream.
+            if (full.trim()) {
+              events.push(
+                this.createSubagentLogEntryEvent({
+                  kind: "assistant",
+                  entryId: `subagent-assistant-${thinkingAccumKey}`,
+                  title: "子代理思考",
+                  content: this.truncateSubagentLogContent(full),
+                  status: "completed",
+                  checkpointNs,
+                  subagentToolCallId: this.resolveSubagentToolCallId(checkpointNs)
+                })
+              )
+            }
+          }
         } else {
           // Main agent message
           const content = this.extractContent(kwargs.content)
@@ -1948,6 +1992,25 @@ export class ElectronIPCTransport implements UseStreamTransport {
     )
   }
 
+  /**
+   * Resolve the parent task tool_call_id of the subagent that owns a given
+   * checkpoint namespace, so subagent log entries can be attributed explicitly
+   * (the UI no longer guesses). Matches a running subagent whose toolCallId
+   * appears in the namespace; falls back to the sole running subagent.
+   */
+  private resolveSubagentToolCallId(ns?: string): string | undefined {
+    const running = Array.from(this.activeSubagents.values()).filter(
+      (subagent) => subagent.status === "running"
+    )
+    if (ns) {
+      const matched = running.find(
+        (subagent) => subagent.toolCallId && ns.includes(subagent.toolCallId)
+      )
+      if (matched?.toolCallId) return matched.toolCallId
+    }
+    return running.length === 1 ? running[0].toolCallId : undefined
+  }
+
   private isQuietCoordinatorToolName(toolName?: string): boolean {
     return !!toolName && QUIET_COORDINATOR_TOOL_NAMES.has(toolName)
   }
@@ -2383,20 +2446,23 @@ export class ElectronIPCTransport implements UseStreamTransport {
   }
 
   private createSubagentLogEntryEvent(input: {
-    kind: "tool_call" | "tool_result"
+    kind: "tool_call" | "tool_result" | "assistant"
     title: string
+    entryId?: string
     content?: string
     result?: string
     status?: "waiting" | "completed"
     checkpointNs?: string
     toolCallId?: string
     toolName?: string
+    subagentToolCallId?: string
   }): StreamEvent {
     this.subagentLogSequence += 1
     const entryId =
-      input.toolCallId && this.subagentToolLogEntryIds.has(input.toolCallId)
+      input.entryId ??
+      (input.toolCallId && this.subagentToolLogEntryIds.has(input.toolCallId)
         ? this.subagentToolLogEntryIds.get(input.toolCallId)!
-        : `subagent-log-${Date.now()}-${this.subagentLogSequence}`
+        : `subagent-log-${Date.now()}-${this.subagentLogSequence}`)
 
     if (input.toolCallId) {
       this.subagentToolLogEntryIds.set(input.toolCallId, entryId)
@@ -2416,6 +2482,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           checkpointNs: input.checkpointNs,
           toolCallId: input.toolCallId,
           toolName: input.toolName,
+          subagentToolCallId: input.subagentToolCallId,
           createdAt: new Date().toISOString()
         }
       }
