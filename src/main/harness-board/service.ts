@@ -30,6 +30,8 @@ import type {
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
   HarnessRunNode,
+  HarnessSkipNodeInput,
+  HarnessSkipNodeResult,
   HarnessFeatureSummary,
   HarnessStatus,
   HarnessWatchRef,
@@ -50,12 +52,14 @@ type HarnessInspectCommandName =
   | "createProject"
   | "createFeature"
   | "dynamicWorkflow"
+  | "skipNode"
 type HarnessInspectCommandConfigKey =
   | "project_status"
   | "feature_status"
   | "create_project"
   | "create_feature"
   | "dynamic_workflow"
+  | "skip_node"
 type HarnessPlatformConfigKey =
   | HarnessInspectCommandConfigKey
   | "system_prompt_inject"
@@ -67,7 +71,8 @@ const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<HarnessInspectCommandName, Har
   run: "feature_status",
   createProject: "create_project",
   createFeature: "create_feature",
-  dynamicWorkflow: "dynamic_workflow"
+  dynamicWorkflow: "dynamic_workflow",
+  skipNode: "skip_node"
 }
 
 interface ConfiguredHarnessInvocation {
@@ -96,6 +101,7 @@ interface HarnessCommandParseOptions {
   projectDirs?: string[]
   workflowTemplate?: string
   workflowNodes?: string
+  nodeId?: string
 }
 
 const HARNESS_BOARD_FILE = join(getOpenworkDir(), "harness-board-projects.json")
@@ -660,10 +666,11 @@ function replaceHarnessConfigPlaceholders(
     pluginPath: cwd,
     mode,
     workflowTemplate: options.workflowTemplate ?? "",
-    workflowNodes: options.workflowNodes ?? ""
+    workflowNodes: options.workflowNodes ?? "",
+    nodeId: options.nodeId ?? ""
   }
   return value.replace(
-    /\$\{(pluginWorkspace|project|projectDir|projectCode|feature|pluginPath|mode|workflowTemplate|workflowNodes)\}/g,
+    /\$\{(pluginWorkspace|project|projectDir|projectCode|feature|pluginPath|mode|workflowTemplate|workflowNodes|nodeId)\}/g,
     (_, key: string) => replacements[key] ?? ""
   )
 }
@@ -828,6 +835,10 @@ function buildConfiguredHarnessInvocation(
     throw new Error(`插件未配置 inspectCommands.${process.platform}.${configKey}，请检查插件设置`)
   }
   return configured
+}
+
+function hasConfiguredHarnessInvocation(project: HarnessProjectMetadata, mode: HarnessInspectCommandName): boolean {
+  return readBoardConfigInspectCommand(adapterPluginDir(project), mode) !== null
 }
 
 function runHarnessInvocation(
@@ -1726,6 +1737,19 @@ function normalizeFeatureWorkflowNodeIds(value: unknown): string[] {
   return nodes
 }
 
+function validateSkipNodeInput(input: HarnessSkipNodeInput): { projectId: string; slug: string; nodeId: string } {
+  const projectId = normalizeText(input.projectId).trim()
+  const slug = normalizeText(input.slug).trim()
+  const nodeId = normalizeText(input.nodeId).trim()
+  if (!projectId || !slug || !nodeId) {
+    throw new Error("Project, feature and node are required")
+  }
+  if (slug.includes("\0") || nodeId.includes("\0")) {
+    throw new Error("Skip node input contains invalid characters")
+  }
+  return { projectId, slug, nodeId }
+}
+
 function buildFeatureWorkflowCommandOptions(
   input: HarnessFeatureCreateInput
 ): Pick<HarnessCommandParseOptions, "workflowTemplate" | "workflowNodes"> {
@@ -1991,6 +2015,33 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
     slug: feature,
     title: feature,
     workspacePath
+  }
+}
+
+export function skipHarnessRunNode(input: HarnessSkipNodeInput): HarnessSkipNodeResult {
+  const { projectId, slug, nodeId } = validateSkipNodeInput(input)
+  const project = requireProject(projectId)
+  const workspacePath = projectDirectoryPath(project)
+
+  if (!existsSync(workspacePath)) {
+    throw new Error(projectDirectoryMissingMessage(project))
+  }
+
+  try {
+    const configured = buildConfiguredHarnessInvocation(project, "skipNode", {
+      feature: slug,
+      nodeId
+    })
+    runHarnessInvocation(configured, harnessCommandLogOptions("skipNode"))
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error)
+    throw new Error(`跳过节点失败：${raw}`)
+  }
+
+  return {
+    projectId,
+    slug,
+    nodeId
   }
 }
 
@@ -2278,6 +2329,7 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
   const hookLogRefs = normalizeHookLogRefs(project, run.hookLogRefs)
   const hookLogEntries = readHookLogRefs(project, hookLogRefs)
   const { nodes: nodesWithHookLogs, unmatchedHooks } = applyHookLogEntries(nodes, hookLogEntries)
+  const skipNodeAvailable = hasConfiguredHarnessInvocation(project, "skipNode")
   return {
     project: {
       projectId: project.projectId,
@@ -2304,6 +2356,7 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
       featureStatus,
       ...(featureStatusLabel ? { featureStatusLabel } : {}),
       overallStatus,
+      skipNodeAvailable,
       hookLogRefs,
       watchRefs: normalizeWatchRefs(project, run.watchRefs, makeWatchRefs(featureSlug)),
       currentNodeId,

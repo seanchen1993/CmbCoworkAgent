@@ -10,6 +10,7 @@ import {
   getHarnessRunDetail,
   listHarnessAdapters,
   listHarnessProjects,
+  skipHarnessRunNode,
   updateHarnessProjectMetadata
 } from "../harness-board/service"
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
@@ -20,6 +21,8 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessSkipNodeInput,
+  HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
   HarnessDynamicWorkflowConfig
 } from "../../shared/harness-board-types"
@@ -117,6 +120,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
         detail.run.watchRefs
       )
       return detail
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:skipNode",
+    async (_event, input: HarnessSkipNodeInput): Promise<HarnessSkipNodeResult> => {
+      return skipHarnessRunNode(input)
     }
   )
 

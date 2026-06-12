@@ -127,6 +127,18 @@ export interface HarnessFeatureCreateResult {
   workspacePath: string
 }
 
+export interface HarnessSkipNodeInput {
+  projectId: string
+  slug: string
+  nodeId: string
+}
+
+export interface HarnessSkipNodeResult {
+  projectId: string
+  slug: string
+  nodeId: string
+}
+
 export interface HarnessProjectMetadataUpdateInput {
   adapterId: string
   adapterType: HarnessAdapterType
@@ -393,6 +405,7 @@ export interface HarnessRunDetailViewModel {
     featureStatus?: HarnessFeatureStatus
     featureStatusLabel?: string
     overallStatus?: HarnessStatus
+    skipNodeAvailable: boolean
     currentNodeId: string
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]

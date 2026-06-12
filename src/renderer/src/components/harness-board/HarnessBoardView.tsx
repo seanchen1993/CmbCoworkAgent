@@ -471,6 +471,7 @@ function createUnboundRunDetail(
       title: slug,
       hookLogRefs: [],
       watchRefs: [],
+      skipNodeAvailable: false,
       currentNodeId: "",
       nodes: [],
       unmatchedHooks: []
@@ -2920,7 +2921,7 @@ function FeatureDetailPage({
   fallbackFeatureSlug?: string
   onBackToList: () => void
   onBackToProject: () => void
-  onRefresh: () => void
+  onRefresh: () => void | Promise<void>
   onActiveSessionChange?: (threadId: string) => void
   onSessionViewChange?: (viewing: boolean) => void
   onActiveSessionThreadChange?: (threadId: string | null) => void
@@ -2975,6 +2976,7 @@ function FeatureDetailPage({
   const allThreadStates = useAllThreadStates()
   const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
   const [sessionBusy, setSessionBusy] = useState<"create" | null>(null)
+  const [skippingNodeId, setSkippingNodeId] = useState<string | null>(null)
   const [selectedSessionState, setSelectedSessionState] = useState<{
     detailKey: string
     threadId: string | null
@@ -3033,7 +3035,7 @@ function FeatureDetailPage({
   const handleBackToFeature = (): void => {
     setActiveDetailTab("feature")
     onSessionViewChange?.(false)
-    onRefresh()
+    void onRefresh()
   }
 
   const handleHookSessionSelect = useCallback((threadId: string): void => {
@@ -3089,29 +3091,64 @@ function FeatureDetailPage({
     onSessionViewChange?.(true)
   }, [detailKey, onActiveSessionChange, onSessionViewChange])
 
+  const canSkipNode = useCallback((node: HarnessRunNode | null): boolean => Boolean(
+    detail &&
+    node &&
+    detail.run.skipNodeAvailable &&
+    !unbound &&
+    node.id === detail.run.currentNodeId
+  ), [detail, unbound])
+
+  const handleSkipNode = useCallback(async (node: HarnessRunNode): Promise<void> => {
+    if (!detail || !canSkipNode(node) || skippingNodeId) return
+    const nodeId = node.id
+    setSkippingNodeId(nodeId)
+    setSelectedNodeId(nodeId)
+    try {
+      await window.api.harnessBoard.skipNode({
+        projectId: detail.project.projectId,
+        slug: detail.run.slug,
+        nodeId
+      })
+      toast.success("已跳过当前节点")
+      await onRefresh()
+    } catch (error) {
+      toast.error(cleanIpcError(error))
+    } finally {
+      setSkippingNodeId(null)
+    }
+  }, [canSkipNode, detail, onRefresh, skippingNodeId])
+
   const renderStageNodeStrip = (): React.JSX.Element | null => {
     if (!detail) return null
     if (detail.run.nodes.length === 0) return null
 
     const renderStageNodeButton = (node: HarnessRunNode): React.JSX.Element => {
       const selected = effectiveSelectedNodeId === node.id
+      const skippable = canSkipNode(node)
+      const skipping = skippingNodeId === node.id
       return (
-        <button
+        <div
           key={node.id}
-          type="button"
-          onClick={() => {
-            setSelectedNodeId(node.id)
-          }}
-          aria-pressed={selected}
           title={node.label}
           className={cn(
-            "w-[210px] cursor-pointer rounded-md border px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            "relative w-[210px] rounded-md border transition-colors",
             selected
               ? "border-status-info bg-status-info/10 shadow-sm"
               : "border-border bg-background hover:border-primary/45"
           )}
         >
-          <div className="flex min-w-0 items-start gap-1.5">
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedNodeId(node.id)
+            }}
+            aria-pressed={selected}
+            className={cn(
+              "flex w-full cursor-pointer items-start gap-1.5 rounded-md px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              skippable ? "pr-[72px]" : ""
+            )}
+          >
             <span className="mt-0.5 shrink-0">{statusIcon(node.status)}</span>
             <span className="min-w-0">
               <span className="block truncate text-sm font-medium">{node.label}</span>
@@ -3119,8 +3156,24 @@ function FeatureDetailPage({
                 {node.status.label}
               </span>
             </span>
-          </div>
-        </button>
+          </button>
+          {skippable && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="absolute right-2 top-2 h-7 gap-1 px-2 text-xs"
+              onClick={(event) => {
+                event.stopPropagation()
+                void handleSkipNode(node)
+              }}
+              disabled={skippingNodeId !== null}
+            >
+              {skipping ? <Loader2 className="size-3 animate-spin" /> : <SkipForward className="size-3" />}
+              跳过
+            </Button>
+          )}
+        </div>
       )
     }
 
@@ -3296,7 +3349,10 @@ function FeatureDetailPage({
                 {renderStageNodeStrip()}
 
                 {selectedNode ? (
-                  <StageArtifactPanel node={selectedNode} workspacePath={detail.project.projectRootPath} />
+                  <StageArtifactPanel
+                    node={selectedNode}
+                    workspacePath={detail.project.projectRootPath}
+                  />
                 ) : (
                   <section className="rounded-md border border-dashed border-border bg-background px-3 py-8 text-center text-sm text-muted-foreground">
                     暂无阶段数据。
@@ -4647,7 +4703,7 @@ export function HarnessBoardView({
           fallbackFeatureSlug={fallbackFeatureSummary?.slug ?? selectedFeature.slug}
           onBackToList={handleBackToProjectList}
           onBackToProject={handleBackToProject}
-          onRefresh={() => void refreshSelectedRunDetail()}
+          onRefresh={refreshSelectedRunDetail}
           onActiveSessionChange={handleActiveSessionChange}
           onSessionViewChange={handleSessionViewChange}
           onActiveSessionThreadChange={onActiveSessionThreadChange}
