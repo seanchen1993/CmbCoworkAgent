@@ -1659,7 +1659,6 @@ function validateCreateInput(input: HarnessProjectCreateInput): void {
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
     throw new Error("Project name, code, description, system and workspace are required")
   }
-  validateHarnessName(input.name, "项目名称")
   validateHarnessName(input.projectCode, "项目编号")
   validateHarnessName(input.projectDir, "项目文件夹")
 }
@@ -1679,7 +1678,6 @@ function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput):
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
     throw new Error("Project name, code, description, system and workspace are required")
   }
-  validateHarnessName(input.name, "项目名称")
   validateHarnessName(input.projectCode, "项目编号")
   validateHarnessName(input.projectDir, "项目文件夹")
 }

@@ -112,6 +112,24 @@ export interface HarnessProjectCreateInput {
   workspacePath: string
 }
 
+export interface HarnessEnterpriseProjectSearchInput {
+  keyword: string
+}
+
+export interface HarnessEnterpriseProjectSearchItem {
+  projectCode: string
+  projectName: string
+  pm: string
+  systemId: string
+  systemName: string
+}
+
+export interface HarnessEnterpriseProjectSearchResult {
+  projects: HarnessEnterpriseProjectSearchItem[]
+  total: number
+  hasMore: boolean
+}
+
 export interface HarnessFeatureCreateInput {
   projectId: string
   feature: string

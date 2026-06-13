@@ -47,6 +47,8 @@ import type {
 } from "../main/ipc/code-exec-tools"
 import type { CoordinatorWorkerSnapshot } from "../main/agent/coordinator-worker-manager"
 import type {
+  HarnessEnterpriseProjectSearchInput,
+  HarnessEnterpriseProjectSearchResult,
   HarnessProjectCreateInput,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
@@ -1818,6 +1820,9 @@ interface CustomAPI {
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
+    searchEnterpriseProjects: (
+      input: HarnessEnterpriseProjectSearchInput
+    ) => Promise<HarnessEnterpriseProjectSearchResult>
     createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
     updateProject: (

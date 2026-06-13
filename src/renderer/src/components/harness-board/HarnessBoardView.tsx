@@ -38,7 +38,7 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Select,
@@ -90,6 +90,7 @@ import type {
   HarnessSessionBinding,
   HarnessAdapterRegistryItem,
   HarnessBoardCompatibility,
+  HarnessEnterpriseProjectSearchItem,
   HarnessStatus,
   HarnessWorkflowNextAction,
   HarnessWorkflow,
@@ -138,6 +139,8 @@ const OTHER_ADAPTER_SCENARIO = "其他类别"
 const ADAPTER_SELECT_PLACEHOLDER = "请选择已安装的支持项目模式的插件"
 const PROJECT_STATUS_POLL_INTERVAL_MS = 10000
 const CUSTOM_WORKFLOW_TEMPLATE_ID = "custom"
+const ENTERPRISE_PROJECT_SEARCH_MIN_CHARS = 2
+const ENTERPRISE_PROJECT_SEARCH_DEBOUNCE_MS = 300
 
 const preventHarnessDialogOutsideClose: React.ComponentProps<typeof DialogContent>["onPointerDownOutside"] =
   (event) => {
@@ -321,6 +324,10 @@ function getThreadWorkspacePath(thread: Thread | null | undefined): string | nul
 
 function sanitizeHarnessNameInput(value: string): string {
   return value.replace(/\s+/g, "")
+}
+
+function sanitizeProjectDirFromProjectName(value: string): string {
+  return value.replace(/[^\u4e00-\u9fffA-Za-z0-9_-]/gu, "")
 }
 
 function readThreadHarnessFeature(thread: Thread): HarnessFeatureThreadMetadata | null {
@@ -569,7 +576,6 @@ function getHarnessNameError(label: string, value: string): string | null {
 
 function getProjectMetadataNameError(form: HarnessProjectMetadataUpdateInput): string | null {
   return (
-    getHarnessNameError("项目名称", form.name) ??
     getHarnessNameError("项目编号", form.projectCode) ??
     getHarnessNameError("项目文件夹", form.projectDir)
   )
@@ -1160,6 +1166,167 @@ function AdapterSelectGroups({ registry }: { registry: HarnessAdapterRegistryIte
   )
 }
 
+function EnterpriseProjectNameInput({
+  value,
+  onValueChange,
+  onSelect,
+  ariaInvalid
+}: {
+  value: string
+  onValueChange: (value: string) => void
+  onSelect: (project: HarnessEnterpriseProjectSearchItem) => void
+  ariaInvalid?: boolean
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [projects, setProjects] = useState<HarnessEnterpriseProjectSearchItem[]>([])
+  const [hasMore, setHasMore] = useState(false)
+  const [searchKeyword, setSearchKeyword] = useState("")
+  const requestIdRef = useRef(0)
+  const keyword = searchKeyword.trim()
+  const shouldShowPopover =
+    open &&
+    (loading ||
+      projects.length > 0 ||
+      (keyword.length > 0 && keyword.length < ENTERPRISE_PROJECT_SEARCH_MIN_CHARS))
+
+  const clearSearchState = useCallback(() => {
+    setSearchKeyword("")
+    setLoading(false)
+    setProjects([])
+    setHasMore(false)
+    setOpen(false)
+  }, [])
+
+  useEffect(() => {
+    if (!searchKeyword || value.trim() === searchKeyword.trim()) return
+    clearSearchState()
+  }, [clearSearchState, searchKeyword, value])
+
+  useEffect(() => {
+    const nextRequestId = requestIdRef.current + 1
+    requestIdRef.current = nextRequestId
+
+    if (!keyword || keyword.length < ENTERPRISE_PROJECT_SEARCH_MIN_CHARS) {
+      setLoading(false)
+      setProjects([])
+      setHasMore(false)
+      return
+    }
+
+    let canceled = false
+    setLoading(true)
+    const timer = window.setTimeout(() => {
+      window.api.harnessBoard
+        .searchEnterpriseProjects({ keyword })
+        .then((result) => {
+          if (canceled || requestIdRef.current !== nextRequestId) return
+          setProjects(result.projects)
+          setHasMore(result.hasMore)
+          setOpen(result.projects.length > 0)
+        })
+        .catch((error) => {
+          if (canceled || requestIdRef.current !== nextRequestId) return
+          setProjects([])
+          setHasMore(false)
+          setOpen(false)
+          toast.error(cleanIpcError(error))
+        })
+        .finally(() => {
+          if (!canceled && requestIdRef.current === nextRequestId) setLoading(false)
+        })
+    }, ENTERPRISE_PROJECT_SEARCH_DEBOUNCE_MS)
+
+    return () => {
+      canceled = true
+      window.clearTimeout(timer)
+    }
+  }, [keyword])
+
+  const handleSelect = (project: HarnessEnterpriseProjectSearchItem): void => {
+    clearSearchState()
+    onSelect(project)
+  }
+
+  return (
+    <Popover
+      open={shouldShowPopover}
+      onOpenChange={(nextOpen) => {
+        if (nextOpen) {
+          setOpen(true)
+          return
+        }
+        clearSearchState()
+      }}
+    >
+      <PopoverAnchor asChild>
+        <Input
+          value={value}
+          onChange={(event) => {
+            const nextValue = event.target.value
+            setSearchKeyword(nextValue)
+            onValueChange(nextValue)
+            setOpen(true)
+          }}
+          onFocus={() => {
+            if (searchKeyword.trim()) setOpen(true)
+          }}
+          placeholder="输入项目名称搜索"
+          className={harnessProjectCreateInputClassName}
+          aria-autocomplete="list"
+          aria-invalid={ariaInvalid ? true : undefined}
+        />
+      </PopoverAnchor>
+      <PopoverContent
+        align="start"
+        className="z-[70] w-[var(--radix-popover-trigger-width)] p-0"
+        onOpenAutoFocus={(event) => event.preventDefault()}
+      >
+        <div className="max-h-72 overflow-hidden py-1 text-sm">
+          {keyword.length < ENTERPRISE_PROJECT_SEARCH_MIN_CHARS ? (
+            <div className="px-3 py-2 text-xs text-muted-foreground">继续输入项目名称以搜索</div>
+          ) : loading ? (
+            <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin" />
+              搜索项目...
+            </div>
+          ) : projects.length > 0 ? (
+            <>
+              <div className="max-h-60 overflow-y-auto py-1">
+                {projects.map((project) => (
+                  <button
+                    key={`${project.projectCode}:${project.projectName}`}
+                    type="button"
+                    className="group grid w-full cursor-pointer gap-1.5 px-2 py-2 text-left outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
+                    onClick={() => handleSelect(project)}
+                  >
+                    <span className="flex min-w-0 items-center gap-2 text-foreground group-hover:text-accent-foreground group-focus-visible:text-accent-foreground">
+                      <span className="shrink-0 font-mono">
+                        {project.projectCode || "-"}
+                      </span>
+                      <span className="min-w-0 truncate">
+                        {project.projectName || "-"}
+                      </span>
+                    </span>
+                    <span className="truncate text-xs leading-5 text-muted-foreground group-hover:text-accent-foreground group-focus-visible:text-accent-foreground">
+                      项目经理：{project.pm || "-"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+              {hasMore && (
+                <div className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
+                  仅显示前 15 条，请输入更精确的关键词
+                </div>
+              )}
+            </>
+          ) : null}
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
 function ProjectFormDialog({
   open,
   creating,
@@ -1181,7 +1348,6 @@ function ProjectFormDialog({
   onPickWorkspace: () => void
   onSubmit: () => void
 }): React.JSX.Element {
-  const projectNameError = getHarnessNameError("项目名称", form.name)
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
   const projectDirError = getHarnessNameError("项目文件夹", form.projectDir)
   const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
@@ -1226,22 +1392,36 @@ function ProjectFormDialog({
             <div className="grid grid-cols-2 gap-3">
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目名称 *
-                <Input
+                <EnterpriseProjectNameInput
                   value={form.name}
-                  onChange={(event) => {
-                    const name = sanitizeHarnessNameInput(event.target.value)
-                    const shouldSyncProjectDir = !form.projectDir || form.projectDir === form.name
+                  onValueChange={(name) => {
+                    const shouldSyncProjectDir =
+                      !form.projectDir ||
+                      form.projectDir === sanitizeProjectDirFromProjectName(form.name)
                     onChange({
                       ...form,
                       name,
-                      projectDir: shouldSyncProjectDir ? name : form.projectDir
+                      projectDir: shouldSyncProjectDir
+                        ? sanitizeProjectDirFromProjectName(name)
+                        : form.projectDir
                     })
                   }}
-                  placeholder="请输入"
-                  className={harnessProjectCreateInputClassName}
-                  aria-invalid={projectNameError ? true : undefined}
+                  onSelect={(project) => {
+                    const shouldSyncProjectDir =
+                      !form.projectDir ||
+                      form.projectDir === sanitizeProjectDirFromProjectName(form.name)
+                    onChange({
+                      ...form,
+                      name: project.projectName,
+                      projectCode: project.projectCode,
+                      systemId: project.systemId || form.systemId,
+                      systemName: project.systemName || form.systemName,
+                      projectDir: shouldSyncProjectDir
+                        ? sanitizeProjectDirFromProjectName(project.projectName)
+                        : form.projectDir
+                    })
+                  }}
                 />
-                {projectNameError && <span className="text-status-critical">{projectNameError}</span>}
               </label>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目编号 *
@@ -1391,7 +1571,6 @@ function ProjectEditDialog({
   onChange: (form: HarnessProjectMetadataUpdateInput) => void
   onSubmit: () => void
 }): React.JSX.Element {
-  const projectNameError = getHarnessNameError("项目名称", form.name)
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
   const projectDirError = getHarnessNameError("项目文件夹", form.projectDir)
   const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
@@ -1432,16 +1611,19 @@ function ProjectEditDialog({
             <div className="grid grid-cols-2 gap-3">
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目名称 *
-                <Input
+                <EnterpriseProjectNameInput
                   value={form.name}
-                  onChange={(event) =>
-                    onChange({ ...form, name: sanitizeHarnessNameInput(event.target.value) })
+                  onValueChange={(name) => onChange({ ...form, name })}
+                  onSelect={(project) =>
+                    onChange({
+                      ...form,
+                      name: project.projectName,
+                      projectCode: project.projectCode,
+                      systemId: project.systemId || form.systemId,
+                      systemName: project.systemName || form.systemName
+                    })
                   }
-                  placeholder="请输入"
-                  className={harnessProjectCreateInputClassName}
-                  aria-invalid={projectNameError ? true : undefined}
                 />
-                {projectNameError && <span className="text-status-critical">{projectNameError}</span>}
               </label>
               <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 <label htmlFor="harness-edit-project-code">项目编号 *</label>
