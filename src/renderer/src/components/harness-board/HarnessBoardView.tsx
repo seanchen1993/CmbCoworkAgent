@@ -56,6 +56,7 @@ import { TabbedPanel } from "@/components/tabs"
 import { ThreadListItem } from "@/components/sidebar/ThreadSidebar"
 import { createHarnessFeatureThread } from "@/lib/harness-feature-thread"
 import { getHarnessRunNextAction } from "@/lib/harness-run-next-action"
+import { buildUploaderIdCandidates } from "@/lib/skill-data-service"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import {
@@ -65,6 +66,7 @@ import {
 } from "@/lib/thread-context"
 import { toast } from "sonner"
 import { marketApi, type MarketItem } from "../../api/market"
+import { formatTopUserOrgName } from "@/components/dashboard/use-dashboard"
 import { UpdateVersionTooltip } from "@/components/customize/MarketPanel/MarketUpdateBadge"
 import {
   getMarketPluginUpdateInfo,
@@ -237,6 +239,14 @@ interface GitPanelDiffState {
 interface AdapterScenarioGroup {
   useScenario: string
   adapters: HarnessAdapterRegistryItem[]
+}
+
+interface HarnessMarketUploaderProfile {
+  sapId: string
+  userName: string
+  orgName: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
 }
 
 interface WorkspaceChangeGroup {
@@ -931,24 +941,34 @@ function buildInstalledPluginMap(items: PluginMetadata[]): Map<string, PluginMet
   return map
 }
 
-function readMarketTextField(
-  item: MarketItem,
-  fieldNames: string[]
-): string {
-  const record = item as unknown as Record<string, unknown>
-  for (const fieldName of fieldNames) {
-    const value = record[fieldName]
-    if (typeof value !== "string") continue
-    const trimmed = value.trim()
-    if (trimmed) return trimmed
+function resolveHarnessMarketUploaderProfile(
+  profiles: Record<string, HarnessMarketUploaderProfile>,
+  userId?: string | null
+): HarnessMarketUploaderProfile | null {
+  const normalizedUserId = userId?.trim()
+  if (!normalizedUserId) return null
+
+  const directProfile = profiles[normalizedUserId]
+  if (directProfile) return directProfile
+
+  const candidates = buildUploaderIdCandidates(normalizedUserId)
+  for (const candidate of candidates) {
+    const profile = profiles[candidate]
+    if (profile) return profile
   }
-  return ""
+
+  return (
+    Object.values(profiles).find((profile) =>
+      candidates.some((candidate) => profile.sapId.includes(candidate))
+    ) ?? null
+  )
 }
 
 function applyMarketAdapterDisplayData(
   registry: HarnessAdapterRegistryItem[],
   marketPlugins: MarketItem[],
-  installedPlugins: PluginMetadata[]
+  installedPlugins: PluginMetadata[],
+  uploaderProfiles: Record<string, HarnessMarketUploaderProfile> = {}
 ): HarnessAdapterRegistryItem[] {
   const marketByName = buildMarketPluginMap(marketPlugins)
   const installedByName = buildInstalledPluginMap(installedPlugins)
@@ -968,19 +988,16 @@ function applyMarketAdapterDisplayData(
     const marketPlugin = adapterName ? marketByName.get(adapterName) : undefined
     if (!marketPlugin) return fallback
 
+    const uploaderProfile = resolveHarnessMarketUploaderProfile(uploaderProfiles, marketPlugin.user_id)
+
     return {
       ...fallback,
       version: installedVersion,
       description: marketPlugin.description?.trim() || "",
       useScenario: normalizeAdapterUseScenario(marketPlugin.category),
-      developerName: readMarketTextField(marketPlugin, ["developerName", "developer", "managerName"]),
-      organizationName: readMarketTextField(marketPlugin, [
-        "organizationName",
-        "organization",
-        "orgName",
-        "department",
-        "managerDepartment"
-      ])
+      ...(uploaderProfile?.userName ? { developerName: uploaderProfile.userName } : {}),
+      ...(uploaderProfile?.sapId ? { developerSapId: uploaderProfile.sapId } : {}),
+      ...(uploaderProfile?.orgName ? { organizationName: uploaderProfile.orgName } : {})
     }
   })
 }
@@ -999,6 +1016,49 @@ async function loadHarnessInstalledPlugins(): Promise<PluginMetadata[]> {
     return await window.api.plugins.list()
   } catch {
     return []
+  }
+}
+
+async function loadHarnessMarketPluginUploaderProfiles(
+  marketPlugins: MarketItem[]
+): Promise<Record<string, HarnessMarketUploaderProfile>> {
+  const rawUserIds = Array.from(
+    new Set(marketPlugins.map((item) => item.user_id?.trim() || "").filter(Boolean))
+  )
+  if (rawUserIds.length === 0) return {}
+
+  if (typeof window.api?.dashboard?.queryAllUser !== "function") return {}
+
+  try {
+    const response = await window.api.dashboard.queryAllUser()
+    if (!response.success || !response.data) {
+      throw new Error(response.error || "获取全量用户信息失败")
+    }
+
+    const allUsers = response.data.filter((user) => user.sapId?.trim())
+    const nextMap: Record<string, HarnessMarketUploaderProfile> = {}
+    for (const rawUserId of rawUserIds) {
+      const lookupIds = buildUploaderIdCandidates(rawUserId)
+      const target = allUsers.find((user) =>
+        lookupIds.some((lookupId) => user.sapId.includes(lookupId))
+      )
+      if (!target) continue
+      nextMap[rawUserId] = {
+        sapId: target.sapId,
+        userName: target.userName,
+        orgName: formatTopUserOrgName(
+          target.orgName || "",
+          target.upperOrgLv1 || "",
+          target.upperOrgLv0 || ""
+        ),
+        upperOrgLv0: target.upperOrgLv0,
+        upperOrgLv1: target.upperOrgLv1
+      }
+    }
+    return nextMap
+  } catch (error) {
+    console.warn("[HarnessBoard] Failed to load plugin uploader profiles:", error)
+    return {}
   }
 }
 
@@ -1042,6 +1102,7 @@ function formatAdapterSelectText(adapter: HarnessAdapterRegistryItem): string {
   return [
     formatAdapterSelectLabel(adapter),
     adapter.developerName,
+    adapter.developerSapId,
     adapter.organizationName
   ].filter(Boolean).join(" ")
 }
@@ -1053,45 +1114,42 @@ function AdapterPublisherInfo({
   adapter: HarnessAdapterRegistryItem
   className?: string
 }): React.JSX.Element | null {
-  if (!adapter.developerName && !adapter.organizationName) return null
+  if (!adapter.developerName && !adapter.developerSapId && !adapter.organizationName) return null
+  const developerLabel = [
+    adapter.developerName,
+    adapter.developerSapId ? `（${adapter.developerSapId}）` : ""
+  ].filter(Boolean).join("")
 
   return (
     <span
       className={cn(
-        "ml-auto flex min-w-0 max-w-[52%] shrink-0 items-center justify-end gap-1 text-[11px] font-normal text-muted-foreground",
+        "flex min-w-0 items-center gap-1 text-xs font-normal leading-5 text-muted-foreground",
         className
       )}
     >
-      {adapter.developerName && (
-        <span className="min-w-0 truncate" title={`开发人员：${adapter.developerName}`}>
-          开发人员：{adapter.developerName}
+      {developerLabel && (
+        <span className="min-w-0 truncate" title={developerLabel}>
+          {developerLabel}
         </span>
       )}
-      {adapter.developerName && adapter.organizationName && (
+      {developerLabel && adapter.organizationName && (
         <span className="shrink-0 text-muted-foreground/50">/</span>
       )}
       {adapter.organizationName && (
-        <span className="min-w-0 truncate" title={`组织机构：${adapter.organizationName}`}>
-          组织机构：{adapter.organizationName}
+        <span className="min-w-0 truncate" title={adapter.organizationName}>
+          {adapter.organizationName}
         </span>
       )}
     </span>
   )
 }
 
-function AdapterOptionHeader({
-  adapter,
-  infoClassName
-}: {
-  adapter: HarnessAdapterRegistryItem
-  infoClassName?: string
-}): React.JSX.Element {
+function AdapterOptionHeader({ adapter }: { adapter: HarnessAdapterRegistryItem }): React.JSX.Element {
   return (
     <span className="flex min-w-0 items-center gap-2">
       <span className="min-w-0 flex-1 truncate">
         {formatAdapterSelectLabel(adapter)}
       </span>
-      <AdapterPublisherInfo adapter={adapter} className={infoClassName} />
     </span>
   )
 }
@@ -1123,9 +1181,10 @@ function AdapterSelectItem({ adapter }: { adapter: HarnessAdapterRegistryItem })
       className="group py-2 pl-4 pr-10"
     >
       <span className="flex min-w-0 max-w-[calc(var(--radix-select-trigger-width)-3rem)] flex-col gap-1">
-        <AdapterOptionHeader
+        <AdapterOptionHeader adapter={adapter} />
+        <AdapterPublisherInfo
           adapter={adapter}
-          infoClassName="group-focus:text-accent-foreground group-data-[highlighted]:text-accent-foreground"
+          className="group-focus:text-accent-foreground group-data-[highlighted]:text-accent-foreground"
         />
         {adapter.description && (
           <span
@@ -3992,13 +4051,20 @@ export function HarnessBoardView({
       )
       scheduleHarnessAdapterDisplayRefresh(() => {
         if (requestId !== loadProjectsRequestIdRef.current) return
-        void Promise.all([loadHarnessMarketPlugins(), loadHarnessInstalledPlugins()]).then(
-          ([marketPlugins, installedPlugins]) => {
+        void Promise.all([loadHarnessMarketPlugins(), loadHarnessInstalledPlugins()])
+          .then(async ([marketPlugins, installedPlugins]) => {
+            const uploaderProfiles = await loadHarnessMarketPluginUploaderProfiles(marketPlugins)
             if (requestId !== loadProjectsRequestIdRef.current) return
             setMarketPluginItems(marketPlugins)
-            setAdapterRegistry(applyMarketAdapterDisplayData(registry, marketPlugins, installedPlugins))
-          }
-        )
+            setAdapterRegistry(
+              applyMarketAdapterDisplayData(
+                registry,
+                marketPlugins,
+                installedPlugins,
+                uploaderProfiles
+              )
+            )
+          })
       })
     } catch (error) {
       if (requestId !== loadProjectsRequestIdRef.current) return
