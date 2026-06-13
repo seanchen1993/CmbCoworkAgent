@@ -1125,11 +1125,11 @@ function AdapterSelectItem({ adapter }: { adapter: HarnessAdapterRegistryItem })
       <span className="flex min-w-0 max-w-[calc(var(--radix-select-trigger-width)-3rem)] flex-col gap-1">
         <AdapterOptionHeader
           adapter={adapter}
-          infoClassName="group-focus:text-accent-foreground group-data-[state=checked]:text-accent-foreground group-data-[highlighted]:text-accent-foreground"
+          infoClassName="group-focus:text-accent-foreground group-data-[highlighted]:text-accent-foreground"
         />
         {adapter.description && (
           <span
-            className="line-clamp-2 whitespace-normal break-words text-xs leading-5 text-muted-foreground group-focus:text-accent-foreground group-data-[state=checked]:text-accent-foreground group-data-[highlighted]:text-accent-foreground"
+            className="line-clamp-2 whitespace-normal break-words text-xs leading-5 text-muted-foreground group-focus:text-accent-foreground group-data-[highlighted]:text-accent-foreground"
             title={adapter.description}
           >
             {adapter.description}
@@ -1164,6 +1164,25 @@ function AdapterSelectGroups({ registry }: { registry: HarnessAdapterRegistryIte
       ))}
     </>
   )
+}
+
+function handleEnterpriseProjectListWheel(event: React.WheelEvent<HTMLDivElement>): void {
+  const list = event.currentTarget
+  if (list.scrollHeight <= list.clientHeight) return
+
+  const deltaY =
+    event.deltaMode === 1
+      ? event.deltaY * 16
+      : event.deltaMode === 2
+        ? event.deltaY * list.clientHeight
+        : event.deltaY
+  const maxScrollTop = list.scrollHeight - list.clientHeight
+  const nextScrollTop = Math.max(0, Math.min(maxScrollTop, list.scrollTop + deltaY))
+  if (nextScrollTop === list.scrollTop) return
+
+  event.preventDefault()
+  event.stopPropagation()
+  list.scrollTop = nextScrollTop
 }
 
 function EnterpriseProjectNameInput({
@@ -1292,7 +1311,10 @@ function EnterpriseProjectNameInput({
             </div>
           ) : projects.length > 0 ? (
             <>
-              <div className="max-h-60 overflow-y-auto py-1">
+              <div
+                className="max-h-60 overscroll-y-contain overflow-y-auto py-1"
+                onWheel={handleEnterpriseProjectListWheel}
+              >
                 {projects.map((project) => (
                   <button
                     key={`${project.projectCode}:${project.projectName}`}
@@ -2976,7 +2998,12 @@ function ProjectDetailPage({
                 <dl className="mt-4 grid gap-3 text-sm">
                   <div>
                     <dt className="text-xs text-muted-foreground">项目名称</dt>
-                    <dd className="mt-1 truncate font-medium" title={project.name}>{project.name}</dd>
+                    <dd
+                      className="mt-1 min-w-0 whitespace-normal break-words font-medium [overflow-wrap:anywhere]"
+                      title={project.name}
+                    >
+                      {project.name}
+                    </dd>
                   </div>
                   <div>
                     <dt className="text-xs text-muted-foreground">系统编号</dt>
