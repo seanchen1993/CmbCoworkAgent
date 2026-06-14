@@ -1623,8 +1623,9 @@ function DashboardTabBar({
 }): React.JSX.Element {
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
     { id: "overview", label: "平台运营概览" },
-    ...(projectModeAllowed ? ([{ id: "project-mode", label: "项目运营概览" }] as const) : []),
-    { id: "skill-eval", label: "技能评估" }
+    ...(projectModeAllowed ? ([{ id: "project-mode", label: "项目运营概览" }] as const) : [])
+    // 技能评估 tab 暂时隐藏（仅移除入口，skill-eval 相关逻辑/内容/类型均保留，需要时取消注释即可恢复）
+    // { id: "skill-eval", label: "技能评估" }
   ]
 
   return (
