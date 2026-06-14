@@ -116,6 +116,7 @@ export function OverviewPanel({
   loading,
   onSkillClick,
   onActiveUsersClick,
+  onFunnelFirstStageClick,
   marketSkillKeys = new Set(),
   pluginSkillKeys = new Set()
 }: {
@@ -123,6 +124,7 @@ export function OverviewPanel({
   loading: boolean
   onSkillClick?: (skill: string) => void
   onActiveUsersClick?: () => void
+  onFunnelFirstStageClick?: () => void
   marketSkillKeys?: Set<string>
   pluginSkillKeys?: Set<string>
 }) {
@@ -242,6 +244,7 @@ export function OverviewPanel({
             measuredAdoptionRate: data.codeMeasuredAdoptionRate,
             pushedAdoptionRate: data.codePushedAdoptionRate
           }}
+          onFirstStageClick={onFunnelFirstStageClick}
         />
       </div>
 
