@@ -158,7 +158,7 @@ The following instructions come from AGENTS.md files discovered in your workspac
 
 When these instructions conflict with the general system instructions above, the AGENTS.md instructions take precedence.
 
-If multiple AGENTS.md files apply to the file you are modifying, instructions in deeper (more specific) directories take precedence over those in parent directories. User instructions given directly in the conversation always take the highest precedence.
+Priority among loaded AGENTS.md files is: global < project < harness. Within project files, deeper directories override parent directories. Within harness files, more specific service-level instructions override broader system/product-level instructions. Direct user instructions in the conversation override all AGENTS.md instructions.
 
 When working on files in subdirectories, always check whether those directories contain their own AGENTS.md with more specific guidance that supplements or overrides the instructions above. You may also check README/README.md files for more information about the project.
 

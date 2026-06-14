@@ -94,12 +94,27 @@ async function testGlobalAndProjectOrdering(): Promise<void> {
       result.loadedPaths.every((path) => basename(path) === "AGENTS.md"),
       "expected AGENTS.md files"
     )
-    assert(prompt.includes("# Global AGENTS.md instructions"), "missing global section")
-    assert(prompt.includes("\n\n---\n\n"), "missing project separator")
-    assert(!prompt.includes("--- project-doc ---"), "old project separator should not render")
+    assert(prompt.includes("### Loaded AGENTS.md Files"), "missing loaded AGENTS list")
     assert(
-      prompt.includes(`<!-- From: ${join(root, "AGENTS.md")} -->`),
-      "project source should render as HTML comment"
+      !prompt.includes("# Global AGENTS.md instructions"),
+      "old global section should not render"
+    )
+    assert(
+      !prompt.includes("# AGENTS.md instructions for "),
+      "old project section should not render"
+    )
+    assert(
+      !prompt.includes("# Harness configured AGENTS.md instructions"),
+      "old harness section should not render"
+    )
+    assert(!prompt.includes("\n\n---\n\n"), "old section separator should not render")
+    assert(
+      prompt.includes(`<!-- From: ${join(globalHome, "AGENTS.md")} | scope: global -->`),
+      "global source scope should render as HTML comment"
+    )
+    assert(
+      prompt.includes(`<!-- From: ${join(root, "AGENTS.md")} | scope: project -->`),
+      "project source scope should render as HTML comment"
     )
     assert(
       !prompt.includes(`[${join(root, "AGENTS.md")}]`),
@@ -577,6 +592,10 @@ async function testLeafFirstBudgetKeepsNestedInstructions(): Promise<void> {
 function testAgentsProjectInstructionsHelper(): void {
   const rendered = renderAgentsProjectInstructions("# AGENTS.md instructions\n\nRULE")
   assert(rendered.includes(AGENTS_MD_PREAMBLE), "rendered instructions should include preamble")
+  assert(
+    AGENTS_MD_PREAMBLE.includes("global < project < harness"),
+    "preamble should document AGENTS priority"
+  )
   assert(rendered.includes("RULE"), "rendered instructions should include AGENTS prompt")
   assert(
     rendered.indexOf(AGENTS_MD_PREAMBLE) < rendered.indexOf("RULE"),
@@ -586,6 +605,45 @@ function testAgentsProjectInstructionsHelper(): void {
     renderAgentsProjectInstructions(null) === undefined,
     "empty AGENTS prompt should not render project instructions"
   )
+}
+
+async function testScopedRenderedBudgetBoundary(): Promise<void> {
+  await withTempDir("agents-md-scoped-budget", async (base) => {
+    const { root, nested, globalHome } = await setupWorkspace(base)
+    process.env.CMB_COWORK_AGENT_HOME = globalHome
+
+    const agentsPath = join(root, "AGENTS.md")
+    await writeFile(
+      agentsPath,
+      `BOUNDARY_BEGIN\n${"B".repeat(1000)}\nBOUNDARY_END`,
+      "utf8"
+    )
+
+    const minimumPrompt = [
+      "### Loaded AGENTS.md Files",
+      "",
+      `<!-- From: ${agentsPath} | scope: project -->`,
+      "`````````",
+      "BOUNDARY_BEGIN",
+      "`````````",
+      ""
+    ].join("\n")
+    const projectMaxBytes = Buffer.byteLength(minimumPrompt, "utf8") + 40
+
+    const result = await loadAgentsPromptForWorkspace(nested, {
+      globalMaxBytes: 1024,
+      projectMaxBytes
+    })
+    const prompt = result.prompt ?? ""
+
+    assert(
+      Buffer.byteLength(prompt, "utf8") <= projectMaxBytes,
+      "scoped source comment should be included in rendered budget fitting"
+    )
+    assert(prompt.includes("BOUNDARY_BEGIN"), "boundary budget should retain content prefix")
+    assert(!prompt.includes("BOUNDARY_END"), "boundary budget should truncate content suffix")
+    assert(result.truncated === true, "boundary budget pressure should report truncation")
+  })
 }
 
 async function testNumericBudgetAppliesToFinalPrompt(): Promise<void> {
@@ -707,9 +765,22 @@ async function testHarnessConfiguredAgentsLoad(): Promise<void> {
     )
 
     const prompt = result.prompt ?? ""
+    assert(prompt.includes("### Loaded AGENTS.md Files"), `missing loaded AGENTS list: ${prompt}`)
     assert(
-      prompt.includes("# Harness configured AGENTS.md instructions"),
-      `missing harness configured section: ${prompt}`
+      !prompt.includes("# Harness configured AGENTS.md instructions"),
+      `old harness configured section should not render: ${prompt}`
+    )
+    assert(
+      prompt.includes(
+        `<!-- From: ${join(pluginRoot, "sys", "SYS1", "AGENTS.md")} | scope: harness -->`
+      ),
+      `system harness source scope should render: ${prompt}`
+    )
+    assert(
+      prompt.includes(
+        `<!-- From: ${join(pluginRoot, "sys", "SYS1", "svc-a", "AGENTS.md")} | scope: harness -->`
+      ),
+      `service harness source scope should render: ${prompt}`
     )
     assert(
       prompt.includes("SERVICE_RULE system=SYS1 feature=feature-1"),
@@ -821,6 +892,8 @@ async function run(): Promise<void> {
     console.log("PASS leaf-first AGENTS budget")
     testAgentsProjectInstructionsHelper()
     console.log("PASS AGENTS project instructions helper")
+    await testScopedRenderedBudgetBoundary()
+    console.log("PASS scoped AGENTS rendered budget boundary")
     await testNumericBudgetAppliesToFinalPrompt()
     console.log("PASS numeric final budget compatibility")
     await testUtf8SafeTruncation()
