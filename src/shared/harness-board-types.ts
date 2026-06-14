@@ -131,6 +131,20 @@ export interface HarnessEnterpriseProjectSearchResult {
   hasMore: boolean
 }
 
+export interface HarnessEnterpriseProjectDetailInput {
+  prjCodeList: string[]
+}
+
+export interface HarnessEnterpriseProjectDetailItem extends HarnessEnterpriseProjectSearchItem {
+  status: string
+  phaseStatus: string
+  baselineEndDate: string
+}
+
+export interface HarnessEnterpriseProjectDetailResult {
+  projects: HarnessEnterpriseProjectDetailItem[]
+}
+
 export interface HarnessFeatureCreateInput {
   projectId: string
   feature: string

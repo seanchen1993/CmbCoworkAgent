@@ -92,6 +92,7 @@ import type {
   HarnessSessionBinding,
   HarnessAdapterRegistryItem,
   HarnessBoardCompatibility,
+  HarnessEnterpriseProjectDetailItem,
   HarnessEnterpriseProjectSearchItem,
   HarnessStatus,
   HarnessWorkflowNextAction,
@@ -143,6 +144,7 @@ const PROJECT_STATUS_POLL_INTERVAL_MS = 10000
 const CUSTOM_WORKFLOW_TEMPLATE_ID = "custom"
 const ENTERPRISE_PROJECT_SEARCH_MIN_CHARS = 2
 const ENTERPRISE_PROJECT_SEARCH_DEBOUNCE_MS = 300
+const ENTERPRISE_PROJECT_DETAIL_QUERY_DEBOUNCE_MS = 160
 
 const preventHarnessDialogOutsideClose: React.ComponentProps<typeof DialogContent>["onPointerDownOutside"] =
   (event) => {
@@ -177,6 +179,10 @@ function cleanIpcError(error: unknown): string {
   return error.message
     .replace(/^Error invoking remote method '[^']+':\s*/i, "")
     .replace(/^Error:\s*/, "")
+}
+
+function normalizeEnterpriseProjectCode(value: string): string {
+  return value.trim()
 }
 
 function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataUpdateInput {
@@ -219,6 +225,10 @@ interface ProjectFeatureSessionGroup {
   sessions: HarnessSessionBinding[]
   section: ProjectFeatureSessionGroupSection
 }
+
+type EnterpriseProjectDetailCacheEntry =
+  | { kind: "hit"; project: HarnessEnterpriseProjectDetailItem }
+  | { kind: "miss" }
 
 interface GitPanelFileChange {
   path: string
@@ -2277,6 +2287,7 @@ function ProjectCard({
   onEditProject,
   onArchiveProject,
   onUpdatePlugin,
+  onProjectVisible,
   onOpenProject
 }: {
   project: HarnessProjectListItem
@@ -2288,8 +2299,13 @@ function ProjectCard({
   onEditProject: (project: HarnessProjectListItem) => void
   onArchiveProject: (project: HarnessProjectListItem) => void
   onUpdatePlugin: (project: HarnessProjectListItem, updateInfo: MarketPluginUpdateInfo) => void
+  onProjectVisible: (project: HarnessProjectListItem) => void
   onOpenProject: (projectId: string) => void
 }): React.JSX.Element {
+  const cardRef = useRef<HTMLElement | null>(null)
+  const projectRef = useRef(project)
+  projectRef.current = project
+  const projectCode = project.projectCode.trim()
   const runs = detail?.runs ?? []
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
@@ -2299,8 +2315,34 @@ function ProjectCard({
   const archivedStatus: HarnessStatus = { label: "已归档", uiKind: "archived" }
   const projectRootPath = resolveProjectRootPath(project)
 
+  useEffect(() => {
+    if (archived || !projectCode) return
+    const element = cardRef.current
+    if (!element) return
+
+    if (typeof IntersectionObserver === "undefined") {
+      onProjectVisible(projectRef.current)
+      return
+    }
+
+    let visible = false
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (visible || !entries.some((entry) => entry.isIntersecting)) return
+        visible = true
+        onProjectVisible(projectRef.current)
+        observer.disconnect()
+      },
+      { root: null, rootMargin: "0px", threshold: 0.01 }
+    )
+    observer.observe(element)
+
+    return () => observer.disconnect()
+  }, [archived, onProjectVisible, projectCode])
+
   return (
     <article
+      ref={cardRef}
       role="button"
       tabIndex={0}
       className={cn(
@@ -2424,6 +2466,7 @@ function SystemSection({
   onEditProject,
   onArchiveProject,
   onUpdateProjectPlugin,
+  onProjectVisible,
   onOpenProject
 }: {
   group: SystemGroup
@@ -2438,6 +2481,7 @@ function SystemSection({
     project: HarnessProjectListItem,
     updateInfo: MarketPluginUpdateInfo
   ) => void
+  onProjectVisible: (project: HarnessProjectListItem) => void
   onOpenProject: (projectId: string) => void
 }): React.JSX.Element {
   return (
@@ -2463,6 +2507,7 @@ function SystemSection({
               onEditProject={onEditProject}
               onArchiveProject={onArchiveProject}
               onUpdatePlugin={onUpdateProjectPlugin}
+              onProjectVisible={onProjectVisible}
               onOpenProject={onOpenProject}
             />
           ))}
@@ -2956,9 +3001,45 @@ function FeatureWorkspaceChangesPanel({
   )
 }
 
+function EnterpriseProjectDetailSummary({
+  entry
+}: {
+  entry?: EnterpriseProjectDetailCacheEntry
+}): React.JSX.Element | null {
+  if (!entry) return null
+
+  if (entry.kind === "miss") {
+    return (
+      <div>
+        <p className="text-xs leading-5 text-status-warning">请选择有效的项目编号</p>
+      </div>
+    )
+  }
+
+  const fields = [
+    ["项目状态", entry.project.status],
+    ["阶段状态", entry.project.phaseStatus],
+    ["结项日期", entry.project.baselineEndDate]
+  ]
+
+  return (
+    <>
+      {fields.map(([label, value]) => (
+        <div key={label}>
+          <dt className="text-xs text-muted-foreground">{label}</dt>
+          <dd className="mt-1 truncate font-medium" title={value || "-"}>
+            {value || "-"}
+          </dd>
+        </div>
+      ))}
+    </>
+  )
+}
+
 function ProjectDetailPage({
   project,
   detail,
+  enterpriseProjectDetail,
   loading,
   creatingFeature,
   onBackToList,
@@ -2969,6 +3050,7 @@ function ProjectDetailPage({
 }: {
   project: HarnessProjectListItem
   detail?: HarnessProjectDetailViewModel
+  enterpriseProjectDetail?: EnterpriseProjectDetailCacheEntry
   loading: boolean
   creatingFeature: boolean
   onBackToList: () => void
@@ -3064,6 +3146,7 @@ function ProjectDetailPage({
                       {project.name}
                     </dd>
                   </div>
+                  <EnterpriseProjectDetailSummary entry={enterpriseProjectDetail} />
                   <div>
                     <dt className="text-xs text-muted-foreground">系统编号</dt>
                     <dd className="mt-1 truncate font-medium" title={project.systemId}>
@@ -3888,6 +3971,9 @@ export function HarnessBoardView({
 }: HarnessBoardViewProps = {}): React.JSX.Element {
   const [projects, setProjects] = useState<HarnessProjectListItem[]>([])
   const [detailsByProjectId, setDetailsByProjectId] = useState<Record<string, HarnessProjectDetailViewModel>>({})
+  const [enterpriseProjectDetailsByCode, setEnterpriseProjectDetailsByCode] = useState<
+    Record<string, EnterpriseProjectDetailCacheEntry>
+  >({})
   const [loadingDetailIds, setLoadingDetailIds] = useState<Set<string>>(new Set())
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const [selectedFeature, setSelectedFeature] = useState<SelectedFeature | null>(null)
@@ -3948,6 +4034,10 @@ export function HarnessBoardView({
   const [creatingSidebarSessionKey, setCreatingSidebarSessionKey] = useState<string | null>(null)
   const creatingFeatureRef = useRef(false)
   const projectsRef = useRef(projects)
+  const enterpriseProjectDetailsByCodeRef = useRef(enterpriseProjectDetailsByCode)
+  const enterpriseProjectDetailQueueRef = useRef<Set<string>>(new Set())
+  const enterpriseProjectDetailPendingCodesRef = useRef<Set<string>>(new Set())
+  const enterpriseProjectDetailTimerRef = useRef<number | null>(null)
   const selectedProjectIdRef = useRef(selectedProjectId)
   const selectedFeatureRef = useRef(selectedFeature)
   const currentThreadIdRef = useRef(currentThreadId)
@@ -3958,10 +4048,84 @@ export function HarnessBoardView({
   const loadProjectsRequestIdRef = useRef(0)
   const featureWorkflowRequestIdRef = useRef(0)
   projectsRef.current = projects
+  enterpriseProjectDetailsByCodeRef.current = enterpriseProjectDetailsByCode
   selectedProjectIdRef.current = selectedProjectId
   selectedFeatureRef.current = selectedFeature
   currentThreadIdRef.current = currentThreadId
   isViewingSessionRef.current = isViewingSession
+
+  const flushEnterpriseProjectDetailQueue = useCallback(() => {
+    const queuedCodes = Array.from(enterpriseProjectDetailQueueRef.current)
+    enterpriseProjectDetailQueueRef.current.clear()
+    enterpriseProjectDetailTimerRef.current = null
+
+    const cache = enterpriseProjectDetailsByCodeRef.current
+    const pendingCodes = enterpriseProjectDetailPendingCodesRef.current
+    const prjCodeList = queuedCodes.filter((code) => !cache[code] && !pendingCodes.has(code))
+    if (prjCodeList.length === 0) return
+
+    for (const code of prjCodeList) {
+      pendingCodes.add(code)
+    }
+
+    window.api.harnessBoard
+      .getEnterpriseProjectDetails({ prjCodeList })
+      .then((result) => {
+        const projectsByCode = new Map(
+          result.projects.map((project) => [
+            normalizeEnterpriseProjectCode(project.projectCode),
+            project
+          ])
+        )
+        setEnterpriseProjectDetailsByCode((current) => {
+          const next = { ...current }
+          for (const code of prjCodeList) {
+            const project = projectsByCode.get(code)
+            next[code] = project ? { kind: "hit", project } : { kind: "miss" }
+          }
+          return next
+        })
+      })
+      .catch(() => {
+        // Enterprise project details are auxiliary. Scroll-triggered failures should stay silent.
+      })
+      .finally(() => {
+        for (const code of prjCodeList) {
+          pendingCodes.delete(code)
+        }
+      })
+  }, [])
+
+  const scheduleEnterpriseProjectDetailQuery = useCallback(
+    (projectCodes: string[]) => {
+      const cache = enterpriseProjectDetailsByCodeRef.current
+      const pendingCodes = enterpriseProjectDetailPendingCodesRef.current
+      let shouldSchedule = false
+
+      for (const projectCode of projectCodes) {
+        const code = normalizeEnterpriseProjectCode(projectCode)
+        if (!code || cache[code] || pendingCodes.has(code)) continue
+        enterpriseProjectDetailQueueRef.current.add(code)
+        shouldSchedule = true
+      }
+
+      if (!shouldSchedule || enterpriseProjectDetailTimerRef.current !== null) return
+
+      enterpriseProjectDetailTimerRef.current = window.setTimeout(
+        flushEnterpriseProjectDetailQueue,
+        ENTERPRISE_PROJECT_DETAIL_QUERY_DEBOUNCE_MS
+      )
+    },
+    [flushEnterpriseProjectDetailQueue]
+  )
+
+  useEffect(() => {
+    return () => {
+      if (enterpriseProjectDetailTimerRef.current !== null) {
+        window.clearTimeout(enterpriseProjectDetailTimerRef.current)
+      }
+    }
+  }, [])
 
   const persistUnread = useCallback((ids: Set<string>) => {
     localStorage.setItem(THREAD_UNREAD_STORAGE_KEY, JSON.stringify([...ids]))
@@ -3992,6 +4156,14 @@ export function HarnessBoardView({
       })
     },
     [persistUnread]
+  )
+
+  const handleProjectCardVisible = useCallback(
+    (project: HarnessProjectListItem) => {
+      if (project.lifecycle.status === "archived") return
+      scheduleEnterpriseProjectDetailQuery([project.projectCode])
+    },
+    [scheduleEnterpriseProjectDetailQuery]
   )
 
   const loadProjectDetail = useCallback(async (
@@ -4602,6 +4774,50 @@ export function HarnessBoardView({
   const selectedProject =
     selectedProjectId ? projects.find((project) => project.projectId === selectedProjectId) ?? null : null
   const selectedProjectDetail = selectedProjectId ? detailsByProjectId[selectedProjectId] : undefined
+  const selectedProjectCode = selectedProject
+    ? normalizeEnterpriseProjectCode(selectedProject.projectCode)
+    : ""
+  const selectedProjectArchived = selectedProject?.lifecycle.status === "archived"
+  const selectedEnterpriseProjectDetail =
+    selectedProjectCode && !selectedProjectArchived
+      ? enterpriseProjectDetailsByCode[selectedProjectCode]
+      : undefined
+
+  useEffect(() => {
+    if (!selectedProjectCode || selectedProjectArchived || selectedEnterpriseProjectDetail) return
+
+    let canceled = false
+    window.api.harnessBoard
+      .getEnterpriseProjectDetails({ prjCodeList: [selectedProjectCode] })
+      .then((result) => {
+        if (canceled) return
+        const project = result.projects.find(
+          (item) => normalizeEnterpriseProjectCode(item.projectCode) === selectedProjectCode
+        )
+        setEnterpriseProjectDetailsByCode((current) => {
+          const currentEntry = current[selectedProjectCode]
+          if (currentEntry?.kind === "hit") return current
+          if (!project && currentEntry) return current
+          return {
+            ...current,
+            [selectedProjectCode]: project ? { kind: "hit", project } : { kind: "miss" }
+          }
+        })
+      })
+      .catch(() => {
+        if (canceled) return
+        setEnterpriseProjectDetailsByCode((current) =>
+          current[selectedProjectCode]
+            ? current
+            : { ...current, [selectedProjectCode]: { kind: "miss" } }
+        )
+      })
+
+    return () => {
+      canceled = true
+    }
+  }, [selectedEnterpriseProjectDetail, selectedProjectArchived, selectedProjectCode])
+
   const projectPluginUpdateInfoById = useMemo(() => {
     const marketPluginByName = buildMarketPluginMap(marketPluginItems)
     const next = new Map<string, MarketPluginUpdateInfo>()
@@ -4998,6 +5214,7 @@ export function HarnessBoardView({
         <ProjectDetailPage
           project={selectedProject}
           detail={selectedProjectDetail}
+          enterpriseProjectDetail={selectedEnterpriseProjectDetail}
           loading={loadingDetailIds.has(selectedProject.projectId)}
           creatingFeature={creatingFeatureProjectId === selectedProject.projectId}
           onBackToList={handleBackToProjectList}
@@ -5132,6 +5349,7 @@ export function HarnessBoardView({
                     onUpdateProjectPlugin={(project, updateInfo) =>
                       void handleUpdateProjectPlugin(project, updateInfo)
                     }
+                    onProjectVisible={handleProjectCardVisible}
                     onOpenProject={openProjectDetail}
                   />
                 ))
@@ -5169,6 +5387,7 @@ export function HarnessBoardView({
                         onUpdateProjectPlugin={(project, updateInfo) =>
                           void handleUpdateProjectPlugin(project, updateInfo)
                         }
+                        onProjectVisible={handleProjectCardVisible}
                         onOpenProject={openProjectDetail}
                       />
                     ))

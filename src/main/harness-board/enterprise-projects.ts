@@ -1,5 +1,8 @@
 import { getUserInfo } from "../storage"
 import type {
+  HarnessEnterpriseProjectDetailInput,
+  HarnessEnterpriseProjectDetailItem,
+  HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchItem,
   HarnessEnterpriseProjectSearchResult
@@ -71,6 +74,10 @@ function getEnterpriseProjectQueryUrl(): string {
   return (import.meta.env.VITE_ENTERPRISE_PROJECT_QUERY_URL as string | undefined)?.trim() || ""
 }
 
+function getEnterpriseProjectListUrl(): string {
+  return (import.meta.env.VITE_ENTERPRISE_PROJECT_LIST as string | undefined)?.trim() || ""
+}
+
 function isEnterpriseProjectQueryMockEnabled(): boolean {
   const value = (import.meta.env.VITE_ENTERPRISE_PROJECT_QUERY_MOCK as string | undefined)
     ?.trim()
@@ -107,6 +114,18 @@ function normalizeEnterpriseProjectItem(value: unknown): HarnessEnterpriseProjec
   }
 }
 
+function normalizeEnterpriseProjectDetailItem(value: unknown): HarnessEnterpriseProjectDetailItem | null {
+  const base = normalizeEnterpriseProjectItem(value)
+  if (!base) return null
+
+  return {
+    ...base,
+    status: normalizeText(value.status),
+    phaseStatus: normalizeText(value.phaseStatus),
+    baselineEndDate: normalizeText(value.baselineEndDate)
+  }
+}
+
 function normalizeSearchResponse(
   response: EnterpriseProjectQueryResponse
 ): HarnessEnterpriseProjectSearchResult {
@@ -128,6 +147,22 @@ function normalizeSearchResponse(
     total,
     hasMore: total > projects.length || pages > pageNum
   }
+}
+
+function normalizeDetailResponse(
+  response: EnterpriseProjectQueryResponse
+): HarnessEnterpriseProjectDetailResult {
+  if (response.returnCode !== ENTERPRISE_PROJECT_SUCCESS_CODE) {
+    throw new Error(response.errorMsg || "找不到项目")
+  }
+
+  const body = isObject(response.body) ? response.body : undefined
+  const rawData = Array.isArray(body?.data) ? body.data : []
+  const projects = rawData
+    .map((item) => normalizeEnterpriseProjectDetailItem(item))
+    .filter((item): item is HarnessEnterpriseProjectDetailItem => item !== null)
+
+  return { projects }
 }
 
 function makeMockEnterpriseProjectSearchResult(): HarnessEnterpriseProjectSearchResult {
@@ -157,6 +192,37 @@ function makeMockEnterpriseProjectSearchResult(): HarnessEnterpriseProjectSearch
         systemName: "（B）企业服务中台"
       }
     ]
+  }
+}
+
+function makeMockEnterpriseProjectDetailResult(
+  prjCodeList: string[]
+): HarnessEnterpriseProjectDetailResult {
+  const details: HarnessEnterpriseProjectDetailItem[] = [
+    {
+      projectCode: "T26GIW81",
+      projectName: "企业客户经营平台优化",
+      pm: "张明",
+      systemId: "LF39.18",
+      systemName: "（C）WE运营管理平台",
+      status: "任务_实施中",
+      phaseStatus: "开发中",
+      baselineEndDate: "2026-07-17"
+    },
+    {
+      projectCode: "T26HXK02",
+      projectName: "企业项目协同流程改造",
+      pm: "李娜",
+      systemId: "AB12.34",
+      systemName: "（A）项目协同管理系统",
+      status: "任务_实施中",
+      phaseStatus: "联调中",
+      baselineEndDate: "2026-08-05"
+    }
+  ]
+  const requestedCodes = new Set(prjCodeList)
+  return {
+    projects: details.filter((project) => requestedCodes.has(project.projectCode))
   }
 }
 
@@ -207,6 +273,54 @@ export async function searchEnterpriseProjects(
 
     const json = (await response.json()) as EnterpriseProjectQueryResponse
     return normalizeSearchResponse(json)
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("项目查询超时")
+    }
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+export async function getEnterpriseProjectDetails(
+  input: HarnessEnterpriseProjectDetailInput
+): Promise<HarnessEnterpriseProjectDetailResult> {
+  const prjCodeList = Array.from(
+    new Set(input.prjCodeList.map((code) => normalizeText(code)).filter(Boolean))
+  )
+  if (prjCodeList.length === 0) {
+    return { projects: [] }
+  }
+
+  if (isEnterpriseProjectQueryMockEnabled()) {
+    return makeMockEnterpriseProjectDetailResult(prjCodeList)
+  }
+
+  const queryUrl = getEnterpriseProjectListUrl()
+  if (!queryUrl) {
+    throw new Error("未配置项目详情查询地址")
+  }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS)
+
+  try {
+    const response = await fetch(queryUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ prjCodeList }),
+      signal: controller.signal
+    })
+
+    if (!response.ok) {
+      throw new Error("项目查询失败")
+    }
+
+    const json = (await response.json()) as EnterpriseProjectQueryResponse
+    return normalizeDetailResponse(json)
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error("项目查询超时")

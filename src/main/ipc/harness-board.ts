@@ -13,9 +13,14 @@ import {
   skipHarnessRunNode,
   updateHarnessProjectMetadata
 } from "../harness-board/service"
-import { searchEnterpriseProjects } from "../harness-board/enterprise-projects"
+import {
+  getEnterpriseProjectDetails,
+  searchEnterpriseProjects
+} from "../harness-board/enterprise-projects"
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
 import type {
+  HarnessEnterpriseProjectDetailInput,
+  HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
   HarnessProjectCreateInput,
@@ -59,6 +64,16 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       input: HarnessEnterpriseProjectSearchInput
     ): Promise<HarnessEnterpriseProjectSearchResult> => {
       return searchEnterpriseProjects(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getEnterpriseProjectDetails",
+    async (
+      _event,
+      input: HarnessEnterpriseProjectDetailInput
+    ): Promise<HarnessEnterpriseProjectDetailResult> => {
+      return getEnterpriseProjectDetails(input)
     }
   )
 

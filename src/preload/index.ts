@@ -47,6 +47,8 @@ import type {
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
 import type {
+  HarnessEnterpriseProjectDetailInput,
+  HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
   HarnessProjectCreateInput,
@@ -2671,6 +2673,13 @@ const api = {
         "harnessBoard:searchEnterpriseProjects",
         input
       ) as Promise<HarnessEnterpriseProjectSearchResult>,
+    getEnterpriseProjectDetails: (
+      input: HarnessEnterpriseProjectDetailInput
+    ): Promise<HarnessEnterpriseProjectDetailResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:getEnterpriseProjectDetails",
+        input
+      ) as Promise<HarnessEnterpriseProjectDetailResult>,
     createFeature: (input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> =>
       ipcRenderer.invoke(
         "harnessBoard:createFeature",

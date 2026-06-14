@@ -93,6 +93,9 @@ import type {
   SavedCodeExecToolUpdatePayload
 } from "../../main/ipc/code-exec-tools"
 import type {
+  HarnessEnterpriseProjectDetailInput,
+  HarnessEnterpriseProjectDetailItem,
+  HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchItem,
   HarnessEnterpriseProjectSearchResult,
@@ -163,6 +166,9 @@ export type {
 export type { ManagedSavedCodeExecTool, SavedCodeExecPreviewResult, SavedCodeExecToolUpdatePayload }
 
 export type {
+  HarnessEnterpriseProjectDetailInput,
+  HarnessEnterpriseProjectDetailItem,
+  HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchItem,
   HarnessEnterpriseProjectSearchResult,
