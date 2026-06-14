@@ -5,6 +5,7 @@ export interface HarnessPlaceholderContext {
   pluginWorkspace?: string
   projectCode?: string
   featureId?: string
+  systemId?: string
 }
 
 function normalizePlaceholderPath(value: string): string {
@@ -37,11 +38,13 @@ export function replaceHarnessPlaceholders(
         ? context.projectCode
         : undefined,
     FEATURE_ID:
-      context.featureId !== undefined && context.featureId !== "" ? context.featureId : undefined
+      context.featureId !== undefined && context.featureId !== "" ? context.featureId : undefined,
+    SYSTEM_ID:
+      context.systemId !== undefined && context.systemId !== "" ? context.systemId : undefined
   }
 
   return content.replace(
-    /\{(PLUGIN_ROOT|PLUGIN_WORKSPACE|PROJECT_CODE|FEATURE_ID)\}/g,
+    /\{(PLUGIN_ROOT|PLUGIN_WORKSPACE|PROJECT_CODE|FEATURE_ID|SYSTEM_ID)\}/g,
     (match, key: string) => replacements[key] ?? match
   )
 }

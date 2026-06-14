@@ -1,5 +1,5 @@
 import { constants as fsConstants, type Stats } from "fs"
-import { lstat, open, realpath, stat } from "fs/promises"
+import { lstat, open, readFile, realpath, stat } from "fs/promises"
 import { homedir } from "os"
 import { dirname, isAbsolute, join, relative, resolve } from "path"
 import { replaceHarnessPlaceholders } from "./placeholders"
@@ -12,6 +12,7 @@ const AGENTS_PROJECT_SEPARATOR = "\n\n---\n\n"
 const AGENTS_CONTENT_FENCE_MIN_TICKS = 9
 const UTF8_READ_PADDING_BYTES = 4
 const GLOBAL_AGENTS_SECTION_TITLE = "# Global AGENTS.md instructions"
+const HARNESS_CONFIGURED_AGENTS_SECTION_TITLE = "# Harness configured AGENTS.md instructions"
 
 export interface AgentsPromptEntry {
   path: string
@@ -51,6 +52,7 @@ export interface AgentsPromptPlaceholderContext {
   pluginWorkspace?: string
   featureId?: string
   projectCode?: string
+  systemId?: string
 }
 
 type AgentsPromptBudget = number | AgentsPromptBudgetOptions
@@ -76,6 +78,134 @@ function replaceAgentsPlaceholders(
 function isWithinRoot(rootDir: string, targetDir: string): boolean {
   const rel = relative(rootDir, targetDir)
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
+}
+
+interface HarnessAgentsmdLoadConfig {
+  active?: unknown
+  loadSystemAgentsmd?: unknown
+  systemAgentsmdDir?: unknown
+  services?: unknown
+}
+
+interface HarnessAgentsmdLoadServiceConfig {
+  service?: unknown
+  agentsmdDir?: unknown
+}
+
+function normalizeConfigText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : ""
+}
+
+function hasHarnessboardAgentsContext(
+  context: AgentsPromptPlaceholderContext
+): context is Required<AgentsPromptPlaceholderContext> {
+  return Boolean(
+    context.pluginRoot &&
+    context.pluginWorkspace &&
+    context.projectCode &&
+    context.featureId &&
+    context.systemId
+  )
+}
+
+function resolvePluginAgentsPath(pluginRoot: string, agentsmdDir: unknown): string | null {
+  const rawDir = normalizeConfigText(agentsmdDir)
+  if (!rawDir) return null
+
+  const normalizedDir = rawDir.replace(/\\/g, "/")
+  if (isAbsolute(normalizedDir)) {
+    console.warn("[AGENTS] Skipping harness AGENTS absolute path:", rawDir)
+    return null
+  }
+
+  const resolvedDir = resolve(pluginRoot, normalizedDir)
+  if (!isWithinRoot(resolve(pluginRoot), resolvedDir)) {
+    console.warn("[AGENTS] Skipping harness AGENTS path outside plugin root:", rawDir)
+    return null
+  }
+
+  return join(resolvedDir, DEFAULT_AGENTS_FILENAME)
+}
+
+async function discoverHarnessConfiguredAgentsFiles(
+  context: AgentsPromptPlaceholderContext
+): Promise<AgentsFileReference[]> {
+  if (!hasHarnessboardAgentsContext(context)) {
+    return []
+  }
+
+  const pluginWorkspace = resolve(context.pluginWorkspace)
+  const configPath = resolve(
+    pluginWorkspace,
+    context.projectCode,
+    ".autobizdevops",
+    "features",
+    context.featureId,
+    "agentsmd_load_conf.json"
+  )
+  if (!isWithinRoot(pluginWorkspace, configPath)) {
+    console.warn("[AGENTS] Skipping harness agents config outside plugin workspace:", configPath)
+    return []
+  }
+
+  let raw: string
+  try {
+    raw = await readFile(configPath, "utf8")
+  } catch (error) {
+    console.warn("[AGENTS] Failed to read harness agents config:", configPath, error)
+    return []
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw) as unknown
+  } catch (error) {
+    console.warn("[AGENTS] Invalid harness agents config JSON:", configPath, error)
+    return []
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    console.warn("[AGENTS] Invalid harness agents config shape:", configPath)
+    return []
+  }
+
+  const config = parsed as HarnessAgentsmdLoadConfig
+  if (config.active !== true) {
+    return []
+  }
+
+  const pluginRoot = resolve(context.pluginRoot)
+  const agentPaths: string[] = []
+  if (config.loadSystemAgentsmd === true) {
+    const systemAgentsPath = resolvePluginAgentsPath(pluginRoot, config.systemAgentsmdDir)
+    if (systemAgentsPath) agentPaths.push(systemAgentsPath)
+  }
+
+  if (Array.isArray(config.services)) {
+    for (const item of config.services) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        console.warn("[AGENTS] Ignoring invalid harness service agents config:", item)
+        continue
+      }
+      const service = item as HarnessAgentsmdLoadServiceConfig
+      const agentsPath = resolvePluginAgentsPath(pluginRoot, service.agentsmdDir)
+      if (agentsPath) agentPaths.push(agentsPath)
+    }
+  }
+
+  const files: AgentsFileReference[] = []
+  for (const agentsPath of agentPaths) {
+    const file = await resolveSafeAgentsFile(pluginRoot, agentsPath, {
+      rejectHardLinks: true,
+      rejectSymlinks: true
+    })
+    if (file) {
+      files.push(file)
+    } else {
+      console.warn("[AGENTS] Harness configured AGENTS.md not loaded:", agentsPath)
+    }
+  }
+
+  return files
 }
 
 function buildDirectoryChain(rootDir: string, cwd: string): string[] {
@@ -694,15 +824,20 @@ function fitEntriesToTotalBudget(
 export function renderAgentsPrompt(
   cwd: string,
   projectEntries: AgentsPromptEntry[],
-  globalEntries: AgentsPromptEntry[] = []
+  globalEntries: AgentsPromptEntry[] = [],
+  harnessEntries: AgentsPromptEntry[] = []
 ): string | null {
   const globalPrompt = renderAgentsPromptSection(GLOBAL_AGENTS_SECTION_TITLE, globalEntries)
   const projectPrompt = renderAgentsPromptSection(getProjectAgentsSectionTitle(cwd), projectEntries)
+  const harnessPrompt = renderAgentsPromptSection(
+    HARNESS_CONFIGURED_AGENTS_SECTION_TITLE,
+    harnessEntries
+  )
+  const prompts = [globalPrompt, projectPrompt, harnessPrompt].filter((prompt): prompt is string =>
+    Boolean(prompt)
+  )
 
-  if (globalPrompt && projectPrompt) {
-    return `${globalPrompt}${AGENTS_PROJECT_SEPARATOR}${projectPrompt}`
-  }
-  return globalPrompt ?? projectPrompt
+  return prompts.length > 0 ? prompts.join(AGENTS_PROJECT_SEPARATOR) : null
 }
 
 export async function loadAgentsPromptForWorkspace(
@@ -717,6 +852,7 @@ export async function loadAgentsPromptForWorkspace(
   const projectRoot = await findProjectRootByGitMarker(cwd)
   const globalPaths = await discoverGlobalAgentsFiles()
   const projectPaths = await discoverAgentsFiles(projectRoot, cwd)
+  const harnessPaths = await discoverHarnessConfiguredAgentsFiles(placeholderContext)
   const { globalMaxBytes, projectMaxBytes, totalMaxBytes } = normalizeAgentsPromptBudget(budget)
   const globalResult = await readAgentsFiles(
     globalPaths,
@@ -727,6 +863,12 @@ export async function loadAgentsPromptForWorkspace(
     projectPaths,
     projectMaxBytes,
     getProjectAgentsSectionTitle(cwd),
+    placeholderContext
+  )
+  const harnessResult = await readAgentsFilesInternal(
+    harnessPaths,
+    projectMaxBytes,
+    HARNESS_CONFIGURED_AGENTS_SECTION_TITLE,
     placeholderContext
   )
   const totalBudgetResult =
@@ -742,12 +884,19 @@ export async function loadAgentsPromptForWorkspace(
     prompt: renderAgentsPrompt(
       cwd,
       totalBudgetResult.projectEntries,
-      totalBudgetResult.globalEntries
+      totalBudgetResult.globalEntries,
+      harnessResult.entries
     ),
     projectRoot,
-    loadedPaths: [...totalBudgetResult.globalEntries, ...totalBudgetResult.projectEntries].map(
-      (entry) => entry.path
-    ),
-    truncated: globalResult.truncated || projectResult.truncated || totalBudgetResult.truncated
+    loadedPaths: [
+      ...totalBudgetResult.globalEntries,
+      ...totalBudgetResult.projectEntries,
+      ...harnessResult.entries
+    ].map((entry) => entry.path),
+    truncated:
+      globalResult.truncated ||
+      projectResult.truncated ||
+      harnessResult.truncated ||
+      totalBudgetResult.truncated
   }
 }

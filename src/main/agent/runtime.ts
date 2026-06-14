@@ -2585,7 +2585,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         pluginRoot,
         pluginWorkspace,
         featureId,
-        projectCode
+        projectCode,
+        systemId
       }
     )
     if (agentsPrompt.prompt) {

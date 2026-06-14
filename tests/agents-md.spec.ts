@@ -652,6 +652,137 @@ async function testEmojiSafeRenderedBudgetTruncation(): Promise<void> {
   })
 }
 
+async function testHarnessConfiguredAgentsLoad(): Promise<void> {
+  await withTempDir("agents-md-harness-configured", async (base) => {
+    const { nested, globalHome } = await setupWorkspace(base)
+    process.env.CMB_COWORK_AGENT_HOME = globalHome
+
+    const pluginRoot = join(base, "plugins", "demo-plugin")
+    const pluginWorkspace = join(base, "plugin-workspace")
+    const projectCode = "DEMO"
+    const featureId = "feature-1"
+    await mkdir(join(pluginRoot, "sys", "SYS1", "svc-a"), { recursive: true })
+    await writeFile(join(pluginRoot, "sys", "SYS1", "AGENTS.md"), "SYSTEM_RULE", "utf8")
+    await mkdir(join(pluginWorkspace, projectCode, ".autobizdevops", "features", featureId), {
+      recursive: true
+    })
+    await writeFile(
+      join(pluginRoot, "sys", "SYS1", "svc-a", "AGENTS.md"),
+      "SERVICE_RULE system={SYSTEM_ID} feature={FEATURE_ID}",
+      "utf8"
+    )
+    await writeFile(
+      join(
+        pluginWorkspace,
+        projectCode,
+        ".autobizdevops",
+        "features",
+        featureId,
+        "agentsmd_load_conf.json"
+      ),
+      JSON.stringify({
+        version: 1,
+        active: true,
+        systemId: "SYS1",
+        loadSystemAgentsmd: true,
+        systemAgentsmdDir: "sys/SYS1",
+        services: [{ service: "svc-a", agentsmdDir: "sys/SYS1/svc-a" }]
+      }),
+      "utf8"
+    )
+
+    const result = await loadAgentsPromptForWorkspace(
+      nested,
+      {
+        globalMaxBytes: 2048,
+        projectMaxBytes: 2048
+      },
+      {
+        pluginRoot,
+        pluginWorkspace,
+        projectCode,
+        featureId,
+        systemId: "SYS1"
+      }
+    )
+
+    const prompt = result.prompt ?? ""
+    assert(
+      prompt.includes("# Harness configured AGENTS.md instructions"),
+      `missing harness configured section: ${prompt}`
+    )
+    assert(
+      prompt.includes("SERVICE_RULE system=SYS1 feature=feature-1"),
+      `harness AGENTS placeholders should be replaced: ${prompt}`
+    )
+    assert(prompt.includes("SYSTEM_RULE"), `system harness AGENTS should load: ${prompt}`)
+    assert(
+      prompt.indexOf("SYSTEM_RULE") < prompt.indexOf("SERVICE_RULE"),
+      `system harness AGENTS should render before service AGENTS: ${prompt}`
+    )
+    assert(
+      result.loadedPaths.includes(join(pluginRoot, "sys", "SYS1", "svc-a", "AGENTS.md")),
+      "harness AGENTS path should be reported as loaded"
+    )
+  })
+}
+
+async function testHarnessConfigIgnoredWithoutCompleteContext(): Promise<void> {
+  await withTempDir("agents-md-harness-context-gate", async (base) => {
+    const { nested, globalHome } = await setupWorkspace(base)
+    process.env.CMB_COWORK_AGENT_HOME = globalHome
+
+    const pluginRoot = join(base, "plugins", "demo-plugin")
+    const pluginWorkspace = join(base, "plugin-workspace")
+    const projectCode = "DEMO"
+    const featureId = "feature-1"
+    await mkdir(join(pluginRoot, "sys", "SYS1", "svc-a"), { recursive: true })
+    await mkdir(join(pluginWorkspace, projectCode, ".autobizdevops", "features", featureId), {
+      recursive: true
+    })
+    await writeFile(
+      join(pluginRoot, "sys", "SYS1", "svc-a", "AGENTS.md"),
+      "SHOULD_NOT_LOAD",
+      "utf8"
+    )
+    await writeFile(
+      join(
+        pluginWorkspace,
+        projectCode,
+        ".autobizdevops",
+        "features",
+        featureId,
+        "agentsmd_load_conf.json"
+      ),
+      JSON.stringify({
+        version: 1,
+        active: true,
+        systemId: "SYS1",
+        loadSystemAgentsmd: false,
+        services: [{ service: "svc-a", agentsmdDir: "sys/SYS1/svc-a" }]
+      }),
+      "utf8"
+    )
+
+    const result = await loadAgentsPromptForWorkspace(
+      nested,
+      {
+        globalMaxBytes: 2048,
+        projectMaxBytes: 2048
+      },
+      {
+        pluginRoot,
+        pluginWorkspace,
+        projectCode,
+        featureId
+      }
+    )
+
+    const prompt = result.prompt ?? ""
+    assert(!prompt.includes("SHOULD_NOT_LOAD"), `harness AGENTS should require systemId: ${prompt}`)
+  })
+}
+
 async function run(): Promise<void> {
   try {
     await testGlobalAndProjectOrdering()
@@ -696,6 +827,10 @@ async function run(): Promise<void> {
     console.log("PASS UTF-8 safe truncation")
     await testEmojiSafeRenderedBudgetTruncation()
     console.log("PASS emoji safe rendered truncation")
+    await testHarnessConfiguredAgentsLoad()
+    console.log("PASS harness configured AGENTS load")
+    await testHarnessConfigIgnoredWithoutCompleteContext()
+    console.log("PASS harness context gate")
   } finally {
     delete process.env.CMB_COWORK_AGENT_HOME
   }

@@ -79,6 +79,7 @@ import type {
   HarnessNodeStatus,
   HarnessRunDetailViewModel,
   HarnessRunNode,
+  HarnessServiceAgentsOptions,
   HarnessSessionBinding,
   HarnessAdapterRegistryItem,
   HarnessBoardCompatibility,
@@ -1436,18 +1437,30 @@ function FeatureCreateDialog({
   featureName,
   creating,
   error,
+  serviceOptions,
+  selectedServices,
+  loadingServices,
+  serviceOptionsWarning,
   onOpenChange,
   onChange,
+  onToggleService,
   onSubmit
 }: {
   project: HarnessProjectListItem | null
   featureName: string
   creating: boolean
   error: string | null
+  serviceOptions: HarnessServiceAgentsOptions | null
+  selectedServices: string[]
+  loadingServices: boolean
+  serviceOptionsWarning: string | null
   onOpenChange: (open: boolean) => void
   onChange: (featureName: string) => void
+  onToggleService: (service: string, checked: boolean) => void
   onSubmit: () => void
 }): React.JSX.Element {
+  const showServiceOptions =
+    loadingServices || Boolean(serviceOptionsWarning) || Boolean(serviceOptions?.active)
   const featureNameError = getHarnessNameError("特性名称", featureName)
 
   return (
@@ -1478,6 +1491,62 @@ function FeatureCreateDialog({
             />
             {featureNameError && <span className="text-status-critical">{featureNameError}</span>}
           </label>
+          {showServiceOptions && (
+            <div className="grid gap-2">
+              <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                <span>涉及服务</span>
+                <TooltipProvider delayDuration={150}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        className="inline-flex size-5 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
+                        aria-label="涉及服务说明"
+                      >
+                        <Info className="size-3.5" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className="z-[70] max-w-72">
+                      默认加载对应服务的 AGENTS.md 到系统提示词中。
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
+              {serviceOptionsWarning && (
+                <div className="rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
+                  {serviceOptionsWarning}
+                </div>
+              )}
+              {loadingServices ? (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3.5 animate-spin" />
+                  加载服务配置中
+                </div>
+              ) : serviceOptions?.active && serviceOptions.services.length > 0 ? (
+                <ScrollArea className="max-h-[328px] rounded-md border border-border bg-background">
+                  <div className="grid py-1">
+                    {serviceOptions.services.map((service) => {
+                      const checked = selectedServices.includes(service.service)
+                      return (
+                        <label
+                          key={service.service}
+                          className="flex h-8 min-w-0 cursor-pointer items-center gap-2 px-3 text-sm text-foreground hover:bg-muted/60"
+                        >
+                          <input
+                            type="checkbox"
+                            className="size-4 shrink-0 accent-primary"
+                            checked={checked}
+                            onChange={(event) => onToggleService(service.service, event.target.checked)}
+                          />
+                          <span className="truncate">{service.service}</span>
+                        </label>
+                      )
+                    })}
+                  </div>
+                </ScrollArea>
+              ) : null}
+            </div>
+          )}
           {error && (
             <div className="rounded-md border border-status-critical/30 bg-status-critical/10 px-3 py-2 text-sm text-status-critical">
               {error}
@@ -3144,6 +3213,10 @@ export function HarnessBoardView({
   const [featureDialogProject, setFeatureDialogProject] = useState<HarnessProjectListItem | null>(null)
   const [featureName, setFeatureName] = useState("")
   const [featureError, setFeatureError] = useState<string | null>(null)
+  const [featureServiceOptions, setFeatureServiceOptions] = useState<HarnessServiceAgentsOptions | null>(null)
+  const [selectedFeatureServices, setSelectedFeatureServices] = useState<string[]>([])
+  const [loadingFeatureServices, setLoadingFeatureServices] = useState(false)
+  const [featureServiceOptionsWarning, setFeatureServiceOptionsWarning] = useState<string | null>(null)
   const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const {
@@ -3181,6 +3254,7 @@ export function HarnessBoardView({
   const selectedProjectRefreshInFlightRef = useRef(false)
   const skipRunDetailLoadForSessionRef = useRef<string | null>(null)
   const loadProjectsRequestIdRef = useRef(0)
+  const featureServiceOptionsRequestIdRef = useRef(0)
   projectsRef.current = projects
   selectedProjectIdRef.current = selectedProjectId
   selectedFeatureRef.current = selectedFeature
@@ -3638,21 +3712,57 @@ export function HarnessBoardView({
       toast.warning(compatibilityMessage)
       return
     }
+    const requestId = ++featureServiceOptionsRequestIdRef.current
     setFeatureDialogProject(project)
     setFeatureName("")
     setFeatureError(null)
+    setSelectedFeatureServices([])
+    setFeatureServiceOptions(null)
+    setFeatureServiceOptionsWarning(null)
+    setLoadingFeatureServices(true)
+    void window.api.harnessBoard
+      .getFeatureServiceOptions(project.projectId)
+      .then((options) => {
+        if (requestId !== featureServiceOptionsRequestIdRef.current) return
+        setFeatureServiceOptions(options)
+        setFeatureServiceOptionsWarning(options.warning ?? null)
+      })
+      .catch((error) => {
+        if (requestId !== featureServiceOptionsRequestIdRef.current) return
+        setFeatureServiceOptions(null)
+        setFeatureServiceOptionsWarning(cleanIpcError(error))
+      })
+      .finally(() => {
+        if (requestId === featureServiceOptionsRequestIdRef.current) {
+          setLoadingFeatureServices(false)
+        }
+      })
   }, [])
 
   const handleFeatureDialogOpenChange = useCallback(
     (open: boolean): void => {
       if (!open && !creatingFeatureProjectId) {
+        featureServiceOptionsRequestIdRef.current += 1
         setFeatureDialogProject(null)
         setFeatureName("")
         setFeatureError(null)
+        setFeatureServiceOptions(null)
+        setSelectedFeatureServices([])
+        setLoadingFeatureServices(false)
+        setFeatureServiceOptionsWarning(null)
       }
     },
     [creatingFeatureProjectId]
   )
+
+  const handleToggleFeatureService = useCallback((service: string, checked: boolean): void => {
+    setSelectedFeatureServices((current) => {
+      if (checked) {
+        return current.includes(service) ? current : [...current, service]
+      }
+      return current.filter((item) => item !== service)
+    })
+  }, [])
 
   const handleSubmitFeature = useCallback(async (): Promise<void> => {
     if (!featureDialogProject || creatingFeatureRef.current) return
@@ -3673,11 +3783,16 @@ export function HarnessBoardView({
     try {
       const result = await window.api.harnessBoard.createFeature({
         projectId: featureDialogProject.projectId,
-        feature
+        feature,
+        selectedServices: selectedFeatureServices
       })
 
       setFeatureDialogProject(null)
       setFeatureName("")
+      setFeatureServiceOptions(null)
+      setSelectedFeatureServices([])
+      setLoadingFeatureServices(false)
+      setFeatureServiceOptionsWarning(null)
       await loadProjectDetail(result.projectId)
       setSelectedProjectId(result.projectId)
       setSelectedFeature({
@@ -3694,7 +3809,8 @@ export function HarnessBoardView({
   }, [
     featureDialogProject,
     featureName,
-    loadProjectDetail
+    loadProjectDetail,
+    selectedFeatureServices
   ])
 
   const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
@@ -4105,8 +4221,13 @@ export function HarnessBoardView({
           featureName={featureName}
           creating={creatingFeatureProjectId !== null}
           error={featureError}
+          serviceOptions={featureServiceOptions}
+          selectedServices={selectedFeatureServices}
+          loadingServices={loadingFeatureServices}
+          serviceOptionsWarning={featureServiceOptionsWarning}
           onOpenChange={handleFeatureDialogOpenChange}
           onChange={setFeatureName}
+          onToggleService={handleToggleFeatureService}
           onSubmit={() => void handleSubmitFeature()}
         />
         <ProjectEditDialog
@@ -4263,8 +4384,13 @@ export function HarnessBoardView({
         featureName={featureName}
         creating={creatingFeatureProjectId !== null}
         error={featureError}
+        serviceOptions={featureServiceOptions}
+        selectedServices={selectedFeatureServices}
+        loadingServices={loadingFeatureServices}
+        serviceOptionsWarning={featureServiceOptionsWarning}
         onOpenChange={handleFeatureDialogOpenChange}
         onChange={setFeatureName}
+        onToggleService={handleToggleFeatureService}
         onSubmit={() => void handleSubmitFeature()}
       />
       <ProjectFormDialog

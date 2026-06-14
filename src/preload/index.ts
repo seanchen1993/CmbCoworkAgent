@@ -56,6 +56,7 @@ import type {
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
   HarnessAdapterRegistryItem,
+  HarnessServiceAgentsOptions,
   HarnessWatchRefChangedEvent
 } from "../shared/harness-board-types"
 import type {
@@ -2683,6 +2684,11 @@ const api = {
         "harnessBoard:createFeature",
         input
       ) as Promise<HarnessFeatureCreateResult>,
+    getFeatureServiceOptions: (projectId: string): Promise<HarnessServiceAgentsOptions> =>
+      ipcRenderer.invoke(
+        "harnessBoard:getFeatureServiceOptions",
+        projectId
+      ) as Promise<HarnessServiceAgentsOptions>,
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput

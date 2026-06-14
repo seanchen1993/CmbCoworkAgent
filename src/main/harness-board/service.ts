@@ -1,6 +1,6 @@
 import { execFileSync } from "child_process"
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs"
-import { basename, isAbsolute, join, relative, resolve } from "path"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "path"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import { v4 as uuid } from "uuid"
@@ -28,6 +28,8 @@ import type {
   HarnessRunDetailViewModel,
   HarnessRunNode,
   HarnessFeatureSummary,
+  HarnessServiceAgentsOptions,
+  HarnessServiceAgentsServiceOption,
   HarnessStatus,
   HarnessWatchRef,
   HarnessWorkflow,
@@ -75,6 +77,21 @@ interface HarnessInvocationLogOptions {
 interface HarnessHookLogEntry {
   nodeId: string
   hook: HarnessRunNode["hooks"][number]
+}
+
+interface SystemHarnessConfig {
+  active_condition?: unknown
+  system_agentsmd_dir?: unknown
+  services?: unknown
+}
+
+interface SystemHarnessServiceConfig {
+  service?: unknown
+  agentsmd_dir?: unknown
+}
+
+interface InternalHarnessServiceAgentsOptions extends HarnessServiceAgentsOptions {
+  configured: boolean
 }
 
 const HARNESS_BOARD_FILE = join(getOpenworkDir(), "harness-board-projects.json")
@@ -686,6 +703,13 @@ function readBoardConfigPlatformText(cwd: string, key: HarnessPlatformConfigKey)
   return command || null
 }
 
+function readBoardConfigTopLevelText(cwd: string, key: string): string | null {
+  const parsed = readBoardConfig(cwd)
+  if (!parsed) return null
+  const value = normalizeText(parsed[key]).trim()
+  return value || null
+}
+
 function readBoardConfigInspectCommand(cwd: string, mode: HarnessInspectCommandName): string | null {
   return readBoardConfigPlatformText(cwd, HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode])
 }
@@ -702,6 +726,173 @@ function projectDirectoryPath(project: HarnessProjectMetadata): string {
 function isInsideDirectory(basePath: string, targetPath: string): boolean {
   const relativePath = relative(resolve(basePath), resolve(targetPath))
   return relativePath === "" || (!!relativePath && !relativePath.startsWith("..") && !isAbsolute(relativePath))
+}
+
+function replaceSystemHarnessPlaceholders(value: string, systemId: string): string {
+  return value.replace(/\{SYSTEM_ID\}|\$\{SYSTEM_ID\}/g, systemId)
+}
+
+function resolvePluginRelativePath(
+  pluginRoot: string,
+  value: unknown,
+  label: string
+): { absolutePath: string; relativePath: string } {
+  const rawPath = normalizeText(value).trim()
+  if (!rawPath) {
+    throw new Error(`${label} is empty`)
+  }
+
+  const normalizedPath = rawPath.replace(/\\/g, "/")
+  if (isAbsolute(normalizedPath)) {
+    throw new Error(`${label} must be relative to plugin root`)
+  }
+
+  const absolutePath = resolve(pluginRoot, normalizedPath)
+  if (!isInsideDirectory(pluginRoot, absolutePath)) {
+    throw new Error(`${label} resolves outside plugin root`)
+  }
+
+  return {
+    absolutePath,
+    relativePath: relative(pluginRoot, absolutePath).replace(/\\/g, "/")
+  }
+}
+
+function inactiveServiceAgentsOptions(
+  systemId: string,
+  configured: boolean,
+  warning?: string
+): InternalHarnessServiceAgentsOptions {
+  return {
+    active: false,
+    configured,
+    systemId,
+    services: [],
+    ...(warning ? { warning } : {})
+  }
+}
+
+function readSystemHarnessConfig(project: HarnessProjectMetadata): InternalHarnessServiceAgentsOptions {
+  const systemId = normalizeText(project.systemId).trim()
+  const pluginRoot = adapterPluginDir(project)
+
+  let harnessConfigTemplate: string | null
+  try {
+    harnessConfigTemplate = readBoardConfigTopLevelText(pluginRoot, "systemHarnessConf")
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return inactiveServiceAgentsOptions(systemId, true, `Failed to read board_config.json: ${message}`)
+  }
+  if (!harnessConfigTemplate) {
+    return inactiveServiceAgentsOptions(systemId, false)
+  }
+
+  let harnessConfigPath: { absolutePath: string; relativePath: string }
+  try {
+    harnessConfigPath = resolvePluginRelativePath(
+      pluginRoot,
+      replaceSystemHarnessPlaceholders(harnessConfigTemplate, systemId),
+      "systemHarnessConf"
+    )
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return inactiveServiceAgentsOptions(systemId, true, message)
+  }
+
+  if (!existsSync(harnessConfigPath.absolutePath)) {
+    return inactiveServiceAgentsOptions(
+      systemId,
+      true,
+      `Service agents config not found: ${harnessConfigPath.relativePath}`
+    )
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(readFileSync(harnessConfigPath.absolutePath, "utf-8")) as unknown
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return inactiveServiceAgentsOptions(
+      systemId,
+      true,
+      `Invalid service agents config ${harnessConfigPath.relativePath}: ${message}`
+    )
+  }
+
+  if (!isObject(parsed)) {
+    return inactiveServiceAgentsOptions(
+      systemId,
+      true,
+      `Invalid service agents config ${harnessConfigPath.relativePath}: top-level JSON is not an object`
+    )
+  }
+
+  const config = parsed as SystemHarnessConfig
+  if (config.active_condition !== true) {
+    return inactiveServiceAgentsOptions(systemId, true)
+  }
+
+  const warnings: string[] = []
+  let systemAgentsmdDir: string | undefined
+  const rawSystemAgentsmdDir = normalizeText(config.system_agentsmd_dir).trim()
+  if (rawSystemAgentsmdDir) {
+    try {
+      systemAgentsmdDir = resolvePluginRelativePath(
+        pluginRoot,
+        rawSystemAgentsmdDir,
+        "system_agentsmd_dir"
+      ).relativePath
+    } catch (error) {
+      warnings.push(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const services: HarnessServiceAgentsServiceOption[] = []
+  if (Array.isArray(config.services)) {
+    for (const item of config.services) {
+      if (!isObject(item)) {
+        warnings.push("Ignored service config because it is not an object")
+        continue
+      }
+      const serviceConfig = item as SystemHarnessServiceConfig
+      const service = normalizeText(serviceConfig.service).trim()
+      if (!service) {
+        warnings.push("Ignored service config with empty service")
+        continue
+      }
+      try {
+        services.push({
+          service,
+          agentsmdDir: resolvePluginRelativePath(
+            pluginRoot,
+            serviceConfig.agentsmd_dir,
+            `agentsmd_dir for ${service}`
+          ).relativePath
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        warnings.push(message)
+      }
+    }
+  } else {
+    warnings.push("services must be an array")
+  }
+
+  return {
+    active: true,
+    configured: true,
+    systemId,
+    ...(systemAgentsmdDir ? { systemAgentsmdDir } : {}),
+    services,
+    ...(warnings.length > 0 ? { warning: warnings.join("; ") } : {})
+  }
+}
+
+function toPublicServiceAgentsOptions(
+  options: InternalHarnessServiceAgentsOptions
+): HarnessServiceAgentsOptions {
+  const { configured: _configured, ...publicOptions } = options
+  return publicOptions
 }
 
 function resolveAdapterFilePath(project: HarnessProjectMetadata, value: unknown): string | null {
@@ -1645,6 +1836,16 @@ export function buildHarnessFeatureDialogTips(projectId: string, slug: string): 
   return replaceHarnessConfigPlaceholders(template, project, "run", cwd, feature).trim() || null
 }
 
+export function getFeatureServiceOptions(projectId: string): HarnessServiceAgentsOptions {
+  const normalizedProjectId = normalizeText(projectId).trim()
+  if (!normalizedProjectId) {
+    throw new Error("Project is required")
+  }
+
+  const project = requireProject(normalizedProjectId)
+  return toPublicServiceAgentsOptions(readSystemHarnessConfig(project))
+}
+
 export function listHarnessProjects(): HarnessProjectListItem[] {
   return readProjectStore().projects.map(toListItem)
 }
@@ -1700,6 +1901,75 @@ export function createHarnessProject(input: HarnessProjectCreateInput): HarnessP
   return project
 }
 
+function agentsmdLoadConfPath(project: HarnessProjectMetadata, feature: string): string {
+  return join(
+    projectDirectoryPath(project),
+    ".autobizdevops",
+    "features",
+    feature,
+    "agentsmd_load_conf.json"
+  )
+}
+
+function writeAgentsmdLoadConf(
+  project: HarnessProjectMetadata,
+  feature: string,
+  config: Record<string, unknown>
+): void {
+  const configPath = agentsmdLoadConfPath(project, feature)
+  mkdirSync(dirname(configPath), { recursive: true })
+  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf-8")
+}
+
+function writeFeatureAgentsmdLoadConf(
+  project: HarnessProjectMetadata,
+  feature: string,
+  selectedServices: unknown
+): void {
+  const options = readSystemHarnessConfig(project)
+  if (!options.active) {
+    if (options.configured && options.warning) {
+      writeAgentsmdLoadConf(project, feature, {
+        version: 1,
+        active: false,
+        systemId: options.systemId,
+        loadSystemAgentsmd: false,
+        systemAgentsmdDir: "",
+        services: []
+      })
+      console.warn("[HarnessBoard] Service AGENTS config is inactive:", options.warning)
+    }
+    return
+  }
+
+  const selectedServiceNames = Array.isArray(selectedServices)
+    ? selectedServices
+        .map((item) => normalizeText(item).trim())
+        .filter((item): item is string => Boolean(item))
+    : []
+  const configuredServices = new Map(options.services.map((service) => [service.service, service]))
+  const services = selectedServiceNames
+    .filter((service, index, array) => array.indexOf(service) === index)
+    .map((service) => configuredServices.get(service))
+    .filter((service): service is HarnessServiceAgentsServiceOption => Boolean(service))
+
+  const ignoredServices = [...new Set(selectedServiceNames)].filter(
+    (service) => !configuredServices.has(service)
+  )
+  if (ignoredServices.length > 0) {
+    console.warn("[HarnessBoard] Ignored unknown selected services:", ignoredServices)
+  }
+
+  writeAgentsmdLoadConf(project, feature, {
+    version: 1,
+    active: true,
+    systemId: options.systemId,
+    loadSystemAgentsmd: false,
+    systemAgentsmdDir: options.systemAgentsmdDir ?? "",
+    services
+  })
+}
+
 export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessFeatureCreateResult {
   validateFeatureCreateInput(input)
   const project = requireProject(input.projectId)
@@ -1718,6 +1988,13 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
       throw new Error("该特性在当前项目路径下已存在")
     }
     throw new Error(`创建特性失败：${raw}`)
+  }
+
+  try {
+    writeFeatureAgentsmdLoadConf(project, feature, input.selectedServices)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.warn("[HarnessBoard] Failed to write agentsmd_load_conf.json:", message)
   }
 
   return {

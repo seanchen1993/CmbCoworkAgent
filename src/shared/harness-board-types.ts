@@ -111,6 +111,7 @@ export interface HarnessProjectCreateInput {
 export interface HarnessFeatureCreateInput {
   projectId: string
   feature: string
+  selectedServices?: string[]
 }
 
 export interface HarnessFeatureCreateResult {
@@ -118,6 +119,19 @@ export interface HarnessFeatureCreateResult {
   slug: string
   title: string
   workspacePath: string
+}
+
+export interface HarnessServiceAgentsServiceOption {
+  service: string
+  agentsmdDir: string
+}
+
+export interface HarnessServiceAgentsOptions {
+  active: boolean
+  systemId: string
+  systemAgentsmdDir?: string
+  services: HarnessServiceAgentsServiceOption[]
+  warning?: string
 }
 
 export interface HarnessProjectMetadataUpdateInput {

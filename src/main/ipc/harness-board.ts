@@ -4,6 +4,7 @@ import {
   createHarnessFeature,
   createHarnessProject,
   buildHarnessFeatureDialogTips,
+  getFeatureServiceOptions,
   getHarnessProjectDetail,
   getHarnessProjectDetails,
   getHarnessRunDetail,
@@ -19,7 +20,8 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
-  HarnessAdapterRegistryItem
+  HarnessAdapterRegistryItem,
+  HarnessServiceAgentsOptions
 } from "../../shared/harness-board-types"
 import type {
   HarnessFeatureCreateInput,
@@ -48,6 +50,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     "harnessBoard:createFeature",
     async (_event, input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> => {
       return createHarnessFeature(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getFeatureServiceOptions",
+    async (_event, projectId: string): Promise<HarnessServiceAgentsOptions> => {
+      return getFeatureServiceOptions(projectId)
     }
   )
 
