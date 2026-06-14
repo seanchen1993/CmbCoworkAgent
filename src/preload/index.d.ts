@@ -1835,6 +1835,7 @@ interface CustomAPI {
       input: HarnessProjectMetadataUpdateInput
     ) => Promise<HarnessProjectMetadata>
     archiveProject: (projectId: string) => Promise<HarnessProjectMetadata>
+    deleteProject: (projectId: string) => Promise<HarnessProjectMetadata>
     getProjectDetail: (projectId: string) => Promise<HarnessProjectDetailViewModel>
     getProjectDetails: (
       projectIds: string[],

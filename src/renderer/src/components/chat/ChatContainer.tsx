@@ -920,6 +920,7 @@ interface ChatContainerProps {
   showGitChangeNotice?: boolean
   surface?: ChatSurface
   hideWelcomeSkillTabs?: boolean
+  readOnlyReason?: string | null
   onOpenGitPanel?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
   onHarnessSessionCreated?: (threadId: string) => void
@@ -1398,14 +1399,16 @@ export function ChatContainer({
   showGitChangeNotice = false,
   surface = "default",
   hideWelcomeSkillTabs = false,
+  readOnlyReason = null,
   onOpenGitPanel,
   onThreadGitStatusChange,
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
+  const readOnly = Boolean(readOnlyReason)
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
-  const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips
+  const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -1931,7 +1934,8 @@ export function ChatContainer({
     (worker) => worker.status === "running"
   )
   const isLoading = streamData.isLoading || scheduledTaskLoading
-  const isHarnessContextReminderEnabled = surface === "harness-project" && Boolean(harnessFeatureBinding)
+  const isHarnessContextReminderEnabled =
+    surface === "harness-project" && Boolean(harnessFeatureBinding) && !readOnly
   const agentModeSwitchDisabledReason = disableCoordinatorModeOption
     ? "项目模式暂不支持子代理协同模式，只能使用 Solo Agent。"
     : !canChangeAgentMode
@@ -2904,9 +2908,10 @@ export function ChatContainer({
     isHarnessContextReminderEnabled,
     contextReminder
   )
-  const effectiveInputDisabled = inputDisabled || contextReminderPending
-  const effectiveComposerControlsDisabled = composerControlsDisabled || contextReminderPending
+  const effectiveInputDisabled = inputDisabled || contextReminderPending || readOnly
+  const effectiveComposerControlsDisabled = composerControlsDisabled || contextReminderPending || readOnly
   const inputPlaceholder = useMemo(() => {
+    if (readOnlyReason) return readOnlyReason
     if (contextReminderPending) return "请先处理上下文提醒"
     const goal = goalUi.goal
     if (isLoading) {
@@ -2934,6 +2939,7 @@ export function ChatContainer({
     hasActiveGoalRunning,
     goalControlAllowedWhileLoading,
     isLoading,
+    readOnlyReason,
     scheduledTaskLoading,
     streamData.isLoading
   ])
@@ -3195,6 +3201,7 @@ export function ChatContainer({
     // future invoker (hotkey, programmatic call) can't accidentally ship the
     // literal "/xxx" text as a message.
     if (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) return
+    if (readOnly) return
     if (contextReminderPending) return
     if (
       (!trimmedInput && attachments.length === 0 && !selectedSkill) ||

@@ -2703,6 +2703,11 @@ const api = {
         "harnessBoard:archiveProject",
         projectId
       ) as Promise<HarnessProjectMetadata>,
+    deleteProject: (projectId: string): Promise<HarnessProjectMetadata> =>
+      ipcRenderer.invoke(
+        "harnessBoard:deleteProject",
+        projectId
+      ) as Promise<HarnessProjectMetadata>,
     getProjectDetail: (projectId: string): Promise<HarnessProjectDetailViewModel> =>
       ipcRenderer.invoke(
         "harnessBoard:getProjectDetail",

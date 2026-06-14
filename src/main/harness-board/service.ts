@@ -2145,6 +2145,18 @@ export function archiveHarnessProject(projectId: string): HarnessProjectMetadata
   return archived
 }
 
+export function deleteHarnessProject(projectId: string): HarnessProjectMetadata {
+  const store = readProjectStore()
+  const index = store.projects.findIndex((item) => item.projectId === projectId)
+  if (index === -1) {
+    throw new Error("Project not found")
+  }
+
+  const [deleted] = store.projects.splice(index, 1)
+  writeProjectStore(store)
+  return deleted
+}
+
 export function getHarnessProjectDetail(projectId: string): HarnessProjectDetailViewModel {
   return getHarnessProjectDetails([projectId])[projectId]
 }

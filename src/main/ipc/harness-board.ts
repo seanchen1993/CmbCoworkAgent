@@ -5,6 +5,7 @@ import {
   createHarnessProject,
   buildHarnessFeatureDialogTips,
   getHarnessDynamicWorkflowConfig,
+  deleteHarnessProject,
   getHarnessProjectDetail,
   getHarnessProjectDetails,
   getHarnessRunDetail,
@@ -105,6 +106,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     "harnessBoard:archiveProject",
     async (_event, projectId: string): Promise<HarnessProjectMetadata> => {
       return archiveHarnessProject(projectId)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:deleteProject",
+    async (_event, projectId: string): Promise<HarnessProjectMetadata> => {
+      return deleteHarnessProject(projectId)
     }
   )
 
