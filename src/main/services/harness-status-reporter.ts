@@ -71,6 +71,46 @@ function getEventIndex(): string {
   return (import.meta.env.VITE_ES_INDEX_EVENT as string) || "devclaw_event"
 }
 
+/**
+ * Base URL of the existing event-report backend (same as the trace/event upload
+ * endpoint). When configured, project snapshots are relayed through the backend
+ * (`POST {base}/api/traces/project-snapshot`, which performs the non-empty
+ * preservation guard server-side) so machines that cannot reach ES directly
+ * still work; when empty, we fall back to writing ES directly.
+ */
+function getEventRelayBaseUrl(): string {
+  const raw = import.meta.env.VITE_API_TRACE_BASE_URL as string | undefined
+  return raw ? raw.trim().replace(/\/+$/, "") : ""
+}
+
+/**
+ * Relay the snapshot upsert through the backend event service (which performs
+ * the non-empty preservation guard itself). Returns `false` when the backend
+ * does not yet expose this endpoint (HTTP 404), signalling the caller to fall
+ * back to writing ES directly — the base URL is always configured (shared with
+ * the other reporting endpoints), so 404 is the only reliable "endpoint not
+ * deployed yet" signal.
+ */
+async function upsertProjectSnapshotViaBackend(
+  baseUrl: string,
+  docId: string,
+  doc: Record<string, unknown>,
+  newFeatureCount: number
+): Promise<boolean> {
+  const resp = await fetch(`${baseUrl}/api/traces/project-snapshot`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ docId, document: doc, newFeatureCount, preserveIfEmpty: true }),
+    signal: AbortSignal.timeout(WRITE_TIMEOUT_MS)
+  })
+  if (resp.status === 404) return false
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "")
+    throw new Error(`relay ${resp.status}: ${text.slice(0, 200)}`)
+  }
+  return true
+}
+
 /** Deterministic ES `_id` so re-polls overwrite the same document. */
 function projectDocId(projectId: string): string {
   return `harness_project_${projectId}`
@@ -233,8 +273,10 @@ async function fetchExistingFeatureCount(docId: string): Promise<number | null> 
 // ─────────────────────────────────────────────────────────
 
 async function pollOnce(): Promise<void> {
-  // Skip the (heavy) inspect work entirely when ES is not configured.
-  if (getEsNodes().length === 0) return
+  // Skip the (heavy) inspect work entirely when there is nowhere to report to —
+  // neither the backend relay nor a direct ES connection is configured.
+  const relayBaseUrl = getEventRelayBaseUrl()
+  if (!relayBaseUrl && getEsNodes().length === 0) return
 
   let projects: HarnessProjectListItem[] = []
   try {
@@ -267,6 +309,23 @@ async function pollOnce(): Promise<void> {
       // still exists and previously reported features. Don't let that empty
       // result clobber a good snapshot: when the probe is empty but the stored
       // doc already has features, preserve the existing data and skip the write.
+      if (relayBaseUrl) {
+        // The backend performs the non-empty preservation guard itself, so we
+        // just hand it the doc + probe count in a single call.
+        const handled = await upsertProjectSnapshotViaBackend(
+          relayBaseUrl,
+          docId,
+          doc,
+          newFeatureCount
+        )
+        if (handled) {
+          reported += 1
+          continue
+        }
+        // 404: backend endpoint not deployed yet → fall through to direct ES.
+      }
+
+      // Direct-ES fallback: perform the preservation guard client-side.
       if (newFeatureCount === 0) {
         const existing = await fetchExistingFeatureCount(docId)
         if (existing === null || existing > 0) {
