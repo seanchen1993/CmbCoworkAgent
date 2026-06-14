@@ -518,6 +518,13 @@ interface DashboardProjectModeProjectCounts {
   archivedFeatureCount: number
 }
 
+type DashboardProjectModeProjectSortKey =
+  | "featureCount"
+  | "conversationCount"
+  | "generatedLines"
+  | "archivedAt"
+type DashboardProjectModeProjectSortOrder = "asc" | "desc"
+
 interface DashboardProjectModeProjectPageData {
   projects: DashboardProjectModeProject[]
   total: number
@@ -528,6 +535,8 @@ interface DashboardProjectModeProjectPageData {
   adapterName: string
   creatorKeyword: string
   creatorOrgKeyword: string
+  sortBy: DashboardProjectModeProjectSortKey | null
+  sortOrder: DashboardProjectModeProjectSortOrder
 }
 
 interface DashboardProjectModeProjectPageOptions {
@@ -539,6 +548,8 @@ interface DashboardProjectModeProjectPageOptions {
   adapterName?: string | null
   creatorKeyword?: string | null
   creatorOrgKeyword?: string | null
+  sortBy?: DashboardProjectModeProjectSortKey | null
+  sortOrder?: DashboardProjectModeProjectSortOrder | null
 }
 
 interface DashboardProjectModeAdapter {

@@ -395,6 +395,13 @@ export interface DashboardProjectModeProjectCounts {
   archivedFeatureCount: number
 }
 
+export type DashboardProjectModeProjectSortKey =
+  | "featureCount"
+  | "conversationCount"
+  | "generatedLines"
+  | "archivedAt"
+export type DashboardProjectModeProjectSortOrder = "asc" | "desc"
+
 export interface DashboardProjectModeProjectPageData {
   projects: DashboardProjectModeProject[]
   total: number
@@ -405,6 +412,8 @@ export interface DashboardProjectModeProjectPageData {
   adapterName: string
   creatorKeyword: string
   creatorOrgKeyword: string
+  sortBy: DashboardProjectModeProjectSortKey | null
+  sortOrder: DashboardProjectModeProjectSortOrder
 }
 
 export interface DashboardProjectModeProjectPageOptions {
@@ -416,6 +425,8 @@ export interface DashboardProjectModeProjectPageOptions {
   adapterName?: string | null
   creatorKeyword?: string | null
   creatorOrgKeyword?: string | null
+  sortBy?: DashboardProjectModeProjectSortKey | null
+  sortOrder?: DashboardProjectModeProjectSortOrder | null
 }
 
 export interface DashboardProjectModeAdapter {
@@ -1969,7 +1980,9 @@ export function useDashboard() {
       pageSize: number,
       adapterName: string,
       creatorKeyword: string,
-      creatorOrgKeyword: string
+      creatorOrgKeyword: string,
+      sortBy: DashboardProjectModeProjectSortKey | null = null,
+      sortOrder: DashboardProjectModeProjectSortOrder = "desc"
     ) => {
       const id = ++projectModeProjectPageFetchIdRef.current[status]
       setProjectModeProjectPageLoading((current) => ({ ...current, [status]: true }))
@@ -1984,7 +1997,9 @@ export function useDashboard() {
           keyword,
           adapterName,
           creatorKeyword,
-          creatorOrgKeyword
+          creatorOrgKeyword,
+          sortBy,
+          sortOrder
         })
         if (id !== projectModeProjectPageFetchIdRef.current[status]) return
         if (!result.success) throw new Error(result.error ?? "获取项目列表失败")

@@ -6737,7 +6737,9 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     status: "active",
     page: 1,
     pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
-    keyword: ""
+    keyword: "",
+    sortBy: "conversationCount",
+    sortOrder: "desc"
   })
   return {
     summary: {
@@ -7812,6 +7814,8 @@ interface ProjectModeProjectView {
   creatorUpperOrgLv0?: string
   creatorUpperOrgLv1?: string
   lifecycleStatus?: string
+  /** 生命周期最近变更时间（归档时间用此排序）；ISO 字符串。 */
+  lifecycleUpdatedAt?: string
   compatible?: boolean
   compatibilityStatus?: string
   featureCount: number
@@ -7823,6 +7827,22 @@ interface ProjectModeProjectView {
 }
 
 type ProjectModeProjectStatus = "active" | "archived"
+
+/**
+ * Sortable project-list columns.
+ * - `featureCount` / `archivedAt` are snapshot-doc fields → sorted cheaply in
+ *   the paginated snapshot query. `archivedAt` (= lifecycle updateAt) is only
+ *   meaningful on the「已归档」tab and is its default ordering.
+ * - `conversationCount` / `generatedLines` are per-range metrics on the trace /
+ *   code indices → require the heavier metric-sort path, which is only enabled
+ *   for the「进行中」(active) tab (archived projects accumulate; active are few).
+ */
+type ProjectModeProjectSortKey =
+  | "featureCount"
+  | "conversationCount"
+  | "generatedLines"
+  | "archivedAt"
+type ProjectModeProjectSortOrder = "asc" | "desc"
 
 interface ProjectModeProjectCounts {
   total: number
@@ -7843,6 +7863,8 @@ interface ProjectModeProjectPageData {
   adapterName: string
   creatorKeyword: string
   creatorOrgKeyword: string
+  sortBy: ProjectModeProjectSortKey | null
+  sortOrder: ProjectModeProjectSortOrder
 }
 
 interface ProjectModeProjectPageOptions extends OrgFilterOptions {
@@ -7853,6 +7875,8 @@ interface ProjectModeProjectPageOptions extends OrgFilterOptions {
   adapterName?: string | null
   creatorKeyword?: string | null
   creatorOrgKeyword?: string | null
+  sortBy?: ProjectModeProjectSortKey | null
+  sortOrder?: ProjectModeProjectSortOrder | null
 }
 
 interface ProjectModeAdapterView {
@@ -7917,6 +7941,25 @@ function adapterKey(name: string, version?: string): string {
 
 function normalizeProjectModeProjectStatus(value?: string | null): ProjectModeProjectStatus {
   return value === "archived" ? "archived" : "active"
+}
+
+/**
+ * Resolve the requested sort. `featureCount` is always honoured; the per-range
+ * metric sorts are dropped (→ default name-asc) on the archived tab, so callers
+ * can blindly forward the user's choice without leaking the active-only rule.
+ */
+function normalizeProjectModeProjectSort(
+  options: ProjectModeProjectPageOptions | undefined,
+  status: ProjectModeProjectStatus
+): { sortBy: ProjectModeProjectSortKey | null; sortOrder: ProjectModeProjectSortOrder } {
+  const sortOrder: ProjectModeProjectSortOrder = options?.sortOrder === "asc" ? "asc" : "desc"
+  const key = options?.sortBy
+  if (key === "featureCount") return { sortBy: "featureCount", sortOrder }
+  if (key === "archivedAt" && status === "archived") return { sortBy: "archivedAt", sortOrder }
+  if ((key === "conversationCount" || key === "generatedLines") && status !== "archived") {
+    return { sortBy: key, sortOrder }
+  }
+  return { sortBy: null, sortOrder }
 }
 
 function normalizeProjectModeKeyword(value?: string | null): string {
@@ -8094,25 +8137,30 @@ function buildProjectModeMockAnalytics(projects: ProjectModeProjectView[]): Proj
   }
 }
 
+/** Numeric value of a project for a given sort key (DEV mock only). */
+function projectModeProjectSortValue(
+  project: ProjectModeProjectView,
+  sortBy: ProjectModeProjectSortKey
+): number {
+  if (sortBy === "conversationCount") return project.conversationCount
+  if (sortBy === "generatedLines") return project.codeStats?.generatedLines ?? 0
+  if (sortBy === "archivedAt") {
+    const t = project.lifecycleUpdatedAt ? Date.parse(project.lifecycleUpdatedAt) : NaN
+    return Number.isNaN(t) ? 0 : t
+  }
+  return project.featureCount
+}
+
 function sliceProjectModeProjects(
   projects: ProjectModeProjectView[],
   options?: ProjectModeProjectPageOptions
-): {
-  projects: ProjectModeProjectView[]
-  total: number
-  page: number
-  pageSize: number
-  status: ProjectModeProjectStatus
-  keyword: string
-  adapterName: string
-  creatorKeyword: string
-  creatorOrgKeyword: string
-} {
+): ProjectModeProjectPageData {
   const status = normalizeProjectModeProjectStatus(options?.status)
   const keyword = normalizeProjectModeKeyword(options?.keyword)
   const adapterName = normalizeProjectModeAdapterName(options?.adapterName)
   const creatorKeyword = normalizeProjectModeCreatorKeyword(options?.creatorKeyword)
   const creatorOrgKeyword = normalizeProjectModeCreatorOrgKeyword(options?.creatorOrgKeyword)
+  const { sortBy, sortOrder } = normalizeProjectModeProjectSort(options, status)
   const page = clampLimit(options?.page, 1, 10_000)
   const pageSize = clampLimit(options?.pageSize, 10, 100)
   const filtered = projects
@@ -8121,11 +8169,18 @@ function sliceProjectModeProjects(
     .filter((project) => projectMatchesAdapterName(project, adapterName))
     .filter((project) => projectMatchesCreatorKeyword(project, creatorKeyword))
     .filter((project) => projectMatchesCreatorOrgKeyword(project, creatorOrgKeyword))
-    .sort(compareProjectByName)
-  const total = filtered.length
+  const sorted = sortBy
+    ? [...filtered].sort((a, b) => {
+        const av = projectModeProjectSortValue(a, sortBy)
+        const bv = projectModeProjectSortValue(b, sortBy)
+        if (av !== bv) return sortOrder === "asc" ? av - bv : bv - av
+        return compareProjectByName(a, b)
+      })
+    : filtered.sort(compareProjectByName)
+  const total = sorted.length
   const start = (page - 1) * pageSize
   return {
-    projects: filtered.slice(start, start + pageSize),
+    projects: sorted.slice(start, start + pageSize),
     total,
     page,
     pageSize,
@@ -8133,7 +8188,9 @@ function sliceProjectModeProjects(
     keyword,
     adapterName,
     creatorKeyword,
-    creatorOrgKeyword
+    creatorOrgKeyword,
+    sortBy,
+    sortOrder
   }
 }
 
@@ -8173,6 +8230,7 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     creatorUpperOrgLv1:
       asOptionalString(props.creatorUpperOrgLv1) ?? asOptionalString(source.upperOrgLv1),
     lifecycleStatus: asOptionalString(props.lifecycleStatus),
+    lifecycleUpdatedAt: asOptionalString(props.lifecycleUpdatedAt),
     compatible: typeof props.compatible === "boolean" ? props.compatible : undefined,
     compatibilityStatus: asOptionalString(props.compatibilityStatus),
     featureCount: asNumber(props.featureCount, features.length),
@@ -8448,28 +8506,28 @@ function buildProjectModeCreatorOrgSearchFilter(
  * 列表分页交给 ES：状态(term) + 关键词(wildcard，按 keyword 原值匹配) + 名称排序 + from/size，
  * collapse(projectId) 兜底去重；total 用 cardinality 取去重后的项目数。返回的项目尚未带本期指标。
  */
-async function fetchProjectModeProjectPageHits(
+/**
+ * Build the shared snapshot-index filter set + normalized list options. Reused
+ * by the paginated page query, the metric-sort id-set query, and the per-page
+ * view-by-ids query so all three apply identical status/keyword/adapter/creator/
+ * org filtering.
+ */
+function buildProjectModeProjectListFilters(
   options: ProjectModeProjectPageOptions | undefined,
   access: DashboardAccessContext
-): Promise<{
-  projects: ProjectModeProjectView[]
-  total: number
-  page: number
-  pageSize: number
+): {
+  filters: Record<string, unknown>[]
   status: ProjectModeProjectStatus
   keyword: string
   adapterName: string
   creatorKeyword: string
   creatorOrgKeyword: string
-}> {
+} {
   const status = normalizeProjectModeProjectStatus(options?.status)
   const keyword = normalizeProjectModeKeyword(options?.keyword)
   const adapterName = normalizeProjectModeAdapterName(options?.adapterName)
   const creatorKeyword = normalizeProjectModeCreatorKeyword(options?.creatorKeyword)
   const creatorOrgKeyword = normalizeProjectModeCreatorOrgKeyword(options?.creatorOrgKeyword)
-  const pageSize = clampLimit(options?.pageSize, 10, 100)
-  const maxPage = Math.max(1, Math.floor(ES_MAX_RESULT_WINDOW / pageSize))
-  const page = clampLimit(options?.page, 1, maxPage)
   const orgFilterClause = buildProjectModeOrgFilter(options, access)
 
   const statusFilter: Record<string, unknown>[] =
@@ -8497,37 +8555,66 @@ async function fetchProjectModeProjectPageHits(
   const creatorSearchFilter = buildProjectModeCreatorSearchFilter(creatorKeyword)
   const creatorOrgSearchFilter = buildProjectModeCreatorOrgSearchFilter(creatorOrgKeyword)
 
+  const filters = [
+    ...projectModeSnapshotFilters(orgFilterClause),
+    ...statusFilter,
+    ...keywordFilter,
+    ...adapterFilter,
+    ...(creatorSearchFilter ? [creatorSearchFilter] : []),
+    ...(creatorOrgSearchFilter ? [creatorOrgSearchFilter] : [])
+  ]
+  return { filters, status, keyword, adapterName, creatorKeyword, creatorOrgKeyword }
+}
+
+async function fetchProjectModeProjectPageHits(
+  options: ProjectModeProjectPageOptions | undefined,
+  access: DashboardAccessContext
+): Promise<{
+  projects: ProjectModeProjectView[]
+  total: number
+  page: number
+  pageSize: number
+  status: ProjectModeProjectStatus
+  keyword: string
+  adapterName: string
+  creatorKeyword: string
+  creatorOrgKeyword: string
+}> {
+  const { filters, status, keyword, adapterName, creatorKeyword, creatorOrgKeyword } =
+    buildProjectModeProjectListFilters(options, access)
+  const pageSize = clampLimit(options?.pageSize, 10, 100)
+  const maxPage = Math.max(1, Math.floor(ES_MAX_RESULT_WINDOW / pageSize))
+  const page = clampLimit(options?.page, 1, maxPage)
+  const { sortBy, sortOrder } = normalizeProjectModeProjectSort(options, status)
+
+  // `featureCount` / `archivedAt` live in the snapshot doc and sort here; the
+  // metric sorts are handled upstream by the metric-sort path.
+  const sort =
+    sortBy === "featureCount"
+      ? [
+          { "properties.featureCount": { order: sortOrder } },
+          { "properties.projectId": { order: "asc" } }
+        ]
+      : sortBy === "archivedAt"
+        ? [
+            { "properties.lifecycleUpdatedAt": { order: sortOrder, missing: "_last" } },
+            { "properties.projectId": { order: "asc" } }
+          ]
+        : [{ "properties.name": { order: "asc" } }, { "properties.projectId": { order: "asc" } }]
+
   const body = {
     track_total_hits: false,
     from: (page - 1) * pageSize,
     size: pageSize,
     query: {
       bool: {
-        filter: [
-          ...projectModeSnapshotFilters(orgFilterClause),
-          ...statusFilter,
-          ...keywordFilter,
-          ...adapterFilter,
-          ...(creatorSearchFilter ? [creatorSearchFilter] : []),
-          ...(creatorOrgSearchFilter ? [creatorOrgSearchFilter] : [])
-        ]
+        filter: filters
       }
     },
-    sort: [{ "properties.name": { order: "asc" } }, { "properties.projectId": { order: "asc" } }],
+    sort,
     collapse: { field: "properties.projectId" },
     aggs: { distinct_projects: { cardinality: { field: "properties.projectId" } } },
-    _source: {
-      includes: [
-        "eventTime",
-        "userName",
-        "sapId",
-        "ystId",
-        "orgName",
-        "upperOrgLv0",
-        "upperOrgLv1",
-        "properties"
-      ]
-    }
+    _source: { includes: PROJECT_MODE_SNAPSHOT_SOURCE_INCLUDES }
   }
   const raw = (await esQuery(getEsIndex("event"), body)) as EsSearchResponse
   const hits = raw.hits?.hits ?? []
@@ -8538,6 +8625,165 @@ async function fetchProjectModeProjectPageHits(
     asRecord(asRecord(raw.aggregations).distinct_projects).value,
     projects.length
   )
+  return {
+    projects,
+    total,
+    page,
+    pageSize,
+    status,
+    keyword,
+    adapterName,
+    creatorKeyword,
+    creatorOrgKeyword
+  }
+}
+
+/** `_source` fields needed to build a ProjectModeProjectView from a snapshot hit. */
+const PROJECT_MODE_SNAPSHOT_SOURCE_INCLUDES = [
+  "eventTime",
+  "userName",
+  "sapId",
+  "ystId",
+  "orgName",
+  "upperOrgLv0",
+  "upperOrgLv1",
+  "properties"
+]
+
+/**
+ * Resolve the full set of project ids matching the list filters (no
+ * pagination). Lightweight — a single `terms` agg returning only the ids, capped
+ * at PROJECT_MODE_PROJECT_ID_LIMIT. Used by the metric-sort path to rank the
+ * whole (active) set before paginating in-app.
+ */
+async function fetchProjectModeFilteredProjectIds(
+  filters: Record<string, unknown>[]
+): Promise<string[]> {
+  const raw = (await esQuery(getEsIndex("event"), {
+    size: 0,
+    track_total_hits: false,
+    query: { bool: { filter: filters } },
+    aggs: {
+      ids: { terms: { field: "properties.projectId", size: PROJECT_MODE_PROJECT_ID_LIMIT } }
+    }
+  })) as EsSearchResponse
+  const buckets = asRecord(asRecord(raw.aggregations).ids).buckets
+  if (!Array.isArray(buckets)) return []
+  return buckets.map((bucket) => asString(asRecord(bucket).key)).filter(Boolean)
+}
+
+/**
+ * Per-project `原始生成行数` (Σ code_gen lineCount), keyed by harnessProjectId.
+ * Mirrors how `codeStats.generatedLines` is computed but drops the adopt /
+ * per-feature breakdown, so it stays cheap across the full active project set.
+ */
+async function fetchProjectModeGeneratedLinesByProject(
+  projectIds: string[],
+  range: TimeRange,
+  opts: OrgFilterOptions | undefined,
+  access: DashboardAccessContext
+): Promise<Map<string, number>> {
+  const result = new Map<string, number>()
+  if (projectIds.length === 0) return result
+  const orgFilterClause = buildProjectModeOrgFilter(opts, access)
+  const raw = await fetchProjectModeCodeAggs(
+    projectIds,
+    range,
+    (perBucketAggs, scopedProjectIds) => ({
+      by_project: {
+        terms: {
+          field: "properties.harnessProjectId",
+          size: Math.max(1, scopedProjectIds.length)
+        },
+        aggs: { code_gen: perBucketAggs.code_gen }
+      }
+    }),
+    orgFilterClause ? [orgFilterClause] : []
+  )
+  const buckets = asRecord(asRecord(asRecord(raw).aggregations).by_project).buckets
+  if (Array.isArray(buckets)) {
+    for (const bucket of buckets) {
+      const b = asRecord(bucket)
+      const id = asString(b.key)
+      if (!id) continue
+      result.set(id, asNumber(asRecord(asRecord(b.code_gen).generated_lines).value))
+    }
+  }
+  return result
+}
+
+/** Build project views for an explicit id set (one collapsed hit per project). */
+async function fetchProjectModeProjectViewsByIds(
+  projectIds: string[],
+  filters: Record<string, unknown>[]
+): Promise<Map<string, ProjectModeProjectView>> {
+  const map = new Map<string, ProjectModeProjectView>()
+  if (projectIds.length === 0) return map
+  const raw = (await esQuery(getEsIndex("event"), {
+    track_total_hits: false,
+    size: projectIds.length,
+    query: {
+      bool: { filter: [...filters, { terms: { "properties.projectId": projectIds } }] }
+    },
+    collapse: { field: "properties.projectId" },
+    _source: { includes: PROJECT_MODE_SNAPSHOT_SOURCE_INCLUDES }
+  })) as EsSearchResponse
+  for (const hit of raw.hits?.hits ?? []) {
+    const view = parseProjectModeSnapshotHit(hit)
+    if (view) map.set(view.projectId, view)
+  }
+  return map
+}
+
+/**
+ * Metric-sort page (active tab only): rank the whole filtered active project set
+ * by a per-range metric, then paginate in-app and fetch just the page's views.
+ * Returns the same shape as `fetchProjectModeProjectPageHits` so the shared
+ * enrichment in `fetchProjectModeProjectPage` applies unchanged.
+ */
+async function fetchProjectModeProjectPageMetricSorted(
+  range: TimeRange,
+  options: ProjectModeProjectPageOptions | undefined,
+  access: DashboardAccessContext,
+  sortBy: "conversationCount" | "generatedLines",
+  sortOrder: ProjectModeProjectSortOrder
+): Promise<{
+  projects: ProjectModeProjectView[]
+  total: number
+  page: number
+  pageSize: number
+  status: ProjectModeProjectStatus
+  keyword: string
+  adapterName: string
+  creatorKeyword: string
+  creatorOrgKeyword: string
+}> {
+  const { filters, status, keyword, adapterName, creatorKeyword, creatorOrgKeyword } =
+    buildProjectModeProjectListFilters(options, access)
+  const pageSize = clampLimit(options?.pageSize, 10, 100)
+  const allIds = await fetchProjectModeFilteredProjectIds(filters)
+  const total = allIds.length
+  const maxPage = Math.max(1, Math.ceil(total / pageSize))
+  const page = clampLimit(options?.page, 1, maxPage)
+
+  const metric =
+    sortBy === "conversationCount"
+      ? (await fetchProjectModePageUsage(allIds, range, options, access)).perProject
+      : await fetchProjectModeGeneratedLinesByProject(allIds, range, options, access)
+
+  const dir = sortOrder === "asc" ? 1 : -1
+  const ordered = [...allIds].sort((a, b) => {
+    const av = metric.get(a) ?? 0
+    const bv = metric.get(b) ?? 0
+    if (av !== bv) return (av - bv) * dir
+    return a.localeCompare(b)
+  })
+  const pageIds = ordered.slice((page - 1) * pageSize, page * pageSize)
+  const views = await fetchProjectModeProjectViewsByIds(pageIds, filters)
+  const projects = pageIds
+    .map((id) => views.get(id))
+    .filter((project): project is ProjectModeProjectView => Boolean(project))
+
   return {
     projects,
     total,
@@ -9054,17 +9300,24 @@ async function fetchProjectModeProjectPage(
   options?: ProjectModeProjectPageOptions,
   access: DashboardAccessContext = requireDashboardProjectModeAccess()
 ): Promise<ProjectModeProjectPageData> {
-  const sliced = await fetchProjectModeProjectPageHits(options, access)
+  const status = normalizeProjectModeProjectStatus(options?.status)
+  const { sortBy, sortOrder } = normalizeProjectModeProjectSort(options, status)
+  const metricSort = sortBy === "conversationCount" || sortBy === "generatedLines"
+
+  // featureCount / default sort paginate the snapshot index directly; metric
+  // sorts (active tab only) rank the full set first, then page.
+  const sliced = metricSort
+    ? await fetchProjectModeProjectPageMetricSorted(range, options, access, sortBy, sortOrder)
+    : await fetchProjectModeProjectPageHits(options, access)
   const projectIds = sliced.projects.map((project) => project.projectId)
   const usage = await fetchProjectModePageUsage(projectIds, range, options, access)
-  const code = await fetchProjectModeProjectCodeStats(
-    [...usage.perProject.keys()],
-    range,
-    options,
-    access
-  )
+  // Key code stats on the page's project ids (not just those with conversations)
+  // so a project ranked high by 原始生成行数 still shows its adoption columns.
+  const code = await fetchProjectModeProjectCodeStats(projectIds, range, options, access)
   return {
     ...sliced,
+    sortBy,
+    sortOrder,
     projects: sliced.projects.map((project) => ({
       ...project,
       conversationCount: usage.perProject.get(project.projectId) ?? 0,
@@ -9274,7 +9527,10 @@ async function fetchProjectMode(
         status: "active",
         page: 1,
         pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
-        keyword: ""
+        keyword: "",
+        // 列表默认按对话数降序；与渲染层初始排序态一致，避免首屏二次请求。
+        sortBy: "conversationCount",
+        sortOrder: "desc"
       },
       access
     )

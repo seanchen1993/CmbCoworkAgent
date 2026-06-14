@@ -45,6 +45,14 @@ const INITIAL_DELAY_MS = 90 * 1000
 /** Max time to wait for a single ES write before giving up. */
 const WRITE_TIMEOUT_MS = 10_000
 
+/**
+ * Archived projects are terminal, so we stop re-upserting them once their
+ * lifecycle change is older than this. The window still covers the
+ * active→archived transition and any recent edit, so the dashboard reliably
+ * sees the archived state — it just isn't rewritten forever.
+ */
+const ARCHIVED_REPORT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+
 let started = false
 
 // ─────────────────────────────────────────────────────────
@@ -173,6 +181,8 @@ function buildProjectDoc(
     creatorUpperOrgLv0: project.creator?.upperOrgLv0,
     creatorUpperOrgLv1: project.creator?.upperOrgLv1,
     lifecycleStatus: project.lifecycle?.status,
+    // 生命周期最近变更时间（元数据编辑 / 归档时写入）；用于「已归档」列表按归档时间倒序。
+    lifecycleUpdatedAt: project.lifecycle?.updateAt,
     compatible: project.boardCompatibility?.compatible,
     compatibilityStatus: project.boardCompatibility?.status,
     featureCount: features.length,
@@ -272,20 +282,50 @@ async function fetchExistingFeatureCount(docId: string): Promise<number | null> 
 // Polling
 // ─────────────────────────────────────────────────────────
 
+/**
+ * Whether a project still needs its snapshot upserted this poll.
+ * - Active projects: always (their feature snapshot keeps changing as work
+ *   progresses — `lifecycle.updateAt` only tracks metadata edits, not that).
+ * - Archived projects: only while their lifecycle change is recent
+ *   (`updateAt` within ARCHIVED_REPORT_MAX_AGE_MS). This captures the
+ *   active→archived transition and recent edits, while long-archived stable
+ *   projects stop being re-upserted.
+ */
+function shouldReportProject(project: HarnessProjectListItem, now: number): boolean {
+  if ((project.lifecycle?.status ?? "active") !== "archived") return true
+  const updatedAt = project.lifecycle?.updateAt
+  if (!updatedAt) return false
+  const t = Date.parse(updatedAt)
+  if (Number.isNaN(t)) return false
+  return now - t <= ARCHIVED_REPORT_MAX_AGE_MS
+}
+
 async function pollOnce(): Promise<void> {
   // Skip the (heavy) inspect work entirely when there is nowhere to report to —
   // neither the backend relay nor a direct ES connection is configured.
   const relayBaseUrl = getEventRelayBaseUrl()
   if (!relayBaseUrl && getEsNodes().length === 0) return
 
-  let projects: HarnessProjectListItem[] = []
+  let allProjects: HarnessProjectListItem[] = []
   try {
-    projects = listHarnessProjects()
+    allProjects = listHarnessProjects()
   } catch (e) {
     console.warn("[HarnessStatusReporter] Failed to list projects:", e)
     return
   }
-  if (projects.length === 0) return
+  if (allProjects.length === 0) return
+
+  // Only report active projects + recently-changed archived ones; skip stable
+  // archived projects so we don't re-probe/re-upsert them every poll.
+  const now = Date.now()
+  const projects = allProjects.filter((p) => shouldReportProject(p, now))
+  const skippedStable = allProjects.length - projects.length
+  if (projects.length === 0) {
+    console.log(
+      `[HarnessStatusReporter] Nothing to report (${skippedStable} stable archived projects skipped)`
+    )
+    return
+  }
 
   let details: Record<string, HarnessProjectDetailViewModel> = {}
   try {
@@ -346,7 +386,8 @@ async function pollOnce(): Promise<void> {
   }
   console.log(
     `[HarnessStatusReporter] Upserted ${reported}/${projects.length} project snapshots` +
-      (skipped > 0 ? ` (${skipped} skipped to preserve non-empty data)` : "")
+      (skipped > 0 ? ` (${skipped} skipped to preserve non-empty data)` : "") +
+      (skippedStable > 0 ? ` (${skippedStable} stable archived skipped)` : "")
   )
 }
 

@@ -7,6 +7,9 @@ import {
   MessagesSquare,
   ArrowDownToLine,
   ArrowUpFromLine,
+  ArrowUp,
+  ArrowDown,
+  ArrowUpDown,
   ChevronLeft,
   ChevronDown,
   ChevronRight,
@@ -54,6 +57,8 @@ import type {
   DashboardProjectModeProject,
   DashboardProjectModeProjectCounts,
   DashboardProjectModeProjectPageData,
+  DashboardProjectModeProjectSortKey,
+  DashboardProjectModeProjectSortOrder,
   DashboardProjectModeProjectStatus,
   DashboardProjectModeSkillCount,
   DashboardProjectModeToolUsage,
@@ -857,6 +862,51 @@ function ProjectListSearchInput({
   )
 }
 
+/** 可排序表头单元格：未启用时退化为普通 <th>，启用时显示排序箭头并响应点击。 */
+function SortableTh({
+  label,
+  sortKey,
+  activeKey,
+  order,
+  enabled,
+  onSort,
+  title
+}: {
+  label: string
+  sortKey: DashboardProjectModeProjectSortKey
+  activeKey: DashboardProjectModeProjectSortKey | null
+  order: DashboardProjectModeProjectSortOrder
+  enabled: boolean
+  onSort: (key: DashboardProjectModeProjectSortKey) => void
+  title?: string
+}): React.JSX.Element {
+  if (!enabled) {
+    return (
+      <th className="px-3 py-2 text-right font-medium" title={title}>
+        {label}
+      </th>
+    )
+  }
+  const active = activeKey === sortKey
+  const Icon = active ? (order === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown
+  return (
+    <th className="px-3 py-2 text-right font-medium">
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        title={title ?? `按${label}排序`}
+        className={cn(
+          "ml-auto inline-flex items-center gap-1 transition-colors hover:text-foreground",
+          active ? "text-foreground" : "text-muted-foreground"
+        )}
+      >
+        <span>{label}</span>
+        <Icon className={cn("size-3", active ? "opacity-100" : "opacity-40")} />
+      </button>
+    </th>
+  )
+}
+
 /**
  * 项目列表：进行中 / 已归档双 tab + 项目名搜索 + 后端分页。
  * 默认随项目模式总览返回「进行中」第一页，已归档 tab 首次切换时懒加载。
@@ -888,7 +938,9 @@ function ProjectListSection({
     pageSize: number,
     adapterName: string,
     creatorKeyword: string,
-    creatorOrgKeyword: string
+    creatorOrgKeyword: string,
+    sortBy?: DashboardProjectModeProjectSortKey | null,
+    sortOrder?: DashboardProjectModeProjectSortOrder
   ) => void
   onOpenTraces: (
     project: DashboardProjectModeProject,
@@ -906,12 +958,30 @@ function ProjectListSection({
   const [departmentQuery, setDepartmentQuery] = useState("")
   const [adapterName, setAdapterName] = useState("")
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  // null = 用所在 tab 的默认排序；非空 = 用户显式选择。
+  const [sortBy, setSortBy] = useState<DashboardProjectModeProjectSortKey | null>(null)
+  const [sortOrder, setSortOrder] = useState<DashboardProjectModeProjectSortOrder>("desc")
 
   const trimmed = query.trim()
   const creatorKeyword = creatorQuery.trim()
   const creatorOrgKeyword = departmentQuery.trim()
   const rawSelectedAdapter = adapterName.trim()
   const selectedAdapter = adapterOptions.includes(rawSelectedAdapter) ? rawSelectedAdapter : ""
+  // 对话数 / 原始生成行数 排序仅在「进行中」开放（归档项目量大，按指标全量排序代价高）。
+  const metricSortAllowed = tab === "active"
+  // 各 tab 默认排序：进行中→对话数降序；已归档→归档时间降序。
+  const tabDefaultSort: {
+    key: DashboardProjectModeProjectSortKey
+    order: DashboardProjectModeProjectSortOrder
+  } =
+    tab === "archived"
+      ? { key: "archivedAt", order: "desc" }
+      : { key: "conversationCount", order: "desc" }
+  const sortKeyApplicable = (key: DashboardProjectModeProjectSortKey): boolean =>
+    key === "featureCount" ? true : key === "archivedAt" ? tab === "archived" : metricSortAllowed
+  const useExplicitSort = sortBy !== null && sortKeyApplicable(sortBy)
+  const effectiveSortBy = useExplicitSort ? sortBy : tabDefaultSort.key
+  const effectiveSortOrder = useExplicitSort ? sortOrder : tabDefaultSort.order
   const pageData = projectPages[tab]
   const currentError = pageError[tab]
   const tabCount =
@@ -920,8 +990,15 @@ function ProjectListSection({
   const pageMatchesAdapter = (pageData?.adapterName ?? "") === selectedAdapter
   const pageMatchesCreator = (pageData?.creatorKeyword ?? "") === creatorKeyword
   const pageMatchesCreatorOrg = (pageData?.creatorOrgKeyword ?? "") === creatorOrgKeyword
+  const pageMatchesSort =
+    (pageData?.sortBy ?? null) === effectiveSortBy &&
+    (pageData?.sortOrder ?? "desc") === effectiveSortOrder
   const pageMatchesFilter =
-    pageMatchesQuery && pageMatchesAdapter && pageMatchesCreator && pageMatchesCreatorOrg
+    pageMatchesQuery &&
+    pageMatchesAdapter &&
+    pageMatchesCreator &&
+    pageMatchesCreatorOrg &&
+    pageMatchesSort
   const pageItems = pageMatchesFilter ? (pageData?.projects ?? []) : []
   const total = pageMatchesFilter ? (pageData?.total ?? 0) : 0
   const totalPages = Math.max(1, Math.ceil(total / PROJECT_PAGE_SIZE))
@@ -949,7 +1026,9 @@ function ProjectListSection({
       (pageData.adapterName ?? "") === selectedAdapter &&
       (pageData.creatorKeyword ?? "") === creatorKeyword &&
       (pageData.creatorOrgKeyword ?? "") === creatorOrgKeyword &&
-      pageData.pageSize === PROJECT_PAGE_SIZE
+      pageData.pageSize === PROJECT_PAGE_SIZE &&
+      (pageData.sortBy ?? null) === effectiveSortBy &&
+      (pageData.sortOrder ?? "desc") === effectiveSortOrder
     ) {
       return
     }
@@ -963,13 +1042,17 @@ function ProjectListSection({
         PROJECT_PAGE_SIZE,
         selectedAdapter,
         creatorKeyword,
-        creatorOrgKeyword
+        creatorOrgKeyword,
+        effectiveSortBy,
+        effectiveSortOrder
       )
     }, 250)
     return () => window.clearTimeout(timer)
   }, [
     creatorKeyword,
     creatorOrgKeyword,
+    effectiveSortBy,
+    effectiveSortOrder,
     onPageChange,
     pageData,
     pageLoading,
@@ -979,6 +1062,8 @@ function ProjectListSection({
   ])
 
   const switchTab = (next: ProjectListTab): void => {
+    // 不重置排序态：归档 tab 由 effectiveSortBy 自动忽略指标排序，
+    // 切回进行中时仍恢复原排序（含默认的对话数降序）。
     setTab(next)
     setExpandedId(null)
   }
@@ -997,8 +1082,26 @@ function ProjectListSection({
       PROJECT_PAGE_SIZE,
       selectedAdapter,
       creatorKeyword,
-      creatorOrgKeyword
+      creatorOrgKeyword,
+      effectiveSortBy,
+      effectiveSortOrder
     )
+  }
+  // 点击表头切换排序：未生效→降序；降序→升序；升序→取消（回到该 tab 默认排序）。
+  const cycleSort = (key: DashboardProjectModeProjectSortKey): void => {
+    setExpandedId(null)
+    if (effectiveSortBy !== key) {
+      setSortBy(key)
+      setSortOrder("desc")
+      return
+    }
+    if (effectiveSortOrder === "desc") {
+      setSortBy(key)
+      setSortOrder("asc")
+      return
+    }
+    setSortBy(null)
+    setSortOrder("desc")
   }
 
   const tabs: Array<{ id: ProjectListTab; label: string; count: number }> = [
@@ -1078,14 +1181,31 @@ function ProjectListSection({
               <th className="px-3 py-2 text-left font-medium">项目</th>
               <th className="px-3 py-2 text-left font-medium">插件</th>
               <th className="px-3 py-2 text-left font-medium">项目状态</th>
-              <th className="px-3 py-2 text-right font-medium">特性数</th>
-              <th className="px-3 py-2 text-right font-medium">对话数</th>
-              <th
-                className="px-3 py-2 text-right font-medium"
+              <SortableTh
+                label="特性数"
+                sortKey="featureCount"
+                activeKey={effectiveSortBy}
+                order={sortOrder}
+                enabled
+                onSort={cycleSort}
+              />
+              <SortableTh
+                label="对话数"
+                sortKey="conversationCount"
+                activeKey={effectiveSortBy}
+                order={sortOrder}
+                enabled={metricSortAllowed}
+                onSort={cycleSort}
+              />
+              <SortableTh
+                label="原始生成行数"
+                sortKey="generatedLines"
+                activeKey={effectiveSortBy}
+                order={sortOrder}
+                enabled={metricSortAllowed}
+                onSort={cycleSort}
                 title="Agent 原始生成行数（未经去重/抵消的原始产出）"
-              >
-                原始生成行数
-              </th>
+              />
               <th className="px-3 py-2 text-right font-medium">提交口径采纳率</th>
               <th className="px-3 py-2 text-right font-medium">总量口径采纳率</th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
@@ -1500,7 +1620,9 @@ export function ProjectModePanel({
     pageSize: number,
     adapterName: string,
     creatorKeyword: string,
-    creatorOrgKeyword: string
+    creatorOrgKeyword: string,
+    sortBy?: DashboardProjectModeProjectSortKey | null,
+    sortOrder?: DashboardProjectModeProjectSortOrder
   ) => void
   onOpenTraces: (
     project: DashboardProjectModeProject,
