@@ -23,6 +23,7 @@ import {
   CodeAdoptionFunnel,
   GeneratedLinesTooltip,
   InclusiveAdoptionTooltip,
+  InclusivePushedAdoptionTooltip,
   InfoHint,
   MeasuredAdoptionTooltip,
   PushedAdoptionTooltip,
@@ -195,6 +196,18 @@ export function OverviewPanel({
             value={formatNumber(data.codeDeletedLines)}
             color="bg-zinc-500"
             tooltipContent={<GeneratedLinesTooltip />}
+          />
+          <StatCard
+            icon={Gauge}
+            label="总量入库采纳率"
+            value={formatPercent(data.codeInclusivePushedAdoptionRate)}
+            sub={
+              data.codeInclusivePushedAdoptionRate === null
+                ? "暂无已 Push 数据"
+                : `${formatNumber(data.codePushedAdoptedLines)} / ${formatNumber(data.codeInclusiveEffectiveGeneratedLines)} 行`
+            }
+            color="bg-emerald-500"
+            tooltipContent={<InclusivePushedAdoptionTooltip data={codeTooltipData} />}
           />
           <StatCard
             icon={Gauge}

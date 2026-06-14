@@ -777,7 +777,8 @@ function formatSkillAdoptionSortValue(
   if (
     sortKey === "measuredAdoptionRate" ||
     sortKey === "inclusiveAdoptionRate" ||
-    sortKey === "pushedAdoptionRate"
+    sortKey === "pushedAdoptionRate" ||
+    sortKey === "inclusivePushedAdoptionRate"
   )
     return formatPercent(value)
   if (sortKey === "commitCount" || sortKey === "pushedCommitCount")
@@ -913,12 +914,17 @@ function SkillAdoptionRankingPanel({
                       </span>
                     </div>
                     <div className="mb-1 truncate text-[10px] text-muted-foreground">
-                      已Commit {formatNullablePercent(item.measuredAdoptionRate)}
-                      <span className="mx-1 text-border">|</span>
-                      含未提交 {formatNullablePercent(item.inclusiveAdoptionRate)}
-                      <span className="mx-1 text-border">|</span>已 Push{" "}
+                      <span className="text-muted-foreground/70">提交口径</span> 提交{" "}
+                      {formatNullablePercent(item.measuredAdoptionRate)}
+                      <span className="mx-1 text-border">·</span>入库{" "}
                       {formatNullablePercent(item.pushedAdoptionRate)}
                       <span className="mx-1 text-border">|</span>
+                      <span className="text-muted-foreground/70">总量口径</span> 提交{" "}
+                      {formatNullablePercent(item.inclusiveAdoptionRate)}
+                      <span className="mx-1 text-border">·</span>入库{" "}
+                      {formatNullablePercent(item.inclusivePushedAdoptionRate)}
+                    </div>
+                    <div className="mb-1 truncate text-[10px] text-muted-foreground">
                       采纳 {formatNumber(item.adoptedLines)} 行
                       <span className="mx-1 text-border">|</span>
                       提交 {formatNumber(item.commitCount)} 次

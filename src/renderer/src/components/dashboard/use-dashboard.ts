@@ -1044,6 +1044,7 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     const measuredAdoptionRate = b.measured_adoption_rate?.value
     const inclusiveAdoptionRate = b.inclusive_adoption_rate?.value
     const pushedAdoptionRate = b.pushed_adoption_rate?.value
+    const inclusivePushedAdoptionRate = b.inclusive_pushed_adoption_rate?.value
     return {
       skill: b.key || "unknown",
       generatedLines: b.generated_lines?.value ?? 0,
@@ -1060,6 +1061,8 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
       inclusiveAdoptionRate:
         typeof inclusiveAdoptionRate === "number" ? inclusiveAdoptionRate : null,
       pushedAdoptionRate: typeof pushedAdoptionRate === "number" ? pushedAdoptionRate : null,
+      inclusivePushedAdoptionRate:
+        typeof inclusivePushedAdoptionRate === "number" ? inclusivePushedAdoptionRate : null,
       commitCount: b.commit_count?.value ?? 0
     }
   })

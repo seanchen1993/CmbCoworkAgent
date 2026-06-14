@@ -449,7 +449,7 @@ function CodeEfficiencyModelInfo(): React.JSX.Element {
   )
 }
 
-/** Per-feature code-adoption line: Agent生成行数 / 有效生成行数 / 已Commit·已Push 采纳率（含行数明细）。 */
+/** Per-feature code-adoption line: 原始生成行数 / 有效生成行数 / 已Commit·已Push 采纳率（含行数明细）。 */
 function FeatureCodeStatsLine({
   codeStats
 }: {
@@ -458,39 +458,115 @@ function FeatureCodeStatsLine({
   if (!codeStats) {
     return <div className="text-[11px] text-muted-foreground/80">暂无代码生成数据</div>
   }
-  const adoptedLabel = `${formatLineCount(codeStats.adoptedLines)} / ${formatLineCount(codeStats.effectiveGeneratedLines)} 行`
-  const pushedLabel = `${formatLineCount(codeStats.pushedAdoptedLines)} / ${formatLineCount(codeStats.pushedEffectiveGeneratedLines)} 行`
+  const commitDenom = formatLineCount(codeStats.effectiveGeneratedLines)
+  const pushDenom = formatLineCount(codeStats.pushedEffectiveGeneratedLines)
+  const totalDenom = formatLineCount(codeStats.inclusiveEffectiveGeneratedLines)
+  const adopted = formatLineCount(codeStats.adoptedLines)
+  const pushedAdopted = formatLineCount(codeStats.pushedAdoptedLines)
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
-      <span>
-        Agent生成行数{" "}
-        <span className="font-medium text-foreground">
-          {formatLineCount(codeStats.generatedLines)}
+    <div className="space-y-1 text-[11px] text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span>
+          原始生成行数{" "}
+          <span className="font-medium text-foreground">
+            {formatLineCount(codeStats.generatedLines)}
+          </span>
         </span>
-      </span>
-      <span className="inline-flex items-center gap-1">
-        有效生成行数{" "}
-        <span className="font-medium text-foreground">
-          {formatLineCount(codeStats.effectiveGeneratedLines)}
+        <span className="inline-flex items-center gap-1">
+          有效生成行数{" "}
+          <span className="font-medium text-foreground">
+            {formatLineCount(codeStats.effectiveGeneratedLines)}
+          </span>
+          <InfoHint hint="Agent 原始生成行数扣除被Agent后续修改覆盖、回退或删除的行后，真正纳入采纳率分母的有效产出。" />
         </span>
-        <InfoHint hint="Agent 原始生成行数扣除被Agent后续修改覆盖、回退或删除的行后，真正纳入采纳率分母的有效产出。" />
-      </span>
-      <span>
-        已Commit采纳率{" "}
-        <span className="font-medium text-foreground">
-          {formatPercent(codeStats.measuredAdoptionRate)}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span className="text-muted-foreground/70">提交口径</span>
+        <span>
+          提交{" "}
+          <span className="font-medium text-foreground">
+            {formatPercent(codeStats.measuredAdoptionRate)}
+          </span>
+          <span className="ml-1 text-muted-foreground/80">
+            ({adopted} / {commitDenom} 行)
+          </span>
         </span>
-        <span className="ml-1 text-muted-foreground/80">({adoptedLabel})</span>
-      </span>
-      <span>
-        已Push采纳率{" "}
-        <span className="font-medium text-foreground">
-          {formatPercent(codeStats.pushedAdoptionRate)}
+        <span>
+          入库{" "}
+          <span className="font-medium text-foreground">
+            {formatPercent(codeStats.pushedAdoptionRate)}
+          </span>
+          <span className="ml-1 text-muted-foreground/80">
+            ({pushedAdopted} / {pushDenom} 行)
+          </span>
         </span>
-        <span className="ml-1 text-muted-foreground/80">({pushedLabel})</span>
-      </span>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span className="text-muted-foreground/70">总量口径</span>
+        <span>
+          提交{" "}
+          <span className="font-medium text-foreground">
+            {formatPercent(codeStats.inclusiveAdoptionRate)}
+          </span>
+          <span className="ml-1 text-muted-foreground/80">
+            ({adopted} / {totalDenom} 行)
+          </span>
+        </span>
+        <span>
+          入库{" "}
+          <span className="font-medium text-foreground">
+            {formatPercent(codeStats.inclusivePushedAdoptionRate)}
+          </span>
+          <span className="ml-1 text-muted-foreground/80">
+            ({pushedAdopted} / {totalDenom} 行)
+          </span>
+        </span>
+      </div>
     </div>
   )
+}
+
+/** 表格内一条「label X% (采纳/生成)」采纳率，按口径分组的列里上下各一条；有数据时可点击采纳溯源。 */
+function AdoptionRateLine({
+  label,
+  rate,
+  detail,
+  clickable,
+  onActivate,
+  title
+}: {
+  label: string
+  rate: number | null
+  detail: string
+  clickable: boolean
+  onActivate: () => void
+  title: string
+}): React.JSX.Element {
+  const body = (
+    <span className="whitespace-nowrap">
+      <span className="text-muted-foreground/70">{label}</span>{" "}
+      <span className="font-medium underline-offset-2 group-hover:underline">
+        {formatPercent(rate)}
+      </span>
+      <span className="ml-1 text-[10px] text-muted-foreground">{detail}</span>
+    </span>
+  )
+  if (clickable) {
+    return (
+      <button
+        type="button"
+        className="group block w-full text-right transition-colors hover:text-primary"
+        title={title}
+        onClick={(event) => {
+          event.stopPropagation()
+          onActivate()
+        }}
+      >
+        {body}
+      </button>
+    )
+  }
+  return <div className="text-right">{body}</div>
 }
 
 function ProjectRow({
@@ -511,12 +587,22 @@ function ProjectRow({
   const codeStats = project.codeStats
   const hasCommitAdoption = Boolean(codeStats && codeStats.effectiveGeneratedLines > 0)
   const hasPushedAdoption = Boolean(codeStats && codeStats.pushedEffectiveGeneratedLines > 0)
-  const adoptionLineLabel = codeStats
-    ? `${formatLineCount(codeStats.adoptedLines)} / ${formatLineCount(codeStats.effectiveGeneratedLines)} 行`
+  const adopted = codeStats ? formatLineCount(codeStats.adoptedLines) : "—"
+  const pushedAdopted = codeStats ? formatLineCount(codeStats.pushedAdoptedLines) : "—"
+  const commitDetail = codeStats
+    ? `${adopted}/${formatLineCount(codeStats.effectiveGeneratedLines)}`
     : "—"
-  const pushedAdoptionLineLabel = codeStats
-    ? `${formatLineCount(codeStats.pushedAdoptedLines)} / ${formatLineCount(codeStats.pushedEffectiveGeneratedLines)} 行`
+  const pushDetail = codeStats
+    ? `${pushedAdopted}/${formatLineCount(codeStats.pushedEffectiveGeneratedLines)}`
     : "—"
+  const totalDetail = codeStats
+    ? `${adopted}/${formatLineCount(codeStats.inclusiveEffectiveGeneratedLines)}`
+    : "—"
+  const totalPushDetail = codeStats
+    ? `${pushedAdopted}/${formatLineCount(codeStats.inclusiveEffectiveGeneratedLines)}`
+    : "—"
+  const commitTraceTitle = "查看采纳溯源：该项目关联的 commit 明细"
+  const pushTraceTitle = "查看采纳溯源：该项目已 Push 的 commit 明细"
   const creatorName = project.creatorUserName || project.creatorSapId || project.creatorYstId || "—"
   const creatorId = project.creatorSapId || project.creatorYstId || ""
   const creatorDepartment = formatProjectCreatorDepartment(project)
@@ -572,54 +658,44 @@ function ProjectRow({
           {formatLineCount(codeStats?.generatedLines ?? 0)}
         </td>
         <td className="px-3 py-2 text-right tabular-nums">
-          {hasCommitAdoption ? (
-            <button
-              type="button"
-              className="ml-auto block text-right transition-colors hover:text-primary"
-              title="查看采纳溯源：该项目关联的 commit 明细"
-              onClick={(event) => {
-                event.stopPropagation()
-                onOpenProjectCommits(false)
-              }}
-            >
-              <div className="font-medium underline-offset-2 hover:underline">
-                {formatPercent(codeStats?.measuredAdoptionRate)}
-              </div>
-              <div className="mt-0.5 text-[10px] text-muted-foreground">{adoptionLineLabel}</div>
-            </button>
-          ) : (
-            <>
-              <div className="font-medium">{formatPercent(codeStats?.measuredAdoptionRate)}</div>
-              <div className="mt-0.5 text-[10px] text-muted-foreground">{adoptionLineLabel}</div>
-            </>
-          )}
+          <div className="flex flex-col items-end gap-0.5">
+            <AdoptionRateLine
+              label="提交"
+              rate={codeStats?.measuredAdoptionRate ?? null}
+              detail={commitDetail}
+              clickable={hasCommitAdoption}
+              onActivate={() => onOpenProjectCommits(false)}
+              title={commitTraceTitle}
+            />
+            <AdoptionRateLine
+              label="入库"
+              rate={codeStats?.pushedAdoptionRate ?? null}
+              detail={pushDetail}
+              clickable={hasPushedAdoption}
+              onActivate={() => onOpenProjectCommits(true)}
+              title={pushTraceTitle}
+            />
+          </div>
         </td>
         <td className="px-3 py-2 text-right tabular-nums">
-          {hasPushedAdoption ? (
-            <button
-              type="button"
-              className="ml-auto block text-right transition-colors hover:text-primary"
-              title="查看采纳溯源：该项目已 Push 的 commit 明细"
-              onClick={(event) => {
-                event.stopPropagation()
-                onOpenProjectCommits(true)
-              }}
-            >
-              <div className="font-medium underline-offset-2 hover:underline">
-                {formatPercent(codeStats?.pushedAdoptionRate)}
-              </div>
-              <div className="mt-0.5 text-[10px] text-muted-foreground">
-                {pushedAdoptionLineLabel}
-              </div>
-            </button>
-          ) : (
-            <>
-              <div className="font-medium">{formatPercent(codeStats?.pushedAdoptionRate)}</div>
-              <div className="mt-0.5 text-[10px] text-muted-foreground">
-                {pushedAdoptionLineLabel}
-              </div>
-            </>
-          )}
+          <div className="flex flex-col items-end gap-0.5">
+            <AdoptionRateLine
+              label="提交"
+              rate={codeStats?.inclusiveAdoptionRate ?? null}
+              detail={totalDetail}
+              clickable={hasCommitAdoption}
+              onActivate={() => onOpenProjectCommits(false)}
+              title={commitTraceTitle}
+            />
+            <AdoptionRateLine
+              label="入库"
+              rate={codeStats?.inclusivePushedAdoptionRate ?? null}
+              detail={totalPushDetail}
+              clickable={hasPushedAdoption}
+              onActivate={() => onOpenProjectCommits(true)}
+              title={pushTraceTitle}
+            />
+          </div>
         </td>
         <td className="px-3 py-2">
           <div className="font-medium text-foreground">{creatorName}</div>
@@ -934,7 +1010,7 @@ function ProjectListSection({
     <section>
       <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-        项目、插件、项目状态、特性数为当前状态；对话数、Agent生成行数（原始生成行数）、已Commit/已Push采纳率，以及展开行的技能、各特性采纳明细与关联
+        项目、插件、项目状态、特性数为当前状态；对话数、原始生成行数、提交、总量两口径采纳率，以及展开行的技能、各特性采纳明细与关联
         Commit 按所选时间范围统计。
       </p>
 
@@ -1008,10 +1084,10 @@ function ProjectListSection({
                 className="px-3 py-2 text-right font-medium"
                 title="Agent 原始生成行数（未经去重/抵消的原始产出）"
               >
-                Agent生成行数
+                原始生成行数
               </th>
-              <th className="px-3 py-2 text-right font-medium">已Commit采纳率</th>
-              <th className="px-3 py-2 text-right font-medium">已Push采纳率</th>
+              <th className="px-3 py-2 text-right font-medium">提交口径采纳率</th>
+              <th className="px-3 py-2 text-right font-medium">总量口径采纳率</th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
               <th className="px-3 py-2 text-left font-medium">部门</th>
               <th className="px-3 py-2 text-right font-medium">操作</th>
@@ -1256,8 +1332,8 @@ function AdapterListSection({
       <h2 className="mb-1 text-sm font-semibold text-foreground">插件列表</h2>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
         {mode === "byName"
-          ? "按插件名聚合同名插件的多个版本；按项目数降序排列，项目数为当前状态，对话数、已Commit/已Push采纳率按所选时间范围统计。"
-          : "按插件版本展开；按项目数降序排列，项目数为当前状态，对话数、已Commit/已Push采纳率按所选时间范围统计。"}
+          ? "按插件名聚合同名插件的多个版本；按项目数降序排列，项目数为当前状态，对话数、提交、总量两口径采纳率按所选时间范围统计。"
+          : "按插件版本展开；按项目数降序排列，项目数为当前状态，对话数、提交、总量两口径采纳率按所选时间范围统计。"}
       </p>
       <div className="mb-3 flex items-center overflow-hidden rounded-md border border-border w-fit">
         {modeTabs.map((t) => (
@@ -1334,15 +1410,23 @@ function AdapterListSection({
                         </span>
                       </span>
                       <span>
-                        已Commit采纳率{" "}
+                        <span className="text-muted-foreground/70">提交口径</span> 提交{" "}
                         <span className="font-medium text-foreground">
                           {formatPercent(adapter.codeStats?.measuredAdoptionRate)}
+                        </span>{" "}
+                        · 入库{" "}
+                        <span className="font-medium text-foreground">
+                          {formatPercent(adapter.codeStats?.pushedAdoptionRate)}
                         </span>
                       </span>
                       <span>
-                        已Push采纳率{" "}
+                        <span className="text-muted-foreground/70">总量口径</span> 提交{" "}
                         <span className="font-medium text-foreground">
-                          {formatPercent(adapter.codeStats?.pushedAdoptionRate)}
+                          {formatPercent(adapter.codeStats?.inclusiveAdoptionRate)}
+                        </span>{" "}
+                        · 入库{" "}
+                        <span className="font-medium text-foreground">
+                          {formatPercent(adapter.codeStats?.inclusivePushedAdoptionRate)}
                         </span>
                       </span>
                     </div>

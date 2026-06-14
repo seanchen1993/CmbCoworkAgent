@@ -736,7 +736,9 @@ function isDashboardProjectModeAllowed(): boolean {
   return access.loggedIn
 }
 
-function isDashboardProjectModeAdmin(access: DashboardAccessContext = getDashboardAccessContext()): boolean {
+function isDashboardProjectModeAdmin(
+  access: DashboardAccessContext = getDashboardAccessContext()
+): boolean {
   if (import.meta.env.DEV) return true
   if (!access.loggedIn || !access.ystId) return false
   return getDashboardAllowedIds().has(access.ystId)
@@ -773,7 +775,9 @@ function buildTraceAccessFilter(access: DashboardAccessContext): Record<string, 
   return buildUpperOrgLv1Filter(access.upperOrgLv1)
 }
 
-function buildProjectModeAccessFilter(access: DashboardAccessContext): Record<string, unknown> | null {
+function buildProjectModeAccessFilter(
+  access: DashboardAccessContext
+): Record<string, unknown> | null {
   if (isDashboardProjectModeAdmin(access)) return null
   if (!access.upperOrgLv1) return buildNoAccessFilter()
   return buildUpperOrgLv1Filter(access.upperOrgLv1)
@@ -785,7 +789,10 @@ function buildProjectModeOrgFilter(
 ): Record<string, unknown> | null {
   const filters: Record<string, unknown>[] = []
   appendOptionalFilter(filters, buildProjectModeAccessFilter(access))
-  appendOptionalFilter(filters, buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1)))
+  appendOptionalFilter(
+    filters,
+    buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
+  )
   if (filters.length === 0) return null
   if (filters.length === 1) return filters[0]
   return { bool: { filter: filters } }
@@ -2051,6 +2058,7 @@ async function fetchOverview(
           pushed_effective_generated_lines: { value: item.pushedEffectiveGeneratedLines },
           pushed_adopted_lines: { value: item.pushedAdoptedLines },
           pushed_adoption_rate: { value: item.pushedAdoptionRate },
+          inclusive_pushed_adoption_rate: { value: item.inclusivePushedAdoptionRate },
           pushed_commit_count: { value: item.pushedCommitCount }
         }))
       }
@@ -2871,7 +2879,9 @@ async function fetchUserDetail(
   range: TimeRange,
   options?: UserDetailOptions
 ): Promise<DashboardUserDetail> {
-  const access = options?.projectMode ? requireDashboardProjectModeAccess() : requireDashboardAccess()
+  const access = options?.projectMode
+    ? requireDashboardProjectModeAccess()
+    : requireDashboardAccess()
   const normalizedSapId = sapId.trim()
   if (!normalizedSapId) throw new Error("sapId is required")
   const traceViewMode = normalizeTraceViewMode(options?.viewMode ?? options?.mode)
@@ -5459,6 +5469,7 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
               pushed_effective_generated_lines: { value: 490 },
               pushed_adopted_lines: { value: 380 },
               pushed_adoption_rate: { value: 380 / 490 },
+              inclusive_pushed_adoption_rate: { value: 380 / 790 },
               pushed_commit_count: { value: 8 },
               commit_count: { value: 18 }
             },
@@ -5476,6 +5487,7 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
               pushed_effective_generated_lines: { value: 380 },
               pushed_adopted_lines: { value: 340 },
               pushed_adoption_rate: { value: 340 / 380 },
+              inclusive_pushed_adoption_rate: { value: 340 / 560 },
               pushed_commit_count: { value: 6 },
               commit_count: { value: 12 }
             },
@@ -5493,6 +5505,7 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
               pushed_effective_generated_lines: { value: 180 },
               pushed_adopted_lines: { value: 140 },
               pushed_adoption_rate: { value: 140 / 180 },
+              inclusive_pushed_adoption_rate: { value: 140 / 430 },
               pushed_commit_count: { value: 3 },
               commit_count: { value: 7 }
             },
@@ -5510,6 +5523,7 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
               pushed_effective_generated_lines: { value: 245 },
               pushed_adopted_lines: { value: 180 },
               pushed_adoption_rate: { value: 180 / 245 },
+              inclusive_pushed_adoption_rate: { value: 180 / 390 },
               pushed_commit_count: { value: 4 },
               commit_count: { value: 9 }
             },
@@ -5527,6 +5541,7 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
               pushed_effective_generated_lines: { value: 0 },
               pushed_adopted_lines: { value: 0 },
               pushed_adoption_rate: { value: null },
+              inclusive_pushed_adoption_rate: { value: 0 },
               pushed_commit_count: { value: 0 },
               commit_count: { value: 0 }
             }
@@ -9252,13 +9267,17 @@ async function fetchProjectMode(
     fetchProjectModeSnapshotAggs(opts, access),
     fetchProjectModeUsage(range, opts, access),
     fetchProjectModeAggregateCodeStats(range, opts, access),
-    fetchProjectModeProjectPage(range, {
-      ...opts,
-      status: "active",
-      page: 1,
-      pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
-      keyword: ""
-    }, access)
+    fetchProjectModeProjectPage(
+      range,
+      {
+        ...opts,
+        status: "active",
+        page: 1,
+        pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
+        keyword: ""
+      },
+      access
+    )
   ])
 
   // Adapter rows: usage carries conversation counts, snapshot aggs carry project /
@@ -9813,15 +9832,18 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle("dashboard:threadTraces", async (_, threadId: string, options?: ThreadTracesOptions) => {
-    if (import.meta.env.DEV) return { success: true, data: makeMockThreadTraces(threadId) }
-    try {
-      return { success: true, data: await fetchThreadTraces(threadId, options) }
-    } catch (e) {
-      console.error("[Dashboard] threadTraces error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
+  _ipcMain.handle(
+    "dashboard:threadTraces",
+    async (_, threadId: string, options?: ThreadTracesOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockThreadTraces(threadId) }
+      try {
+        return { success: true, data: await fetchThreadTraces(threadId, options) }
+      } catch (e) {
+        console.error("[Dashboard] threadTraces error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
     }
-  })
+  )
 
   _ipcMain.handle(
     "dashboard:marketSkillRecentTraces",
