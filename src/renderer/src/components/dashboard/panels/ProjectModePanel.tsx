@@ -38,6 +38,7 @@ import {
   CodeAdoptionFunnel,
   GeneratedLinesTooltip,
   InclusiveAdoptionTooltip,
+  InclusivePushedAdoptionTooltip,
   MeasuredAdoptionTooltip,
   PushedAdoptionTooltip,
   SkillRankingPanel,
@@ -144,7 +145,8 @@ function StatCard({
   value,
   sub,
   color,
-  hint
+  hint,
+  tag
 }: {
   icon: React.ElementType
   label: string
@@ -152,10 +154,12 @@ function StatCard({
   sub?: string
   color: string
   hint?: React.ReactNode
+  /** 口径标签：底部小药丸，如「总量口径 · 入库」。 */
+  tag?: string
 }): React.JSX.Element {
   return (
     <div className="flex w-full items-center gap-3 rounded-xl border border-border bg-card px-4 py-3">
-      <div className={`flex size-9 items-center justify-center rounded-lg ${color}`}>
+      <div className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${color}`}>
         <Icon className="size-4 text-white" />
       </div>
       <div className="min-w-0">
@@ -165,6 +169,11 @@ function StatCard({
         </div>
         <div className="text-lg font-bold leading-tight text-foreground">{value}</div>
         {sub && <div className="whitespace-nowrap text-[10px] text-muted-foreground">{sub}</div>}
+        {tag && (
+          <div className="mt-1.5 inline-block whitespace-nowrap rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+            {tag}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1125,6 +1134,7 @@ function mergeCodeStats(
     measuredAdoptionRate,
     inclusiveAdoptionRate: adoptionRate(adoptedLines, inclusiveEffectiveGeneratedLines),
     pushedAdoptionRate: adoptionRate(pushedAdoptedLines, pushedEffectiveGeneratedLines),
+    inclusivePushedAdoptionRate: adoptionRate(pushedAdoptedLines, inclusiveEffectiveGeneratedLines),
     adoptionRate: measuredAdoptionRate
   }
 }
@@ -1532,17 +1542,53 @@ export function ProjectModePanel({
             <InfoHint hint="项目模式下产生的全部代码（含 Vibecoding 等未使用 Skill 的对话）。" />
           </div>
           <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3">
-            <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-5">
               <StatCard
                 icon={Code2}
                 label="代码生成行数"
+                tag="计数"
                 value={formatLineCount(summary?.codeStats?.generatedLines ?? 0)}
                 color="bg-sky-500"
                 hint={<GeneratedLinesTooltip />}
               />
               <StatCard
                 icon={Gauge}
-                label="入库率"
+                label="总量入库采纳率"
+                tag="总量口径 · 入库"
+                value={formatPercent(summary?.codeStats?.inclusivePushedAdoptionRate)}
+                sub={
+                  summary?.codeStats
+                    ? `${formatLineCount(summary.codeStats.pushedAdoptedLines)} / ${formatLineCount(summary.codeStats.inclusiveEffectiveGeneratedLines)} 行`
+                    : "暂无已 Push 数据"
+                }
+                color="bg-emerald-500"
+                hint={
+                  summary?.codeStats ? (
+                    <InclusivePushedAdoptionTooltip data={summary.codeStats} />
+                  ) : undefined
+                }
+              />
+              <StatCard
+                icon={Gauge}
+                label="总量提交采纳率"
+                tag="总量口径 · 提交"
+                value={formatPercent(summary?.codeStats?.inclusiveAdoptionRate)}
+                sub={
+                  summary?.codeStats
+                    ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.inclusiveEffectiveGeneratedLines)} 行`
+                    : "暂无代码生成数据"
+                }
+                color="bg-cyan-500"
+                hint={
+                  summary?.codeStats ? (
+                    <InclusiveAdoptionTooltip data={summary.codeStats} />
+                  ) : undefined
+                }
+              />
+              <StatCard
+                icon={Gauge}
+                label="入库采纳率"
+                tag="提交口径 · 已push"
                 value={formatPercent(summary?.codeStats?.pushedAdoptionRate)}
                 sub={
                   summary?.codeStats
@@ -1558,7 +1604,8 @@ export function ProjectModePanel({
               />
               <StatCard
                 icon={Gauge}
-                label="提交率"
+                label="提交采纳率"
+                tag="提交口径 · 对标组织级"
                 value={formatPercent(summary?.codeStats?.measuredAdoptionRate)}
                 sub={
                   summary?.codeStats
@@ -1569,22 +1616,6 @@ export function ProjectModePanel({
                 hint={
                   summary?.codeStats ? (
                     <MeasuredAdoptionTooltip data={summary.codeStats} />
-                  ) : undefined
-                }
-              />
-              <StatCard
-                icon={Gauge}
-                label="代码总量采纳率"
-                value={formatPercent(summary?.codeStats?.inclusiveAdoptionRate)}
-                sub={
-                  summary?.codeStats
-                    ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.inclusiveEffectiveGeneratedLines)} 行`
-                    : "暂无代码生成数据"
-                }
-                color="bg-cyan-500"
-                hint={
-                  summary?.codeStats ? (
-                    <InclusiveAdoptionTooltip data={summary.codeStats} />
                   ) : undefined
                 }
               />
@@ -1600,10 +1631,11 @@ export function ProjectModePanel({
             <InfoHint hint="仅统计调用了 AutoBizDevOps 插件 Skill 的对话所生成的代码，是项目模式总量的子集。" />
           </div>
           <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3">
-            <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-5">
               <StatCard
                 icon={Code2}
                 label="Skill 生成行数"
+                tag="计数"
                 value={formatLineCount(skillCodeStats?.generatedLines ?? 0)}
                 sub="由 Skill 生成的原始行数"
                 color="bg-violet-500"
@@ -1611,7 +1643,40 @@ export function ProjectModePanel({
               />
               <StatCard
                 icon={Gauge}
-                label="入库率"
+                label="总量入库采纳率"
+                tag="总量口径 · 入库"
+                value={formatPercent(skillCodeStats?.inclusivePushedAdoptionRate)}
+                sub={
+                  skillCodeStats
+                    ? `${formatLineCount(skillCodeStats.pushedAdoptedLines)} / ${formatLineCount(skillCodeStats.inclusiveEffectiveGeneratedLines)} 行`
+                    : "暂无已 Push 数据"
+                }
+                color="bg-emerald-500"
+                hint={
+                  skillCodeStats ? (
+                    <InclusivePushedAdoptionTooltip data={skillCodeStats} />
+                  ) : undefined
+                }
+              />
+              <StatCard
+                icon={Gauge}
+                label="总量提交采纳率"
+                tag="总量口径 · 提交"
+                value={formatPercent(skillCodeStats?.inclusiveAdoptionRate)}
+                sub={
+                  skillCodeStats
+                    ? `${formatLineCount(skillCodeStats.adoptedLines)} / ${formatLineCount(skillCodeStats.inclusiveEffectiveGeneratedLines)} 行`
+                    : "暂无代码生成数据"
+                }
+                color="bg-cyan-500"
+                hint={
+                  skillCodeStats ? <InclusiveAdoptionTooltip data={skillCodeStats} /> : undefined
+                }
+              />
+              <StatCard
+                icon={Gauge}
+                label="入库采纳率"
+                tag="提交口径 · 已push"
                 value={formatPercent(skillCodeStats?.pushedAdoptionRate)}
                 sub={
                   skillCodeStats
@@ -1623,7 +1688,8 @@ export function ProjectModePanel({
               />
               <StatCard
                 icon={Gauge}
-                label="提交率"
+                label="提交采纳率"
+                tag="提交口径 · 对标组织级"
                 value={formatPercent(skillCodeStats?.measuredAdoptionRate)}
                 sub={
                   skillCodeStats
@@ -1633,20 +1699,6 @@ export function ProjectModePanel({
                 color="bg-indigo-500"
                 hint={
                   skillCodeStats ? <MeasuredAdoptionTooltip data={skillCodeStats} /> : undefined
-                }
-              />
-              <StatCard
-                icon={Gauge}
-                label="代码总量采纳率"
-                value={formatPercent(skillCodeStats?.inclusiveAdoptionRate)}
-                sub={
-                  skillCodeStats
-                    ? `${formatLineCount(skillCodeStats.adoptedLines)} / ${formatLineCount(skillCodeStats.inclusiveEffectiveGeneratedLines)} 行`
-                    : "暂无代码生成数据"
-                }
-                color="bg-cyan-500"
-                hint={
-                  skillCodeStats ? <InclusiveAdoptionTooltip data={skillCodeStats} /> : undefined
                 }
               />
             </div>

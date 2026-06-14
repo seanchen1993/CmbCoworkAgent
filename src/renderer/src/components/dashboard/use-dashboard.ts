@@ -37,6 +37,8 @@ export interface OverviewData {
   codeMeasuredAdoptionRate: number | null
   codeInclusiveAdoptionRate: number | null
   codePushedAdoptionRate: number | null
+  /** 已 Push 采纳行 ÷ 全部有效生成行（含未提交）。端到端「真实入库」口径，领导主看。 */
+  codeInclusivePushedAdoptionRate: number | null
   codeAdoptionRate: number | null
   totalSkills: number
   totalTools: number
@@ -243,6 +245,8 @@ export interface DashboardCodeStats {
   measuredAdoptionRate: number | null
   inclusiveAdoptionRate: number | null
   pushedAdoptionRate: number | null
+  /** 已 Push 采纳行 ÷ 全部有效生成行（含未提交）。端到端「真实入库」口径，领导主看。 */
+  inclusivePushedAdoptionRate: number | null
   adoptionRate: number | null
 }
 
@@ -1004,6 +1008,10 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     codePushedEffectiveGeneratedLines > 0
       ? codePushedAdoptedLines / codePushedEffectiveGeneratedLines
       : null
+  const codeInclusivePushedAdoptionRate =
+    codeInclusiveEffectiveGeneratedLines > 0
+      ? codePushedAdoptedLines / codeInclusiveEffectiveGeneratedLines
+      : null
   const codeAdoptionRate = codeMeasuredAdoptionRate
   const totalSkills = aggs.total_skills?.value ?? 0
   const totalTools = aggs.total_tools?.value ?? 0
@@ -1103,6 +1111,7 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     codePushedCommitCount,
     codeMeasuredAdoptionRate,
     codeInclusiveAdoptionRate,
+    codeInclusivePushedAdoptionRate,
     codePushedAdoptionRate,
     codeAdoptionRate,
     totalSkills,

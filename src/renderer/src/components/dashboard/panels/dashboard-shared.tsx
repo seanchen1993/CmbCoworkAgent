@@ -94,7 +94,7 @@ export function GeneratedLinesTooltip(): React.JSX.Element {
       </div>
       <div className="text-muted-foreground">
         以下文件不纳入统计：非代码文件（如
-        Markdown、JSON、图片等）、锁文件（package-lock.json、pnpm-lock.yaml、yarn.lock）、压缩/构建产物（.min.js/.min.css、.map）、依赖与构建目录（node_modules、dist、build
+        Markdown、JSON、YAML、.properties、图片等）、锁文件（package-lock.json、pnpm-lock.yaml、yarn.lock）、压缩/构建产物（.min.js/.min.css、.map）、依赖与构建目录（node_modules、dist、build
         等）。
       </div>
     </div>
@@ -104,7 +104,7 @@ export function GeneratedLinesTooltip(): React.JSX.Element {
 export function PushedAdoptionTooltip({ data }: { data: CodeStatsTooltipData }): React.JSX.Element {
   return (
     <div className="space-y-1.5">
-      <div className="text-[11px] font-medium text-foreground">入库率（已 Push 采纳率）</div>
+      <div className="text-[11px] font-medium text-foreground">入库采纳率（已 Push 采纳率）</div>
       <div className="space-y-1 text-[11px]">
         <TooltipRow
           label="已 Push 采纳行数"
@@ -138,7 +138,7 @@ export function MeasuredAdoptionTooltip({
 }): React.JSX.Element {
   return (
     <div className="space-y-1.5">
-      <div className="text-[11px] font-medium text-foreground">提交率（已 Commit 采纳率）</div>
+      <div className="text-[11px] font-medium text-foreground">提交采纳率（已 Commit 采纳率）</div>
       <div className="space-y-1 text-[11px]">
         <TooltipRow label="采纳行数" value={`${formatExactNumber(data.adoptedLines)} 行`} />
         <TooltipRow
@@ -153,6 +153,7 @@ export function MeasuredAdoptionTooltip({
       <div className="space-y-0.5 text-[10px] text-muted-foreground">
         <div>采纳率 = 采纳行数 / 已测量有效生成行数。</div>
         <div>已测量有效生成行数已剔除被 agent 自己改写的中间稿部分。</div>
+        <div>口径等同组织级工具的「代码入库率」，可横向对比。</div>
       </div>
     </div>
   )
@@ -166,7 +167,7 @@ export function InclusiveAdoptionTooltip({
   return (
     <div className="space-y-1.5">
       <div className="text-[11px] font-medium text-foreground">
-        代码总量采纳率（含未提交采纳率）
+        总量提交采纳率（相对全部有效生成）
       </div>
       <div className="space-y-1 text-[11px]">
         <TooltipRow label="采纳行数" value={`${formatExactNumber(data.adoptedLines)} 行`} />
@@ -186,6 +187,50 @@ export function InclusiveAdoptionTooltip({
       <div className="space-y-0.5 text-[10px] text-muted-foreground">
         <div>采纳率 = 采纳行数 / (已测量有效生成行数 + 未提交生成行数)。</div>
         <div>已测量有效生成行数已剔除被 agent 自己改写的中间稿部分。</div>
+        <div>
+          分母合计通常小于「代码生成行数」：已提交部分已扣除被 agent
+          改写覆盖/回退的中间稿，未提交部分尚未测量、仍按原始行数计入。
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export function InclusivePushedAdoptionTooltip({
+  data
+}: {
+  data: CodeStatsTooltipData
+}): React.JSX.Element {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-medium text-foreground">
+        总量入库采纳率（已 Push 真实入库率）
+      </div>
+      <div className="space-y-1 text-[11px]">
+        <TooltipRow
+          label="已 Push 采纳行数"
+          value={`${formatExactNumber(data.pushedAdoptedLines)} 行`}
+        />
+        <TooltipRow
+          label="已测量有效生成行数"
+          value={`${formatExactNumber(data.effectiveGeneratedLines)} 行`}
+        />
+        <TooltipRow
+          label="未提交生成行数"
+          value={`${formatExactNumber(data.unmeasuredGeneratedLines)} 行`}
+        />
+        <TooltipRow
+          label="含未提交分母"
+          value={`${formatExactNumber(data.inclusiveEffectiveGeneratedLines)} 行`}
+        />
+      </div>
+      <div className="space-y-0.5 text-[10px] text-muted-foreground">
+        <div>采纳率 = 已 Push 采纳行数 / (已测量有效生成行数 + 未提交生成行数)。</div>
+        <div>Agent 有效产出中最终真实推送入库的比例，分母含未提交，口径最严。</div>
+        <div>
+          分母合计通常小于「代码生成行数」：已提交部分已扣除被 agent
+          改写覆盖/回退的中间稿，未提交部分尚未测量、仍按原始行数计入。
+        </div>
       </div>
     </div>
   )

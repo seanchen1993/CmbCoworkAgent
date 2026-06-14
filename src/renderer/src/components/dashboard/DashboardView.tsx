@@ -255,6 +255,7 @@ function buildDashboardAnalysisPanelSnapshot({
           codePushedEffectiveGeneratedLines: overview.codePushedEffectiveGeneratedLines,
           codePushedAdoptedLines: overview.codePushedAdoptedLines,
           codePushedAdoptionRate: overview.codePushedAdoptionRate,
+          codeInclusivePushedAdoptionRate: overview.codeInclusivePushedAdoptionRate,
           codePushedCommitCount: overview.codePushedCommitCount
         }
       : null,
@@ -895,6 +896,7 @@ const EMPTY_SKILL_DETAIL: DashboardSkillDetail = {
     measuredAdoptionRate: null,
     inclusiveAdoptionRate: null,
     pushedAdoptionRate: null,
+    inclusivePushedAdoptionRate: null,
     adoptionRate: null
   },
   traces: [],
@@ -1001,13 +1003,14 @@ function buildProjectModeCodeRows(
     ["代码未提交生成行数", stats.unmeasuredGeneratedLines],
     ["代码含未提交分母行数", stats.inclusiveEffectiveGeneratedLines],
     ["代码采纳行数", stats.adoptedLines],
-    ["代码总量采纳率（含未提交）", formatPercent(stats.inclusiveAdoptionRate)],
-    ["提交率（已 Commit 采纳率）", formatPercent(stats.measuredAdoptionRate)],
+    ["总量提交采纳率（相对全部有效生成）", formatPercent(stats.inclusiveAdoptionRate)],
+    ["提交采纳率（已 Commit 采纳率）", formatPercent(stats.measuredAdoptionRate)],
     ["代码已 Push 原始生成行数", stats.pushedMeasuredGeneratedLines],
     ["代码已 Push 有效生成行数", stats.pushedEffectiveGeneratedLines],
     ["代码已 Push 采纳行数", stats.pushedAdoptedLines],
     ["代码已 Push Commit 数", stats.pushedCommitCount],
-    ["入库率（已 Push 采纳率）", formatPercent(stats.pushedAdoptionRate)]
+    ["入库采纳率（已 Push 采纳率）", formatPercent(stats.pushedAdoptionRate)],
+    ["总量入库采纳率（已 Push 真实入库率）", formatPercent(stats.inclusivePushedAdoptionRate)]
   ]
 }
 
@@ -3592,13 +3595,14 @@ export function DashboardView(): React.JSX.Element {
             ["代码含未提交分母行数", overview.codeInclusiveEffectiveGeneratedLines],
             ["代码删除行数", overview.codeDeletedLines],
             ["代码采纳行数", overview.codeAdoptedLines],
-            ["代码总量采纳率（含未提交）", formatPercent(overview.codeInclusiveAdoptionRate)],
-            ["提交率（已 Commit 采纳率）", formatPercent(overview.codeMeasuredAdoptionRate)],
+            ["总量提交采纳率（相对全部有效生成）", formatPercent(overview.codeInclusiveAdoptionRate)],
+            ["提交采纳率（已 Commit 采纳率）", formatPercent(overview.codeMeasuredAdoptionRate)],
             ["代码已 Push 原始生成行数", overview.codePushedMeasuredGeneratedLines],
             ["代码已 Push 有效生成行数", overview.codePushedEffectiveGeneratedLines],
             ["代码已 Push 采纳行数", overview.codePushedAdoptedLines],
             ["代码已 Push Commit 数", overview.codePushedCommitCount],
-            ["入库率（已 Push 采纳率）", formatPercent(overview.codePushedAdoptionRate)],
+            ["入库采纳率（已 Push 采纳率）", formatPercent(overview.codePushedAdoptionRate)],
+            ["总量入库采纳率（已 Push 真实入库率）", formatPercent(overview.codeInclusivePushedAdoptionRate)],
             ["Skill 种类数", overview.totalSkills],
             ["Skill 调用次数", overview.totalSkillCalls],
             ["Tool 种类数", overview.totalTools],
@@ -3911,7 +3915,7 @@ export function DashboardView(): React.JSX.Element {
       if (projectMode.adapters.length > 0) {
         sheets.push({
           name: "项目插件统计",
-          header: ["插件", "版本", "项目数", "特性数", "对话数", "提交率", "入库率"],
+          header: ["插件", "版本", "项目数", "特性数", "对话数", "提交采纳率", "入库采纳率"],
           rows: projectMode.adapters.map((adapter) => [
             adapter.name,
             adapter.version || "",
@@ -3964,8 +3968,8 @@ export function DashboardView(): React.JSX.Element {
           name: "项目Skill采纳排行",
           header: [
             "Skill",
-            "提交率",
-            "入库率",
+            "提交采纳率",
+            "入库采纳率",
             "生成行数",
             "有效生成行数",
             "采纳行数",

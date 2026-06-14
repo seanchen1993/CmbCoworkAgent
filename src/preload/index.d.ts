@@ -287,6 +287,7 @@ interface DashboardCodeStats {
   measuredAdoptionRate: number | null
   inclusiveAdoptionRate: number | null
   pushedAdoptionRate: number | null
+  inclusivePushedAdoptionRate: number | null
   adoptionRate: number | null
 }
 
