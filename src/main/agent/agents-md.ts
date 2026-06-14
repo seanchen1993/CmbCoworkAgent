@@ -2,6 +2,7 @@ import { constants as fsConstants, type Stats } from "fs"
 import { lstat, open, realpath, stat } from "fs/promises"
 import { homedir } from "os"
 import { dirname, isAbsolute, join, relative, resolve } from "path"
+import { replaceHarnessPlaceholders } from "./placeholders"
 
 export const DEFAULT_AGENTS_FILENAME = "AGENTS.md"
 export const LOCAL_AGENTS_OVERRIDE_FILENAME = "AGENTS.override.md"
@@ -65,33 +66,11 @@ interface ResolveAgentsFileOptions {
   rejectSymlinks?: boolean
 }
 
-function normalizeAgentsPlaceholderPath(value: string): string {
-  return resolve(value).replace(/\\/g, "/")
-}
-
 function replaceAgentsPlaceholders(
   content: string,
   context: AgentsPromptPlaceholderContext
 ): string {
-  const replacements: Record<string, string | undefined> = {
-    PLUGIN_ROOT:
-      context.pluginRoot !== undefined && context.pluginRoot !== ""
-        ? normalizeAgentsPlaceholderPath(context.pluginRoot)
-        : undefined,
-    PLUGIN_WORKSPACE:
-      context.pluginWorkspace !== undefined && context.pluginWorkspace !== ""
-        ? normalizeAgentsPlaceholderPath(context.pluginWorkspace)
-        : undefined,
-    PROJECT_CODE:
-      context.projectCode !== undefined && context.projectCode !== "" ? context.projectCode : undefined,
-    FEATURE_ID:
-      context.featureId !== undefined && context.featureId !== "" ? context.featureId : undefined
-  }
-
-  return content.replace(
-    /\{(PLUGIN_ROOT|PLUGIN_WORKSPACE|PROJECT_CODE|FEATURE_ID)\}/g,
-    (match, key: string) => replacements[key] ?? match
-  )
+  return replaceHarnessPlaceholders(content, context)
 }
 
 function isWithinRoot(rootDir: string, targetDir: string): boolean {

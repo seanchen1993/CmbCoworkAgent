@@ -36,6 +36,7 @@ import fg from "fast-glob"
 import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
 import micromatch from "micromatch"
+import { hasCompleteHarnessPlaceholderContext, replaceHarnessPlaceholders } from "./placeholders"
 import { replace } from "./replace"
 import type { ToolOrchestrator } from "./tool-orchestrator"
 import { assessCommandSafety, classifyCommandConcurrency, isGitCommitCommand } from "./exec-policy"
@@ -98,6 +99,10 @@ async function mapLimit<T, R>(
   })
   await Promise.all(workers)
   return results
+}
+
+function normalizeSkillDocumentPathKey(inputPath: string): string {
+  return path.resolve(inputPath).replace(/\\/g, "/").toLowerCase()
 }
 
 /**
@@ -3112,6 +3117,24 @@ export class LocalSandbox
         result =
           `[Lines ${effectiveOffset + 1}-${end} of ${total}. Use offset=${end} to read more.]\n` +
           formatted
+      }
+
+      if (
+        skillMatch &&
+        hasCompleteHarnessPlaceholderContext({
+          pluginWorkspace: this.pluginWorkspace,
+          featureId: this.featureId,
+          projectCode: this.projectCode
+        }) &&
+        normalizeSkillDocumentPathKey(resolvedPath) ===
+          normalizeSkillDocumentPathKey(skillMatch.path)
+      ) {
+        result = replaceHarnessPlaceholders(result, {
+          pluginRoot: skillMatch.pluginRoot ?? this.pluginRoot,
+          pluginWorkspace: this.pluginWorkspace,
+          featureId: this.featureId,
+          projectCode: this.projectCode
+        })
       }
 
       if (fireSkillHooks && skillMatch) {
