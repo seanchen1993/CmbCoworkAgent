@@ -152,6 +152,28 @@ Your memory files are stored as Markdown in the memory directory. You can update
 - Never store API keys, passwords, or credentials in memory files
 `
 
+export const AGENTS_MD_PREAMBLE = `## Project Instructions (from AGENTS.md)
+
+The following instructions come from AGENTS.md files discovered in your workspace. They contain project-specific conventions, coding styles, architecture rules, and user preferences.
+
+When these instructions conflict with the general system instructions above, the AGENTS.md instructions take precedence.
+
+If multiple AGENTS.md files apply to the file you are modifying, instructions in deeper (more specific) directories take precedence over those in parent directories. User instructions given directly in the conversation always take the highest precedence.
+
+When working on files in subdirectories, always check whether those directories contain their own AGENTS.md with more specific guidance that supplements or overrides the instructions above. You may also check README/README.md files for more information about the project.
+
+If you modify any files, styles, structures, configurations, workflows, or conventions mentioned in AGENTS.md files, you MUST update the corresponding AGENTS.md files to keep them up-to-date.`
+
+export function renderAgentsProjectInstructions(agentsPrompt: string): string
+export function renderAgentsProjectInstructions(
+  agentsPrompt: string | null | undefined
+): string | undefined
+export function renderAgentsProjectInstructions(
+  agentsPrompt: string | null | undefined
+): string | undefined {
+  return agentsPrompt ? `${AGENTS_MD_PREAMBLE}\n\n${agentsPrompt}` : undefined
+}
+
 const TOOL_ROUTING_GATE_PROMPT_PREFIX = `
 ## Tool Routing Gate
 
@@ -176,7 +198,7 @@ function renderToolRoutingGatePrompt(options: {
     directRouteWarnings.push("deferred tools")
   }
   if (options.hasCodeExecRoute) {
-    directRouteWarnings.push("\`caller=\"code_exec\"\`")
+    directRouteWarnings.push('`caller="code_exec"`')
   }
 
   const lines = [
@@ -228,9 +250,7 @@ IMPORTANT: Any MCP tool invoked via mcp.$call(...) in \`code_exec\` without prio
 `
 
 function joinPromptSections(sections: string[]): string {
-  const normalizedSections = sections
-    .map((section) => section.trim())
-    .filter(Boolean)
+  const normalizedSections = sections.map((section) => section.trim()).filter(Boolean)
 
   if (normalizedSections.length === 0) return ""
   return `\n${normalizedSections.join("\n\n")}\n`
@@ -243,12 +263,15 @@ export function renderInjectedToolUsagePrompt(options: {
   hasCodeExecTool: boolean
 }): string {
   const sections: string[] = []
-  const hasDeferredWorkflow = options.hasSearchTool && options.hasInspectTool && options.hasInvokeDeferredTool
+  const hasDeferredWorkflow =
+    options.hasSearchTool && options.hasInspectTool && options.hasInvokeDeferredTool
   if (hasDeferredWorkflow || options.hasCodeExecTool) {
-    sections.push(renderToolRoutingGatePrompt({
-      hasDeferredRoute: hasDeferredWorkflow,
-      hasCodeExecRoute: options.hasCodeExecTool
-    }))
+    sections.push(
+      renderToolRoutingGatePrompt({
+        hasDeferredRoute: hasDeferredWorkflow,
+        hasCodeExecRoute: options.hasCodeExecTool
+      })
+    )
   }
   if (hasDeferredWorkflow) {
     sections.push(DEFERRED_TOOLS_WORKFLOW_PROMPT)
@@ -259,7 +282,7 @@ export function renderInjectedToolUsagePrompt(options: {
       CODE_EXEC_BASE_PROMPT_PREFIX,
       hasDeferredWorkflow
         ? '1. **Identify MCP tools (if needed):** If you are tackling a complex task and do not already know the exact MCP tool_ids for code execution, you may call `search_tool(..., caller="code_exec")` to find them.'
-        : '1. **Identify MCP tools:** Determine the exact MCP tool_ids you need for the code_exec from the callable tool list.',
+        : "1. **Identify MCP tools:** Determine the exact MCP tool_ids you need for the code_exec from the callable tool list.",
       CODE_EXEC_BASE_PROMPT_TAIL
     ]
     sections.push(codeExecLines.join(""))

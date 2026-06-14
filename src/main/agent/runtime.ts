@@ -72,6 +72,7 @@ import { app, BrowserWindow } from "electron"
 import {
   BASE_SYSTEM_PROMPT,
   MEMORY_SYSTEM_PROMPT,
+  renderAgentsProjectInstructions,
   renderInjectedToolUsagePrompt,
   renderAvailableDeferredToolsPrompt
 } from "./system-prompt"
@@ -1087,7 +1088,11 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         return parts.join("")
       }
       const customExecute = lcTool(
-        async (input: { command: string; cwd?: string; run_in_background?: boolean }): Promise<string> => {
+        async (input: {
+          command: string
+          cwd?: string
+          run_in_background?: boolean
+        }): Promise<string> => {
           const sandbox = filesystemBackend as LocalSandbox
           if (input.run_in_background) {
             return sandbox.executeBackground(input.command, input.cwd)
@@ -2568,13 +2573,25 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     loadedPaths: [],
     truncated: false
   }
+  let agentsProjectInstructions: string | undefined
   if (enableAgentsPrompt) {
-    agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, {
-      globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
-      projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
-    })
+    agentsPrompt = await loadAgentsPromptForWorkspace(
+      workspacePath,
+      {
+        globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+        projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+      },
+      {
+        pluginRoot,
+        pluginWorkspace,
+        featureId,
+        projectCode
+      }
+    )
     if (agentsPrompt.prompt) {
-      systemPrompt += "\n\n" + agentsPrompt.prompt
+      const renderedAgentsProjectInstructions = renderAgentsProjectInstructions(agentsPrompt.prompt)
+      agentsProjectInstructions = renderedAgentsProjectInstructions
+      systemPrompt += "\n\n" + renderedAgentsProjectInstructions
       console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
       if (agentsPrompt.truncated) {
         console.warn("[Runtime] AGENTS.md content exceeded prompt budget and was truncated:", {
@@ -2715,7 +2732,7 @@ The workspace root is: ${workspacePath}`
     // Disable ad hoc code_exec authoring in Agent Team and project mode. Saved tools remain
     // available through the deferred-tool bridge when code exec is enabled.
     codeExecRouteEnabled =
-      codeExecEnabled && allMcpTools.length > 0 && !isCoordinatorMode && !Boolean(featureId)
+      codeExecEnabled && allMcpTools.length > 0 && !isCoordinatorMode && !featureId
     eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
     lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
     mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata)
@@ -2901,14 +2918,11 @@ The workspace root is: ${workspacePath}`
   }
 
   const coordinatorWorkingDirAppendix = workingDirPromptAppendix?.trim()
-  const coordinatorProjectInstructions = [
-    agentsPrompt.prompt,
-    extraSystemPrompt
-  ]
+  const coordinatorProjectInstructions = [agentsProjectInstructions, extraSystemPrompt]
     .filter(Boolean)
     .join("\n\n")
   const coordinatorWorkerProjectInstructions = [
-    agentsPrompt.prompt,
+    agentsProjectInstructions,
     coordinatorWorkingDirAppendix
       ? `### Project Mode Adapter Instructions\n\n${coordinatorWorkingDirAppendix}`
       : "",
@@ -3595,7 +3609,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     backend,
     systemPrompt,
     filesystemSystemPrompt,
-    subagentExtraSystemPrompt: agentsPrompt.prompt ?? undefined,
+    subagentExtraSystemPrompt: agentsProjectInstructions,
     mainTodosEnabled: !isCoordinatorMode,
     mainFilesystemEnabled: !isCoordinatorMode,
     mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents,

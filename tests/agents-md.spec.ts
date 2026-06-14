@@ -9,6 +9,10 @@ import { link, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "fs/promi
 import { tmpdir } from "os"
 import { basename, join } from "path"
 import * as agentsMd from "../src/main/agent/agents-md.ts"
+import {
+  AGENTS_MD_PREAMBLE,
+  renderAgentsProjectInstructions
+} from "../src/main/agent/system-prompt.ts"
 
 const {
   discoverGlobalAgentsFiles,
@@ -91,7 +95,17 @@ async function testGlobalAndProjectOrdering(): Promise<void> {
       "expected AGENTS.md files"
     )
     assert(prompt.includes("# Global AGENTS.md instructions"), "missing global section")
-    assert(prompt.includes("--- project-doc ---"), "missing project separator")
+    assert(prompt.includes("\n\n---\n\n"), "missing project separator")
+    assert(!prompt.includes("--- project-doc ---"), "old project separator should not render")
+    assert(
+      prompt.includes(`<!-- From: ${join(root, "AGENTS.md")} -->`),
+      "project source should render as HTML comment"
+    )
+    assert(
+      !prompt.includes(`[${join(root, "AGENTS.md")}]`),
+      "source should not render as a bare bracket marker"
+    )
+    assert(prompt.includes("`````````"), "AGENTS content should render inside fenced blocks")
     assert(
       prompt.indexOf("GLOBAL_RULE") < prompt.indexOf("ROOT_RULE"),
       "global should render before project"
@@ -101,6 +115,31 @@ async function testGlobalAndProjectOrdering(): Promise<void> {
       "project should render root-to-cwd"
     )
     assert(result.truncated === false, "small files should not be truncated")
+  })
+}
+
+async function testBacktickFenceDoesNotConflictWithContent(): Promise<void> {
+  await withTempDir("agents-md-fence", async (base) => {
+    const { root, nested, globalHome } = await setupWorkspace(base)
+    process.env.CMB_COWORK_AGENT_HOME = globalHome
+
+    await writeFile(
+      join(root, "AGENTS.md"),
+      "ROOT_WITH_FENCE\n`````````\ninner fenced text",
+      "utf8"
+    )
+
+    const result = await loadAgentsPromptForWorkspace(nested, {
+      globalMaxBytes: 1024,
+      projectMaxBytes: 2048
+    })
+    const prompt = result.prompt ?? ""
+
+    assert(prompt.includes("ROOT_WITH_FENCE"), "AGENTS content should render")
+    assert(
+      prompt.includes("\n``````````\nROOT_WITH_FENCE"),
+      "outer fence should be longer than the content fence"
+    )
   })
 }
 
@@ -332,6 +371,162 @@ async function testReadAgentsFilesLegacySignature(): Promise<void> {
   })
 }
 
+async function testProjectPlaceholderReplacement(): Promise<void> {
+  await withTempDir("agents-md-placeholders", async (base) => {
+    const { root, nested, globalHome } = await setupWorkspace(base)
+    process.env.CMB_COWORK_AGENT_HOME = globalHome
+
+    const pluginRoot = join(base, "plugins", "demo-plugin")
+    const pluginWorkspace = join(base, "plugin-workspace")
+    await mkdir(pluginRoot, { recursive: true })
+    await mkdir(pluginWorkspace, { recursive: true })
+
+    await writeFile(
+      join(globalHome, "AGENTS.md"),
+      "global root={PLUGIN_ROOT} code={PROJECT_CODE}",
+      "utf8"
+    )
+    await writeFile(
+      join(root, "AGENTS.md"),
+      [
+        "root plugin={PLUGIN_ROOT}",
+        "again={PLUGIN_ROOT}",
+        "workspace={PLUGIN_WORKSPACE}",
+        "code={PROJECT_CODE}",
+        "feature={FEATURE_ID}",
+        "unknown={UNKNOWN_PLACEHOLDER}"
+      ].join("\n"),
+      "utf8"
+    )
+
+    const result = await loadAgentsPromptForWorkspace(
+      nested,
+      {
+        globalMaxBytes: 2048,
+        projectMaxBytes: 2048
+      },
+      {
+        pluginRoot,
+        pluginWorkspace,
+        projectCode: "DEMO-CODE",
+        featureId: "feature-42"
+      }
+    )
+
+    const prompt = result.prompt ?? ""
+    const normalizedPluginRoot = pluginRoot.replace(/\\/g, "/")
+    const normalizedPluginWorkspace = pluginWorkspace.replace(/\\/g, "/")
+
+    assert(
+      prompt.includes("global root={PLUGIN_ROOT} code={PROJECT_CODE}"),
+      "global AGENTS placeholders should not be replaced"
+    )
+    assert(
+      prompt.includes(`root plugin=${normalizedPluginRoot}`),
+      `PLUGIN_ROOT should be replaced in project AGENTS, got: ${prompt}`
+    )
+    assert(
+      prompt.includes(`again=${normalizedPluginRoot}`),
+      `repeated PLUGIN_ROOT should be replaced, got: ${prompt}`
+    )
+    assert(
+      prompt.includes(`workspace=${normalizedPluginWorkspace}`),
+      `PLUGIN_WORKSPACE should be replaced in project AGENTS, got: ${prompt}`
+    )
+    assert(prompt.includes("code=DEMO-CODE"), `PROJECT_CODE should be replaced, got: ${prompt}`)
+    assert(prompt.includes("feature=feature-42"), `FEATURE_ID should be replaced, got: ${prompt}`)
+    assert(
+      prompt.includes("unknown={UNKNOWN_PLACEHOLDER}"),
+      `unknown placeholders should be retained, got: ${prompt}`
+    )
+  })
+}
+
+async function testPlaceholderRetainedWhenContextMissingOrEmpty(): Promise<void> {
+  await withTempDir("agents-md-placeholder-missing", async (base) => {
+    const { root, nested, globalHome } = await setupWorkspace(base)
+    process.env.CMB_COWORK_AGENT_HOME = globalHome
+
+    await writeFile(
+      join(root, "AGENTS.md"),
+      [
+        "root=[{PLUGIN_ROOT}]",
+        "workspace=[{PLUGIN_WORKSPACE}]",
+        "code=[{PROJECT_CODE}]",
+        "feature=[{FEATURE_ID}]"
+      ].join("\n"),
+      "utf8"
+    )
+
+    const result = await loadAgentsPromptForWorkspace(
+      nested,
+      {
+        globalMaxBytes: 2048,
+        projectMaxBytes: 2048
+      },
+      {
+        pluginRoot: "",
+        projectCode: "   "
+      }
+    )
+
+    const prompt = result.prompt ?? ""
+    assert(
+      prompt.includes("root=[{PLUGIN_ROOT}]"),
+      `empty PLUGIN_ROOT should be retained: ${prompt}`
+    )
+    assert(
+      prompt.includes("workspace=[{PLUGIN_WORKSPACE}]"),
+      `missing PLUGIN_WORKSPACE should be retained: ${prompt}`
+    )
+    assert(
+      prompt.includes("code=[   ]"),
+      `whitespace PROJECT_CODE should replace as-is: ${prompt}`
+    )
+    assert(
+      prompt.includes("feature=[{FEATURE_ID}]"),
+      `missing FEATURE_ID should be retained: ${prompt}`
+    )
+  })
+}
+
+async function testPlaceholderReplacementHappensBeforeBudgetFitting(): Promise<void> {
+  await withTempDir("agents-md-placeholder-budget", async (base) => {
+    const { root, nested, globalHome } = await setupWorkspace(base)
+    process.env.CMB_COWORK_AGENT_HOME = globalHome
+
+    await writeFile(
+      join(root, "AGENTS.md"),
+      "BUDGET_BEGIN\n{PLUGIN_ROOT}\nBUDGET_END",
+      "utf8"
+    )
+
+    const projectMaxBytes = 420
+    const result = await loadAgentsPromptForWorkspace(
+      nested,
+      {
+        globalMaxBytes: 2048,
+        projectMaxBytes
+      },
+      {
+        pluginRoot: join(base, "plugins", "x".repeat(600))
+      }
+    )
+
+    const prompt = result.prompt ?? ""
+    assert(
+      Buffer.byteLength(prompt, "utf8") <= projectMaxBytes,
+      "project prompt should fit budget"
+    )
+    assert(prompt.includes("BUDGET_BEGIN"), "placeholder budget test should retain content prefix")
+    assert(!prompt.includes("BUDGET_END"), "expanded placeholder should force truncation")
+    assert(
+      result.truncated === true,
+      "expanded placeholder budget pressure should report truncation"
+    )
+  })
+}
+
 async function testSeparateGlobalAndProjectBudgets(): Promise<void> {
   await withTempDir("agents-md-budget", async (base) => {
     const { root, nested, globalHome } = await setupWorkspace(base)
@@ -356,6 +551,41 @@ async function testSeparateGlobalAndProjectBudgets(): Promise<void> {
     )
     assert(result.truncated === true, "result should report truncation")
   })
+}
+
+async function testLeafFirstBudgetKeepsNestedInstructions(): Promise<void> {
+  await withTempDir("agents-md-leaf-budget", async (base) => {
+    const { root, nested, globalHome } = await setupWorkspace(base)
+    process.env.CMB_COWORK_AGENT_HOME = globalHome
+
+    await writeFile(join(root, "AGENTS.md"), `ROOT_BEGIN\n${"R".repeat(2000)}\nROOT_END`, "utf8")
+    await writeFile(join(nested, "AGENTS.md"), "NESTED_BEGIN\nNESTED_END", "utf8")
+
+    const result = await loadAgentsPromptForWorkspace(nested, {
+      globalMaxBytes: 1024,
+      projectMaxBytes: 450
+    })
+    const prompt = result.prompt ?? ""
+
+    assert(prompt.includes("NESTED_BEGIN"), "leaf AGENTS should be retained under budget")
+    assert(prompt.includes("NESTED_END"), "leaf AGENTS should be retained completely")
+    assert(!prompt.includes("ROOT_END"), "ancestor AGENTS should be truncated before leaf AGENTS")
+    assert(result.truncated === true, "leaf-first budget pressure should report truncation")
+  })
+}
+
+function testAgentsProjectInstructionsHelper(): void {
+  const rendered = renderAgentsProjectInstructions("# AGENTS.md instructions\n\nRULE")
+  assert(rendered.includes(AGENTS_MD_PREAMBLE), "rendered instructions should include preamble")
+  assert(rendered.includes("RULE"), "rendered instructions should include AGENTS prompt")
+  assert(
+    rendered.indexOf(AGENTS_MD_PREAMBLE) < rendered.indexOf("RULE"),
+    "preamble should render before AGENTS prompt"
+  )
+  assert(
+    renderAgentsProjectInstructions(null) === undefined,
+    "empty AGENTS prompt should not render project instructions"
+  )
 }
 
 async function testNumericBudgetAppliesToFinalPrompt(): Promise<void> {
@@ -426,6 +656,8 @@ async function run(): Promise<void> {
   try {
     await testGlobalAndProjectOrdering()
     console.log("PASS global/project ordering")
+    await testBacktickFenceDoesNotConflictWithContent()
+    console.log("PASS AGENTS markdown fence")
     await testOverridePriority()
     console.log("PASS override priority")
     await testGlobalSymlinkCannotEscapeHome()
@@ -446,8 +678,18 @@ async function run(): Promise<void> {
     console.log("PASS leading whitespace AGENTS budget")
     await testReadAgentsFilesLegacySignature()
     console.log("PASS readAgentsFiles legacy signature")
+    await testProjectPlaceholderReplacement()
+    console.log("PASS project AGENTS placeholder replacement")
+    await testPlaceholderRetainedWhenContextMissingOrEmpty()
+    console.log("PASS AGENTS placeholder retention")
+    await testPlaceholderReplacementHappensBeforeBudgetFitting()
+    console.log("PASS AGENTS placeholder budget fitting")
     await testSeparateGlobalAndProjectBudgets()
     console.log("PASS separate global/project budgets")
+    await testLeafFirstBudgetKeepsNestedInstructions()
+    console.log("PASS leaf-first AGENTS budget")
+    testAgentsProjectInstructionsHelper()
+    console.log("PASS AGENTS project instructions helper")
     await testNumericBudgetAppliesToFinalPrompt()
     console.log("PASS numeric final budget compatibility")
     await testUtf8SafeTruncation()

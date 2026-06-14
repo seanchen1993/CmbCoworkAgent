@@ -7,7 +7,8 @@ export const DEFAULT_AGENTS_FILENAME = "AGENTS.md"
 export const LOCAL_AGENTS_OVERRIDE_FILENAME = "AGENTS.override.md"
 export const DEFAULT_AGENTS_MAX_BYTES = 32 * 1024
 export const DEFAULT_GLOBAL_AGENTS_MAX_BYTES = DEFAULT_AGENTS_MAX_BYTES
-const AGENTS_PROJECT_SEPARATOR = "\n\n--- project-doc ---\n\n"
+const AGENTS_PROJECT_SEPARATOR = "\n\n---\n\n"
+const AGENTS_CONTENT_FENCE_MIN_TICKS = 9
 const UTF8_READ_PADDING_BYTES = 4
 const GLOBAL_AGENTS_SECTION_TITLE = "# Global AGENTS.md instructions"
 
@@ -44,6 +45,13 @@ export interface AgentsPromptBudgetOptions {
   totalMaxBytes?: number
 }
 
+export interface AgentsPromptPlaceholderContext {
+  pluginRoot?: string
+  pluginWorkspace?: string
+  featureId?: string
+  projectCode?: string
+}
+
 type AgentsPromptBudget = number | AgentsPromptBudgetOptions
 
 interface NormalizedAgentsPromptBudget {
@@ -55,6 +63,35 @@ interface NormalizedAgentsPromptBudget {
 interface ResolveAgentsFileOptions {
   rejectHardLinks?: boolean
   rejectSymlinks?: boolean
+}
+
+function normalizeAgentsPlaceholderPath(value: string): string {
+  return resolve(value).replace(/\\/g, "/")
+}
+
+function replaceAgentsPlaceholders(
+  content: string,
+  context: AgentsPromptPlaceholderContext
+): string {
+  const replacements: Record<string, string | undefined> = {
+    PLUGIN_ROOT:
+      context.pluginRoot !== undefined && context.pluginRoot !== ""
+        ? normalizeAgentsPlaceholderPath(context.pluginRoot)
+        : undefined,
+    PLUGIN_WORKSPACE:
+      context.pluginWorkspace !== undefined && context.pluginWorkspace !== ""
+        ? normalizeAgentsPlaceholderPath(context.pluginWorkspace)
+        : undefined,
+    PROJECT_CODE:
+      context.projectCode !== undefined && context.projectCode !== "" ? context.projectCode : undefined,
+    FEATURE_ID:
+      context.featureId !== undefined && context.featureId !== "" ? context.featureId : undefined
+  }
+
+  return content.replace(
+    /\{(PLUGIN_ROOT|PLUGIN_WORKSPACE|PROJECT_CODE|FEATURE_ID)\}/g,
+    (match, key: string) => replacements[key] ?? match
+  )
 }
 
 function isWithinRoot(rootDir: string, targetDir: string): boolean {
@@ -404,17 +441,24 @@ export async function readAgentsFiles(
       : typeof thirdArg === "string"
         ? thirdArg
         : undefined
+  return readAgentsFilesInternal(files, maxBytes, sectionTitle)
+}
+
+async function readAgentsFilesInternal(
+  files: AgentsFileReference[],
+  maxBytes: number,
+  sectionTitle?: string,
+  placeholderContext?: AgentsPromptPlaceholderContext
+): Promise<{ entries: AgentsPromptEntry[]; truncated: boolean }> {
   const entries: AgentsPromptEntry[] = []
   let truncated = false
-  let remainingBytes = maxBytes
+
+  if (maxBytes <= 0) {
+    return { entries, truncated: files.length > 0 }
+  }
 
   for (const file of files) {
-    if (remainingBytes <= 0) {
-      truncated = true
-      break
-    }
-
-    const readResult = await readFirstAvailableAgentsFile(file, remainingBytes)
+    const readResult = await readFirstAvailableAgentsFile(file, maxBytes)
     if (!readResult) {
       continue
     }
@@ -425,52 +469,31 @@ export async function readAgentsFiles(
       truncated = true
     }
 
-    const content = rawContent.content.trim()
+    let content = rawContent.content.trim()
     if (!content) {
       continue
     }
 
-    let finalContent = content
-    let entryTruncated = rawContent.truncated
-
-    if (
-      sectionTitle &&
-      !doesRenderedSectionFit(
-        sectionTitle,
-        [...entries, { path: loadedFile.path, content, truncated: rawContent.truncated }],
-        maxBytes
-      )
-    ) {
-      finalContent = fitRenderedContentToSectionBudget(
-        sectionTitle,
-        entries,
-        loadedFile.path,
-        content,
-        maxBytes
-      )
-      entryTruncated = true
-      truncated = true
+    if (placeholderContext) {
+      content = replaceAgentsPlaceholders(content, placeholderContext)
     }
-
-    if (!finalContent.trim()) {
-      truncated = true
-      break
-    }
-
-    remainingBytes = Math.max(0, remainingBytes - Buffer.byteLength(finalContent, "utf8"))
 
     entries.push({
       path: loadedFile.path,
-      content: finalContent,
-      truncated: entryTruncated
+      content,
+      truncated: rawContent.truncated
     })
-
-    if (entryTruncated) {
-      break
-    }
   }
 
-  return { entries, truncated }
+  if (!sectionTitle) {
+    return { entries, truncated }
+  }
+
+  const fitted = fitEntriesToSectionBudget(sectionTitle, entries, maxBytes)
+  return {
+    entries: fitted.entries,
+    truncated: truncated || fitted.truncated || fitted.entries.length < entries.length
+  }
 }
 
 function getProjectAgentsSectionTitle(cwd: string): string {
@@ -482,19 +505,41 @@ function renderAgentsPromptSection(title: string, entries: AgentsPromptEntry[]):
     return null
   }
 
-  const lines: string[] = [title, "", "<INSTRUCTIONS>"]
+  const lines: string[] = [title, ""]
   for (const entry of entries) {
-    lines.push(`[${entry.path}]`)
+    const fence = getMarkdownFenceForContent(entry.content)
+    lines.push(`<!-- From: ${escapeHtmlCommentText(entry.path)} -->`)
+    lines.push(fence)
     lines.push(entry.content)
+    lines.push(fence)
     if (entry.truncated) {
       lines.push("")
       lines.push("[truncated to fit prompt budget]")
     }
     lines.push("")
   }
-  lines.push("</INSTRUCTIONS>")
 
   return lines.join("\n")
+}
+
+function escapeHtmlCommentText(value: string): string {
+  return value.replace(/--/g, "- -")
+}
+
+function getMarkdownFenceForContent(content: string): string {
+  let longestRun = 0
+  let currentRun = 0
+
+  for (const char of content) {
+    if (char === "`") {
+      currentRun += 1
+      longestRun = Math.max(longestRun, currentRun)
+    } else {
+      currentRun = 0
+    }
+  }
+
+  return "`".repeat(Math.max(AGENTS_CONTENT_FENCE_MIN_TICKS, longestRun + 1))
 }
 
 function doesRenderedSectionFit(
@@ -509,16 +554,22 @@ function doesRenderedSectionFit(
   return Buffer.byteLength(prompt, "utf8") <= maxBytes
 }
 
-function fitRenderedContentToSectionBudget(
+function materializeSelectedEntries(
+  selectedEntries: Array<AgentsPromptEntry | null>
+): AgentsPromptEntry[] {
+  return selectedEntries.filter((entry): entry is AgentsPromptEntry => entry != null)
+}
+
+function fitRenderedContentAtIndexToSectionBudget(
   title: string,
-  existingEntries: AgentsPromptEntry[],
-  filePath: string,
-  content: string,
+  selectedEntries: Array<AgentsPromptEntry | null>,
+  entryIndex: number,
+  entry: AgentsPromptEntry,
   maxBytes: number
 ): string {
   let best = ""
   let low = 1
-  const codePoints = Array.from(content)
+  const codePoints = Array.from(entry.content)
   let high = codePoints.length
 
   while (low <= high) {
@@ -529,9 +580,15 @@ function fitRenderedContentToSectionBudget(
       continue
     }
 
+    const candidateEntries = [...selectedEntries]
+    candidateEntries[entryIndex] = {
+      ...entry,
+      content: candidate,
+      truncated: true
+    }
     const fits = doesRenderedSectionFit(
       title,
-      [...existingEntries, { path: filePath, content: candidate, truncated: true }],
+      materializeSelectedEntries(candidateEntries),
       maxBytes
     )
     if (fits) {
@@ -550,38 +607,45 @@ function fitEntriesToSectionBudget(
   entries: AgentsPromptEntry[],
   maxBytes: number
 ): { entries: AgentsPromptEntry[]; truncated: boolean } {
-  const fittedEntries: AgentsPromptEntry[] = []
+  const fittedEntries: Array<AgentsPromptEntry | null> = Array(entries.length).fill(null)
+  let truncated = false
 
   if (maxBytes <= 0) {
-    return { entries: fittedEntries, truncated: entries.length > 0 }
+    return { entries: [], truncated: entries.length > 0 }
   }
 
-  for (const entry of entries) {
-    if (doesRenderedSectionFit(title, [...fittedEntries, entry], maxBytes)) {
-      fittedEntries.push(entry)
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]
+    fittedEntries[index] = entry
+
+    if (doesRenderedSectionFit(title, materializeSelectedEntries(fittedEntries), maxBytes)) {
       continue
     }
 
-    const fittedContent = fitRenderedContentToSectionBudget(
+    fittedEntries[index] = null
+    const fittedContent = fitRenderedContentAtIndexToSectionBudget(
       title,
       fittedEntries,
-      entry.path,
-      entry.content,
+      index,
+      entry,
       maxBytes
     )
 
     if (fittedContent.trim()) {
-      fittedEntries.push({
+      fittedEntries[index] = {
         ...entry,
         content: fittedContent,
         truncated: true
-      })
+      }
     }
 
-    return { entries: fittedEntries, truncated: true }
+    truncated = true
   }
 
-  return { entries: fittedEntries, truncated: false }
+  return {
+    entries: materializeSelectedEntries(fittedEntries),
+    truncated
+  }
 }
 
 function fitEntriesToTotalBudget(
@@ -667,7 +731,8 @@ export async function loadAgentsPromptForWorkspace(
   budget: AgentsPromptBudget = {
     globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
     projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
-  }
+  },
+  placeholderContext: AgentsPromptPlaceholderContext = {}
 ): Promise<AgentsPromptResult> {
   const cwd = await normalizeWorkspacePath(workspacePath)
   const projectRoot = await findProjectRootByGitMarker(cwd)
@@ -679,10 +744,11 @@ export async function loadAgentsPromptForWorkspace(
     globalMaxBytes,
     GLOBAL_AGENTS_SECTION_TITLE
   )
-  const projectResult = await readAgentsFiles(
+  const projectResult = await readAgentsFilesInternal(
     projectPaths,
     projectMaxBytes,
-    getProjectAgentsSectionTitle(cwd)
+    getProjectAgentsSectionTitle(cwd),
+    placeholderContext
   )
   const totalBudgetResult =
     totalMaxBytes == null
