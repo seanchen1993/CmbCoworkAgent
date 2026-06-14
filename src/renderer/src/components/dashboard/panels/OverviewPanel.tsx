@@ -242,7 +242,8 @@ export function OverviewPanel({
             pushedAdoptedLines: data.codePushedAdoptedLines,
             inclusiveAdoptionRate: data.codeInclusiveAdoptionRate,
             measuredAdoptionRate: data.codeMeasuredAdoptionRate,
-            pushedAdoptionRate: data.codePushedAdoptionRate
+            pushedAdoptionRate: data.codePushedAdoptionRate,
+            inclusivePushedAdoptionRate: data.codeInclusivePushedAdoptionRate
           }}
           onFirstStageClick={onFunnelFirstStageClick}
         />

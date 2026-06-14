@@ -68,7 +68,8 @@ const EMPTY_FUNNEL_DATA: CodeAdoptionFunnelData = {
   pushedAdoptedLines: 0,
   inclusiveAdoptionRate: null,
   measuredAdoptionRate: null,
-  pushedAdoptionRate: null
+  pushedAdoptionRate: null,
+  inclusivePushedAdoptionRate: null
 }
 
 const EMPTY_TOOL_USAGE: DashboardProjectModeToolUsage = {
