@@ -590,7 +590,9 @@ const CODE_EXTENSIONS = new Set([
   "ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "svelte", "html", "css", "scss", "sass", "less",
   "py", "go", "rs", "java", "kt", "scala", "rb", "php", "c", "cc", "cpp", "h", "hpp", "cs",
   "swift", "m", "mm", "sh", "bash", "zsh", "sql", "lua", "r", "dart", "proto", "graphql",
-  "tf", "xml", "yaml", "yml"
+  "tf", "xml"
+  // NOTE: keep in sync with adoption-tracker.ts CODE_EXTENSIONS.
+  // yaml/yml and .properties are intentionally excluded (config/serialization churn).
 ])
 const EXCLUDED_PATH_SEGMENTS = new Set(["node_modules", "dist", "build", "out", ".next", "__pycache__", "target", ".venv", "venv", ".git", "coverage"])
 const EXCLUDED_FILENAME_PATTERNS = [/package-lock\\.json$/i, /pnpm-lock\\.yaml$/i, /yarn\\.lock$/i, /\\.min\\.(js|css)$/i, /\\.map$/i]

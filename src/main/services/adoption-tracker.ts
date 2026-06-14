@@ -133,10 +133,11 @@ const CODE_EXTENSIONS = new Set<string>([
   "proto",
   "graphql",
   "tf",
-  // Config (user said xml/yaml are legitimate config code)
-  "xml",
-  "yaml",
-  "yml"
+  // Config
+  // NOTE: yaml/yml and .properties are intentionally NOT tracked — they are
+  // config/serialization formats whose churn is mostly mechanical and would
+  // distort code-adoption stats. xml stays (legitimate config code).
+  "xml"
 ])
 
 const EXCLUDED_PATH_SEGMENTS = [
