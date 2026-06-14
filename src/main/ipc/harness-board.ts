@@ -12,6 +12,10 @@ import {
   updateHarnessProjectMetadata
 } from "../harness-board/service"
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
+import {
+  purgeProjectAnalytics,
+  type PurgeProjectAnalyticsResult
+} from "../services/project-analytics-purge"
 import type {
   HarnessProjectCreateInput,
   HarnessProjectDetailViewModel,
@@ -68,11 +72,35 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     }
   )
 
+  // Purge a deleted project's analytics from ES (trace + event docs) so it no
+  // longer appears in the dashboard. Call this *after* the project is deleted.
+  // The "delete project" feature lands on another branch — wire its delete flow
+  // to this (or import purgeProjectAnalytics directly in the main process).
+  ipcMain.handle(
+    "harnessBoard:purgeProjectAnalytics",
+    async (
+      _event,
+      projectId: string
+    ): Promise<{ success: boolean; error?: string } & Partial<PurgeProjectAnalyticsResult>> => {
+      try {
+        const result = await purgeProjectAnalytics(projectId)
+        return { success: true, ...result }
+      } catch (e) {
+        console.error("[HarnessBoard] purgeProjectAnalytics error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
   ipcMain.handle(
     "harnessBoard:getProjectDetail",
     async (_event, projectId: string): Promise<HarnessProjectDetailViewModel> => {
       const detail = getHarnessProjectDetail(projectId)
-      startHarnessWatchRefs(`project:${projectId}`, detail.project.projectRootPath, detail.watchRefs)
+      startHarnessWatchRefs(
+        `project:${projectId}`,
+        detail.project.projectRootPath,
+        detail.watchRefs
+      )
       return detail
     }
   )
@@ -88,7 +116,11 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       const details = getHarnessProjectDetails(projectIds)
       if (shouldWatchRefs) {
         for (const [projectId, detail] of Object.entries(details)) {
-          startHarnessWatchRefs(`project:${projectId}`, detail.project.projectRootPath, detail.watchRefs)
+          startHarnessWatchRefs(
+            `project:${projectId}`,
+            detail.project.projectRootPath,
+            detail.watchRefs
+          )
         }
       }
       return details

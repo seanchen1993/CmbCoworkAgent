@@ -1885,6 +1885,13 @@ interface CustomAPI {
       input: HarnessProjectMetadataUpdateInput
     ) => Promise<HarnessProjectMetadata>
     archiveProject: (projectId: string) => Promise<HarnessProjectMetadata>
+    /** Delete a project's trace + event docs from ES (call after the project is deleted). */
+    purgeProjectAnalytics: (projectId: string) => Promise<{
+      success: boolean
+      error?: string
+      deletedTrace?: number
+      deletedEvent?: number
+    }>
     getProjectDetail: (projectId: string) => Promise<HarnessProjectDetailViewModel>
     getProjectDetails: (
       projectIds: string[],

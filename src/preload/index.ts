@@ -2661,6 +2661,20 @@ const api = {
         "harnessBoard:archiveProject",
         projectId
       ) as Promise<HarnessProjectMetadata>,
+    purgeProjectAnalytics: (
+      projectId: string
+    ): Promise<{
+      success: boolean
+      error?: string
+      deletedTrace?: number
+      deletedEvent?: number
+    }> =>
+      ipcRenderer.invoke("harnessBoard:purgeProjectAnalytics", projectId) as Promise<{
+        success: boolean
+        error?: string
+        deletedTrace?: number
+        deletedEvent?: number
+      }>,
     getProjectDetail: (projectId: string): Promise<HarnessProjectDetailViewModel> =>
       ipcRenderer.invoke(
         "harnessBoard:getProjectDetail",
