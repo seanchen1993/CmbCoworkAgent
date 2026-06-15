@@ -474,8 +474,10 @@ type FunnelScopeTab = "total" | "commit"
 type FunnelStage = {
   key: string
   label: string
-  /** 漏斗宽度依据 = 采纳行数（commit → push 逐级收窄）。 */
-  widthBasis: number
+  /** 当前漏斗段顶部宽度依据。 */
+  topBasis: number
+  /** 当前漏斗段底部宽度依据。 */
+  bottomBasis: number
   /** 该口径下「生成」分母行数（副标签展示）。 */
   generatedLines: number
   adoptedLines: number
@@ -486,11 +488,11 @@ type FunnelStage = {
 const FUNNEL_COMMIT_COLOR = "#3b82f6"
 const FUNNEL_PUSH_COLOR = "#6366f1"
 
-// 代码采纳漏斗：真·漏斗形状（梯形逐级收窄），两层 = 已 Commit → 已 Push。
+// 代码采纳漏斗：真·漏斗形状（梯形逐级收窄），两层 = 生成 → 已 Commit → 已 Push。
 // 两个口径 tab 切换分母：
 //   - 总量：分母 = 有效生成总量（含未提交）→ 总量提交采纳率 / 总量入库采纳率
 //   - 提交：分母 = 各阶段已落库代码 → 提交采纳率 / 入库采纳率
-// 漏斗宽度依据采纳行数（commit 采纳 ≥ push 采纳，必然收窄），标签为各级采纳率。
+// 每段宽度按「上一阶段留存量 → 当前阶段采纳量」绘制，标签为各级采纳率。
 export function CodeAdoptionFunnel({
   data,
   className,
@@ -509,7 +511,8 @@ export function CodeAdoptionFunnel({
           {
             key: "commit",
             label: "已 Commit",
-            widthBasis: data.adoptedLines,
+            topBasis: data.inclusiveEffectiveGeneratedLines,
+            bottomBasis: data.adoptedLines,
             generatedLines: data.inclusiveEffectiveGeneratedLines,
             adoptedLines: data.adoptedLines,
             rate: data.inclusiveAdoptionRate,
@@ -518,7 +521,8 @@ export function CodeAdoptionFunnel({
           {
             key: "push",
             label: "已 Push",
-            widthBasis: data.pushedAdoptedLines,
+            topBasis: data.adoptedLines,
+            bottomBasis: data.pushedAdoptedLines,
             generatedLines: data.inclusiveEffectiveGeneratedLines,
             adoptedLines: data.pushedAdoptedLines,
             rate: data.inclusivePushedAdoptionRate,
@@ -529,7 +533,8 @@ export function CodeAdoptionFunnel({
           {
             key: "commit",
             label: "已 Commit",
-            widthBasis: data.adoptedLines,
+            topBasis: data.effectiveGeneratedLines,
+            bottomBasis: data.adoptedLines,
             generatedLines: data.effectiveGeneratedLines,
             adoptedLines: data.adoptedLines,
             rate: data.measuredAdoptionRate,
@@ -538,7 +543,8 @@ export function CodeAdoptionFunnel({
           {
             key: "push",
             label: "已 Push",
-            widthBasis: data.pushedAdoptedLines,
+            topBasis: data.adoptedLines,
+            bottomBasis: data.pushedAdoptedLines,
             generatedLines: data.pushedEffectiveGeneratedLines,
             adoptedLines: data.pushedAdoptedLines,
             rate: data.pushedAdoptionRate,
@@ -547,8 +553,14 @@ export function CodeAdoptionFunnel({
         ]
   const hasData = stages.some((s) => s.generatedLines > 0 || s.adoptedLines > 0)
   const BAND_H = 48
-  // 采纳行数量级差异可能较大，用平方根压缩 + 最小宽度下限，保证每段可见且仍“逐级收窄”。
-  const maxScaled = Math.max(...stages.map((s) => Math.sqrt(Math.max(0, s.widthBasis))), 1)
+  // 生成量与采纳量可能差异较大，用平方根压缩 + 最小宽度下限，保证每段可见。
+  const maxScaled = Math.max(
+    ...stages.flatMap((s) => [
+      Math.sqrt(Math.max(0, s.topBasis)),
+      Math.sqrt(Math.max(0, s.bottomBasis))
+    ]),
+    1
+  )
   const halfWidthOf = (basis: number): number =>
     Math.max(9, (Math.sqrt(Math.max(0, basis)) / maxScaled) * 50)
 
@@ -582,8 +594,8 @@ export function CodeAdoptionFunnel({
       </div>
       <p className="mb-2 mt-1 text-[10px] leading-tight text-muted-foreground">
         {scopeTab === "total"
-          ? "总量口径：分母为有效生成总量（含未提交），漏斗按采纳行数收窄"
-          : "提交口径：分母为各阶段已落库代码，漏斗按采纳行数收窄"}
+          ? "总量口径：分母为有效生成总量（含未提交），漏斗按生成 → Commit → Push 收窄"
+          : "提交口径：分母为各阶段已落库代码，漏斗按有效生成 → Commit → Push 收窄"}
       </p>
       {!hasData ? (
         <div className="flex flex-1 items-center justify-center py-6 text-xs text-muted-foreground">
@@ -594,9 +606,8 @@ export function CodeAdoptionFunnel({
           {/* 漏斗形状：纯锥形，撑满左侧空间 */}
           <div className="flex flex-1 flex-col">
             {stages.map((s, i) => {
-              const topHalf = halfWidthOf(s.widthBasis)
-              const next = stages[i + 1]
-              const botHalf = next ? halfWidthOf(next.widthBasis) : topHalf * 0.5
+              const topHalf = halfWidthOf(s.topBasis)
+              const botHalf = halfWidthOf(s.bottomBasis)
               const clip = `polygon(${50 - topHalf}% 0, ${50 + topHalf}% 0, ${50 + botHalf}% 100%, ${50 - botHalf}% 100%)`
               const clickable = i === 0 && scopeTab === "total" && Boolean(onFirstStageClick)
               return (
