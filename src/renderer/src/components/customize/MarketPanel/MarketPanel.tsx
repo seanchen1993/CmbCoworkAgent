@@ -342,6 +342,7 @@ interface MarketItemCardProps {
   uploaderProfile?: UploaderProfile | null
   showResolvedUploader?: boolean
   installDisabledReason?: string
+  showProjectModeTag?: boolean
 }
 
 function MarketItemCard({
@@ -362,7 +363,8 @@ function MarketItemCard({
   skillUserCount = null,
   uploaderProfile = null,
   showResolvedUploader = false,
-  installDisabledReason
+  installDisabledReason,
+  showProjectModeTag = false
 }: MarketItemCardProps) {
   const formatMetricValue = (value: number | null): string => {
     if (value === null) return "0"
@@ -440,6 +442,11 @@ function MarketItemCard({
               <span className="inline-flex items-center gap-1 text-[11px] font-medium bg-[#edf7f0] text-[#2e7d4f] border border-[#c4e8d1] px-2 py-0.5 rounded-full shrink-0">
                 <CheckCircle className="size-3" />
                 已安装
+              </span>
+            )}
+            {showProjectModeTag && item.project_mode_supported === true && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-medium bg-[#edf7f0] text-[#2e7d4f] border border-[#c4e8d1] px-2 py-0.5 rounded-full shrink-0">
+                项目模式
               </span>
             )}
             {updateAvailable && (
@@ -2681,6 +2688,7 @@ export function MarketPanel(): React.JSX.Element {
                                 installedVersion={item.installedVersion}
                                 updateAvailable={item.updateAvailable}
                                 installDisabledReason={item.installDisabledReason}
+                                showProjectModeTag={activeTab === "plugin"}
                                 marketTypeLabel={getMarketTypeLabel(activeTab)}
                                 skillCallCount={
                                   activeTab === "skill"
