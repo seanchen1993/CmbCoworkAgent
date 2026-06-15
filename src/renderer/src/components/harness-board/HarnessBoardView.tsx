@@ -868,7 +868,7 @@ function HarnessProjectPhaseFlow({
   return (
     <section className="w-full shrink-0 rounded-2xl border border-border/80 bg-background/90 p-4 shadow-sm">
       <div className="flex flex-col gap-3">
-        <div className="grid gap-3 md:grid-cols-[repeat(5,minmax(0,1fr))]">
+        <div className="grid gap-5 md:grid-cols-[repeat(5,minmax(0,1fr))]">
           {steps.map((step, index) => {
             const isDone = step.tone === "done"
             const isCurrent = step.tone === "current"
@@ -879,7 +879,7 @@ function HarnessProjectPhaseFlow({
                 {!isLast && (
                   <div
                     aria-hidden="true"
-                    className="pointer-events-none absolute left-[calc(100%-15px)] top-1/2 z-20 hidden -translate-y-1/2 md:flex"
+                    className="pointer-events-none absolute left-[calc(100%-10px)] top-1/2 z-20 hidden -translate-y-1/2 md:flex"
                   >
                     <div
                       className={cn(
@@ -2948,7 +2948,7 @@ function ProjectDetailPage({
                     </div>
                   ) : (
                     <ScrollArea className="min-h-0 flex-1">
-                      <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3 pr-3">
+                      <div className="mt-1 grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3 pr-3">
                         {runs.map((run) => (
                           <FeatureCard
                             key={run.slug}
