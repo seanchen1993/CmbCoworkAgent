@@ -128,9 +128,11 @@ export interface DashboardTraceDetail {
   outcome: string
   totalToolCalls: number
   modelCallCount: number
+  userInputRequestCount: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  appVersion?: string
   usedSkills: string[]
   evolvedSkills: string[]
   triggerSource?: string
@@ -1484,9 +1486,11 @@ function parseDashboardTraceDetail(raw: any): DashboardTraceDetail | undefined {
     outcome: String(raw.outcome ?? "unknown"),
     totalToolCalls: numberValue(raw.totalToolCalls),
     modelCallCount: numberValue(raw.modelCallCount),
+    userInputRequestCount: numberValue(raw.userInputRequestCount),
     totalInputTokens: numberValue(raw.totalInputTokens),
     totalOutputTokens: numberValue(raw.totalOutputTokens),
     totalTokens: numberValue(raw.totalTokens),
+    ...(raw.appVersion ? { appVersion: String(raw.appVersion) } : {}),
     usedSkills: Array.isArray(raw.usedSkills) ? raw.usedSkills.map(String) : [],
     evolvedSkills: Array.isArray(raw.evolvedSkills) ? raw.evolvedSkills.map(String) : [],
     ...(raw.triggerSource ? { triggerSource: String(raw.triggerSource) } : {}),

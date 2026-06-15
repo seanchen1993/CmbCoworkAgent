@@ -175,9 +175,13 @@ interface DashboardTraceDetail {
   outcome: string
   totalToolCalls: number
   modelCallCount: number
+  /** 本次 trace 中调用 request_user_input（向用户提问）的次数。 */
+  userInputRequestCount: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  /** 产生该 trace 的客户端 APP 版本。 */
+  appVersion?: string
   usedSkills: string[]
   evolvedSkills: string[]
   triggerSource?: string
@@ -1492,6 +1496,12 @@ function getTotalHits(raw: EsSearchResponse, fallback: number): number {
   return fallback
 }
 
+/** 统计 trace 树中 request_user_input 工具节点的数量（向用户提问的次数）。 */
+function countUserInputRequests(nodes: TraceNode[] | undefined): number {
+  if (!Array.isArray(nodes)) return 0
+  return nodes.filter((node) => node.type === "tool" && node.name === "request_user_input").length
+}
+
 function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
   const source = hit._source ?? {}
   const parsed = parseRawTrace(source._raw)
@@ -1536,9 +1546,13 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       modelCallCount: Array.isArray(trace.modelCalls)
         ? trace.modelCalls.length
         : asNumber(source.modelCallCount),
+      userInputRequestCount: countUserInputRequests(nodes),
       totalInputTokens,
       totalOutputTokens,
       totalTokens,
+      ...(trace.appVersion || source.appVersion
+        ? { appVersion: asString(trace.appVersion || source.appVersion) }
+        : {}),
       usedSkills: Array.isArray(trace.usedSkills)
         ? trace.usedSkills
         : asStringArray(source.usedSkills),
@@ -1571,9 +1585,11 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
     outcome: asString(source.outcome, "unknown"),
     totalToolCalls: asNumber(source.totalToolCalls),
     modelCallCount: asNumber(source.modelCallCount),
+    userInputRequestCount: asNumber(source.userInputRequestCount),
     totalInputTokens: fallbackInputTokens,
     totalOutputTokens: fallbackOutputTokens,
     totalTokens: asNumber(source.totalTokens, fallbackInputTokens + fallbackOutputTokens),
+    ...(source.appVersion ? { appVersion: asString(source.appVersion) } : {}),
     usedSkills: asStringArray(source.usedSkills),
     evolvedSkills: asStringArray(source.evolvedSkills),
     triggerSource: normalizeTraceTriggerSource(source.triggerSource),
@@ -1604,9 +1620,11 @@ function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
     outcome: trace.outcome,
     totalToolCalls: asNumber(trace.totalToolCalls),
     modelCallCount: Array.isArray(trace.modelCalls) ? trace.modelCalls.length : 0,
+    userInputRequestCount: countUserInputRequests(nodes),
     totalInputTokens: usage.totalInputTokens,
     totalOutputTokens: usage.totalOutputTokens,
     totalTokens: usage.totalTokens || usage.totalInputTokens + usage.totalOutputTokens,
+    ...(trace.appVersion ? { appVersion: trace.appVersion } : {}),
     usedSkills: Array.isArray(trace.usedSkills) ? trace.usedSkills : [],
     evolvedSkills: Array.isArray(trace.evolvedSkills) ? trace.evolvedSkills : [],
     triggerSource: normalizeTraceTriggerSource(trace.triggerSource),
@@ -4021,9 +4039,11 @@ function fallbackTraceDetailFromSkillEvalRecord(
     outcome: record.outcome,
     totalToolCalls: record.totalToolCalls,
     modelCallCount: record.modelCallCount,
+    userInputRequestCount: 0,
     totalInputTokens: record.totalInputTokens,
     totalOutputTokens: record.totalOutputTokens,
     totalTokens: record.totalTokens,
+    ...(record.appVersion ? { appVersion: record.appVersion } : {}),
     usedSkills: [record.rawSkillName],
     evolvedSkills: [],
     triggerSource: "chat",
@@ -7297,7 +7317,7 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
       durationMs: 4200
     }
   ]
-  const toolCalls =
+  const baseToolCalls =
     index === 0
       ? repeatedReadFileToolCalls
       : index === 1
@@ -7316,6 +7336,19 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
               durationMs: 310
             }
           ]
+  // 每条 mock trace 追加 1~3 次 request_user_input（向用户提问），让「请求用户输入」指标可见。
+  const userInputPrompts = [
+    "需要确认工具卡片放在对话上方还是下方？",
+    "是否同时调整 Trace 模式的分页上限？",
+    "导出会话记录时要不要包含执行树？"
+  ]
+  const userInputToolCalls = Array.from({ length: (index % 3) + 1 }, (_, askIndex) => ({
+    name: "request_user_input",
+    args: { prompt: userInputPrompts[askIndex % userInputPrompts.length] },
+    result: "用户已回复确认",
+    durationMs: 12_000 + askIndex * 3_000
+  }))
+  const toolCalls = [...baseToolCalls, ...userInputToolCalls]
 
   const trace: AgentTrace = {
     traceId,
@@ -7364,7 +7397,7 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
     totalToolCalls: toolCalls.length,
     outcome: index === 2 ? "error" : "success",
     ...(index === 2 ? { errorMessage: "Mock trace 用于展示异常状态" } : {}),
-    appVersion: "0.3.6",
+    appVersion: ["1.4.4", "1.4.3"][index % 2] ?? "1.4.4",
     usedSkills: [skill],
     evolvedSkills: index % 2 === 0 ? [skill] : [],
     triggerSource: "chat",
@@ -7397,6 +7430,7 @@ function makeMockSkillRecentTraces(
   return Array.from({ length: clampLimit(limit, 10, 10) }, (_, index) => {
     const trace = makeMockAgentTrace(skill, range, index)
     const usage = summarizeTraceTokenUsage(trace.modelCalls)
+    const nodes = buildTraceTree(trace)
     return {
       traceId: trace.traceId,
       threadId: trace.threadId,
@@ -7414,13 +7448,15 @@ function makeMockSkillRecentTraces(
       outcome: trace.outcome,
       totalToolCalls: trace.totalToolCalls,
       modelCallCount: Array.isArray(trace.modelCalls) ? trace.modelCalls.length : 0,
+      userInputRequestCount: countUserInputRequests(nodes),
       totalInputTokens: usage.totalInputTokens,
       totalOutputTokens: usage.totalOutputTokens,
       totalTokens: usage.totalTokens,
+      ...(trace.appVersion ? { appVersion: trace.appVersion } : {}),
       usedSkills: trace.usedSkills,
       evolvedSkills: trace.evolvedSkills,
       triggerSource: trace.triggerSource,
-      nodes: buildTraceTree(trace),
+      nodes,
       rawAvailable: true
     }
   })

@@ -13,6 +13,8 @@ import {
   Hash,
   Info,
   Loader2,
+  MessageCircleQuestion,
+  Tag,
   Timer,
   Wrench
 } from "lucide-react"
@@ -467,8 +469,11 @@ interface TraceThreadGroup {
   errorCount: number
   totalToolCalls: number
   totalModelCalls: number
+  totalUserInputRequests: number
   totalDurationMs: number
   totalTokens: number
+  /** thread 内出现过的 APP 版本（聚合去重，按出现顺序）。 */
+  appVersions: string[]
 }
 
 function summarizeThreadGroup(
@@ -489,8 +494,19 @@ function summarizeThreadGroup(
     errorCount: sorted.filter((trace) => trace.outcome === "error").length,
     totalToolCalls: sorted.reduce((sum, trace) => sum + trace.totalToolCalls, 0),
     totalModelCalls: sorted.reduce((sum, trace) => sum + (trace.modelCallCount ?? 0), 0),
+    totalUserInputRequests: sorted.reduce(
+      (sum, trace) => sum + (trace.userInputRequestCount ?? 0),
+      0
+    ),
     totalDurationMs: sorted.reduce((sum, trace) => sum + trace.durationMs, 0),
-    totalTokens: sorted.reduce((sum, trace) => sum + trace.totalTokens, 0)
+    totalTokens: sorted.reduce((sum, trace) => sum + trace.totalTokens, 0),
+    appVersions: [
+      ...new Set(
+        sorted
+          .map((trace) => trace.appVersion?.trim())
+          .filter((version): version is string => Boolean(version))
+      )
+    ]
   }
 }
 
@@ -799,6 +815,10 @@ export function TraceExplorer({
     metricMode === "thread"
       ? (selectedThreadGroup?.totalModelCalls ?? 0)
       : (selectedTrace?.modelCallCount ?? 0)
+  const metricUserInputRequests =
+    metricMode === "thread"
+      ? (selectedThreadGroup?.totalUserInputRequests ?? 0)
+      : (selectedTrace?.userInputRequestCount ?? 0)
   const metricDurationMs =
     metricMode === "thread"
       ? (selectedThreadGroup?.totalDurationMs ?? 0)
@@ -807,6 +827,13 @@ export function TraceExplorer({
     metricMode === "thread"
       ? (selectedThreadGroup?.totalTokens ?? 0)
       : (selectedTrace?.totalTokens ?? 0)
+  const metricAppVersions =
+    metricMode === "thread"
+      ? (selectedThreadGroup?.appVersions ?? [])
+      : selectedTrace?.appVersion
+        ? [selectedTrace.appVersion]
+        : []
+  const metricAppVersionLabel = metricAppVersions.length > 0 ? metricAppVersions.join("、") : "—"
   if (loading) {
     return (
       <div className={cn("flex min-h-[360px] flex-1 items-center justify-center", className)}>
@@ -896,48 +923,68 @@ export function TraceExplorer({
 
           <div className="flex min-h-0 min-w-0 flex-col">
             {selectedTrace && (
-              <div className="grid shrink-0 grid-cols-5 border-b border-border">
-                <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
-                  <Clock className="size-3.5 text-muted-foreground" />
-                  <div className="min-w-0">
+              <div className="flex shrink-0 overflow-x-auto border-b border-border">
+                <div className="flex shrink-0 items-center gap-2 border-r border-border px-4 py-2.5">
+                  <Clock className="size-3.5 shrink-0 text-muted-foreground" />
+                  <div>
                     <p className="text-[10px] text-muted-foreground">
                       {metricMode === "thread" ? "最近时间" : "时间"}
                     </p>
-                    <p className="truncate text-[12px] font-semibold">
+                    <p className="whitespace-nowrap text-[12px] font-semibold">
                       {formatTime(metricStartedAt ?? "")}
                     </p>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
-                  <Hash className="size-3.5 text-muted-foreground" />
-                  <div className="min-w-0">
+                <div className="flex shrink-0 items-center gap-2 border-r border-border px-4 py-2.5">
+                  <Hash className="size-3.5 shrink-0 text-muted-foreground" />
+                  <div>
                     <p className="text-[10px] text-muted-foreground">工具调用</p>
-                    <p className="truncate text-[12px] font-semibold">{metricToolCalls}</p>
+                    <p className="whitespace-nowrap text-[12px] font-semibold">{metricToolCalls}</p>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
-                  <Cpu className="size-3.5 text-muted-foreground" />
-                  <div className="min-w-0">
+                <div className="flex shrink-0 items-center gap-2 border-r border-border px-4 py-2.5">
+                  <Cpu className="size-3.5 shrink-0 text-muted-foreground" />
+                  <div>
                     <p className="text-[10px] text-muted-foreground">模型调用</p>
-                    <p className="truncate text-[12px] font-semibold">{metricModelCalls}</p>
+                    <p className="whitespace-nowrap text-[12px] font-semibold">{metricModelCalls}</p>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
-                  <Timer className="size-3.5 text-muted-foreground" />
-                  <div className="min-w-0">
+                <div className="flex shrink-0 items-center gap-2 border-r border-border px-4 py-2.5">
+                  <MessageCircleQuestion className="size-3.5 shrink-0 text-muted-foreground" />
+                  <div>
+                    <p className="text-[10px] text-muted-foreground">请求用户输入</p>
+                    <p className="whitespace-nowrap text-[12px] font-semibold">
+                      {metricUserInputRequests}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2 border-r border-border px-4 py-2.5">
+                  <Timer className="size-3.5 shrink-0 text-muted-foreground" />
+                  <div>
                     <p className="text-[10px] text-muted-foreground">
                       {metricMode === "thread" ? "总耗时" : "耗时"}
                     </p>
-                    <p className="truncate text-[12px] font-semibold">
+                    <p className="whitespace-nowrap text-[12px] font-semibold">
                       {fmtDuration(metricDurationMs)}
                     </p>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 px-4 py-2.5">
-                  <Coins className="size-3.5 text-muted-foreground" />
-                  <div className="min-w-0">
+                <div className="flex shrink-0 items-center gap-2 border-r border-border px-4 py-2.5">
+                  <Coins className="size-3.5 shrink-0 text-muted-foreground" />
+                  <div>
                     <p className="text-[10px] text-muted-foreground">Token</p>
-                    <p className="truncate text-[12px] font-semibold">{fmtTokens(metricTokens)}</p>
+                    <p className="whitespace-nowrap text-[12px] font-semibold">
+                      {fmtTokens(metricTokens)}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2 px-4 py-2.5">
+                  <Tag className="size-3.5 shrink-0 text-muted-foreground" />
+                  <div>
+                    <p className="text-[10px] text-muted-foreground">APP 版本</p>
+                    <p className="whitespace-nowrap text-[12px] font-semibold">
+                      {metricAppVersionLabel}
+                    </p>
                   </div>
                 </div>
               </div>

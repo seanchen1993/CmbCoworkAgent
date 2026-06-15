@@ -156,9 +156,11 @@ interface DashboardTraceDetail {
   outcome: string
   totalToolCalls: number
   modelCallCount: number
+  userInputRequestCount: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  appVersion?: string
   usedSkills: string[]
   evolvedSkills: string[]
   triggerSource?: string
