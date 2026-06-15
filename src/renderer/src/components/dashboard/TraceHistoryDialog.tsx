@@ -7,6 +7,7 @@ import {
   Clock,
   Code2,
   Coins,
+  Cpu,
   Download,
   Gauge,
   Hash,
@@ -465,6 +466,7 @@ interface TraceThreadGroup {
   successCount: number
   errorCount: number
   totalToolCalls: number
+  totalModelCalls: number
   totalDurationMs: number
   totalTokens: number
 }
@@ -486,6 +488,7 @@ function summarizeThreadGroup(
     successCount: sorted.filter((trace) => trace.outcome === "success").length,
     errorCount: sorted.filter((trace) => trace.outcome === "error").length,
     totalToolCalls: sorted.reduce((sum, trace) => sum + trace.totalToolCalls, 0),
+    totalModelCalls: sorted.reduce((sum, trace) => sum + (trace.modelCallCount ?? 0), 0),
     totalDurationMs: sorted.reduce((sum, trace) => sum + trace.durationMs, 0),
     totalTokens: sorted.reduce((sum, trace) => sum + trace.totalTokens, 0)
   }
@@ -792,6 +795,10 @@ export function TraceExplorer({
     metricMode === "thread"
       ? (selectedThreadGroup?.totalToolCalls ?? 0)
       : (selectedTrace?.totalToolCalls ?? 0)
+  const metricModelCalls =
+    metricMode === "thread"
+      ? (selectedThreadGroup?.totalModelCalls ?? 0)
+      : (selectedTrace?.modelCallCount ?? 0)
   const metricDurationMs =
     metricMode === "thread"
       ? (selectedThreadGroup?.totalDurationMs ?? 0)
@@ -889,7 +896,7 @@ export function TraceExplorer({
 
           <div className="flex min-h-0 min-w-0 flex-col">
             {selectedTrace && (
-              <div className="grid shrink-0 grid-cols-4 border-b border-border">
+              <div className="grid shrink-0 grid-cols-5 border-b border-border">
                 <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
                   <Clock className="size-3.5 text-muted-foreground" />
                   <div className="min-w-0">
@@ -906,6 +913,13 @@ export function TraceExplorer({
                   <div className="min-w-0">
                     <p className="text-[10px] text-muted-foreground">工具调用</p>
                     <p className="truncate text-[12px] font-semibold">{metricToolCalls}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
+                  <Cpu className="size-3.5 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <p className="text-[10px] text-muted-foreground">模型调用</p>
+                    <p className="truncate text-[12px] font-semibold">{metricModelCalls}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">

@@ -155,6 +155,7 @@ interface DashboardTraceDetail {
   modelName?: string
   outcome: string
   totalToolCalls: number
+  modelCallCount: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number

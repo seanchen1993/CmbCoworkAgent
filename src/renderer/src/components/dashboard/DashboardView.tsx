@@ -2928,6 +2928,7 @@ export function DashboardView(): React.JSX.Element {
       userMessage: skillEvalTraceRun.userMessage,
       outcome: skillEvalTraceRun.outcome,
       totalToolCalls: skillEvalTraceRun.totalToolCalls,
+      modelCallCount: skillEvalTraceRun.modelCallCount,
       totalInputTokens: skillEvalTraceRun.totalInputTokens,
       totalOutputTokens: skillEvalTraceRun.totalOutputTokens,
       totalTokens: skillEvalTraceRun.totalTokens,

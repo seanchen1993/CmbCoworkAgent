@@ -127,6 +127,7 @@ export interface DashboardTraceDetail {
   modelName?: string
   outcome: string
   totalToolCalls: number
+  modelCallCount: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
@@ -1482,6 +1483,7 @@ function parseDashboardTraceDetail(raw: any): DashboardTraceDetail | undefined {
     ...(raw.modelName ? { modelName: String(raw.modelName) } : {}),
     outcome: String(raw.outcome ?? "unknown"),
     totalToolCalls: numberValue(raw.totalToolCalls),
+    modelCallCount: numberValue(raw.modelCallCount),
     totalInputTokens: numberValue(raw.totalInputTokens),
     totalOutputTokens: numberValue(raw.totalOutputTokens),
     totalTokens: numberValue(raw.totalTokens),

@@ -174,6 +174,7 @@ interface DashboardTraceDetail {
   modelName?: string
   outcome: string
   totalToolCalls: number
+  modelCallCount: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
@@ -1532,6 +1533,9 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       modelName: trace.modelName || asOptionalString(source.modelName),
       outcome: trace.outcome || asString(source.outcome, "unknown"),
       totalToolCalls: asNumber(trace.totalToolCalls, asNumber(source.totalToolCalls)),
+      modelCallCount: Array.isArray(trace.modelCalls)
+        ? trace.modelCalls.length
+        : asNumber(source.modelCallCount),
       totalInputTokens,
       totalOutputTokens,
       totalTokens,
@@ -1566,6 +1570,7 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
     modelName: asOptionalString(source.modelName),
     outcome: asString(source.outcome, "unknown"),
     totalToolCalls: asNumber(source.totalToolCalls),
+    modelCallCount: asNumber(source.modelCallCount),
     totalInputTokens: fallbackInputTokens,
     totalOutputTokens: fallbackOutputTokens,
     totalTokens: asNumber(source.totalTokens, fallbackInputTokens + fallbackOutputTokens),
@@ -1598,6 +1603,7 @@ function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
     ...(trace.modelName ? { modelName: trace.modelName } : {}),
     outcome: trace.outcome,
     totalToolCalls: asNumber(trace.totalToolCalls),
+    modelCallCount: Array.isArray(trace.modelCalls) ? trace.modelCalls.length : 0,
     totalInputTokens: usage.totalInputTokens,
     totalOutputTokens: usage.totalOutputTokens,
     totalTokens: usage.totalTokens || usage.totalInputTokens + usage.totalOutputTokens,
@@ -4014,6 +4020,7 @@ function fallbackTraceDetailFromSkillEvalRecord(
     modelName: record.modelName || undefined,
     outcome: record.outcome,
     totalToolCalls: record.totalToolCalls,
+    modelCallCount: record.modelCallCount,
     totalInputTokens: record.totalInputTokens,
     totalOutputTokens: record.totalOutputTokens,
     totalTokens: record.totalTokens,
@@ -7406,6 +7413,7 @@ function makeMockSkillRecentTraces(
       modelName: trace.modelName,
       outcome: trace.outcome,
       totalToolCalls: trace.totalToolCalls,
+      modelCallCount: Array.isArray(trace.modelCalls) ? trace.modelCalls.length : 0,
       totalInputTokens: usage.totalInputTokens,
       totalOutputTokens: usage.totalOutputTokens,
       totalTokens: usage.totalTokens,
