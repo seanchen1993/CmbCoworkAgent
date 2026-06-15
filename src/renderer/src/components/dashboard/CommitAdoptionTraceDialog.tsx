@@ -211,7 +211,11 @@ function TracePairRow({
   const isSuperseded = pair.verdict === "superseded"
   // Superseded drafts are *expected* 0-adopt (their file was rewritten), so don't
   // flag them with the rose "generated-but-not-adopted" treatment.
-  const zeroAdopted = pair.adoptedLineCount === 0 && !isSuperseded
+  const zeroAdopted =
+    pair.adoptedLineCount === 0 &&
+    typeof pair.effectiveGeneratedLineCount === "number" &&
+    pair.effectiveGeneratedLineCount > 0 &&
+    !isSuperseded
   const orphan = !pair.file && !pair.generatedAt
   const canTrace = Boolean(commitSha && pair.genEventId)
   const threadId = pair.threadId
