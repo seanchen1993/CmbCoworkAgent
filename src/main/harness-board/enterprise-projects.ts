@@ -41,22 +41,6 @@ function numberValue(value: unknown): number {
   return 0
 }
 
-function deriveUpperOrgLv1(pathName?: string): string {
-  const parts =
-    typeof pathName === "string"
-      ? pathName
-          .split("/")
-          .map((part) => part.trim())
-          .filter(Boolean)
-      : []
-  const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
-  if (itDeptIndex < 0) return ""
-
-  const lowerParts = parts.slice(itDeptIndex + 1)
-  const startsWithTeam = lowerParts[0]?.includes("团队") ?? false
-  return startsWithTeam ? lowerParts[1] ?? "" : lowerParts[2] ?? ""
-}
-
 function formatDate(date: Date): string {
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, "0")
@@ -238,10 +222,7 @@ export async function searchEnterpriseProjects(
     return makeMockEnterpriseProjectSearchResult()
   }
 
-  const roomName = deriveUpperOrgLv1(getUserInfo()?.pathName).trim()
-  if (!roomName) {
-    throw new Error("未获取到组织信息，无法查询项目")
-  }
+  const roomName = normalizeText(getUserInfo()?.upperOrgLv1)
 
   const queryUrl = getEnterpriseProjectQueryUrl()
   if (!queryUrl) {
@@ -260,7 +241,7 @@ export async function searchEnterpriseProjects(
       body: JSON.stringify({
         createDate: getThreeMonthsAgoDate(),
         prjName: keyword,
-        roomName,
+        ...(roomName ? { roomName } : {}),
         pageNum: 1,
         pageSize: ENTERPRISE_PROJECT_SEARCH_PAGE_SIZE
       }),
