@@ -2153,7 +2153,7 @@ function WorkflowNodeSelector({
                         )}
                       </span>
                       {node.description && (
-                        <span className="mt-0.5 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                        <span className="mt-0.5 line-clamp-3 whitespace-pre-line break-words text-xs leading-5 text-muted-foreground">
                           {node.description}
                         </span>
                       )}
