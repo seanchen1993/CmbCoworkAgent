@@ -2027,7 +2027,7 @@ function ProjectCard({
       role="button"
       tabIndex={0}
       className={cn(
-        "group relative w-[390px] flex-none cursor-pointer overflow-hidden rounded-2xl border border-border/80 bg-background-elevated/90 shadow-sm transition-all duration-200 hover:-translate-y-1 hover:border-primary/40 hover:shadow-[0_18px_45px_rgb(41_37_36/0.12)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "mt-2 group relative w-[390px] flex-none cursor-pointer overflow-hidden rounded-2xl border border-border/80 bg-background-elevated/90 shadow-sm transition-all duration-200 hover:-translate-y-1 hover:border-primary/40 hover:shadow-[0_18px_45px_rgb(41_37_36/0.12)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         archived && "bg-muted/45 opacity-85"
       )}
       onClick={() => onOpenProject(project.projectId)}
@@ -2057,35 +2057,29 @@ function ProjectCard({
       />
       <div className="relative p-4">
         <div className="flex min-w-0 items-start justify-between gap-3">
-          <div className="flex min-w-0 gap-3">
-            <div className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-xl border border-status-info/20 bg-status-info/10 text-status-info">
-              <Workflow className="size-4" />
-            </div>
-            <div className="min-w-0">
-              <ProjectBadgeRow project={project}>
-                <h2 className="truncate text-base font-semibold">{project.name}</h2>
-              </ProjectBadgeRow>
-              <div className="mt-2 line-clamp-2 text-sm leading-5 text-muted-foreground">
-                {project.description}
+          <div className={'flex'}>
+            <div className="flex min-w-0 gap-3">
+              <div
+                className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-xl border border-status-info/20 bg-status-info/10 text-status-info">
+                <Workflow className="size-4" />
+              </div>
+              <div className="min-w-0">
+                <ProjectBadgeRow project={project}>
+                  <h2 className="truncate text-base font-semibold">{project.name}</h2>
+                </ProjectBadgeRow>
+                <div className="mt-2 line-clamp-2 text-sm leading-5 text-muted-foreground">
+                  {project.description}
+                </div>
               </div>
             </div>
           </div>
-          <div className="flex shrink-0 items-start gap-1">
-            <span
-              className="max-w-28 truncate rounded-full border border-border/80 bg-muted/70 px-2.5 py-1 text-[11px] text-muted-foreground"
-              title={project.harnessAdapter.name}
-            >
-              {project.harnessAdapter.name}
-            </span>
-            <ProjectActionMenu
-              project={project}
-              archiving={archiving}
-              onEdit={() => onEditProject(project)}
-              onArchive={() => onArchiveProject(project)}
-            />
-          </div>
+          <ProjectActionMenu
+            project={project}
+            archiving={archiving}
+            onEdit={() => onEditProject(project)}
+            onArchive={() => onArchiveProject(project)}
+          />
         </div>
-
         <div className="mt-4 rounded-xl border border-border/70 bg-muted/25 p-3">
           {pluginCompatibilityMessage ? (
             <div className="flex min-h-[58px] items-center">
@@ -2131,6 +2125,12 @@ function ProjectCard({
             <span className="truncate" title={project.workspacePath}>
               {getWorkspaceName(project.workspacePath)}
             </span>
+            <span
+              className="max-w-28 truncate rounded-full border border-border/80 bg-muted/70 px-2.5 py-1 text-[11px] text-muted-foreground"
+              title={project.harnessAdapter.name}
+            >
+              {project.harnessAdapter.name}
+            </span>
           </div>
           {projectStatus && <StatusPill status={projectStatus} tooltip={detail?.error ?? pluginCompatibilityMessage} />}
         </div>
@@ -2140,12 +2140,12 @@ function ProjectCard({
 }
 
 function SystemSection({
-  group,
-  detailsByProjectId,
-  loadingDetailIds,
-  archivingProjectId,
-  onEditProject,
-  onArchiveProject,
+                         group,
+                         detailsByProjectId,
+                         loadingDetailIds,
+                         archivingProjectId,
+                         onEditProject,
+                         onArchiveProject,
   onOpenProject
 }: {
   group: SystemGroup
