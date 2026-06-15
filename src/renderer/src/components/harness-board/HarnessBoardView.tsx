@@ -228,6 +228,11 @@ interface SelectedFeature {
   deleted?: boolean
 }
 
+type PendingProjectAction = {
+  type: "archive" | "delete"
+  project: HarnessProjectListItem
+} | null
+
 type ProjectFeatureSessionGroupSection = "current" | "project" | "other"
 type ProjectFeatureSidebarProject = Omit<HarnessProjectListItem, "lifecycle"> & {
   lifecycle: {
@@ -2204,6 +2209,59 @@ function FeatureCreateDialog({
   )
 }
 
+function ProjectActionConfirmDialog({
+  action,
+  busy,
+  onOpenChange,
+  onConfirm
+}: {
+  action: PendingProjectAction
+  busy: boolean
+  onOpenChange: (open: boolean) => void
+  onConfirm: () => void
+}): React.JSX.Element {
+  const projectName = action?.project.name ?? ""
+  const isDelete = action?.type === "delete"
+  const title = isDelete ? "删除项目" : "归档项目"
+  const description = isDelete
+    ? `永久删除项目「${projectName}」，会保留项目文件夹。`
+    : `归档项目「${projectName}」？`
+
+  return (
+    <Dialog open={action !== null} onOpenChange={onOpenChange}>
+      <DialogContent
+        className={cn(harnessDialogContentClassName, "max-w-md")}
+        onPointerDownOutside={preventHarnessDialogOutsideClose}
+      >
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
+            取消
+          </Button>
+          <Button
+            variant={isDelete ? "destructive" : "warning"}
+            onClick={onConfirm}
+            disabled={busy}
+            className="gap-2"
+          >
+            {busy ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : isDelete ? (
+              <Trash2 className="size-4" />
+            ) : (
+              <Archive className="size-4" />
+            )}
+            {busy ? "处理中" : title}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function ProjectActionMenu({
   project,
   archiving,
@@ -4124,6 +4182,8 @@ export function HarnessBoardView({
   const [editError, setEditError] = useState<string | null>(null)
   const [archivingProjectId, setArchivingProjectId] = useState<string | null>(null)
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null)
+  const [pendingProjectAction, setPendingProjectAction] = useState<PendingProjectAction>(null)
+  const [confirmingProjectAction, setConfirmingProjectAction] = useState(false)
   const [featureDialogProject, setFeatureDialogProject] = useState<HarnessProjectListItem | null>(null)
   const [featureName, setFeatureName] = useState("")
   const [featureError, setFeatureError] = useState<string | null>(null)
@@ -4674,6 +4734,22 @@ export function HarnessBoardView({
     setEditError(null)
   }, [])
 
+  const requestArchiveProject = useCallback(
+    (project: HarnessProjectListItem): void => {
+      if (archivingProjectId || confirmingProjectAction || project.lifecycle.status === "archived") return
+      setPendingProjectAction({ type: "archive", project })
+    },
+    [archivingProjectId, confirmingProjectAction]
+  )
+
+  const requestDeleteProject = useCallback(
+    (project: HarnessProjectListItem): void => {
+      if (deletingProjectId || confirmingProjectAction) return
+      setPendingProjectAction({ type: "delete", project })
+    },
+    [confirmingProjectAction, deletingProjectId]
+  )
+
   const handleSubmitEdit = async (): Promise<void> => {
     if (!editingProject) return
     setEditError(null)
@@ -4708,8 +4784,6 @@ export function HarnessBoardView({
   const handleArchiveProject = useCallback(
     async (project: HarnessProjectListItem): Promise<void> => {
       if (archivingProjectId || project.lifecycle.status === "archived") return
-      const confirmed = window.confirm(`归档项目「${project.name}」？`)
-      if (!confirmed) return
 
       setArchivingProjectId(project.projectId)
       setLoadError(null)
@@ -4737,10 +4811,6 @@ export function HarnessBoardView({
   const handleDeleteProject = useCallback(
     async (project: HarnessProjectListItem): Promise<void> => {
       if (deletingProjectId) return
-      const confirmed = window.confirm(
-        `永久删除项目「${project.name}」，会保留项目文件夹`
-      )
-      if (!confirmed) return
 
       setDeletingProjectId(project.projectId)
       setLoadError(null)
@@ -4765,6 +4835,25 @@ export function HarnessBoardView({
     },
     [deletingProjectId, loadProjects, selectedProjectId]
   )
+
+  const handleConfirmProjectAction = useCallback((): void => {
+    const action = pendingProjectAction
+    if (!action || confirmingProjectAction) return
+
+    setConfirmingProjectAction(true)
+    void (async () => {
+      try {
+        if (action.type === "archive") {
+          await handleArchiveProject(action.project)
+        } else {
+          await handleDeleteProject(action.project)
+        }
+      } finally {
+        setConfirmingProjectAction(false)
+        setPendingProjectAction(null)
+      }
+    })()
+  }, [confirmingProjectAction, handleArchiveProject, handleDeleteProject, pendingProjectAction])
 
   const openFeatureCreateDialog = useCallback((project: HarnessProjectListItem): void => {
     const compatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
@@ -4959,6 +5048,13 @@ export function HarnessBoardView({
     selectedProjectCode && !selectedProjectArchived
       ? enterpriseProjectDetailsByCode[selectedProjectCode]
       : undefined
+  const projectActionBusy =
+    confirmingProjectAction ||
+    (pendingProjectAction?.type === "archive"
+      ? archivingProjectId === pendingProjectAction.project.projectId
+      : pendingProjectAction?.type === "delete"
+        ? deletingProjectId === pendingProjectAction.project.projectId
+        : false)
 
   useEffect(() => {
     if (!selectedProjectCode || selectedProjectArchived || selectedEnterpriseProjectDetail) return
@@ -5560,8 +5656,8 @@ export function HarnessBoardView({
                     pluginUpdateInfoByProjectId={projectPluginUpdateInfoById}
                     updatingPluginNames={updatingPluginNames}
                     onEditProject={handleEditProject}
-                    onArchiveProject={(project) => void handleArchiveProject(project)}
-                    onDeleteProject={(project) => void handleDeleteProject(project)}
+                    onArchiveProject={requestArchiveProject}
+                    onDeleteProject={requestDeleteProject}
                     onUpdateProjectPlugin={(project, updateInfo) =>
                       void handleUpdateProjectPlugin(project, updateInfo)
                     }
@@ -5600,8 +5696,8 @@ export function HarnessBoardView({
                         pluginUpdateInfoByProjectId={projectPluginUpdateInfoById}
                         updatingPluginNames={updatingPluginNames}
                         onEditProject={handleEditProject}
-                        onArchiveProject={(project) => void handleArchiveProject(project)}
-                        onDeleteProject={(project) => void handleDeleteProject(project)}
+                        onArchiveProject={requestArchiveProject}
+                        onDeleteProject={requestDeleteProject}
                         onUpdateProjectPlugin={(project, updateInfo) =>
                           void handleUpdateProjectPlugin(project, updateInfo)
                         }
@@ -5656,6 +5752,16 @@ export function HarnessBoardView({
         }}
         onChange={setEditForm}
         onSubmit={() => void handleSubmitEdit()}
+      />
+      <ProjectActionConfirmDialog
+        action={pendingProjectAction}
+        busy={projectActionBusy}
+        onOpenChange={(open) => {
+          if (!open && !projectActionBusy) {
+            setPendingProjectAction(null)
+          }
+        }}
+        onConfirm={handleConfirmProjectAction}
       />
       {sidebarDeleteDialog}
       {sidebarPortal}
