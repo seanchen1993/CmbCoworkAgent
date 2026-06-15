@@ -4135,20 +4135,17 @@ export function DashboardView(): React.JSX.Element {
                 <ExternalLink className="size-3.5" />
                 了解技能评估与自进化
               </Button>
-            ) : analysisAgentAllowed &&
-              (activeMainTab === "overview" || activeMainTab === "project-mode") ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="gap-1.5 text-xs"
-                onClick={() => setAnalysisOpen(true)}
-                disabled={activeMainTab === "project-mode" && !projectModeAllowed}
-              >
-                <Bot className="size-3.5" />
-                指标分析
-              </Button>
             ) : null
+            /*
+             * 「指标分析」入口暂时隐藏（分析 Agent 逻辑/弹窗/类型均保留，需要时恢复以下分支即可）：
+             *   analysisAgentAllowed && (activeMainTab === "overview" || activeMainTab === "project-mode") ? (
+             *     <Button type="button" variant="outline" size="sm" className="gap-1.5 text-xs"
+             *       onClick={() => setAnalysisOpen(true)}
+             *       disabled={activeMainTab === "project-mode" && !projectModeAllowed}>
+             *       <Bot className="size-3.5" /> 指标分析
+             *     </Button>
+             *   ) : null
+             */
           }
         />
       )}
