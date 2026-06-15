@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { createPortal } from "react-dom"
+import * as PopoverPrimitive from "@radix-ui/react-popover"
 import {
   AlertCircle,
   ArrowLeft,
@@ -143,6 +144,8 @@ const harnessProjectCreateSelectClassName =
 const harnessDialogContentClassName = "z-[60]"
 const harnessDialogSelectContentClassName =
   "z-[70] w-[var(--radix-select-trigger-width)] max-w-[calc(100vw-2rem)]"
+const harnessProjectPopoverContentClassName =
+  "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-[70] origin-[var(--radix-popover-content-transform-origin)] w-[var(--radix-popover-trigger-width)] rounded-md border p-0 shadow-md outline-none"
 const harnessNamePattern = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
 const harnessNameRuleMessage = "仅支持中文、英文字母、数字、-、_"
 const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
@@ -1292,35 +1295,18 @@ function AdapterSelectGroups({ registry }: { registry: HarnessAdapterRegistryIte
   )
 }
 
-function handleEnterpriseProjectListWheel(event: React.WheelEvent<HTMLDivElement>): void {
-  const list = event.currentTarget
-  if (list.scrollHeight <= list.clientHeight) return
-
-  const deltaY =
-    event.deltaMode === 1
-      ? event.deltaY * 16
-      : event.deltaMode === 2
-        ? event.deltaY * list.clientHeight
-        : event.deltaY
-  const maxScrollTop = list.scrollHeight - list.clientHeight
-  const nextScrollTop = Math.max(0, Math.min(maxScrollTop, list.scrollTop + deltaY))
-  if (nextScrollTop === list.scrollTop) return
-
-  event.preventDefault()
-  event.stopPropagation()
-  list.scrollTop = nextScrollTop
-}
-
 function EnterpriseProjectNameInput({
   value,
   onValueChange,
   onSelect,
-  ariaInvalid
+  ariaInvalid,
+  portalContainer
 }: {
   value: string
   onValueChange: (value: string) => void
   onSelect: (project: HarnessEnterpriseProjectSearchItem) => void
   ariaInvalid?: boolean
+  portalContainer?: HTMLElement | null
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -1422,55 +1408,56 @@ function EnterpriseProjectNameInput({
           aria-invalid={ariaInvalid ? true : undefined}
         />
       </PopoverAnchor>
-      <PopoverContent
-        align="start"
-        className="z-[70] w-[var(--radix-popover-trigger-width)] p-0"
-        onOpenAutoFocus={(event) => event.preventDefault()}
-      >
-        <div className="max-h-72 overflow-hidden py-1 text-sm">
-          {keyword.length < ENTERPRISE_PROJECT_SEARCH_MIN_CHARS ? (
-            <div className="px-3 py-2 text-xs text-muted-foreground">继续输入项目名称以搜索</div>
-          ) : loading ? (
-            <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
-              <Loader2 className="size-3.5 animate-spin" />
-              搜索项目...
-            </div>
-          ) : projects.length > 0 ? (
-            <>
-              <div
-                className="max-h-60 overscroll-y-contain overflow-y-auto py-1"
-                onWheel={handleEnterpriseProjectListWheel}
-              >
-                {projects.map((project) => (
-                  <button
-                    key={`${project.projectCode}:${project.projectName}`}
-                    type="button"
-                    className="group grid w-full cursor-pointer gap-1.5 px-2 py-2 text-left outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
-                    onClick={() => handleSelect(project)}
-                  >
-                    <span className="flex min-w-0 items-center gap-2 text-foreground group-hover:text-accent-foreground group-focus-visible:text-accent-foreground">
-                      <span className="shrink-0 font-mono">
-                        {project.projectCode || "-"}
-                      </span>
-                      <span className="min-w-0 truncate">
-                        {project.projectName || "-"}
-                      </span>
-                    </span>
-                    <span className="truncate text-xs leading-5 text-muted-foreground group-hover:text-accent-foreground group-focus-visible:text-accent-foreground">
-                      项目经理：{project.pm || "-"}
-                    </span>
-                  </button>
-                ))}
+      <PopoverPrimitive.Portal container={portalContainer ?? undefined}>
+        <PopoverPrimitive.Content
+          data-slot="popover-content"
+          align="start"
+          sideOffset={4}
+          className={harnessProjectPopoverContentClassName}
+          onOpenAutoFocus={(event) => event.preventDefault()}
+        >
+          <div className="max-h-72 overflow-hidden py-1 text-sm">
+            {keyword.length < ENTERPRISE_PROJECT_SEARCH_MIN_CHARS ? (
+              <div className="px-3 py-2 text-xs text-muted-foreground">继续输入项目名称以搜索</div>
+            ) : loading ? (
+              <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
+                <Loader2 className="size-3.5 animate-spin" />
+                搜索项目...
               </div>
-              {hasMore && (
-                <div className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
-                  仅显示前 15 条，请输入更精确的关键词
+            ) : projects.length > 0 ? (
+              <>
+                <div className="max-h-60 overscroll-y-contain overflow-y-auto py-1">
+                  {projects.map((project) => (
+                    <button
+                      key={`${project.projectCode}:${project.projectName}`}
+                      type="button"
+                      className="group grid w-full cursor-pointer gap-1.5 px-2 py-2 text-left outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
+                      onClick={() => handleSelect(project)}
+                    >
+                      <span className="flex min-w-0 items-center gap-2 text-foreground group-hover:text-accent-foreground group-focus-visible:text-accent-foreground">
+                        <span className="shrink-0 font-mono">
+                          {project.projectCode || "-"}
+                        </span>
+                        <span className="min-w-0 truncate">
+                          {project.projectName || "-"}
+                        </span>
+                      </span>
+                      <span className="truncate text-xs leading-5 text-muted-foreground group-hover:text-accent-foreground group-focus-visible:text-accent-foreground">
+                        项目经理：{project.pm || "-"}
+                      </span>
+                    </button>
+                  ))}
                 </div>
-              )}
-            </>
-          ) : null}
-        </div>
-      </PopoverContent>
+                {hasMore && (
+                  <div className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
+                    仅显示前 15 条，请输入更精确的关键词
+                  </div>
+                )}
+              </>
+            ) : null}
+          </div>
+        </PopoverPrimitive.Content>
+      </PopoverPrimitive.Portal>
     </Popover>
   )
 }
@@ -1496,6 +1483,7 @@ function ProjectFormDialog({
   onPickWorkspace: () => void
   onSubmit: () => void
 }): React.JSX.Element {
+  const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
   const projectDirError = getHarnessNameError("项目文件夹", form.projectDir)
   const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
@@ -1508,7 +1496,8 @@ function ProjectFormDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className={cn(harnessDialogContentClassName, "max-w-3xl")}
+        ref={setDialogPortalContainer}
+        className={cn(harnessDialogContentClassName, "max-w-3xl overflow-visible")}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
         <DialogHeader>
@@ -1569,6 +1558,7 @@ function ProjectFormDialog({
                         : form.projectDir
                     })
                   }}
+                  portalContainer={dialogPortalContainer}
                 />
               </label>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
@@ -1719,6 +1709,7 @@ function ProjectEditDialog({
   onChange: (form: HarnessProjectMetadataUpdateInput) => void
   onSubmit: () => void
 }): React.JSX.Element {
+  const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
   const projectDirError = getHarnessNameError("项目文件夹", form.projectDir)
   const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
@@ -1727,7 +1718,8 @@ function ProjectEditDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className={cn(harnessDialogContentClassName, "max-w-3xl")}
+        ref={setDialogPortalContainer}
+        className={cn(harnessDialogContentClassName, "max-w-3xl overflow-visible")}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
         <DialogHeader>
@@ -1771,6 +1763,7 @@ function ProjectEditDialog({
                       systemName: project.systemName || form.systemName
                     })
                   }
+                  portalContainer={dialogPortalContainer}
                 />
               </label>
               <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
