@@ -20,6 +20,19 @@ export type HarnessNodeStatus =
   | "in_progress"
   | "done"
   | "blocked"
+  | "warning"
+  | "error"
+  | "skipped"
+  | "archived"
+  | "unknown"
+
+export type HarnessFeatureStatus =
+  | "not_started"
+  | "in_progress"
+  | "done"
+  | "blocked"
+  | "warning"
+  | "error"
   | "skipped"
   | "archived"
   | "unknown"
@@ -53,6 +66,7 @@ export interface HarnessAdapterSnapshot {
 
 export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
   description: string
+  useScenario?: string
   boardCompatibility: HarnessBoardCompatibility
 }
 
@@ -166,11 +180,14 @@ export interface HarnessFeatureSummary {
   slug: string
   title: string
   location: "active" | "archived" | string
+  featureStatus: HarnessFeatureStatus
+  featureStatusLabel?: string
   /**
-   * Feature-level status derived for summary cards. It is not the display value
-   * of the current node state unless the workflow has reached its final node.
+   * Feature-level status for summary cards. Plugins can provide it explicitly;
+   * otherwise the framework derives it from the current node and workflow.
    */
   overallStatus: HarnessStatus
+  workflowId?: string
   currentNodeId: string
   currentNodeStatus: HarnessNodeStatus
   currentNodeStatusLabel?: string
@@ -196,6 +213,7 @@ export interface HarnessProjectDetailViewModel {
   }
   projectState?: HarnessStatus
   workflow: HarnessWorkflow
+  dynamicWorkflows: Record<string, HarnessWorkflow>
   runs: HarnessFeatureSummary[]
   watchRefs: HarnessWatchRef[]
   loading: boolean
@@ -341,6 +359,9 @@ export interface HarnessRunDetailViewModel {
       format: "ndjson" | string
     }>
     watchRefs: HarnessWatchRef[]
+    featureStatus?: HarnessFeatureStatus
+    featureStatusLabel?: string
+    overallStatus?: HarnessStatus
     currentNodeId: string
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]

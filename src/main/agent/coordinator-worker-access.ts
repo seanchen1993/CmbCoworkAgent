@@ -19,7 +19,6 @@ interface RuntimeToolLike {
 const directWriteToolNames = new Set(["write_file", "edit_file"])
 const deferredExecutionToolNames = new Set([
   "code_exec",
-  "prepare_save_code_exec_tool",
   "save_code_exec_tool",
   "invoke_deferred_tool"
 ])

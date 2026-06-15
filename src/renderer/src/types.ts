@@ -84,7 +84,8 @@ import type {
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitMode,
   AgentAutoCommitResult,
-  AgentAutoCommitSettings
+  AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard
 } from "../../shared/auto-commit-types"
 import type {
   ManagedSavedCodeExecTool,
@@ -96,6 +97,7 @@ import type {
   HarnessArtifactStatus,
   HarnessArtifactType,
   HarnessEventStatus,
+  HarnessFeatureStatus,
   HarnessHookLogView,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
@@ -146,6 +148,7 @@ export type {
   AgentAutoCommitMode,
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard,
   AgentAutoCommitResult
 }
 
@@ -156,6 +159,7 @@ export type {
   HarnessArtifactStatus,
   HarnessArtifactType,
   HarnessEventStatus,
+  HarnessFeatureStatus,
   HarnessHookLogView,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
@@ -301,6 +305,13 @@ export interface HITLRequest {
   pendingCount?: number
   pendingToolCallIds?: string[]
   allowRuntimeRestoredCheckpointResume?: boolean
+  operation?: string
+  command?: string
+  reason?: string
+  suggestedCommitMessage?: string
+  suggestedCommitFilePaths?: string[]
+  suggestedCommitFileBasePath?: string
+  suggestedCommitFileSelectionSource?: "pathspec" | "staged"
 }
 
 export interface HITLDecision {

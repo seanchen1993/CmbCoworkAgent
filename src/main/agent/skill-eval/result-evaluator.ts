@@ -95,7 +95,6 @@ const CHANGED_FILE_TOOL_NAMES = new Set([
   "write_file",
   "edit_file",
   "apply_patch",
-  "prepare_save_code_exec_tool",
   "save_code_exec_tool"
 ])
 const SUBAGENT_TOOL_NAMES = new Set(["task"])

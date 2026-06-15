@@ -26,7 +26,7 @@ type TaskMmdSettings = Awaited<ReturnType<typeof window.api.taskMmd.getSettings>
 type TaskMmdSnapshot = Awaited<ReturnType<typeof window.api.taskMmd.getSnapshot>>
 type TaskMmdCompileModelInfo = Awaited<ReturnType<typeof window.api.taskMmd.getCompileModelInfo>>
 type TaskMmdEntry = TaskMmdSnapshot["entries"][number]
-type GraphTooltip = { text: string; x: number; y: number }
+type GraphTooltip = { text: string; x: number; y: number; nodeId: string | null }
 
 const ANSI_ESCAPE = String.fromCharCode(27)
 const ANSI_BEL = String.fromCharCode(7)
@@ -184,6 +184,14 @@ function tooltipPosition(clientX: number, clientY: number): { x: number; y: numb
   }
 }
 
+function tooltipPositionForNode(node: SVGGElement): { x: number; y: number } {
+  const rect = node.getBoundingClientRect()
+  const prefersRight = rect.right + 440 < window.innerWidth
+  const x = prefersRight ? rect.right + 12 : rect.left
+  const y = rect.bottom + 10
+  return tooltipPosition(x - 14, y - 14)
+}
+
 function entrySearchText(entry: TaskMmdEntry): string {
   return stripAnsiText([entry.toolName, entry.argsPreview, entry.resultPreview].join(" ")).toLowerCase()
 }
@@ -322,6 +330,7 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
   const [saving, setSaving] = useState(false)
   const mountedRef = useRef(true)
   const graphRef = useRef<HTMLDivElement | null>(null)
+  const graphTooltipRef = useRef<HTMLDivElement | null>(null)
   const tooltipHideTimerRef = useRef<number | null>(null)
   const tooltipHoverRef = useRef(false)
   const tooltipInteractingRef = useRef(false)
@@ -497,7 +506,8 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
             htmlLabels: true,
             nodeSpacing: 36,
             rankSpacing: 52,
-            padding: 14
+            padding: 14,
+            useMaxWidth: false
           }
         })
         const result = await mermaid.default.render(renderId, mmd)
@@ -526,9 +536,19 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
 
     const svgElement = root.querySelector<SVGSVGElement>("svg")
     if (svgElement) {
+      const viewBox = svgElement.viewBox.baseVal
+      if (viewBox.width > 0) {
+        svgElement.style.width = `${Math.ceil(viewBox.width)}px`
+        svgElement.setAttribute("width", String(Math.ceil(viewBox.width)))
+      }
+      if (viewBox.height > 0) {
+        svgElement.style.height = `${Math.ceil(viewBox.height)}px`
+        svgElement.setAttribute("height", String(Math.ceil(viewBox.height)))
+      }
       svgElement.style.maxWidth = "none"
-      svgElement.style.height = "auto"
       svgElement.style.overflow = "visible"
+      svgElement.style.display = "block"
+      svgElement.setAttribute("preserveAspectRatio", "xMinYMin meet")
     }
 
     const nodeLabels = extractMmdNodeLabels(snapshot?.mmd ?? "")
@@ -558,7 +578,12 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
     const hideTooltip = (): void => scheduleGraphTooltipHide(450)
     const hideTooltipSoon = (): void => scheduleGraphTooltipHide(650)
     const hideTooltipNow = (): void => forceHideGraphTooltip()
-    const showTooltip = (node: SVGGElement, clientX: number, clientY: number): void => {
+    const hideTooltipOnOutsideScroll = (event: Event): void => {
+      const target = event.target
+      if (target instanceof Node && graphTooltipRef.current?.contains(target)) return
+      hideTooltipNow()
+    }
+    const showTooltip = (node: SVGGElement): void => {
       const tooltip = tooltipByNode.get(node)
       if (!tooltip) {
         hideTooltip()
@@ -567,16 +592,33 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
       tooltipHoverRef.current = false
       tooltipInteractingRef.current = false
       cancelGraphTooltipHide()
-      const position = tooltipPosition(clientX, clientY)
-      setGraphTooltip({ text: tooltip, ...position })
+      const nodeId = mermaidDomNodeId(node.getAttribute("id"))
+      const position = tooltipPositionForNode(node)
+      setGraphTooltip((current) => {
+        if (
+          current?.nodeId === nodeId &&
+          current.text === tooltip &&
+          current.x === position.x &&
+          current.y === position.y
+        ) {
+          return current
+        }
+        return { text: tooltip, nodeId, ...position }
+      })
     }
-    const onMouseMove = (event: MouseEvent): void => {
+    const onPointerOver = (event: PointerEvent): void => {
       const node = closestGraphNode(event.target, root)
       if (!node) {
         hideTooltip()
         return
       }
-      showTooltip(node, event.clientX, event.clientY)
+      showTooltip(node)
+    }
+    const onPointerOut = (event: PointerEvent): void => {
+      const node = closestGraphNode(event.target, root)
+      if (!node) return
+      if (event.relatedTarget instanceof Element && node.contains(event.relatedTarget)) return
+      hideTooltip()
     }
     const onFocusIn = (event: FocusEvent): void => {
       const node = closestGraphNode(event.target, root)
@@ -584,28 +626,29 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
         hideTooltip()
         return
       }
-      const rect = node.getBoundingClientRect()
-      showTooltip(node, rect.left + rect.width / 2, rect.top + rect.height / 2)
+      showTooltip(node)
     }
 
-    root.addEventListener("mousemove", onMouseMove)
+    root.addEventListener("pointerover", onPointerOver)
+    root.addEventListener("pointerout", onPointerOut)
     root.addEventListener("mouseleave", hideTooltip)
     root.addEventListener("pointerleave", hideTooltip)
     root.addEventListener("scroll", hideTooltipNow)
     root.addEventListener("focusin", onFocusIn)
     root.addEventListener("focusout", hideTooltipSoon)
     window.addEventListener("blur", hideTooltipNow)
-    window.addEventListener("scroll", hideTooltipNow, true)
+    window.addEventListener("scroll", hideTooltipOnOutsideScroll, true)
 
     return () => {
-      root.removeEventListener("mousemove", onMouseMove)
+      root.removeEventListener("pointerover", onPointerOver)
+      root.removeEventListener("pointerout", onPointerOut)
       root.removeEventListener("mouseleave", hideTooltip)
       root.removeEventListener("pointerleave", hideTooltip)
       root.removeEventListener("scroll", hideTooltipNow)
       root.removeEventListener("focusin", onFocusIn)
       root.removeEventListener("focusout", hideTooltipSoon)
       window.removeEventListener("blur", hideTooltipNow)
-      window.removeEventListener("scroll", hideTooltipNow, true)
+      window.removeEventListener("scroll", hideTooltipOnOutsideScroll, true)
       forceHideGraphTooltip()
     }
   }, [
@@ -905,6 +948,7 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
                 />
                 {graphTooltip ? (
                   <div
+                    ref={graphTooltipRef}
                     className="pointer-events-auto fixed z-[100] max-h-72 cursor-text select-text overflow-auto whitespace-pre-wrap rounded-md border border-border bg-popover px-3 py-2 text-[11px] leading-relaxed text-popover-foreground shadow-lg"
                     style={{
                       left: graphTooltip.x,

@@ -1,5 +1,6 @@
 import { useMemo } from "react"
 import { useAppStore } from "@/lib/store"
+import { isHarnessFeatureThread } from "@/lib/thread-classification"
 import { useAllThreadStates, useAllStreamLoadingStates } from "@/lib/thread-context"
 import { KanbanColumn } from "./KanbanColumn"
 import { KanbanHeader } from "./KanbanHeader"
@@ -40,6 +41,11 @@ export function KanbanView(): React.JSX.Element {
     selectThread(threadId)
   }
 
+  const chatThreads = useMemo(
+    () => threads.filter((thread) => !isHarnessFeatureThread(thread)),
+    [threads]
+  )
+
   const categorizedThreads = useMemo(() => {
     const result: Record<KanbanStatus, ThreadWithStatus[]> = {
       pending: [],
@@ -48,7 +54,7 @@ export function KanbanView(): React.JSX.Element {
       done: []
     }
 
-    for (const thread of threads) {
+    for (const thread of chatThreads) {
       const threadState = allThreadStates[thread.thread_id]
       const isLoading = (loadingStates[thread.thread_id] ?? false) || Boolean(threadState?.scheduledTaskLoading)
       const hasDraft = Boolean(threadState?.draftInput?.trim())
@@ -58,7 +64,7 @@ export function KanbanView(): React.JSX.Element {
     }
 
     return result
-  }, [threads, loadingStates, allThreadStates])
+  }, [chatThreads, loadingStates, allThreadStates])
 
   const categorizedSubagents = useMemo(() => {
     if (!showSubagentsInKanban) {
@@ -72,7 +78,7 @@ export function KanbanView(): React.JSX.Element {
       done: []
     }
 
-    const threadMap = new Map(threads.map((t) => [t.thread_id, t]))
+    const threadMap = new Map(chatThreads.map((t) => [t.thread_id, t]))
 
     for (const [threadId, state] of Object.entries(allThreadStates)) {
       const parentThread = threadMap.get(threadId)
@@ -102,7 +108,7 @@ export function KanbanView(): React.JSX.Element {
     }
 
     return result
-  }, [threads, allThreadStates, showSubagentsInKanban])
+  }, [chatThreads, allThreadStates, showSubagentsInKanban])
 
   const columnData: { status: KanbanStatus; title: string }[] = [
     { status: "pending", title: "待处理" },

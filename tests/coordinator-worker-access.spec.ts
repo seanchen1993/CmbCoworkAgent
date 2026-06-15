@@ -82,7 +82,6 @@ function allFilesystemTools(): FakeTool[] {
     fakeTool("execute"),
     fakeTool("task_output"),
     fakeTool("code_exec"),
-    fakeTool("prepare_save_code_exec_tool"),
     fakeTool("save_code_exec_tool"),
     fakeTool("invoke_deferred_tool"),
     fakeTool("grep")
@@ -102,7 +101,6 @@ async function testReadOnlyWorkerToolSurface(): Promise<void> {
     "execute",
     "task_output",
     "code_exec",
-    "prepare_save_code_exec_tool",
     "save_code_exec_tool",
     "invoke_deferred_tool"
   ]) {
@@ -122,6 +120,7 @@ async function testVerifyWorkerToolSurface(): Promise<void> {
   assertNoTool(tools, "write_file", "verify worker")
   assertNoTool(tools, "edit_file", "verify worker")
   assertNoTool(tools, "code_exec", "verify worker")
+  assertNoTool(tools, "save_code_exec_tool", "verify worker")
   assertNoTool(tools, "invoke_deferred_tool", "verify worker")
   assertHasTool(tools, "execute", "verify worker")
   assertHasTool(tools, "task_output", "verify worker")
@@ -149,6 +148,7 @@ async function testScopedWriteWorkerToolSurfaceAndGuard(): Promise<void> {
         fakeTool("edit_file"),
         fakeTool("execute"),
         fakeTool("task_output"),
+        fakeTool("save_code_exec_tool"),
         fakeTool("read_file")
       ],
       {
@@ -160,6 +160,7 @@ async function testScopedWriteWorkerToolSurfaceAndGuard(): Promise<void> {
 
     assertNoTool(tools, "execute", "scoped write worker")
     assertNoTool(tools, "task_output", "scoped write worker")
+    assertNoTool(tools, "save_code_exec_tool", "scoped write worker")
     assertHasTool(tools, "write_file", "scoped write worker")
     assertHasTool(tools, "edit_file", "scoped write worker")
     assertHasTool(tools, "read_file", "scoped write worker")

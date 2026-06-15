@@ -134,7 +134,7 @@ const MENU_GROUPS: MenuGroup[] = [
       { tab: "evolution", label: "自优化", icon: GitBranch, beta: true },
       { tab: "chatx", label: "机器人管理", icon: Cpu },
       { tab: "hooks", label: "钩子", icon: Webhook },
-      { tab: "codeExecTools", label: "编程式工具调用", icon: Wrench, beta: true, truncate: true },
+      { tab: "codeExecTools", label: "编程式工具调用", icon: Wrench, truncate: true },
       { tab: "commitPolicy", label: "提交策略", icon: GitCommit }
     ]
   },

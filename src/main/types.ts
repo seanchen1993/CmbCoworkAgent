@@ -5,6 +5,7 @@ export type {
   AgentAutoCommitMode,
   AgentAutoCommitResult,
   AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard,
   AgentAutoCommitStatus
 } from "../shared/auto-commit-types"
 
@@ -358,6 +359,7 @@ export interface PluginManifest {
   name: string
   version?: string
   description?: string
+  useScenario?: string
   author?: { name?: string; email?: string; url?: string } | string
   license?: string
   keywords?: string[]
@@ -372,6 +374,7 @@ export interface PluginMetadata {
   name: string
   version: string
   description: string
+  useScenario?: string
   author: string
   path: string
   enabled: boolean
@@ -611,9 +614,17 @@ export interface ApprovalRequest extends HITLRequest {
     | "write_file"
     | "edit_file"
     | "code_exec"
-    | "prepare_save_code_exec_tool"
     | "save_code_exec_tool"
+    | "git_commit"
   command?: string // shell command (for execute operations)
+  /** For git_commit: the message the agent passed via -m, used to pre-fill the dialog */
+  suggestedCommitMessage?: string
+  /** For git_commit: file paths the agent selected via pathspecs or existing staged files */
+  suggestedCommitFilePaths?: string[]
+  /** For git_commit: cwd that explicit pathspecs are relative to (after git -C) */
+  suggestedCommitFileBasePath?: string
+  /** For git_commit: where suggestedCommitFilePaths came from */
+  suggestedCommitFileSelectionSource?: "pathspec" | "staged"
   filePath?: string // target file path (for write_file/edit_file operations)
   code?: string // code_exec script preview
   params?: unknown // code_exec params preview
@@ -621,7 +632,6 @@ export interface ApprovalRequest extends HITLRequest {
   savedToolName?: string // proposed saved tool name before slug normalization
   savedToolId?: string // proposed saved tool ID
   savedToolDescription?: string // proposed saved tool description
-  savedToolMetadataError?: string // metadata generation failure message for manual fallback
   cwd: string
   reason?: string // why approval is needed
   retry_reason?: string // sandbox-failure retry context
@@ -636,6 +646,16 @@ export interface ApprovalDecision {
   tool_call_id: string
   savedToolName?: string
   savedToolDescription?: string
+  /**
+   * For git_commit approvals: the outcome of the commit the renderer performed
+   * (via workspace:commitWorktree) after the user picked a task card and confirmed.
+   * Present only when operation === "git_commit".
+   */
+  commitResult?: {
+    success: boolean
+    commitMessage?: string
+    error?: string
+  }
 }
 
 // User input request tool

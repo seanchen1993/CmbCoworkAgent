@@ -1109,14 +1109,14 @@ export function ThreadSidebar(): React.JSX.Element {
                             ) : (
                               <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
                             )}
-                            <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                            <span className="min-w-0 flex-1 truncate text-xs font-medium duration-150">
                               {project.name}
                             </span>
                           </button>
                           {unreadCount > 0 && (
                             <span className="size-2 rounded-full bg-blue-500 shrink-0" />
                           )}
-                          <span className="relative ml-auto flex h-6 w-28 shrink-0 items-center justify-end overflow-hidden">
+                          <span className="relative flex h-6 w-4 shrink-0 items-center justify-end overflow-hidden transition-[width] duration-150 group-hover:w-28 group-focus-within:w-28">
                             <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
                               {project.threads.length}
                             </span>

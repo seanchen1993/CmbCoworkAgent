@@ -281,7 +281,7 @@ async function testRuntimeEvaluatorRetryFallsBackAfterRepeatedFailure(): Promise
     onFinalFailure: () => fallbackDecision
   })
 
-  assertEqual(calls, 2, "runtime evaluator should stop after the configured retry attempts")
+  assertEqual(calls, 3, "runtime evaluator should stop after the configured retry attempts")
   assertEqual(decision.verdict, "blocked", "repeated evaluator failures should fall back to pause")
   assertEqual(
     decision.reason,

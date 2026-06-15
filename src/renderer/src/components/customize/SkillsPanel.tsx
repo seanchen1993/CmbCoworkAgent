@@ -1,6 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import ReactMarkdown from "react-markdown"
-import remarkGfm from "remark-gfm"
 import {
   AlertCircle,
   ChevronDown,
@@ -9,6 +7,7 @@ import {
   FileText,
   Folder,
   GitBranch,
+  Info,
   Plus,
   Power,
   Radio,
@@ -43,6 +42,8 @@ import { UniversalUploadDialog } from "./MarketPanel/UniversalUploadDialog"
 import { toast } from "sonner"
 import { marketInstalledVersionStorage } from "./MarketPanel/MarketUpdateBadge"
 import { marketInstalledSourceStorage } from "./MarketPanel/market-installed-source-storage"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 
 type FilePreviewKind = "text" | "html" | "image" | "pdf"
 type FileTreeNode = {
@@ -1017,6 +1018,12 @@ function SkillsGuide(): React.JSX.Element {
                   ，会被识别为独立的子技能；系统按目录路径区分父子技能和同名技能。
                 </p>
                 <p>
+                  技能说明中提到的相对脚本、资源和模板路径，会按当前
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  所在目录解析；这只用于技能脚本定位，不会改变工作区 Hook 的
+                  <code className="mx-1 font-mono text-foreground/85">WORKSPACE_PATH</code>。
+                </p>
+                <p>
                   应用里会区分内置技能和自定义技能；内置技能不可删除，自定义技能可以上传、禁用、编辑和删除。
                 </p>
               </div>
@@ -1067,6 +1074,11 @@ function SkillsGuide(): React.JSX.Element {
                   作为主技能；如果包含子技能且子技能名称与已有技能重复，会先提示确认。
                 </p>
                 <p>上传后可以在左侧展开目录、右侧预览文件内容，也可以随时切换技能启用状态。</p>
+                <p>
+                  如果普通技能与插件自带技能同名，斜杠列表会同时展示两个入口并标明来源；选中后按对应
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  绝对路径执行，插件自带技能仍由插件管理。
+                </p>
                 <p>禁用技能后，该技能本体和它附带的 Skill Hook 会一起失效。</p>
               </div>
             </SkillGuideSubSection>
@@ -1973,6 +1985,16 @@ export function SkillsPanel(): React.JSX.Element {
               <span className="relative">去应用市场</span>
               <ChevronRight className="relative size-3 text-primary/80 transition-transform duration-200 group-hover:translate-x-0.5" />
             </Button>
+            <div className="rounded-md border border-sky-200/70 bg-sky-50/80 px-2.5 py-2 text-[11px] leading-4 text-sky-900 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-200">
+              <div className="flex items-start gap-1.5">
+                <Info className="mt-0.5 size-3 shrink-0" />
+                <p>
+                  这里管理普通技能。与插件技能同名时，斜杠列表会同时显示并用来源区分；技能说明中的相对脚本路径按
+                  <code className="mx-0.5 rounded bg-sky-100 px-1 dark:bg-sky-500/20">SKILL.md</code>
+                  所在目录解析。
+                </p>
+              </div>
+            </div>
           </div>
         </div>
         <ScrollArea className="flex-1">
@@ -3122,6 +3144,20 @@ export function SkillDetail(props: {
               <p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">
                 {description}
               </p>
+              <div className="flex items-start gap-2 rounded-lg border border-sky-200/70 bg-sky-50/80 px-3 py-2.5 text-xs leading-relaxed text-sky-900 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-200">
+                <Info className="mt-0.5 size-3.5 shrink-0" />
+                <div className="space-y-1">
+                  <p className="font-medium">运行规则</p>
+                  <p>
+                    与插件技能同名时，斜杠列表会同时显示并用来源区分；选中后按对应
+                    <code className="mx-1 rounded bg-sky-100 px-1 dark:bg-sky-500/20">SKILL.md</code>
+                    绝对路径执行。相对脚本、资源和模板路径按
+                    <code className="mx-1 rounded bg-sky-100 px-1 dark:bg-sky-500/20">SKILL.md</code>
+                    所在目录解析，不会改写工作区 Hook 的
+                    <code className="mx-1 rounded bg-sky-100 px-1 dark:bg-sky-500/20">WORKSPACE_PATH</code>。
+                  </p>
+                </div>
+              </div>
               {skillVersionMissingInFrontmatter && (
                 <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-relaxed text-amber-900">
                   <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />

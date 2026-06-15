@@ -17,6 +17,7 @@ import {
   SelectValue
 } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
+import { toast } from "sonner"
 import type {
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitMode,
@@ -28,6 +29,8 @@ const DEFAULT_AUTO_COMMIT_SETTINGS: AgentAutoCommitSettings = {
   push: false,
   messageStrategy: "prompt"
 }
+
+const AUTO_COMMIT_SETTINGS_CHANGED_EVENT = "cmb:auto-commit-settings-changed"
 
 const STRATEGIES: Array<{
   value: AgentAutoCommitMessageStrategy
@@ -100,7 +103,6 @@ export function AutoCommitControl({
     try {
       const saved = await window.api.autoCommit.saveSettings({
         ...next,
-        cardNumber: next.cardNumber?.trim() || undefined,
         template: next.template?.trim() || undefined
       })
       if (!mountedRef.current) return
@@ -108,10 +110,18 @@ export function AutoCommitControl({
       setSettings(normalized)
       setDraft(normalized)
       setDialogOpen(false)
+      window.dispatchEvent(
+        new CustomEvent<AgentAutoCommitSettings>(AUTO_COMMIT_SETTINGS_CHANGED_EVENT, {
+          detail: normalized
+        })
+      )
+      toast.success(normalized.mode === "off" ? "已关闭自动提交" : "自动提交设置已保存")
     } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
       if (mountedRef.current) {
-        setError(e instanceof Error ? e.message : String(e))
+        setError(message)
       }
+      toast.error(`保存失败：${message}`)
     } finally {
       if (mountedRef.current) setPending(false)
     }
@@ -145,19 +155,11 @@ export function AutoCommitControl({
   }, [])
 
   const handleSaveDraft = useCallback(() => {
-    const cardNumber = draft.cardNumber?.trim()
-    if (draft.mode !== "off" && !cardNumber) {
-      setError("开启自动提交前需要填写卡片编号")
-      return
-    }
     void saveSettings({
       ...draft,
-      cardNumber,
       template: draft.template?.trim() || undefined
     })
   }, [draft, saveSettings])
-
-  const needsCard = draft.mode !== "off" && !draft.cardNumber?.trim()
 
   const settingsForm = (
     <div className="space-y-4">
@@ -195,19 +197,11 @@ export function AutoCommitControl({
         </span>
       </label>
 
-      <label className="flex flex-col gap-1.5 text-sm">
-        <span className="font-medium">卡片编号</span>
-        <input
-          value={draft.cardNumber ?? ""}
-          onChange={(e) => updateDraft({ cardNumber: e.target.value })}
-          placeholder="例如 Z990880"
-          disabled={draft.mode === "off" || loading || pending}
-          className={cn(
-            "h-9 rounded-md border bg-background px-3 text-sm outline-none transition-colors focus:border-primary disabled:cursor-not-allowed disabled:opacity-60",
-            needsCard ? "border-amber-500/70" : "border-border"
-          )}
-        />
-      </label>
+      {draft.mode !== "off" && (
+        <div className="rounded-md border border-border bg-background-secondary px-3 py-2 text-xs leading-5 text-muted-foreground">
+          任务卡片在主页面分支旁按工作区选择。
+        </div>
+      )}
 
       <div className="space-y-2">
         <span className="text-sm font-medium">摘要来源</span>
@@ -251,13 +245,6 @@ export function AutoCommitControl({
         </label>
       )}
 
-      {needsCard && (
-        <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-700 dark:text-amber-400">
-          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-          <p>自动提交必须填写卡片编号；缺少时会跳过提交，不会编造编号。</p>
-        </div>
-      )}
-
       {error && (
         <div className="flex items-start gap-2 rounded-md border border-red-500/20 bg-red-500/5 p-3 text-sm text-red-600 dark:text-red-400">
           <AlertTriangle className="mt-0.5 size-4 shrink-0" />
@@ -274,8 +261,8 @@ export function AutoCommitControl({
           <div>
             <h3 className="text-base font-semibold">自动提交</h3>
             <p className="mt-1 text-sm leading-6 text-muted-foreground">
-              提交信息固定为：卡片编号 #comment fix:摘要 #CMBDevClaw。默认只执行 git
-              commit；如需推送请勾选下方"提交后自动推送"。
+              提交信息固定为：任务卡片 #comment fix:摘要 #CMBDevClaw。默认只执行 git
+              commit；如需推送请勾选下方「提交后自动推送」。
             </p>
           </div>
           <GitCommit className="mt-1 size-5 shrink-0 text-muted-foreground" />
@@ -335,7 +322,8 @@ export function AutoCommitControl({
           <DialogHeader>
             <DialogTitle>自动提交设置</DialogTitle>
             <DialogDescription>
-              提交信息固定为：卡片编号 #comment fix:摘要 #CMBDevClaw。这里配置摘要来源与是否自动 push。
+              提交信息固定为：任务卡片 #comment fix:摘要 #CMBDevClaw。这里配置摘要来源与是否自动
+              push。
             </DialogDescription>
           </DialogHeader>
 
