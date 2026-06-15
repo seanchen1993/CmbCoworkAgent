@@ -1,5 +1,17 @@
 import { useEffect, useMemo, useState } from "react"
-import { CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, GitCommit, GitCompare, Info, Loader2, MessagesSquare, Search, X } from "lucide-react"
+import {
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  GitCommit,
+  GitCompare,
+  Info,
+  Loader2,
+  MessagesSquare,
+  Search,
+  X
+} from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -13,7 +25,11 @@ import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TraceExplorer } from "./TraceHistoryDialog"
 import { CommitAdoptionTraceDialog } from "./CommitAdoptionTraceDialog"
-import type { DashboardCommitDetail, DashboardCommitDetailsData, DashboardTraceDetail } from "./use-dashboard"
+import type {
+  DashboardCommitDetail,
+  DashboardCommitDetailsData,
+  DashboardTraceDetail
+} from "./use-dashboard"
 
 function HeaderHint({ hint }: { hint: string }): React.JSX.Element {
   return (
@@ -102,7 +118,7 @@ function CommitRow({
   onViewThread: (item: DashboardCommitDetail) => void
   onViewTrace: (item: DashboardCommitDetail) => void
 }): React.JSX.Element {
-  const externalUrl = item.pushed ? (item.commitUrl || item.repositoryWebUrl || "") : ""
+  const externalUrl = item.pushed ? item.commitUrl || item.repositoryWebUrl || "" : ""
   const displayRepo = repoName(item)
   const displayOrg = orgLabel(item)
 
@@ -116,7 +132,9 @@ function CommitRow({
         <div className="text-[10px] text-muted-foreground">{item.sapId || item.ystId || "-"}</div>
       </td>
       <td className="max-w-[120px] px-3 py-2 text-xs text-muted-foreground">
-        <span className="block truncate" title={displayOrg}>{displayOrg}</span>
+        <span className="block truncate" title={displayOrg}>
+          {displayOrg}
+        </span>
       </td>
       <td className="max-w-[180px] px-3 py-2 text-xs">
         {externalUrl ? (
@@ -141,11 +159,13 @@ function CommitRow({
         </span>
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-xs">
-        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
-          item.pushed
-            ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-            : "bg-muted text-muted-foreground"
-        }`}>
+        <span
+          className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+            item.pushed
+              ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+              : "bg-muted text-muted-foreground"
+          }`}
+        >
           {item.pushed ? "已 Push" : "未 Push"}
         </span>
       </td>
@@ -157,7 +177,11 @@ function CommitRow({
           type="button"
           className="group/trace -mx-1 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-blue-500/10 disabled:cursor-not-allowed disabled:hover:bg-transparent"
           disabled={!item.commitSha}
-          title={item.commitSha ? "查看采纳溯源：该率对应的 gen / adopt 事件" : "无 commit 信息，无法溯源"}
+          title={
+            item.commitSha
+              ? "查看采纳溯源：该率对应的 gen / adopt 事件"
+              : "无 commit 信息，无法溯源"
+          }
           onClick={() => onViewTrace(item)}
         >
           <div className="flex items-center gap-1 font-medium tabular-nums text-foreground">
@@ -167,7 +191,8 @@ function CommitRow({
             ) : null}
           </div>
           <div className="text-[10px] text-muted-foreground">
-            {formatLines(item.codeAdoptedLines)} / {formatLines(item.codeEffectiveGeneratedLines)} 行
+            {formatLines(item.codeAdoptedLines)} / {formatLines(item.codeEffectiveGeneratedLines)}{" "}
+            行
           </div>
         </button>
       </td>
@@ -200,7 +225,11 @@ function CommitRow({
   )
 }
 
-function CommitAdoptionSummaryBar({ commit }: { commit: DashboardCommitDetail }): React.JSX.Element {
+function CommitAdoptionSummaryBar({
+  commit
+}: {
+  commit: DashboardCommitDetail
+}): React.JSX.Element {
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-border bg-muted/10 px-5 py-2 text-[11px] text-muted-foreground">
       <span className="inline-flex items-center gap-1 font-medium text-foreground">
@@ -209,7 +238,10 @@ function CommitAdoptionSummaryBar({ commit }: { commit: DashboardCommitDetail })
       </span>
       <span>有效生成 {formatLines(commit.codeEffectiveGeneratedLines)} 行</span>
       <span>
-        采纳率 <span className="font-medium text-foreground">{formatPercent(commit.codeAdoptionRate)}</span>
+        采纳率{" "}
+        <span className="font-medium text-foreground">
+          {formatPercent(commit.codeAdoptionRate)}
+        </span>
       </span>
       <span className="ml-auto">关联 {commit.threadIds.length} 个会话</span>
     </div>
@@ -319,14 +351,17 @@ function CommitDetailsToolbar({
   toIndex,
   pushedOnly,
   departmentValue,
+  userValue,
   loading,
   canPrev,
   canNext,
   onPageChange,
   onPushedOnlyChange,
   onDepartmentValueChange,
-  onDepartmentSearch,
-  onClearDepartment
+  onUserValueChange,
+  onSearch,
+  onClearDepartment,
+  onClearUser
 }: {
   total: number
   page: number
@@ -336,21 +371,26 @@ function CommitDetailsToolbar({
   toIndex: number
   pushedOnly: boolean
   departmentValue: string
+  userValue: string
   loading: boolean
   canPrev: boolean
   canNext: boolean
   onPageChange: (page: number) => void
   onPushedOnlyChange: (pushedOnly: boolean) => void
   onDepartmentValueChange: (value: string) => void
-  onDepartmentSearch: () => void
+  onUserValueChange: (value: string) => void
+  onSearch: () => void
   onClearDepartment: () => void
+  onClearUser: () => void
 }): React.JSX.Element {
   return (
     <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/10 px-5 py-2 text-xs text-muted-foreground">
       <div className="flex items-center gap-3">
         <span>共 {total} 条</span>
         <span>每页 {pageSize} 条</span>
-        <span>{fromIndex}-{toIndex}</span>
+        <span>
+          {fromIndex}-{toIndex}
+        </span>
         {loading ? <Loader2 className="size-3.5 animate-spin" /> : null}
       </div>
       <div className="flex items-center gap-3">
@@ -358,7 +398,7 @@ function CommitDetailsToolbar({
           className="flex items-center gap-2"
           onSubmit={(event) => {
             event.preventDefault()
-            onDepartmentSearch()
+            onSearch()
           }}
         >
           <div className="relative w-[180px]">
@@ -376,6 +416,27 @@ function CommitDetailsToolbar({
                 onClick={onClearDepartment}
                 className="absolute right-2 top-1/2 inline-flex size-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 aria-label="清空部门筛选"
+                title="清空"
+              >
+                <X className="size-3" />
+              </button>
+            ) : null}
+          </div>
+          <div className="relative w-[160px]">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={userValue}
+              onChange={(event) => onUserValueChange(event.target.value)}
+              aria-label="按用户姓名或 ID 筛选 Commit"
+              placeholder="用户查询"
+              className="h-7 pl-8 pr-7 text-xs"
+            />
+            {userValue ? (
+              <button
+                type="button"
+                onClick={onClearUser}
+                className="absolute right-2 top-1/2 inline-flex size-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                aria-label="清空用户筛选"
                 title="清空"
               >
                 <X className="size-3" />
@@ -418,7 +479,9 @@ function CommitDetailsToolbar({
           >
             <ChevronLeft className="size-3.5" />
           </Button>
-          <span className="min-w-14 text-center tabular-nums">{page} / {pageCount}</span>
+          <span className="min-w-14 text-center tabular-nums">
+            {page} / {pageCount}
+          </span>
           <Button
             variant="ghost"
             size="sm"
@@ -445,9 +508,12 @@ export function CommitDetailsDialog({
   onPageChange,
   onPushedOnlyChange,
   departmentValue,
+  userValue,
   onDepartmentValueChange,
-  onDepartmentSearch,
+  onUserValueChange,
+  onSearch,
   onClearDepartment,
+  onClearUser,
   onOpenExternal
 }: {
   open: boolean
@@ -460,9 +526,12 @@ export function CommitDetailsDialog({
   onPageChange: (page: number) => void
   onPushedOnlyChange: (pushedOnly: boolean) => void
   departmentValue: string
+  userValue: string
   onDepartmentValueChange: (value: string) => void
-  onDepartmentSearch: () => void
+  onUserValueChange: (value: string) => void
+  onSearch: () => void
   onClearDepartment: () => void
+  onClearUser: () => void
   onOpenExternal: (url: string) => void
 }): React.JSX.Element {
   const items = data?.items ?? []
@@ -508,17 +577,22 @@ export function CommitDetailsDialog({
               toIndex={toIndex}
               pushedOnly={pushedOnly}
               departmentValue={departmentValue}
+              userValue={userValue}
               loading={loading}
               canPrev={canPrev}
               canNext={canNext}
               onPageChange={onPageChange}
               onPushedOnlyChange={onPushedOnlyChange}
               onDepartmentValueChange={onDepartmentValueChange}
-              onDepartmentSearch={onDepartmentSearch}
+              onUserValueChange={onUserValueChange}
+              onSearch={onSearch}
               onClearDepartment={onClearDepartment}
+              onClearUser={onClearUser}
             />
             <div className="flex flex-1 items-center justify-center px-6 text-sm text-muted-foreground">
-              {pushedOnly ? "该时间范围内没有已 Push 的 Commit 数据" : "该时间范围内没有 Commit 数据"}
+              {pushedOnly
+                ? "该时间范围内没有已 Push 的 Commit 数据"
+                : "该时间范围内没有 Commit 数据"}
             </div>
           </div>
         ) : (
@@ -532,14 +606,17 @@ export function CommitDetailsDialog({
               toIndex={toIndex}
               pushedOnly={pushedOnly}
               departmentValue={departmentValue}
+              userValue={userValue}
               loading={loading}
               canPrev={canPrev}
               canNext={canNext}
               onPageChange={onPageChange}
               onPushedOnlyChange={onPushedOnlyChange}
               onDepartmentValueChange={onDepartmentValueChange}
-              onDepartmentSearch={onDepartmentSearch}
+              onUserValueChange={onUserValueChange}
+              onSearch={onSearch}
               onClearDepartment={onClearDepartment}
+              onClearUser={onClearUser}
             />
             <ScrollArea className="min-h-0 flex-1" orientation="both">
               <div className="min-w-max">

@@ -619,6 +619,7 @@ interface CommitDetailsOptions {
   pageSize?: number
   pushedOnly?: boolean
   upperOrgLv1?: string | null
+  userKeyword?: string | null
   // 全局「室筛选」（多选 LV1，含「未归类」哨兵），与弹窗内部门搜索 AND 叠加。
   orgLv1List?: string[]
 }
@@ -1176,6 +1177,7 @@ function normalizeCommitDetailsOptions(
       pageSize: clampLimit(value, 20, 500),
       pushedOnly: false,
       upperOrgLv1: null,
+      userKeyword: null,
       orgLv1List: []
     }
   }
@@ -1187,6 +1189,7 @@ function normalizeCommitDetailsOptions(
     pageSize,
     pushedOnly: value?.pushedOnly === true,
     upperOrgLv1: normalizeUpperOrgLv1Option(value?.upperOrgLv1),
+    userKeyword: normalizeCommitUserKeyword(value?.userKeyword),
     orgLv1List: normalizeUpperOrgLv1List(value?.orgLv1List)
   }
 }
@@ -2180,6 +2183,25 @@ function normalizeUpperOrgLv1Option(upperOrgLv1?: string | null): string | null 
   if (typeof upperOrgLv1 !== "string") return null
   const normalized = upperOrgLv1.trim()
   return normalized ? normalized : null
+}
+
+function normalizeCommitUserKeyword(userKeyword?: string | null): string | null {
+  if (typeof userKeyword !== "string") return null
+  const normalized = userKeyword.trim()
+  return normalized ? normalized : null
+}
+
+function buildCommitUserMatchFilter(userKeyword: string): Record<string, unknown> {
+  const escaped = escapeWildcard(userKeyword)
+  const wildcardPattern = `*${escaped}*`
+  const fields = ["userName", "username", "sapId", "ystId"]
+  const should = fields.flatMap((field) => [
+    { term: { [field]: userKeyword } },
+    { term: { [`${field}.keyword`]: userKeyword } },
+    { wildcard: { [field]: wildcardPattern } },
+    { wildcard: { [`${field}.keyword`]: wildcardPattern } }
+  ])
+  return { bool: { should, minimum_should_match: 1 } }
 }
 
 // 「未归类」哨兵：代表 upperOrgLv1 为空或缺失的记录（前后端约定一致）。
@@ -5233,7 +5255,7 @@ async function fetchCommitDetails(
   items: DashboardCommitDetail[]
 }> {
   requireDashboardAccess()
-  const { page, pageSize, pushedOnly, upperOrgLv1, orgLv1List } =
+  const { page, pageSize, pushedOnly, upperOrgLv1, userKeyword, orgLv1List } =
     normalizeCommitDetailsOptions(options)
   const filters: Record<string, unknown>[] = [
     timeRangeFilter("eventTime", range),
@@ -5247,6 +5269,9 @@ async function fetchCommitDetails(
   // 弹窗内的部门搜索（单值，模糊匹配 LV1/LV0）
   if (upperOrgLv1 !== null) {
     filters.push(buildOrgLevelMatchFilter(upperOrgLv1))
+  }
+  if (userKeyword !== null) {
+    filters.push(buildCommitUserMatchFilter(userKeyword))
   }
   const body = {
     track_total_hits: true,
@@ -7572,7 +7597,8 @@ function makeMockCommitDetails(
   pushedOnly: boolean
   items: DashboardCommitDetail[]
 } {
-  const { page, pageSize, pushedOnly, upperOrgLv1 } = normalizeCommitDetailsOptions(options)
+  const { page, pageSize, pushedOnly, upperOrgLv1, userKeyword } =
+    normalizeCommitDetailsOptions(options)
   const from = new Date(range.from)
   const to = new Date(range.to)
   const spanMs = Math.max(60_000, to.getTime() - from.getTime())
@@ -7632,6 +7658,7 @@ function makeMockCommitDetails(
       )
       if (!orgMatched) return false
     }
+    if (!commitDetailMatchesUserKeyword(item, userKeyword)) return false
     return true
   })
   const start = (page - 1) * pageSize
@@ -7642,6 +7669,19 @@ function makeMockCommitDetails(
     pushedOnly,
     items: filteredItems.slice(start, start + pageSize)
   }
+}
+
+function commitDetailMatchesUserKeyword(
+  item: DashboardCommitDetail,
+  userKeyword: string | null
+): boolean {
+  if (userKeyword === null) return true
+  const needle = userKeyword.toLowerCase()
+  return [item.userName, item.sapId, item.ystId].some((value) =>
+    String(value || "")
+      .toLowerCase()
+      .includes(needle)
+  )
 }
 
 /** DEV mock for one feature's Commit 明细: a deterministic slice of the platform commit mock. */
@@ -7657,7 +7697,8 @@ function makeMockProjectModeFeatureCommits(
   pushedOnly: boolean
   items: DashboardCommitDetail[]
 } {
-  const { page, pageSize, pushedOnly, upperOrgLv1 } = normalizeCommitDetailsOptions(options)
+  const { page, pageSize, pushedOnly, upperOrgLv1, userKeyword } =
+    normalizeCommitDetailsOptions(options)
   // 用 projectId+featureSlug 的哈希派生「条数 + 起始偏移」，让每个特性拿到各不相同（且互不重叠）
   // 的 commit 窗口——真实后端按 harnessFeatureSlug 精确圈定，这里仅为 DEV 还原「每条 feature 只看自己的 commit」。
   const seed = `${projectId}/${featureSlug}`
@@ -7684,6 +7725,7 @@ function makeMockProjectModeFeatureCommits(
       )
       if (!matched) return false
     }
+    if (!commitDetailMatchesUserKeyword(item, userKeyword)) return false
     return true
   })
   const start = (page - 1) * pageSize
@@ -7708,7 +7750,8 @@ function makeMockProjectModeProjectCommits(
   pushedOnly: boolean
   items: DashboardCommitDetail[]
 } {
-  const { page, pageSize, pushedOnly, upperOrgLv1 } = normalizeCommitDetailsOptions(options)
+  const { page, pageSize, pushedOnly, upperOrgLv1, userKeyword } =
+    normalizeCommitDetailsOptions(options)
   let hash = 0
   for (let i = 0; i < projectId.length; i += 1) hash = (hash * 31 + projectId.charCodeAt(i)) >>> 0
   const projectCommitCount = 12 + (hash % 28)
@@ -7731,6 +7774,7 @@ function makeMockProjectModeProjectCommits(
       )
       if (!matched) return false
     }
+    if (!commitDetailMatchesUserKeyword(item, userKeyword)) return false
     return true
   })
   const start = (page - 1) * pageSize
@@ -9392,7 +9436,7 @@ async function fetchProjectModeFeatureCommits(
   items: DashboardCommitDetail[]
 }> {
   const access = requireDashboardProjectModeAccess()
-  const { page, pageSize, pushedOnly, upperOrgLv1, orgLv1List } =
+  const { page, pageSize, pushedOnly, upperOrgLv1, userKeyword, orgLv1List } =
     normalizeCommitDetailsOptions(options)
   const orgFilterClause = buildProjectModeOrgFilter({ upperOrgLv1: orgLv1List }, access)
   const normalizedProjectId = projectId.trim()
@@ -9438,6 +9482,7 @@ async function fetchProjectModeFeatureCommits(
   if (pushedOnly) filters.push({ term: { "properties.pushed": true } })
   appendOptionalFilter(filters, orgFilterClause)
   if (upperOrgLv1 !== null) filters.push(buildOrgLevelMatchFilter(upperOrgLv1))
+  if (userKeyword !== null) filters.push(buildCommitUserMatchFilter(userKeyword))
 
   const raw = (await esQuery(getEsIndex("event"), {
     track_total_hits: true,
@@ -9480,7 +9525,7 @@ async function fetchProjectModeProjectCommits(
   items: DashboardCommitDetail[]
 }> {
   const access = requireDashboardProjectModeAccess()
-  const { page, pageSize, pushedOnly, upperOrgLv1, orgLv1List } =
+  const { page, pageSize, pushedOnly, upperOrgLv1, userKeyword, orgLv1List } =
     normalizeCommitDetailsOptions(options)
   const orgFilterClause = buildProjectModeOrgFilter({ upperOrgLv1: orgLv1List }, access)
   const normalizedProjectId = projectId.trim()
@@ -9523,6 +9568,7 @@ async function fetchProjectModeProjectCommits(
   if (pushedOnly) filters.push({ term: { "properties.pushed": true } })
   appendOptionalFilter(filters, orgFilterClause)
   if (upperOrgLv1 !== null) filters.push(buildOrgLevelMatchFilter(upperOrgLv1))
+  if (userKeyword !== null) filters.push(buildCommitUserMatchFilter(userKeyword))
 
   const raw = (await esQuery(getEsIndex("event"), {
     track_total_hits: true,

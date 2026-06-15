@@ -2467,6 +2467,7 @@ export function DashboardView(): React.JSX.Element {
   const [commitDetailsLoading, setCommitDetailsLoading] = useState(false)
   const [commitDetailsError, setCommitDetailsError] = useState<string | null>(null)
   const [commitDepartmentValue, setCommitDepartmentValue] = useState("")
+  const [commitUserValue, setCommitUserValue] = useState("")
   // 「全部生成」漏斗首层下钻：生成但未提交分析弹窗。projectMode 区分平台概览 / 项目概览口径。
   const [uncommittedOpen, setUncommittedOpen] = useState(false)
   const [uncommittedProjectMode, setUncommittedProjectMode] = useState(false)
@@ -2528,6 +2529,7 @@ export function DashboardView(): React.JSX.Element {
     }
   }, [])
   const [commitDepartmentFilter, setCommitDepartmentFilter] = useState("")
+  const [commitUserFilter, setCommitUserFilter] = useState("")
   // 项目模式·特性级关联 Commit 弹窗（复用 CommitDetailsDialog，独立于平台级 Commit 明细）。
   const [featureCommitScope, setFeatureCommitScope] = useState<{
     projectId: string
@@ -2541,6 +2543,8 @@ export function DashboardView(): React.JSX.Element {
   const [featureCommitError, setFeatureCommitError] = useState<string | null>(null)
   const [featureCommitDeptValue, setFeatureCommitDeptValue] = useState("")
   const [featureCommitDeptFilter, setFeatureCommitDeptFilter] = useState("")
+  const [featureCommitUserValue, setFeatureCommitUserValue] = useState("")
+  const [featureCommitUserFilter, setFeatureCommitUserFilter] = useState("")
   const [subPage, setSubPage] = useState<DashboardSubPage>({ kind: "main" })
   const [userList, setUserList] = useState<DashboardUserListData | null>(null)
   const [userListLoading, setUserListLoading] = useState(false)
@@ -3424,7 +3428,8 @@ export function DashboardView(): React.JSX.Element {
       scopeLabel: string,
       page = 1,
       pushedOnly = false,
-      upperOrgLv1 = commitDepartmentFilter
+      upperOrgLv1 = commitDepartmentFilter,
+      userKeyword = commitUserFilter
     ) => {
       setCommitScopeLabel(scopeLabel)
       setCommitDetailsRange(targetRange)
@@ -3433,12 +3438,14 @@ export function DashboardView(): React.JSX.Element {
       setCommitDetailsError(null)
       setCommitDetailsLoading(true)
       const normalizedDepartment = upperOrgLv1.trim()
+      const normalizedUser = userKeyword.trim()
       try {
         const result = await window.api.dashboard.commitDetails(targetRange, {
           page,
           pageSize: 20,
           pushedOnly,
           upperOrgLv1: normalizedDepartment || null,
+          userKeyword: normalizedUser || null,
           // 带入顶部全局「室筛选」
           orgLv1List: selectedOrgLv1List
         })
@@ -3450,28 +3457,54 @@ export function DashboardView(): React.JSX.Element {
         setCommitDetailsLoading(false)
       }
     },
-    [commitDepartmentFilter, selectedOrgLv1List]
+    [commitDepartmentFilter, commitUserFilter, selectedOrgLv1List]
   )
 
   const reloadCommitDetails = useCallback(
-    (page: number, pushedOnly: boolean, upperOrgLv1 = commitDepartmentFilter) => {
+    (
+      page: number,
+      pushedOnly: boolean,
+      upperOrgLv1 = commitDepartmentFilter,
+      userKeyword = commitUserFilter
+    ) => {
       if (!commitDetailsRange) return
-      void loadCommitDetails(commitDetailsRange, commitScopeLabel, page, pushedOnly, upperOrgLv1)
+      void loadCommitDetails(
+        commitDetailsRange,
+        commitScopeLabel,
+        page,
+        pushedOnly,
+        upperOrgLv1,
+        userKeyword
+      )
     },
-    [commitDepartmentFilter, commitDetailsRange, commitScopeLabel, loadCommitDetails]
+    [
+      commitDepartmentFilter,
+      commitDetailsRange,
+      commitScopeLabel,
+      commitUserFilter,
+      loadCommitDetails
+    ]
   )
 
-  const handleCommitDepartmentSearch = useCallback(() => {
+  const handleCommitFilterSearch = useCallback(() => {
     const upperOrgLv1 = commitDepartmentValue.trim()
+    const userKeyword = commitUserValue.trim()
     setCommitDepartmentFilter(upperOrgLv1)
-    reloadCommitDetails(1, commitDetails?.pushedOnly ?? false, upperOrgLv1)
-  }, [commitDepartmentValue, commitDetails?.pushedOnly, reloadCommitDetails])
+    setCommitUserFilter(userKeyword)
+    reloadCommitDetails(1, commitDetails?.pushedOnly ?? false, upperOrgLv1, userKeyword)
+  }, [commitDepartmentValue, commitDetails?.pushedOnly, commitUserValue, reloadCommitDetails])
 
   const handleCommitDepartmentClear = useCallback(() => {
     setCommitDepartmentValue("")
     setCommitDepartmentFilter("")
-    reloadCommitDetails(1, commitDetails?.pushedOnly ?? false, "")
-  }, [commitDetails?.pushedOnly, reloadCommitDetails])
+    reloadCommitDetails(1, commitDetails?.pushedOnly ?? false, "", commitUserFilter)
+  }, [commitDetails?.pushedOnly, commitUserFilter, reloadCommitDetails])
+
+  const handleCommitUserClear = useCallback(() => {
+    setCommitUserValue("")
+    setCommitUserFilter("")
+    reloadCommitDetails(1, commitDetails?.pushedOnly ?? false, commitDepartmentFilter, "")
+  }, [commitDepartmentFilter, commitDetails?.pushedOnly, reloadCommitDetails])
 
   const handleCommitExternalOpen = useCallback((url: string) => {
     if (!url) return
@@ -3485,11 +3518,14 @@ export function DashboardView(): React.JSX.Element {
   const handleCommitTotalClick = useCallback(() => {
     setCommitDepartmentValue("")
     setCommitDepartmentFilter("")
+    setCommitUserValue("")
+    setCommitUserFilter("")
     void loadCommitDetails(
       range,
       `当前范围 · ${formatRangeLabel(range.from, range.to, granularity)}`,
       1,
       false,
+      "",
       ""
     )
   }, [loadCommitDetails, range, granularity])
@@ -3498,11 +3534,14 @@ export function DashboardView(): React.JSX.Element {
     (bucket: { from: string; to: string; label: string }) => {
       setCommitDepartmentValue("")
       setCommitDepartmentFilter("")
+      setCommitUserValue("")
+      setCommitUserFilter("")
       void loadCommitDetails(
         { from: bucket.from, to: bucket.to },
         `时间桶 · ${bucket.label}`,
         1,
         false,
+        "",
         ""
       )
     },
@@ -3514,12 +3553,14 @@ export function DashboardView(): React.JSX.Element {
       scope: { projectId: string; featureSlug: string; label: string },
       page = 1,
       pushedOnly = false,
-      upperOrgLv1 = featureCommitDeptFilter
+      upperOrgLv1 = featureCommitDeptFilter,
+      userKeyword = featureCommitUserFilter
     ) => {
       setFeatureCommitData(null)
       setFeatureCommitError(null)
       setFeatureCommitLoading(true)
       const normalizedDepartment = upperOrgLv1.trim()
+      const normalizedUser = userKeyword.trim()
       try {
         // featureSlug 为空 = 项目级（聚合该项目全部特性的 commit）；否则按单特性圈定。
         const commitOptions = {
@@ -3527,6 +3568,7 @@ export function DashboardView(): React.JSX.Element {
           pageSize: 20,
           pushedOnly,
           upperOrgLv1: normalizedDepartment || null,
+          userKeyword: normalizedUser || null,
           orgLv1List: selectedOrgLv1List
         }
         const result = scope.featureSlug
@@ -3549,7 +3591,7 @@ export function DashboardView(): React.JSX.Element {
         setFeatureCommitLoading(false)
       }
     },
-    [featureCommitDeptFilter, range, selectedOrgLv1List]
+    [featureCommitDeptFilter, featureCommitUserFilter, range, selectedOrgLv1List]
   )
 
   const handleProjectOpenFeatureCommits = useCallback(
@@ -3562,8 +3604,10 @@ export function DashboardView(): React.JSX.Element {
       }
       setFeatureCommitDeptValue("")
       setFeatureCommitDeptFilter("")
+      setFeatureCommitUserValue("")
+      setFeatureCommitUserFilter("")
       setFeatureCommitScope(scope)
-      void loadFeatureCommits(scope, 1, false, "")
+      void loadFeatureCommits(scope, 1, false, "", "")
     },
     [loadFeatureCommits]
   )
@@ -3577,31 +3621,51 @@ export function DashboardView(): React.JSX.Element {
       }
       setFeatureCommitDeptValue("")
       setFeatureCommitDeptFilter("")
+      setFeatureCommitUserValue("")
+      setFeatureCommitUserFilter("")
       setFeatureCommitScope(scope)
-      void loadFeatureCommits(scope, 1, pushedOnly, "")
+      void loadFeatureCommits(scope, 1, pushedOnly, "", "")
     },
     [loadFeatureCommits]
   )
 
   const reloadFeatureCommits = useCallback(
-    (page: number, pushedOnly: boolean, upperOrgLv1 = featureCommitDeptFilter) => {
+    (
+      page: number,
+      pushedOnly: boolean,
+      upperOrgLv1 = featureCommitDeptFilter,
+      userKeyword = featureCommitUserFilter
+    ) => {
       if (!featureCommitScope) return
-      void loadFeatureCommits(featureCommitScope, page, pushedOnly, upperOrgLv1)
+      void loadFeatureCommits(featureCommitScope, page, pushedOnly, upperOrgLv1, userKeyword)
     },
-    [featureCommitDeptFilter, featureCommitScope, loadFeatureCommits]
+    [featureCommitDeptFilter, featureCommitScope, featureCommitUserFilter, loadFeatureCommits]
   )
 
-  const handleFeatureCommitDepartmentSearch = useCallback(() => {
+  const handleFeatureCommitFilterSearch = useCallback(() => {
     const upperOrgLv1 = featureCommitDeptValue.trim()
+    const userKeyword = featureCommitUserValue.trim()
     setFeatureCommitDeptFilter(upperOrgLv1)
-    reloadFeatureCommits(1, featureCommitData?.pushedOnly ?? false, upperOrgLv1)
-  }, [featureCommitData?.pushedOnly, featureCommitDeptValue, reloadFeatureCommits])
+    setFeatureCommitUserFilter(userKeyword)
+    reloadFeatureCommits(1, featureCommitData?.pushedOnly ?? false, upperOrgLv1, userKeyword)
+  }, [
+    featureCommitData?.pushedOnly,
+    featureCommitDeptValue,
+    featureCommitUserValue,
+    reloadFeatureCommits
+  ])
 
   const handleFeatureCommitDepartmentClear = useCallback(() => {
     setFeatureCommitDeptValue("")
     setFeatureCommitDeptFilter("")
-    reloadFeatureCommits(1, featureCommitData?.pushedOnly ?? false, "")
-  }, [featureCommitData?.pushedOnly, reloadFeatureCommits])
+    reloadFeatureCommits(1, featureCommitData?.pushedOnly ?? false, "", featureCommitUserFilter)
+  }, [featureCommitData?.pushedOnly, featureCommitUserFilter, reloadFeatureCommits])
+
+  const handleFeatureCommitUserClear = useCallback(() => {
+    setFeatureCommitUserValue("")
+    setFeatureCommitUserFilter("")
+    reloadFeatureCommits(1, featureCommitData?.pushedOnly ?? false, featureCommitDeptFilter, "")
+  }, [featureCommitData?.pushedOnly, featureCommitDeptFilter, reloadFeatureCommits])
 
   const handleExport = useCallback(async () => {
     if (!overview && !modelStats && !userStats && !productivity) return
@@ -4536,9 +4600,12 @@ export function DashboardView(): React.JSX.Element {
         onPageChange={(page) => reloadCommitDetails(page, commitDetails?.pushedOnly ?? false)}
         onPushedOnlyChange={(pushedOnly) => reloadCommitDetails(1, pushedOnly)}
         departmentValue={commitDepartmentValue}
+        userValue={commitUserValue}
         onDepartmentValueChange={setCommitDepartmentValue}
-        onDepartmentSearch={handleCommitDepartmentSearch}
+        onUserValueChange={setCommitUserValue}
+        onSearch={handleCommitFilterSearch}
         onClearDepartment={handleCommitDepartmentClear}
+        onClearUser={handleCommitUserClear}
         onOpenExternal={handleCommitExternalOpen}
       />
       <CommitDetailsDialog
@@ -4554,9 +4621,12 @@ export function DashboardView(): React.JSX.Element {
         onPageChange={(page) => reloadFeatureCommits(page, featureCommitData?.pushedOnly ?? false)}
         onPushedOnlyChange={(pushedOnly) => reloadFeatureCommits(1, pushedOnly)}
         departmentValue={featureCommitDeptValue}
+        userValue={featureCommitUserValue}
         onDepartmentValueChange={setFeatureCommitDeptValue}
-        onDepartmentSearch={handleFeatureCommitDepartmentSearch}
+        onUserValueChange={setFeatureCommitUserValue}
+        onSearch={handleFeatureCommitFilterSearch}
         onClearDepartment={handleFeatureCommitDepartmentClear}
+        onClearUser={handleFeatureCommitUserClear}
         onOpenExternal={handleCommitExternalOpen}
       />
       <DashboardAnalysisDrawer
