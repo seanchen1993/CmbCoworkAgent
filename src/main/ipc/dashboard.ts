@@ -765,6 +765,36 @@ function requireDashboardAnalysisAgentAccess(): void {
   }
 }
 
+// 「生成但未提交分析」（漏斗首层下钻）的访问门槛——在原管理员可见之上放宽一档：
+// - 管理员（VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS）：可看全部室的数据；
+// - 非管理员但在 VITE_DASHBOARD_UNRESTRICTED_YST_IDS 名单内：仅可看与自己 upperOrgLv1 相同的数据
+//   （需能从 pathName 解析出自己的 upperOrgLv1，否则无可限定的室，视为无权限）。
+interface UncommittedAnalysisAccess {
+  admin: boolean
+  upperOrgLv1: string
+}
+
+function isDashboardUncommittedAnalysisAllowed(
+  access: DashboardAccessContext = getDashboardAccessContext()
+): boolean {
+  if (import.meta.env.DEV) return true
+  if (!access.loggedIn || !access.ystId) return false
+  if (getTraceEvolverReviewAdminIds().has(access.ystId)) return true
+  return access.unrestricted && Boolean(access.upperOrgLv1)
+}
+
+function requireDashboardUncommittedAnalysisAccess(): UncommittedAnalysisAccess {
+  const access = getDashboardAccessContext()
+  if (import.meta.env.DEV) return { admin: true, upperOrgLv1: "" }
+  if (!access.loggedIn) throw new Error("请先登录后再查看生成但未提交分析")
+  const admin = Boolean(access.ystId) && getTraceEvolverReviewAdminIds().has(access.ystId)
+  if (admin) return { admin: true, upperOrgLv1: access.upperOrgLv1 }
+  if (access.unrestricted && access.upperOrgLv1) {
+    return { admin: false, upperOrgLv1: access.upperOrgLv1 }
+  }
+  throw new Error("无生成但未提交分析查看权限")
+}
+
 function buildNoAccessFilter(): Record<string, unknown> {
   return { term: { traceId: "__dashboard_no_access__" } }
 }
@@ -2454,8 +2484,15 @@ function uncommittedSettledRange(range: TimeRange): TimeRange {
   return { from: range.from, to: range.to < settle ? range.to : settle }
 }
 
-function uncommittedScopeFilters(options?: UncommittedScopeOptions): Record<string, unknown>[] {
+function uncommittedScopeFilters(
+  options: UncommittedScopeOptions | undefined,
+  access: UncommittedAnalysisAccess
+): Record<string, unknown>[] {
   const filters: Record<string, unknown>[] = []
+  // 非管理员仅能查看与自己 upperOrgLv1 相同的数据（与界面上的部门筛选 AND 叠加，无法越权）。
+  if (!access.admin && access.upperOrgLv1) {
+    filters.push(buildUpperOrgLv1Filter(access.upperOrgLv1))
+  }
   const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(options?.upperOrgLv1))
   if (orgFilterClause) filters.push(orgFilterClause)
   if (options?.projectMode) filters.push({ exists: { field: "properties.harnessProjectId" } })
@@ -2482,9 +2519,9 @@ async function fetchUncommittedRanking(
   range: TimeRange,
   options?: UncommittedScopeOptions
 ): Promise<UncommittedRankingData> {
-  // 与「运营指标分析 Agent」同一权限门槛：仅 VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS 名单可用。
-  requireDashboardAnalysisAgentAccess()
-  const scopeFilters = uncommittedScopeFilters(options)
+  // 管理员可看全部室；unrestricted 名单内的非管理员仅可看本室（见 requireDashboardUncommittedAnalysisAccess）。
+  const access = requireDashboardUncommittedAnalysisAccess()
+  const scopeFilters = uncommittedScopeFilters(options, access)
   // 上界排除最近 2 小时的在途生成；纯历史范围不受影响（见 uncommittedSettledRange）。
   const settledRange = uncommittedSettledRange(range)
 
@@ -2638,11 +2675,11 @@ async function fetchUncommittedDetail(
   range: TimeRange,
   options?: UncommittedScopeOptions
 ): Promise<UncommittedDetailData> {
-  // 与「运营指标分析 Agent」同一权限门槛。
-  requireDashboardAnalysisAgentAccess()
+  // 管理员可看全部室；unrestricted 名单内的非管理员仅可看本室。
+  const access = requireDashboardUncommittedAnalysisAccess()
   const normalizedSapId = sapId.trim()
   if (!normalizedSapId) throw new Error("sapId is required")
-  const scopeFilters = uncommittedScopeFilters(options)
+  const scopeFilters = uncommittedScopeFilters(options, access)
   // 与榜单口径一致：上界排除最近 2 小时的在途生成。
   const settledRange = uncommittedSettledRange(range)
 
@@ -9706,6 +9743,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle("dashboard:isAnalysisAgentAllowed", async () => {
     return isDashboardAnalysisAgentAllowed()
+  })
+
+  _ipcMain.handle("dashboard:isUncommittedAnalysisAllowed", async () => {
+    return isDashboardUncommittedAnalysisAllowed()
   })
 
   _ipcMain.handle("dashboard:esQuery", async (_, input: DashboardEsQueryInput) => {

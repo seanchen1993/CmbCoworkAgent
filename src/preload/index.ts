@@ -2347,6 +2347,8 @@ const api = {
       ipcRenderer.invoke("dashboard:isProjectModeAllowed"),
     isAnalysisAgentAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isAnalysisAgentAllowed"),
+    isUncommittedAnalysisAllowed: (): Promise<boolean> =>
+      ipcRenderer.invoke("dashboard:isUncommittedAnalysisAllowed"),
     esQuery: (input: {
       indexAlias: "event" | "trace"
       operation: "search" | "msearch" | "count" | "mapping" | "field_caps"

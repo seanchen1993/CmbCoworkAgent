@@ -1661,6 +1661,7 @@ interface CustomAPI {
     isAllowed: () => Promise<boolean>
     isProjectModeAllowed: () => Promise<boolean>
     isAnalysisAgentAllowed: () => Promise<boolean>
+    isUncommittedAnalysisAllowed: () => Promise<boolean>
     esQuery: (input: {
       indexAlias: "event" | "trace"
       operation: "search" | "msearch" | "count" | "mapping" | "field_caps"

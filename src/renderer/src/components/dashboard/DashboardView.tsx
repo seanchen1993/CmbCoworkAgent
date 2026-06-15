@@ -2415,6 +2415,25 @@ export function DashboardView(): React.JSX.Element {
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [analysisAgentAllowed, setAnalysisAgentAllowed] = useState(false)
+  // 「生成但未提交分析」下钻权限：管理员 + unrestricted 名单内（后者仅本室数据，由主进程过滤）。
+  const [uncommittedAnalysisAllowed, setUncommittedAnalysisAllowed] = useState(false)
+  // 「指标分析」入口默认隐藏：在标题栏右侧的隐藏热区连续点三下才显形（不完全移除功能）。
+  const [analysisEntryRevealed, setAnalysisEntryRevealed] = useState(false)
+  const analysisRevealClicksRef = useRef(0)
+  const analysisRevealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const handleAnalysisRevealHotspotClick = useCallback(() => {
+    if (analysisRevealTimerRef.current) clearTimeout(analysisRevealTimerRef.current)
+    analysisRevealClicksRef.current += 1
+    if (analysisRevealClicksRef.current >= 3) {
+      analysisRevealClicksRef.current = 0
+      setAnalysisEntryRevealed(true)
+      return
+    }
+    // 连续点击窗口：超过 600ms 未继续点击则重置计数。
+    analysisRevealTimerRef.current = setTimeout(() => {
+      analysisRevealClicksRef.current = 0
+    }, 600)
+  }, [])
   const [projectModeAllowed, setProjectModeAllowed] = useState(false)
   const [skillDialogOpen, setSkillDialogOpen] = useState(false)
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null)
@@ -2491,6 +2510,17 @@ export function DashboardView(): React.JSX.Element {
         if (cancelled) return
         setAnalysisAgentAllowed(false)
         setAnalysisOpen(false)
+      })
+
+    window.api.dashboard
+      .isUncommittedAnalysisAllowed()
+      .then((allowed) => {
+        if (cancelled) return
+        setUncommittedAnalysisAllowed(allowed)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setUncommittedAnalysisAllowed(false)
       })
 
     return () => {
@@ -4135,17 +4165,30 @@ export function DashboardView(): React.JSX.Element {
                 <ExternalLink className="size-3.5" />
                 了解技能评估与自进化
               </Button>
+            ) : analysisAgentAllowed &&
+              (activeMainTab === "overview" || activeMainTab === "project-mode") ? (
+              analysisEntryRevealed ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5 text-xs"
+                  onClick={() => setAnalysisOpen(true)}
+                  disabled={activeMainTab === "project-mode" && !projectModeAllowed}
+                >
+                  <Bot className="size-3.5" /> 指标分析
+                </Button>
+              ) : (
+                // 隐藏入口：在「指标分析」按钮原位置放一个不可见热区，连续点三下才显形。
+                <button
+                  type="button"
+                  aria-hidden
+                  tabIndex={-1}
+                  onClick={handleAnalysisRevealHotspotClick}
+                  className="h-7 w-16 cursor-default opacity-0"
+                />
+              )
             ) : null
-            /*
-             * 「指标分析」入口暂时隐藏（分析 Agent 逻辑/弹窗/类型均保留，需要时恢复以下分支即可）：
-             *   analysisAgentAllowed && (activeMainTab === "overview" || activeMainTab === "project-mode") ? (
-             *     <Button type="button" variant="outline" size="sm" className="gap-1.5 text-xs"
-             *       onClick={() => setAnalysisOpen(true)}
-             *       disabled={activeMainTab === "project-mode" && !projectModeAllowed}>
-             *       <Bot className="size-3.5" /> 指标分析
-             *     </Button>
-             *   ) : null
-             */
           }
         />
       )}
@@ -4252,7 +4295,7 @@ export function DashboardView(): React.JSX.Element {
                 onSkillClick={handleSkillClick}
                 onUserClick={(sapId) => openUserDetail(sapId, "main", true)}
                 onFunnelFirstStageClick={
-                  analysisAgentAllowed
+                  uncommittedAnalysisAllowed
                     ? () => {
                         setUncommittedProjectMode(true)
                         setUncommittedUsedSkillsOnly(false)
@@ -4261,7 +4304,7 @@ export function DashboardView(): React.JSX.Element {
                     : undefined
                 }
                 onSkillFunnelFirstStageClick={
-                  analysisAgentAllowed
+                  uncommittedAnalysisAllowed
                     ? () => {
                         setUncommittedProjectMode(true)
                         setUncommittedUsedSkillsOnly(true)
@@ -4300,7 +4343,7 @@ export function DashboardView(): React.JSX.Element {
                   onSkillClick={handleSkillClick}
                   onActiveUsersClick={openUserList}
                   onFunnelFirstStageClick={
-                    analysisAgentAllowed
+                    uncommittedAnalysisAllowed
                       ? () => {
                           setUncommittedProjectMode(false)
                           setUncommittedUsedSkillsOnly(false)
