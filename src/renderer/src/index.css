@@ -1005,6 +1005,35 @@
   }
 }
 
+@keyframes harness-phase-flow {
+  from {
+    transform: translateX(-140%);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  80% {
+    opacity: 1;
+  }
+  to {
+    transform: translateX(240%);
+    opacity: 0;
+  }
+}
+
+@keyframes harness-phase-arrow {
+  0%,
+  100% {
+    transform: translateX(0);
+    opacity: 0.85;
+  }
+  50% {
+    transform: translateX(4px);
+    opacity: 1;
+  }
+}
+
 .market-update-badge {
   color: #0f766e;
   background: linear-gradient(135deg, #d9fbf4 0%, #bdf5e8 100%);

@@ -3,7 +3,9 @@ import { createPortal } from "react-dom"
 import {
   AlertCircle,
   ArrowLeft,
+  ArrowRight,
   Archive,
+  Check,
   ChevronDown,
   ChevronRight,
   CheckCircle2,
@@ -206,6 +208,16 @@ interface HarnessBoardStats {
   incompatibleProjects: number
 }
 
+type HarnessProjectPhaseTone = "done" | "current" | "upcoming"
+
+interface HarnessProjectPhaseStep {
+  id: string
+  order: number
+  title: string
+  statusLabel: string
+  tone: HarnessProjectPhaseTone
+}
+
 interface SelectedFeature {
   projectId: string
   slug: string
@@ -259,6 +271,53 @@ interface WorkspaceChangeState {
   changedFilesTotal: number
   omittedFileCount: number
   error?: string
+}
+
+const HARNESS_PROJECT_PHASES_MOCK: readonly HarnessProjectPhaseStep[] = [
+  {
+    id: "requirements",
+    order: 1,
+    title: "需求分析",
+    statusLabel: "已完成",
+    tone: "done"
+  },
+  {
+    id: "design",
+    order: 2,
+    title: "分析设计",
+    statusLabel: "已完成",
+    tone: "done"
+  },
+  {
+    id: "development",
+    order: 3,
+    title: "开发",
+    statusLabel: "进行中",
+    tone: "current"
+  },
+  {
+    id: "testing",
+    order: 4,
+    title: "测试",
+    statusLabel: "待开始",
+    tone: "upcoming"
+  },
+  {
+    id: "release",
+    order: 5,
+    title: "上线",
+    statusLabel: "未开始",
+    tone: "upcoming"
+  }
+] as const
+
+function buildMockProjectPhaseSteps(archived: boolean): HarnessProjectPhaseStep[] {
+  if (!archived) return HARNESS_PROJECT_PHASES_MOCK.map((step) => ({ ...step }))
+  return HARNESS_PROJECT_PHASES_MOCK.map((step) => ({
+    ...step,
+    tone: "done",
+    statusLabel: "已完成"
+  }))
 }
 
 type ThreadWorkspaceStateMap = Record<
@@ -796,6 +855,89 @@ function HarnessBoardOverview({
           icon={<ShieldAlert className="size-4" />}
           tone="warning"
         />
+      </div>
+    </section>
+  )
+}
+
+function HarnessProjectPhaseFlow({
+  steps
+}: {
+  steps: HarnessProjectPhaseStep[]
+}): React.JSX.Element {
+  return (
+    <section className="w-full shrink-0 rounded-2xl border border-border/80 bg-background/90 p-4 shadow-sm">
+      <div className="flex flex-col gap-3">
+        <div className="grid gap-3 md:grid-cols-[repeat(5,minmax(0,1fr))]">
+          {steps.map((step, index) => {
+            const isDone = step.tone === "done"
+            const isCurrent = step.tone === "current"
+            const isLast = index === steps.length - 1
+
+            return (
+              <div key={step.id} className="relative min-w-0">
+                {!isLast && (
+                  <div
+                    aria-hidden="true"
+                    className="pointer-events-none absolute left-[calc(100%-15px)] top-1/2 z-20 hidden -translate-y-1/2 md:flex"
+                  >
+                    <div
+                      className={cn(
+                        "flex h-9 w-10 items-center justify-center ",
+                        isDone && " text-status-nominal",
+                        isCurrent && " text-status-info ",
+                        step.tone === "upcoming" && "text-muted-foreground"
+                      )}
+                    >
+                      <ArrowRight
+                        className={cn(
+                          "size-5",
+                          isCurrent && "animate-[harness-phase-arrow_1.15s_ease-in-out_infinite]"
+                        )}
+                        strokeWidth={2.6}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  className={cn(
+                    "relative z-10 flex w-full min-w-0 items-center gap-3 rounded-xl border px-2.5 py-2.5 text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    isCurrent
+                      ? "border-status-info/35 bg-status-info/[0.06] shadow-[0_6px_16px_rgb(37_99_235/0.08)]"
+                      : "border-border/100 bg-background/100 hover:border-status-info/20 hover:bg-background",
+                    isDone && "border-status-nominal/20 bg-status-nominal/[0.04]"
+                  )}
+                  title={step.title}
+                >
+                  <div
+                    className={cn(
+                      "flex size-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold transition-all duration-200",
+                      isDone && "bg-status-nominal text-white",
+                      isCurrent && "bg-status-info text-white ring-4 ring-status-info/10",
+                      step.tone === "upcoming" && "bg-gray-200 text-muted-foreground"
+                    )}
+                  >
+                    {isDone ? <Check className="size-4" /> : step.order}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div
+                      className={cn(
+                        "truncate text-[12px] font-semibold tracking-tight",
+                        isDone && "text-status-nominal",
+                        isCurrent && "text-status-info",
+                        step.tone === "upcoming" && "text-foreground"
+                      )}
+                    >
+                      {step.title}
+                    </div>
+                  </div>
+                </button>
+              </div>
+            )
+          })}
+        </div>
       </div>
     </section>
   )
@@ -2603,16 +2745,8 @@ function ProjectDetailPage({
   onOpenFeature: (projectId: string, slug: string) => void
 }): React.JSX.Element {
   const runs = detail?.runs ?? []
-  const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
-  const completedCount = runs.filter((run) =>
-    run.overallStatus.uiKind === "done" || run.overallStatus.uiKind === "ok"
-  ).length
-  const riskCount = runs.filter((run) =>
-    run.overallStatus.uiKind === "warning" ||
-    run.overallStatus.uiKind === "blocked" ||
-    run.overallStatus.uiKind === "error"
-  ).length
   const archived = project.lifecycle.status === "archived"
+  const phaseSteps = useMemo(() => buildMockProjectPhaseSteps(archived), [archived])
   const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
   const openProjectWorkspaceInFileManager = useCallback((): void => {
     void openPathInFileManager(project.workspacePath, "无法打开项目工作区")
@@ -2747,36 +2881,7 @@ function ProjectDetailPage({
               </aside>
 
               <div className="flex min-h-0 min-w-0 flex-col p-5">
-                <div className="grid shrink-0 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                  <HarnessMetricCard
-                    label="特性总量"
-                    value={loading || !detail ? "-" : runs.length}
-                    hint="当前项目下的 feature 工作项"
-                    icon={<Workflow className="size-4" />}
-                    tone="info"
-                  />
-                  <HarnessMetricCard
-                    label="进行中"
-                    value={loading || !detail ? "-" : activeCount}
-                    hint="正在推进的特性数量"
-                    icon={<Loader2 className={cn("size-4", activeCount > 0 && "animate-spin")} />}
-                    tone="info"
-                  />
-                  <HarnessMetricCard
-                    label="已完成"
-                    value={loading || !detail ? "-" : completedCount}
-                    hint="已通过或已完成的特性"
-                    icon={<CheckCircle2 className="size-4" />}
-                    tone="nominal"
-                  />
-                  <HarnessMetricCard
-                    label="需关注"
-                    value={loading || !detail ? "-" : riskCount}
-                    hint="警告、阻断或异常状态"
-                    icon={<ShieldAlert className="size-4" />}
-                    tone="warning"
-                  />
-                </div>
+                <HarnessProjectPhaseFlow steps={phaseSteps} />
 
                 <div className="mt-5 flex min-h-0 flex-1 flex-col rounded-2xl border border-border/80 bg-background/80 p-4 shadow-sm">
                   <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -2874,7 +2979,6 @@ function FeatureDetailPage({
   hasPendingGitDiffNotice,
   fallbackProjectName,
   fallbackFeatureTitle,
-  fallbackFeatureSlug,
   onBackToList,
   onBackToProject,
   onRefresh,
@@ -2892,7 +2996,6 @@ function FeatureDetailPage({
   hasPendingGitDiffNotice?: boolean
   fallbackProjectName?: string
   fallbackFeatureTitle?: string
-  fallbackFeatureSlug?: string
   onBackToList: () => void
   onBackToProject: () => void
   onRefresh: () => void
@@ -4620,7 +4723,6 @@ export function HarnessBoardView({
           hasPendingGitDiffNotice={hasPendingGitDiffNotice}
           fallbackProjectName={selectedFeatureProjectDetail?.project?.name ?? selectedProject?.name}
           fallbackFeatureTitle={fallbackFeatureSummary?.title ?? selectedFeature.slug}
-          fallbackFeatureSlug={fallbackFeatureSummary?.slug ?? selectedFeature.slug}
           onBackToList={handleBackToProjectList}
           onBackToProject={handleBackToProject}
           onRefresh={() => void refreshSelectedRunDetail()}
