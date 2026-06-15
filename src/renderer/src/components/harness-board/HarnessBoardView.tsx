@@ -878,9 +878,18 @@ function progressPercentFromValues(progressIndex: number, totalNodes: number): n
   return Math.min(100, Math.round((normalizedProgress / totalNodes) * 100))
 }
 
-function progressIndexFromCurrentNodeId(nodes: Array<{ id: string }>, currentNodeId: string): number {
+function isProgressCompletedNodeStatus(status: HarnessNodeStatus): boolean {
+  return status === "done" || status === "skipped"
+}
+
+function progressIndexFromCurrentNodeId(
+  nodes: Array<{ id: string }>,
+  currentNodeId: string,
+  currentNodeStatus: HarnessNodeStatus
+): number {
   const index = nodes.findIndex((node) => node.id === currentNodeId)
-  return index >= 0 ? index + 1 : 0
+  if (index < 0) return 0
+  return index + (isProgressCompletedNodeStatus(currentNodeStatus) ? 1 : 0)
 }
 
 function currentNodeLabelFromNodes(
@@ -892,6 +901,13 @@ function currentNodeLabelFromNodes(
 
 function currentNodeStatusLabel(run: HarnessFeatureSummary): string {
   return run.currentNodeStatusLabel?.trim() || NODE_STATUS_LABELS[run.currentNodeStatus] || "未知"
+}
+
+function currentNodeStatusFromNodes(
+  nodes: Array<{ id: string; nodeStatus: HarnessNodeStatus }>,
+  currentNodeId: string
+): HarnessNodeStatus {
+  return nodes.find((node) => node.id === currentNodeId)?.nodeStatus ?? "unknown"
 }
 
 function ProgressBar({
@@ -914,9 +930,10 @@ function ProgressBar({
 function groupProgressIndex(
   group: StageNodeGroup,
   workflowNodes: Array<{ id: string }>,
-  currentNodeId: string
+  currentNodeId: string,
+  currentNodeStatus: HarnessNodeStatus
 ): number {
-  const progressIndex = progressIndexFromCurrentNodeId(workflowNodes, currentNodeId)
+  const progressIndex = progressIndexFromCurrentNodeId(workflowNodes, currentNodeId, currentNodeStatus)
   const coveredNodeCount = Math.max(0, Math.min(progressIndex, workflowNodes.length))
   const completedNodeIds = new Set(
     workflowNodes.slice(0, coveredNodeCount).map((node) => node.id)
@@ -2446,7 +2463,11 @@ function FeatureCard({
   workflowNodes: Array<{ id: string; label: string }>
   onOpen: () => void
 }): React.JSX.Element {
-  const progressIndex = progressIndexFromCurrentNodeId(workflowNodes, run.currentNodeId)
+  const progressIndex = progressIndexFromCurrentNodeId(
+    workflowNodes,
+    run.currentNodeId,
+    run.currentNodeStatus
+  )
   const totalNodes = workflowNodes.length
   const currentNodeLabel = currentNodeLabelFromNodes(workflowNodes, run.currentNodeId)
   const nodeStatusLabel = currentNodeStatusLabel(run)
@@ -3706,6 +3727,7 @@ function FeatureDetailPage({
   const renderStageNodeStrip = (): React.JSX.Element | null => {
     if (!detail) return null
     if (detail.run.nodes.length === 0) return null
+    const currentNodeStatus = currentNodeStatusFromNodes(detail.run.nodes, detail.run.currentNodeId)
 
     const renderStageNodeButton = (node: HarnessRunNode): React.JSX.Element => {
       const selected = effectiveSelectedNodeId === node.id
@@ -3783,7 +3805,8 @@ function FeatureDetailPage({
                 const groupProgress = groupProgressIndex(
                   group,
                   detail.workflow.nodes,
-                  detail.run.currentNodeId
+                  detail.run.currentNodeId,
+                  currentNodeStatus
                 )
 
                 return (
