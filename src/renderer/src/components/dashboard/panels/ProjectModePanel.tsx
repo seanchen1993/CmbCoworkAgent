@@ -437,11 +437,11 @@ function CodeEfficiencyModelInfo(): React.JSX.Element {
         </Tooltip>
       </TooltipProvider>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-5xl">
+        <DialogContent className="w-[92vw] max-w-[1720px]">
           <DialogHeader>
             <DialogTitle>生产效能代码指标 · 口径说明</DialogTitle>
           </DialogHeader>
-          <div className="max-h-[80vh] overflow-auto">
+          <div className="max-h-[82vh] overflow-auto">
             <img
               src={codeEfficiencyModel}
               alt="生产效能代码指标口径说明示意图"
