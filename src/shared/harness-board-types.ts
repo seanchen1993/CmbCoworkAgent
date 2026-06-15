@@ -112,6 +112,7 @@ export interface HarnessFeatureCreateInput {
   projectId: string
   feature: string
   selectedServices?: string[]
+  serviceCodeDirectories?: Record<string, string>
 }
 
 export interface HarnessFeatureCreateResult {
@@ -131,7 +132,24 @@ export interface HarnessServiceAgentsOptions {
   systemId: string
   systemAgentsmdDir?: string
   services: HarnessServiceAgentsServiceOption[]
+  serviceCodeDirectoryMappingEnabled?: boolean
+  serviceCodeDirectoryMappings?: Record<string, string>
   warning?: string
+}
+
+export interface HarnessAgentsmdLoadConf {
+  version: 1
+  active: boolean
+  systemId: string
+  loadSystemAgentsmd: boolean
+  systemAgentsmdDir: string
+  services: HarnessServiceAgentsServiceOption[]
+}
+
+export interface HarnessFeatureContext {
+  version: 1
+  agentsmdLoadConf: HarnessAgentsmdLoadConf
+  serviceCodeDirectories: Record<string, string>
 }
 
 export interface HarnessProjectMetadataUpdateInput {
@@ -377,6 +395,7 @@ export interface HarnessRunDetailViewModel {
     featureStatusLabel?: string
     overallStatus?: HarnessStatus
     currentNodeId: string
+    featureContext?: HarnessFeatureContext
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]
   }

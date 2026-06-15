@@ -181,6 +181,7 @@ import {
   buildHarnessFeatureAgentContext,
   readHarnessFeatureMetadata
 } from "../harness-board/service"
+import type { HarnessFeatureContext } from "../../shared/harness-board-types"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
 import {
@@ -360,6 +361,7 @@ interface HarnessAgentContext {
   pluginWorkspace?: string
   featureId?: string
   projectCode?: string
+  harnessFeatureContext?: HarnessFeatureContext
 }
 
 function getHarnessHookContext(
@@ -386,7 +388,8 @@ function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgent
       pluginName: featureContext.pluginName,
       pluginWorkspace: featureContext.pluginWorkspace,
       featureId: featureContext.featureId,
-      projectCode: featureContext.projectCode
+      projectCode: featureContext.projectCode,
+      harnessFeatureContext: featureContext.harnessFeatureContext
     }
   } catch (error) {
     console.warn("[HarnessBoard] Failed to build harness agent context:", error)

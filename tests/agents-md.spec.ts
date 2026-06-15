@@ -721,31 +721,9 @@ async function testHarnessConfiguredAgentsLoad(): Promise<void> {
     const featureId = "feature-1"
     await mkdir(join(pluginRoot, "sys", "SYS1", "svc-a"), { recursive: true })
     await writeFile(join(pluginRoot, "sys", "SYS1", "AGENTS.md"), "SYSTEM_RULE", "utf8")
-    await mkdir(join(pluginWorkspace, projectCode, ".autobizdevops", "features", featureId), {
-      recursive: true
-    })
     await writeFile(
       join(pluginRoot, "sys", "SYS1", "svc-a", "AGENTS.md"),
       "SERVICE_RULE system={SYSTEM_ID} feature={FEATURE_ID}",
-      "utf8"
-    )
-    await writeFile(
-      join(
-        pluginWorkspace,
-        projectCode,
-        ".autobizdevops",
-        "features",
-        featureId,
-        "agentsmd_load_conf.json"
-      ),
-      JSON.stringify({
-        version: 1,
-        active: true,
-        systemId: "SYS1",
-        loadSystemAgentsmd: true,
-        systemAgentsmdDir: "sys/SYS1",
-        services: [{ service: "svc-a", agentsmdDir: "sys/SYS1/svc-a" }]
-      }),
       "utf8"
     )
 
@@ -760,7 +738,22 @@ async function testHarnessConfiguredAgentsLoad(): Promise<void> {
         pluginWorkspace,
         projectCode,
         featureId,
-        systemId: "SYS1"
+        systemId: "SYS1",
+        harnessFeatureContext: {
+          version: 1,
+          agentsmdLoadConf: {
+            version: 1,
+            active: true,
+            systemId: "SYS1",
+            loadSystemAgentsmd: true,
+            systemAgentsmdDir: "sys/SYS1",
+            services: [{ service: "svc-a", agentsmdDir: "sys/SYS1/svc-a" }]
+          },
+          serviceCodeDirectories: {
+            "svc-a": "C:/code/svc-a",
+            "svc-b": ""
+          }
+        }
       }
     )
 
@@ -788,6 +781,12 @@ async function testHarnessConfiguredAgentsLoad(): Promise<void> {
     )
     assert(prompt.includes("SYSTEM_RULE"), `system harness AGENTS should load: ${prompt}`)
     assert(
+      prompt.includes("# Harness service code directories") &&
+        prompt.includes("- svc-a: C:/code/svc-a") &&
+        !prompt.includes("svc-b"),
+      `non-empty service code directories should render: ${prompt}`
+    )
+    assert(
       prompt.indexOf("SYSTEM_RULE") < prompt.indexOf("SERVICE_RULE"),
       `system harness AGENTS should render before service AGENTS: ${prompt}`
     )
@@ -808,30 +807,9 @@ async function testHarnessConfigIgnoredWithoutCompleteContext(): Promise<void> {
     const projectCode = "DEMO"
     const featureId = "feature-1"
     await mkdir(join(pluginRoot, "sys", "SYS1", "svc-a"), { recursive: true })
-    await mkdir(join(pluginWorkspace, projectCode, ".autobizdevops", "features", featureId), {
-      recursive: true
-    })
     await writeFile(
       join(pluginRoot, "sys", "SYS1", "svc-a", "AGENTS.md"),
       "SHOULD_NOT_LOAD",
-      "utf8"
-    )
-    await writeFile(
-      join(
-        pluginWorkspace,
-        projectCode,
-        ".autobizdevops",
-        "features",
-        featureId,
-        "agentsmd_load_conf.json"
-      ),
-      JSON.stringify({
-        version: 1,
-        active: true,
-        systemId: "SYS1",
-        loadSystemAgentsmd: false,
-        services: [{ service: "svc-a", agentsmdDir: "sys/SYS1/svc-a" }]
-      }),
       "utf8"
     )
 

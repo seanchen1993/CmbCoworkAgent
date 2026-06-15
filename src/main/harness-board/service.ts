@@ -1,6 +1,6 @@
 import { execFileSync } from "child_process"
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs"
-import { basename, dirname, isAbsolute, join, relative, resolve } from "path"
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs"
+import { basename, isAbsolute, join, relative, resolve } from "path"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import { v4 as uuid } from "uuid"
@@ -13,10 +13,12 @@ import type {
   HarnessArtifact,
   HarnessArtifactStatus,
   HarnessArtifactType,
+  HarnessAgentsmdLoadConf,
   HarnessBoardCompatibility,
   HarnessEventStatus,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureContext,
   HarnessFeatureStatus,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
@@ -40,6 +42,7 @@ import type {
 interface HarnessProjectStoreFile {
   version: 1
   projects: HarnessProjectMetadata[]
+  serviceDirectoryMappings: Record<string, Record<string, Record<string, string>>>
 }
 
 type HarnessHookLogRef = HarnessRunDetailViewModel["run"]["hookLogRefs"][number]
@@ -82,6 +85,7 @@ interface HarnessHookLogEntry {
 interface SystemHarnessConfig {
   active_condition?: unknown
   system_agentsmd_dir?: unknown
+  service_code_dir_mapping?: unknown
   services?: unknown
 }
 
@@ -227,7 +231,8 @@ const BOARD_CONFIG_REL_PATH = join("board_core", "board_config.json")
 function emptyProjectStore(): HarnessProjectStoreFile {
   return {
     version: 1,
-    projects: []
+    projects: [],
+    serviceDirectoryMappings: {}
   }
 }
 
@@ -237,6 +242,42 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function normalizeText(value: unknown): string {
   return typeof value === "string" ? value : ""
+}
+
+function normalizeStringMap(value: unknown): Record<string, string> {
+  if (!isObject(value)) return {}
+  const normalized: Record<string, string> = {}
+  for (const [key, item] of Object.entries(value)) {
+    const normalizedKey = normalizeText(key).trim()
+    const normalizedValue = normalizeText(item).trim()
+    if (normalizedKey && normalizedValue) {
+      normalized[normalizedKey] = normalizedValue
+    }
+  }
+  return normalized
+}
+
+function normalizeServiceDirectoryMappings(
+  value: unknown
+): HarnessProjectStoreFile["serviceDirectoryMappings"] {
+  if (!isObject(value)) return {}
+  const mappings: HarnessProjectStoreFile["serviceDirectoryMappings"] = {}
+  for (const [projectId, systems] of Object.entries(value)) {
+    const normalizedProjectId = normalizeText(projectId).trim()
+    if (!normalizedProjectId || !isObject(systems)) continue
+    const systemMappings: Record<string, Record<string, string>> = {}
+    for (const [systemId, services] of Object.entries(systems)) {
+      const normalizedSystemId = normalizeText(systemId).trim()
+      const serviceMappings = normalizeStringMap(services)
+      if (normalizedSystemId && Object.keys(serviceMappings).length > 0) {
+        systemMappings[normalizedSystemId] = serviceMappings
+      }
+    }
+    if (Object.keys(systemMappings).length > 0) {
+      mappings[normalizedProjectId] = systemMappings
+    }
+  }
+  return mappings
 }
 
 function parsePositiveInteger(value: unknown): number | null {
@@ -643,7 +684,8 @@ function replaceHarnessConfigPlaceholders(
   project: HarnessProjectMetadata,
   mode: HarnessInspectCommandName,
   cwd: string,
-  feature?: string
+  feature?: string,
+  extraPlaceholders: Record<string, string> = {}
 ): string {
   const replacements: Record<string, string> = {
     pluginWorkspace: project.workspacePath,
@@ -651,9 +693,11 @@ function replaceHarnessConfigPlaceholders(
     projectCode: project.projectCode,
     feature: feature ?? "",
     pluginPath: cwd,
-    mode
+    mode,
+    ...extraPlaceholders
   }
-  return value.replace(/\$\{(pluginWorkspace|project|projectCode|feature|pluginPath|mode)\}/g, (_, key: string) => {
+  return value.replace(/\$\{([A-Za-z0-9_]+)\}/g, (match, key: string) => {
+    if (!(key in replacements)) return match
     return replacements[key] ?? ""
   })
 }
@@ -664,12 +708,13 @@ function parseInspectCommand(
   mode: HarnessInspectCommandName,
   cwd: string,
   feature?: string,
-  projectCodes?: string[]
+  projectCodes?: string[],
+  extraPlaceholders: Record<string, string> = {}
 ): { executable: string; args: string[] } {
   const tokens = tokenizeInspectCommand(command.trim()).flatMap((token) =>
     token === "${projectCodes...}" && projectCodes
       ? projectCodes
-      : [replaceHarnessConfigPlaceholders(token, project, mode, cwd, feature)]
+      : [replaceHarnessConfigPlaceholders(token, project, mode, cwd, feature, extraPlaceholders)]
   )
   const [executable, ...args] = tokens
   if (!executable) {
@@ -770,6 +815,10 @@ function inactiveServiceAgentsOptions(
     services: [],
     ...(warning ? { warning } : {})
   }
+}
+
+function serviceCodeDirectoryMappingEnabled(config: SystemHarnessConfig): boolean {
+  return isObject(config.service_code_dir_mapping) && config.service_code_dir_mapping.enabled === true
 }
 
 function readSystemHarnessConfig(project: HarnessProjectMetadata): InternalHarnessServiceAgentsOptions {
@@ -884,6 +933,7 @@ function readSystemHarnessConfig(project: HarnessProjectMetadata): InternalHarne
     systemId,
     ...(systemAgentsmdDir ? { systemAgentsmdDir } : {}),
     services,
+    serviceCodeDirectoryMappingEnabled: serviceCodeDirectoryMappingEnabled(config),
     ...(warnings.length > 0 ? { warning: warnings.join("; ") } : {})
   }
 }
@@ -939,7 +989,8 @@ function formatProjectDetailError(project: HarnessProjectMetadata, error: unknow
 function buildOptionalConfiguredHarnessInvocation(
   project: HarnessProjectMetadata,
   mode: HarnessInspectCommandName,
-  feature?: string
+  feature?: string,
+  extraPlaceholders: Record<string, string> = {}
 ): ConfiguredHarnessInvocation | null {
   const cwd = adapterPluginDir(project)
   const configuredCommand = readBoardConfigInspectCommand(cwd, mode)
@@ -947,16 +998,17 @@ function buildOptionalConfiguredHarnessInvocation(
 
   return {
     cwd,
-    invocation: parseInspectCommand(configuredCommand, project, mode, cwd, feature)
+    invocation: parseInspectCommand(configuredCommand, project, mode, cwd, feature, undefined, extraPlaceholders)
   }
 }
 
 function buildConfiguredHarnessInvocation(
   project: HarnessProjectMetadata,
   mode: HarnessInspectCommandName,
-  feature?: string
+  feature?: string,
+  extraPlaceholders: Record<string, string> = {}
 ): ConfiguredHarnessInvocation {
-  const configured = buildOptionalConfiguredHarnessInvocation(project, mode, feature)
+  const configured = buildOptionalConfiguredHarnessInvocation(project, mode, feature, extraPlaceholders)
   if (!configured) {
     const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
     throw new Error(`插件未配置 inspectCommands.${process.platform}.${configKey}，请检查插件设置`)
@@ -993,10 +1045,11 @@ function runHarnessInvocation(
 function runConfiguredHarnessCommand(
   project: HarnessProjectMetadata,
   mode: HarnessInspectCommandName,
-  feature?: string
+  feature?: string,
+  extraPlaceholders: Record<string, string> = {}
 ): Buffer {
   return runHarnessInvocation(
-    buildConfiguredHarnessInvocation(project, mode, feature),
+    buildConfiguredHarnessInvocation(project, mode, feature, extraPlaceholders),
     harnessCommandLogOptions(mode)
   )
 }
@@ -1188,6 +1241,51 @@ function normalizeProjectRuns(
   return snapshot.runs
     .map((run) => normalizeProjectRun(run, workflow, dynamicWorkflows))
     .filter((run): run is HarnessFeatureSummary => run !== null)
+}
+
+function normalizeFeatureContextStringRecord(value: unknown): Record<string, string> {
+  if (!isObject(value)) return {}
+  const normalized: Record<string, string> = {}
+  for (const [key, item] of Object.entries(value)) {
+    const normalizedKey = key.trim()
+    if (!normalizedKey || typeof item !== "string") continue
+    normalized[normalizedKey] = item.trim()
+  }
+  return normalized
+}
+
+function normalizeFeatureContextAgentsmdLoadConf(value: unknown): HarnessAgentsmdLoadConf | null {
+  if (!isObject(value)) return null
+  const systemId = normalizeText(value.systemId).trim()
+  const services = Array.isArray(value.services)
+    ? value.services
+        .map((item): HarnessServiceAgentsServiceOption | null => {
+          if (!isObject(item)) return null
+          const service = normalizeText(item.service).trim()
+          const agentsmdDir = normalizeText(item.agentsmdDir).trim()
+          return service && agentsmdDir ? { service, agentsmdDir } : null
+        })
+        .filter((item): item is HarnessServiceAgentsServiceOption => item !== null)
+    : []
+  return {
+    version: 1,
+    active: value.active === true,
+    systemId,
+    loadSystemAgentsmd: value.loadSystemAgentsmd === true,
+    systemAgentsmdDir: normalizeText(value.systemAgentsmdDir).trim(),
+    services
+  }
+}
+
+function normalizeHarnessFeatureContext(value: unknown): HarnessFeatureContext | undefined {
+  if (!isObject(value)) return undefined
+  const agentsmdLoadConf = normalizeFeatureContextAgentsmdLoadConf(value.agentsmdLoadConf)
+  if (!agentsmdLoadConf) return undefined
+  return {
+    version: 1,
+    agentsmdLoadConf,
+    serviceCodeDirectories: normalizeFeatureContextStringRecord(value.serviceCodeDirectories)
+  }
 }
 
 function normalizeWorkflowStateDefinition(
@@ -1590,7 +1688,8 @@ function readProjectStore(): HarnessProjectStoreFile {
         ? parsed.projects
             .map((item) => normalizeProject(item))
             .filter((item): item is HarnessProjectMetadata => item !== null)
-        : []
+        : [],
+      serviceDirectoryMappings: normalizeServiceDirectoryMappings(parsed.serviceDirectoryMappings)
     }
   } catch {
     return emptyProjectStore()
@@ -1786,6 +1885,7 @@ export interface HarnessFeatureAgentContext {
   pluginWorkspace?: string
   featureId?: string
   projectCode?: string
+  harnessFeatureContext?: HarnessFeatureContext
 }
 
 export function buildHarnessFeatureAgentContext(
@@ -1801,6 +1901,14 @@ export function buildHarnessFeatureAgentContext(
   const systemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
   const systemId = normalizeText(project.systemId).trim()
+  let harnessFeatureContext: HarnessFeatureContext | undefined
+  try {
+    const snapshot = runInspectAdapter(project, "run", feature.slug)
+    const run = isObject(snapshot.run) ? snapshot.run : {}
+    harnessFeatureContext = normalizeHarnessFeatureContext(run.featureContext)
+  } catch (error) {
+    console.warn("[HarnessBoard] Failed to read harness feature context:", error)
+  }
   const render = (
     template: string | null,
     command: HarnessInspectCommandName
@@ -1819,7 +1927,8 @@ export function buildHarnessFeatureAgentContext(
     pluginName: normalizeText(plugin?.name) || adapter.name,
     pluginWorkspace: project.workspacePath,
     featureId: feature.slug,
-    projectCode: project.projectCode
+    projectCode: project.projectCode,
+    ...(harnessFeatureContext ? { harnessFeatureContext } : {})
   }
 }
 
@@ -1843,7 +1952,14 @@ export function getFeatureServiceOptions(projectId: string): HarnessServiceAgent
   }
 
   const project = requireProject(normalizedProjectId)
-  return toPublicServiceAgentsOptions(readSystemHarnessConfig(project))
+  const options = toPublicServiceAgentsOptions(readSystemHarnessConfig(project))
+  const store = readProjectStore()
+  const serviceCodeDirectoryMappings =
+    store.serviceDirectoryMappings[project.projectId]?.[project.systemId] ?? {}
+  return {
+    ...options,
+    serviceCodeDirectoryMappings
+  }
 }
 
 export function listHarnessProjects(): HarnessProjectListItem[] {
@@ -1901,55 +2017,37 @@ export function createHarnessProject(input: HarnessProjectCreateInput): HarnessP
   return project
 }
 
-function agentsmdLoadConfPath(project: HarnessProjectMetadata, feature: string): string {
-  return join(
-    projectDirectoryPath(project),
-    ".autobizdevops",
-    "features",
-    feature,
-    "agentsmd_load_conf.json"
-  )
-}
-
-function writeAgentsmdLoadConf(
-  project: HarnessProjectMetadata,
-  feature: string,
-  config: Record<string, unknown>
-): void {
-  const configPath = agentsmdLoadConfPath(project, feature)
-  mkdirSync(dirname(configPath), { recursive: true })
-  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf-8")
-}
-
-function writeFeatureAgentsmdLoadConf(
-  project: HarnessProjectMetadata,
-  feature: string,
-  selectedServices: unknown
-): void {
-  const options = readSystemHarnessConfig(project)
-  if (!options.active) {
-    if (options.configured && options.warning) {
-      writeAgentsmdLoadConf(project, feature, {
-        version: 1,
-        active: false,
-        systemId: options.systemId,
-        loadSystemAgentsmd: false,
-        systemAgentsmdDir: "",
-        services: []
-      })
-      console.warn("[HarnessBoard] Service AGENTS config is inactive:", options.warning)
-    }
-    return
-  }
-
-  const selectedServiceNames = Array.isArray(selectedServices)
+function normalizeSelectedServices(selectedServices: unknown): string[] {
+  return Array.isArray(selectedServices)
     ? selectedServices
         .map((item) => normalizeText(item).trim())
         .filter((item): item is string => Boolean(item))
+        .filter((service, index, array) => array.indexOf(service) === index)
     : []
+}
+
+function buildFeatureAgentsmdLoadConf(
+  project: HarnessProjectMetadata,
+  selectedServices: unknown
+): HarnessAgentsmdLoadConf {
+  const options = readSystemHarnessConfig(project)
+  if (!options.active) {
+    if (options.configured && options.warning) {
+      console.warn("[HarnessBoard] Service AGENTS config is inactive:", options.warning)
+    }
+    return {
+      version: 1,
+      active: false,
+      systemId: options.systemId,
+      loadSystemAgentsmd: false,
+      systemAgentsmdDir: "",
+      services: []
+    }
+  }
+
+  const selectedServiceNames = normalizeSelectedServices(selectedServices)
   const configuredServices = new Map(options.services.map((service) => [service.service, service]))
   const services = selectedServiceNames
-    .filter((service, index, array) => array.indexOf(service) === index)
     .map((service) => configuredServices.get(service))
     .filter((service): service is HarnessServiceAgentsServiceOption => Boolean(service))
 
@@ -1960,14 +2058,112 @@ function writeFeatureAgentsmdLoadConf(
     console.warn("[HarnessBoard] Ignored unknown selected services:", ignoredServices)
   }
 
-  writeAgentsmdLoadConf(project, feature, {
+  return {
     version: 1,
     active: true,
     systemId: options.systemId,
     loadSystemAgentsmd: false,
     systemAgentsmdDir: options.systemAgentsmdDir ?? "",
     services
-  })
+  }
+}
+
+function normalizeCreateServiceCodeDirectories(
+  selectedServices: string[],
+  serviceCodeDirectories: unknown
+): Record<string, string> {
+  const selected = new Set(selectedServices)
+  const normalized: Record<string, string> = {}
+  if (isObject(serviceCodeDirectories)) {
+    for (const [service, value] of Object.entries(serviceCodeDirectories)) {
+      const normalizedService = service.trim()
+      if (!normalizedService || !selected.has(normalizedService)) continue
+      const directory = normalizeText(value).trim()
+      if (directory && !isAbsolute(directory.replace(/\\/g, "/"))) {
+        throw new Error(`Service code directory for ${normalizedService} must be an absolute path`)
+      }
+      normalized[normalizedService] = directory
+    }
+  }
+  for (const service of selectedServices) {
+    if (!(service in normalized)) normalized[service] = ""
+  }
+  return normalized
+}
+
+function updateServiceDirectoryMappingCache(
+  project: HarnessProjectMetadata,
+  selectedServices: string[],
+  serviceCodeDirectories: Record<string, string>
+): void {
+  const store = readProjectStore()
+  const projectMappings = store.serviceDirectoryMappings[project.projectId] ?? {}
+  const systemMappings = projectMappings[project.systemId] ?? {}
+  let changed = false
+
+  for (const service of selectedServices) {
+    const directory = serviceCodeDirectories[service]?.trim() ?? ""
+    if (directory) {
+      if (systemMappings[service] !== directory) {
+        systemMappings[service] = directory
+        changed = true
+      }
+    } else if (service in systemMappings) {
+      delete systemMappings[service]
+      changed = true
+    }
+  }
+
+  if (!changed) return
+  if (Object.keys(systemMappings).length > 0) {
+    projectMappings[project.systemId] = systemMappings
+  } else {
+    delete projectMappings[project.systemId]
+  }
+  if (Object.keys(projectMappings).length > 0) {
+    store.serviceDirectoryMappings[project.projectId] = projectMappings
+  } else {
+    delete store.serviceDirectoryMappings[project.projectId]
+  }
+  writeProjectStore(store)
+}
+
+function buildFeatureCreateContext(
+  project: HarnessProjectMetadata,
+  feature: string,
+  selectedServices: string[],
+  serviceCodeDirectories: Record<string, string>
+): HarnessFeatureContext & {
+  projectCode: string
+  feature: string
+  systemId: string
+  selectedServices: string[]
+} {
+  return {
+    version: 1,
+    projectCode: project.projectCode,
+    feature,
+    systemId: project.systemId,
+    selectedServices,
+    agentsmdLoadConf: buildFeatureAgentsmdLoadConf(project, selectedServices),
+    serviceCodeDirectories
+  }
+}
+
+function writeFeatureCreateContextTempFile(context: unknown): string {
+  const dir = join(getOpenworkDir(), "harness-board-feature-contexts")
+  mkdirSync(dir, { recursive: true })
+  const filePath = join(dir, `${uuid()}.json`)
+  writeFileSync(filePath, `${JSON.stringify(context, null, 2)}\n`, "utf-8")
+  return filePath
+}
+
+function cleanupFeatureCreateContextTempFile(filePath: string): void {
+  try {
+    if (filePath && existsSync(filePath)) unlinkSync(filePath)
+  } catch (error) {
+    console.warn("[HarnessBoard] Failed to clean feature create context file:", error)
+  }
 }
 
 export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessFeatureCreateResult {
@@ -1975,26 +2171,37 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
   const project = requireProject(input.projectId)
   const feature = input.feature.trim()
   const workspacePath = projectDirectoryPath(project)
+  const selectedServices = normalizeSelectedServices(input.selectedServices)
+  const serviceCodeDirectories = normalizeCreateServiceCodeDirectories(
+    selectedServices,
+    input.serviceCodeDirectories
+  )
+  const featureCreateContext = buildFeatureCreateContext(
+    project,
+    feature,
+    selectedServices,
+    serviceCodeDirectories
+  )
+  let featureCreateContextPath = ""
 
   if (!existsSync(workspacePath)) {
     throw new Error(projectDirectoryMissingMessage(project))
   }
 
   try {
-    runConfiguredHarnessCommand(project, "createFeature", feature)
+    featureCreateContextPath = writeFeatureCreateContextTempFile(featureCreateContext)
+    runConfiguredHarnessCommand(project, "createFeature", feature, {
+      featureCreateContextPath
+    })
+    updateServiceDirectoryMappingCache(project, selectedServices, serviceCodeDirectories)
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
     if (raw.includes("已存在")) {
       throw new Error("该特性在当前项目路径下已存在")
     }
     throw new Error(`创建特性失败：${raw}`)
-  }
-
-  try {
-    writeFeatureAgentsmdLoadConf(project, feature, input.selectedServices)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    console.warn("[HarnessBoard] Failed to write agentsmd_load_conf.json:", message)
+  } finally {
+    cleanupFeatureCreateContextTempFile(featureCreateContextPath)
   }
 
   return {
@@ -2275,6 +2482,7 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
   )
   const featureStatusLabel = explicitFeatureStatus ? normalizeText(run.featureStatusLabel).trim() : ""
   const overallStatus = statusFromFeatureStatus(featureStatus, featureStatusLabel)
+  const featureContext = normalizeHarnessFeatureContext(run.featureContext)
   const hookLogRefs = normalizeHookLogRefs(project, run.hookLogRefs)
   const hookLogEntries = readHookLogRefs(project, hookLogRefs)
   const { nodes: nodesWithHookLogs, unmatchedHooks } = applyHookLogEntries(nodes, hookLogEntries)
@@ -2306,6 +2514,7 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
       hookLogRefs,
       watchRefs: normalizeWatchRefs(project, run.watchRefs, makeWatchRefs(featureSlug)),
       currentNodeId,
+      ...(featureContext ? { featureContext } : {}),
       nodes: nodesWithHookLogs,
       unmatchedHooks
     },

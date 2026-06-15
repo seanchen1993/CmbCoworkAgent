@@ -139,6 +139,7 @@ import {
   DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
   loadAgentsPromptForWorkspace
 } from "./agents-md"
+import type { HarnessFeatureContext } from "../../shared/harness-board-types"
 import {
   buildCoordinatorSystemPrompt,
   buildCoordinatorTaskPrompt,
@@ -2205,6 +2206,8 @@ export interface CreateAgentRuntimeOptions {
   featureId?: string
   /** Harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
+  /** Feature context returned by Harness feature_status. */
+  harnessFeatureContext?: HarnessFeatureContext
   /** Skip the manage_scheduler tool (used by scheduled task / heartbeat execution to prevent recursive scheduling) */
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
@@ -2294,6 +2297,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     pluginWorkspace,
     featureId,
     projectCode,
+    harnessFeatureContext,
     retryHooks,
     maxRetryAttempts,
     coordinatorWorkerTurnPlanning,
@@ -2586,7 +2590,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         pluginWorkspace,
         featureId,
         projectCode,
-        systemId
+        systemId,
+        harnessFeatureContext
       }
     )
     if (agentsPrompt.prompt) {

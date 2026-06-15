@@ -1439,11 +1439,13 @@ function FeatureCreateDialog({
   error,
   serviceOptions,
   selectedServices,
+  selectedServiceCodeDirectories,
   loadingServices,
   serviceOptionsWarning,
   onOpenChange,
   onChange,
   onToggleService,
+  onChangeServiceCodeDirectory,
   onSubmit
 }: {
   project: HarnessProjectListItem | null
@@ -1452,11 +1454,13 @@ function FeatureCreateDialog({
   error: string | null
   serviceOptions: HarnessServiceAgentsOptions | null
   selectedServices: string[]
+  selectedServiceCodeDirectories: Record<string, string>
   loadingServices: boolean
   serviceOptionsWarning: string | null
   onOpenChange: (open: boolean) => void
   onChange: (featureName: string) => void
   onToggleService: (service: string, checked: boolean) => void
+  onChangeServiceCodeDirectory: (service: string, directory: string) => void
   onSubmit: () => void
 }): React.JSX.Element {
   const showServiceOptions =
@@ -1528,18 +1532,30 @@ function FeatureCreateDialog({
                     {serviceOptions.services.map((service) => {
                       const checked = selectedServices.includes(service.service)
                       return (
-                        <label
+                        <div
                           key={service.service}
-                          className="flex h-8 min-w-0 cursor-pointer items-center gap-2 px-3 text-sm text-foreground hover:bg-muted/60"
+                          className="grid gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted/60"
                         >
-                          <input
-                            type="checkbox"
-                            className="size-4 shrink-0 accent-primary"
-                            checked={checked}
-                            onChange={(event) => onToggleService(service.service, event.target.checked)}
-                          />
-                          <span className="truncate">{service.service}</span>
-                        </label>
+                          <label className="flex h-6 min-w-0 cursor-pointer items-center gap-2">
+                            <input
+                              type="checkbox"
+                              className="size-4 shrink-0 accent-primary"
+                              checked={checked}
+                              onChange={(event) => onToggleService(service.service, event.target.checked)}
+                            />
+                            <span className="truncate">{service.service}</span>
+                          </label>
+                          {checked && serviceOptions.serviceCodeDirectoryMappingEnabled && (
+                            <Input
+                              value={selectedServiceCodeDirectories[service.service] ?? ""}
+                              onChange={(event) =>
+                                onChangeServiceCodeDirectory(service.service, event.target.value)
+                              }
+                              placeholder="C:/code/service"
+                              className="h-8 bg-background text-xs"
+                            />
+                          )}
+                        </div>
                       )
                     })}
                   </div>
@@ -3215,6 +3231,7 @@ export function HarnessBoardView({
   const [featureError, setFeatureError] = useState<string | null>(null)
   const [featureServiceOptions, setFeatureServiceOptions] = useState<HarnessServiceAgentsOptions | null>(null)
   const [selectedFeatureServices, setSelectedFeatureServices] = useState<string[]>([])
+  const [selectedServiceCodeDirectories, setSelectedServiceCodeDirectories] = useState<Record<string, string>>({})
   const [loadingFeatureServices, setLoadingFeatureServices] = useState(false)
   const [featureServiceOptionsWarning, setFeatureServiceOptionsWarning] = useState<string | null>(null)
   const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
@@ -3717,6 +3734,7 @@ export function HarnessBoardView({
     setFeatureName("")
     setFeatureError(null)
     setSelectedFeatureServices([])
+    setSelectedServiceCodeDirectories({})
     setFeatureServiceOptions(null)
     setFeatureServiceOptionsWarning(null)
     setLoadingFeatureServices(true)
@@ -3725,11 +3743,13 @@ export function HarnessBoardView({
       .then((options) => {
         if (requestId !== featureServiceOptionsRequestIdRef.current) return
         setFeatureServiceOptions(options)
+        setSelectedServiceCodeDirectories(options.serviceCodeDirectoryMappings ?? {})
         setFeatureServiceOptionsWarning(options.warning ?? null)
       })
       .catch((error) => {
         if (requestId !== featureServiceOptionsRequestIdRef.current) return
         setFeatureServiceOptions(null)
+        setSelectedServiceCodeDirectories({})
         setFeatureServiceOptionsWarning(cleanIpcError(error))
       })
       .finally(() => {
@@ -3748,6 +3768,7 @@ export function HarnessBoardView({
         setFeatureError(null)
         setFeatureServiceOptions(null)
         setSelectedFeatureServices([])
+        setSelectedServiceCodeDirectories({})
         setLoadingFeatureServices(false)
         setFeatureServiceOptionsWarning(null)
       }
@@ -3762,6 +3783,13 @@ export function HarnessBoardView({
       }
       return current.filter((item) => item !== service)
     })
+  }, [])
+
+  const handleChangeServiceCodeDirectory = useCallback((service: string, directory: string): void => {
+    setSelectedServiceCodeDirectories((current) => ({
+      ...current,
+      [service]: directory
+    }))
   }, [])
 
   const handleSubmitFeature = useCallback(async (): Promise<void> => {
@@ -3784,13 +3812,21 @@ export function HarnessBoardView({
       const result = await window.api.harnessBoard.createFeature({
         projectId: featureDialogProject.projectId,
         feature,
-        selectedServices: selectedFeatureServices
+        selectedServices: selectedFeatureServices,
+        serviceCodeDirectories: selectedFeatureServices.reduce<Record<string, string>>(
+          (directories, service) => {
+            directories[service] = selectedServiceCodeDirectories[service] ?? ""
+            return directories
+          },
+          {}
+        )
       })
 
       setFeatureDialogProject(null)
       setFeatureName("")
       setFeatureServiceOptions(null)
       setSelectedFeatureServices([])
+      setSelectedServiceCodeDirectories({})
       setLoadingFeatureServices(false)
       setFeatureServiceOptionsWarning(null)
       await loadProjectDetail(result.projectId)
@@ -3810,6 +3846,7 @@ export function HarnessBoardView({
     featureDialogProject,
     featureName,
     loadProjectDetail,
+    selectedServiceCodeDirectories,
     selectedFeatureServices
   ])
 
@@ -4223,11 +4260,13 @@ export function HarnessBoardView({
           error={featureError}
           serviceOptions={featureServiceOptions}
           selectedServices={selectedFeatureServices}
+          selectedServiceCodeDirectories={selectedServiceCodeDirectories}
           loadingServices={loadingFeatureServices}
           serviceOptionsWarning={featureServiceOptionsWarning}
           onOpenChange={handleFeatureDialogOpenChange}
           onChange={setFeatureName}
           onToggleService={handleToggleFeatureService}
+          onChangeServiceCodeDirectory={handleChangeServiceCodeDirectory}
           onSubmit={() => void handleSubmitFeature()}
         />
         <ProjectEditDialog
@@ -4386,11 +4425,13 @@ export function HarnessBoardView({
         error={featureError}
         serviceOptions={featureServiceOptions}
         selectedServices={selectedFeatureServices}
+        selectedServiceCodeDirectories={selectedServiceCodeDirectories}
         loadingServices={loadingFeatureServices}
         serviceOptionsWarning={featureServiceOptionsWarning}
         onOpenChange={handleFeatureDialogOpenChange}
         onChange={setFeatureName}
         onToggleService={handleToggleFeatureService}
+        onChangeServiceCodeDirectory={handleChangeServiceCodeDirectory}
         onSubmit={() => void handleSubmitFeature()}
       />
       <ProjectFormDialog

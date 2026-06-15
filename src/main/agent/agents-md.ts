@@ -1,8 +1,9 @@
 import { constants as fsConstants, type Stats } from "fs"
-import { lstat, open, readFile, realpath, stat } from "fs/promises"
+import { lstat, open, realpath, stat } from "fs/promises"
 import { homedir } from "os"
 import { dirname, isAbsolute, join, relative, resolve } from "path"
 import { replaceHarnessPlaceholders } from "./placeholders"
+import type { HarnessFeatureContext } from "../../shared/harness-board-types"
 
 export const DEFAULT_AGENTS_FILENAME = "AGENTS.md"
 export const LOCAL_AGENTS_OVERRIDE_FILENAME = "AGENTS.override.md"
@@ -59,6 +60,7 @@ export interface AgentsPromptPlaceholderContext {
   featureId?: string
   projectCode?: string
   systemId?: string
+  harnessFeatureContext?: HarnessFeatureContext
 }
 
 type AgentsPromptBudget = number | AgentsPromptBudgetOptions
@@ -87,15 +89,15 @@ function isWithinRoot(rootDir: string, targetDir: string): boolean {
 }
 
 interface HarnessAgentsmdLoadConfig {
-  active?: unknown
-  loadSystemAgentsmd?: unknown
-  systemAgentsmdDir?: unknown
-  services?: unknown
+  active: boolean
+  loadSystemAgentsmd: boolean
+  systemAgentsmdDir: string
+  services: HarnessAgentsmdLoadServiceConfig[]
 }
 
 interface HarnessAgentsmdLoadServiceConfig {
-  service?: unknown
-  agentsmdDir?: unknown
+  service: string
+  agentsmdDir: string
 }
 
 function normalizeConfigText(value: unknown): string {
@@ -104,7 +106,13 @@ function normalizeConfigText(value: unknown): string {
 
 function hasHarnessboardAgentsContext(
   context: AgentsPromptPlaceholderContext
-): context is Required<AgentsPromptPlaceholderContext> {
+): context is AgentsPromptPlaceholderContext & {
+  pluginRoot: string
+  pluginWorkspace: string
+  featureId: string
+  projectCode: string
+  systemId: string
+} {
   return Boolean(
     context.pluginRoot &&
     context.pluginWorkspace &&
@@ -112,6 +120,13 @@ function hasHarnessboardAgentsContext(
     context.featureId &&
     context.systemId
   )
+}
+
+function getHarnessFeatureContextAgentsmdLoadConf(
+  context: AgentsPromptPlaceholderContext
+): HarnessAgentsmdLoadConfig | null {
+  const config = context.harnessFeatureContext?.agentsmdLoadConf
+  return config?.active === true ? config : null
 }
 
 function resolvePluginAgentsPath(pluginRoot: string, agentsmdDir: unknown): string | null {
@@ -140,44 +155,8 @@ async function discoverHarnessConfiguredAgentsFiles(
     return []
   }
 
-  const pluginWorkspace = resolve(context.pluginWorkspace)
-  const configPath = resolve(
-    pluginWorkspace,
-    context.projectCode,
-    ".autobizdevops",
-    "features",
-    context.featureId,
-    "agentsmd_load_conf.json"
-  )
-  if (!isWithinRoot(pluginWorkspace, configPath)) {
-    console.warn("[AGENTS] Skipping harness agents config outside plugin workspace:", configPath)
-    return []
-  }
-
-  let raw: string
-  try {
-    raw = await readFile(configPath, "utf8")
-  } catch (error) {
-    console.warn("[AGENTS] Failed to read harness agents config:", configPath, error)
-    return []
-  }
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw) as unknown
-  } catch (error) {
-    console.warn("[AGENTS] Invalid harness agents config JSON:", configPath, error)
-    return []
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    console.warn("[AGENTS] Invalid harness agents config shape:", configPath)
-    return []
-  }
-
-  const config = parsed as HarnessAgentsmdLoadConfig
-  if (config.active !== true) {
-    return []
-  }
+  const config = getHarnessFeatureContextAgentsmdLoadConf(context)
+  if (!config) return []
 
   const pluginRoot = resolve(context.pluginRoot)
   const agentPaths: string[] = []
@@ -874,6 +853,31 @@ export function renderAgentsPrompt(
   ])
 }
 
+function buildHarnessServiceCodeDirectoriesEntry(
+  context: AgentsPromptPlaceholderContext
+): AgentsPromptEntry | null {
+  const directories = context.harnessFeatureContext?.serviceCodeDirectories
+  if (!directories) return null
+  const lines = Object.entries(directories)
+    .map(([service, directory]) => [service.trim(), directory.trim()] as const)
+    .filter(([, directory]) => Boolean(directory))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([service, directory]) => `- ${service}: ${directory}`)
+  if (lines.length === 0) return null
+
+  return {
+    path: "Harness service code directories",
+    content: [
+      "# Harness service code directories",
+      "",
+      "The current Harness feature declares these service-to-code-directory mappings:",
+      "",
+      ...lines
+    ].join("\n"),
+    truncated: false
+  }
+}
+
 export async function loadAgentsPromptForWorkspace(
   workspacePath: string,
   budget: AgentsPromptBudget = {
@@ -901,6 +905,10 @@ export async function loadAgentsPromptForWorkspace(
     "harness",
     placeholderContext
   )
+  const harnessServiceDirectoriesEntry = buildHarnessServiceCodeDirectoriesEntry(placeholderContext)
+  const harnessEntries = harnessServiceDirectoriesEntry
+    ? [...harnessResult.entries, harnessServiceDirectoriesEntry]
+    : harnessResult.entries
   const totalBudgetResult =
     totalMaxBytes == null
       ? {
@@ -915,13 +923,13 @@ export async function loadAgentsPromptForWorkspace(
       cwd,
       totalBudgetResult.projectEntries,
       totalBudgetResult.globalEntries,
-      harnessResult.entries
+      harnessEntries
     ),
     projectRoot,
     loadedPaths: [
       ...totalBudgetResult.globalEntries,
       ...totalBudgetResult.projectEntries,
-      ...harnessResult.entries
+      ...harnessEntries
     ].map((entry) => entry.path),
     truncated:
       globalResult.truncated ||
