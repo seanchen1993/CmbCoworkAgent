@@ -211,7 +211,8 @@ function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataU
     description: "",
     systemId: "",
     systemName: "",
-    workspacePath: ""
+    workspacePath: "",
+    sessionWorkspacePath: ""
   }
 }
 
@@ -553,6 +554,7 @@ function createUnboundRunDetail(
       projectDir: detail.project.projectDir,
       systemId: detail.project.systemId,
       workspacePath: detail.project.workspacePath,
+      sessionWorkspacePath: detail.project.sessionWorkspacePath,
       projectRootPath: detail.project.projectRootPath
     },
     adapterSnapshot: {
@@ -625,6 +627,7 @@ async function getLatestSessionWorkspacePath(
 interface CreateHarnessSessionParams {
   projectId: string
   slug: string
+  sessionWorkspacePath?: string | null
   nextAction?: HarnessWorkflowNextAction
   sessions: HarnessSessionBinding[]
   threadsById: Map<string, Thread>
@@ -639,8 +642,20 @@ interface CreateHarnessSessionParams {
 }
 
 async function createHarnessSession(params: CreateHarnessSessionParams): Promise<Thread> {
-  const { projectId, slug, nextAction, sessions, threadsById, threadStates, createThread } = params
-  const workspacePath = await getLatestSessionWorkspacePath(sessions, threadsById, threadStates)
+  const {
+    projectId,
+    slug,
+    sessionWorkspacePath,
+    nextAction,
+    sessions,
+    threadsById,
+    threadStates,
+    createThread
+  } = params
+  const configuredWorkspacePath = normalizeWorkspacePath(sessionWorkspacePath)
+  const workspacePath =
+    configuredWorkspacePath ??
+    (await getLatestSessionWorkspacePath(sessions, threadsById, threadStates))
   return createHarnessFeatureThread({ projectId, slug, workspacePath, nextAction, createThread })
 }
 
@@ -702,7 +717,8 @@ function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectM
     description: project.description,
     systemId: project.systemId,
     systemName: project.systemName,
-    workspacePath: project.workspacePath
+    workspacePath: project.workspacePath,
+    sessionWorkspacePath: project.sessionWorkspacePath ?? ""
   }
 }
 
@@ -1018,6 +1034,27 @@ function ProjectDirTip(): React.JSX.Element {
         </TooltipTrigger>
         <TooltipContent side="top" className="z-[70] max-w-72">
           保存项目文档、详细设计等插件运行产物
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+function SessionWorkspacePathTip(): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label="会话工作区提示"
+            className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Info className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="z-[70] max-w-72">
+          当前项目会话默认工作区
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -1536,6 +1573,7 @@ function ProjectFormDialog({
   onOpenChange,
   onChange,
   onPickWorkspace,
+  onPickSessionWorkspace,
   onSubmit
 }: {
   open: boolean
@@ -1546,6 +1584,7 @@ function ProjectFormDialog({
   onOpenChange: (open: boolean) => void
   onChange: (form: HarnessProjectCreateInput) => void
   onPickWorkspace: () => void
+  onPickSessionWorkspace: () => void
   onSubmit: () => void
 }): React.JSX.Element {
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
@@ -1572,13 +1611,17 @@ function ProjectFormDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         ref={setDialogPortalContainer}
-        className={cn(harnessDialogContentClassName, "top-8 max-w-3xl translate-y-0 overflow-visible")}
+        className={cn(
+          harnessDialogContentClassName,
+          "top-8 grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] translate-y-0 overflow-visible"
+        )}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
         <DialogHeader>
           <DialogTitle>新建项目</DialogTitle>
         </DialogHeader>
-        <div className="grid gap-4 py-1">
+        <div className="min-h-0 overflow-y-auto py-1 pr-1">
+          <div className="grid gap-4">
           <section className="rounded-md border border-border bg-muted/30 p-3">
             <div className="mb-3 text-sm font-semibold">选择插件</div>
             <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
@@ -1701,48 +1744,84 @@ function ProjectFormDialog({
 
           <section className="rounded-md border border-border bg-muted/30 p-3">
             <div className="mb-3 text-sm font-semibold">工作区配置</div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                  <div className="flex items-center gap-1.5">
+                    <span>项目根路径 *</span>
+                    <ProjectWorkspacePathTip />
+                  </div>
+                  <div className="flex min-w-0 gap-2">
+                    <Input
+                      value={form.workspacePath}
+                      readOnly
+                      placeholder="请选择项目根路径"
+                      className={harnessProjectCreateInputClassName}
+                    />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="shrink-0 gap-2"
+                      onClick={onPickWorkspace}
+                    >
+                      <FolderOpen className="size-4" />
+                      选择
+                    </Button>
+                  </div>
+                </div>
+                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                  <span className="flex items-center gap-1.5">
+                    <span>项目文件夹 *</span>
+                    <ProjectDirTip />
+                  </span>
+                  <Input
+                    value={form.projectDir}
+                    onChange={(event) =>
+                      onChange({ ...form, projectDir: sanitizeHarnessNameInput(event.target.value) })
+                    }
+                    placeholder="请输入"
+                    className={harnessProjectCreateInputClassName}
+                    aria-invalid={projectDirValidationError ? true : undefined}
+                  />
+                  {projectDirValidationError && (
+                    <span className="text-status-critical">{projectDirValidationError}</span>
+                  )}
+                </label>
+              </div>
               <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 <div className="flex items-center gap-1.5">
-                  <span>项目根路径 *</span>
-                  <ProjectWorkspacePathTip />
+                  <span>会话工作区路径</span>
+                  <SessionWorkspacePathTip />
                 </div>
                 <div className="flex min-w-0 gap-2">
                   <Input
-                    value={form.workspacePath}
+                    value={form.sessionWorkspacePath ?? ""}
                     readOnly
-                    placeholder="请选择项目根路径"
+                    placeholder="未配置"
                     className={harnessProjectCreateInputClassName}
                   />
+                  {(form.sessionWorkspacePath ?? "").trim() && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="shrink-0 gap-2"
+                      onClick={() => onChange({ ...form, sessionWorkspacePath: "" })}
+                    >
+                      <Trash2 className="size-4" />
+                      清空
+                    </Button>
+                  )}
                   <Button
                     type="button"
                     variant="secondary"
                     className="shrink-0 gap-2"
-                    onClick={onPickWorkspace}
+                    onClick={onPickSessionWorkspace}
                   >
                     <FolderOpen className="size-4" />
                     选择
                   </Button>
                 </div>
               </div>
-              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                <span className="flex items-center gap-1.5">
-                  <span>项目文件夹 *</span>
-                  <ProjectDirTip />
-                </span>
-                <Input
-                  value={form.projectDir}
-                  onChange={(event) =>
-                    onChange({ ...form, projectDir: sanitizeHarnessNameInput(event.target.value) })
-                  }
-                  placeholder="请输入"
-                  className={harnessProjectCreateInputClassName}
-                  aria-invalid={projectDirValidationError ? true : undefined}
-                />
-                {projectDirValidationError && (
-                  <span className="text-status-critical">{projectDirValidationError}</span>
-                )}
-              </label>
             </div>
             {projectCreatePathHint && (
               <div
@@ -1759,6 +1838,7 @@ function ProjectFormDialog({
               {error}
             </div>
           )}
+          </div>
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={creating}>
@@ -1792,6 +1872,7 @@ function ProjectEditDialog({
   error,
   onOpenChange,
   onChange,
+  onPickSessionWorkspace,
   onSubmit
 }: {
   open: boolean
@@ -1801,6 +1882,7 @@ function ProjectEditDialog({
   error: string | null
   onOpenChange: (open: boolean) => void
   onChange: (form: HarnessProjectMetadataUpdateInput) => void
+  onPickSessionWorkspace: () => void
   onSubmit: () => void
 }): React.JSX.Element {
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
@@ -1821,13 +1903,17 @@ function ProjectEditDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         ref={setDialogPortalContainer}
-        className={cn(harnessDialogContentClassName, "top-8 max-w-3xl translate-y-0 overflow-visible")}
+        className={cn(
+          harnessDialogContentClassName,
+          "top-8 grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] translate-y-0 overflow-visible"
+        )}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
         <DialogHeader>
           <DialogTitle>编辑项目</DialogTitle>
         </DialogHeader>
-        <div className="grid gap-4 py-1">
+        <div className="min-h-0 overflow-y-auto py-1 pr-1">
+          <div className="grid gap-4">
           <section className="rounded-md border border-border bg-muted/30 p-3">
             <div className="mb-3 text-sm font-semibold">选择插件</div>
             <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
@@ -1934,35 +2020,71 @@ function ProjectEditDialog({
 
           <section className="rounded-md border border-border bg-muted/30 p-3">
             <div className="mb-3 text-sm font-semibold">工作区配置</div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                <div className="flex items-center gap-1.5">
-                  <span>项目根目录 *</span>
-                  <ProjectWorkspacePathTip />
+            <div className="grid gap-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                  <div className="flex items-center gap-1.5">
+                    <span>项目根路径 *</span>
+                    <ProjectWorkspacePathTip />
+                  </div>
+                  <Input
+                    value={form.workspacePath}
+                    readOnly
+                    aria-readonly="true"
+                    placeholder="请选择项目根路径"
+                    className="bg-muted text-muted-foreground"
+                  />
                 </div>
-                <Input
-                  value={form.workspacePath}
-                  readOnly
-                  aria-readonly="true"
-                  placeholder="请选择项目根路径"
-                  className="bg-muted text-muted-foreground"
-                />
+                <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                  <div className="flex items-center gap-1.5">
+                    <label htmlFor="harness-edit-project-dir">项目文件夹 *</label>
+                    <ProjectDirTip />
+                  </div>
+                  <Input
+                    id="harness-edit-project-dir"
+                    value={form.projectDir}
+                    readOnly
+                    aria-readonly="true"
+                    placeholder="项目文件夹"
+                    className="bg-muted text-muted-foreground"
+                    aria-invalid={projectDirError ? true : undefined}
+                  />
+                  {projectDirError && <span className="text-status-critical">{projectDirError}</span>}
+                </div>
               </div>
               <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 <div className="flex items-center gap-1.5">
-                  <label htmlFor="harness-edit-project-dir">项目文件夹 *</label>
-                  <ProjectDirTip />
+                  <span>会话工作区路径</span>
+                  <SessionWorkspacePathTip />
                 </div>
-                <Input
-                  id="harness-edit-project-dir"
-                  value={form.projectDir}
-                  readOnly
-                  aria-readonly="true"
-                  placeholder="项目文件夹"
-                  className="bg-muted text-muted-foreground"
-                  aria-invalid={projectDirError ? true : undefined}
-                />
-                {projectDirError && <span className="text-status-critical">{projectDirError}</span>}
+                <div className="flex min-w-0 gap-2">
+                  <Input
+                    value={form.sessionWorkspacePath ?? ""}
+                    readOnly
+                    placeholder="未配置"
+                    className={harnessProjectCreateInputClassName}
+                  />
+                  {(form.sessionWorkspacePath ?? "").trim() && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="shrink-0 gap-2"
+                      onClick={() => onChange({ ...form, sessionWorkspacePath: "" })}
+                    >
+                      <Trash2 className="size-4" />
+                      清空
+                    </Button>
+                  )}
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="shrink-0 gap-2"
+                    onClick={onPickSessionWorkspace}
+                  >
+                    <FolderOpen className="size-4" />
+                    选择
+                  </Button>
+                </div>
               </div>
             </div>
           </section>
@@ -1972,6 +2094,7 @@ function ProjectEditDialog({
               {error}
             </div>
           )}
+          </div>
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={saving}>
@@ -3663,6 +3786,7 @@ function FeatureDetailPage({
       const thread = await createHarnessSession({
         projectId: detail.project.projectId,
         slug: detail.run.slug,
+        sessionWorkspacePath: detail.project.sessionWorkspacePath,
         nextAction: getHarnessRunNextAction(detail),
         sessions: detail.sessions,
         threadsById,
@@ -4810,6 +4934,20 @@ export function HarnessBoardView({
     }
   }
 
+  const handlePickSessionWorkspace = async (): Promise<void> => {
+    const sessionWorkspacePath = await window.api.workspace.select()
+    if (sessionWorkspacePath) {
+      setForm((current) => ({ ...current, sessionWorkspacePath }))
+    }
+  }
+
+  const handlePickEditSessionWorkspace = async (): Promise<void> => {
+    const sessionWorkspacePath = await window.api.workspace.select()
+    if (sessionWorkspacePath) {
+      setEditForm((current) => ({ ...current, sessionWorkspacePath }))
+    }
+  }
+
   const handleSubmit = async (): Promise<void> => {
     setFormError(null)
     if (metadataRequiredMissing(form)) {
@@ -5443,6 +5581,7 @@ export function HarnessBoardView({
         const thread = await createHarnessSession({
           projectId: project.projectId,
           slug,
+          sessionWorkspacePath: project.sessionWorkspacePath,
           nextAction: getHarnessRunNextAction(latestRunDetail),
           sessions,
           threadsById,
@@ -5672,6 +5811,7 @@ export function HarnessBoardView({
             }
           }}
           onChange={setEditForm}
+          onPickSessionWorkspace={() => void handlePickEditSessionWorkspace()}
           onSubmit={() => void handleSubmitEdit()}
         />
         {sidebarDeleteDialog}
@@ -5849,6 +5989,7 @@ export function HarnessBoardView({
         onOpenChange={handleCreateDialogOpenChange}
         onChange={setForm}
         onPickWorkspace={() => void handlePickWorkspace()}
+        onPickSessionWorkspace={() => void handlePickSessionWorkspace()}
         onSubmit={() => void handleSubmit()}
       />
       <ProjectEditDialog
@@ -5863,6 +6004,7 @@ export function HarnessBoardView({
           }
         }}
         onChange={setEditForm}
+        onPickSessionWorkspace={() => void handlePickEditSessionWorkspace()}
         onSubmit={() => void handleSubmitEdit()}
       />
       <ProjectActionConfirmDialog

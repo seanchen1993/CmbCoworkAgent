@@ -92,6 +92,7 @@ export interface HarnessProjectMetadata {
   systemId: string
   systemName: string
   workspacePath: string
+  sessionWorkspacePath?: string
   "harness-adapter": HarnessAdapterSnapshot
   creator?: HarnessProjectCreatorMetadata
   lifecycle: {
@@ -111,6 +112,7 @@ export interface HarnessProjectCreateInput {
   systemId: string
   systemName: string
   workspacePath: string
+  sessionWorkspacePath?: string
 }
 
 export interface HarnessEnterpriseProjectSearchInput {
@@ -182,6 +184,7 @@ export interface HarnessProjectMetadataUpdateInput {
   systemId: string
   systemName: string
   workspacePath: string
+  sessionWorkspacePath?: string
 }
 
 export interface HarnessProjectListItem {
@@ -193,6 +196,7 @@ export interface HarnessProjectListItem {
   systemId: string
   systemName: string
   workspacePath: string
+  sessionWorkspacePath?: string
   harnessAdapter: {
     id: string
     name: string
@@ -260,6 +264,7 @@ export interface HarnessProjectDetailViewModel {
     systemId: string
     systemName: string
     workspacePath: string
+    sessionWorkspacePath?: string
     projectRootPath: string
   }
   adapterSnapshot: {
@@ -414,6 +419,7 @@ export interface HarnessRunDetailViewModel {
     projectDir: string
     systemId: string
     workspacePath: string
+    sessionWorkspacePath?: string
     projectRootPath: string
   }
   adapterSnapshot: {

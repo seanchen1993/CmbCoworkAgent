@@ -1526,6 +1526,7 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
     systemId: normalizeText(value.systemId),
     systemName: normalizeText(value.systemName),
     workspacePath: normalizeText(value.workspacePath) || normalizeText(oldWorkspace.path),
+    sessionWorkspacePath: normalizeText(value.sessionWorkspacePath) || undefined,
     "harness-adapter": {
       id: adapterId,
       name: adapterName,
@@ -1606,6 +1607,7 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     systemId: project.systemId,
     systemName: project.systemName,
     workspacePath: project.workspacePath,
+    sessionWorkspacePath: project.sessionWorkspacePath,
     harnessAdapter: {
       id: harnessAdapter.id,
       name: harnessAdapter.name,
@@ -1828,6 +1830,7 @@ function makeProjectDetailViewModel(
       systemId: project.systemId,
       systemName: project.systemName,
       workspacePath: project.workspacePath,
+      sessionWorkspacePath: project.sessionWorkspacePath,
       projectRootPath: projectDirectoryPath(project)
     },
     adapterSnapshot: {
@@ -1973,6 +1976,7 @@ export function createHarnessProject(input: HarnessProjectCreateInput): HarnessP
     systemId: input.systemId.trim(),
     systemName: input.systemName.trim(),
     workspacePath: input.workspacePath.trim(),
+    sessionWorkspacePath: input.sessionWorkspacePath?.trim() || undefined,
     "harness-adapter": harnessAdapter,
     creator: getCurrentProjectCreator(),
     lifecycle: {
@@ -2094,6 +2098,7 @@ export function updateHarnessProjectMetadata(
     systemId: input.systemId.trim(),
     systemName: input.systemName.trim(),
     workspacePath: existing.workspacePath,
+    sessionWorkspacePath: input.sessionWorkspacePath?.trim() || undefined,
     "harness-adapter": harnessAdapter,
     lifecycle: {
       ...existing.lifecycle,
@@ -2355,6 +2360,7 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
       projectDir: projectDirectoryName(project),
       systemId: project.systemId,
       workspacePath: project.workspacePath,
+      sessionWorkspacePath: project.sessionWorkspacePath,
       projectRootPath: projectDirectoryPath(project)
     },
     adapterSnapshot: {
