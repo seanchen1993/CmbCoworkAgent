@@ -48,7 +48,8 @@ import {
   deleteOlderThan,
   deleteMeasuredOlderThan,
   trimToRowCap,
-  vacuumAdoptionIndex
+  vacuumAdoptionIndex,
+  type GenIndexRow
 } from "./adoption-index"
 
 // ─────────────────────────────────────────────────────────
@@ -799,6 +800,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       old_line_hashes: oldLineHashes.length > 0 ? packLineHashes(oldLineHashes) : null,
       created_at: createdAt,
       measured: 0,
+      tool: input.tool,
       used_skills: usedSkills.length > 0 ? JSON.stringify(usedSkills) : null,
       thread_id: input.threadId || null,
       trace_id: ctx.traceId ?? null,
@@ -941,6 +943,73 @@ function resolveMaxGenCreatedAt(commitTimeMs?: number): number | undefined {
 }
 
 /**
+ * Emit a terminal `superseded` code_adopt for an older generation whose file was
+ * later recreated from scratch by a newer write_file. A successful write_file
+ * only happens on a non-existent path, so its existence proves the earlier draft
+ * was deleted and rewritten — none of its lines could have survived. We report
+ * effective/adopted = 0 (so the discarded draft stops inflating the adoption-rate
+ * denominator) but still emit an adopt event, so the gen is not later miscounted
+ * as "generated but never committed" by the uncommitted-analysis anti-join.
+ */
+async function emitSupersededAdopt(
+  pending: GenIndexRow,
+  generatedLineCount: number,
+  commitSha: string | null
+): Promise<void> {
+  const adoptEventId = `a_${randomUUID()}`
+  const measuredAt = Date.now()
+  await appendJsonl({
+    t: "adopt",
+    eventId: adoptEventId,
+    genEventId: pending.event_id,
+    verdict: "superseded",
+    generatedLineCount,
+    effectiveGeneratedLineCount: 0,
+    adoptedLineCount: 0,
+    measureSource: "git_commit",
+    measuredAt,
+    commitSha
+  })
+
+  let usedSkills: string[] = []
+  if (pending.used_skills) {
+    try {
+      usedSkills = normalizeUsedSkills(JSON.parse(pending.used_skills) as unknown)
+    } catch {
+      // corrupt row — treat as no skill attribution
+    }
+  }
+
+  trackEvent("code_adopt", "code_adoption", {
+    schemaVersion: 1,
+    eventId: adoptEventId,
+    genEventId: pending.event_id,
+    threadId: pending.thread_id ?? null,
+    traceId: pending.trace_id ?? null,
+    verdict: "superseded",
+    generatedLineCount,
+    effectiveGeneratedLineCount: 0,
+    adoptedLineCount: 0,
+    measureSource: "git_commit",
+    measureLatencyMs: measuredAt - pending.created_at,
+    generatedAt: new Date(pending.created_at).toISOString(),
+    measuredAt: new Date(measuredAt).toISOString(),
+    commitSha,
+    usedSkills,
+    modelId: pending.model_id ?? null,
+    modelName: pending.model_name ?? null,
+    harnessProjectId: pending.harness_project_id ?? null,
+    harnessFeatureSlug: pending.harness_feature_slug ?? null,
+    harnessAdapterName: pending.harness_adapter_name ?? null,
+    harnessAdapterVersion: pending.harness_adapter_version ?? null
+  })
+
+  console.log(
+    `[AdoptionTracker] measure verdict=superseded genEventId=${pending.event_id} generatedLines=${generatedLineCount} (file recreated by newer write_file) commitSha=${commitSha ?? "none"}`
+  )
+}
+
+/**
  * Resolve all pending gen rows for a file (newest first within the attribution
  * window) and produce `code_adopt` events against them. Never throws.
  *
@@ -1002,10 +1071,25 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
       }
     }
 
+    let sawFullRewrite = false
     for (const pending of pendingRows) {
-      let verdict: "deleted" | "committed" | "skipped_large" = "committed"
-
       const storedHashes = pending.line_hashes ? unpackLineHashes(pending.line_hashes) : null
+
+      // A newer full-file write_file already recreated this file from scratch
+      // (write_file only succeeds on a non-existent path), so every older
+      // generation's lines are gone. Emit a terminal `superseded` verdict
+      // (0 effective / 0 adopted) instead of letting the discarded draft inflate
+      // the adoption-rate denominator. We still emit an adopt event so the gen is
+      // not later miscounted as "generated but never committed".
+      if (sawFullRewrite) {
+        if (storedHashes && storedHashes.length > 0) {
+          await emitSupersededAdopt(pending, storedHashes.length, opts?.commitSha ?? null)
+        }
+        markMeasured(pending.event_id)
+        continue
+      }
+
+      let verdict: "deleted" | "committed" | "skipped_large" = "committed"
       if (!storedHashes || storedHashes.length === 0) {
         // No net-new baseline. This can be a legitimate supersession-only
         // edit (for example an agent deleting a previously generated line).
@@ -1107,6 +1191,10 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
           // corrupt row — keep measuring older rows without supersession hints
         }
       }
+
+      // Once we pass a full-file write_file (rows are newest-first), every older
+      // row is a pre-rewrite draft that cannot have survived — void it next.
+      if (pending.tool === "write_file") sawFullRewrite = true
     }
   } catch (e) {
     console.warn("[AdoptionTracker] doMeasureFile failed:", e)

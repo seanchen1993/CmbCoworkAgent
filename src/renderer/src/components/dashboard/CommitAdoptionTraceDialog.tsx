@@ -33,6 +33,11 @@ const VERDICT_META: Record<string, { label: string; cls: string; hint: string }>
     label: "超大跳过",
     cls: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
     hint: "基线超 2 万行，未参与逐行测量（有效/采纳为空）"
+  },
+  superseded: {
+    label: "已重写",
+    cls: "bg-muted text-muted-foreground",
+    hint: "生成后整文件被后续 write_file 重写覆盖，原稿作废，不计入有效/采纳"
   }
 }
 
@@ -203,7 +208,10 @@ function TracePairRow({
   onViewThread?: (threadId: string) => void
 }): React.JSX.Element {
   const rate = pairRate(pair)
-  const zeroAdopted = pair.adoptedLineCount === 0
+  const isSuperseded = pair.verdict === "superseded"
+  // Superseded drafts are *expected* 0-adopt (their file was rewritten), so don't
+  // flag them with the rose "generated-but-not-adopted" treatment.
+  const zeroAdopted = pair.adoptedLineCount === 0 && !isSuperseded
   const orphan = !pair.file && !pair.generatedAt
   const canTrace = Boolean(commitSha && pair.genEventId)
   const threadId = pair.threadId
@@ -216,7 +224,9 @@ function TracePairRow({
   const toggle = (): void => {
     const next = !expanded
     setExpanded(next)
-    if (!next || fetched || !canTrace) return
+    // Superseded drafts have no meaningful per-line view (the file was fully
+    // rewritten); the expanded panel shows a static note instead of fetching.
+    if (!next || fetched || !canTrace || isSuperseded) return
     const api = window.api?.adoption
     if (!api || typeof api.commitLines !== "function") {
       setLocalError("当前环境不支持本地逐行溯源")
@@ -337,7 +347,16 @@ function TracePairRow({
       {expanded ? (
         <tr className="border-b border-border/60 bg-muted/10">
           <td colSpan={TRACE_COLSPAN} className="px-3 pb-3">
-            <LocalLinesPanel loading={localLoading} error={localError} data={localData} />
+            {isSuperseded ? (
+              <div className="px-2 py-3 text-xs text-muted-foreground">
+                该生成已被后续整文件重写覆盖，原稿作废，逐行从略。
+                <div className="mt-1 text-[10px] text-muted-foreground/80">
+                  其有效/采纳均计 0，不影响该 commit 的采纳率分母。
+                </div>
+              </div>
+            ) : (
+              <LocalLinesPanel loading={localLoading} error={localError} data={localData} />
+            )}
           </td>
         </tr>
       ) : null}
