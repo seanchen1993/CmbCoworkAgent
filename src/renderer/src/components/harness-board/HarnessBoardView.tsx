@@ -1551,7 +1551,7 @@ function FeatureCreateDialog({
                               onChange={(event) =>
                                 onChangeServiceCodeDirectory(service.service, event.target.value)
                               }
-                              placeholder="C:/code/service"
+                              placeholder="输入服务对应项目路径-C:/code/service"
                               className="h-8 bg-background text-xs"
                             />
                           )}
