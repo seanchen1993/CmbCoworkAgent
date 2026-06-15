@@ -77,6 +77,7 @@ import {
 } from "./system-prompt"
 import { getMemoryStore, closeMemoryStore } from "../memory/store"
 import { createMemorySearchTool, createMemoryGetTool } from "../memory/tools"
+import { resolveWorkspaceMemoryDirs } from "../memory/paths"
 import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import { getThread } from "../db/index"
@@ -1087,7 +1088,11 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         return parts.join("")
       }
       const customExecute = lcTool(
-        async (input: { command: string; cwd?: string; run_in_background?: boolean }): Promise<string> => {
+        async (input: {
+          command: string
+          cwd?: string
+          run_in_background?: boolean
+        }): Promise<string> => {
           const sandbox = filesystemBackend as LocalSandbox
           if (input.run_in_background) {
             return sandbox.executeBackground(input.command, input.cwd)
@@ -2672,11 +2677,20 @@ The workspace root is: ${workspacePath}`
   let memoryTools: ReturnType<typeof createMemorySearchTool | typeof createMemoryGetTool>[] = []
   let memorySources: string[] | undefined
   if (isMemoryEnabled()) {
-    const memoryStore = await getMemoryStore()
-    const memoryDir = memoryStore.getMemoryDir()
-    memoryTools = [createMemorySearchTool(memoryStore), createMemoryGetTool(memoryStore)]
-    memorySources = [join(memoryDir, "MEMORY.md")]
-    console.log("[Runtime] Memory initialized, dir:", memoryDir)
+    const memoryDirs = resolveWorkspaceMemoryDirs(workspacePath)
+    const globalStore = await getMemoryStore(memoryDirs.global.dir)
+    const projectStore = memoryDirs.project ? await getMemoryStore(memoryDirs.project.dir) : null
+    const storesForSearch = projectStore ? [projectStore, globalStore] : [globalStore]
+    memoryTools = [createMemorySearchTool(storesForSearch), createMemoryGetTool(storesForSearch)]
+    memorySources = [
+      join(memoryDirs.global.dir, "MEMORY.md"),
+      ...(memoryDirs.project ? [join(memoryDirs.project.dir, "MEMORY.md")] : [])
+    ]
+    console.log("[Runtime] Memory initialized:", {
+      globalDir: memoryDirs.global.dir,
+      projectDir: memoryDirs.project?.dir ?? null,
+      projectId: memoryDirs.project?.projectId ?? null
+    })
   } else {
     console.log("[Runtime] Memory disabled by user setting")
   }
@@ -2907,10 +2921,7 @@ The workspace root is: ${workspacePath}`
   }
 
   const coordinatorWorkingDirAppendix = workingDirPromptAppendix?.trim()
-  const coordinatorProjectInstructions = [
-    agentsPrompt.prompt,
-    extraSystemPrompt
-  ]
+  const coordinatorProjectInstructions = [agentsPrompt.prompt, extraSystemPrompt]
     .filter(Boolean)
     .join("\n\n")
   const coordinatorWorkerProjectInstructions = [

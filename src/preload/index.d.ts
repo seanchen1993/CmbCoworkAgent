@@ -1142,7 +1142,23 @@ interface CustomAPI {
     }) => Promise<{ success: boolean; tools?: string[]; error?: string }>
   }
   memory: {
-    listFiles: () => Promise<
+    listProjects: (request?: { workspacePath?: string | null }) => Promise<
+      Array<{
+        projectId: string
+        displayName: string
+        memoryDir: string
+        gitRoot?: string
+        fileCount: number
+        totalSize: number
+        indexSize: number
+        isCurrent: boolean
+      }>
+    >
+    listFiles: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }) => Promise<
       Array<{
         name: string
         size: number
@@ -1153,21 +1169,47 @@ interface CustomAPI {
         recallCount: number
       }>
     >
-    readFile: (name: string) => Promise<string>
-    deleteFile: (name: string) => Promise<void>
+    readFile: (
+      name: string,
+      request?: {
+        scope?: "global" | "project"
+        workspacePath?: string | null
+        projectId?: string | null
+      }
+    ) => Promise<string>
+    deleteFile: (
+      name: string,
+      request?: {
+        scope?: "global" | "project"
+        workspacePath?: string | null
+        projectId?: string | null
+      }
+    ) => Promise<void>
     getEnabled: () => Promise<boolean>
     setEnabled: (enabled: boolean) => Promise<void>
     getDreamEnabled: () => Promise<boolean>
     setDreamEnabled: (enabled: boolean) => Promise<void>
-    getStats: () => Promise<{
+    getStats: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }) => Promise<{
       fileCount: number
       totalSize: number
       indexSize: number
       enabled: boolean
       dreamEnabled: boolean
       dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
+      scope: "global" | "project"
+      memoryDir: string
+      projectId?: string
+      gitRoot?: string
     }>
-    consolidate: () => Promise<{
+    consolidate: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }) => Promise<{
       archived: number
       merged: number
       created: number

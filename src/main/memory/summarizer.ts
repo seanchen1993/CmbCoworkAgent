@@ -142,6 +142,8 @@ export interface SummarizeOptions {
   model: ChatOpenAI
   conversation: string
   memoryDir: string
+  scopeHint?: string
+  allowedTypes?: MemoryType[]
 }
 
 interface CreateOp {
@@ -255,7 +257,20 @@ function clampContent(s: string): string {
   return s.slice(0, MAX_CONTENT_CHARS) + "\n…(truncated)"
 }
 
-function applyCreate(memoryDir: string, op: CreateOp, existing: Set<string>): string | null {
+function isAllowedType(type: MemoryType, allowedTypes?: Set<MemoryType>): boolean {
+  return !allowedTypes || allowedTypes.has(type)
+}
+
+function applyCreate(
+  memoryDir: string,
+  op: CreateOp,
+  existing: Set<string>,
+  allowedTypes?: Set<MemoryType>
+): string | null {
+  if (!isAllowedType(op.type, allowedTypes)) {
+    console.warn("[Memory] Create op rejected by scope type policy:", op.type, op.name)
+    return null
+  }
   // Validate or regenerate filename.
   let filename = op.filename
   if (!filename || !isValidFactFilename(filename, op.type)) {
@@ -278,7 +293,11 @@ function applyCreate(memoryDir: string, op: CreateOp, existing: Set<string>): st
   return fullPath
 }
 
-function applyUpdate(memoryDir: string, op: UpdateOp): string | null {
+function applyUpdate(
+  memoryDir: string,
+  op: UpdateOp,
+  allowedTypes?: Set<MemoryType>
+): string | null {
   // Path-traversal guard: the LLM-supplied filename must be a bare filename
   // (no slashes, no parent traversal) and must match the per-fact file shape.
   const safe = basename(op.filename)
@@ -305,6 +324,10 @@ function applyUpdate(memoryDir: string, op: UpdateOp): string | null {
   const type = parseMemoryType(frontmatter.type)
   if (!type) {
     console.warn("[Memory] Update target has invalid/missing type, skipping:", safe)
+    return null
+  }
+  if (!isAllowedType(type, allowedTypes)) {
+    console.warn("[Memory] Update op rejected by scope type policy:", type, safe)
     return null
   }
   const fm = buildFrontmatter({
@@ -352,7 +375,8 @@ export function summarizeAndSave(options: SummarizeOptions): Promise<void> {
 }
 
 async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
-  const { model, conversation, memoryDir } = options
+  const { model, conversation, memoryDir, scopeHint } = options
+  const allowedTypes = options.allowedTypes ? new Set(options.allowedTypes) : undefined
 
   if (!conversation.trim()) return
 
@@ -375,6 +399,7 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
         : conversation
 
     const userPrompt =
+      (scopeHint?.trim() ? `SCOPE RULES:\n${scopeHint.trim()}\n\n` : "") +
       `CURRENT MEMORY.md:\n${currentMemoryMd || "(empty)"}\n\n` +
       `EXISTING PER-FACT FILES:\n${manifestText}\n\n` +
       `CONVERSATION:\n${truncated}\n\n` +
@@ -397,13 +422,13 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
     for (const op of operations) {
       try {
         if (op.action === "create") {
-          const path = applyCreate(memoryDir, op, existingFilenames)
+          const path = applyCreate(memoryDir, op, existingFilenames, allowedTypes)
           if (path) {
             touched.push(path)
             creates++
           }
         } else if (op.action === "update") {
-          const path = applyUpdate(memoryDir, op)
+          const path = applyUpdate(memoryDir, op, allowedTypes)
           if (path) {
             touched.push(path)
             updates++
@@ -453,7 +478,7 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
     // Re-index touched files in the search store.
     if (touched.length > 0 || manifestWritten) {
       try {
-        const store = await getMemoryStore()
+        const store = await getMemoryStore(memoryDir)
         for (const path of touched) {
           const content = readFileSync(path, "utf-8")
           store.addDocument(path, content)

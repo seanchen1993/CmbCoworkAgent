@@ -1480,7 +1480,25 @@ const api = {
     }
   },
   memory: {
-    listFiles: (): Promise<
+    listProjects: (request?: {
+      workspacePath?: string | null
+    }): Promise<
+      Array<{
+        projectId: string
+        displayName: string
+        memoryDir: string
+        gitRoot?: string
+        fileCount: number
+        totalSize: number
+        indexSize: number
+        isCurrent: boolean
+      }>
+    > => ipcRenderer.invoke("memory:listProjects", request),
+    listFiles: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }): Promise<
       Array<{
         name: string
         size: number
@@ -1490,29 +1508,55 @@ const api = {
         description: string | null
         recallCount: number
       }>
-    > => ipcRenderer.invoke("memory:listFiles"),
-    readFile: (name: string): Promise<string> => ipcRenderer.invoke("memory:readFile", name),
-    deleteFile: (name: string): Promise<void> => ipcRenderer.invoke("memory:deleteFile", name),
+    > => ipcRenderer.invoke("memory:listFiles", request),
+    readFile: (
+      name: string,
+      request?: {
+        scope?: "global" | "project"
+        workspacePath?: string | null
+        projectId?: string | null
+      }
+    ): Promise<string> => ipcRenderer.invoke("memory:readFile", name, request),
+    deleteFile: (
+      name: string,
+      request?: {
+        scope?: "global" | "project"
+        workspacePath?: string | null
+        projectId?: string | null
+      }
+    ): Promise<void> => ipcRenderer.invoke("memory:deleteFile", name, request),
     getEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getEnabled"),
     setEnabled: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("memory:setEnabled", enabled),
     getDreamEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getDreamEnabled"),
     setDreamEnabled: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("memory:setDreamEnabled", enabled),
-    getStats: (): Promise<{
+    getStats: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }): Promise<{
       fileCount: number
       totalSize: number
       indexSize: number
       enabled: boolean
       dreamEnabled: boolean
       dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
-    }> => ipcRenderer.invoke("memory:getStats"),
-    consolidate: (): Promise<{
+      scope: "global" | "project"
+      memoryDir: string
+      projectId?: string
+      gitRoot?: string
+    }> => ipcRenderer.invoke("memory:getStats", request),
+    consolidate: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }): Promise<{
       archived: number
       merged: number
       created: number
       skipped: number
-    }> => ipcRenderer.invoke("memory:consolidate"),
+    }> => ipcRenderer.invoke("memory:consolidate", request),
     onChanged: (callback: () => void): (() => void) => {
       const handler = (): void => {
         callback()

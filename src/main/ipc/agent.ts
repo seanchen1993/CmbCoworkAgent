@@ -12,8 +12,9 @@ import {
 import { addThreadGoalEvent, getThread, updateThread } from "../db"
 import { summarizeAndSave } from "../memory/summarizer"
 import { consolidateMemories, shouldRunDream, incrementDreamSessions } from "../memory/consolidate"
-import { scanMemoryFiles } from "../memory/manifest"
+import { scanMemoryFiles, type MemoryType } from "../memory/manifest"
 import { getMemoryStore } from "../memory/store"
+import { resolveWorkspaceMemoryDirs, type MemoryNamespace } from "../memory/paths"
 import { ChatOpenAI } from "@langchain/openai"
 import {
   getCustomModelConfigs,
@@ -4311,8 +4312,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Sync FTS index with any memory files changed since last invocation
         if (isMemoryEnabled()) {
           try {
-            const memoryStore = await getMemoryStore()
-            memoryStore.syncMemoryFiles()
+            const memoryDirs = resolveWorkspaceMemoryDirs(workspacePath)
+            const dirs = [
+              memoryDirs.global.dir,
+              ...(memoryDirs.project ? [memoryDirs.project.dir] : [])
+            ]
+            for (const dir of dirs) {
+              const memoryStore = await getMemoryStore(dir)
+              memoryStore.syncMemoryFiles()
+            }
           } catch {
             /* non-critical */
           }
@@ -5727,11 +5735,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               : ""
 
           if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
-            const memoryStore = await getMemoryStore()
-            const memDir = memoryStore.getMemoryDir()
-            const memDirNormalized = memDir.replace(/\\/g, "/")
-            const agentAlreadyWroteMemory = fileWritePaths.some(
-              (p) => p.startsWith(memDirNormalized) || p.startsWith(memDir)
+            const memoryDirs = resolveWorkspaceMemoryDirs(workspacePath)
+            const namespaces: MemoryNamespace[] = [
+              memoryDirs.global,
+              ...(memoryDirs.project ? [memoryDirs.project] : [])
+            ]
+            const memoryDirChecks = namespaces.map((ns) => ({
+              dir: ns.dir,
+              normalized: ns.dir.replace(/\\/g, "/")
+            }))
+            const agentAlreadyWroteMemory = fileWritePaths.some((p) =>
+              memoryDirChecks.some((dir) => p.startsWith(dir.normalized) || p.startsWith(dir.dir))
             )
 
             const resolveMemoryModel = async (): Promise<ChatOpenAI | null> => {
@@ -5763,7 +5777,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
 
-            const tryTriggerDream = (memoryModel: ChatOpenAI): void => {
+            const tryTriggerDream = (memoryModel: ChatOpenAI, memDir: string): void => {
               try {
                 if (!isDreamEnabled()) {
                   console.log("[Agent] Dream auto-trigger disabled")
@@ -5781,28 +5795,54 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
             }
 
+            const buildScopeHint = (namespace: MemoryNamespace): string | undefined => {
+              if (namespace.scope === "global") {
+                return (
+                  "You are maintaining GLOBAL memory shared across all projects. " +
+                  "Extract only cross-project user facts, durable personal preferences, and feedback that applies broadly. " +
+                  "Skip project-specific codebase facts, repository paths, transient implementation status, and external resources tied to one project."
+                )
+              }
+              return (
+                `You are maintaining PROJECT memory for git root: ${namespace.gitRoot ?? "unknown"}. ` +
+                "Extract project facts, project-specific feedback, decisions, constraints, and reference links for this repository. " +
+                "Skip broad user profile facts that should apply to every project."
+              )
+            }
+            const allowedTypesForScope = (namespace: MemoryNamespace): MemoryType[] =>
+              namespace.scope === "global"
+                ? ["user", "feedback"]
+                : ["project", "reference", "feedback"]
+
             if (agentAlreadyWroteMemory) {
               console.log(
                 "[Agent] Main agent wrote to memory during conversation — skipping summarizeAndSave"
               )
-              incrementDreamSessions(memDir)
+              for (const ns of namespaces) {
+                incrementDreamSessions(ns.dir)
+              }
               const memoryModel = await resolveMemoryModel()
               if (memoryModel) {
-                tryTriggerDream(memoryModel)
+                for (const ns of namespaces) {
+                  tryTriggerDream(memoryModel, ns.dir)
+                }
               }
             } else {
               const memoryModel = await resolveMemoryModel()
               if (memoryModel) {
-                summarizeAndSave({
-                  model: memoryModel,
-                  conversation,
-                  memoryDir: memDir
-                })
-                  .then(() => {
-                    incrementDreamSessions(memDir)
-                    tryTriggerDream(memoryModel)
-                  })
-                  .catch((e) => console.warn("[Agent] Memory summarize failed:", e))
+                ;(async () => {
+                  for (const ns of namespaces) {
+                    await summarizeAndSave({
+                      model: memoryModel,
+                      conversation,
+                      memoryDir: ns.dir,
+                      scopeHint: buildScopeHint(ns),
+                      allowedTypes: allowedTypesForScope(ns)
+                    })
+                    incrementDreamSessions(ns.dir)
+                    tryTriggerDream(memoryModel, ns.dir)
+                  }
+                })().catch((e) => console.warn("[Agent] Memory summarize failed:", e))
               }
             }
           }
