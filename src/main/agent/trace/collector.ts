@@ -48,6 +48,7 @@ import { getUserInfo } from "../../storage"
 import { listAllSkills } from "../../ipc/skills"
 import { getHarnessProjectAdapterSnapshot } from "../../harness-board/service"
 import { nowIsoLocal } from "../../util/local-time"
+import { deriveUpperOrgLevelsFromPath } from "../../org-levels"
 import {
   DEFAULT_SKILL_VERSION,
   ensureVersionedSkillIdentifier,
@@ -152,44 +153,6 @@ function normalizeTrace(parsed: AgentTrace): AgentTrace {
     usedSkills: Array.isArray(parsed.usedSkills) ? parsed.usedSkills : [],
     evolvedSkills: Array.isArray(parsed.evolvedSkills) ? parsed.evolvedSkills : [],
     triggerSource: parsed.triggerSource ?? "chat"
-  }
-}
-
-function deriveUpperOrgLevels(
-  pathName?: string
-): Pick<AgentTrace, "upperOrgLv0" | "upperOrgLv1" | "upperOrgLv2" | "upperOrgLv3"> {
-  const emptyLevels = {
-    upperOrgLv0: "",
-    upperOrgLv1: "",
-    upperOrgLv2: "",
-    upperOrgLv3: ""
-  }
-  const parts =
-    typeof pathName === "string"
-      ? pathName
-          .split("/")
-          .map((part) => part.trim())
-          .filter(Boolean)
-      : []
-  const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
-  if (itDeptIndex < 0) return emptyLevels
-
-  const lowerParts = parts.slice(itDeptIndex + 1)
-  const startsWithTeam = lowerParts[0]?.includes("团队") ?? false
-  if (startsWithTeam) {
-    return {
-      upperOrgLv0: lowerParts[2] ?? "",
-      upperOrgLv1: lowerParts[1] ?? "",
-      upperOrgLv2: lowerParts[0] ?? "",
-      upperOrgLv3: "本部团队"
-    }
-  }
-
-  return {
-    upperOrgLv0: lowerParts[3] ?? "",
-    upperOrgLv1: lowerParts[2] ?? "",
-    upperOrgLv2: lowerParts[1] ?? "",
-    upperOrgLv3: lowerParts[0] ?? ""
   }
 }
 
@@ -645,7 +608,7 @@ export class TraceCollector {
     const evolvedSkillsWithVersions = await resolveSkillVersions(this.evolvedSkills)
 
     const userInfo = getUserInfo()
-    const upperOrgLevels = deriveUpperOrgLevels(userInfo?.pathName)
+    const upperOrgLevels = deriveUpperOrgLevelsFromPath(userInfo?.pathName)
 
     // Project-mode traces also record the bound adapter plugin's version, so
     // operations analytics can attribute a project conversation to a plugin

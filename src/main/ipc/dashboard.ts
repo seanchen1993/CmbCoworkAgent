@@ -8,6 +8,7 @@
 
 import { ipcMain, dialog, BrowserWindow } from "electron"
 import { getUserInfo } from "../storage"
+import { deriveUpperOrgLv1FromPath } from "../org-levels"
 import * as fs from "fs"
 import AdmZip from "adm-zip"
 import { buildTraceTree } from "../agent/trace/tree-builder"
@@ -670,22 +671,6 @@ function splitEnvIds(value: string | undefined): Set<string> {
   )
 }
 
-function deriveDashboardUpperOrgLv1(pathName?: string): string {
-  const parts =
-    typeof pathName === "string"
-      ? pathName
-          .split("/")
-          .map((part) => part.trim())
-          .filter(Boolean)
-      : []
-  const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
-  if (itDeptIndex < 0) return ""
-
-  const lowerParts = parts.slice(itDeptIndex + 1)
-  const startsWithTeam = lowerParts[0]?.includes("团队") ?? false
-  return startsWithTeam ? (lowerParts[1] ?? "") : (lowerParts[2] ?? "")
-}
-
 function getDashboardUnrestrictedIds(): Set<string> {
   return splitEnvIds(import.meta.env[DASHBOARD_UNRESTRICTED_IDS_ENV] as string | undefined)
 }
@@ -720,7 +705,7 @@ function getDashboardAccessContext(): DashboardAccessContext {
     unrestricted: loggedIn && [ystId, sapId].some((id) => Boolean(id && unrestrictedIds.has(id))),
     sapId,
     ystId,
-    upperOrgLv1: deriveDashboardUpperOrgLv1(userInfo?.pathName)
+    upperOrgLv1: deriveUpperOrgLv1FromPath(userInfo?.pathName)
   }
 }
 

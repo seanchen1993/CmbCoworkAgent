@@ -1,4 +1,5 @@
 import { getUserInfo } from "../storage"
+import { deriveUpperOrgLv1FromPath } from "../org-levels"
 import type {
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailItem,
@@ -15,13 +16,15 @@ const ENTERPRISE_PROJECT_SUCCESS_CODE = "SUC0000"
 interface EnterpriseProjectQueryResponse {
   returnCode?: string
   errorMsg?: string | null
-  body?: {
-    pageNum?: number
-    pageSize?: number
-    pages?: number
-    total?: number
-    data?: unknown[]
-  }
+  body?:
+    | {
+        pageNum?: number
+        pageSize?: number
+        pages?: number
+        total?: number
+        data?: unknown[]
+      }
+    | unknown[]
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -140,8 +143,7 @@ function normalizeDetailResponse(
     throw new Error(response.errorMsg || "找不到项目")
   }
 
-  const body = isObject(response.body) ? response.body : undefined
-  const rawData = Array.isArray(body?.data) ? body.data : []
+  const rawData = Array.isArray(response.body) ? response.body : []
   const projects = rawData
     .map((item) => normalizeEnterpriseProjectDetailItem(item))
     .filter((item): item is HarnessEnterpriseProjectDetailItem => item !== null)
@@ -222,7 +224,8 @@ export async function searchEnterpriseProjects(
     return makeMockEnterpriseProjectSearchResult()
   }
 
-  const roomName = normalizeText(getUserInfo()?.upperOrgLv1)
+  const userInfo = getUserInfo()
+  const roomName = deriveUpperOrgLv1FromPath(userInfo?.pathName)
 
   const queryUrl = getEnterpriseProjectQueryUrl()
   if (!queryUrl) {

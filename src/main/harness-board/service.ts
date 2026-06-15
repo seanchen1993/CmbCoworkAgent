@@ -5,6 +5,7 @@ import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import { v4 as uuid } from "uuid"
 import { getOpenworkDir, getPlugins, getUserInfo } from "../storage"
+import { deriveUpperOrgLevelsFromPath } from "../org-levels"
 import type { PluginMetadata } from "../types"
 import type {
   HarnessAdapterRegistryItem,
@@ -1540,26 +1541,6 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
   }
 }
 
-function deriveCreatorOrgLevels(
-  pathName?: string
-): Pick<HarnessProjectCreatorMetadata, "upperOrgLv0" | "upperOrgLv1"> {
-  const parts =
-    typeof pathName === "string"
-      ? pathName
-          .split("/")
-          .map((part) => part.trim())
-          .filter(Boolean)
-      : []
-  const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
-  if (itDeptIndex < 0) return {}
-
-  const lowerParts = parts.slice(itDeptIndex + 1)
-  const startsWithTeam = lowerParts[0]?.includes("团队") ?? false
-  return startsWithTeam
-    ? { upperOrgLv0: lowerParts[2] ?? "", upperOrgLv1: lowerParts[1] ?? "" }
-    : { upperOrgLv0: lowerParts[3] ?? "", upperOrgLv1: lowerParts[2] ?? "" }
-}
-
 function normalizeProjectCreator(value: unknown): HarnessProjectCreatorMetadata | null {
   if (!isObject(value)) return null
   const creator: HarnessProjectCreatorMetadata = {
@@ -1576,13 +1557,15 @@ function normalizeProjectCreator(value: unknown): HarnessProjectCreatorMetadata 
 
 function getCurrentProjectCreator(): HarnessProjectCreatorMetadata | undefined {
   const userInfo = getUserInfo()
+  const orgLevels = deriveUpperOrgLevelsFromPath(userInfo?.pathName)
   const creator = normalizeProjectCreator({
     sapId: userInfo?.sapId,
     ystId: userInfo?.ystId,
     userName: userInfo?.userName,
     orgName: userInfo?.orgName,
     pathName: userInfo?.pathName,
-    ...deriveCreatorOrgLevels(userInfo?.pathName)
+    upperOrgLv0: orgLevels.upperOrgLv0,
+    upperOrgLv1: orgLevels.upperOrgLv1
   })
   return creator ?? undefined
 }
