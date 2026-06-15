@@ -148,6 +148,10 @@ const harnessProjectPopoverContentClassName =
   "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-[70] origin-[var(--radix-popover-content-transform-origin)] w-[var(--radix-popover-trigger-width)] rounded-md border p-0 shadow-md outline-none"
 const harnessNamePattern = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
 const harnessNameRuleMessage = "仅支持中文、英文字母、数字、-、_"
+const PROJECT_NAME_MAX_CHARS = 50
+const PROJECT_CODE_MAX_CHARS = 15
+const PROJECT_DESCRIPTION_MAX_CHARS = 100
+const PROJECT_DIR_MAX_CHARS = 30
 const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
 const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
 const OTHER_ADAPTER_SCENARIO = "其他类别"
@@ -659,6 +663,11 @@ function getHarnessNameError(label: string, value: string): string | null {
   return harnessNamePattern.test(value) ? null : `${label}${harnessNameRuleMessage}`
 }
 
+function getTextLengthError(label: string, value: string, maxChars: number): string | null {
+  if (Array.from(value.trim()).length <= maxChars) return null
+  return `${label}不能超过 ${maxChars} 字`
+}
+
 function getProjectMetadataNameError(form: HarnessProjectMetadataUpdateInput): string | null {
   return (
     getHarnessNameError("项目编号", form.projectCode) ??
@@ -668,6 +677,19 @@ function getProjectMetadataNameError(form: HarnessProjectMetadataUpdateInput): s
 
 function metadataNameInvalid(form: HarnessProjectMetadataUpdateInput): boolean {
   return getProjectMetadataNameError(form) !== null
+}
+
+function metadataLengthInvalid(
+  form: HarnessProjectMetadataUpdateInput,
+  options: { validateProjectDir?: boolean } = {}
+): boolean {
+  return (
+    getTextLengthError("项目名称", form.name, PROJECT_NAME_MAX_CHARS) !== null ||
+    getTextLengthError("项目编号", form.projectCode, PROJECT_CODE_MAX_CHARS) !== null ||
+    getTextLengthError("项目描述", form.description, PROJECT_DESCRIPTION_MAX_CHARS) !== null ||
+    (options.validateProjectDir === true &&
+      getTextLengthError("项目文件夹", form.projectDir, PROJECT_DIR_MAX_CHARS) !== null)
+  )
 }
 
 function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectMetadataUpdateInput {
@@ -958,6 +980,27 @@ function ProjectWorkspacePathTip(): React.JSX.Element {
         </TooltipTrigger>
         <TooltipContent side="top" className="z-[70] max-w-72">
           项目产物路径，非代码仓库
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+function ProjectDirTip(): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label="项目文件夹说明"
+            className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Info className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="z-[70] max-w-72">
+          保存项目文档、详细设计等插件运行产物
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -1491,18 +1534,28 @@ function ProjectFormDialog({
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
   const projectDirError = getHarnessNameError("项目文件夹", form.projectDir)
+  const projectNameLengthError = getTextLengthError("项目名称", form.name, PROJECT_NAME_MAX_CHARS)
+  const projectCodeLengthError = getTextLengthError("项目编号", form.projectCode, PROJECT_CODE_MAX_CHARS)
+  const projectDescriptionLengthError = getTextLengthError(
+    "项目描述",
+    form.description,
+    PROJECT_DESCRIPTION_MAX_CHARS
+  )
+  const projectDirLengthError = getTextLengthError("项目文件夹", form.projectDir, PROJECT_DIR_MAX_CHARS)
+  const projectCodeValidationError = projectCodeError ?? projectCodeLengthError
+  const projectDirValidationError = projectDirError ?? projectDirLengthError
   const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
   const selectedAdapterMessage = boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
   const projectRootPath = form.workspacePath.trim()
   const projectDir = form.projectDir.trim()
   const projectCreatePathHint =
-    projectRootPath && projectDir ? `将在 ${projectRootPath} 下创建文件夹: ${projectDir} ` : ""
+    projectRootPath && projectDir ? `将在 ${projectRootPath} 下创建文件夹: ${projectDir}` : ""
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         ref={setDialogPortalContainer}
-        className={cn(harnessDialogContentClassName, "max-w-3xl overflow-visible")}
+        className={cn(harnessDialogContentClassName, "top-8 max-w-3xl translate-y-0 overflow-visible")}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
         <DialogHeader>
@@ -1531,7 +1584,7 @@ function ProjectFormDialog({
 
           <section className="rounded-md border border-border bg-muted/30 p-3">
             <div className="mb-3 text-sm font-semibold">项目信息</div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 items-start gap-3">
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目名称 *
                 <EnterpriseProjectNameInput
@@ -1564,7 +1617,11 @@ function ProjectFormDialog({
                     })
                   }}
                   portalContainer={dialogPortalContainer}
+                  ariaInvalid={projectNameLengthError ? true : undefined}
                 />
+                {projectNameLengthError && (
+                  <span className="text-status-critical">{projectNameLengthError}</span>
+                )}
               </label>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目编号 *
@@ -1575,9 +1632,11 @@ function ProjectFormDialog({
                   }
                   placeholder="请输入"
                   className={harnessProjectCreateInputClassName}
-                  aria-invalid={projectCodeError ? true : undefined}
+                  aria-invalid={projectCodeValidationError ? true : undefined}
                 />
-                {projectCodeError && <span className="text-status-critical">{projectCodeError}</span>}
+                {projectCodeValidationError && (
+                  <span className="text-status-critical">{projectCodeValidationError}</span>
+                )}
               </label>
               <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目描述 *
@@ -1586,7 +1645,11 @@ function ProjectFormDialog({
                   onChange={(event) => onChange({ ...form, description: event.target.value })}
                   placeholder="请输入"
                   className={harnessProjectCreateInputClassName}
+                  aria-invalid={projectDescriptionLengthError ? true : undefined}
                 />
+                {projectDescriptionLengthError && (
+                  <span className="text-status-critical">{projectDescriptionLengthError}</span>
+                )}
               </label>
             </div>
           </section>
@@ -1646,7 +1709,10 @@ function ProjectFormDialog({
                 </div>
               </div>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                项目文件夹 *
+                <span className="flex items-center gap-1.5">
+                  <span>项目文件夹 *</span>
+                  <ProjectDirTip />
+                </span>
                 <Input
                   value={form.projectDir}
                   onChange={(event) =>
@@ -1654,13 +1720,18 @@ function ProjectFormDialog({
                   }
                   placeholder="请输入"
                   className={harnessProjectCreateInputClassName}
-                  aria-invalid={projectDirError ? true : undefined}
+                  aria-invalid={projectDirValidationError ? true : undefined}
                 />
-                {projectDirError && <span className="text-status-critical">{projectDirError}</span>}
+                {projectDirValidationError && (
+                  <span className="text-status-critical">{projectDirValidationError}</span>
+                )}
               </label>
             </div>
             {projectCreatePathHint && (
-              <div className="mt-3 truncate text-xs text-muted-foreground" title={projectCreatePathHint}>
+              <div
+                className="mt-3 max-w-full break-all text-xs leading-relaxed text-muted-foreground"
+                title={projectCreatePathHint}
+              >
                 {projectCreatePathHint}
               </div>
             )}
@@ -1682,6 +1753,7 @@ function ProjectFormDialog({
               creating ||
               metadataRequiredMissing(form) ||
               metadataNameInvalid(form) ||
+              metadataLengthInvalid(form, { validateProjectDir: true }) ||
               !selectedAdapter?.boardCompatibility.compatible
             }
             className="gap-2"
@@ -1717,6 +1789,14 @@ function ProjectEditDialog({
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
   const projectDirError = getHarnessNameError("项目文件夹", form.projectDir)
+  const projectNameLengthError = getTextLengthError("项目名称", form.name, PROJECT_NAME_MAX_CHARS)
+  const projectCodeLengthError = getTextLengthError("项目编号", form.projectCode, PROJECT_CODE_MAX_CHARS)
+  const projectDescriptionLengthError = getTextLengthError(
+    "项目描述",
+    form.description,
+    PROJECT_DESCRIPTION_MAX_CHARS
+  )
+  const projectCodeValidationError = projectCodeError ?? projectCodeLengthError
   const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
   const selectedAdapterMessage = boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
 
@@ -1724,7 +1804,7 @@ function ProjectEditDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         ref={setDialogPortalContainer}
-        className={cn(harnessDialogContentClassName, "max-w-3xl overflow-visible")}
+        className={cn(harnessDialogContentClassName, "top-8 max-w-3xl translate-y-0 overflow-visible")}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
         <DialogHeader>
@@ -1753,7 +1833,7 @@ function ProjectEditDialog({
 
           <section className="rounded-md border border-border bg-muted/30 p-3">
             <div className="mb-3 text-sm font-semibold">项目信息</div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 items-start gap-3">
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目名称 *
                 <EnterpriseProjectNameInput
@@ -1769,7 +1849,11 @@ function ProjectEditDialog({
                     })
                   }
                   portalContainer={dialogPortalContainer}
+                  ariaInvalid={projectNameLengthError ? true : undefined}
                 />
+                {projectNameLengthError && (
+                  <span className="text-status-critical">{projectNameLengthError}</span>
+                )}
               </label>
               <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 <label htmlFor="harness-edit-project-code">项目编号 *</label>
@@ -1781,9 +1865,11 @@ function ProjectEditDialog({
                   }
                   placeholder="请输入"
                   className={harnessProjectCreateInputClassName}
-                  aria-invalid={projectCodeError ? true : undefined}
+                  aria-invalid={projectCodeValidationError ? true : undefined}
                 />
-                {projectCodeError && <span className="text-status-critical">{projectCodeError}</span>}
+                {projectCodeValidationError && (
+                  <span className="text-status-critical">{projectCodeValidationError}</span>
+                )}
               </div>
               <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目描述 *
@@ -1792,7 +1878,11 @@ function ProjectEditDialog({
                   onChange={(event) => onChange({ ...form, description: event.target.value })}
                   placeholder="请输入"
                   className={harnessProjectCreateInputClassName}
+                  aria-invalid={projectDescriptionLengthError ? true : undefined}
                 />
+                {projectDescriptionLengthError && (
+                  <span className="text-status-critical">{projectDescriptionLengthError}</span>
+                )}
               </label>
             </div>
           </section>
@@ -1844,22 +1934,7 @@ function ProjectEditDialog({
               <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 <div className="flex items-center gap-1.5">
                   <label htmlFor="harness-edit-project-dir">项目文件夹 *</label>
-                  <TooltipProvider delayDuration={150}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          aria-label="项目文件夹修改提示"
-                          className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        >
-                          <Info className="size-3.5" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent side="top" className="z-[70] max-w-72">
-                        项目文件夹创建后不可修改
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
+                  <ProjectDirTip />
                 </div>
                 <Input
                   id="harness-edit-project-dir"
@@ -1887,7 +1962,12 @@ function ProjectEditDialog({
           </Button>
           <Button
             onClick={onSubmit}
-            disabled={saving || metadataRequiredMissing(form) || metadataNameInvalid(form)}
+            disabled={
+              saving ||
+              metadataRequiredMissing(form) ||
+              metadataNameInvalid(form) ||
+              metadataLengthInvalid(form)
+            }
             className="gap-2"
           >
             {saving ? <Loader2 className="size-4 animate-spin" /> : <Pencil className="size-4" />}
