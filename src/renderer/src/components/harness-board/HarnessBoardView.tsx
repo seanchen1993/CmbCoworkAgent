@@ -879,7 +879,7 @@ function progressPercentFromValues(progressIndex: number, totalNodes: number): n
 }
 
 function isProgressCompletedNodeStatus(status: HarnessNodeStatus): boolean {
-  return status === "done" || status === "skipped"
+  return status === "done" || status === "skipped" || status === "archived"
 }
 
 function progressIndexFromCurrentNodeId(
