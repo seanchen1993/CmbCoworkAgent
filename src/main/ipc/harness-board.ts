@@ -4,6 +4,7 @@ import {
   createHarnessFeature,
   createHarnessProject,
   buildHarnessFeatureDialogTips,
+  deleteHarnessProject,
   getHarnessProjectDetail,
   getHarnessProjectDetails,
   getHarnessRunDetail,
@@ -12,10 +13,7 @@ import {
   updateHarnessProjectMetadata
 } from "../harness-board/service"
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
-import {
-  purgeProjectAnalytics,
-  type PurgeProjectAnalyticsResult
-} from "../services/project-analytics-purge"
+import { purgeProjectAnalytics } from "../services/project-analytics-purge"
 import type {
   HarnessProjectCreateInput,
   HarnessProjectDetailViewModel,
@@ -72,23 +70,23 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  // Purge a deleted project's analytics from ES (trace + event docs) so it no
-  // longer appears in the dashboard. Call this *after* the project is deleted.
-  // The "delete project" feature lands on another branch — wire its delete flow
-  // to this (or import purgeProjectAnalytics directly in the main process).
   ipcMain.handle(
-    "harnessBoard:purgeProjectAnalytics",
-    async (
-      _event,
-      projectId: string
-    ): Promise<{ success: boolean; error?: string } & Partial<PurgeProjectAnalyticsResult>> => {
-      try {
-        const result = await purgeProjectAnalytics(projectId)
-        return { success: true, ...result }
-      } catch (e) {
-        console.error("[HarnessBoard] purgeProjectAnalytics error:", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
+    "harnessBoard:deleteProject",
+    async (_event, projectId: string): Promise<HarnessProjectMetadata> => {
+      const deleted = deleteHarnessProject(projectId)
+      // 项目本地删除后，后台清理其在 ES 中的 trace/event 文档，使其不再出现在运营面板统计中。
+      // 尽力而为（fire-and-forget）：内网部分机器无法直连 ES/后端，清理失败不应阻断或回滚删除。
+      void purgeProjectAnalytics(projectId)
+        .then((result) => {
+          console.log(`[HarnessBoard] purged analytics for deleted project ${projectId}:`, result)
+        })
+        .catch((e) => {
+          console.error(
+            `[HarnessBoard] purgeProjectAnalytics failed for deleted project ${projectId}:`,
+            e
+          )
+        })
+      return deleted
     }
   )
 

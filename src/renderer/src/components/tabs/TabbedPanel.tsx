@@ -12,6 +12,7 @@ interface TabbedPanelProps {
   hasPendingGitDiffNotice?: boolean
   chatSurface?: ChatSurface
   hideWelcomeSkillTabs?: boolean
+  readOnlyReason?: string | null
   onRequestOpenGitPanel?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
 }
@@ -22,6 +23,7 @@ export function TabbedPanel({
   hasPendingGitDiffNotice = false,
   chatSurface = "default",
   hideWelcomeSkillTabs = false,
+  readOnlyReason = null,
   onRequestOpenGitPanel,
   onThreadGitStatusChange
 }: TabbedPanelProps): React.JSX.Element {
@@ -62,6 +64,7 @@ export function TabbedPanel({
             showGitChangeNotice={hasPendingGitDiffNotice}
             surface={chatSurface}
             hideWelcomeSkillTabs={hideWelcomeSkillTabs}
+            readOnlyReason={readOnlyReason}
             onOpenGitPanel={onRequestOpenGitPanel}
             onThreadGitStatusChange={onThreadGitStatusChange}
           />

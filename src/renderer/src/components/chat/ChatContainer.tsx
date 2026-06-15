@@ -915,6 +915,7 @@ interface ChatContainerProps {
   showGitChangeNotice?: boolean
   surface?: ChatSurface
   hideWelcomeSkillTabs?: boolean
+  readOnlyReason?: string | null
   onOpenGitPanel?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
 }
@@ -1392,13 +1393,15 @@ export function ChatContainer({
   showGitChangeNotice = false,
   surface = "default",
   hideWelcomeSkillTabs = false,
+  readOnlyReason = null,
   onOpenGitPanel,
   onThreadGitStatusChange
 }: ChatContainerProps): React.JSX.Element {
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
+  const readOnly = Boolean(readOnlyReason)
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
-  const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips
+  const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -2808,7 +2811,11 @@ export function ChatContainer({
     hasPendingTransportPayload: hasPendingGoalTransportPayload,
     goalControlAllowedWhileLoading
   })
+  // 项目已删除时，会话仅可查看历史：禁用输入框与编辑器控件。
+  const effectiveInputDisabled = inputDisabled || readOnly
+  const effectiveComposerControlsDisabled = composerControlsDisabled || readOnly
   const inputPlaceholder = useMemo(() => {
+    if (readOnlyReason) return readOnlyReason
     const goal = goalUi.goal
     if (isLoading) {
       if (streamData.isLoading && !scheduledTaskLoading && hasActiveGoalRunning) {
@@ -2834,6 +2841,7 @@ export function ChatContainer({
     hasActiveGoalRunning,
     goalControlAllowedWhileLoading,
     isLoading,
+    readOnlyReason,
     scheduledTaskLoading,
     streamData.isLoading
   ])
@@ -3095,6 +3103,7 @@ export function ChatContainer({
     // future invoker (hotkey, programmatic call) can't accidentally ship the
     // literal "/xxx" text as a message.
     if (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) return
+    if (readOnly) return
     if (
       (!trimmedInput && attachments.length === 0 && !selectedSkill) ||
       historyLoading ||
@@ -5122,7 +5131,7 @@ export function ChatContainer({
                   }}
                   onKeyDown={handleKeyDown}
                   placeholder={inputPlaceholder}
-                  disabled={inputDisabled}
+                  disabled={effectiveInputDisabled}
                   className={cn(
                     "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
                     "p-4 text-sm placeholder:text-muted-foreground",
@@ -5138,7 +5147,7 @@ export function ChatContainer({
                     <button
                       type="button"
                       disabled={
-                        composerControlsDisabled ||
+                        effectiveComposerControlsDisabled ||
                         attachmentLoading ||
                         attachments.length >= MAX_ATTACHMENTS ||
                         totalAttachmentChars >= MAX_TOTAL_CHARS
@@ -5170,7 +5179,7 @@ export function ChatContainer({
                         <TooltipTrigger asChild>
                           <button
                             type="button"
-                            disabled={inputDisabled}
+                            disabled={effectiveInputDisabled}
                             onClick={handleInsertNewline}
                             aria-label="换行"
                             className="cursor-pointer flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -5229,7 +5238,7 @@ export function ChatContainer({
                         <button
                           type="submit"
                           disabled={
-                            inputDisabled ||
+                            effectiveInputDisabled ||
                             (!input.trim() && attachments.length === 0 && !selectedSkill) ||
                             (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(input))
                           }
