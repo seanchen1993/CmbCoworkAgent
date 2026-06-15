@@ -3742,20 +3742,29 @@ function FeatureDetailPage({
             </span>
           </button>
           {skippable && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="absolute right-2 top-2 h-7 gap-1 px-2 text-xs"
-              onClick={(event) => {
-                event.stopPropagation()
-                void handleSkipNode(node)
-              }}
-              disabled={skippingNodeId !== null}
-            >
-              {skipping ? <Loader2 className="size-3 animate-spin" /> : <SkipForward className="size-3" />}
-              跳过
-            </Button>
+            <TooltipProvider delayDuration={150}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="absolute right-2 top-2 h-7 gap-1 px-2 text-xs"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      void handleSkipNode(node)
+                    }}
+                    disabled={skippingNodeId !== null}
+                  >
+                    {skipping ? <Loader2 className="size-3 animate-spin" /> : <SkipForward className="size-3" />}
+                    跳过
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="z-[70] max-w-72">
+                  跳过当前节点，不再产生对应阶段产物
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           )}
         </div>
       )
