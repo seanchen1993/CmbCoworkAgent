@@ -307,7 +307,21 @@ export interface LocalSandboxOptions {
 interface ExecuteRawOptions {
   background?: boolean
   cwd?: string
+  /**
+   * Live partial-output callback. Invoked per stdout/stderr chunk while the
+   * command is running so background tasks can expose progress before they
+   * complete. The final authoritative output still uses encoding detection.
+   */
+  onData?: (text: string) => void
 }
+
+/**
+ * ExecuteResponse (from `deepagents`) extended with our background-task cap
+ * marker. `capReached` is set true only when a background task is terminated
+ * because it hit BACKGROUND_ABSOLUTE_MAX_MS — distinct from a foreground
+ * timeout so it does NOT trigger the sandbox-escape retry path.
+ */
+type LocalExecuteResponse = ExecuteResponse & { capReached?: boolean }
 
 type WindowsSandboxMode = "none" | "unelevated" | "readonly" | "elevated"
 
@@ -4761,8 +4775,20 @@ export class LocalSandbox
    */
   private static readonly SPAWN_RETRY_COUNT = 2
   private static readonly SPAWN_RETRY_DELAY_MS = 300
-  /** Maximum timeout for background tasks (10 minutes). */
+  /**
+   * Legacy background-task timeout (10 minutes). Retained because
+   * isBackgroundExecution() uses it as a fallback signal for detecting
+   * background execution when ExecuteRawOptions.background is not threaded.
+   * No longer used as the hard wall-clock kill — see BACKGROUND_ABSOLUTE_MAX_MS.
+   */
   private static readonly BACKGROUND_TIMEOUT_MS = 600_000
+  /**
+   * Absolute hard cap for background tasks (2 hours). This is the only
+   * wall-clock kill for background execution; tasks producing live output run
+   * until they finish or hit this cap, at which point they are terminated
+   * gracefully with a capReached marker (not the sandbox-escape 124 sentinel).
+   */
+  private static readonly BACKGROUND_ABSOLUTE_MAX_MS = 7_200_000
 
   /** Active background tasks (static — shared across instances so tasks survive re-creation). */
   private static backgroundTasks = new Map<
@@ -4775,8 +4801,14 @@ export class LocalSandbox
       startedAt: number
       completed: boolean
       outputChunks: string[]
+      /** Live partial-output buffer, populated via onData while !completed. */
+      partialOutput: string
+      /** True once partialOutput hit the maxOutputBytes cap and stopped growing. */
+      partialTruncated: boolean
+      /** Timestamp of the most recent onData chunk (for idle detection). */
+      lastOutputAt: number
       abortController: AbortController
-      result?: ExecuteResponse
+      result?: LocalExecuteResponse
     }
   >()
 
@@ -4836,8 +4868,11 @@ export class LocalSandbox
       startedAt: Date.now(),
       completed: false as boolean,
       outputChunks: [] as string[],
+      partialOutput: "",
+      partialTruncated: false,
+      lastOutputAt: Date.now(),
       abortController: taskAbortController,
-      result: undefined as ExecuteResponse | undefined
+      result: undefined as LocalExecuteResponse | undefined
     }
     LocalSandbox.backgroundTasks.set(taskId, task)
 
@@ -4847,9 +4882,30 @@ export class LocalSandbox
     this.executeRaw(
       effectiveCommand,
       undefined,
-      LocalSandbox.BACKGROUND_TIMEOUT_MS,
+      LocalSandbox.BACKGROUND_ABSOLUTE_MAX_MS,
       taskAbortController.signal,
-      { background: true, cwd: effectiveCwd }
+      {
+        background: true,
+        cwd: effectiveCwd,
+        // Live partial-output buffer (separate from the final authoritative
+        // output appended to outputChunks/result on completion). Caps at
+        // maxOutputBytes; once exceeded it stops growing and marks truncated.
+        onData: (text: string) => {
+          task.lastOutputAt = Date.now()
+          if (task.partialTruncated) return
+          const remaining = this.maxOutputBytes - task.partialOutput.length
+          if (remaining <= 0) {
+            task.partialTruncated = true
+            return
+          }
+          if (text.length > remaining) {
+            task.partialOutput += text.slice(0, remaining)
+            task.partialTruncated = true
+          } else {
+            task.partialOutput += text
+          }
+        }
+      }
     ).then(async rawResult => {
       // Guard: if already completed (e.g. cancelled via cancelBackgroundTasks), don't overwrite.
       if (task.completed) return
@@ -4919,18 +4975,31 @@ export class LocalSandbox
     elapsedSeconds?: number
     command?: string
     cwd?: string
+    partialOutput?: string
+    partialTruncated?: boolean
+    idleSeconds?: number
+    capReached?: boolean
   } | null {
     const task = LocalSandbox.backgroundTasks.get(taskId)
     if (!task) return null
     const elapsedSeconds = Math.round((Date.now() - task.startedAt) / 1000)
     if (!task.completed) {
-      return { completed: false, elapsedSeconds, command: task.command, cwd: task.cwd }
+      return {
+        completed: false,
+        elapsedSeconds,
+        command: task.command,
+        cwd: task.cwd,
+        partialOutput: task.partialOutput,
+        partialTruncated: task.partialTruncated,
+        idleSeconds: Math.round((Date.now() - task.lastOutputAt) / 1000)
+      }
     }
     return {
       completed: true,
       output: task.result?.output,
       exitCode: task.result?.exitCode,
-      elapsedSeconds
+      elapsedSeconds,
+      capReached: task.result?.capReached
     }
   }
 
@@ -5167,8 +5236,9 @@ export class LocalSandbox
     sandboxModeOverride?: string,
     timeoutMs?: number,
     overrideAbortSignal?: AbortSignal,
-    cwd?: string
-  ): Promise<ExecuteResponse> {
+    cwd?: string,
+    options?: ExecuteRawOptions
+  ): Promise<LocalExecuteResponse> {
     const effectiveSandboxMode = (sandboxModeOverride ?? this.windowsSandbox) as WindowsSandboxMode
     const effectiveTimeout = timeoutMs ?? this.timeout
     const effectiveCwd = this.resolveExecutionCwd(cwd)
@@ -5184,7 +5254,7 @@ export class LocalSandbox
         )
       }
       if (shouldBypassSandboxForProjectPluginHook) {
-        return this.executeRawUnserialized(command, "none", timeoutMs, overrideAbortSignal, effectiveCwd)
+        return this.executeRawUnserialized(command, "none", timeoutMs, overrideAbortSignal, effectiveCwd, options)
       }
 
       // Commands that need to escape the Windows sandbox (e.g. `git pull` writing .git,
@@ -5198,7 +5268,8 @@ export class LocalSandbox
         effectiveSandboxMode,
         effectiveTimeout,
         overrideAbortSignal,
-        effectiveCwd
+        effectiveCwd,
+        options
       )
     }
 
@@ -5223,7 +5294,8 @@ export class LocalSandbox
         isWindows,
         effectiveTimeout,
         overrideAbortSignal,
-        effectiveCwd
+        effectiveCwd,
+        options
       )
       const isSpawnEperm =
         result.exitCode === 1 &&
@@ -5247,7 +5319,7 @@ export class LocalSandbox
     timeoutMs?: number,
     overrideAbortSignal?: AbortSignal,
     options?: ExecuteRawOptions
-  ): Promise<ExecuteResponse> {
+  ): Promise<LocalExecuteResponse> {
     const effectiveSandboxMode = (sandboxModeOverride ?? this.windowsSandbox) as typeof this.windowsSandbox
     const backgroundExecution = LocalSandbox.isBackgroundExecution(timeoutMs, overrideAbortSignal, options)
     const effectiveCwd = this.resolveExecutionCwd(options?.cwd)
@@ -5266,7 +5338,8 @@ export class LocalSandbox
         sandboxModeOverride,
         timeoutMs,
         overrideAbortSignal,
-        effectiveCwd
+        effectiveCwd,
+        options
       )
     }
 
@@ -5280,7 +5353,8 @@ export class LocalSandbox
           sandboxModeOverride,
           timeoutMs,
           overrideAbortSignal,
-          effectiveCwd
+          effectiveCwd,
+          options
         )
       )
     }
@@ -5291,7 +5365,8 @@ export class LocalSandbox
         sandboxModeOverride,
         timeoutMs,
         overrideAbortSignal,
-        effectiveCwd
+        effectiveCwd,
+        options
       )
     )
   }
@@ -5309,8 +5384,9 @@ export class LocalSandbox
     sandboxModeOverride?: WindowsSandboxMode,
     timeoutMs?: number,
     overrideAbortSignal?: AbortSignal,
-    cwd?: string
-  ): Promise<ExecuteResponse> {
+    cwd?: string,
+    options?: ExecuteRawOptions
+  ): Promise<LocalExecuteResponse> {
     const methodStartMs = Date.now()
     const effectiveMode = sandboxModeOverride ?? this.windowsSandbox
     const effectiveAbortSignal = overrideAbortSignal ?? this.abortSignal
@@ -5573,7 +5649,7 @@ export class LocalSandbox
         return LocalSandbox.createAbortedExecuteResponse()
       }
       const sandboxEnv = await LocalSandbox.buildSandboxEnv(this.env)
-      const result = await new Promise<ExecuteResponse>((resolve) => {
+      const result = await new Promise<LocalExecuteResponse>((resolve) => {
         const stdoutChunks: Buffer[] = []
         const stderrChunks: Buffer[] = []
         let totalBytes = 0
@@ -5647,6 +5723,13 @@ export class LocalSandbox
             stdoutChunks.push(chunk)
             totalBytes += chunk.length
           }
+          // Live preview: per-chunk utf8 decode is acceptable here; the final
+          // authoritative output still uses detectCmdEncoding below.
+          try {
+            options?.onData?.(chunk.toString("utf8"))
+          } catch {
+            /* never let the live preview interfere with resolution */
+          }
         })
 
         proc.stderr?.on("data", (chunk: Buffer) => {
@@ -5657,6 +5740,11 @@ export class LocalSandbox
           if (totalBytes < this.maxOutputBytes) {
             stderrChunks.push(chunk)
             totalBytes += chunk.length
+          }
+          try {
+            options?.onData?.(chunk.toString("utf8"))
+          } catch {
+            /* never let the live preview interfere with resolution */
           }
         })
 
@@ -5703,8 +5791,18 @@ export class LocalSandbox
               const metadata = `<execute_metadata>\nUser aborted the command, process has been killed\n</execute_metadata>\n\n`
               resolve({ output: metadata + output, exitCode: 130, truncated })
             } else if (timedOut) {
-              const metadata = LocalSandbox.createTimeoutMetadata(cmdTimeout)
-              resolve({ output: metadata + output, exitCode: 124, truncated })
+              const isBackgroundCap = options?.background === true
+              if (isBackgroundCap) {
+                // Background absolute-cap kill: deliberately omit the timeout
+                // SENTINEL/REASON strings so this does NOT satisfy
+                // isSparseSandboxTimeoutOutput and never triggers the
+                // sandbox-escape retry path. capReached marks it explicitly.
+                const metadata = `<execute_metadata>\nBackground task reached the absolute maximum runtime (${(cmdTimeout / 1000 / 60).toFixed(0)} min) and was terminated; partial output is preserved.\n</execute_metadata>\n\n`
+                resolve({ output: metadata + output, exitCode: 124, truncated, capReached: true })
+              } else {
+                const metadata = LocalSandbox.createTimeoutMetadata(cmdTimeout)
+                resolve({ output: metadata + output, exitCode: 124, truncated })
+              }
             } else {
               resolve({ output, exitCode: signal ? null : code, truncated })
             }
@@ -5762,7 +5860,8 @@ export class LocalSandbox
                   sandboxModeOverride,
                   timeoutMs,
                   overrideAbortSignal,
-                  executionCwd
+                  executionCwd,
+                  options
                 )
               )
             }, LocalSandbox.SPAWN_RETRY_DELAY_MS)
@@ -5810,7 +5909,8 @@ export class LocalSandbox
         "unelevated",
         timeoutMs,
         overrideAbortSignal,
-        executionCwd
+        executionCwd,
+        options
       )
     }
 
@@ -5829,11 +5929,12 @@ export class LocalSandbox
     isWindows: boolean,
     timeoutMs?: number,
     overrideAbortSignal?: AbortSignal,
-    cwd?: string
-  ): Promise<ExecuteResponse> {
+    cwd?: string,
+    options?: ExecuteRawOptions
+  ): Promise<LocalExecuteResponse> {
     const onceStartMs = Date.now()
     const effectiveCwd = this.resolveExecutionCwd(cwd)
-    return new Promise<ExecuteResponse>((resolve) => {
+    return new Promise<LocalExecuteResponse>((resolve) => {
       const stdoutChunks: Buffer[] = []
       const stderrChunks: Buffer[] = []
       let totalBytes = 0
@@ -5952,6 +6053,13 @@ export class LocalSandbox
             `[LocalSandbox] first data at +${firstDataAt - onceStartMs}ms pid=${proc.pid}`
           )
         }
+        // Live preview before the byte-cap short-circuit: per-chunk utf8 decode
+        // is acceptable; the final authoritative output uses encoding detection.
+        try {
+          options?.onData?.(chunk.toString("utf8"))
+        } catch {
+          /* never let the live preview interfere with resolution */
+        }
         if (byteCapReached) return
         stdoutChunks.push(chunk)
         totalBytes += chunk.length
@@ -5964,6 +6072,11 @@ export class LocalSandbox
           console.log(
             `[LocalSandbox] first data at +${firstDataAt - onceStartMs}ms pid=${proc.pid}`
           )
+        }
+        try {
+          options?.onData?.(chunk.toString("utf8"))
+        } catch {
+          /* never let the live preview interfere with resolution */
         }
         if (byteCapReached) return
         stderrChunks.push(chunk)
@@ -6033,8 +6146,18 @@ export class LocalSandbox
             const metadata = `<execute_metadata>\nUser aborted the command, process has been killed\n</execute_metadata>\n\n`
             resolve({ output: metadata + output, exitCode: 130, truncated })
           } else if (timedOut) {
-            const metadata = LocalSandbox.createTimeoutMetadata(cmdTimeout)
-            resolve({ output: metadata + output, exitCode: 124, truncated })
+            const isBackgroundCap = options?.background === true
+            if (isBackgroundCap) {
+              // Background absolute-cap kill: deliberately omit the timeout
+              // SENTINEL/REASON strings so this does NOT satisfy
+              // isSparseSandboxTimeoutOutput and never triggers the
+              // sandbox-escape retry path. capReached marks it explicitly.
+              const metadata = `<execute_metadata>\nBackground task reached the absolute maximum runtime (${(cmdTimeout / 1000 / 60).toFixed(0)} min) and was terminated; partial output is preserved.\n</execute_metadata>\n\n`
+              resolve({ output: metadata + output, exitCode: 124, truncated, capReached: true })
+            } else {
+              const metadata = LocalSandbox.createTimeoutMetadata(cmdTimeout)
+              resolve({ output: metadata + output, exitCode: 124, truncated })
+            }
           } else {
             resolve({ output, exitCode: signal ? null : code, truncated })
           }

@@ -130,6 +130,10 @@ export interface Subagent {
   completedAt?: Date
   toolCallId?: string
   subagentType?: string
+  /** Latest interior tool the subagent invoked — drives the collapsed status line. */
+  currentTool?: string
+  /** ISO timestamp of the subagent's most recent interior activity (heartbeat). */
+  lastActivityAt?: string
 }
 
 // Stream events from agent
