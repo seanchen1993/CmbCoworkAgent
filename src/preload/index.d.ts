@@ -1981,7 +1981,7 @@ interface CustomAPI {
   git: {
     currentBranch: (
       cwd?: string
-    ) => Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }>
+    ) => Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean; error?: string }>
     listBranches: (
       cwd?: string,
       options?: { refreshRemote?: boolean }
