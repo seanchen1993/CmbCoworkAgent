@@ -2415,7 +2415,7 @@ export function DashboardView(): React.JSX.Element {
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [analysisAgentAllowed, setAnalysisAgentAllowed] = useState(false)
-  // 「生成但未提交分析」下钻权限：管理员 + unrestricted 名单内（后者仅本室数据，由主进程过滤）。
+  // 「生成但未提交分析」下钻权限：已登录可见；主进程按身份限制为全量 / 本室 / 本人数据。
   const [uncommittedAnalysisAllowed, setUncommittedAnalysisAllowed] = useState(false)
   // 「指标分析」入口默认隐藏：在标题栏右侧的隐藏热区连续点三下才显形（不完全移除功能）。
   const [analysisEntryRevealed, setAnalysisEntryRevealed] = useState(false)

@@ -779,12 +779,15 @@ function requireDashboardAnalysisAgentAccess(): void {
   }
 }
 
-// 「生成但未提交分析」（漏斗首层下钻）的访问门槛——在原管理员可见之上放宽一档：
-// - 管理员（VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS）：可看全部室的数据；
-// - 非管理员但在 VITE_DASHBOARD_UNRESTRICTED_YST_IDS 名单内：仅可看与自己 upperOrgLv1 相同的数据
-//   （需能从 pathName 解析出自己的 upperOrgLv1，否则无可限定的室，视为无权限）。
+// 「生成但未提交分析」（漏斗首层下钻）的访问门槛：
+// - 管理员（VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS）：可看全部数据；
+// - 非管理员但在 VITE_DASHBOARD_UNRESTRICTED_YST_IDS 名单内：可看与自己 upperOrgLv1 相同的数据；
+// - 其他普通登录用户：仅可看自己的数据。
 interface UncommittedAnalysisAccess {
   admin: boolean
+  selfOnly: boolean
+  sapId: string
+  ystId: string
   upperOrgLv1: string
 }
 
@@ -792,21 +795,41 @@ function isDashboardUncommittedAnalysisAllowed(
   access: DashboardAccessContext = getDashboardAccessContext()
 ): boolean {
   if (import.meta.env.DEV) return true
-  if (!access.loggedIn || !access.ystId) return false
-  if (getTraceEvolverReviewAdminIds().has(access.ystId)) return true
-  return access.unrestricted && Boolean(access.upperOrgLv1)
+  return access.loggedIn
 }
 
 function requireDashboardUncommittedAnalysisAccess(): UncommittedAnalysisAccess {
   const access = getDashboardAccessContext()
-  if (import.meta.env.DEV) return { admin: true, upperOrgLv1: "" }
+  if (import.meta.env.DEV) {
+    return { admin: true, selfOnly: false, sapId: "dev", ystId: "dev", upperOrgLv1: "" }
+  }
   if (!access.loggedIn) throw new Error("请先登录后再查看生成但未提交分析")
   const admin = Boolean(access.ystId) && getTraceEvolverReviewAdminIds().has(access.ystId)
-  if (admin) return { admin: true, upperOrgLv1: access.upperOrgLv1 }
-  if (access.unrestricted && access.upperOrgLv1) {
-    return { admin: false, upperOrgLv1: access.upperOrgLv1 }
+  if (admin) {
+    return {
+      admin: true,
+      selfOnly: false,
+      sapId: access.sapId,
+      ystId: access.ystId,
+      upperOrgLv1: access.upperOrgLv1
+    }
   }
-  throw new Error("无生成但未提交分析查看权限")
+  if (access.unrestricted && access.upperOrgLv1) {
+    return {
+      admin: false,
+      selfOnly: false,
+      sapId: access.sapId,
+      ystId: access.ystId,
+      upperOrgLv1: access.upperOrgLv1
+    }
+  }
+  return {
+    admin: false,
+    selfOnly: true,
+    sapId: access.sapId,
+    ystId: access.ystId,
+    upperOrgLv1: access.upperOrgLv1
+  }
 }
 
 function buildNoAccessFilter(): Record<string, unknown> {
@@ -2540,13 +2563,29 @@ function uncommittedSettledRange(range: TimeRange): TimeRange {
   return { from: range.from, to: range.to < settle ? range.to : settle }
 }
 
+function buildUncommittedSelfUserFilter(access: UncommittedAnalysisAccess): Record<string, unknown> {
+  const should: Record<string, unknown>[] = []
+  const sapId = access.sapId.trim()
+  const ystId = access.ystId.trim()
+  if (sapId) {
+    should.push({ term: { sapId } }, { term: { "sapId.keyword": sapId } })
+  }
+  if (ystId) {
+    should.push({ term: { ystId } }, { term: { "ystId.keyword": ystId } })
+  }
+  if (should.length === 0) return { term: { sapId: "__dashboard_no_access__" } }
+  return { bool: { should, minimum_should_match: 1 } }
+}
+
 function uncommittedScopeFilters(
   options: UncommittedScopeOptions | undefined,
   access: UncommittedAnalysisAccess
 ): Record<string, unknown>[] {
   const filters: Record<string, unknown>[] = []
-  // 非管理员仅能查看与自己 upperOrgLv1 相同的数据（与界面上的部门筛选 AND 叠加，无法越权）。
-  if (!access.admin && access.upperOrgLv1) {
+  // 数据权限与界面筛选 AND 叠加：普通用户锁本人，名单用户锁本室，管理员不加身份约束。
+  if (access.selfOnly) {
+    filters.push(buildUncommittedSelfUserFilter(access))
+  } else if (!access.admin && access.upperOrgLv1) {
     filters.push(buildUpperOrgLv1Filter(access.upperOrgLv1))
   }
   const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(options?.upperOrgLv1))
@@ -2584,7 +2623,7 @@ async function fetchUncommittedRanking(
   range: TimeRange,
   options?: UncommittedScopeOptions
 ): Promise<UncommittedRankingData> {
-  // 管理员可看全部室；unrestricted 名单内的非管理员仅可看本室（见 requireDashboardUncommittedAnalysisAccess）。
+  // 管理员可看全部；unrestricted 名单用户看本室；普通用户只看本人。
   const access = requireDashboardUncommittedAnalysisAccess()
   const scopeFilters = uncommittedScopeFilters(options, access)
   // 上界排除最近 2 小时的在途生成；纯历史范围不受影响（见 uncommittedSettledRange）。
@@ -2740,7 +2779,7 @@ async function fetchUncommittedDetail(
   range: TimeRange,
   options?: UncommittedScopeOptions
 ): Promise<UncommittedDetailData> {
-  // 管理员可看全部室；unrestricted 名单内的非管理员仅可看本室。
+  // 管理员可看全部；unrestricted 名单用户看本室；普通用户只看本人。
   const access = requireDashboardUncommittedAnalysisAccess()
   const normalizedSapId = sapId.trim()
   if (!normalizedSapId) throw new Error("sapId is required")
