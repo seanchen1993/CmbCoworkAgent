@@ -2480,6 +2480,17 @@ export function ChatContainer({
     ]
   )
 
+  useEffect(() => {
+    if (!yoloMode || !pendingApproval) return
+    const approvalRecord = pendingApproval as unknown as Record<string, unknown>
+    if (
+      approvalRecord._orchestratorRequestId &&
+      approvalRecord.operation === "git_push"
+    ) {
+      void handleApprovalDecision("approve")
+    }
+  }, [handleApprovalDecision, pendingApproval, yoloMode])
+
   // The pending git_commit approval (agent ran `git commit` → task-card dialog), if any.
   const agentCommitApproval = useMemo(() => {
     const approval = pendingApproval as unknown as
@@ -4809,6 +4820,7 @@ export function ChatContainer({
                           toolResults={toolResults}
                           toolCallStates={toolCallDisplayStates}
                           pendingApproval={pendingApproval}
+                          autoApproveGitPush={yoloMode}
                           onApprovalDecision={handleApprovalDecision}
                           onEditUserMessage={handleEditUserMessage}
                           onSetGoalFromMessage={handleSetGoalFromMessage}
@@ -4941,7 +4953,11 @@ export function ChatContainer({
               Boolean(
                 (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId
               ) &&
-              (pendingApproval as unknown as Record<string, unknown>).operation !== "git_commit" && (
+              (pendingApproval as unknown as Record<string, unknown>).operation !== "git_commit" &&
+              !(
+                yoloMode &&
+                (pendingApproval as unknown as Record<string, unknown>).operation === "git_push"
+              ) && (
               <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>
           {(() => {
               const approval = pendingApproval as unknown as Record<string, unknown>
