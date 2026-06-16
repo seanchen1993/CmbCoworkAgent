@@ -260,17 +260,18 @@ type EnterpriseProjectDetailCacheEntry =
   | { kind: "hit"; project: HarnessEnterpriseProjectDetailItem }
   | { kind: "miss" }
 
-interface GitPanelFileChange {
+type GitChangedFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+
+interface GitChangedFileSummary {
   path: string
-  diff: string
-  additions: number
-  deletions: number
+  previousPath?: string
+  status?: GitChangedFileStatus
 }
 
-interface GitPanelDiffState {
+interface GitChangedFilesSummaryState {
   success: boolean
   isGitRepo?: boolean
-  files: GitPanelFileChange[]
+  files: GitChangedFileSummary[]
   changedFilesTotal?: number
   omittedFileCount?: number
   error?: string
@@ -300,7 +301,7 @@ interface WorkspaceChangeGroup {
 
 interface WorkspaceChangeState {
   status: "loading" | "ready" | "error"
-  files: GitPanelFileChange[]
+  files: GitChangedFileSummary[]
   changedFilesTotal: number
   omittedFileCount: number
   error?: string
@@ -3214,6 +3215,7 @@ function FeatureWorkspaceChangesPanel({
   }, [groups])
 
   const [changesByGroup, setChangesByGroup] = useState<Record<string, WorkspaceChangeState>>({})
+  const refreshRequestIdsRef = useRef(new Map<string, number>())
 
   const openWorkspacePathInFileManager = useCallback(async (workspacePath: string): Promise<void> => {
     try {
@@ -3230,6 +3232,10 @@ function FeatureWorkspaceChangesPanel({
   }, [])
 
   const refreshGroup = useCallback(async (group: WorkspaceChangeGroup): Promise<void> => {
+    const requestId = (refreshRequestIdsRef.current.get(group.key) ?? 0) + 1
+    refreshRequestIdsRef.current.set(group.key, requestId)
+    const isLatestRequest = (): boolean => refreshRequestIdsRef.current.get(group.key) === requestId
+
     setChangesByGroup((current) => ({
       ...current,
       [group.key]: {
@@ -3241,7 +3247,10 @@ function FeatureWorkspaceChangesPanel({
     }))
 
     try {
-      const state: GitPanelDiffState = await window.api.workspace.getGitPanelDiffs(group.representativeThreadId)
+      const state: GitChangedFilesSummaryState = await window.api.workspace.getGitChangedFilesSummary(
+        group.representativeThreadId
+      )
+      if (!isLatestRequest()) return
       if (!state.success) {
         setChangesByGroup((current) => ({
           ...current,
@@ -3266,6 +3275,7 @@ function FeatureWorkspaceChangesPanel({
         }
       }))
     } catch (error) {
+      if (!isLatestRequest()) return
       setChangesByGroup((current) => ({
         ...current,
         [group.key]: {
