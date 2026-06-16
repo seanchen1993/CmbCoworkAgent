@@ -8,6 +8,7 @@
 import {
   MAX_COORDINATOR_WORKERS_IN_THREAD_STATE,
   coordinatorWorkersEqual,
+  hasSubagentToolActivity,
   mergeCoordinatorWorkers,
   safeTimestamp,
   upsertSubagentLogEntry,
@@ -97,6 +98,46 @@ async function testSubagentLogCapKeepsNewestEntries(): Promise<void> {
   assert(logs.length === 20, "subagent logs should be capped at 20 entries")
   assert(logs[0].id === "log-5", "cap should drop oldest entries")
   assert(logs[19].id === "log-24", "cap should keep newest entry")
+}
+
+async function testSubagentLogCapRetainsThinkingUnderToolBurst(): Promise<void> {
+  // 40 tool entries followed by a couple of thinking entries: assistant entries
+  // must survive even when far more recent tool entries exist.
+  const toolEntries = Array.from({ length: 40 }, (_, index) =>
+    logEntry({ id: `tool-${index}`, kind: "tool_call" })
+  )
+  const thinkingEntries = [
+    logEntry({ id: "think-1", kind: "assistant", content: "early reasoning" }),
+    logEntry({ id: "think-2", kind: "assistant", content: "later reasoning" })
+  ]
+  const logs = [...toolEntries, ...thinkingEntries].reduce<SubagentInternalLogEntry[]>(
+    (current, entry) => upsertSubagentLogEntry(current, entry),
+    []
+  )
+
+  const retainedThinking = logs.filter((entry) => entry.kind === "assistant")
+  assert(retainedThinking.length === 2, "both thinking entries should survive a tool burst")
+  assert(logs.length <= 32, "overall log should stay bounded (recent tools + thinking)")
+}
+
+async function testSubagentToolActivityPredicate(): Promise<void> {
+  const thinkingOnly = [logEntry({ id: "a-1", kind: "assistant", content: "thinking..." })]
+  assert(
+    hasSubagentToolActivity(0, thinkingOnly) === false,
+    "assistant-only logs should not render the current-tool card"
+  )
+  assert(
+    hasSubagentToolActivity(0, [logEntry({ id: "t-1", kind: "tool_call" })]) === true,
+    "a tool_call log should render the current-tool card"
+  )
+  assert(
+    hasSubagentToolActivity(1, thinkingOnly) === true,
+    "a positive tool count should render the current-tool card"
+  )
+  assert(
+    hasSubagentToolActivity(0, []) === false,
+    "no logs and no tool count should not render the current-tool card"
+  )
 }
 
 async function testCoordinatorWorkerMergeAndSort(): Promise<void> {
@@ -349,6 +390,10 @@ async function run(): Promise<void> {
   console.log("PASS thread state helper log upsert")
   await testSubagentLogCapKeepsNewestEntries()
   console.log("PASS thread state helper log cap")
+  await testSubagentLogCapRetainsThinkingUnderToolBurst()
+  console.log("PASS thread state helper retains thinking under tool burst")
+  await testSubagentToolActivityPredicate()
+  console.log("PASS thread state helper subagent tool activity predicate")
   await testCoordinatorWorkerMergeAndSort()
   console.log("PASS thread state helper worker merge")
   await testCoordinatorWorkerAuthoritativeMergeRemovesMissingWorkers()

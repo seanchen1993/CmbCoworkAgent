@@ -43,6 +43,7 @@ import {
   type CoordinatorWorkerView,
   type SubagentInternalLogEntry
 } from "@/lib/thread-context"
+import { hasSubagentToolActivity } from "@/lib/thread-state-helpers"
 import { getFileType } from "@/lib/file-types"
 import { Badge } from "@/components/ui/badge"
 import { emitOpenResourcePreview, onOpenResourcePreview } from "@/lib/resource-preview-events"
@@ -2353,7 +2354,7 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
 
   return (
     <div className="p-3 space-y-3">
-      {(subagentToolCallCount > 0 || subagentInternalLogs.length > 0) && (
+      {hasSubagentToolActivity(subagentToolCallCount, subagentInternalLogs) && (
         <SubagentCurrentToolCard
           logs={subagentInternalLogs}
           toolCallCount={subagentToolCallCount}
@@ -2725,8 +2726,12 @@ function SubagentCurrentToolCard({
   hasRunningSubagent: boolean
   nowMs: number
 }): React.JSX.Element {
+  const [showProcess, setShowProcess] = useState(false)
+  // Thinking entries are shown in the per-subagent card; keep this card tool-only
+  // (including `currentLog`, so thinking text is never mistaken for a tool input).
+  const toolLogs = logs.filter((entry) => entry.kind !== "assistant")
   const currentLog =
-    [...logs].reverse().find((log) => log.toolCallId || log.toolName) ?? logs.at(-1)
+    [...toolLogs].reverse().find((log) => log.toolCallId || log.toolName) ?? toolLogs.at(-1)
   const isToolWaiting = currentLog
     ? currentLog.status !== "completed" && currentLog.result === undefined
     : toolCallCount > 0
@@ -2810,6 +2815,43 @@ function SubagentCurrentToolCard({
           </div>
         </div>
       </div>
+
+      {/* Phase 2 (A1'): expandable real-time subagent process — thinking text,
+          tool calls and tool results. Collapsed by default so the card stays a
+          quiet status line; expand to follow the full interior as it streams. */}
+      {toolLogs.length > 0 && (
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => setShowProcess((value) => !value)}
+            className="text-[11px] font-medium text-sky-700 hover:underline dark:text-sky-300"
+          >
+            {showProcess ? "收起工具执行" : `展开工具执行（${toolLogs.length}）`}
+          </button>
+          {showProcess && (
+            <div className="mt-2 max-h-64 space-y-1.5 overflow-y-auto rounded-xl border border-border/50 bg-background/60 px-3 py-2">
+              {toolLogs.map((entry) => {
+                const body = entry.kind === "tool_result" ? entry.result : entry.content
+                const marker =
+                  entry.kind === "assistant" ? "💭 " : entry.kind === "tool_result" ? "↩ " : "🔧 "
+                return (
+                  <div key={entry.id} className="text-[11px] leading-relaxed">
+                    <div className="font-medium text-foreground/80">
+                      {marker}
+                      {entry.title}
+                    </div>
+                    {body && (
+                      <div className="mt-0.5 whitespace-pre-wrap break-words text-muted-foreground">
+                        {body}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

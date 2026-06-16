@@ -1854,11 +1854,12 @@ const api = {
     // Approval decision from renderer → main
     sendApprovalDecision: (decision: {
       requestId: string
-      type: string
+      type: "approve" | "approve_session" | "approve_permanent" | "reject" | "error"
       tool_call_id: string
       savedToolName?: string
       savedToolDescription?: string
       commitResult?: { success: boolean; commitMessage?: string; error?: string }
+      pushResult?: { success: boolean; error?: string }
     }): void => {
       ipcRenderer.send("sandbox:approvalDecision", decision)
     },

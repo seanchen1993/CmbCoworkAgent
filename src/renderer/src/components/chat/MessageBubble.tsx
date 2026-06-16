@@ -542,6 +542,7 @@ interface MessageBubbleProps {
   toolResults?: Map<string, ToolResultInfo>
   toolCallStates?: Map<string, ToolCallState>
   pendingApproval?: HITLRequest | null
+  autoApproveGitPush?: boolean
   onApprovalDecision?: (
     decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
   ) => void
@@ -562,6 +563,7 @@ export function MessageBubble({
   toolResults,
   toolCallStates,
   pendingApproval,
+  autoApproveGitPush = false,
   onApprovalDecision,
   onEditUserMessage,
   onSetGoalFromMessage,
@@ -1043,9 +1045,12 @@ export function MessageBubble({
                 const isBatch = (pendingApproval?.pendingCount ?? 1) > 1
                 // git commit is approved through the dedicated task-card dialog, so the
                 // inline approve/reject buttons are hidden to avoid a second (card-less) path.
-                const isGitCommitApproval =
-                  (pendingApproval as unknown as { operation?: string } | null)?.operation ===
-                  "git_commit"
+                const pendingOperation = (pendingApproval as unknown as {
+                  operation?: string
+                } | null)?.operation
+                const isGitCommitApproval = pendingOperation === "git_commit"
+                const isAutoGitPushApproval =
+                  autoApproveGitPush && pendingOperation === "git_push"
                 return (
                   <ToolCallRenderer
                     key={`${toolId}-${needsApproval ? "pending" : "done"}`}
@@ -1054,7 +1059,7 @@ export function MessageBubble({
                     isError={result?.is_error}
                     status={inferredStatus}
                     needsApproval={needsApproval}
-                    showApprovalButtons={!isBatch && !isGitCommitApproval}
+                    showApprovalButtons={!isBatch && !isGitCommitApproval && !isAutoGitPushApproval}
                     onApprovalDecision={onApprovalDecision}
                     approvalTypes={
                       (

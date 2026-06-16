@@ -540,6 +540,13 @@ export function AgentGitCommitDialog({
           </div>
         </div>
 
+        {diffLoading && !diff && (
+          <div className="mx-4 mt-3 flex h-64 items-center justify-center rounded-lg border border-border/70 bg-muted/10 text-xs text-muted-foreground">
+            <Loader2 className="mr-2 size-4 animate-spin" />
+            正在加载文件变更...
+          </div>
+        )}
+
         {diff && diff.files.length > 0 && (
           <div className="mx-4 mt-3 space-y-2">
             <div className="flex items-center justify-between gap-2 text-xs">

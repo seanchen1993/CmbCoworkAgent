@@ -24,6 +24,8 @@ import {
   isChainedShellCommand,
   isForcePushCommand,
   isGitCommitCommand,
+  isGitMergeCommand,
+  isGitPushCommand,
   normalizeCdPrefixedGitCommitCommand,
   normalizeGitAddPrefixedGitCommitCommand,
   resolveGitCommandCwd
@@ -200,11 +202,30 @@ export class ToolOrchestrator {
         return this.requestCardCommit(commitCommand, commitCwd, preselectedFilePaths)
       }
 
+      // 2.6 git push → route a plain (non-force) push through workspace:pushWorktree — the
+      // same robust, unsandboxed mechanism the Git Panel uses. Running push inside the
+      // sandbox often hangs on Git Credential Manager prompts and times out. This branch is
+      // intentionally before the YOLO shortcut so YOLO pushes can still use the Git Panel
+      // path; the renderer auto-accepts git_push requests in YOLO mode. Force pushes and
+      // chained pushes keep the raw path (pushWorktree only performs a plain
+      // `push -u origin <current branch>`), and we only route when the push actually targets
+      // the current cwd — a `git -C <other>` push to a different repo would otherwise be
+      // silently redirected to the thread's worktree.
+      if (
+        isGitPushCommand(command) &&
+        !isForcePushCommand(command) &&
+        !isChainedShellCommand(command) &&
+        isPathInsideOrSame(resolveGitCommandCwd(command, cwd), cwd)
+      ) {
+        return this.requestWorktreePush(command, cwd)
+      }
+
       // 3. YOLO mode: skip the initial command approval for safe + needs_approval
       // commands, but still require explicit approval before escaping the sandbox.
-      // History-rewriting force pushes are the exception — they always prompt, even in
-      // YOLO, so an unattended run can't destroy remote history.
-      if (this.yoloMode && !isForcePushCommand(command)) {
+      // History-rewriting force pushes AND merges are exceptions — they still prompt even in
+      // YOLO, so an unattended run can't rewrite remote history or auto-create a merge commit
+      // that bypasses the task-card flow.
+      if (this.yoloMode && !isForcePushCommand(command) && !isGitMergeCommand(command)) {
         const result = await this.rawExecute(command, sandboxMode, cwd)
         return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result)
       }
@@ -348,6 +369,49 @@ export class ToolOrchestrator {
     }
     return {
       output: `提交失败：${result?.error || "未知错误"}`,
+      exitCode: 1,
+      truncated: false
+    }
+  }
+
+  /**
+   * Handle a plain `git push` by routing it through the renderer's workspace:pushWorktree —
+   * the same path the Git Panel push button uses (unsandboxed `push -u origin <branch>` in
+   * the main process, with LFS compat + adoption push-marking). This avoids the sandbox
+   * credential-prompt hang/timeout. We never run the raw `git push` ourselves; the renderer
+   * performs the push and reports the outcome back via decision.pushResult.
+   */
+  private async requestWorktreePush(command: string, cwd: string): Promise<ExecuteResponse> {
+    console.log(`[Orchestrator] git push → workspace:pushWorktree (cwd=${cwd})`)
+    const decision = await this.requestApproval({
+      id: randomUUID(),
+      tool_call: { id: randomUUID(), name: "execute", args: { command } },
+      safety_level: "needs_approval",
+      operation: "git_push",
+      command,
+      cwd,
+      reason: "Git 推送将通过 Git 面板的推送机制执行（push -u origin <当前分支>）",
+      allowed_decisions: ["approve", "reject"],
+      allowed_approval_types: ["approve", "reject"]
+    })
+
+    const result = decision.pushResult
+    if (decision.type !== "approve") {
+      if (decision.type === "error" || result) {
+        return {
+          output: `推送失败：${result?.error || "未知错误"}`,
+          exitCode: 1,
+          truncated: false
+        }
+      }
+      return { output: "用户取消了本次推送。", exitCode: 1, truncated: false }
+    }
+
+    if (result?.success) {
+      return { output: "推送成功（push -u origin 当前分支）。", exitCode: 0, truncated: false }
+    }
+    return {
+      output: `推送失败：${result?.error || "未知错误"}`,
       exitCode: 1,
       truncated: false
     }

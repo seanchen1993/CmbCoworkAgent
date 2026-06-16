@@ -37,7 +37,9 @@ function assertSourceOrder(value: string, first: string, second: string, label: 
 }
 
 async function readProjectFile(path: string): Promise<string> {
-  return readFile(join(PROJECT_ROOT, path), "utf8")
+  // Normalize CRLF -> LF so multi-line source-guard assertions (which use \n)
+  // match regardless of the checkout's line endings on Windows.
+  return (await readFile(join(PROJECT_ROOT, path), "utf8")).replace(/\r\n/g, "\n")
 }
 
 async function testTransportCountsHiddenSubagentTools(): Promise<void> {
@@ -228,7 +230,11 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
     "upsertSubagentLogEntry(prev.subagentInternalLogs, data.entry!)",
     "thread context updates existing tool log entries"
   )
-  assertIncludes(threadStateHelpers, ".slice(-20)", "thread state helper caps internal log entries")
+  assertIncludes(
+    threadStateHelpers,
+    "limitSubagentLogs",
+    "thread state helper caps internal log entries"
+  )
   assertIncludes(
     threadContext,
     "Math.max(0, Math.floor(data.count!))",

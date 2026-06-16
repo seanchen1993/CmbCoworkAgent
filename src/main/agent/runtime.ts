@@ -1168,7 +1168,10 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
               return JSON.stringify({
                 retrieval_status: "not_ready",
                 elapsed: result.elapsedSeconds,
-                command: result.command
+                command: result.command,
+                partialOutput: result.partialOutput,
+                partialTruncated: result.partialTruncated,
+                idleSeconds: result.idleSeconds
               })
             }
             const status = result.exitCode === 0 ? "succeeded" : "failed"
@@ -1202,7 +1205,10 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
           return JSON.stringify({
             retrieval_status: "timeout",
             elapsed: final.elapsedSeconds,
-            command: final.command
+            command: final.command,
+            partialOutput: final.partialOutput,
+            partialTruncated: final.partialTruncated,
+            idleSeconds: final.idleSeconds
           })
         }
 
