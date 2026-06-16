@@ -67,7 +67,10 @@ type HarnessPlatformConfigKey =
   | "plugin_dir_hook"
   | "dialog_tips"
 
-const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<HarnessInspectCommandName, HarnessInspectCommandConfigKey> = {
+const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
+  HarnessInspectCommandName,
+  HarnessInspectCommandConfigKey
+> = {
   project: "project_status",
   run: "feature_status",
   createProject: "create_project",
@@ -405,7 +408,10 @@ export function listHarnessAdapters(): HarnessAdapterRegistryItem[] {
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
-function resolveHarnessAdapter(adapterId: string, adapterType: HarnessAdapterType): HarnessAdapterSnapshot {
+function resolveHarnessAdapter(
+  adapterId: string,
+  adapterType: HarnessAdapterType
+): HarnessAdapterSnapshot {
   if (adapterType !== "plugin") {
     throw new Error(`Unsupported harness adapter type: ${adapterType}`)
   }
@@ -413,7 +419,9 @@ function resolveHarnessAdapter(adapterId: string, adapterType: HarnessAdapterTyp
     (item) => pluginHasBoardConfig(item) && pluginMatchesAdapterId(item, adapterId)
   )
   if (!plugin) {
-    throw new Error("Selected plugin is not installed or does not provide board_core/board_config.json")
+    throw new Error(
+      "Selected plugin is not installed or does not provide board_core/board_config.json"
+    )
   }
   const compatibility = evaluateBoardPluginCompatibility(plugin, plugin.name)
   if (!compatibility.compatible) {
@@ -425,7 +433,9 @@ function resolveHarnessAdapter(adapterId: string, adapterType: HarnessAdapterTyp
 function resolveHarnessAdapterSnapshot(adapter: HarnessAdapterSnapshot): HarnessAdapterSnapshot {
   const plugin = findPluginForAdapterSnapshot(adapter)
   if (!plugin) {
-    throw new Error("Selected plugin is not installed or does not provide board_core/board_config.json")
+    throw new Error(
+      "Selected plugin is not installed or does not provide board_core/board_config.json"
+    )
   }
   return pluginToHarnessAdapterSnapshot(plugin)
 }
@@ -439,7 +449,10 @@ function adapterPluginDir(project: HarnessProjectMetadata): string {
   const plugin = findAdapterPlugin(project)
   const compatibility = evaluateBoardPluginCompatibility(plugin, adapter.name || adapter.id)
   if (!compatibility.compatible) {
-    throw new Error(compatibility.message || `Harness adapter plugin not compatible: ${adapter.name || adapter.id}`)
+    throw new Error(
+      compatibility.message ||
+        `Harness adapter plugin not compatible: ${adapter.name || adapter.id}`
+    )
   }
   if (!plugin) {
     throw new Error(`Harness adapter plugin not found: ${adapter.name || adapter.id}`)
@@ -516,8 +529,8 @@ function formatAdapterError(error: unknown, label = "Harness adapter"): string {
 }
 
 function formatHarnessCommandToken(value: string): string {
-  if (!value) return "\"\""
-  return /^[A-Za-z0-9_/:=.,@%+-]+$/.test(value) ? value : (JSON.stringify(value) ?? "\"\"")
+  if (!value) return '""'
+  return /^[A-Za-z0-9_/:=.,@%+-]+$/.test(value) ? value : (JSON.stringify(value) ?? '""')
 }
 
 function formatHarnessCommand(invocation: ConfiguredHarnessInvocation["invocation"]): string {
@@ -548,7 +561,9 @@ function logHarnessInvocationStart(
   options: HarnessInvocationLogOptions
 ): void {
   const detail = options.detail ? ` ${options.detail}` : ""
-  console.log(`[HarnessBoard] [${options.configKey}] Running${detail}: ${formatHarnessCommand(configured.invocation)}`)
+  console.log(
+    `[HarnessBoard] [${options.configKey}] Running${detail}: ${formatHarnessCommand(configured.invocation)}`
+  )
   console.log(`[HarnessBoard] [${options.configKey}] CWD: ${configured.cwd}`)
 }
 
@@ -558,7 +573,9 @@ function logHarnessInvocationSuccess(
 ): void {
   if (options.successResult === "none") return
   if (options.successResult === "full") {
-    console.log(`[HarnessBoard] [${options.configKey}] Result:\n${formatHarnessLogOutput(stdoutBuffer)}`)
+    console.log(
+      `[HarnessBoard] [${options.configKey}] Result:\n${formatHarnessLogOutput(stdoutBuffer)}`
+    )
     return
   }
   console.log(`[HarnessBoard] [${options.configKey}] success`)
@@ -571,10 +588,16 @@ function logHarnessInvocationFailure(
 ): void {
   const maybeError = error as { stdout?: unknown; stderr?: unknown }
   console.error(`[HarnessBoard] [${options.configKey}] Failed: ${formatAdapterError(error)}`)
-  console.error(`[HarnessBoard] [${options.configKey}] Command: ${formatHarnessCommand(configured.invocation)}`)
+  console.error(
+    `[HarnessBoard] [${options.configKey}] Command: ${formatHarnessCommand(configured.invocation)}`
+  )
   console.error(`[HarnessBoard] [${options.configKey}] CWD: ${configured.cwd}`)
-  console.error(`[HarnessBoard] [${options.configKey}] stdout:\n${formatHarnessLogOutput(maybeError.stdout)}`)
-  console.error(`[HarnessBoard] [${options.configKey}] stderr:\n${formatHarnessLogOutput(maybeError.stderr)}`)
+  console.error(
+    `[HarnessBoard] [${options.configKey}] stdout:\n${formatHarnessLogOutput(maybeError.stdout)}`
+  )
+  console.error(
+    `[HarnessBoard] [${options.configKey}] stderr:\n${formatHarnessLogOutput(maybeError.stderr)}`
+  )
 }
 
 function logHarnessStatusResultFailure(
@@ -584,7 +607,9 @@ function logHarnessStatusResultFailure(
   errorMessage: string
 ): void {
   console.error(`[HarnessBoard] [${configKey}] Failed after command completed: ${errorMessage}`)
-  console.error(`[HarnessBoard] [${configKey}] Command: ${formatHarnessCommand(configured.invocation)}`)
+  console.error(
+    `[HarnessBoard] [${configKey}] Command: ${formatHarnessCommand(configured.invocation)}`
+  )
   console.error(`[HarnessBoard] [${configKey}] CWD: ${configured.cwd}`)
   console.error(`[HarnessBoard] [${configKey}] Result:\n${formatHarnessLogOutput(stdoutBuffer)}`)
 }
@@ -742,7 +767,10 @@ function readBoardConfigPlatformText(cwd: string, key: HarnessPlatformConfigKey)
   return command || null
 }
 
-function readBoardConfigInspectCommand(cwd: string, mode: HarnessInspectCommandName): string | null {
+function readBoardConfigInspectCommand(
+  cwd: string,
+  mode: HarnessInspectCommandName
+): string | null {
   return readBoardConfigPlatformText(cwd, HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode])
 }
 
@@ -766,7 +794,10 @@ function projectDirectoryPath(project: HarnessProjectMetadata): string {
 
 function isInsideDirectory(basePath: string, targetPath: string): boolean {
   const relativePath = relative(resolve(basePath), resolve(targetPath))
-  return relativePath === "" || (!!relativePath && !relativePath.startsWith("..") && !isAbsolute(relativePath))
+  return (
+    relativePath === "" ||
+    (!!relativePath && !relativePath.startsWith("..") && !isAbsolute(relativePath))
+  )
 }
 
 function resolveAdapterFilePath(project: HarnessProjectMetadata, value: unknown): string | null {
@@ -880,7 +911,12 @@ function runInspectAdapter(
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
 
   if (!raw) {
-    logHarnessStatusResultFailure(invocation, configKey, stdoutBuffer, "Inspect adapter returned empty output")
+    logHarnessStatusResultFailure(
+      invocation,
+      configKey,
+      stdoutBuffer,
+      "Inspect adapter returned empty output"
+    )
     throw new Error("Inspect adapter returned empty output")
   }
 
@@ -1071,7 +1107,10 @@ function statusFromNodeStatus(nodeStatus: HarnessNodeStatus, label?: string): Ha
   }
 }
 
-function statusFromFeatureStatus(featureStatus: HarnessFeatureStatus, label?: string): HarnessStatus {
+function statusFromFeatureStatus(
+  featureStatus: HarnessFeatureStatus,
+  label?: string
+): HarnessStatus {
   return {
     label: label?.trim() || DEFAULT_FEATURE_STATUS_LABELS[featureStatus],
     uiKind: FEATURE_STATUS_UI_KIND[featureStatus]
@@ -1168,12 +1207,12 @@ function normalizeProjectRun(
   const currentNodeIndex = workflow.nodes.findIndex((node) => node.id === currentNodeId)
   const currentNodeDefinition = currentNodeIndex >= 0 ? workflow.nodes[currentNodeIndex] : undefined
   const explicitFeatureStatus = normalizeFeatureStatus(value.featureStatus)
-  const featureStatus = explicitFeatureStatus ?? deriveFeatureStatusFromCurrentNode(
-    currentNodeStatus,
-    currentNodeIndex,
-    workflow.nodes.length
-  )
-  const featureStatusLabel = explicitFeatureStatus ? normalizeText(value.featureStatusLabel).trim() : ""
+  const featureStatus =
+    explicitFeatureStatus ??
+    deriveFeatureStatusFromCurrentNode(currentNodeStatus, currentNodeIndex, workflow.nodes.length)
+  const featureStatusLabel = explicitFeatureStatus
+    ? normalizeText(value.featureStatusLabel).trim()
+    : ""
   const status = statusFromFeatureStatus(featureStatus, featureStatusLabel)
   const currentNodeLabel = currentNodeDefinition?.label ?? currentNodeId
   const summaryText = currentNodeLabel ? `${currentNodeLabel} · ${status.label}` : status.label
@@ -1235,7 +1274,9 @@ function normalizeWorkflowNextAction(value: unknown): HarnessWorkflowNextAction 
   return Object.keys(nextAction).length > 0 ? nextAction : undefined
 }
 
-function normalizeWorkflowArtifactDefinition(value: unknown): HarnessWorkflowArtifactDefinition | null {
+function normalizeWorkflowArtifactDefinition(
+  value: unknown
+): HarnessWorkflowArtifactDefinition | null {
   if (!isObject(value)) return null
   const artifactId = normalizeText(value.id)
   if (!artifactId) return null
@@ -1310,7 +1351,9 @@ function normalizeWorkflow(value: unknown): HarnessWorkflow {
   }
 }
 
-function workflowArtifactDefinitions(workflow: HarnessWorkflow): Map<string, Map<string, HarnessWorkflowArtifactDefinition>> {
+function workflowArtifactDefinitions(
+  workflow: HarnessWorkflow
+): Map<string, Map<string, HarnessWorkflowArtifactDefinition>> {
   const byNode = new Map<string, Map<string, HarnessWorkflowArtifactDefinition>>()
   for (const node of workflow.nodes) {
     const artifacts = new Map<string, HarnessWorkflowArtifactDefinition>()
@@ -1473,33 +1516,37 @@ function normalizeRunNodes(
   }
   const artifactDefinitions = workflowArtifactDefinitions(workflow)
   return workflow.nodes.map((nodeDefinition): HarnessRunNode => {
-      const node = runNodesById.get(nodeDefinition.id)
-      const id = nodeDefinition.id
-      const definitions = artifactDefinitions.get(id)
-      const nodeStatus = normalizeNodeStatus(node?.nodeStatus)
-      const nodeStatusLabel = normalizeText(node?.nodeStatusLabel).trim()
-      return {
-        id,
-        label: nodeDefinition.label,
-        ...(nodeDefinition.group ? { group: nodeDefinition.group } : {}),
-        nodeStatus,
-        ...(nodeStatusLabel ? { nodeStatusLabel } : {}),
-        status: statusFromNodeStatus(nodeStatus, nodeStatusLabel),
-        artifacts: Array.isArray(node?.artifacts)
-          ? node.artifacts
-              .map((artifact) => {
-                const artifactId = isObject(artifact) ? normalizeText(artifact.id) : ""
-                return normalizeArtifact(project, artifact, artifactId ? definitions?.get(artifactId) : undefined)
-              })
-              .filter((artifact): artifact is HarnessArtifact => artifact !== null)
-          : [],
-        hooks: Array.isArray(node?.hooks)
-          ? node.hooks
-              .map((hook) => normalizeHook(hook))
-              .filter((hook): hook is HarnessRunNode["hooks"][number] => hook !== null)
-          : []
-      }
-    })
+    const node = runNodesById.get(nodeDefinition.id)
+    const id = nodeDefinition.id
+    const definitions = artifactDefinitions.get(id)
+    const nodeStatus = normalizeNodeStatus(node?.nodeStatus)
+    const nodeStatusLabel = normalizeText(node?.nodeStatusLabel).trim()
+    return {
+      id,
+      label: nodeDefinition.label,
+      ...(nodeDefinition.group ? { group: nodeDefinition.group } : {}),
+      nodeStatus,
+      ...(nodeStatusLabel ? { nodeStatusLabel } : {}),
+      status: statusFromNodeStatus(nodeStatus, nodeStatusLabel),
+      artifacts: Array.isArray(node?.artifacts)
+        ? node.artifacts
+            .map((artifact) => {
+              const artifactId = isObject(artifact) ? normalizeText(artifact.id) : ""
+              return normalizeArtifact(
+                project,
+                artifact,
+                artifactId ? definitions?.get(artifactId) : undefined
+              )
+            })
+            .filter((artifact): artifact is HarnessArtifact => artifact !== null)
+        : [],
+      hooks: Array.isArray(node?.hooks)
+        ? node.hooks
+            .map((hook) => normalizeHook(hook))
+            .filter((hook): hook is HarnessRunNode["hooks"][number] => hook !== null)
+        : []
+    }
+  })
 }
 
 function normalizeProject(value: unknown): HarnessProjectMetadata | null {
@@ -1616,9 +1663,13 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
       type: harnessAdapter.type
     },
     creator: project.creator,
-    boardCompatibility: evaluateBoardPluginCompatibility(plugin, harnessAdapter.name || harnessAdapter.id),
+    boardCompatibility: evaluateBoardPluginCompatibility(
+      plugin,
+      harnessAdapter.name || harnessAdapter.id
+    ),
     lifecycle: {
-      status: project.lifecycle.status
+      status: project.lifecycle.status,
+      updateAt: project.lifecycle.updateAt
     }
   }
 }
@@ -1675,7 +1726,11 @@ function validateHarnessName(value: unknown, label: string): void {
   }
 }
 
-function validateProjectCodeUnique(code: string, store: HarnessProjectStoreFile, excludeProjectId?: string): void {
+function validateProjectCodeUnique(
+  code: string,
+  store: HarnessProjectStoreFile,
+  excludeProjectId?: string
+): void {
   const trimmed = code.trim()
   const duplicate = store.projects.find(
     (item) =>
@@ -1808,9 +1863,7 @@ function makeWatchRefs(slug?: string): HarnessWatchRef[] {
         { path: `${base}/features/${slug}`, purpose: "artifacts" },
         { path: `${base}/features/${slug}/hooks.ndjson`, purpose: "hook-log" }
       ]
-    : [
-        { path: `${base}/STATE.md`, purpose: "run-list" }
-      ]
+    : [{ path: `${base}/STATE.md`, purpose: "run-list" }]
 }
 
 function makeProjectDetailViewModel(
@@ -1868,7 +1921,9 @@ function initializeHarnessProject(project: HarnessProjectMetadata): void {
   }
 }
 
-export function readHarnessFeatureMetadata(metadata: unknown): { projectId: string; slug: string } | null {
+export function readHarnessFeatureMetadata(
+  metadata: unknown
+): { projectId: string; slug: string } | null {
   if (!isObject(metadata) || !isObject(metadata.harnessFeature)) return null
   const projectId = normalizeText(metadata.harnessFeature.projectId).trim()
   const slug = normalizeText(metadata.harnessFeature.slug).trim()
@@ -2169,7 +2224,11 @@ function runInspectAdapterBatch(
 
   const projectDirs = projects.map((project) => projectDirectoryName(project))
   const { executable, args } = parseInspectCommand(
-    configuredCommand, firstProject, mode, cwd, { projectDirs }
+    configuredCommand,
+    firstProject,
+    mode,
+    cwd,
+    { projectDirs }
   )
 
   const configured: ConfiguredHarnessInvocation = {
@@ -2187,7 +2246,12 @@ function runInspectAdapterBatch(
 
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
   if (!raw) {
-    logHarnessStatusResultFailure(configured, configKey, stdoutBuffer, "Inspect adapter returned empty output")
+    logHarnessStatusResultFailure(
+      configured,
+      configKey,
+      stdoutBuffer,
+      "Inspect adapter returned empty output"
+    )
     throw new Error("Inspect adapter returned empty output")
   }
 
@@ -2245,10 +2309,13 @@ export function getHarnessProjectDetails(
 
   const projects = projectIds.map((id) => requireProject(id))
   const result: Record<string, HarnessProjectDetailViewModel> = {}
-  const groups = new Map<string, {
-    cwd: string
-    projects: HarnessProjectMetadata[]
-  }>()
+  const groups = new Map<
+    string,
+    {
+      cwd: string
+      projects: HarnessProjectMetadata[]
+    }
+  >()
 
   for (const project of projects) {
     if (project.lifecycle.status === "archived") {
@@ -2345,14 +2412,15 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
   const currentNodeId = normalizeText(run.currentNodeId)
   const nodes = normalizeRunNodes(project, run.nodes, workflow)
   const currentNodeIndex = workflow.nodes.findIndex((node) => node.id === currentNodeId)
-  const currentNodeStatus = nodes.find((node) => node.id === currentNodeId)?.nodeStatus ?? UNKNOWN_NODE_STATUS
+  const currentNodeStatus =
+    nodes.find((node) => node.id === currentNodeId)?.nodeStatus ?? UNKNOWN_NODE_STATUS
   const explicitFeatureStatus = normalizeFeatureStatus(run.featureStatus)
-  const featureStatus = explicitFeatureStatus ?? deriveFeatureStatusFromCurrentNode(
-    currentNodeStatus,
-    currentNodeIndex,
-    workflow.nodes.length
-  )
-  const featureStatusLabel = explicitFeatureStatus ? normalizeText(run.featureStatusLabel).trim() : ""
+  const featureStatus =
+    explicitFeatureStatus ??
+    deriveFeatureStatusFromCurrentNode(currentNodeStatus, currentNodeIndex, workflow.nodes.length)
+  const featureStatusLabel = explicitFeatureStatus
+    ? normalizeText(run.featureStatusLabel).trim()
+    : ""
   const overallStatus = statusFromFeatureStatus(featureStatus, featureStatusLabel)
   const hookLogRefs = normalizeHookLogRefs(project, run.hookLogRefs)
   const hookLogEntries = readHookLogRefs(project, hookLogRefs)

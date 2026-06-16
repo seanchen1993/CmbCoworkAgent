@@ -175,9 +175,14 @@ interface DashboardTraceDetail {
   modelName?: string
   outcome: string
   totalToolCalls: number
+  modelCallCount: number
+  /** 本次 trace 中调用 request_user_input（向用户提问）的次数。 */
+  userInputRequestCount: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  /** 产生该 trace 的客户端 APP 版本。 */
+  appVersion?: string
   usedSkills: string[]
   evolvedSkills: string[]
   triggerSource?: string
@@ -249,6 +254,8 @@ interface CommitAdoptionEventPair {
   generatedAt: string | null // gen.createdAt
   // adopt 侧（code_adopt）
   verdict: string | null
+  /** 仅 verdict=superseded 时有值：作废原因（same_path_rewrite | agent_rm），供溯源展示。 */
+  reason: string | null
   generatedLineCount: number | null
   effectiveGeneratedLineCount: number | null
   adoptedLineCount: number | null
@@ -530,8 +537,14 @@ interface UncommittedScopeOptions {
   upperOrgLv1?: string | string[] | null
   /** 仅统计项目模式（带 properties.harnessProjectId）的生成。 */
   projectMode?: boolean
+  /** 收窄到单个项目模式项目。 */
+  projectId?: string | null
+  /** 收窄到单个项目特性。 */
+  featureSlug?: string | null
   /** 仅统计由 Skill 生成的代码（properties.usedSkills 非空），对应「插件约束生成」漏斗。 */
   usedSkillsOnly?: boolean
+  /** 榜单内按用户姓名 / sapId / ystId 查询。 */
+  userKeyword?: string | null
 }
 
 interface UncommittedRankingItem {
@@ -620,6 +633,7 @@ interface CommitDetailsOptions {
   pageSize?: number
   pushedOnly?: boolean
   upperOrgLv1?: string | null
+  userKeyword?: string | null
   // 全局「室筛选」（多选 LV1，含「未归类」哨兵），与弹窗内部门搜索 AND 叠加。
   orgLv1List?: string[]
 }
@@ -721,7 +735,9 @@ function isDashboardProjectModeAllowed(): boolean {
   return access.loggedIn
 }
 
-function isDashboardProjectModeAdmin(access: DashboardAccessContext = getDashboardAccessContext()): boolean {
+function isDashboardProjectModeAdmin(
+  access: DashboardAccessContext = getDashboardAccessContext()
+): boolean {
   if (import.meta.env.DEV) return true
   if (!access.loggedIn || !access.ystId) return false
   return getDashboardAllowedIds().has(access.ystId)
@@ -748,6 +764,59 @@ function requireDashboardAnalysisAgentAccess(): void {
   }
 }
 
+// 「生成但未提交分析」（漏斗首层下钻）的访问门槛：
+// - 管理员（VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS）：可看全部数据；
+// - 非管理员但在 VITE_DASHBOARD_UNRESTRICTED_YST_IDS 名单内：可看与自己 upperOrgLv1 相同的数据；
+// - 其他普通登录用户：仅可看自己的数据。
+interface UncommittedAnalysisAccess {
+  admin: boolean
+  selfOnly: boolean
+  sapId: string
+  ystId: string
+  upperOrgLv1: string
+}
+
+function isDashboardUncommittedAnalysisAllowed(
+  access: DashboardAccessContext = getDashboardAccessContext()
+): boolean {
+  if (import.meta.env.DEV) return true
+  return access.loggedIn
+}
+
+function requireDashboardUncommittedAnalysisAccess(): UncommittedAnalysisAccess {
+  const access = getDashboardAccessContext()
+  if (import.meta.env.DEV) {
+    return { admin: true, selfOnly: false, sapId: "dev", ystId: "dev", upperOrgLv1: "" }
+  }
+  if (!access.loggedIn) throw new Error("请先登录后再查看生成但未提交分析")
+  const admin = Boolean(access.ystId) && getTraceEvolverReviewAdminIds().has(access.ystId)
+  if (admin) {
+    return {
+      admin: true,
+      selfOnly: false,
+      sapId: access.sapId,
+      ystId: access.ystId,
+      upperOrgLv1: access.upperOrgLv1
+    }
+  }
+  if (access.unrestricted && access.upperOrgLv1) {
+    return {
+      admin: false,
+      selfOnly: false,
+      sapId: access.sapId,
+      ystId: access.ystId,
+      upperOrgLv1: access.upperOrgLv1
+    }
+  }
+  return {
+    admin: false,
+    selfOnly: true,
+    sapId: access.sapId,
+    ystId: access.ystId,
+    upperOrgLv1: access.upperOrgLv1
+  }
+}
+
 function buildNoAccessFilter(): Record<string, unknown> {
   return { term: { traceId: "__dashboard_no_access__" } }
 }
@@ -758,7 +827,9 @@ function buildTraceAccessFilter(access: DashboardAccessContext): Record<string, 
   return buildUpperOrgLv1Filter(access.upperOrgLv1)
 }
 
-function buildProjectModeAccessFilter(access: DashboardAccessContext): Record<string, unknown> | null {
+function buildProjectModeAccessFilter(
+  access: DashboardAccessContext
+): Record<string, unknown> | null {
   if (isDashboardProjectModeAdmin(access)) return null
   if (!access.upperOrgLv1) return buildNoAccessFilter()
   return buildUpperOrgLv1Filter(access.upperOrgLv1)
@@ -770,7 +841,10 @@ function buildProjectModeOrgFilter(
 ): Record<string, unknown> | null {
   const filters: Record<string, unknown>[] = []
   appendOptionalFilter(filters, buildProjectModeAccessFilter(access))
-  appendOptionalFilter(filters, buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1)))
+  appendOptionalFilter(
+    filters,
+    buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1))
+  )
   if (filters.length === 0) return null
   if (filters.length === 1) return filters[0]
   return { bool: { filter: filters } }
@@ -1124,6 +1198,7 @@ function normalizeCommitDetailsOptions(
       pageSize: clampLimit(value, 20, 500),
       pushedOnly: false,
       upperOrgLv1: null,
+      userKeyword: null,
       orgLv1List: []
     }
   }
@@ -1135,6 +1210,7 @@ function normalizeCommitDetailsOptions(
     pageSize,
     pushedOnly: value?.pushedOnly === true,
     upperOrgLv1: normalizeUpperOrgLv1Option(value?.upperOrgLv1),
+    userKeyword: normalizeCommitUserKeyword(value?.userKeyword),
     orgLv1List: normalizeUpperOrgLv1List(value?.orgLv1List)
   }
 }
@@ -1436,6 +1512,12 @@ function getTotalHits(raw: EsSearchResponse, fallback: number): number {
   return fallback
 }
 
+/** 统计 trace 树中 request_user_input 工具节点的数量（向用户提问的次数）。 */
+function countUserInputRequests(nodes: TraceNode[] | undefined): number {
+  if (!Array.isArray(nodes)) return 0
+  return nodes.filter((node) => node.type === "tool" && node.name === "request_user_input").length
+}
+
 function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
   const source = hit._source ?? {}
   const parsed = parseRawTrace(source._raw)
@@ -1477,9 +1559,16 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       modelName: trace.modelName || asOptionalString(source.modelName),
       outcome: trace.outcome || asString(source.outcome, "unknown"),
       totalToolCalls: asNumber(trace.totalToolCalls, asNumber(source.totalToolCalls)),
+      modelCallCount: Array.isArray(trace.modelCalls)
+        ? trace.modelCalls.length
+        : asNumber(source.modelCallCount),
+      userInputRequestCount: countUserInputRequests(nodes),
       totalInputTokens,
       totalOutputTokens,
       totalTokens,
+      ...(trace.appVersion || source.appVersion
+        ? { appVersion: asString(trace.appVersion || source.appVersion) }
+        : {}),
       usedSkills: Array.isArray(trace.usedSkills)
         ? trace.usedSkills
         : asStringArray(source.usedSkills),
@@ -1511,9 +1600,12 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
     modelName: asOptionalString(source.modelName),
     outcome: asString(source.outcome, "unknown"),
     totalToolCalls: asNumber(source.totalToolCalls),
+    modelCallCount: asNumber(source.modelCallCount),
+    userInputRequestCount: asNumber(source.userInputRequestCount),
     totalInputTokens: fallbackInputTokens,
     totalOutputTokens: fallbackOutputTokens,
     totalTokens: asNumber(source.totalTokens, fallbackInputTokens + fallbackOutputTokens),
+    ...(source.appVersion ? { appVersion: asString(source.appVersion) } : {}),
     usedSkills: asStringArray(source.usedSkills),
     evolvedSkills: asStringArray(source.evolvedSkills),
     triggerSource: normalizeTraceTriggerSource(source.triggerSource),
@@ -1543,9 +1635,12 @@ function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
     ...(trace.modelName ? { modelName: trace.modelName } : {}),
     outcome: trace.outcome,
     totalToolCalls: asNumber(trace.totalToolCalls),
+    modelCallCount: Array.isArray(trace.modelCalls) ? trace.modelCalls.length : 0,
+    userInputRequestCount: countUserInputRequests(nodes),
     totalInputTokens: usage.totalInputTokens,
     totalOutputTokens: usage.totalOutputTokens,
     totalTokens: usage.totalTokens || usage.totalInputTokens + usage.totalOutputTokens,
+    ...(trace.appVersion ? { appVersion: trace.appVersion } : {}),
     usedSkills: Array.isArray(trace.usedSkills) ? trace.usedSkills : [],
     evolvedSkills: Array.isArray(trace.evolvedSkills) ? trace.evolvedSkills : [],
     triggerSource: normalizeTraceTriggerSource(trace.triggerSource),
@@ -1607,7 +1702,7 @@ async function fetchCommitAdoptionMap(
   // already a precise, globally-unique selector for the exact commits in the
   // visible (eventTime-filtered) list. A `code_adopt` event is timestamped at
   // *commit* time but carries `generatedAt` = the *generation* time, which can
-  // predate the commit by up to the attribution window (≈7 days). Filtering by
+  // predate the commit by up to the attribution window (≈14 days). Filtering by
   // `generatedAt` within the commit-list range would drop adoption rows for any
   // commit whose code was generated before the window started — making the
   // commit show up in the list with an empty 采纳率. Matching on commitSha alone
@@ -1737,6 +1832,7 @@ async function fetchCommitAdoptionEvents(commitSha: string): Promise<CommitAdopt
       includes: [
         "properties.genEventId",
         "properties.verdict",
+        "properties.reason",
         "properties.generatedLineCount",
         "properties.effectiveGeneratedLineCount",
         "properties.adoptedLineCount",
@@ -1828,6 +1924,7 @@ async function fetchCommitAdoptionEvents(commitSha: string): Promise<CommitAdopt
       modelName: gen ? (asOptionalString(gen.modelName) ?? null) : null,
       generatedAt: gen ? (asOptionalString(gen.createdAt) ?? null) : null,
       verdict: asOptionalString(adopt.verdict) ?? null,
+      reason: asOptionalString(adopt.reason) ?? null,
       generatedLineCount,
       effectiveGeneratedLineCount,
       adoptedLineCount,
@@ -2036,6 +2133,7 @@ async function fetchOverview(
           pushed_effective_generated_lines: { value: item.pushedEffectiveGeneratedLines },
           pushed_adopted_lines: { value: item.pushedAdoptedLines },
           pushed_adoption_rate: { value: item.pushedAdoptionRate },
+          inclusive_pushed_adoption_rate: { value: item.inclusivePushedAdoptionRate },
           pushed_commit_count: { value: item.pushedCommitCount }
         }))
       }
@@ -2127,6 +2225,25 @@ function normalizeUpperOrgLv1Option(upperOrgLv1?: string | null): string | null 
   if (typeof upperOrgLv1 !== "string") return null
   const normalized = upperOrgLv1.trim()
   return normalized ? normalized : null
+}
+
+function normalizeCommitUserKeyword(userKeyword?: string | null): string | null {
+  if (typeof userKeyword !== "string") return null
+  const normalized = userKeyword.trim()
+  return normalized ? normalized : null
+}
+
+function buildCommitUserMatchFilter(userKeyword: string): Record<string, unknown> {
+  const escaped = escapeWildcard(userKeyword)
+  const wildcardPattern = `*${escaped}*`
+  const fields = ["userName", "username", "sapId", "ystId"]
+  const should = fields.flatMap((field) => [
+    { term: { [field]: userKeyword } },
+    { term: { [`${field}.keyword`]: userKeyword } },
+    { wildcard: { [field]: wildcardPattern } },
+    { wildcard: { [`${field}.keyword`]: wildcardPattern } }
+  ])
+  return { bool: { should, minimum_should_match: 1 } }
 }
 
 // 「未归类」哨兵：代表 upperOrgLv1 为空或缺失的记录（前后端约定一致）。
@@ -2431,13 +2548,45 @@ function uncommittedSettledRange(range: TimeRange): TimeRange {
   return { from: range.from, to: range.to < settle ? range.to : settle }
 }
 
-function uncommittedScopeFilters(options?: UncommittedScopeOptions): Record<string, unknown>[] {
+function buildUncommittedSelfUserFilter(access: UncommittedAnalysisAccess): Record<string, unknown> {
+  const should: Record<string, unknown>[] = []
+  const sapId = access.sapId.trim()
+  const ystId = access.ystId.trim()
+  if (sapId) {
+    should.push({ term: { sapId } }, { term: { "sapId.keyword": sapId } })
+  }
+  if (ystId) {
+    should.push({ term: { ystId } }, { term: { "ystId.keyword": ystId } })
+  }
+  if (should.length === 0) return { term: { sapId: "__dashboard_no_access__" } }
+  return { bool: { should, minimum_should_match: 1 } }
+}
+
+function uncommittedScopeFilters(
+  options: UncommittedScopeOptions | undefined,
+  access: UncommittedAnalysisAccess
+): Record<string, unknown>[] {
   const filters: Record<string, unknown>[] = []
+  // 数据权限与界面筛选 AND 叠加：普通用户锁本人，名单用户锁本室，管理员不加身份约束。
+  if (access.selfOnly) {
+    filters.push(buildUncommittedSelfUserFilter(access))
+  } else if (!access.admin && access.upperOrgLv1) {
+    filters.push(buildUpperOrgLv1Filter(access.upperOrgLv1))
+  }
   const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(options?.upperOrgLv1))
   if (orgFilterClause) filters.push(orgFilterClause)
-  if (options?.projectMode) filters.push({ exists: { field: "properties.harnessProjectId" } })
+  const projectId = typeof options?.projectId === "string" ? options.projectId.trim() : ""
+  const featureSlug = typeof options?.featureSlug === "string" ? options.featureSlug.trim() : ""
+  if (projectId) {
+    filters.push({ term: { "properties.harnessProjectId": projectId } })
+  } else if (options?.projectMode || featureSlug) {
+    filters.push({ exists: { field: "properties.harnessProjectId" } })
+  }
+  if (featureSlug) filters.push({ term: { "properties.harnessFeatureSlug": featureSlug } })
   // 「由 Skill 生成」口径：usedSkills 非空，与项目概览 skillCodeStats 一致。
   if (options?.usedSkillsOnly) filters.push({ exists: { field: "properties.usedSkills" } })
+  const userKeyword = normalizeCommitUserKeyword(options?.userKeyword)
+  if (userKeyword !== null) filters.push(buildCommitUserMatchFilter(userKeyword))
   return filters
 }
 
@@ -2459,9 +2608,9 @@ async function fetchUncommittedRanking(
   range: TimeRange,
   options?: UncommittedScopeOptions
 ): Promise<UncommittedRankingData> {
-  // 与「运营指标分析 Agent」同一权限门槛：仅 VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS 名单可用。
-  requireDashboardAnalysisAgentAccess()
-  const scopeFilters = uncommittedScopeFilters(options)
+  // 管理员可看全部；unrestricted 名单用户看本室；普通用户只看本人。
+  const access = requireDashboardUncommittedAnalysisAccess()
+  const scopeFilters = uncommittedScopeFilters(options, access)
   // 上界排除最近 2 小时的在途生成；纯历史范围不受影响（见 uncommittedSettledRange）。
   const settledRange = uncommittedSettledRange(range)
 
@@ -2615,11 +2764,11 @@ async function fetchUncommittedDetail(
   range: TimeRange,
   options?: UncommittedScopeOptions
 ): Promise<UncommittedDetailData> {
-  // 与「运营指标分析 Agent」同一权限门槛。
-  requireDashboardAnalysisAgentAccess()
+  // 管理员可看全部；unrestricted 名单用户看本室；普通用户只看本人。
+  const access = requireDashboardUncommittedAnalysisAccess()
   const normalizedSapId = sapId.trim()
   if (!normalizedSapId) throw new Error("sapId is required")
-  const scopeFilters = uncommittedScopeFilters(options)
+  const scopeFilters = uncommittedScopeFilters(options, access)
   // 与榜单口径一致：上界排除最近 2 小时的在途生成。
   const settledRange = uncommittedSettledRange(range)
 
@@ -2856,7 +3005,9 @@ async function fetchUserDetail(
   range: TimeRange,
   options?: UserDetailOptions
 ): Promise<DashboardUserDetail> {
-  const access = options?.projectMode ? requireDashboardProjectModeAccess() : requireDashboardAccess()
+  const access = options?.projectMode
+    ? requireDashboardProjectModeAccess()
+    : requireDashboardAccess()
   const normalizedSapId = sapId.trim()
   if (!normalizedSapId) throw new Error("sapId is required")
   const traceViewMode = normalizeTraceViewMode(options?.viewMode ?? options?.mode)
@@ -3930,9 +4081,12 @@ function fallbackTraceDetailFromSkillEvalRecord(
     modelName: record.modelName || undefined,
     outcome: record.outcome,
     totalToolCalls: record.totalToolCalls,
+    modelCallCount: record.modelCallCount,
+    userInputRequestCount: 0,
     totalInputTokens: record.totalInputTokens,
     totalOutputTokens: record.totalOutputTokens,
     totalTokens: record.totalTokens,
+    ...(record.appVersion ? { appVersion: record.appVersion } : {}),
     usedSkills: [record.rawSkillName],
     evolvedSkills: [],
     triggerSource: "chat",
@@ -5171,7 +5325,7 @@ async function fetchCommitDetails(
   items: DashboardCommitDetail[]
 }> {
   requireDashboardAccess()
-  const { page, pageSize, pushedOnly, upperOrgLv1, orgLv1List } =
+  const { page, pageSize, pushedOnly, upperOrgLv1, userKeyword, orgLv1List } =
     normalizeCommitDetailsOptions(options)
   const filters: Record<string, unknown>[] = [
     timeRangeFilter("eventTime", range),
@@ -5185,6 +5339,9 @@ async function fetchCommitDetails(
   // 弹窗内的部门搜索（单值，模糊匹配 LV1/LV0）
   if (upperOrgLv1 !== null) {
     filters.push(buildOrgLevelMatchFilter(upperOrgLv1))
+  }
+  if (userKeyword !== null) {
+    filters.push(buildCommitUserMatchFilter(userKeyword))
   }
   const body = {
     track_total_hits: true,
@@ -5444,6 +5601,7 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
               pushed_effective_generated_lines: { value: 490 },
               pushed_adopted_lines: { value: 380 },
               pushed_adoption_rate: { value: 380 / 490 },
+              inclusive_pushed_adoption_rate: { value: 380 / 790 },
               pushed_commit_count: { value: 8 },
               commit_count: { value: 18 }
             },
@@ -5461,6 +5619,7 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
               pushed_effective_generated_lines: { value: 380 },
               pushed_adopted_lines: { value: 340 },
               pushed_adoption_rate: { value: 340 / 380 },
+              inclusive_pushed_adoption_rate: { value: 340 / 560 },
               pushed_commit_count: { value: 6 },
               commit_count: { value: 12 }
             },
@@ -5478,6 +5637,7 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
               pushed_effective_generated_lines: { value: 180 },
               pushed_adopted_lines: { value: 140 },
               pushed_adoption_rate: { value: 140 / 180 },
+              inclusive_pushed_adoption_rate: { value: 140 / 430 },
               pushed_commit_count: { value: 3 },
               commit_count: { value: 7 }
             },
@@ -5495,6 +5655,7 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
               pushed_effective_generated_lines: { value: 245 },
               pushed_adopted_lines: { value: 180 },
               pushed_adoption_rate: { value: 180 / 245 },
+              inclusive_pushed_adoption_rate: { value: 180 / 390 },
               pushed_commit_count: { value: 4 },
               commit_count: { value: 9 }
             },
@@ -5512,6 +5673,7 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
               pushed_effective_generated_lines: { value: 0 },
               pushed_adopted_lines: { value: 0 },
               pushed_adoption_rate: { value: null },
+              inclusive_pushed_adoption_rate: { value: 0 },
               pushed_commit_count: { value: 0 },
               commit_count: { value: 0 }
             }
@@ -6205,10 +6367,14 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
   }
 }
 
-function makeMockUncommittedRanking(): UncommittedRankingData {
-  const items: UncommittedRankingItem[] = Array.from({ length: 12 }, (_, index) => {
+function makeMockUncommittedRanking(options?: UncommittedScopeOptions): UncommittedRankingData {
+  const userKeyword = normalizeCommitUserKeyword(options?.userKeyword)?.toLowerCase() ?? ""
+  const projectScoped = Boolean(options?.projectId?.trim() || options?.featureSlug?.trim())
+  const skillScale = options?.usedSkillsOnly ? 0.62 : 1
+  const projectScale = projectScoped ? 0.42 : 1
+  let items: UncommittedRankingItem[] = Array.from({ length: 12 }, (_, index) => {
     const user = makeMockDashboardUser(index)
-    const generatedLines = 1800 - index * 110
+    const generatedLines = Math.round((1800 - index * 110) * skillScale * projectScale)
     const measuredGeneratedLines = Math.round(generatedLines * (0.4 + index * 0.03))
     const uncommittedLines = Math.max(0, generatedLines - measuredGeneratedLines)
     return {
@@ -6223,7 +6389,16 @@ function makeMockUncommittedRanking(): UncommittedRankingData {
       uncommittedLines,
       uncommittedRate: generatedLines > 0 ? uncommittedLines / generatedLines : null
     }
-  }).sort((a, b) => b.uncommittedLines - a.uncommittedLines)
+  })
+  if (projectScoped) items = items.slice(0, 8)
+  if (userKeyword) {
+    items = items.filter((item) =>
+      [item.userName, item.sapId, item.ystId, item.orgName, item.upperOrgLv0, item.upperOrgLv1]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(userKeyword))
+    )
+  }
+  items.sort((a, b) => b.uncommittedLines - a.uncommittedLines)
   return {
     items,
     totalGeneratedLines: items.reduce((sum, item) => sum + item.generatedLines, 0),
@@ -6233,9 +6408,14 @@ function makeMockUncommittedRanking(): UncommittedRankingData {
   }
 }
 
-function makeMockUncommittedDetail(sapId: string): UncommittedDetailData {
+function makeMockUncommittedDetail(
+  sapId: string,
+  options?: UncommittedScopeOptions
+): UncommittedDetailData {
   const tools = ["write_file", "str_replace", "edit_file"]
   const langs = ["ts", "tsx", "py", "md", "json"]
+  const projectId = options?.projectId?.trim() || undefined
+  const featureSlug = options?.featureSlug?.trim() || undefined
   const samples: UncommittedDetailSample[] = Array.from({ length: 48 }, (_, index) => ({
     eventId: `mock_gen_${sapId}_${index}`,
     eventTime: new Date(Date.now() - index * 3_600_000).toISOString(),
@@ -6244,7 +6424,8 @@ function makeMockUncommittedDetail(sapId: string): UncommittedDetailData {
     lineCount: 40 + (index % 5) * 25,
     fileHint: `module-${index % 6}.${langs[index % langs.length]}`,
     threadId: `thread_${index % 4}`,
-    harnessFeatureSlug: index % 3 === 0 ? `feature-${index % 3}` : undefined,
+    harnessProjectId: projectId ?? (index % 3 === 0 ? `mock-project-${index % 4}` : undefined),
+    harnessFeatureSlug: featureSlug ?? (index % 3 === 0 ? `feature-${index % 3}` : undefined),
     modelName: "claude-opus-4-8"
   }))
   const byTool = new Map<string, { gens: number; lines: number }>()
@@ -6256,7 +6437,11 @@ function makeMockUncommittedDetail(sapId: string): UncommittedDetailData {
     uncommittedLines += sample.lineCount
     pushBreakdown(byTool, sample.tool || "未知工具", sample.lineCount)
     pushBreakdown(byLanguage, sample.language || "未知语言", sample.lineCount)
-    pushBreakdown(byProject, sample.harnessFeatureSlug || "非项目模式", sample.lineCount)
+    pushBreakdown(
+      byProject,
+      sample.harnessFeatureSlug || sample.harnessProjectId || "非项目模式",
+      sample.lineCount
+    )
     if (sample.threadId) pushBreakdown(byThread, sample.threadId, sample.lineCount)
   }
   return {
@@ -6707,7 +6892,9 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     status: "active",
     page: 1,
     pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
-    keyword: ""
+    keyword: "",
+    sortBy: "conversationCount",
+    sortOrder: "desc"
   })
   return {
     summary: {
@@ -7196,7 +7383,7 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
       durationMs: 4200
     }
   ]
-  const toolCalls =
+  const baseToolCalls =
     index === 0
       ? repeatedReadFileToolCalls
       : index === 1
@@ -7215,6 +7402,19 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
               durationMs: 310
             }
           ]
+  // 每条 mock trace 追加 1~3 次 request_user_input（向用户提问），让「请求用户输入」指标可见。
+  const userInputPrompts = [
+    "需要确认工具卡片放在对话上方还是下方？",
+    "是否同时调整 Trace 模式的分页上限？",
+    "导出会话记录时要不要包含执行树？"
+  ]
+  const userInputToolCalls = Array.from({ length: (index % 3) + 1 }, (_, askIndex) => ({
+    name: "request_user_input",
+    args: { prompt: userInputPrompts[askIndex % userInputPrompts.length] },
+    result: "用户已回复确认",
+    durationMs: 12_000 + askIndex * 3_000
+  }))
+  const toolCalls = [...baseToolCalls, ...userInputToolCalls]
 
   const trace: AgentTrace = {
     traceId,
@@ -7263,7 +7463,7 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
     totalToolCalls: toolCalls.length,
     outcome: index === 2 ? "error" : "success",
     ...(index === 2 ? { errorMessage: "Mock trace 用于展示异常状态" } : {}),
-    appVersion: "0.3.6",
+    appVersion: ["1.4.4", "1.4.3"][index % 2] ?? "1.4.4",
     usedSkills: [skill],
     evolvedSkills: index % 2 === 0 ? [skill] : [],
     triggerSource: "chat",
@@ -7296,6 +7496,7 @@ function makeMockSkillRecentTraces(
   return Array.from({ length: clampLimit(limit, 10, 10) }, (_, index) => {
     const trace = makeMockAgentTrace(skill, range, index)
     const usage = summarizeTraceTokenUsage(trace.modelCalls)
+    const nodes = buildTraceTree(trace)
     return {
       traceId: trace.traceId,
       threadId: trace.threadId,
@@ -7312,13 +7513,16 @@ function makeMockSkillRecentTraces(
       modelName: trace.modelName,
       outcome: trace.outcome,
       totalToolCalls: trace.totalToolCalls,
+      modelCallCount: Array.isArray(trace.modelCalls) ? trace.modelCalls.length : 0,
+      userInputRequestCount: countUserInputRequests(nodes),
       totalInputTokens: usage.totalInputTokens,
       totalOutputTokens: usage.totalOutputTokens,
       totalTokens: usage.totalTokens,
+      ...(trace.appVersion ? { appVersion: trace.appVersion } : {}),
       usedSkills: trace.usedSkills,
       evolvedSkills: trace.evolvedSkills,
       triggerSource: trace.triggerSource,
-      nodes: buildTraceTree(trace),
+      nodes,
       rawAvailable: true
     }
   })
@@ -7410,6 +7614,7 @@ function makeMockCommitAdoptionEvents(commitSha: string): CommitAdoptionEvents {
       modelName: "claude-opus-4-8",
       generatedAt: iso(9 * 60 * 1000),
       verdict: "committed",
+      reason: null,
       generatedLineCount: 120,
       effectiveGeneratedLineCount: 110,
       adoptedLineCount: 88,
@@ -7427,6 +7632,7 @@ function makeMockCommitAdoptionEvents(commitSha: string): CommitAdoptionEvents {
       modelName: "claude-opus-4-8",
       generatedAt: iso(8 * 60 * 1000),
       verdict: "deleted",
+      reason: null,
       generatedLineCount: 40,
       effectiveGeneratedLineCount: 40,
       adoptedLineCount: 0,
@@ -7444,6 +7650,7 @@ function makeMockCommitAdoptionEvents(commitSha: string): CommitAdoptionEvents {
       modelName: "claude-opus-4-8",
       generatedAt: iso(7 * 60 * 1000),
       verdict: "skipped_large",
+      reason: null,
       generatedLineCount: 24000,
       effectiveGeneratedLineCount: null,
       adoptedLineCount: null,
@@ -7461,12 +7668,31 @@ function makeMockCommitAdoptionEvents(commitSha: string): CommitAdoptionEvents {
       modelName: null,
       generatedAt: null,
       verdict: "committed",
+      reason: null,
       generatedLineCount: 30,
       effectiveGeneratedLineCount: 30,
       adoptedLineCount: 21,
       measureSource: "git_commit",
       pushed: true,
       measuredAt: iso(5 * 60 * 1000),
+      threadId: "mock-thread-2"
+    },
+    {
+      genEventId: "g_mock_agent_rm",
+      file: "AgentOperationList.tsx",
+      tool: "write_file",
+      language: "tsx",
+      usedSkills: [],
+      modelName: "claude-opus-4-8",
+      generatedAt: iso(10 * 60 * 1000),
+      verdict: "superseded",
+      reason: "agent_rm",
+      generatedLineCount: 64,
+      effectiveGeneratedLineCount: 0,
+      adoptedLineCount: 0,
+      measureSource: "agent_file_op",
+      pushed: false,
+      measuredAt: iso(9 * 60 * 1000),
       threadId: "mock-thread-2"
     }
   ]
@@ -7503,7 +7729,8 @@ function makeMockCommitDetails(
   pushedOnly: boolean
   items: DashboardCommitDetail[]
 } {
-  const { page, pageSize, pushedOnly, upperOrgLv1 } = normalizeCommitDetailsOptions(options)
+  const { page, pageSize, pushedOnly, upperOrgLv1, userKeyword } =
+    normalizeCommitDetailsOptions(options)
   const from = new Date(range.from)
   const to = new Date(range.to)
   const spanMs = Math.max(60_000, to.getTime() - from.getTime())
@@ -7563,6 +7790,7 @@ function makeMockCommitDetails(
       )
       if (!orgMatched) return false
     }
+    if (!commitDetailMatchesUserKeyword(item, userKeyword)) return false
     return true
   })
   const start = (page - 1) * pageSize
@@ -7573,6 +7801,19 @@ function makeMockCommitDetails(
     pushedOnly,
     items: filteredItems.slice(start, start + pageSize)
   }
+}
+
+function commitDetailMatchesUserKeyword(
+  item: DashboardCommitDetail,
+  userKeyword: string | null
+): boolean {
+  if (userKeyword === null) return true
+  const needle = userKeyword.toLowerCase()
+  return [item.userName, item.sapId, item.ystId].some((value) =>
+    String(value || "")
+      .toLowerCase()
+      .includes(needle)
+  )
 }
 
 /** DEV mock for one feature's Commit 明细: a deterministic slice of the platform commit mock. */
@@ -7588,7 +7829,8 @@ function makeMockProjectModeFeatureCommits(
   pushedOnly: boolean
   items: DashboardCommitDetail[]
 } {
-  const { page, pageSize, pushedOnly, upperOrgLv1 } = normalizeCommitDetailsOptions(options)
+  const { page, pageSize, pushedOnly, upperOrgLv1, userKeyword } =
+    normalizeCommitDetailsOptions(options)
   // 用 projectId+featureSlug 的哈希派生「条数 + 起始偏移」，让每个特性拿到各不相同（且互不重叠）
   // 的 commit 窗口——真实后端按 harnessFeatureSlug 精确圈定，这里仅为 DEV 还原「每条 feature 只看自己的 commit」。
   const seed = `${projectId}/${featureSlug}`
@@ -7615,6 +7857,7 @@ function makeMockProjectModeFeatureCommits(
       )
       if (!matched) return false
     }
+    if (!commitDetailMatchesUserKeyword(item, userKeyword)) return false
     return true
   })
   const start = (page - 1) * pageSize
@@ -7639,7 +7882,8 @@ function makeMockProjectModeProjectCommits(
   pushedOnly: boolean
   items: DashboardCommitDetail[]
 } {
-  const { page, pageSize, pushedOnly, upperOrgLv1 } = normalizeCommitDetailsOptions(options)
+  const { page, pageSize, pushedOnly, upperOrgLv1, userKeyword } =
+    normalizeCommitDetailsOptions(options)
   let hash = 0
   for (let i = 0; i < projectId.length; i += 1) hash = (hash * 31 + projectId.charCodeAt(i)) >>> 0
   const projectCommitCount = 12 + (hash % 28)
@@ -7662,6 +7906,7 @@ function makeMockProjectModeProjectCommits(
       )
       if (!matched) return false
     }
+    if (!commitDetailMatchesUserKeyword(item, userKeyword)) return false
     return true
   })
   const start = (page - 1) * pageSize
@@ -7782,6 +8027,8 @@ interface ProjectModeProjectView {
   creatorUpperOrgLv0?: string
   creatorUpperOrgLv1?: string
   lifecycleStatus?: string
+  /** 生命周期最近变更时间（归档时间用此排序）；ISO 字符串。 */
+  lifecycleUpdatedAt?: string
   compatible?: boolean
   compatibilityStatus?: string
   featureCount: number
@@ -7793,6 +8040,22 @@ interface ProjectModeProjectView {
 }
 
 type ProjectModeProjectStatus = "active" | "archived"
+
+/**
+ * Sortable project-list columns.
+ * - `featureCount` / `archivedAt` are snapshot-doc fields → sorted cheaply in
+ *   the paginated snapshot query. `archivedAt` (= lifecycle updateAt) is only
+ *   meaningful on the「已归档」tab and is its default ordering.
+ * - `conversationCount` / `generatedLines` are per-range metrics on the trace /
+ *   code indices → require the heavier metric-sort path, which is only enabled
+ *   for the「进行中」(active) tab (archived projects accumulate; active are few).
+ */
+type ProjectModeProjectSortKey =
+  | "featureCount"
+  | "conversationCount"
+  | "generatedLines"
+  | "archivedAt"
+type ProjectModeProjectSortOrder = "asc" | "desc"
 
 interface ProjectModeProjectCounts {
   total: number
@@ -7813,6 +8076,8 @@ interface ProjectModeProjectPageData {
   adapterName: string
   creatorKeyword: string
   creatorOrgKeyword: string
+  sortBy: ProjectModeProjectSortKey | null
+  sortOrder: ProjectModeProjectSortOrder
 }
 
 interface ProjectModeProjectPageOptions extends OrgFilterOptions {
@@ -7823,6 +8088,8 @@ interface ProjectModeProjectPageOptions extends OrgFilterOptions {
   adapterName?: string | null
   creatorKeyword?: string | null
   creatorOrgKeyword?: string | null
+  sortBy?: ProjectModeProjectSortKey | null
+  sortOrder?: ProjectModeProjectSortOrder | null
 }
 
 interface ProjectModeAdapterView {
@@ -7887,6 +8154,25 @@ function adapterKey(name: string, version?: string): string {
 
 function normalizeProjectModeProjectStatus(value?: string | null): ProjectModeProjectStatus {
   return value === "archived" ? "archived" : "active"
+}
+
+/**
+ * Resolve the requested sort. `featureCount` is always honoured; the per-range
+ * metric sorts are dropped (→ default name-asc) on the archived tab, so callers
+ * can blindly forward the user's choice without leaking the active-only rule.
+ */
+function normalizeProjectModeProjectSort(
+  options: ProjectModeProjectPageOptions | undefined,
+  status: ProjectModeProjectStatus
+): { sortBy: ProjectModeProjectSortKey | null; sortOrder: ProjectModeProjectSortOrder } {
+  const sortOrder: ProjectModeProjectSortOrder = options?.sortOrder === "asc" ? "asc" : "desc"
+  const key = options?.sortBy
+  if (key === "featureCount") return { sortBy: "featureCount", sortOrder }
+  if (key === "archivedAt" && status === "archived") return { sortBy: "archivedAt", sortOrder }
+  if ((key === "conversationCount" || key === "generatedLines") && status !== "archived") {
+    return { sortBy: key, sortOrder }
+  }
+  return { sortBy: null, sortOrder }
 }
 
 function normalizeProjectModeKeyword(value?: string | null): string {
@@ -8064,25 +8350,30 @@ function buildProjectModeMockAnalytics(projects: ProjectModeProjectView[]): Proj
   }
 }
 
+/** Numeric value of a project for a given sort key (DEV mock only). */
+function projectModeProjectSortValue(
+  project: ProjectModeProjectView,
+  sortBy: ProjectModeProjectSortKey
+): number {
+  if (sortBy === "conversationCount") return project.conversationCount
+  if (sortBy === "generatedLines") return project.codeStats?.generatedLines ?? 0
+  if (sortBy === "archivedAt") {
+    const t = project.lifecycleUpdatedAt ? Date.parse(project.lifecycleUpdatedAt) : NaN
+    return Number.isNaN(t) ? 0 : t
+  }
+  return project.featureCount
+}
+
 function sliceProjectModeProjects(
   projects: ProjectModeProjectView[],
   options?: ProjectModeProjectPageOptions
-): {
-  projects: ProjectModeProjectView[]
-  total: number
-  page: number
-  pageSize: number
-  status: ProjectModeProjectStatus
-  keyword: string
-  adapterName: string
-  creatorKeyword: string
-  creatorOrgKeyword: string
-} {
+): ProjectModeProjectPageData {
   const status = normalizeProjectModeProjectStatus(options?.status)
   const keyword = normalizeProjectModeKeyword(options?.keyword)
   const adapterName = normalizeProjectModeAdapterName(options?.adapterName)
   const creatorKeyword = normalizeProjectModeCreatorKeyword(options?.creatorKeyword)
   const creatorOrgKeyword = normalizeProjectModeCreatorOrgKeyword(options?.creatorOrgKeyword)
+  const { sortBy, sortOrder } = normalizeProjectModeProjectSort(options, status)
   const page = clampLimit(options?.page, 1, 10_000)
   const pageSize = clampLimit(options?.pageSize, 10, 100)
   const filtered = projects
@@ -8091,11 +8382,18 @@ function sliceProjectModeProjects(
     .filter((project) => projectMatchesAdapterName(project, adapterName))
     .filter((project) => projectMatchesCreatorKeyword(project, creatorKeyword))
     .filter((project) => projectMatchesCreatorOrgKeyword(project, creatorOrgKeyword))
-    .sort(compareProjectByName)
-  const total = filtered.length
+  const sorted = sortBy
+    ? [...filtered].sort((a, b) => {
+        const av = projectModeProjectSortValue(a, sortBy)
+        const bv = projectModeProjectSortValue(b, sortBy)
+        if (av !== bv) return sortOrder === "asc" ? av - bv : bv - av
+        return compareProjectByName(a, b)
+      })
+    : filtered.sort(compareProjectByName)
+  const total = sorted.length
   const start = (page - 1) * pageSize
   return {
-    projects: filtered.slice(start, start + pageSize),
+    projects: sorted.slice(start, start + pageSize),
     total,
     page,
     pageSize,
@@ -8103,7 +8401,9 @@ function sliceProjectModeProjects(
     keyword,
     adapterName,
     creatorKeyword,
-    creatorOrgKeyword
+    creatorOrgKeyword,
+    sortBy,
+    sortOrder
   }
 }
 
@@ -8143,6 +8443,7 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     creatorUpperOrgLv1:
       asOptionalString(props.creatorUpperOrgLv1) ?? asOptionalString(source.upperOrgLv1),
     lifecycleStatus: asOptionalString(props.lifecycleStatus),
+    lifecycleUpdatedAt: asOptionalString(props.lifecycleUpdatedAt),
     compatible: typeof props.compatible === "boolean" ? props.compatible : undefined,
     compatibilityStatus: asOptionalString(props.compatibilityStatus),
     featureCount: asNumber(props.featureCount, features.length),
@@ -8418,28 +8719,28 @@ function buildProjectModeCreatorOrgSearchFilter(
  * 列表分页交给 ES：状态(term) + 关键词(wildcard，按 keyword 原值匹配) + 名称排序 + from/size，
  * collapse(projectId) 兜底去重；total 用 cardinality 取去重后的项目数。返回的项目尚未带本期指标。
  */
-async function fetchProjectModeProjectPageHits(
+/**
+ * Build the shared snapshot-index filter set + normalized list options. Reused
+ * by the paginated page query, the metric-sort id-set query, and the per-page
+ * view-by-ids query so all three apply identical status/keyword/adapter/creator/
+ * org filtering.
+ */
+function buildProjectModeProjectListFilters(
   options: ProjectModeProjectPageOptions | undefined,
   access: DashboardAccessContext
-): Promise<{
-  projects: ProjectModeProjectView[]
-  total: number
-  page: number
-  pageSize: number
+): {
+  filters: Record<string, unknown>[]
   status: ProjectModeProjectStatus
   keyword: string
   adapterName: string
   creatorKeyword: string
   creatorOrgKeyword: string
-}> {
+} {
   const status = normalizeProjectModeProjectStatus(options?.status)
   const keyword = normalizeProjectModeKeyword(options?.keyword)
   const adapterName = normalizeProjectModeAdapterName(options?.adapterName)
   const creatorKeyword = normalizeProjectModeCreatorKeyword(options?.creatorKeyword)
   const creatorOrgKeyword = normalizeProjectModeCreatorOrgKeyword(options?.creatorOrgKeyword)
-  const pageSize = clampLimit(options?.pageSize, 10, 100)
-  const maxPage = Math.max(1, Math.floor(ES_MAX_RESULT_WINDOW / pageSize))
-  const page = clampLimit(options?.page, 1, maxPage)
   const orgFilterClause = buildProjectModeOrgFilter(options, access)
 
   const statusFilter: Record<string, unknown>[] =
@@ -8467,37 +8768,66 @@ async function fetchProjectModeProjectPageHits(
   const creatorSearchFilter = buildProjectModeCreatorSearchFilter(creatorKeyword)
   const creatorOrgSearchFilter = buildProjectModeCreatorOrgSearchFilter(creatorOrgKeyword)
 
+  const filters = [
+    ...projectModeSnapshotFilters(orgFilterClause),
+    ...statusFilter,
+    ...keywordFilter,
+    ...adapterFilter,
+    ...(creatorSearchFilter ? [creatorSearchFilter] : []),
+    ...(creatorOrgSearchFilter ? [creatorOrgSearchFilter] : [])
+  ]
+  return { filters, status, keyword, adapterName, creatorKeyword, creatorOrgKeyword }
+}
+
+async function fetchProjectModeProjectPageHits(
+  options: ProjectModeProjectPageOptions | undefined,
+  access: DashboardAccessContext
+): Promise<{
+  projects: ProjectModeProjectView[]
+  total: number
+  page: number
+  pageSize: number
+  status: ProjectModeProjectStatus
+  keyword: string
+  adapterName: string
+  creatorKeyword: string
+  creatorOrgKeyword: string
+}> {
+  const { filters, status, keyword, adapterName, creatorKeyword, creatorOrgKeyword } =
+    buildProjectModeProjectListFilters(options, access)
+  const pageSize = clampLimit(options?.pageSize, 10, 100)
+  const maxPage = Math.max(1, Math.floor(ES_MAX_RESULT_WINDOW / pageSize))
+  const page = clampLimit(options?.page, 1, maxPage)
+  const { sortBy, sortOrder } = normalizeProjectModeProjectSort(options, status)
+
+  // `featureCount` / `archivedAt` live in the snapshot doc and sort here; the
+  // metric sorts are handled upstream by the metric-sort path.
+  const sort =
+    sortBy === "featureCount"
+      ? [
+          { "properties.featureCount": { order: sortOrder } },
+          { "properties.projectId": { order: "asc" } }
+        ]
+      : sortBy === "archivedAt"
+        ? [
+            { "properties.lifecycleUpdatedAt": { order: sortOrder, missing: "_last" } },
+            { "properties.projectId": { order: "asc" } }
+          ]
+        : [{ "properties.name": { order: "asc" } }, { "properties.projectId": { order: "asc" } }]
+
   const body = {
     track_total_hits: false,
     from: (page - 1) * pageSize,
     size: pageSize,
     query: {
       bool: {
-        filter: [
-          ...projectModeSnapshotFilters(orgFilterClause),
-          ...statusFilter,
-          ...keywordFilter,
-          ...adapterFilter,
-          ...(creatorSearchFilter ? [creatorSearchFilter] : []),
-          ...(creatorOrgSearchFilter ? [creatorOrgSearchFilter] : [])
-        ]
+        filter: filters
       }
     },
-    sort: [{ "properties.name": { order: "asc" } }, { "properties.projectId": { order: "asc" } }],
+    sort,
     collapse: { field: "properties.projectId" },
     aggs: { distinct_projects: { cardinality: { field: "properties.projectId" } } },
-    _source: {
-      includes: [
-        "eventTime",
-        "userName",
-        "sapId",
-        "ystId",
-        "orgName",
-        "upperOrgLv0",
-        "upperOrgLv1",
-        "properties"
-      ]
-    }
+    _source: { includes: PROJECT_MODE_SNAPSHOT_SOURCE_INCLUDES }
   }
   const raw = (await esQuery(getEsIndex("event"), body)) as EsSearchResponse
   const hits = raw.hits?.hits ?? []
@@ -8508,6 +8838,165 @@ async function fetchProjectModeProjectPageHits(
     asRecord(asRecord(raw.aggregations).distinct_projects).value,
     projects.length
   )
+  return {
+    projects,
+    total,
+    page,
+    pageSize,
+    status,
+    keyword,
+    adapterName,
+    creatorKeyword,
+    creatorOrgKeyword
+  }
+}
+
+/** `_source` fields needed to build a ProjectModeProjectView from a snapshot hit. */
+const PROJECT_MODE_SNAPSHOT_SOURCE_INCLUDES = [
+  "eventTime",
+  "userName",
+  "sapId",
+  "ystId",
+  "orgName",
+  "upperOrgLv0",
+  "upperOrgLv1",
+  "properties"
+]
+
+/**
+ * Resolve the full set of project ids matching the list filters (no
+ * pagination). Lightweight — a single `terms` agg returning only the ids, capped
+ * at PROJECT_MODE_PROJECT_ID_LIMIT. Used by the metric-sort path to rank the
+ * whole (active) set before paginating in-app.
+ */
+async function fetchProjectModeFilteredProjectIds(
+  filters: Record<string, unknown>[]
+): Promise<string[]> {
+  const raw = (await esQuery(getEsIndex("event"), {
+    size: 0,
+    track_total_hits: false,
+    query: { bool: { filter: filters } },
+    aggs: {
+      ids: { terms: { field: "properties.projectId", size: PROJECT_MODE_PROJECT_ID_LIMIT } }
+    }
+  })) as EsSearchResponse
+  const buckets = asRecord(asRecord(raw.aggregations).ids).buckets
+  if (!Array.isArray(buckets)) return []
+  return buckets.map((bucket) => asString(asRecord(bucket).key)).filter(Boolean)
+}
+
+/**
+ * Per-project `原始生成行数` (Σ code_gen lineCount), keyed by harnessProjectId.
+ * Mirrors how `codeStats.generatedLines` is computed but drops the adopt /
+ * per-feature breakdown, so it stays cheap across the full active project set.
+ */
+async function fetchProjectModeGeneratedLinesByProject(
+  projectIds: string[],
+  range: TimeRange,
+  opts: OrgFilterOptions | undefined,
+  access: DashboardAccessContext
+): Promise<Map<string, number>> {
+  const result = new Map<string, number>()
+  if (projectIds.length === 0) return result
+  const orgFilterClause = buildProjectModeOrgFilter(opts, access)
+  const raw = await fetchProjectModeCodeAggs(
+    projectIds,
+    range,
+    (perBucketAggs, scopedProjectIds) => ({
+      by_project: {
+        terms: {
+          field: "properties.harnessProjectId",
+          size: Math.max(1, scopedProjectIds.length)
+        },
+        aggs: { code_gen: perBucketAggs.code_gen }
+      }
+    }),
+    orgFilterClause ? [orgFilterClause] : []
+  )
+  const buckets = asRecord(asRecord(asRecord(raw).aggregations).by_project).buckets
+  if (Array.isArray(buckets)) {
+    for (const bucket of buckets) {
+      const b = asRecord(bucket)
+      const id = asString(b.key)
+      if (!id) continue
+      result.set(id, asNumber(asRecord(asRecord(b.code_gen).generated_lines).value))
+    }
+  }
+  return result
+}
+
+/** Build project views for an explicit id set (one collapsed hit per project). */
+async function fetchProjectModeProjectViewsByIds(
+  projectIds: string[],
+  filters: Record<string, unknown>[]
+): Promise<Map<string, ProjectModeProjectView>> {
+  const map = new Map<string, ProjectModeProjectView>()
+  if (projectIds.length === 0) return map
+  const raw = (await esQuery(getEsIndex("event"), {
+    track_total_hits: false,
+    size: projectIds.length,
+    query: {
+      bool: { filter: [...filters, { terms: { "properties.projectId": projectIds } }] }
+    },
+    collapse: { field: "properties.projectId" },
+    _source: { includes: PROJECT_MODE_SNAPSHOT_SOURCE_INCLUDES }
+  })) as EsSearchResponse
+  for (const hit of raw.hits?.hits ?? []) {
+    const view = parseProjectModeSnapshotHit(hit)
+    if (view) map.set(view.projectId, view)
+  }
+  return map
+}
+
+/**
+ * Metric-sort page (active tab only): rank the whole filtered active project set
+ * by a per-range metric, then paginate in-app and fetch just the page's views.
+ * Returns the same shape as `fetchProjectModeProjectPageHits` so the shared
+ * enrichment in `fetchProjectModeProjectPage` applies unchanged.
+ */
+async function fetchProjectModeProjectPageMetricSorted(
+  range: TimeRange,
+  options: ProjectModeProjectPageOptions | undefined,
+  access: DashboardAccessContext,
+  sortBy: "conversationCount" | "generatedLines",
+  sortOrder: ProjectModeProjectSortOrder
+): Promise<{
+  projects: ProjectModeProjectView[]
+  total: number
+  page: number
+  pageSize: number
+  status: ProjectModeProjectStatus
+  keyword: string
+  adapterName: string
+  creatorKeyword: string
+  creatorOrgKeyword: string
+}> {
+  const { filters, status, keyword, adapterName, creatorKeyword, creatorOrgKeyword } =
+    buildProjectModeProjectListFilters(options, access)
+  const pageSize = clampLimit(options?.pageSize, 10, 100)
+  const allIds = await fetchProjectModeFilteredProjectIds(filters)
+  const total = allIds.length
+  const maxPage = Math.max(1, Math.ceil(total / pageSize))
+  const page = clampLimit(options?.page, 1, maxPage)
+
+  const metric =
+    sortBy === "conversationCount"
+      ? (await fetchProjectModePageUsage(allIds, range, options, access)).perProject
+      : await fetchProjectModeGeneratedLinesByProject(allIds, range, options, access)
+
+  const dir = sortOrder === "asc" ? 1 : -1
+  const ordered = [...allIds].sort((a, b) => {
+    const av = metric.get(a) ?? 0
+    const bv = metric.get(b) ?? 0
+    if (av !== bv) return (av - bv) * dir
+    return a.localeCompare(b)
+  })
+  const pageIds = ordered.slice((page - 1) * pageSize, page * pageSize)
+  const views = await fetchProjectModeProjectViewsByIds(pageIds, filters)
+  const projects = pageIds
+    .map((id) => views.get(id))
+    .filter((project): project is ProjectModeProjectView => Boolean(project))
+
   return {
     projects,
     total,
@@ -9024,17 +9513,24 @@ async function fetchProjectModeProjectPage(
   options?: ProjectModeProjectPageOptions,
   access: DashboardAccessContext = requireDashboardProjectModeAccess()
 ): Promise<ProjectModeProjectPageData> {
-  const sliced = await fetchProjectModeProjectPageHits(options, access)
+  const status = normalizeProjectModeProjectStatus(options?.status)
+  const { sortBy, sortOrder } = normalizeProjectModeProjectSort(options, status)
+  const metricSort = sortBy === "conversationCount" || sortBy === "generatedLines"
+
+  // featureCount / default sort paginate the snapshot index directly; metric
+  // sorts (active tab only) rank the full set first, then page.
+  const sliced = metricSort
+    ? await fetchProjectModeProjectPageMetricSorted(range, options, access, sortBy, sortOrder)
+    : await fetchProjectModeProjectPageHits(options, access)
   const projectIds = sliced.projects.map((project) => project.projectId)
   const usage = await fetchProjectModePageUsage(projectIds, range, options, access)
-  const code = await fetchProjectModeProjectCodeStats(
-    [...usage.perProject.keys()],
-    range,
-    options,
-    access
-  )
+  // Key code stats on the page's project ids (not just those with conversations)
+  // so a project ranked high by 原始生成行数 still shows its adoption columns.
+  const code = await fetchProjectModeProjectCodeStats(projectIds, range, options, access)
   return {
     ...sliced,
+    sortBy,
+    sortOrder,
     projects: sliced.projects.map((project) => ({
       ...project,
       conversationCount: usage.perProject.get(project.projectId) ?? 0,
@@ -9072,7 +9568,7 @@ async function fetchProjectModeFeatureCommits(
   items: DashboardCommitDetail[]
 }> {
   const access = requireDashboardProjectModeAccess()
-  const { page, pageSize, pushedOnly, upperOrgLv1, orgLv1List } =
+  const { page, pageSize, pushedOnly, upperOrgLv1, userKeyword, orgLv1List } =
     normalizeCommitDetailsOptions(options)
   const orgFilterClause = buildProjectModeOrgFilter({ upperOrgLv1: orgLv1List }, access)
   const normalizedProjectId = projectId.trim()
@@ -9118,6 +9614,7 @@ async function fetchProjectModeFeatureCommits(
   if (pushedOnly) filters.push({ term: { "properties.pushed": true } })
   appendOptionalFilter(filters, orgFilterClause)
   if (upperOrgLv1 !== null) filters.push(buildOrgLevelMatchFilter(upperOrgLv1))
+  if (userKeyword !== null) filters.push(buildCommitUserMatchFilter(userKeyword))
 
   const raw = (await esQuery(getEsIndex("event"), {
     track_total_hits: true,
@@ -9160,7 +9657,7 @@ async function fetchProjectModeProjectCommits(
   items: DashboardCommitDetail[]
 }> {
   const access = requireDashboardProjectModeAccess()
-  const { page, pageSize, pushedOnly, upperOrgLv1, orgLv1List } =
+  const { page, pageSize, pushedOnly, upperOrgLv1, userKeyword, orgLv1List } =
     normalizeCommitDetailsOptions(options)
   const orgFilterClause = buildProjectModeOrgFilter({ upperOrgLv1: orgLv1List }, access)
   const normalizedProjectId = projectId.trim()
@@ -9203,6 +9700,7 @@ async function fetchProjectModeProjectCommits(
   if (pushedOnly) filters.push({ term: { "properties.pushed": true } })
   appendOptionalFilter(filters, orgFilterClause)
   if (upperOrgLv1 !== null) filters.push(buildOrgLevelMatchFilter(upperOrgLv1))
+  if (userKeyword !== null) filters.push(buildCommitUserMatchFilter(userKeyword))
 
   const raw = (await esQuery(getEsIndex("event"), {
     track_total_hits: true,
@@ -9237,13 +9735,20 @@ async function fetchProjectMode(
     fetchProjectModeSnapshotAggs(opts, access),
     fetchProjectModeUsage(range, opts, access),
     fetchProjectModeAggregateCodeStats(range, opts, access),
-    fetchProjectModeProjectPage(range, {
-      ...opts,
-      status: "active",
-      page: 1,
-      pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
-      keyword: ""
-    }, access)
+    fetchProjectModeProjectPage(
+      range,
+      {
+        ...opts,
+        status: "active",
+        page: 1,
+        pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
+        keyword: "",
+        // 列表默认按对话数降序；与渲染层初始排序态一致，避免首屏二次请求。
+        sortBy: "conversationCount",
+        sortOrder: "desc"
+      },
+      access
+    )
   ])
 
   // Adapter rows: usage carries conversation counts, snapshot aggs carry project /
@@ -9416,6 +9921,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle("dashboard:isAnalysisAgentAllowed", async () => {
     return isDashboardAnalysisAgentAllowed()
+  })
+
+  _ipcMain.handle("dashboard:isUncommittedAnalysisAllowed", async () => {
+    return isDashboardUncommittedAnalysisAllowed()
   })
 
   _ipcMain.handle("dashboard:esQuery", async (_, input: DashboardEsQueryInput) => {
@@ -9632,7 +10141,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:uncommittedRanking",
     async (_, range: TimeRange, options?: UncommittedScopeOptions) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockUncommittedRanking() }
+      if (import.meta.env.DEV) return { success: true, data: makeMockUncommittedRanking(options) }
       try {
         return { success: true, data: await fetchUncommittedRanking(range, options) }
       } catch (e) {
@@ -9648,7 +10157,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       const normalizedSapId = sapId?.trim?.() ?? ""
       if (!normalizedSapId) return { success: false, error: "sapId is required" }
       if (import.meta.env.DEV)
-        return { success: true, data: makeMockUncommittedDetail(normalizedSapId) }
+        return { success: true, data: makeMockUncommittedDetail(normalizedSapId, options) }
       try {
         return {
           success: true,
@@ -9798,15 +10307,18 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle("dashboard:threadTraces", async (_, threadId: string, options?: ThreadTracesOptions) => {
-    if (import.meta.env.DEV) return { success: true, data: makeMockThreadTraces(threadId) }
-    try {
-      return { success: true, data: await fetchThreadTraces(threadId, options) }
-    } catch (e) {
-      console.error("[Dashboard] threadTraces error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
+  _ipcMain.handle(
+    "dashboard:threadTraces",
+    async (_, threadId: string, options?: ThreadTracesOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockThreadTraces(threadId) }
+      try {
+        return { success: true, data: await fetchThreadTraces(threadId, options) }
+      } catch (e) {
+        console.error("[Dashboard] threadTraces error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
     }
-  })
+  )
 
   _ipcMain.handle(
     "dashboard:marketSkillRecentTraces",

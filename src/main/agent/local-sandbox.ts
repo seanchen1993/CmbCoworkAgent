@@ -70,7 +70,10 @@ import type { SkillLifecycleMatch, SkillLifecycleRegistry } from "./skill-lifecy
 import { getSkillActivationKey } from "./skill-lifecycle/activation"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
-import { recordGen as recordAdoptionGen } from "../services/adoption-tracker"
+import {
+  recordGen as recordAdoptionGen,
+  recordShellFileOps as recordAdoptionShellFileOps
+} from "../services/adoption-tracker"
 import {
   READ_FILE_DEFAULT_LIMIT,
   READ_FILE_MAX_LIMIT,
@@ -5115,6 +5118,9 @@ export class LocalSandbox
         effectiveCwd,
         this.windowsSandbox
       )
+      // Adoption tracking: react to agent rm/mv of generated files (side-effect
+      // only, never throws). Only successful commands act (exitCode === 0).
+      recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
       const postResult = await this.runHooks("PostToolUse", {
         toolName: "execute",
         toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
@@ -5128,6 +5134,7 @@ export class LocalSandbox
     const result = await this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
       cwd: effectiveCwd
     })
+    recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "execute",
       toolArgs: { command: effectiveCommand, cwd: effectiveCwd },

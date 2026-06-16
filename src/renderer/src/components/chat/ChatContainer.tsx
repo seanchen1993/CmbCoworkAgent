@@ -2970,6 +2970,7 @@ export function ChatContainer({
     isHarnessContextReminderEnabled,
     contextReminder
   )
+  // 项目已删除时，会话仅可查看历史：禁用输入框与编辑器控件。
   const effectiveInputDisabled = inputDisabled || contextReminderPending || readOnly
   const effectiveComposerControlsDisabled = composerControlsDisabled || contextReminderPending || readOnly
   const inputPlaceholder = useMemo(() => {

@@ -482,8 +482,9 @@ if (!gotTheLock) {
     }
 
     // Periodically upsert Harness Board project/feature status into the event
-    // index. Writes directly to ES (VITE_ES_NODES); no-ops when ES is not
-    // configured, so it does not depend on the trace upload base URL.
+    // index. Prefers the backend event service (VITE_API_TRACE_BASE_URL) and
+    // falls back to writing ES directly (VITE_ES_NODES); no-ops when neither is
+    // configured.
     startHarnessStatusReporter()
 
     // Initialize database

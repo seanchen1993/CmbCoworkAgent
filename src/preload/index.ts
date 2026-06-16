@@ -2390,6 +2390,8 @@ const api = {
       ipcRenderer.invoke("dashboard:isProjectModeAllowed"),
     isAnalysisAgentAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isAnalysisAgentAllowed"),
+    isUncommittedAnalysisAllowed: (): Promise<boolean> =>
+      ipcRenderer.invoke("dashboard:isUncommittedAnalysisAllowed"),
     esQuery: (input: {
       indexAlias: "event" | "trace"
       operation: "search" | "msearch" | "count" | "mapping" | "field_caps"
@@ -2460,6 +2462,7 @@ const api = {
         pageSize?: number
         pushedOnly?: boolean
         upperOrgLv1?: string | null
+        userKeyword?: string | null
         orgLv1List?: string[]
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -2478,6 +2481,7 @@ const api = {
         pageSize?: number
         pushedOnly?: boolean
         upperOrgLv1?: string | null
+        userKeyword?: string | null
         orgLv1List?: string[]
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -2534,7 +2538,10 @@ const api = {
       options?: {
         upperOrgLv1?: string | string[] | null
         projectMode?: boolean
+        projectId?: string | null
+        featureSlug?: string | null
         usedSkillsOnly?: boolean
+        userKeyword?: string | null
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:uncommittedRanking", range, options),
@@ -2544,7 +2551,10 @@ const api = {
       options?: {
         upperOrgLv1?: string | string[] | null
         projectMode?: boolean
+        projectId?: string | null
+        featureSlug?: string | null
         usedSkillsOnly?: boolean
+        userKeyword?: string | null
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:uncommittedDetail", sapId, range, options),
@@ -2649,6 +2659,7 @@ const api = {
         pageSize?: number
         pushedOnly?: boolean
         upperOrgLv1?: string | null
+        userKeyword?: string | null
         orgLv1List?: string[]
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -2889,11 +2900,17 @@ const api = {
   git: {
     currentBranch: (
       cwd?: string
-    ): Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }> =>
+    ): Promise<{
+      isGitRepo: boolean
+      branch: string | null
+      isWorktree: boolean
+      error?: string
+    }> =>
       ipcRenderer.invoke("git:currentBranch", cwd) as Promise<{
         isGitRepo: boolean
         branch: string | null
         isWorktree: boolean
+        error?: string
       }>,
     listBranches: (
       cwd?: string,

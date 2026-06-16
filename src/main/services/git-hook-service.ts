@@ -34,7 +34,7 @@ const PUSH_RECHECK_INTERVAL_MS = 30_000
 // Commit reconciler — hook-independent backstop for external IDE/CLI commits whose
 // pre-commit/post-commit hooks never fired (e.g. IntelliJ IDEA 2026's local commit).
 // Bounded to the adoption attribution window so we never backfill ancient history.
-const COMMIT_RECONCILE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+const COMMIT_RECONCILE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000
 const COMMIT_RECONCILE_MAX_COMMITS = 50
 const RECONCILE_STAGED_BLOB_MAX_BYTES = 8 * 1024 * 1024
 
@@ -590,7 +590,9 @@ const CODE_EXTENSIONS = new Set([
   "ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "svelte", "html", "css", "scss", "sass", "less",
   "py", "go", "rs", "java", "kt", "scala", "rb", "php", "c", "cc", "cpp", "h", "hpp", "cs",
   "swift", "m", "mm", "sh", "bash", "zsh", "sql", "lua", "r", "dart", "proto", "graphql",
-  "tf", "xml", "yaml", "yml"
+  "tf", "xml"
+  // NOTE: keep in sync with adoption-tracker.ts CODE_EXTENSIONS.
+  // yaml/yml and .properties are intentionally excluded (config/serialization churn).
 ])
 const EXCLUDED_PATH_SEGMENTS = new Set(["node_modules", "dist", "build", "out", ".next", "__pycache__", "target", ".venv", "venv", ".git", "coverage"])
 const EXCLUDED_FILENAME_PATTERNS = [/package-lock\\.json$/i, /pnpm-lock\\.yaml$/i, /yarn\\.lock$/i, /\\.min\\.(js|css)$/i, /\\.map$/i]

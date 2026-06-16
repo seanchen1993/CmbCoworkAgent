@@ -7,6 +7,9 @@ import {
   MessagesSquare,
   ArrowDownToLine,
   ArrowUpFromLine,
+  ArrowUp,
+  ArrowDown,
+  ArrowUpDown,
   ChevronLeft,
   ChevronDown,
   ChevronRight,
@@ -38,6 +41,7 @@ import {
   CodeAdoptionFunnel,
   GeneratedLinesTooltip,
   InclusiveAdoptionTooltip,
+  InclusivePushedAdoptionTooltip,
   MeasuredAdoptionTooltip,
   PushedAdoptionTooltip,
   SkillRankingPanel,
@@ -53,6 +57,8 @@ import type {
   DashboardProjectModeProject,
   DashboardProjectModeProjectCounts,
   DashboardProjectModeProjectPageData,
+  DashboardProjectModeProjectSortKey,
+  DashboardProjectModeProjectSortOrder,
   DashboardProjectModeProjectStatus,
   DashboardProjectModeSkillCount,
   DashboardProjectModeToolUsage,
@@ -67,7 +73,8 @@ const EMPTY_FUNNEL_DATA: CodeAdoptionFunnelData = {
   pushedAdoptedLines: 0,
   inclusiveAdoptionRate: null,
   measuredAdoptionRate: null,
-  pushedAdoptionRate: null
+  pushedAdoptionRate: null,
+  inclusivePushedAdoptionRate: null
 }
 
 const EMPTY_TOOL_USAGE: DashboardProjectModeToolUsage = {
@@ -144,7 +151,8 @@ function StatCard({
   value,
   sub,
   color,
-  hint
+  hint,
+  tag
 }: {
   icon: React.ElementType
   label: string
@@ -152,10 +160,12 @@ function StatCard({
   sub?: string
   color: string
   hint?: React.ReactNode
+  /** 口径标签：底部小药丸，如「总量口径 · 入库」。 */
+  tag?: string
 }): React.JSX.Element {
   return (
     <div className="flex w-full items-center gap-3 rounded-xl border border-border bg-card px-4 py-3">
-      <div className={`flex size-9 items-center justify-center rounded-lg ${color}`}>
+      <div className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${color}`}>
         <Icon className="size-4 text-white" />
       </div>
       <div className="min-w-0">
@@ -165,6 +175,11 @@ function StatCard({
         </div>
         <div className="text-lg font-bold leading-tight text-foreground">{value}</div>
         {sub && <div className="whitespace-nowrap text-[10px] text-muted-foreground">{sub}</div>}
+        {tag && (
+          <div className="mt-1.5 inline-block whitespace-nowrap rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+            {tag}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -422,11 +437,11 @@ function CodeEfficiencyModelInfo(): React.JSX.Element {
         </Tooltip>
       </TooltipProvider>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-5xl">
+        <DialogContent className="w-[92vw] max-w-[1720px]">
           <DialogHeader>
             <DialogTitle>生产效能代码指标 · 口径说明</DialogTitle>
           </DialogHeader>
-          <div className="max-h-[80vh] overflow-auto">
+          <div className="max-h-[82vh] overflow-auto">
             <img
               src={codeEfficiencyModel}
               alt="生产效能代码指标口径说明示意图"
@@ -439,7 +454,7 @@ function CodeEfficiencyModelInfo(): React.JSX.Element {
   )
 }
 
-/** Per-feature code-adoption line: Agent生成行数 / 有效生成行数 / 已Commit·已Push 采纳率（含行数明细）。 */
+/** Per-feature code-adoption line: 原始生成行数 / 有效生成行数 / 已Commit·已Push 采纳率（含行数明细）。 */
 function FeatureCodeStatsLine({
   codeStats
 }: {
@@ -448,39 +463,115 @@ function FeatureCodeStatsLine({
   if (!codeStats) {
     return <div className="text-[11px] text-muted-foreground/80">暂无代码生成数据</div>
   }
-  const adoptedLabel = `${formatLineCount(codeStats.adoptedLines)} / ${formatLineCount(codeStats.effectiveGeneratedLines)} 行`
-  const pushedLabel = `${formatLineCount(codeStats.pushedAdoptedLines)} / ${formatLineCount(codeStats.pushedEffectiveGeneratedLines)} 行`
+  const commitDenom = formatLineCount(codeStats.effectiveGeneratedLines)
+  const pushDenom = formatLineCount(codeStats.pushedEffectiveGeneratedLines)
+  const totalDenom = formatLineCount(codeStats.inclusiveEffectiveGeneratedLines)
+  const adopted = formatLineCount(codeStats.adoptedLines)
+  const pushedAdopted = formatLineCount(codeStats.pushedAdoptedLines)
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
-      <span>
-        Agent生成行数{" "}
-        <span className="font-medium text-foreground">
-          {formatLineCount(codeStats.generatedLines)}
+    <div className="space-y-1 text-[11px] text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span>
+          原始生成行数{" "}
+          <span className="font-medium text-foreground">
+            {formatLineCount(codeStats.generatedLines)}
+          </span>
         </span>
-      </span>
-      <span className="inline-flex items-center gap-1">
-        有效生成行数{" "}
-        <span className="font-medium text-foreground">
-          {formatLineCount(codeStats.effectiveGeneratedLines)}
+        <span className="inline-flex items-center gap-1">
+          有效生成行数{" "}
+          <span className="font-medium text-foreground">
+            {formatLineCount(codeStats.effectiveGeneratedLines)}
+          </span>
+          <InfoHint hint="Agent 原始生成行数扣除被Agent后续修改覆盖、回退或删除的行后，真正纳入采纳率分母的有效产出。" />
         </span>
-        <InfoHint hint="Agent 原始生成行数扣除被Agent后续修改覆盖、回退或删除的行后，真正纳入采纳率分母的有效产出。" />
-      </span>
-      <span>
-        提交率{" "}
-        <span className="font-medium text-foreground">
-          {formatPercent(codeStats.measuredAdoptionRate)}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span className="text-muted-foreground/70">提交口径</span>
+        <span>
+          提交{" "}
+          <span className="font-medium text-foreground">
+            {formatPercent(codeStats.measuredAdoptionRate)}
+          </span>
+          <span className="ml-1 text-muted-foreground/80">
+            ({adopted} / {commitDenom} 行)
+          </span>
         </span>
-        <span className="ml-1 text-muted-foreground/80">({adoptedLabel})</span>
-      </span>
-      <span>
-        入库率{" "}
-        <span className="font-medium text-foreground">
-          {formatPercent(codeStats.pushedAdoptionRate)}
+        <span>
+          入库{" "}
+          <span className="font-medium text-foreground">
+            {formatPercent(codeStats.pushedAdoptionRate)}
+          </span>
+          <span className="ml-1 text-muted-foreground/80">
+            ({pushedAdopted} / {pushDenom} 行)
+          </span>
         </span>
-        <span className="ml-1 text-muted-foreground/80">({pushedLabel})</span>
-      </span>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span className="text-muted-foreground/70">总量口径</span>
+        <span>
+          提交{" "}
+          <span className="font-medium text-foreground">
+            {formatPercent(codeStats.inclusiveAdoptionRate)}
+          </span>
+          <span className="ml-1 text-muted-foreground/80">
+            ({adopted} / {totalDenom} 行)
+          </span>
+        </span>
+        <span>
+          入库{" "}
+          <span className="font-medium text-foreground">
+            {formatPercent(codeStats.inclusivePushedAdoptionRate)}
+          </span>
+          <span className="ml-1 text-muted-foreground/80">
+            ({pushedAdopted} / {totalDenom} 行)
+          </span>
+        </span>
+      </div>
     </div>
   )
+}
+
+/** 表格内一条「label X% (采纳/生成)」采纳率，按口径分组的列里上下各一条；有数据时可点击采纳溯源。 */
+function AdoptionRateLine({
+  label,
+  rate,
+  detail,
+  clickable,
+  onActivate,
+  title
+}: {
+  label: string
+  rate: number | null
+  detail: string
+  clickable: boolean
+  onActivate: () => void
+  title: string
+}): React.JSX.Element {
+  const body = (
+    <span className="whitespace-nowrap">
+      <span className="text-muted-foreground/70">{label}</span>{" "}
+      <span className="font-medium underline-offset-2 group-hover:underline">
+        {formatPercent(rate)}
+      </span>
+      <span className="ml-1 text-[10px] text-muted-foreground">{detail}</span>
+    </span>
+  )
+  if (clickable) {
+    return (
+      <button
+        type="button"
+        className="group block w-full text-right transition-colors hover:text-primary"
+        title={title}
+        onClick={(event) => {
+          event.stopPropagation()
+          onActivate()
+        }}
+      >
+        {body}
+      </button>
+    )
+  }
+  return <div className="text-right">{body}</div>
 }
 
 function ProjectRow({
@@ -501,12 +592,22 @@ function ProjectRow({
   const codeStats = project.codeStats
   const hasCommitAdoption = Boolean(codeStats && codeStats.effectiveGeneratedLines > 0)
   const hasPushedAdoption = Boolean(codeStats && codeStats.pushedEffectiveGeneratedLines > 0)
-  const adoptionLineLabel = codeStats
-    ? `${formatLineCount(codeStats.adoptedLines)} / ${formatLineCount(codeStats.effectiveGeneratedLines)} 行`
+  const adopted = codeStats ? formatLineCount(codeStats.adoptedLines) : "—"
+  const pushedAdopted = codeStats ? formatLineCount(codeStats.pushedAdoptedLines) : "—"
+  const commitDetail = codeStats
+    ? `${adopted}/${formatLineCount(codeStats.effectiveGeneratedLines)}`
     : "—"
-  const pushedAdoptionLineLabel = codeStats
-    ? `${formatLineCount(codeStats.pushedAdoptedLines)} / ${formatLineCount(codeStats.pushedEffectiveGeneratedLines)} 行`
+  const pushDetail = codeStats
+    ? `${pushedAdopted}/${formatLineCount(codeStats.pushedEffectiveGeneratedLines)}`
     : "—"
+  const totalDetail = codeStats
+    ? `${adopted}/${formatLineCount(codeStats.inclusiveEffectiveGeneratedLines)}`
+    : "—"
+  const totalPushDetail = codeStats
+    ? `${pushedAdopted}/${formatLineCount(codeStats.inclusiveEffectiveGeneratedLines)}`
+    : "—"
+  const commitTraceTitle = "查看采纳溯源：该项目关联的 commit 明细"
+  const pushTraceTitle = "查看采纳溯源：该项目已 Push 的 commit 明细"
   const creatorName = project.creatorUserName || project.creatorSapId || project.creatorYstId || "—"
   const creatorId = project.creatorSapId || project.creatorYstId || ""
   const creatorDepartment = formatProjectCreatorDepartment(project)
@@ -562,54 +663,44 @@ function ProjectRow({
           {formatLineCount(codeStats?.generatedLines ?? 0)}
         </td>
         <td className="px-3 py-2 text-right tabular-nums">
-          {hasCommitAdoption ? (
-            <button
-              type="button"
-              className="ml-auto block text-right transition-colors hover:text-primary"
-              title="查看采纳溯源：该项目关联的 commit 明细"
-              onClick={(event) => {
-                event.stopPropagation()
-                onOpenProjectCommits(false)
-              }}
-            >
-              <div className="font-medium underline-offset-2 hover:underline">
-                {formatPercent(codeStats?.measuredAdoptionRate)}
-              </div>
-              <div className="mt-0.5 text-[10px] text-muted-foreground">{adoptionLineLabel}</div>
-            </button>
-          ) : (
-            <>
-              <div className="font-medium">{formatPercent(codeStats?.measuredAdoptionRate)}</div>
-              <div className="mt-0.5 text-[10px] text-muted-foreground">{adoptionLineLabel}</div>
-            </>
-          )}
+          <div className="flex flex-col items-end gap-0.5">
+            <AdoptionRateLine
+              label="提交"
+              rate={codeStats?.measuredAdoptionRate ?? null}
+              detail={commitDetail}
+              clickable={hasCommitAdoption}
+              onActivate={() => onOpenProjectCommits(false)}
+              title={commitTraceTitle}
+            />
+            <AdoptionRateLine
+              label="入库"
+              rate={codeStats?.pushedAdoptionRate ?? null}
+              detail={pushDetail}
+              clickable={hasPushedAdoption}
+              onActivate={() => onOpenProjectCommits(true)}
+              title={pushTraceTitle}
+            />
+          </div>
         </td>
         <td className="px-3 py-2 text-right tabular-nums">
-          {hasPushedAdoption ? (
-            <button
-              type="button"
-              className="ml-auto block text-right transition-colors hover:text-primary"
-              title="查看采纳溯源：该项目已 Push 的 commit 明细"
-              onClick={(event) => {
-                event.stopPropagation()
-                onOpenProjectCommits(true)
-              }}
-            >
-              <div className="font-medium underline-offset-2 hover:underline">
-                {formatPercent(codeStats?.pushedAdoptionRate)}
-              </div>
-              <div className="mt-0.5 text-[10px] text-muted-foreground">
-                {pushedAdoptionLineLabel}
-              </div>
-            </button>
-          ) : (
-            <>
-              <div className="font-medium">{formatPercent(codeStats?.pushedAdoptionRate)}</div>
-              <div className="mt-0.5 text-[10px] text-muted-foreground">
-                {pushedAdoptionLineLabel}
-              </div>
-            </>
-          )}
+          <div className="flex flex-col items-end gap-0.5">
+            <AdoptionRateLine
+              label="提交"
+              rate={codeStats?.inclusiveAdoptionRate ?? null}
+              detail={totalDetail}
+              clickable={hasCommitAdoption}
+              onActivate={() => onOpenProjectCommits(false)}
+              title={commitTraceTitle}
+            />
+            <AdoptionRateLine
+              label="入库"
+              rate={codeStats?.inclusivePushedAdoptionRate ?? null}
+              detail={totalPushDetail}
+              clickable={hasPushedAdoption}
+              onActivate={() => onOpenProjectCommits(true)}
+              title={pushTraceTitle}
+            />
+          </div>
         </td>
         <td className="px-3 py-2">
           <div className="font-medium text-foreground">{creatorName}</div>
@@ -771,6 +862,51 @@ function ProjectListSearchInput({
   )
 }
 
+/** 可排序表头单元格：未启用时退化为普通 <th>，启用时显示排序箭头并响应点击。 */
+function SortableTh({
+  label,
+  sortKey,
+  activeKey,
+  order,
+  enabled,
+  onSort,
+  title
+}: {
+  label: string
+  sortKey: DashboardProjectModeProjectSortKey
+  activeKey: DashboardProjectModeProjectSortKey | null
+  order: DashboardProjectModeProjectSortOrder
+  enabled: boolean
+  onSort: (key: DashboardProjectModeProjectSortKey) => void
+  title?: string
+}): React.JSX.Element {
+  if (!enabled) {
+    return (
+      <th className="px-3 py-2 text-right font-medium" title={title}>
+        {label}
+      </th>
+    )
+  }
+  const active = activeKey === sortKey
+  const Icon = active ? (order === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown
+  return (
+    <th className="px-3 py-2 text-right font-medium">
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        title={title ?? `按${label}排序`}
+        className={cn(
+          "ml-auto inline-flex items-center gap-1 transition-colors hover:text-foreground",
+          active ? "text-foreground" : "text-muted-foreground"
+        )}
+      >
+        <span>{label}</span>
+        <Icon className={cn("size-3", active ? "opacity-100" : "opacity-40")} />
+      </button>
+    </th>
+  )
+}
+
 /**
  * 项目列表：进行中 / 已归档双 tab + 项目名搜索 + 后端分页。
  * 默认随项目模式总览返回「进行中」第一页，已归档 tab 首次切换时懒加载。
@@ -802,7 +938,9 @@ function ProjectListSection({
     pageSize: number,
     adapterName: string,
     creatorKeyword: string,
-    creatorOrgKeyword: string
+    creatorOrgKeyword: string,
+    sortBy?: DashboardProjectModeProjectSortKey | null,
+    sortOrder?: DashboardProjectModeProjectSortOrder
   ) => void
   onOpenTraces: (
     project: DashboardProjectModeProject,
@@ -820,12 +958,30 @@ function ProjectListSection({
   const [departmentQuery, setDepartmentQuery] = useState("")
   const [adapterName, setAdapterName] = useState("")
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  // null = 用所在 tab 的默认排序；非空 = 用户显式选择。
+  const [sortBy, setSortBy] = useState<DashboardProjectModeProjectSortKey | null>(null)
+  const [sortOrder, setSortOrder] = useState<DashboardProjectModeProjectSortOrder>("desc")
 
   const trimmed = query.trim()
   const creatorKeyword = creatorQuery.trim()
   const creatorOrgKeyword = departmentQuery.trim()
   const rawSelectedAdapter = adapterName.trim()
   const selectedAdapter = adapterOptions.includes(rawSelectedAdapter) ? rawSelectedAdapter : ""
+  // 对话数 / 原始生成行数 排序仅在「进行中」开放（归档项目量大，按指标全量排序代价高）。
+  const metricSortAllowed = tab === "active"
+  // 各 tab 默认排序：进行中→对话数降序；已归档→归档时间降序。
+  const tabDefaultSort: {
+    key: DashboardProjectModeProjectSortKey
+    order: DashboardProjectModeProjectSortOrder
+  } =
+    tab === "archived"
+      ? { key: "archivedAt", order: "desc" }
+      : { key: "conversationCount", order: "desc" }
+  const sortKeyApplicable = (key: DashboardProjectModeProjectSortKey): boolean =>
+    key === "featureCount" ? true : key === "archivedAt" ? tab === "archived" : metricSortAllowed
+  const useExplicitSort = sortBy !== null && sortKeyApplicable(sortBy)
+  const effectiveSortBy = useExplicitSort ? sortBy : tabDefaultSort.key
+  const effectiveSortOrder = useExplicitSort ? sortOrder : tabDefaultSort.order
   const pageData = projectPages[tab]
   const currentError = pageError[tab]
   const tabCount =
@@ -834,8 +990,15 @@ function ProjectListSection({
   const pageMatchesAdapter = (pageData?.adapterName ?? "") === selectedAdapter
   const pageMatchesCreator = (pageData?.creatorKeyword ?? "") === creatorKeyword
   const pageMatchesCreatorOrg = (pageData?.creatorOrgKeyword ?? "") === creatorOrgKeyword
+  const pageMatchesSort =
+    (pageData?.sortBy ?? null) === effectiveSortBy &&
+    (pageData?.sortOrder ?? "desc") === effectiveSortOrder
   const pageMatchesFilter =
-    pageMatchesQuery && pageMatchesAdapter && pageMatchesCreator && pageMatchesCreatorOrg
+    pageMatchesQuery &&
+    pageMatchesAdapter &&
+    pageMatchesCreator &&
+    pageMatchesCreatorOrg &&
+    pageMatchesSort
   const pageItems = pageMatchesFilter ? (pageData?.projects ?? []) : []
   const total = pageMatchesFilter ? (pageData?.total ?? 0) : 0
   const totalPages = Math.max(1, Math.ceil(total / PROJECT_PAGE_SIZE))
@@ -863,7 +1026,9 @@ function ProjectListSection({
       (pageData.adapterName ?? "") === selectedAdapter &&
       (pageData.creatorKeyword ?? "") === creatorKeyword &&
       (pageData.creatorOrgKeyword ?? "") === creatorOrgKeyword &&
-      pageData.pageSize === PROJECT_PAGE_SIZE
+      pageData.pageSize === PROJECT_PAGE_SIZE &&
+      (pageData.sortBy ?? null) === effectiveSortBy &&
+      (pageData.sortOrder ?? "desc") === effectiveSortOrder
     ) {
       return
     }
@@ -877,13 +1042,17 @@ function ProjectListSection({
         PROJECT_PAGE_SIZE,
         selectedAdapter,
         creatorKeyword,
-        creatorOrgKeyword
+        creatorOrgKeyword,
+        effectiveSortBy,
+        effectiveSortOrder
       )
     }, 250)
     return () => window.clearTimeout(timer)
   }, [
     creatorKeyword,
     creatorOrgKeyword,
+    effectiveSortBy,
+    effectiveSortOrder,
     onPageChange,
     pageData,
     pageLoading,
@@ -893,6 +1062,8 @@ function ProjectListSection({
   ])
 
   const switchTab = (next: ProjectListTab): void => {
+    // 不重置排序态：归档 tab 由 effectiveSortBy 自动忽略指标排序，
+    // 切回进行中时仍恢复原排序（含默认的对话数降序）。
     setTab(next)
     setExpandedId(null)
   }
@@ -911,8 +1082,26 @@ function ProjectListSection({
       PROJECT_PAGE_SIZE,
       selectedAdapter,
       creatorKeyword,
-      creatorOrgKeyword
+      creatorOrgKeyword,
+      effectiveSortBy,
+      effectiveSortOrder
     )
+  }
+  // 点击表头切换排序：未生效→降序；降序→升序；升序→取消（回到该 tab 默认排序）。
+  const cycleSort = (key: DashboardProjectModeProjectSortKey): void => {
+    setExpandedId(null)
+    if (effectiveSortBy !== key) {
+      setSortBy(key)
+      setSortOrder("desc")
+      return
+    }
+    if (effectiveSortOrder === "desc") {
+      setSortBy(key)
+      setSortOrder("asc")
+      return
+    }
+    setSortBy(null)
+    setSortOrder("desc")
   }
 
   const tabs: Array<{ id: ProjectListTab; label: string; count: number }> = [
@@ -924,7 +1113,7 @@ function ProjectListSection({
     <section>
       <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-        项目、插件、项目状态、特性数为当前状态；对话数、Agent生成行数（原始生成行数）、提交率/入库率，以及展开行的技能、各特性采纳明细与关联
+        项目、插件、项目状态、特性数为当前状态；对话数、原始生成行数、提交、总量两口径采纳率，以及展开行的技能、各特性采纳明细与关联
         Commit 按所选时间范围统计。
       </p>
 
@@ -992,16 +1181,33 @@ function ProjectListSection({
               <th className="px-3 py-2 text-left font-medium">项目</th>
               <th className="px-3 py-2 text-left font-medium">插件</th>
               <th className="px-3 py-2 text-left font-medium">项目状态</th>
-              <th className="px-3 py-2 text-right font-medium">特性数</th>
-              <th className="px-3 py-2 text-right font-medium">对话数</th>
-              <th
-                className="px-3 py-2 text-right font-medium"
+              <SortableTh
+                label="特性数"
+                sortKey="featureCount"
+                activeKey={effectiveSortBy}
+                order={sortOrder}
+                enabled
+                onSort={cycleSort}
+              />
+              <SortableTh
+                label="对话数"
+                sortKey="conversationCount"
+                activeKey={effectiveSortBy}
+                order={sortOrder}
+                enabled={metricSortAllowed}
+                onSort={cycleSort}
+              />
+              <SortableTh
+                label="原始生成行数"
+                sortKey="generatedLines"
+                activeKey={effectiveSortBy}
+                order={sortOrder}
+                enabled={metricSortAllowed}
+                onSort={cycleSort}
                 title="Agent 原始生成行数（未经去重/抵消的原始产出）"
-              >
-                Agent生成行数
-              </th>
-              <th className="px-3 py-2 text-right font-medium">提交率</th>
-              <th className="px-3 py-2 text-right font-medium">入库率</th>
+              />
+              <th className="px-3 py-2 text-right font-medium">提交口径采纳率</th>
+              <th className="px-3 py-2 text-right font-medium">总量口径采纳率</th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
               <th className="px-3 py-2 text-left font-medium">部门</th>
               <th className="px-3 py-2 text-right font-medium">操作</th>
@@ -1125,6 +1331,7 @@ function mergeCodeStats(
     measuredAdoptionRate,
     inclusiveAdoptionRate: adoptionRate(adoptedLines, inclusiveEffectiveGeneratedLines),
     pushedAdoptionRate: adoptionRate(pushedAdoptedLines, pushedEffectiveGeneratedLines),
+    inclusivePushedAdoptionRate: adoptionRate(pushedAdoptedLines, inclusiveEffectiveGeneratedLines),
     adoptionRate: measuredAdoptionRate
   }
 }
@@ -1245,8 +1452,8 @@ function AdapterListSection({
       <h2 className="mb-1 text-sm font-semibold text-foreground">插件列表</h2>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
         {mode === "byName"
-          ? "按插件名聚合同名插件的多个版本；按项目数降序排列，项目数为当前状态，对话数、提交率/入库率按所选时间范围统计。"
-          : "按插件版本展开；按项目数降序排列，项目数为当前状态，对话数、提交率/入库率按所选时间范围统计。"}
+          ? "按插件名聚合同名插件的多个版本；按项目数降序排列，项目数为当前状态，对话数、提交、总量两口径采纳率按所选时间范围统计。"
+          : "按插件版本展开；按项目数降序排列，项目数为当前状态，对话数、提交、总量两口径采纳率按所选时间范围统计。"}
       </p>
       <div className="mb-3 flex items-center overflow-hidden rounded-md border border-border w-fit">
         {modeTabs.map((t) => (
@@ -1323,15 +1530,23 @@ function AdapterListSection({
                         </span>
                       </span>
                       <span>
-                        提交率{" "}
+                        <span className="text-muted-foreground/70">提交口径</span> 提交{" "}
                         <span className="font-medium text-foreground">
                           {formatPercent(adapter.codeStats?.measuredAdoptionRate)}
+                        </span>{" "}
+                        · 入库{" "}
+                        <span className="font-medium text-foreground">
+                          {formatPercent(adapter.codeStats?.pushedAdoptionRate)}
                         </span>
                       </span>
                       <span>
-                        入库率{" "}
+                        <span className="text-muted-foreground/70">总量口径</span> 提交{" "}
                         <span className="font-medium text-foreground">
-                          {formatPercent(adapter.codeStats?.pushedAdoptionRate)}
+                          {formatPercent(adapter.codeStats?.inclusiveAdoptionRate)}
+                        </span>{" "}
+                        · 入库{" "}
+                        <span className="font-medium text-foreground">
+                          {formatPercent(adapter.codeStats?.inclusivePushedAdoptionRate)}
                         </span>
                       </span>
                     </div>
@@ -1405,7 +1620,9 @@ export function ProjectModePanel({
     pageSize: number,
     adapterName: string,
     creatorKeyword: string,
-    creatorOrgKeyword: string
+    creatorOrgKeyword: string,
+    sortBy?: DashboardProjectModeProjectSortKey | null,
+    sortOrder?: DashboardProjectModeProjectSortOrder
   ) => void
   onOpenTraces: (
     project: DashboardProjectModeProject,
@@ -1532,17 +1749,53 @@ export function ProjectModePanel({
             <InfoHint hint="项目模式下产生的全部代码（含 Vibecoding 等未使用 Skill 的对话）。" />
           </div>
           <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3">
-            <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-5">
               <StatCard
                 icon={Code2}
                 label="代码生成行数"
+                tag="计数"
                 value={formatLineCount(summary?.codeStats?.generatedLines ?? 0)}
                 color="bg-sky-500"
                 hint={<GeneratedLinesTooltip />}
               />
               <StatCard
                 icon={Gauge}
-                label="入库率"
+                label="总量入库采纳率"
+                tag="总量口径 · 入库"
+                value={formatPercent(summary?.codeStats?.inclusivePushedAdoptionRate)}
+                sub={
+                  summary?.codeStats
+                    ? `${formatLineCount(summary.codeStats.pushedAdoptedLines)} / ${formatLineCount(summary.codeStats.inclusiveEffectiveGeneratedLines)} 行`
+                    : "暂无已 Push 数据"
+                }
+                color="bg-emerald-500"
+                hint={
+                  summary?.codeStats ? (
+                    <InclusivePushedAdoptionTooltip data={summary.codeStats} />
+                  ) : undefined
+                }
+              />
+              <StatCard
+                icon={Gauge}
+                label="总量提交采纳率"
+                tag="总量口径 · 提交"
+                value={formatPercent(summary?.codeStats?.inclusiveAdoptionRate)}
+                sub={
+                  summary?.codeStats
+                    ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.inclusiveEffectiveGeneratedLines)} 行`
+                    : "暂无代码生成数据"
+                }
+                color="bg-cyan-500"
+                hint={
+                  summary?.codeStats ? (
+                    <InclusiveAdoptionTooltip data={summary.codeStats} />
+                  ) : undefined
+                }
+              />
+              <StatCard
+                icon={Gauge}
+                label="入库采纳率"
+                tag="提交口径 · 已push"
                 value={formatPercent(summary?.codeStats?.pushedAdoptionRate)}
                 sub={
                   summary?.codeStats
@@ -1558,7 +1811,8 @@ export function ProjectModePanel({
               />
               <StatCard
                 icon={Gauge}
-                label="提交率"
+                label="提交采纳率"
+                tag="提交口径 · 对标组织级"
                 value={formatPercent(summary?.codeStats?.measuredAdoptionRate)}
                 sub={
                   summary?.codeStats
@@ -1569,22 +1823,6 @@ export function ProjectModePanel({
                 hint={
                   summary?.codeStats ? (
                     <MeasuredAdoptionTooltip data={summary.codeStats} />
-                  ) : undefined
-                }
-              />
-              <StatCard
-                icon={Gauge}
-                label="代码总量采纳率"
-                value={formatPercent(summary?.codeStats?.inclusiveAdoptionRate)}
-                sub={
-                  summary?.codeStats
-                    ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.inclusiveEffectiveGeneratedLines)} 行`
-                    : "暂无代码生成数据"
-                }
-                color="bg-cyan-500"
-                hint={
-                  summary?.codeStats ? (
-                    <InclusiveAdoptionTooltip data={summary.codeStats} />
                   ) : undefined
                 }
               />
@@ -1600,10 +1838,11 @@ export function ProjectModePanel({
             <InfoHint hint="仅统计调用了 AutoBizDevOps 插件 Skill 的对话所生成的代码，是项目模式总量的子集。" />
           </div>
           <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3">
-            <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-5">
               <StatCard
                 icon={Code2}
                 label="Skill 生成行数"
+                tag="计数"
                 value={formatLineCount(skillCodeStats?.generatedLines ?? 0)}
                 sub="由 Skill 生成的原始行数"
                 color="bg-violet-500"
@@ -1611,7 +1850,40 @@ export function ProjectModePanel({
               />
               <StatCard
                 icon={Gauge}
-                label="入库率"
+                label="总量入库采纳率"
+                tag="总量口径 · 入库"
+                value={formatPercent(skillCodeStats?.inclusivePushedAdoptionRate)}
+                sub={
+                  skillCodeStats
+                    ? `${formatLineCount(skillCodeStats.pushedAdoptedLines)} / ${formatLineCount(skillCodeStats.inclusiveEffectiveGeneratedLines)} 行`
+                    : "暂无已 Push 数据"
+                }
+                color="bg-emerald-500"
+                hint={
+                  skillCodeStats ? (
+                    <InclusivePushedAdoptionTooltip data={skillCodeStats} />
+                  ) : undefined
+                }
+              />
+              <StatCard
+                icon={Gauge}
+                label="总量提交采纳率"
+                tag="总量口径 · 提交"
+                value={formatPercent(skillCodeStats?.inclusiveAdoptionRate)}
+                sub={
+                  skillCodeStats
+                    ? `${formatLineCount(skillCodeStats.adoptedLines)} / ${formatLineCount(skillCodeStats.inclusiveEffectiveGeneratedLines)} 行`
+                    : "暂无代码生成数据"
+                }
+                color="bg-cyan-500"
+                hint={
+                  skillCodeStats ? <InclusiveAdoptionTooltip data={skillCodeStats} /> : undefined
+                }
+              />
+              <StatCard
+                icon={Gauge}
+                label="入库采纳率"
+                tag="提交口径 · 已push"
                 value={formatPercent(skillCodeStats?.pushedAdoptionRate)}
                 sub={
                   skillCodeStats
@@ -1623,7 +1895,8 @@ export function ProjectModePanel({
               />
               <StatCard
                 icon={Gauge}
-                label="提交率"
+                label="提交采纳率"
+                tag="提交口径 · 对标组织级"
                 value={formatPercent(skillCodeStats?.measuredAdoptionRate)}
                 sub={
                   skillCodeStats
@@ -1633,20 +1906,6 @@ export function ProjectModePanel({
                 color="bg-indigo-500"
                 hint={
                   skillCodeStats ? <MeasuredAdoptionTooltip data={skillCodeStats} /> : undefined
-                }
-              />
-              <StatCard
-                icon={Gauge}
-                label="代码总量采纳率"
-                value={formatPercent(skillCodeStats?.inclusiveAdoptionRate)}
-                sub={
-                  skillCodeStats
-                    ? `${formatLineCount(skillCodeStats.adoptedLines)} / ${formatLineCount(skillCodeStats.inclusiveEffectiveGeneratedLines)} 行`
-                    : "暂无代码生成数据"
-                }
-                color="bg-cyan-500"
-                hint={
-                  skillCodeStats ? <InclusiveAdoptionTooltip data={skillCodeStats} /> : undefined
                 }
               />
             </div>

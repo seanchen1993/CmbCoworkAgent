@@ -104,6 +104,7 @@ function normalizeEnterpriseProjectItem(value: unknown): HarnessEnterpriseProjec
 function normalizeEnterpriseProjectDetailItem(value: unknown): HarnessEnterpriseProjectDetailItem | null {
   const base = normalizeEnterpriseProjectItem(value)
   if (!base) return null
+  if (!isObject(value)) return null
 
   return {
     ...base,

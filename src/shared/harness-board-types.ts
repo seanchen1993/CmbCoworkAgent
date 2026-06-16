@@ -211,6 +211,8 @@ export interface HarnessProjectListItem {
   boardCompatibility: HarnessBoardCompatibility
   lifecycle: {
     status: "active" | "archived"
+    /** Last lifecycle/metadata change (set on metadata edit and on archive). */
+    updateAt?: string
   }
 }
 
@@ -329,12 +331,7 @@ export type HarnessArtifactType =
   | "virtual"
   | "unknown"
 
-export type HarnessArtifactStatus =
-  | "generated"
-  | "missing"
-  | "partial"
-  | "invalid"
-  | "unknown"
+export type HarnessArtifactStatus = "generated" | "missing" | "partial" | "invalid" | "unknown"
 
 export interface HarnessWorkflowArtifactDefinition {
   id: string
@@ -386,12 +383,7 @@ export interface HarnessArtifact {
   }
 }
 
-export type HarnessEventStatus =
-  | "success"
-  | "blocked"
-  | "skipped"
-  | "error"
-  | "unknown"
+export type HarnessEventStatus = "success" | "blocked" | "skipped" | "error" | "unknown"
 
 export interface HarnessHookLogView {
   ts: string

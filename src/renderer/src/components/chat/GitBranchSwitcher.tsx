@@ -32,6 +32,7 @@ export function GitBranchSwitcher({
   const [isGitRepo, setIsGitRepo] = useState(false)
   const [currentBranch, setCurrentBranch] = useState<string | null>(null)
   const [isWorktree, setIsWorktree] = useState(false)
+  const [gitStatusError, setGitStatusError] = useState<string | null>(null)
   const [branches, setBranches] = useState<string[]>([])
   const [searchQuery, setSearchQuery] = useState("")
   const [switching, setSwitching] = useState(false)
@@ -47,10 +48,12 @@ export function GitBranchSwitcher({
       setIsGitRepo(result.isGitRepo)
       setCurrentBranch(result.branch)
       setIsWorktree(result.isWorktree)
-    } catch {
+      setGitStatusError(result.error ?? null)
+    } catch (error) {
       setIsGitRepo(false)
       setCurrentBranch(null)
       setIsWorktree(false)
+      setGitStatusError(error instanceof Error ? error.message : null)
     } finally {
       setGitRepoChecked(true)
     }
@@ -84,6 +87,7 @@ export function GitBranchSwitcher({
     setIsGitRepo(false)
     setCurrentBranch(null)
     setIsWorktree(false)
+    setGitStatusError(null)
     setBranches([])
     setOpen(false)
     detectBranch()
@@ -165,6 +169,7 @@ export function GitBranchSwitcher({
   if (!gitRepoChecked) return null
 
   if (!isGitRepo) {
+    const unavailable = Boolean(gitStatusError)
     return (
       <TooltipProvider delayDuration={300}>
         <Tooltip>
@@ -174,15 +179,17 @@ export function GitBranchSwitcher({
               disabled
               className={cn(
                 "inline-flex items-center gap-1 text-[11px] font-medium px-1.5 py-0.5 rounded-md",
-                "text-muted-foreground cursor-not-allowed opacity-70 max-w-[200px]"
+                unavailable
+                  ? "text-destructive border border-destructive/40 bg-destructive/10 cursor-help opacity-100 max-w-[200px]"
+                  : "text-muted-foreground cursor-not-allowed opacity-70 max-w-[200px]"
               )}
             >
               <GitBranch className="size-3 shrink-0" />
-              <span className="truncate">非 Git 仓库</span>
+              <span className="truncate">{unavailable ? "Git 配置异常" : "非 Git 仓库"}</span>
             </button>
           </TooltipTrigger>
           <TooltipContent side="top" sideOffset={6}>
-            <p>当前工作区不是 Git 仓库，无法切换分支</p>
+            <p>{gitStatusError ?? "当前工作区不是 Git 仓库，无法切换分支"}</p>
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>

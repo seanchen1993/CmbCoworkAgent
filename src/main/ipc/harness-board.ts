@@ -19,6 +19,7 @@ import {
   searchEnterpriseProjects
 } from "../harness-board/enterprise-projects"
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
+import { purgeProjectAnalytics } from "../services/project-analytics-purge"
 import type {
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailResult,
@@ -112,7 +113,20 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:deleteProject",
     async (_event, projectId: string): Promise<HarnessProjectMetadata> => {
-      return deleteHarnessProject(projectId)
+      const deleted = deleteHarnessProject(projectId)
+      // 项目本地删除后，后台清理其在 ES 中的 trace/event 文档，使其不再出现在运营面板统计中。
+      // 尽力而为（fire-and-forget）：内网部分机器无法直连 ES/后端，清理失败不应阻断或回滚删除。
+      void purgeProjectAnalytics(projectId)
+        .then((result) => {
+          console.log(`[HarnessBoard] purged analytics for deleted project ${projectId}:`, result)
+        })
+        .catch((e) => {
+          console.error(
+            `[HarnessBoard] purgeProjectAnalytics failed for deleted project ${projectId}:`,
+            e
+          )
+        })
+      return deleted
     }
   )
 
@@ -120,7 +134,11 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     "harnessBoard:getProjectDetail",
     async (_event, projectId: string): Promise<HarnessProjectDetailViewModel> => {
       const detail = getHarnessProjectDetail(projectId)
-      startHarnessWatchRefs(`project:${projectId}`, detail.project.projectRootPath, detail.watchRefs)
+      startHarnessWatchRefs(
+        `project:${projectId}`,
+        detail.project.projectRootPath,
+        detail.watchRefs
+      )
       return detail
     }
   )
@@ -136,7 +154,11 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       const details = getHarnessProjectDetails(projectIds)
       if (shouldWatchRefs) {
         for (const [projectId, detail] of Object.entries(details)) {
-          startHarnessWatchRefs(`project:${projectId}`, detail.project.projectRootPath, detail.watchRefs)
+          startHarnessWatchRefs(
+            `project:${projectId}`,
+            detail.project.projectRootPath,
+            detail.watchRefs
+          )
         }
       }
       return details

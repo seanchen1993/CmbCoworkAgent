@@ -162,9 +162,12 @@ interface DashboardTraceDetail {
   modelName?: string
   outcome: string
   totalToolCalls: number
+  modelCallCount: number
+  userInputRequestCount: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  appVersion?: string
   usedSkills: string[]
   evolvedSkills: string[]
   triggerSource?: string
@@ -214,6 +217,7 @@ interface DashboardCommitDetailsOptions {
   pageSize?: number
   pushedOnly?: boolean
   upperOrgLv1?: string | null
+  userKeyword?: string | null
   orgLv1List?: string[]
 }
 
@@ -226,6 +230,7 @@ interface DashboardCommitAdoptionPair {
   modelName: string | null
   generatedAt: string | null
   verdict: string | null
+  reason: string | null
   generatedLineCount: number | null
   effectiveGeneratedLineCount: number | null
   adoptedLineCount: number | null
@@ -294,6 +299,7 @@ interface DashboardCodeStats {
   measuredAdoptionRate: number | null
   inclusiveAdoptionRate: number | null
   pushedAdoptionRate: number | null
+  inclusivePushedAdoptionRate: number | null
   adoptionRate: number | null
 }
 
@@ -524,6 +530,13 @@ interface DashboardProjectModeProjectCounts {
   archivedFeatureCount: number
 }
 
+type DashboardProjectModeProjectSortKey =
+  | "featureCount"
+  | "conversationCount"
+  | "generatedLines"
+  | "archivedAt"
+type DashboardProjectModeProjectSortOrder = "asc" | "desc"
+
 interface DashboardProjectModeProjectPageData {
   projects: DashboardProjectModeProject[]
   total: number
@@ -534,6 +547,8 @@ interface DashboardProjectModeProjectPageData {
   adapterName: string
   creatorKeyword: string
   creatorOrgKeyword: string
+  sortBy: DashboardProjectModeProjectSortKey | null
+  sortOrder: DashboardProjectModeProjectSortOrder
 }
 
 interface DashboardProjectModeProjectPageOptions {
@@ -545,6 +560,8 @@ interface DashboardProjectModeProjectPageOptions {
   adapterName?: string | null
   creatorKeyword?: string | null
   creatorOrgKeyword?: string | null
+  sortBy?: DashboardProjectModeProjectSortKey | null
+  sortOrder?: DashboardProjectModeProjectSortOrder | null
 }
 
 interface DashboardProjectModeAdapter {
@@ -1676,6 +1693,7 @@ interface CustomAPI {
     isAllowed: () => Promise<boolean>
     isProjectModeAllowed: () => Promise<boolean>
     isAnalysisAgentAllowed: () => Promise<boolean>
+    isUncommittedAnalysisAllowed: () => Promise<boolean>
     esQuery: (input: {
       indexAlias: "event" | "trace"
       operation: "search" | "msearch" | "count" | "mapping" | "field_caps"
@@ -1777,7 +1795,10 @@ interface CustomAPI {
       options?: {
         upperOrgLv1?: string | string[] | null
         projectMode?: boolean
+        projectId?: string | null
+        featureSlug?: string | null
         usedSkillsOnly?: boolean
+        userKeyword?: string | null
       }
     ) => Promise<{ success: boolean; data?: DashboardUncommittedRankingData; error?: string }>
     uncommittedDetail: (
@@ -1786,7 +1807,10 @@ interface CustomAPI {
       options?: {
         upperOrgLv1?: string | string[] | null
         projectMode?: boolean
+        projectId?: string | null
+        featureSlug?: string | null
         usedSkillsOnly?: boolean
+        userKeyword?: string | null
       }
     ) => Promise<{ success: boolean; data?: DashboardUncommittedDetailData; error?: string }>
     skillUsageSummary: (
@@ -1999,7 +2023,7 @@ interface CustomAPI {
   git: {
     currentBranch: (
       cwd?: string
-    ) => Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }>
+    ) => Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean; error?: string }>
     listBranches: (
       cwd?: string,
       options?: { refreshRemote?: boolean }

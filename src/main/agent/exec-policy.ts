@@ -1100,6 +1100,195 @@ function tokenizeCommand(command: string): string[] | null {
   return tokens
 }
 
+/** A file-relocating / file-deleting operation parsed out of a shell command. */
+export interface ShellFileOp {
+  op: "rm" | "mv"
+  /**
+   * Raw (unresolved) source path operands. For `rm` these are the delete
+   * targets; for `mv` they are every operand except the last. Callers resolve
+   * them against the command's cwd.
+   */
+  paths: string[]
+  /** Raw `mv` destination (last operand); undefined for `rm`. */
+  dest?: string
+}
+
+const SHELL_SEGMENT_SEPARATORS = new Set(["&&", "||", ";", "|", "&"])
+
+/**
+ * Best-effort extraction of `rm` / `mv` (incl. `git rm` / `git mv`) operations
+ * from a shell command, so the adoption tracker can react to an agent deleting
+ * or relocating a generated file BEFORE it is committed (path-keyed attribution
+ * would otherwise orphan the pending generation).
+ *
+ * Conservative by design — a missed op merely degrades to existing behaviour,
+ * whereas a wrong op corrupts adoption data, so we err toward parsing nothing:
+ *   - malformed quoting (tokeniser returns null) → no ops;
+ *   - command separators (`;` `&&` `||` `|` `&`) are split into segments even
+ *     when glued (`rm a.ts;mv b c`), and each segment is parsed independently;
+ *   - a segment with an unresolvable construct (command substitution, redirect,
+ *     subshell) is skipped rather than guessed;
+ *   - flags are skipped; `--` ends option parsing;
+ *   - the `mv -t DIR` / `--target-directory` form (which inverts operand order)
+ *     is skipped rather than mis-parsed.
+ * Glob operands are returned as-is; the caller skips ones it cannot resolve.
+ */
+export function extractShellFileOps(command: string): ShellFileOp[] {
+  if (!command || typeof command !== "string") return []
+  const tokens = tokenizeFileOpCommand(command)
+  if (!tokens || tokens.length === 0) return []
+
+  const ops: ShellFileOp[] = []
+  let segment: string[] = []
+  const flush = (): void => {
+    if (segment.length > 0) {
+      const op = parseFileOpSegment(segment)
+      if (op) ops.push(op)
+    }
+    segment = []
+  }
+  for (const tok of tokens) {
+    if (SHELL_SEGMENT_SEPARATORS.has(tok)) flush()
+    else segment.push(tok)
+  }
+  flush()
+  return ops
+}
+
+/**
+ * Tokenise a command for file-op extraction. Differs from the safety tokeniser
+ * in one way that matters for Windows: inside double quotes a backslash is
+ * literal UNLESS it escapes a shell-special char (`$ \` " \\` or newline), so a
+ * path like `"D:\proj\src"` survives intact instead of collapsing to
+ * `D:projsrc`. (bash's double-quote rule; the safety tokeniser eats every `\`.)
+ * Returns null on unbalanced quoting/escape so callers parse nothing.
+ */
+function tokenizeFileOpCommand(command: string): string[] | null {
+  const tokens: string[] = []
+  let current = ""
+  let quote: "'" | '"' | null = null
+  let escaped = false
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]
+    if (escaped) {
+      current += ch
+      escaped = false
+      continue
+    }
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      else current += ch
+      continue
+    }
+    if (quote === '"') {
+      if (ch === "\\") {
+        const next = command[i + 1]
+        if (next === '"' || next === "\\" || next === "$" || next === "`" || next === "\n") {
+          escaped = true
+        } else {
+          current += ch // literal backslash (e.g. a Windows path separator)
+        }
+        continue
+      }
+      if (ch === '"') quote = null
+      else current += ch
+      continue
+    }
+    if (ch === "\\") {
+      escaped = true
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    // Command separators become standalone tokens even when glued to a path
+    // (`rm a.ts;mv b c`, `a&&b`) so a compound command segments correctly
+    // instead of being dropped — LLMs routinely write `;` with no leading space.
+    if (ch === ";" || ch === "&" || ch === "|") {
+      if (current) {
+        tokens.push(current)
+        current = ""
+      }
+      if ((ch === "&" || ch === "|") && command[i + 1] === ch) {
+        tokens.push(ch + ch)
+        i++
+      } else {
+        tokens.push(ch)
+      }
+      continue
+    }
+    if (/\s/.test(ch)) {
+      if (current) {
+        tokens.push(current)
+        current = ""
+      }
+      continue
+    }
+    current += ch
+  }
+
+  if (escaped || quote) return null
+  if (current) tokens.push(current)
+  return tokens
+}
+
+function parseFileOpSegment(tokens: string[]): ShellFileOp | null {
+  // Command separators are already split into their own tokens by the tokeniser
+  // (even when glued), so a control metacharacter still present inside a token
+  // means something we cannot resolve to a concrete path: command substitution
+  // (`$(...)` / backticks), redirects (`>` `<`), a subshell (`( )`), or a rare
+  // quoted-operator filename. Parse nothing for that segment — a miss only
+  // degrades to existing behaviour, whereas guessing would void/transfer an
+  // unrelated generation and corrupt adoption data.
+  for (const tok of tokens) {
+    if (/[;&|`$<>()]/.test(tok)) return null
+  }
+
+  let idx = 0
+  // Skip a leading env-assignment prefix (e.g. `FOO=bar rm x`).
+  while (idx < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx])) idx++
+  if (idx >= tokens.length) return null
+
+  let exe = normalizeExecutable(tokens[idx])
+  idx++
+  if (exe === "git") {
+    if (idx >= tokens.length) return null
+    const sub = tokens[idx].toLowerCase()
+    if (sub !== "rm" && sub !== "mv") return null
+    exe = sub
+    idx++
+  }
+  if (exe !== "rm" && exe !== "mv") return null
+
+  const operands: string[] = []
+  let endOfOptions = false
+  let hasTargetDirFlag = false
+  for (; idx < tokens.length; idx++) {
+    const tok = tokens[idx]
+    if (!endOfOptions && tok === "--") {
+      endOfOptions = true
+      continue
+    }
+    if (!endOfOptions && tok.length > 1 && tok.startsWith("-")) {
+      if (tok === "-t" || tok === "--target-directory" || tok.startsWith("--target-directory=")) {
+        hasTargetDirFlag = true
+      }
+      continue
+    }
+    operands.push(tok)
+  }
+  if (hasTargetDirFlag) return null
+
+  if (exe === "rm") {
+    return operands.length > 0 ? { op: "rm", paths: operands } : null
+  }
+  // mv needs at least one source + a destination.
+  if (operands.length < 2) return null
+  return { op: "mv", paths: operands.slice(0, -1), dest: operands[operands.length - 1] }
+}
+
 function parseApprovalPattern(pattern: string): string[] | null {
   if (!pattern.startsWith(APPROVAL_PREFIX_RULE_PREFIX)) return null
   try {

@@ -1367,9 +1367,6 @@ export function MarketPanel(): React.JSX.Element {
           await loadInstalledSkills()
         } else if (activeTab === "mcp") {
           await loadInstalledMcps()
-        } else if (activeTab === "plugin") {
-          await loadInstalledPlugins()
-          bumpPluginVersion()
         }
         triggerReload()
       } else {
