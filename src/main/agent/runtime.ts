@@ -70,8 +70,8 @@ import { createGunzip } from "zlib"
 import { pipeline } from "stream/promises"
 import { app, BrowserWindow } from "electron"
 import {
-  BASE_SYSTEM_PROMPT,
   MEMORY_SYSTEM_PROMPT,
+  renderBaseSystemPrompt,
   renderInjectedToolUsagePrompt,
   renderAvailableDeferredToolsPrompt
 } from "./system-prompt"
@@ -1506,7 +1506,8 @@ function getRuntimeTimeContext(date: Date = new Date()): {
 function getSystemPrompt(
   workspacePath: string,
   windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated",
-  workingDirPromptAppendix?: string
+  workingDirPromptAppendix?: string,
+  options: { includeSubagents?: boolean } = {}
 ): string {
   const isWindows = process.platform === "win32"
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
@@ -1600,7 +1601,7 @@ ${shellGuidance}
     workingDirAppendix +
     backgroundExecSection +
     sandboxSection +
-    BASE_SYSTEM_PROMPT +
+    renderBaseSystemPrompt({ includeSubagents: options.includeSubagents }) +
     memorySection
   )
 }
@@ -2568,7 +2569,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, yoloMode)
   backend.setOrchestrator(orchestrator)
 
-  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, workingDirPromptAppendix)
+  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, workingDirPromptAppendix, {
+    includeSubagents: !featureId
+  })
   let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
     prompt: null,
     projectRoot: workspacePath,
@@ -3608,7 +3611,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     subagentExtraSystemPrompt: agentsPrompt.prompt ?? undefined,
     mainTodosEnabled: !isCoordinatorMode,
     mainFilesystemEnabled: !isCoordinatorMode,
-    mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents,
+    mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && !featureId,
     filesystemAccess: options.filesystemAccess,
     taskSystemPrompt: isCoordinatorMode
       ? buildCoordinatorTaskPrompt(threadId)

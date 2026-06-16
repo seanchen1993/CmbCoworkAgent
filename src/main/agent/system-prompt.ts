@@ -5,6 +5,15 @@
  *
  * @see https://github.com/deepagents-ai/deepagents
  */
+const SUBAGENT_SYSTEM_PROMPT_SECTION = `## Working with Subagents (task tool)
+When delegating to subagents:
+- **Use filesystem for large I/O**: If input/output is large (>500 words), communicate via files
+- **Parallelize independent work**: Spawn parallel subagents for independent tasks
+- **Clear specifications**: Tell subagent exactly what format/structure you need
+- **Main agent synthesizes**: Subagents gather/execute, main agent integrates results
+
+`
+
 export const BASE_SYSTEM_PROMPT = `You are an AI assistant that helps users with various tasks including coding, research, and analysis.
 
 # Core Behavior
@@ -46,14 +55,7 @@ When exploring codebases or reading multiple files, use pagination to prevent co
 - Small files (<2000 lines)
 - Files you need to edit immediately after reading
 
-## Working with Subagents (task tool)
-When delegating to subagents:
-- **Use filesystem for large I/O**: If input/output is large (>500 words), communicate via files
-- **Parallelize independent work**: Spawn parallel subagents for independent tasks
-- **Clear specifications**: Tell subagent exactly what format/structure you need
-- **Main agent synthesizes**: Subagents gather/execute, main agent integrates results
-
-## Tools
+${SUBAGENT_SYSTEM_PROMPT_SECTION}## Tools
 
 ### Browser Operation Priority
 - If the user asks to operate a browser (open pages, click/fill forms, scrape page content, screenshots, web UI workflows), first check whether any enabled **skills** already cover that workflow and follow the skill guidance.
@@ -125,6 +127,12 @@ When using the write_todos tool:
 
 The todo list is a planning tool - use it judiciously to avoid overwhelming the user with excessive task tracking.
 `
+
+export function renderBaseSystemPrompt(options: { includeSubagents?: boolean } = {}): string {
+  return options.includeSubagents === false
+    ? BASE_SYSTEM_PROMPT.replace(SUBAGENT_SYSTEM_PROMPT_SECTION, "")
+    : BASE_SYSTEM_PROMPT
+}
 
 export const MEMORY_SYSTEM_PROMPT = `
 
