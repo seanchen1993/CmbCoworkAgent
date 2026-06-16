@@ -88,6 +88,7 @@ export interface HarnessProjectMetadata {
   name: string
   description: string
   projectCode: string
+  projectFromLean: boolean
   projectDir: string
   systemId: string
   systemName: string
@@ -107,6 +108,7 @@ export interface HarnessProjectCreateInput {
   adapterType: HarnessAdapterType
   name: string
   projectCode: string
+  projectFromLean: boolean
   projectDir: string
   description: string
   systemId: string
@@ -180,6 +182,7 @@ export interface HarnessProjectMetadataUpdateInput {
   adapterType: HarnessAdapterType
   name: string
   projectCode: string
+  projectFromLean: boolean
   projectDir: string
   description: string
   systemId: string
@@ -193,6 +196,7 @@ export interface HarnessProjectListItem {
   name: string
   description: string
   projectCode: string
+  projectFromLean: boolean
   projectDir: string
   systemId: string
   systemName: string

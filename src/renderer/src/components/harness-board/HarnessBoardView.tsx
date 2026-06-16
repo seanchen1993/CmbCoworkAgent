@@ -207,6 +207,7 @@ function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataU
     adapterType: "plugin",
     name: "",
     projectCode: "",
+    projectFromLean: false,
     projectDir: "",
     description: "",
     systemId: "",
@@ -420,6 +421,7 @@ function makeDeletedProjectSidebarItem(projectId: string, name: string): Project
     name: name.trim() || DELETED_PROJECT_NAME,
     description: "",
     projectCode: "",
+    projectFromLean: false,
     projectDir: "",
     systemId: "",
     systemName: "",
@@ -713,6 +715,7 @@ function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectM
     adapterType: project.harnessAdapter.type,
     name: project.name,
     projectCode: project.projectCode,
+    projectFromLean: project.projectFromLean ?? false,
     projectDir: project.projectDir,
     description: project.description,
     systemId: project.systemId,
@@ -1660,7 +1663,9 @@ function ProjectFormDialog({
                   searchField="code"
                   searchLabel="项目编号"
                   normalizeValue={sanitizeHarnessNameInput}
-                  onValueChange={(projectCode) => onChange({ ...form, projectCode })}
+                  onValueChange={(projectCode) =>
+                    onChange({ ...form, projectCode, projectFromLean: false })
+                  }
                   onSelect={(project) => {
                     const shouldSyncProjectDir =
                       !form.projectDir ||
@@ -1669,6 +1674,7 @@ function ProjectFormDialog({
                       ...form,
                       name: project.projectName,
                       projectCode: project.projectCode,
+                      projectFromLean: true,
                       systemId: project.systemId || form.systemId,
                       systemName: project.systemName || form.systemName,
                       projectDir: shouldSyncProjectDir
@@ -1696,6 +1702,7 @@ function ProjectFormDialog({
                     onChange({
                       ...form,
                       name,
+                      projectFromLean: false,
                       projectDir: shouldSyncProjectDir
                         ? sanitizeProjectDirFromProjectName(name)
                         : form.projectDir
@@ -1709,6 +1716,7 @@ function ProjectFormDialog({
                       ...form,
                       name: project.projectName,
                       projectCode: project.projectCode,
+                      projectFromLean: true,
                       systemId: project.systemId || form.systemId,
                       systemName: project.systemName || form.systemName,
                       projectDir: shouldSyncProjectDir
@@ -1969,12 +1977,15 @@ function ProjectEditDialog({
                   searchField="code"
                   searchLabel="项目编号"
                   normalizeValue={sanitizeHarnessNameInput}
-                  onValueChange={(projectCode) => onChange({ ...form, projectCode })}
+                  onValueChange={(projectCode) =>
+                    onChange({ ...form, projectCode, projectFromLean: false })
+                  }
                   onSelect={(project) =>
                     onChange({
                       ...form,
                       name: project.projectName,
                       projectCode: project.projectCode,
+                      projectFromLean: true,
                       systemId: project.systemId || form.systemId,
                       systemName: project.systemName || form.systemName
                     })
@@ -1992,12 +2003,13 @@ function ProjectEditDialog({
                   value={form.name}
                   searchField="name"
                   searchLabel="项目名称"
-                  onValueChange={(name) => onChange({ ...form, name })}
+                  onValueChange={(name) => onChange({ ...form, name, projectFromLean: false })}
                   onSelect={(project) =>
                     onChange({
                       ...form,
                       name: project.projectName,
                       projectCode: project.projectCode,
+                      projectFromLean: true,
                       systemId: project.systemId || form.systemId,
                       systemName: project.systemName || form.systemName
                     })
