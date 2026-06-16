@@ -386,6 +386,13 @@ export interface ThreadState {
   workspacePath: string | null
   gitContext: ThreadGitContext | null
   subagents: Subagent[]
+  /**
+   * Per-subagentId live transcript buffer (Phase 2, A1'). Subagent-interior
+   * message-delta / tool-message scheduler events tagged with `subagentId` are
+   * appended here instead of into `messages`, so the `task` card can render the
+   * subagent's nested interior on demand without polluting the main thread.
+   */
+  subagentTranscripts: Record<string, Message[]>
   coordinatorWorkers: CoordinatorWorkerView[]
   subagentToolCallCount: number
   subagentInternalLogs: SubagentInternalLogEntry[]
@@ -519,6 +526,7 @@ const createDefaultThreadState = (): ThreadState => ({
   workspacePath: null,
   gitContext: null,
   subagents: [],
+  subagentTranscripts: {},
   coordinatorWorkers: [],
   subagentToolCallCount: 0,
   subagentInternalLogs: [],
@@ -866,6 +874,8 @@ interface CustomEventData {
     startedAt?: Date
     completedAt?: Date
     subagentType?: string
+    currentTool?: string
+    lastActivityAt?: string
   }>
   workers?: CoordinatorWorkerView[]
   worker?: CoordinatorWorkerView
@@ -2119,7 +2129,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 status: (s.status || "pending") as "pending" | "running" | "completed" | "failed",
                 startedAt: s.startedAt,
                 completedAt: s.completedAt,
-                subagentType: s.subagentType
+                subagentType: s.subagentType,
+                currentTool: s.currentTool,
+                lastActivityAt: s.lastActivityAt
               }))
             }))
           }

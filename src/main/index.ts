@@ -147,6 +147,7 @@ import { registerTerminalHandlers, disposeAllTerminals } from "./ipc/terminal"
 import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
 import { registerDashboardHandlers } from "./ipc/dashboard"
+import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { registerLspHandlers } from "./ipc/lsp"
@@ -520,6 +521,7 @@ if (!gotTheLock) {
     registerCodeExecToolsHandlers(ipcMain)
     registerRoutingHandlers(ipcMain)
     registerDashboardHandlers(ipcMain)
+    registerAdoptionTraceHandlers(ipcMain)
     registerFeatureGateHandlers(ipcMain)
     registerHarnessBoardHandlers(ipcMain)
     registerUpdaterHandlers()

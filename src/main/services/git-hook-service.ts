@@ -89,6 +89,8 @@ interface HookSnapshotMeta {
   gitRoot: string
   branch?: string
   commitSha?: string
+  /** ISO timestamp written by the post-commit hook (≈ commit creation time). */
+  committedAt?: string
   files?: HookSnapshotFile[]
 }
 
@@ -133,6 +135,10 @@ const autoInstallInFlight = new Set<string>()
 // last-seen commit cursor (HEAD sha + reflog mtime) used to detect new commits.
 const reflogPathCache = new Map<string, string>()
 const repoCommitCursor = new Map<string, { headSha: string; reflogMtimeMs: number }>()
+// Push reconciler state: repoKey → last-seen remote-tracking ref tips
+// ({ refName → sha }). Used to detect commits newly arrived on the remote even
+// when the pre-push hook never fired or the in-app push marking failed.
+const repoPushCursor = new Map<string, Record<string, string>>()
 let registeredSyncTimer: ReturnType<typeof setInterval> | null = null
 let registeredRepoWriteQueue: Promise<void> = Promise.resolve()
 
@@ -970,6 +976,25 @@ async function getCommitStats(gitRoot: string, commitSha: string): Promise<{ fil
   }
 }
 
+/**
+ * Commit creation time in epoch ms (committer date), or undefined when it can't
+ * be resolved. Passed to adoption measurement as an upper bound on eligible gen
+ * rows so a re-measure of an old commit (this reconciler / the hook sync running
+ * long after the commit) never attributes later, still-uncommitted generations
+ * to it. `%ct` is whole-second resolution; the tracker adds tolerance.
+ */
+async function getCommitTimeMs(gitRoot: string, commitSha: string): Promise<number | undefined> {
+  try {
+    const raw = await runGit(gitRoot, ["show", "-s", "--format=%ct", commitSha], {
+      timeoutMs: GIT_EXEC_TIMEOUT_MS
+    })
+    const seconds = Number.parseInt(raw.trim(), 10)
+    return Number.isFinite(seconds) ? seconds * 1000 : undefined
+  } catch {
+    return undefined
+  }
+}
+
 async function getCurrentBranch(gitRoot: string): Promise<string> {
   try {
     const branch = await runGit(gitRoot, ["rev-parse", "--abbrev-ref", "HEAD"])
@@ -1017,7 +1042,17 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
     }
   }
 
-  if (snapshots.length === 0 || !hasPendingGenerationsForCommit(snapshots)) {
+  // Upper bound on eligible gen rows = commit creation time. The ready snapshot
+  // can be processed long after the commit (sync cadence), so without this the
+  // pending-gen set read here could include generations made *after* the commit
+  // and vacuum them into it. Prefer the committer date; fall back to the
+  // post-commit hook's timestamp.
+  const committedAtMs = meta.committedAt ? Date.parse(meta.committedAt) : NaN
+  const commitTimeMs =
+    (await getCommitTimeMs(meta.gitRoot, meta.commitSha)) ??
+    (Number.isFinite(committedAtMs) ? committedAtMs : undefined)
+
+  if (snapshots.length === 0 || !hasPendingGenerationsForCommit(snapshots, commitTimeMs)) {
     console.log(
       `[GitHook] skip commit snapshot without pending code_gen: commitSha=${meta.commitSha} files=${snapshots.length}`
     )
@@ -1027,7 +1062,7 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
     return
   }
 
-  measureForCommit(snapshots, meta.commitSha)
+  measureForCommit(snapshots, meta.commitSha, commitTimeMs)
 
   const gitRoot = meta.gitRoot
   const [stats, branch, remoteUrl] = await Promise.all([
@@ -1408,7 +1443,14 @@ async function reconcileOneCommit(
     absPath: resolvePath(gitRoot, entry.relPath),
     stagedContent: null
   }))
-  if (probe.length === 0 || !hasPendingGenerationsForCommit(probe)) {
+  // Upper bound on eligible gen rows = this commit's creation time. Without it,
+  // re-measuring an in-app/agent commit (which never recorded itself in
+  // processed-commits.json) would sweep newer uncommitted gens for the same
+  // files into this old commit — inflating its denominator and double-emitting
+  // git.commit.created. With the bound, such commits correctly gate to "no
+  // pending gens" and are skipped here.
+  const commitTimeMs = await getCommitTimeMs(gitRoot, commitSha)
+  if (probe.length === 0 || !hasPendingGenerationsForCommit(probe, commitTimeMs)) {
     processed.add(commitSha)
     await saveProcessedCommitSet(repoDir, processed)
     return
@@ -1437,7 +1479,7 @@ async function reconcileOneCommit(
     return
   }
 
-  measureForCommit(snapshots, commitSha)
+  measureForCommit(snapshots, commitSha, commitTimeMs)
 
   const [stats, branch, remoteUrl] = await Promise.all([
     getCommitStats(gitRoot, commitSha),
@@ -1518,6 +1560,210 @@ async function reconcileCommitsForRepo(gitRoot: string): Promise<void> {
   await saveCommitCursor(gitRoot, key, head, reflogMtimeMs)
 }
 
+// ─────────────────────────────────────────────────────────
+// Push reconciler — hook-independent backstop for the adoption "pushed" flag
+//
+// Marking commits as pushed (so the dashboard's 已Push 采纳率 counts them) is
+// otherwise driven only by (a) the in-app push handler and (b) the pre-push hook
+// → push-intent files. Both can miss a push: the in-app marking runs in the
+// background and depends on a fragile pre-push commit snapshot (empty on a first
+// push with no upstream) plus ES already having indexed the commit's code_adopt
+// events; the pre-push shell hook never fires for IDEs/clients that bypass hooks.
+//
+// This reconciler observes the local remote-tracking refs (refs/remotes/origin/*)
+// directly. A successful push — in-app or external, from this machine — advances
+// those refs, so newly-published commits are detected and (re-)marked pushed with
+// no dependency on either fragile path. Running later than the push, it also
+// sidesteps the ES indexing race that can defeat the in-app attempt.
+//
+// It intentionally does NOT emit git.push.executed: push *operation* telemetry
+// stays owned by the in-app / hook paths, so this backstop can never double-count
+// push events. It only repairs the pushed=true adoption flag (an idempotent ES
+// update), deduped via a per-repo processed-pushed-commits set.
+// ─────────────────────────────────────────────────────────
+
+async function getRemoteTrackingTips(
+  gitRoot: string,
+  remoteName = "origin"
+): Promise<Record<string, string>> {
+  try {
+    const out = await runGit(
+      gitRoot,
+      ["for-each-ref", "--format=%(refname) %(objectname)", `refs/remotes/${remoteName}/`],
+      { timeoutMs: GIT_EXEC_TIMEOUT_MS }
+    )
+    const tips: Record<string, string> = {}
+    for (const line of out.split("\n")) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      const sepIndex = trimmed.indexOf(" ")
+      if (sepIndex <= 0) continue
+      const refName = trimmed.slice(0, sepIndex)
+      const sha = trimmed.slice(sepIndex + 1).trim()
+      if (refName.endsWith("/HEAD")) continue // symbolic ref, not a branch tip
+      if (!/^[0-9a-f]{40}$/i.test(sha)) continue
+      tips[refName] = sha
+    }
+    return tips
+  } catch {
+    return {}
+  }
+}
+
+function pushCursorPath(gitRoot: string): string {
+  return join(getRepoEventsDir(gitRoot), "push-cursor.json")
+}
+
+async function loadPushCursor(
+  gitRoot: string,
+  key: string
+): Promise<Record<string, string> | null> {
+  const cached = repoPushCursor.get(key)
+  if (cached) return cached
+  const raw = await readJsonFile<{ refs?: Record<string, unknown> }>(pushCursorPath(gitRoot))
+  if (!raw || typeof raw.refs !== "object" || !raw.refs) return null
+  const refs: Record<string, string> = {}
+  for (const [refName, sha] of Object.entries(raw.refs)) {
+    if (typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha)) refs[refName] = sha
+  }
+  repoPushCursor.set(key, refs)
+  return refs
+}
+
+async function savePushCursor(
+  gitRoot: string,
+  key: string,
+  tips: Record<string, string>
+): Promise<void> {
+  repoPushCursor.set(key, tips)
+  try {
+    await ensureDir(getRepoEventsDir(gitRoot))
+    await writeFile(
+      pushCursorPath(gitRoot),
+      JSON.stringify({ schemaVersion: 1, refs: tips, updatedAt: nowIsoLocal() }, null, 2),
+      "utf-8"
+    )
+  } catch {
+    // Cursor persistence is best-effort; the in-memory cursor still gates this run.
+  }
+}
+
+async function getProcessedPushedCommitSet(repoDir: string): Promise<Set<string>> {
+  const raw = await readJsonFile<string[]>(join(repoDir, "processed-pushed-commits.json"))
+  return new Set((Array.isArray(raw) ? raw : []).filter((sha) => /^[0-9a-f]{7,40}$/i.test(sha)))
+}
+
+async function saveProcessedPushedCommitSet(repoDir: string, commits: Set<string>): Promise<void> {
+  const values = Array.from(commits).slice(-5000)
+  await writeFile(
+    join(repoDir, "processed-pushed-commits.json"),
+    JSON.stringify(values, null, 2),
+    "utf-8"
+  )
+}
+
+// Commits reachable from `toSha` that arrived since `fromSha`, bounded to the
+// adoption window. When `fromSha` is unknown or no longer an ancestor (first
+// sight, force-push, gc'd cursor), fall back to a capped recent-history scan of
+// `toSha` — the processed-pushed set keeps that idempotent.
+async function listNewlyPushedCommits(
+  gitRoot: string,
+  fromSha: string | undefined,
+  toSha: string
+): Promise<string[]> {
+  const sinceIso = new Date(Date.now() - COMMIT_RECONCILE_MAX_AGE_MS).toISOString()
+  const useRange =
+    !!fromSha &&
+    /^[0-9a-f]{40}$/i.test(fromSha) &&
+    fromSha !== toSha &&
+    (await isAncestor(gitRoot, fromSha, toSha))
+  const args = [
+    "rev-list",
+    "--no-merges",
+    `--max-count=${COMMIT_RECONCILE_MAX_COMMITS}`,
+    `--since=${sinceIso}`
+  ]
+  args.push(useRange ? `${fromSha}..${toSha}` : toSha)
+  try {
+    const out = await runGit(gitRoot, args, { timeoutMs: GIT_EXEC_TIMEOUT_MS })
+    return out
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((sha) => /^[0-9a-f]{40}$/i.test(sha))
+  } catch {
+    return []
+  }
+}
+
+function remoteTipsEqual(a: Record<string, string>, b: Record<string, string>): boolean {
+  const aKeys = Object.keys(a)
+  if (aKeys.length !== Object.keys(b).length) return false
+  for (const refName of aKeys) {
+    if (a[refName] !== b[refName]) return false
+  }
+  return true
+}
+
+async function reconcilePushesForRepo(gitRoot: string): Promise<void> {
+  const key = normalizePathForKey(gitRoot)
+  const currentTips = await getRemoteTrackingTips(gitRoot, "origin")
+  // No remote-tracking refs yet (never fetched/pushed) → nothing could be pushed.
+  if (Object.keys(currentTips).length === 0) return
+
+  const cursor = await loadPushCursor(gitRoot, key)
+  // Fast path: tips unchanged since last sweep → nothing pushed, skip the
+  // rev-list / marking work and avoid rewriting the cursor file every sync.
+  if (cursor && remoteTipsEqual(cursor, currentTips)) return
+
+  // Collect commits newly present on any remote-tracking ref since last sweep.
+  // First sight (cursor === null) backfills a bounded window from each tip so a
+  // push missed *before* this reconciler existed is still recovered.
+  const candidates = new Set<string>()
+  for (const [refName, newSha] of Object.entries(currentTips)) {
+    const oldSha = cursor?.[refName]
+    if (oldSha === newSha) continue
+    for (const sha of await listNewlyPushedCommits(gitRoot, cursor ? oldSha : undefined, newSha)) {
+      candidates.add(sha)
+    }
+  }
+
+  // Advance the cursor regardless, so unchanged tips aren't rescanned next sweep.
+  await savePushCursor(gitRoot, key, currentTips)
+  if (candidates.size === 0) return
+
+  const repoDir = getRepoEventsDir(gitRoot)
+  const processedPushed = await getProcessedPushedCommitSet(repoDir)
+  const toMark = Array.from(candidates).filter((sha) => !processedPushed.has(sha))
+  if (toMark.length === 0) return
+
+  const [branch, remoteUrl] = await Promise.all([
+    getCurrentBranch(gitRoot),
+    getRemoteUrl(gitRoot, "origin")
+  ])
+  const remoteInfo = parseGitRemoteInfo(remoteUrl)
+  // Idempotent: sets properties.pushed=true on matching code_adopt /
+  // git.commit.created docs. Non-adoption commits simply match nothing.
+  scheduleMarkCodeAdoptionCommitsPushed({
+    commitShas: toMark,
+    repoPath: gitRoot,
+    branch,
+    remoteUrl,
+    repositoryName: remoteInfo?.repositoryName ?? "",
+    repositoryFullName: remoteInfo?.repositoryFullName ?? "",
+    repositoryHost: remoteInfo?.repositoryHost ?? "",
+    repositoryWebUrl: remoteInfo?.repositoryWebUrl ?? "",
+    commitUrlTemplate: remoteInfo?.commitUrlTemplate ?? "",
+    pushedAt: nowIsoLocal(),
+    pushOperationId: randomUUID()
+  })
+  console.log(
+    `[GitHook] push reconcile: repo=${gitRoot} markedPushed=${toMark.length} (adoption flag only, no git.push.executed)`
+  )
+
+  for (const sha of toMark) processedPushed.add(sha)
+  await saveProcessedPushedCommitSet(repoDir, processedPushed)
+}
+
 export async function syncGitHookEvents(workspacePath: string): Promise<GitHookSyncResult> {
   const context = await resolveGitContext(workspacePath)
   if (!context) return "unavailable"
@@ -1558,6 +1804,16 @@ export async function syncGitHookEvents(workspacePath: string): Promise<GitHookS
       await reconcileCommitsForRepo(context.gitRoot)
     } catch (e) {
       console.warn("[GitHook] failed to reconcile commits:", e)
+    }
+
+    // Hook-independent backstop for the adoption "pushed" flag: detect commits
+    // that have reached the remote (refs/remotes/origin/*) but were never marked
+    // pushed — covers external pushes and in-app pushes whose background marking
+    // failed (no-upstream snapshot, ES indexing race, app closed mid-retry).
+    try {
+      await reconcilePushesForRepo(context.gitRoot)
+    } catch (e) {
+      console.warn("[GitHook] failed to reconcile pushes:", e)
     }
     return "synced"
   } finally {

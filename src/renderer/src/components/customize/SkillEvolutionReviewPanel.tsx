@@ -17,6 +17,7 @@ import { evolutionApi, type EvolutionCandidate } from "@/api/evolution"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
 import { trackCloudEvolutionCandidatePublished } from "@/lib/cloud-evolution-events"
 import { extractTextBundleFromZip, type TextBundleFile } from "@/lib/skill-bundle-diff"
+import { normalizeMarketSkillKey } from "@/components/dashboard/skill-market"
 import { SkillBundleMergeEditor } from "./SkillBundleMergeEditor"
 
 const PROPOSAL_FILES_CACHE_KEY = "trace-evolver-review-proposal-files"
@@ -70,7 +71,21 @@ function scoreLabel(score?: string | null): string {
   return value.toFixed(2)
 }
 
-export function SkillEvolutionReviewPanel(): React.JSX.Element {
+export interface SkillEvolutionReviewPanelProps {
+  /**
+   * admin：白名单审批员，可见全部候选（默认）。
+   * creator：技能创建者，仅可见自己上传技能的候选（按 ownedSkillKeys 过滤）。
+   */
+  mode?: "admin" | "creator"
+  /** creator 模式下当前用户上传技能的归一化 key 集合。 */
+  ownedSkillKeys?: Set<string>
+}
+
+export function SkillEvolutionReviewPanel({
+  mode = "admin",
+  ownedSkillKeys
+}: SkillEvolutionReviewPanelProps = {}): React.JSX.Element {
+  const isCreatorMode = mode === "creator"
   const [items, setItems] = useState<EvolutionCandidate[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [diff, setDiff] = useState("")
@@ -100,9 +115,13 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
   )
   const debugRevealCountRef = useRef(0)
   const debugRevealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const visibleItems = useMemo(() => {
+    if (!isCreatorMode || !ownedSkillKeys) return items
+    return items.filter((item) => ownedSkillKeys.has(normalizeMarketSkillKey(item.skill_name)))
+  }, [items, isCreatorMode, ownedSkillKeys])
   const selected = useMemo(
-    () => items.find((item) => item.candidate_id === selectedId) || items[0] || null,
-    [items, selectedId]
+    () => visibleItems.find((item) => item.candidate_id === selectedId) || visibleItems[0] || null,
+    [visibleItems, selectedId]
   )
   const selectedCandidateId = selected?.candidate_id ?? null
   const diffRequestSeq = useRef(0)
@@ -133,6 +152,15 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
   useEffect(() => {
     void load()
   }, [load])
+
+  // creator 模式下 load 拉取的是全量候选，过滤后 selectedId 可能指向不可见项；这里把选中项收敛回可见列表。
+  useEffect(() => {
+    setSelectedId((prev) =>
+      prev && visibleItems.some((item) => item.candidate_id === prev)
+        ? prev
+        : (visibleItems[0]?.candidate_id ?? null)
+    )
+  }, [visibleItems])
 
   const reviewer = localStorage.getItem("userName") || localStorage.getItem("ystId") || "admin"
 
@@ -172,7 +200,7 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
 
   // 标题处连点 3 次（1.2s 内）显示本地调试开关。
   const handleDebugReveal = useCallback(() => {
-    if (showDebugToggle) return
+    if (isCreatorMode || showDebugToggle) return
     debugRevealCountRef.current += 1
     if (debugRevealTimerRef.current) clearTimeout(debugRevealTimerRef.current)
     if (debugRevealCountRef.current >= 3) {
@@ -183,7 +211,7 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
     debugRevealTimerRef.current = setTimeout(() => {
       debugRevealCountRef.current = 0
     }, 1200)
-  }, [showDebugToggle])
+  }, [isCreatorMode, showDebugToggle])
 
   useEffect(() => {
     return () => {
@@ -315,9 +343,13 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
                 className="text-lg font-semibold text-[#181713] cursor-default select-none"
                 onClick={handleDebugReveal}
               >
-                技能进化审批
+                {isCreatorMode ? "我的技能优化候选" : "技能进化审批"}
               </h2>
-              <p className="mt-1 text-sm text-[#7b7970]">审阅 Trace Evolver 生成的候选补丁。</p>
+              <p className="mt-1 text-sm text-[#7b7970]">
+                {isCreatorMode
+                  ? "审阅并发布你上传技能的优化候选。"
+                  : "审阅 Trace Evolver 生成的候选补丁。"}
+              </p>
               {showDebugToggle && (
                 <div className="mt-3 flex min-w-0 items-start gap-2 text-xs leading-5 text-[#7b7970]">
                   <button
@@ -355,12 +387,14 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
         </div>
         <ScrollArea className="flex-1">
           <div className="p-3 space-y-2">
-            {items.length === 0 && (
+            {visibleItems.length === 0 && (
               <div className="rounded-xl border border-dashed border-[#d8d3c2] p-5 text-sm text-[#7b7970]">
-                暂无待审批候选。Trace Evolver 跑完后会出现在这里。
+                {isCreatorMode
+                  ? "暂无你技能的优化候选。把技能上传到应用市场后，云端自进化跑出的优化版本会出现在这里。"
+                  : "暂无待审批候选。Trace Evolver 跑完后会出现在这里。"}
               </div>
             )}
-            {items.map((item) => (
+            {visibleItems.map((item) => (
               <button
                 key={item.candidate_id}
                 className={cn(

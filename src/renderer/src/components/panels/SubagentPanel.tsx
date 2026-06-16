@@ -107,6 +107,27 @@ export function SubagentPanel(): React.JSX.Element {
 }
 
 export function SubagentCard({ subagent }: { subagent: Subagent }): React.JSX.Element {
+  const { currentThreadId } = useAppStore()
+  const threadState = useThreadState(currentThreadId)
+  // Phase 2 (A1'): show the subagent's streamed thinking text here, prominently
+  // and separate from the tool-execution log so reasoning is not buried.
+  const subagentCount = threadState?.subagents?.length ?? 0
+  const thinkingEntries = (threadState?.subagentInternalLogs ?? []).filter(
+    (entry) => entry.kind === "assistant"
+  )
+  // Attribution is set explicitly by the transport (subagentToolCallId); the UI no
+  // longer guesses from checkpoint_ns. With a single subagent, show all thinking so
+  // entries whose owner could not be resolved still appear.
+  const thinkingText = (
+    subagentCount <= 1
+      ? thinkingEntries
+      : thinkingEntries.filter((entry) => entry.subagentToolCallId === subagent.toolCallId)
+  )
+    .map((entry) => entry.content)
+    .filter(Boolean)
+    .join("\n\n")
+    .trim()
+
   const getStatusConfig = (): {
     icon: React.ElementType
     badge: "outline" | "info" | "nominal" | "critical"
@@ -187,6 +208,18 @@ export function SubagentCard({ subagent }: { subagent: Subagent }): React.JSX.El
             </span>
           )}
         </div>
+
+        {thinkingText && (
+          <div className="rounded-lg border border-sky-500/20 bg-sky-500/5 px-2.5 py-2">
+            <div className="mb-1 flex items-center gap-1 text-[11px] font-medium text-sky-700 dark:text-sky-300">
+              <Sparkles className="size-3" />
+              思考过程
+            </div>
+            <div className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed text-muted-foreground">
+              {thinkingText}
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   )

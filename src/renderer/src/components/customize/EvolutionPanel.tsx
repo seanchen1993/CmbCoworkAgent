@@ -49,6 +49,7 @@ import {
 import { trackCloudEvolutionCandidateAccepted } from "@/lib/cloud-evolution-events"
 import type { SkillMetadata } from "@/types"
 import { SkillEvolutionReviewPanel } from "./SkillEvolutionReviewPanel"
+import { useMyUploadedSkills } from "../../lib/use-my-uploaded-skills"
 import { SkillBundleMergeEditor } from "./SkillBundleMergeEditor"
 
 interface SkillCandidate {
@@ -1437,11 +1438,18 @@ export function EvolutionPanel(): React.JSX.Element {
     setPendingEvolution
   } = useAppStore()
 
+  const { ownedSkillKeys } = useMyUploadedSkills()
   const localPendingCandidateCount = candidates.filter((c) => c.status === "pending").length
   const cloudPendingUpdateCount = cloudEvolutionUpdates.filter((candidate) => candidate.local_adoption_status !== "adopted").length
   const cloudAdoptedUpdateCount = cloudEvolutionUpdates.length - cloudPendingUpdateCount
   const pendingCount = localPendingCandidateCount + cloudPendingUpdateCount
-  const showEvolutionReview = import.meta.env.DEV || canReviewEvolution(reviewUserInfo)
+  // 审批员身份决定 Admin 标签 + admin 模式（可见全部候选）。
+  // DEV 默认按 Admin 走，方便本地调试；生产环境严格按白名单。
+  // 非白名单用户进入 creator 模式，仅可见自己上传技能的候选。
+  const isReviewAdmin = import.meta.env.DEV || canReviewEvolution(reviewUserInfo)
+  // 审批 tab 对所有人常驻显示；没有自己技能的候选时展示空状态即可。
+  const showEvolutionReview = true
+  const reviewMode: "admin" | "creator" = isReviewAdmin ? "admin" : "creator"
 
   const loadTraces = useCallback(async () => {
     setTracesLoading(true)
@@ -2157,9 +2165,15 @@ export function EvolutionPanel(): React.JSX.Element {
               <>
                 <ShieldCheck className="size-3.5" />
                 进化审批
-                <span className="ml-1 rounded-full bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
-                  Admin
-                </span>
+                {isReviewAdmin ? (
+                  <span className="ml-1 rounded-full bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+                    Admin
+                  </span>
+                ) : (
+                  <span className="ml-1 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                    我的
+                  </span>
+                )}
               </>
             )}
           </button>
@@ -2247,7 +2261,7 @@ export function EvolutionPanel(): React.JSX.Element {
 
       {tab === "review" ? (
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          <SkillEvolutionReviewPanel />
+          <SkillEvolutionReviewPanel mode={reviewMode} ownedSkillKeys={ownedSkillKeys} />
         </div>
       ) : (
         <ScrollArea className="flex-1">
