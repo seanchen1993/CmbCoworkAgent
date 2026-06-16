@@ -2355,6 +2355,9 @@ export function ChatContainer({
     }
   }, [historyLoading, isLoading, scheduleChatReportUpload, threadId, threadMessages])
 
+  // Guards against a rapid double-click on the git_push approve button firing two
+  // workspace:pushWorktree calls before the pending approval is cleared on re-render.
+  const gitPushInFlightRef = useRef<Set<string>>(new Set())
   const handleApprovalDecision = useCallback(
     async (
       decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
@@ -2364,11 +2367,59 @@ export function ChatContainer({
       // Check if this is an orchestrator-sourced approval (has requestId)
       const approvalAny = pendingApproval as unknown as Record<string, unknown>
       if (approvalAny._orchestratorRequestId) {
+        const requestId = approvalAny._orchestratorRequestId as string
+        const toolCallId = pendingApproval.tool_call?.id || ""
+        const isApprove =
+          decision === "approve" ||
+          decision === "approve_session" ||
+          decision === "approve_permanent"
+
+        // git_push → the renderer performs the push via workspace:pushWorktree (the same
+        // path as the Git Panel) and reports the outcome back, instead of the orchestrator
+        // running the raw (sandboxed, timeout-prone) command.
+        if (approvalAny.operation === "git_push" && isApprove) {
+          // Re-entry guard: ignore a second click for the same push while it is in flight.
+          if (gitPushInFlightRef.current.has(requestId)) return
+          gitPushInFlightRef.current.add(requestId)
+          setToolCallState(toolCallId, { status: "running" })
+          removePendingApproval(pendingApproval.id)
+          try {
+            const res = await window.api.workspace.pushWorktree(threadId)
+            if (!res.success) {
+              setToolCallState(toolCallId, {
+                status: "failed",
+                reason: res.error || "推送失败"
+              })
+            }
+            window.api.sandbox.sendApprovalDecision({
+              requestId,
+              type: res.success ? "approve" : "error",
+              tool_call_id: toolCallId,
+              pushResult: { success: res.success, error: res.error }
+            })
+          } catch (e) {
+            const errorMessage = e instanceof Error ? e.message : "推送失败"
+            setToolCallState(toolCallId, {
+              status: "failed",
+              reason: errorMessage
+            })
+            window.api.sandbox.sendApprovalDecision({
+              requestId,
+              type: "error",
+              tool_call_id: toolCallId,
+              pushResult: { success: false, error: errorMessage }
+            })
+          } finally {
+            gitPushInFlightRef.current.delete(requestId)
+          }
+          return
+        }
+
         // Send decision to main process via the orchestrator's IPC channel
         window.api.sandbox.sendApprovalDecision({
-          requestId: approvalAny._orchestratorRequestId as string,
+          requestId,
           type: decision === "edit" ? "reject" : decision,
-          tool_call_id: pendingApproval.tool_call?.id || ""
+          tool_call_id: toolCallId
         })
         setToolCallState(pendingApproval.tool_call?.id || "", {
           status:
@@ -2668,13 +2719,13 @@ export function ChatContainer({
 
       if (result !== undefined) {
         status = result.is_error ? "failed" : "completed"
-      } else if (baseState?.status === "rejected") {
-        status = "rejected"
+      } else if (isTerminalToolCallStatus(baseState?.status)) {
+        status = baseState.status
       } else if (currentApprovalIds.has(toolCall.id)) {
         status = "awaiting_approval"
         activeAssigned = true
       } else if (!isLoading) {
-        status = isTerminalToolCallStatus(baseState?.status) ? baseState!.status : "interrupted"
+        status = "interrupted"
       } else if (!activeAssigned) {
         status = "running"
         activeAssigned = true

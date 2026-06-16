@@ -350,7 +350,12 @@ export function classifyCommandConcurrency(command: string): CommandConcurrencyC
  * as a value-bearing argument.
  */
 function stripQuotedSpans(command: string): string {
-  return command.replace(/"[^"]*"/g, " __quoted_arg__ ").replace(/'[^']*'/g, " __quoted_arg__ ")
+  // Double-quoted spans honour backslash escapes (`"a\" && b"` is one argument), so an
+  // escaped quote can't prematurely end the span and leak a `&&` into chain detection.
+  // POSIX single-quoted spans take no escapes, so a plain `'[^']*'` is exact there.
+  return command
+    .replace(/"(?:\\.|[^"\\])*"/g, " __quoted_arg__ ")
+    .replace(/'[^']*'/g, " __quoted_arg__ ")
 }
 
 const GIT_SUBMIT_SUBCOMMANDS = new Set(["add", "commit", "push", "merge"])
@@ -536,6 +541,16 @@ function commandHasGitSubcommand(command: string, subcommands: Set<string>): boo
 /** True when the command is (or contains) a real `git commit` invocation. */
 export function isGitCommitCommand(command: string): boolean {
   return commandHasGitSubcommand(command.trim(), new Set(["commit"]))
+}
+
+/** True when the command is (or contains) a real `git push` invocation. */
+export function isGitPushCommand(command: string): boolean {
+  return commandHasGitSubcommand(command.trim(), new Set(["push"]))
+}
+
+/** True when the command is (or contains) a real `git merge` invocation. */
+export function isGitMergeCommand(command: string): boolean {
+  return commandHasGitSubcommand(command.trim(), new Set(["merge"]))
 }
 
 /**
