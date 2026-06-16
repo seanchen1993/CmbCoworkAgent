@@ -391,6 +391,7 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   if (context.pluginWorkspace) payload.plugin_workspace = context.pluginWorkspace
   if (context.featureId) payload.feature_id = context.featureId
   if (context.projectCode) payload.project_code = context.projectCode
+  if (context.projectDir) payload.project_dir = context.projectDir
   if (context.toolResult !== undefined) {
     // Upstream passes JSON.stringify(result); parse it back so hooks see a real object
     // (matches Claude Code spec where tool_response is the structured response).
