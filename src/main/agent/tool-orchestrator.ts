@@ -204,12 +204,13 @@ export class ToolOrchestrator {
 
       // 2.6 git push → route a plain (non-force) push through workspace:pushWorktree — the
       // same robust, unsandboxed mechanism the Git Panel uses. Running push inside the
-      // sandbox often hangs on Git Credential Manager prompts and times out. This applies
-      // even in YOLO (push is outward-facing — the one push that still confirms), matching
-      // how commit always prompts. Force pushes and chained pushes keep the raw path
-      // (pushWorktree only performs a plain `push -u origin <current branch>`), and we only
-      // route when the push actually targets the current cwd — a `git -C <other>` push to a
-      // different repo would otherwise be silently redirected to the thread's worktree.
+      // sandbox often hangs on Git Credential Manager prompts and times out. This branch is
+      // intentionally before the YOLO shortcut so YOLO pushes can still use the Git Panel
+      // path; the renderer auto-accepts git_push requests in YOLO mode. Force pushes and
+      // chained pushes keep the raw path (pushWorktree only performs a plain
+      // `push -u origin <current branch>`), and we only route when the push actually targets
+      // the current cwd — a `git -C <other>` push to a different repo would otherwise be
+      // silently redirected to the thread's worktree.
       if (
         isGitPushCommand(command) &&
         !isForcePushCommand(command) &&
