@@ -300,6 +300,51 @@ function shouldReportProject(project: HarnessProjectListItem, now: number): bool
   return now - t <= ARCHIVED_REPORT_MAX_AGE_MS
 }
 
+/**
+ * Build + upsert a single project's snapshot, applying the same non-empty
+ * preservation guard as the poll loop. Returns whether the doc was written
+ * ("reported") or intentionally left untouched to preserve existing data
+ * ("skipped"). Throws on transport failure so the caller can log it.
+ */
+async function reportOneProject(
+  project: HarnessProjectListItem,
+  detail: HarnessProjectDetailViewModel | undefined,
+  relayBaseUrl: string
+): Promise<"reported" | "skipped"> {
+  const { docId, doc } = buildProjectDoc(project, detail)
+  const props = (doc as { properties?: { featureCount?: unknown } }).properties
+  const newFeatureCount = typeof props?.featureCount === "number" ? props.featureCount : 0
+
+  // The snapshot is a full-document overwrite built from a *local* probe of the
+  // workspace. If the workspace was manually altered (or the inspect failed),
+  // the probe can come back with 0 features even though the project still
+  // exists and previously reported features. Don't let that empty result
+  // clobber a good snapshot: when the probe is empty but the stored doc already
+  // has features, preserve the existing data and skip the write.
+  if (relayBaseUrl) {
+    // The backend performs the non-empty preservation guard itself, so we just
+    // hand it the doc + probe count in a single call.
+    const handled = await upsertProjectSnapshotViaBackend(relayBaseUrl, docId, doc, newFeatureCount)
+    if (handled) return "reported"
+    // 404: backend endpoint not deployed yet → fall through to direct ES.
+  }
+
+  // Direct-ES fallback: perform the preservation guard client-side.
+  if (newFeatureCount === 0) {
+    const existing = await fetchExistingFeatureCount(docId)
+    if (existing === null || existing > 0) {
+      console.warn(
+        `[HarnessStatusReporter] Skipped ${project.projectId}: probe returned 0 features ` +
+          `but existing snapshot has ${existing ?? "unknown"} — preserving previous data`
+      )
+      return "skipped"
+    }
+  }
+
+  await upsertProjectDoc(docId, doc)
+  return "reported"
+}
+
 async function pollOnce(): Promise<void> {
   // Skip the (heavy) inspect work entirely when there is nowhere to report to —
   // neither the backend relay nor a direct ES connection is configured.
@@ -339,47 +384,9 @@ async function pollOnce(): Promise<void> {
   let skipped = 0
   for (const project of projects) {
     try {
-      const { docId, doc } = buildProjectDoc(project, details[project.projectId])
-      const props = (doc as { properties?: { featureCount?: unknown } }).properties
-      const newFeatureCount = typeof props?.featureCount === "number" ? props.featureCount : 0
-
-      // The snapshot is a full-document overwrite built from a *local* probe of
-      // the workspace. If the workspace was manually altered (or the inspect
-      // failed), the probe can come back with 0 features even though the project
-      // still exists and previously reported features. Don't let that empty
-      // result clobber a good snapshot: when the probe is empty but the stored
-      // doc already has features, preserve the existing data and skip the write.
-      if (relayBaseUrl) {
-        // The backend performs the non-empty preservation guard itself, so we
-        // just hand it the doc + probe count in a single call.
-        const handled = await upsertProjectSnapshotViaBackend(
-          relayBaseUrl,
-          docId,
-          doc,
-          newFeatureCount
-        )
-        if (handled) {
-          reported += 1
-          continue
-        }
-        // 404: backend endpoint not deployed yet → fall through to direct ES.
-      }
-
-      // Direct-ES fallback: perform the preservation guard client-side.
-      if (newFeatureCount === 0) {
-        const existing = await fetchExistingFeatureCount(docId)
-        if (existing === null || existing > 0) {
-          console.warn(
-            `[HarnessStatusReporter] Skipped ${project.projectId}: probe returned 0 features ` +
-              `but existing snapshot has ${existing ?? "unknown"} — preserving previous data`
-          )
-          skipped += 1
-          continue
-        }
-      }
-
-      await upsertProjectDoc(docId, doc)
-      reported += 1
+      const outcome = await reportOneProject(project, details[project.projectId], relayBaseUrl)
+      if (outcome === "reported") reported += 1
+      else skipped += 1
     } catch (e) {
       console.warn(`[HarnessStatusReporter] Failed to report project ${project.projectId}:`, e)
     }
@@ -389,6 +396,45 @@ async function pollOnce(): Promise<void> {
       (skipped > 0 ? ` (${skipped} skipped to preserve non-empty data)` : "") +
       (skippedStable > 0 ? ` (${skippedStable} stable archived skipped)` : "")
   )
+}
+
+/**
+ * Report a single project's snapshot immediately, out of band from the 20-minute
+ * poll. Intended to be fired (and forgotten) right after a project or feature is
+ * created so the operations dashboard reflects it without waiting for the next
+ * poll. No-ops when there is nowhere to report to or the project is unknown;
+ * never throws — all failures are logged and swallowed, mirroring the poll loop.
+ */
+export async function reportProjectSnapshotNow(projectId: string): Promise<void> {
+  const id = projectId?.trim()
+  if (!id) return
+
+  const relayBaseUrl = getEventRelayBaseUrl()
+  if (!relayBaseUrl && getEsNodes().length === 0) return
+
+  let project: HarnessProjectListItem | undefined
+  try {
+    project = listHarnessProjects().find((p) => p.projectId === id)
+  } catch (e) {
+    console.warn("[HarnessStatusReporter] reportNow: failed to list projects:", e)
+    return
+  }
+  if (!project) return
+
+  let detail: HarnessProjectDetailViewModel | undefined
+  try {
+    detail = getHarnessProjectDetails([id])[id]
+  } catch (e) {
+    // Metadata-only snapshot if the inspect probe fails.
+    console.warn(`[HarnessStatusReporter] reportNow: failed to compute detail for ${id}:`, e)
+  }
+
+  try {
+    const outcome = await reportOneProject(project, detail, relayBaseUrl)
+    console.log(`[HarnessStatusReporter] On-demand snapshot for ${id}: ${outcome}`)
+  } catch (e) {
+    console.warn(`[HarnessStatusReporter] On-demand snapshot failed for ${id}:`, e)
+  }
 }
 
 /**
