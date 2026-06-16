@@ -967,6 +967,21 @@ interface CustomAPI {
       suggestedCommitMessage?: string
       error?: string
     }>
+    getGitChangedFilesSummary: (threadId: string) => Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      files: Array<{
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+      }>
+      changedFilesTotal: number
+      omittedFileCount: number
+      hasPendingDiff: boolean
+      error?: string
+    }>
     getGitPanelSummary: (threadId: string) => Promise<{
       success: boolean
       isWorktree: boolean

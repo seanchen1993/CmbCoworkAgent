@@ -88,6 +88,18 @@ interface GitPanelDiffStatePayload {
   error?: string
 }
 
+interface GitChangedFilesSummaryPayload {
+  success: boolean
+  isWorktree: boolean
+  isGitRepo?: boolean
+  taskId: string
+  files: GitPanelChangedFile[]
+  changedFilesTotal: number
+  omittedFileCount: number
+  hasPendingDiff: boolean
+  error?: string
+}
+
 interface ExecFileError extends Error {
   stderr?: string | Buffer
   stdout?: string | Buffer
@@ -1808,7 +1820,7 @@ async function buildGitPanelState(
 async function getChangedFileEntriesForGitOps(
   worktreePath: string,
   trackedFiles: string[],
-  options?: { silent?: boolean; includeAllWhenNoTracked?: boolean }
+  options?: { silent?: boolean; includeAllWhenNoTracked?: boolean; combineMoves?: boolean }
 ): Promise<GitPanelChangedFile[]> {
   // commit/push 场景只需要“文件列表”即可，不做重型 diff 计算。
   // 该函数是 Git 提交流程的轻量快速路径。
@@ -1831,6 +1843,9 @@ async function getChangedFileEntriesForGitOps(
   const rawEntries = collectChangedFileEntriesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
     filterByTracked
   })
+  if (options?.combineMoves === false) {
+    return rawEntries
+  }
   return combineFilesystemMovesForDisplay(worktreePath, rawEntries, { silent })
 }
 
@@ -1965,6 +1980,23 @@ function createEmptyGitPanelDiffState(
   }
 }
 
+function createEmptyGitChangedFilesSummary(
+  taskId: string,
+  overrides: Partial<GitChangedFilesSummaryPayload> = {}
+): GitChangedFilesSummaryPayload {
+  return {
+    success: false,
+    isWorktree: false,
+    isGitRepo: false,
+    taskId,
+    files: [],
+    changedFilesTotal: 0,
+    omittedFileCount: 0,
+    hasPendingDiff: false,
+    ...overrides
+  }
+}
+
 async function buildGitPanelMetaState(
   threadId: string,
   context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>>
@@ -2012,6 +2044,40 @@ async function buildGitPanelMetaState(
     pendingCommits: pushability.pendingCommits,
     trackedFiles: tracked,
     worktreeBranch
+  }
+}
+
+async function buildGitChangedFilesSummary(
+  threadId: string,
+  context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>>
+): Promise<GitChangedFilesSummaryPayload> {
+  if (!context.workspacePath) {
+    return createEmptyGitChangedFilesSummary(threadId, { error: "未配置工作区" })
+  }
+
+  if (!context.isGitRepo) {
+    return createEmptyGitChangedFilesSummary(threadId, {
+      error: "当前任务未关联 Git 仓库，无法读取 Git 变更"
+    })
+  }
+
+  const tracked = getTrackedLlmFiles(context.metadata)
+  const changedFileEntries = await getChangedFileEntriesForGitOps(context.workspacePath, tracked, {
+    silent: true,
+    includeAllWhenNoTracked: true,
+    combineMoves: false
+  })
+  const files = changedFileEntries.slice(0, GIT_PANEL_MAX_VISIBLE_FILES)
+
+  return {
+    success: true,
+    isWorktree: context.isWorktree,
+    isGitRepo: true,
+    taskId: threadId,
+    files,
+    changedFilesTotal: changedFileEntries.length,
+    omittedFileCount: Math.max(0, changedFileEntries.length - files.length),
+    hasPendingDiff: changedFileEntries.length > 0
   }
 }
 
@@ -2921,6 +2987,20 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         isWorktree: Boolean(context?.isWorktree),
         isGitRepo: Boolean(context?.isGitRepo),
         error: e instanceof Error ? e.message : "加载 Git 文件变更失败"
+      })
+    }
+  })
+
+  ipcMain.handle("workspace:getGitChangedFilesSummary", async (_event, { threadId }: { threadId: string }) => {
+    let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+    try {
+      context = await resolveThreadWorkspaceContext(threadId)
+      return await buildGitChangedFilesSummary(threadId, context)
+    } catch (e) {
+      return createEmptyGitChangedFilesSummary(threadId, {
+        isWorktree: Boolean(context?.isWorktree),
+        isGitRepo: Boolean(context?.isGitRepo),
+        error: e instanceof Error ? e.message : "加载 Git 文件列表失败"
       })
     }
   })
