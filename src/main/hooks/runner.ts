@@ -92,6 +92,8 @@ export interface HookContext {
   featureId?: string
   /** Harness project code exposed to hooks as PROJECT_CODE. */
   projectCode?: string
+  /** Harness project directory exposed to hooks as PROJECT_DIR. */
+  projectDir?: string
   /**
    * Absolute path to the on-disk conversation history for this session.
    * Exposed to hooks as `transcript_path` in stdin JSON and `TRANSCRIPT_PATH` env.
@@ -353,6 +355,7 @@ function buildHookEnv(
   if (context.pluginWorkspace) env.PLUGIN_WORKSPACE = context.pluginWorkspace
   if (context.featureId) env.FEATURE_ID = context.featureId
   if (context.projectCode) env.PROJECT_CODE = context.projectCode
+  if (context.projectDir) env.PROJECT_DIR = context.projectDir
   if (context.sessionId) env.SESSION_ID = context.sessionId
   if (context.systemId) env.SYSTEM_ID = context.systemId
   if (context.userPrompt) env.USER_PROMPT = context.userPrompt

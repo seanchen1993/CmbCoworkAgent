@@ -568,6 +568,7 @@ export function createScopedMcpCapabilityService(
     pluginWorkspace?: string
     featureId?: string
     projectCode?: string
+    projectDir?: string
   }
 ): McpCapabilityService {
   const getEffectivePriority = (tool: McpCapabilityTool): number => {
@@ -764,6 +765,7 @@ export function createScopedMcpCapabilityService(
         pluginWorkspace: baseContext.pluginWorkspace,
         featureId: baseContext.featureId,
         projectCode: baseContext.projectCode,
+        projectDir: baseContext.projectDir,
         pluginId,
         pluginName: pluginId ? getPluginName(pluginId) : undefined
       }
@@ -2200,6 +2202,8 @@ export interface CreateAgentRuntimeOptions {
   featureId?: string
   /** Harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
+  /** Harness project directory exposed to child processes as PROJECT_DIR. */
+  projectDir?: string
   /** Skip the manage_scheduler tool (used by scheduled task / heartbeat execution to prevent recursive scheduling) */
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
@@ -2289,6 +2293,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     pluginWorkspace,
     featureId,
     projectCode,
+    projectDir,
     retryHooks,
     maxRetryAttempts,
     coordinatorWorkerTurnPlanning,
@@ -2432,6 +2437,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     pluginWorkspace,
     featureId,
     projectCode,
+    projectDir,
     onFileMutation,
     abortSignal: options.abortSignal,
     runId: threadId,
@@ -2527,6 +2533,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         pluginWorkspace,
         featureId,
         projectCode,
+        projectDir,
         // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
         // Lets a Notification hook know whether the user is in YOLO mode (where
         // approvals only fire for sandbox-escape) vs the default approve flow.
@@ -2688,6 +2695,7 @@ The workspace root is: ${workspacePath}`
       pluginWorkspace,
       featureId,
       projectCode,
+      projectDir,
       turnId: hookTurnId
     }
   )
@@ -2871,6 +2879,7 @@ The workspace root is: ${workspacePath}`
     pluginWorkspace,
     featureId,
     projectCode,
+    projectDir,
     skipToolNames: toolHookExclusions
   })
 
@@ -3054,6 +3063,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       pluginWorkspace,
       featureId,
       projectCode,
+      projectDir,
       pluginOutputDir,
       hookTurnId
     }

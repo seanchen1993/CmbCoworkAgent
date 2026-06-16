@@ -302,6 +302,8 @@ export interface LocalSandboxOptions {
   featureId?: string
   /** Optional harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
+  /** Optional harness project directory exposed to child processes as PROJECT_DIR. */
+  projectDir?: string
 }
 
 interface ExecuteRawOptions {
@@ -371,6 +373,7 @@ export class LocalSandbox
   private readonly pluginWorkspace?: string
   private readonly featureId?: string
   private readonly projectCode?: string
+  private readonly projectDir?: string
   private readonly codexExePath: string
   private readonly getHooks: () => HookConfig[]
   private readonly resolveHooks: LocalSandboxHookResolver
@@ -1553,6 +1556,8 @@ export class LocalSandbox
     if (featureId) baseEnv.FEATURE_ID = featureId
     const projectCode = options.projectCode?.trim()
     if (projectCode) baseEnv.PROJECT_CODE = projectCode
+    const projectDir = options.projectDir?.trim()
+    if (projectDir) baseEnv.PROJECT_DIR = projectDir
     // Ensure UTF-8 locale for spawned shells (Git Bash via pipe defaults to
     // Windows console code page, e.g. GBK, producing garbled CJK output)
     if (process.platform === "win32") {
@@ -1568,6 +1573,7 @@ export class LocalSandbox
     this.pluginWorkspace = pluginWorkspace || undefined
     this.featureId = featureId || undefined
     this.projectCode = projectCode || undefined
+    this.projectDir = projectDir || undefined
     this.codexExePath = options.codexExePath ?? "codex"
     const h = options.hooks
     this.getHooks = typeof h === "function" ? h : () => h ?? []
@@ -1827,6 +1833,7 @@ export class LocalSandbox
         : {}),
       ...(this.featureId && !context.featureId ? { featureId: this.featureId } : {}),
       ...(this.projectCode && !context.projectCode ? { projectCode: this.projectCode } : {}),
+      ...(this.projectDir && !context.projectDir ? { projectDir: this.projectDir } : {}),
       turnId: context.turnId ?? this._hookTurnId
     }
 

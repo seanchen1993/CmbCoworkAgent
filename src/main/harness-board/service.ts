@@ -1883,6 +1883,7 @@ export interface HarnessFeatureAgentContext {
   pluginWorkspace?: string
   featureId?: string
   projectCode?: string
+  projectDir?: string
 }
 
 export function buildHarnessFeatureAgentContext(
@@ -1916,7 +1917,8 @@ export function buildHarnessFeatureAgentContext(
     pluginName: normalizeText(plugin?.name) || adapter.name,
     pluginWorkspace: project.workspacePath,
     featureId: feature.slug,
-    projectCode: project.projectCode
+    projectCode: project.projectCode,
+    projectDir: projectDirectoryName(project)
   }
 }
 
