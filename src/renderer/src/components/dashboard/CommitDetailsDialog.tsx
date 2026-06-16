@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ExternalLink,
+  FileWarning,
   GitCommit,
   GitCompare,
   Info,
@@ -22,14 +23,21 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TraceExplorer } from "./TraceHistoryDialog"
 import { CommitAdoptionTraceDialog } from "./CommitAdoptionTraceDialog"
+import { UncommittedCodeAnalysisPanel, type UncommittedScope } from "./UncommittedCodeDialog"
 import type {
   DashboardCommitDetail,
   DashboardCommitDetailsData,
   DashboardTraceDetail
 } from "./use-dashboard"
+
+interface CommitDetailsUncommittedAnalysis {
+  range: { from: string; to: string }
+  scope: UncommittedScope
+}
 
 function HeaderHint({ hint }: { hint: string }): React.JSX.Element {
   return (
@@ -514,7 +522,8 @@ export function CommitDetailsDialog({
   onSearch,
   onClearDepartment,
   onClearUser,
-  onOpenExternal
+  onOpenExternal,
+  uncommittedAnalysis
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -533,6 +542,7 @@ export function CommitDetailsDialog({
   onClearDepartment: () => void
   onClearUser: () => void
   onOpenExternal: (url: string) => void
+  uncommittedAnalysis?: CommitDetailsUncommittedAnalysis
 }): React.JSX.Element {
   const items = data?.items ?? []
   const total = data?.total ?? 0
@@ -546,120 +556,160 @@ export function CommitDetailsDialog({
   const canNext = page < pageCount && !loading
   const [threadCommit, setThreadCommit] = useState<DashboardCommitDetail | null>(null)
   const [traceCommit, setTraceCommit] = useState<DashboardCommitDetail | null>(null)
+  const [activeTab, setActiveTab] = useState<"commits" | "uncommitted">("commits")
+  const hasUncommittedTab = Boolean(uncommittedAnalysis)
+  const tabValue = hasUncommittedTab ? activeTab : "commits"
+  const handleDialogOpenChange = (nextOpen: boolean): void => {
+    if (!nextOpen) setActiveTab("commits")
+    onOpenChange(nextOpen)
+  }
+
+  const commitContent =
+    loading && !data ? (
+      <div className="flex flex-1 items-center justify-center">
+        <Loader2 className="size-6 animate-spin text-muted-foreground" />
+      </div>
+    ) : error ? (
+      <div className="flex flex-1 items-center justify-center px-6 text-sm text-destructive">
+        {error}
+      </div>
+    ) : items.length === 0 ? (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <CommitDetailsToolbar
+          total={total}
+          page={page}
+          pageSize={pageSize}
+          pageCount={pageCount}
+          fromIndex={fromIndex}
+          toIndex={toIndex}
+          pushedOnly={pushedOnly}
+          departmentValue={departmentValue}
+          userValue={userValue}
+          loading={loading}
+          canPrev={canPrev}
+          canNext={canNext}
+          onPageChange={onPageChange}
+          onPushedOnlyChange={onPushedOnlyChange}
+          onDepartmentValueChange={onDepartmentValueChange}
+          onUserValueChange={onUserValueChange}
+          onSearch={onSearch}
+          onClearDepartment={onClearDepartment}
+          onClearUser={onClearUser}
+        />
+        <div className="flex flex-1 items-center justify-center px-6 text-sm text-muted-foreground">
+          {pushedOnly ? "该时间范围内没有已 Push 的 Commit 数据" : "该时间范围内没有 Commit 数据"}
+        </div>
+      </div>
+    ) : (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <CommitDetailsToolbar
+          total={total}
+          page={page}
+          pageSize={pageSize}
+          pageCount={pageCount}
+          fromIndex={fromIndex}
+          toIndex={toIndex}
+          pushedOnly={pushedOnly}
+          departmentValue={departmentValue}
+          userValue={userValue}
+          loading={loading}
+          canPrev={canPrev}
+          canNext={canNext}
+          onPageChange={onPageChange}
+          onPushedOnlyChange={onPushedOnlyChange}
+          onDepartmentValueChange={onDepartmentValueChange}
+          onUserValueChange={onUserValueChange}
+          onSearch={onSearch}
+          onClearDepartment={onClearDepartment}
+          onClearUser={onClearUser}
+        />
+        <ScrollArea className="min-h-0 flex-1" orientation="both">
+          <div className="min-w-max">
+            <table className="w-full min-w-[1060px] text-left">
+              <thead className="sticky top-0 z-10 bg-background">
+                <tr className="border-b border-border text-[11px] text-muted-foreground">
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">时间</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">用户</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">部门</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">仓库</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">分支</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">状态</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">关联 Skill</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">
+                    <span className="inline-flex items-center gap-1">
+                      采纳率
+                      <HeaderHint hint="Agent 生成代码的采纳率。点击下方的数字可进行采纳溯源。" />
+                    </span>
+                  </th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">
+                    <span className="inline-flex items-center gap-1">
+                      变更
+                      <HeaderHint hint="git 提交的变更行数" />
+                    </span>
+                  </th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">对话记录</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item) => (
+                  <CommitRow
+                    key={item.eventId}
+                    item={item}
+                    onOpenExternal={onOpenExternal}
+                    onViewThread={setThreadCommit}
+                    onViewTrace={setTraceCommit}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </ScrollArea>
+      </div>
+    )
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleDialogOpenChange}>
       <DialogContent className="flex h-[75vh] max-w-[1000px] flex-col gap-0 p-0">
         <DialogHeader className="border-b border-border px-5 py-4">
           <DialogTitle className="flex items-center gap-2 text-base">
             <GitCommit className="size-4 text-muted-foreground" />
-            Commit 明细
+            {hasUncommittedTab ? "采纳率下钻" : "Commit 明细"}
           </DialogTitle>
           <DialogDescription>{scopeLabel}</DialogDescription>
         </DialogHeader>
-
-        {loading && !data ? (
-          <div className="flex flex-1 items-center justify-center">
-            <Loader2 className="size-6 animate-spin text-muted-foreground" />
-          </div>
-        ) : error ? (
-          <div className="flex flex-1 items-center justify-center px-6 text-sm text-destructive">
-            {error}
-          </div>
-        ) : items.length === 0 ? (
-          <div className="flex min-h-0 flex-1 flex-col">
-            <CommitDetailsToolbar
-              total={total}
-              page={page}
-              pageSize={pageSize}
-              pageCount={pageCount}
-              fromIndex={fromIndex}
-              toIndex={toIndex}
-              pushedOnly={pushedOnly}
-              departmentValue={departmentValue}
-              userValue={userValue}
-              loading={loading}
-              canPrev={canPrev}
-              canNext={canNext}
-              onPageChange={onPageChange}
-              onPushedOnlyChange={onPushedOnlyChange}
-              onDepartmentValueChange={onDepartmentValueChange}
-              onUserValueChange={onUserValueChange}
-              onSearch={onSearch}
-              onClearDepartment={onClearDepartment}
-              onClearUser={onClearUser}
-            />
-            <div className="flex flex-1 items-center justify-center px-6 text-sm text-muted-foreground">
-              {pushedOnly
-                ? "该时间范围内没有已 Push 的 Commit 数据"
-                : "该时间范围内没有 Commit 数据"}
+        {hasUncommittedTab ? (
+          <Tabs
+            value={tabValue}
+            onValueChange={(value) => setActiveTab(value === "uncommitted" ? value : "commits")}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            <div className="border-b border-border px-5 py-2">
+              <TabsList className="h-8">
+                <TabsTrigger value="commits" className="h-6 gap-1.5 text-xs">
+                  <GitCommit className="size-3.5" />
+                  Commit 明细
+                </TabsTrigger>
+                <TabsTrigger value="uncommitted" className="h-6 gap-1.5 text-xs">
+                  <FileWarning className="size-3.5" />
+                  未提交分析
+                </TabsTrigger>
+              </TabsList>
             </div>
-          </div>
+            <TabsContent value="commits" className="m-0 flex min-h-0 flex-1 flex-col">
+              {commitContent}
+            </TabsContent>
+            <TabsContent value="uncommitted" className="m-0 flex min-h-0 flex-1 flex-col">
+              {uncommittedAnalysis ? (
+                <UncommittedCodeAnalysisPanel
+                  active={open && activeTab === "uncommitted"}
+                  range={uncommittedAnalysis.range}
+                  scope={uncommittedAnalysis.scope}
+                />
+              ) : null}
+            </TabsContent>
+          </Tabs>
         ) : (
-          <div className="flex min-h-0 flex-1 flex-col">
-            <CommitDetailsToolbar
-              total={total}
-              page={page}
-              pageSize={pageSize}
-              pageCount={pageCount}
-              fromIndex={fromIndex}
-              toIndex={toIndex}
-              pushedOnly={pushedOnly}
-              departmentValue={departmentValue}
-              userValue={userValue}
-              loading={loading}
-              canPrev={canPrev}
-              canNext={canNext}
-              onPageChange={onPageChange}
-              onPushedOnlyChange={onPushedOnlyChange}
-              onDepartmentValueChange={onDepartmentValueChange}
-              onUserValueChange={onUserValueChange}
-              onSearch={onSearch}
-              onClearDepartment={onClearDepartment}
-              onClearUser={onClearUser}
-            />
-            <ScrollArea className="min-h-0 flex-1" orientation="both">
-              <div className="min-w-max">
-                <table className="min-w-[1060px] w-full text-left">
-                  <thead className="sticky top-0 z-10 bg-background">
-                    <tr className="border-b border-border text-[11px] text-muted-foreground">
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">时间</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">用户</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">部门</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">仓库</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">分支</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">状态</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">关联 Skill</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">
-                        <span className="inline-flex items-center gap-1">
-                          采纳率
-                          <HeaderHint hint="Agent 生成代码的采纳率。点击下方的数字可进行采纳溯源。" />
-                        </span>
-                      </th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">
-                        <span className="inline-flex items-center gap-1">
-                          变更
-                          <HeaderHint hint="git 提交的变更行数" />
-                        </span>
-                      </th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">对话记录</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {items.map((item) => (
-                      <CommitRow
-                        key={item.eventId}
-                        item={item}
-                        onOpenExternal={onOpenExternal}
-                        onViewThread={setThreadCommit}
-                        onViewTrace={setTraceCommit}
-                      />
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </ScrollArea>
-          </div>
+          commitContent
         )}
       </DialogContent>
       <ThreadConversationDialog

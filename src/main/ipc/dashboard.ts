@@ -536,8 +536,14 @@ interface UncommittedScopeOptions {
   upperOrgLv1?: string | string[] | null
   /** 仅统计项目模式（带 properties.harnessProjectId）的生成。 */
   projectMode?: boolean
+  /** 收窄到单个项目模式项目。 */
+  projectId?: string | null
+  /** 收窄到单个项目特性。 */
+  featureSlug?: string | null
   /** 仅统计由 Skill 生成的代码（properties.usedSkills 非空），对应「插件约束生成」漏斗。 */
   usedSkillsOnly?: boolean
+  /** 榜单内按用户姓名 / sapId / ystId 查询。 */
+  userKeyword?: string | null
 }
 
 interface UncommittedRankingItem {
@@ -2545,9 +2551,18 @@ function uncommittedScopeFilters(
   }
   const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(options?.upperOrgLv1))
   if (orgFilterClause) filters.push(orgFilterClause)
-  if (options?.projectMode) filters.push({ exists: { field: "properties.harnessProjectId" } })
+  const projectId = typeof options?.projectId === "string" ? options.projectId.trim() : ""
+  const featureSlug = typeof options?.featureSlug === "string" ? options.featureSlug.trim() : ""
+  if (projectId) {
+    filters.push({ term: { "properties.harnessProjectId": projectId } })
+  } else if (options?.projectMode || featureSlug) {
+    filters.push({ exists: { field: "properties.harnessProjectId" } })
+  }
+  if (featureSlug) filters.push({ term: { "properties.harnessFeatureSlug": featureSlug } })
   // 「由 Skill 生成」口径：usedSkills 非空，与项目概览 skillCodeStats 一致。
   if (options?.usedSkillsOnly) filters.push({ exists: { field: "properties.usedSkills" } })
+  const userKeyword = normalizeCommitUserKeyword(options?.userKeyword)
+  if (userKeyword !== null) filters.push(buildCommitUserMatchFilter(userKeyword))
   return filters
 }
 
@@ -6328,10 +6343,14 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
   }
 }
 
-function makeMockUncommittedRanking(): UncommittedRankingData {
-  const items: UncommittedRankingItem[] = Array.from({ length: 12 }, (_, index) => {
+function makeMockUncommittedRanking(options?: UncommittedScopeOptions): UncommittedRankingData {
+  const userKeyword = normalizeCommitUserKeyword(options?.userKeyword)?.toLowerCase() ?? ""
+  const projectScoped = Boolean(options?.projectId?.trim() || options?.featureSlug?.trim())
+  const skillScale = options?.usedSkillsOnly ? 0.62 : 1
+  const projectScale = projectScoped ? 0.42 : 1
+  let items: UncommittedRankingItem[] = Array.from({ length: 12 }, (_, index) => {
     const user = makeMockDashboardUser(index)
-    const generatedLines = 1800 - index * 110
+    const generatedLines = Math.round((1800 - index * 110) * skillScale * projectScale)
     const measuredGeneratedLines = Math.round(generatedLines * (0.4 + index * 0.03))
     const uncommittedLines = Math.max(0, generatedLines - measuredGeneratedLines)
     return {
@@ -6346,7 +6365,16 @@ function makeMockUncommittedRanking(): UncommittedRankingData {
       uncommittedLines,
       uncommittedRate: generatedLines > 0 ? uncommittedLines / generatedLines : null
     }
-  }).sort((a, b) => b.uncommittedLines - a.uncommittedLines)
+  })
+  if (projectScoped) items = items.slice(0, 8)
+  if (userKeyword) {
+    items = items.filter((item) =>
+      [item.userName, item.sapId, item.ystId, item.orgName, item.upperOrgLv0, item.upperOrgLv1]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(userKeyword))
+    )
+  }
+  items.sort((a, b) => b.uncommittedLines - a.uncommittedLines)
   return {
     items,
     totalGeneratedLines: items.reduce((sum, item) => sum + item.generatedLines, 0),
@@ -6356,9 +6384,14 @@ function makeMockUncommittedRanking(): UncommittedRankingData {
   }
 }
 
-function makeMockUncommittedDetail(sapId: string): UncommittedDetailData {
+function makeMockUncommittedDetail(
+  sapId: string,
+  options?: UncommittedScopeOptions
+): UncommittedDetailData {
   const tools = ["write_file", "str_replace", "edit_file"]
   const langs = ["ts", "tsx", "py", "md", "json"]
+  const projectId = options?.projectId?.trim() || undefined
+  const featureSlug = options?.featureSlug?.trim() || undefined
   const samples: UncommittedDetailSample[] = Array.from({ length: 48 }, (_, index) => ({
     eventId: `mock_gen_${sapId}_${index}`,
     eventTime: new Date(Date.now() - index * 3_600_000).toISOString(),
@@ -6367,7 +6400,8 @@ function makeMockUncommittedDetail(sapId: string): UncommittedDetailData {
     lineCount: 40 + (index % 5) * 25,
     fileHint: `module-${index % 6}.${langs[index % langs.length]}`,
     threadId: `thread_${index % 4}`,
-    harnessFeatureSlug: index % 3 === 0 ? `feature-${index % 3}` : undefined,
+    harnessProjectId: projectId ?? (index % 3 === 0 ? `mock-project-${index % 4}` : undefined),
+    harnessFeatureSlug: featureSlug ?? (index % 3 === 0 ? `feature-${index % 3}` : undefined),
     modelName: "claude-opus-4-8"
   }))
   const byTool = new Map<string, { gens: number; lines: number }>()
@@ -6379,7 +6413,11 @@ function makeMockUncommittedDetail(sapId: string): UncommittedDetailData {
     uncommittedLines += sample.lineCount
     pushBreakdown(byTool, sample.tool || "未知工具", sample.lineCount)
     pushBreakdown(byLanguage, sample.language || "未知语言", sample.lineCount)
-    pushBreakdown(byProject, sample.harnessFeatureSlug || "非项目模式", sample.lineCount)
+    pushBreakdown(
+      byProject,
+      sample.harnessFeatureSlug || sample.harnessProjectId || "非项目模式",
+      sample.lineCount
+    )
     if (sample.threadId) pushBreakdown(byThread, sample.threadId, sample.lineCount)
   }
   return {
@@ -10079,7 +10117,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:uncommittedRanking",
     async (_, range: TimeRange, options?: UncommittedScopeOptions) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockUncommittedRanking() }
+      if (import.meta.env.DEV) return { success: true, data: makeMockUncommittedRanking(options) }
       try {
         return { success: true, data: await fetchUncommittedRanking(range, options) }
       } catch (e) {
@@ -10095,7 +10133,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       const normalizedSapId = sapId?.trim?.() ?? ""
       if (!normalizedSapId) return { success: false, error: "sapId is required" }
       if (import.meta.env.DEV)
-        return { success: true, data: makeMockUncommittedDetail(normalizedSapId) }
+        return { success: true, data: makeMockUncommittedDetail(normalizedSapId, options) }
       try {
         return {
           success: true,

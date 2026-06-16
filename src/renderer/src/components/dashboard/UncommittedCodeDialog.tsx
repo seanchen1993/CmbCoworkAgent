@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react"
-import { ChevronLeft, Info, Loader2, MessagesSquare } from "lucide-react"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import { ChevronLeft, Info, Loader2, MessagesSquare, Search, X } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -7,6 +7,7 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TraceExplorer } from "./TraceHistoryDialog"
@@ -67,10 +68,13 @@ interface UncommittedDetailData {
   samples: UncommittedDetailSample[]
 }
 
-interface UncommittedScope {
+export interface UncommittedScope {
   upperOrgLv1?: string[]
   projectMode?: boolean
+  projectId?: string
+  featureSlug?: string
   usedSkillsOnly?: boolean
+  label?: string
 }
 
 // ── 工具函数 ────────────────────────────────────────────────────────
@@ -413,17 +417,16 @@ function DetailView({
   )
 }
 
-// ── 主弹窗：榜单（A）+ 点击进入二级详情（B）──────────────────────────
-export function UncommittedCodeDialog({
-  open,
-  onOpenChange,
+export function UncommittedCodeAnalysisPanel({
+  active,
   range,
-  scope
+  scope,
+  className
 }: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
+  active: boolean
   range: { from: string; to: string }
   scope?: UncommittedScope
+  className?: string
 }): React.JSX.Element {
   const [ranking, setRanking] = useState<UncommittedRankingData | null>(null)
   const [rankingLoading, setRankingLoading] = useState(false)
@@ -433,50 +436,62 @@ export function UncommittedCodeDialog({
   const [detail, setDetail] = useState<UncommittedDetailData | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
+  const [userSearchValue, setUserSearchValue] = useState("")
+  const [userKeyword, setUserKeyword] = useState("")
 
-  const scopeOptions = {
-    upperOrgLv1: scope?.upperOrgLv1 ?? null,
-    projectMode: scope?.projectMode,
-    usedSkillsOnly: scope?.usedSkillsOnly
-  }
+  const scopeUpperOrgLv1 = scope?.upperOrgLv1
+  const scopeOptions = useMemo(
+    () => ({
+      upperOrgLv1: scopeUpperOrgLv1 ?? null,
+      projectMode: scope?.projectMode,
+      projectId: scope?.projectId ?? null,
+      featureSlug: scope?.featureSlug ?? null,
+      usedSkillsOnly: scope?.usedSkillsOnly,
+      userKeyword: userKeyword || null
+    }),
+    [
+      scopeUpperOrgLv1,
+      scope?.projectMode,
+      scope?.projectId,
+      scope?.featureSlug,
+      scope?.usedSkillsOnly,
+      userKeyword
+    ]
+  )
 
   // 弹窗打开时加载榜单（A）。
   useEffect(() => {
-    if (!open) return
+    if (!active) return
     let cancelled = false
-    setRanking(null)
-    setRankingError(null)
-    setSelected(null)
-    setDetail(null)
-    setRankingLoading(true)
-    window.api.dashboard
-      .uncommittedRanking(range, scopeOptions)
-      .then((result) => {
-        if (cancelled) return
-        if (result.success) {
-          setRanking((result.data as UncommittedRankingData) ?? null)
-        } else {
-          setRankingError(result.error ?? "加载失败")
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) setRankingError(e instanceof Error ? e.message : String(e))
-      })
-      .finally(() => {
-        if (!cancelled) setRankingLoading(false)
-      })
+    const timer = window.setTimeout(() => {
+      if (cancelled) return
+      setRanking(null)
+      setRankingError(null)
+      setSelected(null)
+      setDetail(null)
+      setRankingLoading(true)
+      window.api.dashboard
+        .uncommittedRanking(range, scopeOptions)
+        .then((result) => {
+          if (cancelled) return
+          if (result.success) {
+            setRanking((result.data as UncommittedRankingData) ?? null)
+          } else {
+            setRankingError(result.error ?? "加载失败")
+          }
+        })
+        .catch((e) => {
+          if (!cancelled) setRankingError(e instanceof Error ? e.message : String(e))
+        })
+        .finally(() => {
+          if (!cancelled) setRankingLoading(false)
+        })
+    }, 0)
     return () => {
       cancelled = true
+      window.clearTimeout(timer)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    open,
-    range.from,
-    range.to,
-    scope?.projectMode,
-    scope?.usedSkillsOnly,
-    (scope?.upperOrgLv1 ?? []).join("")
-  ])
+  }, [active, range, scopeOptions])
 
   // 点击某用户 → 加载二级详情（B）。
   const openDetail = useCallback(
@@ -499,36 +514,197 @@ export function UncommittedCodeDialog({
         })
         .finally(() => setDetailLoading(false))
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [
-      range.from,
-      range.to,
-      scope?.projectMode,
-      scope?.usedSkillsOnly,
-      (scope?.upperOrgLv1 ?? []).join("")
-    ]
+    [range, scopeOptions]
   )
 
+  const handleUserSearchSubmit = useCallback(
+    (event?: React.FormEvent<HTMLFormElement>) => {
+      event?.preventDefault()
+      setSelected(null)
+      setDetail(null)
+      setUserKeyword(userSearchValue.trim())
+    },
+    [userSearchValue]
+  )
+
+  const handleUserSearchClear = useCallback(() => {
+    setUserSearchValue("")
+    setSelected(null)
+    setDetail(null)
+    setUserKeyword("")
+  }, [])
+
+  const userSearchForm = (
+    <form className="flex items-center justify-end gap-2" onSubmit={handleUserSearchSubmit}>
+      <div className="relative w-[240px]">
+        <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          value={userSearchValue}
+          onChange={(event) => setUserSearchValue(event.target.value)}
+          placeholder="搜索用户"
+          className="h-8 rounded-md border-border bg-background pl-8 pr-8 text-xs"
+        />
+        {userSearchValue ? (
+          <button
+            type="button"
+            className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            aria-label="清空用户搜索"
+            onClick={handleUserSearchClear}
+          >
+            <X className="size-3" />
+          </button>
+        ) : null}
+      </div>
+      <button
+        type="submit"
+        className="h-8 rounded-md border border-border px-3 text-xs transition-colors hover:bg-muted/50"
+        disabled={rankingLoading}
+      >
+        查询
+      </button>
+    </form>
+  )
+
+  return (
+    <ScrollArea className={`min-h-0 flex-1 px-5 py-4 ${className ?? ""}`}>
+      {selected ? (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-sm">
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+              onClick={() => setSelected(null)}
+            >
+              <ChevronLeft className="size-4" />
+              返回榜单
+            </button>
+            <span className="font-semibold text-foreground">
+              {selected.userName} · 未提交代码明细
+            </span>
+          </div>
+          <DetailView
+            key={selected.sapId}
+            detail={detail}
+            loading={detailLoading}
+            error={detailError}
+            threadScope={scope?.projectMode ? "project" : "platform"}
+          />
+        </div>
+      ) : rankingLoading ? (
+        <div className="flex flex-1 items-center justify-center py-10 text-sm text-muted-foreground">
+          <Loader2 className="mr-2 size-4 animate-spin" />
+          正在聚合榜单…
+        </div>
+      ) : rankingError ? (
+        <div className="py-10 text-center text-sm text-destructive">{rankingError}</div>
+      ) : !ranking || ranking.items.length === 0 ? (
+        <div className="space-y-3">
+          {userSearchForm}
+          <div className="py-10 text-center text-sm text-muted-foreground">
+            {userKeyword ? "未找到匹配用户的未提交生成数据" : "暂无未提交生成数据"}
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {userSearchForm}
+
+          <div className="grid grid-cols-3 gap-2">
+            <div className="rounded-lg border border-border bg-muted/30 p-2 text-center">
+              <div className="text-[10px] text-muted-foreground">总生成行数</div>
+              <div className="text-base font-bold text-foreground">
+                {formatLines(ranking.totalGeneratedLines)}
+              </div>
+            </div>
+            <div className="rounded-lg border border-border bg-muted/30 p-2 text-center">
+              <div className="text-[10px] text-muted-foreground">已测量（提交）行数</div>
+              <div className="text-base font-bold text-foreground">
+                {formatLines(ranking.totalMeasuredGeneratedLines)}
+              </div>
+            </div>
+            <div className="rounded-lg border border-border bg-muted/30 p-2 text-center">
+              <div className="text-[10px] text-muted-foreground">未提交行数（近似）</div>
+              <div className="text-base font-bold text-amber-600 dark:text-amber-400">
+                {formatLines(ranking.totalUncommittedLines)}
+              </div>
+            </div>
+          </div>
+
+          <p className="text-[10px] leading-relaxed text-muted-foreground">
+            未提交 = 生成行数 − 已测量（进 commit
+            的有效生成）行数，时间口径同上方事件筛选框；若所选范围包含当天，会自动排除最近 2
+            小时的在途生成（刚生成还没来得及提交）。称「近似」是因为它按行数聚合归人，而非逐条
+            genEventId
+            反查——少数生成的提交若落在所选时间窗口外会被误记为未提交。点击某用户进入二级详情即用
+            genEventId 精确反查，定位其「为什么没提交」。
+          </p>
+
+          <div className="overflow-hidden rounded-lg border border-border">
+            <div className="grid grid-cols-[1.8fr_1fr_1fr_0.9fr] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-[10px] font-medium text-muted-foreground">
+              <span>用户 / 部门</span>
+              <span className="text-right">生成行数</span>
+              <span className="text-right">未提交</span>
+              <span className="text-right">未提交率</span>
+            </div>
+            <div className="divide-y divide-border">
+              {ranking.items.map((item) => (
+                <button
+                  key={item.sapId}
+                  type="button"
+                  className="grid w-full grid-cols-[1.8fr_1fr_1fr_0.9fr] items-center gap-2 px-3 py-2 text-left text-[11px] transition-colors hover:bg-muted/40"
+                  onClick={() => openDetail(item)}
+                >
+                  <div className="min-w-0">
+                    <div className="truncate font-medium text-foreground">{item.userName}</div>
+                    <div className="truncate text-[10px] text-muted-foreground">
+                      {orgLabel(item)}
+                    </div>
+                  </div>
+                  <span className="text-right tabular-nums text-foreground">
+                    {formatLines(item.generatedLines)}
+                  </span>
+                  <span className="text-right font-semibold tabular-nums text-amber-600 dark:text-amber-400">
+                    {formatLines(item.uncommittedLines)}
+                  </span>
+                  <span className="text-right tabular-nums text-muted-foreground">
+                    {formatPercent(item.uncommittedRate)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </ScrollArea>
+  )
+}
+
+// ── 主弹窗：榜单（A）+ 点击进入二级详情（B）──────────────────────────
+export function UncommittedCodeDialog({
+  open,
+  onOpenChange,
+  range,
+  scope
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  range: { from: string; to: string }
+  scope?: UncommittedScope
+}): React.JSX.Element {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[80vh] max-w-[920px] flex-col gap-0 p-0">
         <DialogHeader className="border-b border-border px-5 py-3">
           <DialogTitle className="flex items-center gap-2 text-sm">
-            {selected ? (
-              <button
-                type="button"
-                className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
-                onClick={() => setSelected(null)}
-              >
-                <ChevronLeft className="size-4" />
-                返回榜单
-              </button>
-            ) : null}
             <span className="font-semibold text-foreground">
-              {selected ? `${selected.userName} · 未提交代码明细` : "生成但未提交分析"}
+              生成但未提交分析
               {scope?.usedSkillsOnly ? (
                 <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">
                   · 仅 Skill 生成
+                </span>
+              ) : null}
+              {scope?.label ? (
+                <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">
+                  · {scope.label}
                 </span>
               ) : null}
             </span>
@@ -536,96 +712,7 @@ export function UncommittedCodeDialog({
           </DialogTitle>
           <DialogDescription className="sr-only">生成但未提交代码分析</DialogDescription>
         </DialogHeader>
-
-        <ScrollArea className="flex-1 px-5 py-4">
-          {selected ? (
-            <DetailView
-              key={selected.sapId}
-              detail={detail}
-              loading={detailLoading}
-              error={detailError}
-              threadScope={scope?.projectMode ? "project" : "platform"}
-            />
-          ) : rankingLoading ? (
-            <div className="flex flex-1 items-center justify-center py-10 text-sm text-muted-foreground">
-              <Loader2 className="mr-2 size-4 animate-spin" />
-              正在聚合榜单…
-            </div>
-          ) : rankingError ? (
-            <div className="py-10 text-center text-sm text-destructive">{rankingError}</div>
-          ) : !ranking || ranking.items.length === 0 ? (
-            <div className="py-10 text-center text-sm text-muted-foreground">
-              暂无未提交生成数据
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <div className="grid grid-cols-3 gap-2">
-                <div className="rounded-lg border border-border bg-muted/30 p-2 text-center">
-                  <div className="text-[10px] text-muted-foreground">总生成行数</div>
-                  <div className="text-base font-bold text-foreground">
-                    {formatLines(ranking.totalGeneratedLines)}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-border bg-muted/30 p-2 text-center">
-                  <div className="text-[10px] text-muted-foreground">已测量（提交）行数</div>
-                  <div className="text-base font-bold text-foreground">
-                    {formatLines(ranking.totalMeasuredGeneratedLines)}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-border bg-muted/30 p-2 text-center">
-                  <div className="text-[10px] text-muted-foreground">未提交行数（近似）</div>
-                  <div className="text-base font-bold text-amber-600 dark:text-amber-400">
-                    {formatLines(ranking.totalUncommittedLines)}
-                  </div>
-                </div>
-              </div>
-
-              <p className="text-[10px] leading-relaxed text-muted-foreground">
-                未提交 = 生成行数 − 已测量（进 commit
-                的有效生成）行数，时间口径同上方事件筛选框；若所选范围包含当天，会自动排除最近 2
-                小时的在途生成（刚生成还没来得及提交）。称「近似」是因为它按行数聚合归人，而非逐条
-                genEventId
-                反查——少数生成的提交若落在所选时间窗口外会被误记为未提交。点击某用户进入二级详情即用
-                genEventId 精确反查，定位其「为什么没提交」。
-              </p>
-
-              <div className="overflow-hidden rounded-lg border border-border">
-                <div className="grid grid-cols-[1.8fr_1fr_1fr_0.9fr] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-[10px] font-medium text-muted-foreground">
-                  <span>用户 / 部门</span>
-                  <span className="text-right">生成行数</span>
-                  <span className="text-right">未提交</span>
-                  <span className="text-right">未提交率</span>
-                </div>
-                <div className="divide-y divide-border">
-                  {ranking.items.map((item) => (
-                    <button
-                      key={item.sapId}
-                      type="button"
-                      className="grid w-full grid-cols-[1.8fr_1fr_1fr_0.9fr] items-center gap-2 px-3 py-2 text-left text-[11px] transition-colors hover:bg-muted/40"
-                      onClick={() => openDetail(item)}
-                    >
-                      <div className="min-w-0">
-                        <div className="truncate font-medium text-foreground">{item.userName}</div>
-                        <div className="truncate text-[10px] text-muted-foreground">
-                          {orgLabel(item)}
-                        </div>
-                      </div>
-                      <span className="text-right tabular-nums text-foreground">
-                        {formatLines(item.generatedLines)}
-                      </span>
-                      <span className="text-right font-semibold tabular-nums text-amber-600 dark:text-amber-400">
-                        {formatLines(item.uncommittedLines)}
-                      </span>
-                      <span className="text-right tabular-nums text-muted-foreground">
-                        {formatPercent(item.uncommittedRate)}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-        </ScrollArea>
+        <UncommittedCodeAnalysisPanel active={open} range={range} scope={scope} />
       </DialogContent>
     </Dialog>
   )

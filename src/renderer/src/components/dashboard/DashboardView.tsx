@@ -2473,6 +2473,7 @@ export function DashboardView(): React.JSX.Element {
   const [uncommittedProjectMode, setUncommittedProjectMode] = useState(false)
   // 仅 Skill 生成口径（对应「插件约束生成」漏斗下钻）。
   const [uncommittedUsedSkillsOnly, setUncommittedUsedSkillsOnly] = useState(false)
+  const [uncommittedDialogKey, setUncommittedDialogKey] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -4365,6 +4366,7 @@ export function DashboardView(): React.JSX.Element {
                     ? () => {
                         setUncommittedProjectMode(true)
                         setUncommittedUsedSkillsOnly(false)
+                        setUncommittedDialogKey((key) => key + 1)
                         setUncommittedOpen(true)
                       }
                     : undefined
@@ -4374,6 +4376,7 @@ export function DashboardView(): React.JSX.Element {
                     ? () => {
                         setUncommittedProjectMode(true)
                         setUncommittedUsedSkillsOnly(true)
+                        setUncommittedDialogKey((key) => key + 1)
                         setUncommittedOpen(true)
                       }
                     : undefined
@@ -4413,6 +4416,7 @@ export function DashboardView(): React.JSX.Element {
                       ? () => {
                           setUncommittedProjectMode(false)
                           setUncommittedUsedSkillsOnly(false)
+                          setUncommittedDialogKey((key) => key + 1)
                           setUncommittedOpen(true)
                         }
                       : undefined
@@ -4583,6 +4587,7 @@ export function DashboardView(): React.JSX.Element {
         </DialogContent>
       </Dialog>
       <UncommittedCodeDialog
+        key={uncommittedDialogKey}
         open={uncommittedOpen}
         onOpenChange={setUncommittedOpen}
         range={range}
@@ -4630,6 +4635,20 @@ export function DashboardView(): React.JSX.Element {
         onClearDepartment={handleFeatureCommitDepartmentClear}
         onClearUser={handleFeatureCommitUserClear}
         onOpenExternal={handleCommitExternalOpen}
+        uncommittedAnalysis={
+          featureCommitScope && uncommittedAnalysisAllowed
+            ? {
+                range,
+                scope: {
+                  upperOrgLv1: selectedOrgLv1List,
+                  projectMode: true,
+                  projectId: featureCommitScope.projectId,
+                  featureSlug: featureCommitScope.featureSlug || undefined,
+                  label: featureCommitScope.label
+                }
+              }
+            : undefined
+        }
       />
       <DashboardAnalysisDrawer
         open={analysisAgentAllowed && analysisOpen}
