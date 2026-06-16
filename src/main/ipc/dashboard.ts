@@ -253,6 +253,8 @@ interface CommitAdoptionEventPair {
   generatedAt: string | null // gen.createdAt
   // adopt 侧（code_adopt）
   verdict: string | null
+  /** 仅 verdict=superseded 时有值：作废原因（same_path_rewrite | agent_rm），供溯源展示。 */
+  reason: string | null
   generatedLineCount: number | null
   effectiveGeneratedLineCount: number | null
   adoptedLineCount: number | null
@@ -1816,6 +1818,7 @@ async function fetchCommitAdoptionEvents(commitSha: string): Promise<CommitAdopt
       includes: [
         "properties.genEventId",
         "properties.verdict",
+        "properties.reason",
         "properties.generatedLineCount",
         "properties.effectiveGeneratedLineCount",
         "properties.adoptedLineCount",
@@ -1907,6 +1910,7 @@ async function fetchCommitAdoptionEvents(commitSha: string): Promise<CommitAdopt
       modelName: gen ? (asOptionalString(gen.modelName) ?? null) : null,
       generatedAt: gen ? (asOptionalString(gen.createdAt) ?? null) : null,
       verdict: asOptionalString(adopt.verdict) ?? null,
+      reason: asOptionalString(adopt.reason) ?? null,
       generatedLineCount,
       effectiveGeneratedLineCount,
       adoptedLineCount,
@@ -7548,6 +7552,7 @@ function makeMockCommitAdoptionEvents(commitSha: string): CommitAdoptionEvents {
       modelName: "claude-opus-4-8",
       generatedAt: iso(9 * 60 * 1000),
       verdict: "committed",
+      reason: null,
       generatedLineCount: 120,
       effectiveGeneratedLineCount: 110,
       adoptedLineCount: 88,
@@ -7565,6 +7570,7 @@ function makeMockCommitAdoptionEvents(commitSha: string): CommitAdoptionEvents {
       modelName: "claude-opus-4-8",
       generatedAt: iso(8 * 60 * 1000),
       verdict: "deleted",
+      reason: null,
       generatedLineCount: 40,
       effectiveGeneratedLineCount: 40,
       adoptedLineCount: 0,
@@ -7582,6 +7588,7 @@ function makeMockCommitAdoptionEvents(commitSha: string): CommitAdoptionEvents {
       modelName: "claude-opus-4-8",
       generatedAt: iso(7 * 60 * 1000),
       verdict: "skipped_large",
+      reason: null,
       generatedLineCount: 24000,
       effectiveGeneratedLineCount: null,
       adoptedLineCount: null,
@@ -7599,12 +7606,31 @@ function makeMockCommitAdoptionEvents(commitSha: string): CommitAdoptionEvents {
       modelName: null,
       generatedAt: null,
       verdict: "committed",
+      reason: null,
       generatedLineCount: 30,
       effectiveGeneratedLineCount: 30,
       adoptedLineCount: 21,
       measureSource: "git_commit",
       pushed: true,
       measuredAt: iso(5 * 60 * 1000),
+      threadId: "mock-thread-2"
+    },
+    {
+      genEventId: "g_mock_agent_rm",
+      file: "AgentOperationList.tsx",
+      tool: "write_file",
+      language: "tsx",
+      usedSkills: [],
+      modelName: "claude-opus-4-8",
+      generatedAt: iso(10 * 60 * 1000),
+      verdict: "superseded",
+      reason: "agent_rm",
+      generatedLineCount: 64,
+      effectiveGeneratedLineCount: 0,
+      adoptedLineCount: 0,
+      measureSource: "agent_file_op",
+      pushed: false,
+      measuredAt: iso(9 * 60 * 1000),
       threadId: "mock-thread-2"
     }
   ]

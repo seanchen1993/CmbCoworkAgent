@@ -223,6 +223,7 @@ interface DashboardCommitAdoptionPair {
   modelName: string | null
   generatedAt: string | null
   verdict: string | null
+  reason: string | null
   generatedLineCount: number | null
   effectiveGeneratedLineCount: number | null
   adoptedLineCount: number | null

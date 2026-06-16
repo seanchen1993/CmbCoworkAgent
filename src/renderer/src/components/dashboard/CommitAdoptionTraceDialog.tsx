@@ -41,7 +41,19 @@ const VERDICT_META: Record<string, { label: string; cls: string; hint: string }>
   }
 }
 
-function verdictMeta(verdict: string | null): { label: string; cls: string; hint: string } {
+function verdictMeta(
+  verdict: string | null,
+  reason?: string | null
+): { label: string; cls: string; hint: string } {
+  // superseded 现有两种作废原因，按 reason 细分展示（兼容旧数据：reason 为空时回退到
+  // 「同路径重写」文案）。
+  if (verdict === "superseded" && reason === "agent_rm") {
+    return {
+      label: "agent 删除",
+      cls: "bg-muted text-muted-foreground",
+      hint: "生成后该文件被 agent 删除（rm / git rm），原稿作废、不计入有效/采纳；与人工删除（计未采纳）相区别"
+    }
+  }
   if (verdict && VERDICT_META[verdict]) return VERDICT_META[verdict]
   return {
     label: verdict || "未知",
@@ -115,8 +127,14 @@ function SkillChips({ skills }: { skills: string[] }): React.JSX.Element {
   )
 }
 
-function VerdictBadge({ verdict }: { verdict: string | null }): React.JSX.Element {
-  const meta = verdictMeta(verdict)
+function VerdictBadge({
+  verdict,
+  reason
+}: {
+  verdict: string | null
+  reason?: string | null
+}): React.JSX.Element {
+  const meta = verdictMeta(verdict, reason)
   return (
     <TooltipProvider delayDuration={150}>
       <Tooltip>
@@ -209,6 +227,7 @@ function TracePairRow({
 }): React.JSX.Element {
   const rate = pairRate(pair)
   const isSuperseded = pair.verdict === "superseded"
+  const supersededByAgentRm = isSuperseded && pair.reason === "agent_rm"
   // Superseded drafts are *expected* 0-adopt (their file was rewritten), so don't
   // flag them with the rose "generated-but-not-adopted" treatment.
   const zeroAdopted =
@@ -317,7 +336,7 @@ function TracePairRow({
           </div>
         </td>
         <td className="whitespace-nowrap px-3 py-2">
-          <VerdictBadge verdict={pair.verdict} />
+          <VerdictBadge verdict={pair.verdict} reason={pair.reason} />
         </td>
         <td className="whitespace-nowrap px-3 py-2 text-[11px] text-muted-foreground">
           <div>{pair.measureSource ?? "—"}</div>
@@ -353,7 +372,9 @@ function TracePairRow({
           <td colSpan={TRACE_COLSPAN} className="px-3 pb-3">
             {isSuperseded ? (
               <div className="px-2 py-3 text-xs text-muted-foreground">
-                该生成已被后续整文件重写覆盖，原稿作废，逐行从略。
+                {supersededByAgentRm
+                  ? "该生成所在文件已被 agent 删除（rm），原稿作废，逐行从略。"
+                  : "该生成已被后续整文件重写覆盖，原稿作废，逐行从略。"}
                 <div className="mt-1 text-[10px] text-muted-foreground/80">
                   其有效/采纳均计 0，不影响该 commit 的采纳率分母。
                 </div>

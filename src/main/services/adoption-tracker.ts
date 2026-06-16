@@ -28,14 +28,15 @@
  */
 
 import { appendFile, readdir, readFile, stat, unlink, rename } from "fs/promises"
-import { existsSync, mkdirSync } from "fs"
-import { dirname, extname, join, relative, resolve as resolvePath } from "path"
+import { existsSync, mkdirSync, statSync } from "fs"
+import { basename, dirname, extname, join, relative, resolve as resolvePath, sep } from "path"
 import { randomUUID } from "crypto"
 import { execFileSync } from "child_process"
 import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
 import { getOpenworkDir } from "../storage"
 import { ensureVersionedSkillIdentifier } from "../utils/skill-identifiers"
+import { extractShellFileOps } from "../agent/exec-policy"
 import { trackEvent } from "./event-reporter"
 import {
   closeAdoptionIndex,
@@ -44,7 +45,9 @@ import {
   getGenRowByEventId,
   initializeAdoptionIndex,
   insertGenEvent,
+  listPendingGenPaths,
   markMeasured,
+  updateGenFilePath,
   deleteOlderThan,
   deleteMeasuredOlderThan,
   trimToRowCap,
@@ -942,19 +945,34 @@ function resolveMaxGenCreatedAt(commitTimeMs?: number): number | undefined {
   return commitTimeMs + COMMIT_ATTRIBUTION_TOLERANCE_MS
 }
 
+/** Why a pending generation was voided (effective/adopted = 0). Carried on the
+ *  `superseded` code_adopt purely so the 溯源 view can explain the 0. */
+export type SupersedeReason =
+  | "same_path_rewrite" // a newer write_file recreated the file at the same path
+  | "agent_rm" // the agent deleted the file (rm / git rm) before it was committed
+
 /**
- * Emit a terminal `superseded` code_adopt for an older generation whose file was
- * later recreated from scratch by a newer write_file. A successful write_file
- * only happens on a non-existent path, so its existence proves the earlier draft
- * was deleted and rewritten — none of its lines could have survived. We report
- * effective/adopted = 0 (so the discarded draft stops inflating the adoption-rate
- * denominator) but still emit an adopt event, so the gen is not later miscounted
- * as "generated but never committed" by the uncommitted-analysis anti-join.
+ * Emit a terminal `superseded` code_adopt that voids an older generation:
+ * effective/adopted = 0, so the discarded draft stops inflating the
+ * adoption-rate denominator, while still emitting an adopt event so the gen is
+ * not later miscounted as "generated but never committed" by the
+ * uncommitted-analysis anti-join.
+ *
+ * Two triggers share this primitive (`reason` distinguishes them for display):
+ *   - `same_path_rewrite`: a newer write_file recreated the file from scratch
+ *     (write_file only succeeds on a non-existent path), so none of the older
+ *     draft's lines survived. Inferred at commit time. `measureSource =
+ *     git_commit`, carries the commit's sha.
+ *   - `agent_rm`: the agent deleted the file before it was ever committed.
+ *     Driven in real time by shell-op monitoring. `measureSource =
+ *     agent_file_op`, no commit (commitSha = null).
  */
 async function emitSupersededAdopt(
   pending: GenIndexRow,
   generatedLineCount: number,
-  commitSha: string | null
+  commitSha: string | null,
+  reason: SupersedeReason,
+  measureSource: "git_commit" | "agent_file_op" = "git_commit"
 ): Promise<void> {
   const adoptEventId = `a_${randomUUID()}`
   const measuredAt = Date.now()
@@ -963,10 +981,11 @@ async function emitSupersededAdopt(
     eventId: adoptEventId,
     genEventId: pending.event_id,
     verdict: "superseded",
+    reason,
     generatedLineCount,
     effectiveGeneratedLineCount: 0,
     adoptedLineCount: 0,
-    measureSource: "git_commit",
+    measureSource,
     measuredAt,
     commitSha
   })
@@ -987,10 +1006,11 @@ async function emitSupersededAdopt(
     threadId: pending.thread_id ?? null,
     traceId: pending.trace_id ?? null,
     verdict: "superseded",
+    reason,
     generatedLineCount,
     effectiveGeneratedLineCount: 0,
     adoptedLineCount: 0,
-    measureSource: "git_commit",
+    measureSource,
     measureLatencyMs: measuredAt - pending.created_at,
     generatedAt: new Date(pending.created_at).toISOString(),
     measuredAt: new Date(measuredAt).toISOString(),
@@ -1005,7 +1025,7 @@ async function emitSupersededAdopt(
   })
 
   console.log(
-    `[AdoptionTracker] measure verdict=superseded genEventId=${pending.event_id} generatedLines=${generatedLineCount} (file recreated by newer write_file) commitSha=${commitSha ?? "none"}`
+    `[AdoptionTracker] measure verdict=superseded reason=${reason} genEventId=${pending.event_id} generatedLines=${generatedLineCount} commitSha=${commitSha ?? "none"}`
   )
 }
 
@@ -1083,7 +1103,12 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
       // not later miscounted as "generated but never committed".
       if (sawFullRewrite) {
         if (storedHashes && storedHashes.length > 0) {
-          await emitSupersededAdopt(pending, storedHashes.length, opts?.commitSha ?? null)
+          await emitSupersededAdopt(
+            pending,
+            storedHashes.length,
+            opts?.commitSha ?? null,
+            "same_path_rewrite"
+          )
         }
         markMeasured(pending.event_id)
         continue
@@ -1442,6 +1467,156 @@ export function hasPendingGenerationsForCommit(
     if (findPendingGensForFile(snap.absPath, minCreated, maxCreated).length > 0) return true
   }
   return false
+}
+
+// ─────────────────────────────────────────────────────────
+// Agent shell file ops (rm / mv) — keep pending generations honest when the
+// agent deletes or relocates a generated file BEFORE it is committed.
+//
+// Attribution is keyed by absolute file path, so a path change between gen time
+// and commit time orphans the pending generation: it never gets a code_adopt
+// and is later miscounted as "generated but never committed" (phantom 0%
+// adoption), even though the code lives on. write_file refuses to overwrite, so
+// an agent "rewrite/move" ALWAYS deletes the old path first via an explicit
+// shell command — which we observe here:
+//
+//   • rm / git rm  → the generated code was discarded at that path. Void the
+//     pending gen (superseded / agent_rm, effective=0), mirroring the same-path
+//     write→delete→write supersession but driven by an explicit delete.
+//   • mv / git mv  → the generated code moved. Transfer the pending gen's
+//     file_path so commit-time attribution finds it at its new home.
+//
+// Only AGENT commands flow through LocalSandbox.execute → here; a human deleting
+// or moving a file in their own editor is intentionally NOT intercepted (that is
+// a genuine rejection/relocation and must keep its real outcome). Side-effect
+// only; never throws; acts only on exit code 0.
+// ─────────────────────────────────────────────────────────
+
+function pathHasGlobMeta(p: string): boolean {
+  return /[*?[\]{}]/.test(p)
+}
+
+/** True when `candidate` equals `base` or is nested under it. Both absolute,
+ *  both produced by `resolvePath` so separators already agree per-platform.
+ *  Exported for unit testing. */
+export function isPathAtOrUnder(candidate: string, base: string): boolean {
+  if (candidate === base) return true
+  return candidate.startsWith(base.endsWith(sep) ? base : base + sep)
+}
+
+/**
+ * Called by LocalSandbox after a shell command finishes. Reacts to agent rm/mv
+ * so generations relocated/deleted before commit are not orphaned. Returns
+ * immediately; work happens in a background microtask. Never throws.
+ */
+export function recordShellFileOps(command: string, cwd: string, exitCode: number | null): void {
+  if (!initialized) return
+  if (exitCode !== 0 || !command) return
+  queueMicrotask(() => {
+    doRecordShellFileOps(command, cwd).catch((e) => {
+      console.warn("[AdoptionTracker] recordShellFileOps unexpected error:", e)
+    })
+  })
+}
+
+async function doRecordShellFileOps(command: string, cwd: string): Promise<void> {
+  try {
+    const ops = extractShellFileOps(command)
+    if (ops.length === 0) return
+    const baseDir = cwd ? resolvePath(cwd) : process.cwd()
+    for (const op of ops) {
+      if (op.op === "rm") {
+        for (const raw of op.paths) {
+          if (!raw || pathHasGlobMeta(raw)) continue
+          const target = resolvePath(baseDir, raw)
+          // Only void when the path is actually gone. Guards `git rm --cached`
+          // (un-tracks but keeps the file), `rm`/`git rm`/`git mv` dry-runs
+          // (`-n`), and any flag we don't model — if it still exists it was not
+          // deleted, so the generation must not be voided.
+          if (existsSync(target)) continue
+          await voidPendingGensUnderPath(target)
+        }
+      } else if (op.op === "mv" && op.dest && !pathHasGlobMeta(op.dest)) {
+        const destAbs = resolvePath(baseDir, op.dest)
+        for (const raw of op.paths) {
+          if (!raw || pathHasGlobMeta(raw)) continue
+          const srcAbs = resolvePath(baseDir, raw)
+          // Only transfer when the move actually happened: source gone AND
+          // destination present. Guards `mv -n` no-clobber skips and `git mv -n`
+          // dry-runs (source untouched), and mangled/unresolved paths.
+          if (existsSync(srcAbs) || !existsSync(destAbs)) continue
+          transferPendingGensUnderPath(srcAbs, resolveMvFinalBase(srcAbs, destAbs))
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[AdoptionTracker] doRecordShellFileOps failed:", e)
+  }
+}
+
+/**
+ * Resolve the base path an `mv SRC DEST` actually lands SRC at, disambiguating
+ * "rename SRC → DEST" from "move SRC into directory DEST". Runs post-`mv`, so
+ * DEST exists; if DEST is a directory AND DEST/basename(SRC) now exists, SRC was
+ * moved inside it; otherwise SRC was renamed to DEST. Best-effort.
+ * Exported for unit testing.
+ */
+export function resolveMvFinalBase(srcAbs: string, destAbs: string): string {
+  try {
+    if (existsSync(destAbs) && statSync(destAbs).isDirectory()) {
+      const inside = join(destAbs, basename(srcAbs))
+      if (existsSync(inside)) return inside
+    }
+  } catch {
+    // fall through to rename semantics
+  }
+  return destAbs
+}
+
+/** Void every pending gen at or under `prefixAbs` (an agent-deleted file/dir). */
+async function voidPendingGensUnderPath(prefixAbs: string): Promise<void> {
+  const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
+  let pending: { event_id: string; file_path: string }[]
+  try {
+    pending = listPendingGenPaths(minCreated)
+  } catch {
+    return
+  }
+  for (const { event_id, file_path } of pending) {
+    if (!isPathAtOrUnder(file_path, prefixAbs)) continue
+    const row = getGenRowByEventId(event_id)
+    if (!row || row.measured) continue
+    const storedHashes = row.line_hashes ? unpackLineHashes(row.line_hashes) : null
+    const generatedLineCount = storedHashes ? storedHashes.length : 0
+    if (generatedLineCount > 0) {
+      await emitSupersededAdopt(row, generatedLineCount, null, "agent_rm", "agent_file_op")
+    }
+    markMeasured(event_id)
+    console.log(
+      `[AdoptionTracker] agent rm voided pending gen: eventId=${event_id} file=${file_path} generatedLines=${generatedLineCount}`
+    )
+  }
+}
+
+/** Transfer pending gens at or under `srcAbs` to `finalBase` (an agent mv). */
+function transferPendingGensUnderPath(srcAbs: string, finalBase: string): void {
+  if (srcAbs === finalBase) return
+  const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
+  let pending: { event_id: string; file_path: string }[]
+  try {
+    pending = listPendingGenPaths(minCreated)
+  } catch {
+    return
+  }
+  for (const { event_id, file_path } of pending) {
+    if (!isPathAtOrUnder(file_path, srcAbs)) continue
+    // Suffix is "" for an exact-file move, "/sub/x.ts" for a dir move.
+    const newPath = finalBase + file_path.slice(srcAbs.length)
+    updateGenFilePath(event_id, newPath)
+    console.log(
+      `[AdoptionTracker] agent mv transferred pending gen: eventId=${event_id} ${file_path} -> ${newPath}`
+    )
+  }
 }
 
 // ─────────────────────────────────────────────────────────

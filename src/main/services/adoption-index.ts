@@ -300,6 +300,46 @@ export function getGenRowByEventId(eventId: string): GenIndexRow | null {
   }
 }
 
+/**
+ * Lightweight listing of all *pending* (unmeasured) generations within the
+ * window: just `event_id` + `file_path`, no BLOBs. Used by the agent shell-op
+ * handler (rm/mv) to find pending gens at/under a deleted-or-moved path without
+ * loading every line-hash blob.
+ */
+export function listPendingGenPaths(
+  minCreatedAt: number
+): { event_id: string; file_path: string }[] {
+  if (!db) return []
+  const stmt = db.prepare(
+    `SELECT event_id, file_path FROM gen_events WHERE measured = 0 AND created_at >= ?`
+  )
+  stmt.bind([minCreatedAt])
+  try {
+    const rows: { event_id: string; file_path: string }[] = []
+    while (stmt.step()) {
+      rows.push(stmt.getAsObject() as unknown as { event_id: string; file_path: string })
+    }
+    return rows
+  } finally {
+    stmt.free()
+  }
+}
+
+/**
+ * Rewrite a gen row's `file_path`. Used when an agent `mv` relocates a pending
+ * generation before it is committed, so commit-time attribution (keyed by path)
+ * finds it at its new home and still credits adoption.
+ */
+export function updateGenFilePath(eventId: string, newFilePath: string): void {
+  if (!db) return
+  try {
+    db.run(`UPDATE gen_events SET file_path = ? WHERE event_id = ?`, [newFilePath, eventId])
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] updateGenFilePath failed:", e)
+  }
+}
+
 export function markMeasured(eventId: string): void {
   if (!db) return
   try {

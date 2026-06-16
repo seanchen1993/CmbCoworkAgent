@@ -194,6 +194,8 @@ export interface DashboardCommitAdoptionPair {
   modelName: string | null
   generatedAt: string | null
   verdict: string | null
+  /** 仅 verdict=superseded：作废原因 same_path_rewrite | agent_rm，供溯源展示。 */
+  reason: string | null
   generatedLineCount: number | null
   effectiveGeneratedLineCount: number | null
   adoptedLineCount: number | null
