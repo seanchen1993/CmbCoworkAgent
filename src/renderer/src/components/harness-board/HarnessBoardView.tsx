@@ -3554,8 +3554,8 @@ function ProjectDetailPage({
             </div>
           )}
           <section className="rounded-md border border-border bg-background">
-            <div className="grid grid-cols-[minmax(260px,0.36fr)_minmax(0,1fr)] gap-0">
-              <aside className="border-r border-border p-4">
+            <div className="grid min-w-0 grid-cols-[minmax(260px,0.36fr)_minmax(0,1fr)] gap-0">
+              <aside className="min-w-0 border-r border-border p-4">
                 <div className="text-sm font-semibold">项目基础信息</div>
                 <dl className="mt-4 grid gap-3 text-sm">
                   <div>
@@ -3582,8 +3582,11 @@ function ProjectDetailPage({
                   </div>
                   <div>
                     <dt className="text-xs text-muted-foreground">项目文件夹</dt>
-                    <dd className="mt-1 flex min-w-0 items-center gap-1.5">
-                      <span className="min-w-0 flex-1 truncate font-medium" title={projectRootPath}>
+                    <dd className="mt-1 flex min-w-0 items-start gap-1.5">
+                      <span
+                        className="min-w-0 flex-1 whitespace-normal break-words font-medium [overflow-wrap:anywhere]"
+                        title={projectRootPath}
+                      >
                         {getWorkspaceName(projectRootPath)}
                       </span>
                       <Button
