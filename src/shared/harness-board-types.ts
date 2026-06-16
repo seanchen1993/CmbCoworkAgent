@@ -117,6 +117,7 @@ export interface HarnessProjectCreateInput {
 
 export interface HarnessEnterpriseProjectSearchInput {
   keyword: string
+  field?: "name" | "code"
 }
 
 export interface HarnessEnterpriseProjectSearchItem {

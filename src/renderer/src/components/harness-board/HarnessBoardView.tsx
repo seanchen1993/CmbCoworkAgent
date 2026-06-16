@@ -1397,14 +1397,20 @@ function AdapterSelectGroups({ registry }: { registry: HarnessAdapterRegistryIte
   )
 }
 
-function EnterpriseProjectNameInput({
+function EnterpriseProjectSearchInput({
   value,
+  searchField,
+  searchLabel,
+  normalizeValue,
   onValueChange,
   onSelect,
   ariaInvalid,
   portalContainer
 }: {
   value: string
+  searchField: "name" | "code"
+  searchLabel: string
+  normalizeValue?: (value: string) => string
   onValueChange: (value: string) => void
   onSelect: (project: HarnessEnterpriseProjectSearchItem) => void
   ariaInvalid?: boolean
@@ -1451,7 +1457,7 @@ function EnterpriseProjectNameInput({
     setLoading(true)
     const timer = window.setTimeout(() => {
       window.api.harnessBoard
-        .searchEnterpriseProjects({ keyword })
+        .searchEnterpriseProjects({ keyword, field: searchField })
         .then((result) => {
           if (canceled || requestIdRef.current !== nextRequestId) return
           setProjects(result.projects)
@@ -1474,7 +1480,7 @@ function EnterpriseProjectNameInput({
       canceled = true
       window.clearTimeout(timer)
     }
-  }, [keyword])
+  }, [keyword, searchField])
 
   const handleSelect = (project: HarnessEnterpriseProjectSearchItem): void => {
     clearSearchState()
@@ -1496,7 +1502,7 @@ function EnterpriseProjectNameInput({
         <Input
           value={value}
           onChange={(event) => {
-            const nextValue = event.target.value
+            const nextValue = normalizeValue ? normalizeValue(event.target.value) : event.target.value
             setSearchKeyword(nextValue)
             onValueChange(nextValue)
             setOpen(true)
@@ -1504,7 +1510,7 @@ function EnterpriseProjectNameInput({
           onFocus={() => {
             if (searchKeyword.trim()) setOpen(true)
           }}
-          placeholder="输入项目名称搜索"
+          placeholder={`输入${searchLabel}搜索`}
           className={harnessProjectCreateInputClassName}
           aria-autocomplete="list"
           aria-invalid={ariaInvalid ? true : undefined}
@@ -1520,7 +1526,9 @@ function EnterpriseProjectNameInput({
         >
           <div className="max-h-72 overflow-hidden py-1 text-sm">
             {keyword.length < ENTERPRISE_PROJECT_SEARCH_MIN_CHARS ? (
-              <div className="px-3 py-2 text-xs text-muted-foreground">继续输入项目名称以搜索</div>
+              <div className="px-3 py-2 text-xs text-muted-foreground">
+                继续输入{searchLabel}以搜索
+              </div>
             ) : loading ? (
               <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
                 <Loader2 className="size-3.5 animate-spin" />
@@ -1646,9 +1654,41 @@ function ProjectFormDialog({
             <div className="mb-3 text-sm font-semibold">项目信息</div>
             <div className="grid grid-cols-2 items-start gap-3">
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                项目编号 *
+                <EnterpriseProjectSearchInput
+                  value={form.projectCode}
+                  searchField="code"
+                  searchLabel="项目编号"
+                  normalizeValue={sanitizeHarnessNameInput}
+                  onValueChange={(projectCode) => onChange({ ...form, projectCode })}
+                  onSelect={(project) => {
+                    const shouldSyncProjectDir =
+                      !form.projectDir ||
+                      form.projectDir === sanitizeProjectDirFromProjectName(form.name)
+                    onChange({
+                      ...form,
+                      name: project.projectName,
+                      projectCode: project.projectCode,
+                      systemId: project.systemId || form.systemId,
+                      systemName: project.systemName || form.systemName,
+                      projectDir: shouldSyncProjectDir
+                        ? sanitizeProjectDirFromProjectName(project.projectName)
+                        : form.projectDir
+                    })
+                  }}
+                  portalContainer={dialogPortalContainer}
+                  ariaInvalid={projectCodeValidationError ? true : undefined}
+                />
+                {projectCodeValidationError && (
+                  <span className="text-status-critical">{projectCodeValidationError}</span>
+                )}
+              </label>
+              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目名称 *
-                <EnterpriseProjectNameInput
+                <EnterpriseProjectSearchInput
                   value={form.name}
+                  searchField="name"
+                  searchLabel="项目名称"
                   onValueChange={(name) => {
                     const shouldSyncProjectDir =
                       !form.projectDir ||
@@ -1681,21 +1721,6 @@ function ProjectFormDialog({
                 />
                 {projectNameLengthError && (
                   <span className="text-status-critical">{projectNameLengthError}</span>
-                )}
-              </label>
-              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                项目编号 *
-                <Input
-                  value={form.projectCode}
-                  onChange={(event) =>
-                    onChange({ ...form, projectCode: sanitizeHarnessNameInput(event.target.value) })
-                  }
-                  placeholder="请输入"
-                  className={harnessProjectCreateInputClassName}
-                  aria-invalid={projectCodeValidationError ? true : undefined}
-                />
-                {projectCodeValidationError && (
-                  <span className="text-status-critical">{projectCodeValidationError}</span>
                 )}
               </label>
               <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
@@ -1938,9 +1963,35 @@ function ProjectEditDialog({
             <div className="mb-3 text-sm font-semibold">项目信息</div>
             <div className="grid grid-cols-2 items-start gap-3">
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                项目编号 *
+                <EnterpriseProjectSearchInput
+                  value={form.projectCode}
+                  searchField="code"
+                  searchLabel="项目编号"
+                  normalizeValue={sanitizeHarnessNameInput}
+                  onValueChange={(projectCode) => onChange({ ...form, projectCode })}
+                  onSelect={(project) =>
+                    onChange({
+                      ...form,
+                      name: project.projectName,
+                      projectCode: project.projectCode,
+                      systemId: project.systemId || form.systemId,
+                      systemName: project.systemName || form.systemName
+                    })
+                  }
+                  portalContainer={dialogPortalContainer}
+                  ariaInvalid={projectCodeValidationError ? true : undefined}
+                />
+                {projectCodeValidationError && (
+                  <span className="text-status-critical">{projectCodeValidationError}</span>
+                )}
+              </label>
+              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目名称 *
-                <EnterpriseProjectNameInput
+                <EnterpriseProjectSearchInput
                   value={form.name}
+                  searchField="name"
+                  searchLabel="项目名称"
                   onValueChange={(name) => onChange({ ...form, name })}
                   onSelect={(project) =>
                     onChange({
@@ -1958,22 +2009,6 @@ function ProjectEditDialog({
                   <span className="text-status-critical">{projectNameLengthError}</span>
                 )}
               </label>
-              <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                <label htmlFor="harness-edit-project-code">项目编号 *</label>
-                <Input
-                  id="harness-edit-project-code"
-                  value={form.projectCode}
-                  onChange={(event) =>
-                    onChange({ ...form, projectCode: sanitizeHarnessNameInput(event.target.value) })
-                  }
-                  placeholder="请输入"
-                  className={harnessProjectCreateInputClassName}
-                  aria-invalid={projectCodeValidationError ? true : undefined}
-                />
-                {projectCodeValidationError && (
-                  <span className="text-status-critical">{projectCodeValidationError}</span>
-                )}
-              </div>
               <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目描述 *
                 <Input

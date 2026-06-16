@@ -216,6 +216,7 @@ export async function searchEnterpriseProjects(
   input: HarnessEnterpriseProjectSearchInput
 ): Promise<HarnessEnterpriseProjectSearchResult> {
   const keyword = normalizeText(input.keyword)
+  const keywordField = input.field === "code" ? "prjCode" : "prjName"
   if (!keyword) {
     return { projects: [], total: 0, hasMore: false }
   }
@@ -243,7 +244,7 @@ export async function searchEnterpriseProjects(
       },
       body: JSON.stringify({
         createDate: getThreeMonthsAgoDate(),
-        prjName: keyword,
+        [keywordField]: keyword,
         ...(roomName ? { roomName } : {}),
         pageNum: 1,
         pageSize: ENTERPRISE_PROJECT_SEARCH_PAGE_SIZE
