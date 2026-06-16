@@ -20,6 +20,7 @@ import {
 } from "../harness-board/enterprise-projects"
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
 import { purgeProjectAnalytics } from "../services/project-analytics-purge"
+import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import type {
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailResult,
@@ -55,7 +56,11 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:createProject",
     async (_event, input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> => {
-      return createHarnessProject(input)
+      const created = createHarnessProject(input)
+      // 立即补一次快照上报，避免新建项目要等下一轮 20 分钟定时扫描才出现在运营面板。
+      // 尽力而为：内部已 try/catch，不抛错、不阻断创建结果返回。
+      void reportProjectSnapshotNow(created.projectId)
+      return created
     }
   )
 
@@ -82,7 +87,10 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:createFeature",
     async (_event, input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> => {
-      return createHarnessFeature(input)
+      const result = createHarnessFeature(input)
+      // 新建 feature 后立即补一次该项目的快照上报，让面板尽快反映新特性，无需等定时扫描。
+      void reportProjectSnapshotNow(result.projectId)
+      return result
     }
   )
 
