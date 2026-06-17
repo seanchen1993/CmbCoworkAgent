@@ -125,7 +125,7 @@ export interface Subagent {
   id: string
   name: string
   description: string
-  status: "pending" | "running" | "completed" | "failed"
+  status: "pending" | "running" | "completed" | "failed" | "cancelled"
   startedAt?: Date
   completedAt?: Date
   toolCallId?: string
@@ -134,6 +134,8 @@ export interface Subagent {
   currentTool?: string
   /** ISO timestamp of the subagent's most recent interior activity (heartbeat). */
   lastActivityAt?: string
+  /** Registration order (0-based). Used to match LangGraph checkpoint_ns index (e.g. "tools:0"). */
+  spawnIndex?: number
 }
 
 // Stream events from agent

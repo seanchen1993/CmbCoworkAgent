@@ -219,6 +219,14 @@ export interface WorkerFocusView {
   status?: "running" | "completed" | "failed" | "cancelled"
 }
 
+export interface SubagentFocusView {
+  threadId: string
+  subagentId: string
+  name: string
+  description: string
+  status?: "pending" | "running" | "completed" | "failed" | "cancelled"
+}
+
 interface AppState {
   // Main content view routing
   mainView: MainView
@@ -249,6 +257,11 @@ interface AppState {
   closeWorkerFocusView: () => void
   appendWorkerFocusMessage: (workerThreadId: string, message: Message) => void
   appendWorkerFocusMessages: (workerThreadId: string, messages: Message[]) => void
+
+  // Split view for inspecting a short-lived task subagent transcript.
+  subagentFocusView: SubagentFocusView | null
+  openSubagentFocusView: (view: SubagentFocusView) => void
+  closeSubagentFocusView: () => void
 
   // Kanban view state
   showKanbanView: boolean
@@ -398,6 +411,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   workerFocusView: null,
   workerFocusMessagesThreadId: null,
   workerFocusMessages: [],
+  subagentFocusView: null,
   mainView: "thread",
   showKanbanView: false,
   showSubagentsInKanban: true,
@@ -456,7 +470,8 @@ export const useAppStore = create<AppState>((set, get) => ({
             mainView: "thread" as const,
             workerFocusView: null,
             workerFocusMessagesThreadId: null,
-            workerFocusMessages: []
+            workerFocusMessages: [],
+            subagentFocusView: null
           })
       // skillGenerationByThread is NOT reset here: new threads start with no entry
       // in the map, so the card is naturally absent without discarding other threads' state.
@@ -479,7 +494,8 @@ export const useAppStore = create<AppState>((set, get) => ({
             mainView: "thread" as const,
             workerFocusView: null,
             workerFocusMessagesThreadId: null,
-            workerFocusMessages: []
+            workerFocusMessages: [],
+            subagentFocusView: null
           })
       // skillGenerationByThread is NOT cleared here: each thread retains its own card
       // state so switching back to a thread shows the card exactly as it was left.
@@ -511,6 +527,11 @@ export const useAppStore = create<AppState>((set, get) => ({
                 workerFocusView: null,
                 workerFocusMessagesThreadId: null,
                 workerFocusMessages: []
+              }
+            : {}),
+          ...(state.subagentFocusView?.threadId === threadId
+            ? {
+                subagentFocusView: null
               }
             : {})
         }
@@ -579,7 +600,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       workerFocusView: view,
       workerFocusMessagesThreadId: view.workerThreadId,
-      workerFocusMessages: []
+      workerFocusMessages: [],
+      subagentFocusView: null
     })
   },
 
@@ -589,6 +611,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       workerFocusMessagesThreadId: null,
       workerFocusMessages: []
     })
+  },
+
+  openSubagentFocusView: (view) => {
+    set({
+      subagentFocusView: view,
+      workerFocusView: null,
+      workerFocusMessagesThreadId: null,
+      workerFocusMessages: []
+    })
+  },
+
+  closeSubagentFocusView: () => {
+    set({ subagentFocusView: null })
   },
 
   appendWorkerFocusMessage: (workerThreadId, message) => {
@@ -707,7 +742,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentThreadId: null,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null
       })
     } else {
       const restored = get().previousThreadId
@@ -751,7 +787,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentThreadId: null,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null
       })
     } else {
       const restored = get().previousThreadId
@@ -781,7 +818,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         previousThreadId: prev,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null
       })
     } else {
       const restored = get().previousThreadId
@@ -814,7 +852,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         previousThreadId: prev,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null
       })
     } else {
       const restored = get().previousThreadId
@@ -840,7 +879,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         mainView: "customize",
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null
       })
     } else {
       const restored = get().previousThreadId
@@ -887,7 +927,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentThreadId: null,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null
       })
       return
     }
@@ -902,7 +943,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         showDashboardView: false,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null
       })
       return
     }
@@ -918,7 +960,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         showDashboardView: false,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null
       })
       return
     }
@@ -937,7 +980,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentThreadId: null,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null
       })
       return
     }
@@ -955,7 +999,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentThreadId: null,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null
       })
       return
     }
@@ -973,7 +1018,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentThreadId: null,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null
       })
       return
     }
