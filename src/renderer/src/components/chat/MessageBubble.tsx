@@ -33,6 +33,7 @@ import {
 import { getWorkerToolResultKey, getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import { DurationShow } from "./DurationShow"
 import { isGoalClearAlias } from "../../../../shared/goal-slash"
+import { isResultlessCompletedToolCall } from "@/lib/tool-call-display-state"
 
 /**
  * Strip the trailing `<CMBDEVCLAW-SKILL-USE-V1>…</…>` block when present.
@@ -1026,6 +1027,8 @@ export function MessageBubble({
                     ? result.is_error
                       ? "failed"
                       : "completed"
+                    : isResultlessCompletedToolCall(resolvedToolCall)
+                      ? "completed"
                     : isStreaming
                       ? "running"
                       : "interrupted")
