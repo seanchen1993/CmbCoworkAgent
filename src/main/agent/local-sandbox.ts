@@ -9,6 +9,7 @@
  * handled via HITL configuration.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks"
 import { spawn, execFile, type ChildProcess } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import {
@@ -38,7 +39,11 @@ import * as chardet from "jschardet"
 import micromatch from "micromatch"
 import { replace } from "./replace"
 import type { ToolOrchestrator } from "./tool-orchestrator"
-import { assessCommandSafety, classifyCommandConcurrency } from "./exec-policy"
+import {
+  assessCommandSafety,
+  classifyCommandConcurrency,
+  isReadOnlyShellCommand
+} from "./exec-policy"
 import {
   areElevatedRootsPreparedAsync,
   isElevatedSetupComplete,
@@ -49,7 +54,7 @@ import {
   validateElevatedWorkspaceRoot
 } from "../ipc/sandbox"
 import { getWindowsSandboxMode } from "../storage"
-import { homedir } from "node:os"
+import { homedir, userInfo } from "node:os"
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
@@ -351,6 +356,22 @@ interface WorkspaceSwitchPreparationResult {
  * console.log('Exit code:', result.exitCode);
  * ```
  */
+
+/**
+ * Per-execution read-only enforcement, scoped to one tool call's async context.
+ *
+ * A Solo read-only registry subagent (Explore/Plan) SHARES the main agent's
+ * LocalSandbox, which isn't instance-flagged read-only — so its post-hook gate
+ * can't rely on `readOnlyShellEnforced`. Its guard middleware instead runs the
+ * execute tool call inside `readOnlyShellExecutionContext.run(true, …)`;
+ * execute()/executeBackground() read this store and enforce the read-only policy
+ * on the EFFECTIVE command. AsyncLocalStorage scopes the flag to THIS call's
+ * async chain, so concurrent calls (e.g. a write-capable sibling subagent on the
+ * same shared backend) are NOT affected — avoiding the cross-call false-positives
+ * a global backend flag would cause.
+ */
+export const readOnlyShellExecutionContext = new AsyncLocalStorage<boolean>()
+
 export class LocalSandbox
   extends FilesystemBackend
   implements SandboxBackendProtocol, SkillHookContextProvider
@@ -386,6 +407,12 @@ export class LocalSandbox
   private orchestrator?: ToolOrchestrator
   /** When true, block direct git add/commit/push and force git_workflow usage. */
   private enforceGitWorkflowCommitOnly = false
+  /** When true, this is a read-only agent/worker: every command actually executed
+   * must pass isReadOnlyShellCommand. The runtime's execute tool already gates the
+   * agent-issued command, but a PreToolUse hook can rewrite a read-only command
+   * into a build/write one — so the EFFECTIVE (post-hook) command is re-checked
+   * here, after the merge, for both foreground and background execution. */
+  private readOnlyShellEnforced = false
   /** AbortSignal: when signalled, in-flight child processes are killed immediately. */
   private abortSignal?: AbortSignal
   /** Whether the conversation-level abort signal has been triggered. */
@@ -1705,6 +1732,423 @@ export class LocalSandbox
   /** Inject the approval orchestrator (called from runtime.ts). */
   setOrchestrator(orch: ToolOrchestrator): void {
     this.orchestrator = orch
+  }
+
+  /** Mark this sandbox as serving a read-only agent/worker (called from runtime.ts
+   * for shellAccess/workload "read_only" runtimes). Enforced on the EFFECTIVE
+   * post-hook command in execute()/executeBackground(). */
+  setReadOnlyShellEnforced(enabled: boolean): void {
+    this.readOnlyShellEnforced = enabled
+  }
+
+  /** Expand a command into shell-ish WORDS the way spawn({shell}) would before it
+   * opens files, so a literal scan sees the REAL targets:
+   *  - join adjacent quoted/unquoted parts into one word + remove quotes;
+   *  - process POSIX backslash escapes (`\.` → `.`, `~/\.ssh` → `~/.ssh`);
+   *  - expand $VAR / ${VAR} from the SAME env the shell runs with (this.env), so
+   *    $HOME, $USER, $KUBECONFIG, $AWS_SHARED_CREDENTIALS_FILE, $DOCKER_CONFIG …
+   *    all resolve to their real paths (an undefined var → "", like the shell);
+   *  - single quotes suppress expansion (so `'$HOME/x'` stays literal — this also
+   *    avoids over-blocking a genuinely literal path).
+   * Tilde and globbing are handled by the caller. Best-effort: a determined
+   * command can still evade a static scan — the only hard boundary is OS-level
+   * sandboxing, which the chosen "block sensitive dirs" policy does not use. */
+  private expandShellWords(command: string): string[] {
+    const posix = process.platform !== "win32"
+    const env = this.env
+    const lookup = (name: string): string => {
+      if (env[name] != null) return String(env[name])
+      // Windows env vars are case-insensitive (and PowerShell's $home).
+      if (!posix) {
+        const hit = Object.keys(env).find((k) => k.toLowerCase() === name.toLowerCase())
+        if (hit != null) return String(env[hit])
+      }
+      if (name === "HOME" || (!posix && name.toLowerCase() === "home")) return homedir()
+      return ""
+    }
+    const n = command.length
+    let i = 0
+    // Decode a POSIX ANSI-C quoted body ($'...'): \xHH hex, \nnn octal, \uHHHH,
+    // and \n \t … escapes. Unknown escapes drop the backslash (\. → .) — the safe
+    // over-approx direction for a security scan (matches how shells reveal the path).
+    const decodeAnsiC = (s: string): string => {
+      let out = ""
+      for (let k = 0; k < s.length; k++) {
+        if (s[k] !== "\\") {
+          out += s[k]
+          continue
+        }
+        const c = s[++k]
+        if (c === undefined) {
+          out += "\\"
+          break
+        }
+        if (c === "x") {
+          let hex = ""
+          while (hex.length < 2 && /[0-9a-fA-F]/.test(s[k + 1] ?? "")) hex += s[++k]
+          out += hex ? String.fromCharCode(parseInt(hex, 16)) : "x"
+        } else if (c === "u" || c === "U") {
+          const max = c === "u" ? 4 : 8
+          let hex = ""
+          while (hex.length < max && /[0-9a-fA-F]/.test(s[k + 1] ?? "")) hex += s[++k]
+          out += hex ? String.fromCodePoint(parseInt(hex, 16)) : c
+        } else if (/[0-7]/.test(c)) {
+          let oct = c
+          while (oct.length < 3 && /[0-7]/.test(s[k + 1] ?? "")) oct += s[++k]
+          out += String.fromCharCode(parseInt(oct, 8) & 0xff)
+        } else {
+          const simple: Record<string, string> = {
+            n: "\n",
+            t: "\t",
+            r: "\r",
+            a: "\x07",
+            b: "\b",
+            f: "\f",
+            v: "\v",
+            e: "\x1b",
+            E: "\x1b"
+          }
+          out += simple[c] ?? c // \\ \' \" and unknown → the char itself
+        }
+      }
+      return out
+    }
+    // Read $'...' (ANSI-C quote): scan the raw body honoring \' and \\, then decode.
+    const readAnsiC = (): string => {
+      i += 2 // consume $'
+      let raw = ""
+      while (i < n && command[i] !== "'") {
+        if (command[i] === "\\" && i + 1 < n) {
+          raw += command[i] + command[i + 1]
+          i += 2
+        } else {
+          raw += command[i++]
+        }
+      }
+      if (i < n) i++ // consume closing '
+      return decodeAnsiC(raw)
+    }
+    const readVar = (): string => {
+      i++ // consume $
+      if (command[i] === "{") {
+        i++
+        let name = ""
+        while (i < n && command[i] !== "}") name += command[i++]
+        if (i < n) i++ // consume }
+        return lookup(name)
+      }
+      let name = ""
+      while (i < n && /[A-Za-z0-9_]/.test(command[i])) name += command[i++]
+      return name ? lookup(name) : "$"
+    }
+    const words: string[] = []
+    let cur = ""
+    let inWord = false
+    let quote: '"' | "'" | null = null
+    while (i < n) {
+      const ch = command[i]
+      if (quote === "'") {
+        if (ch === "'") quote = null
+        else cur += ch
+        i++
+        continue
+      }
+      if (quote === '"') {
+        if (ch === '"') {
+          quote = null
+          i++
+        } else if (ch === "$") {
+          cur += readVar()
+          inWord = true
+        } else if (posix && ch === "\\" && i + 1 < n && /["\\$`]/.test(command[i + 1])) {
+          cur += command[i + 1]
+          i += 2
+        } else {
+          cur += ch
+          i++
+        }
+        continue
+      }
+      if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
+        if (inWord) words.push(cur)
+        cur = ""
+        inWord = false
+        i++
+      } else if (ch === "'" || ch === '"') {
+        quote = ch
+        inWord = true
+        i++
+      } else if (ch === "$" && command[i + 1] === "'") {
+        // POSIX ANSI-C quoting $'...' (unquoted only — inside "" it is literal).
+        cur += readAnsiC()
+        inWord = true
+      } else if (ch === "$") {
+        cur += readVar()
+        inWord = true
+      } else if (posix && ch === "\\" && i + 1 < n) {
+        cur += command[i + 1]
+        i += 2
+        inWord = true
+      } else {
+        cur += ch
+        i++
+        inWord = true
+      }
+    }
+    if (inWord) words.push(cur)
+    return words
+  }
+
+  /** Split on commas at brace-nesting depth 0 (so `a,{b,c}` → ["a", "{b,c}"]). */
+  private static splitTopLevelCommas(s: string): string[] {
+    const parts: string[] = []
+    let depth = 0
+    let cur = ""
+    for (const c of s) {
+      if (c === "{") depth++
+      else if (c === "}") depth = Math.max(0, depth - 1)
+      if (c === "," && depth === 0) {
+        parts.push(cur)
+        cur = ""
+      } else {
+        cur += c
+      }
+    }
+    parts.push(cur)
+    return parts
+  }
+
+  /** Locate the FIRST balanced `{…}` that has a top-level comma (an expandable
+   * brace group); `{x}`/`{1..3}` with no top-level comma are left literal. */
+  private static findExpandableBrace(
+    s: string
+  ): { pre: string; options: string[]; post: string } | null {
+    for (let start = 0; start < s.length; start++) {
+      if (s[start] !== "{") continue
+      let depth = 0
+      let hasComma = false
+      for (let k = start; k < s.length; k++) {
+        const c = s[k]
+        if (c === "{") depth++
+        else if (c === "}") {
+          depth--
+          if (depth === 0) {
+            if (!hasComma) break // not expandable — try the next `{`
+            return {
+              pre: s.slice(0, start),
+              options: LocalSandbox.splitTopLevelCommas(s.slice(start + 1, k)),
+              post: s.slice(k + 1)
+            }
+          }
+        } else if (c === "," && depth === 1) {
+          hasComma = true
+        }
+      }
+    }
+    return null
+  }
+
+  /** Brace expansion `a{b,c}d` → ["abd","acd"] (recursive, nested, cartesian),
+   * mirroring the shell's FIRST expansion step so `~/{.ssh,x}` is seen as `~/.ssh`.
+   * Quoting is intentionally ignored (over-approx: a quoted `{…}` won't expand in
+   * the shell, but blocking the rare literal case is the safe direction).
+   *
+   * `truncated` = the expansion exceeded CAP, so `words` is INCOMPLETE. The caller
+   * must FAIL CLOSED (treat as sensitive): otherwise `cat ~/{s0,…,s1023,.ssh}/x`
+   * could hide `.ssh` past the cap while the real shell still expands it. CAP is
+   * generous so real read commands enumerate fully; only pathological inputs hit it. */
+  private static braceExpand(input: string): { words: string[]; truncated: boolean } {
+    const out: string[] = []
+    const CAP = 1024
+    let truncated = false
+    const recur = (s: string): void => {
+      if (truncated) return
+      if (out.length >= CAP) {
+        truncated = true
+        return
+      }
+      const found = LocalSandbox.findExpandableBrace(s)
+      if (!found) {
+        out.push(s)
+        return
+      }
+      for (const opt of found.options) {
+        if (truncated) return
+        recur(found.pre + opt + found.post)
+      }
+    }
+    recur(input)
+    return { words: out.length ? out : [input], truncated }
+  }
+
+  /** POSIX bracket character classes → JS char-class bodies, so a glob like
+   * `.[[:lower:]][[:lower:]]h` (which the shell matches against `.ssh`) is handled
+   * instead of mis-parsed. An unknown class falls back to a broad set (safe over-
+   * approx). */
+  private static readonly POSIX_CHAR_CLASSES: Record<string, string> = {
+    alpha: "a-zA-Z",
+    upper: "A-Z",
+    lower: "a-z",
+    digit: "0-9",
+    alnum: "a-zA-Z0-9",
+    xdigit: "0-9a-fA-F",
+    word: "a-zA-Z0-9_",
+    blank: " \\t",
+    space: " \\t\\r\\n\\f\\v",
+    punct: "!-/:-@\\[-`{-~",
+    graph: "!-~",
+    print: " -~",
+    cntrl: "\\x00-\\x1f\\x7f"
+  }
+
+  /** Translate a shell glob SEGMENT to a JS regex source. Handles `*` → `[^/]*`,
+   * `?` → `[^/]`, and bracket expressions PROPERLY: shell negation `[!…]`/`[^…]`
+   * → JS `[^…]`, a leading `]` as literal, POSIX classes `[[:lower:]]` → `[a-z]`,
+   * collating/equivalence `[.x.]`/`[=x=]` → the char, and JS-special chars escaped
+   * inside the class. Getting negation right is the point: `[!.]`/`[^.]` match a
+   * non-dot char, which a naive `.replace()` mis-reads (so `.[!.]sh` slipped past). */
+  private static globToRegexSource(seg: string): string {
+    let out = ""
+    const n = seg.length
+    let i = 0
+    while (i < n) {
+      const c = seg[i]
+      if (c === "*") {
+        out += "[^/]*"
+        i++
+      } else if (c === "?") {
+        out += "[^/]"
+        i++
+      } else if (c === "[") {
+        let j = i + 1
+        let cls = "["
+        if (seg[j] === "!" || seg[j] === "^") {
+          cls += "^"
+          j++
+        }
+        if (seg[j] === "]") {
+          cls += "\\]" // a ] right after [ (or [!/[^) is a LITERAL ]
+          j++
+        }
+        let closed = false
+        while (j < n) {
+          const d = seg[j]
+          if (d === "]") {
+            closed = true
+            j++
+            break
+          }
+          if (d === "[" && (seg[j + 1] === ":" || seg[j + 1] === "." || seg[j + 1] === "=")) {
+            const kind = seg[j + 1]
+            const end = seg.indexOf(kind + "]", j + 2)
+            if (end !== -1) {
+              const name = seg.slice(j + 2, end)
+              cls +=
+                kind === ":"
+                  ? (LocalSandbox.POSIX_CHAR_CLASSES[name] ?? "a-zA-Z0-9")
+                  : name.replace(/[\\\]^-]/g, "\\$&") // [.x.]/[=x=] → the literal char
+              j = end + 2
+              continue
+            }
+          }
+          cls += /[\\\]^]/.test(d) ? "\\" + d : d
+          j++
+        }
+        if (closed) {
+          out += cls + "]"
+          i = j
+        } else {
+          out += "\\[" // unterminated [ → literal
+          i++
+        }
+      } else {
+        out += /[.*+?^${}()|[\]\\/]/.test(c) ? "\\" + c : c
+        i++
+      }
+    }
+    return out
+  }
+
+  /** A glob path SEGMENT (contains `*`/`?`/`[]`) that could expand to a sensitive
+   * credential-dir name. Mirrors default shell globbing where dotglob is OFF — a
+   * leading `*`/`?` does NOT match a name beginning with `.`, and every sensitive
+   * name does, so only a segment starting with a literal `.` (or a `[` class) can
+   * match. fnmatch the segment against SENSITIVE_DIR_NAMES. */
+  private globSegmentMatchesSensitive(seg: string): boolean {
+    if (!/[*?[\]]/.test(seg)) return false
+    if (!seg.startsWith(".") && !seg.startsWith("[")) return false
+    let re: RegExp
+    try {
+      re = new RegExp("^" + LocalSandbox.globToRegexSource(seg) + "$")
+    } catch {
+      return true // unparseable glob → fail safe
+    }
+    for (const name of SENSITIVE_DIR_NAMES) if (re.test(name)) return true
+    return false
+  }
+
+  /** A read-only agent now has `execute`, which can read anything the user can —
+   * e.g. `cat ~/.ssh/id_rsa`. On top of the read-only command check, reject a
+   * read-only command that references a sensitive credential directory (~/.ssh,
+   * ~/.aws, ~/.kube, …) so shell can't exfiltrate secrets. Scope = credential
+   * dirs (isSensitivePath), not full workspace confinement.
+   *
+   * expandShellWords() already mirrored quote removal, POSIX backslash escapes,
+   * and $VAR/${VAR} expansion (so $HOME, $KUBECONFIG, $AWS_SHARED_CREDENTIALS_FILE
+   * … are real paths by now). Each word is then brace-expanded (`~/{.ssh,x}` →
+   * `~/.ssh`, `~/x`), and we add tilde (~ / ~user) and globbing, then resolve each
+   * variant against the effective cwd (so `cat ../../.ssh/id_rsa` is caught too)
+   * and test isSensitivePath. */
+  private commandReadsSensitivePath(command: string, cwd: string): boolean {
+    const home = homedir()
+    const homeNorm = home.replace(/\\/g, "/").replace(/\/+$/, "")
+    let currentUser = ""
+    try {
+      currentUser = userInfo().username
+    } catch {
+      /* userInfo can throw on some container/CI setups — treat as no known user */
+    }
+
+    const expandedWords: string[] = []
+    for (const word of this.expandShellWords(command)) {
+      const { words: variants, truncated } = LocalSandbox.braceExpand(word)
+      // FAIL CLOSED: if a word has too many brace alternatives to fully enumerate,
+      // a sensitive branch could hide past the cap while the shell still expands it.
+      if (truncated) return true
+      expandedWords.push(...variants)
+    }
+    for (let token of expandedWords) {
+      if (!token) continue
+      // Tilde expansion: ~ / ~/ → home; ~<current-user> → home; ~<other-user>/dir
+      // can't be resolved here, but if the next segment is a sensitive name treat
+      // it as sensitive anyway.
+      if (token === "~" || token.startsWith("~/") || token.startsWith("~\\")) {
+        token = home + token.slice(1)
+      } else if (
+        currentUser &&
+        (token === "~" + currentUser ||
+          token.startsWith("~" + currentUser + "/") ||
+          token.startsWith("~" + currentUser + "\\"))
+      ) {
+        token = home + token.slice(1 + currentUser.length)
+      } else if (/^~[^/\\]+[/\\]/.test(token)) {
+        const seg = token.replace(/^~[^/\\]+[/\\]/, "").split(/[/\\]/)[0]
+        if (SENSITIVE_DIR_NAMES.has(seg.toLowerCase()) || this.globSegmentMatchesSensitive(seg)) {
+          return true
+        }
+      }
+
+      const resolved = path.resolve(cwd, token)
+      if (isSensitivePath(resolved)) return true
+      // A glob in the FIRST home-relative segment (~/.ss?/id, ~/.c*/x) escapes
+      // isSensitivePath's literal compare — fnmatch it against the set.
+      const resNorm = resolved.replace(/\\/g, "/")
+      if (resNorm.toLowerCase().startsWith(homeNorm.toLowerCase() + "/")) {
+        const firstSeg = resNorm.slice(homeNorm.length + 1).split("/")[0]
+        if (this.globSegmentMatchesSensitive(firstSeg)) return true
+      }
+    }
+    return false
   }
 
   private resolveExecutionCwd(cwd?: string): string {
@@ -4813,6 +5257,24 @@ export class LocalSandbox
     if (safety.level === "forbidden") {
       return `Command forbidden: ${safety.reason}`
     }
+    // Read-only enforcement on the EFFECTIVE (post-hook) command: a PreToolUse
+    // hook may have rewritten a read-only command into a build/write one.
+    if (
+      (this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true) &&
+      !isReadOnlyShellCommand(
+        effectiveCommand,
+        effectiveCwd,
+        process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
+      )
+    ) {
+      return "execute blocked: this is a read-only agent — only provably read-only commands are allowed (no writes, redirects, mutating commands, or builds/installs). A hook may have rewritten the command into a non-read-only one."
+    }
+    if (
+      (this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true) &&
+      this.commandReadsSensitivePath(effectiveCommand, effectiveCwd)
+    ) {
+      return "execute blocked: this is a read-only agent — reading sensitive credential directories (~/.ssh, ~/.aws, ~/.kube, ~/.gnupg, …) is not allowed."
+    }
 
     const taskId = randomUUID().slice(0, 8)
     const taskAbortController = new AbortController()
@@ -5005,6 +5467,38 @@ export class LocalSandbox
       console.log(`[LocalSandbox] execute: FORBIDDEN — ${safety.reason}`)
       return {
         output: `Command forbidden: ${safety.reason}`,
+        exitCode: 1,
+        truncated: false
+      }
+    }
+    // Read-only enforcement on the EFFECTIVE (post-hook) command: a PreToolUse
+    // hook may have rewritten a read-only command into a build/write one. The
+    // runtime's execute tool already gated the agent-issued command, but the
+    // rewrite happens here, so re-check after the merge.
+    if (
+      (this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true) &&
+      !isReadOnlyShellCommand(
+        effectiveCommand,
+        effectiveCwd,
+        process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
+      )
+    ) {
+      console.log(`[LocalSandbox] execute: READ-ONLY BLOCKED — ${effectiveCommand}`)
+      return {
+        output:
+          "execute blocked: this is a read-only agent — only provably read-only commands are allowed (no writes, redirects, mutating commands, or builds/installs). A hook may have rewritten the command into a non-read-only one.",
+        exitCode: 1,
+        truncated: false
+      }
+    }
+    if (
+      (this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true) &&
+      this.commandReadsSensitivePath(effectiveCommand, effectiveCwd)
+    ) {
+      console.log(`[LocalSandbox] execute: SENSITIVE-PATH BLOCKED — ${effectiveCommand}`)
+      return {
+        output:
+          "execute blocked: this is a read-only agent — reading sensitive credential directories (~/.ssh, ~/.aws, ~/.kube, ~/.gnupg, …) is not allowed.",
         exitCode: 1,
         truncated: false
       }

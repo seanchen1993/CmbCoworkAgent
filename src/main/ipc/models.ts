@@ -7,6 +7,7 @@ import * as path from "path"
 import { execFile } from "child_process"
 import { promisify } from "util"
 import { getWindowsSandboxMode } from "../storage"
+import { workflowRunManager } from "../agent/workflow/run-manager"
 import type {
   ModelConfig,
   Provider,
@@ -239,8 +240,40 @@ async function assertWorkspaceSwitchAllowed(
     typeof nextPath === "string" ? normalizeTrackedPath(nextPath) : ""
   if (normalizedCurrentPath && normalizedCurrentPath === normalizedNextPath) return
   if (currentPath === nextPath) return
+  // Block a workspace switch while a dynamic workflow is running or its result is
+  // still pending: run files live under the OLD workspace, but hydrate / completion
+  // notification / history look them up by the thread's CURRENT workspacePath, so
+  // switching orphans the run. This is the REAL workspace-picker entry (workspace:set
+  // / workspace:select, incl. the "创建 Worktree 并切换" path which calls workspace:set);
+  // threads:update has its own guard reusing the same check. (#2)
+  const pendingRun =
+    typeof currentPath === "string"
+      ? workflowRunManager.findPendingNotification(currentPath, threadId)
+      : null
+  if (
+    workflowRunManager.isBusyForThread(
+      threadId,
+      typeof currentPath === "string" ? currentPath : undefined
+    )
+  ) {
+    throw new Error("仍有动态工作流在运行或结果待汇报，请先等待其完成或取消后再切换工作区。")
+  }
   if (hasActiveAgentRun(threadId)) {
     throw new Error("当前线程仍有前台请求在执行，请等待该轮完成后再切换工作区。")
+  }
+  // Escape hatch (#5): once the pending run's auto-re-report is exhausted this process
+  // (wedged report turn / API outage) isBusyForThread returns false, so the switch is
+  // ALLOWED here rather than locking the user out. HONEST CAVEAT: switching the
+  // workspace strands that pending result under the ORIGINAL workspace — hydrate /
+  // list / completion notification all look runs up by the thread's CURRENT (new)
+  // workspacePath, so the result is NOT lost (still on disk under the old workspace,
+  // visible in its history panel) but won't auto-report until the user switches back
+  // to the original workspace in workflow mode. Mirrors the leave-mode caveat in
+  // threads.ts / agent.ts.
+  if (pendingRun) {
+    console.warn(
+      `[Workflow] Switching workspace with a renotify-exhausted pending run ${pendingRun.runId}: its result stays under the original workspace and won't auto-report until you switch back there in workflow mode. (#5)`
+    )
   }
   if (typeof currentPath === "string" && currentPath.trim()) {
     await coordinatorWorkerManager.restoreWorkersForThread({

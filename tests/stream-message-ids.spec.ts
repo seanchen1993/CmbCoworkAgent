@@ -200,7 +200,7 @@ function testSyntheticCheckpointBaselineIncludesCoordinatorCurrentTurnIds(): voi
       convertToSDKEvents: (
         event: unknown,
         threadId: string,
-        agentMode?: "normal" | "coordinator"
+        agentMode?: "normal" | "coordinator" | "workflow"
       ) => Array<{ event: string; data: unknown }>
     }
   ).convertToSDKEvents.bind(transport)
@@ -278,7 +278,7 @@ function testCoordinatorCurrentTurnValuesUpdatesGrowingAssistantContent(): void 
       convertToSDKEvents: (
         event: unknown,
         threadId: string,
-        agentMode?: "normal" | "coordinator"
+        agentMode?: "normal" | "coordinator" | "workflow"
       ) => Array<{ event: string; data: unknown }>
     }
   ).convertToSDKEvents.bind(transport)

@@ -142,6 +142,38 @@ export function deleteThreadWorkerCheckpoints(parentThreadId: string): number {
   return deleted
 }
 
+/** Delete leftover workflow-subagent checkpoints for a thread. Workflow subagents
+ * use a `<parent>__wf_<run>_a<index>` checkpoint thread (subagent.ts), exactly like
+ * coordinator workers use `__worker__`. They self-clean in the subagent's `finally`
+ * (deleteThreadCheckpoint), so this only sweeps the rare leftovers a crash or a
+ * failed cleanup left behind — the symmetric counterpart to
+ * deleteThreadWorkerCheckpoints, which only covers `__worker__`. (#3) */
+export function deleteThreadWorkflowCheckpoints(parentThreadId: string): number {
+  if (!SAFE_ID_RE.test(parentThreadId)) {
+    throw new Error(`Invalid threadId: ${parentThreadId}`)
+  }
+  if (parentThreadId.includes("__wf_")) {
+    throw new Error(
+      `Invalid workflow parent threadId: ${parentThreadId}. Parent thread ids may not contain the reserved __wf_ delimiter.`
+    )
+  }
+
+  const dir = getThreadCheckpointDir()
+  const prefix = `${parentThreadId}__wf_`
+  let deleted = 0
+
+  for (const filename of readdirSync(dir)) {
+    if (!filename.endsWith(".sqlite")) continue
+    const checkpointThreadId = filename.slice(0, -".sqlite".length)
+    if (!checkpointThreadId.startsWith(prefix)) continue
+    if (!SAFE_ID_RE.test(checkpointThreadId)) continue
+    unlinkSync(join(dir, filename))
+    deleted += 1
+  }
+
+  return deleted
+}
+
 export function getEnvFilePath(): string {
   return ENV_FILE
 }

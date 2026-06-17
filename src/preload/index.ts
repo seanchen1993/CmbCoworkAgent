@@ -157,7 +157,7 @@ const api = {
       message: string,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator",
+      agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ): (() => void) => {
@@ -192,7 +192,7 @@ const api = {
       command: unknown,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator",
+      agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ): (() => void) => {
@@ -356,6 +356,33 @@ const api = {
     },
     isCoordinatorModeForced: (): Promise<boolean> => {
       return ipcRenderer.invoke("agent:coordinator-mode-forced") as Promise<boolean>
+    }
+  },
+  workflows: {
+    listRuns: (threadId: string): Promise<unknown[]> => {
+      return ipcRenderer.invoke("workflow:list-runs", { threadId }) as Promise<unknown[]>
+    },
+    getRun: (threadId: string, runId: string): Promise<unknown | null> => {
+      return ipcRenderer.invoke("workflow:get-run", { threadId, runId }) as Promise<unknown | null>
+    },
+    cancelRun: (threadId: string, runId?: string): Promise<boolean> => {
+      return ipcRenderer.invoke("workflow:cancel-run", { threadId, runId }) as Promise<boolean>
+    },
+    hydrate: (threadId: string): Promise<unknown> => {
+      return ipcRenderer.invoke("workflow:hydrate", { threadId }) as Promise<unknown>
+    },
+    onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void): (() => void) => {
+      // Durable per-thread channel for background workflow runs. Unlike the
+      // run stream, this survives past the launching turn so progress and the
+      // completion notification still reach the renderer.
+      const channel = `agent:workflow-events:${threadId}`
+      const handler = (_: unknown, data: unknown): void => {
+        callback(data)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
     }
   },
   threads: {
@@ -1523,7 +1550,10 @@ const api = {
     saveSettings: (updates: Partial<AgentAutoCommitSettings>): Promise<AgentAutoCommitSettings> =>
       ipcRenderer.invoke("autoCommit:saveSettings", updates) as Promise<AgentAutoCommitSettings>,
     getWorkspaceCard: (workspacePath: string): Promise<AgentAutoCommitWorkspaceCard> =>
-      ipcRenderer.invoke("autoCommit:getWorkspaceCard", workspacePath) as Promise<AgentAutoCommitWorkspaceCard>,
+      ipcRenderer.invoke(
+        "autoCommit:getWorkspaceCard",
+        workspacePath
+      ) as Promise<AgentAutoCommitWorkspaceCard>,
     saveWorkspaceCard: (
       workspacePath: string,
       cardNumber?: string

@@ -87,10 +87,11 @@ async function testRendererSendsAgentMode(): Promise<void> {
   const switcher = await readProjectFile("src/renderer/src/components/chat/AgentModeSwitcher.tsx")
   assertIncludes(switcher, 'value: "normal"', "AgentModeSwitcher exposes normal mode")
   assertIncludes(switcher, 'value: "coordinator"', "AgentModeSwitcher exposes coordinator mode")
+  assertIncludes(switcher, 'value: "workflow"', "AgentModeSwitcher exposes workflow mode")
   assertIncludes(
     switcher,
-    "Solo Agent 快速直达；Agent Team 多代理编排",
-    "AgentModeSwitcher explains coordinator-only flow"
+    "Solo 快速直达；Team 多代理编排；Workflow 大规模并行。",
+    "AgentModeSwitcher explains the three execution modes"
   )
   assertIncludes(switcher, "setOpen(false)", "AgentModeSwitcher closes after selection")
   assertMatches(
@@ -113,13 +114,18 @@ async function testRendererSendsAgentMode(): Promise<void> {
   assertIncludes(chat, "AgentModeSwitcher", "ChatContainer imports mode switcher")
   assertIncludes(
     chat,
-    "const initialAgentMode = isCoordinatorModeMetadata(",
-    "ChatContainer derives its initial mode from stored thread metadata"
+    "const initialAgentMode: ChatAgentMode = isWorkflowModeMetadata(initialThreadMetadata)",
+    "ChatContainer derives its initial mode (workflow/coordinator/normal) from stored thread metadata"
   )
   assertIncludes(
     chat,
-    "const metadataDerivedMode: ChatAgentMode = isCoordinatorModeMetadata(currentThread?.metadata)",
+    "const metadataDerivedMode: ChatAgentMode = disableCoordinatorModeOption",
     "ChatContainer re-derives mode synchronously when switching threads"
+  )
+  assertIncludes(
+    chat,
+    "isWorkflowModeMetadata(currentThread?.metadata)",
+    "ChatContainer re-derivation covers workflow mode alongside coordinator"
   )
   assertIncludes(
     chat,
@@ -138,7 +144,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    "const coordinatorPrefixed = /^\\s*(?:\\[coordinator\\]|#coordinator)",
+    "/^\\s*(?:\\[coordinator\\]|#coordinator)\\s*[:-]?/i.test(fullMessage)",
     "ChatContainer recognizes coordinator prefixes before submitting"
   )
   assertIncludes(
@@ -162,9 +168,10 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。",
     "ChatContainer explains why mode switching is locked after conversation starts"
   )
+  // Formatting-insensitive: prettier may wrap the JSX attribute across lines.
   assertIncludes(
     chat,
-    "locked={isLoading || !canChangeAgentMode}",
+    "disableCoordinatorModeOption || isLoading || !canChangeAgentMode",
     "ChatContainer locks mode switching while running or after the thread has messages"
   )
 
@@ -248,8 +255,8 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    "当前环境变量强制开启 Agent Team，不能切回 Solo Agent",
-    "ChatContainer blocks switching back to normal when coordinator mode is forced by environment"
+    "当前环境变量强制开启 Agent Team，不能切换到其他执行模式",
+    "ChatContainer blocks switching away from coordinator when it is forced by environment"
   )
 
   const transport = await readProjectFile("src/renderer/src/lib/electron-transport.ts")
@@ -312,6 +319,21 @@ async function testRendererSendsAgentMode(): Promise<void> {
     workspacePicker,
     'if (selection.status !== "success") return',
     "WorkspacePicker only resets worktree UI state after a successful workspace change"
+  )
+  assertMatches(
+    workspacePicker,
+    /async function handleCreateWorktree\(\): Promise<void> \{\s*if \(!canChangeWorkspace\)/,
+    "WorkspacePicker blocks worktree creation once the thread has messages"
+  )
+  assertMatches(
+    workspacePicker,
+    /function handleModeSelect\(selected: WorkspaceMode\): void \{\s*if \(selected === "worktree" && !canChangeWorkspace\)/,
+    "WorkspacePicker blocks switching into worktree mode once the thread has messages"
+  )
+  assertIncludes(
+    workspacePicker,
+    "isGit && !isWorktree && !isWorktreePath && canChangeWorkspace",
+    "WorkspacePicker only shows the worktree mode selector while workspace switching is allowed"
   )
 
   const preload = await readProjectFile("src/preload/index.ts")
@@ -432,8 +454,21 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "!coordinatorNotificationRetryOnIdleRef.current[threadId]",
-    "thread context only suppresses idle retry when there is neither an outstanding attempt nor a deferred busy-stream retry"
+    "(coordinatorNotificationAttemptsRef.current[threadId] ?? 0) > 0 ||",
+    "thread context reschedules coordinator notification on idle when an attempt is outstanding or a busy-deferred retry is pending"
+  )
+  // #2: workflow notifications get the SAME retry-on-idle handoff as coordinator,
+  // so a foreground turn longer than the bounded retry budget doesn't strand the
+  // workflow completion turn until the next hydrate.
+  assertIncludes(
+    threadContext,
+    "workflowNotificationRetryOnIdleRef.current[threadId] = true",
+    "thread context defers a busy workflow notification to a retry-on-idle handoff"
+  )
+  assertIncludes(
+    threadContext,
+    "if (workflowNotificationRetryOnIdleRef.current[threadId]) {",
+    "thread context reschedules a deferred workflow notification when the thread goes idle"
   )
   assertIncludes(
     threadContext,
@@ -585,16 +620,9 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "用户输入的普通文本",
     "ChatContainer keeps user-typed coordinator internal markers visible as ordinary text"
   )
-  assertIncludes(
-    chat,
-    "keepPrepareApprovalForSaveMetadata",
-    "ChatContainer keeps the prepare approval visible until the save metadata approval replaces it"
-  )
-  assertIncludes(
-    chat,
-    "if (!keepPrepareApprovalForSaveMetadata)",
-    "ChatContainer clears ordinary orchestrator approvals while preserving code-exec bridge state"
-  )
+  // The `keepPrepareApprovalForSaveMetadata` assertions were removed: that
+  // variable was deleted in the code_exec one-shot-save refactor (86a48337),
+  // so they could never pass and are unrelated to mode plumbing.
 }
 
 async function testMainResolvesAndPersistsMode(): Promise<void> {
@@ -1087,18 +1115,44 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "userMessage: isCoordinatorNotificationTurn ? undefined : message",
-    "agent Stop hook context does not override internal coordinator notification turns with placeholder text"
+    "userMessage: isInternalNotificationTurn ? undefined : message",
+    "agent Stop hook context does not override internal (coordinator OR workflow) notification turns with placeholder text"
   )
   assertIncludes(
     agentIpc,
     "processing internal worker notification turn",
     "agent IPC skips user-prompt hooks for internal worker notifications"
   )
+  // Explicit-skill activation + the UserPromptSubmit hook must be skipped for ANY
+  // internal notification turn (coordinator OR workflow), not just coordinator —
+  // otherwise a plugin could block/rewrite/halt the workflow result-report turn.
   assertIncludes(
     agentIpc,
-    "!isCoordinatorNotificationTurn && isOnlineSkillEvolutionEnabled()",
-    "agent IPC excludes internal worker notifications from skill evolution"
+    "if (!isInternalNotificationTurn) {",
+    "explicit-skill + UserPromptSubmit hooks are gated on isInternalNotificationTurn (covers workflow turns)"
+  )
+  // The COMPLETION Stop hook is neutralized ONLY for WORKFLOW notification turns
+  // (not coordinator): it runs on the success path, so a plugin block would
+  // `return` without hitting the catch-side rollback, permanently losing a
+  // background workflow's one-and-only result report. Coordinator deliberately
+  // KEEPS HEAD behavior (Stop hooks fire) — its worker result is re-discoverable
+  // on the next thread hydrate, so the loss risk does not apply.
+  assertIncludes(
+    agentIpc,
+    "runStopHooks: isWorkflowNotificationTurn ? async () => null : undefined",
+    "Stop hooks are skipped ONLY for workflow notification turns (coordinator keeps HEAD behavior)"
+  )
+  // Guard against regressing coordinator: the Stop-hook skip must NOT key off the
+  // broader isInternalNotificationTurn (which also covers coordinator turns).
+  assertNotIncludes(
+    agentIpc,
+    "runStopHooks: isInternalNotificationTurn ? async () => null : undefined",
+    "Stop-hook skip must not be gated on isInternalNotificationTurn (would re-break coordinator)"
+  )
+  assertIncludes(
+    agentIpc,
+    "!isInternalNotificationTurn && isOnlineSkillEvolutionEnabled()",
+    "agent IPC excludes internal (coordinator OR workflow) notification turns from skill evolution"
   )
   assertIncludes(
     agentIpc,
@@ -1627,6 +1681,21 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "Timed out waiting for coordinator worker cleanup",
     "thread deletion logs cleanup timeout warnings instead of aborting the rest of teardown"
   )
+  // The session export drops ONLY the new workflow notification plumbing.
+  // Coordinator export keeps its HEAD behavior verbatim — this feature must not
+  // alter what an existing coordinator session exports.
+  assertIncludes(
+    threadsIpc,
+    "if (isWorkflowPlumbingContent(rawContent)) return []",
+    "session export filters workflow plumbing messages"
+  )
+  // Guard against regressing coordinator: the export filter must NOT match
+  // coordinator plumbing markers (that would change coordinator export output).
+  assertNotIncludes(
+    threadsIpc,
+    '"[[CMB_COORDINATOR_"',
+    "export filter must not drop coordinator plumbing (keeps HEAD coordinator export behavior)"
+  )
   assertSourceOrder(
     threadsIpc,
     "await waitForCleanupBestEffort()",
@@ -1831,8 +1900,28 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "browser_playwright, deferred tools, and eager MCP tools are unavailable",
-    "runtime tells read-only workers that browser/deferred/eager MCP tools are unavailable"
+    "Eager MCP tools (if any are connected) ARE available for direct single-tool calls",
+    "runtime tells read-only workers eager MCP is available (deferred bridge still cut)"
+  )
+  assertIncludes(
+    runtime,
+    "run read-only shell commands via execute",
+    "runtime lets read-only workers run read-only shell commands (execute kept)"
+  )
+  assertIncludes(
+    runtime,
+    "safety gate that blocks clearly-dangerous and unrecognized commands, but do NOT rely on it",
+    "runtime tells read-only workers the execute gate is a safety net, not a guarantee (self-restrict)"
+  )
+  assertIncludes(
+    runtime,
+    "no mkdir/touch/rm/cp/mv",
+    "runtime gives read-only workers an explicit mutating-command denylist (helps mid-tier models avoid wasted attempts)"
+  )
+  assertIncludes(
+    runtime,
+    'filesystemAccess?.workload === "read_only"',
+    "runtime gates a read-only worker's execute to provably read-only commands via isReadOnlyShellCommand"
   )
   assertIncludes(
     runtime,
@@ -1847,7 +1936,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   assertIncludes(
     runtime,
     "if (isConstrainedCoordinatorWorker)",
-    "runtime branches constrained coordinator workers onto a lightweight capability-discovery path"
+    "runtime branches constrained coordinator workers onto an eager-MCP-only path (deferred bridge + code_exec withheld)"
   )
   assertIncludes(
     runtime,
@@ -1861,8 +1950,13 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "Skipping MCP and deferred tool discovery for constrained coordinator worker",
-    "runtime skips capability discovery work for constrained coordinator workers"
+    "Constrained coordinator worker: keeping",
+    "runtime keeps eager MCP for constrained coordinator workers (deferred bridge + code_exec withheld)"
+  )
+  assertIncludes(
+    runtime,
+    "deferred bridge + code_exec withheld",
+    "runtime withholds the deferred bridge + code_exec from constrained workers while keeping eager MCP"
   )
   assertIncludes(
     runtime,
@@ -2068,8 +2162,8 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "Skipping MCP and deferred tool discovery for constrained coordinator worker",
-    "runtime skips MCP discovery entirely for constrained coordinator workers"
+    'eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")',
+    "runtime still discovers + keeps EAGER MCP for constrained coordinator workers"
   )
   assertIncludes(
     workerAccess,
@@ -2152,6 +2246,16 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     coordinatorMode,
     "Notifications include a bounded <result> handoff from the worker.",
     "coordinator prompt tells the model to rely on pushed worker results"
+  )
+  assertIncludes(
+    coordinatorMode,
+    "read_only workers do not receive direct write_file/edit_file tools, but they DO keep execute",
+    "coordinator prompt reflects that read_only workers keep (read-only-gated) execute — so the model prefers cheap read_only workers for shell inspection"
+  )
+  assertIncludes(
+    coordinatorMode,
+    "mvn dependency:tree",
+    "coordinator prompt lists build-tool read-only inspection subcommands so the model uses a read_only worker (not verify) for dependency inspection"
   )
   assertIncludes(
     coordinatorMode,
@@ -2354,8 +2458,8 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "memory: mainMemorySources",
-    "runtime avoids injecting memory middleware into coordinator main thread"
+    "!disableMemoryInjection && memorySources?.length ? memorySources : undefined",
+    "coordinator main thread DOES inject memory — it is the only user-facing agent, so MEMORY.md collaboration prefs (e.g. reply-in-Chinese) reach it; mirrors CC carrying auto-MEMORY.md into the coordinator main. NOT gated by isCoordinatorMode (unlike todos/fs/skills)"
   )
   assertIncludes(
     workerManager,

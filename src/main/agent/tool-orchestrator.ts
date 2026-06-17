@@ -45,7 +45,15 @@ export class ToolOrchestrator {
     private approvalStore: ApprovalStore,
     private rawExecute: RawExecuteFn,
     private requestApproval: RequestApprovalFn,
-    private yoloMode: boolean = false
+    private yoloMode: boolean = false,
+    /**
+     * Auto-approve file edits (write_file/edit_file) WITHOUT prompting, while
+     * still gating shell execution. Used by dynamic-workflow subagents: the user
+     * already approved the whole workflow at launch, so its background subagents
+     * editing many files must not re-prompt per file (the official acceptEdits
+     * semantics). Shell `execute` stays gated — it's the more dangerous op.
+     */
+    private autoApproveFileEdits: boolean = false
   ) {}
 
   /**
@@ -61,13 +69,18 @@ export class ToolOrchestrator {
    */
   async execute(command: string, cwd: string, sandboxMode: string): Promise<ExecuteResponse> {
     {
-      console.log(`[Orchestrator] execute: "${command}" cwd=${cwd} sandbox=${sandboxMode} yolo=${this.yoloMode}`)
+      console.log(
+        `[Orchestrator] execute: "${command}" cwd=${cwd} sandbox=${sandboxMode} yolo=${this.yoloMode}`
+      )
 
       // 1. Assess command safety — always check, even in YOLO mode
       const safety = assessCommandSafety(command, cwd, {
-        windowsShell: process.platform === "win32" && sandboxMode !== "none" ? "powershell" : "unknown"
+        windowsShell:
+          process.platform === "win32" && sandboxMode !== "none" ? "powershell" : "unknown"
       })
-      console.log(`[Orchestrator] safety: ${safety.level}${safety.reason ? ` (${safety.reason})` : ""}`)
+      console.log(
+        `[Orchestrator] safety: ${safety.level}${safety.reason ? ` (${safety.reason})` : ""}`
+      )
 
       // 2. Forbidden commands → reject immediately, regardless of YOLO mode
       if (safety.level === "forbidden") {
@@ -199,8 +212,8 @@ export class ToolOrchestrator {
     // (e.g. error 1385 = elevated sandbox blocked by domain policy → tell the user
     // to switch sandbox mode, not just approve a per-command bypass). Falls back to
     // Codex's generic "command failed; retry without sandbox?" prompt otherwise.
-    const promptReason = LocalSandbox.getSandboxBypassGuidance(output)
-      ?? SANDBOX_BYPASS_PROMPT_REASON
+    const promptReason =
+      LocalSandbox.getSandboxBypassGuidance(output) ?? SANDBOX_BYPASS_PROMPT_REASON
     console.warn(`[Orchestrator] sandbox bypass eligible for "${command}" (sandbox=${sandboxMode})`)
     const approval = await this.requestApproval({
       id: randomUUID(),
@@ -217,10 +230,14 @@ export class ToolOrchestrator {
     const decision = this.mapDecisionToReview(approval.type)
     if (decision === "denied" || decision === "abort") {
       // Surface the original sandbox failure to the agent so it can adjust its plan.
-      console.warn(`[Orchestrator] sandbox bypass rejected for "${command}" — returning original sandbox output`)
+      console.warn(
+        `[Orchestrator] sandbox bypass rejected for "${command}" — returning original sandbox output`
+      )
       return sandboxResult
     }
-    console.warn(`[Orchestrator] sandbox bypass approved for "${command}" — retrying outside sandbox`)
+    console.warn(
+      `[Orchestrator] sandbox bypass approved for "${command}" — retrying outside sandbox`
+    )
     return this.rawExecute(command, "none", cwd)
   }
 
@@ -237,7 +254,7 @@ export class ToolOrchestrator {
     cwd: string
   ): Promise<boolean> {
     {
-      if (this.yoloMode) return true
+      if (this.yoloMode || this.autoApproveFileEdits) return true
 
       const key = this.approvalStore.makeKey(`${operation}:${filePath}`, cwd, "file")
       // Directory-based pattern for permanent approval: file:write:/dir/* or file:edit:/dir/*
@@ -271,7 +288,9 @@ export class ToolOrchestrator {
       )
 
       const approved = decision !== "denied" && decision !== "abort"
-      console.log(`[Orchestrator] approveFileOp: ${operation} "${filePath}" → ${approved ? "approved" : "rejected"}`)
+      console.log(
+        `[Orchestrator] approveFileOp: ${operation} "${filePath}" → ${approved ? "approved" : "rejected"}`
+      )
       return approved
     }
   }
@@ -279,11 +298,16 @@ export class ToolOrchestrator {
   /** Map renderer decision type to ReviewDecision. */
   private mapDecisionToReview(type: ApprovalDecisionType): ReviewDecision {
     switch (type) {
-      case "approve": return "approved"
-      case "approve_session": return "approved_session"
-      case "approve_permanent": return "approved_permanent"
-      case "reject": return "denied"
-      default: return "denied"
+      case "approve":
+        return "approved"
+      case "approve_session":
+        return "approved_session"
+      case "approve_permanent":
+        return "approved_permanent"
+      case "reject":
+        return "denied"
+      default:
+        return "denied"
     }
   }
 

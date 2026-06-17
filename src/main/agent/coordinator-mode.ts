@@ -9,7 +9,7 @@ import type {
   CoordinatorWorkerWorkload
 } from "./coordinator-worker-manager"
 
-export type AgentMode = "normal" | "coordinator"
+export type AgentMode = "normal" | "coordinator" | "workflow"
 
 const COORDINATOR_BASE_DIR = ".cmbdevclaw/coordinator"
 const THREAD_ID_PATTERN = /^[A-Za-z0-9_-]+$/
@@ -350,6 +350,9 @@ export function getAgentModeFromMetadata(metadata: Record<string, unknown>): Age
   if (metadata.agentMode === "normal") {
     return "normal"
   }
+  if (metadata.agentMode === "workflow") {
+    return "workflow"
+  }
   if (metadata.agentMode === "coordinator" || truthy(metadata.coordinatorMode)) {
     return "coordinator"
   }
@@ -500,7 +503,7 @@ When calling start_worker:
 - Use workload="verify" for independent verification that may run tests/build/lint. Use workload="write" for file-changing workers. If workload is omitted for an implementer, the compatibility fallback is write, matching Claude Code's general worker capability model; do not rely on this fallback.
 - Only verifier workers may use workload="verify". Verification must stay independent, so do not repurpose an implementer as a verifier by changing only the workload.
 - Never combine role="verifier" with workload="write"; verification must stay independent.
-- read_only workers do not receive direct write_file/edit_file or execute/task_output tools.
+- read_only workers do not receive direct write_file/edit_file tools, but they DO keep execute + task_output — execute is gated to provably read-only commands (ls, git log/diff/status, find, cat, head, tail; plus build-tool read-only inspection subcommands like npm ls, go list, cargo tree, mvn dependency:tree, gradle dependencies, dotnet list, and any tool's --version/--help; mutating/unknown commands and installs/builds are rejected). So a read_only worker can inspect dependencies — do NOT escalate to a verify/write worker just to read a dependency tree or run an inspection subcommand.
 - verify workers can run validation commands, but do not receive direct write_file/edit_file tools and must not intentionally modify workspace files. If a verifier needs a throwaway script or harness, it may write only to /tmp or $TMPDIR and should clean it up.
 - verify workers do not run concurrently with write workers; wait for write task-notifications before launching final verification.
 - write workers receive normal workspace write access subject to the app's usual approval, hook, and policy checks. Do not split overlapping file-changing work across multiple write workers; continue the same implementer when context helps.

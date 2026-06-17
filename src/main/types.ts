@@ -21,7 +21,7 @@ export interface AgentInvokeParams {
   threadId: string
   message: string
   modelId?: string
-  agentMode?: "normal" | "coordinator"
+  agentMode?: "normal" | "coordinator" | "workflow"
   coordinatorInternalNotification?: boolean
   /** Renderer user message id for the turn, used to group hook log events. */
   userMessageId?: string
@@ -37,7 +37,7 @@ export interface AgentResumeParams {
     }
   }
   modelId?: string
-  agentMode?: "normal" | "coordinator"
+  agentMode?: "normal" | "coordinator" | "workflow"
 }
 
 export interface AgentInterruptParams {

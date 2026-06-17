@@ -25,7 +25,7 @@ interface TestableTransport {
   convertToSDKEvents: (
     event: unknown,
     threadId: string,
-    agentMode?: "normal" | "coordinator"
+    agentMode?: "normal" | "coordinator" | "workflow"
   ) => SdkEvent[]
 }
 
@@ -220,7 +220,7 @@ async function collectStreamEvents(
 function convert(
   transport: ElectronIPCTransport,
   event: unknown,
-  agentMode: "normal" | "coordinator" = "normal"
+  agentMode: "normal" | "coordinator" | "workflow" = "normal"
 ): SdkEvent[] {
   return (transport as unknown as TestableTransport).convertToSDKEvents(
     event,

@@ -12,6 +12,7 @@ import {
 } from "deepagents"
 import {
   getThreadCheckpointPath,
+  deleteThreadCheckpoint,
   getEnabledSkillsSources,
   getEnabledSkillMiddlewareSources,
   getCustomModelConfigs,
@@ -33,7 +34,11 @@ import {
 import { ChatOpenAI } from "@langchain/openai"
 import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
-import { LocalSandbox, type SkillHookContextProvider } from "./local-sandbox"
+import {
+  LocalSandbox,
+  readOnlyShellExecutionContext,
+  type SkillHookContextProvider
+} from "./local-sandbox"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { combineSkillMiddlewareSources } from "./skill-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
@@ -116,7 +121,8 @@ import {
 } from "../hooks/scope"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
-import { classifyCommandConcurrency } from "./exec-policy"
+import { classifyCommandConcurrency, isReadOnlyShellCommand } from "./exec-policy"
+import type { WindowsShellKind } from "./windows-safe-commands"
 import { SkillUsageDetector } from "./skill-evolution/usage-detector"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
 import type {
@@ -161,8 +167,18 @@ import {
 } from "./coordinator-worker-manager"
 import {
   applyCoordinatorWorkerFilesystemAccess,
-  filterCoordinatorWorkerFinalTools
+  filterCoordinatorWorkerFinalTools,
+  isExplicitToolAccess,
+  blockedToolNamesForAccess,
+  registryAgentBlockedTools,
+  type CoordinatorWorkerFilesystemAccess
 } from "./coordinator-worker-access"
+import {
+  loadAgentProfiles,
+  stripBlockedToolDocs,
+  stripCustomModelPrefix,
+  type AgentShellAccess
+} from "./agent-registry"
 import {
   createWorkerValuesSnapshotContext,
   extractWorkerFinalText,
@@ -176,6 +192,10 @@ import {
 import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool } from "./read-file-tool"
+import { createWorkflowTool } from "./workflow/tool"
+import { WORKFLOW_MODE_SYSTEM_PROMPT } from "./workflow/prompts"
+import type { WorkflowSubagentRuntime } from "./workflow/subagent"
+import { isWorkflowSubagentThreadOf } from "./workflow/types"
 
 function isAbortError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
@@ -229,10 +249,35 @@ export const pendingApprovals = new Map<
   {
     resolve: (decision: ApprovalDecision) => void
     request: ApprovalRequest
+    /** Approval-ROUTING thread (where the UI prompt surfaces). For a workflow
+     * subagent this is the PARENT thread, not the subagent's own thread. */
     threadId: string
+    /** The runtime's OWN thread id. For a workflow subagent this is
+     * `<parent>__wf_<run>_a<i>` (differs from threadId/the parent). Used to detect
+     * which workflow run is blocked on an approval — see hasPendingWorkflowApproval. */
+    runtimeThreadId: string
     targetWebContentsIds: number[]
   }
 >()
+
+/**
+ * True when any workflow subagent of `parentThreadId` is currently blocked on a
+ * pending approval. Subagent runtime threads are `<parent>__wf_<run>_a<i>`, so we
+ * match on runtimeThreadId (NOT threadId, which is the parent approval-routing id
+ * and would also match the parent's own non-workflow approvals). The engine's
+ * inactivity watchdog uses this to NOT abort a run that is merely waiting for an
+ * absent user to answer an approval prompt.
+ *
+ * `runId` scopes the check to ONE run so two concurrent runs on the same parent
+ * thread don't share an "awaiting approval" state (one's pending prompt would
+ * otherwise suppress the other's hung-run watchdog).
+ */
+export function hasPendingWorkflowApproval(parentThreadId: string, runId?: string): boolean {
+  for (const approval of pendingApprovals.values()) {
+    if (isWorkflowSubagentThreadOf(approval.runtimeThreadId, parentThreadId, runId)) return true
+  }
+  return false
+}
 
 // ─── Tool concurrency: AsyncRWLock (writer-preferring) ──────────────────────
 //
@@ -262,6 +307,7 @@ const EXCLUSIVE_TOOL_NAMES = new Set([
   "manage_scheduler",
   "manage_skill",
   "task",
+  "workflow",
   "invoke_deferred_tool",
   "write_file",
   "edit_file"
@@ -414,6 +460,21 @@ function getToolConcurrencyLock(queueId: string): AsyncRWLock {
     toolConcurrencyLocks.set(queueId, lock)
   }
   return lock
+}
+
+/**
+ * Drops the tool-concurrency locks keyed by a thread (its own queue and the
+ * `:subagent` queue) when the thread is deleted, so the module-level map doesn't
+ * accumulate one idle lock per thread for the process lifetime. The thread is
+ * being deleted and its queueId is never reused, so dropping the lock is safe
+ * even if a slow task is still settling past cancelAndWait's BOUNDED/best-effort
+ * wait — that straggler would just lazily recreate a lock no new work shares,
+ * and it's GC'd once the straggler finishes. (No strong "all turns settled"
+ * guarantee is assumed here.)
+ */
+export function clearToolConcurrencyLocksForThread(threadId: string): void {
+  toolConcurrencyLocks.delete(threadId)
+  toolConcurrencyLocks.delete(`${threadId}:subagent`)
 }
 
 function createGradedToolConcurrencyMiddleware(queueId: string) {
@@ -928,6 +989,97 @@ export function createSkillHookContextMiddleware(
   })
 }
 
+/** Best-effort extraction of the command string from an execute tool call's args
+ * (object or JSON string). Returns null if not determinable — then we let the
+ * call through (assessCommandSafety can't judge what it can't see, and the normal
+ * approval flow still applies downstream). */
+function extractExecuteCommand(args: unknown): string | null {
+  let obj: unknown = args
+  if (typeof args === "string") {
+    try {
+      obj = JSON.parse(args)
+    } catch {
+      return null
+    }
+  }
+  if (obj && typeof obj === "object") {
+    const cmd = (obj as { command?: unknown }).command
+    if (typeof cmd === "string") return cmd
+  }
+  return null
+}
+
+/**
+ * Tool-access guard for a Solo task subagent (registry agents with a non-default
+ * tool policy — built-in Explore/Plan/verification + user agents). deepagents
+ * shares the main fs middleware — which provides write_file/edit_file/execute —
+ * across ALL task subagents, and a per-subagent middleware can only be APPENDED,
+ * never remove that shared one. So this guard enforces the agent's policy by
+ * (1) HIDING blocked tools from the model each turn via wrapModelCall (the same
+ * lever deepagents itself uses to drop `execute` for non-exec backends), and
+ * (2) HARD-REJECTING calls to them via wrapToolCall. For shellAccess="read_only"
+ * it keeps execute visible but rejects any command exec-policy does not classify
+ * as provably read-only — stronger than Claude Code's prompt-only constraint.
+ */
+export function createAgentToolGuardMiddleware(
+  disallowedTools: string[],
+  shellAccess: AgentShellAccess,
+  windowsShell: WindowsShellKind = "unknown"
+): ReturnType<typeof createMiddleware> {
+  // Full blocked set = the agent's disallowedTools + ad-hoc-exec/orchestration
+  // meta tools (registry agents are subagents, not orchestrators) + execute/
+  // task_output when shell is off + browser for read-only. MCP is kept.
+  const blocked = registryAgentBlockedTools(disallowedTools, shellAccess)
+  return createMiddleware({
+    name: `agentToolGuard:${shellAccess}`,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    wrapModelCall: (request: any, handler: any) => {
+      const tools = Array.isArray(request.tools)
+        ? request.tools.filter((t: { name?: string }) => !t.name || !blocked.has(t.name))
+        : request.tools
+      // Also strip the blocked tools' usage docs from the injected system prompt
+      // (deepagents' fs middleware advertises tools there, not just in the tool
+      // list) so the model never even sees a description of a tool it can't use —
+      // matching Claude Code, whose disallowed tools never appear in the prompt.
+      const systemMessage = stripBlockedToolDocs(request.systemMessage, blocked)
+      return handler({ ...request, tools, systemMessage })
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    wrapToolCall: (request: any, handler: any) => {
+      const name: string | undefined = request.toolCall?.name
+      const toolCallId: string = request.toolCall?.id ?? ""
+      if (name && blocked.has(name)) {
+        return new ToolMessage({
+          content: `Tool "${name}" is unavailable: this agent's tool policy does not allow it. Inspect and report instead of modifying files.`,
+          tool_call_id: toolCallId,
+          name,
+          status: "error"
+        })
+      }
+      if (name === "execute" && shellAccess === "read_only") {
+        const command = extractExecuteCommand(request.toolCall?.args)
+        if (command !== null && !isReadOnlyShellCommand(command, "", windowsShell)) {
+          return new ToolMessage({
+            content:
+              "execute blocked: this is a read-only agent — only provably read-only commands are allowed (no writes, redirects, mutating commands, or builds/installs). Use read_file/grep/glob, read-only shell like ls, git log, git diff, find, cat, or inspection subcommands like npm ls, go list, mvn dependency:tree.",
+            tool_call_id: toolCallId,
+            name,
+            status: "error"
+          })
+        }
+        // This guards a Solo registry subagent that SHARES the main agent's
+        // (non-read-only) LocalSandbox, so the sandbox's instance flag is off.
+        // Run the execute call inside the read-only context so the sandbox's
+        // post-hook gate still fires if a PreToolUse hook rewrites this safe
+        // command into a build/write one. AsyncLocalStorage scopes it to this
+        // call — concurrent write-capable sibling subagents are unaffected.
+        return readOnlyShellExecutionContext.run(true, () => handler(request))
+      }
+      return handler(request)
+    }
+  })
+}
+
 /**
  * Custom version of deepagents' createDeepAgent.
  *
@@ -970,6 +1122,12 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     includeGeneralPurposeSubagent = true,
     mainSubagentsEnabled = true,
     filesystemAccess,
+    registrySubagentSpecs = [],
+    // Windows shell kind the runtime's commands execute in (derived from the
+    // sandbox). Threaded into the read-only execute gate so Windows PowerShell
+    // read-only cmdlets (Get-Content, …) aren't false-blocked. "unknown" =
+    // strict cross-platform behavior (the macOS/Linux default).
+    windowsShellKind = "unknown",
     toolConcurrencyQueueId = "default",
     toolHookMiddleware,
     threadId,
@@ -1048,9 +1206,22 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
   // Create filesystem middleware and patch upstream tool defaults/descriptions.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const createFsMiddleware = (): any => {
+    // For any restricted leaf runtime — coordinator worker (workload) OR registry
+    // workflow agent (explicit denylist/shell) — strip the blocked tools' docs
+    // from the injected fs system prompt so a removed tool's description doesn't
+    // linger and contradict the tool list (parity with the Solo guard / CC). This
+    // only cleans the prompt; it changes no tool permissions or behaviour. The
+    // unrestricted main agent (filesystemAccess undefined) keeps the full docs.
+    const effectiveFsPrompt =
+      filesystemSystemPrompt && filesystemAccess
+        ? (stripBlockedToolDocs(
+            filesystemSystemPrompt,
+            blockedToolNamesForAccess(filesystemAccess)
+          ) as string)
+        : filesystemSystemPrompt
     const mw = createFilesystemMiddleware({
       backend: filesystemBackend,
-      ...(filesystemSystemPrompt && { systemPrompt: filesystemSystemPrompt }),
+      ...(effectiveFsPrompt && { systemPrompt: effectiveFsPrompt }),
       ...(toolTokenLimitBeforeEvict != null && { toolTokenLimitBeforeEvict })
     })
     patchRuntimeReadFileTool({ middleware: mw, filesystemBackend, toolTokenLimitBeforeEvict })
@@ -1087,8 +1258,31 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         return parts.join("")
       }
       const customExecute = lcTool(
-        async (input: { command: string; cwd?: string; run_in_background?: boolean }): Promise<string> => {
+        async (input: {
+          command: string
+          cwd?: string
+          run_in_background?: boolean
+        }): Promise<string> => {
           const sandbox = filesystemBackend as LocalSandbox
+          // Read-only runtimes keep execute but may only run PROVABLY read-only
+          // commands — gated per command by isReadOnlyShellCommand. Covers both
+          // the registry path (shellAccess "read_only", e.g. Explore) and the
+          // coordinator read-only worker (workload "read_only"). Stronger than
+          // CC's prompt-only constraint AND stronger than plain "safe": "safe" is
+          // the auto-approve tier (so this never surfaces an extra prompt) but it
+          // also auto-approves build/install/codegen (npm install, cargo build,
+          // make, go run, javac …), which WRITE the tree / run arbitrary code.
+          // isReadOnlyShellCommand additionally rejects those while keeping the
+          // tools' inspection subcommands (npm ls, go list, mvn dependency:tree).
+          const readOnlyShell =
+            filesystemAccess?.shellAccess === "read_only" ||
+            filesystemAccess?.workload === "read_only"
+          if (
+            readOnlyShell &&
+            !isReadOnlyShellCommand(input.command, input.cwd ?? "", windowsShellKind)
+          ) {
+            return "execute blocked: this is a read-only agent — only provably read-only commands are allowed (no writes, redirects, mutating commands, or builds/installs). Use read-only shell (ls, git log, git diff, find, cat), inspection subcommands (npm ls, go list, mvn dependency:tree), or the read_file/grep/glob tools."
+          }
           if (input.run_in_background) {
             return sandbox.executeBackground(input.command, input.cwd)
           }
@@ -1386,11 +1580,117 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     systemPrompt: subagentExtraSystemPrompt
       ? `${GENERAL_PURPOSE_SUBAGENT.systemPrompt}\n\n## Project Instructions\n\n${subagentExtraSystemPrompt}`
       : GENERAL_PURPOSE_SUBAGENT.systemPrompt,
-    middleware: skillsMiddlewareArray
+    // general-purpose is write-capable → gets MEMORY.md injection. This mirrors
+    // CC's DEFAULT (tengu_moth_copse off): the user's auto-MEMORY.md (AutoMem) is
+    // carried in userContext.claudeMd alongside CLAUDE.md, and a write-capable
+    // subagent inherits claudeMd — only agents with omitClaudeMd (Explore/Plan)
+    // drop it. Verified against CC source (getMemoryFiles → getClaudeMds →
+    // getUserContext; runAgent omitClaudeMd path). memory_search/memory_get tools
+    // are inherited too.
+    middleware: [...skillsMiddlewareArray, ...memoryMiddlewareArray]
   }
+  // Open registry agents (built-in Explore/Plan/verification + user files under
+  // .cmbcoworkagent/agents/) join general-purpose as task-tool subagents. Each
+  // carries a focused systemPrompt, an optional model override, and — when its
+  // tool policy is non-default — a guard middleware that genuinely removes the
+  // disallowed tools from the model and enforces the shell policy (deepagents
+  // shares the main fs middleware across subagents and only appends per-subagent
+  // middleware, so the guard hides + hard-rejects rather than detaching the
+  // shared tools). Skip any spec colliding with general-purpose or an
+  // already-processed subagent name.
+  const existingSubagentNames = new Set<string>(
+    [
+      ...(includeGeneralPurposeSubagent ? [GENERAL_PURPOSE_SUBAGENT.name] : []),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ...processedSubagents.map((s: any) => (s && typeof s.name === "string" ? s.name : undefined))
+    ].filter((name): name is string => Boolean(name))
+  )
+  const registrySubagents = (
+    registrySubagentSpecs as Array<{
+      name: string
+      description: string
+      systemPrompt: string
+      disallowedTools?: string[]
+      shellAccess?: AgentShellAccess
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      model?: any
+    }>
+  )
+    .filter(
+      (spec) => spec.name !== GENERAL_PURPOSE_SUBAGENT.name && !existingSubagentNames.has(spec.name)
+    )
+    .map((spec) => {
+      const disallowed = spec.disallowedTools ?? []
+      const shell: AgentShellAccess = spec.shellAccess ?? "full"
+      // read_only AND none are both restricted roles → omit AGENTS.md + MEMORY.md
+      // (CC omitClaudeMd parity); only write/verify (full) keep them. A no-shell
+      // agent (`none`, e.g. tools: Read) must not get more context than read_only.
+      const restrictedRole = shell === "read_only" || shell === "none"
+      // The guard ALWAYS applies to registry agents: even a write-capable custom
+      // agent is a subagent and must not get ad-hoc-exec/orchestration meta tools
+      // (code_exec/manage_scheduler/manage_skill). It's ordered BEFORE the skills
+      // middleware so the guard's systemMessage strip runs first and never touches
+      // the injected skill list. Registry agents also see the project skill
+      // catalogue (CC subagents can invoke skills). Both AGENTS.md and MEMORY.md are
+      // injected for write-capable roles and omitted for read_only — this mirrors
+      // CC, where a write-capable subagent inherits the whole claudeMd channel
+      // (CLAUDE.md + auto-MEMORY.md) and CC's omitClaudeMd drops BOTH at once for
+      // read-only Explore/Plan. AGENTS.md is appended to the systemPrompt below
+      // (same as the general-purpose subagent); MEMORY.md rides the memory middleware
+      // here. memory_search/memory_get TOOLS are inherited regardless of role.
+      const middleware = [
+        createAgentToolGuardMiddleware(disallowed, shell, windowsShellKind),
+        ...skillsMiddlewareArray,
+        ...(restrictedRole ? [] : memoryMiddlewareArray)
+      ]
+      return {
+        name: spec.name,
+        description: spec.description,
+        // write/verify (full) get AGENTS.md (project instructions); read_only AND
+        // none omit it (mirrors CC omitClaudeMd dropping the claudeMd channel).
+        // Same `## Project Instructions` format the general-purpose subagent uses.
+        systemPrompt:
+          !restrictedRole && subagentExtraSystemPrompt
+            ? `${spec.systemPrompt}\n\n## Project Instructions\n\n${subagentExtraSystemPrompt}`
+            : spec.systemPrompt,
+        ...(spec.model ? { model: spec.model } : {}),
+        ...(middleware.length > 0 ? { middleware } : {})
+      }
+    })
+
   const availableSubagents = includeGeneralPurposeSubagent
-    ? [generalPurposeSubagent, ...processedSubagents]
-    : processedSubagents
+    ? [generalPurposeSubagent, ...processedSubagents, ...registrySubagents]
+    : [...processedSubagents, ...registrySubagents]
+
+  // deepagents' fs middleware RE-APPENDS its own `## Execute Tool` section in
+  // wrapModelCall whenever the BACKEND supports execution (our LocalSandbox
+  // always does), and that runs AFTER createFsMiddleware already cleaned the
+  // injected filesystemSystemPrompt. So for a restricted runtime whose execute
+  // tool is actually removed (shellAccess "none" registry agent, scoped write
+  // worker), the re-appended doc would survive and advertise a tool the model
+  // doesn't have. Run a SECOND strip placed NEXT in the chain (→ inner, so it
+  // observes the appended section) keyed on the SAME access policy: it drops
+  // `## Execute Tool` only when execute is in the blocked set, so
+  // read_only/verify/full (which KEEP execute, command-gated) are untouched. The
+  // Solo Level-2 path already gets this via createAgentToolGuardMiddleware; this
+  // covers the Level-1 workflow-leaf + coordinator-worker (filesystemAccess)
+  // path, which has no such guard.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let postFsToolDocStripMiddleware: any[] = []
+  if (mainFilesystemEnabled && filesystemAccess) {
+    const postFsBlocked = blockedToolNamesForAccess(filesystemAccess)
+    postFsToolDocStripMiddleware = [
+      createMiddleware({
+        name: "postFsToolDocStrip",
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        wrapModelCall: (request: any, handler: any) =>
+          handler({
+            ...request,
+            systemMessage: stripBlockedToolDocs(request.systemMessage, postFsBlocked)
+          })
+      })
+    ]
+  }
 
   return createAgent({
     model,
@@ -1399,6 +1699,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     middleware: [
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
       ...(mainFilesystemEnabled ? [createFsMiddleware()] : []),
+      ...postFsToolDocStripMiddleware,
       ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "main" })] : []),
       createSkillHookContextMiddleware(filesystemBackend),
       gradedToolConcurrencyMiddleware,
@@ -1504,7 +1805,8 @@ function getRuntimeTimeContext(date: Date = new Date()): {
 function getSystemPrompt(
   workspacePath: string,
   windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated",
-  workingDirPromptAppendix?: string
+  workingDirPromptAppendix?: string,
+  includeBackgroundExec = true
 ): string {
   const isWindows = process.platform === "win32"
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
@@ -1547,7 +1849,15 @@ ${shellGuidance}
 - Always use full absolute paths for all file operations
 `
 
-  const backgroundExecSection = `
+  // The background-exec guidance documents running builds/installs/tests through
+  // execute (run_in_background). Omit it for runtimes whose execute tool has been
+  // removed (shellAccess "none" registry agents, scoped write workers) — otherwise
+  // the prompt tells the agent to call a tool it doesn't have, contradicting its
+  // tool list and the worker's own access note. read_only/full keep it: their
+  // execute IS present (read_only gates each command via isReadOnlyShellCommand).
+  const backgroundExecSection = !includeBackgroundExec
+    ? ""
+    : `
 ### 长时间命令执行
 
 **重要提示：** execute 工具默认超时 60 秒。对于可能超过 60 秒的命令，**必须**使用 \`run_in_background: true\` 参数：
@@ -2208,6 +2518,11 @@ export interface CreateAgentRuntimeOptions {
   enableRequestUserInput?: boolean
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
+  /** Skip injecting MEMORY.md into the system prompt (the memory_search/memory_get
+   * tools stay available). Used by read-only agentType leaves (Explore/Plan) —
+   * mirrors Claude Code, whose Explore/Plan omitClaudeMd and whose built-in agents
+   * inject no memory (it's per-agent opt-in via frontmatter, which they don't set). */
+  disableMemoryInjection?: boolean
   /** Turn-scoped internal coordinator context injected only into the main coordinator prompt. */
   coordinatorTurnPrompt?: string
   /** Explicit /skill selection parsed from the current coordinator turn, if any. */
@@ -2222,12 +2537,9 @@ export interface CreateAgentRuntimeOptions {
   agentMode?: AgentMode
   /** Disable the synchronous deepagents task tool for leaf runtimes such as coordinator async workers. */
   disableSubagents?: boolean
-  /** Optional filesystem access limits for coordinator async worker leaf runtimes. */
-  filesystemAccess?: {
-    workload?: CoordinatorWorkerWorkload
-    ownedFiles?: string[]
-    workspacePath?: string
-  }
+  /** Optional filesystem access limits for leaf runtimes: coordinator async
+   * workers (workload/ownedFiles) or registry agents (disallowedTools/shellAccess). */
+  filesystemAccess?: CoordinatorWorkerFilesystemAccess
   /** AbortSignal — when signalled, any running child process is killed immediately. */
   abortSignal?: AbortSignal
   /** Optional hooks invoked when the model fetch layer retries / resolves. */
@@ -2267,6 +2579,24 @@ export interface CreateAgentRuntimeOptions {
   skillUseTracker?: SkillUseTracker
   /** Callback invoked after successful write/edit/upload filesystem operations. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  /** Extra tools appended to the runtime tool list (e.g. a workflow subagent's structured_output). */
+  additionalTools?: DynamicStructuredTool[]
+  /**
+   * Overrides the tool-concurrency queue id. Tools sharing a queue serialize
+   * their EXCLUSIVE operations (write_file/edit_file/writing execute) via a
+   * module-level lock. Workflow subagents pass the parent thread id so their
+   * file writes serialize across the whole run — parallel agents can't clobber
+   * the same file — while reads still run concurrently. Defaults to the
+   * runtime's own thread id (per-runtime isolation, the original behavior).
+   */
+  toolConcurrencyQueueId?: string
+  /**
+   * Auto-approve file edits (write_file/edit_file) without per-file prompts,
+   * while still gating shell execution. Dynamic-workflow subagents set this:
+   * the user approved the whole workflow at launch, so its background agents
+   * editing many files must not re-prompt per file (official acceptEdits).
+   */
+  autoApproveFileEdits?: boolean
 }
 
 // Create agent runtime with configured model and checkpointer
@@ -2293,6 +2623,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     maxRetryAttempts,
     coordinatorWorkerTurnPlanning,
     enableAgentsPrompt = true,
+    disableMemoryInjection = false,
     agentMode = "normal",
     disableSubagents = false,
     onHookResult,
@@ -2308,6 +2639,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   } = options
   const approvalThreadId = requestedApprovalThreadId ?? threadId
   const isCoordinatorMode = agentMode === "coordinator"
+  const isWorkflowMode = agentMode === "workflow"
 
   if (!threadId) {
     throw new Error("Thread ID is required for checkpointing.")
@@ -2361,6 +2693,53 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
 
   const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts)
   console.log("[Runtime] Model instance created")
+
+  // Open agent-type registry → deepagents task-tool subagents for the Solo main
+  // agent. Gated to the Solo main agent ONLY: coordinator (agentMode
+  // "coordinator") and the workflow orchestrator (agentMode "workflow") are
+  // excluded, as is every leaf runtime (workflow/coordinator subagents run with
+  // disableSubagents=true). This keeps requirement-2 (coordinator untouched) and
+  // routes workflow agent-types through their own Level-1 path, not here.
+  const resolveRegistryModelInstance = (
+    profileModel?: string
+  ): ReturnType<typeof getModelInstance> | undefined => {
+    if (!profileModel) return undefined
+    // Normalize the `custom:` prefix the same way the main model (selectedModelId
+    // above) and the workflow agentType path (workflow/subagent.ts prepends
+    // `custom:`, then the runtime slices it) do. Without this, a profile
+    // `model: custom:foo` resolves fine under a workflow agentType but SILENTLY
+    // inherits the main model for a Solo task subagent.
+    const lookup = stripCustomModelPrefix(profileModel)
+    const cfg =
+      allCustomConfigs.find((item) => item.id === lookup) ||
+      allCustomConfigs.find((item) => item.model === lookup)
+    if (!cfg) {
+      console.warn(
+        `[Runtime] Registry agent model "${profileModel}" not found in custom model configs; inheriting main model.`
+      )
+      return undefined
+    }
+    try {
+      return getModelInstance(cfg, retryHooks, maxRetryAttempts)
+    } catch (error) {
+      console.warn(
+        `[Runtime] Registry agent model "${profileModel}" failed to init; inheriting main model:`,
+        error
+      )
+      return undefined
+    }
+  }
+  const registrySubagentSpecs =
+    agentMode === "normal" && !disableSubagents
+      ? loadAgentProfiles(workspacePath).map((profile) => ({
+          name: profile.name,
+          description: profile.description,
+          systemPrompt: profile.systemPrompt,
+          disallowedTools: profile.disallowedTools,
+          shellAccess: profile.shellAccess,
+          model: resolveRegistryModelInstance(profile.model)
+        }))
+      : []
 
   const checkpointer = await getCheckpointer(threadId)
   console.log("[Runtime] Checkpointer ready for thread:", threadId)
@@ -2439,6 +2818,18 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     skillUseTracker
   })
 
+  // Read-only runtimes (registry shellAccess "read_only" OR coordinator workload
+  // "read_only") gate execute per-command via isReadOnlyShellCommand. The tool
+  // layer checks the agent-issued command, but a PreToolUse hook can rewrite it
+  // after that check — so also enforce on the EFFECTIVE command inside the
+  // sandbox. (Same predicate as the customExecute gate above.)
+  if (
+    options.filesystemAccess?.shellAccess === "read_only" ||
+    options.filesystemAccess?.workload === "read_only"
+  ) {
+    backend.setReadOnlyShellEnforced(true)
+  }
+
   // ── Wire up the approval orchestrator ──
   const yoloMode = getYoloMode()
   // Keep approval IPC available even in YOLO mode. YOLO skips the initial shell/file
@@ -2504,6 +2895,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         },
         request: req,
         threadId: approvalThreadId,
+        // The runtime's own thread (subagent `__wf_…` for a workflow leaf), so
+        // hasPendingWorkflowApproval can tell which workflow run is blocked.
+        runtimeThreadId: threadId,
         targetWebContentsIds: BrowserWindow.getAllWindows().map((w) => w.webContents.id)
       })
       options.abortSignal?.addEventListener("abort", onAbort, { once: true })
@@ -2558,10 +2952,35 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     return backend.executeRaw(command, sandboxMode, undefined, undefined, { cwd })
   }
 
-  const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, yoloMode)
+  const orchestrator = new ToolOrchestrator(
+    approvalStore,
+    rawExecute,
+    requestApproval,
+    yoloMode,
+    options.autoApproveFileEdits === true
+  )
   backend.setOrchestrator(orchestrator)
 
-  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, workingDirPromptAppendix)
+  // The background-exec guidance ("use run_in_background for builds/installs/
+  // tests/codegen") must only be injected when the runtime can ACTUALLY run those:
+  //  - execute removed (shellAccess "none" registry agents, scoped write workers)
+  //    → it would document a tool they don't have; AND
+  //  - read_only runtimes → they KEEP execute but isReadOnlyShellCommand BLOCKS
+  //    builds/installs/tests, so the guidance would steer the agent into commands
+  //    the gate rejects (contradicting its access prompt). Suppress it there too.
+  // The main agent (no filesystemAccess), verify, and whole-workspace write keep it.
+  const executeToolAvailable = options.filesystemAccess
+    ? !blockedToolNamesForAccess(options.filesystemAccess).has("execute")
+    : true
+  const isReadOnlyRuntime =
+    options.filesystemAccess?.shellAccess === "read_only" ||
+    options.filesystemAccess?.workload === "read_only"
+  let systemPrompt = getSystemPrompt(
+    workspacePath,
+    windowsSandbox,
+    workingDirPromptAppendix,
+    executeToolAvailable && !isReadOnlyRuntime
+  )
   let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
     prompt: null,
     projectRoot: workspacePath,
@@ -2691,8 +3110,17 @@ The workspace root is: ${workspacePath}`
       turnId: hookTurnId
     }
   )
+  // "Constrained" coordinator workers = the workload-based read_only/verify/scoped
+  // workers. They keep EAGER MCP but withhold the deferred bridge + code_exec (see
+  // the branch below). The whole-workspace write worker and registry agents
+  // (explicit denylist/shell mode — workflow agentTypes) are NOT constrained and
+  // keep everything. MCP discovery is app-level cached (one shared connect), so
+  // keeping eager MCP costs only the eager tools' schema tokens, not fan-out
+  // latency — matching CC subagents (which inherit MCP) and the Solo/workflow
+  // read-only baseline (eager MCP kept, deferred bridge cut).
   const isConstrainedCoordinatorWorker =
     Boolean(options.filesystemAccess) &&
+    !isExplicitToolAccess(options.filesystemAccess) &&
     (options.filesystemAccess?.workload === "read_only" ||
       options.filesystemAccess?.workload === "verify" ||
       (options.filesystemAccess?.ownedFiles?.length ?? 0) > 0)
@@ -2707,8 +3135,20 @@ The workspace root is: ${workspacePath}`
   let toolSearchTools: unknown[] = []
 
   if (isConstrainedCoordinatorWorker) {
+    // Keep EAGER MCP (a structured single tool call, bounded by the MCP server's
+    // own permissions — safe for a restricted worker, and matching CC subagents +
+    // the Solo/workflow read-only baseline which both keep eager MCP). WITHHOLD the
+    // deferred bridge (search_tool/inspect_tool/invoke_deferred_tool — the last can
+    // run saved code) and ad-hoc code_exec (arbitrary execution), which would
+    // defeat the read-only/verify/scoped restriction. So: discover + eager only —
+    // no lazy catalogue, no toolSearchTools, codeExecRouteEnabled stays false.
+    allMcpTools = await capabilityService.listTools()
+    eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
+    mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata)
     console.log(
-      "[Runtime] Skipping MCP and deferred tool discovery for constrained coordinator worker"
+      "[Runtime] Constrained coordinator worker: keeping",
+      eagerMcpMetadata.length,
+      "eager MCP tools (deferred bridge + code_exec withheld)"
     )
   } else {
     allMcpTools = await capabilityService.listTools()
@@ -2825,6 +3265,137 @@ The workspace root is: ${workspacePath}`
       }
     }
   }
+  if (options.additionalTools?.length) {
+    extraTools.push(...(options.additionalTools as unknown as RuntimeTool[]))
+  }
+
+  if (isWorkflowMode) {
+    // Dynamic Workflows: the model writes a JS orchestration script; the run
+    // executes in the BACKGROUND (detached from this turn — the manager owns
+    // its abort), each agent() runs as a one-shot leaf runtime on its own
+    // checkpoint thread, and approvals surface on this (parent) thread's UI
+    // via approvalThreadId — mirroring coordinator async workers.
+    extraTools.push(
+      createWorkflowTool({
+        threadId,
+        workspacePath,
+        modelId,
+        // Run-before approval gate (aligns with Claude Code's "Review dynamic
+        // workflow before running"): the model writing a workflow can fan out
+        // many file-editing subagents and spend real tokens, so the user
+        // confirms once (Approve / Approve-session / Reject) before launch.
+        yoloMode,
+        approvalStore,
+        requestApproval,
+        // Run-level exclusive file-write lock keyed on this (parent) threadId — the
+        // SAME lock the run's subagent tool writes use (toolConcurrencyQueueId =
+        // threadId). Injected so a script writeFile() and a concurrent agent()'s
+        // tool write serialize TOGETHER, not each in its own silo. (#2)
+        runExclusiveFileWrite: <T>(fn: () => Promise<T>): Promise<T> =>
+          getToolConcurrencyLock(threadId).write(fn),
+        subagentDeps: {
+          createRuntime: async (subagentOptions): Promise<WorkflowSubagentRuntime> => {
+            // read_only AND none are both restricted roles → skip AGENTS.md +
+            // MEMORY.md (CC omitClaudeMd parity). Only full (write/verify) keeps
+            // them; `none` (a no-shell CC-style agent, e.g. tools: Read) must not
+            // get MORE context than read_only. undefined ⇒ full (filesystemAccess
+            // defaults `?? "full"` below), so it still keeps them.
+            const restrictedRole =
+              subagentOptions.shellAccess === "read_only" || subagentOptions.shellAccess === "none"
+            const subagentRuntime = await createAgentRuntime({
+              threadId: subagentOptions.threadId,
+              approvalThreadId: threadId,
+              workspacePath,
+              modelId: subagentOptions.modelId,
+              extraSystemPrompt: subagentOptions.extraSystemPrompt,
+              noSchedulerTool: true,
+              noSkillEvolutionTool: true,
+              // agentType leaves keep skills (CC subagents can invoke project/user
+              // skills via the Skill tool — here that's the injected skill catalogue
+              // + read_file). read-only roles (Explore/Plan) skip BOTH AGENTS.md and
+              // MEMORY.md — this mirrors CC's omitClaudeMd, which drops the whole
+              // claudeMd channel (CLAUDE.md + the user's auto-MEMORY.md ride together
+              // in userContext.claudeMd by default, tengu_moth_copse off). Write/
+              // verify (full shell) keep both: a write-capable subagent inherits
+              // claudeMd in CC. memory_search/memory_get tools stay available either way.
+              enableAgentsPrompt: !restrictedRole,
+              disableMemoryInjection: restrictedRole,
+              agentMode: "normal",
+              disableSubagents: true,
+              // agentType-resolved tool policy. Cuts the disallowed tools and
+              // enforces the shell policy via the same filesystemAccess path
+              // coordinator workers use (explicit denylist mode) — the workflow
+              // Level-1 hard tool cut. read_only shell is gated per-command in
+              // createFsMiddleware's execute via isReadOnlyShellCommand.
+              ...(subagentOptions.disallowedTools !== undefined ||
+              subagentOptions.shellAccess !== undefined
+                ? {
+                    filesystemAccess: {
+                      disallowedTools: subagentOptions.disallowedTools ?? [],
+                      shellAccess: subagentOptions.shellAccess ?? "full",
+                      workspacePath
+                    }
+                  }
+                : {}),
+              abortSignal: subagentOptions.abortSignal,
+              retryHooks,
+              maxRetryAttempts,
+              hookScope: createInheritedHookScope(hookScope),
+              onHookResult,
+              hookTurnId,
+              additionalTools: subagentOptions.additionalTools,
+              // All subagents of this run share the parent thread's tool-
+              // concurrency queue so their file writes serialize across the
+              // run (no two parallel agents clobber the same file); reads
+              // still run concurrently. Also serializes with any foreground
+              // edit the user makes on this thread while the run is in flight.
+              toolConcurrencyQueueId: threadId,
+              // acceptEdits: the user approved the whole workflow at launch, so
+              // its background subagents must not re-prompt per file edit
+              // (shell execution stays gated).
+              autoApproveFileEdits: true
+            })
+            return subagentRuntime as unknown as WorkflowSubagentRuntime
+          },
+          cleanupThread: async (workflowThreadId: string): Promise<void> => {
+            // Kill any run_in_background tasks the subagent started so they don't
+            // outlive the run (coordinator workers cancel theirs the same way via
+            // cancelBackgroundTasks — without this a backgrounded process leaks
+            // CPU/memory/file writes after the workflow completes or is cancelled).
+            LocalSandbox.cancelBackgroundTasks(workflowThreadId)
+            const cleanupResults = await Promise.allSettled([
+              LocalSandbox.revokeGrantedAclsForRun(workflowThreadId),
+              closeCheckpointer(workflowThreadId)
+            ])
+            for (const result of cleanupResults) {
+              if (result.status === "rejected") {
+                console.warn("[Workflow] Subagent cleanup error:", result.reason)
+              }
+            }
+            // Workflow subagent threads are one-shot (retries use a fresh id);
+            // drop the checkpoint sqlite so a 1000-agent run doesn't leave a
+            // thousand dead files in the threads directory.
+            try {
+              deleteThreadCheckpoint(workflowThreadId)
+            } catch (error) {
+              console.warn("[Workflow] Subagent checkpoint delete failed:", error)
+            }
+          },
+          isRetryableApiError,
+          // A run is "awaiting approval" while any of its subagent threads has a
+          // pending approval. Matches on the subagent's runtime thread (the entry's
+          // routing threadId is the PARENT, which is why the earlier threadId-prefix
+          // check was always false). The engine passes its own runId so the check is
+          // scoped to THIS run (two concurrent runs on one parent thread must not
+          // share watchdog state). The engine's inactivity watchdog uses this to NOT
+          // abort a run merely waiting for an absent user to answer a prompt.
+          hasPendingApproval: (runId?: string): boolean =>
+            hasPendingWorkflowApproval(threadId, runId)
+        }
+      }) as unknown as RuntimeTool
+    )
+  }
+
   wrapToolErrors(extraTools)
   wrapToolErrors(memoryTools as RuntimeTool[])
 
@@ -2901,10 +3472,7 @@ The workspace root is: ${workspacePath}`
   }
 
   const coordinatorWorkingDirAppendix = workingDirPromptAppendix?.trim()
-  const coordinatorProjectInstructions = [
-    agentsPrompt.prompt,
-    extraSystemPrompt
-  ]
+  const coordinatorProjectInstructions = [agentsPrompt.prompt, extraSystemPrompt]
     .filter(Boolean)
     .join("\n\n")
   const coordinatorWorkerProjectInstructions = [
@@ -2966,13 +3534,13 @@ The workspace root is: ${workspacePath}`
     const scratchpadDir = getCoordinatorScratchpadDir(workerInput.parentThreadId)
     const workerAccessPrompt = (() => {
       if (workerInput.workload === "read_only") {
-        return "Access limits: read-only worker. You can inspect files and search, but write_file, edit_file, execute, task_output, browser_playwright, deferred tools, and eager MCP tools are unavailable. Do not claim to have run commands."
+        return "Access limits: read-only worker. You can inspect files, search, and run read-only shell commands via execute (e.g. ls, git log, git diff, find, cat, head, tail). The execute tool has a safety gate that blocks clearly-dangerous and unrecognized commands, but do NOT rely on it to catch everything — restrict yourself to read-only inspection: never use the shell for writes — no mkdir/touch/rm/cp/mv, no git add/commit/push, no package installs (npm/pip/etc.), no builds, and no redirect operators (>, >>, |) or heredocs. write_file, edit_file, browser_playwright, and the deferred-tool bridge (search/inspect/invoke_deferred) are unavailable. Eager MCP tools (if any are connected) ARE available for direct single-tool calls."
       }
       if (workerInput.workload === "verify") {
-        return "Access limits: verifier worker. You can inspect files, run validation commands, and use browser_playwright for UI/runtime verification when available, but write_file, edit_file, deferred tools, and eager MCP tools are unavailable. Do not create, modify, or delete files in the project workspace. If a temporary script or harness is necessary, write it only under /tmp or $TMPDIR and clean it up."
+        return "Access limits: verifier worker. You can inspect files, run validation commands, and use browser_playwright for UI/runtime verification when available, but write_file, edit_file, and the deferred-tool bridge (search/inspect/invoke_deferred) are unavailable. Eager MCP tools (if any are connected) ARE available for direct single-tool calls. Do not create, modify, or delete files in the project workspace. If a temporary script or harness is necessary, write it only under /tmp or $TMPDIR and clean it up."
       }
       if (workerInput.ownedFiles.length > 0) {
-        return `Access limits: scoped write worker. write_file and edit_file are limited to owned_files (${workerInput.ownedFiles.join(", ")}). execute, task_output, browser_playwright, deferred tools, and eager MCP tools are unavailable, so do not claim to have run shell/browser checks. File edits may still require explicit user approval; if write_file or edit_file is denied/blocked, do not loop the same call and instead report the blocking file/action back to the coordinator.`
+        return `Access limits: scoped write worker. write_file and edit_file are limited to owned_files (${workerInput.ownedFiles.join(", ")}). execute, task_output, browser_playwright, and the deferred-tool bridge (search/inspect/invoke_deferred) are unavailable, so do not claim to have run shell/browser checks. Eager MCP tools (if any are connected) ARE available for direct single-tool calls. File edits may still require explicit user approval; if write_file or edit_file is denied/blocked, do not loop the same call and instead report the blocking file/action back to the coordinator.`
       }
       return "Access limits: write worker. You may edit workspace files as needed for the assigned implementation. File edits may still require explicit user approval; if write_file or edit_file is denied/blocked, do not loop the same call and instead report the blocking file/action back to the coordinator."
     })()
@@ -3523,7 +4091,18 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       hasInvokeDeferredTool,
       hasCodeExecTool
     })
-    systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)
+    // Only advertise the deferred-tool inventory when the invoke bridge is
+    // actually present. A restricted leaf (read_only/none registry agent — e.g. a
+    // workflow Explore/Plan) has search/inspect/invoke_deferred removed, yet it is
+    // NOT an isConstrainedCoordinatorWorker, so lazy MCP / saved tools still fill
+    // deferredToolIds. Listing IDs it can't invoke is misleading noise, so gate on
+    // the invoke capability (the bridge tools are cut as a set for read_only/none).
+    if (hasInvokeDeferredTool) {
+      systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)
+    }
+    if (isWorkflowMode) {
+      systemPrompt += WORKFLOW_MODE_SYSTEM_PROMPT
+    }
   }
   console.log("[Runtime] System prompt summary:", {
     chars: systemPrompt.length,
@@ -3558,7 +4137,10 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
 
   backend.setGitWorkflowCommitOnly(false)
   const mainTools = isCoordinatorMode ? coordinatorWorkerToolsForMain : finalTools
-  const workerTools = finalTools
+  // Task-tool subagents must not orchestrate workflows of their own.
+  const workerTools = finalTools.filter(
+    (runtimeTool) => (runtimeTool as { name?: string }).name !== "workflow"
+  )
   const coordinatorSubagents: ReturnType<typeof buildCoordinatorWorkerSubagents> = []
 
   console.log(
@@ -3579,12 +4161,20 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       mainTodosEnabled: false,
       mainFilesystemEnabled: false,
       mainSkillsEnabled: false,
-      mainMemoryEnabled: false
+      mainMemoryEnabled: !disableMemoryInjection && Boolean(memorySources?.length)
     })
   }
   const mainSkillSources =
     !isCoordinatorMode && allSkillsSources.length > 0 ? allSkillsSources : undefined
-  const mainMemorySources = !isCoordinatorMode && memorySources?.length ? memorySources : undefined
+  // memory is NOT gated by coordinator mode (unlike todos/fs/skills above, which are
+  // "doing-work" capabilities a pure orchestrator shouldn't have). The coordinator
+  // main agent is the ONLY agent that talks directly to the user, so user-collaboration
+  // preferences in MEMORY.md (e.g. "always reply in Chinese") must reach it. This mirrors
+  // CC: its coordinator main still carries the user's auto-MEMORY.md via
+  // userContext.claudeMd (coordinator only swaps the system prompt, not the user context).
+  // Same memory middleware as a normal main agent — injects content only, no tool changes.
+  const mainMemorySources =
+    !disableMemoryInjection && memorySources?.length ? memorySources : undefined
 
   const agent = createDeepAgent({
     model,
@@ -3600,6 +4190,13 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     mainFilesystemEnabled: !isCoordinatorMode,
     mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents,
     filesystemAccess: options.filesystemAccess,
+    registrySubagentSpecs,
+    // The runtime's commands execute via the sandbox; on Windows with a sandbox
+    // that's PowerShell. Pass that to the read-only execute gate so PS read-only
+    // cmdlets aren't false-blocked (matches the shellKind LocalSandbox uses for
+    // assessCommandSafety). Off Windows / no sandbox → "unknown" (strict).
+    windowsShellKind:
+      process.platform === "win32" && windowsSandbox !== "none" ? "powershell" : "unknown",
     taskSystemPrompt: isCoordinatorMode
       ? buildCoordinatorTaskPrompt(threadId)
       : SEQUENTIAL_TASK_PROMPT,
@@ -3620,7 +4217,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       maxLength: 2000
     },
     threadId: options.threadId,
-    toolConcurrencyQueueId: options.threadId ?? workspacePath,
+    toolConcurrencyQueueId: options.toolConcurrencyQueueId ?? options.threadId ?? workspacePath,
     toolHookMiddleware,
     // PR-12 — closure captures threadId / workspacePath / hookScope so
     // createDeepAgent's middleware can fire-and-forget the PostToolUseFailure
