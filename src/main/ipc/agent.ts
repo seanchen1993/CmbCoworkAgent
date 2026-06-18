@@ -98,6 +98,7 @@ import {
   type CoordinatorSelectedSkill
 } from "../agent/coordinator-mode"
 import { workflowRunManager } from "../agent/workflow/run-manager"
+import { runFilePath } from "../agent/workflow/run-store"
 import {
   WORKFLOW_NOTIFICATION_MARKER_PREFIX,
   WORKFLOW_NOTIFICATION_TURN_PROMPT,
@@ -4179,7 +4180,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             await tracer.finish("success", "WORKFLOW_NOTIFICATION_STALE")
             return
           }
-          effectiveMessage = buildWorkflowNotificationMessage(pendingWorkflowRun)
+          const workflowOutputFile = runFilePath(
+            workspacePath,
+            pendingWorkflowRun.threadId,
+            pendingWorkflowRun.runId
+          )
+          effectiveMessage = buildWorkflowNotificationMessage(
+            pendingWorkflowRun,
+            workflowOutputFile
+          )
           modelInputMessage = effectiveMessage
           // At-least-once (mirrors coordinator): mark in-flight IN MEMORY only —
           // do NOT persist `delivered` yet. The durable flag is set only when this

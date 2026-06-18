@@ -38,8 +38,13 @@ export const WORKFLOW_LOG_MAX_CHARS = 2_000
 /** Maximum retained `log()` lines per run. */
 export const WORKFLOW_MAX_LOG_LINES = 500
 
-/** Truncation cap for the workflow tool's final result returned to the model. */
-export const WORKFLOW_TOOL_RESULT_MAX_CHARS = 32_000
+/** Truncation cap (CHARACTERS) for the workflow tool's final result inlined in the
+ * completion notification. ~8K to match Claude Code's <result> preview cap — CC's
+ * marker reports the unit explicitly as "truncated N chars" and its preview measures
+ * ~8K chars (≈2K tokens), not 32K. When a result exceeds this it is truncated inline
+ * with a marker, and the FULL result is always linked via <output-file> for the model
+ * to read with its file tools. */
+export const WORKFLOW_TOOL_RESULT_MAX_CHARS = 8_000
 
 /** Schema-validation retries granted to a subagent's structured_output tool. */
 export const WORKFLOW_STRUCTURED_OUTPUT_MAX_ATTEMPTS = 5

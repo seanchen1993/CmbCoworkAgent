@@ -84,7 +84,7 @@ export function deleteWorkflowRunsForThread(workspacePath: string, threadId: str
   }
 }
 
-function runFilePath(workspacePath: string, threadId: string, runId: string): string {
+export function runFilePath(workspacePath: string, threadId: string, runId: string): string {
   return join(
     getWorkflowRunsDir(workspacePath, threadId),
     `${assertSafeSegment(runId, "runId")}.json`

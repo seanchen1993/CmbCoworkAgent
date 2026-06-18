@@ -2237,11 +2237,38 @@ return "<".repeat(${WORKFLOW_TOOL_RESULT_MAX_CHARS})`,
     bloatMessage.indexOf("<result>") + "<result>".length,
     bloatMessage.indexOf("</result>")
   )
+  // The body is the capped escaped result PLUS a truncation marker. The capped part
+  // (before the marker) stays within the limit even when escaping expands it; the
+  // marker tells the model how much was cut.
+  const cappedPart = resultBody.split(" ... (truncated")[0]
   assert(
-    resultBody.length <= WORKFLOW_TOOL_RESULT_MAX_CHARS,
-    `escaped result capped to the limit even when escaping expands it (got ${resultBody.length})`
+    cappedPart.length <= WORKFLOW_TOOL_RESULT_MAX_CHARS,
+    `escaped result capped to the limit even when escaping expands it (got ${cappedPart.length})`
   )
-  assert(!/&[a-z]*$/.test(resultBody), "no dangling partial XML entity left at the cap boundary")
+  assert(!/&[a-z]*$/.test(cappedPart), "no dangling partial XML entity left at the cap boundary")
+  assert(/\(truncated \d+ chars/.test(resultBody), "oversized result carries a truncation marker")
+
+  // output-file + summary + truncated-with-path (mirrors Claude Code): an oversized
+  // result points at the on-disk full result so the model can read the complete value
+  // instead of working off half-cut JSON.
+  const fullPath = `/tmp/ws/.cmbdevclaw/workflows/t/${bloating.runId}.json`
+  const withFile = buildWorkflowNotificationMessage(bloatingRun, fullPath)
+  assert(
+    withFile.includes(`<output-file>${fullPath}</output-file>`),
+    "notification surfaces the full-result file path"
+  )
+  assert(withFile.includes("<summary>"), "notification includes a one-line task summary")
+  assert(
+    withFile.includes(`full result in ${fullPath}`),
+    "truncated result points at the full-result file path"
+  )
+  // A small result must NOT be marked truncated, but still carries the output-file path.
+  const smallMsg = buildWorkflowNotificationMessage(run, fullPath)
+  assert(!smallMsg.includes("(truncated"), "small result is not marked truncated")
+  assert(
+    smallMsg.includes(`<output-file>${fullPath}</output-file>`),
+    "output-file present even when the result is not truncated"
+  )
 
   // #1: an undelivered terminal run must still be found when newer DELIVERED runs
   // bury it past the old newest-5 cap — otherwise its result is lost forever. Use

@@ -1626,35 +1626,47 @@ test("workflow warns when the initial run state could not be persisted", () => {
   )
 })
 
-test("workflow refuses a second concurrent run over the same workspace (any thread)", () => {
-  // #1: the per-thread guard does NOT stop two threads opened on the SAME workspace
-  // from each launching a run — they'd race on file writes (host writeFile + every
-  // subagent edit land in one tree, serialized only WITHIN a run). The manager must
-  // scan active runs by workspacePath and refuse the second.
+test("workflow allows concurrent runs over the same workspace; workspace lock removed by design", () => {
+  // The per-thread guard still serializes runs WITHIN one conversation, but the
+  // workspace-level lock (refusing a second run on the same workspace from another
+  // thread) was intentionally removed to match Claude Code desktop behavior. CC runs
+  // concurrent workflows safely because each gets a git-worktree; cmbcowork has no
+  // worktree, so the accepted trade-off is that two write-heavy runs touching the
+  // same file can clobber each other — low-frequency and git-recoverable.
+  // activeRunForWorkspace is KEPT (auto-commit still skips while ANY run is active on
+  // the workspace), so the scan-by-canonical-key + realpath logic must remain.
   assert.match(
     workflowRunManagerSource,
     /activeRunForWorkspace\(workspacePath: string\)[\s\S]*?runKey === key \|\| isPathInside\(runKey, key\) \|\| isPathInside\(key, runKey\)/,
-    "run manager scans active runs by canonical workspace key, incl. parent/child nesting"
+    "activeRunForWorkspace still scans active runs by canonical workspace key (used by auto-commit)"
   )
-  // #4: compare CANONICAL paths (realpath) so a symlink / macOS case-variant /
-  // trailing slash can't let a second run over the same directory slip past.
   assert.match(
     workflowRunManagerSource,
     /function workspaceKey\(p: string\)[\s\S]*?realpathSync\.native\(p\)/,
     "workspace key is realpath-canonicalized"
   )
-  // The authoritative guard lives in launch() (synchronous through active.set, so
-  // race-safe) and throws on a workspace clash.
+  // launch() must NOT throw a workspace clash anymore — the lock is gone.
+  assert.doesNotMatch(
+    workflowRunManagerSource,
+    /already running over this workspace/,
+    "launch() no longer refuses a clashing workspace (workspace lock removed)"
+  )
+  assert.doesNotMatch(
+    workflowToolSource,
+    /already running over this workspace/,
+    "tool entry no longer surfaces a workspace clash (workspace lock removed)"
+  )
+  // The intentional removal is documented in the source so it isn't re-added by mistake.
   assert.match(
     workflowRunManagerSource,
-    /this\.activeRunForWorkspace\(request\.workspacePath\)[\s\S]*?already running over this workspace/,
-    "launch() refuses a clashing workspace before registering the run"
+    /No workspace-level mutual exclusion/,
+    "the removal is documented as an intentional design decision"
   )
-  // The tool entry has an advisory early check so the error precedes approval.
+  // The per-thread lock MUST remain (a single conversation still runs one at a time).
   assert.match(
-    workflowToolSource,
-    /workflowRunManager\.activeRunForWorkspace\(workspacePath\)[\s\S]*?already running over this workspace/,
-    "tool entry surfaces the workspace clash before the approval prompt"
+    workflowRunManagerSource,
+    /already running in this thread/,
+    "per-thread lock is retained"
   )
 })
 

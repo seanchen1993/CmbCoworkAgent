@@ -59,8 +59,15 @@ function escapeAndCap(text: string, max: number): string {
   return cut
 }
 
-export function buildWorkflowNotificationMessage(run: PersistedWorkflowRun): string {
+export function buildWorkflowNotificationMessage(
+  run: PersistedWorkflowRun,
+  outputFilePath?: string
+): string {
   const stats: WorkflowRunStats = run.stats
+  // The COMPLETE result is always persisted to disk; surface its path so the model can
+  // read the full result with its file tools when the inline <result> below is
+  // truncated (mirrors Claude Code's <output-file>).
+  const escapedOutputFile = outputFilePath ? escapeXml(outputFilePath) : ""
   const lines: string[] = [
     `${WORKFLOW_NOTIFICATION_MARKER_PREFIX}${run.runId}]]`,
     "[SYSTEM NOTIFICATION - NOT USER INPUT]",
@@ -68,12 +75,27 @@ export function buildWorkflowNotificationMessage(run: PersistedWorkflowRun): str
     "",
     "<task-notification>",
     `<task-id>${escapeXml(run.runId)}</task-id>`,
-    `<workflow-name>${escapeXml(run.workflowName)}</workflow-name>`,
-    `<status>${escapeXml(run.status)}</status>`
+    `<workflow-name>${escapeXml(run.workflowName)}</workflow-name>`
   ]
+  if (escapedOutputFile) lines.push(`<output-file>${escapedOutputFile}</output-file>`)
+  lines.push(`<status>${escapeXml(run.status)}</status>`)
+  // One-line task summary (meta.description) — an overview the model still has even
+  // when <result> is truncated.
+  const summary = run.description ?? run.workflowName
+  if (summary) lines.push(`<summary>${escapeAndCap(summary, 1_000)}</summary>`)
   if (run.status === "completed") {
     const resultJson = JSON.stringify(toJsonSafe(run.result) ?? null, null, 2)
-    lines.push(`<result>${escapeAndCap(resultJson, WORKFLOW_TOOL_RESULT_MAX_CHARS)}</result>`)
+    const capped = escapeAndCap(resultJson, WORKFLOW_TOOL_RESULT_MAX_CHARS)
+    if (resultJson.length > WORKFLOW_TOOL_RESULT_MAX_CHARS) {
+      // Truncated: tell the model HOW MUCH was cut and WHERE the full result lives, so
+      // it reads the complete value instead of working off half-cut JSON (mirrors
+      // Claude Code's "(truncated N chars, full result in <path>)").
+      const dropped = resultJson.length - WORKFLOW_TOOL_RESULT_MAX_CHARS
+      const where = escapedOutputFile ? `, full result in ${escapedOutputFile}` : ""
+      lines.push(`<result>${capped} ... (truncated ${dropped} chars${where})</result>`)
+    } else {
+      lines.push(`<result>${capped}</result>`)
+    }
     if (run.warning) {
       lines.push(`<warning>${escapeAndCap(run.warning, 2_000)}</warning>`)
     }

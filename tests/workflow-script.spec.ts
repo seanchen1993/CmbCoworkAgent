@@ -138,6 +138,16 @@ function testSyntaxErrorReported(): void {
     "syntax error",
     "syntax error surfaces"
   )
+  // Model-actionable: the message must show the OFFENDING LINE with a position marker
+  // and a fix-and-retry hint — not just acorn's bare "(line:col)".
+  const broken = `export const meta = { name: "a", description: "b" }\nreturn { a: 1, b: }`
+  expectThrows(() => validateWorkflowScript(broken), "»HERE»", "marks the error position inline")
+  expectThrows(() => validateWorkflowScript(broken), "return { a", "shows the offending line content")
+  expectThrows(
+    () => validateWorkflowScript(broken),
+    "Fix this syntax error and call the workflow tool again",
+    "tells the model to fix and retry"
+  )
 }
 
 function testJsonSchemaValidator(): void {
@@ -638,12 +648,12 @@ function testWorkflowModePromptDistinguishesTaskVsWorkflow(): void {
   // Agent side by side) but the prompt must steer fan-out to `workflow` rather
   // than hand-rolled repeated `task` calls (which skip approval/journal/resume).
   assert(
-    WORKFLOW_MODE_SYSTEM_PROMPT.includes("workflow vs the `task` tool"),
+    WORKFLOW_MODE_SYSTEM_PROMPT.includes("`task` is ONE inline subagent") &&
+      WORKFLOW_MODE_SYSTEM_PROMPT.includes("`workflow` is FAN-OUT"),
     "workflow-mode prompt explicitly distinguishes the task tool from workflow"
   )
   assert(
-    WORKFLOW_MODE_SYSTEM_PROMPT.includes("do NOT drive a multi-agent fan-out") &&
-      WORKFLOW_MODE_SYSTEM_PROMPT.includes("repeated `task` calls"),
+    WORKFLOW_MODE_SYSTEM_PROMPT.includes("hand-roll a fan-out with repeated `task` calls"),
     "workflow-mode prompt tells the model not to fan out via repeated task calls"
   )
 }

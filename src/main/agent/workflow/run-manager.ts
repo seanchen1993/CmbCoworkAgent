@@ -188,17 +188,14 @@ class WorkflowRunManager {
         `A dynamic workflow (${this.active.get(request.threadId)!.runId}) is already running in this thread. Wait for its task-notification or cancel it from the workflow panel.`
       )
     }
-    // Workspace-level mutual exclusion: a second run over the SAME workspace (on
-    // another thread) would race the first on file writes. This check + active.set
-    // below run with no await between them, so it cannot interleave with another
-    // launch — unlike the advisory pre-check in the tool entry, which races the
-    // approval await. (Same-thread relaunch is already caught above.)
-    const workspaceClash = this.activeRunForWorkspace(request.workspacePath)
-    if (workspaceClash) {
-      throw new Error(
-        `A dynamic workflow (${workspaceClash.runId}) is already running over this workspace in another thread. Concurrent workflows on one workspace would corrupt each other's edits — wait for it to finish or cancel it.`
-      )
-    }
+    // No workspace-level mutual exclusion: concurrent workflows over the SAME
+    // workspace on different threads are intentionally allowed (matches Claude
+    // Code desktop). Trade-off: cmbcowork has no per-run git-worktree isolation
+    // (CC's mechanism for safe concurrency), so two write-heavy workflows touching
+    // the same file can clobber each other — low-frequency (most workflows are
+    // read-only) and git-recoverable. The same-thread lock above still serializes
+    // runs within one conversation, and auto-commit still skips while ANY workflow
+    // is active on the workspace (activeRunForWorkspace is still used there).
     // Fresh launch (incl. a resume reusing this runId) → reset its re-notify
     // budget, so a prior run's exhausted attempts don't pre-throttle this one.
     this.renotifyAttempts.delete(request.runId)

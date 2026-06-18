@@ -135,15 +135,8 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
           `A dynamic workflow (${workflowRunManager.activeRunId(threadId)}) is already running in this thread. Wait for its task-notification, or the user can cancel it from the workflow panel.`
         )
       }
-      // Advisory early check so the error precedes the approval prompt. The
-      // authoritative, race-safe guard is in run-manager.launch() (this one races
-      // the approval await below).
-      const workspaceClash = workflowRunManager.activeRunForWorkspace(workspacePath)
-      if (workspaceClash) {
-        throw new Error(
-          `A dynamic workflow (${workspaceClash.runId}) is already running over this workspace in another thread. Wait for it to finish or cancel it before starting another.`
-        )
-      }
+      // No workspace-level lock: concurrent workflows over the same workspace on
+      // different threads are intentionally allowed (matches Claude Code desktop).
       // Resolve the resume target first so its persisted script can serve as the
       // script source when the model passes only resumeFromRunId (self-contained
       // resume — it need not re-send the script).

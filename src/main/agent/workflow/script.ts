@@ -187,7 +187,24 @@ export function validateWorkflowScript(source: string): ParsedWorkflowScript {
     }) as unknown as AcornNode
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    throw new WorkflowScriptError(`workflow script has a syntax error: ${message}`)
+    // acorn's bare "(line:col)" is too thin for a model to act on — show the actual
+    // offending line with the error position marked, plus a fix-and-retry hint, so the
+    // model can SEE and correct the syntax instead of guessing from a column number.
+    const loc = (error as { loc?: { line?: number; column?: number } }).loc
+    let context = ""
+    if (loc && typeof loc.line === "number") {
+      const badLine = script.split("\n")[loc.line - 1]
+      if (typeof badLine === "string") {
+        const col = typeof loc.column === "number" ? loc.column : 0
+        const start = Math.max(0, col - 50)
+        const head = (start > 0 ? "…" : "") + badLine.slice(start, col)
+        const tail = badLine.slice(col, col + 50) + (badLine.length > col + 50 ? "…" : "")
+        context = `\n  at line ${loc.line}, col ${col}:  ${head}»HERE»${tail}`
+      }
+    }
+    throw new WorkflowScriptError(
+      `workflow script has a syntax error: ${message}.${context}\n  Fix this syntax error and call the workflow tool again with the corrected script.`
+    )
   }
 
   const statements = program.body as AcornNode[]
