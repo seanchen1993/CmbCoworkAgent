@@ -93,6 +93,10 @@ import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
 import { AgentGitCommitDialog, type AgentCommitOutcome } from "./AgentGitCommitDialog"
+import {
+  ContextReminderController,
+  isContextReminderPending
+} from "./ContextReminderController"
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
 import {
@@ -916,8 +920,10 @@ interface ChatContainerProps {
   showGitChangeNotice?: boolean
   surface?: ChatSurface
   hideWelcomeSkillTabs?: boolean
+  readOnlyReason?: string | null
   onOpenGitPanel?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
+  onHarnessSessionCreated?: (threadId: string) => void
 }
 
 interface SkillIntentBannerRequest {
@@ -1393,13 +1399,16 @@ export function ChatContainer({
   showGitChangeNotice = false,
   surface = "default",
   hideWelcomeSkillTabs = false,
+  readOnlyReason = null,
   onOpenGitPanel,
-  onThreadGitStatusChange
+  onThreadGitStatusChange,
+  onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
+  const readOnly = Boolean(readOnlyReason)
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
-  const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips
+  const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -1437,6 +1446,7 @@ export function ChatContainer({
     }))
   )
   const [yoloMode, setYoloMode] = useState(false)
+  const [yoloModeLoaded, setYoloModeLoaded] = useState(false)
   const [glowVisible, setGlowVisible] = useState(false)
   // NUX (first-run sandbox setup)
   const [showNux, setShowNux] = useState<boolean>(false)
@@ -1530,6 +1540,7 @@ export function ChatContainer({
   const {
     threads,
     models,
+    createThread,
     updateThread,
     generateTitleForFirstMessage,
     setShowCustomizeView,
@@ -1557,55 +1568,7 @@ export function ChatContainer({
     () => getPendingHarnessNextAction(threadId),
     [pendingHarnessNextActionVersion, threadId]
   )
-  const [transientHarnessDialogTips, setTransientHarnessDialogTips] = useState<{
-    threadId: string
-    tips: string
-  } | null>(null)
   const pendingHarnessDialogTips = pendingHarnessNextAction?.dialogTips?.trim() || null
-  const transientHarnessDialogTipsForThread =
-    transientHarnessDialogTips?.threadId === threadId ? transientHarnessDialogTips.tips : null
-  const [harnessDialogTips, setHarnessDialogTips] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!threadId || !pendingHarnessDialogTips) return
-    setTransientHarnessDialogTips({ threadId, tips: pendingHarnessDialogTips })
-  }, [pendingHarnessDialogTips, threadId])
-
-  useEffect(() => {
-    if (!shouldShowHarnessDialogTips || !harnessFeatureBinding) {
-      setHarnessDialogTips(null)
-      return
-    }
-
-    const nextActionDialogTips =
-      pendingHarnessDialogTips ?? transientHarnessDialogTipsForThread?.trim()
-    if (nextActionDialogTips) {
-      setHarnessDialogTips(nextActionDialogTips)
-      return
-    }
-
-    let cancelled = false
-    setHarnessDialogTips(null)
-    window.api.harnessBoard
-      .getDialogTips(harnessFeatureBinding.projectId, harnessFeatureBinding.slug)
-      .then((tips) => {
-        if (!cancelled) setHarnessDialogTips(tips?.trim() || null)
-      })
-      .catch((error) => {
-        console.warn("[ChatContainer] Failed to load harness dialog tips:", error)
-        if (!cancelled) setHarnessDialogTips(null)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [
-    harnessFeatureBinding?.projectId,
-    harnessFeatureBinding?.slug,
-    pendingHarnessDialogTips,
-    transientHarnessDialogTipsForThread,
-    shouldShowHarnessDialogTips
-  ])
 
   const resolveAgentMode = useCallback(
     async (metadata: Record<string, unknown>): Promise<ChatAgentMode> => {
@@ -1844,8 +1807,10 @@ export function ChatContainer({
     hookInterruption,
     workspacePath,
     tokenUsage,
+    contextReminder,
     currentModel,
     draftInput: input,
+    harnessNextActionDialogTips,
     draftSkill: selectedSkill,
     coordinatorWorkers,
     scheduledTaskLoading,
@@ -1865,9 +1830,56 @@ export function ChatContainer({
     setError,
     clearError,
     clearHookInterruption,
+    setContextReminder,
     setDraftInput: setInput,
+    setHarnessNextActionDialogTips,
     setDraftSkill: setSelectedSkill
   } = useCurrentThread(threadId)
+
+  const storedHarnessNextActionDialogTips = harnessNextActionDialogTips?.trim() || null
+  const harnessDialogTipsProjectId = harnessFeatureBinding?.projectId ?? null
+  const harnessDialogTipsSlug = harnessFeatureBinding?.slug ?? null
+  const [harnessDialogTips, setHarnessDialogTips] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!pendingHarnessDialogTips) return
+    setHarnessNextActionDialogTips(pendingHarnessDialogTips)
+  }, [pendingHarnessDialogTips, setHarnessNextActionDialogTips])
+
+  useEffect(() => {
+    if (!shouldShowHarnessDialogTips || !harnessDialogTipsProjectId || !harnessDialogTipsSlug) {
+      setHarnessDialogTips(null)
+      return
+    }
+
+    const nextActionDialogTips = pendingHarnessDialogTips ?? storedHarnessNextActionDialogTips
+    if (nextActionDialogTips) {
+      setHarnessDialogTips(nextActionDialogTips)
+      return
+    }
+
+    let cancelled = false
+    setHarnessDialogTips(null)
+    window.api.harnessBoard
+      .getDialogTips(harnessDialogTipsProjectId, harnessDialogTipsSlug)
+      .then((tips) => {
+        if (!cancelled) setHarnessDialogTips(tips?.trim() || null)
+      })
+      .catch((error) => {
+        console.warn("[ChatContainer] Failed to load harness dialog tips:", error)
+        if (!cancelled) setHarnessDialogTips(null)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    harnessDialogTipsProjectId,
+    harnessDialogTipsSlug,
+    pendingHarnessDialogTips,
+    shouldShowHarnessDialogTips,
+    storedHarnessNextActionDialogTips
+  ])
 
   // Hook logs live in an external store so updates don't re-render the full provider tree.
   // Per-turn buckets are keyed by the user message id that opened the turn,
@@ -1923,6 +1935,8 @@ export function ChatContainer({
     (worker) => worker.status === "running"
   )
   const isLoading = streamData.isLoading || scheduledTaskLoading
+  const isHarnessContextReminderEnabled =
+    surface === "harness-project" && Boolean(harnessFeatureBinding) && !readOnly
   const agentModeSwitchDisabledReason = disableCoordinatorModeOption
     ? "项目模式暂不支持子代理协同模式，只能使用 Solo Agent。"
     : !canChangeAgentMode
@@ -2213,8 +2227,14 @@ export function ChatContainer({
     const fetchYoloMode = (): void => {
       window.api.sandbox
         .getYoloMode()
-        .then(setYoloMode)
-        .catch((e) => console.warn("[YoloMode] Failed to fetch:", e))
+        .then((nextYoloMode) => {
+          setYoloMode(nextYoloMode)
+          setYoloModeLoaded(true)
+        })
+        .catch((e) => {
+          setYoloModeLoaded(true)
+          console.warn("[YoloMode] Failed to fetch:", e)
+        })
     }
     fetchYoloMode()
     return window.api.sandbox.onChanged(fetchYoloMode)
@@ -2355,6 +2375,9 @@ export function ChatContainer({
     }
   }, [historyLoading, isLoading, scheduleChatReportUpload, threadId, threadMessages])
 
+  // Guards against a rapid double-click on the git_push approve button firing two
+  // workspace:pushWorktree calls before the pending approval is cleared on re-render.
+  const gitPushInFlightRef = useRef<Set<string>>(new Set())
   const handleApprovalDecision = useCallback(
     async (
       decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
@@ -2364,11 +2387,59 @@ export function ChatContainer({
       // Check if this is an orchestrator-sourced approval (has requestId)
       const approvalAny = pendingApproval as unknown as Record<string, unknown>
       if (approvalAny._orchestratorRequestId) {
+        const requestId = approvalAny._orchestratorRequestId as string
+        const toolCallId = pendingApproval.tool_call?.id || ""
+        const isApprove =
+          decision === "approve" ||
+          decision === "approve_session" ||
+          decision === "approve_permanent"
+
+        // git_push → the renderer performs the push via workspace:pushWorktree (the same
+        // path as the Git Panel) and reports the outcome back, instead of the orchestrator
+        // running the raw (sandboxed, timeout-prone) command.
+        if (approvalAny.operation === "git_push" && isApprove) {
+          // Re-entry guard: ignore a second click for the same push while it is in flight.
+          if (gitPushInFlightRef.current.has(requestId)) return
+          gitPushInFlightRef.current.add(requestId)
+          setToolCallState(toolCallId, { status: "running" })
+          removePendingApproval(pendingApproval.id)
+          try {
+            const res = await window.api.workspace.pushWorktree(threadId)
+            if (!res.success) {
+              setToolCallState(toolCallId, {
+                status: "failed",
+                reason: res.error || "推送失败"
+              })
+            }
+            window.api.sandbox.sendApprovalDecision({
+              requestId,
+              type: res.success ? "approve" : "error",
+              tool_call_id: toolCallId,
+              pushResult: { success: res.success, error: res.error }
+            })
+          } catch (e) {
+            const errorMessage = e instanceof Error ? e.message : "推送失败"
+            setToolCallState(toolCallId, {
+              status: "failed",
+              reason: errorMessage
+            })
+            window.api.sandbox.sendApprovalDecision({
+              requestId,
+              type: "error",
+              tool_call_id: toolCallId,
+              pushResult: { success: false, error: errorMessage }
+            })
+          } finally {
+            gitPushInFlightRef.current.delete(requestId)
+          }
+          return
+        }
+
         // Send decision to main process via the orchestrator's IPC channel
         window.api.sandbox.sendApprovalDecision({
-          requestId: approvalAny._orchestratorRequestId as string,
+          requestId,
           type: decision === "edit" ? "reject" : decision,
-          tool_call_id: pendingApproval.tool_call?.id || ""
+          tool_call_id: toolCallId
         })
         setToolCallState(pendingApproval.tool_call?.id || "", {
           status:
@@ -2428,6 +2499,17 @@ export function ChatContainer({
       threadId
     ]
   )
+
+  useEffect(() => {
+    if (!yoloModeLoaded || !yoloMode || !pendingApproval) return
+    const approvalRecord = pendingApproval as unknown as Record<string, unknown>
+    if (
+      approvalRecord._orchestratorRequestId &&
+      approvalRecord.operation === "git_push"
+    ) {
+      void handleApprovalDecision("approve")
+    }
+  }, [handleApprovalDecision, pendingApproval, yoloMode, yoloModeLoaded])
 
   // The pending git_commit approval (agent ran `git commit` → task-card dialog), if any.
   const agentCommitApproval = useMemo(() => {
@@ -2668,13 +2750,13 @@ export function ChatContainer({
 
       if (result !== undefined) {
         status = result.is_error ? "failed" : "completed"
-      } else if (baseState?.status === "rejected") {
-        status = "rejected"
+      } else if (isTerminalToolCallStatus(baseState?.status)) {
+        status = baseState.status
       } else if (currentApprovalIds.has(toolCall.id)) {
         status = "awaiting_approval"
         activeAssigned = true
       } else if (!isLoading) {
-        status = isTerminalToolCallStatus(baseState?.status) ? baseState!.status : "interrupted"
+        status = "interrupted"
       } else if (!activeAssigned) {
         status = "running"
         activeAssigned = true
@@ -2891,7 +2973,16 @@ export function ChatContainer({
     hasPendingTransportPayload: hasPendingGoalTransportPayload,
     goalControlAllowedWhileLoading
   })
+  const contextReminderPending = isContextReminderPending(
+    isHarnessContextReminderEnabled,
+    contextReminder
+  )
+  // 项目已删除时，会话仅可查看历史：禁用输入框与编辑器控件。
+  const effectiveInputDisabled = inputDisabled || contextReminderPending || readOnly
+  const effectiveComposerControlsDisabled = composerControlsDisabled || contextReminderPending || readOnly
   const inputPlaceholder = useMemo(() => {
+    if (readOnlyReason) return readOnlyReason
+    if (contextReminderPending) return "请先处理上下文提醒"
     const goal = goalUi.goal
     if (isLoading) {
       if (streamData.isLoading && !scheduledTaskLoading && hasActiveGoalRunning) {
@@ -2913,10 +3004,12 @@ export function ChatContainer({
     return "输入新问题，或用 /goal <目标> 开始新的长期任务"
   }, [
     attachments.length,
+    contextReminderPending,
     goalUi.goal,
     hasActiveGoalRunning,
     goalControlAllowedWhileLoading,
     isLoading,
+    readOnlyReason,
     scheduledTaskLoading,
     streamData.isLoading
   ])
@@ -3178,6 +3271,8 @@ export function ChatContainer({
     // future invoker (hotkey, programmatic call) can't accidentally ship the
     // literal "/xxx" text as a message.
     if (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) return
+    if (readOnly) return
+    if (contextReminderPending) return
     if (
       (!trimmedInput && attachments.length === 0 && !selectedSkill) ||
       historyLoading ||
@@ -3553,7 +3648,7 @@ export function ChatContainer({
   }
 
   const handleInsertNewline = useCallback((): void => {
-    if (inputDisabled) return
+    if (effectiveInputDisabled) return
 
     const textarea = inputRef.current
     const selectionStart = textarea?.selectionStart ?? input.length
@@ -3568,7 +3663,7 @@ export function ChatContainer({
       target.focus()
       target.setSelectionRange(nextCursor, nextCursor)
     })
-  }, [input, inputDisabled, setInput])
+  }, [effectiveInputDisabled, input, setInput])
 
   // Auto-resize textarea based on content
   const adjustTextareaHeight = (): void => {
@@ -4758,6 +4853,7 @@ export function ChatContainer({
                           toolResults={toolResults}
                           toolCallStates={toolCallDisplayStates}
                           pendingApproval={pendingApproval}
+                          autoApproveGitPush={!yoloModeLoaded || yoloMode}
                           onApprovalDecision={handleApprovalDecision}
                           onEditUserMessage={handleEditUserMessage}
                           onSetGoalFromMessage={handleSetGoalFromMessage}
@@ -4890,7 +4986,11 @@ export function ChatContainer({
               Boolean(
                 (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId
               ) &&
-              (pendingApproval as unknown as Record<string, unknown>).operation !== "git_commit" && (
+              (pendingApproval as unknown as Record<string, unknown>).operation !== "git_commit" &&
+              !(
+                (!yoloModeLoaded || yoloMode) &&
+                (pendingApproval as unknown as Record<string, unknown>).operation === "git_push"
+              ) && (
               <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>
           {(() => {
               const approval = pendingApproval as unknown as Record<string, unknown>
@@ -5070,6 +5170,25 @@ export function ChatContainer({
             })()}
               </div>
             )}
+            <ContextReminderController
+              enabled={isHarnessContextReminderEnabled}
+              isLoading={isLoading}
+              historyLoading={historyLoading}
+              hasPendingApproval={Boolean(pendingApproval)}
+              hasQueuedApprovals={approvalQueue.length > 0}
+              hasPendingUserInput={Boolean(pendingUserInput)}
+              tokenUsage={tokenUsage}
+              currentModel={currentModel}
+              modelContextLimit={modelContextLimit}
+              contextReminder={contextReminder}
+              setContextReminder={setContextReminder}
+              harnessFeatureBinding={harnessFeatureBinding}
+              workspacePath={workspacePath}
+              currentThreadMetadata={currentThread?.metadata}
+              createThread={createThread}
+              reserveRightSpace={reserveRightSpace}
+              onHarnessSessionCreated={onHarnessSessionCreated}
+            />
             {goalUi.goal && (
               <div className={cn("px-4 pb-1", reserveRightSpace && "md:pr-20")}>
                 <GoalStatusPanel
@@ -5206,7 +5325,7 @@ export function ChatContainer({
                   }}
                   onKeyDown={handleKeyDown}
                   placeholder={inputPlaceholder}
-                  disabled={inputDisabled}
+                  disabled={effectiveInputDisabled}
                   className={cn(
                     "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
                     "p-4 text-sm placeholder:text-muted-foreground",
@@ -5222,7 +5341,7 @@ export function ChatContainer({
                     <button
                       type="button"
                       disabled={
-                        composerControlsDisabled ||
+                        effectiveComposerControlsDisabled ||
                         attachmentLoading ||
                         attachments.length >= MAX_ATTACHMENTS ||
                         totalAttachmentChars >= MAX_TOTAL_CHARS
@@ -5254,7 +5373,7 @@ export function ChatContainer({
                         <TooltipTrigger asChild>
                           <button
                             type="button"
-                            disabled={inputDisabled}
+                            disabled={effectiveInputDisabled}
                             onClick={handleInsertNewline}
                             aria-label="换行"
                             className="cursor-pointer flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -5313,7 +5432,7 @@ export function ChatContainer({
                         <button
                           type="submit"
                           disabled={
-                            inputDisabled ||
+                            effectiveInputDisabled ||
                             (!input.trim() && attachments.length === 0 && !selectedSkill) ||
                             (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(input))
                           }

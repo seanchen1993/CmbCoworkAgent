@@ -23,6 +23,7 @@ import {
   CodeAdoptionFunnel,
   GeneratedLinesTooltip,
   InclusiveAdoptionTooltip,
+  InclusivePushedAdoptionTooltip,
   InfoHint,
   MeasuredAdoptionTooltip,
   PushedAdoptionTooltip,
@@ -198,31 +199,19 @@ export function OverviewPanel({
           />
           <StatCard
             icon={Gauge}
-            label="入库率"
-            value={formatPercent(data.codePushedAdoptionRate)}
+            label="总量入库采纳率"
+            value={formatPercent(data.codeInclusivePushedAdoptionRate)}
             sub={
-              data.codePushedAdoptionRate === null
+              data.codeInclusivePushedAdoptionRate === null
                 ? "暂无已 Push 数据"
-                : `${formatNumber(data.codePushedAdoptedLines)} / ${formatNumber(data.codePushedEffectiveGeneratedLines)} 行`
+                : `${formatNumber(data.codePushedAdoptedLines)} / ${formatNumber(data.codeInclusiveEffectiveGeneratedLines)} 行`
             }
-            color="bg-indigo-500"
-            tooltipContent={<PushedAdoptionTooltip data={codeTooltipData} />}
+            color="bg-emerald-500"
+            tooltipContent={<InclusivePushedAdoptionTooltip data={codeTooltipData} />}
           />
           <StatCard
             icon={Gauge}
-            label="提交率"
-            value={formatPercent(data.codeMeasuredAdoptionRate)}
-            sub={
-              data.codeMeasuredAdoptionRate === null
-                ? "暂无测量数据"
-                : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeEffectiveGeneratedLines)} 行`
-            }
-            color="bg-blue-500"
-            tooltipContent={<MeasuredAdoptionTooltip data={codeTooltipData} />}
-          />
-          <StatCard
-            icon={Gauge}
-            label="代码总量采纳率"
+            label="总量提交采纳率"
             value={formatPercent(data.codeInclusiveAdoptionRate)}
             sub={
               data.codeInclusiveAdoptionRate === null
@@ -231,6 +220,30 @@ export function OverviewPanel({
             }
             color="bg-cyan-500"
             tooltipContent={<InclusiveAdoptionTooltip data={codeTooltipData} />}
+          />
+          <StatCard
+            icon={Gauge}
+            label="入库采纳率"
+            value={formatPercent(data.codePushedAdoptionRate)}
+            sub={
+              data.codePushedAdoptionRate === null
+                ? "暂无已 Push 数据"
+                : `${formatNumber(data.codePushedAdoptedLines)} / ${formatNumber(data.codePushedEffectiveGeneratedLines)} 行`
+            }
+            color="bg-teal-500"
+            tooltipContent={<PushedAdoptionTooltip data={codeTooltipData} />}
+          />
+          <StatCard
+            icon={Gauge}
+            label="提交采纳率"
+            value={formatPercent(data.codeMeasuredAdoptionRate)}
+            sub={
+              data.codeMeasuredAdoptionRate === null
+                ? "暂无测量数据"
+                : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeEffectiveGeneratedLines)} 行`
+            }
+            color="bg-indigo-500"
+            tooltipContent={<MeasuredAdoptionTooltip data={codeTooltipData} />}
           />
         </div>
         <CodeAdoptionFunnel
@@ -242,7 +255,8 @@ export function OverviewPanel({
             pushedAdoptedLines: data.codePushedAdoptedLines,
             inclusiveAdoptionRate: data.codeInclusiveAdoptionRate,
             measuredAdoptionRate: data.codeMeasuredAdoptionRate,
-            pushedAdoptionRate: data.codePushedAdoptionRate
+            pushedAdoptionRate: data.codePushedAdoptionRate,
+            inclusivePushedAdoptionRate: data.codeInclusivePushedAdoptionRate
           }}
           onFirstStageClick={onFunnelFirstStageClick}
         />

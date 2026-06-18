@@ -6,7 +6,7 @@
  */
 
 import { mkdtemp, rm, mkdir } from "fs/promises"
-import { existsSync } from "fs"
+import { existsSync, readFileSync } from "fs"
 import { tmpdir } from "os"
 import { execFileSync } from "child_process"
 import { join, resolve } from "path"
@@ -189,7 +189,8 @@ async function testSummarizerRejectsDisallowedScopeTypes(): Promise<void> {
           content: "The user prefers concise summaries."
         }
       ],
-      memory_md: "# Memory Index\n"
+      memory_md:
+        "# Memory Index\n\n## Project\n- [Wrong scope](project_wrong_scope.md) — This should not stay in global\n\n## User\n- [Allowed scope](user_allowed_scope.md) — This user fact can be saved globally\n"
     })
 
     await summarizeAndSave({
@@ -201,6 +202,15 @@ async function testSummarizerRejectsDisallowedScopeTypes(): Promise<void> {
 
     assert(!existsSync(join(memoryDir, "project_wrong_scope.md")), "project fact is rejected")
     assert(existsSync(join(memoryDir, "user_allowed_scope.md")), "allowed user fact is written")
+    const memoryMd = readFileSync(join(memoryDir, "MEMORY.md"), "utf-8")
+    assert(
+      !memoryMd.includes("project_wrong_scope.md"),
+      "scope-filtered MEMORY.md excludes rejected project links"
+    )
+    assert(
+      memoryMd.includes("user_allowed_scope.md"),
+      "scope-filtered MEMORY.md includes allowed links"
+    )
     assert(
       scanMemoryFiles(memoryDir).every((header) => header.type !== "project"),
       "rejected project type is absent from scanned facts"

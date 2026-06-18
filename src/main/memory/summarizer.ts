@@ -6,6 +6,7 @@ import { getMemoryStore } from "./store"
 import { notifyMemoryChanged } from "./events"
 import {
   scanMemoryFiles,
+  formatManifest,
   regenerateManifest,
   buildFrontmatter,
   isValidFactFilename,
@@ -358,6 +359,13 @@ function readCurrentMemoryMd(memoryDir: string): string {
   return content.slice(0, MAX_CURRENT_MEMORY_MD_PROMPT_CHARS) + "\n...(truncated)"
 }
 
+function buildScopedMemoryMd(memoryDir: string, allowedTypes: Set<MemoryType>): string {
+  const headers = scanMemoryFiles(memoryDir).filter((header) =>
+    header.type ? isAllowedType(header.type, allowedTypes) : false
+  )
+  return formatManifest(headers)
+}
+
 /**
  * Module-level serialization queue: ensures two concurrent summarize calls
  * (e.g. two agent threads ending within seconds of each other) don't
@@ -455,10 +463,27 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
     // overwriting the agent's mid-conversation edits.
     const memoryMdPath = join(memoryDir, "MEMORY.md")
     let manifestWritten = false
-    if (memoryMd && memoryMd.trim()) {
+    let manifestSource = "unchanged"
+    if (allowedTypes) {
+      try {
+        writeFileSync(
+          memoryMdPath,
+          clampMemoryMd(buildScopedMemoryMd(memoryDir, allowedTypes)),
+          "utf-8"
+        )
+        manifestWritten = true
+        manifestSource = "scope-filtered"
+      } catch (e) {
+        console.warn(
+          "[Memory] Failed to write scope-filtered MEMORY.md:",
+          e instanceof Error ? e.message : e
+        )
+      }
+    } else if (memoryMd && memoryMd.trim()) {
       try {
         writeFileSync(memoryMdPath, clampMemoryMd(memoryMd), "utf-8")
         manifestWritten = true
+        manifestSource = "rewritten by LLM"
       } catch (e) {
         console.warn(
           "[Memory] Failed to write LLM-curated MEMORY.md:",
@@ -470,6 +495,7 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
       try {
         regenerateManifest(memoryDir)
         manifestWritten = true
+        manifestSource = "bootstrapped"
       } catch (e) {
         console.warn("[Memory] Failed to bootstrap MEMORY.md:", e instanceof Error ? e.message : e)
       }
@@ -500,7 +526,7 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
 
     console.log(
       `[Memory] Applied ${creates} create, ${updates} update, ${skips} skip; ` +
-        `manifest ${manifestWritten ? (memoryMd ? "rewritten by LLM" : "bootstrapped") : "unchanged"}`
+        `manifest ${manifestWritten ? manifestSource : "unchanged"}`
     )
   } catch (e) {
     console.warn("[Memory] Failed to summarize:", e instanceof Error ? e.message : e)

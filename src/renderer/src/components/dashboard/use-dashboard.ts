@@ -37,6 +37,8 @@ export interface OverviewData {
   codeMeasuredAdoptionRate: number | null
   codeInclusiveAdoptionRate: number | null
   codePushedAdoptionRate: number | null
+  /** 已 Push 采纳行 ÷ 全部有效生成行（含未提交）。端到端「真实入库」口径，领导主看。 */
+  codeInclusivePushedAdoptionRate: number | null
   codeAdoptionRate: number | null
   totalSkills: number
   totalTools: number
@@ -125,9 +127,12 @@ export interface DashboardTraceDetail {
   modelName?: string
   outcome: string
   totalToolCalls: number
+  modelCallCount: number
+  userInputRequestCount: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  appVersion?: string
   usedSkills: string[]
   evolvedSkills: string[]
   triggerSource?: string
@@ -189,6 +194,8 @@ export interface DashboardCommitAdoptionPair {
   modelName: string | null
   generatedAt: string | null
   verdict: string | null
+  /** 仅 verdict=superseded：作废原因 same_path_rewrite | agent_rm，供溯源展示。 */
+  reason: string | null
   generatedLineCount: number | null
   effectiveGeneratedLineCount: number | null
   adoptedLineCount: number | null
@@ -243,6 +250,8 @@ export interface DashboardCodeStats {
   measuredAdoptionRate: number | null
   inclusiveAdoptionRate: number | null
   pushedAdoptionRate: number | null
+  /** 已 Push 采纳行 ÷ 全部有效生成行（含未提交）。端到端「真实入库」口径，领导主看。 */
+  inclusivePushedAdoptionRate: number | null
   adoptionRate: number | null
 }
 
@@ -391,6 +400,13 @@ export interface DashboardProjectModeProjectCounts {
   archivedFeatureCount: number
 }
 
+export type DashboardProjectModeProjectSortKey =
+  | "featureCount"
+  | "conversationCount"
+  | "generatedLines"
+  | "archivedAt"
+export type DashboardProjectModeProjectSortOrder = "asc" | "desc"
+
 export interface DashboardProjectModeProjectPageData {
   projects: DashboardProjectModeProject[]
   total: number
@@ -401,6 +417,8 @@ export interface DashboardProjectModeProjectPageData {
   adapterName: string
   creatorKeyword: string
   creatorOrgKeyword: string
+  sortBy: DashboardProjectModeProjectSortKey | null
+  sortOrder: DashboardProjectModeProjectSortOrder
 }
 
 export interface DashboardProjectModeProjectPageOptions {
@@ -412,6 +430,8 @@ export interface DashboardProjectModeProjectPageOptions {
   adapterName?: string | null
   creatorKeyword?: string | null
   creatorOrgKeyword?: string | null
+  sortBy?: DashboardProjectModeProjectSortKey | null
+  sortOrder?: DashboardProjectModeProjectSortOrder | null
 }
 
 export interface DashboardProjectModeAdapter {
@@ -1004,6 +1024,10 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     codePushedEffectiveGeneratedLines > 0
       ? codePushedAdoptedLines / codePushedEffectiveGeneratedLines
       : null
+  const codeInclusivePushedAdoptionRate =
+    codeInclusiveEffectiveGeneratedLines > 0
+      ? codePushedAdoptedLines / codeInclusiveEffectiveGeneratedLines
+      : null
   const codeAdoptionRate = codeMeasuredAdoptionRate
   const totalSkills = aggs.total_skills?.value ?? 0
   const totalTools = aggs.total_tools?.value ?? 0
@@ -1036,6 +1060,7 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     const measuredAdoptionRate = b.measured_adoption_rate?.value
     const inclusiveAdoptionRate = b.inclusive_adoption_rate?.value
     const pushedAdoptionRate = b.pushed_adoption_rate?.value
+    const inclusivePushedAdoptionRate = b.inclusive_pushed_adoption_rate?.value
     return {
       skill: b.key || "unknown",
       generatedLines: b.generated_lines?.value ?? 0,
@@ -1052,6 +1077,8 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
       inclusiveAdoptionRate:
         typeof inclusiveAdoptionRate === "number" ? inclusiveAdoptionRate : null,
       pushedAdoptionRate: typeof pushedAdoptionRate === "number" ? pushedAdoptionRate : null,
+      inclusivePushedAdoptionRate:
+        typeof inclusivePushedAdoptionRate === "number" ? inclusivePushedAdoptionRate : null,
       commitCount: b.commit_count?.value ?? 0
     }
   })
@@ -1103,6 +1130,7 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     codePushedCommitCount,
     codeMeasuredAdoptionRate,
     codeInclusiveAdoptionRate,
+    codeInclusivePushedAdoptionRate,
     codePushedAdoptionRate,
     codeAdoptionRate,
     totalSkills,
@@ -1459,9 +1487,12 @@ function parseDashboardTraceDetail(raw: any): DashboardTraceDetail | undefined {
     ...(raw.modelName ? { modelName: String(raw.modelName) } : {}),
     outcome: String(raw.outcome ?? "unknown"),
     totalToolCalls: numberValue(raw.totalToolCalls),
+    modelCallCount: numberValue(raw.modelCallCount),
+    userInputRequestCount: numberValue(raw.userInputRequestCount),
     totalInputTokens: numberValue(raw.totalInputTokens),
     totalOutputTokens: numberValue(raw.totalOutputTokens),
     totalTokens: numberValue(raw.totalTokens),
+    ...(raw.appVersion ? { appVersion: String(raw.appVersion) } : {}),
     usedSkills: Array.isArray(raw.usedSkills) ? raw.usedSkills.map(String) : [],
     evolvedSkills: Array.isArray(raw.evolvedSkills) ? raw.evolvedSkills.map(String) : [],
     ...(raw.triggerSource ? { triggerSource: String(raw.triggerSource) } : {}),
@@ -1957,7 +1988,9 @@ export function useDashboard() {
       pageSize: number,
       adapterName: string,
       creatorKeyword: string,
-      creatorOrgKeyword: string
+      creatorOrgKeyword: string,
+      sortBy: DashboardProjectModeProjectSortKey | null = null,
+      sortOrder: DashboardProjectModeProjectSortOrder = "desc"
     ) => {
       const id = ++projectModeProjectPageFetchIdRef.current[status]
       setProjectModeProjectPageLoading((current) => ({ ...current, [status]: true }))
@@ -1972,7 +2005,9 @@ export function useDashboard() {
           keyword,
           adapterName,
           creatorKeyword,
-          creatorOrgKeyword
+          creatorOrgKeyword,
+          sortBy,
+          sortOrder
         })
         if (id !== projectModeProjectPageFetchIdRef.current[status]) return
         if (!result.success) throw new Error(result.error ?? "获取项目列表失败")

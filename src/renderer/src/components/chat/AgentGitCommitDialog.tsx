@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { CheckCircle2, GitCommitHorizontal, Loader2 } from "lucide-react"
 import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
@@ -55,6 +55,7 @@ interface DiffFile {
   additions: number
   deletions: number
   diff: string
+  diffLoaded?: boolean
 }
 
 /** Drop git metadata lines that add noise without informing the reviewer. */
@@ -334,6 +335,8 @@ export function AgentGitCommitDialog({
   onCommitted,
   onCancel
 }: AgentGitCommitDialogProps): React.JSX.Element {
+  const activeThreadIdRef = useRef(threadId)
+  const diffListRequestIdRef = useRef(0)
   const { cardNumber, handleCardNumberChange, persistNow } = useWorkspaceTaskCard(workspacePath)
   // Seed type + message from the agent's suggestion. The parent remounts this dialog
   // (via a key tied to the approval id) for each new commit, so lazy initializers give
@@ -360,6 +363,9 @@ export function AgentGitCommitDialog({
   // dialog is remounted per commit (keyed on the approval id), so this re-initializes.
   const [diffLoading, setDiffLoading] = useState(true)
   const [diffError, setDiffError] = useState<string | null>(null)
+  // Per-file lazy diff loading: only the file the user is viewing has its patch fetched.
+  const [fileDiffLoadingPaths, setFileDiffLoadingPaths] = useState<Set<string>>(new Set())
+  const [fileDiffErrors, setFileDiffErrors] = useState<Record<string, string>>({})
   // Master-detail: which file's diff is shown on the right. null → fall back to first file.
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
   const [selectedCommitPaths, setSelectedCommitPaths] = useState<Set<string>>(
@@ -371,17 +377,30 @@ export function AgentGitCommitDialog({
   )
 
   useEffect(() => {
-    if (!open) return
+    activeThreadIdRef.current = threadId
+    if (!open) {
+      diffListRequestIdRef.current += 1
+      return
+    }
+    const requestId = ++diffListRequestIdRef.current
     let cancelled = false
     setDiffError(null)
     window.api.workspace
-      .getGitPanelDiffs(threadId)
+      // 仅拉取文件列表与统计，diff 正文等用户在右侧查看某文件时再按需加载，
+      // 避免一次性为所有变更文件串行计算 diff 导致打开提交弹窗很慢。
+      .getGitPanelDiffs(threadId, {
+        includeDiffs: false,
+        includeChangedFiles: true,
+        statusUntrackedMode: "normal"
+      })
       .then((res) => {
-        if (cancelled) return
+        if (cancelled || requestId !== diffListRequestIdRef.current) return
         if (!res.success) {
           setDiffError(res.error || "加载 Git 文件变更失败")
           return
         }
+        setFileDiffLoadingPaths(new Set())
+        setFileDiffErrors({})
         setDiff({
           files: res.files ?? [],
           changedFiles: res.changedFiles ?? [],
@@ -396,10 +415,10 @@ export function AgentGitCommitDialog({
         )
       })
       .catch(() => {
-        if (!cancelled) setDiffError("加载 Git 文件变更失败")
+        if (!cancelled && requestId === diffListRequestIdRef.current) setDiffError("加载 Git 文件变更失败")
       })
       .finally(() => {
-        if (!cancelled) setDiffLoading(false)
+        if (!cancelled && requestId === diffListRequestIdRef.current) setDiffLoading(false)
       })
     return () => {
       cancelled = true
@@ -410,6 +429,92 @@ export function AgentGitCommitDialog({
     () => diff?.files.find((f) => f.path === selectedFilePath) ?? diff?.files[0],
     [diff, selectedFilePath]
   )
+
+  const loadFileDiff = useCallback(
+    async (filePath: string): Promise<void> => {
+      const target = diff?.files.find((f) => f.path === filePath)
+      if (!target || target.diffLoaded || fileDiffLoadingPaths.has(filePath)) return
+      const requestId = diffListRequestIdRef.current
+      const requestThreadId = threadId
+
+      setFileDiffLoadingPaths((prev) => new Set(prev).add(filePath))
+      setFileDiffErrors((prev) => {
+        if (!(filePath in prev)) return prev
+        const next = { ...prev }
+        delete next[filePath]
+        return next
+      })
+
+      try {
+        const res = await window.api.workspace.getGitPanelFileDiff(threadId, filePath)
+        if (requestId !== diffListRequestIdRef.current || res.taskId !== activeThreadIdRef.current) return
+        if (!res.success || !res.file) {
+          throw new Error(res.error || "加载文件 diff 失败")
+        }
+        setDiff((prev) => {
+          if (!prev) return prev
+          if (requestId !== diffListRequestIdRef.current || requestThreadId !== activeThreadIdRef.current) return prev
+          const files = prev.files.map((f) =>
+            f.path === filePath
+              ? {
+                  ...f,
+                  diff: res.file?.diff ?? "",
+                  diffLoaded: true,
+                  additions: res.file?.additions ?? f.additions,
+                  deletions: res.file?.deletions ?? f.deletions
+                }
+              : f
+          )
+          // 行数在按需加载后可能精确化，同步重算 totals，避免汇总与逐文件 +/- 对不上。
+          const totals = files.reduce(
+            (acc, f) => {
+              acc.additions += f.additions
+              acc.deletions += f.deletions
+              return acc
+            },
+            { additions: 0, deletions: 0 }
+          )
+          return {
+            ...prev,
+            files,
+            totals: { ...prev.totals, additions: totals.additions, deletions: totals.deletions }
+          }
+        })
+      } catch (e) {
+        if (requestId !== diffListRequestIdRef.current || requestThreadId !== activeThreadIdRef.current) return
+        setFileDiffErrors((prev) => ({
+          ...prev,
+          [filePath]: e instanceof Error ? e.message : "加载文件 diff 失败"
+        }))
+      } finally {
+        if (requestId === diffListRequestIdRef.current && requestThreadId === activeThreadIdRef.current) {
+          setFileDiffLoadingPaths((prev) => {
+            const next = new Set(prev)
+            next.delete(filePath)
+            return next
+          })
+        }
+      }
+    },
+    [threadId, diff?.files, fileDiffLoadingPaths]
+  )
+
+  useEffect(() => {
+    if (!open) return
+    const filePath = selectedFile?.path
+    if (!filePath) return
+    if (selectedFile?.diffLoaded || fileDiffLoadingPaths.has(filePath) || fileDiffErrors[filePath]) {
+      return
+    }
+    void loadFileDiff(filePath)
+  }, [
+    open,
+    selectedFile?.path,
+    selectedFile?.diffLoaded,
+    fileDiffLoadingPaths,
+    fileDiffErrors,
+    loadFileDiff
+  ])
 
   const selectedCommitFilePaths = useMemo(() => {
     const selected = new Set<string>()
@@ -540,6 +645,13 @@ export function AgentGitCommitDialog({
           </div>
         </div>
 
+        {diffLoading && !diff && (
+          <div className="mx-4 mt-3 flex h-64 items-center justify-center rounded-lg border border-border/70 bg-muted/10 text-xs text-muted-foreground">
+            <Loader2 className="mr-2 size-4 animate-spin" />
+            正在加载文件变更...
+          </div>
+        )}
+
         {diff && diff.files.length > 0 && (
           <div className="mx-4 mt-3 space-y-2">
             <div className="flex items-center justify-between gap-2 text-xs">
@@ -610,13 +722,27 @@ export function AgentGitCommitDialog({
                   )
                 })}
               </div>
-              {/* Right: selected file's diff only. */}
+              {/* Right: selected file's diff only (loaded on demand). */}
               <div className="min-w-0 flex-1">
-                {selectedFile?.diff ? (
+                {!selectedFile ? (
+                  <div className="flex h-full items-center justify-center px-4 text-center text-[11px] text-muted-foreground">
+                    选择左侧文件查看改动
+                  </div>
+                ) : fileDiffLoadingPaths.has(selectedFile.path) ||
+                  (!selectedFile.diffLoaded && !fileDiffErrors[selectedFile.path]) ? (
+                  <div className="flex h-full items-center justify-center gap-2 px-4 text-center text-[11px] text-muted-foreground">
+                    <Loader2 className="size-3.5 animate-spin" />
+                    正在加载该文件 diff...
+                  </div>
+                ) : fileDiffErrors[selectedFile.path] ? (
+                  <div className="flex h-full items-center justify-center px-4 text-center text-[11px] text-destructive">
+                    {fileDiffErrors[selectedFile.path]}
+                  </div>
+                ) : selectedFile.diff ? (
                   <UnifiedDiffView diff={selectedFile.diff} />
                 ) : (
                   <div className="flex h-full items-center justify-center px-4 text-center text-[11px] text-muted-foreground">
-                    {selectedFile ? "该文件无文本改动（可能为二进制或体积过大）" : "选择左侧文件查看改动"}
+                    该文件无文本改动（可能为二进制或体积过大）
                   </div>
                 )}
               </div>

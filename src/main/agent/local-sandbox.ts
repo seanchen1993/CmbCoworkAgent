@@ -38,7 +38,12 @@ import * as chardet from "jschardet"
 import micromatch from "micromatch"
 import { replace } from "./replace"
 import type { ToolOrchestrator } from "./tool-orchestrator"
-import { assessCommandSafety, classifyCommandConcurrency, isGitCommitCommand } from "./exec-policy"
+import {
+  assessCommandSafety,
+  classifyCommandConcurrency,
+  isGitCommitCommand,
+  isGitPushCommand
+} from "./exec-policy"
 import {
   areElevatedRootsPreparedAsync,
   isElevatedSetupComplete,
@@ -61,8 +66,11 @@ import type { SkillLifecycleMatch, SkillLifecycleRegistry } from "./skill-lifecy
 import { getSkillActivationKey } from "./skill-lifecycle/activation"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
-import { recordGen as recordAdoptionGen } from "../services/adoption-tracker"
 import { isMemoryStoragePath } from "../memory/paths"
+import {
+  recordGen as recordAdoptionGen,
+  recordShellFileOps as recordAdoptionShellFileOps
+} from "../services/adoption-tracker"
 import {
   READ_FILE_DEFAULT_LIMIT,
   READ_FILE_MAX_LIMIT,
@@ -299,6 +307,8 @@ export interface LocalSandboxOptions {
   featureId?: string
   /** Optional harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
+  /** Optional harness project directory exposed to child processes as PROJECT_DIR. */
+  projectDir?: string
 }
 
 interface ExecuteRawOptions {
@@ -382,6 +392,7 @@ export class LocalSandbox
   private readonly pluginWorkspace?: string
   private readonly featureId?: string
   private readonly projectCode?: string
+  private readonly projectDir?: string
   private readonly codexExePath: string
   private readonly getHooks: () => HookConfig[]
   private readonly resolveHooks: LocalSandboxHookResolver
@@ -1621,6 +1632,8 @@ export class LocalSandbox
     if (featureId) baseEnv.FEATURE_ID = featureId
     const projectCode = options.projectCode?.trim()
     if (projectCode) baseEnv.PROJECT_CODE = projectCode
+    const projectDir = options.projectDir?.trim()
+    if (projectDir) baseEnv.PROJECT_DIR = projectDir
     // Ensure UTF-8 locale for spawned shells (Git Bash via pipe defaults to
     // Windows console code page, e.g. GBK, producing garbled CJK output)
     if (process.platform === "win32") {
@@ -1636,6 +1649,7 @@ export class LocalSandbox
     this.pluginWorkspace = pluginWorkspace || undefined
     this.featureId = featureId || undefined
     this.projectCode = projectCode || undefined
+    this.projectDir = projectDir || undefined
     this.codexExePath = options.codexExePath ?? "codex"
     const h = options.hooks
     this.getHooks = typeof h === "function" ? h : () => h ?? []
@@ -1926,6 +1940,7 @@ export class LocalSandbox
         : {}),
       ...(this.featureId && !context.featureId ? { featureId: this.featureId } : {}),
       ...(this.projectCode && !context.projectCode ? { projectCode: this.projectCode } : {}),
+      ...(this.projectDir && !context.projectDir ? { projectDir: this.projectDir } : {}),
       turnId: context.turnId ?? this._hookTurnId
     }
 
@@ -5017,16 +5032,20 @@ export class LocalSandbox
       return `Command forbidden: ${safety.reason}`
     }
 
-    // A git commit must always go through the interactive task-card dialog, which only
-    // the foreground orchestrator path drives. Backgrounding it would silently skip card
-    // selection, so run it synchronously through the orchestrator and return the outcome.
-    if (this.orchestrator && isGitCommitCommand(effectiveCommand)) {
+    // git commit / git push must go through the foreground orchestrator path (task-card
+    // dialog for commit; workspace:pushWorktree for push). Backgrounding them would skip
+    // that and re-introduce the sandbox credential-prompt timeout, so run synchronously
+    // through the orchestrator and return the outcome.
+    if (
+      this.orchestrator &&
+      (isGitCommitCommand(effectiveCommand) || isGitPushCommand(effectiveCommand))
+    ) {
       const result = await this.orchestrator.execute(
         effectiveCommand,
         effectiveCwd,
         this.windowsSandbox
       )
-      return result.output || (result.exitCode === 0 ? "提交成功" : "提交失败")
+      return result.output || (result.exitCode === 0 ? "操作成功" : "操作失败")
     }
 
     const taskId = randomUUID().slice(0, 8)
@@ -5294,6 +5313,9 @@ export class LocalSandbox
         effectiveCwd,
         this.windowsSandbox
       )
+      // Adoption tracking: react to agent rm/mv of generated files (side-effect
+      // only, never throws). Only successful commands act (exitCode === 0).
+      recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
       const postResult = await this.runHooks("PostToolUse", {
         toolName: "execute",
         toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
@@ -5307,6 +5329,7 @@ export class LocalSandbox
     const result = await this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
       cwd: effectiveCwd
     })
+    recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "execute",
       toolArgs: { command: effectiveCommand, cwd: effectiveCwd },

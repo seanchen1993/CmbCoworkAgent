@@ -26,6 +26,11 @@ trace_evolver_service/
 .codex/
 tests/screenshots/
 
+# OMC local runtime/cache state
+.omc/project-memory.json
+.omc/state/
+.omc/sessions/
+
 # Java LSP VSIX bundles (downloaded via scripts/download-jdtls.sh)
 resources/lsp-vsix/*.vsix
 

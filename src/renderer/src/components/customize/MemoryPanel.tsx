@@ -243,6 +243,9 @@ export function MemoryPanel({ workspacePath }: MemoryPanelProps): React.JSX.Elem
           )
         })
         setProjectScopeStatus(projectList.length > 0 ? "available" : "unavailable")
+        if (workspacePath?.trim() && projectList.some((project) => project.isCurrent)) {
+          setActiveScope((scope) => (scope === "global" ? "project" : scope))
+        }
       })
       .catch((e) => {
         console.error(e)

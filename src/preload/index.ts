@@ -47,6 +47,10 @@ import type {
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
 import type {
+  HarnessEnterpriseProjectDetailInput,
+  HarnessEnterpriseProjectDetailResult,
+  HarnessEnterpriseProjectSearchInput,
+  HarnessEnterpriseProjectSearchResult,
   HarnessProjectCreateInput,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
@@ -55,7 +59,10 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessSkipNodeInput,
+  HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
+  HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent
 } from "../shared/harness-board-types"
 import type {
@@ -815,6 +822,7 @@ const api = {
         previousPath?: string
         status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
         diff: string
+        diffLoaded?: boolean
         additions: number
         deletions: number
       }>
@@ -840,6 +848,7 @@ const api = {
           previousPath?: string
           status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
           diff: string
+          diffLoaded?: boolean
           additions: number
           deletions: number
         }>
@@ -886,7 +895,12 @@ const api = {
       }>
     },
     getGitPanelDiffs: (
-      threadId: string
+      threadId: string,
+      options?: {
+        includeDiffs?: boolean
+        includeChangedFiles?: boolean
+        statusUntrackedMode?: "all" | "normal" | "no"
+      }
     ): Promise<{
       success: boolean
       isWorktree: boolean
@@ -897,6 +911,7 @@ const api = {
         previousPath?: string
         status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
         diff: string
+        diffLoaded?: boolean
         additions: number
         deletions: number
       }>
@@ -908,7 +923,7 @@ const api = {
       suggestedCommitMessage?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:getGitPanelDiffs", { threadId }) as Promise<{
+      return ipcRenderer.invoke("workspace:getGitPanelDiffs", { threadId, options }) as Promise<{
         success: boolean
         isWorktree: boolean
         isGitRepo?: boolean
@@ -918,6 +933,7 @@ const api = {
           previousPath?: string
           status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
           diff: string
+          diffLoaded?: boolean
           additions: number
           deletions: number
         }>
@@ -927,6 +943,75 @@ const api = {
         totals: { additions: number; deletions: number; fileCount: number }
         hasPendingDiff: boolean
         suggestedCommitMessage?: string
+        error?: string
+      }>
+    },
+    getGitPanelFileDiff: (
+      threadId: string,
+      filePath: string
+    ): Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      file?: {
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+        diff: string
+        diffLoaded?: boolean
+        additions: number
+        deletions: number
+      }
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:getGitPanelFileDiff", { threadId, filePath }) as Promise<{
+        success: boolean
+        isWorktree: boolean
+        isGitRepo?: boolean
+        taskId: string
+        file?: {
+          path: string
+          previousPath?: string
+          status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+          diff: string
+          diffLoaded?: boolean
+          additions: number
+          deletions: number
+        }
+        error?: string
+      }>
+    },
+    getGitChangedFilesSummary: (
+      threadId: string
+    ): Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      files: Array<{
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+      }>
+      changedFilesTotal: number
+      omittedFileCount: number
+      hasPendingDiff: boolean
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:getGitChangedFilesSummary", { threadId }) as Promise<{
+        success: boolean
+        isWorktree: boolean
+        isGitRepo?: boolean
+        taskId: string
+        files: Array<{
+          path: string
+          previousPath?: string
+          status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+        }>
+        changedFilesTotal: number
+        omittedFileCount: number
+        hasPendingDiff: boolean
         error?: string
       }>
     },
@@ -1891,11 +1976,12 @@ const api = {
     // Approval decision from renderer → main
     sendApprovalDecision: (decision: {
       requestId: string
-      type: string
+      type: "approve" | "approve_session" | "approve_permanent" | "reject" | "error"
       tool_call_id: string
       savedToolName?: string
       savedToolDescription?: string
       commitResult?: { success: boolean; commitMessage?: string; error?: string }
+      pushResult?: { success: boolean; error?: string }
     }): void => {
       ipcRenderer.send("sandbox:approvalDecision", decision)
     },
@@ -2426,6 +2512,8 @@ const api = {
       ipcRenderer.invoke("dashboard:isProjectModeAllowed"),
     isAnalysisAgentAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isAnalysisAgentAllowed"),
+    isUncommittedAnalysisAllowed: (): Promise<boolean> =>
+      ipcRenderer.invoke("dashboard:isUncommittedAnalysisAllowed"),
     esQuery: (input: {
       indexAlias: "event" | "trace"
       operation: "search" | "msearch" | "count" | "mapping" | "field_caps"
@@ -2496,6 +2584,7 @@ const api = {
         pageSize?: number
         pushedOnly?: boolean
         upperOrgLv1?: string | null
+        userKeyword?: string | null
         orgLv1List?: string[]
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -2514,6 +2603,7 @@ const api = {
         pageSize?: number
         pushedOnly?: boolean
         upperOrgLv1?: string | null
+        userKeyword?: string | null
         orgLv1List?: string[]
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -2570,7 +2660,10 @@ const api = {
       options?: {
         upperOrgLv1?: string | string[] | null
         projectMode?: boolean
+        projectId?: string | null
+        featureSlug?: string | null
         usedSkillsOnly?: boolean
+        userKeyword?: string | null
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:uncommittedRanking", range, options),
@@ -2580,7 +2673,10 @@ const api = {
       options?: {
         upperOrgLv1?: string | string[] | null
         projectMode?: boolean
+        projectId?: string | null
+        featureSlug?: string | null
         usedSkillsOnly?: boolean
+        userKeyword?: string | null
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:uncommittedDetail", sapId, range, options),
@@ -2685,6 +2781,7 @@ const api = {
         pageSize?: number
         pushedOnly?: boolean
         upperOrgLv1?: string | null
+        userKeyword?: string | null
         orgLv1List?: string[]
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -2722,11 +2819,30 @@ const api = {
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
     createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>
       ipcRenderer.invoke("harnessBoard:createProject", input) as Promise<HarnessProjectMetadata>,
+    searchEnterpriseProjects: (
+      input: HarnessEnterpriseProjectSearchInput
+    ): Promise<HarnessEnterpriseProjectSearchResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:searchEnterpriseProjects",
+        input
+      ) as Promise<HarnessEnterpriseProjectSearchResult>,
+    getEnterpriseProjectDetails: (
+      input: HarnessEnterpriseProjectDetailInput
+    ): Promise<HarnessEnterpriseProjectDetailResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:getEnterpriseProjectDetails",
+        input
+      ) as Promise<HarnessEnterpriseProjectDetailResult>,
     createFeature: (input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> =>
       ipcRenderer.invoke(
         "harnessBoard:createFeature",
         input
       ) as Promise<HarnessFeatureCreateResult>,
+    getDynamicWorkflowConfig: (projectId: string): Promise<HarnessDynamicWorkflowConfig | null> =>
+      ipcRenderer.invoke(
+        "harnessBoard:getDynamicWorkflowConfig",
+        projectId
+      ) as Promise<HarnessDynamicWorkflowConfig | null>,
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput
@@ -2738,6 +2854,11 @@ const api = {
     archiveProject: (projectId: string): Promise<HarnessProjectMetadata> =>
       ipcRenderer.invoke(
         "harnessBoard:archiveProject",
+        projectId
+      ) as Promise<HarnessProjectMetadata>,
+    deleteProject: (projectId: string): Promise<HarnessProjectMetadata> =>
+      ipcRenderer.invoke(
+        "harnessBoard:deleteProject",
         projectId
       ) as Promise<HarnessProjectMetadata>,
     getProjectDetail: (projectId: string): Promise<HarnessProjectDetailViewModel> =>
@@ -2758,6 +2879,8 @@ const api = {
         projectId,
         slug
       }) as Promise<HarnessRunDetailViewModel>,
+    skipNode: (input: HarnessSkipNodeInput): Promise<HarnessSkipNodeResult> =>
+      ipcRenderer.invoke("harnessBoard:skipNode", input) as Promise<HarnessSkipNodeResult>,
     getDialogTips: (projectId: string, slug: string): Promise<string | null> =>
       ipcRenderer.invoke("harnessBoard:getDialogTips", { projectId, slug }) as Promise<
         string | null
@@ -2899,11 +3022,17 @@ const api = {
   git: {
     currentBranch: (
       cwd?: string
-    ): Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }> =>
+    ): Promise<{
+      isGitRepo: boolean
+      branch: string | null
+      isWorktree: boolean
+      error?: string
+    }> =>
       ipcRenderer.invoke("git:currentBranch", cwd) as Promise<{
         isGitRepo: boolean
         branch: string | null
         isWorktree: boolean
+        error?: string
       }>,
     listBranches: (
       cwd?: string,
