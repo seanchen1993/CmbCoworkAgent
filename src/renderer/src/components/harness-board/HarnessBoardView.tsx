@@ -662,9 +662,10 @@ function workflowForProjectRun(
   detail: HarnessProjectDetailViewModel,
   run: HarnessFeatureSummary
 ): HarnessWorkflow {
-  if (run.nodeIds.length === 0) return detail.workflow
+  const nodeIds = Array.isArray(run.nodeIds) ? run.nodeIds : []
+  if (nodeIds.length === 0) return detail.workflow
   const nodesById = new Map(detail.workflow.nodes.map((node) => [node.id, node]))
-  const nodes = run.nodeIds
+  const nodes = nodeIds
     .map((nodeId) => nodesById.get(nodeId))
     .filter((node): node is HarnessWorkflow["nodes"][number] => Boolean(node))
   return { ...detail.workflow, nodes }
@@ -4188,7 +4189,6 @@ function FeatureDetailPage({
   hasPendingGitDiffNotice,
   fallbackProjectName,
   fallbackFeatureTitle,
-  fallbackFeatureSlug,
   onBackToList,
   onBackToProject,
   onRefresh,
@@ -4207,7 +4207,6 @@ function FeatureDetailPage({
   hasPendingGitDiffNotice?: boolean
   fallbackProjectName?: string
   fallbackFeatureTitle?: string
-  fallbackFeatureSlug?: string
   onBackToList: () => void
   onBackToProject: () => void
   onRefresh: () => void | Promise<void>
@@ -5627,6 +5626,18 @@ export function HarnessBoardView({
     }
   }, [detailsByProjectId, projects, query])
 
+  const boardStats = useMemo(
+    () => buildHarnessBoardStats(projects, detailsByProjectId),
+    [detailsByProjectId, projects]
+  )
+
+  const visibleProjectCount = useMemo(
+    () =>
+      activeSystemGroups.reduce((count, group) => count + group.projects.length, 0) +
+      archivedSystemGroups.reduce((count, group) => count + group.projects.length, 0),
+    [activeSystemGroups, archivedSystemGroups]
+  )
+
   const resetCreateForm = useCallback(() => {
     setForm(createEmptyProjectForm())
     setFormError(null)
@@ -6478,7 +6489,6 @@ export function HarnessBoardView({
               : selectedFeatureProjectDetail?.project?.name ?? selectedProject?.name
           }
           fallbackFeatureTitle={fallbackFeatureSummary?.title ?? selectedFeature.slug}
-          fallbackFeatureSlug={fallbackFeatureSummary?.slug ?? selectedFeature.slug}
           onBackToList={handleBackToProjectList}
           onBackToProject={handleBackToProject}
           onRefresh={refreshSelectedRunDetail}
