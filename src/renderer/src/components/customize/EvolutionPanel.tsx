@@ -1456,18 +1456,24 @@ export function EvolutionPanel(): React.JSX.Element {
     try {
       const list = await window.api.optimizer.getTraces({ limit: 80 })
       setTraces(list)
+      // Read the current selection at call time (not via closure) so this
+      // callback stays stable. Closing over `selectedTraceIds` would recreate
+      // loadTraces on every selection toggle, re-firing the load effect and
+      // flashing the spinner over the list. We only prune ids that no longer
+      // exist after a fresh load.
+      const current = useAppStore.getState().evolutionSelectedTraceIds
       const keep = new Set<string>()
       const valid = new Set(list.map((t) => t.traceId))
-      for (const id of selectedTraceIds) {
+      for (const id of current) {
         if (valid.has(id)) keep.add(id)
       }
-      if (!isSameIdSet(keep, selectedTraceIds)) {
+      if (!isSameIdSet(keep, current)) {
         setEvolutionSelectedTraceIds(keep)
       }
     } finally {
       setTracesLoading(false)
     }
-  }, [selectedTraceIds, setEvolutionSelectedTraceIds])
+  }, [setEvolutionSelectedTraceIds])
 
   const refreshCloudEvolutionUpdates = useCallback(async () => {
     setCloudUpdateLoading(true)
