@@ -4325,10 +4325,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               memoryDirs.global.dir,
               ...(memoryDirs.project ? [memoryDirs.project.dir] : [])
             ]
-            for (const dir of dirs) {
-              const memoryStore = await getMemoryStore(dir)
-              memoryStore.syncMemoryFiles()
-            }
+            await Promise.all(
+              dirs.map(async (dir) => {
+                const memoryStore = await getMemoryStore(dir)
+                memoryStore.syncMemoryFiles()
+              })
+            )
           } catch {
             /* non-critical */
           }
@@ -5839,17 +5841,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               const memoryModel = await resolveMemoryModel()
               if (memoryModel) {
                 ;(async () => {
-                  for (const ns of namespaces) {
-                    await summarizeAndSave({
-                      model: memoryModel,
-                      conversation,
-                      memoryDir: ns.dir,
-                      scopeHint: buildScopeHint(ns),
-                      allowedTypes: allowedTypesForScope(ns)
+                  await Promise.all(
+                    namespaces.map(async (ns) => {
+                      await summarizeAndSave({
+                        model: memoryModel,
+                        conversation,
+                        memoryDir: ns.dir,
+                        scopeHint: buildScopeHint(ns),
+                        allowedTypes: allowedTypesForScope(ns)
+                      })
+                      incrementDreamSessions(ns.dir)
+                      tryTriggerDream(memoryModel, ns.dir)
                     })
-                    incrementDreamSessions(ns.dir)
-                    tryTriggerDream(memoryModel, ns.dir)
-                  }
+                  )
                 })().catch((e) => console.warn("[Agent] Memory summarize failed:", e))
               }
             }

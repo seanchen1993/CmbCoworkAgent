@@ -367,18 +367,18 @@ function buildScopedMemoryMd(memoryDir: string, allowedTypes: Set<MemoryType>): 
 }
 
 /**
- * Module-level serialization queue: ensures two concurrent summarize calls
- * (e.g. two agent threads ending within seconds of each other) don't
- * clobber each other's MEMORY.md writes or fight over per-fact slug
- * collisions. Each call awaits the previous one before starting.
+ * Per-directory serialization queues: prevents concurrent writes to the same
+ * memory directory (MEMORY.md clobber / slug collision) while allowing
+ * global and project directories to be summarized in parallel.
  */
-let summarizeQueue: Promise<void> = Promise.resolve()
+const summarizeQueues = new Map<string, Promise<void>>()
 
 export function summarizeAndSave(options: SummarizeOptions): Promise<void> {
-  const next = summarizeQueue.then(() => summarizeAndSaveInner(options))
-  // Swallow errors in the chain so one failure doesn't block subsequent
-  // calls forever. The inner function already logs its own failures.
-  summarizeQueue = next.catch(() => undefined)
+  const key = options.memoryDir
+  const prev = summarizeQueues.get(key) ?? Promise.resolve()
+  const next = prev.then(() => summarizeAndSaveInner(options))
+  // Swallow errors so one failure doesn't block subsequent calls for this dir.
+  summarizeQueues.set(key, next.catch(() => undefined))
   return next
 }
 
