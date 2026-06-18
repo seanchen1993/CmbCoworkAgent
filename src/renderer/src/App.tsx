@@ -43,9 +43,13 @@ import {
   getCloudEvolutionPromptSignature,
   hasUnreadCloudEvolutionUpdates,
   markCloudEvolutionUpdatesSeen,
+  markReviewCandidatesNotified,
   pendingCloudEvolutionUpdates,
-  setCloudEvolutionPromptSignature
+  reviewableCandidates,
+  setCloudEvolutionPromptSignature,
+  unnotifiedReviewCandidates
 } from "@/lib/evolution-notices"
+import { useMyUploadedSkills } from "@/lib/use-my-uploaded-skills"
 interface UserInfoConfig {
   sapId: string
   ystId: string
@@ -165,6 +169,7 @@ function App(): React.JSX.Element {
       setCloudEvolutionUpdates: state.setCloudEvolutionUpdates
     }))
   )
+  const { ownedSkillKeys } = useMyUploadedSkills()
   const [isLoading, setIsLoading] = useState(true)
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT)
   const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT)
@@ -576,6 +581,55 @@ function App(): React.JSX.Element {
       window.clearInterval(timer)
     }
   }, [setCloudEvolutionUpdates, setEvolutionTab, setPendingEvolution, setShowCustomizeView])
+
+  // 「待审批发布」提醒：本分支把进化审批权限放开给个人后，技能创建者需要被
+  // 提醒自己上传的技能跑出了优化候选、正等待其审批发布。仅面向个人，管理员不在此提醒范围内。
+  useEffect(() => {
+    let cancelled = false
+
+    const checkPendingReviewCandidates = async (): Promise<void> => {
+      try {
+        // 个人只有上传过技能才可能拥有可审批候选；无技能时直接跳过拉取。
+        if (ownedSkillKeys.size === 0) return
+
+        const awaiting = await evolutionApi.listCandidates("awaiting_review", 50)
+        if (cancelled) return
+
+        const reviewable = reviewableCandidates(awaiting, ownedSkillKeys)
+        // 只对「从未通知过」的新候选提醒，保证每条候选只发一次。
+        const fresh = unnotifiedReviewCandidates(reviewable)
+        if (fresh.length === 0) return
+        markReviewCandidatesNotified(fresh)
+
+        setPendingEvolution(true)
+
+        const first = fresh[0]
+        const message =
+          fresh.length === 1
+            ? `「${first.skill_name}」有 Skill 优化候选待审批发布`
+            : `有 ${fresh.length} 个 Skill 优化候选待审批发布`
+        toast.info(message, {
+          duration: 8000,
+          action: {
+            label: "去审批",
+            onClick: () => {
+              setEvolutionTab("review")
+              setShowCustomizeView(true, "evolution")
+            }
+          }
+        })
+      } catch (error) {
+        console.warn("[SkillReviewPrompt] failed to check pending review candidates:", error)
+      }
+    }
+
+    void checkPendingReviewCandidates()
+    const timer = window.setInterval(() => void checkPendingReviewCandidates(), 30 * 60 * 1000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [ownedSkillKeys, setEvolutionTab, setPendingEvolution, setShowCustomizeView])
 
   // Listen for skill-evolution threshold events — set badge on Evolution tab
   useEffect(() => {

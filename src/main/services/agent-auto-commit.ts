@@ -15,6 +15,7 @@ import {
   saveAgentAutoCommitWorkspaceCard
 } from "../storage"
 import { trackEvent } from "./event-reporter"
+import { captureStagedSnapshotsForCommit, measureForCommit } from "./adoption-tracker"
 import { getTracesDir } from "../agent/trace/collector"
 import type { AgentTrace } from "../agent/trace/types"
 
@@ -748,8 +749,28 @@ export async function maybeAutoCommitAfterAgentRun({
 
     try {
       await runGit(workspacePath, ["add", "--", ...candidateFiles])
+      // Measure adoption in-app (like the manual commit paths) BEFORE the commit
+      // clears the index. Capture time is the upper bound on eligible gens.
+      // Doing it here marks the gens measured, so the hook/reconciler backstop
+      // gates to "no pending gens" and does NOT emit a second git.commit.created
+      // for this same commit — previously every auto-commit produced a duplicate
+      // commit event (one here, one from the backstop that measured adoption).
+      const adoptionCaptureTimeMs = Date.now()
+      let adoptionSnapshots: ReturnType<typeof captureStagedSnapshotsForCommit> = []
+      try {
+        adoptionSnapshots = captureStagedSnapshotsForCommit(workspacePath)
+      } catch {
+        // capture is best-effort; never block the auto-commit
+      }
       await runGit(workspacePath, ["commit", "-m", commitMessage])
       const commitHash = await getHead(workspacePath)
+      if (adoptionSnapshots.length > 0) {
+        try {
+          measureForCommit(adoptionSnapshots, commitHash ?? undefined, adoptionCaptureTimeMs)
+        } catch {
+          // adoption measurement must never affect the commit outcome
+        }
+      }
       // Persist the card actually committed with, so the legacy global card
       // migrates to this workspace and the UI/next run reuse it directly.
       if (workspaceCardNumber?.trim()) {

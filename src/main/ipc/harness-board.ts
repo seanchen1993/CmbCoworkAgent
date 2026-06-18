@@ -4,22 +4,36 @@ import {
   createHarnessFeature,
   createHarnessProject,
   buildHarnessFeatureDialogTips,
+  getHarnessDynamicWorkflowConfig,
+  deleteHarnessProject,
   getHarnessProjectDetail,
   getHarnessProjectDetails,
   getHarnessRunDetail,
   listHarnessAdapters,
   listHarnessProjects,
+  skipHarnessRunNode,
   updateHarnessProjectMetadata
 } from "../harness-board/service"
+import {
+  getEnterpriseProjectDetails,
+  searchEnterpriseProjects
+} from "../harness-board/enterprise-projects"
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
 import type {
+  HarnessEnterpriseProjectDetailInput,
+  HarnessEnterpriseProjectDetailResult,
+  HarnessEnterpriseProjectSearchInput,
+  HarnessEnterpriseProjectSearchResult,
   HarnessProjectCreateInput,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
-  HarnessAdapterRegistryItem
+  HarnessSkipNodeInput,
+  HarnessSkipNodeResult,
+  HarnessAdapterRegistryItem,
+  HarnessDynamicWorkflowConfig
 } from "../../shared/harness-board-types"
 import type {
   HarnessFeatureCreateInput,
@@ -45,9 +59,36 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle(
+    "harnessBoard:searchEnterpriseProjects",
+    async (
+      _event,
+      input: HarnessEnterpriseProjectSearchInput
+    ): Promise<HarnessEnterpriseProjectSearchResult> => {
+      return searchEnterpriseProjects(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getEnterpriseProjectDetails",
+    async (
+      _event,
+      input: HarnessEnterpriseProjectDetailInput
+    ): Promise<HarnessEnterpriseProjectDetailResult> => {
+      return getEnterpriseProjectDetails(input)
+    }
+  )
+
+  ipcMain.handle(
     "harnessBoard:createFeature",
     async (_event, input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> => {
       return createHarnessFeature(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getDynamicWorkflowConfig",
+    async (_event, projectId: string): Promise<HarnessDynamicWorkflowConfig | null> => {
+      return getHarnessDynamicWorkflowConfig(projectId)
     }
   )
 
@@ -65,6 +106,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     "harnessBoard:archiveProject",
     async (_event, projectId: string): Promise<HarnessProjectMetadata> => {
       return archiveHarnessProject(projectId)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:deleteProject",
+    async (_event, projectId: string): Promise<HarnessProjectMetadata> => {
+      return deleteHarnessProject(projectId)
     }
   )
 
@@ -108,6 +156,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
         detail.run.watchRefs
       )
       return detail
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:skipNode",
+    async (_event, input: HarnessSkipNodeInput): Promise<HarnessSkipNodeResult> => {
+      return skipHarnessRunNode(input)
     }
   )
 

@@ -18,6 +18,7 @@ import { randomUUID } from "crypto"
 import { getUserInfo } from "../storage"
 import { getLocalIP } from "../net-utils"
 import { nowIsoLocal } from "../util/local-time"
+import { deriveUpperOrgLevelsFromPath } from "../org-levels"
 
 // ─────────────────────────────────────────────────────────
 // Constants
@@ -143,44 +144,6 @@ export function getEventReporter(): IEventReporter {
   return _reporter
 }
 
-// ─────────────────────────────────────────────────────────
-function deriveUpperOrgLevels(pathName?: string): {
-  upperOrgLv0: string
-  upperOrgLv1: string
-  upperOrgLv2: string
-  upperOrgLv3: string
-} {
-  const emptyLevels = {
-    upperOrgLv0: "",
-    upperOrgLv1: "",
-    upperOrgLv2: "",
-    upperOrgLv3: ""
-  }
-  const parts = typeof pathName === "string"
-    ? pathName.split("/").map((part) => part.trim()).filter(Boolean)
-    : []
-  const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
-  if (itDeptIndex < 0) return emptyLevels
-
-  const lowerParts = parts.slice(itDeptIndex + 1)
-  const startsWithTeam = lowerParts[0]?.includes("团队") ?? false
-  if (startsWithTeam) {
-    return {
-      upperOrgLv0: lowerParts[2] ?? "",
-      upperOrgLv1: lowerParts[1] ?? "",
-      upperOrgLv2: lowerParts[0] ?? "",
-      upperOrgLv3: "本部团队"
-    }
-  }
-
-  return {
-    upperOrgLv0: lowerParts[3] ?? "",
-    upperOrgLv1: lowerParts[2] ?? "",
-    upperOrgLv2: lowerParts[1] ?? "",
-    upperOrgLv3: lowerParts[0] ?? ""
-  }
-}
-
 /**
  * Build a base event with all common fields prefilled from current user/system
  * state. Caller only needs to specify name, category and properties.
@@ -196,7 +159,7 @@ export function buildEvent(
   properties?: Record<string, unknown>
 ): CoworkEvent {
   const userInfo = getUserInfo()
-  const upperOrgLevels = deriveUpperOrgLevels(userInfo?.pathName)
+  const upperOrgLevels = deriveUpperOrgLevelsFromPath(userInfo?.pathName)
   return {
     eventId:       randomUUID(),
     eventName,

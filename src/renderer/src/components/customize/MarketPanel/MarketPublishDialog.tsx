@@ -1,6 +1,9 @@
 import type React from "react"
 import { marketApi, type MarketItem, type MarketItemType } from "../../../api/market"
-import { UniversalUploadDialog } from "./UniversalUploadDialog"
+import {
+  UniversalUploadDialog,
+  type GeneratedMarketFileBuildContext
+} from "./UniversalUploadDialog"
 import { markUploadedItemInStorage } from "./marketPublishStorage"
 
 type PublishMode = "upload" | "update"
@@ -13,6 +16,8 @@ export type MarketPublishTarget = {
   category?: string
   guidance?: string
 }
+
+export type MarketPublishFileBuildContext = GeneratedMarketFileBuildContext
 
 function getTypeLabel(type: MarketPublishTarget["type"]): string {
   return type === "mcp" ? "MCP 连接器" : "Plugin"
@@ -27,7 +32,8 @@ export function MarketPublishDialog(props: {
     "name" | "description" | "category" | "chinese_name" | "guidance" | "version"
   >
   buildFile: (
-    target: MarketPublishTarget
+    target: MarketPublishTarget,
+    context: MarketPublishFileBuildContext
   ) => Promise<{ success: boolean; file?: File; error?: string }>
   onOpenChange: (open: boolean) => void
   onSuccess: (payload: {
@@ -94,7 +100,7 @@ export function MarketPublishDialog(props: {
         target
           ? {
               label: target.type === "mcp" ? "将自动生成 MCP JSON 配置" : "将自动打包 Plugin ZIP",
-              build: () => buildFile(target)
+              build: (context) => buildFile(target, context)
             }
           : undefined
       }

@@ -130,6 +130,10 @@ export interface Subagent {
   completedAt?: Date
   toolCallId?: string
   subagentType?: string
+  /** Latest interior tool the subagent invoked — drives the collapsed status line. */
+  currentTool?: string
+  /** ISO timestamp of the subagent's most recent interior activity (heartbeat). */
+  lastActivityAt?: string
 }
 
 // Stream events from agent
@@ -615,7 +619,17 @@ export interface ApprovalRequest extends HITLRequest {
     | "edit_file"
     | "code_exec"
     | "save_code_exec_tool"
+    | "git_commit"
+    | "git_push"
   command?: string // shell command (for execute operations)
+  /** For git_commit: the message the agent passed via -m, used to pre-fill the dialog */
+  suggestedCommitMessage?: string
+  /** For git_commit: file paths the agent selected via pathspecs or existing staged files */
+  suggestedCommitFilePaths?: string[]
+  /** For git_commit: cwd that explicit pathspecs are relative to (after git -C) */
+  suggestedCommitFileBasePath?: string
+  /** For git_commit: where suggestedCommitFilePaths came from */
+  suggestedCommitFileSelectionSource?: "pathspec" | "staged"
   filePath?: string // target file path (for write_file/edit_file operations)
   code?: string // code_exec script preview
   params?: unknown // code_exec params preview
@@ -629,7 +643,12 @@ export interface ApprovalRequest extends HITLRequest {
   allowed_approval_types: ApprovalDecisionType[]
 }
 
-export type ApprovalDecisionType = "approve" | "approve_session" | "approve_permanent" | "reject"
+export type ApprovalDecisionType =
+  | "approve"
+  | "approve_session"
+  | "approve_permanent"
+  | "reject"
+  | "error"
 
 /** Fine-grained approval decision from the renderer */
 export interface ApprovalDecision {
@@ -637,6 +656,25 @@ export interface ApprovalDecision {
   tool_call_id: string
   savedToolName?: string
   savedToolDescription?: string
+  /**
+   * For git_commit approvals: the outcome of the commit the renderer performed
+   * (via workspace:commitWorktree) after the user picked a task card and confirmed.
+   * Present only when operation === "git_commit".
+   */
+  commitResult?: {
+    success: boolean
+    commitMessage?: string
+    error?: string
+  }
+  /**
+   * For git_push approvals: the outcome of the push the renderer performed (via
+   * workspace:pushWorktree, the same path as the Git Panel) after the user approved.
+   * Present only when operation === "git_push".
+   */
+  pushResult?: {
+    success: boolean
+    error?: string
+  }
 }
 
 // User input request tool

@@ -1,5 +1,5 @@
 import type { IpcMain } from "electron"
-import { getUserInfo } from "../storage"
+import { getUserInfo, upsertUserInfoConfig, type UserInfoConfig } from "../storage"
 import type {
   TaskCardItem,
   TaskCardsListResult,
@@ -8,12 +8,22 @@ import type {
 import { normalizeTaskCardsPayload } from "../../shared/task-card-types"
 
 const DEFAULT_TASK_CARDS_ENDPOINT =
-  "https://devops-kanban.paas.cmbchina.cn/api-market/api-market/v2/rest/tasks/by-assignee"
+  "https://devops-kanban.paas.cmbchina.cn/api-market/v2/rest/tasks/by-assignee"
 const TASK_CARDS_CACHE_TTL_MS = 90_000
 const TASK_CARDS_TIMEOUT_MS = 15_000
 const TASK_CARDS_CACHE_LIMIT = 8
 const TASK_CARDS_MAX_PAGES = 10
 const TASK_CARDS_TOTAL_TIMEOUT_MS = 45_000
+const TASK_CARDS_ERROR_BODY_LOG_LIMIT = 800
+const SENSITIVE_RESPONSE_HEADERS = new Set(["authorization", "proxy-authorization", "set-cookie"])
+
+type TaskCardsHttpMethod = "GET" | "POST"
+
+interface TaskCardsRequestResult extends TaskCardsListResult {
+  httpStatus?: number
+  requestMethod?: TaskCardsHttpMethod
+  methodFallbackUsed?: boolean
+}
 
 const MOCK_TASK_CARDS: TaskCardItem[] = [
   {
@@ -190,6 +200,10 @@ interface TaskCardsCacheEntry {
 }
 
 const taskCardsCache = new Map<string, TaskCardsCacheEntry>()
+let taskCardsRequestSequence = 0
+// The desktop app has one signed-in user per process; share an in-flight refresh
+// so parallel task-card loads do not stampede the login-info endpoint.
+let taskCardsLoginRefreshPromise: Promise<UserInfoConfig | null> | null = null
 
 function normalizeQuery(query?: TaskCardsQuery): NormalizedTaskCardsQuery {
   const pageSize =
@@ -215,6 +229,18 @@ function getTaskCardsEndpoint(): string {
   return configured || process.env.CMB_TASK_CARDS_ENDPOINT || DEFAULT_TASK_CARDS_ENDPOINT
 }
 
+function getLoginInfoEndpoint(): string {
+  const viteEnv = (import.meta.env ?? {}) as Record<string, string | undefined>
+  const configured = viteEnv.VITE_LOGIN_INFO_ENDPOINT?.trim() || process.env.CMB_LOGIN_INFO_ENDPOINT
+  if (configured?.trim()) return configured.trim()
+
+  const loginPt = viteEnv.VITE_LOGIN_PT?.trim() || process.env.VITE_LOGIN_PT?.trim()
+  if (!loginPt) {
+    throw new Error("未配置登录环境，无法刷新任务卡登录凭据")
+  }
+  return `https://archguardservice.paas.${loginPt}.cn/cowork/login-info`
+}
+
 function isTaskCardsMockEnabled(): boolean {
   const viteEnv = (import.meta.env ?? {}) as Record<string, string | undefined>
   return viteEnv.VITE_TASK_CARDS_MOCK === "1" || process.env.CMB_TASK_CARDS_MOCK === "1"
@@ -226,6 +252,56 @@ function createHttpsTaskCardsUrl(endpoint: string): URL {
     throw new Error("任务卡接口必须使用 HTTPS，已拒绝通过明文 HTTP 传输登录令牌")
   }
   return url
+}
+
+function createHttpsLoginInfoUrl(endpoint: string): URL {
+  const url = new URL(endpoint)
+  if (url.protocol !== "https:") {
+    throw new Error("登录凭据刷新接口必须使用 HTTPS")
+  }
+  return url
+}
+
+function nextTaskCardsRequestId(): string {
+  taskCardsRequestSequence = (taskCardsRequestSequence + 1) % 100_000
+  return `task-cards-${Date.now()}-${taskCardsRequestSequence}`
+}
+
+function getTaskCardsRequestHeaders(): Record<string, string> {
+  return {
+    Authorization: "Bearer <redacted>",
+    Accept: "application/json"
+  }
+}
+
+function getTaskCardsResponseHeaders(response: Response): Record<string, string> {
+  const headers: Record<string, string> = {}
+  response.headers.forEach((value, key) => {
+    headers[key] = SENSITIVE_RESPONSE_HEADERS.has(key.toLowerCase()) ? "<redacted>" : value
+  })
+  return headers
+}
+
+function truncateForLog(value: string): string {
+  if (value.length <= TASK_CARDS_ERROR_BODY_LOG_LIMIT) return value
+  return `${value.slice(0, TASK_CARDS_ERROR_BODY_LOG_LIMIT)}...<truncated>`
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
+function readString(raw: Record<string, unknown>, key: string): string | undefined {
+  const value = raw[key]
+  if (typeof value === "string") {
+    const trimmed = value.trim()
+    return trimmed || undefined
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value)
+  }
+  return undefined
 }
 
 function buildCacheKey(query: NormalizedTaskCardsQuery, userKey: string, endpoint: string): string {
@@ -241,8 +317,13 @@ function buildCacheKey(query: NormalizedTaskCardsQuery, userKey: string, endpoin
 function emptyResult(
   query: NormalizedTaskCardsQuery,
   error: string,
-  options?: { loginRequired?: boolean }
-): TaskCardsListResult {
+  options?: {
+    loginRequired?: boolean
+    httpStatus?: number
+    requestMethod?: TaskCardsHttpMethod
+    methodFallbackUsed?: boolean
+  }
+): TaskCardsRequestResult {
   return {
     success: false,
     cards: [],
@@ -250,8 +331,43 @@ function emptyResult(
     pageSize: query.pageSize,
     pageNum: query.pageNum,
     error,
-    ...(options?.loginRequired ? { loginRequired: true } : {})
+    ...(options?.loginRequired ? { loginRequired: true } : {}),
+    ...(options?.httpStatus !== undefined ? { httpStatus: options.httpStatus } : {}),
+    ...(options?.requestMethod !== undefined ? { requestMethod: options.requestMethod } : {}),
+    ...(options?.methodFallbackUsed !== undefined
+      ? { methodFallbackUsed: options.methodFallbackUsed }
+      : {})
   }
+}
+
+function stripRequestMetadata(result: TaskCardsRequestResult): TaskCardsListResult {
+  const {
+    httpStatus: _httpStatus,
+    requestMethod: _requestMethod,
+    methodFallbackUsed: _methodFallbackUsed,
+    ...publicResult
+  } = result
+  return publicResult
+}
+
+function isUnauthorizedResult(result: TaskCardsRequestResult): boolean {
+  return result.httpStatus === 401
+}
+
+function shouldRetryUnauthorizedWithGet(result: TaskCardsRequestResult): boolean {
+  return (
+    isUnauthorizedResult(result) && result.requestMethod === "POST" && !result.methodFallbackUsed
+  )
+}
+
+function loginExpiredResult(query: NormalizedTaskCardsQuery): TaskCardsRequestResult {
+  return emptyResult(query, "登录凭据已过期，请重新登录后再选择任务卡片", {
+    loginRequired: true
+  })
+}
+
+function getTaskCardsUserKey(userInfo: UserInfoConfig): string {
+  return userInfo.ystId || userInfo.sapId || "current-user"
 }
 
 function readCache(cacheKey: string): TaskCardsListResult | null {
@@ -306,41 +422,244 @@ function createMockTaskCardsResult(query: NormalizedTaskCardsQuery): TaskCardsLi
   )
 }
 
-async function fetchTaskCardsPage(
-  endpoint: string,
-  accessToken: string,
-  query: NormalizedTaskCardsQuery
-): Promise<TaskCardsListResult> {
-  const url = createHttpsTaskCardsUrl(endpoint)
-  url.searchParams.set("pageSize", String(query.pageSize))
-  url.searchParams.set("pageNum", String(query.pageNum))
-  url.searchParams.set("includeArchived", query.includeArchived ? "true" : "false")
+function mergeRefreshedUserInfo(
+  current: UserInfoConfig,
+  body: Record<string, unknown>
+): UserInfoConfig {
+  const nextAccessToken = readString(body, "ystAccessToken")
+  if (!nextAccessToken) {
+    throw new Error("登录凭据刷新响应缺少 ystAccessToken")
+  }
+
+  return {
+    ...current,
+    sapId: readString(body, "sapId") || current.sapId,
+    ystId: readString(body, "ystId") || current.ystId,
+    userName: readString(body, "userName") || current.userName,
+    originOrgId: readString(body, "originOrgId") || current.originOrgId,
+    orgName: readString(body, "orgName") || current.orgName,
+    pathName: readString(body, "pathName") || current.pathName,
+    originPathId: readString(body, "originPathId") || current.originPathId,
+    ystRefreshToken: readString(body, "ystRefreshToken") || current.ystRefreshToken,
+    ystIdToken: readString(body, "ystIdToken") || current.ystIdToken,
+    ystCode: readString(body, "ystCode") || current.ystCode,
+    ystAccessToken: nextAccessToken
+  }
+}
+
+async function requestTaskCardsLoginRefresh(
+  userInfo: UserInfoConfig
+): Promise<UserInfoConfig | null> {
+  const refreshToken = userInfo.ystRefreshToken?.trim()
+  const ystCode = userInfo.ystCode?.trim()
+  if (!refreshToken && !ystCode) {
+    console.warn("[TaskCards] token-refresh:missing-refresh-token")
+    return null
+  }
+
+  const requestId = nextTaskCardsRequestId()
+  const url = createHttpsLoginInfoUrl(getLoginInfoEndpoint())
+  const headers: Record<string, string> = {}
+  if (refreshToken) headers.ystRefreshToken = refreshToken
+  if (ystCode) headers.ystCode = ystCode
 
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), TASK_CARDS_TIMEOUT_MS)
 
   try {
-    const response = await fetch(url.toString(), {
-      method: "POST",
+    const startedAt = Date.now()
+    console.info("[TaskCards] token-refresh:start", {
+      requestId,
+      url: url.toString(),
       headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({}),
+        ystRefreshToken: refreshToken ? "<redacted>" : undefined,
+        ystCode: ystCode ? "<redacted>" : undefined
+      }
+    })
+
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers,
       signal: controller.signal
+    })
+    console.info("[TaskCards] token-refresh:response", {
+      requestId,
+      status: response.status,
+      statusText: response.statusText,
+      durationMs: Date.now() - startedAt,
+      headers: getTaskCardsResponseHeaders(response)
     })
 
     if (!response.ok) {
-      return emptyResult(query, `任务卡接口请求失败：HTTP ${response.status}`)
+      const responseText = await response.text().catch(() => "")
+      console.warn("[TaskCards] token-refresh:failed", {
+        requestId,
+        status: response.status,
+        statusText: response.statusText,
+        bodyPreview: responseText ? truncateForLog(responseText) : ""
+      })
+      return null
+    }
+
+    const payload = asRecord(await response.json())
+    if (!payload) {
+      throw new Error("登录凭据刷新响应格式异常")
+    }
+
+    const returnCode = readString(payload, "returnCode")
+    if (returnCode !== "SUC0000") {
+      console.warn("[TaskCards] token-refresh:business-failed", {
+        requestId,
+        returnCode,
+        error: readString(payload, "errorMsg")
+      })
+      return null
+    }
+
+    const body = asRecord(payload.body)
+    if (!body) {
+      throw new Error("登录凭据刷新响应缺少 body")
+    }
+
+    const nextUserInfo = mergeRefreshedUserInfo(userInfo, body)
+    upsertUserInfoConfig(nextUserInfo)
+    return nextUserInfo
+  } catch (error) {
+    const aborted = error instanceof Error && error.name === "AbortError"
+    console.warn("[TaskCards] token-refresh:error", {
+      requestId,
+      aborted,
+      message: error instanceof Error ? error.message : String(error)
+    })
+    return null
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function refreshTaskCardsLogin(userInfo: UserInfoConfig): Promise<UserInfoConfig | null> {
+  if (!taskCardsLoginRefreshPromise) {
+    taskCardsLoginRefreshPromise = requestTaskCardsLoginRefresh(userInfo).finally(() => {
+      taskCardsLoginRefreshPromise = null
+    })
+  }
+  return taskCardsLoginRefreshPromise
+}
+
+async function fetchTaskCardsPage(
+  endpoint: string,
+  accessToken: string,
+  query: NormalizedTaskCardsQuery,
+  options?: { preferredMethod?: TaskCardsHttpMethod }
+): Promise<TaskCardsRequestResult> {
+  const requestId = nextTaskCardsRequestId()
+  const url = createHttpsTaskCardsUrl(endpoint)
+  url.searchParams.set("pageSize", String(query.pageSize))
+  url.searchParams.set("pageNum", String(query.pageNum))
+  url.searchParams.set("includeArchived", query.includeArchived ? "true" : "false")
+
+  const requestTaskCards = async (method: "GET" | "POST"): Promise<Response> => {
+    const startedAt = Date.now()
+    console.info("[TaskCards] request:start", {
+      requestId,
+      method,
+      url: url.toString(),
+      query: {
+        pageSize: query.pageSize,
+        pageNum: query.pageNum,
+        includeArchived: query.includeArchived
+      },
+      headers: getTaskCardsRequestHeaders(),
+      body: null
+    })
+    return fetch(url.toString(), {
+      method,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json"
+      },
+      signal: controller.signal
+    }).then((response) => {
+      console.info("[TaskCards] request:response", {
+        requestId,
+        method,
+        status: response.status,
+        statusText: response.statusText,
+        durationMs: Date.now() - startedAt,
+        headers: getTaskCardsResponseHeaders(response)
+      })
+      return response
+    })
+  }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), TASK_CARDS_TIMEOUT_MS)
+
+  try {
+    const preferredMethod = options?.preferredMethod || "POST"
+    let responseMethod: TaskCardsHttpMethod = preferredMethod
+    let response = await requestTaskCards(preferredMethod)
+    let methodFallbackUsed = false
+    if (preferredMethod === "POST" && response.status === 405) {
+      methodFallbackUsed = true
+      responseMethod = "GET"
+      console.warn("[TaskCards] request:method-not-allowed-fallback", {
+        requestId,
+        fromMethod: "POST",
+        toMethod: "GET",
+        status: response.status,
+        allow: response.headers.get("allow") || undefined
+      })
+      response = await requestTaskCards("GET")
+    }
+
+    if (!response.ok) {
+      const responseText = await response.text().catch(() => "")
+      console.warn("[TaskCards] request:failed", {
+        requestId,
+        status: response.status,
+        statusText: response.statusText,
+        methodFallbackUsed,
+        headers: getTaskCardsResponseHeaders(response),
+        bodyPreview: responseText ? truncateForLog(responseText) : ""
+      })
+      const methodHint =
+        response.status === 405
+          ? methodFallbackUsed
+            ? "（POST/GET 均被当前网关拒绝，请确认接口路由允许的方法）"
+            : "（当前网关不允许该请求方法）"
+          : ""
+      return emptyResult(query, `任务卡接口请求失败：HTTP ${response.status}${methodHint}`, {
+        httpStatus: response.status,
+        loginRequired: response.status === 401,
+        requestMethod: responseMethod,
+        methodFallbackUsed
+      })
     }
 
     const payload = (await response.json()) as unknown
-    return normalizeTaskCardsPayload(payload, {
+    const result = normalizeTaskCardsPayload(payload, {
       pageSize: query.pageSize,
       pageNum: query.pageNum
     })
+    console.info("[TaskCards] request:parsed", {
+      requestId,
+      success: result.success,
+      total: result.total,
+      cards: result.cards.length,
+      pageSize: result.pageSize,
+      pageNum: result.pageNum,
+      error: result.error
+    })
+    return result
   } catch (error) {
     const aborted = error instanceof Error && error.name === "AbortError"
+    console.error("[TaskCards] request:error", {
+      requestId,
+      aborted,
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined
+    })
     return emptyResult(
       query,
       error instanceof Error && !aborted
@@ -357,9 +676,10 @@ async function fetchTaskCardsPage(
 async function fetchAllTaskCards(
   endpoint: string,
   accessToken: string,
-  query: NormalizedTaskCardsQuery
-): Promise<TaskCardsListResult> {
-  const firstPage = await fetchTaskCardsPage(endpoint, accessToken, query)
+  query: NormalizedTaskCardsQuery,
+  options?: { preferredMethod?: TaskCardsHttpMethod }
+): Promise<TaskCardsRequestResult> {
+  const firstPage = await fetchTaskCardsPage(endpoint, accessToken, query, options)
   if (!firstPage.success) return firstPage
 
   const cards = [...firstPage.cards]
@@ -387,10 +707,15 @@ async function fetchAllTaskCards(
     }
 
     pageNum += 1
-    const nextPage = await fetchTaskCardsPage(endpoint, accessToken, {
-      ...query,
-      pageNum
-    })
+    const nextPage = await fetchTaskCardsPage(
+      endpoint,
+      accessToken,
+      {
+        ...query,
+        pageNum
+      },
+      options
+    )
     if (!nextPage.success) return nextPage
     lastPageCount = nextPage.cards.length
     if (nextPage.cards.length === 0) break
@@ -425,28 +750,58 @@ export async function listCurrentUserTaskCards(
 
   const userInfo = getUserInfo()
   const accessToken = userInfo?.ystAccessToken?.trim()
-  if (!accessToken) {
+  if (!userInfo || !accessToken) {
     return emptyResult(query, "未获取到登录凭据，请先登录后再选择任务卡片", {
       loginRequired: true
     })
   }
 
   const endpoint = getTaskCardsEndpoint()
-  const userKey = userInfo?.ystId || userInfo?.sapId || "current-user"
-  const cacheKey = buildCacheKey(query, userKey, endpoint)
+  let cacheUserKey = getTaskCardsUserKey(userInfo)
+  let cacheKey = buildCacheKey(query, cacheUserKey, endpoint)
   if (!query.forceRefresh) {
     const cached = readCache(cacheKey)
     if (cached) return cached
   }
 
   try {
-    const result = await fetchAllTaskCards(endpoint, accessToken, query)
+    let result = await fetchAllTaskCards(endpoint, accessToken, query)
+    if (isUnauthorizedResult(result)) {
+      taskCardsCache.clear()
+      console.warn("[TaskCards] request:unauthorized-refresh-token", {
+        endpoint,
+        userKey: cacheUserKey
+      })
 
-    if (result.success) {
-      writeCache(cacheKey, result)
+      const refreshedUserInfo = await refreshTaskCardsLogin(userInfo)
+      const refreshedAccessToken = refreshedUserInfo?.ystAccessToken?.trim()
+      if (!refreshedUserInfo || !refreshedAccessToken) {
+        return loginExpiredResult(query)
+      }
+
+      cacheUserKey = getTaskCardsUserKey(refreshedUserInfo)
+      cacheKey = buildCacheKey(query, cacheUserKey, endpoint)
+      result = await fetchAllTaskCards(endpoint, refreshedAccessToken, query)
+      if (shouldRetryUnauthorizedWithGet(result)) {
+        console.warn("[TaskCards] request:unauthorized-get-fallback", {
+          endpoint,
+          userKey: cacheUserKey
+        })
+        result = await fetchAllTaskCards(endpoint, refreshedAccessToken, query, {
+          preferredMethod: "GET"
+        })
+      }
+      if (isUnauthorizedResult(result)) {
+        return loginExpiredResult(query)
+      }
     }
 
-    return result
+    const publicResult = stripRequestMetadata(result)
+    if (result.success) {
+      writeCache(cacheKey, publicResult)
+    }
+
+    return publicResult
   } catch (error) {
     return emptyResult(query, error instanceof Error ? error.message : "任务卡接口请求异常")
   }

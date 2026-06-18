@@ -1,7 +1,7 @@
 import type { GoalEvaluationInput } from "./evaluator"
 import type { GoalJudgeDecision } from "./types"
 
-export const DEFAULT_GOAL_EVALUATOR_RUNTIME_ATTEMPTS = 2
+export const DEFAULT_GOAL_EVALUATOR_RUNTIME_ATTEMPTS = 3
 export const DEFAULT_GOAL_EVALUATOR_RUNTIME_RETRY_DELAY_MS = 750
 
 type GoalEvaluatorRuntime = (

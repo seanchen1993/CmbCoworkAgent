@@ -274,6 +274,30 @@ export interface ModelRetryState {
   startedAt: Date
 }
 
+/** One failover attempt shown in the error detail card. */
+export interface ApiErrorFailoverAttempt {
+  modelId: string
+  reason: string
+}
+
+/**
+ * Structured diagnostics for a failed turn, mirrored from the main process
+ * `error_detail` custom event. Everything is optional so the card degrades
+ * gracefully when a field is unavailable.
+ */
+export interface ApiErrorDetailState {
+  code?: string
+  status?: number
+  statusLabel?: string
+  hint?: string
+  requestId?: string
+  reason?: string
+  providerMessage?: string
+  rawBody?: string
+  model?: string
+  failover?: ApiErrorFailoverAttempt[]
+}
+
 export interface HookLogEntry {
   id: string
   /** "executed" = ran to completion; "skipped" = matched event but scope-filtered. */
@@ -352,6 +376,22 @@ export interface ThreadGitContext {
   branch?: string | null
 }
 
+export interface ContextReminderState {
+  pending: boolean
+  shownCount: number
+  completedTurnCount: number
+  lastPromptCompletedTurnCount: number
+}
+
+function createDefaultContextReminderState(): ContextReminderState {
+  return {
+    pending: false,
+    shownCount: 0,
+    completedTurnCount: 0,
+    lastPromptCompletedTurnCount: 0
+  }
+}
+
 // Per-thread state (persisted/restored from checkpoints)
 export interface ThreadState {
   messages: Message[]
@@ -362,6 +402,13 @@ export interface ThreadState {
   workspacePath: string | null
   gitContext: ThreadGitContext | null
   subagents: Subagent[]
+  /**
+   * Per-subagentId live transcript buffer (Phase 2, A1'). Subagent-interior
+   * message-delta / tool-message scheduler events tagged with `subagentId` are
+   * appended here instead of into `messages`, so the `task` card can render the
+   * subagent's nested interior on demand without polluting the main thread.
+   */
+  subagentTranscripts: Record<string, Message[]>
   coordinatorWorkers: CoordinatorWorkerView[]
   subagentToolCallCount: number
   subagentInternalLogs: SubagentInternalLogEntry[]
@@ -371,13 +418,16 @@ export interface ThreadState {
   approvalQueue: HITLRequest[]
   pendingUserInput: UserInputRequest | null
   error: string | null
+  errorDetail: ApiErrorDetailState | null
   hookInterruption: HookInterruptionState | null
   currentModel: string
   openFiles: OpenFile[]
   activeTab: "agent" | string
   fileContents: Record<string, string>
   tokenUsage: TokenUsage | null
+  contextReminder: ContextReminderState
   draftInput: string
+  harnessNextActionDialogTips: string | null
   /**
    * Skill chip the user has selected for the next send. Kept alongside
    * draftInput so the chip survives view switches (chat → customize → back),
@@ -456,7 +506,13 @@ export interface ThreadActions {
   closeFile: (path: string) => void
   setActiveTab: (tab: "agent" | string) => void
   setFileContents: (path: string, content: string) => void
+  setContextReminder: (
+    update:
+      | ContextReminderState
+      | ((prev: ContextReminderState) => ContextReminderState)
+  ) => void
   setDraftInput: (input: string) => void
+  setHarnessNextActionDialogTips: (tips: string | null) => void
   setDraftSkill: (skill: SkillMetadata | null) => void
 }
 
@@ -494,6 +550,7 @@ const createDefaultThreadState = (): ThreadState => ({
   workspacePath: null,
   gitContext: null,
   subagents: [],
+  subagentTranscripts: {},
   coordinatorWorkers: [],
   subagentToolCallCount: 0,
   subagentInternalLogs: [],
@@ -503,13 +560,16 @@ const createDefaultThreadState = (): ThreadState => ({
   approvalQueue: [],
   pendingUserInput: null,
   error: null,
+  errorDetail: null,
   hookInterruption: null,
   currentModel: "",
   openFiles: [],
   activeTab: "agent",
   fileContents: {},
   tokenUsage: null,
+  contextReminder: createDefaultContextReminderState(),
   draftInput: "",
+  harnessNextActionDialogTips: null,
   draftSkill: null,
   scheduledTaskLoading: false,
   historyLoading: false,
@@ -677,6 +737,10 @@ function normalizeApprovalPayload(request: unknown): HITLRequest & Record<string
     command: req.command,
     reason: req.reason,
     operation: req.operation,
+    suggestedCommitMessage: req.suggestedCommitMessage,
+    suggestedCommitFilePaths: req.suggestedCommitFilePaths,
+    suggestedCommitFileBasePath: req.suggestedCommitFileBasePath,
+    suggestedCommitFileSelectionSource: req.suggestedCommitFileSelectionSource,
     filePath: req.filePath,
     code: req.code,
     params: req.params,
@@ -836,6 +900,8 @@ interface CustomEventData {
     startedAt?: Date
     completedAt?: Date
     subagentType?: string
+    currentTool?: string
+    lastActivityAt?: string
   }>
   workers?: CoordinatorWorkerView[]
   worker?: CoordinatorWorkerView
@@ -864,6 +930,8 @@ interface CustomEventData {
   maxRetries?: number
   reason?: string
   message?: string
+  // error_detail field
+  detail?: ApiErrorDetailState
   goalId?: string | null
   activeWindowId?: string | null
   eventId?: number | null
@@ -1940,6 +2008,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     (threadId: string, error: Error) => {
       console.error("[ThreadContext] Stream error:", { threadId, error })
       const userFriendlyMessage = parseErrorMessage(error)
+      // NOTE: do NOT clear errorDetail here. The `error_detail` custom event is
+      // emitted just BEFORE this error event (the error event terminates the
+      // stream in useStream, so a later custom event would be dropped). Clearing
+      // here would wipe the detail that was just set. Any stale detail from a
+      // previous turn is reset at the next turn start (ChatContainer submit) and
+      // is gated by `threadError`, so it never shows on its own.
       updateThreadState(threadId, () => ({ error: userFriendlyMessage, modelRetry: null }))
     },
     [parseErrorMessage, updateThreadState]
@@ -2081,7 +2155,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 status: (s.status || "pending") as "pending" | "running" | "completed" | "failed",
                 startedAt: s.startedAt,
                 completedAt: s.completedAt,
-                subagentType: s.subagentType
+                subagentType: s.subagentType,
+                currentTool: s.currentTool,
+                lastActivityAt: s.lastActivityAt
               }))
             }))
           }
@@ -2192,6 +2268,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         case "model_retry_clear":
           updateThreadState(threadId, () => ({ modelRetry: null }))
           break
+        case "error_detail":
+          // Structured diagnostics for the failed turn. Arrives just before the
+          // plain `error` event (which sets `error`); stored separately so the
+          // error card can render status / request-id / real reason.
+          if (data.detail && typeof data.detail === "object") {
+            const detail = data.detail as ApiErrorDetailState
+            updateThreadState(threadId, () => ({ errorDetail: detail }))
+          }
+          break
         case "goal_subturn_complete":
           {
             const messages = Array.isArray(data.messages) ? data.messages : []
@@ -2266,6 +2351,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               : undefined
           updateThreadState(threadId, () => ({
             error: null,
+            errorDetail: null,
             hookInterruption: {
               event: eventName,
               action,
@@ -2623,7 +2709,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           updateThreadState(threadId, () => ({ error }))
         },
         clearError: () => {
-          updateThreadState(threadId, () => ({ error: null }))
+          updateThreadState(threadId, () => ({ error: null, errorDetail: null }))
         },
         clearHookInterruption: () => {
           updateThreadState(threadId, () => ({ hookInterruption: null }))
@@ -2675,8 +2761,24 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             fileContents: { ...state.fileContents, [path]: content }
           }))
         },
+        setContextReminder: (
+          update:
+            | ContextReminderState
+            | ((prev: ContextReminderState) => ContextReminderState)
+        ) => {
+          updateThreadState(threadId, (state) => ({
+            contextReminder:
+              typeof update === "function"
+                ? update(state.contextReminder ?? createDefaultContextReminderState())
+                : update
+          }))
+        },
         setDraftInput: (input: string) => {
           updateThreadState(threadId, () => ({ draftInput: input }))
+        },
+        setHarnessNextActionDialogTips: (tips: string | null) => {
+          const normalizedTips = tips?.trim() || null
+          updateThreadState(threadId, () => ({ harnessNextActionDialogTips: normalizedTips }))
         },
         setDraftSkill: (skill: SkillMetadata | null) => {
           updateThreadState(threadId, () => ({ draftSkill: skill }))

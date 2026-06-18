@@ -29,7 +29,7 @@
 
 import { appendFile, readdir, readFile, stat, unlink, rename } from "fs/promises"
 import { existsSync, mkdirSync } from "fs"
-import { extname, join, relative, resolve as resolvePath } from "path"
+import { dirname, extname, join, relative, resolve as resolvePath } from "path"
 import { randomUUID } from "crypto"
 import { execFileSync } from "child_process"
 import * as iconv from "iconv-lite"
@@ -41,6 +41,7 @@ import {
   closeAdoptionIndex,
   findPendingGensForFile,
   flushAdoptionIndex,
+  getGenRowByEventId,
   initializeAdoptionIndex,
   insertGenEvent,
   markMeasured,
@@ -59,6 +60,12 @@ import {
 // also doubled as the L2 timer window — L2 has been removed, this is now purely
 // "how long do we keep a baseline around for commit-time attribution".)
 const GEN_ATTRIBUTION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+// Slack added to a commit's creation time when using it as an upper bound on
+// eligible gen rows. Covers git's 1-second committer-time granularity (a gen
+// written in the same wall-clock second as the commit must not be floored out)
+// plus minor clock jitter, while staying far below the multi-second gap to any
+// *subsequent* (post-commit) generation we want to exclude.
+const COMMIT_ATTRIBUTION_TOLERANCE_MS = 2 * 1000
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000 // shard rotation / retention / VACUUM cadence
 const SHARD_SIZE_LIMIT_BYTES = 10 * 1024 * 1024 // 10 MB per shard
 const SHARD_MAX_AGE_MS = 30 * 60 * 1000 // rotate every 30 min
@@ -68,7 +75,11 @@ const MAX_CONTEXT_ENTRIES = 32 // bound in-memory context size
 const STAGED_BLOB_MAX_BYTES = 8 * 1024 * 1024 // cap git show output per staged file
 
 // sqlite index safeguards — keep the on-disk file bounded even under abuse
-const INDEX_MEASURED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000 // already-measured rows: 3 days
+// Already-measured rows are kept for the full attribution window (7 days) so the
+// local line-level 溯源 reader can still recover stored per-line hashes for any
+// commit inside that window. (Was 3 days — bumped to align with
+// GEN_ATTRIBUTION_WINDOW_MS; INDEX_MAX_ROWS still caps total growth.)
+const INDEX_MEASURED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const INDEX_MAX_ROWS = 5000 // hard row cap (oldest measured dropped first)
 const INDEX_VACUUM_EVERY_N_SWEEPS = 12 // VACUUM cadence (12 × 5min = 1h)
 
@@ -899,10 +910,28 @@ interface MeasureOpts {
   currentContent?: string | Buffer
   commitSha?: string
   /**
+   * Commit creation time (epoch ms). Used as an inclusive upper bound (plus a
+   * small tolerance) on eligible gen rows so generations made *after* this
+   * commit are never attributed to it. Critical for out-of-order re-measures
+   * (commit reconciler / hook sync) that run long after the commit, when newer
+   * uncommitted gens for the same file may exist. Omit to disable the bound.
+   */
+  commitTimeMs?: number
+  /**
    * When true, short-circuit to `verdict: deleted` without reading the worktree
    * or comparing hashes. Used by the commit path for files staged as deletions.
    */
   stagedDeleted?: boolean
+}
+
+/**
+ * Inclusive upper bound on eligible gen `created_at`, derived from a commit's
+ * creation time plus tolerance. Returns undefined when no commit time is known
+ * (preserving the legacy "no upper bound" behaviour).
+ */
+function resolveMaxGenCreatedAt(commitTimeMs?: number): number | undefined {
+  if (typeof commitTimeMs !== "number" || !Number.isFinite(commitTimeMs)) return undefined
+  return commitTimeMs + COMMIT_ATTRIBUTION_TOLERANCE_MS
 }
 
 /**
@@ -929,9 +958,10 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
   try {
     absPath = resolvePath(filePath)
     const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
-    const pendingRows = findPendingGensForFile(absPath, minCreated)
+    const maxCreated = resolveMaxGenCreatedAt(opts?.commitTimeMs)
+    const pendingRows = findPendingGensForFile(absPath, minCreated, maxCreated)
     console.log(
-      `[AdoptionTracker] doMeasureFile: absPath=${absPath} pendingGens=${pendingRows.length} commitSha=${opts?.commitSha ?? "none"} stagedDeleted=${opts?.stagedDeleted ?? false}`
+      `[AdoptionTracker] doMeasureFile: absPath=${absPath} pendingGens=${pendingRows.length} commitSha=${opts?.commitSha ?? "none"} commitTimeMs=${opts?.commitTimeMs ?? "none"} stagedDeleted=${opts?.stagedDeleted ?? false}`
     )
     if (pendingRows.length === 0) return
 
@@ -1276,35 +1306,205 @@ export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnaps
  * is the only signal we treat as adoption. Deletions surface via a null
  * stagedContent (→ `verdict: deleted`).
  */
-export function measureForCommit(snapshots: StagedSnapshot[], commitSha?: string): void {
+export function measureForCommit(
+  snapshots: StagedSnapshot[],
+  commitSha?: string,
+  commitTimeMs?: number
+): void {
   if (!initialized) {
     console.warn("[AdoptionTracker] measureForCommit skipped — tracker not initialized")
     return
   }
   console.log(
-    `[AdoptionTracker] measureForCommit: snapshotCount=${snapshots.length} commitSha=${commitSha ?? "unknown"}`
+    `[AdoptionTracker] measureForCommit: snapshotCount=${snapshots.length} commitSha=${commitSha ?? "unknown"} commitTimeMs=${commitTimeMs ?? "none"}`
   )
   for (const snap of snapshots) {
     if (!isCodeFile(snap.absPath)) continue
     if (snap.stagedContent === null) {
-      measureFile(snap.absPath, { stagedDeleted: true, commitSha })
+      measureFile(snap.absPath, { stagedDeleted: true, commitSha, commitTimeMs })
       continue
     }
     measureFile(snap.absPath, {
       currentContent: snap.stagedContent,
-      commitSha
+      commitSha,
+      commitTimeMs
     })
   }
 }
 
-export function hasPendingGenerationsForCommit(snapshots: StagedSnapshot[]): boolean {
+export function hasPendingGenerationsForCommit(
+  snapshots: StagedSnapshot[],
+  commitTimeMs?: number
+): boolean {
   if (!initialized) return false
   const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
+  // Mirror the upper bound used at measure time so the "should I measure this
+  // commit?" gate and the measurement itself agree — otherwise the reconciler
+  // would re-process (and re-emit git.commit.created for) commits whose only
+  // pending gens are newer than the commit and would be skipped anyway.
+  const maxCreated = resolveMaxGenCreatedAt(commitTimeMs)
   for (const snap of snapshots) {
     if (!isCodeFile(snap.absPath)) continue
-    if (findPendingGensForFile(snap.absPath, minCreated).length > 0) return true
+    if (findPendingGensForFile(snap.absPath, minCreated, maxCreated).length > 0) return true
   }
   return false
+}
+
+// ─────────────────────────────────────────────────────────
+// Local line-level 溯源 (read-only)
+//
+// Reconstructs, on demand, which committed lines a past generation was credited
+// for. Content was never stored — only per-line FNV hashes (sqlite) — so we
+// re-read the committed blob via `git show <sha>:<path>` and intersect its line
+// hashes with the stored generation hashes. This recovers the *committed* text
+// of adopted lines; lines the agent generated but that never reached the commit
+// have no retrievable text (only a count). Only works for the current machine's
+// own recent (≤7d) commits whose sqlite row survives.
+// ─────────────────────────────────────────────────────────
+
+export interface LocalAdoptionLine {
+  lineNumber: number
+  text: string
+  /** True when this committed line matched a stored generated-line hash. */
+  adopted: boolean
+}
+
+export interface LocalGenAdoptionLines {
+  genEventId: string
+  available: boolean
+  /** Populated when available=false to explain the degradation. */
+  reason?: string
+  /** Repo-relative path of the committed file (best-effort). */
+  relPath?: string
+  /** Number of generated (net-new) lines recorded at gen time. */
+  generatedLineCount?: number
+  /** Committed lines that matched a stored generated-line hash. */
+  matchedLineCount?: number
+  /** True when the committed file exceeded the display cap and was truncated. */
+  truncated?: boolean
+  lines?: LocalAdoptionLine[]
+}
+
+const LOCAL_TRACE_MAX_GENS = 50
+const LOCAL_TRACE_MAX_LINES = 4000
+
+/**
+ * Walk the committed file's physical lines, marking each as adopted when its
+ * normalised hash is present in the stored generated-line multiset (consuming
+ * the count so multiplicity is respected — mirrors the commit-time measure).
+ */
+function matchCommittedLinesAgainstHashes(
+  committedText: string,
+  storedHashes: Uint32Array,
+  maxLines: number
+): { lines: LocalAdoptionLine[]; matchedLineCount: number; truncated: boolean } {
+  const counts = buildLineHashCounts(storedHashes)
+  const physical = committedText.split(/\r?\n/)
+  const limit = Math.min(physical.length, maxLines)
+  const lines: LocalAdoptionLine[] = []
+  let matchedLineCount = 0
+  for (let i = 0; i < limit; i++) {
+    const raw = physical[i]
+    const norm = normalizeLine(raw)
+    let adopted = false
+    if (norm.length > 0) {
+      const h = fnv1a32(norm)
+      const c = counts.get(h)
+      if (c && c > 0) {
+        counts.set(h, c - 1)
+        adopted = true
+        matchedLineCount++
+      }
+    }
+    lines.push({ lineNumber: i + 1, text: raw, adopted })
+  }
+  return { lines, matchedLineCount, truncated: physical.length > limit }
+}
+
+/**
+ * Reconstruct local line-level adoption for specific generations of a commit.
+ * Never throws — each gen degrades independently to `available: false` with a
+ * human-readable reason. Side-effect free.
+ */
+export async function readLocalCommitAdoptionLines(
+  commitSha: string,
+  genEventIds: string[]
+): Promise<LocalGenAdoptionLines[]> {
+  const sha = (commitSha ?? "").trim()
+  const ids = Array.isArray(genEventIds)
+    ? genEventIds
+        .filter((id): id is string => typeof id === "string" && id.length > 0)
+        .slice(0, LOCAL_TRACE_MAX_GENS)
+    : []
+  if (!sha || ids.length === 0) return []
+
+  const results: LocalGenAdoptionLines[] = []
+  for (const genEventId of ids) {
+    try {
+      const row = getGenRowByEventId(genEventId)
+      if (!row || !row.line_hashes || !row.file_path) {
+        results.push({
+          genEventId,
+          available: false,
+          reason: "本地无该生成记录或哈希已过期（仅当前机器近 7 天可逐行）"
+        })
+        continue
+      }
+      const absPath = row.file_path
+      let gitRoot: string
+      try {
+        gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+          encoding: "utf-8",
+          cwd: dirname(absPath),
+          timeout: 5000,
+          maxBuffer: 1024 * 1024
+        }).trim()
+      } catch {
+        results.push({ genEventId, available: false, reason: "无法定位本地 git 仓库" })
+        continue
+      }
+      const relPath = relative(gitRoot, absPath).replace(/\\/g, "/")
+      let blob: Buffer
+      try {
+        blob = execFileSync("git", ["show", `${sha}:${relPath}`], {
+          cwd: gitRoot,
+          timeout: 5000,
+          maxBuffer: STAGED_BLOB_MAX_BYTES
+        })
+      } catch {
+        results.push({
+          genEventId,
+          available: false,
+          relPath,
+          reason: "该文件在此 commit 中不存在（可能已删除或重命名）"
+        })
+        continue
+      }
+      const committedText = decodeCodeBuffer(blob)
+      const storedHashes = unpackLineHashes(row.line_hashes)
+      const { lines, matchedLineCount, truncated } = matchCommittedLinesAgainstHashes(
+        committedText,
+        storedHashes,
+        LOCAL_TRACE_MAX_LINES
+      )
+      results.push({
+        genEventId,
+        available: true,
+        relPath,
+        generatedLineCount: storedHashes.length,
+        matchedLineCount,
+        truncated,
+        lines
+      })
+    } catch (e) {
+      results.push({
+        genEventId,
+        available: false,
+        reason: e instanceof Error ? e.message : String(e)
+      })
+    }
+  }
+  return results
 }
 
 // ─────────────────────────────────────────────────────────

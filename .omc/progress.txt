@@ -1,0 +1,28 @@
+# Ralph Progress — Phase 1 后台超时韧性
+
+## Iteration 1 (setup)
+- PRD 写入 .omc/prd.json，4 个 story (US-1 绝对上限 / US-2 实时部分输出 / US-3 capReached / US-4 测试)。
+- 代码勘察完成，关键 anchors (src/main/agent/local-sandbox.ts)：
+  - BACKGROUND_TIMEOUT_MS=600_000 @4765；backgroundTasks map @4768；executeBackground @4788 (调 executeRaw @4847，传 {background:true,cwd})。
+  - getTaskOutput @4915 (!completed 当前只回 elapsed/command，无 output)；4870 完成时 push output。
+  - isBackgroundExecution @5082 (primary=options.background===true，fallback=timeoutMs===BACKGROUND_TIMEOUT_MS)。
+  - executeRaw @5244 (options 5th param，但只抽 cwd 传下游；background→executeRawUnserialized @5263)。
+  - executeRawUnserialized @5165；executeInWindowsSandbox @5306；executeOnce @5826。
+  - 两个 collect 闭包：sandbox @5663 (data handlers 5641/5652，timedOut→124 @5705)；executeOnce @5974 (data handlers 5948/5961，timedOut→124 @6035)。
+  - createTimeoutMetadata @4685 用 TIMEOUT_METADATA_SENTINEL/REASON；sandbox-escape 三重门 isCommandSpecificSandboxRetryCandidate @1286 (124 + isSparseSandboxTimeoutOutput@1315 + isLikelyInteractiveNetworkCommand@1330)。
+  - ExecuteResponse / ExecuteRawOptions(@307) 类型；ExecuteResponse imported @28 from ../types。
+  - runtime.ts task_output @1137-1231 (not_ready/timeout JSON 分支)。
+- 设计定稿：background 用 2h 绝对上限替换 600s (cmdTimeout 自动生效)；onData 透传到两 collect 闭包做实时 partialOutput；timedOut 分支按 options.background 选 capReached metadata(无 sentinel) 避免误触 1301。
+
+## Learnings
+- executeRaw 当前丢弃 options(仅留 cwd)；需把 options 透传 executeRawUnserialized/executeInWindowsSandbox/executeOnce。
+- background 在 Windows sandbox 与非 sandbox 两条路径都可达 → 两个 collect 块都要改。
+- 绝对上限用 options.background 判定，勿用 timeoutMs===常量(会破 5088)。
+
+## Iteration 1 — COMPLETE (Phase 1)
+- Implemented US-1..US-4 in src/main/agent/local-sandbox.ts + runtime.ts; new test tests/local-sandbox-background-cap.spec.ts.
+- Independent verification: node+web typecheck exit 0; cap test 5/5 PASS; cwd 5/5, concurrency 4/4, elevated 33/33 regression PASS.
+- Architect verification: APPROVED (all AC-B7/B8/B9/B10 PASS, threading correct, race-safe, capReached propagates, no foreground/600s leak).
+- Deslop: no changes needed (hunks already clean; comments document non-obvious WHY; both collect-block branches reachable=necessary).
+- Correction to architect note: Windows-sandboxed background DOES reach the sandbox collect block (executeRaw→executeRawUnserialized→executeInWindowsSandbox), so dual capReached branches are both live, not dead.
+- All 4 PRD stories passes:true. Phase 1 DONE. Next: Phase 2 (visibility) via team.

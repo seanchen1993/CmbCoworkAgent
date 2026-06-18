@@ -47,6 +47,10 @@ import type {
 } from "../main/ipc/code-exec-tools"
 import type { CoordinatorWorkerSnapshot } from "../main/agent/coordinator-worker-manager"
 import type {
+  HarnessEnterpriseProjectDetailInput,
+  HarnessEnterpriseProjectDetailResult,
+  HarnessEnterpriseProjectSearchInput,
+  HarnessEnterpriseProjectSearchResult,
   HarnessProjectCreateInput,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
@@ -55,7 +59,10 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessSkipNodeInput,
+  HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
+  HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent
 } from "../shared/harness-board-types"
 import type {
@@ -210,6 +217,51 @@ interface DashboardCommitDetailsOptions {
   orgLv1List?: string[]
 }
 
+interface DashboardCommitAdoptionPair {
+  genEventId: string
+  file: string | null
+  tool: string | null
+  language: string | null
+  usedSkills: string[]
+  modelName: string | null
+  generatedAt: string | null
+  verdict: string | null
+  generatedLineCount: number | null
+  effectiveGeneratedLineCount: number | null
+  adoptedLineCount: number | null
+  measureSource: string | null
+  pushed: boolean
+  measuredAt: string | null
+  threadId: string | null
+}
+
+interface DashboardCommitAdoptionEvents {
+  commitSha: string
+  pairs: DashboardCommitAdoptionPair[]
+  reconciliation: {
+    sumEffective: number
+    sumAdopted: number
+    rate: number | null
+  }
+}
+
+interface LocalAdoptionLine {
+  lineNumber: number
+  text: string
+  adopted: boolean
+}
+
+interface LocalGenAdoptionLines {
+  genEventId: string
+  available: boolean
+  reason?: string
+  relPath?: string
+  generatedLineCount?: number
+  matchedLineCount?: number
+  truncated?: boolean
+  lines?: LocalAdoptionLine[]
+}
+
 interface DashboardSkillEvalOptions {
   limit?: number
   recentPage?: number
@@ -220,6 +272,7 @@ interface DashboardSkillEvalOptions {
   skillName?: string
   skillVersion?: string
   skillNames?: string[]
+  upperOrgLv1?: string | string[] | null
   defaultRecentToLatestSkill?: boolean
   recentOnly?: boolean
   listOnly?: boolean
@@ -275,6 +328,60 @@ interface DashboardUserListData {
   pageSize: number
   nextAfterKey?: Record<string, string | number>
   totalActiveUsers: number
+}
+
+interface DashboardUncommittedRankingItem {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  generatedLines: number
+  measuredGeneratedLines: number
+  uncommittedLines: number
+  uncommittedRate: number | null
+}
+
+interface DashboardUncommittedRankingData {
+  items: DashboardUncommittedRankingItem[]
+  totalGeneratedLines: number
+  totalMeasuredGeneratedLines: number
+  totalUncommittedLines: number
+  limit: number
+}
+
+interface DashboardUncommittedDetailBreakdown {
+  key: string
+  gens: number
+  lines: number
+}
+
+interface DashboardUncommittedDetailSample {
+  eventId: string
+  eventTime: string
+  tool?: string
+  language?: string
+  lineCount: number
+  fileHint?: string
+  threadId?: string
+  harnessProjectId?: string
+  harnessFeatureSlug?: string
+  modelName?: string
+}
+
+interface DashboardUncommittedDetailData {
+  sapId: string
+  userName: string
+  scannedGens: number
+  scanCapped: boolean
+  uncommittedGens: number
+  uncommittedLines: number
+  byTool: DashboardUncommittedDetailBreakdown[]
+  byLanguage: DashboardUncommittedDetailBreakdown[]
+  byProject: DashboardUncommittedDetailBreakdown[]
+  byThread: DashboardUncommittedDetailBreakdown[]
+  samples: DashboardUncommittedDetailSample[]
 }
 
 interface DashboardUserDetail {
@@ -551,10 +658,7 @@ interface CustomAPI {
         workerTurn?: number
       }) => void
     ) => () => void
-    onCoordinatorWorkerHook: (
-      threadId: string,
-      callback: (envelope: unknown) => void
-    ) => () => void
+    onCoordinatorWorkerHook: (threadId: string, callback: (envelope: unknown) => void) => () => void
     setCoordinatorWorkerStreamFocus: (
       threadId: string,
       workerThreadId: string | null,
@@ -809,7 +913,15 @@ interface CustomAPI {
       isWorktree: boolean
       isGitRepo?: boolean
       taskId: string
-      files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      files: Array<{
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+        diff: string
+        additions: number
+        deletions: number
+      }>
+      changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
       totals: { additions: number; deletions: number; fileCount: number }
@@ -839,12 +951,35 @@ interface CustomAPI {
       isWorktree: boolean
       isGitRepo?: boolean
       taskId: string
-      files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      files: Array<{
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+        diff: string
+        additions: number
+        deletions: number
+      }>
+      changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       suggestedCommitMessage?: string
+      error?: string
+    }>
+    getGitChangedFilesSummary: (threadId: string) => Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      files: Array<{
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+      }>
+      changedFilesTotal: number
+      omittedFileCount: number
+      hasPendingDiff: boolean
       error?: string
     }>
     getGitPanelSummary: (threadId: string) => Promise<{
@@ -1214,11 +1349,13 @@ interface CustomAPI {
     install: (
       buffer: ArrayBuffer,
       fileName: string,
-      origin?: "market" | "local"
+      origin?: "market" | "local",
+      version?: string
     ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
     installFromDir: () => Promise<{ success: boolean; pluginName?: string; error?: string }>
     exportForMarket: (
-      id: string
+      id: string,
+      options?: { version?: string | null }
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (id: string) => Promise<{ success: boolean; error?: string }>
     setEnabled: (id: string, enabled: boolean) => Promise<void>
@@ -1270,10 +1407,12 @@ interface CustomAPI {
     deleteApprovalRule: (pattern: string) => Promise<void>
     sendApprovalDecision: (decision: {
       requestId: string
-      type: string
+      type: "approve" | "approve_session" | "approve_permanent" | "reject" | "error"
       tool_call_id: string
       savedToolName?: string
       savedToolDescription?: string
+      commitResult?: { success: boolean; commitMessage?: string; error?: string }
+      pushResult?: { success: boolean; error?: string }
     }) => void
     onApprovalRequest: (threadId: string, callback: (request: unknown) => void) => () => void
     onApprovalTimeout: (
@@ -1551,6 +1690,30 @@ interface CustomAPI {
   dashboard: {
     isAllowed: () => Promise<boolean>
     isProjectModeAllowed: () => Promise<boolean>
+    isAnalysisAgentAllowed: () => Promise<boolean>
+    esQuery: (input: {
+      indexAlias: "event" | "trace"
+      operation: "search" | "msearch" | "count" | "mapping" | "field_caps"
+      body?: unknown
+      context?: {
+        scope?: "platform" | "project"
+        upperOrgLv1?: string | string[] | null
+        projectId?: string | null
+        featureSlug?: string | null
+      }
+    }) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    analysisAgent: (input: {
+      question: string
+      messages?: Array<{ role: "user" | "assistant"; content: string }>
+      context?: {
+        scope?: "platform" | "project"
+        range?: { from: string; to: string }
+        upperOrgLv1?: string | string[] | null
+        projectId?: string | null
+        featureSlug?: string | null
+        panelSnapshot?: Record<string, unknown> | null
+      }
+    }) => Promise<{ success: boolean; data?: unknown; error?: string }>
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -1565,6 +1728,37 @@ interface CustomAPI {
       range: { from: string; to: string },
       options?: DashboardProjectModeTracesOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeTracesData; error?: string }>
+    projectModeFeatureCommits: (
+      projectId: string,
+      featureSlug: string,
+      range: { from: string; to: string },
+      options?: DashboardCommitDetailsOptions
+    ) => Promise<{
+      success: boolean
+      data?: {
+        total: number
+        page: number
+        pageSize: number
+        pushedOnly: boolean
+        items: DashboardCommitDetail[]
+      }
+      error?: string
+    }>
+    projectModeProjectCommits: (
+      projectId: string,
+      range: { from: string; to: string },
+      options?: DashboardCommitDetailsOptions
+    ) => Promise<{
+      success: boolean
+      data?: {
+        total: number
+        page: number
+        pageSize: number
+        pushedOnly: boolean
+        items: DashboardCommitDetail[]
+      }
+      error?: string
+    }>
     overview: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -1593,6 +1787,23 @@ interface CustomAPI {
       range: { from: string; to: string },
       options?: DashboardUserDetailOptions
     ) => Promise<{ success: boolean; data?: DashboardUserDetail; error?: string }>
+    uncommittedRanking: (
+      range: { from: string; to: string },
+      options?: {
+        upperOrgLv1?: string | string[] | null
+        projectMode?: boolean
+        usedSkillsOnly?: boolean
+      }
+    ) => Promise<{ success: boolean; data?: DashboardUncommittedRankingData; error?: string }>
+    uncommittedDetail: (
+      sapId: string,
+      range: { from: string; to: string },
+      options?: {
+        upperOrgLv1?: string | string[] | null
+        projectMode?: boolean
+        usedSkillsOnly?: boolean
+      }
+    ) => Promise<{ success: boolean; data?: DashboardUncommittedDetailData; error?: string }>
     skillUsageSummary: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -1634,7 +1845,8 @@ interface CustomAPI {
       triggerScope?: DashboardTraceTriggerScope
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     threadTraces: (
-      threadId: string
+      threadId: string,
+      options?: { scope?: "platform" | "project" }
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     marketSkillRecentTraces: (
       skill: string,
@@ -1671,6 +1883,9 @@ interface CustomAPI {
       }
       error?: string
     }>
+    commitAdoptionEvents: (
+      commitSha: string
+    ) => Promise<{ success: boolean; data?: DashboardCommitAdoptionEvents; error?: string }>
     exportSkillTraces: (payload: {
       skill: string
       range: { from: string; to: string }
@@ -1684,22 +1899,37 @@ interface CustomAPI {
       options?: { fileName?: string }
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
   }
+  adoption: {
+    commitLines: (
+      commitSha: string,
+      genEventIds: string[]
+    ) => Promise<{ success: boolean; data?: LocalGenAdoptionLines[]; error?: string }>
+  }
   harnessBoard: {
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
+    searchEnterpriseProjects: (
+      input: HarnessEnterpriseProjectSearchInput
+    ) => Promise<HarnessEnterpriseProjectSearchResult>
+    getEnterpriseProjectDetails: (
+      input: HarnessEnterpriseProjectDetailInput
+    ) => Promise<HarnessEnterpriseProjectDetailResult>
     createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
+    getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput
     ) => Promise<HarnessProjectMetadata>
     archiveProject: (projectId: string) => Promise<HarnessProjectMetadata>
+    deleteProject: (projectId: string) => Promise<HarnessProjectMetadata>
     getProjectDetail: (projectId: string) => Promise<HarnessProjectDetailViewModel>
     getProjectDetails: (
       projectIds: string[],
       options?: { watchRefs?: boolean }
     ) => Promise<Record<string, HarnessProjectDetailViewModel>>
     getRunDetail: (projectId: string, slug: string) => Promise<HarnessRunDetailViewModel>
+    skipNode: (input: HarnessSkipNodeInput) => Promise<HarnessSkipNodeResult>
     getDialogTips: (projectId: string, slug: string) => Promise<string | null>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
   }

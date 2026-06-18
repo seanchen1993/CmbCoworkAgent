@@ -306,6 +306,7 @@ export interface HookEnv {
   PLUGIN_WORKSPACE?: string
   FEATURE_ID?: string
   PROJECT_CODE?: string
+  PROJECT_DIR?: string
   USER_PROMPT?: string // UserPromptSubmit event
   SESSION_ID?: string // threadId
   SYSTEM_ID?: string

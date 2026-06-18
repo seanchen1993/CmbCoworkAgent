@@ -1,6 +1,6 @@
 export interface SubagentInternalLogEntry {
   id: string
-  kind: "tool_call" | "tool_result"
+  kind: "tool_call" | "tool_result" | "assistant"
   title: string
   content: string
   result?: string
@@ -9,6 +9,9 @@ export interface SubagentInternalLogEntry {
   checkpointNs?: string
   toolCallId?: string
   toolName?: string
+  /** Parent task tool_call_id of the owning subagent (set by the transport so the
+   *  UI can attribute thinking to a specific subagent without guessing). */
+  subagentToolCallId?: string
 }
 
 export interface CoordinatorWorkerView {
@@ -48,13 +51,41 @@ export interface CoordinatorWorkerView {
 
 export const MAX_COORDINATOR_WORKERS_IN_THREAD_STATE = 40
 
+// Keep the most-recent tool/result entries, plus a bounded number of the most-
+// recent assistant (thinking) entries so a burst of tool entries can't evict
+// reasoning — while still keeping the overall log bounded (<= RECENT + ASSISTANT).
+const MAX_RECENT_SUBAGENT_LOGS = 20
+const MAX_ASSISTANT_SUBAGENT_LOGS = 12
+
+function limitSubagentLogs(logs: SubagentInternalLogEntry[]): SubagentInternalLogEntry[] {
+  if (logs.length <= MAX_RECENT_SUBAGENT_LOGS) return logs
+  const keep = new Set<string>()
+  for (const entry of logs
+    .filter((entry) => entry.kind === "assistant")
+    .slice(-MAX_ASSISTANT_SUBAGENT_LOGS)) {
+    keep.add(entry.id)
+  }
+  for (const entry of logs.slice(-MAX_RECENT_SUBAGENT_LOGS)) keep.add(entry.id)
+  return logs.filter((entry) => keep.has(entry.id))
+}
+
+// Whether the subagent "current tool" card should render. Assistant (thinking)
+// entries alone are not tool activity — showing the tool card then would mislead
+// (e.g. "等待工具调用 / 输入：<思考文本>"). Thinking is shown in the per-subagent card.
+export function hasSubagentToolActivity(
+  subagentToolCallCount: number,
+  logs: SubagentInternalLogEntry[]
+): boolean {
+  return subagentToolCallCount > 0 || logs.some((entry) => entry.kind !== "assistant")
+}
+
 export function upsertSubagentLogEntry(
   logs: SubagentInternalLogEntry[],
   entry: SubagentInternalLogEntry
 ): SubagentInternalLogEntry[] {
   const existingIndex = logs.findIndex((log) => log.id === entry.id)
   if (existingIndex === -1) {
-    return [...logs, entry].slice(-20)
+    return limitSubagentLogs([...logs, entry])
   }
 
   const nextLogs = [...logs]
@@ -68,7 +99,7 @@ export function upsertSubagentLogEntry(
     toolName: entry.toolName || existing.toolName,
     title: entry.title || existing.title
   }
-  return nextLogs.slice(-20)
+  return limitSubagentLogs(nextLogs)
 }
 
 export function mergeCoordinatorWorkers(

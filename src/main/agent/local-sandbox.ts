@@ -38,7 +38,12 @@ import * as chardet from "jschardet"
 import micromatch from "micromatch"
 import { replace } from "./replace"
 import type { ToolOrchestrator } from "./tool-orchestrator"
-import { assessCommandSafety, classifyCommandConcurrency } from "./exec-policy"
+import {
+  assessCommandSafety,
+  classifyCommandConcurrency,
+  isGitCommitCommand,
+  isGitPushCommand
+} from "./exec-policy"
 import {
   areElevatedRootsPreparedAsync,
   isElevatedSetupComplete,
@@ -302,11 +307,28 @@ export interface LocalSandboxOptions {
   featureId?: string
   /** Optional harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
+  /** Optional harness project directory exposed to child processes as PROJECT_DIR. */
+  projectDir?: string
 }
 
 interface ExecuteRawOptions {
   background?: boolean
+  cwd?: string
+  /**
+   * Live partial-output callback. Invoked per stdout/stderr chunk while the
+   * command is running so background tasks can expose progress before they
+   * complete. The final authoritative output still uses encoding detection.
+   */
+  onData?: (text: string) => void
 }
+
+/**
+ * ExecuteResponse (from `deepagents`) extended with our background-task cap
+ * marker. `capReached` is set true only when a background task is terminated
+ * because it hit BACKGROUND_ABSOLUTE_MAX_MS — distinct from a foreground
+ * timeout so it does NOT trigger the sandbox-escape retry path.
+ */
+type LocalExecuteResponse = ExecuteResponse & { capReached?: boolean }
 
 type WindowsSandboxMode = "none" | "unelevated" | "readonly" | "elevated"
 
@@ -370,6 +392,7 @@ export class LocalSandbox
   private readonly pluginWorkspace?: string
   private readonly featureId?: string
   private readonly projectCode?: string
+  private readonly projectDir?: string
   private readonly codexExePath: string
   private readonly getHooks: () => HookConfig[]
   private readonly resolveHooks: LocalSandboxHookResolver
@@ -1552,6 +1575,8 @@ export class LocalSandbox
     if (featureId) baseEnv.FEATURE_ID = featureId
     const projectCode = options.projectCode?.trim()
     if (projectCode) baseEnv.PROJECT_CODE = projectCode
+    const projectDir = options.projectDir?.trim()
+    if (projectDir) baseEnv.PROJECT_DIR = projectDir
     // Ensure UTF-8 locale for spawned shells (Git Bash via pipe defaults to
     // Windows console code page, e.g. GBK, producing garbled CJK output)
     if (process.platform === "win32") {
@@ -1567,6 +1592,7 @@ export class LocalSandbox
     this.pluginWorkspace = pluginWorkspace || undefined
     this.featureId = featureId || undefined
     this.projectCode = projectCode || undefined
+    this.projectDir = projectDir || undefined
     this.codexExePath = options.codexExePath ?? "codex"
     const h = options.hooks
     this.getHooks = typeof h === "function" ? h : () => h ?? []
@@ -1706,6 +1732,60 @@ export class LocalSandbox
     this.orchestrator = orch
   }
 
+  private resolveExecutionCwd(cwd?: string): string {
+    const trimmed = cwd?.trim()
+    return trimmed ? path.resolve(this.workingDir, trimmed) : this.workingDir
+  }
+
+  private static normalizeDirBoundaryKey(dir: string): string {
+    const resolved = path.resolve(dir)
+    if (process.platform === "win32") {
+      return resolved.replace(/[\\/]+/g, "\\").replace(/\\+$/, "").toLowerCase()
+    }
+    return resolved.replace(/\/+$/, "") || "/"
+  }
+
+  private static isPathInsideDir(targetPath: string, dirPath: string): boolean {
+    const target = LocalSandbox.normalizeDirBoundaryKey(targetPath)
+    const dir = LocalSandbox.normalizeDirBoundaryKey(dirPath)
+    const separator = process.platform === "win32" ? "\\" : "/"
+    if (dir === separator) return target === dir || target.startsWith(separator)
+    return target === dir || target.startsWith(`${dir}${separator}`)
+  }
+
+  private isRealExecutionCwdInsideBoundary(
+    cwd: string,
+    boundaryDir: string,
+    realpathCache: Map<string, string | null>
+  ): boolean {
+    const realCwd = this.realpathDeepestExistingCached(cwd, realpathCache)
+    const realBoundary = this.realpathDeepestExistingCached(boundaryDir, realpathCache)
+    return Boolean(
+      realCwd &&
+      realBoundary &&
+      LocalSandbox.isPathInsideDir(realCwd, realBoundary)
+    )
+  }
+
+  private validateExecutionCwd(cwd: string): string | null {
+    const realpathCache = new Map<string, string | null>()
+    if (LocalSandbox.isPathInsideDir(cwd, this.workingDir)) {
+      return this.isRealExecutionCwdInsideBoundary(cwd, this.workingDir, realpathCache)
+        ? null
+        : `Invalid cwd: '${cwd}' resolves outside the workspace.`
+    }
+    if (this.isHiddenSkillPath(cwd, realpathCache)) {
+      return `Invalid cwd: '${cwd}' is inside a disabled skill.`
+    }
+    const skillMatch = this._skillLifecycleRegistry?.resolveRead(cwd, cwd)
+    if (skillMatch) {
+      return this.isRealExecutionCwdInsideBoundary(cwd, skillMatch.rootDir, realpathCache)
+        ? null
+        : `Invalid cwd: '${cwd}' resolves outside enabled skill '${skillMatch.name}'.`
+    }
+    return `Invalid cwd: '${cwd}' is outside the workspace and is not a known enabled skill directory.`
+  }
+
   /** Toggle direct git submit command blocking when git_workflow is available. */
   setGitWorkflowCommitOnly(enabled: boolean): void {
     this.enforceGitWorkflowCommitOnly = enabled
@@ -1772,6 +1852,7 @@ export class LocalSandbox
         : {}),
       ...(this.featureId && !context.featureId ? { featureId: this.featureId } : {}),
       ...(this.projectCode && !context.projectCode ? { projectCode: this.projectCode } : {}),
+      ...(this.projectDir && !context.projectDir ? { projectDir: this.projectDir } : {}),
       turnId: context.turnId ?? this._hookTurnId
     }
 
@@ -4706,8 +4787,20 @@ export class LocalSandbox
    */
   private static readonly SPAWN_RETRY_COUNT = 2
   private static readonly SPAWN_RETRY_DELAY_MS = 300
-  /** Maximum timeout for background tasks (10 minutes). */
+  /**
+   * Legacy background-task timeout (10 minutes). Retained because
+   * isBackgroundExecution() uses it as a fallback signal for detecting
+   * background execution when ExecuteRawOptions.background is not threaded.
+   * No longer used as the hard wall-clock kill — see BACKGROUND_ABSOLUTE_MAX_MS.
+   */
   private static readonly BACKGROUND_TIMEOUT_MS = 600_000
+  /**
+   * Absolute hard cap for background tasks (2 hours). This is the only
+   * wall-clock kill for background execution; tasks producing live output run
+   * until they finish or hit this cap, at which point they are terminated
+   * gracefully with a capReached marker (not the sandbox-escape 124 sentinel).
+   */
+  private static readonly BACKGROUND_ABSOLUTE_MAX_MS = 7_200_000
 
   /** Active background tasks (static — shared across instances so tasks survive re-creation). */
   private static backgroundTasks = new Map<
@@ -4716,11 +4809,18 @@ export class LocalSandbox
       id: string
       threadId: string
       command: string
+      cwd: string
       startedAt: number
       completed: boolean
       outputChunks: string[]
+      /** Live partial-output buffer, populated via onData while !completed. */
+      partialOutput: string
+      /** True once partialOutput hit the maxOutputBytes cap and stopped growing. */
+      partialTruncated: boolean
+      /** Timestamp of the most recent onData chunk (for idle detection). */
+      lastOutputAt: number
       abortController: AbortController
-      result?: ExecuteResponse
+      result?: LocalExecuteResponse
     }
   >()
 
@@ -4729,8 +4829,9 @@ export class LocalSandbox
    * The command runs asynchronously with a long timeout.
    * Use `getTaskOutput(taskId)` to retrieve the result or check progress.
    */
-  async executeBackground(command: string): Promise<string> {
-    const toolArgs = { command, run_in_background: true }
+  async executeBackground(command: string, cwd?: string): Promise<string> {
+    const requestedCwd = this.resolveExecutionCwd(cwd)
+    const toolArgs = { command, run_in_background: true, cwd: requestedCwd }
     const preResult = await this.runPreToolUseHookForTool("execute", toolArgs)
     if (preResult?.blocked || preResult?.decision === "block") {
       return `[Hook blocked] ${preResult.stdout || preResult.reason || "execute was blocked by a hook"}`
@@ -4740,7 +4841,15 @@ export class LocalSandbox
       typeof updatedArgs.command === "string" && updatedArgs.command.trim()
         ? updatedArgs.command
         : command
-    const safety = assessCommandSafety(effectiveCommand, this.workingDir, {
+    const effectiveCwd =
+      typeof updatedArgs.cwd === "string" && updatedArgs.cwd.trim()
+        ? this.resolveExecutionCwd(updatedArgs.cwd)
+        : requestedCwd
+    const cwdError = this.validateExecutionCwd(effectiveCwd)
+    if (cwdError) {
+      return `Error: ${cwdError}`
+    }
+    const safety = assessCommandSafety(effectiveCommand, effectiveCwd, {
       windowsShell:
         process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
       enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly
@@ -4749,17 +4858,37 @@ export class LocalSandbox
       return `Command forbidden: ${safety.reason}`
     }
 
+    // git commit / git push must go through the foreground orchestrator path (task-card
+    // dialog for commit; workspace:pushWorktree for push). Backgrounding them would skip
+    // that and re-introduce the sandbox credential-prompt timeout, so run synchronously
+    // through the orchestrator and return the outcome.
+    if (
+      this.orchestrator &&
+      (isGitCommitCommand(effectiveCommand) || isGitPushCommand(effectiveCommand))
+    ) {
+      const result = await this.orchestrator.execute(
+        effectiveCommand,
+        effectiveCwd,
+        this.windowsSandbox
+      )
+      return result.output || (result.exitCode === 0 ? "操作成功" : "操作失败")
+    }
+
     const taskId = randomUUID().slice(0, 8)
     const taskAbortController = new AbortController()
     const task = {
       id: taskId,
       threadId: this.runId,
       command: effectiveCommand,
+      cwd: effectiveCwd,
       startedAt: Date.now(),
       completed: false as boolean,
       outputChunks: [] as string[],
+      partialOutput: "",
+      partialTruncated: false,
+      lastOutputAt: Date.now(),
       abortController: taskAbortController,
-      result: undefined as ExecuteResponse | undefined
+      result: undefined as LocalExecuteResponse | undefined
     }
     LocalSandbox.backgroundTasks.set(taskId, task)
 
@@ -4767,11 +4896,32 @@ export class LocalSandbox
     // Background tasks use their own AbortController (not the conversation's abortSignal)
     // so they survive conversation switches but can still be cancelled explicitly.
     this.executeRaw(
-      command,
+      effectiveCommand,
       undefined,
-      LocalSandbox.BACKGROUND_TIMEOUT_MS,
+      LocalSandbox.BACKGROUND_ABSOLUTE_MAX_MS,
       taskAbortController.signal,
-      { background: true }
+      {
+        background: true,
+        cwd: effectiveCwd,
+        // Live partial-output buffer (separate from the final authoritative
+        // output appended to outputChunks/result on completion). Caps at
+        // maxOutputBytes; once exceeded it stops growing and marks truncated.
+        onData: (text: string) => {
+          task.lastOutputAt = Date.now()
+          if (task.partialTruncated) return
+          const remaining = this.maxOutputBytes - task.partialOutput.length
+          if (remaining <= 0) {
+            task.partialTruncated = true
+            return
+          }
+          if (text.length > remaining) {
+            task.partialOutput += text.slice(0, remaining)
+            task.partialTruncated = true
+          } else {
+            task.partialOutput += text
+          }
+        }
+      }
     ).then(async rawResult => {
       // Guard: if already completed (e.g. cancelled via cancelBackgroundTasks), don't overwrite.
       if (task.completed) return
@@ -4781,7 +4931,7 @@ export class LocalSandbox
       // approval prompt renders for backgrounded `npm run build` etc. before the task
       // is marked complete and task_output() returns to the agent.
       const result = this.orchestrator
-        ? await this.orchestrator.maybeRetryOutsideSandbox(command, this.workingDir, this.windowsSandbox, rawResult).catch((err) => {
+        ? await this.orchestrator.maybeRetryOutsideSandbox(effectiveCommand, effectiveCwd, this.windowsSandbox, rawResult).catch((err) => {
             console.warn(`[LocalSandbox] background bypass check failed for task ${taskId}:`, err)
             return rawResult
           })
@@ -4813,7 +4963,7 @@ export class LocalSandbox
     try {
       return await this.applyPostToolUseHookToText(
         "execute",
-        { command: effectiveCommand, run_in_background: true },
+        { command: effectiveCommand, run_in_background: true, cwd: effectiveCwd },
         startedMessage
       )
     } catch (error) {
@@ -4840,18 +4990,32 @@ export class LocalSandbox
     exitCode?: number | null
     elapsedSeconds?: number
     command?: string
+    cwd?: string
+    partialOutput?: string
+    partialTruncated?: boolean
+    idleSeconds?: number
+    capReached?: boolean
   } | null {
     const task = LocalSandbox.backgroundTasks.get(taskId)
     if (!task) return null
     const elapsedSeconds = Math.round((Date.now() - task.startedAt) / 1000)
     if (!task.completed) {
-      return { completed: false, elapsedSeconds, command: task.command }
+      return {
+        completed: false,
+        elapsedSeconds,
+        command: task.command,
+        cwd: task.cwd,
+        partialOutput: task.partialOutput,
+        partialTruncated: task.partialTruncated,
+        idleSeconds: Math.round((Date.now() - task.lastOutputAt) / 1000)
+      }
     }
     return {
       completed: true,
       output: task.result?.output,
       exitCode: task.result?.exitCode,
-      elapsedSeconds
+      elapsedSeconds,
+      capReached: task.result?.capReached
     }
   }
 
@@ -4886,7 +5050,7 @@ export class LocalSandbox
     }
   }
 
-  async execute(command: string): Promise<ExecuteResponse> {
+  async execute(command: string, cwd?: string): Promise<ExecuteResponse> {
     if (!command || typeof command !== "string") {
       return {
         output: "Error: Shell tool expects a non-empty command string.",
@@ -4900,7 +5064,9 @@ export class LocalSandbox
     )
 
     // PreToolUse hook
-    const preResult = await this.runPreToolUseHook("execute", { command })
+    const requestedCwd = this.resolveExecutionCwd(cwd)
+    const requestedArgs = { command, cwd: requestedCwd }
+    const preResult = await this.runPreToolUseHook("execute", requestedArgs)
     if (preResult?.blocked || preResult?.decision === "block") {
       return {
         output: `[Hook blocked] ${preResult.stdout || "execute was blocked by a hook"}`,
@@ -4908,14 +5074,26 @@ export class LocalSandbox
         truncated: false
       }
     }
-    const updatedArgs = LocalSandbox.mergeUpdatedInput({ command }, preResult?.updatedInput)
+    const updatedArgs = LocalSandbox.mergeUpdatedInput(requestedArgs, preResult?.updatedInput)
     const effectiveCommand =
       typeof updatedArgs.command === "string" && updatedArgs.command.trim()
         ? updatedArgs.command
         : command
+    const effectiveCwd =
+      typeof updatedArgs.cwd === "string" && updatedArgs.cwd.trim()
+        ? this.resolveExecutionCwd(updatedArgs.cwd)
+        : requestedCwd
+    const cwdError = this.validateExecutionCwd(effectiveCwd)
+    if (cwdError) {
+      return {
+        output: `Error: ${cwdError}`,
+        exitCode: 1,
+        truncated: false
+      }
+    }
 
     // Always check forbidden commands, even without orchestrator (YOLO mode safety net)
-    const safety = assessCommandSafety(effectiveCommand, this.workingDir, {
+    const safety = assessCommandSafety(effectiveCommand, effectiveCwd, {
       windowsShell:
         process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
       enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly
@@ -4934,12 +5112,12 @@ export class LocalSandbox
     if (this.orchestrator) {
       const result = await this.orchestrator.execute(
         effectiveCommand,
-        this.workingDir,
+        effectiveCwd,
         this.windowsSandbox
       )
       const postResult = await this.runHooks("PostToolUse", {
         toolName: "execute",
-        toolArgs: { command: effectiveCommand },
+        toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
         toolResult: LocalSandbox.formatExecuteResultForHook(result),
         workspacePath: this.workingDir,
         sessionId: this.runId
@@ -4947,10 +5125,12 @@ export class LocalSandbox
       return LocalSandbox.applyPostHookToExecResult(result, postResult)
     }
 
-    const result = await this.executeRaw(effectiveCommand)
+    const result = await this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
+      cwd: effectiveCwd
+    })
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "execute",
-      toolArgs: { command: effectiveCommand },
+      toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
       toolResult: LocalSandbox.formatExecuteResultForHook(result),
       workspacePath: this.workingDir,
       sessionId: this.runId
@@ -5039,6 +5219,22 @@ export class LocalSandbox
     return command
   }
 
+  private static withWindowsExecutionCwdPreamble(
+    command: string,
+    shellBase: string,
+    executionCwd: string,
+    sandboxWorkspaceRoot: string
+  ): string {
+    if (normalizeDirKey(executionCwd) === normalizeDirKey(sandboxWorkspaceRoot)) return command
+    if (shellBase === "cmd") {
+      return `cd /d "${cmdSetLiteral(executionCwd)}" && (${command})`
+    }
+    if (shellBase === "pwsh" || shellBase === "powershell") {
+      return `Set-Location -LiteralPath ${powershellSingleQuote(executionCwd)} -ErrorAction Stop; ${command}`
+    }
+    return command
+  }
+
   private isProjectPluginHookCommand(command: string): boolean {
     if (!this.pluginRoot) return false
 
@@ -5055,12 +5251,15 @@ export class LocalSandbox
     command: string,
     sandboxModeOverride?: string,
     timeoutMs?: number,
-    overrideAbortSignal?: AbortSignal
-  ): Promise<ExecuteResponse> {
+    overrideAbortSignal?: AbortSignal,
+    cwd?: string,
+    options?: ExecuteRawOptions
+  ): Promise<LocalExecuteResponse> {
     const effectiveSandboxMode = (sandboxModeOverride ?? this.windowsSandbox) as WindowsSandboxMode
     const effectiveTimeout = timeoutMs ?? this.timeout
+    const effectiveCwd = this.resolveExecutionCwd(cwd)
     console.log(
-      `[LocalSandbox] executeRaw: command="${command}" effectiveMode=${effectiveSandboxMode} override=${sandboxModeOverride} timeout=${effectiveTimeout}ms overrideAbort=${!!overrideAbortSignal}`
+      `[LocalSandbox] executeRaw: command="${command}" cwd="${effectiveCwd}" effectiveMode=${effectiveSandboxMode} override=${sandboxModeOverride} timeout=${effectiveTimeout}ms overrideAbort=${!!overrideAbortSignal}`
     )
 
     if (process.platform === "win32" && effectiveSandboxMode !== "none") {
@@ -5071,7 +5270,7 @@ export class LocalSandbox
         )
       }
       if (shouldBypassSandboxForProjectPluginHook) {
-        return this.executeRawUnserialized(command, "none", timeoutMs, overrideAbortSignal)
+        return this.executeRawUnserialized(command, "none", timeoutMs, overrideAbortSignal, effectiveCwd, options)
       }
 
       // Commands that need to escape the Windows sandbox (e.g. `git pull` writing .git,
@@ -5079,7 +5278,15 @@ export class LocalSandbox
       // The orchestrator inspects the post-run output, asks the user for permission, and
       // retries with `mode="none"` only after explicit approval — same UX as Codex CLI.
       console.log("[LocalSandbox] -> executeInWindowsSandbox")
-      return this.executeInWindowsSandbox(command, 1, effectiveSandboxMode, effectiveTimeout, overrideAbortSignal)
+      return this.executeInWindowsSandbox(
+        command,
+        1,
+        effectiveSandboxMode,
+        effectiveTimeout,
+        overrideAbortSignal,
+        effectiveCwd,
+        options
+      )
     }
 
     const isWindows = process.platform === "win32"
@@ -5102,7 +5309,9 @@ export class LocalSandbox
         shell,
         isWindows,
         effectiveTimeout,
-        overrideAbortSignal
+        overrideAbortSignal,
+        effectiveCwd,
+        options
       )
       const isSpawnEperm =
         result.exitCode === 1 &&
@@ -5126,24 +5335,55 @@ export class LocalSandbox
     timeoutMs?: number,
     overrideAbortSignal?: AbortSignal,
     options?: ExecuteRawOptions
-  ): Promise<ExecuteResponse> {
+  ): Promise<LocalExecuteResponse> {
     const effectiveSandboxMode = (sandboxModeOverride ?? this.windowsSandbox) as typeof this.windowsSandbox
     const backgroundExecution = LocalSandbox.isBackgroundExecution(timeoutMs, overrideAbortSignal, options)
-
-    if (process.platform !== "win32" || effectiveSandboxMode === "none" || backgroundExecution) {
-      return this.executeRawUnserialized(command, sandboxModeOverride, timeoutMs, overrideAbortSignal)
+    const effectiveCwd = this.resolveExecutionCwd(options?.cwd)
+    const cwdError = this.validateExecutionCwd(effectiveCwd)
+    if (cwdError) {
+      return {
+        output: `Error: ${cwdError}`,
+        exitCode: 1,
+        truncated: false
+      }
     }
 
-    const queueKey = LocalSandbox.buildSerializedExecutionKey(this.runId, this.workingDir, effectiveSandboxMode)
+    if (process.platform !== "win32" || effectiveSandboxMode === "none" || backgroundExecution) {
+      return this.executeRawUnserialized(
+        command,
+        sandboxModeOverride,
+        timeoutMs,
+        overrideAbortSignal,
+        effectiveCwd,
+        options
+      )
+    }
+
+    const sandboxWorkspaceRoot = path.resolve(this.workingDir)
+    const queueKey = LocalSandbox.buildSerializedExecutionKey(this.runId, sandboxWorkspaceRoot, effectiveSandboxMode)
     const commandConcurrency = classifyCommandConcurrency(command)
     if (commandConcurrency === "parallel_safe") {
       return LocalSandbox.runParallelSafeExecution(queueKey, () =>
-        this.executeRawUnserialized(command, sandboxModeOverride, timeoutMs, overrideAbortSignal)
+        this.executeRawUnserialized(
+          command,
+          sandboxModeOverride,
+          timeoutMs,
+          overrideAbortSignal,
+          effectiveCwd,
+          options
+        )
       )
     }
 
     return LocalSandbox.runSerializedExecution(queueKey, () =>
-      this.executeRawUnserialized(command, sandboxModeOverride, timeoutMs, overrideAbortSignal)
+      this.executeRawUnserialized(
+        command,
+        sandboxModeOverride,
+        timeoutMs,
+        overrideAbortSignal,
+        effectiveCwd,
+        options
+      )
     )
   }
 
@@ -5154,10 +5394,20 @@ export class LocalSandbox
    * - elevated: dedicated sandbox user + strong ACL isolation; codex.exe manages credentials and ACLs internally
    * Retries on EPERM (antivirus transient lock); reports error on other failures.
    */
-  private async executeInWindowsSandbox(command: string, attempt = 1, sandboxModeOverride?: WindowsSandboxMode, timeoutMs?: number, overrideAbortSignal?: AbortSignal): Promise<ExecuteResponse> {
+  private async executeInWindowsSandbox(
+    command: string,
+    attempt = 1,
+    sandboxModeOverride?: WindowsSandboxMode,
+    timeoutMs?: number,
+    overrideAbortSignal?: AbortSignal,
+    cwd?: string,
+    options?: ExecuteRawOptions
+  ): Promise<LocalExecuteResponse> {
     const methodStartMs = Date.now()
     const effectiveMode = sandboxModeOverride ?? this.windowsSandbox
     const effectiveAbortSignal = overrideAbortSignal ?? this.abortSignal
+    const executionCwd = this.resolveExecutionCwd(cwd)
+    const sandboxWorkspaceRoot = path.resolve(this.workingDir)
     // Package install commands (pip, npm, cargo, etc.) often fail in elevated mode due to
     // permission issues with TEMP, site-packages, or certificate stores. Route them directly
     // to unelevated mode to avoid the wasted elevated attempt + fallback retry overhead.
@@ -5166,7 +5416,14 @@ export class LocalSandbox
     if (effectiveMode === "elevated" && sandboxModeOverride !== "unelevated") {
       if (await LocalSandbox.shouldPreferUnelevated(command)) {
         console.log("[LocalSandbox] elevated command prefers unelevated sandbox; routing directly to unelevated")
-        return this.executeInWindowsSandbox(command, attempt, "unelevated", timeoutMs, overrideAbortSignal)
+        return this.executeInWindowsSandbox(
+          command,
+          attempt,
+          "unelevated",
+          timeoutMs,
+          overrideAbortSignal,
+          executionCwd
+        )
       }
     }
 
@@ -5183,13 +5440,18 @@ export class LocalSandbox
     ].map((dir) => path.win32.normalize(dir))))
     const executionPlan = LocalSandbox.buildWindowsSandboxExecutionPlan(command, effectiveMode, sandboxCacheRoots)
     executionPlan.writableRoots = Array.from(new Set(executionPlan.writableRoots.map((dir) => path.win32.normalize(dir))))
-    const sandboxCacheWritableRootsOverride = executionPlan.writableRoots.length > 0
-      ? LocalSandbox.buildWritableRootsOverride(executionPlan.writableRoots)
+    const sandboxWritableRoots = Array.from(
+      new Set([...executionPlan.writableRoots, executionCwd].map((dir) => path.win32.normalize(dir)))
+    )
+    const sandboxCacheWritableRootsOverride = sandboxWritableRoots.length > 0
+      ? LocalSandbox.buildWritableRootsOverride(sandboxWritableRoots)
       : undefined
 
     if (isElevatedSandbox) {
       try {
-        const sensitivePathError = getElevatedSystemSensitivePathError(this.workingDir)
+        const sensitivePathError =
+          getElevatedSystemSensitivePathError(sandboxWorkspaceRoot) ??
+          getElevatedSystemSensitivePathError(executionCwd)
         if (sensitivePathError) {
           return {
             output: sensitivePathError,
@@ -5204,12 +5466,12 @@ export class LocalSandbox
             truncated: false
           }
         }
-        void LocalSandbox.prewarmElevatedWorkspaceRoots(this.workingDir, executionPlan.writableRoots).catch((err) => {
+        void LocalSandbox.prewarmElevatedWorkspaceRoots(sandboxWorkspaceRoot, sandboxWritableRoots).catch((err) => {
           console.warn("[LocalSandbox] elevated background prewarm failed:", err)
         })
         await LocalSandbox.waitForElevatedRootsPrepared(
-          this.workingDir,
-          executionPlan.writableRoots,
+          sandboxWorkspaceRoot,
+          sandboxWritableRoots,
           LocalSandbox.ELEVATED_COMMAND_PREPARE_GRACE_MS,
           effectiveAbortSignal
         )
@@ -5272,6 +5534,12 @@ export class LocalSandbox
         ? `${sandboxUserEnvPreamble} & ${effectiveCommand}`
         : `${sandboxUserEnvPreamble}; ${effectiveCommand}`
       : effectiveCommand
+    const commandWithExecutionCwd = LocalSandbox.withWindowsExecutionCwdPreamble(
+      commandWithSandboxEnv,
+      shellBase,
+      executionCwd,
+      sandboxWorkspaceRoot
+    )
 
     const isReadonly = effectiveMode === "readonly"
     const elevated = isReadonly ? await LocalSandbox.getElevationState() : false
@@ -5297,7 +5565,7 @@ export class LocalSandbox
         "--",
         shell,
         ...shellFlags,
-        commandWithSandboxEnv
+        commandWithExecutionCwd
       ]
     } else if (isReadonly) {
       sandboxArgs = elevated
@@ -5311,7 +5579,7 @@ export class LocalSandbox
             "--",
             shell,
             ...shellFlags,
-            commandWithSandboxEnv
+            commandWithExecutionCwd
           ]
         : [
             "-c",
@@ -5323,7 +5591,7 @@ export class LocalSandbox
             "--",
             shell,
             ...shellFlags,
-            commandWithSandboxEnv
+            commandWithExecutionCwd
           ]
     } else {
       sandboxArgs = [
@@ -5337,7 +5605,7 @@ export class LocalSandbox
         "--",
         shell,
         ...shellFlags,
-        commandWithSandboxEnv
+        commandWithExecutionCwd
       ]
     }
 
@@ -5346,7 +5614,7 @@ export class LocalSandbox
     const aclDirs: string[] = []
     if (!isElevatedSandbox) {
       if (!isReadonly || elevated) {
-        aclDirs.push(this.workingDir)
+        aclDirs.push(sandboxWorkspaceRoot, executionCwd)
       }
       // TEMP is granted once and marked permanent — never revoked because it's a public
       // temp directory. This avoids 2 icacls spawns (grant + revoke) per command.
@@ -5397,7 +5665,7 @@ export class LocalSandbox
         return LocalSandbox.createAbortedExecuteResponse()
       }
       const sandboxEnv = await LocalSandbox.buildSandboxEnv(this.env)
-      const result = await new Promise<ExecuteResponse>((resolve) => {
+      const result = await new Promise<LocalExecuteResponse>((resolve) => {
         const stdoutChunks: Buffer[] = []
         const stderrChunks: Buffer[] = []
         let totalBytes = 0
@@ -5415,10 +5683,11 @@ export class LocalSandbox
         }
 
         console.log(`[LocalSandbox] spawn: ${this.codexExePath} ${JSON.stringify(sandboxArgs)}`)
-        console.log(`[LocalSandbox] cwd: ${this.workingDir}`)
+        console.log(`[LocalSandbox] sandbox cwd: ${sandboxWorkspaceRoot}`)
+        console.log(`[LocalSandbox] command cwd: ${executionCwd}`)
 
         const proc = spawn(this.codexExePath, sandboxArgs, {
-          cwd: this.workingDir,
+          cwd: sandboxWorkspaceRoot,
           env: sandboxEnv,
           stdio: ["ignore", "pipe", "pipe"],
           windowsHide: true
@@ -5470,6 +5739,13 @@ export class LocalSandbox
             stdoutChunks.push(chunk)
             totalBytes += chunk.length
           }
+          // Live preview: per-chunk utf8 decode is acceptable here; the final
+          // authoritative output still uses detectCmdEncoding below.
+          try {
+            options?.onData?.(chunk.toString("utf8"))
+          } catch {
+            /* never let the live preview interfere with resolution */
+          }
         })
 
         proc.stderr?.on("data", (chunk: Buffer) => {
@@ -5480,6 +5756,11 @@ export class LocalSandbox
           if (totalBytes < this.maxOutputBytes) {
             stderrChunks.push(chunk)
             totalBytes += chunk.length
+          }
+          try {
+            options?.onData?.(chunk.toString("utf8"))
+          } catch {
+            /* never let the live preview interfere with resolution */
           }
         })
 
@@ -5526,8 +5807,18 @@ export class LocalSandbox
               const metadata = `<execute_metadata>\nUser aborted the command, process has been killed\n</execute_metadata>\n\n`
               resolve({ output: metadata + output, exitCode: 130, truncated })
             } else if (timedOut) {
-              const metadata = LocalSandbox.createTimeoutMetadata(cmdTimeout)
-              resolve({ output: metadata + output, exitCode: 124, truncated })
+              const isBackgroundCap = options?.background === true
+              if (isBackgroundCap) {
+                // Background absolute-cap kill: deliberately omit the timeout
+                // SENTINEL/REASON strings so this does NOT satisfy
+                // isSparseSandboxTimeoutOutput and never triggers the
+                // sandbox-escape retry path. capReached marks it explicitly.
+                const metadata = `<execute_metadata>\nBackground task reached the absolute maximum runtime (${(cmdTimeout / 1000 / 60).toFixed(0)} min) and was terminated; partial output is preserved.\n</execute_metadata>\n\n`
+                resolve({ output: metadata + output, exitCode: 124, truncated, capReached: true })
+              } else {
+                const metadata = LocalSandbox.createTimeoutMetadata(cmdTimeout)
+                resolve({ output: metadata + output, exitCode: 124, truncated })
+              }
             } else {
               resolve({ output, exitCode: signal ? null : code, truncated })
             }
@@ -5578,7 +5869,17 @@ export class LocalSandbox
               `[LocalSandbox] codex.exe EPERM attempt ${attempt}/${LocalSandbox.SPAWN_RETRY_COUNT + 1}, retrying in ${LocalSandbox.SPAWN_RETRY_DELAY_MS}ms...`
             )
             setTimeout(() => {
-              resolve(this.executeInWindowsSandbox(command, attempt + 1, sandboxModeOverride, timeoutMs, overrideAbortSignal))
+              resolve(
+                this.executeInWindowsSandbox(
+                  command,
+                  attempt + 1,
+                  sandboxModeOverride,
+                  timeoutMs,
+                  overrideAbortSignal,
+                  executionCwd,
+                  options
+                )
+              )
             }, LocalSandbox.SPAWN_RETRY_DELAY_MS)
             return
           }
@@ -5593,8 +5894,8 @@ export class LocalSandbox
       })
 
     if (isElevatedSandbox && result.exitCode !== 0 && result.output.includes("setup refresh failed")) {
-      console.warn(`[LocalSandbox] elevated: setup refresh failed for ${this.workingDir}, scheduling background prewarm`)
-      void LocalSandbox.prewarmElevatedWorkspaceRoots(this.workingDir, executionPlan.writableRoots).catch((err) => {
+      console.warn(`[LocalSandbox] elevated: setup refresh failed for ${sandboxWorkspaceRoot}, scheduling background prewarm`)
+      void LocalSandbox.prewarmElevatedWorkspaceRoots(sandboxWorkspaceRoot, sandboxWritableRoots).catch((err) => {
         console.warn("[LocalSandbox] elevated background prewarm after refresh failure failed:", err)
       })
       return {
@@ -5618,7 +5919,15 @@ export class LocalSandbox
       // credentials (Kerberos/NTLM), so commands accessing corporate repos (Maven, npm, etc.)
       // will fail. Retry with unelevated sandbox which inherits the real user's credentials.
       console.warn("[LocalSandbox] elevated network auth failed; auto-retrying with unelevated sandbox")
-      return this.executeInWindowsSandbox(command, 1, "unelevated", timeoutMs, overrideAbortSignal)
+      return this.executeInWindowsSandbox(
+        command,
+        1,
+        "unelevated",
+        timeoutMs,
+        overrideAbortSignal,
+        executionCwd,
+        options
+      )
     }
 
     console.log(`[LocalSandbox] executeInWindowsSandbox total: ${Date.now() - execStartMs}ms, command="${command.slice(0, 80)}"`)
@@ -5635,10 +5944,13 @@ export class LocalSandbox
     shell: string,
     isWindows: boolean,
     timeoutMs?: number,
-    overrideAbortSignal?: AbortSignal
-  ): Promise<ExecuteResponse> {
+    overrideAbortSignal?: AbortSignal,
+    cwd?: string,
+    options?: ExecuteRawOptions
+  ): Promise<LocalExecuteResponse> {
     const onceStartMs = Date.now()
-    return new Promise<ExecuteResponse>((resolve) => {
+    const effectiveCwd = this.resolveExecutionCwd(cwd)
+    return new Promise<LocalExecuteResponse>((resolve) => {
       const stdoutChunks: Buffer[] = []
       const stderrChunks: Buffer[] = []
       let totalBytes = 0
@@ -5684,7 +5996,7 @@ export class LocalSandbox
 
       const proc = isBashOnWin
         ? spawn(shell, [], {
-            cwd: this.workingDir,
+            cwd: effectiveCwd,
             env: spawnEnv,
             stdio: ["pipe", "pipe", "pipe"],
             detached: false,
@@ -5692,7 +6004,7 @@ export class LocalSandbox
           })
         : spawn(command, {
             shell,
-            cwd: this.workingDir,
+            cwd: effectiveCwd,
             env: spawnEnv,
             stdio: ["ignore", "pipe", "pipe"],
             detached: !isWindows,
@@ -5757,6 +6069,13 @@ export class LocalSandbox
             `[LocalSandbox] first data at +${firstDataAt - onceStartMs}ms pid=${proc.pid}`
           )
         }
+        // Live preview before the byte-cap short-circuit: per-chunk utf8 decode
+        // is acceptable; the final authoritative output uses encoding detection.
+        try {
+          options?.onData?.(chunk.toString("utf8"))
+        } catch {
+          /* never let the live preview interfere with resolution */
+        }
         if (byteCapReached) return
         stdoutChunks.push(chunk)
         totalBytes += chunk.length
@@ -5769,6 +6088,11 @@ export class LocalSandbox
           console.log(
             `[LocalSandbox] first data at +${firstDataAt - onceStartMs}ms pid=${proc.pid}`
           )
+        }
+        try {
+          options?.onData?.(chunk.toString("utf8"))
+        } catch {
+          /* never let the live preview interfere with resolution */
         }
         if (byteCapReached) return
         stderrChunks.push(chunk)
@@ -5838,8 +6162,18 @@ export class LocalSandbox
             const metadata = `<execute_metadata>\nUser aborted the command, process has been killed\n</execute_metadata>\n\n`
             resolve({ output: metadata + output, exitCode: 130, truncated })
           } else if (timedOut) {
-            const metadata = LocalSandbox.createTimeoutMetadata(cmdTimeout)
-            resolve({ output: metadata + output, exitCode: 124, truncated })
+            const isBackgroundCap = options?.background === true
+            if (isBackgroundCap) {
+              // Background absolute-cap kill: deliberately omit the timeout
+              // SENTINEL/REASON strings so this does NOT satisfy
+              // isSparseSandboxTimeoutOutput and never triggers the
+              // sandbox-escape retry path. capReached marks it explicitly.
+              const metadata = `<execute_metadata>\nBackground task reached the absolute maximum runtime (${(cmdTimeout / 1000 / 60).toFixed(0)} min) and was terminated; partial output is preserved.\n</execute_metadata>\n\n`
+              resolve({ output: metadata + output, exitCode: 124, truncated, capReached: true })
+            } else {
+              const metadata = LocalSandbox.createTimeoutMetadata(cmdTimeout)
+              resolve({ output: metadata + output, exitCode: 124, truncated })
+            }
           } else {
             resolve({ output, exitCode: signal ? null : code, truncated })
           }

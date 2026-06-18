@@ -1,0 +1,7 @@
+{
+  "name": "Priority Path Plugin",
+  "version": "1.0.0",
+  "description": "Manual fixture plugin for same-name skill priority tests.",
+  "author": "CmbCoworkAgent Test",
+  "skills": "skills"
+}

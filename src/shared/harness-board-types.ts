@@ -67,6 +67,9 @@ export interface HarnessAdapterSnapshot {
 export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
   description: string
   useScenario?: string
+  developerName?: string
+  developerSapId?: string
+  organizationName?: string
   boardCompatibility: HarnessBoardCompatibility
 }
 
@@ -85,9 +88,12 @@ export interface HarnessProjectMetadata {
   name: string
   description: string
   projectCode: string
+  projectFromLean: boolean
+  projectDir: string
   systemId: string
   systemName: string
   workspacePath: string
+  sessionWorkspacePath?: string
   "harness-adapter": HarnessAdapterSnapshot
   creator?: HarnessProjectCreatorMetadata
   lifecycle: {
@@ -102,15 +108,54 @@ export interface HarnessProjectCreateInput {
   adapterType: HarnessAdapterType
   name: string
   projectCode: string
+  projectFromLean: boolean
+  projectDir: string
   description: string
   systemId: string
   systemName: string
   workspacePath: string
+  sessionWorkspacePath?: string
+}
+
+export interface HarnessEnterpriseProjectSearchInput {
+  keyword: string
+  field?: "name" | "code"
+}
+
+export interface HarnessEnterpriseProjectSearchItem {
+  projectCode: string
+  projectName: string
+  pm: string
+  systemId: string
+  systemName: string
+}
+
+export interface HarnessEnterpriseProjectSearchResult {
+  projects: HarnessEnterpriseProjectSearchItem[]
+  total: number
+  hasMore: boolean
+}
+
+export interface HarnessEnterpriseProjectDetailInput {
+  prjCodeList: string[]
+}
+
+export interface HarnessEnterpriseProjectDetailItem extends HarnessEnterpriseProjectSearchItem {
+  status: string
+  phaseStatus: string
+  baselineEndDate: string
+}
+
+export interface HarnessEnterpriseProjectDetailResult {
+  projects: HarnessEnterpriseProjectDetailItem[]
 }
 
 export interface HarnessFeatureCreateInput {
   projectId: string
   feature: string
+  workflowTemplate?: string
+  workflowNodes?: string[]
+  workflowConfig?: HarnessDynamicWorkflowConfig
 }
 
 export interface HarnessFeatureCreateResult {
@@ -120,15 +165,30 @@ export interface HarnessFeatureCreateResult {
   workspacePath: string
 }
 
+export interface HarnessSkipNodeInput {
+  projectId: string
+  slug: string
+  nodeId: string
+}
+
+export interface HarnessSkipNodeResult {
+  projectId: string
+  slug: string
+  nodeId: string
+}
+
 export interface HarnessProjectMetadataUpdateInput {
   adapterId: string
   adapterType: HarnessAdapterType
   name: string
   projectCode: string
+  projectFromLean: boolean
+  projectDir: string
   description: string
   systemId: string
   systemName: string
   workspacePath: string
+  sessionWorkspacePath?: string
 }
 
 export interface HarnessProjectListItem {
@@ -136,9 +196,12 @@ export interface HarnessProjectListItem {
   name: string
   description: string
   projectCode: string
+  projectFromLean: boolean
+  projectDir: string
   systemId: string
   systemName: string
   workspacePath: string
+  sessionWorkspacePath?: string
   harnessAdapter: {
     id: string
     name: string
@@ -187,7 +250,7 @@ export interface HarnessFeatureSummary {
    * otherwise the framework derives it from the current node and workflow.
    */
   overallStatus: HarnessStatus
-  workflowId?: string
+  nodeIds: string[]
   currentNodeId: string
   currentNodeStatus: HarnessNodeStatus
   currentNodeStatusLabel?: string
@@ -202,9 +265,11 @@ export interface HarnessProjectDetailViewModel {
     projectId: string
     name: string
     projectCode: string
+    projectDir: string
     systemId: string
     systemName: string
     workspacePath: string
+    sessionWorkspacePath?: string
     projectRootPath: string
   }
   adapterSnapshot: {
@@ -213,11 +278,31 @@ export interface HarnessProjectDetailViewModel {
   }
   projectState?: HarnessStatus
   workflow: HarnessWorkflow
-  dynamicWorkflows: Record<string, HarnessWorkflow>
   runs: HarnessFeatureSummary[]
   watchRefs: HarnessWatchRef[]
   loading: boolean
   error: string | null
+}
+
+export interface HarnessDynamicWorkflowTemplate {
+  id: string
+  templateType: string
+  label: string
+  description: string
+  nodes: string[]
+  requiredNodes: string[]
+}
+
+export interface HarnessDynamicWorkflowNode {
+  id: string
+  label: string
+  group?: string
+  description: string
+}
+
+export interface HarnessDynamicWorkflowConfig {
+  templates: HarnessDynamicWorkflowTemplate[]
+  nodes: HarnessDynamicWorkflowNode[]
 }
 
 export interface HarnessWorkflowNextAction {
@@ -336,8 +421,10 @@ export interface HarnessRunDetailViewModel {
     projectId: string
     name: string
     projectCode: string
+    projectDir: string
     systemId: string
     workspacePath: string
+    sessionWorkspacePath?: string
     projectRootPath: string
   }
   adapterSnapshot: {
@@ -362,6 +449,7 @@ export interface HarnessRunDetailViewModel {
     featureStatus?: HarnessFeatureStatus
     featureStatusLabel?: string
     overallStatus?: HarnessStatus
+    skipNodeAvailable: boolean
     currentNodeId: string
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]

@@ -12,8 +12,28 @@ import type { Subagent } from "../types"
 // ---------------------------------------------------------------------------
 export type SchedulerEvent =
   | { type: "custom"; data: Record<string, unknown> }
-  | { type: "message-delta"; id: string; content: string; toolCalls?: unknown[] }
-  | { type: "tool-message"; id: string; content: string; toolCallId: string; name?: string }
+  | {
+      type: "message-delta"
+      id: string
+      content: string
+      toolCalls?: unknown[]
+      /**
+       * When present, this delta is subagent-interior (its checkpoint_ns matched
+       * a running subagent). The renderer MUST route it into that subagent's
+       * transcript buffer and keep it out of the main message list. Absent =
+       * main-flow, rendered identically to before.
+       */
+      subagentId?: string
+    }
+  | {
+      type: "tool-message"
+      id: string
+      content: string
+      toolCallId: string
+      name?: string
+      /** See message-delta.subagentId — same routing contract for tool results. */
+      subagentId?: string
+    }
   | {
       type: "full-messages"
       messages: Array<{
@@ -120,9 +140,19 @@ export class StreamConverter {
     const kwargs = (msgChunk.kwargs || {}) as Record<string, unknown>
     const className = getClassName(msgChunk)
 
-    // Drop subagent-internal messages
+    // Subagent-interior messages carry a checkpoint_ns containing "tools:".
+    // Phase 2 (A1'): instead of dropping them, resolve the owning subagent and
+    // route the events to its transcript buffer via a `subagentId` tag. The
+    // renderer nests these under the `task` card and keeps them out of the main
+    // message list. If we cannot attribute the message to a running subagent we
+    // fall back to the OLD behaviour (drop) so unowned interior never leaks.
     const ns = metadata?.langgraph_checkpoint_ns || metadata?.checkpoint_ns
-    if (ns && ns.includes("tools:")) return events
+    const isInterior = !!ns && ns.includes("tools:")
+    let subagentId: string | undefined
+    if (isInterior) {
+      subagentId = this.resolveSubagentId(ns!)
+      if (!subagentId) return events // unattributed interior — drop (legacy behaviour)
+    }
 
     if (className.includes("AI")) {
       const content = extractContent(kwargs.content ?? msgChunk.content)
@@ -131,42 +161,67 @@ export class StreamConverter {
 
       const toolCalls = kwargs.tool_calls as unknown[] | undefined
       if (content || toolCalls?.length) {
-        events.push({ type: "message-delta", id: msgId, content: content || "", toolCalls })
-      }
-
-      // Detect new subagent from tool_calls
-      if (toolCalls?.length) {
-        for (const tc of toolCalls as Array<{
-          id?: string
-          name?: string
-          args?: Record<string, unknown>
-        }>) {
-          if (tc.name === "task" && tc.id && !this.activeSubagents.has(tc.id)) {
-            this.registerSubagent(tc.id, tc.args || {})
-            events.push(this.subagentCustomEvent())
-          }
-        }
-      }
-
-      // Token usage
-      const usageMeta = getUsageMetadata(kwargs)
-      if (usageMeta && typeof usageMeta.input_tokens === "number" && usageMeta.input_tokens > 0) {
-        const details = usageMeta.input_token_details as
-          | { cache_read?: number; cache_creation?: number }
-          | undefined
         events.push({
-          type: "custom",
-          data: {
-            type: "token_usage",
-            usage: {
-              inputTokens: usageMeta.input_tokens,
-              outputTokens: usageMeta.output_tokens || 0,
-              totalTokens: usageMeta.total_tokens || 0,
-              cacheReadTokens: details?.cache_read,
-              cacheCreationTokens: details?.cache_creation
+          type: "message-delta",
+          id: msgId,
+          content: content || "",
+          toolCalls,
+          ...(subagentId ? { subagentId } : {})
+        })
+      }
+
+      if (subagentId) {
+        // Interior AI message: treat task tool_calls as activity only (do NOT
+        // register nested subagents — avoids recursion noise). Refresh the card
+        // status with the latest interior tool name + heartbeat.
+        const sa = this.activeSubagents.get(subagentId)
+        if (sa) {
+          const latestToolName = Array.isArray(toolCalls)
+            ? (toolCalls as Array<{ name?: string }>)
+                .map((tc) => tc.name)
+                .filter((name): name is string => typeof name === "string")
+                .pop()
+            : undefined
+          if (latestToolName) sa.currentTool = latestToolName
+          sa.lastActivityAt = new Date().toISOString()
+          events.push(this.subagentCustomEvent())
+        }
+      } else {
+        // Main-flow only: detect new subagents and emit token usage. Neither of
+        // these must ever be driven by interior messages (AC-A6, no recursion).
+        if (toolCalls?.length) {
+          for (const tc of toolCalls as Array<{
+            id?: string
+            name?: string
+            args?: Record<string, unknown>
+          }>) {
+            if (tc.name === "task" && tc.id && !this.activeSubagents.has(tc.id)) {
+              this.registerSubagent(tc.id, tc.args || {})
+              events.push(this.subagentCustomEvent())
             }
           }
-        })
+        }
+
+        // Token usage — main-flow only so subagent usage isn't double-counted.
+        const usageMeta = getUsageMetadata(kwargs)
+        if (usageMeta && typeof usageMeta.input_tokens === "number" && usageMeta.input_tokens > 0) {
+          const details = usageMeta.input_token_details as
+            | { cache_read?: number; cache_creation?: number }
+            | undefined
+          events.push({
+            type: "custom",
+            data: {
+              type: "token_usage",
+              usage: {
+                inputTokens: usageMeta.input_tokens,
+                outputTokens: usageMeta.output_tokens || 0,
+                totalTokens: usageMeta.total_tokens || 0,
+                cacheReadTokens: details?.cache_read,
+                cacheCreationTokens: details?.cache_creation
+              }
+            }
+          })
+        }
       }
     }
 
@@ -179,11 +234,20 @@ export class StreamConverter {
         id: msgId,
         content,
         toolCallId: kwargs.tool_call_id as string,
-        name: kwargs.name as string | undefined
+        name: kwargs.name as string | undefined,
+        ...(subagentId ? { subagentId } : {})
       })
 
-      // Subagent completion
-      if (kwargs.name === "task") {
+      if (subagentId) {
+        // Interior tool result — heartbeat only. The subagent record's
+        // completion is driven exclusively by the main-flow `task` result below.
+        const sa = this.activeSubagents.get(subagentId)
+        if (sa) {
+          sa.lastActivityAt = new Date().toISOString()
+          events.push(this.subagentCustomEvent())
+        }
+      } else if (kwargs.name === "task") {
+        // Main-flow subagent completion.
         const sa = this.activeSubagents.get(kwargs.tool_call_id as string)
         if (sa && sa.status === "running") {
           sa.status = isToolMessageError(kwargs) ? "failed" : "completed"
@@ -194,6 +258,33 @@ export class StreamConverter {
     }
 
     return events
+  }
+
+  /**
+   * Resolve the owning subagent id for an interior checkpoint_ns. Strategy:
+   *   (a) ns contains a running subagent's toolCallId → that subagent;
+   *   (b) exactly one running subagent → that subagent;
+   *   (c) otherwise the most-recently-started running subagent;
+   *   (d) none running → undefined (caller drops the message).
+   */
+  private resolveSubagentId(ns: string): string | undefined {
+    const running = Array.from(this.activeSubagents.values()).filter(
+      (sa) => sa.status === "running"
+    )
+    if (running.length === 0) return undefined
+
+    for (const sa of running) {
+      if (sa.toolCallId && ns.includes(sa.toolCallId)) return sa.id
+    }
+
+    if (running.length === 1) return running[0].id
+
+    const mostRecent = running.reduce((latest, sa) => {
+      const latestTime = latest.startedAt?.getTime() ?? 0
+      const saTime = sa.startedAt?.getTime() ?? 0
+      return saTime >= latestTime ? sa : latest
+    })
+    return mostRecent.id
   }
 
   // -- values mode ----------------------------------------------------------
