@@ -92,7 +92,7 @@ export function getWorkflowAgentTimeoutMs(): number {
   const raw = process.env.CMB_WORKFLOW_AGENT_TIMEOUT_MS
   const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN
   if (Number.isFinite(parsed) && parsed >= 30_000) return parsed
-  return 10 * 60 * 1000
+  return 20 * 60 * 1000
 }
 
 /**
