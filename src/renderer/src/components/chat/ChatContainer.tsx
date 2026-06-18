@@ -1446,6 +1446,7 @@ export function ChatContainer({
     }))
   )
   const [yoloMode, setYoloMode] = useState(false)
+  const [yoloModeLoaded, setYoloModeLoaded] = useState(false)
   const [glowVisible, setGlowVisible] = useState(false)
   // NUX (first-run sandbox setup)
   const [showNux, setShowNux] = useState<boolean>(false)
@@ -2226,8 +2227,14 @@ export function ChatContainer({
     const fetchYoloMode = (): void => {
       window.api.sandbox
         .getYoloMode()
-        .then(setYoloMode)
-        .catch((e) => console.warn("[YoloMode] Failed to fetch:", e))
+        .then((nextYoloMode) => {
+          setYoloMode(nextYoloMode)
+          setYoloModeLoaded(true)
+        })
+        .catch((e) => {
+          setYoloModeLoaded(true)
+          console.warn("[YoloMode] Failed to fetch:", e)
+        })
     }
     fetchYoloMode()
     return window.api.sandbox.onChanged(fetchYoloMode)
@@ -2494,7 +2501,7 @@ export function ChatContainer({
   )
 
   useEffect(() => {
-    if (!yoloMode || !pendingApproval) return
+    if (!yoloModeLoaded || !yoloMode || !pendingApproval) return
     const approvalRecord = pendingApproval as unknown as Record<string, unknown>
     if (
       approvalRecord._orchestratorRequestId &&
@@ -2502,7 +2509,7 @@ export function ChatContainer({
     ) {
       void handleApprovalDecision("approve")
     }
-  }, [handleApprovalDecision, pendingApproval, yoloMode])
+  }, [handleApprovalDecision, pendingApproval, yoloMode, yoloModeLoaded])
 
   // The pending git_commit approval (agent ran `git commit` → task-card dialog), if any.
   const agentCommitApproval = useMemo(() => {
@@ -4846,7 +4853,7 @@ export function ChatContainer({
                           toolResults={toolResults}
                           toolCallStates={toolCallDisplayStates}
                           pendingApproval={pendingApproval}
-                          autoApproveGitPush={yoloMode}
+                          autoApproveGitPush={!yoloModeLoaded || yoloMode}
                           onApprovalDecision={handleApprovalDecision}
                           onEditUserMessage={handleEditUserMessage}
                           onSetGoalFromMessage={handleSetGoalFromMessage}
@@ -4981,7 +4988,7 @@ export function ChatContainer({
               ) &&
               (pendingApproval as unknown as Record<string, unknown>).operation !== "git_commit" &&
               !(
-                yoloMode &&
+                (!yoloModeLoaded || yoloMode) &&
                 (pendingApproval as unknown as Record<string, unknown>).operation === "git_push"
               ) && (
               <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>

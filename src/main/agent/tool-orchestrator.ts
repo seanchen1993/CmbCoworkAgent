@@ -24,7 +24,6 @@ import {
   isChainedShellCommand,
   isForcePushCommand,
   isGitCommitCommand,
-  isGitMergeCommand,
   isGitPushCommand,
   normalizeCdPrefixedGitCommitCommand,
   normalizeGitAddPrefixedGitCommitCommand,
@@ -222,10 +221,7 @@ export class ToolOrchestrator {
 
       // 3. YOLO mode: skip the initial command approval for safe + needs_approval
       // commands, but still require explicit approval before escaping the sandbox.
-      // History-rewriting force pushes AND merges are exceptions — they still prompt even in
-      // YOLO, so an unattended run can't rewrite remote history or auto-create a merge commit
-      // that bypasses the task-card flow.
-      if (this.yoloMode && !isForcePushCommand(command) && !isGitMergeCommand(command)) {
+      if (this.yoloMode) {
         const result = await this.rawExecute(command, sandboxMode, cwd)
         return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result)
       }
