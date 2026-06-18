@@ -398,51 +398,47 @@ When updating an existing skill, set action="patch" and keep skillId exactly equ
 Only suggest skills that are NOT already covered by existing custom skills above.
 Output JSON array only.`
 
-    // Call LLM (streaming with 60s per-chunk idle timeout)
+    // Call LLM (streaming with 60s per-chunk idle timeout).
+    //
+    // Genuine LLM failures (timeout / network / auth) are intentionally NOT
+    // swallowed into a summary here: they are re-thrown so the IPC layer can
+    // surface them to the renderer as a stream error, which shows the user an
+    // error reminder + a "重试" button. A successful-but-empty analysis still
+    // returns normally with a summary below.
     let rawResponse = ""
-    try {
-      const TOKEN_IDLE_TIMEOUT_MS = 60_000
-      const innerAbort = new AbortController()
-      let timedOut = false
-      let idleTimer: ReturnType<typeof setTimeout> = setTimeout(() => {
+    const TOKEN_IDLE_TIMEOUT_MS = 60_000
+    const innerAbort = new AbortController()
+    let timedOut = false
+    let idleTimer: ReturnType<typeof setTimeout> = setTimeout(() => {
+      timedOut = true
+      innerAbort.abort()
+    }, TOKEN_IDLE_TIMEOUT_MS)
+    const resetIdleTimer = (): void => {
+      clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => {
         timedOut = true
         innerAbort.abort()
       }, TOKEN_IDLE_TIMEOUT_MS)
-      const resetIdleTimer = (): void => {
-        clearTimeout(idleTimer)
-        idleTimer = setTimeout(() => {
-          timedOut = true
-          innerAbort.abort()
-        }, TOKEN_IDLE_TIMEOUT_MS)
-      }
+    }
 
+    try {
       const stream = await this.model.stream(
         [new SystemMessage(ANALYZER_SYSTEM_PROMPT), new HumanMessage(userPrompt)],
         { signal: innerAbort.signal }
       )
-      try {
-        for await (const chunk of stream) {
-          resetIdleTimer()
-          const text = typeof chunk.content === "string" ? chunk.content : ""
-          if (text) {
-            rawResponse += text
-            this.onChunk?.(text)
-          }
+      for await (const chunk of stream) {
+        resetIdleTimer()
+        const text = typeof chunk.content === "string" ? chunk.content : ""
+        if (text) {
+          rawResponse += text
+          this.onChunk?.(text)
         }
-      } catch (streamErr) {
-        if (timedOut) throw new Error("LLM 生成超时（60s 无新内容），请点击重试")
-        throw streamErr
-      } finally {
-        clearTimeout(idleTimer)
       }
-    } catch (e) {
-      return {
-        startedAt,
-        endedAt: new Date().toISOString(),
-        tracesAnalyzed: rawTraces.length,
-        candidates: [],
-        summary: `LLM 调用失败: ${String(e)}`
-      }
+    } catch (streamErr) {
+      if (timedOut) throw new Error("LLM 生成超时（60s 内无新内容），请点击重试")
+      throw streamErr
+    } finally {
+      clearTimeout(idleTimer)
     }
 
     // Parse response

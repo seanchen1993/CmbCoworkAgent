@@ -17,6 +17,7 @@ import { getMemoryStore } from "../memory/store"
 import { ChatOpenAI } from "@langchain/openai"
 import {
   getCustomModelConfigs,
+  getDefaultModelConfig,
   isDreamEnabled,
   isMemoryEnabled,
   getCustomSkillsDir,
@@ -2679,8 +2680,7 @@ async function judgeSkillWorthiness(
   threadId: string,
   context: SkillProposalWindowContext
 ): Promise<WorthinessResult | null> {
-  const configs = getCustomModelConfigs()
-  const config = configs[0]
+  const config = getDefaultModelConfig()
   if (!config?.apiKey) {
     console.log(
       `[SkillEvolution][${threadId}] Worthiness LLM skipped: missing model config or API key`
@@ -2763,8 +2763,7 @@ async function generateSkillProposal(
   // both on the initial run and on manual retry.
   emitSkillGenerating(threadId, "start")
 
-  const configs = getCustomModelConfigs()
-  const config = configs[0]
+  const config = getDefaultModelConfig()
   if (!config?.apiKey) {
     emitSkillGenerating(threadId, "error", "未配置模型或 API Key，无法生成技能草稿")
     return null

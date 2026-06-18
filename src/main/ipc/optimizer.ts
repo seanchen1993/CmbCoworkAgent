@@ -33,7 +33,7 @@ import {
 import { buildTraceTree } from "../agent/trace/tree-builder"
 import type { AgentTrace } from "../agent/trace/types"
 import {
-  getCustomModelConfigs,
+  getDefaultModelConfig,
   getCustomSkillsDir,
   clearDisabledSkillsForSkillDir,
   findExistingSkillById,
@@ -81,8 +81,7 @@ function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
 }
 
 function getDefaultModel(): ChatOpenAI | null {
-  const configs = getCustomModelConfigs()
-  const config = configs[0]
+  const config = getDefaultModelConfig()
   if (!config || !config.apiKey) return null
   return new ChatOpenAI({
     model: config.model,
@@ -229,7 +228,7 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
           })
           runResult = await optimizer.run()
         } catch (e) {
-          const errMsg = String(e)
+          const errMsg = e instanceof Error ? e.message : String(e)
           notifyRenderer("optimizer:streamEnd", { success: false, error: errMsg })
           return {
             startedAt: new Date().toISOString(),
@@ -272,7 +271,7 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         })
         result = await optimizer.run()
       } catch (e) {
-        const errMsg = String(e)
+        const errMsg = e instanceof Error ? e.message : String(e)
         notifyRenderer("optimizer:streamEnd", { success: false, error: errMsg })
         return {
           startedAt: new Date().toISOString(),
