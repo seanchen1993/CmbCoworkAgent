@@ -25,8 +25,14 @@ const GIT_CONTEXT_QUERY_TIMEOUT_MS = 10_000
 
 const GIT_BASE_ENV: NodeJS.ProcessEnv = {
   ...process.env,
-  GIT_LFS_SKIP_SMUDGE: "1"
+  GIT_OPTIONAL_LOCKS: "0",
+  GIT_LFS_SKIP_SMUDGE: "1",
+  // 缺凭据时直接失败而不是挂起一个隐藏的 git.exe。
+  GIT_TERMINAL_PROMPT: "0"
 }
+
+// 隐藏 Windows 上 git.exe 子进程的控制台窗口，避免自动提交时频繁闪窗。
+const GIT_SPAWN_OPTIONS = { windowsHide: true } as const
 
 interface ExecFileError extends Error {
   stderr?: string | Buffer
@@ -82,7 +88,9 @@ function quoteArg(value: string): string {
 }
 
 async function addSafeDirectory(worktreePath: string): Promise<void> {
-  await execFileAsync("git", ["config", "--global", "--add", "safe.directory", worktreePath])
+  await execFileAsync("git", ["config", "--global", "--add", "safe.directory", worktreePath], {
+    ...GIT_SPAWN_OPTIONS
+  })
 }
 
 async function runGit(
@@ -97,7 +105,8 @@ async function runGit(
     const { stdout } = await execFileAsync("git", baseArgs, {
       env: GIT_BASE_ENV,
       timeout: options?.timeoutMs,
-      maxBuffer: options?.maxBufferBytes ?? GIT_EXEC_MAX_BUFFER_BYTES
+      maxBuffer: options?.maxBufferBytes ?? GIT_EXEC_MAX_BUFFER_BYTES,
+      ...GIT_SPAWN_OPTIONS
     })
     return stdout
   } catch (error) {
@@ -106,7 +115,8 @@ async function runGit(
     const { stdout } = await execFileAsync("git", baseArgs, {
       env: GIT_BASE_ENV,
       timeout: options?.timeoutMs,
-      maxBuffer: options?.maxBufferBytes ?? GIT_EXEC_MAX_BUFFER_BYTES
+      maxBuffer: options?.maxBufferBytes ?? GIT_EXEC_MAX_BUFFER_BYTES,
+      ...GIT_SPAWN_OPTIONS
     })
     return stdout
   }

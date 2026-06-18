@@ -305,9 +305,12 @@ async function runGit(
     encoding: "utf-8",
     timeout: options?.timeoutMs ?? GIT_EXEC_TIMEOUT_MS,
     maxBuffer: 20 * 1024 * 1024,
+    // 隐藏 Windows 控制台窗口，并禁止缺凭据时挂起等待终端输入。
+    windowsHide: true,
     env: {
       ...process.env,
       GIT_LFS_SKIP_SMUDGE: "1",
+      GIT_TERMINAL_PROMPT: "0",
       ...(options?.env ?? {})
     }
   })
@@ -606,6 +609,8 @@ function runGit(args, options = {}) {
     cwd: options.cwd || process.cwd(),
     encoding: options.encoding || "utf8",
     maxBuffer: options.maxBuffer || 20 * 1024 * 1024,
+    windowsHide: true,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
     stdio: options.stdio || ["ignore", "pipe", "ignore"]
   })
 }
@@ -1286,7 +1291,8 @@ async function runGitBuffer(
     encoding: "buffer",
     timeout: options?.timeoutMs ?? GIT_EXEC_TIMEOUT_MS,
     maxBuffer: RECONCILE_STAGED_BLOB_MAX_BYTES,
-    env: { ...process.env, GIT_LFS_SKIP_SMUDGE: "1" }
+    windowsHide: true,
+    env: { ...process.env, GIT_LFS_SKIP_SMUDGE: "1", GIT_TERMINAL_PROMPT: "0" }
   })
   return Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout as unknown as string)
 }

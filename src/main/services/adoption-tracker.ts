@@ -1339,7 +1339,8 @@ export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnaps
         encoding: "utf-8",
         cwd: workingDir,
         timeout: 5000,
-        maxBuffer: 1024 * 1024
+        maxBuffer: 1024 * 1024,
+        windowsHide: true
       }).trim()
     } catch {
       // Fallback to workingDir — best-effort
@@ -1349,7 +1350,8 @@ export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnaps
       encoding: "utf-8",
       cwd: workingDir,
       timeout: 5000,
-      maxBuffer: 1024 * 1024
+      maxBuffer: 1024 * 1024,
+      windowsHide: true
     })
     if (!raw) {
       console.log(`[AdoptionTracker] pre-commit capture: no staged files in ${workingDir}`)
@@ -1394,7 +1396,8 @@ export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnaps
         const stagedContent = execFileSync("git", ["show", `:${relPath}`], {
           cwd: workingDir,
           timeout: 5000,
-          maxBuffer: STAGED_BLOB_MAX_BYTES
+          maxBuffer: STAGED_BLOB_MAX_BYTES,
+          windowsHide: true
         })
         snapshots.push({ absPath, stagedContent })
         capturedCode++
@@ -1726,7 +1729,8 @@ export async function readLocalCommitAdoptionLines(
           encoding: "utf-8",
           cwd: dirname(absPath),
           timeout: 5000,
-          maxBuffer: 1024 * 1024
+          maxBuffer: 1024 * 1024,
+          windowsHide: true
         }).trim()
       } catch {
         results.push({ genEventId, available: false, reason: "无法定位本地 git 仓库" })
@@ -1738,7 +1742,8 @@ export async function readLocalCommitAdoptionLines(
         blob = execFileSync("git", ["show", `${sha}:${relPath}`], {
           cwd: gitRoot,
           timeout: 5000,
-          maxBuffer: STAGED_BLOB_MAX_BYTES
+          maxBuffer: STAGED_BLOB_MAX_BYTES,
+          windowsHide: true
         })
       } catch {
         results.push({

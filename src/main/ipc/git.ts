@@ -108,6 +108,7 @@ function extractCommitSha(commitOutput: string, workingDir: string): string | nu
       encoding: "utf-8",
       cwd: workingDir,
       timeout: 5000,
+      windowsHide: true,
       shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
     }).trim()
     return sha || null

@@ -822,6 +822,7 @@ const api = {
         previousPath?: string
         status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
         diff: string
+        diffLoaded?: boolean
         additions: number
         deletions: number
       }>
@@ -847,6 +848,7 @@ const api = {
           previousPath?: string
           status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
           diff: string
+          diffLoaded?: boolean
           additions: number
           deletions: number
         }>
@@ -893,7 +895,12 @@ const api = {
       }>
     },
     getGitPanelDiffs: (
-      threadId: string
+      threadId: string,
+      options?: {
+        includeDiffs?: boolean
+        includeChangedFiles?: boolean
+        statusUntrackedMode?: "all" | "normal" | "no"
+      }
     ): Promise<{
       success: boolean
       isWorktree: boolean
@@ -904,6 +911,7 @@ const api = {
         previousPath?: string
         status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
         diff: string
+        diffLoaded?: boolean
         additions: number
         deletions: number
       }>
@@ -915,7 +923,7 @@ const api = {
       suggestedCommitMessage?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:getGitPanelDiffs", { threadId }) as Promise<{
+      return ipcRenderer.invoke("workspace:getGitPanelDiffs", { threadId, options }) as Promise<{
         success: boolean
         isWorktree: boolean
         isGitRepo?: boolean
@@ -925,6 +933,7 @@ const api = {
           previousPath?: string
           status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
           diff: string
+          diffLoaded?: boolean
           additions: number
           deletions: number
         }>
@@ -934,6 +943,42 @@ const api = {
         totals: { additions: number; deletions: number; fileCount: number }
         hasPendingDiff: boolean
         suggestedCommitMessage?: string
+        error?: string
+      }>
+    },
+    getGitPanelFileDiff: (
+      threadId: string,
+      filePath: string
+    ): Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      file?: {
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+        diff: string
+        diffLoaded?: boolean
+        additions: number
+        deletions: number
+      }
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:getGitPanelFileDiff", { threadId, filePath }) as Promise<{
+        success: boolean
+        isWorktree: boolean
+        isGitRepo?: boolean
+        taskId: string
+        file?: {
+          path: string
+          previousPath?: string
+          status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+          diff: string
+          diffLoaded?: boolean
+          additions: number
+          deletions: number
+        }
         error?: string
       }>
     },

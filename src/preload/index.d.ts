@@ -935,6 +935,7 @@ interface CustomAPI {
         previousPath?: string
         status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
         diff: string
+        diffLoaded?: boolean
         additions: number
         deletions: number
       }>
@@ -963,7 +964,14 @@ interface CustomAPI {
       worktreeBranch?: string | null
       error?: string
     }>
-    getGitPanelDiffs: (threadId: string) => Promise<{
+    getGitPanelDiffs: (
+      threadId: string,
+      options?: {
+        includeDiffs?: boolean
+        includeChangedFiles?: boolean
+        statusUntrackedMode?: "all" | "normal" | "no"
+      }
+    ) => Promise<{
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
@@ -973,6 +981,7 @@ interface CustomAPI {
         previousPath?: string
         status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
         diff: string
+        diffLoaded?: boolean
         additions: number
         deletions: number
       }>
@@ -982,6 +991,22 @@ interface CustomAPI {
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       suggestedCommitMessage?: string
+      error?: string
+    }>
+    getGitPanelFileDiff: (threadId: string, filePath: string) => Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      file?: {
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+        diff: string
+        diffLoaded?: boolean
+        additions: number
+        deletions: number
+      }
       error?: string
     }>
     getGitChangedFilesSummary: (threadId: string) => Promise<{
