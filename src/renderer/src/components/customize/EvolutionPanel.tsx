@@ -1500,7 +1500,7 @@ export function EvolutionPanel(): React.JSX.Element {
       mode?: "auto" | "selected"
       traceIds?: string[]
     },
-    pendingMessage = "正在分析选中内容，请稍候..."
+    pendingMessage = "正在生成优化候选，请稍候..."
   ) => {
     setEvolutionLastRunOpts(opts ?? null)
     setEvolutionStreamedText("")
@@ -1923,16 +1923,16 @@ export function EvolutionPanel(): React.JSX.Element {
       return
     }
     const pendingMessage = selectedThreadCount > 0
-      ? `正在分析已选内容（${traceIds.length} 条 trace / ${selectedThreadCount} 个会话），请稍候...`
-      : `正在分析已选内容（${traceIds.length} 条 trace），请稍候...`
+      ? `正在生成优化候选（${traceIds.length} 条 trace / ${selectedThreadCount} 个会话），请稍候...`
+      : `正在生成优化候选（${traceIds.length} 条 trace），请稍候...`
     await runOptimizer({ mode: "selected", traceIds }, pendingMessage)
     setTab("candidates")
   }, [runOptimizer, selectedTraceIds, selectedThreadCount])
 
   const handleRetryOptimizer = useCallback(() => {
     const pendingMessage = lastRunOpts?.traceIds
-      ? `正在重试分析（${lastRunOpts.traceIds.length} 条 trace），请稍候...`
-      : "正在重试分析，请稍候..."
+      ? `正在重试生成候选（${lastRunOpts.traceIds.length} 条 trace），请稍候...`
+      : "正在重试生成候选，请稍候..."
     runOptimizer(lastRunOpts ?? undefined, pendingMessage).catch(console.warn)
   }, [lastRunOpts, runOptimizer])
 
@@ -2160,7 +2160,7 @@ export function EvolutionPanel(): React.JSX.Element {
             ) : item === "traces" ? (
               <>
                 <Activity className="size-3.5" />
-                执行 Traces
+                历史会话执行记录
                 {traces.length > 0 && (
                   <span className="ml-1 text-[10px] text-muted-foreground">
                     ({traceGroups.length} 个会话 / {traces.length} 条)
@@ -2250,7 +2250,7 @@ export function EvolutionPanel(): React.JSX.Element {
                 分析中...
               </>
             ) : (
-              "分析选中内容"
+              "生成优化候选"
             )}
           </Button>
           <Button
@@ -2279,7 +2279,7 @@ export function EvolutionPanel(): React.JSX.Element {
                   <EmptyState
                     icon={<Sparkles className="size-8 text-muted-foreground/40 mb-3" />}
                     title="暂无优化候选"
-                    desc="请先切换到「执行 Traces」分析本地记录，或等待云端自进化服务推送新版本"
+                    desc="请先切换到「历史会话执行记录」分析本地记录，或等待云端自进化服务推送新版本"
                   />
                 </>
               ) : (
