@@ -41,7 +41,7 @@
     "test": "vitest run && npm run test:hooks && npm run test:plugins && npm run test:task-cards && npm run test:merge",
     "test:merge": "npx tsx tests/skill-bundle-merge.spec.ts && npx tsx tests/skill-bundle-version.spec.ts",
     "test:hooks": "npx tsx tests/hook-cc-field-alignment.spec.ts && npx tsx tests/hook-timeout-bounds.spec.ts && npx tsx tests/hook-phase2-spec.spec.ts && npx tsx tests/hook-phase2-followup.spec.ts && npx tsx tests/git-hook-collection-path.spec.ts",
-    "test:plugins": "npx tsx tests/plugin-inspect-zip.spec.ts && npx tsx tests/plugin-market-version.spec.ts && npx vitest run src/main/ipc/plugins-market-sim.test.ts",
+    "test:plugins": "npx tsx tests/plugin-inspect-zip.spec.ts && npx tsx tests/plugin-market-version.spec.ts && npx tsx tests/plugin-skill-evolution-match.spec.ts && npx vitest run src/main/ipc/plugins-market-sim.test.ts",
     "test:task-cards": "npx tsx tests/task-cards.spec.ts",
     "test:watch": "vitest",
     "test:goal:unit": "npx tsx tests/goals.spec.ts && npx tsx tests/goals-db.spec.ts && npx tsx tests/goals-evaluator.spec.ts && npx tsx tests/goals-runtime-harness.spec.ts && npx tsx tests/goal-notice-ui.spec.ts && npx tsx tests/goal-transcript.spec.ts && npx tsx tests/goal-panel-view.spec.ts && npx tsx tests/goal-ui-events.spec.ts && npx tsx tests/checkpoint-message-times.spec.ts && npx tsx tests/thread-values-merge.spec.ts && npx tsx tests/submit-in-flight-lock.spec.ts && npx tsx tests/goal-control-submit.spec.ts && npx tsx tests/live-stream-messages.spec.ts && npx tsx tests/stream-message-ids.spec.ts",

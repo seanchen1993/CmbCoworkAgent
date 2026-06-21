@@ -30,7 +30,7 @@ import {
   ShieldCheck
 } from "lucide-react"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
-import { evolutionApi, type EvolutionCandidate } from "@/api/evolution"
+import { evolutionApi, evolutionSkillKey, type EvolutionCandidate } from "@/api/evolution"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -1478,7 +1478,13 @@ export function EvolutionPanel(): React.JSX.Element {
   const refreshCloudEvolutionUpdates = useCallback(async () => {
     setCloudUpdateLoading(true)
     try {
-      const installedSkills = await window.api.skills.list()
+      // Include plugin-owned skills so cloud candidates can target SKILLs that
+      // live inside plugins, not just standalone custom skills.
+      const [customSkills, pluginSkills] = await Promise.all([
+        window.api.skills.list(),
+        window.api.skills.listPlugins()
+      ])
+      const installedSkills = [...customSkills, ...pluginSkills]
       const updates = await evolutionApi.listAvailableUpdates(installedSkills)
       setCloudEvolutionUpdates(updates)
       if (tab === "candidates") {
@@ -1696,8 +1702,16 @@ export function EvolutionPanel(): React.JSX.Element {
     trackCloudEvolutionCandidateAccepted(candidate, candidate.source_version ?? null)
     let backupId: string | undefined
     try {
-      const installedSkills = await window.api.skills.list()
-      const existing = installedSkills.find((skill: SkillMetadata) => skill.name === candidate.skill_name)
+      // Match across custom + plugin skills, keyed so a plugin "pdf" never
+      // resolves to a same-named custom skill.
+      const [customSkills, pluginSkills] = await Promise.all([
+        window.api.skills.list(),
+        window.api.skills.listPlugins()
+      ])
+      const candidateKey = evolutionSkillKey(candidate.skill_name, candidate.plugin_name)
+      const existing = [...customSkills, ...pluginSkills].find(
+        (skill: SkillMetadata) => evolutionSkillKey(skill.name, skill.pluginName) === candidateKey
+      )
       if (!existing) {
         throw new Error(`本地未安装同名 Skill：${candidate.skill_name}`)
       }
@@ -1709,27 +1723,50 @@ export function EvolutionPanel(): React.JSX.Element {
         : await evolutionApi.downloadCandidateBundle(candidate.candidate_id)
       const buffer = "blob" in bundle ? await bundle.blob.arrayBuffer() : bundle.buffer
       const filename = bundle.filename
-      const backupResult = await window.api.skills.backupForCloudEvolution({
-        skillPath: existing.path,
-        candidateId: candidate.candidate_id,
-        skillName: candidate.skill_name,
-        sourceVersion: existing.version || candidate.source_version || null,
-        targetVersion: candidate.target_version || null
-      })
-      if (!backupResult.success || !backupResult.backupId) {
-        throw new Error(backupResult.error || `备份旧版 Skill 失败：${candidate.skill_name}`)
-      }
-      backupId = backupResult.backupId
 
-      const deleteResult = await window.api.skills.delete(existing.path)
-      if (!deleteResult.success) {
-        throw new Error(deleteResult.error || `删除旧版 Skill 失败：${candidate.skill_name}`)
-      }
+      let backupPath: string | undefined
+      const isPluginSkill = !!(candidate.plugin_name || existing.pluginId || existing.pluginName)
+      if (isPluginSkill) {
+        // Plugin skills are evolved in place inside the plugin dir (the custom-
+        // dir delete+upload path is not valid for plugin-owned files). The IPC
+        // backs the dir up itself and returns the backupId for rollback.
+        const applyResult = await window.api.skills.applyPluginSkillEvolution({
+          skillPath: existing.path,
+          candidateId: candidate.candidate_id,
+          skillName: candidate.skill_name,
+          buffer,
+          fileName: filename,
+          sourceVersion: existing.version || candidate.source_version || null,
+          targetVersion: candidate.target_version || null
+        })
+        if (!applyResult.success || !applyResult.backupId) {
+          throw new Error(applyResult.error || `安装云端自进化 Skill 失败：${candidate.skill_name}`)
+        }
+        backupId = applyResult.backupId
+      } else {
+        const backupResult = await window.api.skills.backupForCloudEvolution({
+          skillPath: existing.path,
+          candidateId: candidate.candidate_id,
+          skillName: candidate.skill_name,
+          sourceVersion: existing.version || candidate.source_version || null,
+          targetVersion: candidate.target_version || null
+        })
+        if (!backupResult.success || !backupResult.backupId) {
+          throw new Error(backupResult.error || `备份旧版 Skill 失败：${candidate.skill_name}`)
+        }
+        backupId = backupResult.backupId
+        backupPath = backupResult.backupPath
 
-      const uploadResult = await window.api.skills.upload(buffer, filename)
-      if (!uploadResult.success) {
-        await window.api.skills.restoreCloudEvolutionBackup(backupId).catch(console.warn)
-        throw new Error(uploadResult.error || `安装云端自进化 Skill 失败：${candidate.skill_name}`)
+        const deleteResult = await window.api.skills.delete(existing.path)
+        if (!deleteResult.success) {
+          throw new Error(deleteResult.error || `删除旧版 Skill 失败：${candidate.skill_name}`)
+        }
+
+        const uploadResult = await window.api.skills.upload(buffer, filename)
+        if (!uploadResult.success) {
+          await window.api.skills.restoreCloudEvolutionBackup(backupId).catch(console.warn)
+          throw new Error(uploadResult.error || `安装云端自进化 Skill 失败：${candidate.skill_name}`)
+        }
       }
 
       const adoption = {
@@ -1738,8 +1775,8 @@ export function EvolutionPanel(): React.JSX.Element {
         source_version: existing.version || candidate.source_version || null,
         target_version: candidate.target_version || null,
         adopted_at: new Date().toISOString(),
-        backup_id: backupResult.backupId,
-        backup_path: backupResult.backupPath,
+        backup_id: backupId,
+        backup_path: backupPath,
         candidate
       }
       evolutionApi.markCandidateAdopted(adoption)
@@ -1766,7 +1803,11 @@ export function EvolutionPanel(): React.JSX.Element {
     if (!confirm(`确定要将「${candidate.skill_name}」回滚到采纳前的旧版本吗？`)) return
     setInstallingCloudCandidateId(candidate.candidate_id)
     try {
-      const result = await window.api.skills.restoreCloudEvolutionBackup(candidate.local_backup_id)
+      // Plugin skills were evolved in place, so roll back into the plugin dir;
+      // standalone skills restore into the custom dir.
+      const result = candidate.plugin_name
+        ? await window.api.skills.rollbackPluginSkillEvolution(candidate.local_backup_id)
+        : await window.api.skills.restoreCloudEvolutionBackup(candidate.local_backup_id)
       if (!result.success) {
         throw new Error(result.error || `回滚旧版 Skill 失败：${candidate.skill_name}`)
       }
