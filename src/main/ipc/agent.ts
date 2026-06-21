@@ -179,7 +179,8 @@ import {
 import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
 import {
   buildHarnessFeatureAgentContext,
-  readHarnessFeatureMetadata
+  readHarnessFeatureMetadata,
+  type HarnessSystemPromptConfig
 } from "../harness-board/service"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
@@ -361,6 +362,7 @@ interface HarnessAgentContext {
   featureId?: string
   projectCode?: string
   projectDir?: string
+  systemPromptConfig?: HarnessSystemPromptConfig
 }
 
 function getHarnessHookContext(
@@ -389,7 +391,8 @@ function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgent
       pluginWorkspace: featureContext.pluginWorkspace,
       featureId: featureContext.featureId,
       projectCode: featureContext.projectCode,
-      projectDir: featureContext.projectDir
+      projectDir: featureContext.projectDir,
+      systemPromptConfig: featureContext.systemPromptConfig
     }
   } catch (error) {
     console.warn("[HarnessBoard] Failed to build harness agent context:", error)

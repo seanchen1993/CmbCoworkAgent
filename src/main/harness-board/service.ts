@@ -724,11 +724,13 @@ function parseInspectCommand(
       args.push(...options.projectDirs)
       continue
     }
-    const optionalArg = optionalWorkflowArgs.find((item) => !options[item.key] && (
-      token === item.placeholder ||
-      token === `${item.flag}=${item.placeholder}` ||
-      (token === item.flag && tokens[index + 1] === item.placeholder)
-    ))
+    const optionalArg = optionalWorkflowArgs.find(
+      (item) =>
+        !options[item.key] &&
+        (token === item.placeholder ||
+          token === `${item.flag}=${item.placeholder}` ||
+          (token === item.flag && tokens[index + 1] === item.placeholder))
+    )
     if (optionalArg) {
       if (token === optionalArg.flag) index += 1
       continue
@@ -767,6 +769,31 @@ function readBoardConfigPlatformText(cwd: string, key: HarnessPlatformConfigKey)
   return command || null
 }
 
+function readBoardConfigSystemPrompt(cwd: string): HarnessSystemPromptConfig | undefined {
+  const parsed = readBoardConfig(cwd)
+  if (!parsed) return undefined
+
+  const raw = parsed.systemPrompt
+  if (!isObject(raw)) return undefined
+
+  const config = raw as Record<string, unknown>
+  const template = typeof config.template === "string" ? config.template.trim() : undefined
+  const rawArgs = config.args
+
+  let args: Record<string, string> | undefined
+  if (isObject(rawArgs)) {
+    const entries = Object.entries(rawArgs as Record<string, unknown>).filter(
+      ([, value]) => typeof value === "string"
+    ) as [string, string][]
+    if (entries.length > 0) {
+      args = Object.fromEntries(entries)
+    }
+  }
+
+  if (!template && !args) return undefined
+  return { template, args }
+}
+
 function readBoardConfigInspectCommand(
   cwd: string,
   mode: HarnessInspectCommandName
@@ -774,7 +801,9 @@ function readBoardConfigInspectCommand(
   return readBoardConfigPlatformText(cwd, HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode])
 }
 
-function projectDirectoryName(project: Pick<HarnessProjectMetadata, "projectDir" | "projectCode">): string {
+function projectDirectoryName(
+  project: Pick<HarnessProjectMetadata, "projectDir" | "projectCode">
+): string {
   return normalizeText(project.projectDir).trim() || normalizeText(project.projectCode).trim()
 }
 
@@ -869,7 +898,10 @@ function buildConfiguredHarnessInvocation(
   return configured
 }
 
-function hasConfiguredHarnessInvocation(project: HarnessProjectMetadata, mode: HarnessInspectCommandName): boolean {
+function hasConfiguredHarnessInvocation(
+  project: HarnessProjectMetadata,
+  mode: HarnessInspectCommandName
+): boolean {
   return readBoardConfigInspectCommand(adapterPluginDir(project), mode) !== null
 }
 
@@ -947,7 +979,12 @@ function runHarnessJsonInvocation(
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
 
   if (!raw) {
-    logHarnessStatusResultFailure(configured, configKey, stdoutBuffer, "Inspect adapter returned empty output")
+    logHarnessStatusResultFailure(
+      configured,
+      configKey,
+      stdoutBuffer,
+      "Inspect adapter returned empty output"
+    )
     throw new Error("Inspect adapter returned empty output")
   }
 
@@ -1059,7 +1096,9 @@ function normalizeDynamicWorkflowNodeList(value: unknown): HarnessDynamicWorkflo
   return nodes
 }
 
-function normalizeDynamicWorkflowConfigSnapshot(value: unknown): HarnessDynamicWorkflowConfig | null {
+function normalizeDynamicWorkflowConfigSnapshot(
+  value: unknown
+): HarnessDynamicWorkflowConfig | null {
   if (!isObject(value)) return null
   const templates = normalizeDynamicWorkflowTemplateList(value.templates)
   const nodes = normalizeDynamicWorkflowNodeList(value.nodes)
@@ -1798,7 +1837,11 @@ function normalizeFeatureWorkflowNodeIds(value: unknown): string[] {
   return nodes
 }
 
-function validateSkipNodeInput(input: HarnessSkipNodeInput): { projectId: string; slug: string; nodeId: string } {
+function validateSkipNodeInput(input: HarnessSkipNodeInput): {
+  projectId: string
+  slug: string
+  nodeId: string
+} {
   const projectId = normalizeText(input.projectId).trim()
   const slug = normalizeText(input.slug).trim()
   const nodeId = normalizeText(input.nodeId).trim()
@@ -1930,6 +1973,11 @@ export function readHarnessFeatureMetadata(
   return projectId && slug ? { projectId, slug } : null
 }
 
+export interface HarnessSystemPromptConfig {
+  template?: string
+  args?: Record<string, string>
+}
+
 export interface HarnessFeatureAgentContext {
   systemPromptInject?: string
   pluginOutputDir?: string
@@ -1941,6 +1989,7 @@ export interface HarnessFeatureAgentContext {
   featureId?: string
   projectCode?: string
   projectDir?: string
+  systemPromptConfig?: HarnessSystemPromptConfig
 }
 
 export function buildHarnessFeatureAgentContext(
@@ -1955,14 +2004,16 @@ export function buildHarnessFeatureAgentContext(
   const plugin = findAdapterPlugin(project)
   const systemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
+  const systemPromptConfig = readBoardConfigSystemPrompt(cwd)
   const systemId = normalizeText(project.systemId).trim()
   const render = (
     template: string | null,
     command: HarnessInspectCommandName
   ): string | undefined =>
     template
-      ? replaceHarnessConfigPlaceholders(template, project, command, cwd, { feature: feature.slug }).trim() ||
-        undefined
+      ? replaceHarnessConfigPlaceholders(template, project, command, cwd, {
+          feature: feature.slug
+        }).trim() || undefined
       : undefined
 
   return {
@@ -1975,7 +2026,8 @@ export function buildHarnessFeatureAgentContext(
     pluginWorkspace: project.workspacePath,
     featureId: feature.slug,
     projectCode: project.projectCode,
-    projectDir: projectDirectoryName(project)
+    projectDir: projectDirectoryName(project),
+    systemPromptConfig
   }
 }
 
@@ -2223,13 +2275,9 @@ function runInspectAdapterBatch(
   }
 
   const projectDirs = projects.map((project) => projectDirectoryName(project))
-  const { executable, args } = parseInspectCommand(
-    configuredCommand,
-    firstProject,
-    mode,
-    cwd,
-    { projectDirs }
-  )
+  const { executable, args } = parseInspectCommand(configuredCommand, firstProject, mode, cwd, {
+    projectDirs
+  })
 
   const configured: ConfiguredHarnessInvocation = {
     cwd,

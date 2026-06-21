@@ -184,7 +184,7 @@ function renderToolRoutingGatePrompt(options: {
     directRouteWarnings.push("deferred tools")
   }
   if (options.hasCodeExecRoute) {
-    directRouteWarnings.push("\`caller=\"code_exec\"\`")
+    directRouteWarnings.push('\`caller="code_exec"\`')
   }
 
   const lines = [
@@ -236,9 +236,7 @@ IMPORTANT: Any MCP tool invoked via mcp.$call(...) in \`code_exec\` without prio
 `
 
 function joinPromptSections(sections: string[]): string {
-  const normalizedSections = sections
-    .map((section) => section.trim())
-    .filter(Boolean)
+  const normalizedSections = sections.map((section) => section.trim()).filter(Boolean)
 
   if (normalizedSections.length === 0) return ""
   return `\n${normalizedSections.join("\n\n")}\n`
@@ -251,12 +249,15 @@ export function renderInjectedToolUsagePrompt(options: {
   hasCodeExecTool: boolean
 }): string {
   const sections: string[] = []
-  const hasDeferredWorkflow = options.hasSearchTool && options.hasInspectTool && options.hasInvokeDeferredTool
+  const hasDeferredWorkflow =
+    options.hasSearchTool && options.hasInspectTool && options.hasInvokeDeferredTool
   if (hasDeferredWorkflow || options.hasCodeExecTool) {
-    sections.push(renderToolRoutingGatePrompt({
-      hasDeferredRoute: hasDeferredWorkflow,
-      hasCodeExecRoute: options.hasCodeExecTool
-    }))
+    sections.push(
+      renderToolRoutingGatePrompt({
+        hasDeferredRoute: hasDeferredWorkflow,
+        hasCodeExecRoute: options.hasCodeExecTool
+      })
+    )
   }
   if (hasDeferredWorkflow) {
     sections.push(DEFERRED_TOOLS_WORKFLOW_PROMPT)
@@ -267,7 +268,7 @@ export function renderInjectedToolUsagePrompt(options: {
       CODE_EXEC_BASE_PROMPT_PREFIX,
       hasDeferredWorkflow
         ? '1. **Identify MCP tools (if needed):** If you are tackling a complex task and do not already know the exact MCP tool_ids for code execution, you may call `search_tool(..., caller="code_exec")` to find them.'
-        : '1. **Identify MCP tools:** Determine the exact MCP tool_ids you need for the code_exec from the callable tool list.',
+        : "1. **Identify MCP tools:** Determine the exact MCP tool_ids you need for the code_exec from the callable tool list.",
       CODE_EXEC_BASE_PROMPT_TAIL
     ]
     sections.push(codeExecLines.join(""))
@@ -285,4 +286,28 @@ export function renderAvailableDeferredToolsPrompt(toolIds: string[]): string {
   if (uniqueSortedToolIds.length === 0) return ""
 
   return `\n<deferred-tool-ids>\n${uniqueSortedToolIds.join("\n")}\n</deferred-tool-ids>\n`
+}
+
+export function renderToolUsageSection(options: {
+  hasSearchTool: boolean
+  hasInspectTool: boolean
+  hasInvokeDeferredTool: boolean
+  hasCodeExecTool: boolean
+  deferredToolIds: string[]
+}): string {
+  const sections: string[] = []
+  const dynamicPrompt = renderInjectedToolUsagePrompt({
+    hasSearchTool: options.hasSearchTool,
+    hasInspectTool: options.hasInspectTool,
+    hasInvokeDeferredTool: options.hasInvokeDeferredTool,
+    hasCodeExecTool: options.hasCodeExecTool
+  })
+  if (dynamicPrompt.trim()) {
+    sections.push(dynamicPrompt)
+  }
+  const deferredToolsPrompt = renderAvailableDeferredToolsPrompt(options.deferredToolIds)
+  if (deferredToolsPrompt.trim()) {
+    sections.push(deferredToolsPrompt)
+  }
+  return joinPromptSections(sections)
 }

@@ -73,7 +73,8 @@ import {
   MEMORY_SYSTEM_PROMPT,
   renderBaseSystemPrompt,
   renderInjectedToolUsagePrompt,
-  renderAvailableDeferredToolsPrompt
+  renderAvailableDeferredToolsPrompt,
+  renderToolUsageSection
 } from "./system-prompt"
 import { getMemoryStore, closeMemoryStore } from "../memory/store"
 import { createMemorySearchTool, createMemoryGetTool } from "../memory/tools"
@@ -176,6 +177,8 @@ import {
 import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool } from "./read-file-tool"
+import type { HarnessFeatureAgentContext } from "../harness-board/service"
+import { loadAgentSpec, renderTemplate } from "./agent-spec"
 
 function isAbortError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
@@ -484,7 +487,8 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
         const runSharedTool = () =>
           lock.read(async () => {
             const waited = Date.now() - waitStart
-            if (waited > 50) console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
+            if (waited > 50)
+              console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
             return handler(request)
           })
 
@@ -1045,9 +1049,7 @@ function wrapTaskToolWithOwnerMetadata(taskTool: DynamicStructuredTool): Dynamic
 function stampSubagentOwnerMetadata<T>(middleware: T): T {
   const mw = middleware as { tools?: DynamicStructuredTool[] }
   if (Array.isArray(mw.tools) && mw.tools.length > 0) {
-    mw.tools = mw.tools.map((t) =>
-      t?.name === "task" ? wrapTaskToolWithOwnerMetadata(t) : t
-    )
+    mw.tools = mw.tools.map((t) => (t?.name === "task" ? wrapTaskToolWithOwnerMetadata(t) : t))
   }
   return middleware
 }
@@ -1211,7 +1213,11 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         return parts.join("")
       }
       const customExecute = lcTool(
-        async (input: { command: string; cwd?: string; run_in_background?: boolean }): Promise<string> => {
+        async (input: {
+          command: string
+          cwd?: string
+          run_in_background?: boolean
+        }): Promise<string> => {
           const sandbox = filesystemBackend as LocalSandbox
           if (input.run_in_background) {
             return sandbox.executeBackground(input.command, input.cwd)
@@ -1734,6 +1740,144 @@ ${shellGuidance}
     renderBaseSystemPrompt({ includeSubagents: options.includeSubagents }) +
     memorySection
   )
+}
+
+// ─────────────────────────────────────────────────────────
+// Harnessboard system prompt template helpers
+// ─────────────────────────────────────────────────────────
+
+const HARNESS_DEFAULT_AGENT_SPEC_PATH = path.join(
+  __dirname,
+  "agent",
+  "templates",
+  "harness",
+  "agent.yaml"
+)
+
+async function listWorkspace(workspacePath: string, maxEntries = 30): Promise<string> {
+  try {
+    const entries = await fs.readdir(workspacePath, { withFileTypes: true })
+    const sorted = entries
+      .sort((a, b) => {
+        if (a.isDirectory() && !b.isDirectory()) return -1
+        if (!a.isDirectory() && b.isDirectory()) return 1
+        return a.name.localeCompare(b.name)
+      })
+      .slice(0, maxEntries)
+
+    const lines = sorted.map((entry) => {
+      const suffix = entry.isDirectory() ? "/" : ""
+      return `${entry.name}${suffix}`
+    })
+
+    const remaining = entries.length - sorted.length
+    if (remaining > 0) {
+      lines.push(`... and ${remaining} more`)
+    }
+    return lines.join("\n") || "(empty directory)"
+  } catch (error) {
+    console.warn("[Runtime] Failed to list workspace:", error)
+    return "[directory not readable]"
+  }
+}
+
+function formatSkills(skillSources: string[]): string {
+  if (skillSources.length === 0) {
+    return "No skills found."
+  }
+
+  const items = skillSources.map((source) => {
+    const name = path.basename(source)
+    return `- ${name}`
+  })
+
+  return [
+    "Skills are reusable, composable capabilities that enhance your abilities.",
+    "",
+    "## Available skills",
+    "",
+    ...items,
+    "",
+    "## How to use skills",
+    "",
+    "Identify the skills that are likely to be useful for the tasks you are currently working on, read the `SKILL.md` file for detailed instructions, guidelines, scripts and more.",
+    "",
+    "Only read skill details when needed to conserve the context window."
+  ].join("\n")
+}
+
+function buildHarnessProjectInfo(context: HarnessFeatureAgentContext): string {
+  const lines: string[] = []
+  if (context.featureId) lines.push(`- Feature: ${context.featureId}`)
+  if (context.projectCode) lines.push(`- Project Code: ${context.projectCode}`)
+  if (context.projectDir) lines.push(`- Project Directory: ${context.projectDir}`)
+  if (context.pluginId) lines.push(`- Plugin: ${context.pluginId}`)
+  if (context.pluginName && context.pluginName !== context.pluginId) {
+    lines.push(`- Plugin Name: ${context.pluginName}`)
+  }
+  if (context.pluginWorkspace) lines.push(`- Plugin Workspace: ${context.pluginWorkspace}`)
+  if (context.systemId) lines.push(`- System ID: ${context.systemId}`)
+
+  if (lines.length === 0) {
+    return "No additional harness project context available."
+  }
+  return lines.join("\n")
+}
+
+interface BuildHarnessSystemPromptOptions {
+  workspacePath: string
+  windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"
+  deferredToolIds: string[]
+  hasSearchTool: boolean
+  hasInspectTool: boolean
+  hasInvokeDeferredTool: boolean
+  hasCodeExecTool: boolean
+  agentsMd: { prompt: string | null; loadedPaths: string[]; truncated: boolean }
+  skillSources: string[]
+  harnessContext: HarnessFeatureAgentContext
+}
+
+async function buildHarnessSystemPrompt(options: BuildHarnessSystemPromptOptions): Promise<string> {
+  const spec = await loadAgentSpec(HARNESS_DEFAULT_AGENT_SPEC_PATH)
+
+  // Merge board_config.json systemPrompt configuration if present
+  const config = options.harnessContext.systemPromptConfig
+  if (config?.template) {
+    const baseDir =
+      options.harnessContext.pluginRoot ?? path.dirname(HARNESS_DEFAULT_AGENT_SPEC_PATH)
+    spec.systemPromptPath = path.isAbsolute(config.template)
+      ? config.template
+      : path.resolve(baseDir, config.template)
+  }
+  if (config?.args) {
+    spec.systemPromptArgs = { ...spec.systemPromptArgs, ...config.args }
+  }
+
+  const isWindows = process.platform === "win32"
+  const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
+  const { name: shell } = getShellInfo(options.windowsSandbox)
+
+  const vars: Record<string, string> = {
+    ROLE_ADDITIONAL: spec.systemPromptArgs.ROLE_ADDITIONAL ?? "",
+    CMB_NOW: getRuntimeTimeContext().currentTime,
+    WORKSPACE_PATH: options.workspacePath,
+    WORKSPACE_LS: await listWorkspace(options.workspacePath),
+    OS: platform,
+    SHELL: shell,
+    HARNESS_PROJECT_INFO: buildHarnessProjectInfo(options.harnessContext),
+    AGENTS_MD: options.agentsMd.prompt ?? "",
+    SKILLS: formatSkills(options.skillSources),
+    TOOL_USAGE: renderToolUsageSection({
+      hasSearchTool: options.hasSearchTool,
+      hasInspectTool: options.hasInspectTool,
+      hasInvokeDeferredTool: options.hasInvokeDeferredTool,
+      hasCodeExecTool: options.hasCodeExecTool,
+      deferredToolIds: options.deferredToolIds
+    })
+  }
+
+  const template = await fs.readFile(spec.systemPromptPath, "utf-8")
+  return renderTemplate(template, vars)
 }
 
 // Per-thread checkpointer cache
@@ -2335,6 +2479,8 @@ export interface CreateAgentRuntimeOptions {
   projectCode?: string
   /** Harness project directory exposed to child processes as PROJECT_DIR. */
   projectDir?: string
+  /** Optional harness system prompt template configuration from board_config.json. */
+  systemPromptConfig?: import("../harness-board/service").HarnessSystemPromptConfig
   /** Skip the manage_scheduler tool (used by scheduled task / heartbeat execution to prevent recursive scheduling) */
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
@@ -2425,6 +2571,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     featureId,
     projectCode,
     projectDir,
+    systemPromptConfig,
     retryHooks,
     maxRetryAttempts,
     coordinatorWorkerTurnPlanning,
@@ -2699,37 +2846,66 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, yoloMode)
   backend.setOrchestrator(orchestrator)
 
-  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, workingDirPromptAppendix, {
-    includeSubagents: !featureId
-  })
+  let systemPrompt: string
   let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
     prompt: null,
     projectRoot: workspacePath,
     loadedPaths: [],
     truncated: false
   }
-  if (enableAgentsPrompt) {
-    agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, {
-      globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
-      projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
-    })
-    if (agentsPrompt.prompt) {
-      systemPrompt += "\n\n" + agentsPrompt.prompt
-      console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
-      if (agentsPrompt.truncated) {
-        console.warn("[Runtime] AGENTS.md content exceeded prompt budget and was truncated:", {
-          globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
-          projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
-        })
+
+  if (featureId) {
+    // Harnessboard mode: defer system prompt rendering until tool metadata is available.
+    // The final prompt is rendered from a Markdown template with AGENTS.md injected as a variable.
+    if (enableAgentsPrompt) {
+      agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, {
+        globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+        projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+      })
+      if (agentsPrompt.prompt) {
+        console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
+        if (agentsPrompt.truncated) {
+          console.warn("[Runtime] AGENTS.md content exceeded prompt budget and was truncated:", {
+            globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+            projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+          })
+        }
+      } else {
+        console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
       }
     } else {
-      console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
+      console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
     }
+    // Placeholder; will be replaced by the harness template after tool discovery.
+    systemPrompt = ""
   } else {
-    console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
-  }
-  if (extraSystemPrompt) {
-    systemPrompt += "\n\n" + extraSystemPrompt
+    // Normal mode: preserve the existing hard-coded system prompt assembly.
+    systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, workingDirPromptAppendix, {
+      includeSubagents: true
+    })
+    if (enableAgentsPrompt) {
+      agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, {
+        globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+        projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+      })
+      if (agentsPrompt.prompt) {
+        systemPrompt += "\n\n" + agentsPrompt.prompt
+        console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
+        if (agentsPrompt.truncated) {
+          console.warn("[Runtime] AGENTS.md content exceeded prompt budget and was truncated:", {
+            globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+            projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+          })
+        }
+      } else {
+        console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
+      }
+    } else {
+      console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
+    }
+    if (extraSystemPrompt) {
+      systemPrompt += "\n\n" + extraSystemPrompt
+    }
   }
 
   const isWindows = process.platform === "win32"
@@ -3043,10 +3219,7 @@ The workspace root is: ${workspacePath}`
   }
 
   const coordinatorWorkingDirAppendix = workingDirPromptAppendix?.trim()
-  const coordinatorProjectInstructions = [
-    agentsPrompt.prompt,
-    extraSystemPrompt
-  ]
+  const coordinatorProjectInstructions = [agentsPrompt.prompt, extraSystemPrompt]
     .filter(Boolean)
     .join("\n\n")
   const coordinatorWorkerProjectInstructions = [
@@ -3659,6 +3832,39 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       hasCodeExecTool,
       deferredToolIds
     })
+  } else if (featureId) {
+    // Harnessboard mode: render the dedicated system prompt template.
+    systemPrompt = await buildHarnessSystemPrompt({
+      workspacePath,
+      windowsSandbox,
+      deferredToolIds,
+      hasSearchTool,
+      hasInspectTool,
+      hasInvokeDeferredTool,
+      hasCodeExecTool,
+      agentsMd: {
+        prompt: agentsPrompt.prompt,
+        loadedPaths: agentsPrompt.loadedPaths,
+        truncated: agentsPrompt.truncated
+      },
+      skillSources: allSkillsSources,
+      harnessContext: {
+        systemPromptInject: workingDirPromptAppendix,
+        pluginOutputDir,
+        systemId,
+        pluginRoot,
+        pluginId,
+        pluginName,
+        pluginWorkspace,
+        featureId,
+        projectCode,
+        projectDir,
+        systemPromptConfig
+      }
+    })
+    if (extraSystemPrompt) {
+      systemPrompt += "\n\n" + extraSystemPrompt
+    }
   } else {
     systemPrompt += renderInjectedToolUsagePrompt({
       hasSearchTool,
@@ -3743,9 +3949,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     mainFilesystemEnabled: !isCoordinatorMode,
     mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && !featureId,
     filesystemAccess: options.filesystemAccess,
-    taskSystemPrompt: isCoordinatorMode
-      ? buildCoordinatorTaskPrompt(threadId)
-      : TASK_TOOL_PROMPT,
+    taskSystemPrompt: isCoordinatorMode ? buildCoordinatorTaskPrompt(threadId) : TASK_TOOL_PROMPT,
     includeGeneralPurposeSubagent: !isCoordinatorMode,
     skills: mainSkillSources,
     memory: mainMemorySources,

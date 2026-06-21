@@ -15,6 +15,7 @@ const {
   discoverAgentsFiles,
   findProjectRootByGitMarker,
   loadAgentsPromptForWorkspace,
+  loadAgentsMdForTemplate,
   readAgentsFiles
 } = agentsMd as typeof import("../src/main/agent/agents-md.ts")
 
@@ -422,12 +423,37 @@ async function testEmojiSafeRenderedBudgetTruncation(): Promise<void> {
   })
 }
 
+async function testLoadAgentsMdForTemplate(): Promise<void> {
+  await withTempDir("agents-md-template", async (base) => {
+    const { root, nested, globalHome } = await setupWorkspace(base)
+    process.env.CMB_COWORK_AGENT_HOME = globalHome
+
+    await writeFile(join(globalHome, "AGENTS.md"), "GLOBAL_RULE", "utf8")
+    await writeFile(join(root, "AGENTS.md"), "ROOT_RULE", "utf8")
+    await writeFile(join(nested, "AGENTS.md"), "NESTED_RULE", "utf8")
+
+    const result = await loadAgentsMdForTemplate(nested, {
+      globalMaxBytes: 1024,
+      projectMaxBytes: 2048
+    })
+
+    assert(result.prompt !== null, "Expected non-null prompt")
+    assert(result.prompt.includes("GLOBAL_RULE"), "Missing global rule")
+    assert(result.prompt.includes("ROOT_RULE"), "Missing root rule")
+    assert(result.prompt.includes("NESTED_RULE"), "Missing nested rule")
+    assert(result.loadedPaths.length === 3, `Expected 3 paths, got ${result.loadedPaths.length}`)
+    assert(result.truncated === false, "Should not be truncated")
+  })
+}
+
 async function run(): Promise<void> {
   try {
     await testGlobalAndProjectOrdering()
     console.log("PASS global/project ordering")
     await testOverridePriority()
     console.log("PASS override priority")
+    await testLoadAgentsMdForTemplate()
+    console.log("PASS loadAgentsMdForTemplate wrapper")
     await testGlobalSymlinkCannotEscapeHome()
     console.log("PASS global symlink boundary")
     await testGlobalSymlinkOverrideFallsBackToAgents()
