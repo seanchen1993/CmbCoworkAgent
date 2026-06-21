@@ -47,6 +47,7 @@ import {
   RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
 } from "../../shared/goal-events"
 import { TraceCollector } from "../agent/trace/collector"
+import { dumpAgentInputDebug } from "../agent/debug-dump"
 import {
   requestSkillIntent,
   requestSkillConfirmation,
@@ -4592,6 +4593,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             })
             // First attempt sends the message; subsequent attempts resume from checkpoint
             const input = isFirstAttempt ? { messages: humanMessages } : null
+            if (input) {
+              dumpAgentInputDebug({
+                workspacePath,
+                threadId,
+                modelId: candidateId,
+                input: {
+                  messages: humanMessages.map((item) => ({
+                    id: item.id,
+                    content: item.content,
+                    additional_kwargs: item.additional_kwargs
+                  }))
+                },
+                metadata: {
+                  agentMode: effectiveAgentMode,
+                  messageCount: humanMessages.length,
+                  coordinatorNotification: Boolean(coordinatorNotificationHumanMessage)
+                }
+              })
+            }
             stream = await agent.stream(input, streamConfig)
             usedModelId = candidateId
             break

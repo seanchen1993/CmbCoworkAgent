@@ -179,6 +179,7 @@ import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool } from "./read-file-tool"
 import type { HarnessFeatureAgentContext } from "../harness-board/service"
 import { loadAgentSpec, renderTemplate } from "./agent-spec"
+import { dumpModelCallDebug, dumpSystemPromptDebug } from "./debug-dump"
 
 function isAbortError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
@@ -997,6 +998,162 @@ export function createSkillHookContextMiddleware(
   })
 }
 
+function textFromDebugContent(raw: unknown): string {
+  if (typeof raw === "string") return raw
+  if (Array.isArray(raw)) {
+    return raw
+      .map((item) => {
+        if (typeof item === "string") return item
+        if (!item || typeof item !== "object") return ""
+        const record = item as { text?: unknown; content?: unknown }
+        if (typeof record.text === "string") return record.text
+        if (typeof record.content === "string") return record.content
+        if (Array.isArray(record.content)) return textFromDebugContent(record.content)
+        return ""
+      })
+      .filter(Boolean)
+      .join("\n")
+  }
+  return ""
+}
+
+function debugRoleFromMessage(
+  message: unknown
+): "system" | "user" | "assistant" | "tool" | "unknown" {
+  if (!message || typeof message !== "object") return "unknown"
+  const record = message as {
+    _getType?: () => string
+    type?: string
+    id?: unknown
+    kwargs?: { type?: string }
+  }
+  const type =
+    (typeof record._getType === "function" ? record._getType() : undefined) ??
+    record.type ??
+    record.kwargs?.type
+  if (type === "system") return "system"
+  if (type === "human" || type === "user") return "user"
+  if (type === "ai" || type === "assistant") return "assistant"
+  if (type === "tool") return "tool"
+  const classId = Array.isArray(record.id) ? record.id : []
+  const className = String(classId[classId.length - 1] ?? "")
+  if (className.includes("System")) return "system"
+  if (className.includes("Human")) return "user"
+  if (className.includes("AI")) return "assistant"
+  if (className.includes("Tool")) return "tool"
+  return "unknown"
+}
+
+function debugMessageFromUnknown(message: unknown): Record<string, unknown> {
+  if (!message || typeof message !== "object") {
+    return { role: "unknown", content: String(message ?? "") }
+  }
+  const record = message as {
+    id?: unknown
+    name?: unknown
+    content?: unknown
+    tool_call_id?: unknown
+    tool_calls?: unknown
+    kwargs?: {
+      id?: unknown
+      name?: unknown
+      content?: unknown
+      tool_call_id?: unknown
+      tool_calls?: unknown
+      usage_metadata?: unknown
+      response_metadata?: unknown
+    }
+  }
+  const kwargs = record.kwargs ?? {}
+  return {
+    role: debugRoleFromMessage(message),
+    id: kwargs.id ?? record.id,
+    name: kwargs.name ?? record.name,
+    toolCallId: kwargs.tool_call_id ?? record.tool_call_id,
+    content: textFromDebugContent(kwargs.content ?? record.content),
+    toolCalls: kwargs.tool_calls ?? record.tool_calls
+  }
+}
+
+function debugUsageFromMessage(message: unknown): unknown {
+  if (!message || typeof message !== "object") return undefined
+  const record = message as {
+    usage_metadata?: unknown
+    response_metadata?: { token_usage?: unknown; usage?: unknown }
+    kwargs?: {
+      usage_metadata?: unknown
+      response_metadata?: { token_usage?: unknown; usage?: unknown }
+    }
+  }
+  const kwargs = record.kwargs ?? {}
+  const responseMetadata = kwargs.response_metadata ?? record.response_metadata
+  return (
+    kwargs.usage_metadata ??
+    record.usage_metadata ??
+    responseMetadata?.token_usage ??
+    responseMetadata?.usage
+  )
+}
+
+function createDebugModelCallMiddleware(options: {
+  workspacePath?: string
+  threadId?: string
+  modelId?: string
+  agentMode?: string
+}) {
+  return createMiddleware({
+    name: "agentDebugDump",
+    wrapModelCall: async (request, handler) => {
+      if (!options.workspacePath) return handler(request)
+      const systemMessage =
+        typeof request.systemMessage === "string"
+          ? request.systemMessage
+          : textFromDebugContent((request.systemMessage as { content?: unknown })?.content)
+      const inputMessages = [
+        ...(systemMessage ? [{ role: "system", content: systemMessage }] : []),
+        ...((request.messages ?? []) as unknown[]).map(debugMessageFromUnknown)
+      ]
+      try {
+        const output = await handler(request)
+        const outputMessage = debugMessageFromUnknown(output)
+        dumpModelCallDebug({
+          workspacePath: options.workspacePath,
+          threadId: options.threadId,
+          modelId: options.modelId,
+          messageId:
+            typeof outputMessage.id === "string" ? (outputMessage.id as string) : undefined,
+          inputMessages,
+          outputMessage,
+          toolCalls: Array.isArray(outputMessage.toolCalls) ? outputMessage.toolCalls : [],
+          tokenUsage: debugUsageFromMessage(output),
+          metadata: {
+            source: "runtime_wrap_model_call",
+            agentMode: options.agentMode
+          }
+        })
+        return output
+      } catch (error) {
+        dumpModelCallDebug({
+          workspacePath: options.workspacePath,
+          threadId: options.threadId,
+          modelId: options.modelId,
+          inputMessages,
+          outputMessage: {
+            role: "unknown",
+            content: error instanceof Error ? error.message : String(error)
+          },
+          metadata: {
+            source: "runtime_wrap_model_call",
+            agentMode: options.agentMode,
+            error: true
+          }
+        })
+        throw error
+      }
+    }
+  })
+}
+
 /**
  * Stable metadata key stamped onto every subagent-interior stream chunk so the
  * renderer can attribute it to the owning `task` tool call deterministically —
@@ -1099,6 +1256,9 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     toolConcurrencyQueueId = "default",
     toolHookMiddleware,
     threadId,
+    debugWorkspacePath,
+    debugModelId,
+    debugAgentMode,
     // PR-12 — optional callback fired-and-forgotten by toolErrorMiddleware
     // when a tool throws. Closed-over context (threadId / workspace /
     // hookScope / onHookResult) lives at the createAgentRuntime layer; this
@@ -1498,6 +1658,12 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
   const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(
     `${toolConcurrencyQueueId}:subagent`
   )
+  const debugModelCallMiddleware = createDebugModelCallMiddleware({
+    workspacePath: debugWorkspacePath,
+    threadId,
+    modelId: debugModelId ?? (typeof model === "string" ? model : undefined),
+    agentMode: debugAgentMode
+  })
 
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
@@ -1508,6 +1674,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     ...(toolHookMiddleware ? [toolHookMiddleware] : []),
     toolErrorMiddleware,
     createSummarizationMiddleware(summarizationOptions),
+    debugModelCallMiddleware,
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
     createPatchToolCallsMiddleware()
   ]
@@ -1556,6 +1723,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
           ]
         : []),
       createSummarizationMiddleware(summarizationOptions),
+      debugModelCallMiddleware,
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       createPatchToolCallsMiddleware(),
       ...skillsMiddlewareArray,
@@ -3909,6 +4077,23 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
   const mainTools = isCoordinatorMode ? coordinatorWorkerToolsForMain : finalTools
   const workerTools = finalTools
   const coordinatorSubagents: ReturnType<typeof buildCoordinatorWorkerSubagents> = []
+  dumpSystemPromptDebug({
+    workspacePath,
+    threadId,
+    runtimeThreadId: threadId,
+    modelId,
+    agentMode,
+    systemPrompt,
+    toolNames: mainTools.map((tool) => (tool as { name?: string }).name ?? "(unnamed)"),
+    metadata: {
+      hasAgentsPrompt: Boolean(agentsPrompt.prompt),
+      agentsFilesLoaded: agentsPrompt.loadedPaths,
+      hasExtraSystemPrompt: Boolean(extraSystemPrompt),
+      deferredToolIds,
+      coordinatorMode: isCoordinatorMode,
+      approvalThreadId
+    }
+  })
 
   console.log(
     "[Runtime] Final tool list:",
@@ -3968,6 +4153,9 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     },
     threadId: options.threadId,
     toolConcurrencyQueueId: options.threadId ?? workspacePath,
+    debugWorkspacePath: workspacePath,
+    debugModelId: modelId,
+    debugAgentMode: agentMode,
     toolHookMiddleware,
     // PR-12 — closure captures threadId / workspacePath / hookScope so
     // createDeepAgent's middleware can fire-and-forget the PostToolUseFailure
