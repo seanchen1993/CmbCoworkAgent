@@ -32,7 +32,7 @@ import {
 } from "../storage"
 
 import { ChatOpenAI } from "@langchain/openai"
-import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
+import { DynamicStructuredTool, ToolInputParsingException, tool } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import {
   LocalSandbox,
@@ -75,8 +75,8 @@ import { createGunzip } from "zlib"
 import { pipeline } from "stream/promises"
 import { app, BrowserWindow } from "electron"
 import {
-  BASE_SYSTEM_PROMPT,
   MEMORY_SYSTEM_PROMPT,
+  renderBaseSystemPrompt,
   renderInjectedToolUsagePrompt,
   renderAvailableDeferredToolsPrompt
 } from "./system-prompt"
@@ -295,8 +295,7 @@ type ToolConcurrencyTier = "exclusive" | "shared" | "bypass"
 
 /**
  * Tools that mutate cross-tool shared state (tool registry, scheduler, skill
- * files, subagent slots). These must run one-at-a-time across the entire
- * thread — write lock.
+ * files). These must run one-at-a-time across the entire thread — write lock.
  *
  * Note: mutating shell / file I/O tools are also exclusive. Only commands that
  * are provably read-only are allowed to overlap with other read-only work.
@@ -307,7 +306,6 @@ const EXCLUSIVE_TOOL_NAMES = new Set([
   "browser_playwright",
   "manage_scheduler",
   "manage_skill",
-  "task",
   "workflow",
   "invoke_deferred_tool",
   "write_file",
@@ -329,8 +327,13 @@ const SHARED_TOOL_NAMES = new Set([
   "search_tool",
   "inspect_tool",
   "task_output",
-  "view_image"
+  "view_image",
+  // Subagent task calls may run concurrently. Subagent-internal tools use the
+  // separate subagent concurrency gate below, so file writes remain exclusive.
+  "task"
 ])
+
+const MAX_PARALLEL_TASK_SUBAGENTS = 3
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -463,7 +466,44 @@ class AsyncRWLock {
   }
 }
 
+class AsyncSemaphore {
+  private active = 0
+  private queue: Array<() => void> = []
+
+  constructor(private readonly limit: number) {}
+
+  async run<T>(task: () => Promise<T>): Promise<T> {
+    await this.acquire()
+    try {
+      return await task()
+    } finally {
+      this.release()
+    }
+  }
+
+  private acquire(): Promise<void> {
+    if (this.active < this.limit) {
+      this.active++
+      return Promise.resolve()
+    }
+
+    return new Promise<void>((resolve) => {
+      this.queue.push(() => {
+        this.active++
+        resolve()
+      })
+    })
+  }
+
+  private release(): void {
+    this.active = Math.max(0, this.active - 1)
+    const next = this.queue.shift()
+    if (next) next()
+  }
+}
+
 const toolConcurrencyLocks = new Map<string, AsyncRWLock>()
+const taskConcurrencyLimiters = new Map<string, AsyncSemaphore>()
 
 function getToolConcurrencyLock(queueId: string): AsyncRWLock {
   let lock = toolConcurrencyLocks.get(queueId)
@@ -487,10 +527,22 @@ function getToolConcurrencyLock(queueId: string): AsyncRWLock {
 export function clearToolConcurrencyLocksForThread(threadId: string): void {
   toolConcurrencyLocks.delete(threadId)
   toolConcurrencyLocks.delete(`${threadId}:subagent`)
+  taskConcurrencyLimiters.delete(threadId)
+  taskConcurrencyLimiters.delete(`${threadId}:subagent`)
+}
+
+function getTaskConcurrencyLimiter(queueId: string): AsyncSemaphore {
+  let limiter = taskConcurrencyLimiters.get(queueId)
+  if (!limiter) {
+    limiter = new AsyncSemaphore(MAX_PARALLEL_TASK_SUBAGENTS)
+    taskConcurrencyLimiters.set(queueId, limiter)
+  }
+  return limiter
 }
 
 function createGradedToolConcurrencyMiddleware(queueId: string) {
   const lock = getToolConcurrencyLock(queueId)
+  const taskLimiter = getTaskConcurrencyLimiter(queueId)
   return createMiddleware({
     name: "gradedToolConcurrency",
     wrapToolCall: async (request, handler) => {
@@ -507,11 +559,18 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
       const label = `${toolCall?.name ?? "unknown"}:${toolCall?.id ?? "no-id"}`
       const waitStart = Date.now()
       if (tier === "shared") {
-        return lock.read(async () => {
-          const waited = Date.now() - waitStart
-          if (waited > 50) console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
-          return handler(request)
-        })
+        const runSharedTool = () =>
+          lock.read(async () => {
+            const waited = Date.now() - waitStart
+            if (waited > 50) console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
+            return handler(request)
+          })
+
+        if (toolCall?.name === "task") {
+          return taskLimiter.run(runSharedTool)
+        }
+
+        return runSharedTool()
       }
       return lock.write(async () => {
         const waited = Date.now() - waitStart
@@ -644,6 +703,7 @@ export function createScopedMcpCapabilityService(
     pluginWorkspace?: string
     featureId?: string
     projectCode?: string
+    projectDir?: string
   }
 ): McpCapabilityService {
   const getEffectivePriority = (tool: McpCapabilityTool): number => {
@@ -840,6 +900,7 @@ export function createScopedMcpCapabilityService(
         pluginWorkspace: baseContext.pluginWorkspace,
         featureId: baseContext.featureId,
         projectCode: baseContext.projectCode,
+        projectDir: baseContext.projectDir,
         pluginId,
         pluginName: pluginId ? getPluginName(pluginId) : undefined
       }
@@ -942,7 +1003,7 @@ export function createScopedMcpCapabilityService(
   }
 }
 
-const SEQUENTIAL_TASK_PROMPT = `## \`task\` (subagent spawner)
+const TASK_TOOL_PROMPT = `## \`task\` (subagent spawner)
 
 You have access to a \`task\` tool to launch short-lived subagents that handle isolated tasks. These agents are ephemeral — they live only for the duration of the task and return a single result.
 
@@ -965,7 +1026,13 @@ When NOT to use the task tool:
 - If splitting would add latency without benefit
 
 ## Important Task Tool Usage Notes to Remember
-- **CRITICAL: Only launch ONE subagent at a time.** Wait for the current subagent to finish and return its result before deciding whether to launch the next one. Do NOT spawn multiple subagents in parallel. This ensures stable context and predictable execution order.
+- You can call up to 3 \`task\` tools in a single response. When delegated tasks have no dependencies, launch independent subagents in parallel instead of serializing work that can run simultaneously.
+- Use parallel subagents for independent research angles, large-context investigations, or isolated multi-step work that would otherwise bloat the main thread. Do not use subagents excessively for trivial lookups.
+- If one subagent's result is needed to define another task, run those tasks sequentially.
+- For write-heavy work, avoid parallel subagents that may edit overlapping files; use one subagent per file area or serialize dependent edits.
+- Avoid duplicate delegation and do not repeat the same research yourself while subagents are doing it. Give each subagent a distinct question, file area, or acceptance criterion.
+- Each subagent prompt must be self-contained. Subagents cannot see the main conversation or other subagents' findings unless you include the needed context.
+- After subagents return, synthesize results in the main thread. Do not hand off vague instructions like "based on the findings" to another subagent.
 - Remember to use the \`task\` tool to silo independent tasks within a multi-part objective.
 - You should use the \`task\` tool whenever you have a complex task that will take multiple steps, and is independent from other tasks that the agent needs to complete. These agents are highly competent and efficient.`
 
@@ -1096,6 +1163,65 @@ export function createAgentToolGuardMiddleware(
 }
 
 /**
+ * Stable metadata key stamped onto every subagent-interior stream chunk so the
+ * renderer can attribute it to the owning `task` tool call deterministically —
+ * independent of concurrency or chunk ordering. The value is the parent `task`
+ * tool_call_id (== the subagent id used by the UI).
+ *
+ * Mirrored as a literal in electron-transport.ts and stream-converter.ts; the
+ * renderer cannot import from main, so keep the three in sync.
+ */
+export const SUBAGENT_OWNER_METADATA_KEY = "cmb_subagent_owner_tool_call_id"
+
+/**
+ * Wrap deepagents' internal `task` tool so each subagent invocation stamps its
+ * owning tool_call_id into run metadata. deepagents passes the task tool's
+ * `config` straight to `subagent.invoke`, and LangGraph propagates
+ * `config.metadata` into every streamed message's metadata — so the owner id
+ * rides along on all subagent-interior chunks. Re-invoking the original tool
+ * with the ToolCall as input re-establishes `config.toolCall` inside it (see
+ * @langchain/core tools `invoke`), preserving its Command/result contract.
+ */
+function wrapTaskToolWithOwnerMetadata(taskTool: DynamicStructuredTool): DynamicStructuredTool {
+  return tool(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async (input: Record<string, unknown>, config: any) => {
+      const ownerId: string | undefined = config?.toolCall?.id
+      const patchedConfig = ownerId
+        ? {
+            ...config,
+            metadata: { ...(config?.metadata ?? {}), [SUBAGENT_OWNER_METADATA_KEY]: ownerId }
+          }
+        : config
+      // Pass the ToolCall as input so the original re-derives config.toolCall.id
+      // and returns its Command (state update + task ToolMessage) unchanged.
+      return taskTool.invoke(config?.toolCall ?? input, patchedConfig)
+    },
+    {
+      name: taskTool.name,
+      description: taskTool.description,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      schema: (taskTool as any).schema
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ) as unknown as DynamicStructuredTool
+}
+
+/**
+ * Replace the `task` tool inside a subagent middleware with the owner-stamping
+ * wrapper, leaving the middleware's wrapModelCall (task system prompt) intact.
+ */
+function stampSubagentOwnerMetadata<T>(middleware: T): T {
+  const mw = middleware as { tools?: DynamicStructuredTool[] }
+  if (Array.isArray(mw.tools) && mw.tools.length > 0) {
+    mw.tools = mw.tools.map((t) =>
+      t?.name === "task" ? wrapTaskToolWithOwnerMetadata(t) : t
+    )
+  }
+  return middleware
+}
+
+/**
  * Custom version of deepagents' createDeepAgent.
  *
  * Aligned with official 1.8.1 except:
@@ -1133,7 +1259,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     mainFilesystemEnabled = true,
     mainTodosEnabled = true,
     subagentDefaultTools,
-    taskSystemPrompt = SEQUENTIAL_TASK_PROMPT,
+    taskSystemPrompt = TASK_TOOL_PROMPT,
     includeGeneralPurposeSubagent = true,
     mainSubagentsEnabled = true,
     filesystemAccess,
@@ -1375,7 +1501,10 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
               return JSON.stringify({
                 retrieval_status: "not_ready",
                 elapsed: result.elapsedSeconds,
-                command: result.command
+                command: result.command,
+                partialOutput: result.partialOutput,
+                partialTruncated: result.partialTruncated,
+                idleSeconds: result.idleSeconds
               })
             }
             const status = result.exitCode === 0 ? "succeeded" : "failed"
@@ -1409,7 +1538,10 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
           return JSON.stringify({
             retrieval_status: "timeout",
             elapsed: final.elapsedSeconds,
-            command: final.command
+            command: final.command,
+            partialOutput: final.partialOutput,
+            partialTruncated: final.partialTruncated,
+            idleSeconds: final.idleSeconds
           })
         }
 
@@ -1722,15 +1854,17 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
       toolErrorMiddleware,
       ...(mainSubagentsEnabled
         ? [
-            createSubAgentMiddleware({
-              defaultModel: model,
-              defaultTools: subagentDefaultTools ?? tools,
-              defaultMiddleware: subagentMiddleware,
-              defaultInterruptOn: null,
-              subagents: availableSubagents,
-              generalPurposeAgent: false,
-              systemPrompt: taskSystemPrompt
-            } as Parameters<typeof createSubAgentMiddleware>[0])
+            stampSubagentOwnerMetadata(
+              createSubAgentMiddleware({
+                defaultModel: model,
+                defaultTools: subagentDefaultTools ?? tools,
+                defaultMiddleware: subagentMiddleware,
+                defaultInterruptOn: null,
+                subagents: availableSubagents,
+                generalPurposeAgent: false,
+                systemPrompt: taskSystemPrompt
+              } as Parameters<typeof createSubAgentMiddleware>[0])
+            )
           ]
         : []),
       createSummarizationMiddleware(summarizationOptions),
@@ -1821,8 +1955,9 @@ function getSystemPrompt(
   workspacePath: string,
   windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated",
   workingDirPromptAppendix?: string,
-  includeBackgroundExec = true
+  options: { includeBackgroundExec?: boolean; includeSubagents?: boolean } = {}
 ): string {
+  const includeBackgroundExec = options.includeBackgroundExec ?? true
   const isWindows = process.platform === "win32"
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
   const { name: shell, isBashLike, isPowerShell } = getShellInfo(windowsSandbox)
@@ -1868,8 +2003,8 @@ ${shellGuidance}
   // execute (run_in_background). Omit it for runtimes whose execute tool has been
   // removed (shellAccess "none" registry agents, scoped write workers) — otherwise
   // the prompt tells the agent to call a tool it doesn't have, contradicting its
-  // tool list and the worker's own access note. read_only/full keep it: their
-  // execute IS present (read_only gates each command via isReadOnlyShellCommand).
+  // tool list and the worker's own access note. Omit it for read_only too:
+  // execute is present, but isReadOnlyShellCommand rejects builds/installs/tests.
   const backgroundExecSection = !includeBackgroundExec
     ? ""
     : `
@@ -1923,7 +2058,7 @@ ${shellGuidance}
     workingDirAppendix +
     backgroundExecSection +
     sandboxSection +
-    BASE_SYSTEM_PROMPT +
+    renderBaseSystemPrompt({ includeSubagents: options.includeSubagents }) +
     memorySection
   )
 }
@@ -2525,6 +2660,8 @@ export interface CreateAgentRuntimeOptions {
   featureId?: string
   /** Harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
+  /** Harness project directory exposed to child processes as PROJECT_DIR. */
+  projectDir?: string
   /** Skip the manage_scheduler tool (used by scheduled task / heartbeat execution to prevent recursive scheduling) */
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
@@ -2634,6 +2771,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     pluginWorkspace,
     featureId,
     projectCode,
+    projectDir,
     retryHooks,
     maxRetryAttempts,
     coordinatorWorkerTurnPlanning,
@@ -2826,6 +2964,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     pluginWorkspace,
     featureId,
     projectCode,
+    projectDir,
     onFileMutation,
     abortSignal: options.abortSignal,
     runId: threadId,
@@ -2936,6 +3075,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         pluginWorkspace,
         featureId,
         projectCode,
+        projectDir,
         // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
         // Lets a Notification hook know whether the user is in YOLO mode (where
         // approvals only fire for sandbox-escape) vs the default approve flow.
@@ -2994,7 +3134,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     workspacePath,
     windowsSandbox,
     workingDirPromptAppendix,
-    executeToolAvailable && !isReadOnlyRuntime
+    {
+      includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
+      includeSubagents: !featureId
+    }
   )
   let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
     prompt: null,
@@ -3122,6 +3265,7 @@ The workspace root is: ${workspacePath}`
       pluginWorkspace,
       featureId,
       projectCode,
+      projectDir,
       turnId: hookTurnId
     }
   )
@@ -3457,6 +3601,7 @@ The workspace root is: ${workspacePath}`
     pluginWorkspace,
     featureId,
     projectCode,
+    projectDir,
     skipToolNames: toolHookExclusions
   })
 
@@ -3637,6 +3782,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       pluginWorkspace,
       featureId,
       projectCode,
+      projectDir,
       pluginOutputDir,
       hookTurnId
     }
@@ -4203,7 +4349,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     subagentExtraSystemPrompt: agentsPrompt.prompt ?? undefined,
     mainTodosEnabled: !isCoordinatorMode,
     mainFilesystemEnabled: !isCoordinatorMode,
-    mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents,
+    mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && !featureId,
     filesystemAccess: options.filesystemAccess,
     registrySubagentSpecs,
     // The runtime's commands execute via the sandbox; on Windows with a sandbox
@@ -4214,7 +4360,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       process.platform === "win32" && windowsSandbox !== "none" ? "powershell" : "unknown",
     taskSystemPrompt: isCoordinatorMode
       ? buildCoordinatorTaskPrompt(threadId)
-      : SEQUENTIAL_TASK_PROMPT,
+      : TASK_TOOL_PROMPT,
     includeGeneralPurposeSubagent: !isCoordinatorMode,
     skills: mainSkillSources,
     memory: mainMemorySources,

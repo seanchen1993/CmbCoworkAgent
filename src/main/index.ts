@@ -148,6 +148,7 @@ import { registerTerminalHandlers, disposeAllTerminals } from "./ipc/terminal"
 import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
 import { registerDashboardHandlers } from "./ipc/dashboard"
+import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { registerLspHandlers } from "./ipc/lsp"
@@ -482,8 +483,9 @@ if (!gotTheLock) {
     }
 
     // Periodically upsert Harness Board project/feature status into the event
-    // index. Writes directly to ES (VITE_ES_NODES); no-ops when ES is not
-    // configured, so it does not depend on the trace upload base URL.
+    // index. Prefers the backend event service (VITE_API_TRACE_BASE_URL) and
+    // falls back to writing ES directly (VITE_ES_NODES); no-ops when neither is
+    // configured.
     startHarnessStatusReporter()
 
     // Initialize database
@@ -522,6 +524,7 @@ if (!gotTheLock) {
     registerCodeExecToolsHandlers(ipcMain)
     registerRoutingHandlers(ipcMain)
     registerDashboardHandlers(ipcMain)
+    registerAdoptionTraceHandlers(ipcMain)
     registerFeatureGateHandlers(ipcMain)
     registerHarnessBoardHandlers(ipcMain)
     registerUpdaterHandlers()

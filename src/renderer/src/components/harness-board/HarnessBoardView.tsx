@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { createPortal } from "react-dom"
+import * as PopoverPrimitive from "@radix-ui/react-popover"
 import {
   AlertCircle,
   ArrowLeft,
@@ -25,7 +26,9 @@ import {
   Search,
   ShieldAlert,
   SkipForward,
-  Workflow
+  Trash2,
+  Workflow,
+  Zap
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -37,7 +40,7 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Select,
@@ -53,10 +56,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TabbedPanel } from "@/components/tabs"
 import { ThreadListItem } from "@/components/sidebar/ThreadSidebar"
-import {
-  normalizeHarnessNextAction,
-  setPendingHarnessNextAction
-} from "@/lib/harness-next-action"
+import { createHarnessFeatureThread } from "@/lib/harness-feature-thread"
+import { getHarnessRunNextAction } from "@/lib/harness-run-next-action"
+import { buildUploaderIdCandidates } from "@/lib/skill-data-service"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import {
@@ -65,10 +67,20 @@ import {
   useThreadContext
 } from "@/lib/thread-context"
 import { toast } from "sonner"
-import type { MarketPluginItem } from "../../api/market-plugins"
+import { marketApi, type MarketItem } from "../../api/market"
+import { formatTopUserOrgName } from "@/components/dashboard/use-dashboard"
+import { UpdateVersionTooltip } from "@/components/customize/MarketPanel/MarketUpdateBadge"
+import {
+  getMarketPluginUpdateInfo,
+  installMarketPluginUpdate,
+  type MarketPluginUpdateInfo
+} from "@/components/customize/MarketPanel/market-plugin-update"
 import type {
   HarnessArtifact,
   HarnessArtifactType,
+  HarnessDynamicWorkflowConfig,
+  HarnessDynamicWorkflowNode,
+  HarnessDynamicWorkflowTemplate,
   HarnessEventStatus,
   HarnessHookLogView,
   HarnessProjectCreateInput,
@@ -82,6 +94,8 @@ import type {
   HarnessSessionBinding,
   HarnessAdapterRegistryItem,
   HarnessBoardCompatibility,
+  HarnessEnterpriseProjectDetailItem,
+  HarnessEnterpriseProjectSearchItem,
   HarnessStatus,
   HarnessWorkflowNextAction,
   HarnessWorkflow,
@@ -115,6 +129,14 @@ const harnessActionOverlayClassName =
   "pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-primary-foreground/10 to-primary-foreground/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
 const harnessActionIconClassName =
   "relative flex size-4 items-center justify-center rounded-full bg-primary-foreground/15 ring-1 ring-primary-foreground/25 transition-transform duration-200 group-hover:scale-105"
+const DELETED_PROJECT_NAME = "项目已删除"
+
+const deletedProjectCompatibility: HarnessBoardCompatibility = {
+  status: "missing-plugin",
+  compatible: false,
+  appApiVersion: 1,
+  label: "项目已删除"
+}
 const harnessProjectCreateInputClassName =
   "bg-background text-foreground placeholder:text-muted-foreground/45"
 const harnessProjectCreateSelectClassName =
@@ -122,13 +144,23 @@ const harnessProjectCreateSelectClassName =
 const harnessDialogContentClassName = "z-[60]"
 const harnessDialogSelectContentClassName =
   "z-[70] w-[var(--radix-select-trigger-width)] max-w-[calc(100vw-2rem)]"
+const harnessProjectPopoverContentClassName =
+  "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-[70] origin-[var(--radix-popover-content-transform-origin)] w-[var(--radix-popover-trigger-width)] rounded-md border p-0 shadow-md outline-none"
 const harnessNamePattern = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
 const harnessNameRuleMessage = "仅支持中文、英文字母、数字、-、_"
+const PROJECT_NAME_MAX_CHARS = 50
+const PROJECT_CODE_MAX_CHARS = 15
+const PROJECT_DESCRIPTION_MAX_CHARS = 100
+const PROJECT_DIR_MAX_CHARS = 30
 const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
 const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
 const OTHER_ADAPTER_SCENARIO = "其他类别"
 const ADAPTER_SELECT_PLACEHOLDER = "请选择已安装的支持项目模式的插件"
-const PROJECT_STATUS_POLL_INTERVAL_MS = 10000
+const PROJECT_STATUS_POLL_INTERVAL_MS = 60 * 1000
+const CUSTOM_WORKFLOW_TEMPLATE_ID = "custom"
+const ENTERPRISE_PROJECT_SEARCH_MIN_CHARS = 2
+const ENTERPRISE_PROJECT_SEARCH_DEBOUNCE_MS = 300
+const ENTERPRISE_PROJECT_DETAIL_QUERY_DEBOUNCE_MS = 160
 
 const preventHarnessDialogOutsideClose: React.ComponentProps<typeof DialogContent>["onPointerDownOutside"] =
   (event) => {
@@ -165,16 +197,23 @@ function cleanIpcError(error: unknown): string {
     .replace(/^Error:\s*/, "")
 }
 
+function normalizeEnterpriseProjectCode(value: string): string {
+  return value.trim()
+}
+
 function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataUpdateInput {
   return {
     adapterId,
     adapterType: "plugin",
     name: "",
     projectCode: "",
+    projectFromLean: false,
+    projectDir: "",
     description: "",
     systemId: "",
     systemName: "",
-    workspacePath: ""
+    workspacePath: "",
+    sessionWorkspacePath: ""
   }
 }
 
@@ -192,30 +231,47 @@ interface SelectedFeature {
   projectId: string
   slug: string
   activeSessionThreadId?: string
+  deleted?: boolean
 }
 
+type PendingProjectAction = {
+  type: "archive" | "delete"
+  project: HarnessProjectListItem
+} | null
+
 type ProjectFeatureSessionGroupSection = "current" | "project" | "other"
+type ProjectFeatureSidebarProject = Omit<HarnessProjectListItem, "lifecycle"> & {
+  lifecycle: {
+    status: HarnessProjectListItem["lifecycle"]["status"] | "deleted"
+  }
+}
 
 interface ProjectFeatureSessionGroup {
   key: string
-  project: HarnessProjectListItem
+  project: ProjectFeatureSidebarProject
   slug: string
   title: string
   sessions: HarnessSessionBinding[]
   section: ProjectFeatureSessionGroupSection
+  deleted?: boolean
 }
 
-interface GitPanelFileChange {
+type EnterpriseProjectDetailCacheEntry =
+  | { kind: "hit"; project: HarnessEnterpriseProjectDetailItem }
+  | { kind: "miss" }
+
+type GitChangedFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+
+interface GitChangedFileSummary {
   path: string
-  diff: string
-  additions: number
-  deletions: number
+  previousPath?: string
+  status?: GitChangedFileStatus
 }
 
-interface GitPanelDiffState {
+interface GitChangedFilesSummaryState {
   success: boolean
   isGitRepo?: boolean
-  files: GitPanelFileChange[]
+  files: GitChangedFileSummary[]
   changedFilesTotal?: number
   omittedFileCount?: number
   error?: string
@@ -224,6 +280,14 @@ interface GitPanelDiffState {
 interface AdapterScenarioGroup {
   useScenario: string
   adapters: HarnessAdapterRegistryItem[]
+}
+
+interface HarnessMarketUploaderProfile {
+  sapId: string
+  userName: string
+  orgName: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
 }
 
 interface WorkspaceChangeGroup {
@@ -237,7 +301,7 @@ interface WorkspaceChangeGroup {
 
 interface WorkspaceChangeState {
   status: "loading" | "ready" | "error"
-  files: GitPanelFileChange[]
+  files: GitChangedFileSummary[]
   changedFilesTotal: number
   omittedFileCount: number
   error?: string
@@ -250,6 +314,7 @@ type ThreadWorkspaceStateMap = Record<
     scheduledTaskLoading?: boolean
     pendingApproval?: unknown
     pendingUserInput?: unknown
+    contextReminder?: { pending?: boolean }
   } | undefined
 >
 
@@ -257,20 +322,6 @@ interface HarnessFeatureThreadMetadata {
   projectId: string
   slug: string
   source: string
-}
-
-function getRunNextAction(
-  detail: HarnessRunDetailViewModel | null | undefined
-): HarnessWorkflowNextAction | undefined {
-  if (!detail) return undefined
-  const currentNodeId = detail.run.currentNodeId
-  const nodeStatus = detail.run.nodes.find((node) => node.id === currentNodeId)?.nodeStatus
-  if (!currentNodeId || !nodeStatus) return undefined
-  const workflowNode = detail.workflow.nodes.find((node) => node.id === currentNodeId)
-  const state =
-    workflowNode?.states?.find((item) => item.nodeStatus === nodeStatus) ??
-    detail.workflow.states?.find((item) => item.nodeStatus === nodeStatus)
-  return normalizeHarnessNextAction(state?.nextAction)
 }
 
 interface HarnessSessionIndex {
@@ -294,6 +345,10 @@ function resolveWorkspaceFilePath(filePath: string, workspacePath: string): stri
 
   const workspaceRoot = workspacePath.replace(/\\/g, "/").replace(/\/+$/, "")
   return `${workspaceRoot}/${input.replace(/^\/+/, "")}`
+}
+
+function resolveProjectRootPath(project: Pick<HarnessProjectListItem, "workspacePath" | "projectDir">): string {
+  return resolveWorkspaceFilePath(project.projectDir, project.workspacePath)
 }
 
 async function openPathInFileManager(targetPath: string, fallbackError: string): Promise<void> {
@@ -322,6 +377,10 @@ function sanitizeHarnessNameInput(value: string): string {
   return value.replace(/\s+/g, "")
 }
 
+function sanitizeProjectDirFromProjectName(value: string): string {
+  return value.replace(/[^\u4e00-\u9fffA-Za-z0-9_-]/gu, "")
+}
+
 function readThreadHarnessFeature(thread: Thread): HarnessFeatureThreadMetadata | null {
   const harnessFeature = thread.metadata?.harnessFeature
   if (!harnessFeature || typeof harnessFeature !== "object") return null
@@ -336,6 +395,48 @@ function readThreadHarnessFeature(thread: Thread): HarnessFeatureThreadMetadata 
       ? metadata.source
       : HARNESS_SOURCE
   return { projectId, slug, source }
+}
+
+function readThreadHarnessProjectName(thread: Thread | null | undefined): string {
+  const metadata = thread?.metadata
+  const harnessFeature =
+    metadata?.harnessFeature && typeof metadata.harnessFeature === "object"
+      ? metadata.harnessFeature as Record<string, unknown>
+      : null
+  const candidates = [
+    harnessFeature?.projectName,
+    harnessFeature?.name,
+    metadata?.harnessProjectName,
+    metadata?.projectName
+  ]
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim()
+  }
+  return DELETED_PROJECT_NAME
+}
+
+function makeDeletedProjectSidebarItem(projectId: string, name: string): ProjectFeatureSidebarProject {
+  return {
+    projectId,
+    name: name.trim() || DELETED_PROJECT_NAME,
+    description: "",
+    projectCode: "",
+    projectFromLean: false,
+    projectDir: "",
+    systemId: "",
+    systemName: "",
+    workspacePath: "",
+    harnessAdapter: {
+      id: "",
+      name: "",
+      type: "plugin"
+    },
+    boardCompatibility: deletedProjectCompatibility,
+    lifecycle: {
+      status: "deleted"
+    }
+  }
 }
 
 function toSessionTimestamp(value: Date | string): string {
@@ -453,8 +554,10 @@ function createUnboundRunDetail(
       projectId: detail.project.projectId,
       name: detail.project.name,
       projectCode: detail.project.projectCode,
+      projectDir: detail.project.projectDir,
       systemId: detail.project.systemId,
       workspacePath: detail.project.workspacePath,
+      sessionWorkspacePath: detail.project.sessionWorkspacePath,
       projectRootPath: detail.project.projectRootPath
     },
     adapterSnapshot: {
@@ -469,6 +572,7 @@ function createUnboundRunDetail(
       title: slug,
       hookLogRefs: [],
       watchRefs: [],
+      skipNodeAvailable: false,
       currentNodeId: "",
       nodes: [],
       unmatchedHooks: []
@@ -481,8 +585,12 @@ function workflowForProjectRun(
   detail: HarnessProjectDetailViewModel,
   run: HarnessFeatureSummary
 ): HarnessWorkflow {
-  const workflowId = run.workflowId?.trim()
-  return workflowId ? detail.dynamicWorkflows?.[workflowId] ?? detail.workflow : detail.workflow
+  if (run.nodeIds.length === 0) return detail.workflow
+  const nodesById = new Map(detail.workflow.nodes.map((node) => [node.id, node]))
+  const nodes = run.nodeIds
+    .map((nodeId) => nodesById.get(nodeId))
+    .filter((node): node is HarnessWorkflow["nodes"][number] => Boolean(node))
+  return { ...detail.workflow, nodes }
 }
 
 function featureSessionKey(projectId: string, slug: string, threadId: string): string {
@@ -522,6 +630,7 @@ async function getLatestSessionWorkspacePath(
 interface CreateHarnessSessionParams {
   projectId: string
   slug: string
+  sessionWorkspacePath?: string | null
   nextAction?: HarnessWorkflowNextAction
   sessions: HarnessSessionBinding[]
   threadsById: Map<string, Thread>
@@ -536,18 +645,21 @@ interface CreateHarnessSessionParams {
 }
 
 async function createHarnessSession(params: CreateHarnessSessionParams): Promise<Thread> {
-  const { projectId, slug, nextAction, sessions, threadsById, threadStates, createThread } = params
-  const workspacePath = await getLatestSessionWorkspacePath(sessions, threadsById, threadStates)
-  const normalizedNextAction = normalizeHarnessNextAction(nextAction)
-  const thread = await createThread(
-    {
-      workspacePath,
-      harnessFeature: { projectId, slug, source: HARNESS_SOURCE }
-    },
-    { preserveView: true }
-  )
-  if (normalizedNextAction) setPendingHarnessNextAction(thread.thread_id, normalizedNextAction)
-  return thread
+  const {
+    projectId,
+    slug,
+    sessionWorkspacePath,
+    nextAction,
+    sessions,
+    threadsById,
+    threadStates,
+    createThread
+  } = params
+  const configuredWorkspacePath = normalizeWorkspacePath(sessionWorkspacePath)
+  const workspacePath =
+    configuredWorkspacePath ??
+    (await getLatestSessionWorkspacePath(sessions, threadsById, threadStates))
+  return createHarnessFeatureThread({ projectId, slug, workspacePath, nextAction, createThread })
 }
 
 function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boolean {
@@ -556,6 +668,7 @@ function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boole
     form.adapterType,
     form.name,
     form.projectCode,
+    form.projectDir,
     form.description,
     form.systemId,
     form.systemName,
@@ -568,12 +681,33 @@ function getHarnessNameError(label: string, value: string): string | null {
   return harnessNamePattern.test(value) ? null : `${label}${harnessNameRuleMessage}`
 }
 
+function getTextLengthError(label: string, value: string, maxChars: number): string | null {
+  if (Array.from(value.trim()).length <= maxChars) return null
+  return `${label}不能超过 ${maxChars} 字`
+}
+
 function getProjectMetadataNameError(form: HarnessProjectMetadataUpdateInput): string | null {
-  return getHarnessNameError("项目名称", form.name) ?? getHarnessNameError("项目编号", form.projectCode)
+  return (
+    getHarnessNameError("项目编号", form.projectCode) ??
+    getHarnessNameError("项目文件夹", form.projectDir)
+  )
 }
 
 function metadataNameInvalid(form: HarnessProjectMetadataUpdateInput): boolean {
   return getProjectMetadataNameError(form) !== null
+}
+
+function metadataLengthInvalid(
+  form: HarnessProjectMetadataUpdateInput,
+  options: { validateProjectDir?: boolean } = {}
+): boolean {
+  return (
+    getTextLengthError("项目名称", form.name, PROJECT_NAME_MAX_CHARS) !== null ||
+    getTextLengthError("项目编号", form.projectCode, PROJECT_CODE_MAX_CHARS) !== null ||
+    getTextLengthError("项目描述", form.description, PROJECT_DESCRIPTION_MAX_CHARS) !== null ||
+    (options.validateProjectDir === true &&
+      getTextLengthError("项目文件夹", form.projectDir, PROJECT_DIR_MAX_CHARS) !== null)
+  )
 }
 
 function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectMetadataUpdateInput {
@@ -582,10 +716,13 @@ function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectM
     adapterType: project.harnessAdapter.type,
     name: project.name,
     projectCode: project.projectCode,
+    projectFromLean: project.projectFromLean ?? false,
+    projectDir: project.projectDir,
     description: project.description,
     systemId: project.systemId,
     systemName: project.systemName,
-    workspacePath: project.workspacePath
+    workspacePath: project.workspacePath,
+    sessionWorkspacePath: project.sessionWorkspacePath ?? ""
   }
 }
 
@@ -761,9 +898,18 @@ function progressPercentFromValues(progressIndex: number, totalNodes: number): n
   return Math.min(100, Math.round((normalizedProgress / totalNodes) * 100))
 }
 
-function progressIndexFromCurrentNodeId(nodes: Array<{ id: string }>, currentNodeId: string): number {
+function isProgressCompletedNodeStatus(status: HarnessNodeStatus): boolean {
+  return status === "done" || status === "skipped" || status === "archived"
+}
+
+function progressIndexFromCurrentNodeId(
+  nodes: Array<{ id: string }>,
+  currentNodeId: string,
+  currentNodeStatus: HarnessNodeStatus
+): number {
   const index = nodes.findIndex((node) => node.id === currentNodeId)
-  return index >= 0 ? index + 1 : 0
+  if (index < 0) return 0
+  return index + (isProgressCompletedNodeStatus(currentNodeStatus) ? 1 : 0)
 }
 
 function currentNodeLabelFromNodes(
@@ -775,6 +921,13 @@ function currentNodeLabelFromNodes(
 
 function currentNodeStatusLabel(run: HarnessFeatureSummary): string {
   return run.currentNodeStatusLabel?.trim() || NODE_STATUS_LABELS[run.currentNodeStatus] || "未知"
+}
+
+function currentNodeStatusFromNodes(
+  nodes: Array<{ id: string; nodeStatus: HarnessNodeStatus }>,
+  currentNodeId: string
+): HarnessNodeStatus {
+  return nodes.find((node) => node.id === currentNodeId)?.nodeStatus ?? "unknown"
 }
 
 function ProgressBar({
@@ -797,9 +950,10 @@ function ProgressBar({
 function groupProgressIndex(
   group: StageNodeGroup,
   workflowNodes: Array<{ id: string }>,
-  currentNodeId: string
+  currentNodeId: string,
+  currentNodeStatus: HarnessNodeStatus
 ): number {
-  const progressIndex = progressIndexFromCurrentNodeId(workflowNodes, currentNodeId)
+  const progressIndex = progressIndexFromCurrentNodeId(workflowNodes, currentNodeId, currentNodeStatus)
   const coveredNodeCount = Math.max(0, Math.min(progressIndex, workflowNodes.length))
   const completedNodeIds = new Set(
     workflowNodes.slice(0, coveredNodeCount).map((node) => node.id)
@@ -862,7 +1016,49 @@ function ProjectWorkspacePathTip(): React.JSX.Element {
           </button>
         </TooltipTrigger>
         <TooltipContent side="top" className="z-[70] max-w-72">
-          本项目的插件产物将统一在该路径管理。非代码仓库路径
+          项目产物路径，非代码仓库
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+function ProjectDirTip(): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label="项目文件夹说明"
+            className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Info className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="z-[70] max-w-72">
+          保存项目文档、详细设计等插件运行产物
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+function SessionWorkspacePathTip(): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label="会话工作区提示"
+            className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Info className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="z-[70] max-w-72">
+          当前项目会话默认工作区
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -903,8 +1099,8 @@ function normalizeAdapterMarketName(value?: string): string {
   return value?.trim() || ""
 }
 
-function buildMarketPluginMap(items: MarketPluginItem[]): Map<string, MarketPluginItem> {
-  const map = new Map<string, MarketPluginItem>()
+function buildMarketPluginMap(items: MarketItem[]): Map<string, MarketItem> {
+  const map = new Map<string, MarketItem>()
   for (const item of items) {
     const name = normalizeAdapterMarketName(item.name)
     if (name) map.set(name, item)
@@ -921,41 +1117,70 @@ function buildInstalledPluginMap(items: PluginMetadata[]): Map<string, PluginMet
   return map
 }
 
+function resolveHarnessMarketUploaderProfile(
+  profiles: Record<string, HarnessMarketUploaderProfile>,
+  userId?: string | null
+): HarnessMarketUploaderProfile | null {
+  const normalizedUserId = userId?.trim()
+  if (!normalizedUserId) return null
+
+  const directProfile = profiles[normalizedUserId]
+  if (directProfile) return directProfile
+
+  const candidates = buildUploaderIdCandidates(normalizedUserId)
+  for (const candidate of candidates) {
+    const profile = profiles[candidate]
+    if (profile) return profile
+  }
+
+  return (
+    Object.values(profiles).find((profile) =>
+      candidates.some((candidate) => profile.sapId.includes(candidate))
+    ) ?? null
+  )
+}
+
 function applyMarketAdapterDisplayData(
   registry: HarnessAdapterRegistryItem[],
-  marketPlugins: MarketPluginItem[],
-  installedPlugins: PluginMetadata[]
+  marketPlugins: MarketItem[],
+  installedPlugins: PluginMetadata[],
+  uploaderProfiles: Record<string, HarnessMarketUploaderProfile> = {}
 ): HarnessAdapterRegistryItem[] {
   const marketByName = buildMarketPluginMap(marketPlugins)
   const installedByName = buildInstalledPluginMap(installedPlugins)
 
   return registry.map((adapter) => {
+    const adapterName = normalizeAdapterMarketName(adapter.name)
+    const installedPlugin = adapterName ? installedByName.get(adapterName) : undefined
+    const installedVersion = installedPlugin?.version?.trim() || adapter.version?.trim() || ""
     const fallback: HarnessAdapterRegistryItem = {
       ...adapter,
-      version: "",
+      version: installedVersion,
       description: "",
       useScenario: OTHER_ADAPTER_SCENARIO
     }
-    const adapterName = normalizeAdapterMarketName(adapter.name)
-    const installedPlugin = adapterName ? installedByName.get(adapterName) : undefined
     if (installedPlugin?.origin !== "market") return fallback
 
     const marketPlugin = adapterName ? marketByName.get(adapterName) : undefined
     if (!marketPlugin) return fallback
 
+    const uploaderProfile = resolveHarnessMarketUploaderProfile(uploaderProfiles, marketPlugin.user_id)
+
     return {
       ...fallback,
-      version: marketPlugin.version?.trim() || "",
+      version: installedVersion,
       description: marketPlugin.description?.trim() || "",
-      useScenario: normalizeAdapterUseScenario(marketPlugin.category)
+      useScenario: normalizeAdapterUseScenario(marketPlugin.category),
+      ...(uploaderProfile?.userName ? { developerName: uploaderProfile.userName } : {}),
+      ...(uploaderProfile?.sapId ? { developerSapId: uploaderProfile.sapId } : {}),
+      ...(uploaderProfile?.orgName ? { organizationName: uploaderProfile.orgName } : {})
     }
   })
 }
 
-async function loadHarnessMarketPlugins(): Promise<MarketPluginItem[]> {
+async function loadHarnessMarketPlugins(): Promise<MarketItem[]> {
   try {
-    const { getMarketPlugins } = await import("../../api/market-plugins")
-    const response = await getMarketPlugins()
+    const response = await marketApi.getPlugins({ allowMockOnError: false, silent: true })
     return response.success && response.data ? response.data : []
   } catch {
     return []
@@ -967,6 +1192,49 @@ async function loadHarnessInstalledPlugins(): Promise<PluginMetadata[]> {
     return await window.api.plugins.list()
   } catch {
     return []
+  }
+}
+
+async function loadHarnessMarketPluginUploaderProfiles(
+  marketPlugins: MarketItem[]
+): Promise<Record<string, HarnessMarketUploaderProfile>> {
+  const rawUserIds = Array.from(
+    new Set(marketPlugins.map((item) => item.user_id?.trim() || "").filter(Boolean))
+  )
+  if (rawUserIds.length === 0) return {}
+
+  if (typeof window.api?.dashboard?.queryAllUser !== "function") return {}
+
+  try {
+    const response = await window.api.dashboard.queryAllUser()
+    if (!response.success || !response.data) {
+      throw new Error(response.error || "获取全量用户信息失败")
+    }
+
+    const allUsers = response.data.filter((user) => user.sapId?.trim())
+    const nextMap: Record<string, HarnessMarketUploaderProfile> = {}
+    for (const rawUserId of rawUserIds) {
+      const lookupIds = buildUploaderIdCandidates(rawUserId)
+      const target = allUsers.find((user) =>
+        lookupIds.some((lookupId) => user.sapId.includes(lookupId))
+      )
+      if (!target) continue
+      nextMap[rawUserId] = {
+        sapId: target.sapId,
+        userName: target.userName,
+        orgName: formatTopUserOrgName(
+          target.orgName || "",
+          target.upperOrgLv1 || "",
+          target.upperOrgLv0 || ""
+        ),
+        upperOrgLv0: target.upperOrgLv0,
+        upperOrgLv1: target.upperOrgLv1
+      }
+    }
+    return nextMap
+  } catch (error) {
+    console.warn("[HarnessBoard] Failed to load plugin uploader profiles:", error)
+    return {}
   }
 }
 
@@ -1006,6 +1274,62 @@ function formatAdapterSelectLabel(adapter: HarnessAdapterRegistryItem): string {
   return adapter.version ? `${adapter.name} · ${adapter.version}` : adapter.name
 }
 
+function formatAdapterSelectText(adapter: HarnessAdapterRegistryItem): string {
+  return [
+    formatAdapterSelectLabel(adapter),
+    adapter.developerName,
+    adapter.developerSapId,
+    adapter.organizationName
+  ].filter(Boolean).join(" ")
+}
+
+function AdapterPublisherInfo({
+  adapter,
+  className
+}: {
+  adapter: HarnessAdapterRegistryItem
+  className?: string
+}): React.JSX.Element | null {
+  if (!adapter.developerName && !adapter.developerSapId && !adapter.organizationName) return null
+  const developerLabel = [
+    adapter.developerName,
+    adapter.developerSapId ? `（${adapter.developerSapId}）` : ""
+  ].filter(Boolean).join("")
+
+  return (
+    <span
+      className={cn(
+        "flex min-w-0 items-center gap-1 text-xs font-normal leading-5 text-muted-foreground",
+        className
+      )}
+    >
+      {developerLabel && (
+        <span className="min-w-0 truncate" title={developerLabel}>
+          {developerLabel}
+        </span>
+      )}
+      {developerLabel && adapter.organizationName && (
+        <span className="shrink-0 text-muted-foreground/50">/</span>
+      )}
+      {adapter.organizationName && (
+        <span className="min-w-0 truncate" title={adapter.organizationName}>
+          {adapter.organizationName}
+        </span>
+      )}
+    </span>
+  )
+}
+
+function AdapterOptionHeader({ adapter }: { adapter: HarnessAdapterRegistryItem }): React.JSX.Element {
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      <span className="min-w-0 flex-1 truncate">
+        {formatAdapterSelectLabel(adapter)}
+      </span>
+    </span>
+  )
+}
+
 function AdapterSelectedValue({
   adapter
 }: {
@@ -1015,7 +1339,7 @@ function AdapterSelectedValue({
     <SelectValue placeholder={ADAPTER_SELECT_PLACEHOLDER}>
       {adapter ? (
         <span className="block min-w-0 truncate text-left">
-          {formatAdapterSelectLabel(adapter)}
+          <AdapterOptionHeader adapter={adapter} />
         </span>
       ) : undefined}
     </SelectValue>
@@ -1028,17 +1352,19 @@ function AdapterSelectItem({ adapter }: { adapter: HarnessAdapterRegistryItem })
     <SelectItem
       key={adapter.id}
       value={adapter.id}
-      textValue={formatAdapterSelectLabel(adapter)}
+      textValue={formatAdapterSelectText(adapter)}
       disabled={!adapter.boardCompatibility.compatible}
       className="group py-2 pl-4 pr-10"
     >
       <span className="flex min-w-0 max-w-[calc(var(--radix-select-trigger-width)-3rem)] flex-col gap-1">
-        <span className="truncate">
-          {formatAdapterSelectLabel(adapter)}
-        </span>
+        <AdapterOptionHeader adapter={adapter} />
+        <AdapterPublisherInfo
+          adapter={adapter}
+          className="group-focus:text-accent-foreground group-data-[highlighted]:text-accent-foreground"
+        />
         {adapter.description && (
           <span
-            className="line-clamp-2 whitespace-normal break-words text-xs leading-5 text-muted-foreground group-focus:text-accent-foreground group-data-[state=checked]:text-accent-foreground group-data-[highlighted]:text-accent-foreground"
+            className="line-clamp-2 whitespace-normal break-words text-xs leading-5 text-muted-foreground group-focus:text-accent-foreground group-data-[highlighted]:text-accent-foreground"
             title={adapter.description}
           >
             {adapter.description}
@@ -1075,6 +1401,181 @@ function AdapterSelectGroups({ registry }: { registry: HarnessAdapterRegistryIte
   )
 }
 
+function EnterpriseProjectSearchInput({
+  value,
+  searchField,
+  searchLabel,
+  normalizeValue,
+  onValueChange,
+  onSelect,
+  ariaInvalid,
+  portalContainer
+}: {
+  value: string
+  searchField: "name" | "code"
+  searchLabel: string
+  normalizeValue?: (value: string) => string
+  onValueChange: (value: string) => void
+  onSelect: (project: HarnessEnterpriseProjectSearchItem) => void
+  ariaInvalid?: boolean
+  portalContainer?: HTMLElement | null
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [projects, setProjects] = useState<HarnessEnterpriseProjectSearchItem[]>([])
+  const [hasMore, setHasMore] = useState(false)
+  const [searchKeyword, setSearchKeyword] = useState("")
+  const requestIdRef = useRef(0)
+  const keyword = searchKeyword.trim()
+  const shouldShowPopover =
+    open &&
+    (loading ||
+      projects.length > 0 ||
+      (keyword.length > 0 && keyword.length < ENTERPRISE_PROJECT_SEARCH_MIN_CHARS))
+
+  const clearSearchState = useCallback(() => {
+    setSearchKeyword("")
+    setLoading(false)
+    setProjects([])
+    setHasMore(false)
+    setOpen(false)
+  }, [])
+
+  useEffect(() => {
+    if (!searchKeyword || value.trim() === searchKeyword.trim()) return
+    clearSearchState()
+  }, [clearSearchState, searchKeyword, value])
+
+  useEffect(() => {
+    const nextRequestId = requestIdRef.current + 1
+    requestIdRef.current = nextRequestId
+
+    if (!keyword || keyword.length < ENTERPRISE_PROJECT_SEARCH_MIN_CHARS) {
+      setLoading(false)
+      setProjects([])
+      setHasMore(false)
+      return
+    }
+
+    let canceled = false
+    setLoading(true)
+    const timer = window.setTimeout(() => {
+      window.api.harnessBoard
+        .searchEnterpriseProjects({ keyword, field: searchField })
+        .then((result) => {
+          if (canceled || requestIdRef.current !== nextRequestId) return
+          setProjects(result.projects)
+          setHasMore(result.hasMore)
+          setOpen(result.projects.length > 0)
+        })
+        .catch((error) => {
+          if (canceled || requestIdRef.current !== nextRequestId) return
+          setProjects([])
+          setHasMore(false)
+          setOpen(false)
+          toast.error(cleanIpcError(error))
+        })
+        .finally(() => {
+          if (!canceled && requestIdRef.current === nextRequestId) setLoading(false)
+        })
+    }, ENTERPRISE_PROJECT_SEARCH_DEBOUNCE_MS)
+
+    return () => {
+      canceled = true
+      window.clearTimeout(timer)
+    }
+  }, [keyword, searchField])
+
+  const handleSelect = (project: HarnessEnterpriseProjectSearchItem): void => {
+    clearSearchState()
+    onSelect(project)
+  }
+
+  return (
+    <Popover
+      open={shouldShowPopover}
+      onOpenChange={(nextOpen) => {
+        if (nextOpen) {
+          setOpen(true)
+          return
+        }
+        clearSearchState()
+      }}
+    >
+      <PopoverAnchor asChild>
+        <Input
+          value={value}
+          onChange={(event) => {
+            const nextValue = normalizeValue ? normalizeValue(event.target.value) : event.target.value
+            setSearchKeyword(nextValue)
+            onValueChange(nextValue)
+            setOpen(true)
+          }}
+          onFocus={() => {
+            if (searchKeyword.trim()) setOpen(true)
+          }}
+          placeholder={`输入${searchLabel}搜索`}
+          className={harnessProjectCreateInputClassName}
+          aria-autocomplete="list"
+          aria-invalid={ariaInvalid ? true : undefined}
+        />
+      </PopoverAnchor>
+      <PopoverPrimitive.Portal container={portalContainer ?? undefined}>
+        <PopoverPrimitive.Content
+          data-slot="popover-content"
+          align="start"
+          sideOffset={4}
+          className={harnessProjectPopoverContentClassName}
+          onOpenAutoFocus={(event) => event.preventDefault()}
+        >
+          <div className="max-h-72 overflow-hidden py-1 text-sm">
+            {keyword.length < ENTERPRISE_PROJECT_SEARCH_MIN_CHARS ? (
+              <div className="px-3 py-2 text-xs text-muted-foreground">
+                继续输入{searchLabel}以搜索
+              </div>
+            ) : loading ? (
+              <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
+                <Loader2 className="size-3.5 animate-spin" />
+                搜索项目...
+              </div>
+            ) : projects.length > 0 ? (
+              <>
+                <div className="max-h-60 overscroll-y-contain overflow-y-auto py-1">
+                  {projects.map((project) => (
+                    <button
+                      key={`${project.projectCode}:${project.projectName}`}
+                      type="button"
+                      className="group grid w-full cursor-pointer gap-1.5 px-2 py-2 text-left outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
+                      onClick={() => handleSelect(project)}
+                    >
+                      <span className="flex min-w-0 items-center gap-2 text-foreground group-hover:text-accent-foreground group-focus-visible:text-accent-foreground">
+                        <span className="shrink-0 font-mono">
+                          {project.projectCode || "-"}
+                        </span>
+                        <span className="min-w-0 truncate">
+                          {project.projectName || "-"}
+                        </span>
+                      </span>
+                      <span className="truncate text-xs leading-5 text-muted-foreground group-hover:text-accent-foreground group-focus-visible:text-accent-foreground">
+                        项目经理：{project.pm || "-"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                {hasMore && (
+                  <div className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
+                    仅显示前 15 条，请输入更精确的关键词
+                  </div>
+                )}
+              </>
+            ) : null}
+          </div>
+        </PopoverPrimitive.Content>
+      </PopoverPrimitive.Portal>
+    </Popover>
+  )
+}
+
 function ProjectFormDialog({
   open,
   creating,
@@ -1084,6 +1585,7 @@ function ProjectFormDialog({
   onOpenChange,
   onChange,
   onPickWorkspace,
+  onPickSessionWorkspace,
   onSubmit
 }: {
   open: boolean
@@ -1094,23 +1596,44 @@ function ProjectFormDialog({
   onOpenChange: (open: boolean) => void
   onChange: (form: HarnessProjectCreateInput) => void
   onPickWorkspace: () => void
+  onPickSessionWorkspace: () => void
   onSubmit: () => void
 }): React.JSX.Element {
-  const projectNameError = getHarnessNameError("项目名称", form.name)
+  const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
+  const projectDirError = getHarnessNameError("项目文件夹", form.projectDir)
+  const projectNameLengthError = getTextLengthError("项目名称", form.name, PROJECT_NAME_MAX_CHARS)
+  const projectCodeLengthError = getTextLengthError("项目编号", form.projectCode, PROJECT_CODE_MAX_CHARS)
+  const projectDescriptionLengthError = getTextLengthError(
+    "项目描述",
+    form.description,
+    PROJECT_DESCRIPTION_MAX_CHARS
+  )
+  const projectDirLengthError = getTextLengthError("项目文件夹", form.projectDir, PROJECT_DIR_MAX_CHARS)
+  const projectCodeValidationError = projectCodeError ?? projectCodeLengthError
+  const projectDirValidationError = projectDirError ?? projectDirLengthError
   const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
   const selectedAdapterMessage = boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
+  const projectRootPath = form.workspacePath.trim()
+  const projectDir = form.projectDir.trim()
+  const projectCreatePathHint =
+    projectRootPath && projectDir ? `将在 ${projectRootPath} 下创建文件夹: ${projectDir}` : ""
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className={cn(harnessDialogContentClassName, "max-w-3xl")}
+        ref={setDialogPortalContainer}
+        className={cn(
+          harnessDialogContentClassName,
+          "top-8 grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] translate-y-0 overflow-visible"
+        )}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
         <DialogHeader>
           <DialogTitle>新建项目</DialogTitle>
         </DialogHeader>
-        <div className="grid gap-4 py-1">
+        <div className="min-h-0 overflow-y-auto py-1 pr-1">
+          <div className="grid gap-4">
           <section className="rounded-md border border-border bg-muted/30 p-3">
             <div className="mb-3 text-sm font-semibold">选择插件</div>
             <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
@@ -1133,32 +1656,81 @@ function ProjectFormDialog({
 
           <section className="rounded-md border border-border bg-muted/30 p-3">
             <div className="mb-3 text-sm font-semibold">项目信息</div>
-            <div className="grid grid-cols-2 gap-3">
-              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                项目名称 *
-                <Input
-                  value={form.name}
-                  onChange={(event) =>
-                    onChange({ ...form, name: sanitizeHarnessNameInput(event.target.value) })
-                  }
-                  placeholder="请输入"
-                  className={harnessProjectCreateInputClassName}
-                  aria-invalid={projectNameError ? true : undefined}
-                />
-                {projectNameError && <span className="text-status-critical">{projectNameError}</span>}
-              </label>
+            <div className="grid grid-cols-2 items-start gap-3">
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目编号 *
-                <Input
+                <EnterpriseProjectSearchInput
                   value={form.projectCode}
-                  onChange={(event) =>
-                    onChange({ ...form, projectCode: sanitizeHarnessNameInput(event.target.value) })
+                  searchField="code"
+                  searchLabel="项目编号"
+                  normalizeValue={sanitizeHarnessNameInput}
+                  onValueChange={(projectCode) =>
+                    onChange({ ...form, projectCode, projectFromLean: false })
                   }
-                  placeholder="请输入"
-                  className={harnessProjectCreateInputClassName}
-                  aria-invalid={projectCodeError ? true : undefined}
+                  onSelect={(project) => {
+                    const shouldSyncProjectDir =
+                      !form.projectDir ||
+                      form.projectDir === sanitizeProjectDirFromProjectName(form.name)
+                    onChange({
+                      ...form,
+                      name: project.projectName,
+                      projectCode: project.projectCode,
+                      projectFromLean: true,
+                      systemId: project.systemId || form.systemId,
+                      systemName: project.systemName || form.systemName,
+                      projectDir: shouldSyncProjectDir
+                        ? sanitizeProjectDirFromProjectName(project.projectName)
+                        : form.projectDir
+                    })
+                  }}
+                  portalContainer={dialogPortalContainer}
+                  ariaInvalid={projectCodeValidationError ? true : undefined}
                 />
-                {projectCodeError && <span className="text-status-critical">{projectCodeError}</span>}
+                {projectCodeValidationError && (
+                  <span className="text-status-critical">{projectCodeValidationError}</span>
+                )}
+              </label>
+              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                项目名称 *
+                <EnterpriseProjectSearchInput
+                  value={form.name}
+                  searchField="name"
+                  searchLabel="项目名称"
+                  onValueChange={(name) => {
+                    const shouldSyncProjectDir =
+                      !form.projectDir ||
+                      form.projectDir === sanitizeProjectDirFromProjectName(form.name)
+                    onChange({
+                      ...form,
+                      name,
+                      projectFromLean: false,
+                      projectDir: shouldSyncProjectDir
+                        ? sanitizeProjectDirFromProjectName(name)
+                        : form.projectDir
+                    })
+                  }}
+                  onSelect={(project) => {
+                    const shouldSyncProjectDir =
+                      !form.projectDir ||
+                      form.projectDir === sanitizeProjectDirFromProjectName(form.name)
+                    onChange({
+                      ...form,
+                      name: project.projectName,
+                      projectCode: project.projectCode,
+                      projectFromLean: true,
+                      systemId: project.systemId || form.systemId,
+                      systemName: project.systemName || form.systemName,
+                      projectDir: shouldSyncProjectDir
+                        ? sanitizeProjectDirFromProjectName(project.projectName)
+                        : form.projectDir
+                    })
+                  }}
+                  portalContainer={dialogPortalContainer}
+                  ariaInvalid={projectNameLengthError ? true : undefined}
+                />
+                {projectNameLengthError && (
+                  <span className="text-status-critical">{projectNameLengthError}</span>
+                )}
               </label>
               <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目描述 *
@@ -1167,7 +1739,11 @@ function ProjectFormDialog({
                   onChange={(event) => onChange({ ...form, description: event.target.value })}
                   placeholder="请输入"
                   className={harnessProjectCreateInputClassName}
+                  aria-invalid={projectDescriptionLengthError ? true : undefined}
                 />
+                {projectDescriptionLengthError && (
+                  <span className="text-status-critical">{projectDescriptionLengthError}</span>
+                )}
               </label>
             </div>
           </section>
@@ -1197,23 +1773,83 @@ function ProjectFormDialog({
                   className={harnessProjectCreateInputClassName}
                 />
               </label>
-              <div className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
+            </div>
+          </section>
+
+          <section className="rounded-md border border-border bg-muted/30 p-3">
+            <div className="mb-3 text-sm font-semibold">工作区配置</div>
+            <div className="grid gap-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                  <div className="flex items-center gap-1.5">
+                    <span>项目根路径 *</span>
+                    <ProjectWorkspacePathTip />
+                  </div>
+                  <div className="flex min-w-0 gap-2">
+                    <Input
+                      value={form.workspacePath}
+                      readOnly
+                      placeholder="请选择项目根路径"
+                      className={harnessProjectCreateInputClassName}
+                    />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="shrink-0 gap-2"
+                      onClick={onPickWorkspace}
+                    >
+                      <FolderOpen className="size-4" />
+                      选择
+                    </Button>
+                  </div>
+                </div>
+                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                  <span className="flex items-center gap-1.5">
+                    <span>项目文件夹 *</span>
+                    <ProjectDirTip />
+                  </span>
+                  <Input
+                    value={form.projectDir}
+                    onChange={(event) =>
+                      onChange({ ...form, projectDir: sanitizeHarnessNameInput(event.target.value) })
+                    }
+                    placeholder="请输入"
+                    className={harnessProjectCreateInputClassName}
+                    aria-invalid={projectDirValidationError ? true : undefined}
+                  />
+                  {projectDirValidationError && (
+                    <span className="text-status-critical">{projectDirValidationError}</span>
+                  )}
+                </label>
+              </div>
+              <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 <div className="flex items-center gap-1.5">
-                  <span>项目工作区 *</span>
-                  <ProjectWorkspacePathTip />
+                  <span>会话工作区路径</span>
+                  <SessionWorkspacePathTip />
                 </div>
                 <div className="flex min-w-0 gap-2">
                   <Input
-                    value={form.workspacePath}
+                    value={form.sessionWorkspacePath ?? ""}
                     readOnly
-                    placeholder="请选择插件工作区路径"
+                    placeholder="未配置"
                     className={harnessProjectCreateInputClassName}
                   />
+                  {(form.sessionWorkspacePath ?? "").trim() && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="shrink-0 gap-2"
+                      onClick={() => onChange({ ...form, sessionWorkspacePath: "" })}
+                    >
+                      <Trash2 className="size-4" />
+                      清空
+                    </Button>
+                  )}
                   <Button
                     type="button"
                     variant="secondary"
                     className="shrink-0 gap-2"
-                    onClick={onPickWorkspace}
+                    onClick={onPickSessionWorkspace}
                   >
                     <FolderOpen className="size-4" />
                     选择
@@ -1221,6 +1857,14 @@ function ProjectFormDialog({
                 </div>
               </div>
             </div>
+            {projectCreatePathHint && (
+              <div
+                className="mt-3 max-w-full break-all text-xs leading-relaxed text-muted-foreground"
+                title={projectCreatePathHint}
+              >
+                {projectCreatePathHint}
+              </div>
+            )}
           </section>
 
           {error && (
@@ -1228,6 +1872,7 @@ function ProjectFormDialog({
               {error}
             </div>
           )}
+          </div>
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={creating}>
@@ -1239,6 +1884,7 @@ function ProjectFormDialog({
               creating ||
               metadataRequiredMissing(form) ||
               metadataNameInvalid(form) ||
+              metadataLengthInvalid(form, { validateProjectDir: true }) ||
               !selectedAdapter?.boardCompatibility.compatible
             }
             className="gap-2"
@@ -1260,6 +1906,7 @@ function ProjectEditDialog({
   error,
   onOpenChange,
   onChange,
+  onPickSessionWorkspace,
   onSubmit
 }: {
   open: boolean
@@ -1269,23 +1916,38 @@ function ProjectEditDialog({
   error: string | null
   onOpenChange: (open: boolean) => void
   onChange: (form: HarnessProjectMetadataUpdateInput) => void
+  onPickSessionWorkspace: () => void
   onSubmit: () => void
 }): React.JSX.Element {
-  const projectNameError = getHarnessNameError("项目名称", form.name)
+  const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
+  const projectDirError = getHarnessNameError("项目文件夹", form.projectDir)
+  const projectNameLengthError = getTextLengthError("项目名称", form.name, PROJECT_NAME_MAX_CHARS)
+  const projectCodeLengthError = getTextLengthError("项目编号", form.projectCode, PROJECT_CODE_MAX_CHARS)
+  const projectDescriptionLengthError = getTextLengthError(
+    "项目描述",
+    form.description,
+    PROJECT_DESCRIPTION_MAX_CHARS
+  )
+  const projectCodeValidationError = projectCodeError ?? projectCodeLengthError
   const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
   const selectedAdapterMessage = boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className={cn(harnessDialogContentClassName, "max-w-3xl")}
+        ref={setDialogPortalContainer}
+        className={cn(
+          harnessDialogContentClassName,
+          "top-8 grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] translate-y-0 overflow-visible"
+        )}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
         <DialogHeader>
           <DialogTitle>编辑项目</DialogTitle>
         </DialogHeader>
-        <div className="grid gap-4 py-1">
+        <div className="min-h-0 overflow-y-auto py-1 pr-1">
+          <div className="grid gap-4">
           <section className="rounded-md border border-border bg-muted/30 p-3">
             <div className="mb-3 text-sm font-semibold">选择插件</div>
             <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
@@ -1308,52 +1970,58 @@ function ProjectEditDialog({
 
           <section className="rounded-md border border-border bg-muted/30 p-3">
             <div className="mb-3 text-sm font-semibold">项目信息</div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 items-start gap-3">
+              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                项目编号 *
+                <EnterpriseProjectSearchInput
+                  value={form.projectCode}
+                  searchField="code"
+                  searchLabel="项目编号"
+                  normalizeValue={sanitizeHarnessNameInput}
+                  onValueChange={(projectCode) =>
+                    onChange({ ...form, projectCode, projectFromLean: false })
+                  }
+                  onSelect={(project) =>
+                    onChange({
+                      ...form,
+                      name: project.projectName,
+                      projectCode: project.projectCode,
+                      projectFromLean: true,
+                      systemId: project.systemId || form.systemId,
+                      systemName: project.systemName || form.systemName
+                    })
+                  }
+                  portalContainer={dialogPortalContainer}
+                  ariaInvalid={projectCodeValidationError ? true : undefined}
+                />
+                {projectCodeValidationError && (
+                  <span className="text-status-critical">{projectCodeValidationError}</span>
+                )}
+              </label>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目名称 *
-                <Input
+                <EnterpriseProjectSearchInput
                   value={form.name}
-                  onChange={(event) =>
-                    onChange({ ...form, name: sanitizeHarnessNameInput(event.target.value) })
+                  searchField="name"
+                  searchLabel="项目名称"
+                  onValueChange={(name) => onChange({ ...form, name, projectFromLean: false })}
+                  onSelect={(project) =>
+                    onChange({
+                      ...form,
+                      name: project.projectName,
+                      projectCode: project.projectCode,
+                      projectFromLean: true,
+                      systemId: project.systemId || form.systemId,
+                      systemName: project.systemName || form.systemName
+                    })
                   }
-                  placeholder="请输入"
-                  className={harnessProjectCreateInputClassName}
-                  aria-invalid={projectNameError ? true : undefined}
+                  portalContainer={dialogPortalContainer}
+                  ariaInvalid={projectNameLengthError ? true : undefined}
                 />
-                {projectNameError && <span className="text-status-critical">{projectNameError}</span>}
+                {projectNameLengthError && (
+                  <span className="text-status-critical">{projectNameLengthError}</span>
+                )}
               </label>
-              <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                <div className="flex items-center gap-1.5">
-                  <label htmlFor="harness-edit-project-code">项目编号 *</label>
-                  <TooltipProvider delayDuration={150}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          aria-label="项目编号修改提示"
-                          className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        >
-                          <Info className="size-3.5" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent side="top" className="z-[70] max-w-72">
-                        请勿在技能会话运行期间修改项目编号，以免造成产物路径错误
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-                <Input
-                  id="harness-edit-project-code"
-                  value={form.projectCode}
-                  onChange={(event) =>
-                    onChange({ ...form, projectCode: sanitizeHarnessNameInput(event.target.value) })
-                  }
-                  placeholder="请输入"
-                  className={harnessProjectCreateInputClassName}
-                  aria-invalid={projectCodeError ? true : undefined}
-                />
-                {projectCodeError && <span className="text-status-critical">{projectCodeError}</span>}
-              </div>
               <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目描述 *
                 <Input
@@ -1361,7 +2029,11 @@ function ProjectEditDialog({
                   onChange={(event) => onChange({ ...form, description: event.target.value })}
                   placeholder="请输入"
                   className={harnessProjectCreateInputClassName}
+                  aria-invalid={projectDescriptionLengthError ? true : undefined}
                 />
+                {projectDescriptionLengthError && (
+                  <span className="text-status-critical">{projectDescriptionLengthError}</span>
+                )}
               </label>
             </div>
           </section>
@@ -1391,18 +2063,76 @@ function ProjectEditDialog({
                   className={harnessProjectCreateInputClassName}
                 />
               </label>
-              <div className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
-                <div className="flex items-center gap-1.5">
-                  <span>项目工作区 *</span>
-                  <ProjectWorkspacePathTip />
+            </div>
+          </section>
+
+          <section className="rounded-md border border-border bg-muted/30 p-3">
+            <div className="mb-3 text-sm font-semibold">工作区配置</div>
+            <div className="grid gap-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                  <div className="flex items-center gap-1.5">
+                    <span>项目根路径 *</span>
+                    <ProjectWorkspacePathTip />
+                  </div>
+                  <Input
+                    value={form.workspacePath}
+                    readOnly
+                    aria-readonly="true"
+                    placeholder="请选择项目根路径"
+                    className="bg-muted text-muted-foreground"
+                  />
                 </div>
-                <Input
-                  value={form.workspacePath}
-                  readOnly
-                  aria-readonly="true"
-                  placeholder="请选择插件工作区路径"
-                  className="bg-muted text-muted-foreground"
-                />
+                <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                  <div className="flex items-center gap-1.5">
+                    <label htmlFor="harness-edit-project-dir">项目文件夹 *</label>
+                    <ProjectDirTip />
+                  </div>
+                  <Input
+                    id="harness-edit-project-dir"
+                    value={form.projectDir}
+                    readOnly
+                    aria-readonly="true"
+                    placeholder="项目文件夹"
+                    className="bg-muted text-muted-foreground"
+                    aria-invalid={projectDirError ? true : undefined}
+                  />
+                  {projectDirError && <span className="text-status-critical">{projectDirError}</span>}
+                </div>
+              </div>
+              <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                <div className="flex items-center gap-1.5">
+                  <span>会话工作区路径</span>
+                  <SessionWorkspacePathTip />
+                </div>
+                <div className="flex min-w-0 gap-2">
+                  <Input
+                    value={form.sessionWorkspacePath ?? ""}
+                    readOnly
+                    placeholder="未配置"
+                    className={harnessProjectCreateInputClassName}
+                  />
+                  {(form.sessionWorkspacePath ?? "").trim() && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="shrink-0 gap-2"
+                      onClick={() => onChange({ ...form, sessionWorkspacePath: "" })}
+                    >
+                      <Trash2 className="size-4" />
+                      清空
+                    </Button>
+                  )}
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="shrink-0 gap-2"
+                    onClick={onPickSessionWorkspace}
+                  >
+                    <FolderOpen className="size-4" />
+                    选择
+                  </Button>
+                </div>
               </div>
             </div>
           </section>
@@ -1412,6 +2142,7 @@ function ProjectEditDialog({
               {error}
             </div>
           )}
+          </div>
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={saving}>
@@ -1419,7 +2150,12 @@ function ProjectEditDialog({
           </Button>
           <Button
             onClick={onSubmit}
-            disabled={saving || metadataRequiredMissing(form) || metadataNameInvalid(form)}
+            disabled={
+              saving ||
+              metadataRequiredMissing(form) ||
+              metadataNameInvalid(form) ||
+              metadataLengthInvalid(form)
+            }
             className="gap-2"
           >
             {saving ? <Loader2 className="size-4 animate-spin" /> : <Pencil className="size-4" />}
@@ -1431,29 +2167,238 @@ function ProjectEditDialog({
   )
 }
 
+interface DynamicWorkflowNodeGroup {
+  key: string
+  label: string
+  nodes: HarnessDynamicWorkflowNode[]
+}
+
+function defaultWorkflowTemplateId(config: HarnessDynamicWorkflowConfig | null): string {
+  return config?.templates[0]?.id ?? ""
+}
+
+function isCustomWorkflowTemplate(template: HarnessDynamicWorkflowTemplate | null | undefined): boolean {
+  return template?.templateType === CUSTOM_WORKFLOW_TEMPLATE_ID
+}
+
+function selectedWorkflowTemplate(
+  config: HarnessDynamicWorkflowConfig | null,
+  templateId: string
+): HarnessDynamicWorkflowTemplate | null {
+  return config?.templates.find((template) => template.id === templateId) ?? null
+}
+
+function requiredWorkflowNodeIds(
+  config: HarnessDynamicWorkflowConfig | null,
+  templateId: string
+): Set<string> {
+  const template = selectedWorkflowTemplate(config, templateId)
+  return new Set(template && isCustomWorkflowTemplate(template) ? template.requiredNodes : [])
+}
+
+function ensureRequiredWorkflowNodes(
+  selectedNodeIds: Set<string>,
+  config: HarnessDynamicWorkflowConfig | null,
+  templateId: string
+): Set<string> {
+  const requiredNodeIds = requiredWorkflowNodeIds(config, templateId)
+  if (requiredNodeIds.size === 0) return selectedNodeIds
+
+  const next = new Set(selectedNodeIds)
+  for (const nodeId of requiredNodeIds) next.add(nodeId)
+  return next
+}
+
+function orderedSelectedWorkflowNodeIds(
+  config: HarnessDynamicWorkflowConfig | null,
+  selectedNodeIds: Set<string>
+): string[] {
+  return config?.nodes.filter((node) => selectedNodeIds.has(node.id)).map((node) => node.id) ?? []
+}
+
+function groupDynamicWorkflowNodes(nodes: HarnessDynamicWorkflowNode[]): DynamicWorkflowNodeGroup[] {
+  const groups: DynamicWorkflowNodeGroup[] = []
+  const groupsByKey = new Map<string, DynamicWorkflowNodeGroup>()
+  const ungroupedNodes: HarnessDynamicWorkflowNode[] = []
+
+  for (const node of nodes) {
+    const label = node.group?.trim()
+    if (!label) {
+      ungroupedNodes.push(node)
+      continue
+    }
+
+    const key = `group:${label}`
+    const existing = groupsByKey.get(key)
+    if (existing) {
+      existing.nodes.push(node)
+      continue
+    }
+
+    const group = { key, label, nodes: [node] }
+    groupsByKey.set(key, group)
+    groups.push(group)
+  }
+
+  if (groups.length > 0 && ungroupedNodes.length > 0) {
+    groups.push({ key: "ungrouped", label: "未分组", nodes: ungroupedNodes })
+  }
+  if (groups.length === 0 && ungroupedNodes.length > 0) {
+    groups.push({ key: "all", label: "节点", nodes: ungroupedNodes })
+  }
+
+  return groups
+}
+
+function WorkflowTemplateCard({
+  template,
+  selected,
+  onSelect
+}: {
+  template: HarnessDynamicWorkflowTemplate
+  selected: boolean
+  onSelect: (templateId: string) => void
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      className={cn(
+        "flex min-h-[56px] w-full cursor-pointer items-center rounded-md border px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        selected
+          ? "border-primary bg-primary/5 text-foreground shadow-sm"
+          : "border-border bg-background hover:border-primary/40 hover:bg-muted/30"
+      )}
+      onClick={() => onSelect(template.id)}
+    >
+      <span className="flex w-full min-w-0 items-start justify-between gap-2">
+        <span className="min-w-0 truncate text-sm font-semibold">{template.label}</span>
+        <CheckCircle2
+          className={cn(
+            "mt-0.5 size-4 shrink-0",
+            selected ? "text-primary" : "text-muted-foreground/30"
+          )}
+        />
+      </span>
+    </button>
+  )
+}
+
+function WorkflowNodeSelector({
+  config,
+  title,
+  readOnly,
+  requiredNodeIds,
+  selectedNodeIds,
+  onToggleNode
+}: {
+  config: HarnessDynamicWorkflowConfig
+  title: string
+  readOnly: boolean
+  requiredNodeIds: Set<string>
+  selectedNodeIds: Set<string>
+  onToggleNode: (nodeId: string, checked: boolean) => void
+}): React.JSX.Element {
+  const selectedCount = orderedSelectedWorkflowNodeIds(config, selectedNodeIds).length
+
+  return (
+    <div className="rounded-md border border-border bg-background">
+      <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
+        <span className="text-xs font-medium text-muted-foreground">{title}</span>
+        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+          {selectedCount}/{config.nodes.length}
+        </span>
+      </div>
+      <div className="max-h-56 overflow-y-auto px-3 py-2">
+        {groupDynamicWorkflowNodes(config.nodes).map((group) => (
+          <div key={group.key} className="space-y-1.5 py-1.5">
+            <div className="text-[11px] font-semibold text-muted-foreground/80">{group.label}</div>
+            <div className="grid gap-1">
+              {group.nodes.map((node) => {
+                const checked = selectedNodeIds.has(node.id)
+                const required = requiredNodeIds.has(node.id)
+                return (
+                  <label
+                    key={node.id}
+                    className={cn(
+                      "flex min-w-0 items-start gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors",
+                      readOnly || required ? "text-muted-foreground" : "cursor-pointer hover:bg-muted/60"
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={readOnly || required}
+                      className="mt-0.5 size-4 shrink-0 accent-primary disabled:cursor-not-allowed"
+                      onChange={(event) => onToggleNode(node.id, event.target.checked)}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span className="truncate text-foreground">{node.label}</span>
+                        {required && (
+                          <span className="shrink-0 text-[11px] text-muted-foreground">必选</span>
+                        )}
+                      </span>
+                      {node.description && (
+                        <span className="mt-0.5 line-clamp-3 whitespace-pre-line break-words text-xs leading-5 text-muted-foreground">
+                          {node.description}
+                        </span>
+                      )}
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+          </div>
+        ))}
+        {config.nodes.length === 0 && (
+          <div className="py-5 text-center text-sm text-muted-foreground">暂无可选节点</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function FeatureCreateDialog({
   project,
   featureName,
+  workflowConfig,
+  workflowLoading,
+  workflowTemplate,
+  selectedWorkflowNodeIds,
   creating,
   error,
   onOpenChange,
   onChange,
+  onWorkflowTemplateChange,
+  onWorkflowNodeToggle,
   onSubmit
 }: {
   project: HarnessProjectListItem | null
   featureName: string
+  workflowConfig: HarnessDynamicWorkflowConfig | null
+  workflowLoading: boolean
+  workflowTemplate: string
+  selectedWorkflowNodeIds: Set<string>
   creating: boolean
   error: string | null
   onOpenChange: (open: boolean) => void
   onChange: (featureName: string) => void
+  onWorkflowTemplateChange: (templateId: string) => void
+  onWorkflowNodeToggle: (nodeId: string, checked: boolean) => void
   onSubmit: () => void
 }): React.JSX.Element {
   const featureNameError = getHarnessNameError("特性名称", featureName)
+  const selectedTemplate = selectedWorkflowTemplate(workflowConfig, workflowTemplate)
+  const customWorkflowSelected = isCustomWorkflowTemplate(selectedTemplate)
+  const customRequiredNodeIds = requiredWorkflowNodeIds(workflowConfig, workflowTemplate)
+  const selectedTemplateNodeIds = new Set(selectedTemplate?.nodes ?? [])
 
   return (
     <Dialog open={project !== null} onOpenChange={onOpenChange}>
       <DialogContent
-        className={cn(harnessDialogContentClassName, "max-w-md")}
+        className={cn(harnessDialogContentClassName, workflowConfig ? "max-w-2xl" : "max-w-md")}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
         <DialogHeader>
@@ -1478,6 +2423,36 @@ function FeatureCreateDialog({
             />
             {featureNameError && <span className="text-status-critical">{featureNameError}</span>}
           </label>
+          {!workflowLoading && workflowConfig && (
+            <section className="grid gap-3 rounded-md border border-border bg-muted/30 p-3">
+              <div className="text-sm font-semibold">选择要使用的工作流</div>
+              <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="选择要使用的工作流">
+                {workflowConfig.templates.map((template) => (
+                  <WorkflowTemplateCard
+                    key={template.id}
+                    template={template}
+                    selected={template.id === workflowTemplate}
+                    onSelect={onWorkflowTemplateChange}
+                  />
+                ))}
+              </div>
+              {selectedTemplate && (
+                <div className="rounded-md border border-border bg-background px-3 py-2 text-xs leading-5 text-muted-foreground">
+                  {selectedTemplate.description || "插件未提供流程说明。"}
+                </div>
+              )}
+              {selectedTemplate && (
+                <WorkflowNodeSelector
+                  config={workflowConfig}
+                  title={customWorkflowSelected ? "节点选择（自定义）" : "包含节点"}
+                  readOnly={!customWorkflowSelected}
+                  requiredNodeIds={customWorkflowSelected ? customRequiredNodeIds : new Set()}
+                  selectedNodeIds={customWorkflowSelected ? selectedWorkflowNodeIds : selectedTemplateNodeIds}
+                  onToggleNode={onWorkflowNodeToggle}
+                />
+              )}
+            </section>
+          )}
           {error && (
             <div className="rounded-md border border-status-critical/30 bg-status-critical/10 px-3 py-2 text-sm text-status-critical">
               {error}
@@ -1489,7 +2464,7 @@ function FeatureCreateDialog({
             </Button>
             <Button
               type="submit"
-              disabled={creating || !featureName.trim() || featureNameError !== null}
+              disabled={creating || workflowLoading || !featureName.trim() || featureNameError !== null}
               className="gap-2"
             >
               {creating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
@@ -1502,18 +2477,76 @@ function FeatureCreateDialog({
   )
 }
 
+function ProjectActionConfirmDialog({
+  action,
+  busy,
+  onOpenChange,
+  onConfirm
+}: {
+  action: PendingProjectAction
+  busy: boolean
+  onOpenChange: (open: boolean) => void
+  onConfirm: () => void
+}): React.JSX.Element {
+  const projectName = action?.project.name ?? ""
+  const isDelete = action?.type === "delete"
+  const title = isDelete ? "删除项目" : "归档项目"
+  const description = isDelete
+    ? `永久删除项目「${projectName}」，会保留项目文件夹。`
+    : `归档项目「${projectName}」？`
+
+  return (
+    <Dialog open={action !== null} onOpenChange={onOpenChange}>
+      <DialogContent
+        className={cn(harnessDialogContentClassName, "max-w-md")}
+        onPointerDownOutside={preventHarnessDialogOutsideClose}
+      >
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
+            取消
+          </Button>
+          <Button
+            variant={isDelete ? "destructive" : "warning"}
+            onClick={onConfirm}
+            disabled={busy}
+            className="gap-2"
+          >
+            {busy ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : isDelete ? (
+              <Trash2 className="size-4" />
+            ) : (
+              <Archive className="size-4" />
+            )}
+            {busy ? "处理中" : title}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function ProjectActionMenu({
   project,
   archiving,
+  deleting,
   onEdit,
-  onArchive
+  onArchive,
+  onDelete
 }: {
   project: HarnessProjectListItem
   archiving: boolean
+  deleting: boolean
   onEdit: () => void
   onArchive: () => void
+  onDelete: () => void
 }): React.JSX.Element {
   const archived = project.lifecycle.status === "archived"
+  const busy = archiving || deleting
   const [open, setOpen] = useState(false)
 
   return (
@@ -1547,11 +2580,11 @@ function ProjectActionMenu({
           type="button"
           className={cn(
             "flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-            archived || archiving
+            archived || busy
               ? "cursor-not-allowed text-muted-foreground opacity-60"
               : "text-status-critical hover:bg-status-critical/10"
           )}
-          disabled={archived || archiving}
+          disabled={archived || busy}
           onClick={(event) => {
             event.stopPropagation()
             setOpen(false)
@@ -1564,6 +2597,28 @@ function ProjectActionMenu({
             <Archive className="size-4 text-muted-foreground" />
           )}
           {archived ? "已归档" : "归档项目"}
+        </button>
+        <button
+          type="button"
+          className={cn(
+            "flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            busy
+              ? "cursor-not-allowed text-muted-foreground opacity-60"
+              : "text-status-critical hover:bg-status-critical/10"
+          )}
+          disabled={busy}
+          onClick={(event) => {
+            event.stopPropagation()
+            setOpen(false)
+            onDelete()
+          }}
+        >
+          {deleting ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <Trash2 className="size-4 text-muted-foreground" />
+          )}
+          删除项目
         </button>
       </PopoverContent>
     </Popover>
@@ -1579,7 +2634,11 @@ function FeatureCard({
   workflowNodes: Array<{ id: string; label: string }>
   onOpen: () => void
 }): React.JSX.Element {
-  const progressIndex = progressIndexFromCurrentNodeId(workflowNodes, run.currentNodeId)
+  const progressIndex = progressIndexFromCurrentNodeId(
+    workflowNodes,
+    run.currentNodeId,
+    run.currentNodeStatus
+  )
   const totalNodes = workflowNodes.length
   const currentNodeLabel = currentNodeLabelFromNodes(workflowNodes, run.currentNodeId)
   const nodeStatusLabel = currentNodeStatusLabel(run)
@@ -1615,18 +2674,12 @@ function ProjectBadgeRow({
   project: HarnessProjectListItem
   children?: ReactNode
 }): React.JSX.Element {
-  const archived = project.lifecycle.status === "archived"
   return (
     <div className="flex min-w-0 items-center gap-2">
       {children}
       <span className="shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
         {project.projectCode}
       </span>
-      {archived && (
-        <span className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
-          已归档
-        </span>
-      )}
     </div>
   )
 }
@@ -1636,31 +2689,75 @@ function ProjectCard({
   detail,
   loading,
   archiving,
+  deleting,
+  pluginUpdateInfo,
+  updatingPlugin,
   onEditProject,
   onArchiveProject,
+  onDeleteProject,
+  onUpdatePlugin,
+  onProjectVisible,
   onOpenProject
 }: {
   project: HarnessProjectListItem
   detail?: HarnessProjectDetailViewModel
   loading: boolean
   archiving: boolean
+  deleting: boolean
+  pluginUpdateInfo?: MarketPluginUpdateInfo | null
+  updatingPlugin: boolean
   onEditProject: (project: HarnessProjectListItem) => void
   onArchiveProject: (project: HarnessProjectListItem) => void
+  onDeleteProject: (project: HarnessProjectListItem) => void
+  onUpdatePlugin: (project: HarnessProjectListItem, updateInfo: MarketPluginUpdateInfo) => void
+  onProjectVisible: (project: HarnessProjectListItem) => void
   onOpenProject: (projectId: string) => void
 }): React.JSX.Element {
+  const cardRef = useRef<HTMLElement | null>(null)
+  const projectRef = useRef(project)
+  projectRef.current = project
+  const projectCode = project.projectCode.trim()
   const runs = detail?.runs ?? []
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
   const detailError = detail?.error?.trim()
   const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
   const pluginCompatibilityStatus = boardCompatibilityStatus(project.boardCompatibility)
+  const archivedStatus: HarnessStatus = { label: "已归档", uiKind: "archived" }
+  const projectRootPath = resolveProjectRootPath(project)
+
+  useEffect(() => {
+    if (archived || !projectCode) return
+    const element = cardRef.current
+    if (!element) return
+
+    if (typeof IntersectionObserver === "undefined") {
+      onProjectVisible(projectRef.current)
+      return
+    }
+
+    let visible = false
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (visible || !entries.some((entry) => entry.isIntersecting)) return
+        visible = true
+        onProjectVisible(projectRef.current)
+        observer.disconnect()
+      },
+      { root: null, rootMargin: "0px", threshold: 0.01 }
+    )
+    observer.observe(element)
+
+    return () => observer.disconnect()
+  }, [archived, onProjectVisible, projectCode])
 
   return (
     <article
+      ref={cardRef}
       role="button"
       tabIndex={0}
       className={cn(
-        "w-[420px] flex-none cursor-pointer overflow-hidden rounded-md border border-border border-t-[3px] shadow-sm transition-all hover:border-primary/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        "h-full w-full min-w-0 cursor-pointer overflow-hidden rounded-md border border-border border-t-[3px] shadow-sm transition-all hover:border-primary/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         archived ? "border-t-muted-foreground/50 bg-muted/20" : "border-t-status-info bg-background"
       )}
       onClick={() => onOpenProject(project.projectId)}
@@ -1681,21 +2778,59 @@ function ProjectCard({
               {project.description}
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <span className="rounded border border-border bg-muted px-2 py-1 text-[11px] text-muted-foreground">
-              {project.harnessAdapter.name}
-            </span>
-            <ProjectActionMenu
-              project={project}
-              archiving={archiving}
-              onEdit={() => onEditProject(project)}
-              onArchive={() => onArchiveProject(project)}
-            />
+          <div className="flex shrink-0 flex-col items-end gap-1.5">
+            <div className="flex items-center gap-1">
+              <span className="rounded border border-border bg-muted px-2 py-1 text-[11px] text-muted-foreground">
+                {project.harnessAdapter.name}
+              </span>
+              <ProjectActionMenu
+                project={project}
+                archiving={archiving}
+                deleting={deleting}
+                onEdit={() => onEditProject(project)}
+                onArchive={() => onArchiveProject(project)}
+                onDelete={() => onDeleteProject(project)}
+              />
+            </div>
+            {pluginUpdateInfo && (
+              <UpdateVersionTooltip
+                typeLabel="插件"
+                installedVersion={pluginUpdateInfo.installedVersion}
+                currentVersion={pluginUpdateInfo.currentVersion}
+              >
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="market-update-bounce h-7 px-3 gap-1 text-xs cursor-pointer rounded-lg text-[#0f766e] border-[#78d7cb] bg-[#e5fbf7] hover:bg-[#d4f7f0] disabled:cursor-not-allowed disabled:opacity-70"
+                  disabled={updatingPlugin}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onUpdatePlugin(project, pluginUpdateInfo)
+                  }}
+                  onKeyDown={(event) => event.stopPropagation()}
+                >
+                  {updatingPlugin ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : (
+                    <Zap className="size-3" />
+                  )}
+                  {updatingPlugin ? "更新中" : "可更新"}
+                </Button>
+              </UpdateVersionTooltip>
+            )}
           </div>
         </div>
 
         <div className="mt-4 border-t border-border pt-3">
-          {pluginCompatibilityMessage ? (
+          {archived ? (
+            <div className="flex min-h-[44px] flex-wrap items-center gap-2">
+              {pluginCompatibilityMessage && (
+                <StatusPill status={pluginCompatibilityStatus} tooltip={pluginCompatibilityMessage} />
+              )}
+              <StatusPill status={archivedStatus} />
+            </div>
+          ) : pluginCompatibilityMessage ? (
             <div className="flex min-h-[44px] items-center">
               <StatusPill status={pluginCompatibilityStatus} tooltip={pluginCompatibilityMessage} />
             </div>
@@ -1718,12 +2853,12 @@ function ProjectCard({
                 </strong>
               </div>
               <div className="min-w-0 text-xs text-muted-foreground">
-                工作区
+                项目文件夹
                 <strong
                   className="mt-1 block truncate text-sm text-foreground"
-                  title={project.workspacePath}
+                  title={projectRootPath}
                 >
-                  {getWorkspaceName(project.workspacePath)}
+                  {getWorkspaceName(projectRootPath)}
                 </strong>
               </div>
             </div>
@@ -1739,16 +2874,31 @@ function SystemSection({
   detailsByProjectId,
   loadingDetailIds,
   archivingProjectId,
+  deletingProjectId,
+  pluginUpdateInfoByProjectId,
+  updatingPluginNames,
   onEditProject,
   onArchiveProject,
+  onDeleteProject,
+  onUpdateProjectPlugin,
+  onProjectVisible,
   onOpenProject
 }: {
   group: SystemGroup
   detailsByProjectId: Record<string, HarnessProjectDetailViewModel>
   loadingDetailIds: Set<string>
   archivingProjectId: string | null
+  deletingProjectId: string | null
+  pluginUpdateInfoByProjectId: Map<string, MarketPluginUpdateInfo>
+  updatingPluginNames: Set<string>
   onEditProject: (project: HarnessProjectListItem) => void
   onArchiveProject: (project: HarnessProjectListItem) => void
+  onDeleteProject: (project: HarnessProjectListItem) => void
+  onUpdateProjectPlugin: (
+    project: HarnessProjectListItem,
+    updateInfo: MarketPluginUpdateInfo
+  ) => void
+  onProjectVisible: (project: HarnessProjectListItem) => void
   onOpenProject: (projectId: string) => void
 }): React.JSX.Element {
   return (
@@ -1760,8 +2910,8 @@ function SystemSection({
         </div>
         <div className="shrink-0 text-sm text-muted-foreground">{group.projects.length} 个项目</div>
       </div>
-      <div className="-mx-1 overflow-x-auto pb-2">
-        <div className="flex w-max gap-4 px-1">
+      <div className="-mx-1 pb-1">
+        <div className="grid gap-4 px-1 md:grid-cols-2 2xl:grid-cols-3">
           {group.projects.map((project) => (
             <ProjectCard
               key={project.projectId}
@@ -1769,8 +2919,14 @@ function SystemSection({
               detail={detailsByProjectId[project.projectId]}
               loading={loadingDetailIds.has(project.projectId)}
               archiving={archivingProjectId === project.projectId}
+              deleting={deletingProjectId === project.projectId}
+              pluginUpdateInfo={pluginUpdateInfoByProjectId.get(project.projectId)}
+              updatingPlugin={updatingPluginNames.has(project.harnessAdapter.name)}
               onEditProject={onEditProject}
               onArchiveProject={onArchiveProject}
+              onDeleteProject={onDeleteProject}
+              onUpdatePlugin={onUpdateProjectPlugin}
+              onProjectVisible={onProjectVisible}
               onOpenProject={onOpenProject}
             />
           ))}
@@ -1972,12 +3128,16 @@ function StageArtifactPanel({
 
 function FeatureConversationPanel({
   threadId,
+  readOnlyReason,
   hasPendingGitDiffNotice,
+  onHarnessSessionCreated,
   onRequestOpenGitPanel,
   onThreadGitStatusChange
 }: {
   threadId: string | null
+  readOnlyReason?: string | null
   hasPendingGitDiffNotice?: boolean
+  onHarnessSessionCreated?: (threadId: string) => void
   onRequestOpenGitPanel?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
 }): React.JSX.Element {
@@ -1991,8 +3151,10 @@ function FeatureConversationPanel({
             hasPendingGitDiffNotice={hasPendingGitDiffNotice}
             chatSurface="harness-project"
             hideWelcomeSkillTabs
+            readOnlyReason={readOnlyReason}
             onRequestOpenGitPanel={onRequestOpenGitPanel}
             onThreadGitStatusChange={onThreadGitStatusChange}
+            onHarnessSessionCreated={onHarnessSessionCreated}
           />
         </div>
       ) : (
@@ -2053,6 +3215,7 @@ function FeatureWorkspaceChangesPanel({
   }, [groups])
 
   const [changesByGroup, setChangesByGroup] = useState<Record<string, WorkspaceChangeState>>({})
+  const refreshRequestIdsRef = useRef(new Map<string, number>())
 
   const openWorkspacePathInFileManager = useCallback(async (workspacePath: string): Promise<void> => {
     try {
@@ -2069,6 +3232,10 @@ function FeatureWorkspaceChangesPanel({
   }, [])
 
   const refreshGroup = useCallback(async (group: WorkspaceChangeGroup): Promise<void> => {
+    const requestId = (refreshRequestIdsRef.current.get(group.key) ?? 0) + 1
+    refreshRequestIdsRef.current.set(group.key, requestId)
+    const isLatestRequest = (): boolean => refreshRequestIdsRef.current.get(group.key) === requestId
+
     setChangesByGroup((current) => ({
       ...current,
       [group.key]: {
@@ -2080,7 +3247,10 @@ function FeatureWorkspaceChangesPanel({
     }))
 
     try {
-      const state: GitPanelDiffState = await window.api.workspace.getGitPanelDiffs(group.representativeThreadId)
+      const state: GitChangedFilesSummaryState = await window.api.workspace.getGitChangedFilesSummary(
+        group.representativeThreadId
+      )
+      if (!isLatestRequest()) return
       if (!state.success) {
         setChangesByGroup((current) => ({
           ...current,
@@ -2105,6 +3275,7 @@ function FeatureWorkspaceChangesPanel({
         }
       }))
     } catch (error) {
+      if (!isLatestRequest()) return
       setChangesByGroup((current) => ({
         ...current,
         [group.key]: {
@@ -2261,9 +3432,45 @@ function FeatureWorkspaceChangesPanel({
   )
 }
 
+function EnterpriseProjectDetailSummary({
+  entry
+}: {
+  entry?: EnterpriseProjectDetailCacheEntry
+}): React.JSX.Element | null {
+  if (!entry) return null
+
+  if (entry.kind === "miss") {
+    return (
+      <div>
+        <p className="text-xs leading-5 text-status-warning">请选择有效的项目编号</p>
+      </div>
+    )
+  }
+
+  const fields = [
+    ["项目状态", entry.project.status],
+    ["阶段状态", entry.project.phaseStatus],
+    ["结项日期", entry.project.baselineEndDate]
+  ]
+
+  return (
+    <>
+      {fields.map(([label, value]) => (
+        <div key={label}>
+          <dt className="text-xs text-muted-foreground">{label}</dt>
+          <dd className="mt-1 truncate font-medium" title={value || "-"}>
+            {value || "-"}
+          </dd>
+        </div>
+      ))}
+    </>
+  )
+}
+
 function ProjectDetailPage({
   project,
   detail,
+  enterpriseProjectDetail,
   loading,
   creatingFeature,
   onBackToList,
@@ -2274,6 +3481,7 @@ function ProjectDetailPage({
 }: {
   project: HarnessProjectListItem
   detail?: HarnessProjectDetailViewModel
+  enterpriseProjectDetail?: EnterpriseProjectDetailCacheEntry
   loading: boolean
   creatingFeature: boolean
   onBackToList: () => void
@@ -2286,9 +3494,10 @@ function ProjectDetailPage({
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
   const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
+  const projectRootPath = resolveProjectRootPath(project)
   const openProjectWorkspaceInFileManager = useCallback((): void => {
-    void openPathInFileManager(project.workspacePath, "无法打开项目工作区")
-  }, [project.workspacePath])
+    void openPathInFileManager(projectRootPath, "无法打开项目工作区")
+  }, [projectRootPath])
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
@@ -2355,14 +3564,20 @@ function ProjectDetailPage({
             </div>
           )}
           <section className="rounded-md border border-border bg-background">
-            <div className="grid grid-cols-[minmax(260px,0.36fr)_minmax(0,1fr)] gap-0">
-              <aside className="border-r border-border p-4">
+            <div className="grid min-w-0 grid-cols-[minmax(260px,0.36fr)_minmax(0,1fr)] gap-0">
+              <aside className="min-w-0 border-r border-border p-4">
                 <div className="text-sm font-semibold">项目基础信息</div>
                 <dl className="mt-4 grid gap-3 text-sm">
                   <div>
                     <dt className="text-xs text-muted-foreground">项目名称</dt>
-                    <dd className="mt-1 truncate font-medium" title={project.name}>{project.name}</dd>
+                    <dd
+                      className="mt-1 min-w-0 whitespace-normal break-words font-medium [overflow-wrap:anywhere]"
+                      title={project.name}
+                    >
+                      {project.name}
+                    </dd>
                   </div>
+                  <EnterpriseProjectDetailSummary entry={enterpriseProjectDetail} />
                   <div>
                     <dt className="text-xs text-muted-foreground">系统编号</dt>
                     <dd className="mt-1 truncate font-medium" title={project.systemId}>
@@ -2376,10 +3591,13 @@ function ProjectDetailPage({
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-xs text-muted-foreground">工作区</dt>
-                    <dd className="mt-1 flex min-w-0 items-center gap-1.5">
-                      <span className="min-w-0 flex-1 truncate font-medium" title={project.workspacePath}>
-                        {getWorkspaceName(project.workspacePath)}
+                    <dt className="text-xs text-muted-foreground">项目文件夹</dt>
+                    <dd className="mt-1 flex min-w-0 items-start gap-1.5">
+                      <span
+                        className="min-w-0 flex-1 whitespace-normal break-words font-medium [overflow-wrap:anywhere]"
+                        title={projectRootPath}
+                      >
+                        {getWorkspaceName(projectRootPath)}
                       </span>
                       <Button
                         type="button"
@@ -2462,6 +3680,7 @@ function FeatureDetailPage({
   detail,
   loading,
   unbound,
+  projectDeleted,
   activeSessionThreadId,
   isViewingSession,
   hasPendingGitDiffNotice,
@@ -2480,6 +3699,7 @@ function FeatureDetailPage({
   detail: HarnessRunDetailViewModel | null
   loading: boolean
   unbound?: boolean
+  projectDeleted?: boolean
   activeSessionThreadId?: string
   isViewingSession: boolean
   hasPendingGitDiffNotice?: boolean
@@ -2488,7 +3708,7 @@ function FeatureDetailPage({
   fallbackFeatureSlug?: string
   onBackToList: () => void
   onBackToProject: () => void
-  onRefresh: () => void
+  onRefresh: () => void | Promise<void>
   onActiveSessionChange?: (threadId: string) => void
   onSessionViewChange?: (viewing: boolean) => void
   onActiveSessionThreadChange?: (threadId: string | null) => void
@@ -2543,6 +3763,7 @@ function FeatureDetailPage({
   const allThreadStates = useAllThreadStates()
   const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
   const [sessionBusy, setSessionBusy] = useState<"create" | null>(null)
+  const [skippingNodeId, setSkippingNodeId] = useState<string | null>(null)
   const [selectedSessionState, setSelectedSessionState] = useState<{
     detailKey: string
     threadId: string | null
@@ -2550,6 +3771,7 @@ function FeatureDetailPage({
   const [activeDetailTab, setActiveDetailTab] = useState<"feature" | "session">(() =>
     isViewingSession && activeSessionThreadId ? "session" : "feature"
   )
+  const projectInteractionDisabled = Boolean(unbound || projectDeleted)
 
   useEffect(() => {
     if (!detail) {
@@ -2601,7 +3823,7 @@ function FeatureDetailPage({
   const handleBackToFeature = (): void => {
     setActiveDetailTab("feature")
     onSessionViewChange?.(false)
-    onRefresh()
+    void onRefresh()
   }
 
   const handleHookSessionSelect = useCallback((threadId: string): void => {
@@ -2618,13 +3840,14 @@ function FeatureDetailPage({
   }, [activeSessionThreadIdForView, selectThread])
 
   const handleCreateSession = useCallback(async (): Promise<void> => {
-    if (!detail || sessionBusy || unbound) return
+    if (!detail || sessionBusy || projectInteractionDisabled) return
     setSessionBusy("create")
     try {
       const thread = await createHarnessSession({
         projectId: detail.project.projectId,
         slug: detail.run.slug,
-        nextAction: getRunNextAction(detail),
+        sessionWorkspacePath: detail.project.sessionWorkspacePath,
+        nextAction: getHarnessRunNextAction(detail),
         sessions: detail.sessions,
         threadsById,
         threadStates: allThreadStates,
@@ -2644,34 +3867,78 @@ function FeatureDetailPage({
     detail,
     detailKey,
     onActiveSessionChange,
+    projectInteractionDisabled,
     sessionBusy,
-    threadsById,
-    unbound
+    threadsById
   ])
+
+  const handleContextReminderSessionCreated = useCallback((threadId: string): void => {
+    if (!threadId) return
+    setSelectedSessionState({ detailKey, threadId })
+    onActiveSessionChange?.(threadId)
+    setActiveDetailTab("session")
+    onSessionViewChange?.(true)
+  }, [detailKey, onActiveSessionChange, onSessionViewChange])
+
+  const canSkipNode = useCallback((node: HarnessRunNode | null): boolean => Boolean(
+    detail &&
+    node &&
+    detail.run.skipNodeAvailable &&
+    !projectInteractionDisabled &&
+    node.id === detail.run.currentNodeId
+  ), [detail, projectInteractionDisabled])
+
+  const handleSkipNode = useCallback(async (node: HarnessRunNode): Promise<void> => {
+    if (!detail || !canSkipNode(node) || skippingNodeId) return
+    const nodeId = node.id
+    setSkippingNodeId(nodeId)
+    setSelectedNodeId(nodeId)
+    try {
+      await window.api.harnessBoard.skipNode({
+        projectId: detail.project.projectId,
+        slug: detail.run.slug,
+        nodeId
+      })
+      toast.success("已跳过当前节点")
+      await onRefresh()
+    } catch (error) {
+      toast.error(cleanIpcError(error))
+    } finally {
+      setSkippingNodeId(null)
+    }
+  }, [canSkipNode, detail, onRefresh, skippingNodeId])
 
   const renderStageNodeStrip = (): React.JSX.Element | null => {
     if (!detail) return null
     if (detail.run.nodes.length === 0) return null
+    const currentNodeStatus = currentNodeStatusFromNodes(detail.run.nodes, detail.run.currentNodeId)
 
     const renderStageNodeButton = (node: HarnessRunNode): React.JSX.Element => {
       const selected = effectiveSelectedNodeId === node.id
+      const skippable = canSkipNode(node)
+      const skipping = skippingNodeId === node.id
       return (
-        <button
+        <div
           key={node.id}
-          type="button"
-          onClick={() => {
-            setSelectedNodeId(node.id)
-          }}
-          aria-pressed={selected}
           title={node.label}
           className={cn(
-            "w-[210px] cursor-pointer rounded-md border px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            "relative w-[210px] rounded-md border transition-colors",
             selected
               ? "border-status-info bg-status-info/10 shadow-sm"
               : "border-border bg-background hover:border-primary/45"
           )}
         >
-          <div className="flex min-w-0 items-start gap-1.5">
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedNodeId(node.id)
+            }}
+            aria-pressed={selected}
+            className={cn(
+              "flex w-full cursor-pointer items-start gap-1.5 rounded-md px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              skippable ? "pr-[72px]" : ""
+            )}
+          >
             <span className="mt-0.5 shrink-0">{statusIcon(node.status)}</span>
             <span className="min-w-0">
               <span className="block truncate text-sm font-medium">{node.label}</span>
@@ -2679,8 +3946,33 @@ function FeatureDetailPage({
                 {node.status.label}
               </span>
             </span>
-          </div>
-        </button>
+          </button>
+          {skippable && (
+            <TooltipProvider delayDuration={150}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="absolute right-2 top-2 h-7 gap-1 px-2 text-xs"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      void handleSkipNode(node)
+                    }}
+                    disabled={skippingNodeId !== null}
+                  >
+                    {skipping ? <Loader2 className="size-3 animate-spin" /> : <SkipForward className="size-3" />}
+                    跳过
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="z-[70] max-w-72">
+                  跳过当前节点，不再产生对应阶段产物
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+        </div>
       )
     }
 
@@ -2697,7 +3989,8 @@ function FeatureDetailPage({
                 const groupProgress = groupProgressIndex(
                   group,
                   detail.workflow.nodes,
-                  detail.run.currentNodeId
+                  detail.run.currentNodeId,
+                  currentNodeStatus
                 )
 
                 return (
@@ -2774,10 +4067,22 @@ function FeatureDetailPage({
                   ? threadsById.get(activeSessionThreadIdForView)?.title
                   : undefined
               }
-              onBack={effectiveActiveDetailTab === "session" ? handleBackToFeature : onBackToProject}
+              onBack={
+                projectDeleted
+                  ? onBackToList
+                  : effectiveActiveDetailTab === "session"
+                    ? handleBackToFeature
+                    : onBackToProject
+              }
               onProjectList={onBackToList}
-              onProject={onBackToProject}
-              onFeature={effectiveActiveDetailTab === "session" ? handleBackToFeature : undefined}
+              onProject={projectDeleted ? undefined : onBackToProject}
+              onFeature={
+                projectDeleted
+                  ? undefined
+                  : effectiveActiveDetailTab === "session"
+                    ? handleBackToFeature
+                    : undefined
+              }
             />
             <div className="flex min-w-0 items-center gap-2">
               <Workflow className="size-4 shrink-0 text-status-info" />
@@ -2806,7 +4111,7 @@ function FeatureDetailPage({
                 size="sm"
                 className={harnessDetailRefreshButtonClassName}
                 onClick={onRefresh}
-                disabled={loading || !detail || unbound}
+                disabled={loading || !detail || projectInteractionDisabled}
               >
                 {loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
                 刷新
@@ -2816,7 +4121,7 @@ function FeatureDetailPage({
                 size="sm"
                 className={cn(harnessDetailPrimaryButtonClassName, harnessActionButtonClassName)}
                 onClick={() => void handleCreateSession()}
-                disabled={loading || !detail || unbound || sessionBusy !== null}
+                disabled={loading || !detail || projectInteractionDisabled || sessionBusy !== null}
               >
                 <span aria-hidden="true" className={harnessActionOverlayClassName} />
                 <span className={harnessActionIconClassName}>
@@ -2837,10 +4142,16 @@ function FeatureDetailPage({
         <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col overflow-hidden p-6">
           <FeatureConversationPanel
             threadId={activeSessionThreadIdForView}
+            readOnlyReason={projectDeleted ? "项目已删除，仅可查看历史会话" : null}
             hasPendingGitDiffNotice={hasPendingGitDiffNotice}
+            onHarnessSessionCreated={handleContextReminderSessionCreated}
             onRequestOpenGitPanel={onRequestOpenGitPanel}
             onThreadGitStatusChange={onThreadGitStatusChange}
           />
+        </div>
+      ) : projectDeleted ? (
+        <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
+          项目已删除，仅可从左侧选择历史会话。
         </div>
       ) : loading || !detail ? (
         <div className="flex flex-1 items-center justify-center text-muted-foreground">
@@ -2855,7 +4166,10 @@ function FeatureDetailPage({
                 {renderStageNodeStrip()}
 
                 {selectedNode ? (
-                  <StageArtifactPanel node={selectedNode} workspacePath={detail.project.projectRootPath} />
+                  <StageArtifactPanel
+                    node={selectedNode}
+                    workspacePath={detail.project.projectRootPath}
+                  />
                 ) : (
                   <section className="rounded-md border border-dashed border-border bg-background px-3 py-8 text-center text-sm text-muted-foreground">
                     暂无阶段数据。
@@ -2938,11 +4252,11 @@ function ProjectFeatureSidebar({
   onToggleCollapse: (key: string) => void
   onToggleAll: () => void
   onCreateSession: (
-    project: HarnessProjectListItem,
+    project: ProjectFeatureSidebarProject,
     slug: string,
     sessions: HarnessSessionBinding[]
   ) => void
-  onSelectSession: (projectId: string, slug: string, threadId: string) => void
+  onSelectSession: (projectId: string, slug: string, threadId: string, deleted?: boolean) => void
   onRunFinished: (threadId: string) => void
   onDeleteSession: (thread: Thread) => void
   onExportSession: (thread: Thread) => void
@@ -2986,6 +4300,7 @@ function ProjectFeatureSidebar({
               unreadIds.has(session.threadId)
             )
             const projectArchived = group.project.lifecycle.status === "archived"
+            const projectDeleted = group.deleted === true
 
             return (
               <div key={group.key} className="space-y-1">
@@ -3019,7 +4334,14 @@ function ProjectFeatureSidebar({
                       <span className="min-w-0 flex-1 truncate text-xs font-medium" title={group.title}>
                         {group.title}
                       </span>
-                      {projectArchived && (
+                      {projectDeleted ? (
+                        <span
+                          className="shrink-0 rounded-sm border border-status-critical/30 bg-status-critical/10 px-2 py-0.5 text-[11px] font-medium leading-none text-status-critical"
+                          title={`所属项目「${group.project.name}」已删除`}
+                        >
+                          已删除
+                        </span>
+                      ) : projectArchived && (
                         <span
                           className="shrink-0 rounded-sm border border-status-warning/30 bg-status-warning/15 px-2 py-0.5 text-[11px] font-medium leading-none text-status-warning"
                           title={`所属项目「${group.project.name}」已归档`}
@@ -3039,10 +4361,11 @@ function ProjectFeatureSidebar({
                         variant="ghost"
                         size="icon-sm"
                         className="size-6 shrink-0 opacity-70 hover:bg-accent/20"
-                        title="新增会话"
-                        disabled={creatingSession}
+                        title={projectDeleted ? "项目已删除，无法新增会话" : "新增会话"}
+                        disabled={creatingSession || projectDeleted}
                         onClick={(event) => {
                           event.stopPropagation()
+                          if (projectDeleted) return
                           void onCreateSession(group.project, group.slug, group.sessions)
                         }}
                       >
@@ -3065,6 +4388,7 @@ function ProjectFeatureSidebar({
                         const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
                         const hasPendingApproval = Boolean(threadState?.pendingApproval)
                         const hasPendingUserInput = Boolean(threadState?.pendingUserInput)
+                        const hasContextReminder = Boolean(threadState?.contextReminder?.pending)
 
                         return (
                           <ThreadListItem
@@ -3072,6 +4396,7 @@ function ProjectFeatureSidebar({
                             thread={thread}
                             isLoading={isLoading}
                             hasPendingApproval={hasPendingApproval}
+                            hasContextReminder={hasContextReminder}
                             scheduledTaskLoading={scheduledTaskLoading}
                             isExporting={exportingThreadId === thread.thread_id}
                             isSelected={highlightThreadId === thread.thread_id}
@@ -3080,7 +4405,14 @@ function ProjectFeatureSidebar({
                             hasPendingUserInput={hasPendingUserInput}
                             editingTitle={editingTitle}
                             hoverTitle={`所属项目：${group.project.name} / ${group.title}`}
-                            onSelect={() => onSelectSession(group.project.projectId, session.slug, thread.thread_id)}
+                            onSelect={() =>
+                              onSelectSession(
+                                group.project.projectId,
+                                session.slug,
+                                thread.thread_id,
+                                projectDeleted
+                              )
+                            }
                             onRunFinished={() => onRunFinished(thread.thread_id)}
                             onDelete={() => onDeleteSession(thread)}
                             onExport={() => void onExportSession(thread)}
@@ -3121,12 +4453,16 @@ export function HarnessBoardView({
 }: HarnessBoardViewProps = {}): React.JSX.Element {
   const [projects, setProjects] = useState<HarnessProjectListItem[]>([])
   const [detailsByProjectId, setDetailsByProjectId] = useState<Record<string, HarnessProjectDetailViewModel>>({})
+  const [enterpriseProjectDetailsByCode, setEnterpriseProjectDetailsByCode] = useState<
+    Record<string, EnterpriseProjectDetailCacheEntry>
+  >({})
   const [loadingDetailIds, setLoadingDetailIds] = useState<Set<string>>(new Set())
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const [selectedFeature, setSelectedFeature] = useState<SelectedFeature | null>(null)
   const [isViewingSession, setIsViewingSession] = useState(false)
   const [runDetail, setRunDetail] = useState<HarnessRunDetailViewModel | null>(null)
   const [adapterRegistry, setAdapterRegistry] = useState<HarnessAdapterRegistryItem[]>([])
+  const [marketPluginItems, setMarketPluginItems] = useState<MarketItem[]>([])
   const [query, setQuery] = useState("")
   const [loadingProjects, setLoadingProjects] = useState(true)
   const [loadingRun, setLoadingRun] = useState(false)
@@ -3141,10 +4477,18 @@ export function HarnessBoardView({
   const [savingEdit, setSavingEdit] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
   const [archivingProjectId, setArchivingProjectId] = useState<string | null>(null)
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null)
+  const [pendingProjectAction, setPendingProjectAction] = useState<PendingProjectAction>(null)
+  const [confirmingProjectAction, setConfirmingProjectAction] = useState(false)
   const [featureDialogProject, setFeatureDialogProject] = useState<HarnessProjectListItem | null>(null)
   const [featureName, setFeatureName] = useState("")
   const [featureError, setFeatureError] = useState<string | null>(null)
+  const [featureWorkflowConfig, setFeatureWorkflowConfig] = useState<HarnessDynamicWorkflowConfig | null>(null)
+  const [featureWorkflowLoading, setFeatureWorkflowLoading] = useState(false)
+  const [featureWorkflowTemplate, setFeatureWorkflowTemplate] = useState("")
+  const [selectedWorkflowNodeIds, setSelectedWorkflowNodeIds] = useState<Set<string>>(new Set())
   const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
+  const [updatingPluginNames, setUpdatingPluginNames] = useState<Set<string>>(new Set())
   const [loadError, setLoadError] = useState<string | null>(null)
   const {
     threads,
@@ -3152,7 +4496,9 @@ export function HarnessBoardView({
     createThread,
     selectThread,
     updateThread,
-    deleteThread
+    deleteThread,
+    pluginVersion,
+    bumpPluginVersion
   } = useAppStore()
   const { cleanupThread } = useThreadContext()
   const allThreadStates = useAllThreadStates()
@@ -3173,6 +4519,10 @@ export function HarnessBoardView({
   const [creatingSidebarSessionKey, setCreatingSidebarSessionKey] = useState<string | null>(null)
   const creatingFeatureRef = useRef(false)
   const projectsRef = useRef(projects)
+  const enterpriseProjectDetailsByCodeRef = useRef(enterpriseProjectDetailsByCode)
+  const enterpriseProjectDetailQueueRef = useRef<Set<string>>(new Set())
+  const enterpriseProjectDetailPendingCodesRef = useRef<Set<string>>(new Set())
+  const enterpriseProjectDetailTimerRef = useRef<number | null>(null)
   const selectedProjectIdRef = useRef(selectedProjectId)
   const selectedFeatureRef = useRef(selectedFeature)
   const currentThreadIdRef = useRef(currentThreadId)
@@ -3181,11 +4531,86 @@ export function HarnessBoardView({
   const selectedProjectRefreshInFlightRef = useRef(false)
   const skipRunDetailLoadForSessionRef = useRef<string | null>(null)
   const loadProjectsRequestIdRef = useRef(0)
+  const featureWorkflowRequestIdRef = useRef(0)
   projectsRef.current = projects
+  enterpriseProjectDetailsByCodeRef.current = enterpriseProjectDetailsByCode
   selectedProjectIdRef.current = selectedProjectId
   selectedFeatureRef.current = selectedFeature
   currentThreadIdRef.current = currentThreadId
   isViewingSessionRef.current = isViewingSession
+
+  const flushEnterpriseProjectDetailQueue = useCallback(() => {
+    const queuedCodes = Array.from(enterpriseProjectDetailQueueRef.current)
+    enterpriseProjectDetailQueueRef.current.clear()
+    enterpriseProjectDetailTimerRef.current = null
+
+    const cache = enterpriseProjectDetailsByCodeRef.current
+    const pendingCodes = enterpriseProjectDetailPendingCodesRef.current
+    const prjCodeList = queuedCodes.filter((code) => !cache[code] && !pendingCodes.has(code))
+    if (prjCodeList.length === 0) return
+
+    for (const code of prjCodeList) {
+      pendingCodes.add(code)
+    }
+
+    window.api.harnessBoard
+      .getEnterpriseProjectDetails({ prjCodeList })
+      .then((result) => {
+        const projectsByCode = new Map(
+          result.projects.map((project) => [
+            normalizeEnterpriseProjectCode(project.projectCode),
+            project
+          ])
+        )
+        setEnterpriseProjectDetailsByCode((current) => {
+          const next = { ...current }
+          for (const code of prjCodeList) {
+            const project = projectsByCode.get(code)
+            next[code] = project ? { kind: "hit", project } : { kind: "miss" }
+          }
+          return next
+        })
+      })
+      .catch(() => {
+        // Enterprise project details are auxiliary. Scroll-triggered failures should stay silent.
+      })
+      .finally(() => {
+        for (const code of prjCodeList) {
+          pendingCodes.delete(code)
+        }
+      })
+  }, [])
+
+  const scheduleEnterpriseProjectDetailQuery = useCallback(
+    (projectCodes: string[]) => {
+      const cache = enterpriseProjectDetailsByCodeRef.current
+      const pendingCodes = enterpriseProjectDetailPendingCodesRef.current
+      let shouldSchedule = false
+
+      for (const projectCode of projectCodes) {
+        const code = normalizeEnterpriseProjectCode(projectCode)
+        if (!code || cache[code] || pendingCodes.has(code)) continue
+        enterpriseProjectDetailQueueRef.current.add(code)
+        shouldSchedule = true
+      }
+
+      if (!shouldSchedule || enterpriseProjectDetailTimerRef.current !== null) return
+
+      enterpriseProjectDetailTimerRef.current = window.setTimeout(
+        flushEnterpriseProjectDetailQueue,
+        ENTERPRISE_PROJECT_DETAIL_QUERY_DEBOUNCE_MS
+      )
+    },
+    [flushEnterpriseProjectDetailQueue]
+  )
+
+  useEffect(() => {
+    return () => {
+      if (enterpriseProjectDetailTimerRef.current !== null) {
+        window.clearTimeout(enterpriseProjectDetailTimerRef.current)
+      }
+    }
+  }, [])
 
   const persistUnread = useCallback((ids: Set<string>) => {
     localStorage.setItem(THREAD_UNREAD_STORAGE_KEY, JSON.stringify([...ids]))
@@ -3216,6 +4641,14 @@ export function HarnessBoardView({
       })
     },
     [persistUnread]
+  )
+
+  const handleProjectCardVisible = useCallback(
+    (project: HarnessProjectListItem) => {
+      if (project.lifecycle.status === "archived") return
+      scheduleEnterpriseProjectDetailQuery([project.projectCode])
+    },
+    [scheduleEnterpriseProjectDetailQuery]
   )
 
   const loadProjectDetail = useCallback(async (
@@ -3271,16 +4704,30 @@ export function HarnessBoardView({
         setDetailsByProjectId((current) => mergeProjectDetailsIfChanged(current, details))
       }
       setSelectedProjectId((current) =>
-        current && items.some((item) => item.projectId === current) ? current : null
+        current &&
+        (
+          items.some((item) => item.projectId === current) ||
+          (selectedFeatureRef.current?.deleted && selectedFeatureRef.current.projectId === current)
+        )
+          ? current
+          : null
       )
       scheduleHarnessAdapterDisplayRefresh(() => {
         if (requestId !== loadProjectsRequestIdRef.current) return
-        void Promise.all([loadHarnessMarketPlugins(), loadHarnessInstalledPlugins()]).then(
-          ([marketPlugins, installedPlugins]) => {
+        void Promise.all([loadHarnessMarketPlugins(), loadHarnessInstalledPlugins()])
+          .then(async ([marketPlugins, installedPlugins]) => {
+            const uploaderProfiles = await loadHarnessMarketPluginUploaderProfiles(marketPlugins)
             if (requestId !== loadProjectsRequestIdRef.current) return
-            setAdapterRegistry(applyMarketAdapterDisplayData(registry, marketPlugins, installedPlugins))
-          }
-        )
+            setMarketPluginItems(marketPlugins)
+            setAdapterRegistry(
+              applyMarketAdapterDisplayData(
+                registry,
+                marketPlugins,
+                installedPlugins,
+                uploaderProfiles
+              )
+            )
+          })
       })
     } catch (error) {
       if (requestId !== loadProjectsRequestIdRef.current) return
@@ -3294,7 +4741,7 @@ export function HarnessBoardView({
 
   useEffect(() => {
     void loadProjects()
-  }, [loadProjects])
+  }, [loadProjects, pluginVersion])
 
   const refreshProjectDetailsInBackground = useCallback(async () => {
     if (selectedProjectIdRef.current || selectedFeatureRef.current) return
@@ -3352,6 +4799,12 @@ export function HarnessBoardView({
     if (!selectedFeature) {
       skipRunDetailLoadForSessionRef.current = null
       setRunDetail(null)
+      return
+    }
+    if (selectedFeature.deleted) {
+      skipRunDetailLoadForSessionRef.current = null
+      setRunDetail(null)
+      setLoadingRun(false)
       return
     }
     const activeSessionThreadId = selectedFeature.activeSessionThreadId
@@ -3419,7 +4872,11 @@ export function HarnessBoardView({
         }
         return
       }
-      if (currentFeature && event.scopeKey === `run:${currentFeature.projectId}:${currentFeature.slug}`) {
+      if (
+        currentFeature &&
+        !currentFeature.deleted &&
+        event.scopeKey === `run:${currentFeature.projectId}:${currentFeature.slug}`
+      ) {
         const capturedProjectId = currentFeature.projectId
         const capturedSlug = currentFeature.slug
         void window.api.harnessBoard
@@ -3441,7 +4898,7 @@ export function HarnessBoardView({
   }, [loadProjectDetail])
 
   const refreshSelectedRunDetail = useCallback(async (): Promise<void> => {
-    if (!selectedFeature) return
+    if (!selectedFeature || selectedFeature.deleted) return
     setLoadingRun(true)
     setLoadError(null)
     try {
@@ -3475,6 +4932,7 @@ export function HarnessBoardView({
           project.name,
           project.description,
           project.projectCode,
+          project.projectDir,
           project.systemId,
           project.systemName,
           project.harnessAdapter.name,
@@ -3536,6 +4994,20 @@ export function HarnessBoardView({
     }
   }
 
+  const handlePickSessionWorkspace = async (): Promise<void> => {
+    const sessionWorkspacePath = await window.api.workspace.select()
+    if (sessionWorkspacePath) {
+      setForm((current) => ({ ...current, sessionWorkspacePath }))
+    }
+  }
+
+  const handlePickEditSessionWorkspace = async (): Promise<void> => {
+    const sessionWorkspacePath = await window.api.workspace.select()
+    if (sessionWorkspacePath) {
+      setEditForm((current) => ({ ...current, sessionWorkspacePath }))
+    }
+  }
+
   const handleSubmit = async (): Promise<void> => {
     setFormError(null)
     if (metadataRequiredMissing(form)) {
@@ -3572,6 +5044,22 @@ export function HarnessBoardView({
     setEditError(null)
   }, [])
 
+  const requestArchiveProject = useCallback(
+    (project: HarnessProjectListItem): void => {
+      if (archivingProjectId || confirmingProjectAction || project.lifecycle.status === "archived") return
+      setPendingProjectAction({ type: "archive", project })
+    },
+    [archivingProjectId, confirmingProjectAction]
+  )
+
+  const requestDeleteProject = useCallback(
+    (project: HarnessProjectListItem): void => {
+      if (deletingProjectId || confirmingProjectAction) return
+      setPendingProjectAction({ type: "delete", project })
+    },
+    [confirmingProjectAction, deletingProjectId]
+  )
+
   const handleSubmitEdit = async (): Promise<void> => {
     if (!editingProject) return
     setEditError(null)
@@ -3606,8 +5094,6 @@ export function HarnessBoardView({
   const handleArchiveProject = useCallback(
     async (project: HarnessProjectListItem): Promise<void> => {
       if (archivingProjectId || project.lifecycle.status === "archived") return
-      const confirmed = window.confirm(`归档项目「${project.name}」？`)
-      if (!confirmed) return
 
       setArchivingProjectId(project.projectId)
       setLoadError(null)
@@ -3632,27 +5118,129 @@ export function HarnessBoardView({
     [archivingProjectId, loadProjects, selectedProjectId]
   )
 
+  const handleDeleteProject = useCallback(
+    async (project: HarnessProjectListItem): Promise<void> => {
+      if (deletingProjectId) return
+
+      setDeletingProjectId(project.projectId)
+      setLoadError(null)
+      try {
+        await window.api.harnessBoard.deleteProject(project.projectId)
+        setDetailsByProjectId((current) => {
+          const next = { ...current }
+          delete next[project.projectId]
+          return next
+        })
+        if (selectedProjectId === project.projectId) {
+          setSelectedProjectId(null)
+          setSelectedFeature(null)
+          setIsViewingSession(false)
+        }
+        await loadProjects()
+      } catch (error) {
+        setLoadError(cleanIpcError(error))
+      } finally {
+        setDeletingProjectId(null)
+      }
+    },
+    [deletingProjectId, loadProjects, selectedProjectId]
+  )
+
+  const handleConfirmProjectAction = useCallback((): void => {
+    const action = pendingProjectAction
+    if (!action || confirmingProjectAction) return
+
+    setConfirmingProjectAction(true)
+    void (async () => {
+      try {
+        if (action.type === "archive") {
+          await handleArchiveProject(action.project)
+        } else {
+          await handleDeleteProject(action.project)
+        }
+      } finally {
+        setConfirmingProjectAction(false)
+        setPendingProjectAction(null)
+      }
+    })()
+  }, [confirmingProjectAction, handleArchiveProject, handleDeleteProject, pendingProjectAction])
+
   const openFeatureCreateDialog = useCallback((project: HarnessProjectListItem): void => {
     const compatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
     if (compatibilityMessage) {
       toast.warning(compatibilityMessage)
       return
     }
+    const requestId = ++featureWorkflowRequestIdRef.current
     setFeatureDialogProject(project)
     setFeatureName("")
     setFeatureError(null)
+    setFeatureWorkflowConfig(null)
+    setFeatureWorkflowTemplate("")
+    setSelectedWorkflowNodeIds(new Set())
+    setFeatureWorkflowLoading(true)
+
+    void window.api.harnessBoard
+      .getDynamicWorkflowConfig(project.projectId)
+      .then((config) => {
+        if (requestId !== featureWorkflowRequestIdRef.current) return
+        const templateId = defaultWorkflowTemplateId(config)
+        setFeatureWorkflowConfig(config)
+        setFeatureWorkflowTemplate(templateId)
+        setSelectedWorkflowNodeIds(requiredWorkflowNodeIds(config, templateId))
+      })
+      .catch(() => {
+        if (requestId !== featureWorkflowRequestIdRef.current) return
+        setFeatureWorkflowConfig(null)
+        setFeatureWorkflowTemplate("")
+        setSelectedWorkflowNodeIds(new Set())
+      })
+      .finally(() => {
+        if (requestId === featureWorkflowRequestIdRef.current) {
+          setFeatureWorkflowLoading(false)
+        }
+      })
   }, [])
 
   const handleFeatureDialogOpenChange = useCallback(
     (open: boolean): void => {
       if (!open && !creatingFeatureProjectId) {
+        featureWorkflowRequestIdRef.current += 1
         setFeatureDialogProject(null)
         setFeatureName("")
         setFeatureError(null)
+        setFeatureWorkflowConfig(null)
+        setFeatureWorkflowLoading(false)
+        setFeatureWorkflowTemplate("")
+        setSelectedWorkflowNodeIds(new Set())
       }
     },
     [creatingFeatureProjectId]
   )
+
+  const handleWorkflowTemplateChange = useCallback((templateId: string): void => {
+    setFeatureWorkflowTemplate(templateId)
+    const template = selectedWorkflowTemplate(featureWorkflowConfig, templateId)
+    if (isCustomWorkflowTemplate(template)) {
+      setSelectedWorkflowNodeIds((current) =>
+        ensureRequiredWorkflowNodes(current, featureWorkflowConfig, templateId)
+      )
+    }
+  }, [featureWorkflowConfig])
+
+  const handleWorkflowNodeToggle = useCallback((nodeId: string, checked: boolean): void => {
+    setSelectedWorkflowNodeIds((current) => {
+      const requiredNodeIds = requiredWorkflowNodeIds(featureWorkflowConfig, featureWorkflowTemplate)
+      if (requiredNodeIds.has(nodeId)) return current
+      const next = new Set(current)
+      if (checked) {
+        next.add(nodeId)
+      } else {
+        next.delete(nodeId)
+      }
+      return next
+    })
+  }, [featureWorkflowConfig, featureWorkflowTemplate])
 
   const handleSubmitFeature = useCallback(async (): Promise<void> => {
     if (!featureDialogProject || creatingFeatureRef.current) return
@@ -3671,9 +5259,31 @@ export function HarnessBoardView({
     setCreatingFeatureProjectId(featureDialogProject.projectId)
     setFeatureError(null)
     try {
+      const selectedTemplate = selectedWorkflowTemplate(featureWorkflowConfig, featureWorkflowTemplate)
+      const customWorkflowSelected = isCustomWorkflowTemplate(selectedTemplate)
+      const workflowInput =
+        featureWorkflowConfig && featureWorkflowTemplate
+          ? {
+              workflowTemplate: featureWorkflowTemplate,
+              workflowConfig: featureWorkflowConfig,
+              ...(customWorkflowSelected
+                ? {
+                    workflowNodes: orderedSelectedWorkflowNodeIds(
+                      featureWorkflowConfig,
+                      ensureRequiredWorkflowNodes(
+                        selectedWorkflowNodeIds,
+                        featureWorkflowConfig,
+                        featureWorkflowTemplate
+                      )
+                    )
+                  }
+                : {})
+            }
+          : {}
       const result = await window.api.harnessBoard.createFeature({
         projectId: featureDialogProject.projectId,
-        feature
+        feature,
+        ...workflowInput
       })
 
       setFeatureDialogProject(null)
@@ -3694,6 +5304,9 @@ export function HarnessBoardView({
   }, [
     featureDialogProject,
     featureName,
+    featureWorkflowConfig,
+    featureWorkflowTemplate,
+    selectedWorkflowNodeIds,
     loadProjectDetail
   ])
 
@@ -3737,6 +5350,71 @@ export function HarnessBoardView({
   const selectedProject =
     selectedProjectId ? projects.find((project) => project.projectId === selectedProjectId) ?? null : null
   const selectedProjectDetail = selectedProjectId ? detailsByProjectId[selectedProjectId] : undefined
+  const selectedProjectCode = selectedProject
+    ? normalizeEnterpriseProjectCode(selectedProject.projectCode)
+    : ""
+  const selectedProjectArchived = selectedProject?.lifecycle.status === "archived"
+  const selectedEnterpriseProjectDetail =
+    selectedProjectCode && !selectedProjectArchived
+      ? enterpriseProjectDetailsByCode[selectedProjectCode]
+      : undefined
+  const projectActionBusy =
+    confirmingProjectAction ||
+    (pendingProjectAction?.type === "archive"
+      ? archivingProjectId === pendingProjectAction.project.projectId
+      : pendingProjectAction?.type === "delete"
+        ? deletingProjectId === pendingProjectAction.project.projectId
+        : false)
+
+  useEffect(() => {
+    if (!selectedProjectCode || selectedProjectArchived || selectedEnterpriseProjectDetail) return
+
+    let canceled = false
+    window.api.harnessBoard
+      .getEnterpriseProjectDetails({ prjCodeList: [selectedProjectCode] })
+      .then((result) => {
+        if (canceled) return
+        const project = result.projects.find(
+          (item) => normalizeEnterpriseProjectCode(item.projectCode) === selectedProjectCode
+        )
+        setEnterpriseProjectDetailsByCode((current) => {
+          const currentEntry = current[selectedProjectCode]
+          if (currentEntry?.kind === "hit") return current
+          if (!project && currentEntry) return current
+          return {
+            ...current,
+            [selectedProjectCode]: project ? { kind: "hit", project } : { kind: "miss" }
+          }
+        })
+      })
+      .catch(() => {
+        if (canceled) return
+        setEnterpriseProjectDetailsByCode((current) =>
+          current[selectedProjectCode]
+            ? current
+            : { ...current, [selectedProjectCode]: { kind: "miss" } }
+        )
+      })
+
+    return () => {
+      canceled = true
+    }
+  }, [selectedEnterpriseProjectDetail, selectedProjectArchived, selectedProjectCode])
+
+  const projectPluginUpdateInfoById = useMemo(() => {
+    const marketPluginByName = buildMarketPluginMap(marketPluginItems)
+    const next = new Map<string, MarketPluginUpdateInfo>()
+
+    for (const project of projects) {
+      const marketPlugin = marketPluginByName.get(normalizeAdapterMarketName(project.harnessAdapter.name))
+      const updateInfo = getMarketPluginUpdateInfo(marketPlugin)
+      if (updateInfo) {
+        next.set(project.projectId, updateInfo)
+      }
+    }
+
+    return next
+  }, [marketPluginItems, pluginVersion, projects])
 
   const openProjectDetail = useCallback(
     (projectId: string): void => {
@@ -3749,12 +5427,39 @@ export function HarnessBoardView({
     [detailsByProjectId, loadProjectDetail, loadingDetailIds]
   )
 
+  const handleUpdateProjectPlugin = useCallback(
+    async (project: HarnessProjectListItem, updateInfo: MarketPluginUpdateInfo): Promise<void> => {
+      const pluginName = project.harnessAdapter.name
+      if (updatingPluginNames.has(pluginName)) return
+
+      setUpdatingPluginNames((current) => new Set(current).add(pluginName))
+      try {
+        const response = await installMarketPluginUpdate(updateInfo.item)
+        if (response.success) {
+          toast.success(`已为您更新并安装「${updateInfo.itemName}」到插件，请新开一个会话试试效果。`)
+          bumpPluginVersion()
+        } else {
+          toast.error(response.error || "更新安装失败")
+        }
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "更新安装失败")
+      } finally {
+        setUpdatingPluginNames((current) => {
+          const next = new Set(current)
+          next.delete(pluginName)
+          return next
+        })
+      }
+    },
+    [bumpPluginVersion, updatingPluginNames]
+  )
+
   const openFeatureDetail = useCallback(
-    (projectId: string, slug: string, activeSessionThreadId?: string): void => {
+    (projectId: string, slug: string, activeSessionThreadId?: string, deleted?: boolean): void => {
       setSelectedProjectId(projectId)
-      setSelectedFeature({ projectId, slug, activeSessionThreadId })
+      setSelectedFeature({ projectId, slug, activeSessionThreadId, deleted })
       setIsViewingSession(!!activeSessionThreadId)
-      if (!detailsByProjectId[projectId] && !loadingDetailIds.has(projectId)) {
+      if (!deleted && !detailsByProjectId[projectId] && !loadingDetailIds.has(projectId)) {
         void loadProjectDetail(projectId)
       }
     },
@@ -3775,6 +5480,7 @@ export function HarnessBoardView({
   const projectSidebarGroups = useMemo<ProjectFeatureSessionGroup[]>(() => {
     const groups: ProjectFeatureSessionGroup[] = []
     const activeProjectId = selectedFeature?.projectId ?? selectedProjectId
+    const knownProjectIds = new Set(projects.map((project) => project.projectId))
 
     for (const project of projects) {
       const sessionsBySlug = new Map<string, HarnessSessionBinding[]>()
@@ -3803,6 +5509,34 @@ export function HarnessBoardView({
       }
     }
 
+    for (const [projectId, sessionsBySlug] of harnessSessionIndex.byProjectSlug) {
+      if (knownProjectIds.has(projectId)) continue
+
+      for (const [slug, sessions] of sessionsBySlug) {
+        const firstThread = threadsById.get(sessions[0]?.threadId ?? "")
+        const deletedProject = makeDeletedProjectSidebarItem(
+          projectId,
+          readThreadHarnessProjectName(firstThread)
+        )
+        const section: ProjectFeatureSessionGroupSection =
+          selectedFeature && projectId === selectedFeature.projectId && slug === selectedFeature.slug
+            ? "current"
+            : activeProjectId && projectId === activeProjectId
+              ? "project"
+              : "other"
+
+        groups.push({
+          key: `deleted:${projectId}:${slug}`,
+          project: deletedProject,
+          slug,
+          title: slug,
+          sessions,
+          section,
+          deleted: true
+        })
+      }
+    }
+
     if (!activeProjectId) return groups
 
     return groups
@@ -3812,7 +5546,7 @@ export function HarnessBoardView({
       })
       .sort((a, b) => a.priority - b.priority || a.index - b.index)
       .map(({ group }) => group)
-  }, [harnessSessionIndex, projects, selectedFeature, selectedProjectId])
+  }, [harnessSessionIndex, projects, selectedFeature, selectedProjectId, threadsById])
 
   const allFeatureGroupsCollapsed =
     projectSidebarGroups.length > 0 &&
@@ -3894,10 +5628,11 @@ export function HarnessBoardView({
 
   const handleCreateSidebarSession = useCallback(
     async (
-      project: HarnessProjectListItem,
+      project: ProjectFeatureSidebarProject,
       slug: string,
       sessions: HarnessSessionBinding[]
     ): Promise<void> => {
+      if (project.lifecycle.status === "deleted") return
       const key = `${project.projectId}:${slug}`
       if (creatingSidebarSessionKey) return
       setCreatingSidebarSessionKey(key)
@@ -3906,7 +5641,8 @@ export function HarnessBoardView({
         const thread = await createHarnessSession({
           projectId: project.projectId,
           slug,
-          nextAction: getRunNextAction(latestRunDetail),
+          sessionWorkspacePath: project.sessionWorkspacePath,
+          nextAction: getHarnessRunNextAction(latestRunDetail),
           sessions,
           threadsById,
           threadStates: allThreadStates,
@@ -4029,8 +5765,8 @@ export function HarnessBoardView({
               onCreateSession={(project, slug, sessions) => {
                 void handleCreateSidebarSession(project, slug, sessions)
               }}
-              onSelectSession={(projectId, slug, threadId) => {
-                openFeatureDetail(projectId, slug, threadId)
+              onSelectSession={(projectId, slug, threadId, deleted) => {
+                openFeatureDetail(projectId, slug, threadId, deleted)
                 markRead(threadId)
                 void selectThread(threadId, { preserveView: true })
               }}
@@ -4059,21 +5795,28 @@ export function HarnessBoardView({
   }, [onActiveSessionThreadChange, selectedFeature])
 
   if (selectedFeature) {
+    const selectedFeatureDeleted = selectedFeature.deleted === true
+    const selectedFeatureThread = threadsById.get(selectedFeature.activeSessionThreadId ?? "")
     return (
       <>
         <FeatureDetailPage
           detail={runDetailWithSessions}
           loading={loadingRun}
           unbound={showingUnboundRunDetail}
+          projectDeleted={selectedFeatureDeleted}
           activeSessionThreadId={selectedFeature.activeSessionThreadId}
           isViewingSession={isViewingSession}
           hasPendingGitDiffNotice={hasPendingGitDiffNotice}
-          fallbackProjectName={selectedFeatureProjectDetail?.project?.name ?? selectedProject?.name}
+          fallbackProjectName={
+            selectedFeatureDeleted
+              ? readThreadHarnessProjectName(selectedFeatureThread)
+              : selectedFeatureProjectDetail?.project?.name ?? selectedProject?.name
+          }
           fallbackFeatureTitle={fallbackFeatureSummary?.title ?? selectedFeature.slug}
           fallbackFeatureSlug={fallbackFeatureSummary?.slug ?? selectedFeature.slug}
           onBackToList={handleBackToProjectList}
           onBackToProject={handleBackToProject}
-          onRefresh={() => void refreshSelectedRunDetail()}
+          onRefresh={refreshSelectedRunDetail}
           onActiveSessionChange={handleActiveSessionChange}
           onSessionViewChange={handleSessionViewChange}
           onActiveSessionThreadChange={onActiveSessionThreadChange}
@@ -4092,6 +5835,7 @@ export function HarnessBoardView({
         <ProjectDetailPage
           project={selectedProject}
           detail={selectedProjectDetail}
+          enterpriseProjectDetail={selectedEnterpriseProjectDetail}
           loading={loadingDetailIds.has(selectedProject.projectId)}
           creatingFeature={creatingFeatureProjectId === selectedProject.projectId}
           onBackToList={handleBackToProjectList}
@@ -4103,10 +5847,16 @@ export function HarnessBoardView({
         <FeatureCreateDialog
           project={featureDialogProject}
           featureName={featureName}
+          workflowConfig={featureWorkflowConfig}
+          workflowLoading={featureWorkflowLoading}
+          workflowTemplate={featureWorkflowTemplate}
+          selectedWorkflowNodeIds={selectedWorkflowNodeIds}
           creating={creatingFeatureProjectId !== null}
           error={featureError}
           onOpenChange={handleFeatureDialogOpenChange}
           onChange={setFeatureName}
+          onWorkflowTemplateChange={handleWorkflowTemplateChange}
+          onWorkflowNodeToggle={handleWorkflowNodeToggle}
           onSubmit={() => void handleSubmitFeature()}
         />
         <ProjectEditDialog
@@ -4121,6 +5871,7 @@ export function HarnessBoardView({
             }
           }}
           onChange={setEditForm}
+          onPickSessionWorkspace={() => void handlePickEditSessionWorkspace()}
           onSubmit={() => void handleSubmitEdit()}
         />
         {sidebarDeleteDialog}
@@ -4213,8 +5964,16 @@ export function HarnessBoardView({
                     detailsByProjectId={detailsByProjectId}
                     loadingDetailIds={loadingDetailIds}
                     archivingProjectId={archivingProjectId}
+                    deletingProjectId={deletingProjectId}
+                    pluginUpdateInfoByProjectId={projectPluginUpdateInfoById}
+                    updatingPluginNames={updatingPluginNames}
                     onEditProject={handleEditProject}
-                    onArchiveProject={(project) => void handleArchiveProject(project)}
+                    onArchiveProject={requestArchiveProject}
+                    onDeleteProject={requestDeleteProject}
+                    onUpdateProjectPlugin={(project, updateInfo) =>
+                      void handleUpdateProjectPlugin(project, updateInfo)
+                    }
+                    onProjectVisible={handleProjectCardVisible}
                     onOpenProject={openProjectDetail}
                   />
                 ))
@@ -4245,8 +6004,16 @@ export function HarnessBoardView({
                         detailsByProjectId={detailsByProjectId}
                         loadingDetailIds={loadingDetailIds}
                         archivingProjectId={archivingProjectId}
+                        deletingProjectId={deletingProjectId}
+                        pluginUpdateInfoByProjectId={projectPluginUpdateInfoById}
+                        updatingPluginNames={updatingPluginNames}
                         onEditProject={handleEditProject}
-                        onArchiveProject={(project) => void handleArchiveProject(project)}
+                        onArchiveProject={requestArchiveProject}
+                        onDeleteProject={requestDeleteProject}
+                        onUpdateProjectPlugin={(project, updateInfo) =>
+                          void handleUpdateProjectPlugin(project, updateInfo)
+                        }
+                        onProjectVisible={handleProjectCardVisible}
                         onOpenProject={openProjectDetail}
                       />
                     ))
@@ -4261,10 +6028,16 @@ export function HarnessBoardView({
       <FeatureCreateDialog
         project={featureDialogProject}
         featureName={featureName}
+        workflowConfig={featureWorkflowConfig}
+        workflowLoading={featureWorkflowLoading}
+        workflowTemplate={featureWorkflowTemplate}
+        selectedWorkflowNodeIds={selectedWorkflowNodeIds}
         creating={creatingFeatureProjectId !== null}
         error={featureError}
         onOpenChange={handleFeatureDialogOpenChange}
         onChange={setFeatureName}
+        onWorkflowTemplateChange={handleWorkflowTemplateChange}
+        onWorkflowNodeToggle={handleWorkflowNodeToggle}
         onSubmit={() => void handleSubmitFeature()}
       />
       <ProjectFormDialog
@@ -4276,6 +6049,7 @@ export function HarnessBoardView({
         onOpenChange={handleCreateDialogOpenChange}
         onChange={setForm}
         onPickWorkspace={() => void handlePickWorkspace()}
+        onPickSessionWorkspace={() => void handlePickSessionWorkspace()}
         onSubmit={() => void handleSubmit()}
       />
       <ProjectEditDialog
@@ -4290,7 +6064,18 @@ export function HarnessBoardView({
           }
         }}
         onChange={setEditForm}
+        onPickSessionWorkspace={() => void handlePickEditSessionWorkspace()}
         onSubmit={() => void handleSubmitEdit()}
+      />
+      <ProjectActionConfirmDialog
+        action={pendingProjectAction}
+        busy={projectActionBusy}
+        onOpenChange={(open) => {
+          if (!open && !projectActionBusy) {
+            setPendingProjectAction(null)
+          }
+        }}
+        onConfirm={handleConfirmProjectAction}
       />
       {sidebarDeleteDialog}
       {sidebarPortal}

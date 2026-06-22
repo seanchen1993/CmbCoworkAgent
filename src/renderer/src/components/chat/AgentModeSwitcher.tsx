@@ -25,8 +25,8 @@ const MODES: Array<{
     value: "normal",
     label: "Solo Agent",
     shortLabel: "Solo",
-    description: "单 agent 串行执行，低开销、响应快。",
-    detail: "适合日常问答、明确小改动、快速排查与验证。",
+    description: "单主控轻量执行，必要时并行委派。",
+    detail: "适合日常问答、明确小改动、快速排查与独立子任务。",
     badge: "轻量"
   },
   {

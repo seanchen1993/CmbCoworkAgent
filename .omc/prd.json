@@ -1,0 +1,56 @@
+{
+  "title": "Phase 1 — 后台命令超时韧性 (idle 保活 + 绝对上限兜底 + 实时部分输出)",
+  "source_plan": ".omc/plans/subagent-visibility-timeout-consensus.md",
+  "scope": "仅 Phase 1。落点 src/main/agent/local-sandbox.ts 后台执行层 + src/main/agent/runtime.ts task_output。不动 Phase 2 可见性与 Phase 0 探针。",
+  "stories": [
+    {
+      "id": "US-1",
+      "title": "后台命令绝对上限替换 600s wall-clock",
+      "priority": 1,
+      "passes": true,
+      "acceptanceCriteria": [
+        "新增 BACKGROUND_ABSOLUTE_MAX_MS 常量 (默认 7_200_000ms = 2h)；保留 BACKGROUND_TIMEOUT_MS 常量不删 (护 isBackgroundExecution:5088 回退分支)",
+        "executeBackground 调 executeRaw 时传入 BACKGROUND_ABSOLUTE_MAX_MS 作为 timeoutMs，并保持 options.background:true",
+        "持续每≤30s输出一次、运行>600s 的后台命令不再在 600s 被杀；只有达到 2h 绝对上限才被杀 (AC-B7)",
+        "前台 execute(默认60s)、用户 abort(130)、命令正常完成的退出码与行为完全不变 (AC-B10)"
+      ]
+    },
+    {
+      "id": "US-2",
+      "title": "实时部分输出管线 (onData → 活动部分输出)",
+      "priority": 2,
+      "passes": true,
+      "acceptanceCriteria": [
+        "ExecuteRawOptions 增加可选 onData?:(text:string)=>void；executeRaw 将 options 透传到 executeRawUnserialized → executeInWindowsSandbox / executeOnce 的两个 collect 闭包",
+        "两个 collect 块的 stdout/stderr data 处理器 (sandbox ~5641/5652; executeOnce ~5948/5961) 在收到 chunk 时调用 options.onData?.(逐块解码文本)",
+        "executeBackground 传入的 onData 将文本累加到 task 的 live 部分缓冲 (partialOutput) 并更新 lastOutputAt；累加遵守 maxOutputBytes 截断，触顶置 partialTruncated:true",
+        "getTaskOutput 在 !completed 时返回 partialOutput、partialTruncated、idleSeconds(自 lastOutputAt 起) 字段；completed 时仍返回 task.result.output (不双重计入)",
+        "task_output (runtime.ts:1137-1231) 的 not_ready/timeout 分支带出 partialOutput 与 idleSeconds (AC-B8)"
+      ]
+    },
+    {
+      "id": "US-3",
+      "title": "绝对上限终止使用 capReached 标志而非裸 124 sentinel",
+      "priority": 3,
+      "passes": true,
+      "acceptanceCriteria": [
+        "后台命令达到绝对上限被杀时，collectAndResolve 返回的 metadata 不使用 TIMEOUT_METADATA_SENTINEL/REASON，从而不满足 isSparseSandboxTimeoutOutput，避免误触 isCommandSpecificSandboxRetryCandidate:1301 的 sandbox-escape 重试",
+        "返回结果带 capReached 语义 (经 metadata 或 ExecuteResponse 字段)，并把已产生的部分输出交回 (AC-B9)",
+        "abort(130) 与前台 timeout(124, 普通命令) 路径不受影响"
+      ]
+    },
+    {
+      "id": "US-4",
+      "title": "单元测试覆盖 AC-B7/B8/B9/B10",
+      "priority": 4,
+      "passes": true,
+      "acceptanceCriteria": [
+        "新增/扩展 local-sandbox 测试：持续输出命令运行>600s 不被杀且最终拿到完整输出 (AC-B7)",
+        "长 idle 无输出命令 (<2h) 不被杀，getTaskOutput/task_output 返回 partialOutput+idleSeconds (AC-B8)",
+        "达到 (用小常量覆盖) 绝对上限时返回 capReached + 部分输出，且不触发 sandbox-escape 判定 (AC-B9)",
+        "abort→130、前台60s timeout→124、正常完成退出码回归用例通过 (AC-B10)",
+        "npm run typecheck 与 npm run typecheck:web 无新增错误"
+      ]
+    }
+  ]
+}

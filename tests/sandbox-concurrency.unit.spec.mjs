@@ -51,6 +51,24 @@ test("runtime only shares read-only execute calls", () => {
   )
 })
 
+test("runtime allows parallel task subagent spawns", () => {
+  const exclusiveSection = sectionBetween(runtimeSource, "const EXCLUSIVE_TOOL_NAMES = new Set", "const SHARED_TOOL_NAMES = new Set")
+  const sharedSection = sectionBetween(runtimeSource, "const SHARED_TOOL_NAMES = new Set", "function isRecord")
+
+  assert.doesNotMatch(exclusiveSection, /"task"/, "task should not serialize subagent spawns")
+  assert.match(sharedSection, /"task"/, "task should be eligible for parallel subagent spawning")
+  assert.match(
+    runtimeSource,
+    /const MAX_PARALLEL_TASK_SUBAGENTS = 3/,
+    "parallel task subagent spawns should have a hard limit"
+  )
+  assert.match(
+    runtimeSource,
+    /toolCall\?\.name === "task"[\s\S]*taskLimiter\.run\(runSharedTool\)/,
+    "task tool calls should pass through the task-specific limiter"
+  )
+})
+
 test("subagents use their own concurrency gate to avoid parent task deadlock", () => {
   const subagentSection = sectionBetween(runtimeSource, "const subagentMiddleware: any[] = [", "const generalPurposeSubagent =")
   const mainAgentSection = sectionBetween(runtimeSource, "return createAgent({", "createSubAgentMiddleware({")

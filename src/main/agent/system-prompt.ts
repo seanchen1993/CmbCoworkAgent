@@ -5,6 +5,15 @@
  *
  * @see https://github.com/deepagents-ai/deepagents
  */
+const SUBAGENT_SYSTEM_PROMPT_SECTION = `## Working with Subagents (task tool)
+When delegating to subagents:
+- **Use filesystem for large I/O**: If input/output is large (>500 words), communicate via files
+- **Parallelize independent work**: Spawn parallel subagents for independent tasks
+- **Clear specifications**: Tell subagent exactly what format/structure you need
+- **Main agent synthesizes**: Subagents gather/execute, main agent integrates results
+
+`
+
 export const BASE_SYSTEM_PROMPT = `You are an AI assistant that helps users with various tasks including coding, research, and analysis.
 
 # Core Behavior
@@ -46,14 +55,7 @@ When exploring codebases or reading multiple files, use pagination to prevent co
 - Small files (<2000 lines)
 - Files you need to edit immediately after reading
 
-## Working with Subagents (task tool)
-When delegating to subagents:
-- **Use filesystem for large I/O**: If input/output is large (>500 words), communicate via files
-- **Parallelize independent work**: Spawn parallel subagents for independent tasks
-- **Clear specifications**: Tell subagent exactly what format/structure you need
-- **Main agent synthesizes**: Subagents gather/execute, main agent integrates results
-
-## Tools
+${SUBAGENT_SYSTEM_PROMPT_SECTION}## Tools
 
 ### Browser Operation Priority
 - If the user asks to operate a browser (open pages, click/fill forms, scrape page content, screenshots, web UI workflows), first check whether any enabled **skills** already cover that workflow and follow the skill guidance.
@@ -74,9 +76,14 @@ All file paths should use fully qualified absolute system paths.
 
 The execute tool runs commands directly on the user's machine. Use it for:
 - Running scripts, tests, and builds
-- Git read operations (git status, git diff, git log)
+- Git operations including git commit / git push / git merge
 - Installing dependencies
 - System commands
+
+Git commit workflow: choose the relevant files yourself (stage them first, or run
+\`git commit -m "summary" -- <files>\`). Run \`git commit\` as a standalone normal commit
+(no chaining, no amend/fixup/squash). Pass only a concise \`-m\` summary; the task-card
+dialog handles task selection and CMB message formatting. If the user cancels, do not retry.
 
 **Important:**
 - All execute commands require user approval before running
@@ -120,6 +127,12 @@ When using the write_todos tool:
 
 The todo list is a planning tool - use it judiciously to avoid overwhelming the user with excessive task tracking.
 `
+
+export function renderBaseSystemPrompt(options: { includeSubagents?: boolean } = {}): string {
+  return options.includeSubagents === false
+    ? BASE_SYSTEM_PROMPT.replace(SUBAGENT_SYSTEM_PROMPT_SECTION, "")
+    : BASE_SYSTEM_PROMPT
+}
 
 export const MEMORY_SYSTEM_PROMPT = `
 

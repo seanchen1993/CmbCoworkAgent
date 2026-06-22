@@ -21,6 +21,7 @@ interface StartedSession {
   pluginWorkspace?: string
   featureId?: string
   projectCode?: string
+  projectDir?: string
   hookScope?: HookScopeController
 }
 
@@ -41,7 +42,7 @@ export async function fireSessionStartOnce(
   turnId?: string,
   pluginOutputDir?: string,
   systemId?: string,
-  harnessContext?: Pick<HookContext, "pluginWorkspace" | "featureId" | "projectCode">
+  harnessContext?: Pick<HookContext, "pluginWorkspace" | "featureId" | "projectCode" | "projectDir">
 ): Promise<void> {
   const existing = startedSessions.get(threadId)
   if (existing) {
@@ -52,6 +53,7 @@ export async function fireSessionStartOnce(
       pluginWorkspace: harnessContext?.pluginWorkspace ?? existing.pluginWorkspace,
       featureId: harnessContext?.featureId ?? existing.featureId,
       projectCode: harnessContext?.projectCode ?? existing.projectCode,
+      projectDir: harnessContext?.projectDir ?? existing.projectDir,
       hookScope: hookScope ?? existing.hookScope
     })
     return
@@ -63,6 +65,7 @@ export async function fireSessionStartOnce(
     pluginWorkspace: harnessContext?.pluginWorkspace,
     featureId: harnessContext?.featureId,
     projectCode: harnessContext?.projectCode,
+    projectDir: harnessContext?.projectDir,
     hookScope
   })
 
@@ -177,6 +180,7 @@ export async function fireSessionEnd(
     pluginWorkspace: started.pluginWorkspace,
     featureId: started.featureId,
     projectCode: started.projectCode,
+    projectDir: started.projectDir,
     sessionId: threadId,
     sessionEndReason: reason
   }
@@ -215,6 +219,7 @@ export async function fireSessionEndAll(
         pluginWorkspace: session.pluginWorkspace,
         featureId: session.featureId,
         projectCode: session.projectCode,
+        projectDir: session.projectDir,
         // PR-16 follow-up — before-quit drain → CC `reason: "logout"`.
         sessionEndReason: "logout"
       }

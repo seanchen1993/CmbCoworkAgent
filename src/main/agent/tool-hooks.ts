@@ -19,6 +19,7 @@ export interface ToolHookMiddlewareOptions {
   pluginWorkspace?: string
   featureId?: string
   projectCode?: string
+  projectDir?: string
   skipToolNames?: ReadonlySet<string>
 }
 
@@ -36,7 +37,8 @@ function buildHookContext(
     systemId: options.systemId,
     pluginWorkspace: options.pluginWorkspace,
     featureId: options.featureId,
-    projectCode: options.projectCode
+    projectCode: options.projectCode,
+    projectDir: options.projectDir
   }
 }
 

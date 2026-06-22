@@ -40,8 +40,7 @@ import { useShallow } from "zustand/react/shallow"
 import {
   useThreadState,
   useThreadStream,
-  type CoordinatorWorkerView,
-  type SubagentInternalLogEntry
+  type CoordinatorWorkerView
 } from "@/lib/thread-context"
 import { getFileType } from "@/lib/file-types"
 import { Badge } from "@/components/ui/badge"
@@ -2304,9 +2303,6 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
   const threadState = useThreadState(threadId)
   const subagents = threadState?.subagents ?? []
   const coordinatorWorkers = threadState?.coordinatorWorkers ?? []
-  const subagentToolCallCount = threadState?.subagentToolCallCount ?? 0
-  const subagentInternalLogs = threadState?.subagentInternalLogs ?? []
-  const hasRunningSubagent = subagents.some((subagent) => subagent.status === "running")
   const hasRunningCoordinatorWorker = coordinatorWorkers.some(
     (worker) => worker.status === "running"
   )
@@ -2330,17 +2326,15 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
   }, [canMutateCurrentThreadState, threadId, skillRetryContext, setSkillGenerationPhase])
 
   useEffect(() => {
-    if (!hasRunningSubagent && !hasRunningCoordinatorWorker) return
+    if (!hasRunningCoordinatorWorker) return
     const timer = window.setInterval(() => setSharedNowMs(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [hasRunningSubagent, hasRunningCoordinatorWorker])
+  }, [hasRunningCoordinatorWorker])
 
   if (
     subagents.length === 0 &&
     coordinatorWorkers.length === 0 &&
-    !hasSkillGen &&
-    subagentToolCallCount === 0 &&
-    subagentInternalLogs.length === 0
+    !hasSkillGen
   ) {
     return (
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
@@ -2353,15 +2347,6 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
 
   return (
     <div className="p-3 space-y-3">
-      {(subagentToolCallCount > 0 || subagentInternalLogs.length > 0) && (
-        <SubagentCurrentToolCard
-          logs={subagentInternalLogs}
-          toolCallCount={subagentToolCallCount}
-          hasRunningSubagent={hasRunningSubagent}
-          nowMs={sharedNowMs}
-        />
-      )}
-
       {/* Virtual skill generation card — shown above regular subagents */}
       {hasSkillGen && (
         <SkillGenerationCard
@@ -2384,7 +2369,7 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
         />
       )}
       {subagents.map((agent) => (
-        <SubagentCard key={agent.id} subagent={agent} />
+        <SubagentCard key={agent.id} subagent={agent} threadId={threadId} />
       ))}
       {coordinatorWorkers.map((worker) => (
         <CoordinatorWorkerCard
@@ -2714,192 +2699,10 @@ function resolveCoordinatorWorkerPreviewPath(
   return undefined
 }
 
-function SubagentCurrentToolCard({
-  logs,
-  toolCallCount,
-  hasRunningSubagent,
-  nowMs
-}: {
-  logs: SubagentInternalLogEntry[]
-  toolCallCount: number
-  hasRunningSubagent: boolean
-  nowMs: number
-}): React.JSX.Element {
-  const currentLog =
-    [...logs].reverse().find((log) => log.toolCallId || log.toolName) ?? logs.at(-1)
-  const isToolWaiting = currentLog
-    ? currentLog.status !== "completed" && currentLog.result === undefined
-    : toolCallCount > 0
-  const isAwaitingNextStep =
-    hasRunningSubagent &&
-    !!currentLog &&
-    currentLog.status === "completed" &&
-    currentLog.result !== undefined
-  const isMissingFinalResult = !hasRunningSubagent && isToolWaiting && !!currentLog
-  const isActive = hasRunningSubagent && (isToolWaiting || isAwaitingNextStep || !currentLog)
-  const lastActivityMs =
-    hasRunningSubagent && currentLog?.createdAt
-      ? Math.max(0, nowMs - new Date(currentLog.createdAt).getTime())
-      : null
-  const lastActivityLabel = lastActivityMs === null ? null : formatCompactElapsed(lastActivityMs)
-  const inputSummary = summarizeSubagentToolInput(currentLog)
-  const resultSummary = summarizeSubagentToolResult(
-    currentLog,
-    hasRunningSubagent,
-    lastActivityLabel
-  )
-
-  return (
-    <div className="rounded-2xl border border-border/70 bg-gradient-to-br from-background to-muted/30 p-3 text-xs shadow-sm">
-      <div className="flex items-center justify-between gap-2">
-        <span className="flex min-w-0 items-center gap-2 text-muted-foreground">
-          {isActive ? (
-            <Loader2 className="size-3.5 animate-spin text-sky-600 dark:text-sky-400" />
-          ) : isMissingFinalResult ? (
-            <AlertCircle className="size-3.5 text-amber-600 dark:text-amber-400" />
-          ) : (
-            <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
-          )}
-          <span className="truncate font-medium text-foreground">
-            {isToolWaiting
-              ? "子代理执行中"
-              : isAwaitingNextStep
-                ? "子代理整理中"
-                : hasRunningSubagent
-                  ? "子代理运行中"
-                  : "子代理最近步骤"}
-          </span>
-        </span>
-        <Badge variant="outline">{toolCallCount} 次</Badge>
-      </div>
-
-      <div className="mt-3 rounded-xl border border-border/50 bg-background/75 px-3 py-2.5">
-        <div className="flex items-center justify-between gap-2">
-          <span className="flex min-w-0 items-center gap-2 font-medium text-sky-700 dark:text-sky-300">
-            <Code2 className="size-3.5 shrink-0" />
-            <span className="truncate">{currentLog?.toolName || "等待工具调用"}</span>
-          </span>
-          <span
-            className={cn(
-              "shrink-0 rounded-full px-2 py-0.5 text-[10px]",
-              isMissingFinalResult
-                ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
-                : isActive
-                  ? "bg-sky-500/10 text-sky-700 dark:text-sky-300"
-                  : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-            )}
-          >
-            {isMissingFinalResult
-              ? "未收到返回"
-              : isToolWaiting
-                ? "Waiting"
-                : isAwaitingNextStep
-                  ? "等待下一步"
-                  : "已返回"}
-          </span>
-        </div>
-
-        <div className="mt-2 space-y-1.5 text-[11px] leading-relaxed text-muted-foreground">
-          <div className="truncate">
-            <span className="text-foreground/70">输入：</span>
-            {inputSummary}
-          </div>
-          <div className="truncate">
-            <span className="text-foreground/70">状态：</span>
-            {resultSummary}
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function summarizeSubagentToolInput(log?: SubagentInternalLogEntry): string {
-  if (!log) return "等待子代理开始执行"
-
-  const raw = log.content?.trim()
-  if (!raw) return "无明显输入"
-
-  const parsed = parseMaybeJson(raw)
-  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-    const data = parsed as Record<string, unknown>
-    const path = firstString(data.file_path, data.path)
-    const command = firstString(data.command)
-    const pattern = firstString(data.pattern, data.query)
-
-    if (command) return `命令：${compactInline(command)}`
-    if (path) return `路径：${compactPath(path)}`
-    if (pattern) return `搜索：${compactInline(pattern)}`
-  }
-
-  return compactInline(raw)
-}
-
-function summarizeSubagentToolResult(
-  log: SubagentInternalLogEntry | undefined,
-  hasRunningSubagent: boolean,
-  lastActivityLabel: string | null
-): string {
-  if (!log) {
-    return hasRunningSubagent ? "等待首次工具调用" : "尚未开始"
-  }
-  if (log.status !== "completed" && log.result === undefined) {
-    if (!hasRunningSubagent) {
-      return "子代理已结束，但该工具返回事件未收到"
-    }
-    return "等待工具返回，若长时间停留说明卡在当前工具"
-  }
-
-  if (hasRunningSubagent) {
-    return lastActivityLabel
-      ? `工具已返回，等待子代理继续 · ${lastActivityLabel}无新工具`
-      : "工具已返回，等待子代理继续"
-  }
-
-  const result = log.result?.trim()
-  if (!result) return "已返回，无详细输出"
-  if (/\[command succeeded with exit code 0\]/i.test(result)) return "执行成功"
-  const exitCodeMatch = result.match(/exit code (\d+)/i)
-  if (exitCodeMatch) return `命令结束，退出码 ${exitCodeMatch[1]}`
-  if (/error|failed|not found/i.test(result)) return compactInline(firstLine(result))
-  if (result.length > 160) return `已返回，输出约 ${result.length} 字符`
-  return compactInline(firstLine(result))
-}
-
-function parseMaybeJson(value: string): unknown | null {
-  try {
-    return JSON.parse(value)
-  } catch {
-    return null
-  }
-}
-
-function firstString(...values: unknown[]): string | null {
-  for (const value of values) {
-    if (typeof value === "string" && value.trim()) return value.trim()
-  }
-  return null
-}
-
-function firstLine(value: string): string {
-  return (
-    value
-      .split(/\r?\n/)
-      .find((line) => line.trim())
-      ?.trim() ?? ""
-  )
-}
-
 function compactInline(value: string): string {
   const compacted = value.replace(/\s+/g, " ").trim()
   if (compacted.length <= 96) return compacted
   return `${compacted.slice(0, 46)}...${compacted.slice(-32)}`
-}
-
-function compactPath(value: string): string {
-  const compacted = value.replace(/\s+/g, " ").trim()
-  if (compacted.length <= 72) return compacted
-  return `...${compacted.slice(-69)}`
 }
 
 function safeDateMs(value: string | undefined): number {

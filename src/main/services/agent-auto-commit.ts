@@ -12,6 +12,7 @@ import {
   saveAgentAutoCommitWorkspaceCard
 } from "../storage"
 import { trackEvent } from "./event-reporter"
+import { captureStagedSnapshotsForCommit, measureForCommit } from "./adoption-tracker"
 import { getTracesDir } from "../agent/trace/collector"
 import type { AgentTrace } from "../agent/trace/types"
 
@@ -21,8 +22,14 @@ const GIT_CONTEXT_QUERY_TIMEOUT_MS = 10_000
 
 const GIT_BASE_ENV: NodeJS.ProcessEnv = {
   ...process.env,
-  GIT_LFS_SKIP_SMUDGE: "1"
+  GIT_OPTIONAL_LOCKS: "0",
+  GIT_LFS_SKIP_SMUDGE: "1",
+  // 缺凭据时直接失败而不是挂起一个隐藏的 git.exe。
+  GIT_TERMINAL_PROMPT: "0"
 }
+
+// 隐藏 Windows 上 git.exe 子进程的控制台窗口，避免自动提交时频繁闪窗。
+const GIT_SPAWN_OPTIONS = { windowsHide: true } as const
 
 interface ExecFileError extends Error {
   stderr?: string | Buffer
@@ -78,7 +85,9 @@ function quoteArg(value: string): string {
 }
 
 async function addSafeDirectory(worktreePath: string): Promise<void> {
-  await execFileAsync("git", ["config", "--global", "--add", "safe.directory", worktreePath])
+  await execFileAsync("git", ["config", "--global", "--add", "safe.directory", worktreePath], {
+    ...GIT_SPAWN_OPTIONS
+  })
 }
 
 async function runGit(
@@ -93,7 +102,8 @@ async function runGit(
     const { stdout } = await execFileAsync("git", baseArgs, {
       env: GIT_BASE_ENV,
       timeout: options?.timeoutMs,
-      maxBuffer: options?.maxBufferBytes ?? GIT_EXEC_MAX_BUFFER_BYTES
+      maxBuffer: options?.maxBufferBytes ?? GIT_EXEC_MAX_BUFFER_BYTES,
+      ...GIT_SPAWN_OPTIONS
     })
     return stdout
   } catch (error) {
@@ -102,7 +112,8 @@ async function runGit(
     const { stdout } = await execFileAsync("git", baseArgs, {
       env: GIT_BASE_ENV,
       timeout: options?.timeoutMs,
-      maxBuffer: options?.maxBufferBytes ?? GIT_EXEC_MAX_BUFFER_BYTES
+      maxBuffer: options?.maxBufferBytes ?? GIT_EXEC_MAX_BUFFER_BYTES,
+      ...GIT_SPAWN_OPTIONS
     })
     return stdout
   }
@@ -774,8 +785,28 @@ export async function maybeAutoCommitAfterAgentRun({
 
     try {
       await runGit(workspacePath, ["add", "--", ...candidateFiles])
+      // Measure adoption in-app (like the manual commit paths) BEFORE the commit
+      // clears the index. Capture time is the upper bound on eligible gens.
+      // Doing it here marks the gens measured, so the hook/reconciler backstop
+      // gates to "no pending gens" and does NOT emit a second git.commit.created
+      // for this same commit — previously every auto-commit produced a duplicate
+      // commit event (one here, one from the backstop that measured adoption).
+      const adoptionCaptureTimeMs = Date.now()
+      let adoptionSnapshots: ReturnType<typeof captureStagedSnapshotsForCommit> = []
+      try {
+        adoptionSnapshots = captureStagedSnapshotsForCommit(workspacePath)
+      } catch {
+        // capture is best-effort; never block the auto-commit
+      }
       await runGit(workspacePath, ["commit", "-m", commitMessage])
       const commitHash = await getHead(workspacePath)
+      if (adoptionSnapshots.length > 0) {
+        try {
+          measureForCommit(adoptionSnapshots, commitHash ?? undefined, adoptionCaptureTimeMs)
+        } catch {
+          // adoption measurement must never affect the commit outcome
+        }
+      }
       // Persist the card actually committed with, so the legacy global card
       // migrates to this workspace and the UI/next run reuse it directly.
       if (workspaceCardNumber?.trim()) {

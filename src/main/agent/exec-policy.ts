@@ -320,15 +320,10 @@ interface ForbiddenPattern {
 }
 
 const FORBIDDEN_PATTERNS: ForbiddenPattern[] = [
-  {
-    pattern: /\bgit\s+commit\b/i,
-    reason: "LLM cannot run git commit; use Git Panel user approval flow"
-  },
-  {
-    pattern: /\bgit\s+push\b/i,
-    reason: "LLM cannot run git push; use Git Panel user approval flow"
-  },
-  { pattern: /\bgit\s+merge\b/i, reason: "LLM cannot run git merge in this workflow" },
+  // NOTE: git commit/push/merge are intentionally NOT forbidden. The agent may run
+  // them; `git commit` is intercepted by ToolOrchestrator (see isGitCommitCommand)
+  // and routed through the task-card commit dialog, while push/merge fall through to
+  // the normal needs_approval flow. Force-push remains gated via DANGEROUS_INDICATORS.
   // Unix
   { pattern: /\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?\/\s*$/, reason: "rm -rf / is extremely dangerous" },
   { pattern: /\bmkfs\b/, reason: "mkfs formats disk partitions" },
@@ -468,6 +463,14 @@ export function assessCommandSafety(
     }
   }
 
+  if (containsWrappedGitCommitCommand(trimmed)) {
+    return {
+      level: "forbidden",
+      reason:
+        "wrapped git commit commands are not supported — run git commit directly so the task-card dialog can enforce CMB formatting"
+    }
+  }
+
   // 1. Check forbidden patterns first
   for (const { pattern, reason } of FORBIDDEN_PATTERNS) {
     if (pattern.test(trimmed)) {
@@ -569,8 +572,568 @@ export function classifyCommandConcurrency(command: string): CommandConcurrencyC
   return "exclusive"
 }
 
+/**
+ * Replace single/double-quoted spans with a placeholder so that shell operators or the
+ * literal text "git commit" appearing *inside* a string argument (e.g. a commit
+ * message or an `echo` payload) are not mistaken for real commands / chaining,
+ * while quoted option values such as `git -C "C:/repo path" commit` still count
+ * as a value-bearing argument.
+ */
+function stripQuotedSpans(command: string): string {
+  // Double-quoted spans honour backslash escapes (`"a\" && b"` is one argument), so an
+  // escaped quote can't prematurely end the span and leak a `&&` into chain detection.
+  // POSIX single-quoted spans take no escapes, so a plain `'[^']*'` is exact there.
+  return command
+    .replace(/"(?:\\.|[^"\\])*"/g, " __quoted_arg__ ")
+    .replace(/'[^']*'/g, " __quoted_arg__ ")
+}
+
+const GIT_SUBMIT_SUBCOMMANDS = new Set(["add", "commit", "push", "merge"])
+const POSIX_SHELL_WRAPPERS = new Set(["bash", "sh", "zsh"])
+const POWERSHELL_WRAPPERS = new Set(["pwsh", "powershell"])
+const CMD_WRAPPERS = new Set(["cmd"])
+
 function containsDirectGitSubmitCommand(command: string): boolean {
-  return /\bgit\s+(add|commit|push|merge)\b/i.test(command)
+  return commandHasGitSubcommand(command, GIT_SUBMIT_SUBCOMMANDS)
+}
+
+function splitShellCommandSegments(command: string): string[] {
+  const segments: string[] = []
+  let current = ""
+  let quote: "'" | '"' | null = null
+  let escaped = false
+
+  const pushCurrent = (): void => {
+    const trimmed = current.trim()
+    if (trimmed) segments.push(trimmed)
+    current = ""
+  }
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]
+
+    if (escaped) {
+      current += ch
+      escaped = false
+      continue
+    }
+
+    if (ch === "\\" && quote !== "'") {
+      current += ch
+      escaped = true
+      continue
+    }
+
+    if (quote) {
+      current += ch
+      if (ch === quote) quote = null
+      continue
+    }
+
+    if (ch === "'" || ch === "\"") {
+      current += ch
+      quote = ch
+      continue
+    }
+
+    if (ch === "\r" || ch === "\n" || ch === ";" || ch === "&" || ch === "|") {
+      pushCurrent()
+      if ((ch === "&" || ch === "|") && command[i + 1] === ch) i += 1
+      continue
+    }
+
+    current += ch
+  }
+
+  pushCurrent()
+  return segments
+}
+
+function isShellEnvAssignment(token: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(token)
+}
+
+function backslashEscapesNextChar(next: string | undefined, quote: "'" | '"' | null): boolean {
+  if (!next) return false
+  if (/\s/.test(next)) return true
+  if (quote === "\"") return next === "\"" || next === "\\" || next === "$" || next === "`"
+  return next === "'" || next === "\"" || next === "\\" || "$`;&|<>".includes(next)
+}
+
+function getGitInvocationTokens(tokens: string[]): string[] | null {
+  const invocation = getExecutableInvocationTokens(tokens)
+  return normalizeExecutable(invocation[0] || "") === "git" ? invocation : null
+}
+
+function getExecutableInvocationTokens(tokens: string[]): string[] {
+  let index = 0
+  while (index < tokens.length && isShellEnvAssignment(tokens[index])) index += 1
+
+  if (normalizeExecutable(tokens[index] || "") === "command") {
+    index += 1
+  }
+
+  if (normalizeExecutable(tokens[index] || "") === "env") {
+    index += 1
+    while (index < tokens.length) {
+      const token = tokens[index]
+      const lower = token.toLowerCase()
+      if (isShellEnvAssignment(token)) {
+        index += 1
+        continue
+      }
+      if (lower === "--") {
+        index += 1
+        break
+      }
+      if (lower === "-u" || lower === "--unset" || lower === "-s" || lower === "-S") {
+        index += 2
+        continue
+      }
+      if (
+        lower === "-i" ||
+        lower === "-" ||
+        lower.startsWith("-u") ||
+        lower.startsWith("--unset=") ||
+        lower.startsWith("--ignore-environment")
+      ) {
+        index += 1
+        continue
+      }
+      break
+    }
+  }
+
+  return tokens.slice(index)
+}
+
+function getWrappedShellScript(tokens: string[]): string | null {
+  const invocation = getExecutableInvocationTokens(tokens)
+  const executable = normalizeExecutable(invocation[0] || "")
+
+  if (POSIX_SHELL_WRAPPERS.has(executable)) {
+    for (let i = 1; i < invocation.length; i++) {
+      const token = invocation[i]
+      if (!token.startsWith("-")) break
+      if (token === "--") break
+      // Only a short-option cluster carrying `-c` reads the next arg as the script
+      // (e.g. `-c`, `-lc`, `-xc`). A long option that merely contains the letter c
+      // (e.g. `--check`, `--norc`) must NOT be mistaken for `-c`, otherwise a benign
+      // `bash --check '…'` would be wrongly forbidden.
+      if (/^-[A-Za-z]*c[A-Za-z]*$/.test(token)) return invocation[i + 1] || null
+    }
+    return null
+  }
+
+  if (POWERSHELL_WRAPPERS.has(executable)) {
+    for (let i = 1; i < invocation.length; i++) {
+      const lower = invocation[i].toLowerCase()
+      if (lower === "-c" || lower === "-command") return invocation[i + 1] || null
+    }
+    return null
+  }
+
+  if (CMD_WRAPPERS.has(executable)) {
+    for (let i = 1; i < invocation.length; i++) {
+      const lower = invocation[i].toLowerCase()
+      if (lower === "/c" || lower === "/k") return invocation.slice(i + 1).join(" ") || null
+    }
+  }
+
+  return null
+}
+
+function containsWrappedGitCommitCommand(command: string, depth = 0): boolean {
+  if (depth > 3) return false
+  for (const segment of splitShellCommandSegments(command)) {
+    const tokens = tokenizeCommand(segment)
+    if (!tokens) continue
+    const script = getWrappedShellScript(tokens)
+    if (!script) continue
+    if (isGitCommitCommand(script) || containsWrappedGitCommitCommand(script, depth + 1)) {
+      return true
+    }
+  }
+  return false
+}
+
+function commandHasGitSubcommand(command: string, subcommands: Set<string>): boolean {
+  for (const segment of splitShellCommandSegments(command)) {
+    const tokens = tokenizeCommand(segment)
+    const gitTokens = tokens ? getGitInvocationTokens(tokens) : null
+    if (!gitTokens) continue
+    const subcommand = findGitSubcommand(gitTokens)
+    if (subcommand && subcommands.has(subcommand.subcommand)) return true
+  }
+  return false
+}
+
+/** True when the command is (or contains) a real `git commit` invocation. */
+export function isGitCommitCommand(command: string): boolean {
+  return commandHasGitSubcommand(command.trim(), new Set(["commit"]))
+}
+
+/** True when the command is (or contains) a real `git push` invocation. */
+export function isGitPushCommand(command: string): boolean {
+  return commandHasGitSubcommand(command.trim(), new Set(["push"]))
+}
+
+/** True when the command is (or contains) a real `git merge` invocation. */
+export function isGitMergeCommand(command: string): boolean {
+  return commandHasGitSubcommand(command.trim(), new Set(["merge"]))
+}
+
+/**
+ * True when the command chains multiple shell statements (`&&`, `||`, `;`, `|`, `&`)
+ * outside of quoted spans. Used to refuse intercepting a `git commit` that is glued to
+ * other commands — the commit dialog only performs the commit, so the rest of the chain
+ * would otherwise be silently dropped.
+ */
+export function isChainedShellCommand(command: string): boolean {
+  return /\|\||&&|[;&|]|\r|\n/.test(stripQuotedSpans(command))
+}
+
+function normalizeMsysPathForWindows(rawPath: string): string {
+  if (process.platform !== "win32") return rawPath
+  const normalized = rawPath.replace(/\\/g, "/")
+  const match = normalized.match(/^\/([A-Za-z])(?:\/(.*))?$/)
+  if (!match) return rawPath
+  return `${match[1].toUpperCase()}:/${match[2] ?? ""}`
+}
+
+function resolveShellCdTarget(currentCwd: string, segment: string): string | null {
+  const tokens = tokenizeCommand(segment)
+  if (!tokens || tokens.length < 2 || tokens.length > 3) return null
+  if (tokens[0].toLowerCase() !== "cd") return null
+  let targetIndex = 1
+  if (tokens[1] === "--") targetIndex = 2
+  const target = tokens[targetIndex]
+  if (!target || target === "-") return null
+  if (tokens.length > targetIndex + 1) return null
+  return path.resolve(currentCwd, normalizeMsysPathForWindows(target))
+}
+
+export function normalizeCdPrefixedGitCommitCommand(
+  command: string,
+  cwd: string
+): { command: string; cwd: string } | null {
+  if (!isChainedShellCommand(command)) return null
+  const segments = splitShellCommandSegments(command)
+  if (segments.length < 2) return null
+
+  let effectiveCwd = cwd
+  for (let i = 0; i < segments.length - 1; i++) {
+    const nextCwd = resolveShellCdTarget(effectiveCwd, segments[i])
+    if (!nextCwd) return null
+    effectiveCwd = nextCwd
+  }
+
+  const commitCommand = segments[segments.length - 1]
+  if (!isGitCommitCommand(commitCommand) || isChainedShellCommand(commitCommand)) return null
+  return { command: commitCommand, cwd: effectiveCwd }
+}
+
+function extractGitAddPathspecs(command: string): string[] {
+  const tokens = tokenizeCommand(command)
+  const gitTokens = tokens ? getGitInvocationTokens(tokens) : null
+  if (!gitTokens) return []
+  const subcommand = findGitSubcommand(gitTokens)
+  if (!subcommand || subcommand.subcommand !== "add") return []
+
+  const pathspecs: string[] = []
+  const args = gitTokens.slice(subcommand.index + 1)
+  let pathspecMode = false
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i]
+    const lower = token.toLowerCase()
+    if (pathspecMode) {
+      if (token) pathspecs.push(token)
+      continue
+    }
+    if (token === "--") {
+      pathspecMode = true
+      continue
+    }
+    if (lower === "--pathspec-from-file") {
+      i += 1
+      continue
+    }
+    if (lower.startsWith("--pathspec-from-file=")) continue
+    if (token.startsWith("-")) continue
+    pathspecs.push(token)
+  }
+  return Array.from(new Set(pathspecs.filter(Boolean)))
+}
+
+export function normalizeGitAddPrefixedGitCommitCommand(
+  command: string,
+  cwd: string
+): { command: string; cwd: string; filePaths: string[] } | null {
+  if (!isChainedShellCommand(command)) return null
+  const segments = splitShellCommandSegments(command)
+  if (segments.length < 2) return null
+
+  let effectiveCwd = cwd
+  // Each add's pathspecs are recorded together with the cwd they were issued from, so we can
+  // reject a chain whose adds span different directories (those pathspecs are relative to
+  // different bases and cannot be represented by the single basePath the dialog receives).
+  const collected: Array<{ cwd: string; pathspecs: string[] }> = []
+  for (let i = 0; i < segments.length - 1; i++) {
+    const segment = segments[i]
+    const nextCwd = resolveShellCdTarget(effectiveCwd, segment)
+    if (nextCwd) {
+      effectiveCwd = nextCwd
+      continue
+    }
+
+    const addCwd = resolveGitCommandCwdForSubcommand(segment, effectiveCwd, "add")
+    if (!addCwd) return null
+    const addPathspecs = extractGitAddPathspecs(segment)
+    if (addPathspecs.length === 0) return null
+    effectiveCwd = addCwd
+    collected.push({ cwd: addCwd, pathspecs: addPathspecs })
+  }
+
+  const commitCommand = segments[segments.length - 1]
+  if (!isGitCommitCommand(commitCommand) || isChainedShellCommand(commitCommand)) return null
+  const commitCwd = resolveGitCommandCwdForSubcommand(commitCommand, effectiveCwd, "commit")
+  if (!commitCwd) return null
+  if (path.resolve(commitCwd) !== path.resolve(effectiveCwd)) return null
+  // All adds must run at the same directory as the commit; otherwise the pathspecs would be
+  // resolved against the wrong base. Refuse so the orchestrator tells the agent to split it.
+  const resolvedCommitCwd = path.resolve(commitCwd)
+  if (collected.some((entry) => path.resolve(entry.cwd) !== resolvedCommitCwd)) return null
+  const filePaths = Array.from(new Set(collected.flatMap((entry) => entry.pathspecs)))
+  return { command: commitCommand, cwd: commitCwd, filePaths }
+}
+
+/**
+ * True for a history-rewriting force push. These stay gated behind an approval prompt
+ * even in YOLO mode, since an unattended `git push --force` can destroy remote history.
+ */
+export function isForcePushCommand(command: string): boolean {
+  for (const segment of splitShellCommandSegments(command)) {
+    const tokens = tokenizeCommand(segment)
+    const gitTokens = tokens ? getGitInvocationTokens(tokens) : null
+    if (!gitTokens) continue
+    const subcommand = findGitSubcommand(gitTokens)
+    if (!subcommand || subcommand.subcommand !== "push") continue
+    const args = gitTokens.slice(subcommand.index + 1)
+    if (args.some((arg) => /^(--force(?:-with-lease|-if-includes)?(?:=.*)?|-f)$/i.test(arg))) {
+      return true
+    }
+  }
+  return false
+}
+
+function resolveGitCommandCwdForSubcommand(
+  command: string,
+  cwd: string,
+  targetSubcommand: string
+): string | null {
+  for (const segment of splitShellCommandSegments(command)) {
+    const tokens = tokenizeCommand(segment)
+    const gitTokens = tokens ? getGitInvocationTokens(tokens) : null
+    if (!gitTokens) continue
+    const subcommand = findGitSubcommand(gitTokens)
+    if (!subcommand || subcommand.subcommand !== targetSubcommand) continue
+
+    let effectiveCwd = cwd
+    for (let i = 1; i < subcommand.index; i++) {
+      const token = gitTokens[i]
+      const lower = token.toLowerCase()
+      if (token === "-C") {
+        const next = gitTokens[i + 1]
+        if (next) {
+          effectiveCwd = path.resolve(effectiveCwd, normalizeMsysPathForWindows(next))
+          i += 1
+        }
+        continue
+      }
+      if (token.startsWith("-C") && token.length > 2) {
+        effectiveCwd = path.resolve(effectiveCwd, normalizeMsysPathForWindows(token.slice(2)))
+        continue
+      }
+      if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(lower)) {
+        i += 1
+      }
+    }
+    return effectiveCwd
+  }
+  return null
+}
+
+export function resolveGitCommandCwd(command: string, cwd: string): string {
+  return resolveGitCommandCwdForSubcommand(command, cwd, "commit") ?? cwd
+}
+
+/**
+ * Best-effort extraction of the commit message the agent passed via `-m`/`--message`.
+ * Used to pre-fill the task-card commit dialog. Returns undefined when no message arg
+ * is present (e.g. `git commit` with an editor) or the command can't be tokenized.
+ */
+export function extractGitCommitMessage(command: string): string | undefined {
+  const tokens = tokenizeCommand(command)
+  if (!tokens) return undefined
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]
+    if (token === "--message") {
+      const next = tokens[i + 1]
+      if (typeof next === "string" && next) return next
+      continue
+    }
+    if (token.startsWith("--message=")) return token.slice("--message=".length) || undefined
+    // Short-option form. `-m` is the only message-bearing short flag for `git commit`,
+    // so any non-`--` cluster containing `m` (e.g. `-m`, `-mMSG`, `-am`, `-am MSG`)
+    // carries the message: text after `m` is the attached value, otherwise it's the
+    // next token.
+    if (token.startsWith("-") && !token.startsWith("--")) {
+      const mIdx = token.indexOf("m", 1)
+      if (mIdx > 0) {
+        const attached = token.slice(mIdx + 1)
+        if (attached) return attached
+        const next = tokens[i + 1]
+        if (typeof next === "string" && next) return next
+      }
+    }
+  }
+  return undefined
+}
+
+const GIT_COMMIT_LONG_OPTIONS_WITH_VALUE = new Set([
+  "--author",
+  "--cleanup",
+  "--date",
+  "--file",
+  "--message",
+  "--pathspec-from-file",
+  "--reuse-message",
+  "--reedit-message",
+  "--template",
+  "--trailer"
+])
+const GIT_COMMIT_SHORT_OPTIONS_WITH_VALUE = new Set(["-C", "-F", "-m", "-t"])
+
+function shortCommitValueFlagIndex(token: string): number {
+  if (!token.startsWith("-") || token.startsWith("--")) return -1
+  for (let i = 1; i < token.length; i++) {
+    if (token[i] === "m" || token[i] === "F" || token[i] === "C" || token[i] === "t") return i
+  }
+  return -1
+}
+
+function isGitCommitOptionWithInlineValue(token: string): boolean {
+  const lower = token.toLowerCase()
+  const shortValueFlagIndex = shortCommitValueFlagIndex(token)
+  return (
+    lower.startsWith("--author=") ||
+    lower.startsWith("--cleanup=") ||
+    lower.startsWith("--date=") ||
+    lower.startsWith("--file=") ||
+    lower.startsWith("--message=") ||
+    lower.startsWith("--pathspec-from-file=") ||
+    lower.startsWith("--reuse-message=") ||
+    lower.startsWith("--reedit-message=") ||
+    lower.startsWith("--template=") ||
+    lower.startsWith("--trailer=") ||
+    (shortValueFlagIndex > 0 && token.slice(shortValueFlagIndex + 1).length > 0)
+  )
+}
+
+/**
+ * Best-effort extraction of pathspecs from `git commit ... [--] <pathspec>...`.
+ * The task-card dialog uses these as the agent's intended file selection. Returns an
+ * empty list when the command does not name files explicitly (the renderer may then
+ * fall back to currently staged files, or all changed files).
+ */
+export function extractGitCommitPathspecs(command: string): string[] {
+  if (isChainedShellCommand(command)) return []
+  const tokens = tokenizeCommand(command)
+  const gitTokens = tokens ? getGitInvocationTokens(tokens) : null
+  if (!gitTokens) return []
+  const subcommand = findGitSubcommand(gitTokens)
+  if (!subcommand || subcommand.subcommand !== "commit") return []
+
+  const pathspecs: string[] = []
+  const args = gitTokens.slice(subcommand.index + 1)
+  let pathspecMode = false
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i]
+    const lower = token.toLowerCase()
+
+    if (pathspecMode) {
+      if (token) pathspecs.push(token)
+      continue
+    }
+
+    if (token === "--") {
+      pathspecMode = true
+      continue
+    }
+
+    const shortValueFlagIndex = shortCommitValueFlagIndex(token)
+    if (
+      GIT_COMMIT_LONG_OPTIONS_WITH_VALUE.has(lower) ||
+      GIT_COMMIT_SHORT_OPTIONS_WITH_VALUE.has(token) ||
+      (shortValueFlagIndex > 0 && token.slice(shortValueFlagIndex + 1).length === 0)
+    ) {
+      i += 1
+      continue
+    }
+
+    if (isGitCommitOptionWithInlineValue(token)) {
+      continue
+    }
+
+    if (token.startsWith("-")) {
+      continue
+    }
+
+    pathspecs.push(token)
+  }
+
+  return Array.from(new Set(pathspecs.filter(Boolean)))
+}
+
+/**
+ * True when a `git commit` invocation rewrites or amends an existing commit
+ * (`--amend`, `--fixup`, `--squash`). The task-card commit dialog only ever creates a
+ * fresh commit, so these must not be silently turned into a new commit.
+ */
+export function isAmendOrFixupCommit(command: string): boolean {
+  for (const segment of splitShellCommandSegments(command)) {
+    const tokens = tokenizeCommand(segment)
+    const gitTokens = tokens ? getGitInvocationTokens(tokens) : null
+    if (!gitTokens) continue
+    const subcommand = findGitSubcommand(gitTokens)
+    if (!subcommand || subcommand.subcommand !== "commit") continue
+
+    const args = gitTokens.slice(subcommand.index + 1)
+    let pathspecMode = false
+    for (let i = 0; i < args.length; i++) {
+      const token = args[i]
+      const lower = token.toLowerCase()
+      if (pathspecMode) continue
+      if (token === "--") {
+        pathspecMode = true
+        continue
+      }
+      // Real option (not the *value* of a preceding -m/-F/--message/...). Matching here
+      // keeps `git commit -m --amend` (where `--amend` is the message) from being misread
+      // as an amend.
+      if (/^--(amend|fixup|squash)(=.*)?$/.test(lower)) return true
+      // Skip value-bearing options so their value isn't scanned as an option.
+      const shortValueFlagIndex = shortCommitValueFlagIndex(token)
+      if (
+        GIT_COMMIT_LONG_OPTIONS_WITH_VALUE.has(lower) ||
+        GIT_COMMIT_SHORT_OPTIONS_WITH_VALUE.has(token) ||
+        (shortValueFlagIndex > 0 && token.slice(shortValueFlagIndex + 1).length === 0)
+      ) {
+        i += 1
+      }
+    }
+  }
+  return false
 }
 
 export function derivePermanentApprovalPattern(command: string): string | null {
@@ -959,7 +1522,7 @@ function tokenizeCommand(command: string): string[] | null {
       continue
     }
 
-    if (ch === "\\" && quote !== "'") {
+    if (ch === "\\" && quote !== "'" && backslashEscapesNextChar(command[i + 1], quote)) {
       escaped = true
       continue
     }
@@ -992,6 +1555,195 @@ function tokenizeCommand(command: string): string[] | null {
   if (escaped || quote) return null
   if (current) tokens.push(current)
   return tokens
+}
+
+/** A file-relocating / file-deleting operation parsed out of a shell command. */
+export interface ShellFileOp {
+  op: "rm" | "mv"
+  /**
+   * Raw (unresolved) source path operands. For `rm` these are the delete
+   * targets; for `mv` they are every operand except the last. Callers resolve
+   * them against the command's cwd.
+   */
+  paths: string[]
+  /** Raw `mv` destination (last operand); undefined for `rm`. */
+  dest?: string
+}
+
+const SHELL_SEGMENT_SEPARATORS = new Set(["&&", "||", ";", "|", "&"])
+
+/**
+ * Best-effort extraction of `rm` / `mv` (incl. `git rm` / `git mv`) operations
+ * from a shell command, so the adoption tracker can react to an agent deleting
+ * or relocating a generated file BEFORE it is committed (path-keyed attribution
+ * would otherwise orphan the pending generation).
+ *
+ * Conservative by design — a missed op merely degrades to existing behaviour,
+ * whereas a wrong op corrupts adoption data, so we err toward parsing nothing:
+ *   - malformed quoting (tokeniser returns null) → no ops;
+ *   - command separators (`;` `&&` `||` `|` `&`) are split into segments even
+ *     when glued (`rm a.ts;mv b c`), and each segment is parsed independently;
+ *   - a segment with an unresolvable construct (command substitution, redirect,
+ *     subshell) is skipped rather than guessed;
+ *   - flags are skipped; `--` ends option parsing;
+ *   - the `mv -t DIR` / `--target-directory` form (which inverts operand order)
+ *     is skipped rather than mis-parsed.
+ * Glob operands are returned as-is; the caller skips ones it cannot resolve.
+ */
+export function extractShellFileOps(command: string): ShellFileOp[] {
+  if (!command || typeof command !== "string") return []
+  const tokens = tokenizeFileOpCommand(command)
+  if (!tokens || tokens.length === 0) return []
+
+  const ops: ShellFileOp[] = []
+  let segment: string[] = []
+  const flush = (): void => {
+    if (segment.length > 0) {
+      const op = parseFileOpSegment(segment)
+      if (op) ops.push(op)
+    }
+    segment = []
+  }
+  for (const tok of tokens) {
+    if (SHELL_SEGMENT_SEPARATORS.has(tok)) flush()
+    else segment.push(tok)
+  }
+  flush()
+  return ops
+}
+
+/**
+ * Tokenise a command for file-op extraction. Differs from the safety tokeniser
+ * in one way that matters for Windows: inside double quotes a backslash is
+ * literal UNLESS it escapes a shell-special char (`$ \` " \\` or newline), so a
+ * path like `"D:\proj\src"` survives intact instead of collapsing to
+ * `D:projsrc`. (bash's double-quote rule; the safety tokeniser eats every `\`.)
+ * Returns null on unbalanced quoting/escape so callers parse nothing.
+ */
+function tokenizeFileOpCommand(command: string): string[] | null {
+  const tokens: string[] = []
+  let current = ""
+  let quote: "'" | '"' | null = null
+  let escaped = false
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]
+    if (escaped) {
+      current += ch
+      escaped = false
+      continue
+    }
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      else current += ch
+      continue
+    }
+    if (quote === '"') {
+      if (ch === "\\") {
+        const next = command[i + 1]
+        if (next === '"' || next === "\\" || next === "$" || next === "`" || next === "\n") {
+          escaped = true
+        } else {
+          current += ch // literal backslash (e.g. a Windows path separator)
+        }
+        continue
+      }
+      if (ch === '"') quote = null
+      else current += ch
+      continue
+    }
+    if (ch === "\\") {
+      escaped = true
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    // Command separators become standalone tokens even when glued to a path
+    // (`rm a.ts;mv b c`, `a&&b`) so a compound command segments correctly
+    // instead of being dropped — LLMs routinely write `;` with no leading space.
+    if (ch === ";" || ch === "&" || ch === "|") {
+      if (current) {
+        tokens.push(current)
+        current = ""
+      }
+      if ((ch === "&" || ch === "|") && command[i + 1] === ch) {
+        tokens.push(ch + ch)
+        i++
+      } else {
+        tokens.push(ch)
+      }
+      continue
+    }
+    if (/\s/.test(ch)) {
+      if (current) {
+        tokens.push(current)
+        current = ""
+      }
+      continue
+    }
+    current += ch
+  }
+
+  if (escaped || quote) return null
+  if (current) tokens.push(current)
+  return tokens
+}
+
+function parseFileOpSegment(tokens: string[]): ShellFileOp | null {
+  // Command separators are already split into their own tokens by the tokeniser
+  // (even when glued), so a control metacharacter still present inside a token
+  // means something we cannot resolve to a concrete path: command substitution
+  // (`$(...)` / backticks), redirects (`>` `<`), a subshell (`( )`), or a rare
+  // quoted-operator filename. Parse nothing for that segment — a miss only
+  // degrades to existing behaviour, whereas guessing would void/transfer an
+  // unrelated generation and corrupt adoption data.
+  for (const tok of tokens) {
+    if (/[;&|`$<>()]/.test(tok)) return null
+  }
+
+  let idx = 0
+  // Skip a leading env-assignment prefix (e.g. `FOO=bar rm x`).
+  while (idx < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx])) idx++
+  if (idx >= tokens.length) return null
+
+  let exe = normalizeExecutable(tokens[idx])
+  idx++
+  if (exe === "git") {
+    if (idx >= tokens.length) return null
+    const sub = tokens[idx].toLowerCase()
+    if (sub !== "rm" && sub !== "mv") return null
+    exe = sub
+    idx++
+  }
+  if (exe !== "rm" && exe !== "mv") return null
+
+  const operands: string[] = []
+  let endOfOptions = false
+  let hasTargetDirFlag = false
+  for (; idx < tokens.length; idx++) {
+    const tok = tokens[idx]
+    if (!endOfOptions && tok === "--") {
+      endOfOptions = true
+      continue
+    }
+    if (!endOfOptions && tok.length > 1 && tok.startsWith("-")) {
+      if (tok === "-t" || tok === "--target-directory" || tok.startsWith("--target-directory=")) {
+        hasTargetDirFlag = true
+      }
+      continue
+    }
+    operands.push(tok)
+  }
+  if (hasTargetDirFlag) return null
+
+  if (exe === "rm") {
+    return operands.length > 0 ? { op: "rm", paths: operands } : null
+  }
+  // mv needs at least one source + a destination.
+  if (operands.length < 2) return null
+  return { op: "mv", paths: operands.slice(0, -1), dest: operands[operands.length - 1] }
 }
 
 function parseApprovalPattern(pattern: string): string[] | null {

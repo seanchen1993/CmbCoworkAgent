@@ -81,6 +81,14 @@ import {
   resolveLiveStreamMessageEndAt,
   shouldSkipLiveStreamAccumulatorMessage
 } from "./live-stream-transcript"
+import {
+  getSubagentTranscriptsFromThreadValues,
+  mergeSubagentTranscripts,
+  serializeSubagentTranscripts,
+  SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY,
+  upsertTranscriptMessages
+} from "./subagent-transcripts"
+import { resolveIncomingSubagentStatus } from "./subagent-state"
 import { disableChatReportUploadForThread } from "./chat-report-upload-cache"
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
@@ -391,6 +399,22 @@ export interface ThreadGitContext {
   branch?: string | null
 }
 
+export interface ContextReminderState {
+  pending: boolean
+  shownCount: number
+  completedTurnCount: number
+  lastPromptCompletedTurnCount: number
+}
+
+function createDefaultContextReminderState(): ContextReminderState {
+  return {
+    pending: false,
+    shownCount: 0,
+    completedTurnCount: 0,
+    lastPromptCompletedTurnCount: 0
+  }
+}
+
 // Per-thread state (persisted/restored from checkpoints)
 export interface ThreadState {
   messages: Message[]
@@ -401,6 +425,13 @@ export interface ThreadState {
   workspacePath: string | null
   gitContext: ThreadGitContext | null
   subagents: Subagent[]
+  /**
+   * Per-subagentId live transcript buffer (Phase 2, A1'). Subagent-interior
+   * message-delta / tool-message scheduler events tagged with `subagentId` are
+   * appended here instead of into `messages`, so the `task` card can render the
+   * subagent's nested interior on demand without polluting the main thread.
+   */
+  subagentTranscripts: Record<string, Message[]>
   coordinatorWorkers: CoordinatorWorkerView[]
   subagentToolCallCount: number
   subagentInternalLogs: SubagentInternalLogEntry[]
@@ -417,7 +448,9 @@ export interface ThreadState {
   activeTab: "agent" | string
   fileContents: Record<string, string>
   tokenUsage: TokenUsage | null
+  contextReminder: ContextReminderState
   draftInput: string
+  harnessNextActionDialogTips: string | null
   /**
    * Skill chip the user has selected for the next send. Kept alongside
    * draftInput so the chip survives view switches (chat → customize → back),
@@ -500,7 +533,13 @@ export interface ThreadActions {
   closeFile: (path: string) => void
   setActiveTab: (tab: "agent" | string) => void
   setFileContents: (path: string, content: string) => void
+  setContextReminder: (
+    update:
+      | ContextReminderState
+      | ((prev: ContextReminderState) => ContextReminderState)
+  ) => void
   setDraftInput: (input: string) => void
+  setHarnessNextActionDialogTips: (tips: string | null) => void
   setDraftSkill: (skill: SkillMetadata | null) => void
 }
 
@@ -538,6 +577,7 @@ const createDefaultThreadState = (): ThreadState => ({
   workspacePath: null,
   gitContext: null,
   subagents: [],
+  subagentTranscripts: {},
   coordinatorWorkers: [],
   subagentToolCallCount: 0,
   subagentInternalLogs: [],
@@ -554,7 +594,9 @@ const createDefaultThreadState = (): ThreadState => ({
   activeTab: "agent",
   fileContents: {},
   tokenUsage: null,
+  contextReminder: createDefaultContextReminderState(),
   draftInput: "",
+  harnessNextActionDialogTips: null,
   draftSkill: null,
   scheduledTaskLoading: false,
   historyLoading: false,
@@ -723,6 +765,10 @@ function normalizeApprovalPayload(request: unknown): HITLRequest & Record<string
     command: req.command,
     reason: req.reason,
     operation: req.operation,
+    suggestedCommitMessage: req.suggestedCommitMessage,
+    suggestedCommitFilePaths: req.suggestedCommitFilePaths,
+    suggestedCommitFileBasePath: req.suggestedCommitFileBasePath,
+    suggestedCommitFileSelectionSource: req.suggestedCommitFileSelectionSource,
     filePath: req.filePath,
     code: req.code,
     params: req.params,
@@ -882,11 +928,16 @@ interface CustomEventData {
     startedAt?: Date
     completedAt?: Date
     subagentType?: string
+    currentTool?: string
+    lastActivityAt?: string
   }>
   workers?: CoordinatorWorkerView[]
   worker?: CoordinatorWorkerView
   workerThreadId?: string
   workerMessage?: Message
+  subagentId?: string
+  subagentMessage?: Message
+  subagentMessages?: Message[]
   notification?: string
   suppressNotificationAutoRun?: boolean
   mode?: "normal" | "coordinator" | "workflow"
@@ -1059,6 +1110,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const workflowProgressBufferRef = useRef<
     Map<string, { events: WorkflowProgressEventView[]; rafId: number | null }>
   >(new Map())
+  const subagentTranscriptsRef = useRef<Record<string, Record<string, Message[]>>>({})
 
   // Stream data store (not React state - we use subscriptions)
   const streamDataRef = useRef<Record<string, StreamData>>({})
@@ -1069,6 +1121,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const coordinatorNotificationRetryOnIdleRef = useRef<Record<string, boolean>>({})
   const coordinatorNotificationAutoRunSuppressedRef = useRef<Set<string>>(new Set())
   const coordinatorNotificationSuppressTimersRef = useRef<Record<string, number>>({})
+  const subagentTranscriptPersistTimersRef = useRef<Record<string, number>>({})
+  // subagentIds whose transcript changed since the last persist, per thread.
+  // Lets the debounced persist serialize only the subagents that actually
+  // changed instead of every subagent's full transcript each time.
+  const subagentTranscriptDirtyIdsRef = useRef<Record<string, Set<string>>>({})
   const environmentCoordinatorThreadIdsRef = useRef<Set<string>>(new Set())
   const allStreamSubscribersRef = useRef<Set<() => void>>(new Set())
   const liveStreamAccumulatorsRef = useRef<Record<string, LiveStreamAccumulator>>({})
@@ -1531,6 +1588,33 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     [accumulateLiveStreamMessages, flushLiveStreamAccumulator]
   )
 
+  const finalizeRunningSubagentsForStoppedStream = useCallback((threadId: string) => {
+    setThreadStates((prev) => {
+      const current = prev[threadId]
+      if (!current) return prev
+      const normalized = normalizeThreadState(current)
+      const hasRunningSubagent = normalized.subagents.some(
+        (subagent) => subagent.status === "running"
+      )
+      if (!hasRunningSubagent) return prev
+
+      const completedAt = new Date()
+      const next = {
+        ...prev,
+        [threadId]: {
+          ...normalized,
+          subagents: normalized.subagents.map((subagent) =>
+            subagent.status === "running"
+              ? { ...subagent, status: "cancelled" as const, completedAt }
+              : subagent
+          )
+        }
+      }
+      threadStatesRef.current = next
+      return next
+    })
+  }, [])
+
   // Handle stream updates from ThreadStreamHolder
   const handleStreamUpdate = useCallback(
     (threadId: string, data: StreamData, options: StreamUpdateOptions = {}) => {
@@ -1542,6 +1626,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           if (prev[threadId] === data.isLoading) return prev
           return { ...prev, [threadId]: data.isLoading }
         })
+        if (!data.isLoading) {
+          finalizeRunningSubagentsForStoppedStream(threadId)
+        }
         return
       }
 
@@ -1587,6 +1674,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // the main process when a retry succeeds. This fallback covers error paths and
       // any edge case where model_retry_clear was not sent.
       if (!data.isLoading) {
+        finalizeRunningSubagentsForStoppedStream(threadId)
         setThreadStates((prev) => {
           const cur = prev[threadId]
           if (!cur || !cur.modelRetry) return prev
@@ -1598,6 +1686,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     },
     [
       accumulateLiveStreamMessages,
+      finalizeRunningSubagentsForStoppedStream,
       flushLiveStreamAccumulator,
       getCurrentThreadMessageIds,
       getOrCreateLiveStreamAccumulator,
@@ -1702,6 +1791,70 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
     },
     []
+  )
+
+  const saveSubagentTranscripts = useCallback(
+    (threadId: string, transcripts: Record<string, Message[]>, changedIds?: Set<string>) => {
+      // Serialize only the subagents that changed since the last persist. The DB
+      // deep-merges thread values (see mergeThreadValueObjects), so unchanged
+      // subagents are preserved without re-serializing their full transcripts on
+      // every keystroke. When changedIds is absent, fall back to the full map.
+      const subset =
+        changedIds && changedIds.size > 0
+          ? Object.fromEntries(
+              Array.from(changedIds)
+                .filter((id) => transcripts[id] !== undefined)
+                .map((id) => [id, transcripts[id]])
+            )
+          : transcripts
+      if (Object.keys(subset).length === 0) return
+      window.api.threads
+        .mergeThreadValues(threadId, {
+          [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: serializeSubagentTranscripts(subset)
+        })
+        .catch((error) =>
+          console.warn("[ThreadContext] Failed to save subagent transcripts:", error)
+        )
+    },
+    []
+  )
+
+  const scheduleSubagentTranscriptsPersist = useCallback(
+    (threadId: string) => {
+      const existingTimer = subagentTranscriptPersistTimersRef.current[threadId]
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer)
+      }
+      subagentTranscriptPersistTimersRef.current[threadId] = window.setTimeout(() => {
+        delete subagentTranscriptPersistTimersRef.current[threadId]
+        const transcripts = subagentTranscriptsRef.current[threadId] ?? {}
+        const changedIds = subagentTranscriptDirtyIdsRef.current[threadId]
+        delete subagentTranscriptDirtyIdsRef.current[threadId]
+        saveSubagentTranscripts(threadId, transcripts, changedIds)
+      }, 600)
+    },
+    [saveSubagentTranscripts]
+  )
+
+  const appendSubagentTranscriptMessages = useCallback(
+    (threadId: string, subagentId: string, messages: Message[]) => {
+      if (!subagentId || messages.length === 0) return
+      const currentState = normalizeThreadState(
+        threadStatesRef.current[threadId] || createDefaultThreadState()
+      )
+      const currentTranscripts =
+        subagentTranscriptsRef.current[threadId] ?? currentState.subagentTranscripts
+      const nextTranscripts = mergeSubagentTranscripts(currentTranscripts, subagentId, messages)
+      subagentTranscriptsRef.current[threadId] = nextTranscripts
+      const dirtyIds = subagentTranscriptDirtyIdsRef.current[threadId] ?? new Set<string>()
+      dirtyIds.add(subagentId)
+      subagentTranscriptDirtyIdsRef.current[threadId] = dirtyIds
+      updateThreadState(threadId, () => ({
+        subagentTranscripts: nextTranscripts
+      }))
+      scheduleSubagentTranscriptsPersist(threadId)
+    },
+    [scheduleSubagentTranscriptsPersist, updateThreadState]
   )
 
   const scheduleCoordinatorNotificationTurn = useCallback((threadId: string) => {
@@ -2211,17 +2364,34 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           break
         case "subagents":
           if (Array.isArray(data.subagents)) {
-            updateThreadState(threadId, () => ({
-              subagents: data.subagents!.map((s) => ({
-                id: s.id || crypto.randomUUID(),
-                toolCallId: s.toolCallId,
-                name: s.name || "Subagent",
-                description: s.description || "",
-                status: (s.status || "pending") as "pending" | "running" | "completed" | "failed",
-                startedAt: s.startedAt,
-                completedAt: s.completedAt,
-                subagentType: s.subagentType
-              }))
+            const parentStreamData = streamDataRef.current[threadId]
+            const parentStreamHasStopped =
+              parentStreamData?.isLoading === false &&
+              threadStatesRef.current[threadId]?.scheduledTaskLoading !== true
+            const fallbackCompletedAt = parentStreamHasStopped ? new Date() : undefined
+            updateThreadState(threadId, (prev) => ({
+              subagents: data.subagents!.map((s) => {
+                const existing = prev.subagents.find((p) => p.id === s.id)
+                const effectiveStatus = resolveIncomingSubagentStatus({
+                  incomingStatus: s.status,
+                  existingStatus: existing?.status,
+                  parentStreamHasStopped
+                })
+                return {
+                  id: s.id || crypto.randomUUID(),
+                  toolCallId: s.toolCallId ?? existing?.toolCallId,
+                  name: s.name || existing?.name || "Subagent",
+                  description: s.description ?? existing?.description ?? "",
+                  status: effectiveStatus,
+                  startedAt: s.startedAt ?? existing?.startedAt,
+                  completedAt:
+                    s.completedAt ??
+                    (effectiveStatus === "cancelled" ? fallbackCompletedAt : existing?.completedAt),
+                  subagentType: s.subagentType ?? existing?.subagentType,
+                  currentTool: s.currentTool ?? existing?.currentTool,
+                  lastActivityAt: s.lastActivityAt ?? existing?.lastActivityAt
+                }
+              })
             }))
           }
           break
@@ -2270,6 +2440,17 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             }))
           }
           break
+        case "subagent_transcript_message": {
+          const subagentId = data.subagentId
+          const messages = [
+            ...(data.subagentMessages ?? []),
+            ...(data.subagentMessage ? [data.subagentMessage] : [])
+          ]
+          if (subagentId && messages.length > 0) {
+            appendSubagentTranscriptMessages(threadId, subagentId, messages)
+          }
+          break
+        }
         case "routing_result":
           if (data.resolvedModelId && data.resolvedTier) {
             updateThreadState(threadId, () => ({
@@ -2657,6 +2838,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       flushGoalSubturnComplete,
       getOrCreateLiveStreamAccumulator,
       notifyHookLogSubscribers,
+      appendSubagentTranscriptMessages,
       refreshGoalUi,
       scheduleCoordinatorNotificationTurn,
       updateThreadState
@@ -2869,8 +3051,24 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             fileContents: { ...state.fileContents, [path]: content }
           }))
         },
+        setContextReminder: (
+          update:
+            | ContextReminderState
+            | ((prev: ContextReminderState) => ContextReminderState)
+        ) => {
+          updateThreadState(threadId, (state) => ({
+            contextReminder:
+              typeof update === "function"
+                ? update(state.contextReminder ?? createDefaultContextReminderState())
+                : update
+          }))
+        },
         setDraftInput: (input: string) => {
           updateThreadState(threadId, () => ({ draftInput: input }))
+        },
+        setHarnessNextActionDialogTips: (tips: string | null) => {
+          const normalizedTips = tips?.trim() || null
+          updateThreadState(threadId, () => ({ harnessNextActionDialogTips: normalizedTips }))
         },
         setDraftSkill: (skill: SkillMetadata | null) => {
           updateThreadState(threadId, () => ({ draftSkill: skill }))
@@ -2890,6 +3088,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       let persistedInternalGoalMessageTimes: MessageTimeMap = {}
       let persistedInternalGoalMessageTimeOrder: MessageTimeEntry[] = []
       let persistedMessageTimeOrder: MessageTimeEntry[] = []
+      let persistedSubagentTranscripts: Record<string, Message[]> = {}
       let rawRestoredMessages: Message[] = []
       let restoredMessages: Message[] = []
       let restoredGoalEvents: GoalNoticeEvent[] = []
@@ -2907,6 +3106,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             thread.thread_values
           )
           persistedMessageTimeOrder = getMessageTimeOrder(thread.thread_values)
+          persistedSubagentTranscripts = getSubagentTranscriptsFromThreadValues(
+            thread.thread_values
+          )
           const metadata = thread.metadata || {}
           actions.setGitContext(getGitContextFromMetadata(metadata))
           if (metadata.workspacePath) {
@@ -3224,6 +3426,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           persistedMessageTimeOrder
         )
       )
+      if (Object.keys(persistedSubagentTranscripts).length > 0) {
+        updateThreadState(threadId, (prev) => {
+          const merged = { ...persistedSubagentTranscripts }
+          for (const [subagentId, messages] of Object.entries(prev.subagentTranscripts)) {
+            merged[subagentId] = upsertTranscriptMessages(merged[subagentId] ?? [], messages)
+          }
+          subagentTranscriptsRef.current[threadId] = merged
+          return { subagentTranscripts: merged }
+        })
+      }
       try {
         const goalUi = await window.api.threads.getGoalState(threadId, { includeEvents: false })
         const restoredEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
@@ -3301,19 +3513,30 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const schedulerStreamingRef = useRef<
     Record<string, { currentMsgId: string | null; accumulatedContent: string }>
   >({})
+  const clearSchedulerStreamingForThread = useCallback((threadId: string) => {
+    delete schedulerStreamingRef.current[threadId]
+    const subagentPrefix = `${threadId}:subagent:`
+    for (const key of Object.keys(schedulerStreamingRef.current)) {
+      if (key.startsWith(subagentPrefix)) {
+        delete schedulerStreamingRef.current[key]
+      }
+    }
+  }, [])
 
   // Process standardised events from scheduler (produced by StreamConverter)
   const processSchedulerEvent = useCallback(
     (threadId: string, event: { type: string; [key: string]: unknown }) => {
       // Lifecycle events
       if (event.type === "done") {
-        delete schedulerStreamingRef.current[threadId]
+        clearSchedulerStreamingForThread(threadId)
+        finalizeRunningSubagentsForStoppedStream(threadId)
         updateThreadState(threadId, () => ({ scheduledTaskLoading: false }))
         loadThreadHistory(threadId)
         return
       }
       if (event.type === "error") {
-        delete schedulerStreamingRef.current[threadId]
+        clearSchedulerStreamingForThread(threadId)
+        finalizeRunningSubagentsForStoppedStream(threadId)
         updateThreadState(threadId, () => ({
           scheduledTaskLoading: false,
           error: (event.error as string) || "Scheduled task failed"
@@ -3343,7 +3566,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
         // Full message list from a values snapshot
         case "full-messages": {
-          delete schedulerStreamingRef.current[threadId]
+          clearSchedulerStreamingForThread(threadId)
           const msgs = event.messages as Array<{
             id: string
             role: string
@@ -3412,7 +3635,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const id = event.id as string
           const content = event.content as string
           const toolCalls = event.toolCalls as Message["tool_calls"] | undefined
-          const tracker = (schedulerStreamingRef.current[threadId] ||= {
+          const subagentId =
+            typeof event.subagentId === "string" ? (event.subagentId as string) : undefined
+          const streamKey = subagentId ? `${threadId}:subagent:${subagentId}` : threadId
+          const tracker = (schedulerStreamingRef.current[streamKey] ||= {
             currentMsgId: null,
             accumulatedContent: ""
           })
@@ -3423,6 +3649,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             tracker.accumulatedContent += content
           }
           const finalContent = tracker.accumulatedContent
+          if (subagentId) {
+            const now = new Date()
+            appendSubagentTranscriptMessages(threadId, subagentId, [
+              {
+                id,
+                role: "assistant" as const,
+                content: finalContent,
+                ...(toolCalls?.length && { tool_calls: toolCalls }),
+                created_at: now
+              }
+            ])
+            break
+          }
           updateThreadState(threadId, (prev) => {
             const nextToolCallStates = (toolCalls || []).reduce<Record<string, ToolCallState>>(
               (acc, toolCall) =>
@@ -3472,7 +3711,23 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const toolCallId = event.toolCallId as string
           const name = event.name as string | undefined
           const isError = event.isError as boolean | undefined
+          const subagentId =
+            typeof event.subagentId === "string" ? (event.subagentId as string) : undefined
           const now = new Date()
+          if (subagentId) {
+            appendSubagentTranscriptMessages(threadId, subagentId, [
+              {
+                id,
+                role: "tool" as const,
+                content,
+                tool_call_id: toolCallId,
+                name,
+                is_error: isError,
+                created_at: now
+              }
+            ])
+            break
+          }
           updateThreadState(threadId, (prev) => {
             if (prev.messages.some((m) => m.id === id)) return {}
             return {
@@ -3498,7 +3753,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [updateThreadState, loadThreadHistory, handleCustomEvent]
+    [
+      updateThreadState,
+      loadThreadHistory,
+      handleCustomEvent,
+      clearSchedulerStreamingForThread,
+      finalizeRunningSubagentsForStoppedStream,
+      appendSubagentTranscriptMessages
+    ]
   )
 
   const initializeThread = useCallback(
@@ -3773,73 +4035,89 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     }
   }, [currentThreadId, updateThreadState])
 
-  const cleanupThread = useCallback((threadId: string) => {
-    void window.api.agent.unbindCoordinatorWorkers(threadId).catch((error: unknown) => {
-      console.warn("[ThreadProvider] Failed to unbind coordinator worker updates:", error)
-    })
-    schedulerListenerCleanups.current[threadId]?.()
-    delete schedulerListenerCleanups.current[threadId]
-    heartbeatListenerCleanups.current[threadId]?.()
-    delete heartbeatListenerCleanups.current[threadId]
-    coordinatorWorkerHookListenerCleanups.current[threadId]?.()
-    delete coordinatorWorkerHookListenerCleanups.current[threadId]
-    workflowEventsListenerCleanups.current[threadId]?.()
-    delete workflowEventsListenerCleanups.current[threadId]
-    const workflowNotificationTimer = workflowNotificationTimersRef.current[threadId]
-    if (workflowNotificationTimer !== undefined) {
-      window.clearTimeout(workflowNotificationTimer)
-      delete workflowNotificationTimersRef.current[threadId]
-    }
-    delete workflowNotificationAttemptsRef.current[threadId]
-    delete workflowNotificationRetryOnIdleRef.current[threadId]
-    // Cancel any queued workflow_progress RAF and drop the buffer entry. Without
-    // this, a frame still queued when the thread is deleted fires flush →
-    // updateThreadState(threadId, …), which resurrects the deleted thread
-    // (prev[threadId] || createDefaultThreadState()) as a ghost entry. (#2)
-    const workflowProgressBuf = workflowProgressBufferRef.current.get(threadId)
-    if (workflowProgressBuf?.rafId != null) cancelAnimationFrame(workflowProgressBuf.rafId)
-    workflowProgressBufferRef.current.delete(threadId)
-    approvalListenerCleanups.current[threadId]?.forEach((c) => c())
-    delete approvalListenerCleanups.current[threadId]
-    userInputListenerCleanups.current[threadId]?.forEach((c) => c())
-    delete userInputListenerCleanups.current[threadId]
-    delete schedulerStreamingRef.current[threadId]
-    const coordinatorNotificationTimer = coordinatorNotificationTimersRef.current[threadId]
-    if (coordinatorNotificationTimer !== undefined) {
-      window.clearTimeout(coordinatorNotificationTimer)
-    }
-    delete coordinatorNotificationTimersRef.current[threadId]
-    delete coordinatorNotificationAttemptsRef.current[threadId]
-    delete coordinatorNotificationRetryOnIdleRef.current[threadId]
-    coordinatorNotificationAutoRunSuppressedRef.current.delete(threadId)
-    const coordinatorNotificationSuppressTimer =
-      coordinatorNotificationSuppressTimersRef.current[threadId]
-    if (coordinatorNotificationSuppressTimer !== undefined) {
-      window.clearTimeout(coordinatorNotificationSuppressTimer)
-    }
-    delete coordinatorNotificationSuppressTimersRef.current[threadId]
+  const cleanupThread = useCallback(
+    (threadId: string) => {
+      void window.api.agent.unbindCoordinatorWorkers(threadId).catch((error: unknown) => {
+        console.warn("[ThreadProvider] Failed to unbind coordinator worker updates:", error)
+      })
+      schedulerListenerCleanups.current[threadId]?.()
+      delete schedulerListenerCleanups.current[threadId]
+      heartbeatListenerCleanups.current[threadId]?.()
+      delete heartbeatListenerCleanups.current[threadId]
+      coordinatorWorkerHookListenerCleanups.current[threadId]?.()
+      delete coordinatorWorkerHookListenerCleanups.current[threadId]
+      workflowEventsListenerCleanups.current[threadId]?.()
+      delete workflowEventsListenerCleanups.current[threadId]
+      const workflowNotificationTimer = workflowNotificationTimersRef.current[threadId]
+      if (workflowNotificationTimer !== undefined) {
+        window.clearTimeout(workflowNotificationTimer)
+        delete workflowNotificationTimersRef.current[threadId]
+      }
+      delete workflowNotificationAttemptsRef.current[threadId]
+      delete workflowNotificationRetryOnIdleRef.current[threadId]
+      // Cancel any queued workflow_progress RAF and drop the buffer entry. Without
+      // this, a frame still queued when the thread is deleted fires flush →
+      // updateThreadState(threadId, ...), which resurrects the deleted thread
+      // (prev[threadId] || createDefaultThreadState()) as a ghost entry. (#2)
+      const workflowProgressBuf = workflowProgressBufferRef.current.get(threadId)
+      if (workflowProgressBuf?.rafId != null) cancelAnimationFrame(workflowProgressBuf.rafId)
+      workflowProgressBufferRef.current.delete(threadId)
+      approvalListenerCleanups.current[threadId]?.forEach((c) => c())
+      delete approvalListenerCleanups.current[threadId]
+      userInputListenerCleanups.current[threadId]?.forEach((c) => c())
+      delete userInputListenerCleanups.current[threadId]
+      clearSchedulerStreamingForThread(threadId)
+      const subagentTranscriptPersistTimer = subagentTranscriptPersistTimersRef.current[threadId]
+      if (subagentTranscriptPersistTimer !== undefined) {
+        window.clearTimeout(subagentTranscriptPersistTimer)
+        delete subagentTranscriptPersistTimersRef.current[threadId]
+        const transcripts =
+          subagentTranscriptsRef.current[threadId] ??
+          threadStatesRef.current[threadId]?.subagentTranscripts
+        if (transcripts && Object.keys(transcripts).length > 0) {
+          saveSubagentTranscripts(threadId, transcripts, subagentTranscriptDirtyIdsRef.current[threadId])
+        }
+      }
+      delete subagentTranscriptDirtyIdsRef.current[threadId]
+      const coordinatorNotificationTimer = coordinatorNotificationTimersRef.current[threadId]
+      if (coordinatorNotificationTimer !== undefined) {
+        window.clearTimeout(coordinatorNotificationTimer)
+      }
+      delete coordinatorNotificationTimersRef.current[threadId]
+      delete coordinatorNotificationAttemptsRef.current[threadId]
+      delete coordinatorNotificationRetryOnIdleRef.current[threadId]
+      coordinatorNotificationAutoRunSuppressedRef.current.delete(threadId)
+      const coordinatorNotificationSuppressTimer =
+        coordinatorNotificationSuppressTimersRef.current[threadId]
+      if (coordinatorNotificationSuppressTimer !== undefined) {
+        window.clearTimeout(coordinatorNotificationSuppressTimer)
+      }
+      delete coordinatorNotificationSuppressTimersRef.current[threadId]
 
-    initializedThreadsRef.current.delete(threadId)
-    delete actionsCache.current[threadId]
-    delete streamDataRef.current[threadId]
-    delete streamSubscribersRef.current[threadId]
-    delete hookLogBucketsRef.current[threadId]
-    delete liveStreamAccumulatorsRef.current[threadId]
-    delete checkpointFallbackIndexBaselinesRef.current[threadId]
-    disableChatReportUploadForThread(threadId)
-    delete hookLogsSubscribersRef.current[threadId]
-    setActiveThreadIds((prev) => {
-      const next = new Set(prev)
-      next.delete(threadId)
-      return next
-    })
-    setThreadStates((prev) => {
-      const { [threadId]: _removed, ...rest } = prev
-      void _removed // Explicitly mark as intentionally unused
-      threadStatesRef.current = rest
-      return rest
-    })
-  }, [])
+      initializedThreadsRef.current.delete(threadId)
+      delete actionsCache.current[threadId]
+      delete streamDataRef.current[threadId]
+      delete streamSubscribersRef.current[threadId]
+      delete hookLogBucketsRef.current[threadId]
+      delete liveStreamAccumulatorsRef.current[threadId]
+      delete checkpointFallbackIndexBaselinesRef.current[threadId]
+      delete subagentTranscriptsRef.current[threadId]
+      disableChatReportUploadForThread(threadId)
+      delete hookLogsSubscribersRef.current[threadId]
+      setActiveThreadIds((prev) => {
+        const next = new Set(prev)
+        next.delete(threadId)
+        return next
+      })
+      setThreadStates((prev) => {
+        const { [threadId]: _removed, ...rest } = prev
+        void _removed // Explicitly mark as intentionally unused
+        threadStatesRef.current = rest
+        return rest
+      })
+    },
+    [clearSchedulerStreamingForThread, saveSubagentTranscripts]
+  )
 
   const contextValue = useMemo<ThreadContextValue>(
     () => ({

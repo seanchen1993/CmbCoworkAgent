@@ -14,6 +14,7 @@ import { ThreadSidebar } from "@/components/sidebar/ThreadSidebar"
 import { TabbedPanel } from "@/components/tabs"
 import { RightPanel } from "@/components/panels/RightPanel"
 import { WorkerStreamPanel } from "@/components/chat/WorkerStreamPanel"
+import { SubagentStreamPanel } from "@/components/chat/SubagentStreamPanel"
 const KanbanView = lazy(() =>
   import("@/components/kanban").then((m) => ({ default: m.KanbanView }))
 )
@@ -43,9 +44,13 @@ import {
   getCloudEvolutionPromptSignature,
   hasUnreadCloudEvolutionUpdates,
   markCloudEvolutionUpdatesSeen,
+  markReviewCandidatesNotified,
   pendingCloudEvolutionUpdates,
-  setCloudEvolutionPromptSignature
+  reviewableCandidates,
+  setCloudEvolutionPromptSignature,
+  unnotifiedReviewCandidates
 } from "@/lib/evolution-notices"
+import { useMyUploadedSkills } from "@/lib/use-my-uploaded-skills"
 interface UserInfoConfig {
   sapId: string
   ystId: string
@@ -117,7 +122,7 @@ function WorkerSplitHandle({ onDrag }: WorkerSplitHandleProps): React.JSX.Elemen
     <div
       role="separator"
       aria-orientation="vertical"
-      title="拖动调整主对话和 Worker 工具流宽度"
+      title="拖动调整主对话和代理记录宽度"
       onMouseDown={handleMouseDown}
       className="group relative z-20 flex h-full w-5 shrink-0 cursor-col-resize select-none items-center justify-center border-x border-stone-300/70 bg-stone-100/55 shadow-[0_0_18px_rgba(120,113,108,0.12)] backdrop-blur transition-colors hover:border-stone-400/80 hover:bg-stone-200/45 dark:border-stone-700/70 dark:bg-stone-900/35 dark:hover:border-stone-500/80 dark:hover:bg-stone-800/45"
     >
@@ -143,6 +148,7 @@ function App(): React.JSX.Element {
     toggleRightPanel,
     setPendingEvolution,
     workerFocusView,
+    subagentFocusView,
     setShowCustomizeView,
     setEvolutionTab,
     setCloudEvolutionUpdates
@@ -160,11 +166,13 @@ function App(): React.JSX.Element {
       toggleRightPanel: state.toggleRightPanel,
       setPendingEvolution: state.setPendingEvolution,
       workerFocusView: state.workerFocusView,
+      subagentFocusView: state.subagentFocusView,
       setShowCustomizeView: state.setShowCustomizeView,
       setEvolutionTab: state.setEvolutionTab,
       setCloudEvolutionUpdates: state.setCloudEvolutionUpdates
     }))
   )
+  const { ownedSkillKeys } = useMyUploadedSkills()
   const [isLoading, setIsLoading] = useState(true)
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT)
   const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT)
@@ -194,6 +202,15 @@ function App(): React.JSX.Element {
     mainView === "harness" &&
     Boolean(harnessSessionThreadId && workerFocusView?.threadId === harnessSessionThreadId)
   const isWorkerFocusActive = isThreadWorkerFocusActive || isHarnessWorkerFocusActive
+  const isThreadSubagentFocusActive =
+    mainView === "thread" &&
+    Boolean(currentThreadId && subagentFocusView?.threadId === currentThreadId)
+  const isHarnessSubagentFocusActive =
+    mainView === "harness" &&
+    Boolean(harnessSessionThreadId && subagentFocusView?.threadId === harnessSessionThreadId)
+  const isSubagentFocusActive = isThreadSubagentFocusActive || isHarnessSubagentFocusActive
+  const isAgentFocusActive = isWorkerFocusActive || isSubagentFocusActive
+  const isHarnessAgentFocusActive = isHarnessWorkerFocusActive || isHarnessSubagentFocusActive
 
   useEffect(() => {
     if (!workerFocusView?.threadId || !workerFocusView.workerThreadId) return
@@ -483,6 +500,13 @@ function App(): React.JSX.Element {
   }, [harnessSessionThreadId, mainView, workerFocusView?.threadId])
 
   useEffect(() => {
+    if (mainView !== "harness" || !subagentFocusView?.threadId) return
+    if (!harnessSessionThreadId || subagentFocusView.threadId !== harnessSessionThreadId) {
+      useAppStore.getState().closeSubagentFocusView()
+    }
+  }, [harnessSessionThreadId, mainView, subagentFocusView?.threadId])
+
+  useEffect(() => {
     if (mainView === "claudecode") {
       setClaudeCodeMounted(true)
     }
@@ -577,6 +601,55 @@ function App(): React.JSX.Element {
     }
   }, [setCloudEvolutionUpdates, setEvolutionTab, setPendingEvolution, setShowCustomizeView])
 
+  // 「待审批发布」提醒：本分支把进化审批权限放开给个人后，技能创建者需要被
+  // 提醒自己上传的技能跑出了优化候选、正等待其审批发布。仅面向个人，管理员不在此提醒范围内。
+  useEffect(() => {
+    let cancelled = false
+
+    const checkPendingReviewCandidates = async (): Promise<void> => {
+      try {
+        // 个人只有上传过技能才可能拥有可审批候选；无技能时直接跳过拉取。
+        if (ownedSkillKeys.size === 0) return
+
+        const awaiting = await evolutionApi.listCandidates("awaiting_review", 50)
+        if (cancelled) return
+
+        const reviewable = reviewableCandidates(awaiting, ownedSkillKeys)
+        // 只对「从未通知过」的新候选提醒，保证每条候选只发一次。
+        const fresh = unnotifiedReviewCandidates(reviewable)
+        if (fresh.length === 0) return
+        markReviewCandidatesNotified(fresh)
+
+        setPendingEvolution(true)
+
+        const first = fresh[0]
+        const message =
+          fresh.length === 1
+            ? `「${first.skill_name}」有 Skill 优化候选待审批发布`
+            : `有 ${fresh.length} 个 Skill 优化候选待审批发布`
+        toast.info(message, {
+          duration: 8000,
+          action: {
+            label: "去审批",
+            onClick: () => {
+              setEvolutionTab("review")
+              setShowCustomizeView(true, "evolution")
+            }
+          }
+        })
+      } catch (error) {
+        console.warn("[SkillReviewPrompt] failed to check pending review candidates:", error)
+      }
+    }
+
+    void checkPendingReviewCandidates()
+    const timer = window.setInterval(() => void checkPendingReviewCandidates(), 30 * 60 * 1000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [ownedSkillKeys, setEvolutionTab, setPendingEvolution, setShowCustomizeView])
+
   // Listen for skill-evolution threshold events — set badge on Evolution tab
   useEffect(() => {
     return window.api.optimizer.onAutoTriggered(() => {
@@ -639,7 +712,7 @@ function App(): React.JSX.Element {
             className="flex flex-1 h-9 min-w-0 items-center"
             style={{ marginLeft: "var(--titlebar-inset-left, 0px)" }}
           >
-            {mainView !== "customize" && !isWorkerFocusActive && (
+            {mainView !== "customize" && !isAgentFocusActive && (
               <button
                 type="button"
                 className={`${panelToggleBaseClass} ${
@@ -705,7 +778,7 @@ function App(): React.JSX.Element {
           <div
             className="flex flex-1 h-full items-center justify-end pl-1 gap-1"
           >
-            {showRightPanelModuleControls && !isWorkerFocusActive && (
+            {showRightPanelModuleControls && !isAgentFocusActive && (
               <>
                 <button
                   type="button"
@@ -756,7 +829,7 @@ function App(): React.JSX.Element {
                 </button>
               </>
             )}
-            {mainView !== "customize" && !isWorkerFocusActive && (
+            {mainView !== "customize" && !isAgentFocusActive && (
               <button
                 type="button"
                 className={`${panelToggleBaseClass} ${
@@ -799,7 +872,7 @@ function App(): React.JSX.Element {
         ) : mainView !== "claudecode" && mainView !== "dashboard" && mainView !== "harness" ? (
           <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
             {/* Left Sidebar */}
-            {!sidebarCollapsed && !isWorkerFocusActive && (
+            {!sidebarCollapsed && !isAgentFocusActive && (
               <>
                 <div style={{ width: leftWidth }} className="shrink-0">
                   <ThreadSidebar />
@@ -817,7 +890,7 @@ function App(): React.JSX.Element {
             ) : (
               <>
                 {/* Center - Content Panel */}
-                {isWorkerFocusActive ? (
+                {isAgentFocusActive ? (
                   <main
                     ref={workerSplitRef}
                     className="relative flex flex-1 min-w-0 overflow-hidden bg-grid-subtle"
@@ -842,7 +915,7 @@ function App(): React.JSX.Element {
                     </section>
                     <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
                     <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                      <WorkerStreamPanel />
+                      {isWorkerFocusActive ? <WorkerStreamPanel /> : <SubagentStreamPanel />}
                     </section>
                   </main>
                 ) : !previewFullscreen && (
@@ -865,7 +938,7 @@ function App(): React.JSX.Element {
               </>
             )}
 
-            {mainView === "thread" && !rightPanelCollapsed && !isWorkerFocusActive && (
+            {mainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && (
               <>
                 {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
                 {/* Right Panel - floating style */}
@@ -907,10 +980,10 @@ function App(): React.JSX.Element {
         {/* Harness Board 面板 */}
         {mainView === "harness" && (
           <div
-            ref={isHarnessWorkerFocusActive ? workerSplitRef : undefined}
+            ref={isHarnessAgentFocusActive ? workerSplitRef : undefined}
             className="relative flex flex-1 overflow-hidden bg-grid-subtle"
           >
-            {!sidebarCollapsed && !isHarnessWorkerFocusActive && (
+            {!sidebarCollapsed && !isHarnessAgentFocusActive && (
               <>
                 <div style={{ width: leftWidth }} className="shrink-0">
                   <ThreadSidebar />
@@ -920,11 +993,11 @@ function App(): React.JSX.Element {
             )}
             <main
               key="harness-main"
-              style={isHarnessWorkerFocusActive ? { width: `${workerSplitLeftPercent}%` } : undefined}
+              style={isHarnessAgentFocusActive ? { width: `${workerSplitLeftPercent}%` } : undefined}
               className={
-                previewFullscreen && harnessSessionThreadId && !rightPanelCollapsed && !isHarnessWorkerFocusActive
+                previewFullscreen && harnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive
                   ? "hidden"
-                  : isHarnessWorkerFocusActive
+                  : isHarnessAgentFocusActive
                     ? "relative flex min-w-0 flex-col overflow-hidden"
                     : "relative flex flex-1 flex-col min-w-0 overflow-hidden"
               }
@@ -938,15 +1011,15 @@ function App(): React.JSX.Element {
                 />
               </Suspense>
             </main>
-            {isHarnessWorkerFocusActive && (
+            {isHarnessAgentFocusActive && (
               <>
                 <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
                 <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                  <WorkerStreamPanel />
+                  {isHarnessWorkerFocusActive ? <WorkerStreamPanel /> : <SubagentStreamPanel />}
                 </section>
               </>
             )}
-            {harnessSessionThreadId && !rightPanelCollapsed && !isHarnessWorkerFocusActive && (
+            {harnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive && (
               <>
                 {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
                 <div

@@ -56,7 +56,8 @@ export function KanbanView(): React.JSX.Element {
 
     for (const thread of chatThreads) {
       const threadState = allThreadStates[thread.thread_id]
-      const isLoading = (loadingStates[thread.thread_id] ?? false) || Boolean(threadState?.scheduledTaskLoading)
+      const isLoading =
+        (loadingStates[thread.thread_id] ?? false) || Boolean(threadState?.scheduledTaskLoading)
       const hasDraft = Boolean(threadState?.draftInput?.trim())
       const hasPendingApproval = Boolean(threadState?.pendingApproval)
       const status = getThreadKanbanStatus(thread, isLoading, hasDraft, hasPendingApproval)
@@ -97,6 +98,9 @@ export function KanbanView(): React.JSX.Element {
             status = "done"
             break
           case "failed":
+            status = "done"
+            break
+          case "cancelled":
             status = "done"
             break
           default:

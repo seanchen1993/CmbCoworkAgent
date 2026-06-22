@@ -101,7 +101,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     switcher,
-    "适合日常问答、明确小改动、快速排查与验证",
+    "适合日常问答、明确小改动、快速排查与独立子任务",
     "AgentModeSwitcher explains normal mode"
   )
   assertIncludes(

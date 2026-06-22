@@ -880,6 +880,7 @@ export interface UserInfoConfig {
   originOrgId?: string
   orgName?: string
   pathName?: string
+  upperOrgLv1?: string
   originPathId?: string
   ystRefreshToken?: string
   ystIdToken?: string

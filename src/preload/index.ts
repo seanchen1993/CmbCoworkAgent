@@ -47,6 +47,10 @@ import type {
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
 import type {
+  HarnessEnterpriseProjectDetailInput,
+  HarnessEnterpriseProjectDetailResult,
+  HarnessEnterpriseProjectSearchInput,
+  HarnessEnterpriseProjectSearchResult,
   HarnessProjectCreateInput,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
@@ -55,7 +59,10 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessSkipNodeInput,
+  HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
+  HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent
 } from "../shared/harness-board-types"
 import type {
@@ -837,7 +844,16 @@ const api = {
       isWorktree: boolean
       isGitRepo?: boolean
       taskId: string
-      files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      files: Array<{
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+        diff: string
+        diffLoaded?: boolean
+        additions: number
+        deletions: number
+      }>
+      changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
       totals: { additions: number; deletions: number; fileCount: number }
@@ -854,7 +870,16 @@ const api = {
         isWorktree: boolean
         isGitRepo?: boolean
         taskId: string
-        files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+        files: Array<{
+          path: string
+          previousPath?: string
+          status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+          diff: string
+          diffLoaded?: boolean
+          additions: number
+          deletions: number
+        }>
+        changedFiles?: string[]
         changedFilesTotal?: number
         omittedFileCount?: number
         totals: { additions: number; deletions: number; fileCount: number }
@@ -897,13 +922,27 @@ const api = {
       }>
     },
     getGitPanelDiffs: (
-      threadId: string
+      threadId: string,
+      options?: {
+        includeDiffs?: boolean
+        includeChangedFiles?: boolean
+        statusUntrackedMode?: "all" | "normal" | "no"
+      }
     ): Promise<{
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
       taskId: string
-      files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      files: Array<{
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+        diff: string
+        diffLoaded?: boolean
+        additions: number
+        deletions: number
+      }>
+      changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
       totals: { additions: number; deletions: number; fileCount: number }
@@ -911,17 +950,95 @@ const api = {
       suggestedCommitMessage?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:getGitPanelDiffs", { threadId }) as Promise<{
+      return ipcRenderer.invoke("workspace:getGitPanelDiffs", { threadId, options }) as Promise<{
         success: boolean
         isWorktree: boolean
         isGitRepo?: boolean
         taskId: string
-        files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+        files: Array<{
+          path: string
+          previousPath?: string
+          status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+          diff: string
+          diffLoaded?: boolean
+          additions: number
+          deletions: number
+        }>
+        changedFiles?: string[]
         changedFilesTotal?: number
         omittedFileCount?: number
         totals: { additions: number; deletions: number; fileCount: number }
         hasPendingDiff: boolean
         suggestedCommitMessage?: string
+        error?: string
+      }>
+    },
+    getGitPanelFileDiff: (
+      threadId: string,
+      filePath: string
+    ): Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      file?: {
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+        diff: string
+        diffLoaded?: boolean
+        additions: number
+        deletions: number
+      }
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:getGitPanelFileDiff", { threadId, filePath }) as Promise<{
+        success: boolean
+        isWorktree: boolean
+        isGitRepo?: boolean
+        taskId: string
+        file?: {
+          path: string
+          previousPath?: string
+          status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+          diff: string
+          diffLoaded?: boolean
+          additions: number
+          deletions: number
+        }
+        error?: string
+      }>
+    },
+    getGitChangedFilesSummary: (
+      threadId: string
+    ): Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      files: Array<{
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+      }>
+      changedFilesTotal: number
+      omittedFileCount: number
+      hasPendingDiff: boolean
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:getGitChangedFilesSummary", { threadId }) as Promise<{
+        success: boolean
+        isWorktree: boolean
+        isGitRepo?: boolean
+        taskId: string
+        files: Array<{
+          path: string
+          previousPath?: string
+          status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+        }>
+        changedFilesTotal: number
+        omittedFileCount: number
+        hasPendingDiff: boolean
         error?: string
       }>
     },
@@ -1842,10 +1959,12 @@ const api = {
     // Approval decision from renderer → main
     sendApprovalDecision: (decision: {
       requestId: string
-      type: string
+      type: "approve" | "approve_session" | "approve_permanent" | "reject" | "error"
       tool_call_id: string
       savedToolName?: string
       savedToolDescription?: string
+      commitResult?: { success: boolean; commitMessage?: string; error?: string }
+      pushResult?: { success: boolean; error?: string }
     }): void => {
       ipcRenderer.send("sandbox:approvalDecision", decision)
     },
@@ -2374,6 +2493,35 @@ const api = {
     isAllowed: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAllowed"),
     isProjectModeAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isProjectModeAllowed"),
+    isAnalysisAgentAllowed: (): Promise<boolean> =>
+      ipcRenderer.invoke("dashboard:isAnalysisAgentAllowed"),
+    isUncommittedAnalysisAllowed: (): Promise<boolean> =>
+      ipcRenderer.invoke("dashboard:isUncommittedAnalysisAllowed"),
+    esQuery: (input: {
+      indexAlias: "event" | "trace"
+      operation: "search" | "msearch" | "count" | "mapping" | "field_caps"
+      body?: unknown
+      context?: {
+        scope?: "platform" | "project"
+        upperOrgLv1?: string | string[] | null
+        projectId?: string | null
+        featureSlug?: string | null
+      }
+    }): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:esQuery", input),
+    analysisAgent: (input: {
+      question: string
+      messages?: Array<{ role: "user" | "assistant"; content: string }>
+      context?: {
+        scope?: "platform" | "project"
+        range?: { from: string; to: string }
+        upperOrgLv1?: string | string[] | null
+        projectId?: string | null
+        featureSlug?: string | null
+        panelSnapshot?: Record<string, unknown> | null
+      }
+    }): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:analysisAgent", input),
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -2410,6 +2558,39 @@ const api = {
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeTraces", projectId, range, options),
+    projectModeFeatureCommits: (
+      projectId: string,
+      featureSlug: string,
+      range: { from: string; to: string },
+      options?: {
+        page?: number
+        pageSize?: number
+        pushedOnly?: boolean
+        upperOrgLv1?: string | null
+        userKeyword?: string | null
+        orgLv1List?: string[]
+      }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke(
+        "dashboard:projectModeFeatureCommits",
+        projectId,
+        featureSlug,
+        range,
+        options
+      ),
+    projectModeProjectCommits: (
+      projectId: string,
+      range: { from: string; to: string },
+      options?: {
+        page?: number
+        pageSize?: number
+        pushedOnly?: boolean
+        upperOrgLv1?: string | null
+        userKeyword?: string | null
+        orgLv1List?: string[]
+      }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeProjectCommits", projectId, range, options),
     overview: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -2457,6 +2638,31 @@ const api = {
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userDetail", sapId, range, options),
+    uncommittedRanking: (
+      range: { from: string; to: string },
+      options?: {
+        upperOrgLv1?: string | string[] | null
+        projectMode?: boolean
+        projectId?: string | null
+        featureSlug?: string | null
+        usedSkillsOnly?: boolean
+        userKeyword?: string | null
+      }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:uncommittedRanking", range, options),
+    uncommittedDetail: (
+      sapId: string,
+      range: { from: string; to: string },
+      options?: {
+        upperOrgLv1?: string | string[] | null
+        projectMode?: boolean
+        projectId?: string | null
+        featureSlug?: string | null
+        usedSkillsOnly?: boolean
+        userKeyword?: string | null
+      }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:uncommittedDetail", sapId, range, options),
     skillUsageSummary: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -2517,9 +2723,10 @@ const api = {
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit, mode, triggerScope),
     threadTraces: (
-      threadId: string
+      threadId: string,
+      options?: { scope?: "platform" | "project" }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:threadTraces", threadId),
+      ipcRenderer.invoke("dashboard:threadTraces", threadId, options),
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
@@ -2557,10 +2764,15 @@ const api = {
         pageSize?: number
         pushedOnly?: boolean
         upperOrgLv1?: string | null
+        userKeyword?: string | null
         orgLv1List?: string[]
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:commitDetails", range, options),
+    commitAdoptionEvents: (
+      commitSha: string
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:commitAdoptionEvents", commitSha),
     exportSkillTraces: (payload: {
       skill: string
       range: { from: string; to: string }
@@ -2576,6 +2788,13 @@ const api = {
     ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportExcel", sheets, options)
   },
+  adoption: {
+    commitLines: (
+      commitSha: string,
+      genEventIds: string[]
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("adoption:commitLines", commitSha, genEventIds)
+  },
   harnessBoard: {
     registry: (): Promise<HarnessAdapterRegistryItem[]> =>
       ipcRenderer.invoke("harnessBoard:registry") as Promise<HarnessAdapterRegistryItem[]>,
@@ -2583,11 +2802,30 @@ const api = {
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
     createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>
       ipcRenderer.invoke("harnessBoard:createProject", input) as Promise<HarnessProjectMetadata>,
+    searchEnterpriseProjects: (
+      input: HarnessEnterpriseProjectSearchInput
+    ): Promise<HarnessEnterpriseProjectSearchResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:searchEnterpriseProjects",
+        input
+      ) as Promise<HarnessEnterpriseProjectSearchResult>,
+    getEnterpriseProjectDetails: (
+      input: HarnessEnterpriseProjectDetailInput
+    ): Promise<HarnessEnterpriseProjectDetailResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:getEnterpriseProjectDetails",
+        input
+      ) as Promise<HarnessEnterpriseProjectDetailResult>,
     createFeature: (input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> =>
       ipcRenderer.invoke(
         "harnessBoard:createFeature",
         input
       ) as Promise<HarnessFeatureCreateResult>,
+    getDynamicWorkflowConfig: (projectId: string): Promise<HarnessDynamicWorkflowConfig | null> =>
+      ipcRenderer.invoke(
+        "harnessBoard:getDynamicWorkflowConfig",
+        projectId
+      ) as Promise<HarnessDynamicWorkflowConfig | null>,
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput
@@ -2599,6 +2837,11 @@ const api = {
     archiveProject: (projectId: string): Promise<HarnessProjectMetadata> =>
       ipcRenderer.invoke(
         "harnessBoard:archiveProject",
+        projectId
+      ) as Promise<HarnessProjectMetadata>,
+    deleteProject: (projectId: string): Promise<HarnessProjectMetadata> =>
+      ipcRenderer.invoke(
+        "harnessBoard:deleteProject",
         projectId
       ) as Promise<HarnessProjectMetadata>,
     getProjectDetail: (projectId: string): Promise<HarnessProjectDetailViewModel> =>
@@ -2619,6 +2862,8 @@ const api = {
         projectId,
         slug
       }) as Promise<HarnessRunDetailViewModel>,
+    skipNode: (input: HarnessSkipNodeInput): Promise<HarnessSkipNodeResult> =>
+      ipcRenderer.invoke("harnessBoard:skipNode", input) as Promise<HarnessSkipNodeResult>,
     getDialogTips: (projectId: string, slug: string): Promise<string | null> =>
       ipcRenderer.invoke("harnessBoard:getDialogTips", { projectId, slug }) as Promise<
         string | null
@@ -2760,11 +3005,17 @@ const api = {
   git: {
     currentBranch: (
       cwd?: string
-    ): Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }> =>
+    ): Promise<{
+      isGitRepo: boolean
+      branch: string | null
+      isWorktree: boolean
+      error?: string
+    }> =>
       ipcRenderer.invoke("git:currentBranch", cwd) as Promise<{
         isGitRepo: boolean
         branch: string | null
         isWorktree: boolean
+        error?: string
       }>,
     listBranches: (
       cwd?: string,

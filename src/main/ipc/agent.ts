@@ -368,15 +368,17 @@ interface HarnessAgentContext {
   pluginWorkspace?: string
   featureId?: string
   projectCode?: string
+  projectDir?: string
 }
 
 function getHarnessHookContext(
   context: HarnessAgentContext
-): Pick<HookContext, "pluginWorkspace" | "featureId" | "projectCode"> {
+): Pick<HookContext, "pluginWorkspace" | "featureId" | "projectCode" | "projectDir"> {
   return {
     pluginWorkspace: context.pluginWorkspace,
     featureId: context.featureId,
-    projectCode: context.projectCode
+    projectCode: context.projectCode,
+    projectDir: context.projectDir
   }
 }
 
@@ -394,7 +396,8 @@ function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgent
       pluginName: featureContext.pluginName,
       pluginWorkspace: featureContext.pluginWorkspace,
       featureId: featureContext.featureId,
-      projectCode: featureContext.projectCode
+      projectCode: featureContext.projectCode,
+      projectDir: featureContext.projectDir
     }
   } catch (error) {
     console.warn("[HarnessBoard] Failed to build harness agent context:", error)
@@ -920,6 +923,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   pluginWorkspace?: string
   featureId?: string
   projectCode?: string
+  projectDir?: string
   threadId: string
   turnId?: string
   hookScope: HookScopeController
@@ -952,6 +956,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     pluginWorkspace: params.pluginWorkspace,
     featureId: params.featureId,
     projectCode: params.projectCode,
+    projectDir: params.projectDir,
     sessionId: params.threadId,
     turnId: params.turnId,
     subagent: {
@@ -1138,6 +1143,7 @@ async function activateExplicitSkillFromMessage({
   pluginWorkspace,
   featureId,
   projectCode,
+  projectDir,
   sessionId,
   turnId,
   hookScope,
@@ -1153,6 +1159,7 @@ async function activateExplicitSkillFromMessage({
   pluginWorkspace?: string
   featureId?: string
   projectCode?: string
+  projectDir?: string
   sessionId: string
   turnId?: string
   hookScope: HookScopeController
@@ -1203,6 +1210,7 @@ async function activateExplicitSkillFromMessage({
     pluginWorkspace,
     featureId,
     projectCode,
+    projectDir,
     sessionId,
     turnId,
     hookScope,
