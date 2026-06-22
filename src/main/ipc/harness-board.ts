@@ -107,14 +107,21 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       _event,
       payload: { projectId: string; input: HarnessProjectMetadataUpdateInput }
     ): Promise<HarnessProjectMetadata> => {
-      return updateHarnessProjectMetadata(payload.projectId, payload.input)
+      const updated = updateHarnessProjectMetadata(payload.projectId, payload.input)
+      // 编辑元数据（如 projectFromLean 切换）后立即补一次快照上报，否则改动要等下一轮
+      // 20 分钟定时扫描才刷到运营面板。尽力而为：内部已 try/catch，不抛错、不阻断返回。
+      void reportProjectSnapshotNow(payload.projectId)
+      return updated
     }
   )
 
   ipcMain.handle(
     "harnessBoard:archiveProject",
     async (_event, projectId: string): Promise<HarnessProjectMetadata> => {
-      return archiveHarnessProject(projectId)
+      const archived = archiveHarnessProject(projectId)
+      // 归档后立即补一次快照上报，让面板尽快反映「已归档」状态变更，无需等定时扫描。
+      void reportProjectSnapshotNow(projectId)
+      return archived
     }
   )
 
