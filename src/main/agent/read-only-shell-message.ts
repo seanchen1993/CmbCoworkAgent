@@ -14,8 +14,8 @@ export function readOnlyExecuteBlockMessage(
     : ""
   const examples =
     options.detailedExamples !== false
-      ? ' Prefer direct read-only commands such as rg "pattern" file, grep "pattern" file, find ..., ls, git log, git diff, cat file, or use the read_file/grep/glob tools.'
-      : " Prefer direct read-only commands or the read_file/grep/glob tools."
+      ? ' Use direct read-only commands such as rg "pattern" file, grep "pattern" file, find ..., ls, git log, git diff, cat file, or use the read_file/grep/glob tools.'
+      : " Use direct read-only commands or the read_file/grep/glob tools."
 
   if (windowsShell === "powershell") {
     return (
