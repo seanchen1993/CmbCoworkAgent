@@ -193,6 +193,7 @@ import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool } from "./read-file-tool"
 import { createWorkflowTool } from "./workflow/tool"
+import { workflowRunManager } from "./workflow/run-manager"
 import { WORKFLOW_MODE_SYSTEM_PROMPT } from "./workflow/prompts"
 import type { WorkflowSubagentRuntime } from "./workflow/subagent"
 import { isWorkflowSubagentThreadOf } from "./workflow/types"
@@ -373,6 +374,17 @@ function classifyToolConcurrency(
   return "exclusive"
 }
 
+function shouldFastRejectActiveWorkflow(
+  queueId: string,
+  toolCall: { name?: string; args?: unknown } | undefined
+): boolean {
+  // A second workflow launch while one is already active should fail fast with the
+  // workflow tool's own active-run error. If we wait for the exclusive tool lock
+  // first, a long-running workflow subagent command can delay that user-facing
+  // rejection until the command finishes.
+  return toolCall?.name === "workflow" && workflowRunManager.isActive(queueId)
+}
+
 /**
  * Writer-preferring async read-write lock.
  *
@@ -485,6 +497,9 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
       const toolCall = request.toolCall as
         | { id?: string; name?: string; args?: unknown }
         | undefined
+      if (shouldFastRejectActiveWorkflow(queueId, toolCall)) {
+        return handler(request)
+      }
       const tier = classifyToolConcurrency(toolCall)
       if (tier === "bypass") {
         return handler(request)
