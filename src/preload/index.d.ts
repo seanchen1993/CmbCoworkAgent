@@ -549,10 +549,17 @@ interface DashboardProjectModeProjectPageData {
   creatorOrgKeyword: string
   sortBy: DashboardProjectModeProjectSortKey | null
   sortOrder: DashboardProjectModeProjectSortOrder
+  /**
+   * True when more projects matched than the metric-sort enumeration cap, so the
+   * ranking + total only cover the first N projects and the UI should warn that
+   * the list / metrics are incomplete. Always false on the snapshot-paginated path.
+   */
+  truncated: boolean
 }
 
 interface DashboardProjectModeProjectPageOptions {
   upperOrgLv1?: string | string[] | null
+  fromLeanOnly?: boolean | null
   status?: DashboardProjectModeProjectStatus | null
   page?: number
   pageSize?: number
@@ -595,6 +602,10 @@ interface DashboardProjectModeData {
   projectCounts: DashboardProjectModeProjectCounts
   projectPage: DashboardProjectModeProjectPageData
   projects: DashboardProjectModeProject[]
+  /**
+   * 「仅精益项目」开关下精益项目 id 集被截断、遥测汇总可能不完整。开关关闭时恒为 false。
+   */
+  leanTruncated: boolean
 }
 
 interface DashboardProjectModeTracesOptions {
@@ -1760,7 +1771,7 @@ interface CustomAPI {
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | string[] | null }
+      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
     ) => Promise<{ success: boolean; data?: DashboardProjectModeData; error?: string }>
     projectModeProjects: (
       range: { from: string; to: string },

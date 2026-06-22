@@ -506,6 +506,9 @@ interface EsSearchResponse {
 interface OrgFilterOptions {
   // 用户主动选择的 LV1 组织维度筛选（非权限过滤）。支持多选；空/未传表示全部。
   upperOrgLv1?: string | string[] | null
+  // 仅统计绑定了企业（精益）项目的项目（snapshot.properties.projectFromLean === true）。
+  // 全局开关；缺省/false 表示不筛选。
+  fromLeanOnly?: boolean | null
 }
 
 type UserStatsOptions = OrgFilterOptions
@@ -6879,11 +6882,19 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
   })
   // 「室筛选」：按下标分配的室过滤项目列表，使 mock 下切换室也能真实改变数据。
   const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
-  const projects = allProjects.filter((_, i) =>
+  // DEV：把偶数下标的 mock 项目视为「精益项目」，让「仅精益项目」开关在无 ES 时也能可见地筛选。
+  const leanOnly = opts?.fromLeanOnly === true
+  const orgProjects = allProjects.filter((_, i) =>
     mockProjectMatchesOrg(mockProjectOrgAt(i), selectedOrgs)
   )
-  // 聚合块（token/工具/技能/采纳明细等）按室权重缩放，与其它面板口径一致。
-  const aggScale = getMockOrgScale(opts)
+  const projects = allProjects.filter(
+    (_, i) => mockProjectMatchesOrg(mockProjectOrgAt(i), selectedOrgs) && (!leanOnly || i % 2 === 0)
+  )
+  // 写死的聚合块（token/工具/技能/采纳明细/漏斗）不是从项目列表算出来的，真实 ES 路径会按精益 id 集
+  // 过滤这些块；mock 没有明细，故用「精益项目占比」整体缩放，让开关在 dev 里整屏联动而非只动计数卡片。
+  const leanScale = orgProjects.length > 0 ? projects.length / orgProjects.length : 1
+  // 聚合块（token/工具/技能/采纳明细等）按室权重缩放，与其它面板口径一致；叠加精益占比。
+  const aggScale = getMockOrgScale(opts) * leanScale
   const featureCount = projects.reduce((sum, p) => sum + p.featureCount, 0)
   const conversationCount = projects.reduce((sum, p) => sum + p.conversationCount, 0)
   const activeProjectCount = projects.filter((p) => p.conversationCount > 0).length
@@ -7076,7 +7087,9 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     ),
     projectCounts,
     projectPage,
-    projects
+    projects,
+    // Mock filters the in-memory project list directly, so it is never id-cap truncated.
+    leanTruncated: false
   }
 }
 
@@ -8078,6 +8091,13 @@ interface ProjectModeProjectPageData {
   creatorOrgKeyword: string
   sortBy: ProjectModeProjectSortKey | null
   sortOrder: ProjectModeProjectSortOrder
+  /**
+   * True when more projects matched than the metric-sort enumeration cap
+   * (`PROJECT_MODE_PROJECT_ID_LIMIT`), so the ranking + total only reflect the
+   * first N projects. Always false on the snapshot-paginated path (it pages via
+   * ES from/size + cardinality total, which the cap does not bound).
+   */
+  truncated: boolean
 }
 
 interface ProjectModeProjectPageOptions extends OrgFilterOptions {
@@ -8124,6 +8144,11 @@ interface DashboardProjectModeData {
   projectCounts: ProjectModeProjectCounts
   projectPage: ProjectModeProjectPageData
   projects: ProjectModeProjectView[]
+  /**
+   * 「仅精益项目」开关下，精益项目 id 集超过 PROJECT_MODE_PROJECT_ID_LIMIT 被截断，
+   * 遥测汇总（对话/代码等）可能不完整。开关关闭时恒为 false。
+   */
+  leanTruncated: boolean
 }
 
 interface DashboardProjectModeTracesData {
@@ -8403,7 +8428,9 @@ function sliceProjectModeProjects(
     creatorKeyword,
     creatorOrgKeyword,
     sortBy,
-    sortOrder
+    sortOrder,
+    // Mock paginates the in-memory list directly, so it is never cap-truncated.
+    truncated: false
   }
 }
 
@@ -8457,11 +8484,14 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
 
 /** Snapshot-index filter: snapshot event + optional LV1 org（快照顶层带 upperOrgLv1）。 */
 function projectModeSnapshotFilters(
-  orgFilterClause: Record<string, unknown> | null
+  orgFilterClause: Record<string, unknown> | null,
+  fromLeanOnly = false
 ): Record<string, unknown>[] {
   return [
     { term: { eventName: HARNESS_PROJECT_SNAPSHOT_EVENT } },
-    ...(orgFilterClause ? [orgFilterClause] : [])
+    ...(orgFilterClause ? [orgFilterClause] : []),
+    // 「仅精益项目」全局开关：快照当前状态字段，self-healing，无需回填历史。
+    ...(fromLeanOnly ? [{ term: { "properties.projectFromLean": true } }] : [])
   ]
 }
 
@@ -8546,7 +8576,9 @@ async function fetchProjectModeSnapshotAggs(
   const body = {
     size: 0,
     track_total_hits: false,
-    query: { bool: { filter: projectModeSnapshotFilters(orgFilterClause) } },
+    query: {
+      bool: { filter: projectModeSnapshotFilters(orgFilterClause, opts?.fromLeanOnly === true) }
+    },
     aggs: {
       project_count: projectCountAgg,
       feature_total: featureSumAgg,
@@ -8769,7 +8801,7 @@ function buildProjectModeProjectListFilters(
   const creatorOrgSearchFilter = buildProjectModeCreatorOrgSearchFilter(creatorOrgKeyword)
 
   const filters = [
-    ...projectModeSnapshotFilters(orgFilterClause),
+    ...projectModeSnapshotFilters(orgFilterClause, options?.fromLeanOnly === true),
     ...statusFilter,
     ...keywordFilter,
     ...adapterFilter,
@@ -8792,6 +8824,7 @@ async function fetchProjectModeProjectPageHits(
   adapterName: string
   creatorKeyword: string
   creatorOrgKeyword: string
+  truncated: boolean
 }> {
   const { filters, status, keyword, adapterName, creatorKeyword, creatorOrgKeyword } =
     buildProjectModeProjectListFilters(options, access)
@@ -8847,7 +8880,10 @@ async function fetchProjectModeProjectPageHits(
     keyword,
     adapterName,
     creatorKeyword,
-    creatorOrgKeyword
+    creatorOrgKeyword,
+    // Snapshot pagination (from/size + cardinality total) is not bounded by the
+    // metric-sort enumeration cap, so this path is never truncated.
+    truncated: false
   }
 }
 
@@ -8871,7 +8907,7 @@ const PROJECT_MODE_SNAPSHOT_SOURCE_INCLUDES = [
  */
 async function fetchProjectModeFilteredProjectIds(
   filters: Record<string, unknown>[]
-): Promise<string[]> {
+): Promise<{ ids: string[]; truncated: boolean }> {
   const raw = (await esQuery(getEsIndex("event"), {
     size: 0,
     track_total_hits: false,
@@ -8880,9 +8916,16 @@ async function fetchProjectModeFilteredProjectIds(
       ids: { terms: { field: "properties.projectId", size: PROJECT_MODE_PROJECT_ID_LIMIT } }
     }
   })) as EsSearchResponse
-  const buckets = asRecord(asRecord(raw.aggregations).ids).buckets
-  if (!Array.isArray(buckets)) return []
-  return buckets.map((bucket) => asString(asRecord(bucket).key)).filter(Boolean)
+  const idsAgg = asRecord(asRecord(raw.aggregations).ids)
+  const buckets = idsAgg.buckets
+  if (!Array.isArray(buckets)) return { ids: [], truncated: false }
+  const ids = buckets.map((bucket) => asString(asRecord(bucket).key)).filter(Boolean)
+  // Snapshots are a deterministic one-doc-per-project upsert, so the terms agg's
+  // `sum_other_doc_count` is exactly the number of matching projects that did not
+  // fit under the cap. > 0 means the project set was truncated, so the caller's
+  // ranking + total only cover the first PROJECT_MODE_PROJECT_ID_LIMIT projects.
+  const truncated = asNumber(idsAgg.sum_other_doc_count) > 0
+  return { ids, truncated }
 }
 
 /**
@@ -8970,11 +9013,12 @@ async function fetchProjectModeProjectPageMetricSorted(
   adapterName: string
   creatorKeyword: string
   creatorOrgKeyword: string
+  truncated: boolean
 }> {
   const { filters, status, keyword, adapterName, creatorKeyword, creatorOrgKeyword } =
     buildProjectModeProjectListFilters(options, access)
   const pageSize = clampLimit(options?.pageSize, 10, 100)
-  const allIds = await fetchProjectModeFilteredProjectIds(filters)
+  const { ids: allIds, truncated } = await fetchProjectModeFilteredProjectIds(filters)
   const total = allIds.length
   const maxPage = Math.max(1, Math.ceil(total / pageSize))
   const page = clampLimit(options?.page, 1, maxPage)
@@ -9006,12 +9050,20 @@ async function fetchProjectModeProjectPageMetricSorted(
     keyword,
     adapterName,
     creatorKeyword,
-    creatorOrgKeyword
+    creatorOrgKeyword,
+    truncated
   }
 }
 
-/** Upper bound on the project set forwarded to the code-adoption query (ES terms cap is 65536). */
-const PROJECT_MODE_PROJECT_ID_LIMIT = 5000
+/**
+ * Upper bound on the project set forwarded to the metric-sort / code-adoption
+ * queries (ES terms cap is 65536; we stay well under it). When the snapshot
+ * holds more matching projects than this, the metric-sort ranking + total are
+ * computed over only the first `PROJECT_MODE_PROJECT_ID_LIMIT` projects — the
+ * page data carries a `truncated` flag so the UI can warn that the list /
+ * metrics are incomplete and the user should narrow the filter.
+ */
+const PROJECT_MODE_PROJECT_ID_LIMIT = 10000
 const PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE = 10
 /** Per-project cap on feature buckets returned by the nested feature code-stats agg. */
 const PROJECT_MODE_FEATURE_SLUG_LIMIT = 200
@@ -9077,7 +9129,10 @@ function parseProjectModeTopUserBuckets(raw: unknown): ProjectModeTopUser[] {
 async function fetchProjectModeUsage(
   range: TimeRange,
   opts: OrgFilterOptions | undefined,
-  access: DashboardAccessContext
+  access: DashboardAccessContext,
+  // 「仅精益项目」时传入精益项目 id 集，按 harnessProjectId 圈定遥测；undefined=不筛选。
+  // 空数组表示「无精益项目」，terms IN [] 命中 0 条，汇总即为 0（语义正确）。
+  leanProjectIds?: string[]
 ): Promise<{
   conversationCount: number
   activeProjectCount: number
@@ -9095,7 +9150,14 @@ async function fetchProjectModeUsage(
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
   const body = {
     size: 0,
-    query: { bool: { filter: projectModeTraceFilters(range, orgFilterClause) } },
+    query: {
+      bool: {
+        filter: [
+          ...projectModeTraceFilters(range, orgFilterClause),
+          ...(leanProjectIds ? [{ terms: { harnessProjectId: leanProjectIds } }] : [])
+        ]
+      }
+    },
     aggs: {
       conversation_count: { value_count: { field: "traceId" } },
       active_projects: { cardinality: { field: "harnessProjectId" } },
@@ -9389,7 +9451,9 @@ async function fetchProjectModeCodeAggs(
 async function fetchProjectModeAggregateCodeStats(
   range: TimeRange,
   opts: OrgFilterOptions | undefined,
-  access: DashboardAccessContext
+  access: DashboardAccessContext,
+  // 「仅精益项目」时传入精益项目 id 集，按 properties.harnessProjectId 圈定 code 事件。
+  leanProjectIds?: string[]
 ): Promise<ProjectModeCodeStatsResult> {
   // code 事件自带顶层 upperOrgLv1，直接按室过滤即可，无需先枚举项目 id 再用 terms 圈定。
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
@@ -9397,7 +9461,8 @@ async function fetchProjectModeAggregateCodeStats(
   // 否则会把平台全量代码事件也算进来，导致与「平台运营概览」数值一致。
   const extraFilters = [
     ...(orgFilterClause ? [orgFilterClause] : []),
-    { exists: { field: "properties.harnessProjectId" } }
+    { exists: { field: "properties.harnessProjectId" } },
+    ...(leanProjectIds ? [{ terms: { "properties.harnessProjectId": leanProjectIds } }] : [])
   ]
 
   // 「由 Skill 生成的代码」口径：在整体过滤上再叠加 usedSkills 非空（与 by_skill 不同，
@@ -9730,11 +9795,26 @@ async function fetchProjectMode(
   opts?: OrgFilterOptions
 ): Promise<DashboardProjectModeData> {
   const access = requireDashboardProjectModeAccess()
+
+  // 「仅精益项目」：先从自愈快照解析精益项目 id 集（projectFromLean 的唯一真源），仅用于圈定
+  // 遥测汇总（trace / code）；快照聚合与项目列表各自按 projectFromLean term 直接过滤，无需 id 集。
+  // id 集超过 PROJECT_MODE_PROJECT_ID_LIMIT 时截断，leanTruncated 透传给前端做守卫提示。空集表示
+  // 无精益项目 → 遥测 terms IN [] 命中 0 条，汇总为 0（语义正确）。
+  let leanProjectIds: string[] | undefined
+  let leanTruncated = false
+  if (opts?.fromLeanOnly === true) {
+    const resolved = await fetchProjectModeFilteredProjectIds(
+      projectModeSnapshotFilters(buildProjectModeOrgFilter(opts, access), true)
+    )
+    leanProjectIds = resolved.ids
+    leanTruncated = resolved.truncated
+  }
+
   // 总览与列表解耦：快照口径走 size:0 聚合、不回拉文档；列表第一页走 ES 分页。四条并行。
   const [snap, usage, code, projectPage] = await Promise.all([
     fetchProjectModeSnapshotAggs(opts, access),
-    fetchProjectModeUsage(range, opts, access),
-    fetchProjectModeAggregateCodeStats(range, opts, access),
+    fetchProjectModeUsage(range, opts, access, leanProjectIds),
+    fetchProjectModeAggregateCodeStats(range, opts, access, leanProjectIds),
     fetchProjectModeProjectPage(
       range,
       {
@@ -9808,7 +9888,8 @@ async function fetchProjectMode(
     },
     projectCounts: snap.counts,
     projectPage,
-    projects: projectPage.projects
+    projects: projectPage.projects,
+    leanTruncated
   }
 }
 

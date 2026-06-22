@@ -1117,6 +1117,16 @@ function ProjectListSection({
         Commit 按所选时间范围统计。
       </p>
 
+      {pageData?.truncated && pageMatchesFilter && (
+        <div className="mb-3 flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>
+            匹配的项目数量过多，已超过单次统计上限。列表排序与「对话数 /
+            原始生成行数」等指标仅基于上限内的项目，可能不完整。请用上方的项目名称、创建人、部门或插件筛选缩小范围后再查看。
+          </span>
+        </div>
+      )}
+
       <div className="mb-3 flex items-center gap-2 overflow-x-auto px-1 py-1">
         <div className="flex shrink-0 items-center overflow-hidden rounded-md border border-border">
           {tabs.map((t) => (
@@ -1685,6 +1695,15 @@ export function ProjectModePanel({
           <h2 className="text-sm font-semibold text-foreground">项目运营概览</h2>
           {headerAction ? <div className="shrink-0">{headerAction}</div> : null}
         </div>
+        {data?.leanTruncated && (
+          <div className="mb-3 flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              「仅精益项目」命中的项目数量已超过单次统计上限，下方汇总指标（对话数、代码采纳等）可能不完整。请缩小时间范围或叠加部门
+              / 室筛选后再查看。
+            </span>
+          </div>
+        )}
         <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
           <span className="font-medium text-foreground">项目总数 / 特性总数</span>{" "}
           为当前状态（项目快照实时统计，不随时间范围变化）；其余指标按

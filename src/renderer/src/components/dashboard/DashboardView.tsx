@@ -30,6 +30,7 @@ import {
   ChevronDown,
   Check,
   Download,
+  Filter,
   ExternalLink,
   Search,
   X,
@@ -2381,6 +2382,8 @@ export function DashboardView(): React.JSX.Element {
     granularity,
     range,
     selectedOrgLv1List,
+    fromLeanProjectsOnly,
+    setFromLeanProjectsOnly,
     orgOptions,
     loading,
     userStatsLoading,
@@ -2674,11 +2677,19 @@ export function DashboardView(): React.JSX.Element {
     skillEvalScopeOptions
   ])
 
-  // 项目模式 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选变化时重拉。
+  // 项目模式 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选 /「仅精益项目」开关变化时重拉。
   useEffect(() => {
     if (activeMainTab !== "project-mode" || !projectModeAllowed) return
-    void fetchProjectMode(range, granularity, selectedOrgLv1List)
-  }, [activeMainTab, fetchProjectMode, granularity, projectModeAllowed, range, selectedOrgLv1List])
+    void fetchProjectMode(range, granularity, selectedOrgLv1List, fromLeanProjectsOnly)
+  }, [
+    activeMainTab,
+    fetchProjectMode,
+    granularity,
+    projectModeAllowed,
+    range,
+    selectedOrgLv1List,
+    fromLeanProjectsOnly
+  ])
 
   useEffect(() => {
     if (
@@ -3005,7 +3016,7 @@ export function DashboardView(): React.JSX.Element {
       clearSkillEval()
     }
     if (activeMainTab === "project-mode") {
-      void fetchProjectMode(range, granularity, selectedOrgLv1List)
+      void fetchProjectMode(range, granularity, selectedOrgLv1List, fromLeanProjectsOnly)
     }
   }, [
     activeMainTab,
@@ -3014,7 +3025,8 @@ export function DashboardView(): React.JSX.Element {
     granularity,
     range,
     refresh,
-    selectedOrgLv1List
+    selectedOrgLv1List,
+    fromLeanProjectsOnly
   ])
 
   const handleProjectOpenTraces = useCallback(
@@ -4337,20 +4349,33 @@ export function DashboardView(): React.JSX.Element {
                 loading={projectModeLoading}
                 error={projectModeError}
                 headerAction={
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="gap-1.5 text-xs"
-                    onClick={handleProjectModeExport}
-                    disabled={exporting || projectModeLoading || !projectMode}
-                  >
-                    {exporting ? (
-                      <Loader2 className="size-3.5 animate-spin" />
-                    ) : (
-                      <Download className="size-3.5" />
-                    )}
-                    导出Excel
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant={fromLeanProjectsOnly ? "default" : "outline"}
+                      size="sm"
+                      className="gap-1.5 text-xs"
+                      onClick={() => setFromLeanProjectsOnly((v) => !v)}
+                      disabled={projectModeLoading}
+                      title="仅统计绑定了企业（精益）项目的项目"
+                    >
+                      <Filter className="size-3.5" />
+                      仅精益项目
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5 text-xs"
+                      onClick={handleProjectModeExport}
+                      disabled={exporting || projectModeLoading || !projectMode}
+                    >
+                      {exporting ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <Download className="size-3.5" />
+                      )}
+                      导出Excel
+                    </Button>
+                  </div>
                 }
                 projectPages={projectModeProjectPages}
                 projectPageLoading={projectModeProjectPageLoading}

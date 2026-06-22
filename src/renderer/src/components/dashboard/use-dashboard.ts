@@ -419,10 +419,17 @@ export interface DashboardProjectModeProjectPageData {
   creatorOrgKeyword: string
   sortBy: DashboardProjectModeProjectSortKey | null
   sortOrder: DashboardProjectModeProjectSortOrder
+  /**
+   * True when more projects matched than the metric-sort enumeration cap, so the
+   * ranking + total only cover the first N projects and the list / metrics are
+   * incomplete. Always false on the snapshot-paginated path.
+   */
+  truncated: boolean
 }
 
 export interface DashboardProjectModeProjectPageOptions {
   upperOrgLv1?: string | string[] | null
+  fromLeanOnly?: boolean | null
   status?: DashboardProjectModeProjectStatus | null
   page?: number
   pageSize?: number
@@ -467,6 +474,8 @@ export interface DashboardProjectModeData {
   projectCounts: DashboardProjectModeProjectCounts
   projectPage: DashboardProjectModeProjectPageData
   projects: DashboardProjectModeProject[]
+  /** 「仅精益项目」开关下精益项目 id 集被截断、遥测汇总可能不完整；开关关闭时恒为 false。 */
+  leanTruncated: boolean
 }
 
 export interface DashboardProjectModeTracesOptions {
@@ -1858,6 +1867,8 @@ export function useDashboard() {
   const [range, setRange] = useState<TimeRange>(() => getDefaultRange("day"))
   // 顶部「室筛选」支持多选 LV1 组织；空数组表示全部。
   const [selectedOrgLv1List, setSelectedOrgLv1List] = useState<string[]>([])
+  // 项目运营概览「仅精益项目」全局开关：仅统计绑定了企业（精益）项目的项目。
+  const [fromLeanProjectsOnly, setFromLeanProjectsOnly] = useState(false)
   const [loading, setLoading] = useState(false)
   const [userStatsLoading, setUserStatsLoading] = useState(false)
   const [skillEvalLoading, setSkillEvalLoading] = useState(false)
@@ -1952,33 +1963,39 @@ export function useDashboard() {
     []
   )
 
-  const fetchProjectMode = useCallback(async (r: TimeRange, g: Granularity, orgList: string[]) => {
-    const id = ++projectModeFetchIdRef.current
-    setProjectModeLoading(true)
-    setProjectModeError(null)
+  const fetchProjectMode = useCallback(
+    async (r: TimeRange, g: Granularity, orgList: string[], leanOnly = false) => {
+      const id = ++projectModeFetchIdRef.current
+      setProjectModeLoading(true)
+      setProjectModeError(null)
 
-    try {
-      const result = await window.api.dashboard.projectMode(r, g, { upperOrgLv1: orgList })
-      if (id !== projectModeFetchIdRef.current) return
-      if (!result.success) throw new Error(result.error ?? "获取项目模式数据失败")
-      const nextProjectMode = (result.data as DashboardProjectModeData) ?? null
-      projectModeProjectPageFetchIdRef.current.active += 1
-      projectModeProjectPageFetchIdRef.current.archived += 1
-      setProjectMode(nextProjectMode)
-      setProjectModeProjectPages(
-        nextProjectMode?.projectPage
-          ? { [nextProjectMode.projectPage.status]: nextProjectMode.projectPage }
-          : {}
-      )
-      setProjectModeProjectPageError({})
-      setProjectModeProjectPageLoading({ active: false, archived: false })
-    } catch (e) {
-      if (id !== projectModeFetchIdRef.current) return
-      setProjectModeError(e instanceof Error ? e.message : String(e))
-    } finally {
-      if (id === projectModeFetchIdRef.current) setProjectModeLoading(false)
-    }
-  }, [])
+      try {
+        const result = await window.api.dashboard.projectMode(r, g, {
+          upperOrgLv1: orgList,
+          fromLeanOnly: leanOnly
+        })
+        if (id !== projectModeFetchIdRef.current) return
+        if (!result.success) throw new Error(result.error ?? "获取项目模式数据失败")
+        const nextProjectMode = (result.data as DashboardProjectModeData) ?? null
+        projectModeProjectPageFetchIdRef.current.active += 1
+        projectModeProjectPageFetchIdRef.current.archived += 1
+        setProjectMode(nextProjectMode)
+        setProjectModeProjectPages(
+          nextProjectMode?.projectPage
+            ? { [nextProjectMode.projectPage.status]: nextProjectMode.projectPage }
+            : {}
+        )
+        setProjectModeProjectPageError({})
+        setProjectModeProjectPageLoading({ active: false, archived: false })
+      } catch (e) {
+        if (id !== projectModeFetchIdRef.current) return
+        setProjectModeError(e instanceof Error ? e.message : String(e))
+      } finally {
+        if (id === projectModeFetchIdRef.current) setProjectModeLoading(false)
+      }
+    },
+    []
+  )
 
   const fetchProjectModeProjectPage = useCallback(
     async (
@@ -1999,6 +2016,7 @@ export function useDashboard() {
       try {
         const result = await window.api.dashboard.projectModeProjects(range, {
           upperOrgLv1: selectedOrgLv1List,
+          fromLeanOnly: fromLeanProjectsOnly,
           status,
           page,
           pageSize,
@@ -2026,7 +2044,7 @@ export function useDashboard() {
         }
       }
     },
-    [range, selectedOrgLv1List]
+    [range, selectedOrgLv1List, fromLeanProjectsOnly]
   )
 
   const fetchSkillEvalPage = useCallback(
@@ -2254,6 +2272,8 @@ export function useDashboard() {
     granularity,
     range,
     selectedOrgLv1List,
+    fromLeanProjectsOnly,
+    setFromLeanProjectsOnly,
     orgOptions,
     loading,
     userStatsLoading,
