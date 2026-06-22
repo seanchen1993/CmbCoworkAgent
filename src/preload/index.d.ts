@@ -626,7 +626,7 @@ interface CustomAPI {
       message: string,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator",
+      agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ) => () => void
@@ -636,7 +636,7 @@ interface CustomAPI {
       command: unknown,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator",
+      agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ) => () => void
@@ -686,6 +686,14 @@ interface CustomAPI {
       }
     ) => Promise<void>
     isCoordinatorModeForced: () => Promise<boolean>
+  }
+  workflows: {
+    listRuns: (threadId: string) => Promise<unknown[]>
+    getRun: (threadId: string, runId: string) => Promise<unknown | null>
+    cancelRun: (threadId: string, runId?: string) => Promise<boolean>
+    hydrate: (threadId: string) => Promise<unknown>
+    /** Durable per-thread channel; survives past the launching turn. Returns unsubscribe. */
+    onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void) => () => void
   }
   threads: {
     list: () => Promise<Thread[]>

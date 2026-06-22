@@ -6,7 +6,7 @@
  */
 
 import { mkdtemp, rm, mkdir } from "fs/promises"
-import { existsSync, readFileSync } from "fs"
+import { existsSync, readFileSync, realpathSync } from "fs"
 import { tmpdir } from "os"
 import { execFileSync } from "child_process"
 import { join, resolve } from "path"
@@ -86,7 +86,7 @@ async function testGitRootLookupBehavior(): Promise<void> {
 
     clearGitRootCache()
     const root = findCanonicalGitRoot(nested)
-    assert(root === resolve(repo), `nested dir resolves to repo root, got ${root}`)
+    assert(root === realpathSync.native(resolve(repo)), `nested dir resolves to repo root, got ${root}`)
 
     await rm(join(repo, ".git"), { recursive: true, force: true })
     assert(findCanonicalGitRoot(nested) === root, "git root lookup uses in-process cache")

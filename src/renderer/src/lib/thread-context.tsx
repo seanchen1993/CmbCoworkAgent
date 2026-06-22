@@ -13,7 +13,22 @@ import {
 /* eslint-disable react-refresh/only-export-components */
 import { useStream } from "@langchain/langgraph-sdk/react"
 import { ElectronIPCTransport, type StreamFallbackIndexBaselines } from "./electron-transport"
-import { isCoordinatorModeMetadata, isExplicitNormalModeMetadata } from "./coordinator-mode-helpers"
+import {
+  isCoordinatorModeMetadata,
+  isExplicitNormalModeMetadata,
+  isWorkflowModeMetadata
+} from "./coordinator-mode-helpers"
+import { WORKFLOW_NOTIFICATION_TURN_PROMPT } from "./message-display-helpers"
+import {
+  applyWorkflowProgressEvent,
+  type WorkflowProgressEventView,
+  type WorkflowRunView
+} from "./workflow-run-view"
+import {
+  reconcileHydratedWorkflowRun,
+  workflowRunViewFromPersisted,
+  type PersistedWorkflowRunDTO
+} from "./workflow-run-view"
 import {
   coordinatorWorkersEqual,
   mergeCoordinatorWorkers,
@@ -451,6 +466,8 @@ export interface ThreadState {
   scheduledTaskId: string | null
   routingResult: RoutingResultState | null
   modelRetry: ModelRetryState | null
+  /** Live dynamic workflow run (workflow mode), built from workflow_progress events. */
+  workflowRun: WorkflowRunView | null
 }
 
 function debugMessageContentLength(content: Message["content"] | undefined): number {
@@ -503,6 +520,8 @@ export interface ThreadActions {
   setWorkspaceFiles: (files: FileInfo[] | ((prev: FileInfo[]) => FileInfo[])) => void
   setWorkspacePath: (path: string | null) => void
   setGitContext: (context: ThreadGitContext | null) => void
+  /** Drops a finished/aborted workflow panel; a still-running run is kept. */
+  clearFinishedWorkflowRun: () => void
   setSubagents: (subagents: Subagent[]) => void
   setToolCallState: (toolCallId: string, updates: Partial<ToolCallState>) => void
   setPendingApproval: (request: HITLRequest | null) => void
@@ -587,7 +606,8 @@ const createDefaultThreadState = (): ThreadState => ({
   historyLoading: false,
   scheduledTaskId: null,
   routingResult: null,
-  modelRetry: null
+  modelRetry: null,
+  workflowRun: null
 })
 
 function isThreadMetadataInCoordinatorMode(threadId: string): boolean {
@@ -924,7 +944,9 @@ interface CustomEventData {
   subagentMessages?: Message[]
   notification?: string
   suppressNotificationAutoRun?: boolean
-  mode?: "normal" | "coordinator"
+  mode?: "normal" | "coordinator" | "workflow"
+  /** workflow_progress payload (dynamic workflows mode). */
+  workflowEvent?: WorkflowProgressEventView
   source?: string
   persisted?: boolean
   count?: number
@@ -1083,6 +1105,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const previousCurrentThreadIdRef = useRef<string | null>(null)
   const actionsCache = useRef<Record<string, ThreadActions>>({})
   const threadStatesRef = useRef<Record<string, ThreadState>>({})
+  // Throttle workflow_progress (P3 perf): a run emits an event per
+  // agent_start/end/phase/log, and workflowRun lives in ThreadState (which has no
+  // field-level selector — useThreadState returns the whole state), so applying each
+  // event immediately re-renders EVERY useThreadState consumer, i.e. the whole chat
+  // view. Buffer events per thread and apply them once per animation frame; a
+  // terminal ("finished") event flushes immediately so completion isn't delayed.
+  const workflowProgressBufferRef = useRef<
+    Map<string, { events: WorkflowProgressEventView[]; rafId: number | null }>
+  >(new Map())
   const subagentTranscriptsRef = useRef<Record<string, Record<string, Message[]>>>({})
 
   // Stream data store (not React state - we use subscriptions)
@@ -1920,6 +1951,73 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     }, COORDINATOR_NOTIFICATION_RETRY_MS)
   }, [])
 
+  /**
+   * Folds a finished background workflow into the conversation: submits an
+   * internal trigger turn; the main process expands it into the persisted
+   * <task-notification> and the model reports the outcome. Mirrors the
+   * coordinator notification scheduler (retry while the thread is busy).
+   */
+  const scheduleWorkflowNotificationTurn = useCallback((threadId: string) => {
+    if (workflowNotificationTimersRef.current[threadId] !== undefined) return
+    workflowNotificationTimersRef.current[threadId] = window.setTimeout(async () => {
+      delete workflowNotificationTimersRef.current[threadId]
+      try {
+        const thread = useAppStore.getState().threads.find((t) => t.thread_id === threadId)
+        if (!isWorkflowModeMetadata(thread?.metadata)) {
+          delete workflowNotificationAttemptsRef.current[threadId]
+          delete workflowNotificationRetryOnIdleRef.current[threadId]
+          return
+        }
+        const retryLater = (): void => {
+          const attempts = (workflowNotificationAttemptsRef.current[threadId] ?? 0) + 1
+          workflowNotificationAttemptsRef.current[threadId] = attempts
+          if (attempts <= COORDINATOR_NOTIFICATION_MAX_RETRIES) {
+            scheduleWorkflowNotificationTurn(threadId)
+          } else {
+            delete workflowNotificationAttemptsRef.current[threadId]
+          }
+        }
+        const streamData = streamDataRef.current[threadId]
+        if (!streamData?.stream || streamData.isLoading) {
+          // Busy/foreground turn in progress — defer. Flag retry-on-idle so the
+          // turn-completion effect reschedules us even if the bounded retry budget
+          // runs out first (a turn longer than the budget would otherwise strand
+          // the notification until the next hydrate). Mirrors the coordinator path.
+          workflowNotificationRetryOnIdleRef.current[threadId] = true
+          retryLater()
+          return
+        }
+        const threadState = threadStatesRef.current[threadId] ?? createDefaultThreadState()
+        await streamData.stream.submit(
+          { messages: [{ type: "human", content: WORKFLOW_NOTIFICATION_TURN_PROMPT }] },
+          {
+            config: {
+              configurable: {
+                thread_id: threadId,
+                model_id: threadState.currentModel || undefined,
+                agent_mode: "workflow"
+              }
+            }
+          }
+        )
+        delete workflowNotificationAttemptsRef.current[threadId]
+        delete workflowNotificationRetryOnIdleRef.current[threadId]
+      } catch (error) {
+        console.warn("[ThreadContext] Failed to auto-run workflow notification turn:", error)
+        const attempts = (workflowNotificationAttemptsRef.current[threadId] ?? 0) + 1
+        workflowNotificationAttemptsRef.current[threadId] = attempts
+        if (attempts <= COORDINATOR_NOTIFICATION_MAX_RETRIES) {
+          scheduleWorkflowNotificationTurn(threadId)
+        } else {
+          // Reset at the limit (mirrors retryLater) so a stale count can't
+          // pre-suppress a future notification turn for this thread — a later
+          // renotify/hydrate then gets a fresh retry budget.
+          delete workflowNotificationAttemptsRef.current[threadId]
+        }
+      }
+    }, COORDINATOR_NOTIFICATION_RETRY_MS)
+  }, [])
+
   const suppressCoordinatorNotificationAutoRun = useCallback(
     (threadId: string) => {
       coordinatorNotificationAutoRunSuppressedRef.current.add(threadId)
@@ -1947,19 +2045,26 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     const previous = previousLoadingStatesRef.current
     for (const [threadId, wasLoading] of Object.entries(previous)) {
       if (wasLoading && loadingStates[threadId] === false) {
+        // Coordinator: reschedule the worker-completion notification if any worker
+        // is still awaiting it (or a busy-deferred attempt is pending).
         const workers = threadStatesRef.current[threadId]?.coordinatorWorkers ?? []
-        if (workers.length === 0) continue
         if (
-          (coordinatorNotificationAttemptsRef.current[threadId] ?? 0) <= 0 &&
-          !coordinatorNotificationRetryOnIdleRef.current[threadId]
+          workers.length > 0 &&
+          ((coordinatorNotificationAttemptsRef.current[threadId] ?? 0) > 0 ||
+            coordinatorNotificationRetryOnIdleRef.current[threadId])
         ) {
-          continue
+          scheduleCoordinatorNotificationTurn(threadId)
         }
-        scheduleCoordinatorNotificationTurn(threadId)
+        // Workflow: a completion notification deferred while this turn was busy
+        // retries now that the thread is idle — so a turn longer than the retry
+        // budget can't strand it until the next hydrate.
+        if (workflowNotificationRetryOnIdleRef.current[threadId]) {
+          scheduleWorkflowNotificationTurn(threadId)
+        }
       }
     }
     previousLoadingStatesRef.current = loadingStates
-  }, [loadingStates, scheduleCoordinatorNotificationTurn])
+  }, [loadingStates, scheduleCoordinatorNotificationTurn, scheduleWorkflowNotificationTurn])
 
   useEffect(() => {
     const unresolvedThreadIds = unresolvedCoordinatorThreadIdsKey
@@ -2367,15 +2472,55 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             }))
           }
           break
+        case "workflow_progress":
+          if (data.workflowEvent && typeof data.workflowEvent === "object") {
+            const workflowEvent = data.workflowEvent
+            const buffer = workflowProgressBufferRef.current
+            let bufEntry = buffer.get(threadId)
+            if (!bufEntry) {
+              bufEntry = { events: [], rafId: null }
+              buffer.set(threadId, bufEntry)
+            }
+            bufEntry.events.push(workflowEvent)
+            // Apply all buffered events in one updateThreadState (one re-render).
+            const flush = (): void => {
+              const e = buffer.get(threadId)
+              if (!e) return
+              if (e.rafId !== null) {
+                cancelAnimationFrame(e.rafId)
+                e.rafId = null
+              }
+              if (e.events.length === 0) return
+              const batch = e.events
+              e.events = []
+              updateThreadState(threadId, (prev) => {
+                let view = prev.workflowRun
+                for (const ev of batch) view = applyWorkflowProgressEvent(view, ev)
+                return view === prev.workflowRun ? {} : { workflowRun: view }
+              })
+              // Drained with no frame pending → drop the entry so finished/idle
+              // workflow threads don't retain an empty buffer forever. A later
+              // event re-creates it (buffer.get → falls through to set above). (#2)
+              if (e.rafId === null && e.events.length === 0) buffer.delete(threadId)
+            }
+            // Terminal event flushes now (no frame delay on completion); otherwise
+            // coalesce a burst into a single per-frame apply.
+            if (workflowEvent.kind === "finished") {
+              flush()
+            } else if (bufEntry.rafId === null) {
+              bufEntry.rafId = requestAnimationFrame(flush)
+            }
+          }
+          break
         case "agent_mode":
-          if (data.mode === "normal" || data.mode === "coordinator") {
+          if (data.mode === "normal" || data.mode === "coordinator" || data.mode === "workflow") {
             if (
               data.mode === "coordinator" &&
               data.persisted === false &&
               data.source === "environment"
             ) {
               environmentCoordinatorThreadIdsRef.current.add(threadId)
-            } else if (data.mode === "normal") {
+            } else if (data.mode !== "coordinator") {
               environmentCoordinatorThreadIdsRef.current.delete(threadId)
             }
             if (data.persisted === false) {
@@ -2807,6 +2952,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         },
         setGitContext: (context: ThreadGitContext | null) => {
           updateThreadState(threadId, () => ({ gitContext: context }))
+        },
+        clearFinishedWorkflowRun: () => {
+          updateThreadState(threadId, (prev) =>
+            prev.workflowRun && prev.workflowRun.status !== "running" ? { workflowRun: null } : {}
+          )
         },
         setSubagents: (subagents: Subagent[]) => {
           updateThreadState(threadId, () => ({ subagents }))
@@ -3351,6 +3501,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   // past a run so async worker hook records (which fire after the run stream
   // closes) still reach the hook-log buckets.
   const coordinatorWorkerHookListenerCleanups = useRef<Record<string, () => void>>({})
+  const workflowEventsListenerCleanups = useRef<Record<string, () => void>>({})
+  const workflowNotificationTimersRef = useRef<Record<string, number>>({})
+  const workflowNotificationAttemptsRef = useRef<Record<string, number>>({})
+  // Set when a workflow notification is deferred because the thread is busy, so
+  // the turn-completion effect reschedules it even after the 1s×N retry budget is
+  // spent (a long foreground turn would otherwise strand it until the next hydrate).
+  const workflowNotificationRetryOnIdleRef = useRef<Record<string, boolean>>({})
   // Track approval listeners per thread (registered globally, not per-component)
   const approvalListenerCleanups = useRef<Record<string, Array<() => void>>>({})
   // Track request_user_input listeners per thread.
@@ -3653,6 +3810,65 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       )
       coordinatorWorkerHookListenerCleanups.current[threadId] = coordinatorWorkerHookCleanup
 
+      // Durable workflow channel: background runs outlive the launching turn,
+      // so their progress and the completion notification arrive here rather
+      // than on the per-turn run stream.
+      const workflowEventsCleanup = window.api.workflows.onWorkflowEvents(threadId, (payload) => {
+        const envelope = payload as {
+          type?: string
+          workflowEvent?: Record<string, unknown>
+          runId?: string
+        }
+        if (envelope?.type === "workflow_progress" && envelope.workflowEvent) {
+          handleCustomEvent(threadId, {
+            type: "workflow_progress",
+            workflowEvent: envelope.workflowEvent
+          } as CustomEventData)
+        } else if (envelope?.type === "workflow_notification") {
+          scheduleWorkflowNotificationTurn(threadId)
+        }
+      })
+      workflowEventsListenerCleanups.current[threadId] = workflowEventsCleanup
+
+      // Hydrate the panel from disk (renderer reload / app restart) and pick up
+      // a completion that finished while no renderer was listening — ONLY for
+      // workflow-mode threads, so normal/coordinator/goal threads pay no IPC.
+      // (The durable listener above is cheap to keep registered for all
+      // threads, matching the coordinator-hook subscription pattern, so a
+      // thread switched INTO workflow mode still receives live events.)
+      const hydrateThread = useAppStore
+        .getState()
+        .threads.find((thread) => thread.thread_id === threadId)
+      if (isWorkflowModeMetadata(hydrateThread?.metadata)) {
+        void window.api.workflows
+          .hydrate(threadId)
+          .then((raw) => {
+            const hydrate = raw as {
+              latestRun?: PersistedWorkflowRunDTO | null
+              hasPendingNotification?: boolean
+            } | null
+            if (!initializedThreadsRef.current.has(threadId)) return
+            if (hydrate?.latestRun) {
+              const restored = workflowRunViewFromPersisted(hydrate.latestRun)
+              updateThreadState(threadId, (prev) =>
+                // Live events may already have produced fresher state; only restore
+                // when the panel is empty or showing the same run. reconcile keeps
+                // fresh LIVE state but still adopts a TERMINAL hydrate over a stale
+                // local "running" (dropped terminal event → dead cancel button).
+                !prev.workflowRun || prev.workflowRun.runId === restored.runId
+                  ? { workflowRun: reconcileHydratedWorkflowRun(prev.workflowRun, restored) }
+                  : {}
+              )
+            }
+            if (hydrate?.hasPendingNotification) {
+              scheduleWorkflowNotificationTurn(threadId)
+            }
+          })
+          .catch((error) => {
+            console.warn("[ThreadContext] Workflow hydrate failed:", error)
+          })
+      }
+
       const cancelledApprovalRequestIds = new Set<string>()
 
       // Register global approval listeners for this thread (not tied to ChatContainer mount)
@@ -3778,7 +3994,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
       userInputListenerCleanups.current[threadId] = [cleanupUserInput, cleanupUserInputCancel]
     },
-    [loadThreadHistory, processSchedulerEvent, updateThreadState, handleCustomEvent]
+    [
+      loadThreadHistory,
+      processSchedulerEvent,
+      updateThreadState,
+      handleCustomEvent,
+      scheduleWorkflowNotificationTurn
+    ]
   )
 
   useEffect(() => {
@@ -3845,6 +4067,22 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       delete heartbeatListenerCleanups.current[threadId]
       coordinatorWorkerHookListenerCleanups.current[threadId]?.()
       delete coordinatorWorkerHookListenerCleanups.current[threadId]
+      workflowEventsListenerCleanups.current[threadId]?.()
+      delete workflowEventsListenerCleanups.current[threadId]
+      const workflowNotificationTimer = workflowNotificationTimersRef.current[threadId]
+      if (workflowNotificationTimer !== undefined) {
+        window.clearTimeout(workflowNotificationTimer)
+        delete workflowNotificationTimersRef.current[threadId]
+      }
+      delete workflowNotificationAttemptsRef.current[threadId]
+      delete workflowNotificationRetryOnIdleRef.current[threadId]
+      // Cancel any queued workflow_progress RAF and drop the buffer entry. Without
+      // this, a frame still queued when the thread is deleted fires flush →
+      // updateThreadState(threadId, ...), which resurrects the deleted thread
+      // (prev[threadId] || createDefaultThreadState()) as a ghost entry. (#2)
+      const workflowProgressBuf = workflowProgressBufferRef.current.get(threadId)
+      if (workflowProgressBuf?.rafId != null) cancelAnimationFrame(workflowProgressBuf.rafId)
+      workflowProgressBufferRef.current.delete(threadId)
       approvalListenerCleanups.current[threadId]?.forEach((c) => c())
       delete approvalListenerCleanups.current[threadId]
       userInputListenerCleanups.current[threadId]?.forEach((c) => c())

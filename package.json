@@ -38,7 +38,8 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "test": "vitest run && npm run test:hooks && npm run test:plugins && npm run test:task-cards && npm run test:merge",
+    "test": "vitest run && npm run test:hooks && npm run test:plugins && npm run test:task-cards && npm run test:merge && npm run test:workflow",
+    "test:workflow": "npx tsx tests/workflow-script.spec.ts && npx tsx tests/workflow-engine.spec.ts && npx tsx tests/agent-registry.spec.ts && npx tsx tests/coordinator-worker-access.spec.ts && npx tsx tests/coordinator-mode-plumbing.spec.ts && npx tsx tests/local-sandbox-readonly-hook.spec.ts && npx tsx tests/agent-tool-guard.spec.ts && npx tsx tests/thread-checkpoint-cleanup.spec.ts && npx tsx tests/sandbox-elevated.unit.spec.mjs",
     "test:merge": "npx tsx tests/skill-bundle-merge.spec.ts && npx tsx tests/skill-bundle-version.spec.ts",
     "test:hooks": "npx tsx tests/hook-cc-field-alignment.spec.ts && npx tsx tests/hook-timeout-bounds.spec.ts && npx tsx tests/hook-phase2-spec.spec.ts && npx tsx tests/hook-phase2-followup.spec.ts && npx tsx tests/git-hook-collection-path.spec.ts",
     "test:plugins": "npx tsx tests/plugin-inspect-zip.spec.ts && npx tsx tests/plugin-market-version.spec.ts && npx vitest run src/main/ipc/plugins-market-sim.test.ts",
@@ -122,6 +123,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "^2.1.92",
+    "acorn": "^8.16.0",
     "@fontsource/inter": "^5.2.8",
     "@fontsource/rajdhani": "^5.2.7",
     "@langchain/anthropic": "^1.3.21",

@@ -44,7 +44,8 @@ import {
   PauseCircle,
   PlayCircle,
   Trash2,
-  Copy
+  Copy,
+  Workflow
 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -71,9 +72,10 @@ import {
   filterCoordinatorNoiseMessages,
   isCoordinatorNotificationPrompt
 } from "@/lib/message-display-helpers"
-import { isCoordinatorModeMetadata } from "@/lib/coordinator-mode-helpers"
+import { isCoordinatorModeMetadata, isWorkflowModeMetadata } from "@/lib/coordinator-mode-helpers"
 import { ModelSwitcher } from "./ModelSwitcher"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
+import { WorkflowRunPanel, WorkflowHistoryButton } from "./WorkflowRunPanel"
 import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
@@ -1186,7 +1188,9 @@ type MessageTimeValue = {
 
 type MessageTimeMap = Record<string, MessageTimeValue>
 
-const messageTimeOrderEntries = (updates: MessageTimeMap): Array<MessageTimeValue & { id: string }> => {
+const messageTimeOrderEntries = (
+  updates: MessageTimeMap
+): Array<MessageTimeValue & { id: string }> => {
   return Object.entries(updates).map(([id, time]) => ({ id, ...time }))
 }
 
@@ -1417,12 +1421,12 @@ function ChatErrorCard({
   const hint = detail?.hint
   const hasDetails = Boolean(
     detail &&
-      (detail.status != null ||
-        detail.requestId ||
-        detail.code ||
-        detail.model ||
-        (detail.failover && detail.failover.length > 0) ||
-        detail.rawBody)
+    (detail.status != null ||
+      detail.requestId ||
+      detail.code ||
+      detail.model ||
+      (detail.failover && detail.failover.length > 0) ||
+      detail.rawBody)
   )
 
   const copy = (text: string): void => {
@@ -1450,11 +1454,7 @@ function ChatErrorCard({
               onClick={() => setShowDetails((v) => !v)}
               className="mt-2 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
             >
-              {showDetails ? (
-                <ChevronUp className="size-3" />
-              ) : (
-                <ChevronDown className="size-3" />
-              )}
+              {showDetails ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
               {showDetails ? "隐藏详情" : "显示详情"}
             </button>
 
@@ -1525,9 +1525,7 @@ function ChatErrorCard({
           </>
         )}
 
-        <div className="text-xs text-muted-foreground mt-2">
-          你可以尝试发送新消息继续对话。
-        </div>
+        <div className="text-xs text-muted-foreground mt-2">你可以尝试发送新消息继续对话。</div>
       </div>
       <button
         onClick={onDismiss}
@@ -1612,13 +1610,16 @@ export function ChatContainer({
   const wasLoadingRef = useRef(false)
   const loadingMessageCountRef = useRef(0)
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
-  const initialAgentMode = isCoordinatorModeMetadata(
-    useAppStore.getState().threads.find((thread) => thread.thread_id === threadId)?.metadata
-  )
-    ? "coordinator"
-    : "normal"
+  const initialThreadMetadata = useAppStore
+    .getState()
+    .threads.find((thread) => thread.thread_id === threadId)?.metadata
+  const initialAgentMode: ChatAgentMode = isWorkflowModeMetadata(initialThreadMetadata)
+    ? "workflow"
+    : isCoordinatorModeMetadata(initialThreadMetadata)
+      ? "coordinator"
+      : "normal"
   const [agentMode, setAgentMode] = useState<ChatAgentMode>(initialAgentMode)
-  const agentModeHydratedRef = useRef(initialAgentMode === "coordinator")
+  const agentModeHydratedRef = useRef(initialAgentMode !== "normal")
   const chatReportUploadTimersRef = useRef<Record<string, number>>({})
   const chatReportRetryTimersRef = useRef<Record<string, number>>({})
   const chatReportRetryQueuesRef = useRef<
@@ -1721,6 +1722,9 @@ export function ChatContainer({
       if (disableCoordinatorModeOption) {
         return "normal"
       }
+      if (isWorkflowModeMetadata(metadata)) {
+        return "workflow"
+      }
       if (isCoordinatorModeMetadata(metadata)) {
         return "coordinator"
       }
@@ -1749,12 +1753,15 @@ export function ChatContainer({
   useEffect(() => {
     let cancelled = false
     const currentThread = threads.find((thread) => thread.thread_id === threadId)
-    const metadataDerivedMode: ChatAgentMode =
-      !disableCoordinatorModeOption && isCoordinatorModeMetadata(currentThread?.metadata)
-        ? "coordinator"
-        : "normal"
+    const metadataDerivedMode: ChatAgentMode = disableCoordinatorModeOption
+      ? "normal"
+      : isWorkflowModeMetadata(currentThread?.metadata)
+        ? "workflow"
+        : isCoordinatorModeMetadata(currentThread?.metadata)
+          ? "coordinator"
+          : "normal"
     setAgentMode(metadataDerivedMode)
-    agentModeHydratedRef.current = metadataDerivedMode === "coordinator"
+    agentModeHydratedRef.current = metadataDerivedMode !== "normal"
 
     void loadResolvedAgentMode()
       .then((nextMode) => {
@@ -1891,6 +1898,7 @@ export function ChatContainer({
     harnessNextActionDialogTips,
     draftSkill: selectedSkill,
     coordinatorWorkers,
+    workflowRun,
     scheduledTaskLoading,
     historyLoading,
     scheduledTaskId,
@@ -1903,6 +1911,7 @@ export function ChatContainer({
     setPendingApproval,
     setPendingUserInput,
     setActiveTurnStartTime,
+    clearFinishedWorkflowRun,
     appendMessage,
     refreshGoalUi,
     setError,
@@ -2029,8 +2038,8 @@ export function ChatContainer({
     (nextMode: ChatAgentMode): void => {
       const previousMode = agentMode
       void (async () => {
-        if (disableCoordinatorModeOption && nextMode === "coordinator") {
-          toast.error("项目模式暂不支持子代理协同模式，只能使用 Solo Agent。")
+        if (disableCoordinatorModeOption && nextMode !== "normal") {
+          toast.error("项目模式暂不支持子代理协同/工作流模式，只能使用 Solo Agent。")
           return
         }
         if (historyLoading) {
@@ -2041,12 +2050,12 @@ export function ChatContainer({
           toast.error("当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。")
           return
         }
-        if (nextMode === "normal" && !disableCoordinatorModeOption) {
+        if (nextMode !== "coordinator" && !disableCoordinatorModeOption) {
           const isEnvironmentForcedCoordinator = await window.api.agent
             .isCoordinatorModeForced()
             .catch(() => false)
           if (isEnvironmentForcedCoordinator) {
-            toast.error("当前环境变量强制开启 Agent Team，不能切回 Solo Agent")
+            toast.error("当前环境变量强制开启 Agent Team，不能切换到其他执行模式")
             return
           }
           const [workers, hasPendingNotifications] = await Promise.all([
@@ -2059,9 +2068,7 @@ export function ChatContainer({
             (worker) => worker.status === "running" || worker.notification_acknowledged === false
           )
           if (hasRemoteUnresolvedWorkers || hasPendingNotifications) {
-            toast.error(
-              "仍有 Agent Team worker 在运行或结果待处理，请先处理完成后再切回 Solo Agent"
-            )
+            toast.error("仍有 Agent Team worker 在运行或结果待处理，请先处理完成后再切换执行模式")
             return
           }
         }
@@ -2071,7 +2078,7 @@ export function ChatContainer({
         const thread = await window.api.threads.get(threadId)
         const metadata = thread?.metadata ?? {}
         const nextMetadata: Record<string, unknown> = { ...metadata, agentMode: nextMode }
-        if (nextMode === "normal") {
+        if (nextMode !== "coordinator") {
           delete nextMetadata.coordinatorMode
         }
         await updateThread(threadId, {
@@ -2727,8 +2734,9 @@ export function ChatContainer({
       })
 
     // Clean up attachment XML tags in user messages for display
-    const allMessages = [...threadMessages, ...streamingMsgs]
-      .filter(isVisibleCheckpointTranscriptMessage)
+    const allMessages = [...threadMessages, ...streamingMsgs].filter(
+      isVisibleCheckpointTranscriptMessage
+    )
     const cleanedMessages = sortMessagesForDisplay(allMessages).map((msg) => {
       if (
         msg.role !== "user" ||
@@ -3651,24 +3659,27 @@ export function ChatContainer({
         }
       }
 
-    const startTime = Date.now()
-    setActiveTurnStartTime(startTime)
+      const startTime = Date.now()
+      setActiveTurnStartTime(startTime)
+      // A finished workflow panel belongs to the previous turn; drop it when a
+      // new message goes out so it doesn't linger forever in the transcript.
+      clearFinishedWorkflowRun()
       try {
         await stream.submit(
-        {
-          messages: [{ type: "human", content: fullMessage }]
-        },
-        {
-          config: {
-            configurable: {
-              thread_id: threadId,
-              model_id: currentModel,
-              agent_mode: submitAgentMode,
-              ...(visibleUserMessage?.id ? { hook_turn_id: visibleUserMessage.id } : {})
+          {
+            messages: [{ type: "human", content: fullMessage }]
+          },
+          {
+            config: {
+              configurable: {
+                thread_id: threadId,
+                model_id: currentModel,
+                agent_mode: submitAgentMode,
+                ...(visibleUserMessage?.id ? { hook_turn_id: visibleUserMessage.id } : {})
+              }
             }
           }
-        }
-      )
+        )
       } finally {
         setActiveTurnStartTime(null)
       }
@@ -4648,217 +4659,53 @@ export function ChatContainer({
               <div
                 className={cn("p-4", reserveRightSpace && "md:pr-20")}
                 style={
-                  userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined
+                  userInputScrollPadding
+                    ? { paddingBottom: `${userInputScrollPadding}px` }
+                    : undefined
                 }
               >
                 <div className="max-w-3xl mx-auto space-y-4">
                   {historyLoading && displayMessages.length === 0 && (
-              <div
-                className="flex min-h-[42vh] items-center justify-center px-4"
-                aria-live="polite"
-                aria-busy="true"
-              >
-                <div className="flex flex-col items-center gap-3 text-center">
-                  <div className="history-loading-icon">
-                    <Clock className="size-5" />
-                  </div>
-                  <div className="space-y-1">
-                    <div className="text-sm font-medium text-foreground">正在加载会话历史</div>
-                    <div className="text-xs text-muted-foreground">内容较多时可能需要几秒钟...</div>
-                  </div>
-                </div>
-              </div>
-            )}
-            {displayMessages.length === 0 && !isLoading && !historyLoading && (
-              <div className="pt-6 pb-8">
-                {shouldShowHarnessDialogTips && harnessDialogTips ? (
-                  <DialogTipsMarkdown content={harnessDialogTips} />
-                ) : !shouldShowWelcomeHeadline || harnessFeatureBinding ? null : (
-                  <RotatingHeadline />
-                )}
-                {skillsLoading ? (
-                  <div className="text-sm text-muted-foreground text-center py-10">
-                    正在加载技能列表...
-                  </div>
-                ) : skills.length === 0 ? null : (
-                  <div className="space-y-3">
-                    {programmingSkillCards.length > 0 && (
-                      <div className="space-y-2">
-                        <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                          编程场景
+                    <div
+                      className="flex min-h-[42vh] items-center justify-center px-4"
+                      aria-live="polite"
+                      aria-busy="true"
+                    >
+                      <div className="flex flex-col items-center gap-3 text-center">
+                        <div className="history-loading-icon">
+                          <Clock className="size-5" />
                         </div>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                          {programmingSkillCards.map(({ skill, label, icon }) => (
-                            <button
-                              key={label + skill.path}
-                              type="button"
-                              onClick={() => handleUseSkillPrompt(skill)}
-                              className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
-                            >
-                              <div className="flex items-center gap-3">
-                                <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                                  {icon}
-                                </div>
-                                <div className="text-xs text-foreground leading-5">{label}</div>
-                              </div>
-                            </button>
-                          ))}
+                        <div className="space-y-1">
+                          <div className="text-sm font-medium text-foreground">
+                            正在加载会话历史
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            内容较多时可能需要几秒钟...
+                          </div>
                         </div>
-                        {programmingSkills.length > 8 && (
-                          <button
-                            type="button"
-                            onClick={() => setShowAllProgrammingSkills((prev) => !prev)}
-                            className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
-                          >
-                            {showAllProgrammingSkills ? (
-                              <>
-                                <ChevronUp className="size-3.5" />
-                                <span>收起</span>
-                              </>
-                            ) : (
-                              <>
-                                <ChevronDown className="size-3.5" />
-                                <span>展开更多（+{programmingSkills.length - 8}）</span>
-                              </>
-                            )}
-                          </button>
-                        )}
                       </div>
-                    )}
-                    {shouldShowWelcomeSkillTabs && (
-                      <Tabs defaultValue="skills-by-category" className="space-y-3">
-                        <TabsList className="grid h-9 w-full grid-cols-3">
-                          <TabsTrigger value="skills-by-category" className="text-xs">
-                            场景技能
-                          </TabsTrigger>
-                          <TabsTrigger value="installed-skills" className="text-xs gap-1.5">
-                            我安装的技能
-                            {customSkillUpdateCount > 0 && (
-                              <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-teal-100 px-1 text-[10px] font-semibold leading-none text-teal-700 dark:bg-teal-900/40 dark:text-teal-200">
-                                {customSkillUpdateCount}
-                              </span>
-                            )}
-                          </TabsTrigger>
-                          <TabsTrigger value="help" className="text-xs">
-                            帮助
-                          </TabsTrigger>
-                        </TabsList>
-
-                        <TabsContent value="skills-by-category" className="mt-0">
-                          {/* 市场技能：内部使用 getAllSkills 取数并按分类展示 */}
-                          <SkillsByCategorySection
-                            skills={enabledSkillsForSlash}
-                            previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
-                            onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
-                            onOpenOrganizationSkillMarket={handleOpenOrganizationSkillMarket}
-                            onOpenMarketBySkill={handleOpenMarketBySkill}
-                            onUseSkillPrompt={handleUseSkillPrompt}
-                          />
-                        </TabsContent>
-
-                        <TabsContent value="installed-skills" className="mt-0 space-y-3">
-                          {enabledCustomSkillGroups.length > 0 ? (
-                            <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
-                              <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium text-emerald-800 dark:text-emerald-200">
-                                <span>已启用技能</span>
-                                <Badge
-                                  variant="outline"
-                                  className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
-                                >
-                                  {enabledCustomSkills.length}
-                                </Badge>
-                              </div>
-                              <div className="space-y-3">
-                                {enabledCustomSkillGroups.map((group) => (
-                                  <div key={group.category} className="space-y-2">
-                                    <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                                      {group.category}
-                                    </div>
-                                    <WelcomeSkillTree
-                                      cards={group.cards}
-                                      onUseSkill={handleUseSkillPrompt}
-                                      getSkillShowLabel={getSkillShowLabel}
-                                    />
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          ) : (
-                            <button
-                              type="button"
-                              className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
-                            >
-                              <div className="flex items-center gap-2 min-w-0">
-                                <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
-                                  <CircleAlert className={"size-4"} />
-                                </div>
-                                <div className="min-w-0 flex-1">
-                                  <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
-                                    暂无
-                                  </div>
-                                </div>
-                              </div>
-                            </button>
-                          )}
-
-                          {enabledCustomSkills.length > 8 && (
-                            <button
-                              type="button"
-                              onClick={() => setShowAllCustomSkills((prev) => !prev)}
-                              className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
-                            >
-                              {showAllCustomSkills ? (
-                                <>
-                                  <ChevronUp className="size-3.5" />
-                                  <span>收起</span>
-                                </>
-                              ) : (
-                                <>
-                                  <ChevronDown className="size-3.5" />
-                                  <span>展开更多（+{enabledCustomSkills.length - 8}）</span>
-                                </>
-                              )}
-                            </button>
-                          )}
-
-                          {disabledLocalSkills.length > 0 && (
-                            <details className="rounded-lg border border-border/70 bg-muted/20 px-2 py-2">
-                              <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
-                                <span>已禁用技能</span>
-                                <Badge
-                                  variant="outline"
-                                  className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
-                                >
-                                  {disabledLocalSkills.length}
-                                </Badge>
-                              </summary>
-                              <div className="mt-2 space-y-2">
-                                {disabledCustomSkillGroups.map((group) => (
-                                  <div key={group.category} className="space-y-2">
-                                    <div className="text-xs text-muted-foreground/80 font-medium tracking-wider">
-                                      {group.category}
-                                    </div>
-                                    <WelcomeSkillTree
-                                      cards={group.cards}
-                                      disabled
-                                      onUseSkill={handleUseSkillPrompt}
-                                      getSkillShowLabel={getSkillShowLabel}
-                                    />
-                                  </div>
-                                ))}
-                              </div>
-                            </details>
-                          )}
-                        </TabsContent>
-
-                        <TabsContent value="help" className="mt-0 space-y-2">
-                          {helpSceneSkillCards.length > 0 && (
+                    </div>
+                  )}
+                  {displayMessages.length === 0 && !isLoading && !historyLoading && (
+                    <div className="pt-6 pb-8">
+                      {shouldShowHarnessDialogTips && harnessDialogTips ? (
+                        <DialogTipsMarkdown content={harnessDialogTips} />
+                      ) : !shouldShowWelcomeHeadline || harnessFeatureBinding ? null : (
+                        <RotatingHeadline />
+                      )}
+                      {skillsLoading ? (
+                        <div className="text-sm text-muted-foreground text-center py-10">
+                          正在加载技能列表...
+                        </div>
+                      ) : skills.length === 0 ? null : (
+                        <div className="space-y-3">
+                          {programmingSkillCards.length > 0 && (
                             <div className="space-y-2">
                               <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                                通用场景
+                                编程场景
                               </div>
                               <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                                {helpSceneSkillCards.map(({ skill, label, icon }) => (
+                                {programmingSkillCards.map(({ skill, label, icon }) => (
                                   <button
                                     key={label + skill.path}
                                     type="button"
@@ -4876,38 +4723,210 @@ export function ChatContainer({
                                   </button>
                                 ))}
                               </div>
+                              {programmingSkills.length > 8 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setShowAllProgrammingSkills((prev) => !prev)}
+                                  className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
+                                >
+                                  {showAllProgrammingSkills ? (
+                                    <>
+                                      <ChevronUp className="size-3.5" />
+                                      <span>收起</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <ChevronDown className="size-3.5" />
+                                      <span>展开更多（+{programmingSkills.length - 8}）</span>
+                                    </>
+                                  )}
+                                </button>
+                              )}
                             </div>
                           )}
-                          <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                            帮助
-                          </div>
-                          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                            <button
-                              onClick={async () => {
-                                const instructionUrl = import.meta.env.VITE_INTRUCTION_URL
-                                handleCopyToClipboard(instructionUrl)
-                              }}
-                              type="button"
-                              className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
-                            >
-                              <div className="flex items-center gap-3">
-                                <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                                  <Notebook size={14} />
+                          {shouldShowWelcomeSkillTabs && (
+                            <Tabs defaultValue="skills-by-category" className="space-y-3">
+                              <TabsList className="grid h-9 w-full grid-cols-3">
+                                <TabsTrigger value="skills-by-category" className="text-xs">
+                                  场景技能
+                                </TabsTrigger>
+                                <TabsTrigger value="installed-skills" className="text-xs gap-1.5">
+                                  我安装的技能
+                                  {customSkillUpdateCount > 0 && (
+                                    <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-teal-100 px-1 text-[10px] font-semibold leading-none text-teal-700 dark:bg-teal-900/40 dark:text-teal-200">
+                                      {customSkillUpdateCount}
+                                    </span>
+                                  )}
+                                </TabsTrigger>
+                                <TabsTrigger value="help" className="text-xs">
+                                  帮助
+                                </TabsTrigger>
+                              </TabsList>
+
+                              <TabsContent value="skills-by-category" className="mt-0">
+                                {/* 市场技能：内部使用 getAllSkills 取数并按分类展示 */}
+                                <SkillsByCategorySection
+                                  skills={enabledSkillsForSlash}
+                                  previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
+                                  onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
+                                  onOpenOrganizationSkillMarket={handleOpenOrganizationSkillMarket}
+                                  onOpenMarketBySkill={handleOpenMarketBySkill}
+                                  onUseSkillPrompt={handleUseSkillPrompt}
+                                />
+                              </TabsContent>
+
+                              <TabsContent value="installed-skills" className="mt-0 space-y-3">
+                                {enabledCustomSkillGroups.length > 0 ? (
+                                  <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
+                                    <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium text-emerald-800 dark:text-emerald-200">
+                                      <span>已启用技能</span>
+                                      <Badge
+                                        variant="outline"
+                                        className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
+                                      >
+                                        {enabledCustomSkills.length}
+                                      </Badge>
+                                    </div>
+                                    <div className="space-y-3">
+                                      {enabledCustomSkillGroups.map((group) => (
+                                        <div key={group.category} className="space-y-2">
+                                          <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                                            {group.category}
+                                          </div>
+                                          <WelcomeSkillTree
+                                            cards={group.cards}
+                                            onUseSkill={handleUseSkillPrompt}
+                                            getSkillShowLabel={getSkillShowLabel}
+                                          />
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
+                                        <CircleAlert className={"size-4"} />
+                                      </div>
+                                      <div className="min-w-0 flex-1">
+                                        <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
+                                          暂无
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </button>
+                                )}
+
+                                {enabledCustomSkills.length > 8 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setShowAllCustomSkills((prev) => !prev)}
+                                    className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
+                                  >
+                                    {showAllCustomSkills ? (
+                                      <>
+                                        <ChevronUp className="size-3.5" />
+                                        <span>收起</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <ChevronDown className="size-3.5" />
+                                        <span>展开更多（+{enabledCustomSkills.length - 8}）</span>
+                                      </>
+                                    )}
+                                  </button>
+                                )}
+
+                                {disabledLocalSkills.length > 0 && (
+                                  <details className="rounded-lg border border-border/70 bg-muted/20 px-2 py-2">
+                                    <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
+                                      <span>已禁用技能</span>
+                                      <Badge
+                                        variant="outline"
+                                        className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
+                                      >
+                                        {disabledLocalSkills.length}
+                                      </Badge>
+                                    </summary>
+                                    <div className="mt-2 space-y-2">
+                                      {disabledCustomSkillGroups.map((group) => (
+                                        <div key={group.category} className="space-y-2">
+                                          <div className="text-xs text-muted-foreground/80 font-medium tracking-wider">
+                                            {group.category}
+                                          </div>
+                                          <WelcomeSkillTree
+                                            cards={group.cards}
+                                            disabled
+                                            onUseSkill={handleUseSkillPrompt}
+                                            getSkillShowLabel={getSkillShowLabel}
+                                          />
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </details>
+                                )}
+                              </TabsContent>
+
+                              <TabsContent value="help" className="mt-0 space-y-2">
+                                {helpSceneSkillCards.length > 0 && (
+                                  <div className="space-y-2">
+                                    <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                                      通用场景
+                                    </div>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                      {helpSceneSkillCards.map(({ skill, label, icon }) => (
+                                        <button
+                                          key={label + skill.path}
+                                          type="button"
+                                          onClick={() => handleUseSkillPrompt(skill)}
+                                          className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                                        >
+                                          <div className="flex items-center gap-3">
+                                            <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
+                                              {icon}
+                                            </div>
+                                            <div className="text-xs text-foreground leading-5">
+                                              {label}
+                                            </div>
+                                          </div>
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                                <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                                  帮助
                                 </div>
-                                <div className="text-xs text-foreground leading-5">
-                                  操作说明文档
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                  <button
+                                    onClick={async () => {
+                                      const instructionUrl = import.meta.env.VITE_INTRUCTION_URL
+                                      handleCopyToClipboard(instructionUrl)
+                                    }}
+                                    type="button"
+                                    className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                                  >
+                                    <div className="flex items-center gap-3">
+                                      <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
+                                        <Notebook size={14} />
+                                      </div>
+                                      <div className="text-xs text-foreground leading-5">
+                                        操作说明文档
+                                      </div>
+                                    </div>
+                                  </button>
+                                  {/*<UpdateActionButton />*/}
                                 </div>
-                              </div>
-                            </button>
-                            {/*<UpdateActionButton />*/}
-                          </div>
-                        </TabsContent>
-                      </Tabs>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
+                              </TabsContent>
+                            </Tabs>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {displayMessages.map((message, index) => {
                     const previousMessage = index > 0 ? displayMessages[index - 1] : null
                     const isLastMessage = index === displayMessages.length - 1
@@ -4976,109 +4995,116 @@ export function ChatContainer({
                     )
                   })}
 
-            {/*测试git diff功能*/}
-            {/*<DisplayDiffTest/>*/}
+                  {/*测试git diff功能*/}
+                  {/*<DisplayDiffTest/>*/}
 
-            {/*
+                  {/*
               Hook log chips now live under each user message above. The modal
               is mounted once at component scope below so it's not bound to a
               specific message render. Buckets without a visible user message
               (session lifecycle, worker auto-turns, older placeholders) render
               their chips here.
             */}
-            {hookLogConfig.enabled && detachedHookLogBuckets.length > 0 && (
-              <div className="flex flex-wrap justify-start gap-2 mt-1">
-                {detachedHookLogBuckets.map((bucket) => (
-                  <HookLogChip
-                    key={bucket.turnId}
-                    bucket={bucket}
-                    onClick={() => setOpenHookLogBucketId(bucket.turnId)}
-                  />
-                ))}
-              </div>
-            )}
-
-            {/* Orchestrator standalone approval bar moved outside ScrollArea — see below */}
-            {/* Model retry indicator — shown when the fetch layer is retrying a transient error */}
-            {modelRetry && (
-              <div className="flex items-start gap-2 rounded-md border border-amber-300/60 bg-amber-50/60 dark:border-amber-500/40 dark:bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
-                <span className="inline-block size-3 mt-0.5 rounded-full border-2 border-amber-500 border-t-transparent animate-spin shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <span>
-                    模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
-                    {modelRetry.maxRetries}
-                    {modelRetry.delayMs > 0 && (
-                      <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>
-                    )}
-                    …
-                  </span>
-                </div>
-              </div>
-            )}
-            {/* Streaming indicator and inline TODOs */}
-            {isLoading && (
-              <div className="space-y-3">
-                <div className="flex items-center gap-2 text-sm">
-                  <div className="rainbow-spinner" />
-                  <span
-                    className="thinking-shimmer-text"
-                    data-text={THINKING_MESSAGES[thinkingMessageIndex]}
-                  >
-                    {THINKING_MESSAGES[thinkingMessageIndex]}
-                  </span>
-                  {
-                   streamData.isLoading &&  <ProcessingDuration
-                      key={threadId}
-                      startTime={activeTurnStartTime}
-                      text="已处理"
-                    />
-                  }
-                </div>
-                {todos.length > 0 && <ChatTodos todos={todos} />}
-              </div>
-            )}
-            {hookInterruption && !isLoading && (
-              <div className="flex items-start gap-3 rounded-md border border-amber-400/60 bg-amber-50/50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
-                <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
-                <div className="flex-1 min-w-0">
-                  <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
-                    {hookInterruption.action === "halt" ? "Hook 已停止本轮" : "Hook 已阻断本轮"}
-                  </div>
-                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
-                    <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
-                      {hookInterruption.event}
-                    </span>
-                    <span>{hookInterruption.timestamp.toLocaleTimeString()}</span>
-                  </div>
-                  <div className="text-sm text-amber-900/90 mt-2 break-words dark:text-amber-100/90">
-                    {hookInterruption.reason}
-                  </div>
-                  {hookInterruption.systemMessage && (
-                    <div className="text-xs text-amber-700/80 mt-2 break-words dark:text-amber-200/80">
-                      {hookInterruption.systemMessage}
+                  {hookLogConfig.enabled && detachedHookLogBuckets.length > 0 && (
+                    <div className="flex flex-wrap justify-start gap-2 mt-1">
+                      {detachedHookLogBuckets.map((bucket) => (
+                        <HookLogChip
+                          key={bucket.turnId}
+                          bucket={bucket}
+                          onClick={() => setOpenHookLogBucketId(bucket.turnId)}
+                        />
+                      ))}
                     </div>
                   )}
-                  <div className="text-xs text-muted-foreground mt-2">
-                    这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。
-                  </div>
-                </div>
-                <button
-                  onClick={clearHookInterruption}
-                  className="shrink-0 rounded p-1 hover:bg-amber-500/20 transition-colors"
-                  aria-label="Dismiss hook notice"
-                >
-                  <X className="size-4 text-muted-foreground" />
-                </button>
-              </div>
-            )}
-            {/* Error state */}
-            {threadError && !isLoading && (
-              <ChatErrorCard
-                error={threadError}
-                detail={errorDetail}
-                onDismiss={handleDismissError}
-              />
-            )}
+
+                  {/* Orchestrator standalone approval bar moved outside ScrollArea — see below */}
+                  {/* Model retry indicator — shown when the fetch layer is retrying a transient error */}
+                  {modelRetry && (
+                    <div className="flex items-start gap-2 rounded-md border border-amber-300/60 bg-amber-50/60 dark:border-amber-500/40 dark:bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
+                      <span className="inline-block size-3 mt-0.5 rounded-full border-2 border-amber-500 border-t-transparent animate-spin shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <span>
+                          模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
+                          {modelRetry.maxRetries}
+                          {modelRetry.delayMs > 0 && (
+                            <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>
+                          )}
+                          …
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                  {/* Streaming indicator and inline TODOs */}
+                  {isLoading && (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-sm">
+                        <div className="rainbow-spinner" />
+                        <span
+                          className="thinking-shimmer-text"
+                          data-text={THINKING_MESSAGES[thinkingMessageIndex]}
+                        >
+                          {THINKING_MESSAGES[thinkingMessageIndex]}
+                        </span>
+                        {streamData.isLoading && (
+                          <ProcessingDuration
+                            key={threadId}
+                            startTime={activeTurnStartTime}
+                            text="已处理"
+                          />
+                        )}
+                      </div>
+                      {todos.length > 0 && <ChatTodos todos={todos} />}
+                    </div>
+                  )}
+                  {workflowRun ? (
+                    <WorkflowRunPanel threadId={threadId} run={workflowRun} />
+                  ) : isWorkflowModeMetadata(currentThread?.metadata) ? (
+                    <WorkflowHistoryButton threadId={threadId} />
+                  ) : null}
+                  {hookInterruption && !isLoading && (
+                    <div className="flex items-start gap-3 rounded-md border border-amber-400/60 bg-amber-50/50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
+                      <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
+                          {hookInterruption.action === "halt"
+                            ? "Hook 已停止本轮"
+                            : "Hook 已阻断本轮"}
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
+                          <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
+                            {hookInterruption.event}
+                          </span>
+                          <span>{hookInterruption.timestamp.toLocaleTimeString()}</span>
+                        </div>
+                        <div className="text-sm text-amber-900/90 mt-2 break-words dark:text-amber-100/90">
+                          {hookInterruption.reason}
+                        </div>
+                        {hookInterruption.systemMessage && (
+                          <div className="text-xs text-amber-700/80 mt-2 break-words dark:text-amber-200/80">
+                            {hookInterruption.systemMessage}
+                          </div>
+                        )}
+                        <div className="text-xs text-muted-foreground mt-2">
+                          这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。
+                        </div>
+                      </div>
+                      <button
+                        onClick={clearHookInterruption}
+                        className="shrink-0 rounded p-1 hover:bg-amber-500/20 transition-colors"
+                        aria-label="Dismiss hook notice"
+                      >
+                        <X className="size-4 text-muted-foreground" />
+                      </button>
+                    </div>
+                  )}
+                  {/* Error state */}
+                  {threadError && !isLoading && (
+                    <ChatErrorCard
+                      error={threadError}
+                      detail={errorDetail}
+                      onDismiss={handleDismissError}
+                    />
+                  )}
                 </div>
               </div>
             </ScrollArea>
@@ -5092,185 +5118,265 @@ export function ChatContainer({
                 (!yoloModeLoaded || yoloMode) &&
                 (pendingApproval as unknown as Record<string, unknown>).operation === "git_push"
               ) && (
-              <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>
-          {(() => {
-              const approval = pendingApproval as unknown as Record<string, unknown>
-              const operation = approval.operation
-              const isFileApproval = operation === "write_file" || operation === "edit_file"
-              const isCodeExecApproval = operation === "code_exec"
-              const isSaveCodeExecToolApproval = operation === "save_code_exec_tool"
-              const approvalParams =
-                approval.params ?? pendingApproval.tool_call?.args?.params ?? {}
-              const hasApprovalParams =
-                approvalParams &&
-                typeof approvalParams === "object" &&
-                !Array.isArray(approvalParams) &&
-                Object.keys(approvalParams as Record<string, unknown>).length > 0
-              const approvalTypes = Array.isArray(approval._approvalTypes)
-                ? (approval._approvalTypes as Array<
-                    "approve" | "approve_session" | "approve_permanent" | "reject"
-                  >)
-                : ["approve", "approve_session", "approve_permanent", "reject"]
+                <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>
+                  {(() => {
+                    const approval = pendingApproval as unknown as Record<string, unknown>
+                    const operation = approval.operation
+                    const isFileApproval = operation === "write_file" || operation === "edit_file"
+                    const isCodeExecApproval = operation === "code_exec"
+                    const isSaveCodeExecToolApproval = operation === "save_code_exec_tool"
+                    // Dynamic workflow launch approval: the backend sends
+                    // tool_call.name="workflow" with name/description/phases/
+                    // scriptPreview/argsPreview in args (no `operation`/`command`),
+                    // so without a dedicated branch it falls through to the generic
+                    // "command" card and shows nothing useful.
+                    const isWorkflowApproval = pendingApproval.tool_call?.name === "workflow"
+                    const workflowArgs = (pendingApproval.tool_call?.args ?? {}) as Record<
+                      string,
+                      unknown
+                    >
+                    // Backend sends phases as a string[] (meta.phases.map(p =>
+                    // p.title)); tolerate an object form too in case that changes.
+                    const workflowPhases: string[] = Array.isArray(workflowArgs.phases)
+                      ? (workflowArgs.phases as unknown[]).map((phase, phaseIndex) =>
+                          typeof phase === "string"
+                            ? phase
+                            : String(
+                                (phase as Record<string, unknown> | null)?.title ??
+                                  `phase ${phaseIndex + 1}`
+                              )
+                        )
+                      : []
+                    const approvalParams =
+                      approval.params ?? pendingApproval.tool_call?.args?.params ?? {}
+                    const hasApprovalParams =
+                      approvalParams &&
+                      typeof approvalParams === "object" &&
+                      !Array.isArray(approvalParams) &&
+                      Object.keys(approvalParams as Record<string, unknown>).length > 0
+                    const approvalTypes = Array.isArray(approval._approvalTypes)
+                      ? (approval._approvalTypes as Array<
+                          "approve" | "approve_session" | "approve_permanent" | "reject"
+                        >)
+                      : ["approve", "approve_session", "approve_permanent", "reject"]
 
-              return (
-                <div
-                  className={`max-w-3xl mx-auto rounded-lg border-2 p-4 space-y-3 ${
-                    isFileApproval
-                      ? "border-blue-500/50 bg-blue-500/5"
-                      : isCodeExecApproval || isSaveCodeExecToolApproval
-                        ? "border-emerald-500/50 bg-emerald-500/5"
-                        : "border-amber-500/50 bg-amber-500/5"
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    {isFileApproval ? (
-                      <FilePenLine className="size-4 text-blue-500" />
-                    ) : isCodeExecApproval ? (
-                      <Code2 className="size-4 text-emerald-500" />
-                    ) : isSaveCodeExecToolApproval ? (
-                      <Wrench className="size-4 text-emerald-500" />
-                    ) : (
-                      <ShieldCheck className="size-4 text-amber-500" />
-                    )}
-                    <span className="text-sm font-medium">
-                      {operation === "write_file"
-                        ? "写入文件需要审批"
-                        : operation === "edit_file"
-                          ? "编辑文件需要审批"
-                          : isCodeExecApproval
-                            ? "编程式工具调用"
-                            : isSaveCodeExecToolApproval
-                              ? "编程式工具调用"
-                              : "命令需要审批"}
-                    </span>
-                    {queuedApprovalCount > 0 && (
-                      <span className="text-xs text-muted-foreground">
-                        还有 {queuedApprovalCount} 条待审批
-                      </span>
-                    )}
-                  </div>
-                  {isCodeExecApproval || isSaveCodeExecToolApproval ? (
-                    <>
-                      {isSaveCodeExecToolApproval && (
-                        <div className="grid gap-2 md:grid-cols-2">
-                          <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
-                            <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                              工具 ID
+                    return (
+                      <div
+                        className={`max-w-3xl mx-auto rounded-lg border-2 p-4 space-y-3 ${
+                          isFileApproval
+                            ? "border-blue-500/50 bg-blue-500/5"
+                            : isCodeExecApproval || isSaveCodeExecToolApproval
+                              ? "border-emerald-500/50 bg-emerald-500/5"
+                              : isWorkflowApproval
+                                ? "border-violet-500/50 bg-violet-500/5"
+                                : "border-amber-500/50 bg-amber-500/5"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          {isFileApproval ? (
+                            <FilePenLine className="size-4 text-blue-500" />
+                          ) : isCodeExecApproval ? (
+                            <Code2 className="size-4 text-emerald-500" />
+                          ) : isSaveCodeExecToolApproval ? (
+                            <Wrench className="size-4 text-emerald-500" />
+                          ) : isWorkflowApproval ? (
+                            <Workflow className="size-4 text-violet-500" />
+                          ) : (
+                            <ShieldCheck className="size-4 text-amber-500" />
+                          )}
+                          <span className="text-sm font-medium">
+                            {operation === "write_file"
+                              ? "写入文件需要审批"
+                              : operation === "edit_file"
+                                ? "编辑文件需要审批"
+                                : isCodeExecApproval
+                                  ? "编程式工具调用"
+                                  : isSaveCodeExecToolApproval
+                                    ? "编程式工具调用"
+                                    : isWorkflowApproval
+                                      ? "运行动态工作流需要审批"
+                                      : "命令需要审批"}
+                          </span>
+                          {queuedApprovalCount > 0 && (
+                            <span className="text-xs text-muted-foreground">
+                              还有 {queuedApprovalCount} 条待审批
+                            </span>
+                          )}
+                        </div>
+                        {isCodeExecApproval || isSaveCodeExecToolApproval ? (
+                          <>
+                            {isSaveCodeExecToolApproval && (
+                              <div className="grid gap-2 md:grid-cols-2">
+                                <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
+                                  <div className="mb-1 text-[11px] font-medium text-muted-foreground">
+                                    工具 ID
+                                  </div>
+                                  <div className="font-mono break-all">
+                                    {String(
+                                      approval.savedToolId ||
+                                        pendingApproval.tool_call?.args?.toolId ||
+                                        "-"
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                            <div className="overflow-hidden rounded-md border border-border bg-background shadow-sm">
+                              <div className="border-b border-border bg-muted/60 px-3 py-1.5 text-[11px] font-medium text-muted-foreground">
+                                脚本内容
+                              </div>
+                              <div className="max-h-36 overflow-auto px-3 py-2 font-mono text-xs whitespace-pre-wrap break-all">
+                                {String(
+                                  approval.code || pendingApproval.tool_call?.args?.code || ""
+                                )}
+                              </div>
                             </div>
-                            <div className="font-mono break-all">
-                              {String(
-                                approval.savedToolId ||
-                                  pendingApproval.tool_call?.args?.toolId ||
-                                  "-"
+                            {hasApprovalParams && (
+                              <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
+                                <div className="mb-1 text-[11px] font-medium text-muted-foreground">
+                                  params
+                                </div>
+                                <pre className="whitespace-pre-wrap break-all font-mono">
+                                  {JSON.stringify(approvalParams, null, 2)}
+                                </pre>
+                              </div>
+                            )}
+                          </>
+                        ) : isWorkflowApproval ? (
+                          <div className="space-y-2">
+                            <div className="rounded-md bg-muted/30 px-3 py-2 text-xs">
+                              <div className="font-medium break-all">
+                                {String(workflowArgs.name ?? "(unnamed workflow)")}
+                              </div>
+                              {Boolean(workflowArgs.description) && (
+                                <div className="mt-0.5 text-muted-foreground break-all">
+                                  {String(workflowArgs.description)}
+                                </div>
                               )}
                             </div>
+                            {workflowPhases.length > 0 && (
+                              <div className="rounded-md bg-muted/30 px-3 py-2 text-xs">
+                                <div className="mb-1 text-[11px] font-medium text-muted-foreground">
+                                  阶段（{workflowPhases.length}）
+                                </div>
+                                <ul className="space-y-0.5">
+                                  {workflowPhases.map((phase, phaseIndex) => (
+                                    <li key={phaseIndex} className="font-mono break-all">
+                                      {phase}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                            {Boolean(workflowArgs.scriptPreview) && (
+                              <div className="overflow-hidden rounded-md border border-border bg-background shadow-sm">
+                                <div className="border-b border-border bg-muted/60 px-3 py-1.5 text-[11px] font-medium text-muted-foreground">
+                                  脚本预览
+                                </div>
+                                <div className="max-h-36 overflow-auto px-3 py-2 font-mono text-xs whitespace-pre-wrap break-all">
+                                  {String(workflowArgs.scriptPreview)}
+                                </div>
+                              </div>
+                            )}
+                            {Boolean(workflowArgs.argsPreview) &&
+                              String(workflowArgs.argsPreview) !== "(none)" && (
+                                <div className="overflow-auto rounded-md bg-muted/30 px-3 py-2 text-xs">
+                                  <div className="mb-1 text-[11px] font-medium text-muted-foreground">
+                                    args
+                                  </div>
+                                  <pre className="whitespace-pre-wrap break-all font-mono">
+                                    {String(workflowArgs.argsPreview)}
+                                  </pre>
+                                </div>
+                              )}
                           </div>
-                        </div>
-                      )}
-                      <div className="overflow-hidden rounded-md border border-border bg-background shadow-sm">
-                        <div className="border-b border-border bg-muted/60 px-3 py-1.5 text-[11px] font-medium text-muted-foreground">
-                          脚本内容
-                        </div>
-                        <div className="max-h-36 overflow-auto px-3 py-2 font-mono text-xs whitespace-pre-wrap break-all">
-                          {String(approval.code || pendingApproval.tool_call?.args?.code || "")}
+                        ) : (
+                          <pre className="rounded-md bg-muted/50 px-3 py-2 font-mono text-sm whitespace-pre-wrap break-words overflow-auto max-h-40">
+                            {isFileApproval
+                              ? `${operation === "write_file" ? "写入" : "编辑"}: ${String(approval.filePath || pendingApproval.tool_call?.args?.filePath || "unknown")}`
+                              : approval.command
+                                ? String(approval.command)
+                                : pendingApproval.tool_call?.args?.command
+                                  ? String(pendingApproval.tool_call.args.command)
+                                  : "unknown command"}
+                          </pre>
+                        )}
+                        {Boolean(approval._retryReason) && (
+                          <div className="text-xs text-amber-600 dark:text-amber-400">
+                            {String(approval._retryReason)}
+                          </div>
+                        )}
+                        {Boolean(approval.reason) && (
+                          <div className="text-xs text-muted-foreground">
+                            {`原因：${String(approval.reason)}`}
+                          </div>
+                        )}
+                        <div className="flex items-center gap-2">
+                          {approval._retryReason ? (
+                            <>
+                              <button
+                                className="rounded-md bg-amber-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-amber-700"
+                                onClick={() => handleApprovalDecision("approve")}
+                              >
+                                无沙箱重试
+                              </button>
+                              <button
+                                className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/15"
+                                onClick={() => handleApprovalDecision("reject")}
+                              >
+                                拒绝
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              {approvalTypes.includes("approve") && (
+                                <button
+                                  className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
+                                  onClick={() => handleApprovalDecision("approve")}
+                                >
+                                  {isFileApproval
+                                    ? "允许"
+                                    : isCodeExecApproval
+                                      ? "执行脚本"
+                                      : isSaveCodeExecToolApproval
+                                        ? "保存草稿"
+                                        : isWorkflowApproval
+                                          ? "运行工作流"
+                                          : "运行"}
+                                </button>
+                              )}
+                              {approvalTypes.includes("approve_session") && (
+                                <button
+                                  className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700"
+                                  onClick={() => handleApprovalDecision("approve_session")}
+                                >
+                                  本会话允许
+                                </button>
+                              )}
+                              {approvalTypes.includes("approve_permanent") && (
+                                <button
+                                  className="rounded-md bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-green-700"
+                                  onClick={() => handleApprovalDecision("approve_permanent")}
+                                >
+                                  始终允许
+                                </button>
+                              )}
+                              {approvalTypes.includes("reject") && (
+                                <button
+                                  className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/15"
+                                  onClick={() => handleApprovalDecision("reject")}
+                                >
+                                  拒绝
+                                </button>
+                              )}
+                            </>
+                          )}
                         </div>
                       </div>
-                      {hasApprovalParams && (
-                        <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
-                          <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                            params
-                          </div>
-                          <pre className="whitespace-pre-wrap break-all font-mono">
-                            {JSON.stringify(approvalParams, null, 2)}
-                          </pre>
-                        </div>
-                      )}
-                    </>
-                  ) : (
-                    <pre className="rounded-md bg-muted/50 px-3 py-2 font-mono text-sm whitespace-pre-wrap break-words overflow-auto max-h-40">
-                      {isFileApproval
-                        ? `${operation === "write_file" ? "写入" : "编辑"}: ${String(approval.filePath || pendingApproval.tool_call?.args?.filePath || "unknown")}`
-                        : approval.command
-                          ? String(approval.command)
-                          : pendingApproval.tool_call?.args?.command
-                            ? String(pendingApproval.tool_call.args.command)
-                            : "unknown command"}
-                    </pre>
-                  )}
-                  {Boolean(approval._retryReason) && (
-                    <div className="text-xs text-amber-600 dark:text-amber-400">
-                      {String(approval._retryReason)}
-                    </div>
-                  )}
-                  {Boolean(approval.reason) && (
-                    <div className="text-xs text-muted-foreground">
-                      {`原因：${String(approval.reason)}`}
-                    </div>
-                  )}
-                  <div className="flex items-center gap-2">
-                    {approval._retryReason ? (
-                      <>
-                        <button
-                          className="rounded-md bg-amber-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-amber-700"
-                          onClick={() => handleApprovalDecision("approve")}
-                        >
-                          无沙箱重试
-                        </button>
-                        <button
-                          className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/15"
-                          onClick={() => handleApprovalDecision("reject")}
-                        >
-                          拒绝
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        {approvalTypes.includes("approve") && (
-                          <button
-                            className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
-                            onClick={() => handleApprovalDecision("approve")}
-                          >
-                            {isFileApproval
-                              ? "允许"
-                              : isCodeExecApproval
-                                ? "执行脚本"
-                                : isSaveCodeExecToolApproval
-                                  ? "保存草稿"
-                                  : "运行"}
-                          </button>
-                        )}
-                        {approvalTypes.includes("approve_session") && (
-                          <button
-                            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700"
-                            onClick={() => handleApprovalDecision("approve_session")}
-                          >
-                            本会话允许
-                          </button>
-                        )}
-                        {approvalTypes.includes("approve_permanent") && (
-                          <button
-                            className="rounded-md bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-green-700"
-                            onClick={() => handleApprovalDecision("approve_permanent")}
-                          >
-                            始终允许
-                          </button>
-                        )}
-                        {approvalTypes.includes("reject") && (
-                          <button
-                            className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/15"
-                            onClick={() => handleApprovalDecision("reject")}
-                          >
-                            拒绝
-                          </button>
-                        )}
-                      </>
-                    )}
-                  </div>
+                    )
+                  })()}
                 </div>
-              )
-            })()}
-              </div>
-            )}
+              )}
             <ContextReminderController
               enabled={isHarnessContextReminderEnabled}
               isLoading={isLoading}
@@ -5309,295 +5415,304 @@ export function ChatContainer({
                 reserveRightSpace && "md:pr-20"
               )}
             >
-        {showGitChangeNotice && (
-          <div className="max-w-3xl mx-auto mb-2 flex items-center justify-between gap-3 rounded-xl border border-status-warning/40 bg-status-warning/10 px-3 py-2">
-            <div className="min-w-0 flex items-center gap-2 text-[12px] text-foreground">
-              <AlertCircle className="size-3.5 shrink-0 text-status-warning" />
-              <span className="truncate">检测到文件变更，可打开 Git 面板查看。</span>
-            </div>
-            <button
-              type="button"
-              onClick={onOpenGitPanel}
-              disabled={!onOpenGitPanel}
-              className="shrink-0 rounded-md bg-status-warning px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-status-warning/90 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              打开
-            </button>
-          </div>
-        )}
-        <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
-          <SlashCommandPopover
-            mode={slash.mode}
-            selectedIdx={slash.selectedIdx}
-            onHoverIdx={slash.setSelectedIdx}
-            onSelectCommand={applySlashCommand}
-            onSelectSkill={applySkillSelection}
-            skillsLoading={skillsLoading}
-          />
-          <div className="flex flex-col gap-2">
-            <div className="flex items-end gap-2">
-              <div
-                ref={dropZoneRef}
-                className={cn(
-                  "relative flex-1 min-w-0 flex flex-col rounded-3xl border border-border  transition-colors duration-300",
-                  pendingUserInput
-                    ? "border-primary/25 bg-background"
-                    : glowVisible
-                      ? "bg-white/80"
-                      : "bg-white",
-                  dragOver && "border-primary"
-                )}
-                onDrop={handleDrop}
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-              >
-                {/* Selected-skill chip sits above attachments and the textarea */}
-                {selectedSkill && (
-                  <div className="flex items-center gap-1.5 px-3 pt-2.5">
-                    <SkillChip label={selectedSkill.name} onRemove={() => setSelectedSkill(null)} />
+              {showGitChangeNotice && (
+                <div className="max-w-3xl mx-auto mb-2 flex items-center justify-between gap-3 rounded-xl border border-status-warning/40 bg-status-warning/10 px-3 py-2">
+                  <div className="min-w-0 flex items-center gap-2 text-[12px] text-foreground">
+                    <AlertCircle className="size-3.5 shrink-0 text-status-warning" />
+                    <span className="truncate">检测到文件变更，可打开 Git 面板查看。</span>
                   </div>
-                )}
-                {glowVisible && !pendingUserInput && (
-                  <div
-                    className={cn("siri-bg-glow rounded-xl", !isLoading && "siri-bg-glow-out")}
-                    onAnimationEnd={(e) => {
-                      if (
-                        e.animationName === "siri-fade-out" &&
-                        e.target === e.currentTarget &&
-                        !isLoading
-                      )
-                        setGlowVisible(false)
-                    }}
-                  />
-                )}
-                {dragOver && (
-                  <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl border-2 border-dashed border-primary bg-primary/5">
-                    <span className="text-sm text-primary">拖放文件到这里</span>
-                  </div>
-                )}
-                {/* Attachment chips inside input box */}
-                {attachments.length > 0 && (
-                  <div className="flex flex-col gap-1 px-3 pt-2.5">
-                    <div className="flex flex-wrap gap-1.5">
-                      {attachments.map((att, idx) => (
-                        <div
-                          key={`${att.filename}-${idx}`}
-                          className="flex items-center gap-1.5 px-2 py-1 bg-muted/50 rounded-md text-xs group"
-                        >
-                          <FileText className="size-3 text-muted-foreground shrink-0" />
-                          <span className="truncate max-w-[160px]" title={att.filePath}>
-                            {att.filename}
-                          </span>
-                          {att.truncated && (
-                            <span className="text-amber-500" title="内容已截取">
-                              ⚠
-                            </span>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => removeAttachment(idx)}
-                            className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
-                          >
-                            <X className="size-3" />
-                          </button>
-                        </div>
-                      ))}
-                      {attachmentLoading && (
-                        <Loader2 className="size-4 animate-spin text-muted-foreground self-center" />
-                      )}
-                    </div>
-                    <div className="text-[10px] text-muted-foreground/50">
-                      {attachments.length}/{MAX_ATTACHMENTS} 个文件 ·{" "}
-                      {totalAttachmentChars.toLocaleString()}/{MAX_TOTAL_CHARS.toLocaleString()}{" "}
-                      字符
-                    </div>
-                  </div>
-                )}
-                {/* Textarea */}
-                <textarea
-                  ref={inputRef}
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onCompositionStart={() => {
-                    isComposingRef.current = true
-                  }}
-                  onCompositionEnd={() => {
-                    isComposingRef.current = false
-                  }}
-                  onKeyDown={handleKeyDown}
-                  placeholder={inputPlaceholder}
-                  disabled={effectiveInputDisabled}
-                  className={cn(
-                    "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
-                    "p-4 text-sm placeholder:text-muted-foreground",
-                    "focus:outline-none disabled:opacity-70",
-                    attachments.length > 0 && "pt-1.5"
-                  )}
-                  rows={3}
-                  style={{ minHeight: "44px", maxHeight: "200px" }}
+                  <button
+                    type="button"
+                    onClick={onOpenGitPanel}
+                    disabled={!onOpenGitPanel}
+                    className="shrink-0 rounded-md bg-status-warning px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-status-warning/90 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    打开
+                  </button>
+                </div>
+              )}
+              <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
+                <SlashCommandPopover
+                  mode={slash.mode}
+                  selectedIdx={slash.selectedIdx}
+                  onHoverIdx={slash.setSelectedIdx}
+                  onSelectCommand={applySlashCommand}
+                  onSelectSkill={applySkillSelection}
+                  skillsLoading={skillsLoading}
                 />
-                {/* Bottom bar: + button left, send button right */}
-                <div className="flex items-center justify-between px-3 pb-2">
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      disabled={
-                        effectiveComposerControlsDisabled ||
-                        attachmentLoading ||
-                        attachments.length >= MAX_ATTACHMENTS ||
-                        totalAttachmentChars >= MAX_TOTAL_CHARS
-                      }
-                      onClick={handleAttachClick}
-                      title="添加文件 (txt, md, csv, docx, xlsx)"
-                      className="flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-end gap-2">
+                    <div
+                      ref={dropZoneRef}
+                      className={cn(
+                        "relative flex-1 min-w-0 flex flex-col rounded-3xl border border-border  transition-colors duration-300",
+                        pendingUserInput
+                          ? "border-primary/25 bg-background"
+                          : glowVisible
+                            ? "bg-white/80"
+                            : "bg-white",
+                        dragOver && "border-primary"
+                      )}
+                      onDrop={handleDrop}
+                      onDragOver={handleDragOver}
+                      onDragLeave={handleDragLeave}
                     >
-                      <Plus className="size-4" />
-                    </button>
-                    <div className="w-px h-4 bg-border mx-1" />
-                    <ModelSwitcher threadId={threadId} />
-                    <div className="w-px h-4 bg-border mx-1" />
-                    <AgentModeSwitcher
-                      mode={disableCoordinatorModeOption ? "normal" : agentMode}
-                      locked={disableCoordinatorModeOption || isLoading || !canChangeAgentMode}
-                      lockedReason={agentModeSwitchDisabledReason}
-                      onChange={handleAgentModeChange}
-                    />
-                    <div className="w-px h-4 bg-border mx-1" />
-                    <WorkspacePicker
-                      threadId={threadId}
-                      onGitStatusChange={onThreadGitStatusChange}
-                    />
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <TooltipProvider delayDuration={180}>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
+                      {/* Selected-skill chip sits above attachments and the textarea */}
+                      {selectedSkill && (
+                        <div className="flex items-center gap-1.5 px-3 pt-2.5">
+                          <SkillChip
+                            label={selectedSkill.name}
+                            onRemove={() => setSelectedSkill(null)}
+                          />
+                        </div>
+                      )}
+                      {glowVisible && !pendingUserInput && (
+                        <div
+                          className={cn(
+                            "siri-bg-glow rounded-xl",
+                            !isLoading && "siri-bg-glow-out"
+                          )}
+                          onAnimationEnd={(e) => {
+                            if (
+                              e.animationName === "siri-fade-out" &&
+                              e.target === e.currentTarget &&
+                              !isLoading
+                            )
+                              setGlowVisible(false)
+                          }}
+                        />
+                      )}
+                      {dragOver && (
+                        <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl border-2 border-dashed border-primary bg-primary/5">
+                          <span className="text-sm text-primary">拖放文件到这里</span>
+                        </div>
+                      )}
+                      {/* Attachment chips inside input box */}
+                      {attachments.length > 0 && (
+                        <div className="flex flex-col gap-1 px-3 pt-2.5">
+                          <div className="flex flex-wrap gap-1.5">
+                            {attachments.map((att, idx) => (
+                              <div
+                                key={`${att.filename}-${idx}`}
+                                className="flex items-center gap-1.5 px-2 py-1 bg-muted/50 rounded-md text-xs group"
+                              >
+                                <FileText className="size-3 text-muted-foreground shrink-0" />
+                                <span className="truncate max-w-[160px]" title={att.filePath}>
+                                  {att.filename}
+                                </span>
+                                {att.truncated && (
+                                  <span className="text-amber-500" title="内容已截取">
+                                    ⚠
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => removeAttachment(idx)}
+                                  className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
+                                >
+                                  <X className="size-3" />
+                                </button>
+                              </div>
+                            ))}
+                            {attachmentLoading && (
+                              <Loader2 className="size-4 animate-spin text-muted-foreground self-center" />
+                            )}
+                          </div>
+                          <div className="text-[10px] text-muted-foreground/50">
+                            {attachments.length}/{MAX_ATTACHMENTS} 个文件 ·{" "}
+                            {totalAttachmentChars.toLocaleString()}/
+                            {MAX_TOTAL_CHARS.toLocaleString()} 字符
+                          </div>
+                        </div>
+                      )}
+                      {/* Textarea */}
+                      <textarea
+                        ref={inputRef}
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        onCompositionStart={() => {
+                          isComposingRef.current = true
+                        }}
+                        onCompositionEnd={() => {
+                          isComposingRef.current = false
+                        }}
+                        onKeyDown={handleKeyDown}
+                        placeholder={inputPlaceholder}
+                        disabled={effectiveInputDisabled}
+                        className={cn(
+                          "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
+                          "p-4 text-sm placeholder:text-muted-foreground",
+                          "focus:outline-none disabled:opacity-70",
+                          attachments.length > 0 && "pt-1.5"
+                        )}
+                        rows={3}
+                        style={{ minHeight: "44px", maxHeight: "200px" }}
+                      />
+                      {/* Bottom bar: + button left, send button right */}
+                      <div className="flex items-center justify-between px-3 pb-2">
+                        <div className="flex items-center gap-1">
                           <button
                             type="button"
-                            disabled={effectiveInputDisabled}
-                            onClick={handleInsertNewline}
-                            aria-label="换行"
-                            className="cursor-pointer flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                            disabled={
+                              effectiveComposerControlsDisabled ||
+                              attachmentLoading ||
+                              attachments.length >= MAX_ATTACHMENTS ||
+                              totalAttachmentChars >= MAX_TOTAL_CHARS
+                            }
+                            onClick={handleAttachClick}
+                            title="添加文件 (txt, md, csv, docx, xlsx)"
+                            className="flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                           >
-                            <CornerDownLeft className="size-3.5" />
+                            <Plus className="size-4" />
                           </button>
-                        </TooltipTrigger>
-                        <TooltipContent side="top" sideOffset={6}>
-                          Shift + Enter 换行
-                        </TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
-                    {isLoading ? (
-                      <>
-                        {canSubmitGoalCommandWhileLoading && (
-                          <button
-                            type="submit"
-                            disabled={goalSendButtonDisabledWhileLoading}
-                            aria-label="发送 goal 命令"
-                            className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            <Send className="size-3.5" />
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={handleCancel}
-                          aria-label="停止生成"
-                          title="停止生成"
-                          className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
-                        >
-                          <Square className="size-3 fill-current" />
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        {hasRunningCoordinatorWorker && (
-                          <TooltipProvider delayDuration={0}>
+                          <div className="w-px h-4 bg-border mx-1" />
+                          <ModelSwitcher threadId={threadId} />
+                          <div className="w-px h-4 bg-border mx-1" />
+                          <AgentModeSwitcher
+                            mode={disableCoordinatorModeOption ? "normal" : agentMode}
+                            locked={
+                              disableCoordinatorModeOption || isLoading || !canChangeAgentMode
+                            }
+                            lockedReason={agentModeSwitchDisabledReason}
+                            onChange={handleAgentModeChange}
+                          />
+                          <div className="w-px h-4 bg-border mx-1" />
+                          <WorkspacePicker
+                            threadId={threadId}
+                            onGitStatusChange={onThreadGitStatusChange}
+                          />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <TooltipProvider delayDuration={180}>
                             <Tooltip>
                               <TooltipTrigger asChild>
                                 <button
                                   type="button"
-                                  onClick={handleCancelBackgroundWorkers}
-                                  aria-label="停止后台子代理"
-                                  className="flex items-center justify-center size-7 rounded-md border border-red-300 bg-red-50 text-red-600 shadow-sm transition-colors hover:border-red-400 hover:bg-red-100 hover:text-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50 dark:border-red-900/70 dark:bg-red-950/35 dark:text-red-300 dark:hover:border-red-800 dark:hover:bg-red-950/55 dark:hover:text-red-200"
+                                  disabled={effectiveInputDisabled}
+                                  onClick={handleInsertNewline}
+                                  aria-label="换行"
+                                  className="cursor-pointer flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                                 >
-                                  <Square className="size-3 fill-current" />
+                                  <CornerDownLeft className="size-3.5" />
                                 </button>
                               </TooltipTrigger>
                               <TooltipContent side="top" sideOffset={6}>
-                                停止后台子代理
+                                Shift + Enter 换行
                               </TooltipContent>
                             </Tooltip>
                           </TooltipProvider>
-                        )}
+                          {isLoading ? (
+                            <>
+                              {canSubmitGoalCommandWhileLoading && (
+                                <button
+                                  type="submit"
+                                  disabled={goalSendButtonDisabledWhileLoading}
+                                  aria-label="发送 goal 命令"
+                                  className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                  <Send className="size-3.5" />
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={handleCancel}
+                                aria-label="停止生成"
+                                title="停止生成"
+                                className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+                              >
+                                <Square className="size-3 fill-current" />
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              {hasRunningCoordinatorWorker && (
+                                <TooltipProvider delayDuration={0}>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <button
+                                        type="button"
+                                        onClick={handleCancelBackgroundWorkers}
+                                        aria-label="停止后台子代理"
+                                        className="flex items-center justify-center size-7 rounded-md border border-red-300 bg-red-50 text-red-600 shadow-sm transition-colors hover:border-red-400 hover:bg-red-100 hover:text-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50 dark:border-red-900/70 dark:bg-red-950/35 dark:text-red-300 dark:hover:border-red-800 dark:hover:bg-red-950/55 dark:hover:text-red-200"
+                                      >
+                                        <Square className="size-3 fill-current" />
+                                      </button>
+                                    </TooltipTrigger>
+                                    <TooltipContent side="top" sideOffset={6}>
+                                      停止后台子代理
+                                    </TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              )}
+                              <button
+                                type="submit"
+                                disabled={
+                                  effectiveInputDisabled ||
+                                  (!input.trim() && attachments.length === 0 && !selectedSkill) ||
+                                  (slash.mode.kind === "slash" &&
+                                    !isBareGoalSlashCommandInput(input))
+                                }
+                                className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                              >
+                                <Send className="size-3.5" />
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      <UserInputRequestDialog
+                        request={pendingUserInput}
+                        onSubmit={handleUserInputSubmit}
+                        onLayoutChange={handleUserInputDialogLayoutChange}
+                      />
+                      <AgentGitCommitDialog
+                        key={agentCommitApproval?.id ?? "agent-commit-idle"}
+                        open={Boolean(agentCommitApproval)}
+                        threadId={threadId}
+                        workspacePath={workspacePath}
+                        suggestedMessage={agentCommitApproval?.suggestedCommitMessage}
+                        suggestedFilePaths={agentCommitApproval?.suggestedCommitFilePaths}
+                        suggestedFileBasePath={agentCommitApproval?.suggestedCommitFileBasePath}
+                        suggestedFileSelectionSource={
+                          agentCommitApproval?.suggestedCommitFileSelectionSource
+                        }
+                        onCommitted={handleAgentCommitCommitted}
+                        onCancel={handleAgentCommitCancel}
+                      />
+                    </div>
+                  </div>
+                  {/*chat container bottom panel */}
+                  <div className={"flex items-center justify-between"}>
+                    <div className={"flex items-center gap-2"}>
+                      {yoloMode && (
                         <button
-                          type="submit"
-                          disabled={
-                            effectiveInputDisabled ||
-                            (!input.trim() && attachments.length === 0 && !selectedSkill) ||
-                            (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(input))
-                          }
-                          className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          type="button"
+                          title="点击打开设置"
+                          onClick={() => setShowCustomizeView(true, "sandbox")}
+                          className="inline-flex items-center gap-1 text-[11px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 hover:bg-amber-500/25 transition-colors cursor-pointer"
                         >
-                          <Send className="size-3.5" />
+                          <Zap className="size-3" />
+                          YOLO
                         </button>
-                      </>
-                    )}
+                      )}
+                      <SandboxModeSwitcher
+                        onOpenSettings={() => setShowCustomizeView(true, "sandbox")}
+                      />
+                      {tokenUsage && (
+                        <ContextUsageIndicator
+                          tokenUsage={tokenUsage}
+                          modelId={currentModel}
+                          contextLimit={modelContextLimit}
+                        />
+                      )}
+                    </div>
+                    <div className="flex min-w-0 items-center gap-2">
+                      <GitBranchSwitcher workspacePath={workspacePath} />
+                      <WorkspaceTaskCardControl workspacePath={workspacePath} />
+                    </div>
                   </div>
                 </div>
-                <UserInputRequestDialog
-                  request={pendingUserInput}
-                  onSubmit={handleUserInputSubmit}
-                  onLayoutChange={handleUserInputDialogLayoutChange}
-                />
-                <AgentGitCommitDialog
-                  key={agentCommitApproval?.id ?? "agent-commit-idle"}
-                  open={Boolean(agentCommitApproval)}
-                  threadId={threadId}
-                  workspacePath={workspacePath}
-                  suggestedMessage={agentCommitApproval?.suggestedCommitMessage}
-                  suggestedFilePaths={agentCommitApproval?.suggestedCommitFilePaths}
-                  suggestedFileBasePath={agentCommitApproval?.suggestedCommitFileBasePath}
-                  suggestedFileSelectionSource={
-                    agentCommitApproval?.suggestedCommitFileSelectionSource
-                  }
-                  onCommitted={handleAgentCommitCommitted}
-                  onCancel={handleAgentCommitCancel}
-                />
-              </div>
-            </div>
-            {/*chat container bottom panel */}
-            <div className={"flex items-center justify-between"}>
-              <div className={"flex items-center gap-2"}>
-                {yoloMode && (
-                  <button
-                    type="button"
-                    title="点击打开设置"
-                    onClick={() => setShowCustomizeView(true, "sandbox")}
-                    className="inline-flex items-center gap-1 text-[11px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 hover:bg-amber-500/25 transition-colors cursor-pointer"
-                  >
-                    <Zap className="size-3" />
-                    YOLO
-                  </button>
-                )}
-                <SandboxModeSwitcher
-                  onOpenSettings={() => setShowCustomizeView(true, "sandbox")}
-                />
-                {tokenUsage && (
-                  <ContextUsageIndicator
-                    tokenUsage={tokenUsage}
-                    modelId={currentModel}
-                    contextLimit={modelContextLimit}
-                  />
-                )}
-              </div>
-              <div className="flex min-w-0 items-center gap-2">
-                <GitBranchSwitcher workspacePath={workspacePath} />
-                <WorkspaceTaskCardControl workspacePath={workspacePath} />
-              </div>
-            </div>
-          </div>
-        </form>
+              </form>
             </div>
           </>
         )}

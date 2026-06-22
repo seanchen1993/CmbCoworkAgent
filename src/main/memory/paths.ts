@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmdirSync,
   statSync,
@@ -43,7 +44,13 @@ const PROJECT_METADATA_FILE = ".project.json"
 const gitRootCache = new Map<string, { value: string | null; expiresAt: number }>()
 
 function normalizeIdentityPath(value: string): string {
-  const resolved = resolve(value)
+  let resolved = resolve(value)
+  try {
+    resolved = realpathSync.native(resolved)
+  } catch {
+    // The path may not exist yet (for example, a candidate memory file path).
+    // Fall back to lexical resolution so callers can still do prefix checks.
+  }
   return process.platform === "win32" ? resolved.toLowerCase() : resolved
 }
 

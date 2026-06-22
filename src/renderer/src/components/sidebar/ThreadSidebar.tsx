@@ -1077,7 +1077,8 @@ export function ThreadSidebar(): React.JSX.Element {
                 Boolean(
                   threadState?.coordinatorWorkers.some((worker) => worker.status === "running")
                 ) ||
-                Boolean(threadState?.scheduledTaskLoading)
+                Boolean(threadState?.scheduledTaskLoading) ||
+                threadState?.workflowRun?.status === "running"
               )
             })
 
@@ -1252,7 +1253,8 @@ export function ThreadSidebar(): React.JSX.Element {
                       )
                       const isLoading =
                         (allStreamLoadingStates[thread.thread_id] ?? false) ||
-                        hasRunningCoordinatorWorker
+                        hasRunningCoordinatorWorker ||
+                        threadState?.workflowRun?.status === "running"
                       const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
                       const hasPendingApproval = Boolean(threadState?.pendingApproval)
                       const hasPendingUserInput = Boolean(threadState?.pendingUserInput)

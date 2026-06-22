@@ -127,6 +127,7 @@ process.on("unhandledRejection", (reason) => {
   console.error("[Main] Unhandled rejection:", reason)
 })
 import { disposeAllAgentThreadStates, registerAgentHandlers } from "./ipc/agent"
+import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
 import { registerSkillsHandlers } from "./ipc/skills"
@@ -501,6 +502,7 @@ if (!gotTheLock) {
 
     // Register IPC handlers
     registerAgentHandlers(ipcMain)
+    registerWorkflowHandlers(ipcMain)
     registerThreadHandlers(ipcMain)
     registerModelHandlers(ipcMain)
     registerSkillsHandlers(ipcMain)
