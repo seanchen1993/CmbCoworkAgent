@@ -24,6 +24,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Settings,
   ShieldAlert,
   SkipForward,
   Trash2,
@@ -91,6 +92,7 @@ import type {
   HarnessNodeStatus,
   HarnessRunDetailViewModel,
   HarnessRunNode,
+  HarnessServiceUnitMapping,
   HarnessSessionBinding,
   HarnessAdapterRegistryItem,
   HarnessBoardCompatibility,
@@ -219,6 +221,46 @@ function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataU
 
 function createEmptyProjectForm(adapterId = ""): HarnessProjectCreateInput {
   return createEmptyProjectMetadataForm(adapterId)
+}
+
+function createEmptyServiceUnitMapping(): HarnessServiceUnitMapping {
+  return {
+    serviceUnitIdMapping: "",
+    serviceUnitId: "",
+    localRepoPath: ""
+  }
+}
+
+function buildServiceUnitMappingSavePayload(
+  mappings: HarnessServiceUnitMapping[]
+): { mappings: HarnessServiceUnitMapping[]; error: string | null } {
+  // Keep row-specific feedback in the renderer; the main process canonicalizes and assigns IDs.
+  const seen = new Set<string>()
+  const payload: HarnessServiceUnitMapping[] = []
+
+  for (let index = 0; index < mappings.length; index += 1) {
+    const row = mappings[index]
+    const serviceUnitId = row.serviceUnitId.trim()
+    const localRepoPath = row.localRepoPath.trim()
+    if (!serviceUnitId && !localRepoPath) continue
+    if (!serviceUnitId) {
+      return { mappings: [], error: `第 ${index + 1} 行发布单元 ID 不能为空` }
+    }
+    if (!localRepoPath) {
+      return { mappings: [], error: `第 ${index + 1} 行代码库路径不能为空` }
+    }
+    if (seen.has(serviceUnitId)) {
+      return { mappings: [], error: `发布单元 ID 重复：${serviceUnitId}` }
+    }
+    seen.add(serviceUnitId)
+    payload.push({
+      serviceUnitIdMapping: row.serviceUnitIdMapping,
+      serviceUnitId,
+      localRepoPath
+    })
+  }
+
+  return { mappings: payload, error: null }
 }
 
 interface SystemGroup {
@@ -433,6 +475,8 @@ function makeDeletedProjectSidebarItem(projectId: string, name: string): Project
       type: "plugin"
     },
     boardCompatibility: deletedProjectCompatibility,
+    supportsServiceUnits: false,
+    supportedServiceUnits: [],
     lifecycle: {
       status: "deleted"
     }
@@ -573,6 +617,7 @@ function createUnboundRunDetail(
       hookLogRefs: [],
       watchRefs: [],
       skipNodeAvailable: false,
+      selectedServiceUnits: [],
       currentNodeId: "",
       nodes: [],
       unmatchedHooks: []
@@ -1059,6 +1104,27 @@ function SessionWorkspacePathTip(): React.JSX.Element {
         </TooltipTrigger>
         <TooltipContent side="top" className="z-[70] max-w-72">
           当前项目会话默认工作区
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+function ReleaseUnitIdTip(): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label="发布单元 ID 提示"
+            className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Info className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="z-[70] max-w-72">
+          发布单元 ID，样例：LF39.18_AutoService
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -2360,6 +2426,37 @@ function WorkflowNodeSelector({
   )
 }
 
+function FeatureCreateTabTrigger({
+  value,
+  disabled,
+  tooltip,
+  children
+}: {
+  value: string
+  disabled: boolean
+  tooltip?: string
+  children: ReactNode
+}): React.JSX.Element {
+  const trigger = (
+    <TabsTrigger value={value} disabled={disabled} className="w-full min-w-0 text-xs sm:text-sm">
+      <span className="truncate">{children}</span>
+    </TabsTrigger>
+  )
+
+  if (!disabled || !tooltip) return trigger
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex w-full min-w-0 cursor-not-allowed">{trigger}</span>
+      </TooltipTrigger>
+      <TooltipContent side="top" className="z-[70] max-w-72">
+        {tooltip}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
 function FeatureCreateDialog({
   project,
   featureName,
@@ -2367,12 +2464,16 @@ function FeatureCreateDialog({
   workflowLoading,
   workflowTemplate,
   selectedWorkflowNodeIds,
+  serviceUnitMappings,
+  serviceUnitMappingsLoading,
+  selectedServiceUnitIds,
   creating,
   error,
   onOpenChange,
   onChange,
   onWorkflowTemplateChange,
   onWorkflowNodeToggle,
+  onServiceUnitToggle,
   onSubmit
 }: {
   project: HarnessProjectListItem | null
@@ -2381,12 +2482,16 @@ function FeatureCreateDialog({
   workflowLoading: boolean
   workflowTemplate: string
   selectedWorkflowNodeIds: Set<string>
+  serviceUnitMappings: HarnessServiceUnitMapping[]
+  serviceUnitMappingsLoading: boolean
+  selectedServiceUnitIds: Set<string>
   creating: boolean
   error: string | null
   onOpenChange: (open: boolean) => void
   onChange: (featureName: string) => void
   onWorkflowTemplateChange: (templateId: string) => void
   onWorkflowNodeToggle: (nodeId: string, checked: boolean) => void
+  onServiceUnitToggle: (serviceUnitIdMapping: string, checked: boolean) => void
   onSubmit: () => void
 }): React.JSX.Element {
   const featureNameError = getHarnessNameError("特性名称", featureName)
@@ -2394,18 +2499,137 @@ function FeatureCreateDialog({
   const customWorkflowSelected = isCustomWorkflowTemplate(selectedTemplate)
   const customRequiredNodeIds = requiredWorkflowNodeIds(workflowConfig, workflowTemplate)
   const selectedTemplateNodeIds = new Set(selectedTemplate?.nodes ?? [])
+  const supportedServiceUnitIds = new Set(project?.supportedServiceUnits ?? [])
+  const supportsServiceUnits = project?.supportsServiceUnits === true
+  const selectableServiceUnitMappings = serviceUnitMappings.filter((mapping) =>
+    mapping.serviceUnitIdMapping.trim()
+  )
+  const selectedServiceUnitCount = selectableServiceUnitMappings.filter((mapping) =>
+    selectedServiceUnitIds.has(mapping.serviceUnitIdMapping)
+  ).length
+  const workflowTabDisabled = !workflowLoading && !workflowConfig
+  const noSelectableFeatureOptions = !supportsServiceUnits && workflowTabDisabled
+  const defaultTab = supportsServiceUnits ? "service-units" : noSelectableFeatureOptions ? "unavailable" : "workflow"
+  const workflowPanel = workflowLoading ? (
+    <div className="flex min-h-32 items-center justify-center rounded-md border border-border bg-background text-sm text-muted-foreground">
+      <Loader2 className="mr-2 size-4 animate-spin" />
+      加载工作流
+    </div>
+  ) : workflowConfig ? (
+    <section className="grid gap-3 rounded-md border border-border bg-muted/30 p-3">
+      <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="选择要使用的工作流">
+        {workflowConfig.templates.map((template) => (
+          <WorkflowTemplateCard
+            key={template.id}
+            template={template}
+            selected={template.id === workflowTemplate}
+            onSelect={onWorkflowTemplateChange}
+          />
+        ))}
+      </div>
+      {selectedTemplate && (
+        <div className="rounded-md border border-border bg-background px-3 py-2 text-xs leading-5 text-muted-foreground">
+          {selectedTemplate.description || "插件未提供流程说明。"}
+        </div>
+      )}
+      {selectedTemplate && (
+        <WorkflowNodeSelector
+          config={workflowConfig}
+          title={customWorkflowSelected ? "节点选择（自定义）" : "包含节点"}
+          readOnly={!customWorkflowSelected}
+          requiredNodeIds={customWorkflowSelected ? customRequiredNodeIds : new Set()}
+          selectedNodeIds={customWorkflowSelected ? selectedWorkflowNodeIds : selectedTemplateNodeIds}
+          onToggleNode={onWorkflowNodeToggle}
+        />
+      )}
+    </section>
+  ) : (
+    <div className="rounded-md border border-dashed border-border bg-background px-3 py-4 text-sm text-muted-foreground">
+      插件暂不支持动态工作流。
+    </div>
+  )
+  const serviceUnitPanel = !supportsServiceUnits ? (
+    <div className="rounded-md border border-dashed border-border bg-background px-3 py-4 text-sm text-muted-foreground">
+      插件暂不支持发布单元选择。
+    </div>
+  ) : (
+    <section className="grid gap-3 rounded-md border border-border bg-muted/30 p-3">
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <div className="text-sm font-semibold">选择发布单元</div>
+        <div className="shrink-0 text-xs text-muted-foreground">
+          已选择 {selectedServiceUnitCount} 个
+        </div>
+      </div>
+      {serviceUnitMappingsLoading ? (
+        <div className="flex min-h-20 items-center justify-center text-sm text-muted-foreground">
+          <Loader2 className="mr-2 size-4 animate-spin" />
+          加载发布单元
+        </div>
+      ) : selectableServiceUnitMappings.length === 0 ? (
+        <div className="rounded-md border border-dashed border-border bg-background px-3 py-4 text-sm text-muted-foreground">
+          请先在项目列表-发布单元配置中完成配置
+        </div>
+      ) : (
+        <div className="max-h-48 overflow-y-auto rounded-md border border-border bg-background px-3 py-2">
+          {selectableServiceUnitMappings.map((mapping) => {
+            const checked = selectedServiceUnitIds.has(mapping.serviceUnitIdMapping)
+            const agentsSyncSupported = supportedServiceUnitIds.has(mapping.serviceUnitId.trim())
+            return (
+              <label
+                key={mapping.serviceUnitIdMapping}
+                className="flex min-w-0 cursor-pointer items-start gap-2 rounded-sm border border-transparent px-2 py-1.5 text-sm transition-colors hover:bg-muted/60"
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  className="mt-0.5 size-4 shrink-0 accent-primary"
+                  onChange={(event) =>
+                    onServiceUnitToggle(mapping.serviceUnitIdMapping, event.target.checked)
+                  }
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate text-foreground">{mapping.serviceUnitId}</span>
+                    {agentsSyncSupported && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="inline-flex shrink-0 items-center gap-1 rounded border border-status-nominal/30 bg-status-nominal/10 px-1.5 py-0.5 text-[11px] font-medium text-status-nominal">
+                            <CheckCircle2 className="size-3" />
+                            AGENTS.md Ready
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="z-[70] max-w-72">
+                          当前插件支持自动同步该发布单元的 AGENTS.md 文件
+                        </TooltipContent>
+                      </Tooltip>
+                    )}
+                  </span>
+                  <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                    {mapping.localRepoPath}
+                  </span>
+                </span>
+              </label>
+            )
+          })}
+        </div>
+      )}
+    </section>
+  )
 
   return (
     <Dialog open={project !== null} onOpenChange={onOpenChange}>
       <DialogContent
-        className={cn(harnessDialogContentClassName, workflowConfig ? "max-w-2xl" : "max-w-md")}
+        className={cn(
+          harnessDialogContentClassName,
+          "max-h-[calc(100vh-2rem)] w-[min(42rem,calc(100vw-2rem))] max-w-2xl overflow-x-hidden overflow-y-auto"
+        )}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
         <DialogHeader>
           <DialogTitle>创建特性</DialogTitle>
         </DialogHeader>
         <form
-          className="grid gap-4 py-1"
+          className="grid min-w-0 gap-4 py-1"
           onSubmit={(event) => {
             event.preventDefault()
             onSubmit()
@@ -2423,38 +2647,45 @@ function FeatureCreateDialog({
             />
             {featureNameError && <span className="text-status-critical">{featureNameError}</span>}
           </label>
-          {!workflowLoading && workflowConfig && (
-            <section className="grid gap-3 rounded-md border border-border bg-muted/30 p-3">
-              <div className="text-sm font-semibold">选择要使用的工作流</div>
-              <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="选择要使用的工作流">
-                {workflowConfig.templates.map((template) => (
-                  <WorkflowTemplateCard
-                    key={template.id}
-                    template={template}
-                    selected={template.id === workflowTemplate}
-                    onSelect={onWorkflowTemplateChange}
-                  />
-                ))}
-              </div>
-              {selectedTemplate && (
-                <div className="rounded-md border border-border bg-background px-3 py-2 text-xs leading-5 text-muted-foreground">
-                  {selectedTemplate.description || "插件未提供流程说明。"}
-                </div>
+          <TooltipProvider delayDuration={150}>
+            <Tabs
+              key={`${project?.projectId ?? "none"}-${defaultTab}-${workflowTabDisabled ? "workflow-disabled" : "workflow-enabled"}`}
+              defaultValue={defaultTab}
+              className="grid gap-3"
+            >
+              <TabsList className="grid w-full grid-cols-2">
+                <FeatureCreateTabTrigger
+                  value="service-units"
+                  disabled={!supportsServiceUnits}
+                  tooltip="插件暂不支持"
+                >
+                  选择特性对应的发布单元
+                </FeatureCreateTabTrigger>
+                <FeatureCreateTabTrigger
+                  value="workflow"
+                  disabled={workflowTabDisabled}
+                  tooltip="插件暂不支持"
+                >
+                  选择要使用的工作流
+                </FeatureCreateTabTrigger>
+              </TabsList>
+              <TabsContent value="service-units" className="mt-0">
+                {serviceUnitPanel}
+              </TabsContent>
+              <TabsContent value="workflow" className="mt-0">
+                {workflowPanel}
+              </TabsContent>
+              {noSelectableFeatureOptions && (
+                <TabsContent value="unavailable" className="mt-0">
+                  <div className="rounded-md border border-dashed border-border bg-background px-3 py-4 text-sm text-muted-foreground">
+                    插件暂未支持配置发布单元和动态工作流
+                  </div>
+                </TabsContent>
               )}
-              {selectedTemplate && (
-                <WorkflowNodeSelector
-                  config={workflowConfig}
-                  title={customWorkflowSelected ? "节点选择（自定义）" : "包含节点"}
-                  readOnly={!customWorkflowSelected}
-                  requiredNodeIds={customWorkflowSelected ? customRequiredNodeIds : new Set()}
-                  selectedNodeIds={customWorkflowSelected ? selectedWorkflowNodeIds : selectedTemplateNodeIds}
-                  onToggleNode={onWorkflowNodeToggle}
-                />
-              )}
-            </section>
-          )}
+            </Tabs>
+          </TooltipProvider>
           {error && (
-            <div className="rounded-md border border-status-critical/30 bg-status-critical/10 px-3 py-2 text-sm text-status-critical">
+            <div className="min-w-0 max-w-full whitespace-pre-wrap rounded-md border border-status-critical/30 bg-status-critical/10 px-3 py-2 text-sm text-status-critical [overflow-wrap:anywhere]">
               {error}
             </div>
           )}
@@ -2464,7 +2695,15 @@ function FeatureCreateDialog({
             </Button>
             <Button
               type="submit"
-              disabled={creating || workflowLoading || !featureName.trim() || featureNameError !== null}
+              disabled={
+                creating ||
+                workflowLoading ||
+                (supportsServiceUnits && serviceUnitMappingsLoading) ||
+                (supportsServiceUnits && selectableServiceUnitMappings.length === 0) ||
+                (supportsServiceUnits && selectedServiceUnitCount === 0) ||
+                !featureName.trim() ||
+                featureNameError !== null
+              }
               className="gap-2"
             >
               {creating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
@@ -2474,6 +2713,134 @@ function FeatureCreateDialog({
         </form>
       </DialogContent>
     </Dialog>
+  )
+}
+
+function ProjectModeSettingsPanel({
+  mappings,
+  loading,
+  saving,
+  dirty,
+  error,
+  onAdd,
+  onRemove,
+  onChange,
+  onPickPath,
+  onSave
+}: {
+  mappings: HarnessServiceUnitMapping[]
+  loading: boolean
+  saving: boolean
+  dirty: boolean
+  error: string | null
+  onAdd: () => void
+  onRemove: (index: number) => void
+  onChange: (index: number, mapping: HarnessServiceUnitMapping) => void
+  onPickPath: (index: number) => void
+  onSave: () => void
+}): React.JSX.Element {
+  return (
+    <section className="rounded-md border border-border bg-background shadow-sm">
+      <div className="flex min-w-0 items-start justify-between gap-3 border-b border-border px-4 py-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold text-foreground">发布单元路径映射</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            维护发布单元在本机的代码库路径。插件将利用该配置自动同步发布单元对应的公共 AGENTS.md 以及知识库
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
+            type="button"
+            size="sm"
+            className="gap-2"
+            onClick={onSave}
+            disabled={loading || saving || !dirty}
+          >
+            {saving ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
+            保存
+          </Button>
+        </div>
+      </div>
+
+      <div className="space-y-4 p-4">
+        {error && (
+          <div className="rounded-md border border-status-critical/30 bg-status-critical/10 px-3 py-2 text-sm text-status-critical">
+            {error}
+          </div>
+        )}
+
+        {loading ? (
+          <div className="flex min-h-[220px] items-center justify-center text-sm text-muted-foreground">
+            <Loader2 className="mr-2 size-4 animate-spin" />
+            加载中
+          </div>
+        ) : mappings.length === 0 ? (
+          <div className="rounded-md border border-dashed border-border bg-muted/20 px-4 py-10 text-center">
+            <div className="text-sm font-medium text-foreground">暂无发布单元映射</div>
+            <div className="mt-1 text-xs text-muted-foreground">添加后即可在项目模式中选择对应代码库。</div>
+            <Button type="button" variant="secondary" className="mt-4 gap-2" onClick={onAdd}>
+              <Plus className="size-4" />
+              添加发布单元
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-[minmax(160px,0.8fr)_minmax(220px,1.4fr)_132px_40px] gap-2 px-1 text-xs font-medium text-muted-foreground">
+              <div className="flex min-w-0 items-center gap-1">
+                <span>发布单元</span>
+                <ReleaseUnitIdTip />
+              </div>
+              <div>本机代码库路径</div>
+              <div />
+            </div>
+            {mappings.map((mapping, index) => (
+              <div
+                key={index}
+                className="grid grid-cols-[minmax(160px,0.8fr)_minmax(220px,1.4fr)_132px_40px] items-center gap-2"
+              >
+                <Input
+                  value={mapping.serviceUnitId}
+                  onChange={(event) =>
+                    onChange(index, { ...mapping, serviceUnitId: event.target.value })
+                  }
+                  placeholder="请输入发布单元 ID"
+                  className={harnessProjectCreateInputClassName}
+                />
+                <Input
+                  value={mapping.localRepoPath}
+                  readOnly
+                  placeholder="请选择本机代码库路径"
+                  className={harnessProjectCreateInputClassName}
+                  title={mapping.localRepoPath}
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="gap-2"
+                  onClick={() => onPickPath(index)}
+                >
+                  <FolderOpen className="size-4" />
+                  选择路径
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => onRemove(index)}
+                  title="删除映射"
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </div>
+            ))}
+            <Button type="button" variant="outline" className="gap-2" onClick={onAdd}>
+              <Plus className="size-4" />
+              添加发布单元
+            </Button>
+          </div>
+        )}
+      </div>
+    </section>
   )
 }
 
@@ -3166,6 +3533,54 @@ function FeatureConversationPanel({
   )
 }
 
+function FeatureServiceUnitsPanel({
+  serviceUnits
+}: {
+  serviceUnits: HarnessServiceUnitMapping[]
+}): React.JSX.Element {
+  return (
+    <section className="rounded-md border border-border bg-background">
+      <div className="flex min-w-0 items-center gap-2 border-b border-border px-3 py-3 text-sm font-semibold">
+        <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
+        <span className="truncate">当前特性绑定的发布单元</span>
+      </div>
+      {serviceUnits.length === 0 ? (
+        <div className="px-3 py-6 text-sm text-muted-foreground">当前特性没有绑定发布单元。</div>
+      ) : (
+        <div className="divide-y divide-border">
+          {serviceUnits.map((serviceUnit) => (
+            <div key={serviceUnit.serviceUnitIdMapping} className="px-3 py-3">
+              <div className="truncate text-sm font-medium" title={serviceUnit.serviceUnitId}>
+                {serviceUnit.serviceUnitId}
+              </div>
+              <div className="mt-1 flex min-w-0 items-center gap-2">
+                <div
+                  className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
+                  title={serviceUnit.localRepoPath}
+                >
+                  {serviceUnit.localRepoPath}
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  className="size-7 shrink-0"
+                  title="打开代码库路径"
+                  onClick={() =>
+                    void openPathInFileManager(serviceUnit.localRepoPath, "无法打开代码库路径")
+                  }
+                >
+                  <FolderOpen className="size-3.5" />
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
 function FeatureWorkspaceChangesPanel({
   sessions,
   threadsById
@@ -3216,20 +3631,6 @@ function FeatureWorkspaceChangesPanel({
 
   const [changesByGroup, setChangesByGroup] = useState<Record<string, WorkspaceChangeState>>({})
   const refreshRequestIdsRef = useRef(new Map<string, number>())
-
-  const openWorkspacePathInFileManager = useCallback(async (workspacePath: string): Promise<void> => {
-    try {
-      const platform = await window.electron.ipcRenderer.invoke("get-platform")
-      const normalizedPath = platform === "win32" ? workspacePath.replace(/\//g, "\\") : workspacePath
-      const result = await window.electron.ipcRenderer.invoke("show-item-in-folder", normalizedPath)
-      if (result && typeof result === "object" && "success" in result && !result.success) {
-        const error = "error" in result && typeof result.error === "string" ? result.error : "无法打开会话路径"
-        toast.error(error)
-      }
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "无法打开会话路径")
-    }
-  }, [])
 
   const refreshGroup = useCallback(async (group: WorkspaceChangeGroup): Promise<void> => {
     const requestId = (refreshRequestIdsRef.current.get(group.key) ?? 0) + 1
@@ -3384,7 +3785,7 @@ function FeatureWorkspaceChangesPanel({
                     size="icon-sm"
                     className="size-7 shrink-0"
                     title="打开会话路径"
-                    onClick={() => void openWorkspacePathInFileManager(group.workspacePath)}
+                    onClick={() => void openPathInFileManager(group.workspacePath, "无法打开会话路径")}
                   >
                     <FolderOpen className="size-3.5" />
                   </Button>
@@ -4178,6 +4579,7 @@ function FeatureDetailPage({
               </div>
 
               <aside className="min-w-0 space-y-4">
+                <FeatureServiceUnitsPanel serviceUnits={detail.run.selectedServiceUnits} />
                 <FeatureWorkspaceChangesPanel sessions={detail.sessions} threadsById={threadsById} />
 
                 <section className="rounded-md border border-border bg-background">
@@ -4487,9 +4889,16 @@ export function HarnessBoardView({
   const [featureWorkflowLoading, setFeatureWorkflowLoading] = useState(false)
   const [featureWorkflowTemplate, setFeatureWorkflowTemplate] = useState("")
   const [selectedWorkflowNodeIds, setSelectedWorkflowNodeIds] = useState<Set<string>>(new Set())
+  const [selectedServiceUnitIds, setSelectedServiceUnitIds] = useState<Set<string>>(new Set())
+  const [projectModeTab, setProjectModeTab] = useState("projects")
   const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
   const [updatingPluginNames, setUpdatingPluginNames] = useState<Set<string>>(new Set())
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [serviceUnitMappings, setServiceUnitMappings] = useState<HarnessServiceUnitMapping[]>([])
+  const [serviceUnitMappingsLoading, setServiceUnitMappingsLoading] = useState(true)
+  const [serviceUnitMappingsSaving, setServiceUnitMappingsSaving] = useState(false)
+  const [serviceUnitMappingsDirty, setServiceUnitMappingsDirty] = useState(false)
+  const [serviceUnitMappingsError, setServiceUnitMappingsError] = useState<string | null>(null)
   const {
     threads,
     currentThreadId,
@@ -4650,6 +5059,83 @@ export function HarnessBoardView({
     },
     [scheduleEnterpriseProjectDetailQuery]
   )
+
+  const loadServiceUnitMappings = useCallback(async (): Promise<void> => {
+    setServiceUnitMappingsLoading(true)
+    setServiceUnitMappingsError(null)
+    try {
+      const mappings = await window.api.harnessBoard.getServiceUnitMappings()
+      setServiceUnitMappings(mappings)
+      setServiceUnitMappingsDirty(false)
+    } catch (error) {
+      setServiceUnitMappingsError(cleanIpcError(error))
+    } finally {
+      setServiceUnitMappingsLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadServiceUnitMappings()
+  }, [loadServiceUnitMappings])
+
+  const handleAddServiceUnitMapping = useCallback((): void => {
+    setServiceUnitMappings((current) => [...current, createEmptyServiceUnitMapping()])
+    setServiceUnitMappingsDirty(true)
+    setServiceUnitMappingsError(null)
+  }, [])
+
+  const handleRemoveServiceUnitMapping = useCallback((index: number): void => {
+    setServiceUnitMappings((current) => current.filter((_, itemIndex) => itemIndex !== index))
+    setServiceUnitMappingsDirty(true)
+    setServiceUnitMappingsError(null)
+  }, [])
+
+  const handleChangeServiceUnitMapping = useCallback(
+    (index: number, mapping: HarnessServiceUnitMapping): void => {
+      setServiceUnitMappings((current) =>
+        current.map((item, itemIndex) => itemIndex === index ? mapping : item)
+      )
+      setServiceUnitMappingsDirty(true)
+      setServiceUnitMappingsError(null)
+    },
+    []
+  )
+
+  const handlePickServiceUnitRepoPath = useCallback(
+    async (index: number): Promise<void> => {
+      const localRepoPath = await window.api.workspace.select()
+      if (!localRepoPath) return
+      setServiceUnitMappings((current) =>
+        current.map((item, itemIndex) =>
+          itemIndex === index ? { ...item, localRepoPath } : item
+        )
+      )
+      setServiceUnitMappingsDirty(true)
+      setServiceUnitMappingsError(null)
+    },
+    []
+  )
+
+  const handleSaveServiceUnitMappings = useCallback(async (): Promise<void> => {
+    const payload = buildServiceUnitMappingSavePayload(serviceUnitMappings)
+    if (payload.error) {
+      setServiceUnitMappingsError(payload.error)
+      return
+    }
+
+    setServiceUnitMappingsSaving(true)
+    setServiceUnitMappingsError(null)
+    try {
+      const saved = await window.api.harnessBoard.saveServiceUnitMappings(payload.mappings)
+      setServiceUnitMappings(saved)
+      setServiceUnitMappingsDirty(false)
+      toast.success("配置已保存")
+    } catch (error) {
+      setServiceUnitMappingsError(cleanIpcError(error))
+    } finally {
+      setServiceUnitMappingsSaving(false)
+    }
+  }, [serviceUnitMappings])
 
   const loadProjectDetail = useCallback(async (
     projectId: string,
@@ -5178,6 +5664,7 @@ export function HarnessBoardView({
     setFeatureWorkflowConfig(null)
     setFeatureWorkflowTemplate("")
     setSelectedWorkflowNodeIds(new Set())
+    setSelectedServiceUnitIds(new Set())
     setFeatureWorkflowLoading(true)
 
     void window.api.harnessBoard
@@ -5213,6 +5700,7 @@ export function HarnessBoardView({
         setFeatureWorkflowLoading(false)
         setFeatureWorkflowTemplate("")
         setSelectedWorkflowNodeIds(new Set())
+        setSelectedServiceUnitIds(new Set())
       }
     },
     [creatingFeatureProjectId]
@@ -5242,6 +5730,18 @@ export function HarnessBoardView({
     })
   }, [featureWorkflowConfig, featureWorkflowTemplate])
 
+  const handleServiceUnitToggle = useCallback((serviceUnitIdMapping: string, checked: boolean): void => {
+    setSelectedServiceUnitIds((current) => {
+      const next = new Set(current)
+      if (checked) {
+        next.add(serviceUnitIdMapping)
+      } else {
+        next.delete(serviceUnitIdMapping)
+      }
+      return next
+    })
+  }, [])
+
   const handleSubmitFeature = useCallback(async (): Promise<void> => {
     if (!featureDialogProject || creatingFeatureRef.current) return
     const feature = sanitizeHarnessNameInput(featureName).trim()
@@ -5252,6 +5752,20 @@ export function HarnessBoardView({
     const featureNameError = getHarnessNameError("特性名称", feature)
     if (featureNameError) {
       setFeatureError(featureNameError)
+      return
+    }
+    const supportsServiceUnits = featureDialogProject.supportsServiceUnits
+    if (supportsServiceUnits && serviceUnitMappingsDirty) {
+      setFeatureError("发布单元路径配置尚未保存，请先保存后再创建特性")
+      return
+    }
+    const selectedServiceUnits = supportsServiceUnits
+      ? serviceUnitMappings.filter((mapping) =>
+          selectedServiceUnitIds.has(mapping.serviceUnitIdMapping)
+        )
+      : []
+    if (supportsServiceUnits && selectedServiceUnits.length === 0) {
+      setFeatureError("请至少选择一个发布单元")
       return
     }
 
@@ -5283,11 +5797,13 @@ export function HarnessBoardView({
       const result = await window.api.harnessBoard.createFeature({
         projectId: featureDialogProject.projectId,
         feature,
+        ...(supportsServiceUnits ? { selectedServiceUnits } : {}),
         ...workflowInput
       })
 
       setFeatureDialogProject(null)
       setFeatureName("")
+      setSelectedServiceUnitIds(new Set())
       await loadProjectDetail(result.projectId)
       setSelectedProjectId(result.projectId)
       setSelectedFeature({
@@ -5307,6 +5823,9 @@ export function HarnessBoardView({
     featureWorkflowConfig,
     featureWorkflowTemplate,
     selectedWorkflowNodeIds,
+    selectedServiceUnitIds,
+    serviceUnitMappings,
+    serviceUnitMappingsDirty,
     loadProjectDetail
   ])
 
@@ -5851,12 +6370,16 @@ export function HarnessBoardView({
           workflowLoading={featureWorkflowLoading}
           workflowTemplate={featureWorkflowTemplate}
           selectedWorkflowNodeIds={selectedWorkflowNodeIds}
+          serviceUnitMappings={serviceUnitMappings}
+          serviceUnitMappingsLoading={serviceUnitMappingsLoading}
+          selectedServiceUnitIds={selectedServiceUnitIds}
           creating={creatingFeatureProjectId !== null}
           error={featureError}
           onOpenChange={handleFeatureDialogOpenChange}
           onChange={setFeatureName}
           onWorkflowTemplateChange={handleWorkflowTemplateChange}
           onWorkflowNodeToggle={handleWorkflowNodeToggle}
+          onServiceUnitToggle={handleServiceUnitToggle}
           onSubmit={() => void handleSubmitFeature()}
         />
         <ProjectEditDialog
@@ -5900,7 +6423,11 @@ export function HarnessBoardView({
               className={harnessDetailRefreshButtonClassName}
               onClick={() => void loadProjects()}
             >
-              {loadingProjects ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+              {loadingProjects ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <RefreshCw className="size-4" />
+              )}
               刷新
             </Button>
             <Button
@@ -5926,78 +6453,56 @@ export function HarnessBoardView({
             </div>
           )}
 
-          {loadingProjects ? (
-            <div className="flex min-h-[320px] items-center justify-center text-muted-foreground">
-              <Loader2 className="mr-2 size-5 animate-spin" />
-              加载中
-            </div>
-          ) : projects.length === 0 ? (
-            <div className="flex min-h-[360px] items-center justify-center">
-              <div className="max-w-md rounded-md border border-border bg-background px-6 py-5 text-center shadow-sm">
-                <div className="mx-auto flex size-11 items-center justify-center rounded-md bg-status-info/10 text-status-info">
-                  <Workflow className="size-5" />
-                </div>
-                <div className="mt-3 text-sm font-semibold">暂无项目</div>
-                <Button
-                  className={cn("mt-4 gap-2", harnessActionButtonClassName)}
-                  onClick={openCreateDialog}
-                >
-                  <span aria-hidden="true" className={harnessActionOverlayClassName} />
-                  <span className={harnessActionIconClassName}>
-                    <Plus className="size-2.5" />
-                  </span>
-                  <span className="relative">新建项目</span>
-                </Button>
-              </div>
-            </div>
-          ) : (
-            <>
-              {activeSystemGroups.length === 0 ? (
-                <div className="rounded-md border border-dashed border-border bg-background px-4 py-10 text-center text-sm text-muted-foreground">
-                  {query.trim() ? "没有匹配的活跃项目或 feature。" : "暂无活跃项目。"}
-                </div>
-              ) : (
-                activeSystemGroups.map((group) => (
-                  <SystemSection
-                    key={group.systemCode}
-                    group={group}
-                    detailsByProjectId={detailsByProjectId}
-                    loadingDetailIds={loadingDetailIds}
-                    archivingProjectId={archivingProjectId}
-                    deletingProjectId={deletingProjectId}
-                    pluginUpdateInfoByProjectId={projectPluginUpdateInfoById}
-                    updatingPluginNames={updatingPluginNames}
-                    onEditProject={handleEditProject}
-                    onArchiveProject={requestArchiveProject}
-                    onDeleteProject={requestDeleteProject}
-                    onUpdateProjectPlugin={(project, updateInfo) =>
-                      void handleUpdateProjectPlugin(project, updateInfo)
-                    }
-                    onProjectVisible={handleProjectCardVisible}
-                    onOpenProject={openProjectDetail}
-                  />
-                ))
+          <Tabs value={projectModeTab} onValueChange={setProjectModeTab} className="space-y-6">
+            <div className="flex min-w-0 items-center justify-between gap-3">
+              <TabsList>
+                <TabsTrigger value="projects" className="gap-2">
+                  <Workflow className="size-4" />
+                  项目列表
+                </TabsTrigger>
+                <TabsTrigger value="settings" className="gap-2">
+                  <Settings className="size-4" />
+                  发布单元配置
+                </TabsTrigger>
+              </TabsList>
+              {projectModeTab === "projects" && (
+                <div className="text-sm text-muted-foreground">{projects.length} 个项目</div>
               )}
+            </div>
 
-              <Tabs defaultValue="archived" className="border-t border-border pt-6">
-                <div className="flex min-w-0 items-center justify-between gap-3">
-                  <TabsList>
-                    <TabsTrigger value="archived" className="gap-2">
-                      <Archive className="size-4" />
-                      归档项目
-                    </TabsTrigger>
-                  </TabsList>
-                  <div className="text-sm text-muted-foreground">
-                    {archivedSystemGroups.reduce((count, group) => count + group.projects.length, 0)} 个项目
+            <TabsContent value="projects" className="mt-0">
+              {loadingProjects ? (
+                <div className="flex min-h-[320px] items-center justify-center text-muted-foreground">
+                  <Loader2 className="mr-2 size-5 animate-spin" />
+                  加载中
+                </div>
+              ) : projects.length === 0 ? (
+                <div className="flex min-h-[360px] items-center justify-center">
+                  <div className="max-w-md rounded-md border border-border bg-background px-6 py-5 text-center shadow-sm">
+                    <div className="mx-auto flex size-11 items-center justify-center rounded-md bg-status-info/10 text-status-info">
+                      <Workflow className="size-5" />
+                    </div>
+                    <div className="mt-3 text-sm font-semibold">暂无项目</div>
+                    <Button
+                      className={cn("mt-4 gap-2", harnessActionButtonClassName)}
+                      onClick={openCreateDialog}
+                    >
+                      <span aria-hidden="true" className={harnessActionOverlayClassName} />
+                      <span className={harnessActionIconClassName}>
+                        <Plus className="size-2.5" />
+                      </span>
+                      <span className="relative">新建项目</span>
+                    </Button>
                   </div>
                 </div>
-                <TabsContent value="archived" className="mt-4 space-y-6">
-                  {archivedSystemGroups.length === 0 ? (
+              ) : (
+                <div className="space-y-7">
+                  {activeSystemGroups.length === 0 ? (
                     <div className="rounded-md border border-dashed border-border bg-background px-4 py-10 text-center text-sm text-muted-foreground">
-                      {query.trim() ? "没有匹配的归档项目或 feature。" : "暂无归档项目。"}
+                      {query.trim() ? "没有匹配的活跃项目或 feature。" : "暂无活跃项目。"}
                     </div>
                   ) : (
-                    archivedSystemGroups.map((group) => (
+                    activeSystemGroups.map((group) => (
                       <SystemSection
                         key={group.systemCode}
                         group={group}
@@ -6018,10 +6523,71 @@ export function HarnessBoardView({
                       />
                     ))
                   )}
-                </TabsContent>
-              </Tabs>
-            </>
-          )}
+
+                  <Tabs defaultValue="archived" className="border-t border-border pt-6">
+                    <div className="flex min-w-0 items-center justify-between gap-3">
+                      <TabsList>
+                        <TabsTrigger value="archived" className="gap-2">
+                          <Archive className="size-4" />
+                          归档项目
+                        </TabsTrigger>
+                      </TabsList>
+                      <div className="text-sm text-muted-foreground">
+                        {archivedSystemGroups.reduce(
+                          (count, group) => count + group.projects.length,
+                          0
+                        )}{" "}
+                        个项目
+                      </div>
+                    </div>
+                    <TabsContent value="archived" className="mt-4 space-y-6">
+                      {archivedSystemGroups.length === 0 ? (
+                        <div className="rounded-md border border-dashed border-border bg-background px-4 py-10 text-center text-sm text-muted-foreground">
+                          {query.trim() ? "没有匹配的归档项目或 feature。" : "暂无归档项目。"}
+                        </div>
+                      ) : (
+                        archivedSystemGroups.map((group) => (
+                          <SystemSection
+                            key={group.systemCode}
+                            group={group}
+                            detailsByProjectId={detailsByProjectId}
+                            loadingDetailIds={loadingDetailIds}
+                            archivingProjectId={archivingProjectId}
+                            deletingProjectId={deletingProjectId}
+                            pluginUpdateInfoByProjectId={projectPluginUpdateInfoById}
+                            updatingPluginNames={updatingPluginNames}
+                            onEditProject={handleEditProject}
+                            onArchiveProject={requestArchiveProject}
+                            onDeleteProject={requestDeleteProject}
+                            onUpdateProjectPlugin={(project, updateInfo) =>
+                              void handleUpdateProjectPlugin(project, updateInfo)
+                            }
+                            onProjectVisible={handleProjectCardVisible}
+                            onOpenProject={openProjectDetail}
+                          />
+                        ))
+                      )}
+                    </TabsContent>
+                  </Tabs>
+                </div>
+              )}
+            </TabsContent>
+
+            <TabsContent value="settings" className="mt-0">
+              <ProjectModeSettingsPanel
+                mappings={serviceUnitMappings}
+                loading={serviceUnitMappingsLoading}
+                saving={serviceUnitMappingsSaving}
+                dirty={serviceUnitMappingsDirty}
+                error={serviceUnitMappingsError}
+                onAdd={handleAddServiceUnitMapping}
+                onRemove={handleRemoveServiceUnitMapping}
+                onChange={handleChangeServiceUnitMapping}
+                onPickPath={(index) => void handlePickServiceUnitRepoPath(index)}
+                onSave={() => void handleSaveServiceUnitMappings()}
+              />
+            </TabsContent>
+          </Tabs>
         </main>
       </ScrollArea>
 
@@ -6032,12 +6598,16 @@ export function HarnessBoardView({
         workflowLoading={featureWorkflowLoading}
         workflowTemplate={featureWorkflowTemplate}
         selectedWorkflowNodeIds={selectedWorkflowNodeIds}
+        serviceUnitMappings={serviceUnitMappings}
+        serviceUnitMappingsLoading={serviceUnitMappingsLoading}
+        selectedServiceUnitIds={selectedServiceUnitIds}
         creating={creatingFeatureProjectId !== null}
         error={featureError}
         onOpenChange={handleFeatureDialogOpenChange}
         onChange={setFeatureName}
         onWorkflowTemplateChange={handleWorkflowTemplateChange}
         onWorkflowNodeToggle={handleWorkflowNodeToggle}
+        onServiceUnitToggle={handleServiceUnitToggle}
         onSubmit={() => void handleSubmitFeature()}
       />
       <ProjectFormDialog

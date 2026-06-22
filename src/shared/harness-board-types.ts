@@ -73,6 +73,18 @@ export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
   boardCompatibility: HarnessBoardCompatibility
 }
 
+export interface HarnessServiceUnitMapping {
+  serviceUnitIdMapping: string
+  serviceUnitId: string
+  localRepoPath: string
+}
+
+export interface HarnessFeatureServiceUnitBinding {
+  projectId: string
+  featureId: string
+  selectedServiceUnitMappings: HarnessServiceUnitMapping[]
+}
+
 export interface HarnessProjectCreatorMetadata {
   sapId?: string
   ystId?: string
@@ -153,6 +165,7 @@ export interface HarnessEnterpriseProjectDetailResult {
 export interface HarnessFeatureCreateInput {
   projectId: string
   feature: string
+  selectedServiceUnits?: HarnessServiceUnitMapping[]
   workflowTemplate?: string
   workflowNodes?: string[]
   workflowConfig?: HarnessDynamicWorkflowConfig
@@ -209,6 +222,8 @@ export interface HarnessProjectListItem {
   }
   creator?: HarnessProjectCreatorMetadata
   boardCompatibility: HarnessBoardCompatibility
+  supportsServiceUnits: boolean
+  supportedServiceUnits: string[]
   lifecycle: {
     status: "active" | "archived"
     /** Last lifecycle/metadata change (set on metadata edit and on archive). */
@@ -442,6 +457,7 @@ export interface HarnessRunDetailViewModel {
     featureStatusLabel?: string
     overallStatus?: HarnessStatus
     skipNodeAvailable: boolean
+    selectedServiceUnits: HarnessServiceUnitMapping[]
     currentNodeId: string
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]

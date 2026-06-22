@@ -11,6 +11,8 @@ import {
   getHarnessRunDetail,
   listHarnessAdapters,
   listHarnessProjects,
+  listHarnessServiceUnitMappings,
+  saveHarnessServiceUnitMappings,
   skipHarnessRunNode,
   updateHarnessProjectMetadata
 } from "../harness-board/service"
@@ -32,6 +34,7 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessServiceUnitMapping,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
@@ -52,6 +55,17 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("harnessBoard:listProjects", async (): Promise<HarnessProjectListItem[]> => {
     return listHarnessProjects()
   })
+
+  ipcMain.handle("harnessBoard:getServiceUnitMappings", async (): Promise<HarnessServiceUnitMapping[]> => {
+    return listHarnessServiceUnitMappings()
+  })
+
+  ipcMain.handle(
+    "harnessBoard:saveServiceUnitMappings",
+    async (_event, mappings: HarnessServiceUnitMapping[]): Promise<HarnessServiceUnitMapping[]> => {
+      return saveHarnessServiceUnitMappings(mappings)
+    }
+  )
 
   ipcMain.handle(
     "harnessBoard:createProject",

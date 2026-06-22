@@ -59,6 +59,7 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessServiceUnitMapping,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
@@ -1957,6 +1958,10 @@ interface CustomAPI {
   harnessBoard: {
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
+    getServiceUnitMappings: () => Promise<HarnessServiceUnitMapping[]>
+    saveServiceUnitMappings: (
+      mappings: HarnessServiceUnitMapping[]
+    ) => Promise<HarnessServiceUnitMapping[]>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
     searchEnterpriseProjects: (
       input: HarnessEnterpriseProjectSearchInput

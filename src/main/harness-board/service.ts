@@ -21,6 +21,7 @@ import type {
   HarnessEventStatus,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureServiceUnitBinding,
   HarnessFeatureStatus,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
@@ -31,6 +32,7 @@ import type {
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
   HarnessRunNode,
+  HarnessServiceUnitMapping,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessFeatureSummary,
@@ -46,6 +48,21 @@ interface HarnessProjectStoreFile {
   projects: HarnessProjectMetadata[]
 }
 
+interface HarnessServiceUnitMappingStoreFile {
+  version: 1
+  mappings: HarnessServiceUnitMapping[]
+}
+
+interface HarnessFeatureServiceUnitBindingRecord extends HarnessFeatureServiceUnitBinding {
+  createdAt: string
+  updatedAt?: string
+}
+
+interface HarnessFeatureServiceUnitBindingStoreFile {
+  version: 1
+  bindings: HarnessFeatureServiceUnitBindingRecord[]
+}
+
 type HarnessHookLogRef = HarnessRunDetailViewModel["run"]["hookLogRefs"][number]
 type HarnessInspectCommandName =
   | "project"
@@ -54,6 +71,7 @@ type HarnessInspectCommandName =
   | "createFeature"
   | "dynamicWorkflow"
   | "skipNode"
+  | "sessionContext"
 type HarnessInspectCommandConfigKey =
   | "project_status"
   | "feature_status"
@@ -61,6 +79,7 @@ type HarnessInspectCommandConfigKey =
   | "create_feature"
   | "dynamic_workflow"
   | "skip_node"
+  | "session_context"
 type HarnessPlatformConfigKey =
   | HarnessInspectCommandConfigKey
   | "system_prompt_inject"
@@ -76,7 +95,8 @@ const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
   createProject: "create_project",
   createFeature: "create_feature",
   dynamicWorkflow: "dynamic_workflow",
-  skipNode: "skip_node"
+  skipNode: "skip_node",
+  sessionContext: "session_context"
 }
 
 interface ConfiguredHarnessInvocation {
@@ -102,6 +122,7 @@ interface HarnessHookLogEntry {
 
 interface HarnessCommandParseOptions {
   feature?: string
+  selectedServiceUnitsJson?: string
   projectDirs?: string[]
   workflowTemplate?: string
   workflowNodes?: string
@@ -109,9 +130,12 @@ interface HarnessCommandParseOptions {
 }
 
 const HARNESS_BOARD_FILE = join(getOpenworkDir(), "harness-board-projects.json")
+const HARNESS_SERVICE_UNIT_MAPPING_FILE = join(getOpenworkDir(), "harness-serviceUnitId-mapping.json")
+const HARNESS_FEATURE_SERVICE_UNIT_BINDING_FILE = join(getOpenworkDir(), "harness-feature-service-units.json")
 
 const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
 const HARNESS_ADAPTER_MAX_BUFFER = 10 * 1024 * 1024
+const HARNESS_SESSION_CONTEXT_MAX_CHARS = 60_000
 const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
 const HARNESS_NAME_PATTERN = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
@@ -244,6 +268,38 @@ function emptyProjectStore(): HarnessProjectStoreFile {
     version: 1,
     projects: []
   }
+}
+
+function emptyServiceUnitMappingStore(): HarnessServiceUnitMappingStoreFile {
+  return {
+    version: 1,
+    mappings: []
+  }
+}
+
+function emptyFeatureServiceUnitBindingStore(): HarnessFeatureServiceUnitBindingStoreFile {
+  return {
+    version: 1,
+    bindings: []
+  }
+}
+
+function formatGmt8Timestamp(date = new Date()): string {
+  const gmt8Date = new Date(date.getTime() + 8 * 60 * 60 * 1000)
+  const pad = (value: number): string => String(value).padStart(2, "0")
+  return [
+    gmt8Date.getUTCFullYear(),
+    pad(gmt8Date.getUTCMonth() + 1),
+    pad(gmt8Date.getUTCDate())
+  ].join("-") + " " + [
+    pad(gmt8Date.getUTCHours()),
+    pad(gmt8Date.getUTCMinutes()),
+    pad(gmt8Date.getUTCSeconds())
+  ].join(":")
+}
+
+function isGmt8Timestamp(value: string | undefined): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -689,6 +745,7 @@ function replaceHarnessConfigPlaceholders(
     projectDir,
     projectCode: project.projectCode,
     feature: options.feature ?? "",
+    selectedServiceUnits: options.selectedServiceUnitsJson ?? "[]",
     pluginPath: cwd,
     mode,
     workflowTemplate: options.workflowTemplate ?? "",
@@ -696,7 +753,7 @@ function replaceHarnessConfigPlaceholders(
     nodeId: options.nodeId ?? ""
   }
   return value.replace(
-    /\$\{(pluginWorkspace|project|projectDir|projectCode|feature|pluginPath|mode|workflowTemplate|workflowNodes|nodeId)\}/g,
+    /\$\{(pluginWorkspace|project|projectDir|projectCode|feature|selectedServiceUnits|pluginPath|mode|workflowTemplate|workflowNodes|nodeId)\}/g,
     (_, key: string) => replacements[key] ?? ""
   )
 }
@@ -774,6 +831,18 @@ function readBoardConfigInspectCommand(
   return readBoardConfigPlatformText(cwd, HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode])
 }
 
+function boardConfigSupportedServiceUnits(cwd: string): string[] {
+  const parsed = readBoardConfig(cwd)
+  return parsed ? uniqueStringsInOrder(parsed.supported_service_units) : []
+}
+
+function boardConfigSupportsServiceUnitSelection(cwd: string): boolean {
+  return Boolean(
+    readBoardConfigPlatformText(cwd, "create_feature")?.includes("${selectedServiceUnits}") ||
+    readBoardConfigPlatformText(cwd, "session_context")?.includes("${selectedServiceUnits}")
+  )
+}
+
 function projectDirectoryName(project: Pick<HarnessProjectMetadata, "projectDir" | "projectCode">): string {
   return normalizeText(project.projectDir).trim() || normalizeText(project.projectCode).trim()
 }
@@ -827,6 +896,36 @@ function resolveProjectScopedPath(
 
 function projectDirectoryMissingMessage(project: HarnessProjectMetadata): string {
   return `请确认项目「${project.projectCode}」的工作区「${project.workspacePath}」下存在项目文件夹「${projectDirectoryName(project)}」。`
+}
+
+function resolveServiceUnitMappingSnapshots(
+  snapshots: HarnessServiceUnitMapping[]
+): HarnessServiceUnitMapping[] {
+  const mappingsById = new Map(
+    readServiceUnitMappingStore().mappings.map((mapping) => [mapping.serviceUnitIdMapping, mapping])
+  )
+  return snapshots.map((snapshot) => mappingsById.get(snapshot.serviceUnitIdMapping) ?? snapshot)
+}
+
+function resolveFeatureServiceUnitMappings(
+  projectId: string,
+  featureId: string
+): HarnessServiceUnitMapping[] {
+  const binding = findFeatureServiceUnitBinding(projectId, featureId)
+  return binding ? resolveServiceUnitMappingSnapshots(binding.selectedServiceUnitMappings) : []
+}
+
+function getHarnessSelectedServiceUnitsCommandOptions(
+  project: HarnessProjectMetadata,
+  featureId: string,
+  selectedServiceUnits?: HarnessServiceUnitMapping[]
+): Pick<HarnessCommandParseOptions, "selectedServiceUnitsJson"> {
+  const resolvedServiceUnits =
+    selectedServiceUnits ??
+    resolveFeatureServiceUnitMappings(project.projectId, featureId)
+  return {
+    selectedServiceUnitsJson: JSON.stringify(resolvedServiceUnits)
+  }
 }
 
 function isProjectMissingError(message: string): boolean {
@@ -1604,6 +1703,79 @@ function normalizeProjectCreator(value: unknown): HarnessProjectCreatorMetadata 
   return Object.values(creator).some((item) => item.trim()) ? creator : null
 }
 
+function createUniqueServiceUnitMappingId(seenIds: Set<string>): string {
+  let id = uuid()
+  while (seenIds.has(id)) {
+    id = uuid()
+  }
+  return id
+}
+
+function normalizeServiceUnitMappings(
+  value: unknown,
+  options: { assignMissingOrDuplicateMappingId?: boolean } = {}
+): HarnessServiceUnitMapping[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const seenIds = new Set<string>()
+  const mappings: HarnessServiceUnitMapping[] = []
+  for (const item of value) {
+    if (!isObject(item)) continue
+    const serviceUnitId = normalizeText(item.serviceUnitId).trim()
+    const localRepoPath = normalizeText(item.localRepoPath).trim()
+    if (!serviceUnitId || !localRepoPath || seen.has(serviceUnitId)) continue
+
+    let serviceUnitIdMapping = normalizeText(item.serviceUnitIdMapping).trim()
+    if (!serviceUnitIdMapping || seenIds.has(serviceUnitIdMapping)) {
+      if (!options.assignMissingOrDuplicateMappingId) continue
+      serviceUnitIdMapping = createUniqueServiceUnitMappingId(seenIds)
+    }
+
+    seen.add(serviceUnitId)
+    seenIds.add(serviceUnitIdMapping)
+    mappings.push({ serviceUnitIdMapping, serviceUnitId, localRepoPath })
+  }
+  return mappings
+}
+
+function normalizeServiceUnitMappingsForSave(value: unknown): HarnessServiceUnitMapping[] {
+  return normalizeServiceUnitMappings(value, { assignMissingOrDuplicateMappingId: true })
+}
+
+function normalizeFeatureServiceUnitBinding(
+  value: unknown
+): HarnessFeatureServiceUnitBindingRecord | null {
+  if (!isObject(value)) return null
+  const projectId = normalizeText(value.projectId).trim()
+  const featureId = normalizeText(value.featureId).trim()
+  const selectedServiceUnitMappings = normalizeServiceUnitMappings(value.selectedServiceUnitMappings)
+  if (!projectId || !featureId) return null
+  return {
+    projectId,
+    featureId,
+    selectedServiceUnitMappings,
+    createdAt: normalizeText(value.createdAt).trim() || formatGmt8Timestamp(),
+    updatedAt: normalizeText(value.updatedAt).trim() || undefined
+  }
+}
+
+function normalizeFeatureServiceUnitBindings(
+  value: unknown
+): HarnessFeatureServiceUnitBindingRecord[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const bindings: HarnessFeatureServiceUnitBindingRecord[] = []
+  for (const item of value) {
+    const binding = normalizeFeatureServiceUnitBinding(item)
+    if (!binding) continue
+    const key = featureServiceUnitBindingKey(binding.projectId, binding.featureId)
+    if (seen.has(key)) continue
+    seen.add(key)
+    bindings.push(binding)
+  }
+  return bindings
+}
+
 function getCurrentProjectCreator(): HarnessProjectCreatorMetadata | undefined {
   const userInfo = getUserInfo()
   const orgLevels = deriveUpperOrgLevelsFromPath(userInfo?.pathName)
@@ -1643,9 +1815,123 @@ function writeProjectStore(store: HarnessProjectStoreFile): void {
   writeFileSync(HARNESS_BOARD_FILE, `${JSON.stringify(store, null, 2)}\n`)
 }
 
+function readServiceUnitMappingStore(): HarnessServiceUnitMappingStoreFile {
+  getOpenworkDir()
+  if (!existsSync(HARNESS_SERVICE_UNIT_MAPPING_FILE)) return emptyServiceUnitMappingStore()
+  try {
+    const parsed = JSON.parse(readFileSync(HARNESS_SERVICE_UNIT_MAPPING_FILE, "utf-8")) as unknown
+    if (!isObject(parsed)) return emptyServiceUnitMappingStore()
+    return {
+      version: 1,
+      mappings: normalizeServiceUnitMappings(parsed.mappings)
+    }
+  } catch {
+    return emptyServiceUnitMappingStore()
+  }
+}
+
+function writeServiceUnitMappingStore(store: HarnessServiceUnitMappingStoreFile): void {
+  getOpenworkDir()
+  writeFileSync(HARNESS_SERVICE_UNIT_MAPPING_FILE, `${JSON.stringify(store, null, 2)}\n`)
+}
+
+function featureServiceUnitBindingKey(projectId: string, featureId: string): string {
+  return `${projectId}\0${featureId}`
+}
+
+function readFeatureServiceUnitBindingStore(): HarnessFeatureServiceUnitBindingStoreFile {
+  getOpenworkDir()
+  if (!existsSync(HARNESS_FEATURE_SERVICE_UNIT_BINDING_FILE)) {
+    return emptyFeatureServiceUnitBindingStore()
+  }
+  try {
+    const parsed = JSON.parse(
+      readFileSync(HARNESS_FEATURE_SERVICE_UNIT_BINDING_FILE, "utf-8")
+    ) as unknown
+    if (!isObject(parsed)) return emptyFeatureServiceUnitBindingStore()
+    return {
+      version: 1,
+      bindings: normalizeFeatureServiceUnitBindings(parsed.bindings)
+    }
+  } catch {
+    return emptyFeatureServiceUnitBindingStore()
+  }
+}
+
+function writeFeatureServiceUnitBindingStore(
+  store: HarnessFeatureServiceUnitBindingStoreFile
+): void {
+  getOpenworkDir()
+  writeFileSync(HARNESS_FEATURE_SERVICE_UNIT_BINDING_FILE, `${JSON.stringify(store, null, 2)}\n`)
+}
+
+function findFeatureServiceUnitBinding(
+  projectId: string,
+  featureId: string
+): HarnessFeatureServiceUnitBindingRecord | null {
+  const key = featureServiceUnitBindingKey(projectId, featureId)
+  return (
+    readFeatureServiceUnitBindingStore().bindings.find(
+      (binding) => featureServiceUnitBindingKey(binding.projectId, binding.featureId) === key
+    ) ?? null
+  )
+}
+
+function saveFeatureServiceUnitBinding(
+  projectId: string,
+  featureId: string,
+  selectedServiceUnitMappings: HarnessServiceUnitMapping[]
+): HarnessFeatureServiceUnitBindingRecord {
+  const store = readFeatureServiceUnitBindingStore()
+  const key = featureServiceUnitBindingKey(projectId, featureId)
+  const now = formatGmt8Timestamp()
+  const existingIndex = store.bindings.findIndex(
+    (binding) => featureServiceUnitBindingKey(binding.projectId, binding.featureId) === key
+  )
+  const existing = existingIndex >= 0 ? store.bindings[existingIndex] : null
+  const binding: HarnessFeatureServiceUnitBindingRecord = {
+    projectId,
+    featureId,
+    selectedServiceUnitMappings,
+    createdAt:
+      existing?.createdAt && isGmt8Timestamp(existing.createdAt) ? existing.createdAt : now,
+    updatedAt: now
+  }
+  if (existingIndex >= 0) {
+    store.bindings[existingIndex] = binding
+  } else {
+    store.bindings.unshift(binding)
+  }
+  writeFeatureServiceUnitBindingStore(store)
+  return binding
+}
+
+export function listHarnessServiceUnitMappings(): HarnessServiceUnitMapping[] {
+  return readServiceUnitMappingStore().mappings
+}
+
+export function saveHarnessServiceUnitMappings(
+  mappings: HarnessServiceUnitMapping[]
+): HarnessServiceUnitMapping[] {
+  const normalized = normalizeServiceUnitMappingsForSave(mappings)
+  writeServiceUnitMappingStore({
+    version: 1,
+    mappings: normalized
+  })
+  return normalized
+}
+
 function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
   const harnessAdapter = project["harness-adapter"]
   const plugin = findAdapterPlugin(project)
+  const boardCompatibility = evaluateBoardPluginCompatibility(
+    plugin,
+    harnessAdapter.name || harnessAdapter.id
+  )
+  const supportedServiceUnits =
+    boardCompatibility.compatible && plugin ? boardConfigSupportedServiceUnits(plugin.path) : []
+  const supportsServiceUnits =
+    boardCompatibility.compatible && plugin ? boardConfigSupportsServiceUnitSelection(plugin.path) : false
   return {
     projectId: project.projectId,
     name: project.name,
@@ -1663,10 +1949,9 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
       type: harnessAdapter.type
     },
     creator: project.creator,
-    boardCompatibility: evaluateBoardPluginCompatibility(
-      plugin,
-      harnessAdapter.name || harnessAdapter.id
-    ),
+    boardCompatibility,
+    supportsServiceUnits,
+    supportedServiceUnits,
     lifecycle: {
       status: project.lifecycle.status,
       updateAt: project.lifecycle.updateAt
@@ -1771,6 +2056,47 @@ function validateFeatureCreateInput(input: HarnessFeatureCreateInput): void {
     throw new Error("Feature name contains invalid characters")
   }
   validateHarnessName(input.feature, "特性名称")
+}
+
+function resolveFeatureSelectedServiceUnits(
+  input: HarnessFeatureCreateInput,
+  project: HarnessProjectMetadata
+): HarnessServiceUnitMapping[] {
+  if (!Array.isArray(input.selectedServiceUnits)) return []
+
+  const selected = normalizeServiceUnitMappings(input.selectedServiceUnits)
+  if (selected.length === 0) {
+    throw new Error("请至少选择一个服务单元")
+  }
+  if (!boardConfigSupportsServiceUnitSelection(adapterPluginDir(project))) {
+    throw new Error("插件暂不支持服务单元选择")
+  }
+
+  const configuredMappings = readServiceUnitMappingStore().mappings
+  const configuredById = new Map(
+    configuredMappings.map((mapping) => [mapping.serviceUnitIdMapping, mapping])
+  )
+  const resolved: HarnessServiceUnitMapping[] = []
+
+  for (const item of selected) {
+    const configured = configuredById.get(item.serviceUnitIdMapping)
+    const resolvedMapping = configured ?? item
+    const serviceUnitId = resolvedMapping.serviceUnitId.trim()
+    const localRepoPath = resolvedMapping.localRepoPath.trim()
+    if (!isAbsolute(localRepoPath)) {
+      throw new Error(`服务单元 ${serviceUnitId} 的代码库路径必须是绝对路径`)
+    }
+    if (!existsSync(localRepoPath)) {
+      throw new Error(`服务单元 ${serviceUnitId} 的代码库路径不存在：${localRepoPath}`)
+    }
+    resolved.push({
+      serviceUnitIdMapping: resolvedMapping.serviceUnitIdMapping,
+      serviceUnitId,
+      localRepoPath
+    })
+  }
+
+  return resolved
 }
 
 function normalizeFeatureWorkflowTemplate(value: unknown): string {
@@ -1943,6 +2269,44 @@ export interface HarnessFeatureAgentContext {
   projectDir?: string
 }
 
+function isHarnessSessionContextOk(value: unknown): boolean {
+  return value === true
+}
+
+function readHarnessFeatureSessionContextPrompt(
+  project: HarnessProjectMetadata,
+  featureId: string
+): string | undefined {
+  if (!hasConfiguredHarnessInvocation(project, "sessionContext")) return undefined
+
+  try {
+    const configured = buildConfiguredHarnessInvocation(project, "sessionContext", {
+      feature: featureId,
+      ...getHarnessSelectedServiceUnitsCommandOptions(project, featureId)
+    })
+    const result = runHarnessJsonInvocation(configured, "sessionContext")
+    const message = normalizeText(result.message).trim()
+    if (!isHarnessSessionContextOk(result.ok)) {
+      if (message) {
+        console.warn("[HarnessBoard] session_context returned not ok:", message)
+      }
+      return undefined
+    }
+    const inlineSystemPrompt = normalizeText(result.inlineSystemPrompt).trim()
+    if (inlineSystemPrompt.length > HARNESS_SESSION_CONTEXT_MAX_CHARS) {
+      console.warn("[HarnessBoard] session_context inlineSystemPrompt truncated:", {
+        chars: inlineSystemPrompt.length,
+        maxChars: HARNESS_SESSION_CONTEXT_MAX_CHARS
+      })
+      return inlineSystemPrompt.slice(0, HARNESS_SESSION_CONTEXT_MAX_CHARS)
+    }
+    return inlineSystemPrompt || undefined
+  } catch (error) {
+    console.warn("[HarnessBoard] session_context failed:", error)
+    return undefined
+  }
+}
+
 export function buildHarnessFeatureAgentContext(
   metadata: unknown
 ): HarnessFeatureAgentContext | null {
@@ -1953,7 +2317,7 @@ export function buildHarnessFeatureAgentContext(
   const cwd = adapterPluginDir(project)
   const adapter = project["harness-adapter"]
   const plugin = findAdapterPlugin(project)
-  const systemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
+  const staticSystemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
   const systemId = normalizeText(project.systemId).trim()
   const render = (
@@ -1964,9 +2328,12 @@ export function buildHarnessFeatureAgentContext(
       ? replaceHarnessConfigPlaceholders(template, project, command, cwd, { feature: feature.slug }).trim() ||
         undefined
       : undefined
+  const renderedStaticPrompt = render(staticSystemPromptInject, "run")
+  const sessionContextPrompt = readHarnessFeatureSessionContextPrompt(project, feature.slug)
+  const systemPromptInject = [renderedStaticPrompt, sessionContextPrompt].filter(Boolean).join("\n\n")
 
   return {
-    systemPromptInject: render(systemPromptInject, "run"),
+    systemPromptInject: systemPromptInject || undefined,
     pluginOutputDir: render(pluginOutputDir, "run"),
     systemId: systemId || undefined,
     pluginRoot: cwd,
@@ -2057,15 +2424,22 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
   const feature = input.feature.trim()
   const workspacePath = projectDirectoryPath(project)
   const workflowOptions = buildFeatureWorkflowCommandOptions(input)
+  const selectedServiceUnits = resolveFeatureSelectedServiceUnits(input, project)
 
   if (!existsSync(workspacePath)) {
     throw new Error(projectDirectoryMissingMessage(project))
   }
+  const selectedServiceUnitsOptions = getHarnessSelectedServiceUnitsCommandOptions(
+    project,
+    feature,
+    selectedServiceUnits
+  )
 
   try {
     const configured = buildConfiguredHarnessInvocation(project, "createFeature", {
       feature,
-      ...workflowOptions
+      ...workflowOptions,
+      ...selectedServiceUnitsOptions
     })
     runHarnessInvocation(configured, harnessCommandLogOptions("createFeature"))
   } catch (error) {
@@ -2074,6 +2448,10 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
       throw new Error("该特性在当前项目路径下已存在")
     }
     throw new Error(`创建特性失败：${raw}`)
+  }
+
+  if (selectedServiceUnits.length > 0) {
+    saveFeatureServiceUnitBinding(project.projectId, feature, selectedServiceUnits)
   }
 
   return {
@@ -2426,6 +2804,7 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
   const hookLogEntries = readHookLogRefs(project, hookLogRefs)
   const { nodes: nodesWithHookLogs, unmatchedHooks } = applyHookLogEntries(nodes, hookLogEntries)
   const skipNodeAvailable = hasConfiguredHarnessInvocation(project, "skipNode")
+  const selectedServiceUnits = resolveFeatureServiceUnitMappings(project.projectId, slug)
   return {
     project: {
       projectId: project.projectId,
@@ -2454,6 +2833,7 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
       ...(featureStatusLabel ? { featureStatusLabel } : {}),
       overallStatus,
       skipNodeAvailable,
+      selectedServiceUnits,
       hookLogRefs,
       watchRefs: normalizeWatchRefs(project, run.watchRefs, makeWatchRefs(featureSlug)),
       currentNodeId,

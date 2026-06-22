@@ -59,6 +59,7 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessServiceUnitMapping,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
@@ -2773,6 +2774,15 @@ const api = {
       ipcRenderer.invoke("harnessBoard:registry") as Promise<HarnessAdapterRegistryItem[]>,
     listProjects: (): Promise<HarnessProjectListItem[]> =>
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
+    getServiceUnitMappings: (): Promise<HarnessServiceUnitMapping[]> =>
+      ipcRenderer.invoke("harnessBoard:getServiceUnitMappings") as Promise<HarnessServiceUnitMapping[]>,
+    saveServiceUnitMappings: (
+      mappings: HarnessServiceUnitMapping[]
+    ): Promise<HarnessServiceUnitMapping[]> =>
+      ipcRenderer.invoke(
+        "harnessBoard:saveServiceUnitMappings",
+        mappings
+      ) as Promise<HarnessServiceUnitMapping[]>,
     createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>
       ipcRenderer.invoke("harnessBoard:createProject", input) as Promise<HarnessProjectMetadata>,
     searchEnterpriseProjects: (
