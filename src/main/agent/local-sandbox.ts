@@ -36,6 +36,10 @@ import fg from "fast-glob"
 import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
 import micromatch from "micromatch"
+import {
+  isSameMarkdownDocumentPath,
+  renderPluginSkillMarkdownPlaceholders
+} from "./markdown-placeholders"
 import { replace } from "./replace"
 import type { ToolOrchestrator } from "./tool-orchestrator"
 import {
@@ -3141,6 +3145,15 @@ export class LocalSandbox
         result =
           `[Lines ${effectiveOffset + 1}-${end} of ${total}. Use offset=${end} to read more.]\n` +
           formatted
+      }
+
+      if (skillMatch && isSameMarkdownDocumentPath(resolvedPath, skillMatch.path)) {
+        result = renderPluginSkillMarkdownPlaceholders(result, skillMatch, {
+          pluginWorkspace: this.pluginWorkspace,
+          projectDir: this.projectDir,
+          featureId: this.featureId,
+          systemId: this.systemId
+        })
       }
 
       if (fireSkillHooks && skillMatch) {

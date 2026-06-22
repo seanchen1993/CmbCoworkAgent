@@ -1,15 +1,21 @@
 import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
-import { getDisabledSkills, getEnabledSkillsSources } from "../storage"
+import {
+  getDisabledSkills,
+  getEnabledPluginSkillSourceMetadata,
+  getEnabledSkillsSources,
+  type PluginSkillSourceMetadata
+} from "../storage"
+import { renderPluginSkillMarkdownPlaceholders } from "../agent/markdown-placeholders"
 import { discoverSkills } from "../skills/discovery"
 import {
   getDiscoveredSkillAliases,
   isDiscoveredSkillDisabled,
   normalizeSkillId
 } from "../skills/ids"
-import { runHooks } from "./runner"
+import { runHooks, type HookContext, type HookResultCallback } from "./runner"
 import { joinHookText } from "./text"
-import type { HookResult } from "./types"
+import type { HookConfig, HookEvent, HookResult } from "./types"
 
 const MAX_REQUIRED_SKILL_CHARS = 12_000
 
@@ -17,6 +23,9 @@ interface ResolvedSkillGuidance {
   name: string
   path: string
   content: string
+  pluginRoot?: string
+  pluginId?: string
+  pluginName?: string
 }
 
 function parseYamlFrontmatter(content: string): Record<string, string> {
@@ -49,26 +58,57 @@ async function resolveSkillGuidance(requiredSkill: string): Promise<ResolvedSkil
   for (const sourceDir of sourceDirs) {
     if (!existsSync(sourceDir)) continue
 
-    for (const skill of await discoverSkills(sourceDir)) {
-      if (isDiscoveredSkillDisabled(skill, disabled)) continue
-      try {
-        const content = await readFile(skill.skillMdPath, "utf-8")
-        const frontmatter = parseYamlFrontmatter(content)
-        const skillName = (frontmatter.name || skill.name).trim()
-        const candidates = new Set([
-          ...getDiscoveredSkillAliases(skill),
-          normalizeSkillId(skillName)
-        ])
-        if (!candidates.has(normalized)) continue
+    const resolved = await resolveSkillGuidanceFromSource({ sourceDir, normalized, disabled })
+    if (resolved) return resolved
+  }
 
-        return {
-          name: skillName,
-          path: skill.skillMdPath,
-          content: trimSkillContent(content)
-        }
-      } catch {
-        continue
+  for (const source of getEnabledPluginSkillSourceMetadata()) {
+    if (!existsSync(source.sourceDir)) continue
+
+    const resolved = await resolveSkillGuidanceFromSource({
+      sourceDir: source.sourceDir,
+      normalized,
+      maxDepth: source.maxDepth,
+      plugin: source
+    })
+    if (resolved) return resolved
+  }
+
+  return null
+}
+
+async function resolveSkillGuidanceFromSource({
+  sourceDir,
+  normalized,
+  disabled,
+  maxDepth,
+  plugin
+}: {
+  sourceDir: string
+  normalized: string
+  disabled?: Set<string>
+  maxDepth?: number
+  plugin?: PluginSkillSourceMetadata
+}): Promise<ResolvedSkillGuidance | null> {
+  for (const skill of await discoverSkills(sourceDir, maxDepth)) {
+    if (disabled && isDiscoveredSkillDisabled(skill, disabled)) continue
+    try {
+      const content = await readFile(skill.skillMdPath, "utf-8")
+      const frontmatter = parseYamlFrontmatter(content)
+      const skillName = (frontmatter.name || skill.name).trim()
+      const candidates = new Set([...getDiscoveredSkillAliases(skill), normalizeSkillId(skillName)])
+      if (!candidates.has(normalized)) continue
+
+      return {
+        name: skillName,
+        path: skill.skillMdPath,
+        content: trimSkillContent(content),
+        pluginRoot: plugin?.pluginRoot,
+        pluginId: plugin?.pluginId,
+        pluginName: plugin?.pluginName
       }
+    } catch {
+      continue
     }
   }
 
@@ -92,13 +132,25 @@ function formatMissingSkillGuidance(requiredSkill: string): string {
 }
 
 export async function enrichHookResultWithRequiredSkill(
-  result: HookResult | null
+  result: HookResult | null,
+  hookContext?: HookContext
 ): Promise<HookResult | null> {
   if (!result?.requiredSkill?.trim()) return result
 
   const resolved = await resolveSkillGuidance(result.requiredSkill)
-  const guidance = resolved
-    ? formatResolvedSkillGuidance(resolved)
+  const renderedResolved = resolved
+    ? {
+        ...resolved,
+        content: renderPluginSkillMarkdownPlaceholders(resolved.content, resolved, {
+          pluginWorkspace: hookContext?.pluginWorkspace,
+          projectDir: hookContext?.projectDir,
+          featureId: hookContext?.featureId,
+          systemId: hookContext?.systemId
+        })
+      }
+    : null
+  const guidance = renderedResolved
+    ? formatResolvedSkillGuidance(renderedResolved)
     : formatMissingSkillGuidance(result.requiredSkill)
 
   const next: HookResult = {
@@ -125,7 +177,13 @@ export async function enrichHookResultWithRequiredSkill(
 }
 
 export async function runHooksEnriched(
-  ...args: Parameters<typeof runHooks>
+  hooks: HookConfig[],
+  event: HookEvent,
+  context: HookContext,
+  onHookResult?: HookResultCallback
 ): Promise<HookResult | null> {
-  return enrichHookResultWithRequiredSkill(await runHooks(...args))
+  return enrichHookResultWithRequiredSkill(
+    await runHooks(hooks, event, context, onHookResult),
+    context
+  )
 }
