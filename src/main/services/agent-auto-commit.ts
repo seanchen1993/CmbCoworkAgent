@@ -766,9 +766,9 @@ export async function maybeAutoCommitAfterAgentRun({
       // for this same commit — previously every auto-commit produced a duplicate
       // commit event (one here, one from the backstop that measured adoption).
       const adoptionCaptureTimeMs = Date.now()
-      let adoptionSnapshots: ReturnType<typeof captureStagedSnapshotsForCommit> = []
+      let adoptionSnapshots: Awaited<ReturnType<typeof captureStagedSnapshotsForCommit>> = []
       try {
-        adoptionSnapshots = captureStagedSnapshotsForCommit(workspacePath)
+        adoptionSnapshots = await captureStagedSnapshotsForCommit(workspacePath)
       } catch {
         // capture is best-effort; never block the auto-commit
       }

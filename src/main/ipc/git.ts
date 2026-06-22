@@ -87,7 +87,11 @@ async function captureStagedSnapshotsForCommand(command: string): Promise<Staged
     const parsed = parseGitCommand(command)
     const workingDir = parsed.workingDirFromFlag || (await getCurrentWorkingDirectory())
     const captureTimeMs = Date.now()
-    return { workingDir, captureTimeMs, snapshots: captureAdoptionStagedSnapshots(workingDir) }
+    return {
+      workingDir,
+      captureTimeMs,
+      snapshots: await captureAdoptionStagedSnapshots(workingDir)
+    }
   } catch (e) {
     console.warn("[Git] adoption pre-commit capture skipped:", e)
     return null

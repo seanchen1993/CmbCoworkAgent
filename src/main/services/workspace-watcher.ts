@@ -341,7 +341,9 @@ export function startWatching(
         }
       }
 
-      console.log(`[WorkspaceWatcher] ${eventType}: ${filename} in thread ${threadId}`)
+      // High-frequency per-file event: keep it at debug so packaged builds drop it
+      // (level gating in logging.ts) and only dev sees the full stream.
+      console.debug(`[WorkspaceWatcher] ${eventType}: ${filename} in thread ${threadId}`)
 
       // Debounce to prevent rapid updates
       const existingTimer = debounceTimers.get(threadId)

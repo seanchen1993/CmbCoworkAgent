@@ -8,7 +8,7 @@ if (process.platform === "linux") {
 
 import { join } from "path"
 import { existsSync, rmSync } from "fs"
-import { writeMainLog, writeRendererLog } from "./logging"
+import { writeMainLog, writeRendererLog, flushLogsSync } from "./logging"
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
@@ -122,10 +122,23 @@ process.stderr.on("error", (err: NodeJS.ErrnoException) => {
 process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
   if (err.code === "EPIPE") return // silently ignore broken pipe
   console.error("[Main] Uncaught exception:", err)
+  // Persist the buffered tail (incl. this error) in case the process dies next.
+  flushLogsSync()
 })
 process.on("unhandledRejection", (reason) => {
   console.error("[Main] Unhandled rejection:", reason)
 })
+
+// Signal-based termination (e.g. Ctrl+C in dev, or SIGTERM from a supervisor)
+// does not fire Node's `exit` event, so flush the log tail before quitting.
+// `once` lets a second signal fall through to default force-kill if quit hangs.
+const flushAndQuitOnSignal = (signal: NodeJS.Signals): void => {
+  console.warn(`[Main] received ${signal}, flushing logs and quitting`)
+  flushLogsSync()
+  app.quit()
+}
+process.once("SIGINT", () => flushAndQuitOnSignal("SIGINT"))
+process.once("SIGTERM", () => flushAndQuitOnSignal("SIGTERM"))
 import { disposeAllAgentThreadStates, registerAgentHandlers } from "./ipc/agent"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
@@ -721,6 +734,10 @@ if (!gotTheLock) {
       if (exited) return
       exited = true
       flush()
+      // app.exit(0) terminates immediately and does not reliably fire Node's
+      // `exit` event, so flush the log tail here explicitly (covers normal quit
+      // and the force-quit timeout path alike).
+      flushLogsSync()
       app.exit(0)
     }
 
