@@ -1,4 +1,4 @@
-import ReactMarkdown from "react-markdown"
+import ReactMarkdown, { type Components } from "react-markdown"
 import rehypeHighlight from "rehype-highlight"
 import remarkGfm from "remark-gfm"
 import { Check, Copy } from "lucide-react"
@@ -67,55 +67,62 @@ function MarkdownCodeBlock({
   )
 }
 
+// Hoisted to module scope so the prop identities stay stable across renders
+// (recreating these every render makes react-markdown redo work and churns GC).
+const REMARK_PLUGINS = [remarkGfm]
+const REHYPE_PLUGINS = [rehypeHighlight]
+
+const MARKDOWN_COMPONENTS: Components = {
+  // `node` is destructured out so it isn't spread onto the DOM element.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  table({ node: _node, children, ...props }) {
+    return (
+      <div className="streaming-markdown-table-wrap">
+        <table {...props}>{children}</table>
+      </div>
+    )
+  },
+  pre({ children }) {
+    return <>{children}</>
+  },
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  code({ node: _node, className, children, ...props }) {
+    const rawCode = getNodeText(children)
+    const language = getLanguageLabel(className)
+    const isBlock = !!language || rawCode.includes("\n")
+
+    if (isBlock) {
+      return (
+        <MarkdownCodeBlock
+          code={rawCode.replace(/\n$/, "")}
+          language={language}
+          className={className}
+        >
+          {children}
+        </MarkdownCodeBlock>
+      )
+    }
+
+    return (
+      <code className="streaming-markdown-inline-code" {...props}>
+        {children}
+      </code>
+    )
+  }
+}
+
 export const StreamingMarkdown = memo(function StreamingMarkdown({
   children
 }: StreamingMarkdownProps): React.JSX.Element {
   return (
     <div className="streaming-markdown">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
-        components={{
-          table({ node: _node, children, ...props }) {
-            return (
-              <div className="streaming-markdown-table-wrap">
-                <table {...props}>{children}</table>
-              </div>
-            )
-          },
-          pre({ children }) {
-            return <>{children}</>
-          },
-          code({ node: _node, className, children, ...props }) {
-            const rawCode = getNodeText(children)
-            const language = getLanguageLabel(className)
-            const isBlock = !!language || rawCode.includes("\n")
-
-            if (isBlock) {
-              return (
-                <MarkdownCodeBlock
-                  code={rawCode.replace(/\n$/, "")}
-                  language={language}
-                  className={className}
-                >
-                  {children}
-                </MarkdownCodeBlock>
-              )
-            }
-
-            return (
-              <code className="streaming-markdown-inline-code" {...props}>
-                {children}
-              </code>
-            )
-          }
-        }}
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={REHYPE_PLUGINS}
+        components={MARKDOWN_COMPONENTS}
       >
         {children}
       </ReactMarkdown>
-      {/*{isStreaming && (*/}
-      {/*  <span className="inline-block w-2 h-4 ml-0.5 bg-foreground/70 animate-pulse" />*/}
-      {/*)}*/}
     </div>
   )
 })

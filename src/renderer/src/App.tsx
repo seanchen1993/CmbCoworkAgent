@@ -98,12 +98,31 @@ function WorkerSplitHandle({ onDrag }: WorkerSplitHandleProps): React.JSX.Elemen
     (event: React.MouseEvent<HTMLDivElement>) => {
       event.preventDefault()
       startXRef.current = event.clientX
+      let frame: number | null = null
+      let latestDelta = 0
+
+      const flushDrag = (): void => {
+        frame = null
+        onDrag(latestDelta)
+      }
+
+      const scheduleDrag = (delta: number): void => {
+        latestDelta = delta
+        if (frame === null) {
+          frame = window.requestAnimationFrame(flushDrag)
+        }
+      }
 
       const handleMouseMove = (moveEvent: MouseEvent): void => {
-        onDrag(moveEvent.clientX - startXRef.current)
+        scheduleDrag(moveEvent.clientX - startXRef.current)
       }
 
       const handleMouseUp = (): void => {
+        if (frame !== null) {
+          window.cancelAnimationFrame(frame)
+          frame = null
+          onDrag(latestDelta)
+        }
         document.removeEventListener("mousemove", handleMouseMove)
         document.removeEventListener("mouseup", handleMouseUp)
         document.body.style.cursor = ""

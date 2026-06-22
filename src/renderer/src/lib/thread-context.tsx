@@ -61,6 +61,7 @@ import {
 } from "./checkpoint-message-times"
 import { mergeLiveStreamMessages, type LiveStreamMessage } from "./live-stream-messages"
 import { buildSyntheticCheckpointBaselineIds } from "./stream-message-ids"
+import { loadWorkspaceFilesDeduped } from "./workspace-file-load"
 import {
   liveStreamMessageToStoreMessage,
   resolveLiveStreamMessageEndAt,
@@ -2023,8 +2024,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     (threadId: string, workspacePath: string) => {
       // 工作区文件树可能很大，不能阻塞会话历史首屏恢复。
       // 这里后台加载，避免 “正在加载会话历史” 被完整目录扫描拖住。
-      window.api.workspace
-        .loadFromDisk(threadId)
+      // 与文件面板共享同一次扫描，避免首次打开时重复扫盘。
+      loadWorkspaceFilesDeduped(threadId, workspacePath)
         .then((diskResult) => {
           if (!diskResult.success) return
 
@@ -3788,6 +3789,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
     }
     previousCurrentThreadIdRef.current = currentThreadId
+
+    // Tell the main process which thread is in the foreground so the workspace
+    // watcher LRU never evicts it (and re-arm it if it was previously evicted).
+    void window.api.workspace.setActiveThread(currentThreadId).catch(() => {})
 
     if (!currentThreadId) return
 

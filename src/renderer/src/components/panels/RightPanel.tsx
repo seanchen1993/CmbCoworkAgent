@@ -43,6 +43,7 @@ import {
   type CoordinatorWorkerView
 } from "@/lib/thread-context"
 import { getFileType } from "@/lib/file-types"
+import { loadWorkspaceFilesDeduped } from "@/lib/workspace-file-load"
 import { Badge } from "@/components/ui/badge"
 import { emitOpenResourcePreview, onOpenResourcePreview } from "@/lib/resource-preview-events"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
@@ -137,14 +138,33 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
     (e: React.MouseEvent) => {
       e.preventDefault()
       startYRef.current = e.clientY
+      let frame: number | null = null
+      let latestDelta = 0
+
+      const flushDrag = (): void => {
+        frame = null
+        onDrag(latestDelta)
+      }
+
+      const scheduleDrag = (delta: number): void => {
+        latestDelta = delta
+        if (frame === null) {
+          frame = window.requestAnimationFrame(flushDrag)
+        }
+      }
 
       const handleMouseMove = (e: MouseEvent): void => {
         // Calculate total delta from drag start
         const totalDelta = e.clientY - startYRef.current
-        onDrag(totalDelta)
+        scheduleDrag(totalDelta)
       }
 
       const handleMouseUp = (): void => {
+        if (frame !== null) {
+          window.cancelAnimationFrame(frame)
+          frame = null
+          onDrag(latestDelta)
+        }
         document.removeEventListener("mousemove", handleMouseMove)
         document.removeEventListener("mouseup", handleMouseUp)
         document.body.style.cursor = ""
@@ -1595,13 +1615,20 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
         if (cancelled) return
         setWorkspacePath(path)
 
-        // If a folder is linked, load files from disk
-        if (path) {
-          const result = await window.api.workspace.loadFromDisk(threadId)
+        if (path && workspaceFiles.length === 0) {
+          // No cached tree yet: scan from disk (this also starts the watcher).
+          // Deduped so it shares the background loader's scan on first open.
+          const result = await loadWorkspaceFilesDeduped(threadId, path)
           if (cancelled) return
-          if (result.success && result.files) {
+          // Guard against writing a stale scan (workspace switched mid-load):
+          // only accept results that match the path we resolved.
+          if (result.success && result.files && result.workspacePath === path) {
             setWorkspaceFiles(result.files)
           }
+        } else if (path) {
+          // Tree already cached: skip the rescan but make sure the watcher is
+          // armed (it may have been evicted by the watcher LRU cap).
+          window.api.workspace.ensureWatching(threadId).catch(() => {})
         }
       }
     }

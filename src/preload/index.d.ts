@@ -875,6 +875,8 @@ interface CustomAPI {
       workspacePath?: string
       error?: string
     }>
+    ensureWatching: (threadId: string) => Promise<{ success: boolean }>
+    setActiveThread: (threadId: string | null) => Promise<{ success: boolean }>
     readFile: (
       threadId: string,
       filePath: string
