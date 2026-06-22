@@ -319,6 +319,57 @@ export function isCodeFile(filePath: string): boolean {
 }
 
 // ─────────────────────────────────────────────────────────
+// git work-tree gate
+//
+// code_gen is only reported for files that live inside a git work tree. Files
+// generated outside any git repo can never reach a commit, so our commit-driven
+// measurement never closes the loop on them — they would sit forever as "100%
+// uncommitted" noise. Such files are also where external platforms (e.g.
+// tag-dev / data-dev) own reporting via their own hook; gating here keeps the two
+// producers from double-counting the same generation, with the partition keyed
+// purely on a signal we own (git membership) — no coordination with that hook.
+//
+// Strict semantics: only a positive "true" from `--is-inside-work-tree` counts.
+// A missing repo, a git error, or git being unavailable all resolve to false
+// (skip). The result is cached per directory so the hot path spawns git at most
+// once per directory for the whole session. Trade-off: if git is ever
+// unavailable, code_gen reporting stops entirely — acceptable, since git is a
+// hard dependency of the rest of the app.
+// ─────────────────────────────────────────────────────────
+
+const GIT_WORKTREE_CACHE_MAX = 256
+const gitWorkTreeCache = new Map<string, boolean>()
+
+function isInsideGitWorkTree(absPath: string): boolean {
+  const dir = dirname(absPath)
+  const cached = gitWorkTreeCache.get(dir)
+  if (cached !== undefined) return cached
+
+  let inside = false
+  try {
+    const out = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
+      cwd: dir,
+      encoding: "utf-8",
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"]
+    })
+    inside = out.trim() === "true"
+  } catch {
+    // Not a repo / git error / git missing — treat as outside a work tree.
+    inside = false
+  }
+
+  // Bounded cache (Map preserves insertion order → evict oldest first).
+  if (!gitWorkTreeCache.has(dir) && gitWorkTreeCache.size >= GIT_WORKTREE_CACHE_MAX) {
+    const oldest = gitWorkTreeCache.keys().next().value
+    if (oldest !== undefined) gitWorkTreeCache.delete(oldest)
+  }
+  gitWorkTreeCache.set(dir, inside)
+  return inside
+}
+
+// ─────────────────────────────────────────────────────────
 // Line hashing (FNV-1a 32-bit) + normalisation
 // ─────────────────────────────────────────────────────────
 
@@ -705,6 +756,15 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     const absPath = input.workspacePath
       ? resolvePath(input.workspacePath, input.filePath)
       : resolvePath(input.filePath)
+
+    // git-gate: only report generations that live inside a git work tree (see
+    // isInsideGitWorkTree). Non-git files never reach a commit and are where
+    // external platforms own reporting via their own hook — skipping them here
+    // avoids double-counting and removes events that could never close the loop.
+    if (!isInsideGitWorkTree(absPath)) {
+      console.log(`[AdoptionTracker] recordGen skip — not in a git work tree: ${input.filePath}`)
+      return
+    }
 
     const relPath = input.workspacePath
       ? relative(input.workspacePath, absPath).replace(/\\/g, "/")
