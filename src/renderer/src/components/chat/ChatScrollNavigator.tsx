@@ -107,6 +107,10 @@ export function ChatScrollNavigator({
     const nearBottom = scrollHeight - scrollTop - clientHeight < 80
     const viewportAnchor = scrollTop + 24
     const viewportBottomAnchor = scrollTop + clientHeight - 80
+    // Read the viewport rect once instead of once per message.
+    const viewportTop = viewport.getBoundingClientRect().top
+    const topOf = (element: HTMLElement): number =>
+      element.getBoundingClientRect().top - viewportTop + scrollTop
     let currentIndex = -1
 
     for (let index = 0; index < userMessageIds.length; index += 1) {
@@ -114,7 +118,7 @@ export function ChatScrollNavigator({
       const targetElement = userMessageRefs.current.get(messageId)
       if (!targetElement) continue
 
-      const top = getElementTopInViewport(targetElement, viewport)
+      const top = topOf(targetElement)
       if (top <= viewportAnchor) {
         currentIndex = index
       } else {
@@ -128,7 +132,7 @@ export function ChatScrollNavigator({
         const targetElement = userMessageRefs.current.get(messageId)
         if (!targetElement) continue
 
-        const top = getElementTopInViewport(targetElement, viewport)
+        const top = topOf(targetElement)
         if (top <= viewportBottomAnchor) return index
       }
     }
@@ -166,16 +170,27 @@ export function ChatScrollNavigator({
     const viewport = getViewport(scrollContainerRef.current)
     if (!viewport) return
 
-    const handleScroll = (): void => {
+    // Coalesce scroll events to one measurement per frame. The measurement
+    // walks user messages with getBoundingClientRect, so running it on every
+    // raw scroll event is an O(n) layout hotspot on long conversations.
+    let frame: number | null = null
+    const measure = (): void => {
+      frame = null
       if (requestedUserQuestionIndexRef.current !== null) {
         setActiveQuestionIndex(requestedUserQuestionIndexRef.current)
         return
       }
       setActiveQuestionIndex(getCurrentUserQuestionIndex())
     }
+    const handleScroll = (): void => {
+      if (frame === null) frame = window.requestAnimationFrame(measure)
+    }
 
     viewport.addEventListener("scroll", handleScroll)
-    return () => viewport.removeEventListener("scroll", handleScroll)
+    return () => {
+      viewport.removeEventListener("scroll", handleScroll)
+      if (frame !== null) window.cancelAnimationFrame(frame)
+    }
   }, [getCurrentUserQuestionIndex, scrollContainerRef])
 
   useEffect(() => {

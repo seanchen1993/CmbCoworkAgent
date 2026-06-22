@@ -1,4 +1,4 @@
-import { useState, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import { ZoomIn, ZoomOut, Maximize2, RotateCw, Hand } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
@@ -17,9 +17,11 @@ export function ImageViewer({
   const [zoom, setZoom] = useState(100)
   const [rotation, setRotation] = useState(0)
   const [isPanning, setIsPanning] = useState(false)
-  const [panStart, setPanStart] = useState({ x: 0, y: 0 })
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 })
   const containerRef = useRef<HTMLDivElement>(null)
+  const panStartRef = useRef({ x: 0, y: 0 })
+  const panFrameRef = useRef<number | null>(null)
+  const pendingPanOffsetRef = useRef<{ x: number; y: number } | null>(null)
 
   const fileName = filePath.split("/").pop() || filePath
   const imageUrl = `data:${mimeType};base64,${base64Content}`
@@ -53,29 +55,50 @@ export function ImageViewer({
   const handleMouseDown = (e: React.MouseEvent): void => {
     if (zoom > 100) {
       setIsPanning(true)
-      setPanStart({ x: e.clientX - panOffset.x, y: e.clientY - panOffset.y })
+      panStartRef.current = { x: e.clientX - panOffset.x, y: e.clientY - panOffset.y }
       e.preventDefault()
     }
   }
 
   const handleMouseMove = (e: React.MouseEvent): void => {
     if (isPanning && zoom > 100) {
-      setPanOffset({
-        x: e.clientX - panStart.x,
-        y: e.clientY - panStart.y
-      })
+      pendingPanOffsetRef.current = {
+        x: e.clientX - panStartRef.current.x,
+        y: e.clientY - panStartRef.current.y
+      }
+      if (panFrameRef.current === null) {
+        panFrameRef.current = window.requestAnimationFrame(() => {
+          panFrameRef.current = null
+          const next = pendingPanOffsetRef.current
+          pendingPanOffsetRef.current = null
+          if (next) setPanOffset(next)
+        })
+      }
     }
   }
 
   const handleMouseUp = (): void => {
+    if (panFrameRef.current !== null) {
+      window.cancelAnimationFrame(panFrameRef.current)
+      panFrameRef.current = null
+      const next = pendingPanOffsetRef.current
+      pendingPanOffsetRef.current = null
+      if (next) setPanOffset(next)
+    }
     setIsPanning(false)
   }
 
   const handleMouseLeave = (): void => {
-    setIsPanning(false)
+    handleMouseUp()
   }
 
-  // Reset pan when zoom changes to 100 or less
+  useEffect(() => {
+    return () => {
+      if (panFrameRef.current !== null) {
+        window.cancelAnimationFrame(panFrameRef.current)
+      }
+    }
+  }, [])
 
   const canPan = zoom > 100
 
@@ -148,7 +171,7 @@ export function ImageViewer({
           <img
             src={imageUrl}
             alt={fileName}
-            className="max-w-full h-auto transition-transform duration-200"
+            className={`max-w-full h-auto ${isPanning ? "" : "transition-transform duration-200"}`}
             style={{
               transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom / 100}) rotate(${rotation}deg)`,
               imageRendering: zoom > 100 ? "pixelated" : "auto"
