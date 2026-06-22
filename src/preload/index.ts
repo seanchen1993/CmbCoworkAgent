@@ -733,10 +733,14 @@ const api = {
     }> => {
       return ipcRenderer.invoke("workspace:loadFromDisk", { threadId })
     },
-    ensureWatching: (threadId: string): Promise<{ success: boolean }> => {
+    ensureWatching: (
+      threadId: string
+    ): Promise<{ success: boolean; restarted?: boolean }> => {
       return ipcRenderer.invoke("workspace:ensureWatching", { threadId })
     },
-    setActiveThread: (threadId: string | null): Promise<{ success: boolean }> => {
+    setActiveThread: (
+      threadId: string | null
+    ): Promise<{ success: boolean; restarted?: boolean }> => {
       return ipcRenderer.invoke("workspace:setActiveThread", { threadId })
     },
     readFile: (

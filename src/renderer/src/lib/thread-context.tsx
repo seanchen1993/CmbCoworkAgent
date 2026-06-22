@@ -61,7 +61,10 @@ import {
 } from "./checkpoint-message-times"
 import { mergeLiveStreamMessages, type LiveStreamMessage } from "./live-stream-messages"
 import { buildSyntheticCheckpointBaselineIds } from "./stream-message-ids"
-import { loadWorkspaceFilesDeduped } from "./workspace-file-load"
+import {
+  loadWorkspaceFilesDeduped,
+  markWorkspaceFilesStale
+} from "./workspace-file-load"
 import {
   liveStreamMessageToStoreMessage,
   resolveLiveStreamMessageEndAt,
@@ -3792,7 +3795,20 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
     // Tell the main process which thread is in the foreground so the workspace
     // watcher LRU never evicts it (and re-arm it if it was previously evicted).
-    void window.api.workspace.setActiveThread(currentThreadId).catch(() => {})
+    void window.api.workspace
+      .setActiveThread(currentThreadId)
+      .then((watcherResult) => {
+        if (!currentThreadId || !watcherResult.success || !watcherResult.restarted) return
+        const workspacePath = threadStatesRef.current[currentThreadId]?.workspacePath
+        if (!workspacePath) return
+
+        // The watcher was absent (normally LRU-evicted) while this thread was
+        // inactive, so changes may have been missed. Refresh even when the file
+        // panel is closed; concurrent panel/background callers share one scan.
+        markWorkspaceFilesStale(currentThreadId, workspacePath)
+        loadWorkspaceFilesInBackground(currentThreadId, workspacePath)
+      })
+      .catch(() => {})
 
     if (!currentThreadId) return
 
@@ -3816,7 +3832,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true
     }
-  }, [currentThreadId, updateThreadState])
+  }, [currentThreadId, loadWorkspaceFilesInBackground, updateThreadState])
 
   const cleanupThread = useCallback(
     (threadId: string) => {

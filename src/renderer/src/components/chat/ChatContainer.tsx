@@ -161,10 +161,19 @@ interface MarketSkillsSnapshot {
   fetchedAt: number
 }
 
+// Min gap between featured-skill install passes. Throttling both success and
+// failure to this interval means: market version updates are re-checked
+// periodically (no permanent "done" latch), while a permanently-failing skill
+// is retried at most once per interval instead of on every session entry.
+const FEATURED_INSTALL_RETRY_MS = 10 * 60 * 1000
+
 let marketSkillsSnapshot: MarketSkillsSnapshot | null = null
 let marketSkillsRequest: Promise<MarketSkillsSnapshot> | null = null
 let featuredSkillsInstallRequest: Promise<boolean> | null = null
-let featuredSkillsInstallCompleted = false
+// Timestamp of the last install pass (0 = never). Combined with the per-skill
+// version check inside installFeaturedSkills, this re-checks for updates after
+// the interval and avoids re-downloading on every mount.
+let lastFeaturedInstallAttemptAt = 0
 
 async function loadMarketSkillsSnapshot(): Promise<MarketSkillsSnapshot> {
   const now = Date.now()
@@ -193,12 +202,15 @@ async function loadMarketSkillsSnapshot(): Promise<MarketSkillsSnapshot> {
   return marketSkillsRequest
 }
 
-async function installFeaturedSkills(goodSkills: MarketItem[]): Promise<boolean> {
-  if (goodSkills.length === 0) return false
+async function installFeaturedSkills(
+  goodSkills: MarketItem[]
+): Promise<{ changed: boolean; hadFailure: boolean }> {
+  if (goodSkills.length === 0) return { changed: false, hadFailure: false }
 
   console.log("Starting automatic installation of good skills...")
   let skillsMetadata = await window.api.skills.list()
   let changed = false
+  let hadFailure = false
 
   for (const skill of goodSkills) {
     try {
@@ -246,30 +258,43 @@ async function installFeaturedSkills(goodSkills: MarketItem[]): Promise<boolean>
         changed = true
         console.log(`Successfully installed skill: ${skillName}`)
       } else {
+        hadFailure = true
         console.error(`Failed to install skill ${skillName}:`, response.error)
       }
     } catch (error) {
+      hadFailure = true
       console.error(`Failed to install skill ${skill.name}:`, error)
     }
   }
 
   console.log("Finished automatic installation of good skills")
-  return changed
+  return { changed, hadFailure }
 }
 
 async function installFeaturedSkillsOnce(goodSkills: MarketItem[]): Promise<boolean> {
-  if (featuredSkillsInstallCompleted || goodSkills.length === 0) return false
+  if (goodSkills.length === 0) return false
 
-  if (!featuredSkillsInstallRequest) {
-    featuredSkillsInstallRequest = installFeaturedSkills(goodSkills)
-      .then((changed) => {
-        featuredSkillsInstallCompleted = true
-        return changed
-      })
-      .finally(() => {
-        featuredSkillsInstallRequest = null
-      })
+  // Share an already-running pass.
+  if (featuredSkillsInstallRequest) return featuredSkillsInstallRequest
+
+  // Throttle passes to one per retry window (applies to both success and
+  // failure): updates are re-checked after the interval via the per-skill
+  // version comparison, and a permanently-failing skill is not re-downloaded on
+  // every session entry.
+  const now = Date.now()
+  if (
+    lastFeaturedInstallAttemptAt !== 0 &&
+    now - lastFeaturedInstallAttemptAt < FEATURED_INSTALL_RETRY_MS
+  ) {
+    return false
   }
+  lastFeaturedInstallAttemptAt = now
+
+  featuredSkillsInstallRequest = installFeaturedSkills(goodSkills)
+    .then(({ changed }) => changed)
+    .finally(() => {
+      featuredSkillsInstallRequest = null
+    })
 
   return featuredSkillsInstallRequest
 }

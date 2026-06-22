@@ -43,7 +43,11 @@ import {
   type CoordinatorWorkerView
 } from "@/lib/thread-context"
 import { getFileType } from "@/lib/file-types"
-import { loadWorkspaceFilesDeduped } from "@/lib/workspace-file-load"
+import {
+  hasLoadedWorkspaceFiles,
+  loadWorkspaceFilesDeduped,
+  markWorkspaceFilesStale
+} from "@/lib/workspace-file-load"
 import { Badge } from "@/components/ui/badge"
 import { emitOpenResourcePreview, onOpenResourcePreview } from "@/lib/resource-preview-events"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
@@ -1615,52 +1619,87 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
         if (cancelled) return
         setWorkspacePath(path)
 
-        if (path && workspaceFiles.length === 0) {
-          // No cached tree yet: scan from disk (this also starts the watcher).
-          // Deduped so it shares the background loader's scan on first open.
-          const result = await loadWorkspaceFilesDeduped(threadId, path)
-          if (cancelled) return
-          // Guard against writing a stale scan (workspace switched mid-load):
-          // only accept results that match the path we resolved.
-          if (result.success && result.files && result.workspacePath === path) {
-            setWorkspaceFiles(result.files)
-          }
-        } else if (path) {
-          // Tree already cached: skip the rescan but make sure the watcher is
-          // armed (it may have been evicted by the watcher LRU cap).
-          window.api.workspace.ensureWatching(threadId).catch(() => {})
+        if (!path) return
+
+        if (hasLoadedWorkspaceFiles(threadId, path)) {
+          // A cached tree may have missed changes while its watcher was evicted.
+          // Re-arm the watcher and refresh once only when it had to be recreated.
+          const watcherResult = await window.api.workspace.ensureWatching(threadId)
+          if (cancelled || !watcherResult.success || !watcherResult.restarted) return
+          markWorkspaceFilesStale(threadId, path)
+        }
+
+        // No successful scan for this exact thread/path, or the watcher was
+        // recreated after eviction. Share an in-flight background scan.
+        const result = await loadWorkspaceFilesDeduped(threadId, path)
+        if (cancelled) return
+        // Guard against writing a stale scan (workspace switched mid-load):
+        // only accept results that match the path we resolved.
+        if (result.success && result.files && result.workspacePath === path) {
+          setWorkspaceFiles(result.files)
         }
       }
     }
-    loadWorkspace()
+    void loadWorkspace().catch((error) => {
+      if (!cancelled) {
+        console.error("[FilesContent] Failed to load workspace files:", error)
+      }
+    })
 
     return () => {
       cancelled = true
     }
+    // The effect intentionally initializes once per thread. Successful scan
+    // state is tracked by threadId + workspacePath instead of array length, so
+    // an empty workspace is still considered loaded.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId])
 
   // Listen for file changes from the workspace watcher
   useEffect(() => {
     if (!threadId || !setWorkspaceFiles) return
+    // Guards against an in-flight callback (started before a workspace switch)
+    // writing back after the effect re-ran for the new path. The closure's
+    // `workspacePath === result.workspacePath` check passes for the old path,
+    // so a flag set in cleanup is required to actually discard the stale write.
+    let cancelled = false
 
     const cleanup = window.api.workspace.onFilesChanged(async (data) => {
-      // Only reload if the event is for the current thread
-      if (data.threadId === threadId) {
-        console.log("[FilesContent] Files changed, reloading...", {
-          threadId: data.threadId,
-          workspacePath: data.workspacePath
+      // Only reload if the event is for the current thread and its workspace.
+      if (data.threadId !== threadId) return
+      if (workspacePath && data.workspacePath && data.workspacePath !== workspacePath) return
+
+      const targetPath = workspacePath ?? data.workspacePath
+      if (!targetPath) return
+
+      console.log("[FilesContent] Files changed, reloading...", {
+        threadId: data.threadId,
+        workspacePath: data.workspacePath
+      })
+      // A real file-change notification requests one trailing pass if another
+      // scan is already in progress, so changes that landed mid-scan are kept.
+      markWorkspaceFilesStale(threadId, targetPath)
+      try {
+        const result = await loadWorkspaceFilesDeduped(threadId, targetPath, {
+          requestTrailingRescan: true
         })
-        const result = await window.api.workspace.loadFromDisk(threadId)
-        if (result.success && result.files) {
+        if (cancelled) return
+        if (result.success && result.files && result.workspacePath === targetPath) {
           setWorkspaceFiles(result.files)
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error("[FilesContent] Failed to refresh workspace files:", error)
         }
       }
     })
 
-    return cleanup
+    return () => {
+      cancelled = true
+      cleanup()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId])
+  }, [threadId, workspacePath])
 
   return (
     <div className="flex flex-col h-full">

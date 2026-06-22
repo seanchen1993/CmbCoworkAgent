@@ -264,7 +264,10 @@ function evictStaleWatchers(keepThreadId: string): void {
   }
 }
 
-export function startWatching(threadId: string, workspacePath: string): void {
+export function startWatching(
+  threadId: string,
+  workspacePath: string
+): "existing" | "started" | "failed" {
   const existing = activeWatchers.get(threadId)
   // Preserve foreground protection across a path switch: stopWatching clears
   // activeThreadId, but switching the *current* thread's workspace must not
@@ -275,7 +278,7 @@ export function startWatching(threadId: string, workspacePath: string): void {
       // Already watching this path; refresh LRU order so re-arming the active
       // thread protects it from eviction.
       touchWatcher(threadId)
-      return
+      return "existing"
     }
     stopWatching(threadId)
   }
@@ -285,11 +288,11 @@ export function startWatching(threadId: string, workspacePath: string): void {
     const stat = fs.statSync(workspacePath)
     if (!stat.isDirectory()) {
       console.warn(`[WorkspaceWatcher] Path is not a directory: ${workspacePath}`)
-      return
+      return "failed"
     }
   } catch (e) {
     console.warn(`[WorkspaceWatcher] Cannot access path: ${workspacePath}`, e)
-    return
+    return "failed"
   }
 
   try {
@@ -364,8 +367,10 @@ export function startWatching(threadId: string, workspacePath: string): void {
     evictStaleWatchers(threadId)
     console.log(`[WorkspaceWatcher] Started watching ${workspacePath} for thread ${threadId}`)
     scheduleGitHookEventSync(workspacePath, 100)
+    return "started"
   } catch (e) {
     console.error(`[WorkspaceWatcher] Failed to start watching ${workspacePath}:`, e)
+    return "failed"
   }
 }
 

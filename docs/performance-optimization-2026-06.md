@@ -39,10 +39,10 @@
 
 | 项 | 文件 | 改动 |
 |---|---|---|
-| 跳过重目录（.gitignore 驱动） | `src/main/ipc/models.ts`、`workspace-watcher.ts` | `loadFromDisk` 硬编码仅跳过 `node_modules/coverage/tmp/temp` + 顶层 `resources/bin` + 隐藏项；**并复用 watcher 的 .gitignore 引擎（导出 `buildGitignoreMatcher`），按工作区自身 `.gitignore` 跳过大目录（dist/out/build/.next/target… 视用户配置而定），仅作用于目录**，单个被忽略文件仍可见。既拿到性能收益又不硬编码隐藏用户文件。 |
+| 跳过重目录（.gitignore 驱动） | `src/main/ipc/models.ts`、`workspace-watcher.ts` | `loadFromDisk` 硬编码仅跳过 `node_modules` + 顶层 `resources/bin` + 隐藏项；**并复用 watcher 的 .gitignore 引擎（导出 `buildGitignoreMatcher`），按工作区自身 `.gitignore` 跳过大目录（dist/out/build/.next/target… 视用户配置而定），仅作用于目录**，单个被忽略文件仍可见。`coverage/tmp/temp` 不再按名称全局隐藏，避免吞掉合法源码或测试夹具。 |
 | 并发 stat（有界） | `src/main/ipc/models.ts` | 同目录文件 `fs.stat` 由串行改为分批并发（`FILE_STAT_CONCURRENCY=48`），子目录递归仍串行以控制总并发、规避 EMFILE。 |
 | 元数据少解析 | `src/main/ipc/models.ts` | `workspace:set` 原本同份 `metadata` 解析 3 次，改为复用一份。 |
-| 文件加载去重/懒加载 | `chat/WorkspacePicker.tsx`、`panels/RightPanel.tsx`、`lib/workspace-file-load.ts`、`lib/thread-context.tsx` | 删除 WorkspacePicker 挂载时的 `loadFromDisk`；文件树已缓存时跳过重扫；新增 in-flight 去重 `loadWorkspaceFilesDeduped`，后台初始化加载与文件面板加载共享同一次扫描。**去重 key 为 `threadId + workspacePath`，且 RightPanel 写回前校验 `result.workspacePath === path`**，避免工作区切换中途把旧目录文件树写进新工作区。 |
+| 文件加载去重/懒加载 | `chat/WorkspacePicker.tsx`、`panels/RightPanel.tsx`、`lib/workspace-file-load.ts`、`lib/thread-context.tsx` | 删除 WorkspacePicker 挂载时的 `loadFromDisk`；按 `threadId + workspacePath` 记录成功加载状态（空目录也算已加载）；新增 in-flight 去重 `loadWorkspaceFilesDeduped`，后台初始化加载与文件面板加载共享同一次扫描。普通并发只共享 Promise，只有真实文件变更才请求一次尾随补扫；IPC reject 用 `finally` 清缓存。RightPanel 写回前校验返回路径，watcher 被 LRU 淘汰后重建时补扫一次。 |
 | 精品技能缓存/单次安装 | `chat/ChatContainer.tsx` | `loadMarketSkillsSnapshot`（10min TTL + 并发请求合并）与 `installFeaturedSkillsOnce`（进程级单次守卫），把"每次进会话拉市场+重装精品技能"降为进程一次。 |
 
 ### 2.4 构建期（仅 dev/lint）
@@ -75,7 +75,7 @@
 第一轮评审：
 - **[高] watcher LRU 淘汰当前线程**：前台线程保护 + LRU touch + `setActiveThread`（切换即重挂）。
 - **[中] 重复扫盘未真正收敛**：`loadWorkspaceFilesDeduped` in-flight 去重。
-- **[中] 硬编码跳过目录隐藏真实文件**：收窄为仅 node_modules/coverage/tmp/temp。
+- **[中] 硬编码跳过目录隐藏真实文件**：收窄为仅 `node_modules`；其他生成目录按项目 `.gitignore` 决定。
 - **[中低] content-visibility 收益被滚动测量抵消**：滚动导航 rAF 节流 + viewport rect 单次读取。
 - **[此前自查] EMFILE**：`fs.stat` 有界并发。
 
@@ -83,6 +83,19 @@
 - **[P1] 切换工作区后前台保护丢失**：`startWatching` 记录并恢复 `wasActive`。
 - **[P2] 去重按 threadId 可能复用旧工作区结果**：key 改为 `threadId + workspacePath`，RightPanel 写回前校验 `result.workspacePath`。
 - **[P3] dist/out/build 大目录仍全量扫描**：复用 watcher 的 .gitignore 引擎，按用户 `.gitignore` 跳过大目录（仅目录级）。
+
+第三轮评审：
+- **[P1] 慢扫描完成后把 watcher 切回旧工作区**：`loadFromDisk` 扫描结束后重新读取 metadata，仅当路径未变才 `startWatching`。
+- **[P2] 文件变更重载绕过去重与路径校验**：`onFilesChanged` 改用 `loadWorkspaceFilesDeduped` + 校验事件路径/返回路径/当前路径。
+- **[P2] 精品技能安装失败后不再重试**：仅当全部成功（无 `hadFailure`）才置 `featuredSkillsInstallCompleted`，失败留待下次 `queryRemoteSkills` 重试。
+
+第四轮评审：
+- **[P1] watcher 重挂后缓存可能过期**：`ensureWatching` 返回是否重建；重建时把文件树标脏并补扫一次。
+- **[P1] “去重”仍串行扫描两次**：普通并发只共享当前 Promise，尾随补扫仅由文件变更事件显式请求。
+- **[P1] IPC reject 永久缓存失败 Promise**：in-flight Map 改为 `finally` 清理，并按 entry 身份校验，避免旧任务误删新任务。
+- **[P2] 持续变更形成无限补扫**：每轮最多执行一次尾随扫描；尾随期间的新通知合并为一个短延迟的下一轮扫描，不延长当前全量扫描循环。
+- **[P2] 空工作区反复扫描**：按线程和路径记录成功加载，不再用 `files.length === 0` 判断。
+- **[P2] `coverage/tmp/temp` 被误隐藏**：硬编码忽略目录收窄为仅 `node_modules`。
 
 ## 6. 已知限制 / 后续
 

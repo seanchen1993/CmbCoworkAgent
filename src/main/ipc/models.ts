@@ -2958,13 +2958,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   // Load files from disk into the workspace view
   ipcMain.handle("workspace:loadFromDisk", async (_event, { threadId }: WorkspaceLoadParams) => {
     const { getThread } = await import("../db")
-    // Always skip a few near-universally machine-generated, large dirs.
+    // Always skip node_modules, the dominant machine-generated directory.
     // `dist`/`out`/`build` are intentionally NOT hardcoded here: in many
     // projects they hold artifacts the user may want to browse. Instead we
     // defer to the workspace's own .gitignore (below) to skip large generated
-    // dirs per the user's intent. node_modules is the dominant perf win;
-    // coverage/tmp/temp are throwaway.
-    const ignoredWorkspaceDirs = new Set(["node_modules", "coverage", "tmp", "temp"])
+    // dirs per the user's intent. The same applies to directories named
+    // coverage/tmp/temp, which can contain legitimate project fixtures.
+    const ignoredWorkspaceDirs = new Set(["node_modules"])
 
     // Get workspace path from thread metadata
     const thread = getThread(threadId)
@@ -3054,8 +3054,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
       await readDir(workspacePath)
 
-      // Start watching for file changes
-      startWatching(threadId, workspacePath)
+      // The scan can take a while; if the thread's workspace switched in the
+      // meantime, don't point the watcher back at the now-stale path. The
+      // renderer also discards stale results via result.workspacePath.
+      const latestThread = getThread(threadId)
+      const latestMetadata = latestThread?.metadata ? JSON.parse(latestThread.metadata) : {}
+      if ((latestMetadata.workspacePath as string | null) === workspacePath) {
+        startWatching(threadId, workspacePath)
+      }
 
       return {
         success: true,
@@ -3082,8 +3088,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
     const workspacePath = metadata.workspacePath as string | null
     if (!workspacePath) return { success: false }
-    startWatching(threadId, workspacePath)
-    return { success: true }
+    const watcherState = startWatching(threadId, workspacePath)
+    return {
+      success: watcherState !== "failed",
+      restarted: watcherState === "started"
+    }
   })
 
   // Mark the foreground thread so the watcher LRU never evicts it, and (re)arm
@@ -3095,13 +3104,17 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     "workspace:setActiveThread",
     async (_event, { threadId }: { threadId: string | null }) => {
       setActiveWatchedThread(threadId)
-      if (!threadId) return { success: true }
+      if (!threadId) return { success: true, restarted: false }
       const { getThread } = await import("../db")
       const thread = getThread(threadId)
       const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
       const workspacePath = metadata.workspacePath as string | null
-      if (workspacePath) startWatching(threadId, workspacePath)
-      return { success: true }
+      if (!workspacePath) return { success: true, restarted: false }
+      const watcherState = startWatching(threadId, workspacePath)
+      return {
+        success: watcherState !== "failed",
+        restarted: watcherState === "started"
+      }
     }
   )
 
