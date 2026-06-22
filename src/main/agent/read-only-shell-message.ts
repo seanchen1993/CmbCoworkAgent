@@ -9,6 +9,10 @@ export function readOnlyExecuteBlockMessage(
   windowsShell: WindowsShellKind = "unknown",
   options: ReadOnlyExecuteBlockMessageOptions = {}
 ): string {
+  if (options.hookRewrite && options.detailedExamples === false) {
+    return "execute blocked: this is a read-only agent — only provably read-only commands are allowed (no writes, redirects, mutating commands, or builds/installs). A hook may have rewritten the command into a non-read-only one."
+  }
+
   const hookNote = options.hookRewrite
     ? " A hook may have rewritten the command into a non-read-only one."
     : ""
@@ -16,6 +20,10 @@ export function readOnlyExecuteBlockMessage(
     options.detailedExamples !== false
       ? ' Use direct read-only commands such as rg "pattern" file, grep "pattern" file, find ..., ls, git log, git diff, cat file, or use the read_file/grep/glob tools.'
       : " Use direct read-only commands or the read_file/grep/glob tools."
+  const strictMessage =
+    "execute blocked: this is a read-only agent — only provably read-only single commands are allowed. " +
+    "Shell composition is blocked in read-only mode, including pipes (|), redirects (<, >, >>), command chaining (&&, ||, ;), heredocs, writes, mutating commands, builds, or installs." +
+    examples
 
   if (windowsShell === "powershell") {
     return (
@@ -26,10 +34,5 @@ export function readOnlyExecuteBlockMessage(
     )
   }
 
-  return (
-    "execute blocked: this is a read-only agent - only provably read-only single commands are allowed. " +
-    "Shell composition is blocked in read-only mode, including pipes (|), redirects (<, >, >>), command chaining (&&, ||, ;), heredocs, writes, mutating commands, builds, or installs." +
-    hookNote +
-    examples
-  )
+  return strictMessage + hookNote
 }
