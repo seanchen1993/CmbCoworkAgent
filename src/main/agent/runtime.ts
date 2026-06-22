@@ -124,6 +124,7 @@ import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
 import { classifyCommandConcurrency, isReadOnlyShellCommand } from "./exec-policy"
 import type { WindowsShellKind } from "./windows-safe-commands"
+import { readOnlyExecuteBlockMessage } from "./read-only-shell-message"
 import { SkillUsageDetector } from "./skill-evolution/usage-detector"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
 import type {
@@ -1143,8 +1144,7 @@ export function createAgentToolGuardMiddleware(
         const command = extractExecuteCommand(request.toolCall?.args)
         if (command !== null && !isReadOnlyShellCommand(command, "", windowsShell)) {
           return new ToolMessage({
-            content:
-              "execute blocked: this is a read-only agent — only provably read-only commands are allowed (no writes, redirects, mutating commands, or builds/installs). Use read_file/grep/glob, read-only shell like ls, git log, git diff, find, cat, or inspection subcommands like npm ls, go list, mvn dependency:tree.",
+            content: readOnlyExecuteBlockMessage(windowsShell),
             tool_call_id: toolCallId,
             name,
             status: "error"
@@ -1423,7 +1423,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
             readOnlyShell &&
             !isReadOnlyShellCommand(input.command, input.cwd ?? "", windowsShellKind)
           ) {
-            return "execute blocked: this is a read-only agent — only provably read-only commands are allowed (no writes, redirects, mutating commands, or builds/installs). Use read-only shell (ls, git log, git diff, find, cat), inspection subcommands (npm ls, go list, mvn dependency:tree), or the read_file/grep/glob tools."
+            return readOnlyExecuteBlockMessage(windowsShellKind)
           }
           if (input.run_in_background) {
             return sandbox.executeBackground(input.command, input.cwd)

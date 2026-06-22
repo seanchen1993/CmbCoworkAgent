@@ -109,8 +109,11 @@ export function blockedToolNamesForAccess(
 
   if (access.workload === "read_only") {
     // read-only workers KEEP execute (+ task_output for its results) but the
-    // runtime's execute tool gates each command through assessCommandSafety, so
-    // only provably read-only commands (ls, git log, git diff, find, cat …) run;
+    // runtime's execute tool gates each command through isReadOnlyShellCommand
+    // (which layers assessCommandSafety with read-only build-tool and Windows
+    // PowerShell handling), so only commands that can be proven read-only (ls,
+    // git log, git diff, find, cat …) run; unsafe/unverified shell composition
+    // such as pipes/chaining/redirection is rejected;
     // mutating/unrecognized commands are rejected. Direct writes, deferred
     // execution surfaces, and browser automation remain unavailable.
     return new Set([...directWriteToolNames, ...deferredToolNames, ...externalSideEffectToolNames])

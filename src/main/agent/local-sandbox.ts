@@ -46,6 +46,7 @@ import {
   isGitPushCommand,
   isReadOnlyShellCommand
 } from "./exec-policy"
+import { readOnlyExecuteBlockMessage } from "./read-only-shell-message"
 import {
   areElevatedRootsPreparedAsync,
   isElevatedSetupComplete,
@@ -5474,15 +5475,16 @@ export class LocalSandbox
     }
     // Read-only enforcement on the EFFECTIVE (post-hook) command: a PreToolUse
     // hook may have rewritten a read-only command into a build/write one.
+    const readOnlyWindowsShell =
+      process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
     if (
       (this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true) &&
-      !isReadOnlyShellCommand(
-        effectiveCommand,
-        effectiveCwd,
-        process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
-      )
+      !isReadOnlyShellCommand(effectiveCommand, effectiveCwd, readOnlyWindowsShell)
     ) {
-      return "execute blocked: this is a read-only agent — only provably read-only commands are allowed (no writes, redirects, mutating commands, or builds/installs). A hook may have rewritten the command into a non-read-only one."
+      return readOnlyExecuteBlockMessage(readOnlyWindowsShell, {
+        hookRewrite: true,
+        detailedExamples: false
+      })
     }
     if (
       (this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true) &&
@@ -5767,18 +5769,18 @@ export class LocalSandbox
     // hook may have rewritten a read-only command into a build/write one. The
     // runtime's execute tool already gated the agent-issued command, but the
     // rewrite happens here, so re-check after the merge.
+    const readOnlyWindowsShell =
+      process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
     if (
       (this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true) &&
-      !isReadOnlyShellCommand(
-        effectiveCommand,
-        effectiveCwd,
-        process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
-      )
+      !isReadOnlyShellCommand(effectiveCommand, effectiveCwd, readOnlyWindowsShell)
     ) {
       console.log(`[LocalSandbox] execute: READ-ONLY BLOCKED — ${effectiveCommand}`)
       return {
-        output:
-          "execute blocked: this is a read-only agent — only provably read-only commands are allowed (no writes, redirects, mutating commands, or builds/installs). A hook may have rewritten the command into a non-read-only one.",
+        output: readOnlyExecuteBlockMessage(readOnlyWindowsShell, {
+          hookRewrite: true,
+          detailedExamples: false
+        }),
         exitCode: 1,
         truncated: false
       }
