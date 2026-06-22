@@ -1292,6 +1292,22 @@ const api = {
     ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
       return ipcRenderer.invoke("skills:restoreCloudEvolutionBackup", backupId)
     },
+    applyPluginSkillEvolution: (payload: {
+      skillPath: string
+      candidateId: string
+      skillName: string
+      buffer: ArrayBuffer
+      fileName: string
+      sourceVersion?: string | null
+      targetVersion?: string | null
+    }): Promise<{ success: boolean; backupId?: string; error?: string }> => {
+      return ipcRenderer.invoke("skills:applyPluginSkillEvolution", payload)
+    },
+    rollbackPluginSkillEvolution: (
+      backupId: string
+    ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
+      return ipcRenderer.invoke("skills:rollbackPluginSkillEvolution", backupId)
+    },
     exportCloudEvolutionBackup: (
       backupId: string,
       targetDir: string

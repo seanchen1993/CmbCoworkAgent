@@ -30,7 +30,7 @@ import {
   ShieldCheck
 } from "lucide-react"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
-import { evolutionApi, type EvolutionCandidate } from "@/api/evolution"
+import { evolutionApi, evolutionSkillKey, type EvolutionCandidate } from "@/api/evolution"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -1456,23 +1456,35 @@ export function EvolutionPanel(): React.JSX.Element {
     try {
       const list = await window.api.optimizer.getTraces({ limit: 80 })
       setTraces(list)
+      // Read the current selection at call time (not via closure) so this
+      // callback stays stable. Closing over `selectedTraceIds` would recreate
+      // loadTraces on every selection toggle, re-firing the load effect and
+      // flashing the spinner over the list. We only prune ids that no longer
+      // exist after a fresh load.
+      const current = useAppStore.getState().evolutionSelectedTraceIds
       const keep = new Set<string>()
       const valid = new Set(list.map((t) => t.traceId))
-      for (const id of selectedTraceIds) {
+      for (const id of current) {
         if (valid.has(id)) keep.add(id)
       }
-      if (!isSameIdSet(keep, selectedTraceIds)) {
+      if (!isSameIdSet(keep, current)) {
         setEvolutionSelectedTraceIds(keep)
       }
     } finally {
       setTracesLoading(false)
     }
-  }, [selectedTraceIds, setEvolutionSelectedTraceIds])
+  }, [setEvolutionSelectedTraceIds])
 
   const refreshCloudEvolutionUpdates = useCallback(async () => {
     setCloudUpdateLoading(true)
     try {
-      const installedSkills = await window.api.skills.list()
+      // Include plugin-owned skills so cloud candidates can target SKILLs that
+      // live inside plugins, not just standalone custom skills.
+      const [customSkills, pluginSkills] = await Promise.all([
+        window.api.skills.list(),
+        window.api.skills.listPlugins()
+      ])
+      const installedSkills = [...customSkills, ...pluginSkills]
       const updates = await evolutionApi.listAvailableUpdates(installedSkills)
       setCloudEvolutionUpdates(updates)
       if (tab === "candidates") {
@@ -1494,7 +1506,7 @@ export function EvolutionPanel(): React.JSX.Element {
       mode?: "auto" | "selected"
       traceIds?: string[]
     },
-    pendingMessage = "正在分析选中内容，请稍候..."
+    pendingMessage = "正在生成优化候选，请稍候..."
   ) => {
     setEvolutionLastRunOpts(opts ?? null)
     setEvolutionStreamedText("")
@@ -1690,8 +1702,16 @@ export function EvolutionPanel(): React.JSX.Element {
     trackCloudEvolutionCandidateAccepted(candidate, candidate.source_version ?? null)
     let backupId: string | undefined
     try {
-      const installedSkills = await window.api.skills.list()
-      const existing = installedSkills.find((skill: SkillMetadata) => skill.name === candidate.skill_name)
+      // Match across custom + plugin skills, keyed so a plugin "pdf" never
+      // resolves to a same-named custom skill.
+      const [customSkills, pluginSkills] = await Promise.all([
+        window.api.skills.list(),
+        window.api.skills.listPlugins()
+      ])
+      const candidateKey = evolutionSkillKey(candidate.skill_name, candidate.plugin_name)
+      const existing = [...customSkills, ...pluginSkills].find(
+        (skill: SkillMetadata) => evolutionSkillKey(skill.name, skill.pluginName) === candidateKey
+      )
       if (!existing) {
         throw new Error(`本地未安装同名 Skill：${candidate.skill_name}`)
       }
@@ -1703,27 +1723,50 @@ export function EvolutionPanel(): React.JSX.Element {
         : await evolutionApi.downloadCandidateBundle(candidate.candidate_id)
       const buffer = "blob" in bundle ? await bundle.blob.arrayBuffer() : bundle.buffer
       const filename = bundle.filename
-      const backupResult = await window.api.skills.backupForCloudEvolution({
-        skillPath: existing.path,
-        candidateId: candidate.candidate_id,
-        skillName: candidate.skill_name,
-        sourceVersion: existing.version || candidate.source_version || null,
-        targetVersion: candidate.target_version || null
-      })
-      if (!backupResult.success || !backupResult.backupId) {
-        throw new Error(backupResult.error || `备份旧版 Skill 失败：${candidate.skill_name}`)
-      }
-      backupId = backupResult.backupId
 
-      const deleteResult = await window.api.skills.delete(existing.path)
-      if (!deleteResult.success) {
-        throw new Error(deleteResult.error || `删除旧版 Skill 失败：${candidate.skill_name}`)
-      }
+      let backupPath: string | undefined
+      const isPluginSkill = !!(candidate.plugin_name || existing.pluginId || existing.pluginName)
+      if (isPluginSkill) {
+        // Plugin skills are evolved in place inside the plugin dir (the custom-
+        // dir delete+upload path is not valid for plugin-owned files). The IPC
+        // backs the dir up itself and returns the backupId for rollback.
+        const applyResult = await window.api.skills.applyPluginSkillEvolution({
+          skillPath: existing.path,
+          candidateId: candidate.candidate_id,
+          skillName: candidate.skill_name,
+          buffer,
+          fileName: filename,
+          sourceVersion: existing.version || candidate.source_version || null,
+          targetVersion: candidate.target_version || null
+        })
+        if (!applyResult.success || !applyResult.backupId) {
+          throw new Error(applyResult.error || `安装云端自进化 Skill 失败：${candidate.skill_name}`)
+        }
+        backupId = applyResult.backupId
+      } else {
+        const backupResult = await window.api.skills.backupForCloudEvolution({
+          skillPath: existing.path,
+          candidateId: candidate.candidate_id,
+          skillName: candidate.skill_name,
+          sourceVersion: existing.version || candidate.source_version || null,
+          targetVersion: candidate.target_version || null
+        })
+        if (!backupResult.success || !backupResult.backupId) {
+          throw new Error(backupResult.error || `备份旧版 Skill 失败：${candidate.skill_name}`)
+        }
+        backupId = backupResult.backupId
+        backupPath = backupResult.backupPath
 
-      const uploadResult = await window.api.skills.upload(buffer, filename)
-      if (!uploadResult.success) {
-        await window.api.skills.restoreCloudEvolutionBackup(backupId).catch(console.warn)
-        throw new Error(uploadResult.error || `安装云端自进化 Skill 失败：${candidate.skill_name}`)
+        const deleteResult = await window.api.skills.delete(existing.path)
+        if (!deleteResult.success) {
+          throw new Error(deleteResult.error || `删除旧版 Skill 失败：${candidate.skill_name}`)
+        }
+
+        const uploadResult = await window.api.skills.upload(buffer, filename)
+        if (!uploadResult.success) {
+          await window.api.skills.restoreCloudEvolutionBackup(backupId).catch(console.warn)
+          throw new Error(uploadResult.error || `安装云端自进化 Skill 失败：${candidate.skill_name}`)
+        }
       }
 
       const adoption = {
@@ -1732,8 +1775,8 @@ export function EvolutionPanel(): React.JSX.Element {
         source_version: existing.version || candidate.source_version || null,
         target_version: candidate.target_version || null,
         adopted_at: new Date().toISOString(),
-        backup_id: backupResult.backupId,
-        backup_path: backupResult.backupPath,
+        backup_id: backupId,
+        backup_path: backupPath,
         candidate
       }
       evolutionApi.markCandidateAdopted(adoption)
@@ -1760,7 +1803,11 @@ export function EvolutionPanel(): React.JSX.Element {
     if (!confirm(`确定要将「${candidate.skill_name}」回滚到采纳前的旧版本吗？`)) return
     setInstallingCloudCandidateId(candidate.candidate_id)
     try {
-      const result = await window.api.skills.restoreCloudEvolutionBackup(candidate.local_backup_id)
+      // Plugin skills were evolved in place, so roll back into the plugin dir;
+      // standalone skills restore into the custom dir.
+      const result = candidate.plugin_name
+        ? await window.api.skills.rollbackPluginSkillEvolution(candidate.local_backup_id)
+        : await window.api.skills.restoreCloudEvolutionBackup(candidate.local_backup_id)
       if (!result.success) {
         throw new Error(result.error || `回滚旧版 Skill 失败：${candidate.skill_name}`)
       }
@@ -1917,16 +1964,16 @@ export function EvolutionPanel(): React.JSX.Element {
       return
     }
     const pendingMessage = selectedThreadCount > 0
-      ? `正在分析已选内容（${traceIds.length} 条 trace / ${selectedThreadCount} 个会话），请稍候...`
-      : `正在分析已选内容（${traceIds.length} 条 trace），请稍候...`
+      ? `正在生成优化候选（${traceIds.length} 条 trace / ${selectedThreadCount} 个会话），请稍候...`
+      : `正在生成优化候选（${traceIds.length} 条 trace），请稍候...`
     await runOptimizer({ mode: "selected", traceIds }, pendingMessage)
     setTab("candidates")
   }, [runOptimizer, selectedTraceIds, selectedThreadCount])
 
   const handleRetryOptimizer = useCallback(() => {
     const pendingMessage = lastRunOpts?.traceIds
-      ? `正在重试分析（${lastRunOpts.traceIds.length} 条 trace），请稍候...`
-      : "正在重试分析，请稍候..."
+      ? `正在重试生成候选（${lastRunOpts.traceIds.length} 条 trace），请稍候...`
+      : "正在重试生成候选，请稍候..."
     runOptimizer(lastRunOpts ?? undefined, pendingMessage).catch(console.warn)
   }, [lastRunOpts, runOptimizer])
 
@@ -2154,7 +2201,7 @@ export function EvolutionPanel(): React.JSX.Element {
             ) : item === "traces" ? (
               <>
                 <Activity className="size-3.5" />
-                执行 Traces
+                历史会话执行记录
                 {traces.length > 0 && (
                   <span className="ml-1 text-[10px] text-muted-foreground">
                     ({traceGroups.length} 个会话 / {traces.length} 条)
@@ -2244,7 +2291,7 @@ export function EvolutionPanel(): React.JSX.Element {
                 分析中...
               </>
             ) : (
-              "分析选中内容"
+              "生成优化候选"
             )}
           </Button>
           <Button
@@ -2273,7 +2320,7 @@ export function EvolutionPanel(): React.JSX.Element {
                   <EmptyState
                     icon={<Sparkles className="size-8 text-muted-foreground/40 mb-3" />}
                     title="暂无优化候选"
-                    desc="请先切换到「执行 Traces」分析本地记录，或等待云端自进化服务推送新版本"
+                    desc="请先切换到「历史会话执行记录」分析本地记录，或等待云端自进化服务推送新版本"
                   />
                 </>
               ) : (

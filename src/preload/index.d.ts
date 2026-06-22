@@ -1178,6 +1178,18 @@ interface CustomAPI {
     restoreCloudEvolutionBackup: (
       backupId: string
     ) => Promise<{ success: boolean; skillName?: string; error?: string }>
+    applyPluginSkillEvolution: (payload: {
+      skillPath: string
+      candidateId: string
+      skillName: string
+      buffer: ArrayBuffer
+      fileName: string
+      sourceVersion?: string | null
+      targetVersion?: string | null
+    }) => Promise<{ success: boolean; backupId?: string; error?: string }>
+    rollbackPluginSkillEvolution: (
+      backupId: string
+    ) => Promise<{ success: boolean; skillName?: string; error?: string }>
     exportCloudEvolutionBackup: (
       backupId: string,
       targetDir: string
