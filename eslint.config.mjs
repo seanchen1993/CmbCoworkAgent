@@ -9,7 +9,7 @@ import eslintPluginReactRefresh from "eslint-plugin-react-refresh"
 export default defineConfig(
   // `.claude/worktrees` holds throwaway git worktree copies of the repo (full
   // duplicate trees); linting them just floods output with duplicate findings.
-  { ignores: ["**/node_modules", "**/dist", "**/out", "**/.claude/worktrees/**"] },
+  { ignores: ["**/node_modules", "**/.vite", "**/dist", "**/out", "**/.claude/worktrees/**"] },
   eslint.configs.recommended,
   tseslint.configs.recommended,
   eslintPluginReact.configs.flat.recommended,

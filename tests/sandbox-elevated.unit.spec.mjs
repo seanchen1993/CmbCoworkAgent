@@ -409,7 +409,7 @@ test("sandbox cache roots canonicalize workspace symlinks asynchronously", () =>
   )
   assert.match(
     executeWindowsSection,
-    /raceWithAbort\(this\._sandboxCacheRootPromise[\s\S]*return this\._sandboxCacheRoot/,
+    /raceWithAbort\(\s*this\._sandboxCacheRootPromise[\s\S]*return this\._sandboxCacheRoot/,
     "Windows sandbox execution should await canonical cache root resolution with a fallback"
   )
   assert.match(
@@ -913,7 +913,7 @@ test("background execute() routes results through the orchestrator's bypass chec
 
   assert.match(
     backgroundSection,
-    /this\.orchestrator[\s\S]*maybeRetryOutsideSandbox\(effectiveCommand, effectiveCwd, this\.windowsSandbox, rawResult\)/,
+    /this\.orchestrator[\s\S]*maybeRetryOutsideSandbox\(\s*effectiveCommand,\s*effectiveCwd,\s*this\.windowsSandbox,\s*rawResult\s*\)/,
     "executeBackground must hand the raw result to the orchestrator's bypass check before marking the task complete — otherwise backgrounded `npm run build` skips the approval prompt"
   )
   assert.match(
@@ -1146,7 +1146,7 @@ test("elevated sandbox preamble injects git safe.directory and openssl backend",
   )
   const unelevatedClearProxySection = sectionBetween(
     localSandboxSource,
-    '    const clearProxyPreamble = !isElevatedSandbox && effectiveMode !== "none"',
+    "    const clearProxyPreamble =",
     "    // Unelevated sandbox: set shared tool env vars"
   )
 
@@ -1398,12 +1398,12 @@ test("Windows sandbox keeps workspace root separate from command cwd", () => {
   )
   assert.match(
     executeWindowsSection,
-    /new Set\(\[\.\.\.executionPlan\.writableRoots, executionCwd\]/,
+    /new Set\(\s*\[\.\.\.executionPlan\.writableRoots,\s*executionCwd\]/,
     "skill cwd should be passed as an additional writable root instead of replacing the workspace"
   )
   assert.match(
     executeWindowsSection,
-    /prewarmElevatedWorkspaceRoots\(sandboxWorkspaceRoot, sandboxWritableRoots\)/,
+    /prewarmElevatedWorkspaceRoots\(\s*sandboxWorkspaceRoot,\s*sandboxWritableRoots\s*\)/,
     "elevated prewarm should prepare the real workspace plus extra writable roots"
   )
   assert.match(

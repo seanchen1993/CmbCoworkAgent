@@ -77,6 +77,10 @@ import {
 import { mergeLiveStreamMessages, type LiveStreamMessage } from "./live-stream-messages"
 import { buildSyntheticCheckpointBaselineIds } from "./stream-message-ids"
 import {
+  loadWorkspaceFilesDeduped,
+  markWorkspaceFilesStale
+} from "./workspace-file-load"
+import {
   liveStreamMessageToStoreMessage,
   resolveLiveStreamMessageEndAt,
   shouldSkipLiveStreamAccumulatorMessage
@@ -2128,8 +2132,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     (threadId: string, workspacePath: string) => {
       // 工作区文件树可能很大，不能阻塞会话历史首屏恢复。
       // 这里后台加载，避免 “正在加载会话历史” 被完整目录扫描拖住。
-      window.api.workspace
-        .loadFromDisk(threadId)
+      // 与文件面板共享同一次扫描，避免首次打开时重复扫盘。
+      loadWorkspaceFilesDeduped(threadId, workspacePath)
         .then((diskResult) => {
           if (!diskResult.success) return
 
@@ -4011,6 +4015,23 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     }
     previousCurrentThreadIdRef.current = currentThreadId
 
+    // Tell the main process which thread is in the foreground so the workspace
+    // watcher LRU never evicts it (and re-arm it if it was previously evicted).
+    void window.api.workspace
+      .setActiveThread(currentThreadId)
+      .then((watcherResult) => {
+        if (!currentThreadId || !watcherResult.success || !watcherResult.restarted) return
+        const workspacePath = threadStatesRef.current[currentThreadId]?.workspacePath
+        if (!workspacePath) return
+
+        // The watcher was absent (normally LRU-evicted) while this thread was
+        // inactive, so changes may have been missed. Refresh even when the file
+        // panel is closed; concurrent panel/background callers share one scan.
+        markWorkspaceFilesStale(currentThreadId, workspacePath)
+        loadWorkspaceFilesInBackground(currentThreadId, workspacePath)
+      })
+      .catch(() => {})
+
     if (!currentThreadId) return
 
     let cancelled = false
@@ -4033,7 +4054,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true
     }
-  }, [currentThreadId, updateThreadState])
+  }, [currentThreadId, loadWorkspaceFilesInBackground, updateThreadState])
 
   const cleanupThread = useCallback(
     (threadId: string) => {

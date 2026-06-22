@@ -4,8 +4,19 @@ import { BrowserWindow } from "electron"
 import micromatch from "micromatch"
 import { scheduleGitHookEventSync } from "./git-hook-service"
 
+interface ActiveWorkspaceWatcher {
+  watcher: fs.FSWatcher
+  workspacePath: string
+}
+
 // Store active watchers by thread ID
-const activeWatchers = new Map<string, fs.FSWatcher>()
+const activeWatchers = new Map<string, ActiveWorkspaceWatcher>()
+
+// Cap concurrent recursive watchers. Each fs.watch(recursive) over a workspace
+// keeps an OS-level watch alive and fires the JS callback for every file change
+// in the tree (builds, npm install, git ops). Threads accumulate watchers when
+// the user opens many sessions, so we evict the oldest once we exceed the cap.
+const MAX_ACTIVE_WATCHERS = 6
 
 // Debounce timers to prevent rapid-fire updates
 const debounceTimers = new Map<string, NodeJS.Timeout>()
@@ -44,6 +55,11 @@ function normalizeRelativePath(input: string): string {
     .replace(/^\/+/, "")
     .replace(/\/+/g, "/")
     .replace(/\/$/, "")
+}
+
+function normalizeWorkspacePath(input: string): string {
+  const resolved = path.resolve(input)
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved
 }
 
 function isWorkspaceHookPath(relativePath: string): boolean {
@@ -176,23 +192,107 @@ function isIgnoredByGitignore(
 }
 
 /**
+ * Build a standalone .gitignore matcher for a workspace (reads the root
+ * .gitignore once). Reuses the same rule engine as the watcher so the initial
+ * file-tree scan and live watching agree on what is ignored. Returns a
+ * predicate; if there is no .gitignore it always returns false.
+ */
+export function buildGitignoreMatcher(workspacePath: string): (relativePath: string) => boolean {
+  let rules: GitignoreRule[] = []
+  try {
+    const content = fs.readFileSync(path.join(workspacePath, ".gitignore"), "utf-8")
+    rules = parseGitignoreRules(content)
+  } catch {
+    rules = []
+  }
+  if (rules.length === 0) return () => false
+
+  return (relativePath: string): boolean => {
+    let ignored = false
+    for (const rule of rules) {
+      if (!matchesGitignoreRule(relativePath, rule)) continue
+      ignored = !rule.negated
+    }
+    return ignored
+  }
+}
+
+/**
  * Start watching a workspace directory for file changes.
  * Sends 'workspace:files-changed' events to the renderer when changes are detected.
  */
-export function startWatching(threadId: string, workspacePath: string): void {
-  // Stop any existing watcher for this thread
-  stopWatching(threadId)
+// The foreground (currently viewed) thread. It must never be evicted by the
+// LRU cap — losing its watcher would silently stop file-tree refresh and Git
+// diff notifications for the thread the user is actually looking at.
+let activeThreadId: string | null = null
+
+// Move a watcher to the most-recently-used position (Map preserves insertion
+// order, so re-inserting puts it last → evicted last).
+function touchWatcher(threadId: string): void {
+  const entry = activeWatchers.get(threadId)
+  if (entry) {
+    activeWatchers.delete(threadId)
+    activeWatchers.set(threadId, entry)
+  }
+}
+
+/**
+ * Mark the foreground thread so the LRU cap never evicts it, and refresh its
+ * position. Background `loadFromDisk` calls for other threads can otherwise
+ * push the active thread out by insertion order.
+ */
+export function setActiveWatchedThread(threadId: string | null): void {
+  activeThreadId = threadId
+  if (threadId) touchWatcher(threadId)
+}
+
+/**
+ * Keep the number of live recursive watchers bounded. Map preserves insertion
+ * order, so the oldest entries (least recently used) are evicted first. The
+ * thread that just started watching and the foreground thread are never evicted.
+ */
+function evictStaleWatchers(keepThreadId: string): void {
+  while (activeWatchers.size > MAX_ACTIVE_WATCHERS) {
+    let evicted = false
+    for (const threadId of activeWatchers.keys()) {
+      if (threadId === keepThreadId || threadId === activeThreadId) continue
+      stopWatching(threadId)
+      evicted = true
+      break
+    }
+    if (!evicted) break
+  }
+}
+
+export function startWatching(
+  threadId: string,
+  workspacePath: string
+): "existing" | "started" | "failed" {
+  const existing = activeWatchers.get(threadId)
+  // Preserve foreground protection across a path switch: stopWatching clears
+  // activeThreadId, but switching the *current* thread's workspace must not
+  // drop its "never evict" status until the next thread change.
+  const wasActive = activeThreadId === threadId
+  if (existing) {
+    if (normalizeWorkspacePath(existing.workspacePath) === normalizeWorkspacePath(workspacePath)) {
+      // Already watching this path; refresh LRU order so re-arming the active
+      // thread protects it from eviction.
+      touchWatcher(threadId)
+      return "existing"
+    }
+    stopWatching(threadId)
+  }
 
   // Verify the path exists and is a directory
   try {
     const stat = fs.statSync(workspacePath)
     if (!stat.isDirectory()) {
       console.warn(`[WorkspaceWatcher] Path is not a directory: ${workspacePath}`)
-      return
+      return "failed"
     }
   } catch (e) {
     console.warn(`[WorkspaceWatcher] Cannot access path: ${workspacePath}`, e)
-    return
+    return "failed"
   }
 
   try {
@@ -262,11 +362,15 @@ export function startWatching(threadId: string, workspacePath: string): void {
       stopWatching(threadId)
     })
 
-    activeWatchers.set(threadId, watcher)
+    activeWatchers.set(threadId, { watcher, workspacePath })
+    if (wasActive) activeThreadId = threadId
+    evictStaleWatchers(threadId)
     console.log(`[WorkspaceWatcher] Started watching ${workspacePath} for thread ${threadId}`)
     scheduleGitHookEventSync(workspacePath, 100)
+    return "started"
   } catch (e) {
     console.error(`[WorkspaceWatcher] Failed to start watching ${workspacePath}:`, e)
+    return "failed"
   }
 }
 
@@ -274,9 +378,13 @@ export function startWatching(threadId: string, workspacePath: string): void {
  * Stop watching the workspace for a specific thread.
  */
 export function stopWatching(threadId: string): void {
-  const watcher = activeWatchers.get(threadId)
-  if (watcher) {
-    watcher.close()
+  // Note: the LRU never stops the foreground thread, so reaching here for the
+  // active thread means an explicit unset/error — drop the protection too.
+  if (activeThreadId === threadId) activeThreadId = null
+
+  const entry = activeWatchers.get(threadId)
+  if (entry) {
+    entry.watcher.close()
     activeWatchers.delete(threadId)
     console.log(`[WorkspaceWatcher] Stopped watching for thread ${threadId}`)
   }

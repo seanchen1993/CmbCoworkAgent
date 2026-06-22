@@ -16,7 +16,12 @@ import type {
   WorkspaceFileParams
 } from "../types"
 import { LocalSandbox } from "../agent/local-sandbox"
-import { startWatching, stopWatching } from "../services/workspace-watcher"
+import {
+  buildGitignoreMatcher,
+  setActiveWatchedThread,
+  startWatching,
+  stopWatching
+} from "../services/workspace-watcher"
 import { trackEvent } from "../services/event-reporter"
 import { captureStagedSnapshotsForCommit, measureForCommit } from "../services/adoption-tracker"
 import { scheduleMarkCodeAdoptionCommitsPushed } from "../services/code-adoption-push-updater"
@@ -2893,7 +2898,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
         if (!ready) return null
 
-        const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
         metadata.workspacePath = newPath
         clearThreadGitContextCache(metadata)
         updateThread(threadId, { metadata: JSON.stringify(metadata) })
@@ -2902,7 +2906,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         // 同步刷新“最近工作区”，供新建线程默认复用。
         store.set("workspacePath", newPath)
       } else {
-        const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
         metadata.workspacePath = newPath
         clearThreadGitContextCache(metadata)
         updateThread(threadId, { metadata: JSON.stringify(metadata) })
@@ -2988,6 +2991,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   // Load files from disk into the workspace view
   ipcMain.handle("workspace:loadFromDisk", async (_event, { threadId }: WorkspaceLoadParams) => {
     const { getThread } = await import("../db")
+    // Always skip node_modules, the dominant machine-generated directory.
+    // `dist`/`out`/`build` are intentionally NOT hardcoded here: in many
+    // projects they hold artifacts the user may want to browse. Instead we
+    // defer to the workspace's own .gitignore (below) to skip large generated
+    // dirs per the user's intent. The same applies to directories named
+    // coverage/tmp/temp, which can contain legitimate project fixtures.
+    const ignoredWorkspaceDirs = new Set(["node_modules"])
 
     // Get workspace path from thread metadata
     const thread = getThread(threadId)
@@ -2998,6 +3008,17 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       return { success: false, error: "No workspace folder linked", files: [] }
     }
 
+    // Respect the workspace's own .gitignore — but for directories only, so
+    // individual gitignored files (e.g. logs, .env) stay visible in the tree
+    // while large gitignored dirs (dist/out/build/.next/target/…) are skipped.
+    const isGitIgnoredDir = buildGitignoreMatcher(workspacePath)
+
+    function shouldSkipWorkspaceDir(name: string, relPath: string): boolean {
+      if (name.startsWith(".") || ignoredWorkspaceDirs.has(name)) return true
+      if (relPath.replace(/\\/g, "/") === "resources/bin") return true
+      return isGitIgnoredDir(relPath)
+    }
+
     try {
       const files: Array<{
         path: string
@@ -3006,41 +3027,74 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         modified_at?: string
       }> = []
 
-      // Recursively read directory
+      // Cap concurrent fs.stat calls so a directory with very many files can't
+      // exhaust the file-descriptor table (EMFILE). Subdirectory recursion is
+      // sequential, so total in-flight stats stay around this bound.
+      const FILE_STAT_CONCURRENCY = 48
+
+      // Recursively read directory. Files within a directory are stat'd in
+      // bounded-parallel batches (the previous sequential `await fs.stat` per
+      // file was the main cost on large repos / network drives).
       async function readDir(dirPath: string, relativePath: string = ""): Promise<void> {
         const entries = await fs.readdir(dirPath, { withFileTypes: true })
 
+        const subDirs: Array<{ fullPath: string; relPath: string }> = []
+        const fileEntries: Array<{ fullPath: string; relPath: string }> = []
+
         for (const entry of entries) {
-          // Skip hidden files and common non-project files
-          if (entry.name.startsWith(".") || entry.name === "node_modules") {
+          const relPath = relativePath ? `${relativePath}/${entry.name}` : entry.name
+
+          // Skip hidden files and heavy generated directories.
+          if (
+            entry.name.startsWith(".") ||
+            (entry.isDirectory() && shouldSkipWorkspaceDir(entry.name, relPath))
+          ) {
             continue
           }
 
           const fullPath = path.join(dirPath, entry.name)
-          const relPath = relativePath ? `${relativePath}/${entry.name}` : entry.name
 
           if (entry.isDirectory()) {
             files.push({
               path: "/" + relPath,
               is_dir: true
             })
-            await readDir(fullPath, relPath)
+            subDirs.push({ fullPath, relPath })
           } else {
-            const stat = await fs.stat(fullPath)
-            files.push({
-              path: "/" + relPath,
-              is_dir: false,
-              size: stat.size,
-              modified_at: stat.mtime.toISOString()
-            })
+            fileEntries.push({ fullPath, relPath })
           }
+        }
+
+        for (let i = 0; i < fileEntries.length; i += FILE_STAT_CONCURRENCY) {
+          const batch = fileEntries.slice(i, i + FILE_STAT_CONCURRENCY)
+          await Promise.all(
+            batch.map(async ({ fullPath, relPath }) => {
+              const stat = await fs.stat(fullPath)
+              files.push({
+                path: "/" + relPath,
+                is_dir: false,
+                size: stat.size,
+                modified_at: stat.mtime.toISOString()
+              })
+            })
+          )
+        }
+
+        for (const dir of subDirs) {
+          await readDir(dir.fullPath, dir.relPath)
         }
       }
 
       await readDir(workspacePath)
 
-      // Start watching for file changes
-      startWatching(threadId, workspacePath)
+      // The scan can take a while; if the thread's workspace switched in the
+      // meantime, don't point the watcher back at the now-stale path. The
+      // renderer also discards stale results via result.workspacePath.
+      const latestThread = getThread(threadId)
+      const latestMetadata = latestThread?.metadata ? JSON.parse(latestThread.metadata) : {}
+      if ((latestMetadata.workspacePath as string | null) === workspacePath) {
+        startWatching(threadId, workspacePath)
+      }
 
       return {
         success: true,
@@ -3055,6 +3109,47 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       }
     }
   })
+
+  // Ensure the workspace watcher is active for a thread without re-scanning the
+  // tree. The renderer caches the file tree per thread and skips loadFromDisk on
+  // revisit, but the watcher may have been evicted by the LRU cap meanwhile —
+  // call this on thread activation to re-arm it. startWatching is idempotent
+  // (same-path calls are a no-op).
+  ipcMain.handle("workspace:ensureWatching", async (_event, { threadId }: WorkspaceLoadParams) => {
+    const { getThread } = await import("../db")
+    const thread = getThread(threadId)
+    const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
+    const workspacePath = metadata.workspacePath as string | null
+    if (!workspacePath) return { success: false }
+    const watcherState = startWatching(threadId, workspacePath)
+    return {
+      success: watcherState !== "failed",
+      restarted: watcherState === "started"
+    }
+  })
+
+  // Mark the foreground thread so the watcher LRU never evicts it, and (re)arm
+  // its watcher from the persisted workspace path. Called by the renderer on
+  // every active-thread switch, independent of whether the file panel is open,
+  // so file-change / Git diff notifications never silently stop for the thread
+  // the user is viewing.
+  ipcMain.handle(
+    "workspace:setActiveThread",
+    async (_event, { threadId }: { threadId: string | null }) => {
+      setActiveWatchedThread(threadId)
+      if (!threadId) return { success: true, restarted: false }
+      const { getThread } = await import("../db")
+      const thread = getThread(threadId)
+      const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
+      const workspacePath = metadata.workspacePath as string | null
+      if (!workspacePath) return { success: true, restarted: false }
+      const watcherState = startWatching(threadId, workspacePath)
+      return {
+        success: watcherState !== "failed",
+        restarted: watcherState === "started"
+      }
+    }
+  )
 
   // Read a single file's contents from disk
   ipcMain.handle(

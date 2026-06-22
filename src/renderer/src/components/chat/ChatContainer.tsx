@@ -155,6 +155,152 @@ import { WorkspaceTaskCardControl } from "@/components/git/WorkspaceTaskCardCont
 import { ProcessingDuration } from "./ProcessingDuration"
 import { HookLogChip, HookLogModal } from "./HookLogViews"
 
+const MARKET_SKILLS_CACHE_TTL_MS = 10 * 60 * 1000
+
+interface MarketSkillsSnapshot {
+  allSkills: MarketItem[]
+  goodSkills: MarketItem[]
+  fetchedAt: number
+}
+
+// Min gap between featured-skill install passes. Throttling both success and
+// failure to this interval means: market version updates are re-checked
+// periodically (no permanent "done" latch), while a permanently-failing skill
+// is retried at most once per interval instead of on every session entry.
+const FEATURED_INSTALL_RETRY_MS = 10 * 60 * 1000
+
+let marketSkillsSnapshot: MarketSkillsSnapshot | null = null
+let marketSkillsRequest: Promise<MarketSkillsSnapshot> | null = null
+let featuredSkillsInstallRequest: Promise<boolean> | null = null
+// Timestamp of the last install pass (0 = never). Combined with the per-skill
+// version check inside installFeaturedSkills, this re-checks for updates after
+// the interval and avoids re-downloading on every mount.
+let lastFeaturedInstallAttemptAt = 0
+
+async function loadMarketSkillsSnapshot(): Promise<MarketSkillsSnapshot> {
+  const now = Date.now()
+  if (marketSkillsSnapshot && now - marketSkillsSnapshot.fetchedAt < MARKET_SKILLS_CACHE_TTL_MS) {
+    return marketSkillsSnapshot
+  }
+
+  if (!marketSkillsRequest) {
+    marketSkillsRequest = marketApi
+      .getSkills()
+      .then((res) => {
+        const allSkills = res?.data || []
+        const snapshot = {
+          allSkills,
+          goodSkills: allSkills.filter((it) => it.featured === "精品"),
+          fetchedAt: Date.now()
+        }
+        marketSkillsSnapshot = snapshot
+        return snapshot
+      })
+      .finally(() => {
+        marketSkillsRequest = null
+      })
+  }
+
+  return marketSkillsRequest
+}
+
+async function installFeaturedSkills(
+  goodSkills: MarketItem[]
+): Promise<{ changed: boolean; hadFailure: boolean }> {
+  if (goodSkills.length === 0) return { changed: false, hadFailure: false }
+
+  console.log("Starting automatic installation of good skills...")
+  let skillsMetadata = await window.api.skills.list()
+  let changed = false
+  let hadFailure = false
+
+  for (const skill of goodSkills) {
+    try {
+      const skillName = skill.name || skill.id || ""
+
+      if (!skillName) {
+        console.error("Skill name is required for installation:", skill)
+        continue
+      }
+
+      console.log(`Installing skill: ${skillName}`)
+      const existingSkill = skillsMetadata.find((s) => s.name === skillName)
+
+      // 精品技能会在欢迎页初始化时自动补齐。为了避免每次进入会话都重复下载：
+      // 1. 本地没有这个技能：需要安装；
+      // 2. 本地有技能但没有安装版本记录：无法判断是否最新，按用户要求默认重新安装；
+      // 3. 本地安装版本和市场版本不一致：需要删除旧技能后重新安装；
+      // 4. 本地安装版本和市场版本一致：跳过安装，保留现有技能目录。
+      const installedVersion = marketInstalledVersionStorage.getVersion(skillName, "skill")
+      const shouldInstall =
+        !existingSkill || !installedVersion || isMarketVersionDifferent(installedVersion, skill.version)
+
+      if (!shouldInstall) {
+        console.log(`Skill ${skillName} is already up to date, skipping install.`)
+        continue
+      }
+
+      if (existingSkill) {
+        console.log(`Deleting existing skill: ${existingSkill.path}`)
+        try {
+          await window.api.skills.delete(existingSkill.path)
+          skillsMetadata = skillsMetadata.filter((s) => s.path !== existingSkill.path)
+        } catch (deleteError) {
+          console.warn(
+            `Failed to delete existing skill ${skillName}, continuing with install:`,
+            deleteError
+          )
+        }
+      }
+
+      const response = await marketApi.downloadItem(skillName, "skill", false)
+
+      if (response.success) {
+        marketInstalledVersionStorage.setVersion(skillName, "skill", skill.version)
+        changed = true
+        console.log(`Successfully installed skill: ${skillName}`)
+      } else {
+        hadFailure = true
+        console.error(`Failed to install skill ${skillName}:`, response.error)
+      }
+    } catch (error) {
+      hadFailure = true
+      console.error(`Failed to install skill ${skill.name}:`, error)
+    }
+  }
+
+  console.log("Finished automatic installation of good skills")
+  return { changed, hadFailure }
+}
+
+async function installFeaturedSkillsOnce(goodSkills: MarketItem[]): Promise<boolean> {
+  if (goodSkills.length === 0) return false
+
+  // Share an already-running pass.
+  if (featuredSkillsInstallRequest) return featuredSkillsInstallRequest
+
+  // Throttle passes to one per retry window (applies to both success and
+  // failure): updates are re-checked after the interval via the per-skill
+  // version comparison, and a permanently-failing skill is not re-downloaded on
+  // every session entry.
+  const now = Date.now()
+  if (
+    lastFeaturedInstallAttemptAt !== 0 &&
+    now - lastFeaturedInstallAttemptAt < FEATURED_INSTALL_RETRY_MS
+  ) {
+    return false
+  }
+  lastFeaturedInstallAttemptAt = now
+
+  featuredSkillsInstallRequest = installFeaturedSkills(goodSkills)
+    .then(({ changed }) => changed)
+    .finally(() => {
+      featuredSkillsInstallRequest = null
+    })
+
+  return featuredSkillsInstallRequest
+}
+
 type WelcomeSkillCard = {
   skill: SkillMetadata
   label: string
@@ -1707,17 +1853,13 @@ export function ChatContainer({
 
   const queryRemoteSkills = useCallback(async () => {
     try {
-      const res = await marketApi.getSkills()
-      const allSkills = res?.data || []
-      const goodSkills = res?.data?.filter((it) => it.featured === "精品")
+      const { allSkills, goodSkills } = await loadMarketSkillsSnapshot()
       allSkillsRef.current = allSkills
       setMarketSkillsData(allSkills)
-      setGoodSkillsData(goodSkills || [])
+      setGoodSkillsData(goodSkills)
 
-      // 自动安装所有精品技能
-      if (goodSkills && goodSkills.length > 0) {
-        await installAllGoodSkills(goodSkills)
-        // 安装完成后重新加载技能列表
+      const installed = await installFeaturedSkillsOnce(goodSkills)
+      if (installed) {
         await loadSkills()
       }
     } catch (error) {
@@ -1734,70 +1876,6 @@ export function ChatContainer({
     const target = allSkillsRef.current?.find((it) => it.name === name || it.chinese_name === name)
     return target?.guidance || ""
   }, [])
-
-  const installAllGoodSkills = async (goodSkills: MarketItem[]) => {
-    console.log("Starting automatic installation of good skills...")
-
-    for (const skill of goodSkills) {
-      try {
-        const skillName = skill.name || skill.id || ""
-
-        if (!skillName) {
-          console.error("Skill name is required for installation:", skill)
-          continue
-        }
-
-        console.log(`Installing skill: ${skillName}`)
-
-        try {
-          const skillsMetadata = await window.api.skills.list()
-          const existingSkill = skillsMetadata.find((s) => s.name === skillName)
-
-          // 精品技能会在欢迎页初始化时自动补齐。为了避免每次进入会话都重复下载：
-          // 1. 本地没有这个技能：需要安装；
-          // 2. 本地有技能但没有安装版本记录：无法判断是否最新，按用户要求默认重新安装；
-          // 3. 本地安装版本和市场版本不一致：需要删除旧技能后重新安装；
-          // 4. 本地安装版本和市场版本一致：跳过安装，保留现有技能目录。
-          const installedVersion = marketInstalledVersionStorage.getVersion(skillName, "skill")
-          const shouldInstall =
-            !existingSkill ||
-            !installedVersion ||
-            isMarketVersionDifferent(installedVersion, skill.version)
-
-          if (!shouldInstall) {
-            console.log(`Skill ${skillName} is already up to date, skipping install.`)
-            continue
-          }
-
-          // 更新安装时先删除同名技能，避免旧文件残留影响新版本行为。
-          if (existingSkill) {
-            console.log(`Deleting existing skill: ${existingSkill.path}`)
-            await window.api.skills.delete(existingSkill.path)
-          }
-        } catch (deleteError) {
-          console.warn(
-            `Failed to delete existing skill ${skillName}, continuing with install:`,
-            deleteError
-          )
-        }
-
-        // 下载并安装技能
-        const response = await marketApi.downloadItem(skillName, "skill", false)
-
-        if (response.success) {
-          // 安装成功后记录市场版本，下一次自动安装精品技能时据此判断是否需要重装。
-          marketInstalledVersionStorage.setVersion(skillName, "skill", skill.version)
-          console.log(`Successfully installed skill: ${skillName}`)
-        } else {
-          console.error(`Failed to install skill ${skillName}:`, response.error)
-        }
-      } catch (error) {
-        console.error(`Failed to install skill ${skill.name}:`, error)
-      }
-    }
-
-    console.log("Finished automatic installation of good skills")
-  }
 
   // Get persisted thread state and actions from context
   const {
@@ -2245,7 +2323,7 @@ export function ChatContainer({
     }
     fetchYoloMode()
     return window.api.sandbox.onChanged(fetchYoloMode)
-  }, []) // 移除queryRemoteSkills依赖，只在组件挂载时执行一次
+  }, [queryRemoteSkills])
 
   const uploadLoChatDataForThread = useCallback(
     async (targetThreadId: string, msgs: Message[], attempt = 0) => {
@@ -2704,6 +2782,28 @@ export function ChatContainer({
       if (message.role !== "tool") return message.id
     }
     return null
+  }, [displayMessages])
+
+  // Per-message derived flags precomputed in a single O(n) reverse pass. The
+  // render loop previously recomputed these with `slice().find/some` for every
+  // message, which is O(n^2) on every render (and renders fire on every
+  // streaming token). Here we walk right-to-left once, tracking the nearest
+  // non-tool message role and whether a later user message exists.
+  const perMessageFlags = useMemo(() => {
+    const n = displayMessages.length
+    const showAssistantMeta: boolean[] = new Array(n)
+    const hasUserAfterHead: boolean[] = new Array(n)
+    let nextNonToolRole: string | null = null
+    let userAfter = false
+    for (let index = n - 1; index >= 0; index -= 1) {
+      const message = displayMessages[index]
+      hasUserAfterHead[index] = userAfter
+      showAssistantMeta[index] =
+        message.role !== "assistant" || nextNonToolRole === null || nextNonToolRole !== "assistant"
+      if (message.role === "user") userAfter = true
+      if (message.role !== "tool") nextNonToolRole = message.role
+    }
+    return { showAssistantMeta, hasUserAfterHead }
   }, [displayMessages])
 
   // Build tool results map from tool messages
@@ -4830,15 +4930,8 @@ export function ChatContainer({
                   {displayMessages.map((message, index) => {
                     const previousMessage = index > 0 ? displayMessages[index - 1] : null
                     const isLastMessage = index === displayMessages.length - 1
-                    const nextNonToolMessage =
-                      displayMessages.slice(index + 1).find((m) => m.role !== "tool") ?? null
-                    const hasUserAfterHead = displayMessages
-                      .slice(index + 1)
-                      .some((m) => m.role === "user")
-                    const showAssistantMeta =
-                      message.role !== "assistant" ||
-                      !nextNonToolMessage ||
-                      nextNonToolMessage.role !== "assistant"
+                    const hasUserAfterHead = perMessageFlags.hasUserAfterHead[index]
+                    const showAssistantMeta = perMessageFlags.showAssistantMeta[index]
 
                     // Per-turn hook log chip: shown right under the user message
                     // that opened the turn, only when Hook logging is enabled and
@@ -4858,7 +4951,20 @@ export function ChatContainer({
                     }
 
                     return (
-                      <div key={message.id} ref={combinedRef} data-message-role={message.role}>
+                      <div
+                        key={message.id}
+                        ref={combinedRef}
+                        data-message-role={message.role}
+                        // Skip layout/paint for off-screen messages (poor-man's
+                        // virtualization). The streaming last message stays fully
+                        // rendered. `contain-intrinsic-size` gives off-screen rows a
+                        // placeholder height so the scrollbar stays stable.
+                        style={
+                          isLastMessage
+                            ? undefined
+                            : { contentVisibility: "auto", containIntrinsicSize: "auto 240px" }
+                        }
+                      >
                         <MessageBubble
                           message={message}
                           previousMessage={previousMessage}

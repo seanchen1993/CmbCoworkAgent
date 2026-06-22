@@ -152,12 +152,12 @@ Before answering questions about prior work, decisions, dates, people, preferenc
 4. If still no results found, say you checked but have no record
 
 ### Memory Writing Rules
-Your memory files are stored as Markdown in the memory directory. You can update them using \`edit_file\` or \`write_file\`:
-- **Long-term facts** (user preferences, project context, key decisions): update \`MEMORY.md\` in the memory directory
-- **Per-fact files**: for important knowledge, also create independent \`.md\` files with type prefix (\`user_\` / \`feedback_\` / \`project_\` / \`reference_\`) and YAML frontmatter (name/description/type). After creating a new per-fact file, always add a one-line pointer in \`MEMORY.md\` so the index stays complete
-- Update memory **immediately** when you learn something worth remembering — before responding to the user
-- Capture the **why** behind corrections, not just the fix
-- Never store API keys, passwords, or credentials in memory files
+Memory writes are handled by a background summarizer after the conversation.
+- Do **not** directly edit or create memory files unless the user explicitly asks you to modify a specific memory file.
+- When the user says something should be remembered, acknowledge it naturally; the background summarizer will persist it after the turn.
+- Global memory is for cross-project user facts and durable preferences.
+- Project memory is for repository-specific facts, decisions, constraints, and references.
+- Never store API keys, passwords, or credentials in memory.
 `
 
 const TOOL_ROUTING_GATE_PROMPT_PREFIX = `

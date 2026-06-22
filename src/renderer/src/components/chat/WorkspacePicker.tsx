@@ -163,10 +163,6 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
       if (cancelled) return
       setWorkspacePath(p)
       if (p) {
-        const result = await window.api.workspace.loadFromDisk(threadId)
-        if (cancelled) return
-        if (result.success && result.files) setWorkspaceFiles(result.files)
-
         const gitInfo = await window.api.workspace.isGit(p, { includeWorktrees: false, threadId })
         if (cancelled) return
         setIsGit(gitInfo.isGit)
