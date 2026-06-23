@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react"
+import { useState, useCallback, useEffect, useMemo, useRef, memo } from "react"
 import {
   Plus,
   Trash2,
@@ -192,7 +192,7 @@ function ThreadStatusIcon({
   return null
 }
 
-export function ThreadListItem({
+function ThreadListItemImpl({
   thread,
   isLoading,
   hasPendingApproval,
@@ -371,6 +371,39 @@ export function ThreadListItem({
     </ContextMenu>
   )
 }
+
+type ThreadListItemProps = Parameters<typeof ThreadListItemImpl>[0]
+
+// Re-render a row only when its own rendered data changes. Callback props are
+// intentionally excluded from the comparison: the parent recreates them on every
+// render, but each row's closures always act on its own thread, so their identity
+// is irrelevant. Without this, a single thread's state tick (loading / approval /
+// unread / …) in allThreadStates re-rendered EVERY row in the list.
+function areThreadListItemPropsEqual(
+  prev: ThreadListItemProps,
+  next: ThreadListItemProps
+): boolean {
+  if (
+    prev.thread !== next.thread ||
+    prev.isLoading !== next.isLoading ||
+    prev.hasPendingApproval !== next.hasPendingApproval ||
+    prev.hasPendingUserInput !== next.hasPendingUserInput ||
+    prev.hasContextReminder !== next.hasContextReminder ||
+    prev.scheduledTaskLoading !== next.scheduledTaskLoading ||
+    prev.isExporting !== next.isExporting ||
+    prev.isSelected !== next.isSelected ||
+    prev.isEditing !== next.isEditing ||
+    prev.isUnread !== next.isUnread ||
+    prev.hoverTitle !== next.hoverTitle
+  ) {
+    return false
+  }
+  // editingTitle only affects the row currently being edited.
+  if (next.isEditing && prev.editingTitle !== next.editingTitle) return false
+  return true
+}
+
+export const ThreadListItem = memo(ThreadListItemImpl, areThreadListItemPropsEqual)
 
 export function ThreadSidebar(): React.JSX.Element {
   const {

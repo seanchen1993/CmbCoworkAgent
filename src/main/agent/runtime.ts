@@ -1741,8 +1741,58 @@ ${shellGuidance}
   )
 }
 
-// Per-thread checkpointer cache
+// Per-thread checkpointer cache (LRU-bounded).
+//
+// sql.js loads each thread's whole DB into WASM memory, so an unbounded cache
+// grew main-process memory monotonically as the user visited threads (measured:
+// hundreds of MB across a few hundred threads). We keep the most-recently-used N
+// and evict the rest by closing them — close() flushes to disk and frees the
+// WASM heap. An evicted thread transparently reloads from disk on next access.
+//
+// Two safety rules:
+//  - Recency: getCheckpointer re-inserts on access, so an actively-used thread is
+//    always most-recently-used and never the eviction victim.
+//  - Busy guard: a thread with a live agent run is never evicted. Closing a
+//    checkpointer a run still holds could leave two SqlJsSaver instances writing
+//    the same DB file. The guard is injected by the IPC layer (which owns the
+//    activeRuns registry) to avoid a circular import.
 const checkpointers = new Map<string, SqlJsSaver>()
+const MAX_CACHED_CHECKPOINTERS = 12
+// In-flight eviction closes, so getCheckpointer can wait one out before
+// recreating an instance for the same thread (avoids reading a half-written DB).
+const closingCheckpointers = new Map<string, Promise<void>>()
+
+let isCheckpointerThreadBusy: (threadId: string) => boolean = () => false
+/** Wire the "is this thread mid-run" predicate (from the IPC layer's activeRuns). */
+export function setCheckpointerBusyGuard(fn: (threadId: string) => boolean): void {
+  isCheckpointerThreadBusy = fn
+}
+
+/** Close least-recently-used checkpointers beyond the cap, skipping busy threads. */
+function evictIdleCheckpointers(): void {
+  if (checkpointers.size <= MAX_CACHED_CHECKPOINTERS) return
+  // Map iterates in insertion order; getCheckpointer re-inserts on access, so the
+  // front entries are the least-recently-used.
+  for (const [threadId, checkpointer] of checkpointers) {
+    if (checkpointers.size <= MAX_CACHED_CHECKPOINTERS) break
+    if (isCheckpointerThreadBusy(threadId)) continue
+    // Worker checkpointers are transient and lifecycle-managed by
+    // closeWorkerCheckpointersForThread; leave them to that explicit cleanup so a
+    // running worker (not necessarily in the busy guard) is never evicted.
+    if (threadId.includes("__worker__")) continue
+    checkpointers.delete(threadId)
+    approvalStores.delete(threadId)
+    // Detached so the run that triggered eviction isn't blocked on disk flushes;
+    // tracked in closingCheckpointers so a re-fetch waits it out.
+    const closing = checkpointer
+      .close()
+      .catch((e) => console.warn(`[Runtime] evict checkpointer close failed for ${threadId}:`, e))
+      .finally(() => {
+        if (closingCheckpointers.get(threadId) === closing) closingCheckpointers.delete(threadId)
+      })
+    closingCheckpointers.set(threadId, closing)
+  }
+}
 
 // ─────────────────────────────────────────────────────────
 // Tool-call counter: track how many tool calls have been made
@@ -1791,13 +1841,28 @@ export function consumeSkillNudge(threadId: string): boolean {
 }
 
 export async function getCheckpointer(threadId: string): Promise<SqlJsSaver> {
-  let checkpointer = checkpointers.get(threadId)
-  if (!checkpointer) {
-    const dbPath = getThreadCheckpointPath(threadId)
-    checkpointer = new SqlJsSaver(dbPath)
-    await checkpointer.initialize()
-    checkpointers.set(threadId, checkpointer)
+  const cached = checkpointers.get(threadId)
+  if (cached) {
+    // Refresh LRU recency: move to the most-recently-used (end) position.
+    checkpointers.delete(threadId)
+    checkpointers.set(threadId, cached)
+    return cached
   }
+  // If this thread was just evicted, wait for its close (flush) to finish before
+  // reopening, so we don't read a half-written DB or run two instances at once.
+  const pendingClose = closingCheckpointers.get(threadId)
+  if (pendingClose) {
+    try {
+      await pendingClose
+    } catch {
+      // best-effort; we reopen from disk regardless
+    }
+  }
+  const dbPath = getThreadCheckpointPath(threadId)
+  const checkpointer = new SqlJsSaver(dbPath)
+  await checkpointer.initialize()
+  checkpointers.set(threadId, checkpointer)
+  evictIdleCheckpointers()
   return checkpointer
 }
 
@@ -3824,8 +3889,11 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
 // Clean up all checkpointer, MCP client, and memory store resources
 export async function closeRuntime(): Promise<void> {
   const closePromises: Promise<void>[] = Array.from(checkpointers.values()).map((cp) => cp.close())
+  // Also wait out any in-flight eviction closes so their flushes land before quit.
+  closePromises.push(...closingCheckpointers.values())
   closePromises.push(closeGlobalMcpCapabilityService())
   closePromises.push(closeMemoryStore())
   await Promise.all(closePromises)
   checkpointers.clear()
+  closingCheckpointers.clear()
 }
