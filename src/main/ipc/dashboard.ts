@@ -5145,6 +5145,9 @@ interface AdvFeatureMetrics {
   evoAccepted: number
   evoRejected: number
   evoCloud: number
+  cloudPublished: number
+  proposalTriggered: number
+  proposalAccepted: number
   evolvedTraces: number
   evolvedUsages: number
   chatxReplied: number
@@ -5153,7 +5156,7 @@ interface AdvFeatureMetrics {
   hookTotal: number
   hookBlocked: number
   codeExec: number
-  deferredTool: number
+  savedTool: number
   acCommitted: number
   acSkipped: number
   acCancelled: number
@@ -5193,14 +5196,24 @@ function assembleAdvancedFeatureCards(
 ): AdvancedFeaturesResult {
   const hbTotal = m.hbActionable + m.hbSilent + m.hbError + m.hbCancelled
   const memTotal = m.memSearch + m.memGet + m.memWrite
-  const evoRun = m.evoCandidates + m.evoEmpty + m.evoRunError
   const chatxTotal = m.chatxReplied + m.chatxCancelled + m.chatxError
-  const progTotal = m.codeExec + m.deferredTool
+  const progTotal = m.codeExec + m.savedTool
   const acTotal = m.acCommitted + m.acSkipped + m.acCancelled + m.acFailed + m.acNeedsConfirm
 
   return {
     source,
     cards: [
+      {
+        key: "optimizer",
+        label: "自优化",
+        value: m.evoAccepted + m.proposalAccepted + m.evoCloud,
+        valueLabel: "总采纳数",
+        hint: `本地沉淀采纳 ${m.evoAccepted + m.proposalAccepted} · 云端候选采纳 ${m.evoCloud}`,
+        items: [
+          { label: "优化候选审批发布次数", count: m.cloudPublished, tone: "good" },
+          { label: "优化后技能使用次数", count: m.evolvedUsages, tone: "good" }
+        ]
+      },
       {
         key: "heartbeat",
         label: "心跳监控",
@@ -5235,31 +5248,6 @@ function assembleAdvancedFeatureCards(
         items: []
       },
       {
-        key: "optimizer",
-        label: "自优化",
-        value: evoRun,
-        valueLabel: "优化运行次数",
-        hint: `采纳 ${m.evoAccepted} · 拒绝 ${m.evoRejected}`,
-        items: [
-          { label: "有候选", count: m.evoCandidates, tone: "good" },
-          { label: "无候选", count: m.evoEmpty, tone: "neutral" },
-          { label: "采纳", count: m.evoAccepted, tone: "good" },
-          { label: "拒绝", count: m.evoRejected, tone: "warn" },
-          { label: "云端安装", count: m.evoCloud, tone: "good" }
-        ]
-      },
-      {
-        key: "evolvedUsage",
-        label: "进化技能使用",
-        value: m.evolvedTraces,
-        valueLabel: "使用会话数",
-        hint: `累计使用 ${m.evolvedUsages} 次`,
-        items: [
-          { label: "使用会话", count: m.evolvedTraces, tone: "good" },
-          { label: "使用次数", count: m.evolvedUsages, tone: "neutral" }
-        ]
-      },
-      {
         key: "chatx",
         label: "机器人 ChatX",
         value: chatxTotal,
@@ -5287,10 +5275,10 @@ function assembleAdvancedFeatureCards(
         label: "编程式工具",
         value: progTotal,
         valueLabel: "工具执行次数",
-        hint: `code_exec ${m.codeExec} · 延迟工具 ${m.deferredTool}`,
+        hint: `code_exec ${m.codeExec} · 保存工具 ${m.savedTool}`,
         items: [
           { label: "code_exec", count: m.codeExec, tone: "neutral" },
-          { label: "延迟工具", count: m.deferredTool, tone: "neutral" }
+          { label: "保存工具", count: m.savedTool, tone: "neutral" }
         ]
       },
       {
@@ -5337,6 +5325,9 @@ async function fetchAdvancedFeatures(
       evo_accepted: { filter: { term: { eventName: "skill.evolution.accepted" } } },
       evo_rejected: { filter: { term: { eventName: "skill.evolution.rejected" } } },
       evo_cloud: { filter: { term: { eventName: "skill.evolution.cloud.accepted" } } },
+      evo_published: { filter: { term: { eventName: "skill.evolution.cloud.published" } } },
+      proposal_triggered: { filter: { term: { eventName: "skill.proposal.triggered" } } },
+      proposal_accepted: { filter: { term: { eventName: "skill.proposal.accepted" } } },
       chatx: {
         filter: { term: { eventName: "chatx.message.processed" } },
         aggs: { by_outcome: { terms: { field: "properties.outcome", size: 10 } } }
@@ -5361,7 +5352,7 @@ async function fetchAdvancedFeatures(
       by_tool: {
         terms: {
           field: "toolNames",
-          include: ["memory_search", "memory_get", "java_lsp", "code_exec", "invoke_deferred_tool"],
+          include: ["memory_search", "memory_get", "java_lsp", "code_exec", "save_code_exec_tool"],
           size: 10
         }
       },
@@ -5409,6 +5400,9 @@ async function fetchAdvancedFeatures(
     evoAccepted: advAggDocCount(eAggs.evo_accepted),
     evoRejected: advAggDocCount(eAggs.evo_rejected),
     evoCloud: advAggDocCount(eAggs.evo_cloud),
+    cloudPublished: advAggDocCount(eAggs.evo_published),
+    proposalTriggered: advAggDocCount(eAggs.proposal_triggered),
+    proposalAccepted: advAggDocCount(eAggs.proposal_accepted),
     evolvedTraces: advAggDocCount(tAggs.evolved_traces),
     evolvedUsages: advAggValue(tAggs.evolved_usages),
     chatxReplied: advBucketCount(chatxOutcome, "replied"),
@@ -5417,7 +5411,7 @@ async function fetchAdvancedFeatures(
     hookTotal: advAggDocCount(eAggs.hooks),
     hookBlocked: advAggDocCount((eAggs.hooks as Record<string, unknown> | undefined)?.blocked),
     codeExec: advBucketCount(toolBuckets, "code_exec"),
-    deferredTool: advBucketCount(toolBuckets, "invoke_deferred_tool"),
+    savedTool: advBucketCount(toolBuckets, "save_code_exec_tool"),
     acCommitted: advBucketCount(acOutcome, "committed"),
     acSkipped: advBucketCount(acOutcome, "skipped"),
     acCancelled: advBucketCount(acOutcome, "cancelled"),
@@ -5451,7 +5445,10 @@ function makeMockAdvancedFeatures(range: TimeRange): AdvancedFeaturesResult {
     evoRunError: k(1),
     evoAccepted: k(2),
     evoRejected: k(1),
-    evoCloud: k(1),
+    evoCloud: k(2),
+    cloudPublished: k(1),
+    proposalTriggered: k(7),
+    proposalAccepted: k(4),
     evolvedTraces: k(9),
     evolvedUsages: k(14),
     chatxReplied: k(12),
@@ -5460,7 +5457,7 @@ function makeMockAdvancedFeatures(range: TimeRange): AdvancedFeaturesResult {
     hookTotal: k(140),
     hookBlocked: k(12),
     codeExec: k(9),
-    deferredTool: k(6),
+    savedTool: k(6),
     acCommitted: k(11),
     acSkipped: k(7),
     acCancelled: k(2),
@@ -10734,8 +10731,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:advancedFeatures",
     async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
-      if (import.meta.env.DEV)
-        return { success: true, data: makeMockAdvancedFeatures(range) }
+      if (import.meta.env.DEV) return { success: true, data: makeMockAdvancedFeatures(range) }
       try {
         return { success: true, data: await fetchAdvancedFeatures(range, granularity, opts) }
       } catch (e) {
