@@ -1781,7 +1781,10 @@ function evictIdleCheckpointers(): void {
     // running worker (not necessarily in the busy guard) is never evicted.
     if (threadId.includes("__worker__")) continue
     checkpointers.delete(threadId)
-    approvalStores.delete(threadId)
+    // NOTE: only free the checkpointer here. Unlike closeCheckpointer (thread
+    // deletion), eviction is pure cache management — the thread still exists, so
+    // sibling state like approvalStores (a pending approval on an idle thread)
+    // must NOT be dropped.
     // Detached so the run that triggered eviction isn't blocked on disk flushes;
     // tracked in closingCheckpointers so a re-fetch waits it out.
     const closing = checkpointer
