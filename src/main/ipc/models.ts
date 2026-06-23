@@ -1147,6 +1147,20 @@ function parseNumstatTotals(output: string): { additions: number; deletions: num
   return { additions, deletions }
 }
 
+// numstat 对重命名/移动会把路径渲染成 `old => new` 或带公共前后缀的
+// `pre{old => new}post` 形式。这里取重命名后的新路径，使其与 status 解析出的
+// `entry.path` 口径一致，能在折叠态正确命中行数。
+function extractNumstatRenameTarget(pathField: string): string {
+  if (!pathField.includes("=>")) return pathField
+  const braceMatch = pathField.match(/^(.*)\{.* => (.*)\}(.*)$/)
+  if (braceMatch) {
+    const [, prefix, newMid, suffix] = braceMatch
+    return `${prefix}${newMid}${suffix}`.replace(/\/{2,}/g, "/")
+  }
+  const arrowParts = pathField.split(" => ")
+  return arrowParts[arrowParts.length - 1] || pathField
+}
+
 function parseNumstatByPath(output: string): Map<string, { additions: number; deletions: number }> {
   const map = new Map<string, { additions: number; deletions: number }>()
   const lines = output
@@ -1160,8 +1174,12 @@ function parseNumstatByPath(output: string): Map<string, { additions: number; de
     const pathRaw = parts.slice(2).join("\t").trim()
     if (!pathRaw) continue
 
+    // numstat 默认会对非 ASCII 路径做 C 风格八进制转义并加引号（core.quotepath=true）。
+    // 必须先按 status 同款逻辑解码，否则 normalizeGitRelativePath 的 `\\ -> /` 规则会把
+    // `"docs/\346..."` 破坏成 `docs/346/...`，导致折叠态 numstat 命中不到对应文件、
+    // 行数回退成全文件估算（展开后才用 parseNumstatTotals 修正回来）。
     const normalizedPath = normalizeGitRelativePath(
-      pathRaw.includes(" -> ") ? pathRaw.split(" -> ").pop() || pathRaw : pathRaw
+      extractNumstatRenameTarget(decodeGitQuotedPath(pathRaw))
     )
     if (!normalizedPath) continue
 
