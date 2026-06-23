@@ -41,7 +41,12 @@ async function runSaveLoop(): Promise<void> {
       const path = getDbPath()
       const tmp = `${path}.tmp`
       await writeFile(tmp, data)
-      if (blockAsyncWrite) return // shutdown flush took over; don't race its write
+      // shutdown flush took over: this snapshot isn't persisted, so re-mark dirty
+      // (flush's `dirty || savePromise` guard then writes it) and don't race it.
+      if (blockAsyncWrite) {
+        dirty = true
+        return
+      }
       await rename(tmp, path)
     } catch (e) {
       // Persistent failure: keep the buffer dirty so a later save (or flush)
@@ -73,6 +78,10 @@ export function saveToDisk(): void {
       })
     }
   }, SAVE_DEBOUNCE_MS)
+  // Don't let a pending background save keep the event loop alive on its own;
+  // the Electron main process stays alive via its own handles, and durability on
+  // exit is guaranteed by the synchronous flush()/closeDatabase().
+  saveTimer.unref?.()
 }
 
 /**

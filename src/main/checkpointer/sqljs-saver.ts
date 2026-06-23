@@ -215,7 +215,12 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         const data = Buffer.from(this.db.export())
         const tmp = `${this.dbPath}.tmp`
         await writeFile(tmp, data)
-        if (this.blockAsyncWrite) return // shutdown flush took over
+        // flush() took over: this snapshot isn't persisted yet, so re-mark dirty
+        // and let flush write it authoritatively rather than racing its write.
+        if (this.blockAsyncWrite) {
+          this.dirty = true
+          return
+        }
         await rename(tmp, this.dbPath)
       } catch (e) {
         this.dirty = true
@@ -246,6 +251,9 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         })
       }
     }, CHECKPOINT_SAVE_DEBOUNCE_MS)
+    // Don't keep the event loop alive solely for a pending background save;
+    // durability on exit is guaranteed by the synchronous flush() in close().
+    this.saveTimer.unref?.()
   }
 
   /**
@@ -260,7 +268,18 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     }
     if (!this.db) return
     this.blockAsyncWrite = true
-    if (this.dirty || this.savePromise) {
+    // Drain any in-flight async save first: blockAsyncWrite makes it bail before
+    // its rename (re-marking dirty), so a pending rename of a stale snapshot can
+    // never land after the authoritative write below. flush() is always awaited
+    // (only close() calls it), so awaiting here is safe.
+    if (this.savePromise) {
+      try {
+        await this.savePromise
+      } catch {
+        // ignore; we re-write below
+      }
+    }
+    if (this.db && this.dirty) {
       try {
         const data = this.db.export()
         writeFileSync(this.dbPath, Buffer.from(data))
