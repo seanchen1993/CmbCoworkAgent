@@ -127,6 +127,7 @@ import type { WindowsShellKind } from "./windows-safe-commands"
 import { readOnlyExecuteBlockMessage } from "./read-only-shell-message"
 import { SkillUsageDetector } from "./skill-evolution/usage-detector"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
+import { emitAppAttention } from "../app-attention-events"
 import type {
   McpCapabilityService,
   McpCapabilityTool,
@@ -3146,6 +3147,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     // back-end side. This matches how Codex surfaces ExecApprovalRequest events.
     return new Promise<ApprovalDecision>((resolve) => {
       let settled = false
+      let attentionRaised = false
       let timeoutId: ReturnType<typeof setTimeout> | undefined
       const rejectDecision = (): ApprovalDecision => ({
         type: "reject",
@@ -3160,6 +3162,15 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         settled = true
         cleanup()
         pendingApprovals.delete(req.id)
+        if (attentionRaised) {
+          attentionRaised = false
+          emitAppAttention({
+            action: "resolve",
+            kind: "approval",
+            threadId: approvalThreadId,
+            key: `approval:${req.id}`
+          })
+        }
         resolve(decision)
       }
       const rejectPending = (reason: "timeout" | "abort"): void => {
@@ -3208,6 +3219,12 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       console.log(
         `[Orchestrator] sending approval request on channel: approval:request:${approvalThreadId}, reqId=${req.id}, runtimeThreadId=${threadId}, command=${req.command}`
       )
+      attentionRaised = true
+      emitAppAttention({
+        kind: "approval",
+        threadId: approvalThreadId,
+        key: `approval:${req.id}`
+      })
       // Fire Notification hook — agent is now waiting on user input.
       // Fire-and-forget so it doesn't delay the UI prompt.
       const notificationContext: HookContext = {

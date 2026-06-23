@@ -9,6 +9,7 @@ import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
 import { showPetCompletedTaskNotice } from "../pet"
 import type { ChatXRobotConfig } from "../types"
+import { emitAppAttention } from "../app-attention-events"
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -279,6 +280,11 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
       }
       notifyAlways(`🤖 ${msg.fromId} 回复完成`, lastAssistantText || "处理完成")
       showPetCompletedTaskNotice(threadId, `${msg.fromId} 回复`)
+      emitAppAttention({
+        kind: "task-complete",
+        threadId,
+        key: `chatx:${msg.msgId}`
+      })
       console.log(`[ChatX] Message processed: ${msg.msgId}`)
     } else {
       broadcastToChannel(channel, { type: "done" })
@@ -295,6 +301,11 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
     } else {
       broadcastToChannel(channel, { type: "error", error: errMsg })
       notifyAlways("🤖 机器人处理失败", errMsg)
+      emitAppAttention({
+        kind: "task-error",
+        threadId,
+        key: `chatx:${msg.msgId}`
+      })
       console.error(`[ChatX] Error processing message:`, errMsg)
     }
 

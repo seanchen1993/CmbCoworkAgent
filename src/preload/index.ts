@@ -77,6 +77,11 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
+import {
+  APP_ATTENTION_CHANNEL,
+  getAgentStreamAttentionKind,
+  type AppAttentionKind
+} from "../shared/app-attention"
 
 interface LspDownloadProgress {
   percent: number
@@ -124,6 +129,26 @@ type PetState =
   | "running"
   | "interaction"
   | "hover"
+
+function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
+  ipcRenderer.send(APP_ATTENTION_CHANNEL, { kind, threadId })
+}
+
+const CANCELLED_AGENT_ATTENTION_TTL_MS = 30_000
+const cancelledAgentAttentionThreads = new Map<string, number>()
+
+function notifyForAgentStreamEvent(event: unknown, threadId?: string): void {
+  const kind = getAgentStreamAttentionKind(event)
+  if (!kind) return
+  if (threadId) {
+    const cancelledAt = cancelledAgentAttentionThreads.get(threadId)
+    if (cancelledAt !== undefined) {
+      cancelledAgentAttentionThreads.delete(threadId)
+      if (Date.now() - cancelledAt <= CANCELLED_AGENT_ATTENTION_TTL_MS) return
+    }
+  }
+  notifyAppAttention(kind, threadId)
+}
 
 // Simple electron API - replaces @electron-toolkit/preload
 const electronAPI = {
@@ -174,6 +199,9 @@ const api = {
 
       const handler = (_: unknown, data: StreamEvent): void => {
         onEvent(data)
+        if (!coordinatorInternalNotification) {
+          notifyForAgentStreamEvent(data, threadId)
+        }
         if (data.type === "done" || data.type === "error") {
           ipcRenderer.removeListener(channel, handler)
         }
@@ -209,6 +237,9 @@ const api = {
 
       const handler = (_: unknown, data: StreamEvent): void => {
         onEvent(data)
+        if (!coordinatorInternalNotification) {
+          notifyForAgentStreamEvent(data, threadId)
+        }
         if (data.type === "done" || data.type === "error") {
           ipcRenderer.removeListener(channel, handler)
         }
@@ -242,6 +273,7 @@ const api = {
 
       const handler = (_: unknown, data: StreamEvent): void => {
         onEvent?.(data)
+        notifyForAgentStreamEvent(data, threadId)
         if (data.type === "done" || data.type === "error") {
           ipcRenderer.removeListener(channel, handler)
         }
@@ -282,7 +314,25 @@ const api = {
       }>
     },
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }): Promise<void> => {
-      return ipcRenderer.invoke("agent:cancel", { threadId, ...options })
+      if (options?.cancelWorkers) {
+        return ipcRenderer.invoke("agent:cancel", { threadId, ...options }).then(() => undefined)
+      }
+      const cancelledAt = Date.now()
+      cancelledAgentAttentionThreads.set(threadId, cancelledAt)
+      setTimeout(() => {
+        if (cancelledAgentAttentionThreads.get(threadId) === cancelledAt) {
+          cancelledAgentAttentionThreads.delete(threadId)
+        }
+      }, CANCELLED_AGENT_ATTENTION_TTL_MS)
+      return ipcRenderer
+        .invoke("agent:cancel", { threadId, ...options })
+        .then((cancelled: unknown) => {
+          if (cancelled !== true) cancelledAgentAttentionThreads.delete(threadId)
+        })
+        .catch((error) => {
+          cancelledAgentAttentionThreads.delete(threadId)
+          throw error
+        })
     },
     getCoordinatorWorkers: (
       threadId: string,

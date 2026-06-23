@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto"
 import { BrowserWindow } from "electron"
 import type { UserInputQuestion, UserInputRequest, UserInputResponse } from "../types"
+import { emitAppAttention } from "../app-attention-events"
 
 interface PendingUserInput {
   request: UserInputRequest
@@ -57,6 +58,12 @@ function cleanupPending(requestId: string): PendingUserInput | undefined {
   if (pending.ackTimeout) {
     clearTimeout(pending.ackTimeout)
   }
+  emitAppAttention({
+    action: "resolve",
+    kind: "user-input",
+    threadId: pending.request.threadId,
+    key: `user-input:${requestId}`
+  })
   return pending
 }
 
@@ -130,6 +137,11 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
     pendingUserInputThreads.set(threadId, request.requestId)
 
     abortSignal?.addEventListener("abort", abortHandler, { once: true })
+    emitAppAttention({
+      kind: "user-input",
+      threadId,
+      key: `user-input:${request.requestId}`
+    })
     sendToThread(threadId, "request", request)
   })
 }

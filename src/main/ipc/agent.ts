@@ -206,6 +206,7 @@ import type {
   AgentInterruptParams,
   AgentCancelParams
 } from "../types"
+import { emitAppAttention } from "../app-attention-events"
 
 const MIN_CHARS_FOR_MEMORY = 200
 const MAX_STOP_HOOK_REVISIONS = 2
@@ -5918,6 +5919,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
           turnStateShouldDispose = true
           safeSendToWindow(window, channel, { type: "done" })
+          if (invokeFinalOutcome === "success" && !isInternalNotificationTurn) {
+            emitAppAttention({
+              kind: "task-complete",
+              threadId,
+              key: `agent:${threadId}:${turnState.turnId}`
+            })
+          }
           const postRunAssistantText = trimPostRunAssistantText(assistantText)
           if (invokeFinalOutcome === "success") {
             notifyIfBackground("✅ 任务完成", lastFinalText || postRunAssistantText || "对话已完成")
@@ -6958,6 +6966,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           turnStateShouldDispose = true
           safeSendToWindow(window, channel, { type: "done" })
+          if (!boundaryGoalId) {
+            emitAppAttention({
+              kind: "task-complete",
+              threadId,
+              key: `agent:${threadId}:${turnState.turnId}`
+            })
+          }
         }
       } catch (error) {
         if (isHookHaltError(error)) {
@@ -7660,6 +7675,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           turnStateShouldDispose = true
           safeSendToWindow(window, channel, { type: "done" })
+          if (!boundaryGoalId) {
+            emitAppAttention({
+              kind: "task-complete",
+              threadId,
+              key: `agent:${threadId}:${turnState.turnId}`
+            })
+          }
         }
       } else if (decision.type === "reject") {
         // For reject, we need to send a Command with reject decision
@@ -7833,6 +7855,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       } else if (!controller && !cancelWorkers) {
         console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
       }
+      return Boolean(controller && !cancelWorkers)
     }
   )
 }
