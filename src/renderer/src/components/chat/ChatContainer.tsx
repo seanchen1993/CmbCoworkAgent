@@ -5518,8 +5518,8 @@ export function ChatContainer({
                         style={{ minHeight: "44px", maxHeight: "200px" }}
                       />
                       {/* Bottom bar: + button left, send button right */}
-                      <div className="flex items-center justify-between px-3 pb-2">
-                        <div className="flex items-center gap-1">
+                      <div className="flex items-center justify-between px-3 pb-2 w-full">
+                        <div className="flex items-center gap-1 flex-1 overflow-auto">
                           <button
                             type="button"
                             disabled={
