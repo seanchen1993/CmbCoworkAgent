@@ -745,7 +745,7 @@ function replaceHarnessConfigPlaceholders(
     projectDir,
     projectCode: project.projectCode,
     feature: options.feature ?? "",
-    selectedServiceUnits: options.selectedServiceUnitsJson ?? "[]",
+    selectedServiceUnits: options.selectedServiceUnitsJson ?? "",
     pluginPath: cwd,
     mode,
     workflowTemplate: options.workflowTemplate ?? "",
@@ -766,13 +766,21 @@ function parseInspectCommand(
   options: HarnessCommandParseOptions = {}
 ): { executable: string; args: string[] } {
   const args: string[] = []
-  const optionalWorkflowArgs: Array<{
-    key: keyof Pick<HarnessCommandParseOptions, "workflowTemplate" | "workflowNodes">
+  const optionalCommandArgs: Array<{
+    key: keyof Pick<
+      HarnessCommandParseOptions,
+      "workflowTemplate" | "workflowNodes" | "selectedServiceUnitsJson"
+    >
     placeholder: string
     flag: string
   }> = [
     { key: "workflowTemplate", placeholder: "${workflowTemplate}", flag: "--workflow-template" },
-    { key: "workflowNodes", placeholder: "${workflowNodes}", flag: "--workflow-nodes" }
+    { key: "workflowNodes", placeholder: "${workflowNodes}", flag: "--workflow-nodes" },
+    {
+      key: "selectedServiceUnitsJson",
+      placeholder: "${selectedServiceUnits}",
+      flag: "--selected-serviceUnit"
+    }
   ]
   const tokens = tokenizeInspectCommand(command.trim())
   for (let index = 0; index < tokens.length; index += 1) {
@@ -781,7 +789,7 @@ function parseInspectCommand(
       args.push(...options.projectDirs)
       continue
     }
-    const optionalArg = optionalWorkflowArgs.find((item) => !options[item.key] && (
+    const optionalArg = optionalCommandArgs.find((item) => !options[item.key] && (
       token === item.placeholder ||
       token === `${item.flag}=${item.placeholder}` ||
       (token === item.flag && tokens[index + 1] === item.placeholder)
@@ -837,10 +845,8 @@ function boardConfigSupportedServiceUnits(cwd: string): string[] {
 }
 
 function boardConfigSupportsServiceUnitSelection(cwd: string): boolean {
-  return Boolean(
-    readBoardConfigPlatformText(cwd, "create_feature")?.includes("${selectedServiceUnits}") ||
-    readBoardConfigPlatformText(cwd, "session_context")?.includes("${selectedServiceUnits}")
-  )
+  const parsed = readBoardConfig(cwd)
+  return Array.isArray(parsed?.supported_service_units)
 }
 
 function projectDirectoryName(project: Pick<HarnessProjectMetadata, "projectDir" | "projectCode">): string {
@@ -923,6 +929,7 @@ function getHarnessSelectedServiceUnitsCommandOptions(
   const resolvedServiceUnits =
     selectedServiceUnits ??
     resolveFeatureServiceUnitMappings(project.projectId, featureId)
+  if (resolvedServiceUnits.length === 0) return {}
   return {
     selectedServiceUnitsJson: JSON.stringify(resolvedServiceUnits)
   }

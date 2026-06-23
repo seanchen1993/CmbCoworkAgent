@@ -2507,6 +2507,7 @@ function FeatureCreateDialog({
   const selectedServiceUnitCount = selectableServiceUnitMappings.filter((mapping) =>
     selectedServiceUnitIds.has(mapping.serviceUnitIdMapping)
   ).length
+  const serviceUnitSelectionWarning = supportsServiceUnits && selectedServiceUnitCount === 0
   const workflowTabDisabled = !workflowLoading && !workflowConfig
   const noSelectableFeatureOptions = !supportsServiceUnits && workflowTabDisabled
   const defaultTab = supportsServiceUnits ? "service-units" : noSelectableFeatureOptions ? "unavailable" : "workflow"
@@ -2554,11 +2555,24 @@ function FeatureCreateDialog({
     </div>
   ) : (
     <section className="grid gap-3 rounded-md border border-border bg-muted/30 p-3">
-      <div className="flex min-w-0 items-center justify-between gap-3">
-        <div className="text-sm font-semibold">选择发布单元</div>
-        <div className="shrink-0 text-xs text-muted-foreground">
+      <div className="flex min-w-0 items-center justify-end gap-1.5">
+        <div className="text-xs text-muted-foreground">
           已选择 {selectedServiceUnitCount} 个
         </div>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-label="发布单元能力说明"
+              className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <Info className="size-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top" className="z-[70] max-w-80 text-xs leading-5">
+            插件可以为选中的发布单元自动下载知识库，并将对应代码文件夹路径作为会话工作区。
+          </TooltipContent>
+        </Tooltip>
       </div>
       {serviceUnitMappingsLoading ? (
         <div className="flex min-h-20 items-center justify-center text-sm text-muted-foreground">
@@ -2567,7 +2581,7 @@ function FeatureCreateDialog({
         </div>
       ) : selectableServiceUnitMappings.length === 0 ? (
         <div className="rounded-md border border-dashed border-border bg-background px-3 py-4 text-sm text-muted-foreground">
-          请先在项目列表-发布单元配置中完成配置
+          请先在项目列表-发布单元配置中添加发布单元
         </div>
       ) : (
         <div className="max-h-48 overflow-y-auto rounded-md border border-border bg-background px-3 py-2">
@@ -2647,6 +2661,14 @@ function FeatureCreateDialog({
             />
             {featureNameError && <span className="text-status-critical">{featureNameError}</span>}
           </label>
+          {serviceUnitSelectionWarning && (
+            <div className="flex min-w-0 items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs leading-5 text-status-warning">
+              <AlertCircle className="mt-0.5 size-4 shrink-0" />
+              <span className="min-w-0 [overflow-wrap:anywhere]">
+                未选择发布单元，插件无法下载对应的 AGENTS.md/将发布单元代码库路径作为会话工作区
+              </span>
+            </div>
+          )}
           <TooltipProvider delayDuration={150}>
             <Tabs
               key={`${project?.projectId ?? "none"}-${defaultTab}-${workflowTabDisabled ? "workflow-disabled" : "workflow-enabled"}`}
@@ -2659,7 +2681,7 @@ function FeatureCreateDialog({
                   disabled={!supportsServiceUnits}
                   tooltip="插件暂不支持"
                 >
-                  选择特性对应的发布单元
+                  选择要开发的发布单元
                 </FeatureCreateTabTrigger>
                 <FeatureCreateTabTrigger
                   value="workflow"
@@ -2698,9 +2720,6 @@ function FeatureCreateDialog({
               disabled={
                 creating ||
                 workflowLoading ||
-                (supportsServiceUnits && serviceUnitMappingsLoading) ||
-                (supportsServiceUnits && selectableServiceUnitMappings.length === 0) ||
-                (supportsServiceUnits && selectedServiceUnitCount === 0) ||
                 !featureName.trim() ||
                 featureNameError !== null
               }
@@ -5137,6 +5156,31 @@ export function HarnessBoardView({
     }
   }, [serviceUnitMappings])
 
+  const handleProjectModeTabChange = useCallback(
+    (nextTab: string): void => {
+      if (projectModeTab === "settings" && nextTab !== "settings") {
+        const payload = buildServiceUnitMappingSavePayload(serviceUnitMappings)
+        if (
+          serviceUnitMappingsDirty &&
+          !serviceUnitMappingsLoading &&
+          !serviceUnitMappingsSaving &&
+          !payload.error
+        ) {
+          void handleSaveServiceUnitMappings()
+        }
+      }
+      setProjectModeTab(nextTab)
+    },
+    [
+      handleSaveServiceUnitMappings,
+      projectModeTab,
+      serviceUnitMappings,
+      serviceUnitMappingsDirty,
+      serviceUnitMappingsLoading,
+      serviceUnitMappingsSaving
+    ]
+  )
+
   const loadProjectDetail = useCallback(async (
     projectId: string,
     options: { showLoading?: boolean; reportError?: boolean } = {}
@@ -5755,17 +5799,14 @@ export function HarnessBoardView({
       return
     }
     const supportsServiceUnits = featureDialogProject.supportsServiceUnits
-    if (supportsServiceUnits && serviceUnitMappingsDirty) {
-      setFeatureError("发布单元路径配置尚未保存，请先保存后再创建特性")
-      return
-    }
     const selectedServiceUnits = supportsServiceUnits
       ? serviceUnitMappings.filter((mapping) =>
           selectedServiceUnitIds.has(mapping.serviceUnitIdMapping)
         )
       : []
-    if (supportsServiceUnits && selectedServiceUnits.length === 0) {
-      setFeatureError("请至少选择一个发布单元")
+    const hasSelectedServiceUnits = selectedServiceUnits.length > 0
+    if (hasSelectedServiceUnits && serviceUnitMappingsDirty) {
+      setFeatureError("发布单元路径配置尚未保存，请先保存后再创建特性")
       return
     }
 
@@ -5797,7 +5838,7 @@ export function HarnessBoardView({
       const result = await window.api.harnessBoard.createFeature({
         projectId: featureDialogProject.projectId,
         feature,
-        ...(supportsServiceUnits ? { selectedServiceUnits } : {}),
+        ...(hasSelectedServiceUnits ? { selectedServiceUnits } : {}),
         ...workflowInput
       })
 
@@ -6453,7 +6494,7 @@ export function HarnessBoardView({
             </div>
           )}
 
-          <Tabs value={projectModeTab} onValueChange={setProjectModeTab} className="space-y-6">
+          <Tabs value={projectModeTab} onValueChange={handleProjectModeTabChange} className="space-y-6">
             <div className="flex min-w-0 items-center justify-between gap-3">
               <TabsList>
                 <TabsTrigger value="projects" className="gap-2">
