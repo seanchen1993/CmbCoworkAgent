@@ -6,6 +6,7 @@ import { Command } from "@langchain/langgraph"
 import {
   createAgentRuntime,
   getSkillEvolutionThreshold,
+  setCheckpointerBusyGuard,
   type ModelRetryHooks,
   type FetchErrorInfo
 } from "../agent/runtime"
@@ -3137,6 +3138,8 @@ async function autoProposeSKill(
 
 export function registerAgentHandlers(ipcMain: IpcMain): void {
   console.log("[Agent] Registering agent handlers...")
+  // Let the runtime's checkpointer LRU avoid evicting threads with a live run.
+  setCheckpointerBusyGuard(hasActiveAgentRun)
   if (!restoredRuntimeGoalsReconciled) {
     restoredRuntimeGoalsReconciled = true
     const pausedCount = goalStore.pauseActiveGoalsForRuntimeRestore()

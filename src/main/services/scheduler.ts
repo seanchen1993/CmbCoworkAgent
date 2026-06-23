@@ -5,7 +5,7 @@ import { getScheduledTasks, getCustomModelConfigs, updateScheduledTaskRunResult,
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { TraceCollector } from "../agent/trace/collector"
 import { trySendChatXReply } from "./chatx"
-import { createAgentRuntime, closeCheckpointer } from "../agent/runtime"
+import { createAgentRuntime, closeCheckpointer, pinCheckpointer } from "../agent/runtime"
 import { createThread as dbCreateThread, deleteThread as dbDeleteThread } from "../db"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
@@ -138,6 +138,7 @@ async function executeTask(taskId: string): Promise<void> {
   const tracer = new TraceCollector(threadId, finalPrompt, task.modelId ?? "unknown", {
     triggerSource: schedulerSource
   })
+  const releaseCheckpointerPin = pinCheckpointer(threadId)
 
   try {
     const workspacePath = task.workDir
@@ -339,7 +340,8 @@ async function executeTask(taskId: string): Promise<void> {
     // see the task as still running and re-set scheduledTaskLoading = true (race).
     runningTasks.delete(taskId)
     activeAbortControllers.delete(taskId)
-    closeCheckpointer(threadId).catch(() => {})
+    releaseCheckpointerPin()
+    await closeCheckpointer(threadId).catch(() => {})
 
     // Now broadcast lifecycle event — renderer can safely call isRunning() = false
     if (taskError) {

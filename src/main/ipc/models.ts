@@ -3655,7 +3655,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         // bound on which generations can belong to this commit — passed to
         // adoption measurement so later (post-capture) gens are not attributed here.
         const adoptionCaptureTimeMs = Date.now()
-        const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
+        const adoptionSnapshots = await captureStagedSnapshotsForCommit(worktreePath)
         logGitStep(threadId, "commit", `commit message: ${message}`)
         if (Array.isArray(filePaths) && filePaths.length > 0) {
           await runGitWithLiteralPathspecs(worktreePath, ["commit", "-m", message], filesToCommit)

@@ -14,7 +14,7 @@ import {
   deleteThread as dbDeleteThread
 } from "../db"
 import {
-  getCheckpointer,
+  withCheckpointer,
   closeCheckpointer,
   closeWorkerCheckpointersForThread,
   clearToolConcurrencyLocksForThread
@@ -460,14 +460,13 @@ function formatMarkdown(payload: ExportPayload): string {
 }
 
 async function getLatestCheckpoint(threadId: string): Promise<ThreadCheckpoint | null> {
-  const checkpointer = await getCheckpointer(threadId)
-  const config = { configurable: { thread_id: threadId } }
-
-  for await (const checkpoint of checkpointer.list(config, { limit: 1 })) {
-    return checkpoint as ThreadCheckpoint
-  }
-
-  return null
+  return withCheckpointer(threadId, async (checkpointer) => {
+    const config = { configurable: { thread_id: threadId } }
+    for await (const checkpoint of checkpointer.list(config, { limit: 1 })) {
+      return checkpoint as ThreadCheckpoint
+    }
+    return null
+  })
 }
 
 function buildExportMessages(messages: CheckpointMessage[] | undefined): ExportMessage[] {
@@ -768,16 +767,14 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   // Get thread history (checkpoints)
   ipcMain.handle("threads:history", async (_event, threadId: string) => {
     try {
-      const checkpointer = await getCheckpointer(threadId)
-
-      const history: unknown[] = []
-      const config = { configurable: { thread_id: threadId } }
-
-      for await (const checkpoint of checkpointer.list(config, { limit: 50 })) {
-        history.push(checkpoint)
-      }
-
-      return history
+      return await withCheckpointer(threadId, async (checkpointer) => {
+        const history: unknown[] = []
+        const config = { configurable: { thread_id: threadId } }
+        for await (const checkpoint of checkpointer.list(config, { limit: 50 })) {
+          history.push(checkpoint)
+        }
+        return history
+      })
     } catch (e) {
       console.warn("Failed to get thread history:", e)
       return []
@@ -789,14 +786,13 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("threads:latest-checkpoint", async (_event, threadId: string) => {
     try {
       const normalizedThreadId = assertValidCheckpointThreadId(threadId)
-      const checkpointer = await getCheckpointer(normalizedThreadId)
-      const config = { configurable: { thread_id: normalizedThreadId } }
-
-      for await (const checkpoint of checkpointer.list(config, { limit: 1 })) {
-        return checkpoint
-      }
-
-      return null
+      return await withCheckpointer(normalizedThreadId, async (checkpointer) => {
+        const config = { configurable: { thread_id: normalizedThreadId } }
+        for await (const checkpoint of checkpointer.list(config, { limit: 1 })) {
+          return checkpoint
+        }
+        return null
+      })
     } catch (e) {
       console.warn("Failed to get latest thread checkpoint:", e)
       return null

@@ -2,7 +2,7 @@ import ReactMarkdown, { type Components } from "react-markdown"
 import rehypeHighlight from "rehype-highlight"
 import remarkGfm from "remark-gfm"
 import { Check, Copy } from "lucide-react"
-import { isValidElement, memo, useState, type ReactNode } from "react"
+import { isValidElement, memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 
 interface StreamingMarkdownProps {
   children: string
@@ -71,6 +71,57 @@ function MarkdownCodeBlock({
 // (recreating these every render makes react-markdown redo work and churns GC).
 const REMARK_PLUGINS = [remarkGfm]
 const REHYPE_PLUGINS = [rehypeHighlight]
+// While streaming we skip syntax highlighting (the expensive rehype pass) and
+// reuse a single empty array identity so react-markdown doesn't see a new prop.
+const NO_REHYPE_PLUGINS: typeof REHYPE_PLUGINS = []
+
+// During streaming the parent re-renders on every token. Re-parsing the full
+// Markdown each time is ~O(n²) over a long answer, so we coalesce updates to at
+// most one parse per throttle window. When streaming ends we flush immediately
+// so the final render is complete and fully highlighted.
+const STREAM_THROTTLE_MS = 50
+
+function useThrottledStreamingText(text: string, isStreaming: boolean): string {
+  const [throttled, setThrottled] = useState(text)
+  const textRef = useRef(text)
+  const flushedRef = useRef(text)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    textRef.current = text
+
+    // Not streaming: the final text is returned directly below, so just drop any
+    // pending flush — no state update needed.
+    if (!isStreaming) {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current)
+        timerRef.current = null
+      }
+      return
+    }
+    // Streaming: trailing-edge throttle. If a flush is already scheduled, let it
+    // pick up the latest text via textRef when it fires.
+    if (timerRef.current) return
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null
+      if (flushedRef.current !== textRef.current) {
+        flushedRef.current = textRef.current
+        setThrottled(textRef.current)
+      }
+    }, STREAM_THROTTLE_MS)
+  }, [text, isStreaming])
+
+  useEffect(
+    () => () => {
+      if (timerRef.current) clearTimeout(timerRef.current)
+    },
+    []
+  )
+
+  // While streaming, render the throttled snapshot; once done, render the full
+  // final text immediately so nothing is lost and highlighting runs on completion.
+  return isStreaming ? throttled : text
+}
 
 const MARKDOWN_COMPONENTS: Components = {
   // `node` is destructured out so it isn't spread onto the DOM element.
@@ -112,17 +163,25 @@ const MARKDOWN_COMPONENTS: Components = {
 }
 
 export const StreamingMarkdown = memo(function StreamingMarkdown({
-  children
+  children,
+  isStreaming = false
 }: StreamingMarkdownProps): React.JSX.Element {
-  return (
-    <div className="streaming-markdown">
+  const text = useThrottledStreamingText(children, isStreaming)
+
+  // Memoize the parsed tree so per-token parent re-renders don't re-run
+  // ReactMarkdown when the throttled text hasn't changed.
+  const rendered = useMemo(
+    () => (
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}
-        rehypePlugins={REHYPE_PLUGINS}
+        rehypePlugins={isStreaming ? NO_REHYPE_PLUGINS : REHYPE_PLUGINS}
         components={MARKDOWN_COMPONENTS}
       >
-        {children}
+        {text}
       </ReactMarkdown>
-    </div>
+    ),
+    [text, isStreaming]
   )
+
+  return <div className="streaming-markdown">{rendered}</div>
 })

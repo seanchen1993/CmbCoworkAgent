@@ -2,7 +2,12 @@ import { BrowserWindow } from "electron"
 import { HumanMessage } from "@langchain/core/messages"
 import { getHeartbeatConfig, getHeartbeatContent, saveHeartbeatConfig, getGlobalRoutingMode } from "../storage"
 import { resolveModel } from "../routing"
-import { createAgentRuntime, getCheckpointer, closeCheckpointer } from "../agent/runtime"
+import {
+  createAgentRuntime,
+  getCheckpointer,
+  closeCheckpointer,
+  pinCheckpointer
+} from "../agent/runtime"
 import {
   createThread as dbCreateThread,
   getThread as dbGetThread,
@@ -256,6 +261,7 @@ async function executeHeartbeat(): Promise<void> {
   }
 
   const channel = `heartbeat:stream:${threadId}`
+  const releaseCheckpointerPin = pinCheckpointer(threadId)
 
   try {
     // Snapshot pre-heartbeat checkpoint so we can restore if HEARTBEAT_OK
@@ -317,10 +323,9 @@ async function executeHeartbeat(): Promise<void> {
       // Restore pre-heartbeat checkpoint: only prune this HEARTBEAT_OK round,
       // preserving any previous actionable history. Aligns with Moltbot's pruneHeartbeatTranscript.
       try {
-        const cp = await getCheckpointer(threadId)
-        await cp.deleteThread(threadId)
+        await checkpointer.deleteThread(threadId)
         if (preHeartbeatSnapshot?.metadata) {
-          await cp.put(
+          await checkpointer.put(
             preHeartbeatSnapshot.config,
             preHeartbeatSnapshot.checkpoint,
             preHeartbeatSnapshot.metadata
@@ -359,7 +364,8 @@ async function executeHeartbeat(): Promise<void> {
   } finally {
     running = false
     abortController = null
-    closeCheckpointer(HEARTBEAT_THREAD_ID).catch(() => {})
+    releaseCheckpointerPin()
+    await closeCheckpointer(HEARTBEAT_THREAD_ID).catch(() => {})
     notifyRenderer("heartbeat:changed")
     notifyRenderer("threads:changed")
   }

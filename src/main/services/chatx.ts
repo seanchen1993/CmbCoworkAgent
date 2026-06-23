@@ -3,7 +3,7 @@ import { BrowserWindow } from "electron"
 import WebSocket from "ws"
 import { HumanMessage } from "@langchain/core/messages"
 import { getChatXConfig } from "../storage"
-import { createAgentRuntime, closeCheckpointer } from "../agent/runtime"
+import { createAgentRuntime, closeCheckpointer, pinCheckpointer } from "../agent/runtime"
 import { createThread as dbCreateThread, deleteThread as dbDeleteThread, getAllThreads, getThread } from "../db/index"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
@@ -222,6 +222,7 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
   threadIdToChatKey.set(threadId, chatKey)
   const channel = `scheduler:stream:${threadId}`
   let hasStreamedContent = false
+  const releaseCheckpointerPin = pinCheckpointer(threadId)
 
   try {
     const thread = getThread(threadId)
@@ -304,7 +305,8 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
     runningChats.delete(chatKey)
     activeAbortControllers.delete(chatKey)
     threadIdToChatKey.delete(threadId)
-    closeCheckpointer(threadId).catch(() => {})
+    releaseCheckpointerPin()
+    await closeCheckpointer(threadId).catch(() => {})
     notifyRenderer("threads:changed")
 
     // Process next queued message for this chat

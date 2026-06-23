@@ -8,8 +8,9 @@ if (process.platform === "linux") {
 
 import { join } from "path"
 import { existsSync, rmSync } from "fs"
-import { writeMainLog, writeRendererLog } from "./logging"
+import { writeMainLog, writeRendererLog, flushLogs, flushLogsSync } from "./logging"
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
+import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
@@ -122,10 +123,23 @@ process.stderr.on("error", (err: NodeJS.ErrnoException) => {
 process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
   if (err.code === "EPIPE") return // silently ignore broken pipe
   console.error("[Main] Uncaught exception:", err)
+  // Persist the buffered tail (incl. this error) in case the process dies next.
+  flushLogsSync()
 })
 process.on("unhandledRejection", (reason) => {
   console.error("[Main] Unhandled rejection:", reason)
 })
+
+// Signal-based termination (e.g. Ctrl+C in dev, or SIGTERM from a supervisor)
+// does not fire Node's `exit` event, so flush the log tail before quitting.
+// `once` lets a second signal fall through to default force-kill if quit hangs.
+const flushAndQuitOnSignal = (signal: NodeJS.Signals): void => {
+  console.warn(`[Main] received ${signal}, flushing logs and quitting`)
+  flushLogsSync()
+  app.quit()
+}
+process.once("SIGINT", () => flushAndQuitOnSignal("SIGINT"))
+process.once("SIGTERM", () => flushAndQuitOnSignal("SIGTERM"))
 import { disposeAllAgentThreadStates, registerAgentHandlers } from "./ipc/agent"
 import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
@@ -717,24 +731,56 @@ if (!gotTheLock) {
       flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
     ])
 
-    // Single-fire exit guard so timeout + finally don't both call app.exit
-    let exited = false
-    const doExit = (): void => {
-      if (exited) return
-      exited = true
-      flush()
+    const CLEANUP_TIMEOUT_MS = 10_000
+    const FORCE_FLUSH_GRACE_MS = 2_000
+    const HARD_EXIT_TIMEOUT_MS = CLEANUP_TIMEOUT_MS + FORCE_FLUSH_GRACE_MS + 500
+
+    let exitStarted = false
+    let cancelHardExit: (() => void) | null = null
+
+    const exitImmediately = (): void => {
+      if (cancelHardExit) {
+        cancelHardExit()
+        cancelHardExit = null
+      }
       app.exit(0)
     }
 
-    // Give async cleanup up to 10s, then force quit
+    const doExit = async (force: boolean): Promise<void> => {
+      if (exitStarted) return
+      exitStarted = true
+
+      if (force) {
+        // Cleanup already exceeded its budget. Give persistence a short bounded
+        // grace period, but never let a stalled disk keep the process alive.
+        await Promise.all([
+          waitBestEffort(flush(), FORCE_FLUSH_GRACE_MS),
+          waitBestEffort(flushLogs(), FORCE_FLUSH_GRACE_MS)
+        ])
+      } else {
+        await flush()
+        await flushLogs()
+      }
+      exitImmediately()
+    }
+
+    // Independent hard deadline: even if cleanup finishes just before its timer
+    // and the normal async flush then stalls, the process still exits.
+    cancelHardExit = scheduleHardDeadline(() => {
+      console.error("[Main] Hard exit deadline reached")
+      flushLogsSync()
+      exitImmediately()
+    }, HARD_EXIT_TIMEOUT_MS)
+
+    // Give async cleanup up to 10s, then switch to bounded best-effort flushes.
     const forceTimer = setTimeout(() => {
       console.warn("[Main] Cleanup timeout, force quitting")
-      doExit()
-    }, 10_000)
+      void doExit(true)
+    }, CLEANUP_TIMEOUT_MS)
 
     cleanup.finally(() => {
       clearTimeout(forceTimer)
-      doExit()
+      void doExit(false)
     })
   })
 }
