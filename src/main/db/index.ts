@@ -1,5 +1,5 @@
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs"
+import { readFileSync, existsSync, mkdirSync } from "fs"
 import { writeFile, rename } from "fs/promises"
 import { dirname } from "path"
 import { getDbPath } from "../storage"
@@ -15,11 +15,8 @@ import { GOAL_CLEAR_ALIASES } from "../../shared/goal-slash"
 let db: SqlJsDatabase | null = null
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 let dirty = false
-// Tracks an in-flight async save so flush() knows whether unpersisted bytes
-// may still be sitting in a not-yet-renamed temp file.
 let savePromise: Promise<void> | null = null
-// Set by the synchronous shutdown flush so any in-flight async save aborts
-// before its rename and can't clobber the authoritative final write.
+let flushPromise: Promise<void> | null = null
 let blockAsyncWrite = false
 
 // Debounce window for background saves. sql.js holds the whole DB in memory and
@@ -79,35 +76,53 @@ export function saveToDisk(): void {
     }
   }, SAVE_DEBOUNCE_MS)
   // Don't let a pending background save keep the event loop alive on its own;
-  // the Electron main process stays alive via its own handles, and durability on
-  // exit is guaranteed by the synchronous flush()/closeDatabase().
+  // orderly shutdown explicitly awaits flush()/closeDatabase().
   saveTimer.unref?.()
 }
 
 /**
- * Force immediate, durable save. The body runs synchronously up to the write so
- * it persists even when the caller can't await it (e.g. just before app.exit on
- * quit). blockAsyncWrite neutralizes any in-flight async save so it can't
- * overwrite this authoritative snapshot.
+ * Force an immediate durable save. Waiting for the background writer first is
+ * essential: once fs.rename() has been submitted it cannot be cancelled, so a
+ * final snapshot written before that rename settles could be overwritten by an
+ * older snapshot.
  */
 export async function flush(): Promise<void> {
-  if (saveTimer) {
-    clearTimeout(saveTimer)
-    saveTimer = null
-  }
-  if (!db) return
-  blockAsyncWrite = true
-  // Write if there are unpersisted edits, or an async save was mid-flight (its
-  // bytes may only exist in the not-yet-renamed temp file).
-  if (dirty || savePromise) {
-    try {
-      const data = db.export()
-      writeFileSync(getDbPath(), Buffer.from(data))
-      dirty = false
-    } catch (e) {
-      console.warn("[DB] flush write failed:", e)
+  if (flushPromise) return flushPromise
+
+  flushPromise = (async () => {
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = null
     }
-  }
+    if (!db) return
+
+    blockAsyncWrite = true
+    try {
+      const pendingSave = savePromise
+      if (pendingSave) await pendingSave
+
+      // Mutations may arrive while an earlier write is settling. Keep taking
+      // authoritative snapshots until no dirty state remains.
+      while (db && dirty) {
+        dirty = false
+        const data = Buffer.from(db.export())
+        const path = getDbPath()
+        const tmp = `${path}.flush.tmp`
+        await writeFile(tmp, data)
+        await rename(tmp, path)
+      }
+    } catch (e) {
+      dirty = true
+      console.warn("[DB] flush write failed:", e)
+    } finally {
+      blockAsyncWrite = false
+      if (dirty && db) saveToDisk()
+    }
+  })().finally(() => {
+    flushPromise = null
+  })
+
+  return flushPromise
 }
 
 export function getDb(): SqlJsDatabase {
@@ -255,27 +270,12 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
   return db
 }
 
-export function closeDatabase(): void {
-  if (saveTimer) {
-    clearTimeout(saveTimer)
-    saveTimer = null
-  }
-  // Stop any in-flight async save from renaming over our final write.
+export async function closeDatabase(): Promise<void> {
+  await flush()
   blockAsyncWrite = true
-  if (db) {
-    // Save any pending changes (also covers bytes still in an unrenamed temp).
-    if (dirty || savePromise) {
-      try {
-        const data = db.export()
-        writeFileSync(getDbPath(), Buffer.from(data))
-        dirty = false
-      } catch (e) {
-        console.warn("[DB] close write failed:", e)
-      }
-    }
-    db.close()
-    db = null
-  }
+  if (!db) return
+  db.close()
+  db = null
 }
 
 // Helper functions for common operations

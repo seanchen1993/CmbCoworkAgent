@@ -83,7 +83,7 @@ interface LogFileState {
   buffer: string[]
   knownSize: number
   sizeSeeded: boolean
-  flushing: boolean
+  flushPromise: Promise<void> | null
 }
 
 const fileStates = new Map<string, LogFileState>()
@@ -92,7 +92,7 @@ let flushTimer: ReturnType<typeof setTimeout> | null = null
 function getFileState(filePath: string): LogFileState {
   let state = fileStates.get(filePath)
   if (!state) {
-    state = { buffer: [], knownSize: 0, sizeSeeded: false, flushing: false }
+    state = { buffer: [], knownSize: 0, sizeSeeded: false, flushPromise: null }
     fileStates.set(filePath, state)
   }
   return state
@@ -114,35 +114,42 @@ function scheduleFlush(): void {
     flushTimer = null
     void flushAll()
   }, FLUSH_INTERVAL_MS)
+  flushTimer.unref?.()
 }
 
 async function flushFile(filePath: string, state: LogFileState): Promise<void> {
-  if (state.flushing || state.buffer.length === 0) return
-  state.flushing = true
-  try {
-    seedSizeOnce(filePath, state)
-    const chunk = state.buffer.join("")
-    state.buffer.length = 0
+  if (state.flushPromise) return state.flushPromise
+  if (state.buffer.length === 0) return
 
-    // Rotate before appending if this chunk would push us past the cap.
-    if (state.knownSize + Buffer.byteLength(chunk) >= MAX_LOG_BYTES) {
+  state.flushPromise = (async () => {
+    while (state.buffer.length > 0) {
+      seedSizeOnce(filePath, state)
+      const chunk = state.buffer.join("")
+      state.buffer.length = 0
+
+      // Rotate before appending if this chunk would push us past the cap.
+      if (state.knownSize + Buffer.byteLength(chunk) >= MAX_LOG_BYTES) {
+        try {
+          await rename(filePath, `${filePath}.1`)
+          state.knownSize = 0
+        } catch {
+          // Best effort rotation; if rename fails, keep appending to current file.
+        }
+      }
+
       try {
-        await rename(filePath, `${filePath}.1`)
-        state.knownSize = 0
+        await appendFile(filePath, chunk, "utf-8")
+        state.knownSize += Buffer.byteLength(chunk)
       } catch {
-        // Best effort rotation; if rename fails, keep appending to current file.
+        // Never let file logging crash the app; drop the chunk on persistent failure.
       }
     }
-
-    await appendFile(filePath, chunk, "utf-8")
-    state.knownSize += Buffer.byteLength(chunk)
-  } catch {
-    // Never let file logging crash the app; drop the chunk on persistent failure.
-  } finally {
-    state.flushing = false
-    // More arrived while we were writing — keep draining.
+  })().finally(() => {
+    state.flushPromise = null
     if (state.buffer.length > 0) scheduleFlush()
-  }
+  })
+
+  return state.flushPromise
 }
 
 async function flushAll(): Promise<void> {
@@ -151,9 +158,26 @@ async function flushAll(): Promise<void> {
   )
 }
 
+/** Drain buffered and already in-flight log writes during an orderly shutdown. */
+export async function flushLogs(): Promise<void> {
+  if (flushTimer) {
+    clearTimeout(flushTimer)
+    flushTimer = null
+  }
+
+  for (;;) {
+    await flushAll()
+    const pending = Array.from(fileStates.values()).some(
+      (state) => state.buffer.length > 0 || state.flushPromise
+    )
+    if (!pending) return
+  }
+}
+
 /**
  * Synchronously drain all buffered log lines. Registered on process exit so a
- * quit or crash doesn't lose the tail of the buffer (exit handlers must be sync).
+ * crash keeps the queued tail where possible. An already in-flight async write
+ * cannot be synchronously joined; orderly shutdown uses flushLogs() instead.
  */
 export function flushLogsSync(): void {
   for (const [filePath, state] of fileStates) {

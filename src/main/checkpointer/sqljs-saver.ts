@@ -1,7 +1,6 @@
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
 import {
   readFileSync,
-  writeFileSync,
   existsSync,
   mkdirSync,
   statSync,
@@ -56,8 +55,10 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   private dirty = false
   /** In-flight async save, so flush() knows bytes may be in an unrenamed temp. */
   private savePromise: Promise<void> | null = null
-  /** Set by the synchronous flush so an in-flight async save aborts before its
-   * rename and can't clobber the authoritative final write. */
+  private flushPromise: Promise<void> | null = null
+  private closePromise: Promise<void> | null = null
+  /** Set while a flush/close drains the writer so no older rename can land
+   * after the authoritative snapshot. */
   private blockAsyncWrite = false
 
   /** Max checkpoints to keep per (thread_id, checkpoint_ns). Older ones are pruned on each put().
@@ -252,42 +253,59 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       }
     }, CHECKPOINT_SAVE_DEBOUNCE_MS)
     // Don't keep the event loop alive solely for a pending background save;
-    // durability on exit is guaranteed by the synchronous flush() in close().
+    // orderly shutdown explicitly awaits close().
     this.saveTimer.unref?.()
   }
 
-  /**
-   * Force immediate, durable save. Runs synchronously up to the write so it
-   * persists even when the caller can't await it. blockAsyncWrite neutralizes any
-   * in-flight async save so it can't overwrite this authoritative snapshot.
-   */
-  async flush(): Promise<void> {
+  private async drainSaves(keepBlocked: boolean): Promise<void> {
     if (this.saveTimer) {
       clearTimeout(this.saveTimer)
       this.saveTimer = null
     }
     if (!this.db) return
     this.blockAsyncWrite = true
-    // Drain any in-flight async save first: blockAsyncWrite makes it bail before
-    // its rename (re-marking dirty), so a pending rename of a stale snapshot can
-    // never land after the authoritative write below. flush() is always awaited
-    // (only close() calls it), so awaiting here is safe.
-    if (this.savePromise) {
-      try {
-        await this.savePromise
-      } catch {
-        // ignore; we re-write below
-      }
-    }
-    if (this.db && this.dirty) {
-      try {
-        const data = this.db.export()
-        writeFileSync(this.dbPath, Buffer.from(data))
+    try {
+      const pendingSave = this.savePromise
+      if (pendingSave) await pendingSave
+
+      // Mutations can land while an earlier async write is settling. Continue
+      // until the latest in-memory state has reached disk.
+      while (this.db && this.dirty) {
         this.dirty = false
-      } catch (e) {
-        console.warn("[SqlJsSaver] flush write failed:", e)
+        const data = Buffer.from(this.db.export())
+        const tmp = `${this.dbPath}.flush.tmp`
+        await writeFile(tmp, data)
+        await rename(tmp, this.dbPath)
+      }
+    } catch (e) {
+      this.dirty = true
+      console.warn("[SqlJsSaver] flush write failed:", e)
+    } finally {
+      if (!keepBlocked) {
+        this.blockAsyncWrite = false
+        if (this.db && this.dirty) this.saveToDisk()
       }
     }
+  }
+
+  /**
+   * Force an immediate durable save without blocking the Electron main thread.
+   */
+  async flush(): Promise<void> {
+    if (this.closePromise) {
+      try {
+        await this.closePromise
+      } catch {
+        // close already reported the persistence failure
+      }
+      return
+    }
+    if (this.flushPromise) return this.flushPromise
+
+    this.flushPromise = this.drainSaves(false).finally(() => {
+      this.flushPromise = null
+    })
+    return this.flushPromise
   }
 
   async getTuple(config: RunnableConfig): Promise<CheckpointTuple | undefined> {
@@ -576,10 +594,18 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * Close the database and save any pending changes
    */
   async close(): Promise<void> {
-    await this.flush()
-    if (this.db) {
-      this.db.close()
-      this.db = null
-    }
+    if (this.closePromise) return this.closePromise
+    this.closePromise = (async () => {
+      const pendingFlush = this.flushPromise
+      if (pendingFlush) await pendingFlush
+      await this.drainSaves(true)
+      if (this.db) {
+        this.db.close()
+        this.db = null
+      }
+    })().finally(() => {
+      this.closePromise = null
+    })
+    return this.closePromise
   }
 }

@@ -465,6 +465,7 @@ export function ThreadSidebar(): React.JSX.Element {
   const [exportingThreadId, setExportingThreadId] = useState<string | null>(null)
   const [projectToDelete, setProjectToDelete] = useState<ThreadProject | null>(null)
   const [projectToRename, setProjectToRename] = useState<ThreadProject | null>(null)
+  const exportingThreadIdRef = useRef<string | null>(null)
   const activeSidebarTab: SidebarTab =
     showHarnessBoardView || mainView === "harness" ? "project" : "chat"
   const {
@@ -808,7 +809,8 @@ export function ThreadSidebar(): React.JSX.Element {
 
   const handleExportThread = useCallback(
     async (thread: Thread): Promise<void> => {
-      if (exportingThreadId) return
+      if (exportingThreadIdRef.current) return
+      exportingThreadIdRef.current = thread.thread_id
       setExportingThreadId(thread.thread_id)
       try {
         const result = await window.api.threads.exportSession(thread.thread_id)
@@ -821,10 +823,13 @@ export function ThreadSidebar(): React.JSX.Element {
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "导出会话失败")
       } finally {
-        setExportingThreadId(null)
+        if (exportingThreadIdRef.current === thread.thread_id) {
+          exportingThreadIdRef.current = null
+          setExportingThreadId(null)
+        }
       }
     },
-    [exportingThreadId]
+    []
   )
 
   const confirmDeleteProject = useCallback(async () => {

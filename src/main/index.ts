@@ -8,8 +8,9 @@ if (process.platform === "linux") {
 
 import { join } from "path"
 import { existsSync, rmSync } from "fs"
-import { writeMainLog, writeRendererLog, flushLogsSync } from "./logging"
+import { writeMainLog, writeRendererLog, flushLogs, flushLogsSync } from "./logging"
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
+import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
@@ -728,28 +729,56 @@ if (!gotTheLock) {
       flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
     ])
 
-    // Single-fire exit guard so timeout + finally don't both call app.exit
-    let exited = false
-    const doExit = (): void => {
-      if (exited) return
-      exited = true
-      flush()
-      // app.exit(0) terminates immediately and does not reliably fire Node's
-      // `exit` event, so flush the log tail here explicitly (covers normal quit
-      // and the force-quit timeout path alike).
-      flushLogsSync()
+    const CLEANUP_TIMEOUT_MS = 10_000
+    const FORCE_FLUSH_GRACE_MS = 2_000
+    const HARD_EXIT_TIMEOUT_MS = CLEANUP_TIMEOUT_MS + FORCE_FLUSH_GRACE_MS + 500
+
+    let exitStarted = false
+    let cancelHardExit: (() => void) | null = null
+
+    const exitImmediately = (): void => {
+      if (cancelHardExit) {
+        cancelHardExit()
+        cancelHardExit = null
+      }
       app.exit(0)
     }
 
-    // Give async cleanup up to 10s, then force quit
+    const doExit = async (force: boolean): Promise<void> => {
+      if (exitStarted) return
+      exitStarted = true
+
+      if (force) {
+        // Cleanup already exceeded its budget. Give persistence a short bounded
+        // grace period, but never let a stalled disk keep the process alive.
+        await Promise.all([
+          waitBestEffort(flush(), FORCE_FLUSH_GRACE_MS),
+          waitBestEffort(flushLogs(), FORCE_FLUSH_GRACE_MS)
+        ])
+      } else {
+        await flush()
+        await flushLogs()
+      }
+      exitImmediately()
+    }
+
+    // Independent hard deadline: even if cleanup finishes just before its timer
+    // and the normal async flush then stalls, the process still exits.
+    cancelHardExit = scheduleHardDeadline(() => {
+      console.error("[Main] Hard exit deadline reached")
+      flushLogsSync()
+      exitImmediately()
+    }, HARD_EXIT_TIMEOUT_MS)
+
+    // Give async cleanup up to 10s, then switch to bounded best-effort flushes.
     const forceTimer = setTimeout(() => {
       console.warn("[Main] Cleanup timeout, force quitting")
-      doExit()
-    }, 10_000)
+      void doExit(true)
+    }, CLEANUP_TIMEOUT_MS)
 
     cleanup.finally(() => {
       clearTimeout(forceTimer)
-      doExit()
+      void doExit(false)
     })
   })
 }

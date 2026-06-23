@@ -15,11 +15,11 @@ import { tmpdir } from "os"
 import { join } from "path"
 import assert from "assert"
 import { SqlJsSaver } from "../src/main/checkpointer/sqljs-saver"
-
-type AnyConfig = { configurable: { thread_id: string; checkpoint_ns: string; checkpoint_id?: string } }
+import type { Checkpoint, CheckpointMetadata } from "@langchain/langgraph-checkpoint"
+import type { RunnableConfig } from "@langchain/core/runnables"
 
 let counter = 0
-function makeCheckpoint(id: string): any {
+function makeCheckpoint(id: string): Checkpoint {
   return {
     v: 1,
     id,
@@ -28,20 +28,26 @@ function makeCheckpoint(id: string): any {
     channel_versions: { value: ++counter },
     versions_seen: {},
     pending_sends: []
-  }
+  } as Checkpoint
 }
 
-function config(threadId: string, checkpointId?: string): AnyConfig {
+function config(threadId: string, checkpointId?: string): RunnableConfig {
   return { configurable: { thread_id: threadId, checkpoint_ns: "", checkpoint_id: checkpointId } }
 }
 
 async function putCheckpoint(saver: SqlJsSaver, threadId: string, id: string): Promise<void> {
-  await saver.put(config(threadId) as any, makeCheckpoint(id), { source: "input", step: 0, writes: {}, parents: {} } as any)
+  const metadata = {
+    source: "input",
+    step: 0,
+    writes: {},
+    parents: {}
+  } as CheckpointMetadata
+  await saver.put(config(threadId), makeCheckpoint(id), metadata)
 }
 
 async function readBackLatestId(dbPath: string, threadId: string): Promise<string | undefined> {
   const reopened = new SqlJsSaver(dbPath)
-  const tuple = await reopened.getTuple(config(threadId) as any)
+  const tuple = await reopened.getTuple(config(threadId))
   await reopened.close()
   return tuple?.checkpoint?.id as string | undefined
 }
@@ -89,12 +95,27 @@ async function testAsyncDebouncedPersist(dir: string): Promise<void> {
   console.log("PASS async debounced save persists without flush")
 }
 
+async function testFlushRemainsReusable(dir: string): Promise<void> {
+  const dbPath = join(dir, "flush-reuse.sqlite")
+  const saver = new SqlJsSaver(dbPath)
+  await putCheckpoint(saver, "t1", "cp-1")
+  await saver.flush()
+  await putCheckpoint(saver, "t1", "cp-2")
+  await Promise.all([saver.flush(), saver.flush()])
+  await saver.close()
+
+  const id = await readBackLatestId(dbPath, "t1")
+  assert(id === "cp-2", `expected cp-2 after a second flush, got ${id}`)
+  console.log("PASS flush remains reusable and coalesces concurrent callers")
+}
+
 async function main(): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "sqljs-saver-flush-"))
   try {
     await testFlushBeforeDebounce(dir)
     await testCloseWhileSaveInFlight(dir)
     await testAsyncDebouncedPersist(dir)
+    await testFlushRemainsReusable(dir)
     console.log("sqljs-saver async/flush tests passed")
   } finally {
     await rm(dir, { recursive: true, force: true })
