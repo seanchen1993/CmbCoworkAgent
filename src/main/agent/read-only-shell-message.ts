@@ -18,7 +18,7 @@ export function readOnlyExecuteBlockMessage(
     : ""
   const examples =
     options.detailedExamples !== false
-      ? ' Use direct read-only commands such as rg "pattern" file, grep "pattern" file, find ..., ls, git log, git diff, cat file, or use the read_file/grep/glob tools.'
+      ? ' Use direct read-only commands such as rg "pattern" file, grep "pattern" file, find ..., ls, git log, git diff, cat file. For build/package tools, use inspection subcommands such as npm ls, go list, mvn dependency:tree, or use the read_file/grep/glob tools.'
       : " Use direct read-only commands or the read_file/grep/glob tools."
   const strictMessage =
     "execute blocked: this is a read-only agent — only provably read-only single commands are allowed. " +

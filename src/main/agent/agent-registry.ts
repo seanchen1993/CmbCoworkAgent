@@ -23,7 +23,7 @@ import { join } from "path"
 import { parseYamlFrontmatter } from "../utils/skill-identifiers"
 
 /** execute/shell policy for an agent. none = no shell at all; read_only = only
- * provably read-only commands (gated by exec-policy's assessCommandSafety);
+ * provably read-only commands (gated by exec-policy's isReadOnlyShellCommand);
  * full = any command (still subject to the normal approval flow). */
 export type AgentShellAccess = "none" | "read_only" | "full"
 

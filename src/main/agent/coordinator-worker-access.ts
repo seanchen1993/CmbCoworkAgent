@@ -12,7 +12,7 @@ export interface CoordinatorWorkerFilesystemAccess {
    * is untouched. */
   disallowedTools?: string[]
   /** execute policy for registry agents: none = cut execute+task_output;
-   * read_only = keep execute (commands gated elsewhere by assessCommandSafety);
+   * read_only = keep execute (commands gated elsewhere by isReadOnlyShellCommand);
    * full = keep execute. */
   shellAccess?: "none" | "read_only" | "full"
 }

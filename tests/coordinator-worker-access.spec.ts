@@ -105,7 +105,7 @@ async function testReadOnlyWorkerToolSurface(): Promise<void> {
     assertNoTool(tools, name, "read_only worker")
   }
   // read-only workers now KEEP execute + task_output (each command is gated to
-  // provably read-only by the runtime's assessCommandSafety check elsewhere).
+  // provably read-only by the runtime's isReadOnlyShellCommand check elsewhere).
   assertHasTool(tools, "execute", "read_only worker")
   assertHasTool(tools, "task_output", "read_only worker")
   assertHasTool(tools, "read_file", "read_only worker")
