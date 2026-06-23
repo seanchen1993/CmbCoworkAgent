@@ -134,6 +134,45 @@ describe("buildGitPanelState — lazy mode (includeDiffs:false)", () => {
     expect(tracked?.additions).toBeGreaterThan(0)
   })
 
+  it("matches collapsed numstat for non-ASCII paths (quotepath regression)", async () => {
+    // git 默认 core.quotepath=true，会把中文路径输出成 "docs/\346..." 的转义形式。
+    // 折叠态走 parseNumstatByPath 按路径命中，必须与 status 一样解码，否则会匹配不到
+    // numstat、把已修改文件的行数错误地回退成全文件估算（展开后才修正）。
+    const localRepo = createRepo("gitpanel-non-ascii-")
+    try {
+      // 显式打开 quotepath（git 默认值），让本用例不受开发机全局
+      // core.quotepath=false 影响——否则 numstat 会直接吐 UTF-8，bug 无法复现、
+      // 测试沦为假通过。被测代码走 `git -C <repo>`，本地配置必然生效。
+      gitIn(localRepo, ["config", "core.quotepath", "true"])
+
+      const name = "文档/性能优化.txt"
+      mkdirSync(join(localRepo, "文档"), { recursive: true })
+      writeFileSync(join(localRepo, name), "第一行\n第二行\n第三行\n")
+      gitIn(localRepo, ["add", "."])
+      gitIn(localRepo, ["commit", "-q", "-m", "init"])
+      // 仅改 1 行：真实 numstat 应为 +1/-1，而非全文件估算。
+      writeFileSync(join(localRepo, name), "第一行改\n第二行\n第三行\n")
+
+      const lazy = await buildGitPanelState(localRepo, [], {
+        silent: true,
+        includeAllWhenNoTracked: true,
+        includeDiffs: false,
+        includeChangedFiles: true
+      })
+      const collapsed = lazy.files.find((f) => f.path === name)
+      expect(collapsed).toBeDefined()
+      expect(collapsed?.additions).toBe(1)
+      expect(collapsed?.deletions).toBe(1)
+
+      // 折叠态行数必须与展开后按需加载的精确口径一致。
+      const expanded = await buildGitPanelFileDiff(localRepo, name, { silent: true })
+      expect(collapsed?.additions).toBe(expanded?.additions)
+      expect(collapsed?.deletions).toBe(expanded?.deletions)
+    } finally {
+      rmSync(localRepo, { recursive: true, force: true })
+    }
+  })
+
   it("keeps untracked directories collapsed in lightweight list mode", async () => {
     const localRepo = createRepo("gitpanel-untracked-dir-")
     try {
