@@ -1637,7 +1637,7 @@ function getSystemPrompt(
   workspacePath: string,
   windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated",
   workingDirPromptAppendix?: string,
-  options: { includeSubagents?: boolean } = {}
+  options: { includeSubagents?: boolean; includeMemory?: boolean } = {}
 ): string {
   const isWindows = process.platform === "win32"
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
@@ -1722,7 +1722,8 @@ ${shellGuidance}
 `
         : ""
 
-  const memorySection = isMemoryEnabled() ? MEMORY_SYSTEM_PROMPT : ""
+  const memorySection =
+    options.includeMemory !== false && isMemoryEnabled() ? MEMORY_SYSTEM_PROMPT : ""
   const workingDirAppendix = workingDirPromptAppendix?.trim()
     ? `${workingDirPromptAppendix.trim()}\n`
     : ""
@@ -2444,6 +2445,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   } = options
   const approvalThreadId = requestedApprovalThreadId ?? threadId
   const isCoordinatorMode = agentMode === "coordinator"
+  const memoryEnabledForRuntime = isMemoryEnabled() && !featureId
 
   if (!threadId) {
     throw new Error("Thread ID is required for checkpointing.")
@@ -2700,7 +2702,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   backend.setOrchestrator(orchestrator)
 
   let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, workingDirPromptAppendix, {
-    includeSubagents: !featureId
+    includeSubagents: !featureId,
+    includeMemory: memoryEnabledForRuntime
   })
   let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
     prompt: null,
@@ -2805,12 +2808,14 @@ The workspace root is: ${workspacePath}`
   // Initialize memory system (gated by user setting)
   let memoryTools: ReturnType<typeof createMemorySearchTool | typeof createMemoryGetTool>[] = []
   let memorySources: string[] | undefined
-  if (isMemoryEnabled()) {
+  if (memoryEnabledForRuntime) {
     const memoryStore = await getMemoryStore()
     const memoryDir = memoryStore.getMemoryDir()
     memoryTools = [createMemorySearchTool(memoryStore), createMemoryGetTool(memoryStore)]
     memorySources = [join(memoryDir, "MEMORY.md")]
     console.log("[Runtime] Memory initialized, dir:", memoryDir)
+  } else if (featureId) {
+    console.log("[Runtime] Memory disabled for project mode feature:", featureId)
   } else {
     console.log("[Runtime] Memory disabled by user setting")
   }

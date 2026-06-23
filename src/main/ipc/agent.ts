@@ -4023,6 +4023,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const workspacePath = metadata.workspacePath as string | undefined
         sessionWorkspacePath = workspacePath ?? undefined
         const harnessAgentContext = getHarnessAgentContext(metadata)
+        const memoryEnabledForThread = isMemoryEnabled() && !harnessAgentContext.featureId
 
         if (!workspacePath) {
           pauseActiveGoalForRuntimeStop("WORKSPACE_REQUIRED")
@@ -4317,7 +4318,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
 
         // Sync FTS index with any memory files changed since last invocation
-        if (isMemoryEnabled()) {
+        if (memoryEnabledForThread) {
           try {
             const memoryStore = await getMemoryStore()
             memoryStore.syncMemoryFiles()
@@ -5734,7 +5735,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               ? `User: ${rootUserPrompt}\n\nAssistant: ${postRunAssistantText}`
               : ""
 
-          if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
+          if (memoryEnabledForThread && conversation.length >= MIN_CHARS_FOR_MEMORY) {
             const memoryStore = await getMemoryStore()
             const memDir = memoryStore.getMemoryDir()
             const memDirNormalized = memDir.replace(/\\/g, "/")
