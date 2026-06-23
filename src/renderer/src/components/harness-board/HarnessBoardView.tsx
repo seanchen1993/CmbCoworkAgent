@@ -6108,6 +6108,40 @@ export function HarnessBoardView({
       .map(({ group }) => group)
   }, [harnessSessionIndex, projects, selectedFeature, selectedProjectId, threadsById])
 
+  useEffect(() => {
+    if (!selectedFeature && !selectedProjectId) return
+
+    setCollapsedFeatureKeys((current) => {
+      const next = new Set(current)
+      let changed = false
+
+      for (const group of projectSidebarGroups) {
+        const isCurrentFeature =
+          selectedFeature &&
+          group.project.projectId === selectedFeature.projectId &&
+          group.slug === selectedFeature.slug
+        const isCurrentProject =
+          !selectedFeature &&
+          selectedProjectId &&
+          group.project.projectId === selectedProjectId
+
+        if (isCurrentFeature) {
+          if (next.delete(group.key)) changed = true
+        } else if (!isCurrentProject && !next.has(group.key)) {
+          next.add(group.key)
+          changed = true
+        }
+      }
+
+      return changed ? next : current
+    })
+  }, [
+    projectSidebarGroups,
+    selectedFeature?.projectId,
+    selectedFeature?.slug,
+    selectedProjectId
+  ])
+
   const allFeatureGroupsCollapsed =
     projectSidebarGroups.length > 0 &&
     projectSidebarGroups.every((group) => collapsedFeatureKeys.has(group.key))
