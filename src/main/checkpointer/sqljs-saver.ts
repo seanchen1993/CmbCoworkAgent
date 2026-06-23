@@ -8,7 +8,13 @@ import {
   renameSync,
   unlinkSync
 } from "fs"
+import { writeFile, rename } from "fs/promises"
 import { dirname } from "path"
+
+// Debounce window for background checkpoint saves. Checkpoints are written very
+// frequently during a streaming agent run; coalescing keeps the synchronous
+// db.export() snapshot off the hot path while the disk write runs async.
+const CHECKPOINT_SAVE_DEBOUNCE_MS = 300
 import type { RunnableConfig } from "@langchain/core/runnables"
 import {
   BaseCheckpointSaver,
@@ -48,6 +54,11 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   private isSetup = false
   private saveTimer: ReturnType<typeof setTimeout> | null = null
   private dirty = false
+  /** In-flight async save, so flush() knows bytes may be in an unrenamed temp. */
+  private savePromise: Promise<void> | null = null
+  /** Set by the synchronous flush so an in-flight async save aborts before its
+   * rename and can't clobber the authoritative final write. */
+  private blockAsyncWrite = false
 
   /** Max checkpoints to keep per (thread_id, checkpoint_ns). Older ones are pruned on each put().
    * Kept at 1 because sql.js loads the entire DB file into memory — retaining more checkpoints
@@ -64,6 +75,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    */
   async initialize(): Promise<void> {
     if (this.db) return
+    // Reset in case this instance was previously closed (flush set the guard).
+    this.blockAsyncWrite = false
 
     const SQL = await initSqlJs()
 
@@ -190,7 +203,30 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   }
 
   /**
-   * Save database to disk (debounced)
+   * Atomically persist the current snapshot off the main thread: export()
+   * snapshots synchronously, then bytes are written to a temp file and renamed
+   * into place (atomic — a crash mid-write can't truncate the live DB). Loops if
+   * more checkpoints arrived while writing.
+   */
+  private async runSaveLoop(): Promise<void> {
+    while (this.db && this.dirty && !this.blockAsyncWrite) {
+      this.dirty = false
+      try {
+        const data = Buffer.from(this.db.export())
+        const tmp = `${this.dbPath}.tmp`
+        await writeFile(tmp, data)
+        if (this.blockAsyncWrite) return // shutdown flush took over
+        await rename(tmp, this.dbPath)
+      } catch (e) {
+        this.dirty = true
+        console.warn("[SqlJsSaver] async save failed, will retry on next change:", e)
+        break
+      }
+    }
+  }
+
+  /**
+   * Save database to disk (debounced, async, atomic)
    */
   private saveToDisk(): void {
     if (!this.db) return
@@ -203,26 +239,35 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     }
 
     this.saveTimer = setTimeout(() => {
-      if (this.db && this.dirty) {
-        const data = this.db.export()
-        writeFileSync(this.dbPath, Buffer.from(data))
-        this.dirty = false
+      this.saveTimer = null
+      if (!this.savePromise) {
+        this.savePromise = this.runSaveLoop().finally(() => {
+          this.savePromise = null
+        })
       }
-    }, 100)
+    }, CHECKPOINT_SAVE_DEBOUNCE_MS)
   }
 
   /**
-   * Force immediate save to disk
+   * Force immediate, durable save. Runs synchronously up to the write so it
+   * persists even when the caller can't await it. blockAsyncWrite neutralizes any
+   * in-flight async save so it can't overwrite this authoritative snapshot.
    */
   async flush(): Promise<void> {
     if (this.saveTimer) {
       clearTimeout(this.saveTimer)
       this.saveTimer = null
     }
-    if (this.db && this.dirty) {
-      const data = this.db.export()
-      writeFileSync(this.dbPath, Buffer.from(data))
-      this.dirty = false
+    if (!this.db) return
+    this.blockAsyncWrite = true
+    if (this.dirty || this.savePromise) {
+      try {
+        const data = this.db.export()
+        writeFileSync(this.dbPath, Buffer.from(data))
+        this.dirty = false
+      } catch (e) {
+        console.warn("[SqlJsSaver] flush write failed:", e)
+      }
     }
   }
 

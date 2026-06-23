@@ -1,5 +1,6 @@
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs"
+import { writeFile, rename } from "fs/promises"
 import { dirname } from "path"
 import { getDbPath } from "../storage"
 import { mergeThreadValueObjects } from "../../shared/thread-values"
@@ -14,9 +15,46 @@ import { GOAL_CLEAR_ALIASES } from "../../shared/goal-slash"
 let db: SqlJsDatabase | null = null
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 let dirty = false
+// Tracks an in-flight async save so flush() knows whether unpersisted bytes
+// may still be sitting in a not-yet-renamed temp file.
+let savePromise: Promise<void> | null = null
+// Set by the synchronous shutdown flush so any in-flight async save aborts
+// before its rename and can't clobber the authoritative final write.
+let blockAsyncWrite = false
+
+// Debounce window for background saves. sql.js holds the whole DB in memory and
+// db.export() snapshots it on the main thread (~1-2ms); coalescing bursts keeps
+// that off the hot path. The disk write itself is async (libuv threadpool).
+const SAVE_DEBOUNCE_MS = 300
 
 /**
- * Save database to disk (debounced)
+ * Atomically persist the current DB snapshot off the main thread: export()
+ * snapshots synchronously, then the bytes are written to a temp file and
+ * renamed into place (rename is atomic, so a crash mid-write can't truncate the
+ * live DB). Loops if more mutations arrived while writing.
+ */
+async function runSaveLoop(): Promise<void> {
+  while (db && dirty && !blockAsyncWrite) {
+    dirty = false
+    try {
+      const data = Buffer.from(db.export())
+      const path = getDbPath()
+      const tmp = `${path}.tmp`
+      await writeFile(tmp, data)
+      if (blockAsyncWrite) return // shutdown flush took over; don't race its write
+      await rename(tmp, path)
+    } catch (e) {
+      // Persistent failure: keep the buffer dirty so a later save (or flush)
+      // retries, but break to avoid a hot error loop.
+      dirty = true
+      console.warn("[DB] async save failed, will retry on next change:", e)
+      break
+    }
+  }
+}
+
+/**
+ * Save database to disk (debounced, async, atomic)
  */
 export function saveToDisk(): void {
   if (!db) return
@@ -28,26 +66,38 @@ export function saveToDisk(): void {
   }
 
   saveTimer = setTimeout(() => {
-    if (db && dirty) {
-      const data = db.export()
-      writeFileSync(getDbPath(), Buffer.from(data))
-      dirty = false
+    saveTimer = null
+    if (!savePromise) {
+      savePromise = runSaveLoop().finally(() => {
+        savePromise = null
+      })
     }
-  }, 100)
+  }, SAVE_DEBOUNCE_MS)
 }
 
 /**
- * Force immediate save
+ * Force immediate, durable save. The body runs synchronously up to the write so
+ * it persists even when the caller can't await it (e.g. just before app.exit on
+ * quit). blockAsyncWrite neutralizes any in-flight async save so it can't
+ * overwrite this authoritative snapshot.
  */
 export async function flush(): Promise<void> {
   if (saveTimer) {
     clearTimeout(saveTimer)
     saveTimer = null
   }
-  if (db && dirty) {
-    const data = db.export()
-    writeFileSync(getDbPath(), Buffer.from(data))
-    dirty = false
+  if (!db) return
+  blockAsyncWrite = true
+  // Write if there are unpersisted edits, or an async save was mid-flight (its
+  // bytes may only exist in the not-yet-renamed temp file).
+  if (dirty || savePromise) {
+    try {
+      const data = db.export()
+      writeFileSync(getDbPath(), Buffer.from(data))
+      dirty = false
+    } catch (e) {
+      console.warn("[DB] flush write failed:", e)
+    }
   }
 }
 
@@ -61,6 +111,8 @@ export function getDb(): SqlJsDatabase {
 export async function initializeDatabase(): Promise<SqlJsDatabase> {
   const dbPath = getDbPath()
   console.log("Initializing database at:", dbPath)
+  // Reset in case the DB was previously closed (flush/close set the guard).
+  blockAsyncWrite = false
 
   const SQL = await initSqlJs()
 
@@ -199,11 +251,18 @@ export function closeDatabase(): void {
     clearTimeout(saveTimer)
     saveTimer = null
   }
+  // Stop any in-flight async save from renaming over our final write.
+  blockAsyncWrite = true
   if (db) {
-    // Save any pending changes
-    if (dirty) {
-      const data = db.export()
-      writeFileSync(getDbPath(), Buffer.from(data))
+    // Save any pending changes (also covers bytes still in an unrenamed temp).
+    if (dirty || savePromise) {
+      try {
+        const data = db.export()
+        writeFileSync(getDbPath(), Buffer.from(data))
+        dirty = false
+      } catch (e) {
+        console.warn("[DB] close write failed:", e)
+      }
     }
     db.close()
     db = null
