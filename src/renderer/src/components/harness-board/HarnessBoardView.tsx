@@ -3158,7 +3158,7 @@ function ProjectCard({
                 <ProjectBadgeRow project={project}>
                   <h2 className="truncate text-base font-semibold">{project.name}</h2>
                 </ProjectBadgeRow>
-                <div className="mt-2 line-clamp-2 text-sm leading-5 text-muted-foreground">
+                <div className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">
                   {project.description}
                 </div>
               </div>
