@@ -16,7 +16,7 @@ import type {
   WorkflowJournalEntry,
   WorkflowRunSummary
 } from "./types"
-import { WORKFLOW_RUN_ID_PATTERN } from "./types"
+import { WORKFLOW_RESULT_SIDECAR_MAX_BYTES, WORKFLOW_RUN_ID_PATTERN } from "./types"
 
 /** Fields the engine supplies for an agent upsert; timestamps are managed by the store. */
 export type WorkflowAgentUpsert = Omit<WorkflowAgentStateRecord, "startedAt" | "endedAt">
@@ -89,6 +89,105 @@ export function runFilePath(workspacePath: string, threadId: string, runId: stri
     getWorkflowRunsDir(workspacePath, threadId),
     `${assertSafeSegment(runId, "runId")}.json`
   )
+}
+
+/** Full-result sidecar (`<runId>.result`, no `.json` so it's skipped by the run-file
+ * scans): holds the COMPLETE workflow return value (compact JSON) when it exceeds
+ * the run record's WORKFLOW_RESULT_MAX_CHARS bound but fits the sidecar cap.
+ * run.json keeps only the bounded copy (small for listing / the runs panel); the
+ * completion notification's <output-file> points here only when the file is complete. */
+export function workflowResultFilePath(
+  workspacePath: string,
+  threadId: string,
+  runId: string
+): string {
+  return join(
+    getWorkflowRunsDir(workspacePath, threadId),
+    `${assertSafeSegment(runId, "runId")}.result`
+  )
+}
+
+/**
+ * The file the completion notification advertises as holding the COMPLETE result, or
+ * undefined when no file faithfully holds it (so the notification omits the false
+ * "full result in <path>"). The run record's `resultSidecarStatus` is the source of
+ * truth — never `existsSync` alone, so a stale `.result` left by a failed cleanup is
+ * not mistaken for the current result:
+ * - "available": the `<runId>.result` sidecar (double-checked it still exists).
+ * - "unavailable": truncated but sidecar is missing, over the cap, or failed to
+ *   write → no complete file → undefined.
+ * - "none": result fit under the bound → run.json holds it whole, but only when the
+ *   current terminal run is actually present on disk (flush-failed in-memory snapshots
+ *   must not point at a missing/stale run.json).
+ * - legacy (absent): run.json, unless its stored result already carries the engine's
+ *   truncation marker (then run.json is NOT complete → undefined). Any unknown
+ *   `.result` sidecar on a legacy run is deliberately ignored.
+ */
+export function resolveWorkflowOutputFile(
+  workspacePath: string,
+  threadId: string,
+  run: Pick<PersistedWorkflowRun, "runId" | "result" | "resultSidecarStatus"> &
+    Partial<
+      Pick<
+        PersistedWorkflowRun,
+        "status" | "startedAt" | "completedAt" | "scriptSha256" | "updatedAt"
+      >
+    >
+): string | undefined {
+  if (run.resultSidecarStatus === "available") {
+    const resultPath = workflowResultFilePath(workspacePath, threadId, run.runId)
+    return isReadableJsonFile(resultPath) ? resultPath : undefined
+  }
+  if (run.resultSidecarStatus === "unavailable") return undefined
+  if (run.resultSidecarStatus === "none") {
+    return resolveCurrentRunJsonOutputFile(workspacePath, threadId, run)
+  }
+  if (typeof run.result === "string" && /\n…\[truncated \d+ chars\]$/.test(run.result)) {
+    return undefined
+  }
+  return resolveCurrentRunJsonOutputFile(workspacePath, threadId, run)
+}
+
+function resolveCurrentRunJsonOutputFile(
+  workspacePath: string,
+  threadId: string,
+  run: Pick<PersistedWorkflowRun, "runId" | "resultSidecarStatus"> &
+    Partial<
+      Pick<
+        PersistedWorkflowRun,
+        "status" | "startedAt" | "completedAt" | "scriptSha256" | "updatedAt"
+      >
+    >
+): string | undefined {
+  const persisted = loadWorkflowRun(workspacePath, threadId, run.runId)
+  if (!persisted) return undefined
+  if (run.status !== undefined && persisted.status !== run.status) return undefined
+  // A flush-failed in-memory terminal snapshot can share a runId with a stale
+  // completed run.json from an earlier generation/resume. Status alone is not a
+  // strong enough identity check, so compare every stable identity timestamp/hash
+  // the caller supplied before advertising run.json as the complete output file.
+  for (const field of ["startedAt", "completedAt", "scriptSha256", "updatedAt"] as const) {
+    if (run[field] !== undefined && persisted[field] !== run[field]) return undefined
+  }
+  if (
+    run.resultSidecarStatus !== undefined &&
+    persisted.resultSidecarStatus !== run.resultSidecarStatus
+  ) {
+    return undefined
+  }
+  return runFilePath(workspacePath, threadId, run.runId)
+}
+
+function isReadableJsonFile(path: string): boolean {
+  try {
+    const stat = statSync(path)
+    if (!stat.isFile()) return false
+    if (stat.size > WORKFLOW_RESULT_SIDECAR_MAX_BYTES) return false
+    JSON.parse(readFileSync(path, "utf-8"))
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** Summary sidecar (`<runId>.summary`, no `.json` so it's skipped by the run-file
@@ -366,11 +465,18 @@ export async function persistRecoveredRun(
     await mkdir(getWorkflowRunsDir(workspacePath, threadId), { recursive: true })
     const path = runFilePath(workspacePath, threadId, run.runId)
     const journalPath = journalFilePath(workspacePath, threadId, run.runId)
-    const json = JSON.stringify({ ...run, journal: [] })
+    let recoveredRun = run
+    if (
+      run.resultSidecarStatus === "available" &&
+      !isReadableJsonFile(workflowResultFilePath(workspacePath, threadId, run.runId))
+    ) {
+      recoveredRun = { ...run, resultSidecarStatus: "unavailable" }
+    }
+    const json = JSON.stringify({ ...recoveredRun, journal: [] })
     // Journal first, run.json second — same crash-safe ordering as doWrite (#3): a
     // crash between the renames leaves journal>=run.json (resume re-runs nothing),
     // never run.json>journal (which would re-execute completed edit agents twice).
-    await writeFile(`${journalPath}.tmp`, JSON.stringify(run.journal ?? []))
+    await writeFile(`${journalPath}.tmp`, JSON.stringify(recoveredRun.journal ?? []))
     await rename(`${journalPath}.tmp`, journalPath)
     await writeFile(`${path}.tmp`, json)
     await rename(`${path}.tmp`, path)
@@ -424,7 +530,9 @@ export function pruneWorkflowRuns(
         ".workflow.js",
         ".summary",
         ".journal",
-        ".journal.tmp"
+        ".journal.tmp",
+        ".result",
+        ".result.tmp"
       ]) {
         try {
           const path = join(dir, `${stale.runId}${suffix}`)
@@ -515,6 +623,15 @@ export interface WorkflowRunStore {
    * during the run are async and non-blocking; this guarantees durability.
    */
   flush(): Promise<boolean>
+  /**
+   * Persist (resultJson != null) or clear (null) the COMPLETE result in the
+   * `<runId>.result` sidecar, serialized through the same write chain as the run
+   * file and guarded by the same stale-writer / disposed-dir checks. Returns whether
+   * the write actually succeeded (false on I/O failure) so finalize can record
+   * `resultSidecarStatus`. Clearing (null) is best-effort — the status, not the
+   * file's presence, is the reader's source of truth.
+   */
+  persistFullResult(resultJson: string | null): Promise<boolean>
   /**
    * Resolves once the INITIAL snapshot has been written to disk (the eager
    * launch-time persist). Await this before reporting a run "launched" so a
@@ -644,6 +761,36 @@ export function createWorkflowRunStore(options: {
     return result
   }
 
+  // Full-result sidecar writer. Writes a DIFFERENT file than doWrite (`<runId>.result`
+  // vs `.json`/`.journal`), so its `.tmp` never collides; same stale-writer /
+  // disposed-dir guard so a late write after a thread delete (or a superseded resume)
+  // can't recreate the removed run directory. null = clear any stale sidecar.
+  const resultSidecarPath = workflowResultFilePath(workspacePath, threadId, state.runId)
+  const doPersistFullResult = async (resultJson: string | null): Promise<boolean> => {
+    if (storeGenerations.get(path) !== generation || disposedRunDirs.has(runDir)) {
+      // Stale writer or disposed dir: skip silently (mirrors doWrite). The run.json
+      // won't persist either, so resultSidecarStatus on a stale record is moot.
+      return true
+    }
+    try {
+      if (resultJson === null) {
+        // Best-effort cleanup: resultSidecarStatus (not the file's presence) is the
+        // reader's source of truth, so a failed unlink here cannot mislead.
+        for (const stale of [resultSidecarPath, `${resultSidecarPath}.tmp`]) {
+          if (existsSync(stale)) unlinkSync(stale)
+        }
+        return true
+      }
+      await mkdir(runDir, { recursive: true })
+      await writeFile(`${resultSidecarPath}.tmp`, resultJson)
+      await rename(`${resultSidecarPath}.tmp`, resultSidecarPath)
+      return true
+    } catch (error) {
+      console.warn(`[Workflow] Failed to persist full-result sidecar ${state.runId}:`, error)
+      return false
+    }
+  }
+
   const scheduleSave = (): void => {
     dirty = true
     if (timer) return
@@ -730,6 +877,17 @@ export function createWorkflowRunStore(options: {
         agentsByIndex.set(record.index, created)
       }
       scheduleSave()
+    },
+    persistFullResult(resultJson) {
+      // Serialize onto the same write chain as doWrite (so the sidecar lands before
+      // the run.json final flush), but keep the chain a VOID promise so a failed
+      // sidecar write never poisons later persists; return THIS write's success.
+      const result = writeChain.then(() => doPersistFullResult(resultJson))
+      writeChain = result.then(
+        () => undefined,
+        () => undefined
+      )
+      return result
     },
     async flush() {
       if (timer) {

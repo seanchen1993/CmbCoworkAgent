@@ -100,7 +100,7 @@ import {
   type CoordinatorSelectedSkill
 } from "../agent/coordinator-mode"
 import { workflowRunManager } from "../agent/workflow/run-manager"
-import { runFilePath } from "../agent/workflow/run-store"
+import { resolveWorkflowOutputFile } from "../agent/workflow/run-store"
 import {
   WORKFLOW_NOTIFICATION_MARKER_PREFIX,
   WORKFLOW_NOTIFICATION_TURN_PROMPT,
@@ -178,7 +178,10 @@ import {
   resolveEvaluatorConfig,
   shouldPauseGoalForEmptyTurn
 } from "../agent/goals/evaluator"
-import { evaluateGoalWithRuntimeRetry } from "../agent/goals/evaluator-runtime"
+import {
+  evaluateGoalWithRuntimeRetry,
+  formatGoalEvaluatorRuntimeFailureReason
+} from "../agent/goals/evaluator-runtime"
 import { GoalEvidenceBuffer } from "../agent/goals/evidence"
 import {
   RUNTIME_RESTORED_ACTIVE_GOAL_REASON,
@@ -4193,10 +4196,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             await tracer.finish("success", "WORKFLOW_NOTIFICATION_STALE")
             return
           }
-          const workflowOutputFile = runFilePath(
+          const workflowOutputFile = resolveWorkflowOutputFile(
             workspacePath,
             pendingWorkflowRun.threadId,
-            pendingWorkflowRun.runId
+            pendingWorkflowRun
           )
           effectiveMessage = buildWorkflowNotificationMessage(
             pendingWorkflowRun,
@@ -5411,11 +5414,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
             }
 
-            const finalMsgs = state.messages.filter((m) => {
+            const finalMsgs = state.messages.slice(valuesStartIndex).filter((m) => {
               const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
               const kw = m.kwargs || {}
+              const isAiMessage = cn.includes("AI") || kw.type === "ai"
               return (
-                cn.includes("AI") &&
+                isAiMessage &&
                 (!kw.tool_calls || !Array.isArray(kw.tool_calls) || kw.tool_calls.length === 0)
               )
             })
@@ -5774,7 +5778,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     console.warn("[Goal] evaluator failed after retry:", error)
                     return {
                       verdict: "blocked",
-                      reason: "评估器暂时不可用。Goal 已暂停，请稍后使用 /goal resume 重试。"
+                      reason: formatGoalEvaluatorRuntimeFailureReason(error)
                     }
                   }
                 })

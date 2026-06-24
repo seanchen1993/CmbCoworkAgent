@@ -117,10 +117,9 @@ export async function runWorkflowSubagent(
 /**
  * Hard-stop race: runs cooperative stream work against the lifetime signal. If
  * runtime.stream() or the async iterator hangs and never honours the AbortSignal,
- * controller.abort() (parent abort or the per-agent timeout) still settles this
- * race, so the subagent — and the engine awaiting it — unblock instead of the whole
- * run hanging on a dead stream. (This is the raceWithAbort the engine's inactivity-
- * watchdog comment refers to.) The orphaned work promise may settle later; its
+ * controller.abort() (parent abort or an optional per-agent timeout) still settles
+ * this race, so the subagent — and the engine awaiting it — unblock instead of the
+ * whole run hanging on a dead stream. The orphaned work promise may settle later; its
  * result/rejection is swallowed so it can't surface as an unhandled rejection.
  */
 function raceWithAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -151,19 +150,21 @@ async function runOnce(
   deps: WorkflowSubagentDeps,
   request: RunWorkflowSubagentRequest,
   attempt: number,
-  timeoutMs: number
+  timeoutMs: number | undefined
 ): Promise<WorkflowSubagentResult> {
   // Fresh thread per attempt so a retried run never resumes a poisoned checkpoint.
   const runShort = request.runId.replace(/^wf_/, "")
   const attemptSuffix = attempt > 1 ? `_r${attempt}` : ""
   const threadId = `${deps.parentThreadId}__wf_${runShort}_a${request.agentIndex}${attemptSuffix}`
 
-  // Subagent lifetime signal: parent abort or per-agent timeout, whichever first.
+  // Subagent lifetime signal: parent abort, plus optional per-agent timeout when
+  // CMB_WORKFLOW_AGENT_TIMEOUT_MS is configured.
   const controller = new AbortController()
   const onParentAbort = (): void => controller.abort()
   request.signal.addEventListener("abort", onParentAbort, { once: true })
-  const timeoutTimer = setTimeout(() => controller.abort(), timeoutMs)
-  timeoutTimer.unref?.()
+  const timeoutTimer =
+    timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(), timeoutMs)
+  timeoutTimer?.unref?.()
 
   const structured: { value: unknown; called: boolean } = { value: undefined, called: false }
 
@@ -207,7 +208,7 @@ async function runOnce(
 
     // raceWithAbort so a stream that never honours controller.signal (a dead async
     // iterator / a gateway that ignores the abort) can't hang the whole run — the
-    // per-agent timeout or a parent abort still unblocks us.
+    // parent abort or configured per-agent timeout still unblocks us.
     let snapshot = await raceWithAbort(
       (async () =>
         consumeValuesStream(
@@ -271,7 +272,7 @@ async function runOnce(
     throwIfAborted(controller.signal, request.signal, timeoutMs)
     throw error
   } finally {
-    clearTimeout(timeoutTimer)
+    if (timeoutTimer) clearTimeout(timeoutTimer)
     request.signal.removeEventListener("abort", onParentAbort)
     // Abort the per-subagent controller on every exit path (including normal
     // completion) so any child process the subagent left tied to this signal
@@ -554,11 +555,12 @@ function stringifyToolCalls(toolCalls: unknown): string {
 function throwIfAborted(
   agentSignal: AbortSignal,
   parentSignal: AbortSignal,
-  timeoutMs: number
+  timeoutMs: number | undefined
 ): void {
   if (parentSignal.aborted) throw new WorkflowAbortError()
   if (agentSignal.aborted) {
-    throw new Error(`subagent timed out after ${timeoutMs}ms`)
+    if (timeoutMs !== undefined) throw new Error(`subagent timed out after ${timeoutMs}ms`)
+    throw new WorkflowAbortError("Subagent aborted")
   }
 }
 
