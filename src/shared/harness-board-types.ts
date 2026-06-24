@@ -70,7 +70,15 @@ export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
   developerName?: string
   developerSapId?: string
   organizationName?: string
+  pullKnowledgeAvailable?: boolean
   boardCompatibility: HarnessBoardCompatibility
+}
+
+export interface HarnessProjectConstraintSyncResult {
+  adapterId: string
+  adapterName: string
+  message?: string
+  path?: string
 }
 
 export interface HarnessServiceUnitMapping {
@@ -79,10 +87,13 @@ export interface HarnessServiceUnitMapping {
   localRepoPath: string
 }
 
+export type HarnessSessionContextInjectionSource = "cmbdevclaw" | "plugin"
+
 export interface HarnessFeatureServiceUnitBinding {
   projectId: string
   featureId: string
   selectedServiceUnitMappings: HarnessServiceUnitMapping[]
+  sessionContextInjectionSource: HarnessSessionContextInjectionSource
 }
 
 export interface HarnessProjectCreatorMetadata {
@@ -166,6 +177,7 @@ export interface HarnessFeatureCreateInput {
   projectId: string
   feature: string
   selectedServiceUnits?: HarnessServiceUnitMapping[]
+  sessionContextInjectionSource?: HarnessSessionContextInjectionSource
   workflowTemplate?: string
   workflowNodes?: string[]
   workflowConfig?: HarnessDynamicWorkflowConfig

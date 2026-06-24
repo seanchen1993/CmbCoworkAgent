@@ -25,6 +25,7 @@ import type {
   HarnessFeatureStatus,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
+  HarnessProjectConstraintSyncResult,
   HarnessProjectCreatorMetadata,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
@@ -32,6 +33,7 @@ import type {
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
   HarnessRunNode,
+  HarnessSessionContextInjectionSource,
   HarnessServiceUnitMapping,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
@@ -72,6 +74,7 @@ type HarnessInspectCommandName =
   | "dynamicWorkflow"
   | "skipNode"
   | "sessionContext"
+  | "pullKnowledge"
 type HarnessInspectCommandConfigKey =
   | "project_status"
   | "feature_status"
@@ -80,6 +83,7 @@ type HarnessInspectCommandConfigKey =
   | "dynamic_workflow"
   | "skip_node"
   | "session_context"
+  | "pull_knowledge"
 type HarnessPlatformConfigKey =
   | HarnessInspectCommandConfigKey
   | "system_prompt_inject"
@@ -96,7 +100,8 @@ const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
   createFeature: "create_feature",
   dynamicWorkflow: "dynamic_workflow",
   skipNode: "skip_node",
-  sessionContext: "session_context"
+  sessionContext: "session_context",
+  pullKnowledge: "pull_knowledge"
 }
 
 interface ConfiguredHarnessInvocation {
@@ -131,7 +136,7 @@ interface HarnessCommandParseOptions {
 
 const HARNESS_BOARD_FILE = join(getOpenworkDir(), "harness-board-projects.json")
 const HARNESS_SERVICE_UNIT_MAPPING_FILE = join(getOpenworkDir(), "harness-serviceUnitId-mapping.json")
-const HARNESS_FEATURE_SERVICE_UNIT_BINDING_FILE = join(getOpenworkDir(), "harness-feature-service-units.json")
+const HARNESS_FEATURE_SERVICE_UNIT_BINDING_FILE = join(getOpenworkDir(), "harness-board-features.json")
 
 const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
 const HARNESS_ADAPTER_MAX_BUFFER = 10 * 1024 * 1024
@@ -164,6 +169,11 @@ const HARNESS_FEATURE_STATUSES = new Set<HarnessFeatureStatus>([
   "skipped",
   "archived",
   "unknown"
+])
+
+const HARNESS_SESSION_CONTEXT_INJECTION_SOURCES = new Set<HarnessSessionContextInjectionSource>([
+  "cmbdevclaw",
+  "plugin"
 ])
 
 const DEFAULT_NODE_STATUS_LABELS: Record<HarnessNodeStatus, string> = {
@@ -433,6 +443,14 @@ function findPluginByAdapterName(adapter: HarnessAdapterSnapshot): PluginMetadat
   return getPlugins().find((item) => item.name === adapterName) ?? null
 }
 
+function hasPullKnowledgeCommand(plugin: PluginMetadata): boolean {
+  try {
+    return readBoardConfigInspectCommand(plugin.path, "pullKnowledge") !== null
+  } catch {
+    return false
+  }
+}
+
 function pluginToHarnessAdapter(plugin: PluginMetadata): HarnessAdapterRegistryItem {
   const id = pluginAdapterId(plugin)
   const useScenario = normalizeText(plugin.useScenario)
@@ -443,6 +461,7 @@ function pluginToHarnessAdapter(plugin: PluginMetadata): HarnessAdapterRegistryI
     type: "plugin",
     description: normalizeText(plugin.description),
     ...(useScenario ? { useScenario } : {}),
+    pullKnowledgeAvailable: hasPullKnowledgeCommand(plugin),
     boardCompatibility: evaluateBoardPluginCompatibility(plugin, normalizeText(plugin.name) || id)
   }
 }
@@ -1749,6 +1768,17 @@ function normalizeServiceUnitMappingsForSave(value: unknown): HarnessServiceUnit
   return normalizeServiceUnitMappings(value, { assignMissingOrDuplicateMappingId: true })
 }
 
+function normalizeSessionContextInjectionSource(
+  value: unknown
+): HarnessSessionContextInjectionSource {
+  const source = normalizeText(value).trim()
+  return HARNESS_SESSION_CONTEXT_INJECTION_SOURCES.has(
+    source as HarnessSessionContextInjectionSource
+  )
+    ? (source as HarnessSessionContextInjectionSource)
+    : "cmbdevclaw"
+}
+
 function normalizeFeatureServiceUnitBinding(
   value: unknown
 ): HarnessFeatureServiceUnitBindingRecord | null {
@@ -1761,6 +1791,9 @@ function normalizeFeatureServiceUnitBinding(
     projectId,
     featureId,
     selectedServiceUnitMappings,
+    sessionContextInjectionSource: normalizeSessionContextInjectionSource(
+      value.sessionContextInjectionSource
+    ),
     createdAt: normalizeText(value.createdAt).trim() || formatGmt8Timestamp(),
     updatedAt: normalizeText(value.updatedAt).trim() || undefined
   }
@@ -1887,7 +1920,8 @@ function findFeatureServiceUnitBinding(
 function saveFeatureServiceUnitBinding(
   projectId: string,
   featureId: string,
-  selectedServiceUnitMappings: HarnessServiceUnitMapping[]
+  selectedServiceUnitMappings: HarnessServiceUnitMapping[],
+  sessionContextInjectionSource: HarnessSessionContextInjectionSource
 ): HarnessFeatureServiceUnitBindingRecord {
   const store = readFeatureServiceUnitBindingStore()
   const key = featureServiceUnitBindingKey(projectId, featureId)
@@ -1900,6 +1934,7 @@ function saveFeatureServiceUnitBinding(
     projectId,
     featureId,
     selectedServiceUnitMappings,
+    sessionContextInjectionSource,
     createdAt:
       existing?.createdAt && isGmt8Timestamp(existing.createdAt) ? existing.createdAt : now,
     updatedAt: now
@@ -2432,6 +2467,9 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
   const workspacePath = projectDirectoryPath(project)
   const workflowOptions = buildFeatureWorkflowCommandOptions(input)
   const selectedServiceUnits = resolveFeatureSelectedServiceUnits(input, project)
+  const sessionContextInjectionSource = normalizeSessionContextInjectionSource(
+    input.sessionContextInjectionSource
+  )
 
   if (!existsSync(workspacePath)) {
     throw new Error(projectDirectoryMissingMessage(project))
@@ -2457,9 +2495,12 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
     throw new Error(`创建特性失败：${raw}`)
   }
 
-  if (selectedServiceUnits.length > 0) {
-    saveFeatureServiceUnitBinding(project.projectId, feature, selectedServiceUnits)
-  }
+  saveFeatureServiceUnitBinding(
+    project.projectId,
+    feature,
+    selectedServiceUnits,
+    sessionContextInjectionSource
+  )
 
   return {
     projectId: project.projectId,
@@ -2589,6 +2630,71 @@ export function deleteHarnessProject(projectId: string): HarnessProjectMetadata 
   const [deleted] = store.projects.splice(index, 1)
   writeProjectStore(store)
   return deleted
+}
+
+export function syncHarnessProjectConstraints(adapterId: string): HarnessProjectConstraintSyncResult {
+  const normalizedAdapterId = normalizeText(adapterId).trim()
+  const plugin = getPlugins().find(
+    (item) => pluginHasBoardConfig(item) && pluginMatchesAdapterId(item, normalizedAdapterId)
+  )
+  if (!plugin) {
+    throw new Error("插件未安装或不支持项目模式")
+  }
+
+  const adapter = pluginToHarnessAdapter(plugin)
+  if (!adapter.boardCompatibility.compatible) {
+    throw new Error(adapter.boardCompatibility.message || adapter.boardCompatibility.label)
+  }
+
+  const configuredCommand = readBoardConfigInspectCommand(plugin.path, "pullKnowledge")
+  if (!configuredCommand) {
+    throw new Error(`插件未配置 inspectCommands.${process.platform}.pull_knowledge，请检查插件设置`)
+  }
+
+  const commandProject: HarnessProjectMetadata = {
+    projectId: "__project_constraints__",
+    name: adapter.name,
+    description: adapter.description,
+    projectCode: adapter.id,
+    projectFromLean: false,
+    projectDir: "project-constraints",
+    systemId: "",
+    systemName: "",
+    workspacePath: getOpenworkDir(),
+    "harness-adapter": pluginToHarnessAdapterSnapshot(plugin),
+    lifecycle: {
+      status: "active",
+      createAt: ""
+    }
+  }
+  const configured: ConfiguredHarnessInvocation = {
+    cwd: plugin.path,
+    invocation: parseInspectCommand(configuredCommand, commandProject, "pullKnowledge", plugin.path)
+  }
+
+  const stdoutBuffer = runHarnessInvocation(configured, harnessCommandLogOptions("pullKnowledge", adapter.name))
+  const raw = decodeAdapterBuffer(stdoutBuffer).trim()
+  let message = ""
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw) as unknown
+  } catch {
+    throw new Error("项目约束同步返回格式异常")
+  }
+  if (!isObject(parsed) || typeof parsed.ok !== "boolean") {
+    throw new Error("项目约束同步返回格式异常")
+  }
+  message = normalizeText(parsed.message).trim()
+  const outputPath = normalizeText(parsed.path).trim()
+  if (!parsed.ok) {
+    throw new Error(message || "项目约束同步失败")
+  }
+  return {
+    adapterId: adapter.id,
+    adapterName: adapter.name,
+    ...(message ? { message } : {}),
+    ...(outputPath ? { path: outputPath } : {})
+  }
 }
 
 export function getHarnessProjectDetail(projectId: string): HarnessProjectDetailViewModel {

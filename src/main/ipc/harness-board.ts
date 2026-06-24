@@ -14,6 +14,7 @@ import {
   listHarnessServiceUnitMappings,
   saveHarnessServiceUnitMappings,
   skipHarnessRunNode,
+  syncHarnessProjectConstraints,
   updateHarnessProjectMetadata
 } from "../harness-board/service"
 import {
@@ -29,6 +30,7 @@ import type {
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
   HarnessProjectCreateInput,
+  HarnessProjectConstraintSyncResult,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
@@ -64,6 +66,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     "harnessBoard:saveServiceUnitMappings",
     async (_event, mappings: HarnessServiceUnitMapping[]): Promise<HarnessServiceUnitMapping[]> => {
       return saveHarnessServiceUnitMappings(mappings)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:syncProjectConstraints",
+    async (_event, adapterId: string): Promise<HarnessProjectConstraintSyncResult> => {
+      return syncHarnessProjectConstraints(adapterId)
     }
   )
 

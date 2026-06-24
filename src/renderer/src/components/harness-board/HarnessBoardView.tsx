@@ -2467,6 +2467,7 @@ function FeatureCreateDialog({
   serviceUnitMappings,
   serviceUnitMappingsLoading,
   selectedServiceUnitIds,
+  pluginServiceUnitContextEnabled,
   creating,
   error,
   onOpenChange,
@@ -2474,6 +2475,8 @@ function FeatureCreateDialog({
   onWorkflowTemplateChange,
   onWorkflowNodeToggle,
   onServiceUnitToggle,
+  onPluginServiceUnitContextChange,
+  onOpenServiceUnitSettings,
   onSubmit
 }: {
   project: HarnessProjectListItem | null
@@ -2485,6 +2488,7 @@ function FeatureCreateDialog({
   serviceUnitMappings: HarnessServiceUnitMapping[]
   serviceUnitMappingsLoading: boolean
   selectedServiceUnitIds: Set<string>
+  pluginServiceUnitContextEnabled: boolean
   creating: boolean
   error: string | null
   onOpenChange: (open: boolean) => void
@@ -2492,6 +2496,8 @@ function FeatureCreateDialog({
   onWorkflowTemplateChange: (templateId: string) => void
   onWorkflowNodeToggle: (nodeId: string, checked: boolean) => void
   onServiceUnitToggle: (serviceUnitIdMapping: string, checked: boolean) => void
+  onPluginServiceUnitContextChange: (enabled: boolean) => void
+  onOpenServiceUnitSettings: () => void
   onSubmit: () => void
 }): React.JSX.Element {
   const featureNameError = getHarnessNameError("特性名称", featureName)
@@ -2555,24 +2561,36 @@ function FeatureCreateDialog({
     </div>
   ) : (
     <section className="grid gap-3 rounded-md border border-border bg-muted/30 p-3">
-      <div className="flex min-w-0 items-center justify-end gap-1.5">
-        <div className="text-xs text-muted-foreground">
-          已选择 {selectedServiceUnitCount} 个
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          className="h-auto min-w-0 px-0 py-0 text-xs"
+          disabled={creating}
+          onClick={onOpenServiceUnitSettings}
+        >
+          需要配置发布单元？
+        </Button>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <div className="text-xs text-muted-foreground">
+            已选择 {selectedServiceUnitCount} 个
+          </div>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label="发布单元能力说明"
+                className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Info className="size-3.5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="z-[70] max-w-80 text-xs leading-5">
+              插件可以为选中的发布单元自动下载知识库，并将对应代码文件夹路径作为会话工作区。
+            </TooltipContent>
+          </Tooltip>
         </div>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="发布单元能力说明"
-              className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <Info className="size-3.5" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="top" className="z-[70] max-w-80 text-xs leading-5">
-            插件可以为选中的发布单元自动下载知识库，并将对应代码文件夹路径作为会话工作区。
-          </TooltipContent>
-        </Tooltip>
       </div>
       {serviceUnitMappingsLoading ? (
         <div className="flex min-h-20 items-center justify-center text-sm text-muted-foreground">
@@ -2581,7 +2599,7 @@ function FeatureCreateDialog({
         </div>
       ) : selectableServiceUnitMappings.length === 0 ? (
         <div className="rounded-md border border-dashed border-border bg-background px-3 py-4 text-sm text-muted-foreground">
-          请先在项目列表-发布单元配置中添加发布单元
+          请先在项目列表-本地工程路径配置中添加发布单元
         </div>
       ) : (
         <div className="max-h-48 overflow-y-auto rounded-md border border-border bg-background px-3 py-2">
@@ -2627,6 +2645,33 @@ function FeatureCreateDialog({
           })}
         </div>
       )}
+      <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium text-foreground">
+            {pluginServiceUnitContextEnabled
+              ? "由插件注入 AGENTS.md 以及知识库"
+              : "由 CMBDevClaw 注入 AGENTS.md"}
+          </div>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={pluginServiceUnitContextEnabled}
+          aria-label="切换 AGENTS.md 和知识库注入方式"
+          className={cn(
+            "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            pluginServiceUnitContextEnabled ? "bg-primary" : "bg-muted-foreground/30"
+          )}
+          onClick={() => onPluginServiceUnitContextChange(!pluginServiceUnitContextEnabled)}
+        >
+          <span
+            className={cn(
+              "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+              pluginServiceUnitContextEnabled ? "translate-x-4" : "translate-x-0"
+            )}
+          />
+        </button>
+      </div>
     </section>
   )
 
@@ -2762,9 +2807,9 @@ function ProjectModeSettingsPanel({
     <section className="rounded-md border border-border bg-background shadow-sm">
       <div className="flex min-w-0 items-start justify-between gap-3 border-b border-border px-4 py-3">
         <div className="min-w-0">
-          <h2 className="text-sm font-semibold text-foreground">发布单元路径映射</h2>
+          <h2 className="text-sm font-semibold text-foreground">本地工程配置</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            维护发布单元在本机的代码库路径。插件将利用该配置自动同步发布单元对应的公共 AGENTS.md 以及知识库
+            配置要使用的本地工程路径以及对应的发布单元。插件将利用该配置拉取远端的发布单元系统约束
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -3887,6 +3932,100 @@ function EnterpriseProjectDetailSummary({
   )
 }
 
+function ProjectConstraintSyncPanel({
+  registry,
+  syncingAdapterIds,
+  syncedPaths,
+  onSync
+}: {
+  registry: HarnessAdapterRegistryItem[]
+  syncingAdapterIds: Set<string>
+  syncedPaths: Record<string, string>
+  onSync: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
+}): React.JSX.Element {
+  const adapters = registry.filter((adapter) => adapter.boardCompatibility.compatible)
+
+  return (
+    <section className="rounded-md border border-border bg-background shadow-sm">
+      <div className="border-b border-border px-4 py-3">
+        <h2 className="text-sm font-semibold text-foreground">项目约束同步</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          下载或更新已安装项目模式插件的项目约束。
+        </p>
+      </div>
+      <div className="space-y-3 p-4">
+        {adapters.length === 0 ? (
+          <div className="rounded-md border border-dashed border-border bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground">
+            暂无支持项目模式的插件。
+          </div>
+        ) : (
+          adapters.map((adapter) => {
+            const syncing = syncingAdapterIds.has(adapter.id)
+            const disabled = syncing || !adapter.pullKnowledgeAvailable
+            const syncedPath = syncedPaths[adapter.id]
+            return (
+              <div
+                key={adapter.id}
+                className="flex min-w-0 items-center justify-between gap-4 rounded-md border border-border bg-muted/20 px-4 py-3"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <AdapterOptionHeader adapter={adapter} />
+                    {adapter.useScenario && (
+                      <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                        {adapter.useScenario}
+                      </span>
+                    )}
+                  </div>
+                  <AdapterPublisherInfo adapter={adapter} className="mt-1" />
+                  {adapter.description && (
+                    <div
+                      className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground"
+                      title={adapter.description}
+                    >
+                      {adapter.description}
+                    </div>
+                  )}
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  {syncedPath && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      title={syncedPath}
+                      onClick={() =>
+                        void openPathInFileManager(syncedPath, "无法打开项目约束目录")
+                      }
+                    >
+                      <FolderOpen className="size-3.5" />
+                    </Button>
+                  )}
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="gap-2"
+                    disabled={disabled}
+                    title={
+                      adapter.pullKnowledgeAvailable
+                        ? "下载/更新项目约束"
+                        : "插件未配置 pull_knowledge"
+                    }
+                    onClick={() => void onSync(adapter)}
+                  >
+                    {syncing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                    下载/更新项目约束
+                  </Button>
+                </div>
+              </div>
+            )
+          })
+        )}
+      </div>
+    </section>
+  )
+}
+
 function ProjectDetailPage({
   project,
   detail,
@@ -4909,7 +5048,10 @@ export function HarnessBoardView({
   const [featureWorkflowTemplate, setFeatureWorkflowTemplate] = useState("")
   const [selectedWorkflowNodeIds, setSelectedWorkflowNodeIds] = useState<Set<string>>(new Set())
   const [selectedServiceUnitIds, setSelectedServiceUnitIds] = useState<Set<string>>(new Set())
+  const [pluginServiceUnitContextEnabled, setPluginServiceUnitContextEnabled] = useState(false)
   const [projectModeTab, setProjectModeTab] = useState("projects")
+  const [syncingProjectConstraintAdapterIds, setSyncingProjectConstraintAdapterIds] = useState<Set<string>>(new Set())
+  const [syncedProjectConstraintPaths, setSyncedProjectConstraintPaths] = useState<Record<string, string>>({})
   const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
   const [updatingPluginNames, setUpdatingPluginNames] = useState<Set<string>>(new Set())
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -5180,6 +5322,34 @@ export function HarnessBoardView({
       serviceUnitMappingsSaving
     ]
   )
+
+  const handleSyncProjectConstraints = async (
+    adapter: HarnessAdapterRegistryItem
+  ): Promise<void> => {
+    if (!adapter.pullKnowledgeAvailable) return
+    if (syncingProjectConstraintAdapterIds.has(adapter.id)) return
+
+    setSyncingProjectConstraintAdapterIds((current) => new Set(current).add(adapter.id))
+    try {
+      const result = await window.api.harnessBoard.syncProjectConstraints(adapter.id)
+      const syncedPath = result.path
+      if (syncedPath) {
+        setSyncedProjectConstraintPaths((current) => ({
+          ...current,
+          [adapter.id]: syncedPath
+        }))
+      }
+      toast.success(result.message || `已更新「${adapter.name}」项目约束`)
+    } catch (error) {
+      toast.error(cleanIpcError(error))
+    } finally {
+      setSyncingProjectConstraintAdapterIds((current) => {
+        const next = new Set(current)
+        next.delete(adapter.id)
+        return next
+      })
+    }
+  }
 
   const loadProjectDetail = useCallback(async (
     projectId: string,
@@ -5709,6 +5879,7 @@ export function HarnessBoardView({
     setFeatureWorkflowTemplate("")
     setSelectedWorkflowNodeIds(new Set())
     setSelectedServiceUnitIds(new Set())
+    setPluginServiceUnitContextEnabled(false)
     setFeatureWorkflowLoading(true)
 
     void window.api.harnessBoard
@@ -5745,10 +5916,20 @@ export function HarnessBoardView({
         setFeatureWorkflowTemplate("")
         setSelectedWorkflowNodeIds(new Set())
         setSelectedServiceUnitIds(new Set())
+        setPluginServiceUnitContextEnabled(false)
       }
     },
     [creatingFeatureProjectId]
   )
+
+  const handleOpenServiceUnitSettings = useCallback((): void => {
+    if (creatingFeatureProjectId) return
+    handleFeatureDialogOpenChange(false)
+    setSelectedFeature(null)
+    setSelectedProjectId(null)
+    setIsViewingSession(false)
+    setProjectModeTab("settings")
+  }, [creatingFeatureProjectId, handleFeatureDialogOpenChange])
 
   const handleWorkflowTemplateChange = useCallback((templateId: string): void => {
     setFeatureWorkflowTemplate(templateId)
@@ -5838,6 +6019,7 @@ export function HarnessBoardView({
       const result = await window.api.harnessBoard.createFeature({
         projectId: featureDialogProject.projectId,
         feature,
+        sessionContextInjectionSource: pluginServiceUnitContextEnabled ? "plugin" : "cmbdevclaw",
         ...(hasSelectedServiceUnits ? { selectedServiceUnits } : {}),
         ...workflowInput
       })
@@ -5865,6 +6047,7 @@ export function HarnessBoardView({
     featureWorkflowTemplate,
     selectedWorkflowNodeIds,
     selectedServiceUnitIds,
+    pluginServiceUnitContextEnabled,
     serviceUnitMappings,
     serviceUnitMappingsDirty,
     loadProjectDetail
@@ -6448,6 +6631,7 @@ export function HarnessBoardView({
           serviceUnitMappings={serviceUnitMappings}
           serviceUnitMappingsLoading={serviceUnitMappingsLoading}
           selectedServiceUnitIds={selectedServiceUnitIds}
+          pluginServiceUnitContextEnabled={pluginServiceUnitContextEnabled}
           creating={creatingFeatureProjectId !== null}
           error={featureError}
           onOpenChange={handleFeatureDialogOpenChange}
@@ -6455,6 +6639,8 @@ export function HarnessBoardView({
           onWorkflowTemplateChange={handleWorkflowTemplateChange}
           onWorkflowNodeToggle={handleWorkflowNodeToggle}
           onServiceUnitToggle={handleServiceUnitToggle}
+          onPluginServiceUnitContextChange={setPluginServiceUnitContextEnabled}
+          onOpenServiceUnitSettings={handleOpenServiceUnitSettings}
           onSubmit={() => void handleSubmitFeature()}
         />
         <ProjectEditDialog
@@ -6537,7 +6723,11 @@ export function HarnessBoardView({
                 </TabsTrigger>
                 <TabsTrigger value="settings" className="gap-2">
                   <Settings className="size-4" />
-                  发布单元配置
+                  本地工程路径配置
+                </TabsTrigger>
+                <TabsTrigger value="constraint-sync" className="gap-2">
+                  <RefreshCw className="size-4" />
+                  项目约束同步
                 </TabsTrigger>
               </TabsList>
               {projectModeTab === "projects" && (
@@ -6662,6 +6852,15 @@ export function HarnessBoardView({
                 onSave={() => void handleSaveServiceUnitMappings()}
               />
             </TabsContent>
+
+            <TabsContent value="constraint-sync" className="mt-0">
+              <ProjectConstraintSyncPanel
+                registry={adapterRegistry}
+                syncingAdapterIds={syncingProjectConstraintAdapterIds}
+                syncedPaths={syncedProjectConstraintPaths}
+                onSync={handleSyncProjectConstraints}
+              />
+            </TabsContent>
           </Tabs>
         </main>
       </ScrollArea>
@@ -6676,6 +6875,7 @@ export function HarnessBoardView({
         serviceUnitMappings={serviceUnitMappings}
         serviceUnitMappingsLoading={serviceUnitMappingsLoading}
         selectedServiceUnitIds={selectedServiceUnitIds}
+        pluginServiceUnitContextEnabled={pluginServiceUnitContextEnabled}
         creating={creatingFeatureProjectId !== null}
         error={featureError}
         onOpenChange={handleFeatureDialogOpenChange}
@@ -6683,6 +6883,8 @@ export function HarnessBoardView({
         onWorkflowTemplateChange={handleWorkflowTemplateChange}
         onWorkflowNodeToggle={handleWorkflowNodeToggle}
         onServiceUnitToggle={handleServiceUnitToggle}
+        onPluginServiceUnitContextChange={setPluginServiceUnitContextEnabled}
+        onOpenServiceUnitSettings={handleOpenServiceUnitSettings}
         onSubmit={() => void handleSubmitFeature()}
       />
       <ProjectFormDialog

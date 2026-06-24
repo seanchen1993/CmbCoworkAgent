@@ -52,6 +52,7 @@ import type {
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
   HarnessProjectCreateInput,
+  HarnessProjectConstraintSyncResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
   HarnessProjectDetailViewModel,
@@ -2783,6 +2784,11 @@ const api = {
         "harnessBoard:saveServiceUnitMappings",
         mappings
       ) as Promise<HarnessServiceUnitMapping[]>,
+    syncProjectConstraints: (adapterId: string): Promise<HarnessProjectConstraintSyncResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:syncProjectConstraints",
+        adapterId
+      ) as Promise<HarnessProjectConstraintSyncResult>,
     createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>
       ipcRenderer.invoke("harnessBoard:createProject", input) as Promise<HarnessProjectMetadata>,
     searchEnterpriseProjects: (
