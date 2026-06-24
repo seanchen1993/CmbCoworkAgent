@@ -35,7 +35,8 @@ import {
 } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
-import { marketApi } from "@/api/market"
+import { marketApi, type MarketItem } from "@/api/market"
+import { buildUploaderIdCandidates } from "@/lib/skill-data-service"
 import codeEfficiencyModel from "@/assets/code-efficiency-model.png"
 import {
   CodeAdoptionFunnel,
@@ -64,6 +65,7 @@ import type {
   DashboardProjectModeToolUsage,
   DashboardCodeStats
 } from "../use-dashboard"
+import { formatTopUserOrgName } from "../use-dashboard"
 
 const EMPTY_FUNNEL_DATA: CodeAdoptionFunnelData = {
   inclusiveEffectiveGeneratedLines: 0,
@@ -1393,6 +1395,46 @@ const DEV_MOCK_PLUGIN_MARKET_INFO: Record<string, PluginMarketInfo> = {
   }
 }
 
+/**
+ * 用 item.user_id（上传者 SAP id）到全量用户目录解析 {负责人, 部门}。
+ * 负责人/部门并不在插件列表响应里——应用市场与 Harness 看板都是靠 user_id 二次查
+ * queryAllUser 拿到的，这里复用同一口径（queryAllUser + buildUploaderIdCandidates）。
+ */
+async function resolvePluginUploaderProfiles(
+  items: MarketItem[]
+): Promise<Map<string, { userName: string; orgName: string }>> {
+  const result = new Map<string, { userName: string; orgName: string }>()
+  const rawUserIds = Array.from(
+    new Set(items.map((item) => item.user_id?.trim() || "").filter(Boolean))
+  )
+  if (rawUserIds.length === 0) return result
+  if (typeof window.api?.dashboard?.queryAllUser !== "function") return result
+  try {
+    const response = await window.api.dashboard.queryAllUser()
+    if (!response.success || !response.data) return result
+    const allUsers = response.data.filter((user) => user.sapId?.trim())
+    for (const rawUserId of rawUserIds) {
+      const lookupIds = buildUploaderIdCandidates(rawUserId)
+      const target = allUsers.find((user) =>
+        lookupIds.some((lookupId) => user.sapId.includes(lookupId))
+      )
+      if (!target) continue
+      result.set(rawUserId, {
+        userName: target.userName,
+        orgName: formatTopUserOrgName(
+          target.orgName || "",
+          target.upperOrgLv1 || "",
+          target.upperOrgLv0 || ""
+        )
+      })
+    }
+    return result
+  } catch (error) {
+    console.warn("[ProjectModePanel] Failed to resolve plugin uploader profiles:", error)
+    return result
+  }
+}
+
 /** 拉取一次市场插件信息，按插件名建立 name → {场景, 负责人, 部门} 映射。市场不可用时静默降级为空。 */
 function usePluginMarketInfo(): Map<string, PluginMarketInfo> {
   const [infoMap, setInfoMap] = useState<Map<string, PluginMarketInfo>>(new Map())
@@ -1403,23 +1445,27 @@ function usePluginMarketInfo(): Map<string, PluginMarketInfo> {
       setInfoMap(new Map(Object.entries(DEV_MOCK_PLUGIN_MARKET_INFO)))
       return
     }
-    void marketApi
-      .getPlugins({ allowMockOnError: false, silent: true })
-      .then((res) => {
-        if (cancelled || !res.success || !res.data) return
-        const next = new Map<string, PluginMarketInfo>()
-        for (const item of res.data) {
-          const name = item.name?.trim()
-          if (!name) continue
-          next.set(name, {
-            useScenario: item.category?.trim() || OTHER_ADAPTER_SCENARIO,
-            managerName: item.managerName?.trim() || "",
-            managerDepartment: item.managerDepartment?.trim() || ""
-          })
-        }
-        setInfoMap(next)
-      })
-      .catch(() => {})
+    void (async () => {
+      const res = await marketApi
+        .getPlugins({ allowMockOnError: false, silent: true })
+        .catch(() => null)
+      if (cancelled || !res?.success || !res.data) return
+      // 负责人/部门要靠 user_id 二次解析，场景（category）则直接来自列表响应。
+      const profiles = await resolvePluginUploaderProfiles(res.data)
+      if (cancelled) return
+      const next = new Map<string, PluginMarketInfo>()
+      for (const item of res.data) {
+        const name = item.name?.trim()
+        if (!name) continue
+        const profile = item.user_id ? profiles.get(item.user_id.trim()) : undefined
+        next.set(name, {
+          useScenario: item.category?.trim() || OTHER_ADAPTER_SCENARIO,
+          managerName: profile?.userName || "",
+          managerDepartment: profile?.orgName || ""
+        })
+      }
+      setInfoMap(next)
+    })()
     return () => {
       cancelled = true
     }
