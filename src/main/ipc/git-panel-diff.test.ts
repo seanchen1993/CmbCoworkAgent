@@ -134,7 +134,7 @@ describe("buildGitPanelState — lazy mode (includeDiffs:false)", () => {
     expect(tracked?.additions).toBeGreaterThan(0)
   })
 
-  it("keeps untracked directories collapsed in lightweight list mode", async () => {
+  it("expands untracked directories to file-level entries (not folder rows)", async () => {
     const localRepo = createRepo("gitpanel-untracked-dir-")
     try {
       mkdirSync(join(localRepo, "bulk"), { recursive: true })
@@ -149,10 +149,72 @@ describe("buildGitPanelState — lazy mode (includeDiffs:false)", () => {
         statusUntrackedMode: "normal"
       })
 
-      expect(state.files.map((f) => f.path)).toEqual(["bulk"])
-      expect(state.changedFiles).toEqual(["bulk"])
-      expect(state.files.map((f) => f.path)).not.toContain("bulk/a.txt")
+      // 未跟踪目录应展开到具体文件，而不是一个光秃秃的 `bulk` 文件夹条目。
+      expect(state.files.map((f) => f.path).sort()).toEqual(["bulk/a.txt", "bulk/b.txt"])
+      expect(state.files.map((f) => f.path)).not.toContain("bulk")
       expect(state.files[0]?.diffLoaded).toBe(false)
+    } finally {
+      rmSync(localRepo, { recursive: true, force: true })
+    }
+  })
+
+  it("excludes UNTRACKED noise dirs but keeps TRACKED changes under them", async () => {
+    const localRepo = createRepo("gitpanel-noise-dirs-")
+    try {
+      // 一个被刻意提交进仓库的 dist 文件：它的真实改动必须照常展示。
+      mkdirSync(join(localRepo, "dist"), { recursive: true })
+      writeFileSync(join(localRepo, "dist", "keep.js"), "v1\n")
+      gitIn(localRepo, ["add", "dist/keep.js"])
+      gitIn(localRepo, ["commit", "-q", "-m", "init"])
+      writeFileSync(join(localRepo, "dist", "keep.js"), "v2\n")
+
+      // 故意不写 .gitignore：未跟踪的 node_modules / dist 构建产物仍不应进入评审列表，
+      // 而用户真实的新建源码目录要展开到文件级。
+      mkdirSync(join(localRepo, "node_modules", "pkg"), { recursive: true })
+      writeFileSync(join(localRepo, "node_modules", "pkg", "index.js"), "module.exports={}\n")
+      writeFileSync(join(localRepo, "dist", "untracked-bundle.js"), "console.log(1)\n")
+      mkdirSync(join(localRepo, "src", "feature", "node_modules"), { recursive: true })
+      writeFileSync(join(localRepo, "src", "feature", "node_modules", "nested.js"), "x\n")
+      writeFileSync(join(localRepo, "src", "feature", "real.ts"), "export const a = 1\n")
+
+      const state = await buildGitPanelState(localRepo, [], {
+        silent: true,
+        includeAllWhenNoTracked: true,
+        includeDiffs: false,
+        includeChangedFiles: true
+      })
+
+      const paths = state.files.map((f) => f.path)
+      // 已跟踪的 dist 改动必须保留（核心 P1 回归点）。
+      expect(paths).toContain("dist/keep.js")
+      // 用户真实新建源码文件要展开到文件级。
+      expect(paths).toContain("src/feature/real.ts")
+      // 顶层/嵌套的未跟踪 node_modules、以及未跟踪的 dist 产物都必须被排除。
+      expect(paths.some((p) => p.includes("node_modules"))).toBe(false)
+      expect(paths).not.toContain("dist/untracked-bundle.js")
+    } finally {
+      rmSync(localRepo, { recursive: true, force: true })
+    }
+  })
+
+  it("preserves leading spaces in untracked file names while filtering noise dirs", async () => {
+    const localRepo = createRepo("gitpanel-leading-space-")
+    try {
+      writeFileSync(join(localRepo, " leading.ts"), "export const spaced = true\n")
+      mkdirSync(join(localRepo, "node_modules", "pkg"), { recursive: true })
+      writeFileSync(join(localRepo, "node_modules", "pkg", "index.js"), "module.exports={}\n")
+
+      const state = await buildGitPanelState(localRepo, [], {
+        silent: true,
+        includeAllWhenNoTracked: true,
+        includeDiffs: false,
+        includeChangedFiles: true
+      })
+
+      const paths = state.files.map((f) => f.path)
+      expect(paths).toContain(" leading.ts")
+      expect(paths).not.toContain("leading.ts")
+      expect(paths.some((p) => p.includes("node_modules"))).toBe(false)
     } finally {
       rmSync(localRepo, { recursive: true, force: true })
     }
