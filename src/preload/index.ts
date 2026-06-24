@@ -2770,6 +2770,21 @@ const api = {
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:commitDetails", range, options),
+    nonGitAdoptionReports: (
+      range: { from: string; to: string },
+      options?: {
+        page?: number
+        pageSize?: number
+        upperOrgLv1?: string | null
+        userKeyword?: string | null
+        orgLv1List?: string[]
+        projectMode?: boolean
+        projectId?: string | null
+        featureSlug?: string | null
+        usedSkillsOnly?: boolean
+      }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:nonGitAdoptionReports", range, options),
     commitAdoptionEvents: (
       commitSha: string
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>

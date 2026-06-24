@@ -221,6 +221,60 @@ interface DashboardCommitDetailsOptions {
   orgLv1List?: string[]
 }
 
+interface DashboardNonGitAdoptionReportsOptions {
+  page?: number
+  pageSize?: number
+  upperOrgLv1?: string | null
+  userKeyword?: string | null
+  orgLv1List?: string[]
+  projectMode?: boolean
+  projectId?: string | null
+  featureSlug?: string | null
+  usedSkillsOnly?: boolean
+}
+
+interface DashboardNonGitAdoptionReportItem {
+  eventId: string
+  eventTime: string
+  generatedAt: string
+  pushedAt?: string
+  measuredAt?: string
+  userName: string
+  sapId?: string
+  ystId?: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  userIp?: string
+  source?: string
+  harnessProjectId?: string
+  harnessFeatureSlug?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  genEventId?: string
+  threadId?: string
+  threadIds: string[]
+  fileHint?: string
+  tool?: string
+  language?: string
+  modelName?: string
+  measureSource?: string
+  verdict?: string
+  pushed: boolean
+  usedSkills: string[]
+  generatedLineCount: number
+  effectiveGeneratedLineCount: number
+  adoptedLineCount: number
+  adoptionRate: number | null
+}
+
+interface DashboardNonGitAdoptionReportsData {
+  total: number
+  page: number
+  pageSize: number
+  items: DashboardNonGitAdoptionReportItem[]
+}
+
 interface DashboardCommitAdoptionPair {
   genEventId: string
   file: string | null
@@ -1971,6 +2025,10 @@ interface CustomAPI {
       }
       error?: string
     }>
+    nonGitAdoptionReports: (
+      range: { from: string; to: string },
+      options?: DashboardNonGitAdoptionReportsOptions
+    ) => Promise<{ success: boolean; data?: DashboardNonGitAdoptionReportsData; error?: string }>
     commitAdoptionEvents: (
       commitSha: string
     ) => Promise<{ success: boolean; data?: DashboardCommitAdoptionEvents; error?: string }>

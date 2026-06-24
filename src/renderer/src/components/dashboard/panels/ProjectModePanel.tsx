@@ -1849,7 +1849,7 @@ export function ProjectModePanel({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value={CODE_SOURCE_ALL}>全部来源</SelectItem>
-                  <SelectItem value={CODE_SOURCE_NATIVE}>原生（DevClaw）</SelectItem>
+                  <SelectItem value={CODE_SOURCE_NATIVE}>Git仓库采纳</SelectItem>
                   {availableSources.map((s) => (
                     <SelectItem key={s} value={s}>
                       {s}

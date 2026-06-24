@@ -225,6 +225,48 @@ interface DashboardCommitDetail {
   codeAdoptionRate: number | null
 }
 
+interface DashboardNonGitAdoptionReportItem {
+  eventId: string
+  eventTime: string
+  generatedAt: string
+  pushedAt?: string
+  measuredAt?: string
+  userName: string
+  sapId?: string
+  ystId?: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  userIp?: string
+  source?: string
+  harnessProjectId?: string
+  harnessFeatureSlug?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  genEventId?: string
+  threadId?: string
+  threadIds: string[]
+  fileHint?: string
+  tool?: string
+  language?: string
+  modelName?: string
+  measureSource?: string
+  verdict?: string
+  pushed: boolean
+  usedSkills: string[]
+  generatedLineCount: number
+  effectiveGeneratedLineCount: number
+  adoptedLineCount: number
+  adoptionRate: number | null
+}
+
+interface DashboardNonGitAdoptionReportsData {
+  total: number
+  page: number
+  pageSize: number
+  items: DashboardNonGitAdoptionReportItem[]
+}
+
 interface CommitAdoptionSummary {
   usedSkills: string[]
   generatedLines: number
@@ -639,6 +681,18 @@ interface CommitDetailsOptions {
   userKeyword?: string | null
   // 全局「室筛选」（多选 LV1，含「未归类」哨兵），与弹窗内部门搜索 AND 叠加。
   orgLv1List?: string[]
+}
+
+interface NonGitAdoptionReportsOptions {
+  page?: number
+  pageSize?: number
+  upperOrgLv1?: string | null
+  userKeyword?: string | null
+  orgLv1List?: string[]
+  projectMode?: boolean
+  projectId?: string | null
+  featureSlug?: string | null
+  usedSkillsOnly?: boolean
 }
 
 interface DashboardAccessContext {
@@ -1215,6 +1269,22 @@ function normalizeCommitDetailsOptions(
     upperOrgLv1: normalizeUpperOrgLv1Option(value?.upperOrgLv1),
     userKeyword: normalizeCommitUserKeyword(value?.userKeyword),
     orgLv1List: normalizeUpperOrgLv1List(value?.orgLv1List)
+  }
+}
+
+function normalizeNonGitAdoptionReportsOptions(
+  value?: NonGitAdoptionReportsOptions
+): Required<NonGitAdoptionReportsOptions> {
+  return {
+    page: clampLimit(value?.page, 1, 10_000),
+    pageSize: clampLimit(value?.pageSize, 20, 100),
+    upperOrgLv1: normalizeUpperOrgLv1Option(value?.upperOrgLv1),
+    userKeyword: normalizeCommitUserKeyword(value?.userKeyword),
+    orgLv1List: normalizeUpperOrgLv1List(value?.orgLv1List),
+    projectMode: value?.projectMode === true,
+    projectId: typeof value?.projectId === "string" ? value.projectId.trim() : null,
+    featureSlug: typeof value?.featureSlug === "string" ? value.featureSlug.trim() : null,
+    usedSkillsOnly: value?.usedSkillsOnly === true
   }
 }
 
@@ -5757,6 +5827,222 @@ async function fetchCommitDetails(
   }
 }
 
+/** `_source` fields needed to render a 非 Git 仓库上报 row. */
+const NON_GIT_ADOPTION_REPORT_SOURCE_INCLUDES = [
+  "eventId",
+  "eventTime",
+  "eventName",
+  "userName",
+  "userIp",
+  "sapId",
+  "ystId",
+  "orgName",
+  "upperOrgLv0",
+  "upperOrgLv1",
+  "properties.source",
+  "properties.genEventId",
+  "properties.generatedAt",
+  "properties.measuredAt",
+  "properties.pushedAt",
+  "properties.pushed",
+  "properties.verdict",
+  "properties.measureSource",
+  "properties.generatedLineCount",
+  "properties.effectiveGeneratedLineCount",
+  "properties.adoptedLineCount",
+  "properties.threadId",
+  "properties.usedSkills",
+  "properties.modelName",
+  "properties.harnessProjectId",
+  "properties.harnessFeatureSlug",
+  "properties.harnessAdapterName",
+  "properties.harnessAdapterVersion"
+]
+
+function buildMissingCommitShaFilter(): Record<string, unknown> {
+  return {
+    bool: {
+      should: [
+        { bool: { must_not: [{ exists: { field: "properties.commitSha" } }] } },
+        { term: { "properties.commitSha": "" } }
+      ],
+      minimum_should_match: 1
+    }
+  }
+}
+
+function buildExternalNonGitReportFilter(): Record<string, unknown> {
+  return {
+    bool: {
+      should: [
+        { exists: { field: "properties.source" } },
+        { term: { "properties.measureSource": "external" } }
+      ],
+      minimum_should_match: 1
+    }
+  }
+}
+
+async function fetchCodeGenMetadataForNonGitReports(
+  genEventIds: string[]
+): Promise<Map<string, Record<string, unknown>>> {
+  const ids = normalizeSkillList(genEventIds).slice(0, GEN_LOOKUP_BATCH)
+  const result = new Map<string, Record<string, unknown>>()
+  if (ids.length === 0) return result
+
+  try {
+    const raw = (await esQuery(getEsIndex("event"), {
+      track_total_hits: false,
+      size: ids.length,
+      query: {
+        bool: {
+          filter: [{ term: { eventName: "code_gen" } }, { terms: { "properties.eventId": ids } }]
+        }
+      },
+      _source: {
+        includes: [
+          "properties.eventId",
+          "properties.relativeHint",
+          "properties.tool",
+          "properties.language",
+          "properties.modelName",
+          "properties.threadId"
+        ]
+      }
+    })) as EsSearchResponse
+
+    for (const hit of raw.hits?.hits ?? []) {
+      const props = asRecord(asRecord(hit._source).properties)
+      const id = asString(props.eventId)
+      if (id) result.set(id, props)
+    }
+  } catch (e) {
+    console.warn("[Dashboard] nonGitAdoptionReports gen lookup failed:", e)
+  }
+
+  return result
+}
+
+function normalizeNonGitAdoptionReport(
+  hit: EsSearchHit,
+  genById: Map<string, Record<string, unknown>>
+): DashboardNonGitAdoptionReportItem {
+  const source = hit._source ?? {}
+  const properties = asRecord(source.properties)
+  const genEventId = asOptionalString(properties.genEventId)
+  const gen = genEventId ? genById.get(genEventId) : undefined
+  const generatedAt = asString(properties.generatedAt, asString(source.eventTime))
+  const threadId =
+    (gen ? asOptionalString(gen.threadId) : undefined) ?? asOptionalString(properties.threadId)
+  const generatedLineCount = asNumber(properties.generatedLineCount)
+  const effectiveGeneratedLineCount = asNumber(properties.effectiveGeneratedLineCount)
+  const adoptedLineCount = asNumber(properties.adoptedLineCount)
+
+  return {
+    eventId: asString(source.eventId, hit._id ?? ""),
+    eventTime: asString(source.eventTime, generatedAt),
+    generatedAt,
+    pushedAt: asOptionalString(properties.pushedAt),
+    measuredAt: asOptionalString(properties.measuredAt),
+    userName: asString(source.userName, "unknown"),
+    sapId: asOptionalString(source.sapId),
+    ystId: asOptionalString(source.ystId),
+    orgName: asOptionalString(source.orgName),
+    upperOrgLv0: asOptionalString(source.upperOrgLv0),
+    upperOrgLv1: asOptionalString(source.upperOrgLv1),
+    userIp: asOptionalString(source.userIp),
+    source: asOptionalString(properties.source),
+    harnessProjectId: asOptionalString(properties.harnessProjectId),
+    harnessFeatureSlug: asOptionalString(properties.harnessFeatureSlug),
+    harnessAdapterName: asOptionalString(properties.harnessAdapterName),
+    harnessAdapterVersion: asOptionalString(properties.harnessAdapterVersion),
+    genEventId,
+    threadId,
+    threadIds: threadId ? [threadId] : [],
+    fileHint: gen ? asOptionalString(gen.relativeHint) : undefined,
+    tool: gen ? asOptionalString(gen.tool) : undefined,
+    language: gen ? asOptionalString(gen.language) : undefined,
+    modelName:
+      asOptionalString(properties.modelName) ?? (gen ? asOptionalString(gen.modelName) : undefined),
+    measureSource: asOptionalString(properties.measureSource),
+    verdict: asOptionalString(properties.verdict),
+    pushed: asBoolean(properties.pushed),
+    usedSkills: normalizeSkillList(asStringArray(properties.usedSkills)),
+    generatedLineCount,
+    effectiveGeneratedLineCount,
+    adoptedLineCount,
+    adoptionRate:
+      effectiveGeneratedLineCount > 0 ? adoptedLineCount / effectiveGeneratedLineCount : null
+  }
+}
+
+async function fetchNonGitAdoptionReports(
+  range: TimeRange,
+  options?: NonGitAdoptionReportsOptions
+): Promise<DashboardNonGitAdoptionReportsData> {
+  const opts = normalizeNonGitAdoptionReportsOptions(options)
+  const access = opts.projectMode ? requireDashboardProjectModeAccess() : requireDashboardAccess()
+  const filters: Record<string, unknown>[] = [
+    { term: { eventName: "code_adopt" } },
+    { exists: { field: "properties.adoptedLineCount" } },
+    { exists: { field: "properties.generatedLineCount" } },
+    { exists: { field: "properties.effectiveGeneratedLineCount" } },
+    timeRangeFilter("properties.generatedAt", range),
+    buildMissingCommitShaFilter(),
+    buildExternalNonGitReportFilter()
+  ]
+
+  if (opts.projectMode) {
+    appendOptionalFilter(
+      filters,
+      buildProjectModeOrgFilter({ upperOrgLv1: opts.orgLv1List }, access)
+    )
+    if (opts.projectId) {
+      filters.push({ term: { "properties.harnessProjectId": opts.projectId } })
+    } else {
+      filters.push({ exists: { field: "properties.harnessProjectId" } })
+    }
+    if (opts.featureSlug) {
+      filters.push({ term: { "properties.harnessFeatureSlug": opts.featureSlug } })
+    }
+  } else {
+    appendOptionalFilter(filters, buildUpperOrgLv1ListFilter(opts.orgLv1List))
+    if (opts.projectId) filters.push({ term: { "properties.harnessProjectId": opts.projectId } })
+    if (opts.featureSlug) {
+      filters.push({ term: { "properties.harnessFeatureSlug": opts.featureSlug } })
+    }
+  }
+
+  if (opts.usedSkillsOnly) filters.push({ exists: { field: "properties.usedSkills" } })
+  if (opts.upperOrgLv1 !== null) filters.push(buildOrgLevelMatchFilter(opts.upperOrgLv1))
+  if (opts.userKeyword !== null) filters.push(buildCommitUserMatchFilter(opts.userKeyword))
+
+  const raw = (await esQuery(getEsIndex("event"), {
+    track_total_hits: true,
+    from: (opts.page - 1) * opts.pageSize,
+    size: opts.pageSize,
+    sort: [
+      { "properties.generatedAt": { order: "desc", missing: "_last" } },
+      { eventTime: { order: "desc", missing: "_last" } }
+    ],
+    query: { bool: { filter: filters } },
+    _source: { includes: NON_GIT_ADOPTION_REPORT_SOURCE_INCLUDES }
+  })) as EsSearchResponse
+  const hits = raw.hits?.hits ?? []
+  const genById = await fetchCodeGenMetadataForNonGitReports(
+    hits
+      .map((hit) => asOptionalString(asRecord(asRecord(hit._source).properties).genEventId) ?? "")
+      .filter(Boolean)
+  )
+
+  return {
+    total: getTotalHits(raw, hits.length),
+    page: opts.page,
+    pageSize: opts.pageSize,
+    items: hits.map((hit) => normalizeNonGitAdoptionReport(hit, genById))
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // Dev mock data
 // ─────────────────────────────────────────────────────────
@@ -8215,6 +8501,93 @@ function commitDetailMatchesUserKeyword(
   )
 }
 
+function makeMockNonGitAdoptionReports(
+  range: TimeRange,
+  options?: NonGitAdoptionReportsOptions
+): DashboardNonGitAdoptionReportsData {
+  const opts = normalizeNonGitAdoptionReportsOptions(options)
+  const from = new Date(range.from)
+  const to = new Date(range.to)
+  const spanMs = Math.max(60_000, to.getTime() - from.getTime())
+  const allItems = Array.from({ length: 72 }, (_, index): DashboardNonGitAdoptionReportItem => {
+    const generatedAt = new Date(to.getTime() - Math.min(spanMs - 1, index * 58 * 60 * 1000))
+    const pushedAt = new Date(generatedAt.getTime() + (2 + (index % 10)) * 60 * 60 * 1000)
+    const generatedLineCount = 24 + (index % 11) * 4
+    const effectiveGeneratedLineCount = generatedLineCount
+    const adoptedLineCount = Math.max(0, generatedLineCount - 3 - (index % 7))
+    const source = index % 2 === 0 ? "tag-platform" : "data-platform"
+    const projectId = opts.projectId || `project-${(index % 3) + 1}`
+    const featureSlug = opts.featureSlug || `feature-${(index % 4) + 1}`
+    const threadId = `mock-external-thread-${(index % 6) + 1}`
+    return {
+      eventId: `mock-non-git-adopt-${index + 1}`,
+      eventTime: pushedAt.toISOString(),
+      generatedAt: generatedAt.toISOString(),
+      pushedAt: pushedAt.toISOString(),
+      measuredAt: pushedAt.toISOString(),
+      userName: ["张三", "李四", "王五", "赵六"][index % 4],
+      sapId: `100200${String(index + 1).padStart(2, "0")}`,
+      ystId: `3842${String(80 + index).padStart(2, "0")}`,
+      orgName: ["标签开发部", "数据开发部", "风险平台部"][index % 3],
+      upperOrgLv1: ["信息研发部", "零售金融部", "风险平台部"][index % 3],
+      upperOrgLv0: ["标签组", "数据应用组", "风控研发组"][index % 3],
+      userIp: `10.2.0.${20 + index}`,
+      source,
+      harnessProjectId: projectId,
+      harnessFeatureSlug: featureSlug,
+      harnessAdapterName: index % 2 === 0 ? "tag-codegen" : "data-codegen",
+      harnessAdapterVersion: `1.${index % 4}.0`,
+      genEventId: `mock-non-git-gen-${index + 1}`,
+      threadId,
+      threadIds: [threadId],
+      fileHint: index % 2 === 0 ? "TagRule.java" : "MetricJob.sql",
+      tool: "external_reporter",
+      language: index % 2 === 0 ? "java" : "sql",
+      modelName: "external-codegen",
+      measureSource: "external",
+      verdict: "committed",
+      pushed: true,
+      usedSkills: index % 2 === 0 ? ["标签开发-v1.0.0"] : ["数据开发-v1.0.0", "接口设计-v1.0.0"],
+      generatedLineCount,
+      effectiveGeneratedLineCount,
+      adoptedLineCount,
+      adoptionRate: adoptedLineCount / effectiveGeneratedLineCount
+    }
+  })
+  const filtered = allItems.filter((item) => {
+    if (opts.projectMode && !item.harnessProjectId) return false
+    if (opts.projectId && item.harnessProjectId !== opts.projectId) return false
+    if (opts.featureSlug && item.harnessFeatureSlug !== opts.featureSlug) return false
+    if (opts.usedSkillsOnly && item.usedSkills.length === 0) return false
+    if (opts.upperOrgLv1 !== null) {
+      const needle = opts.upperOrgLv1.toLowerCase()
+      const matched = [item.upperOrgLv1, item.upperOrgLv0].some((value) =>
+        String(value || "")
+          .toLowerCase()
+          .includes(needle)
+      )
+      if (!matched) return false
+    }
+    if (opts.userKeyword !== null) {
+      const needle = opts.userKeyword.toLowerCase()
+      const matched = [item.userName, item.sapId, item.ystId].some((value) =>
+        String(value || "")
+          .toLowerCase()
+          .includes(needle)
+      )
+      if (!matched) return false
+    }
+    return true
+  })
+  const start = (opts.page - 1) * opts.pageSize
+  return {
+    total: filtered.length,
+    page: opts.page,
+    pageSize: opts.pageSize,
+    items: filtered.slice(start, start + opts.pageSize)
+  }
+}
+
 /** DEV mock for one feature's Commit 明细: a deterministic slice of the platform commit mock. */
 function makeMockProjectModeFeatureCommits(
   projectId: string,
@@ -9817,7 +10190,7 @@ type ProjectModeCodeStatsResult = {
 }
 
 /**
- * source 下拉的「原生（DevClaw）」哨兵：选它表示只看不带 `properties.source` 的事件
+ * source 下拉的「Git仓库采纳」哨兵：选它表示只看不带 `properties.source` 的事件
  * （我方原生 code_gen/code_adopt）。必须与渲染层常量一致；真实外部来源不会取此字面量。
  */
 const NATIVE_CODE_SOURCE = "__native__"
@@ -10962,6 +11335,20 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchCommitDetails(range, options) }
       } catch (e) {
         console.error("[Dashboard] commitDetails error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:nonGitAdoptionReports",
+    async (_, range: TimeRange, options?: NonGitAdoptionReportsOptions) => {
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockNonGitAdoptionReports(range, options) }
+      try {
+        return { success: true, data: await fetchNonGitAdoptionReports(range, options) }
+      } catch (e) {
+        console.error("[Dashboard] nonGitAdoptionReports error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
