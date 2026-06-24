@@ -1881,7 +1881,12 @@ async function fetchCommitAdoptionEvents(commitSha: string): Promise<CommitAdopt
             "properties.language",
             "properties.usedSkills",
             "properties.modelName",
-            "properties.createdAt"
+            "properties.createdAt",
+            // threadId is sourced from the paired gen (see pair assembly). A
+            // code_adopt's threadId is just a copy of its gen's, so reading it
+            // from gen lets producers (e.g. external reporters) carry it on
+            // code_gen only. Falls back to the adopt row for unpaired gens.
+            "properties.threadId"
           ]
         }
       }
@@ -1934,7 +1939,13 @@ async function fetchCommitAdoptionEvents(commitSha: string): Promise<CommitAdopt
       measureSource: asOptionalString(adopt.measureSource) ?? null,
       pushed: adopt.pushed === true,
       measuredAt: asOptionalString(adopt.measuredAt) ?? null,
-      threadId: asOptionalString(adopt.threadId) ?? null
+      // Prefer the paired gen's threadId (it is the source of truth — adopt
+      // merely copies it); fall back to the adopt row when there is no paired
+      // gen (e.g. the "无配对 gen 事件" row) so its 会话 still renders.
+      threadId:
+        (gen ? asOptionalString(gen.threadId) : undefined) ??
+        asOptionalString(adopt.threadId) ??
+        null
     }
   })
 
