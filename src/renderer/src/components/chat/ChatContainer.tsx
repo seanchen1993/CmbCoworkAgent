@@ -1070,6 +1070,7 @@ interface ChatContainerProps {
   hideWelcomeSkillTabs?: boolean
   readOnlyReason?: string | null
   onOpenGitPanel?: () => void
+  onDismissGitChangeNotice?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
   onHarnessSessionCreated?: (threadId: string) => void
 }
@@ -1545,6 +1546,7 @@ export function ChatContainer({
   hideWelcomeSkillTabs = false,
   readOnlyReason = null,
   onOpenGitPanel,
+  onDismissGitChangeNotice,
   onThreadGitStatusChange,
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
@@ -5421,14 +5423,26 @@ export function ChatContainer({
                     <AlertCircle className="size-3.5 shrink-0 text-status-warning" />
                     <span className="truncate">检测到文件变更，可打开 Git 面板查看。</span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={onOpenGitPanel}
-                    disabled={!onOpenGitPanel}
-                    className="shrink-0 rounded-md bg-status-warning px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-status-warning/90 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    打开
-                  </button>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={onOpenGitPanel}
+                      disabled={!onOpenGitPanel}
+                      className="rounded-md bg-status-warning px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-status-warning/90 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      打开
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onDismissGitChangeNotice}
+                      disabled={!onDismissGitChangeNotice}
+                      className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-status-warning/15 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                      aria-label="关闭文件变更提示"
+                      title="关闭"
+                    >
+                      <X className="size-3.5" />
+                    </button>
+                  </div>
                 </div>
               )}
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">

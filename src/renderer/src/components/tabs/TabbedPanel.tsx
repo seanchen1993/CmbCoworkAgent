@@ -14,6 +14,7 @@ interface TabbedPanelProps {
   hideWelcomeSkillTabs?: boolean
   readOnlyReason?: string | null
   onRequestOpenGitPanel?: () => void
+  onDismissGitChangeNotice?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
   onHarnessSessionCreated?: (threadId: string) => void
 }
@@ -26,6 +27,7 @@ export function TabbedPanel({
   hideWelcomeSkillTabs = false,
   readOnlyReason = null,
   onRequestOpenGitPanel,
+  onDismissGitChangeNotice,
   onThreadGitStatusChange,
   onHarnessSessionCreated
 }: TabbedPanelProps): React.JSX.Element {
@@ -68,6 +70,7 @@ export function TabbedPanel({
             hideWelcomeSkillTabs={hideWelcomeSkillTabs}
             readOnlyReason={readOnlyReason}
             onOpenGitPanel={onRequestOpenGitPanel}
+            onDismissGitChangeNotice={onDismissGitChangeNotice}
             onThreadGitStatusChange={onThreadGitStatusChange}
             onHarnessSessionCreated={onHarnessSessionCreated}
           />
