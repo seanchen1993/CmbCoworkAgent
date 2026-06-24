@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type JSX } from "react"
+import { memo, useEffect, useMemo, useState, type JSX } from "react"
 import {
   AlertTriangle,
   Check,
@@ -230,7 +230,9 @@ function ElapsedClock({ startedAtMs }: { startedAtMs: number }): JSX.Element {
   return <>{` · 已运行 ${formatDuration(Math.max(0, now - startedAtMs))}`}</>
 }
 
-export function WorkflowRunPanel({ threadId, run }: WorkflowRunPanelProps): JSX.Element {
+export const WorkflowRunPanel = memo(WorkflowRunPanelImpl)
+
+function WorkflowRunPanelImpl({ threadId, run }: WorkflowRunPanelProps): JSX.Element {
   const badge = statusBadge(run)
   // Recompute the phase grouping only when the run object changes (a new
   // progress event), not on unrelated re-renders. `run` is replaced wholesale by
@@ -395,7 +397,9 @@ export function WorkflowRunPanel({ threadId, run }: WorkflowRunPanelProps): JSX.
  * WorkflowRunsDialog entry lives inside WorkflowRunPanel, so once the finished panel
  * is gone the user can't reach past runs even though they're still on disk. (#4)
  */
-export function WorkflowHistoryButton({ threadId }: { threadId: string }): JSX.Element {
+export const WorkflowHistoryButton = memo(WorkflowHistoryButtonImpl)
+
+function WorkflowHistoryButtonImpl({ threadId }: { threadId: string }): JSX.Element {
   const [historyOpen, setHistoryOpen] = useState(false)
   return (
     <div className="flex justify-end">

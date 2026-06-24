@@ -82,6 +82,7 @@ import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
 import type {
   GoalUiState,
+  HITLRequest,
   Message,
   SkillMetadata,
   Thread,
@@ -1539,6 +1540,142 @@ function ChatErrorCard({
   )
 }
 
+type ChatApprovalDecision = "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
+
+interface ChatToolResultInfo {
+  content: string | unknown
+  is_error?: boolean
+}
+
+interface ChatMessageFlags {
+  showAssistantMeta: boolean[]
+  hasUserAfterHead: boolean[]
+}
+
+interface ChatMessageListProps {
+  messages: Message[]
+  perMessageFlags: ChatMessageFlags
+  hookLoggingEnabled: boolean
+  hookLogBucketByTurnId: Map<string, HookLogBucket>
+  detachedHookLogBuckets: HookLogBucket[]
+  contentMessageRefs: React.RefObject<Map<string, HTMLDivElement>>
+  setMessageRef: (
+    messageId: string,
+    role: Message["role"]
+  ) => (node: HTMLDivElement | null) => void
+  isLoading: boolean
+  toolResults: Map<string, ChatToolResultInfo>
+  toolCallStates: Map<string, ToolCallState>
+  pendingApproval: HITLRequest | null
+  autoApproveGitPush: boolean
+  onApprovalDecision: (decision: ChatApprovalDecision) => void
+  onEditUserMessage: (message: Message) => void
+  onSetGoalFromMessage: (text: string) => void
+  onOpenHookLogBucket: (turnId: string) => void
+  threadId: string
+  assistantDurationMsById: Map<string, number>
+  userSendTimeLabelById: Map<string, string>
+}
+
+const ChatMessageList = React.memo(function ChatMessageList({
+  messages,
+  perMessageFlags,
+  hookLoggingEnabled,
+  hookLogBucketByTurnId,
+  detachedHookLogBuckets,
+  contentMessageRefs,
+  setMessageRef,
+  isLoading,
+  toolResults,
+  toolCallStates,
+  pendingApproval,
+  autoApproveGitPush,
+  onApprovalDecision,
+  onEditUserMessage,
+  onSetGoalFromMessage,
+  onOpenHookLogBucket,
+  threadId,
+  assistantDurationMsById,
+  userSendTimeLabelById
+}: ChatMessageListProps): React.JSX.Element {
+  return (
+    <>
+      {messages.map((message, index) => {
+        const previousMessage = index > 0 ? messages[index - 1] : null
+        const isLastMessage = index === messages.length - 1
+        const hasUserAfterHead = perMessageFlags.hasUserAfterHead[index]
+        const showAssistantMeta = perMessageFlags.showAssistantMeta[index]
+
+        const hookLogBucketForTurn =
+          hookLoggingEnabled && message.role === "user"
+            ? hookLogBucketByTurnId.get(message.id)
+            : undefined
+        const navigatorRef = setMessageRef(message.id, message.role)
+        const combinedRef = (node: HTMLDivElement | null): void => {
+          navigatorRef(node)
+          if (node && message.role !== "tool") {
+            contentMessageRefs.current.set(message.id, node)
+            return
+          }
+          contentMessageRefs.current.delete(message.id)
+        }
+
+        return (
+          <div
+            key={message.id}
+            ref={combinedRef}
+            data-message-role={message.role}
+            style={
+              isLastMessage
+                ? undefined
+                : { contentVisibility: "auto", containIntrinsicSize: "auto 240px" }
+            }
+          >
+            <MessageBubble
+              message={message}
+              previousMessage={previousMessage}
+              isStreaming={isLastMessage && isLoading}
+              showAssistantMeta={showAssistantMeta}
+              toolResults={toolResults}
+              toolCallStates={toolCallStates}
+              pendingApproval={pendingApproval}
+              autoApproveGitPush={autoApproveGitPush}
+              onApprovalDecision={onApprovalDecision}
+              onEditUserMessage={onEditUserMessage}
+              onSetGoalFromMessage={onSetGoalFromMessage}
+              threadId={threadId}
+              isLoading={isLoading}
+              hasUserAfterHead={hasUserAfterHead}
+              assistantDurationMs={assistantDurationMsById.get(message.id)}
+              userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
+            />
+            {hookLogBucketForTurn && hookLogBucketForTurn.entries.length > 0 && (
+              <div className="mt-1 ml-12">
+                <HookLogChip
+                  bucket={hookLogBucketForTurn}
+                  onClick={() => onOpenHookLogBucket(hookLogBucketForTurn.turnId)}
+                />
+              </div>
+            )}
+          </div>
+        )
+      })}
+
+      {hookLoggingEnabled && detachedHookLogBuckets.length > 0 && (
+        <div className="flex flex-wrap justify-start gap-2 mt-1">
+          {detachedHookLogBuckets.map((bucket) => (
+            <HookLogChip
+              key={bucket.turnId}
+              bucket={bucket}
+              onClick={() => onOpenHookLogBucket(bucket.turnId)}
+            />
+          ))}
+        </div>
+      )}
+    </>
+  )
+})
+
 export function ChatContainer({
   threadId,
   showGitChangeNotice = false,
@@ -1556,6 +1693,7 @@ export function ChatContainer({
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
   const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isAtBottomRef = useRef(true)
@@ -1869,10 +2007,10 @@ export function ChatContainer({
     }
   }, [loadSkills])
 
-  const getSkillShowLabel = (name: string): string => {
+  const getSkillShowLabel = useCallback((name: string): string => {
     const target = allSkillsRef.current?.find((it) => it.name === name || it.chinese_name === name)
     return target?.chinese_name || name || ""
-  }
+  }, [])
 
   const getTargetRemoteSkill = useCallback((name: string) => {
     const target = allSkillsRef.current?.find((it) => it.name === name || it.chinese_name === name)
@@ -2010,6 +2148,15 @@ export function ChatContainer({
   const openHookLogBucket = openHookLogBucketId
     ? (hookLogBucketByTurnId.get(openHookLogBucketId) ?? null)
     : null
+  const handleOpenHookLogBucket = useCallback((turnId: string): void => {
+    setOpenHookLogBucketId(turnId)
+  }, [])
+  const handleScrollToQuestion = useCallback((): void => {
+    isAtBottomRef.current = false
+  }, [])
+  const handleOpenSandboxSettings = useCallback((): void => {
+    setShowCustomizeView(true, "sandbox")
+  }, [setShowCustomizeView])
 
   const canChangeAgentMode = !historyLoading && threadMessages.length === 0
   const queuedApprovalCount = Math.max(0, pendingApprovals.length - 1)
@@ -3774,17 +3921,29 @@ export function ChatContainer({
   }, [effectiveInputDisabled, input, setInput])
 
   // Auto-resize textarea based on content
-  const adjustTextareaHeight = (): void => {
+  const adjustTextareaHeight = useCallback((): void => {
     const textarea = inputRef.current
     if (textarea) {
       textarea.style.height = "auto"
       textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
     }
-  }
+  }, [])
 
   useEffect(() => {
-    adjustTextareaHeight()
-  }, [input])
+    if (textareaResizeFrameRef.current !== null) {
+      cancelAnimationFrame(textareaResizeFrameRef.current)
+    }
+    textareaResizeFrameRef.current = requestAnimationFrame(() => {
+      textareaResizeFrameRef.current = null
+      adjustTextareaHeight()
+    })
+    return () => {
+      if (textareaResizeFrameRef.current !== null) {
+        cancelAnimationFrame(textareaResizeFrameRef.current)
+        textareaResizeFrameRef.current = null
+      }
+    }
+  }, [adjustTextareaHeight, input])
 
   const handleCancel = async (): Promise<void> => {
     if (scheduledTaskLoading && scheduledTaskId) {
@@ -4409,7 +4568,7 @@ export function ChatContainer({
     [buildSkillPrompt, setInput, getTargetRemoteSkill]
   )
 
-  const handleCopyToClipboard = (text: string) => {
+  const handleCopyToClipboard = useCallback((text: string) => {
     navigator.clipboard.writeText(text).then(
       () => {
         toast.success("已复制目标链接到剪切板，请在浏览器中打开查看")
@@ -4419,7 +4578,274 @@ export function ChatContainer({
         toast.error("复制失败，请重试")
       }
     )
-  }
+  }, [])
+
+  const welcomePane = useMemo(() => {
+    if (displayMessages.length !== 0 || isLoading || historyLoading) return null
+
+    return (
+      <div className="pt-6 pb-8">
+        {shouldShowHarnessDialogTips && harnessDialogTips ? (
+          <DialogTipsMarkdown content={harnessDialogTips} />
+        ) : !shouldShowWelcomeHeadline || harnessFeatureBinding ? null : (
+          <RotatingHeadline />
+        )}
+        {skillsLoading ? (
+          <div className="text-sm text-muted-foreground text-center py-10">
+            正在加载技能列表...
+          </div>
+        ) : skills.length === 0 ? null : (
+          <div className="space-y-3">
+            {programmingSkillCards.length > 0 && (
+              <div className="space-y-2">
+                <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                  编程场景
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  {programmingSkillCards.map(({ skill, label, icon }) => (
+                    <button
+                      key={label + skill.path}
+                      type="button"
+                      onClick={() => handleUseSkillPrompt(skill)}
+                      className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
+                          {icon}
+                        </div>
+                        <div className="text-xs text-foreground leading-5">{label}</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+                {programmingSkills.length > 8 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllProgrammingSkills((prev) => !prev)}
+                    className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
+                  >
+                    {showAllProgrammingSkills ? (
+                      <>
+                        <ChevronUp className="size-3.5" />
+                        <span>收起</span>
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="size-3.5" />
+                        <span>展开更多（+{programmingSkills.length - 8}）</span>
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+            )}
+            {shouldShowWelcomeSkillTabs && (
+              <Tabs defaultValue="skills-by-category" className="space-y-3">
+                <TabsList className="grid h-9 w-full grid-cols-3">
+                  <TabsTrigger value="skills-by-category" className="text-xs">
+                    场景技能
+                  </TabsTrigger>
+                  <TabsTrigger value="installed-skills" className="text-xs gap-1.5">
+                    我安装的技能
+                    {customSkillUpdateCount > 0 && (
+                      <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-teal-100 px-1 text-[10px] font-semibold leading-none text-teal-700 dark:bg-teal-900/40 dark:text-teal-200">
+                        {customSkillUpdateCount}
+                      </span>
+                    )}
+                  </TabsTrigger>
+                  <TabsTrigger value="help" className="text-xs">
+                    帮助
+                  </TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="skills-by-category" className="mt-0">
+                  <SkillsByCategorySection
+                    skills={enabledSkillsForSlash}
+                    previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
+                    onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
+                    onOpenOrganizationSkillMarket={handleOpenOrganizationSkillMarket}
+                    onOpenMarketBySkill={handleOpenMarketBySkill}
+                    onUseSkillPrompt={handleUseSkillPrompt}
+                  />
+                </TabsContent>
+
+                <TabsContent value="installed-skills" className="mt-0 space-y-3">
+                  {enabledCustomSkillGroups.length > 0 ? (
+                    <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
+                      <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium text-emerald-800 dark:text-emerald-200">
+                        <span>已启用技能</span>
+                        <Badge
+                          variant="outline"
+                          className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
+                        >
+                          {enabledCustomSkills.length}
+                        </Badge>
+                      </div>
+                      <div className="space-y-3">
+                        {enabledCustomSkillGroups.map((group) => (
+                          <div key={group.category} className="space-y-2">
+                            <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                              {group.category}
+                            </div>
+                            <WelcomeSkillTree
+                              cards={group.cards}
+                              onUseSkill={handleUseSkillPrompt}
+                              getSkillShowLabel={getSkillShowLabel}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
+                          <CircleAlert className={"size-4"} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
+                            暂无
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  )}
+
+                  {enabledCustomSkills.length > 8 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllCustomSkills((prev) => !prev)}
+                      className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
+                    >
+                      {showAllCustomSkills ? (
+                        <>
+                          <ChevronUp className="size-3.5" />
+                          <span>收起</span>
+                        </>
+                      ) : (
+                        <>
+                          <ChevronDown className="size-3.5" />
+                          <span>展开更多（+{enabledCustomSkills.length - 8}）</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  {disabledLocalSkills.length > 0 && (
+                    <details className="rounded-lg border border-border/70 bg-muted/20 px-2 py-2">
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
+                        <span>已禁用技能</span>
+                        <Badge
+                          variant="outline"
+                          className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
+                        >
+                          {disabledLocalSkills.length}
+                        </Badge>
+                      </summary>
+                      <div className="mt-2 space-y-2">
+                        {disabledCustomSkillGroups.map((group) => (
+                          <div key={group.category} className="space-y-2">
+                            <div className="text-xs text-muted-foreground/80 font-medium tracking-wider">
+                              {group.category}
+                            </div>
+                            <WelcomeSkillTree
+                              cards={group.cards}
+                              disabled
+                              onUseSkill={handleUseSkillPrompt}
+                              getSkillShowLabel={getSkillShowLabel}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                </TabsContent>
+
+                <TabsContent value="help" className="mt-0 space-y-2">
+                  {helpSceneSkillCards.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                        通用场景
+                      </div>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                        {helpSceneSkillCards.map(({ skill, label, icon }) => (
+                          <button
+                            key={label + skill.path}
+                            type="button"
+                            onClick={() => handleUseSkillPrompt(skill)}
+                            className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
+                                {icon}
+                              </div>
+                              <div className="text-xs text-foreground leading-5">{label}</div>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                    帮助
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                    <button
+                      onClick={async () => {
+                        const instructionUrl = import.meta.env.VITE_INTRUCTION_URL
+                        handleCopyToClipboard(instructionUrl)
+                      }}
+                      type="button"
+                      className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
+                          <Notebook size={14} />
+                        </div>
+                        <div className="text-xs text-foreground leading-5">操作说明文档</div>
+                      </div>
+                    </button>
+                    {/*<UpdateActionButton />*/}
+                  </div>
+                </TabsContent>
+              </Tabs>
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }, [
+    disabledCustomSkillGroups,
+    disabledLocalSkills.length,
+    displayMessages.length,
+    enabledCustomSkillGroups,
+    enabledCustomSkills.length,
+    enabledSkillsForSlash,
+    handleCopyToClipboard,
+    handleOpenMarketBySecondaryCategory,
+    handleOpenMarketBySkill,
+    handleOpenOrganizationSkillMarket,
+    handleUseSkillPrompt,
+    harnessDialogTips,
+    harnessFeatureBinding,
+    helpSceneSkillCards,
+    historyLoading,
+    isLoading,
+    getSkillShowLabel,
+    programmingSkillCards,
+    programmingSkills.length,
+    shouldShowHarnessDialogTips,
+    shouldShowWelcomeHeadline,
+    shouldShowWelcomeSkillTabs,
+    showAllCustomSkills,
+    showAllProgrammingSkills,
+    skills.length,
+    skillsLoading,
+    customSkillUpdateCount
+  ])
 
   const extractMessageText = useCallback((content: Message["content"]): string => {
     return getMessageText(content)
@@ -4651,9 +5077,7 @@ export function ChatContainer({
         messages={displayMessages}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
-        onScrollToQuestion={() => {
-          isAtBottomRef.current = false
-        }}
+        onScrollToQuestion={handleScrollToQuestion}
       >
         {({ reserveRightSpace, setMessageRef }) => (
           <>
@@ -4688,314 +5112,28 @@ export function ChatContainer({
                       </div>
                     </div>
                   )}
-                  {displayMessages.length === 0 && !isLoading && !historyLoading && (
-                    <div className="pt-6 pb-8">
-                      {shouldShowHarnessDialogTips && harnessDialogTips ? (
-                        <DialogTipsMarkdown content={harnessDialogTips} />
-                      ) : !shouldShowWelcomeHeadline || harnessFeatureBinding ? null : (
-                        <RotatingHeadline />
-                      )}
-                      {skillsLoading ? (
-                        <div className="text-sm text-muted-foreground text-center py-10">
-                          正在加载技能列表...
-                        </div>
-                      ) : skills.length === 0 ? null : (
-                        <div className="space-y-3">
-                          {programmingSkillCards.length > 0 && (
-                            <div className="space-y-2">
-                              <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                                编程场景
-                              </div>
-                              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                                {programmingSkillCards.map(({ skill, label, icon }) => (
-                                  <button
-                                    key={label + skill.path}
-                                    type="button"
-                                    onClick={() => handleUseSkillPrompt(skill)}
-                                    className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
-                                  >
-                                    <div className="flex items-center gap-3">
-                                      <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                                        {icon}
-                                      </div>
-                                      <div className="text-xs text-foreground leading-5">
-                                        {label}
-                                      </div>
-                                    </div>
-                                  </button>
-                                ))}
-                              </div>
-                              {programmingSkills.length > 8 && (
-                                <button
-                                  type="button"
-                                  onClick={() => setShowAllProgrammingSkills((prev) => !prev)}
-                                  className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
-                                >
-                                  {showAllProgrammingSkills ? (
-                                    <>
-                                      <ChevronUp className="size-3.5" />
-                                      <span>收起</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <ChevronDown className="size-3.5" />
-                                      <span>展开更多（+{programmingSkills.length - 8}）</span>
-                                    </>
-                                  )}
-                                </button>
-                              )}
-                            </div>
-                          )}
-                          {shouldShowWelcomeSkillTabs && (
-                            <Tabs defaultValue="skills-by-category" className="space-y-3">
-                              <TabsList className="grid h-9 w-full grid-cols-3">
-                                <TabsTrigger value="skills-by-category" className="text-xs">
-                                  场景技能
-                                </TabsTrigger>
-                                <TabsTrigger value="installed-skills" className="text-xs gap-1.5">
-                                  我安装的技能
-                                  {customSkillUpdateCount > 0 && (
-                                    <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-teal-100 px-1 text-[10px] font-semibold leading-none text-teal-700 dark:bg-teal-900/40 dark:text-teal-200">
-                                      {customSkillUpdateCount}
-                                    </span>
-                                  )}
-                                </TabsTrigger>
-                                <TabsTrigger value="help" className="text-xs">
-                                  帮助
-                                </TabsTrigger>
-                              </TabsList>
-
-                              <TabsContent value="skills-by-category" className="mt-0">
-                                {/* 市场技能：内部使用 getAllSkills 取数并按分类展示 */}
-                                <SkillsByCategorySection
-                                  skills={enabledSkillsForSlash}
-                                  previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
-                                  onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
-                                  onOpenOrganizationSkillMarket={handleOpenOrganizationSkillMarket}
-                                  onOpenMarketBySkill={handleOpenMarketBySkill}
-                                  onUseSkillPrompt={handleUseSkillPrompt}
-                                />
-                              </TabsContent>
-
-                              <TabsContent value="installed-skills" className="mt-0 space-y-3">
-                                {enabledCustomSkillGroups.length > 0 ? (
-                                  <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
-                                    <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium text-emerald-800 dark:text-emerald-200">
-                                      <span>已启用技能</span>
-                                      <Badge
-                                        variant="outline"
-                                        className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
-                                      >
-                                        {enabledCustomSkills.length}
-                                      </Badge>
-                                    </div>
-                                    <div className="space-y-3">
-                                      {enabledCustomSkillGroups.map((group) => (
-                                        <div key={group.category} className="space-y-2">
-                                          <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                                            {group.category}
-                                          </div>
-                                          <WelcomeSkillTree
-                                            cards={group.cards}
-                                            onUseSkill={handleUseSkillPrompt}
-                                            getSkillShowLabel={getSkillShowLabel}
-                                          />
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
-                                  >
-                                    <div className="flex items-center gap-2 min-w-0">
-                                      <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
-                                        <CircleAlert className={"size-4"} />
-                                      </div>
-                                      <div className="min-w-0 flex-1">
-                                        <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
-                                          暂无
-                                        </div>
-                                      </div>
-                                    </div>
-                                  </button>
-                                )}
-
-                                {enabledCustomSkills.length > 8 && (
-                                  <button
-                                    type="button"
-                                    onClick={() => setShowAllCustomSkills((prev) => !prev)}
-                                    className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
-                                  >
-                                    {showAllCustomSkills ? (
-                                      <>
-                                        <ChevronUp className="size-3.5" />
-                                        <span>收起</span>
-                                      </>
-                                    ) : (
-                                      <>
-                                        <ChevronDown className="size-3.5" />
-                                        <span>展开更多（+{enabledCustomSkills.length - 8}）</span>
-                                      </>
-                                    )}
-                                  </button>
-                                )}
-
-                                {disabledLocalSkills.length > 0 && (
-                                  <details className="rounded-lg border border-border/70 bg-muted/20 px-2 py-2">
-                                    <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
-                                      <span>已禁用技能</span>
-                                      <Badge
-                                        variant="outline"
-                                        className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
-                                      >
-                                        {disabledLocalSkills.length}
-                                      </Badge>
-                                    </summary>
-                                    <div className="mt-2 space-y-2">
-                                      {disabledCustomSkillGroups.map((group) => (
-                                        <div key={group.category} className="space-y-2">
-                                          <div className="text-xs text-muted-foreground/80 font-medium tracking-wider">
-                                            {group.category}
-                                          </div>
-                                          <WelcomeSkillTree
-                                            cards={group.cards}
-                                            disabled
-                                            onUseSkill={handleUseSkillPrompt}
-                                            getSkillShowLabel={getSkillShowLabel}
-                                          />
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </details>
-                                )}
-                              </TabsContent>
-
-                              <TabsContent value="help" className="mt-0 space-y-2">
-                                {helpSceneSkillCards.length > 0 && (
-                                  <div className="space-y-2">
-                                    <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                                      通用场景
-                                    </div>
-                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                                      {helpSceneSkillCards.map(({ skill, label, icon }) => (
-                                        <button
-                                          key={label + skill.path}
-                                          type="button"
-                                          onClick={() => handleUseSkillPrompt(skill)}
-                                          className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
-                                        >
-                                          <div className="flex items-center gap-3">
-                                            <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                                              {icon}
-                                            </div>
-                                            <div className="text-xs text-foreground leading-5">
-                                              {label}
-                                            </div>
-                                          </div>
-                                        </button>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-                                <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                                  帮助
-                                </div>
-                                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                                  <button
-                                    onClick={async () => {
-                                      const instructionUrl = import.meta.env.VITE_INTRUCTION_URL
-                                      handleCopyToClipboard(instructionUrl)
-                                    }}
-                                    type="button"
-                                    className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
-                                  >
-                                    <div className="flex items-center gap-3">
-                                      <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                                        <Notebook size={14} />
-                                      </div>
-                                      <div className="text-xs text-foreground leading-5">
-                                        操作说明文档
-                                      </div>
-                                    </div>
-                                  </button>
-                                  {/*<UpdateActionButton />*/}
-                                </div>
-                              </TabsContent>
-                            </Tabs>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {displayMessages.map((message, index) => {
-                    const previousMessage = index > 0 ? displayMessages[index - 1] : null
-                    const isLastMessage = index === displayMessages.length - 1
-                    const hasUserAfterHead = perMessageFlags.hasUserAfterHead[index]
-                    const showAssistantMeta = perMessageFlags.showAssistantMeta[index]
-
-                    // Per-turn hook log chip: shown right under the user message
-                    // that opened the turn, only when Hook logging is enabled and
-                    // the bucket has at least one entry. Click opens the modal.
-                    const hookLogBucketForTurn =
-                      hookLogConfig.enabled && message.role === "user"
-                        ? hookLogBucketByTurnId.get(message.id)
-                        : undefined
-                    const navigatorRef = setMessageRef(message.id, message.role)
-                    const combinedRef = (node: HTMLDivElement | null): void => {
-                      navigatorRef(node)
-                      if (node && message.role !== "tool") {
-                        contentMessageRefs.current.set(message.id, node)
-                        return
-                      }
-                      contentMessageRefs.current.delete(message.id)
-                    }
-
-                    return (
-                      <div
-                        key={message.id}
-                        ref={combinedRef}
-                        data-message-role={message.role}
-                        // Skip layout/paint for off-screen messages (poor-man's
-                        // virtualization). The streaming last message stays fully
-                        // rendered. `contain-intrinsic-size` gives off-screen rows a
-                        // placeholder height so the scrollbar stays stable.
-                        style={
-                          isLastMessage
-                            ? undefined
-                            : { contentVisibility: "auto", containIntrinsicSize: "auto 240px" }
-                        }
-                      >
-                        <MessageBubble
-                          message={message}
-                          previousMessage={previousMessage}
-                          isStreaming={isLastMessage && isLoading}
-                          showAssistantMeta={showAssistantMeta}
-                          toolResults={toolResults}
-                          toolCallStates={toolCallDisplayStates}
-                          pendingApproval={pendingApproval}
-                          autoApproveGitPush={!yoloModeLoaded || yoloMode}
-                          onApprovalDecision={handleApprovalDecision}
-                          onEditUserMessage={handleEditUserMessage}
-                          onSetGoalFromMessage={handleSetGoalFromMessage}
-                          threadId={threadId}
-                          isLoading={isLoading}
-                          hasUserAfterHead={hasUserAfterHead}
-                          assistantDurationMs={assistantDurationMsById.get(message.id)}
-                          userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
-                        />
-                        {hookLogBucketForTurn && hookLogBucketForTurn.entries.length > 0 && (
-                          <div className="mt-1 ml-12">
-                            <HookLogChip
-                              bucket={hookLogBucketForTurn}
-                              onClick={() => setOpenHookLogBucketId(hookLogBucketForTurn.turnId)}
-                            />
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })}
+                  {welcomePane}
+                  <ChatMessageList
+                    messages={displayMessages}
+                    perMessageFlags={perMessageFlags}
+                    hookLoggingEnabled={hookLogConfig.enabled}
+                    hookLogBucketByTurnId={hookLogBucketByTurnId}
+                    detachedHookLogBuckets={detachedHookLogBuckets}
+                    contentMessageRefs={contentMessageRefs}
+                    setMessageRef={setMessageRef}
+                    isLoading={isLoading}
+                    toolResults={toolResults}
+                    toolCallStates={toolCallDisplayStates}
+                    pendingApproval={pendingApproval}
+                    autoApproveGitPush={!yoloModeLoaded || yoloMode}
+                    onApprovalDecision={handleApprovalDecision}
+                    onEditUserMessage={handleEditUserMessage}
+                    onSetGoalFromMessage={handleSetGoalFromMessage}
+                    onOpenHookLogBucket={handleOpenHookLogBucket}
+                    threadId={threadId}
+                    assistantDurationMsById={assistantDurationMsById}
+                    userSendTimeLabelById={userSendTimeLabelById}
+                  />
 
                   {/*测试git diff功能*/}
                   {/*<DisplayDiffTest/>*/}
@@ -5005,19 +5143,8 @@ export function ChatContainer({
               is mounted once at component scope below so it's not bound to a
               specific message render. Buckets without a visible user message
               (session lifecycle, worker auto-turns, older placeholders) render
-              their chips here.
+              their chips in ChatMessageList.
             */}
-                  {hookLogConfig.enabled && detachedHookLogBuckets.length > 0 && (
-                    <div className="flex flex-wrap justify-start gap-2 mt-1">
-                      {detachedHookLogBuckets.map((bucket) => (
-                        <HookLogChip
-                          key={bucket.turnId}
-                          bucket={bucket}
-                          onClick={() => setOpenHookLogBucketId(bucket.turnId)}
-                        />
-                      ))}
-                    </div>
-                  )}
 
                   {/* Orchestrator standalone approval bar moved outside ScrollArea — see below */}
                   {/* Model retry indicator — shown when the fetch layer is retrying a transient error */}
@@ -5709,9 +5836,7 @@ export function ChatContainer({
                           YOLO
                         </button>
                       )}
-                      <SandboxModeSwitcher
-                        onOpenSettings={() => setShowCustomizeView(true, "sandbox")}
-                      />
+                      <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                       {tokenUsage && (
                         <ContextUsageIndicator
                           tokenUsage={tokenUsage}

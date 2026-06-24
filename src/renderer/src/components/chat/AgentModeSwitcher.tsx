@@ -1,4 +1,4 @@
-import { useId, useState, type JSX } from "react"
+import { memo, useId, useState, type JSX } from "react"
 import { AlertTriangle, Check, ChevronDown, Route, Sparkles, Workflow, Zap } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
@@ -94,7 +94,9 @@ const MODE_THEMES: Record<ChatAgentMode, ModeTheme> = {
   }
 }
 
-export function AgentModeSwitcher({
+export const AgentModeSwitcher = memo(AgentModeSwitcherImpl)
+
+function AgentModeSwitcherImpl({
   mode,
   locked,
   lockedReason,
