@@ -16,6 +16,7 @@ import {
   WORKFLOW_PROMPT_PREVIEW_MAX_CHARS,
   WORKFLOW_RESULT_MAX_CHARS,
   WORKFLOW_RESULT_PREVIEW_MAX_CHARS,
+  WORKFLOW_RESULT_SIDECAR_MAX_BYTES,
   WorkflowAbortError,
   WorkflowFatalError,
   WorkflowScriptError,
@@ -210,11 +211,34 @@ export async function runWorkflowEngine(
         : promiseWarning
     }
     const runStats = stats()
+    const { bounded, sidecarJson, truncated } = boundResultWithSidecar(
+      result,
+      WORKFLOW_RESULT_MAX_CHARS,
+      WORKFLOW_RESULT_SIDECAR_MAX_BYTES
+    )
+    // When the bound truncated the result and the compact full JSON is within the
+    // sidecar cap, persist it to `<runId>.result` so <output-file> is honest. Pass
+    // null when it fits OR when it is too large for the sidecar, clearing stale
+    // leftovers. Do this BEFORE the run.json flush so "available" always points to
+    // an already-written file. Write failure or over-cap → "unavailable".
+    let resultSidecarStatus: "available" | "unavailable" | "none"
+    if (!truncated) {
+      await options.runStore.persistFullResult(null)
+      resultSidecarStatus = "none"
+    } else if (sidecarJson === null) {
+      await options.runStore.persistFullResult(null)
+      resultSidecarStatus = "unavailable"
+    } else {
+      resultSidecarStatus = (await options.runStore.persistFullResult(sidecarJson))
+        ? "available"
+        : "unavailable"
+    }
     options.runStore.update((run) => {
       run.status = status
       run.error = error
       run.warning = effectiveWarning
-      run.result = boundJsonSafe(result, WORKFLOW_RESULT_MAX_CHARS)
+      run.result = bounded
+      run.resultSidecarStatus = resultSidecarStatus
       run.stats = runStats
       run.completedAt = new Date().toISOString()
       // No agent stays "running" in a settled run file.
@@ -251,8 +275,9 @@ export async function runWorkflowEngine(
   // INACTIVITY backstop (not a total-runtime cap — legitimate runs span hours):
   // every progress event resets the clock; a run with NO events for the whole
   // window is treated as hung (e.g. a stuck await loop) and aborted. The window
-  // exceeds the per-subagent timeout, so a slow-but-alive agent always produces
-  // an agent_end (or timeout error) before it expires. Fires lifetime.abort();
+  // is raised above the optional per-subagent timeout when that timeout is
+  // configured, so a slow-but-alive agent can produce an agent_end (or timeout
+  // error) before it expires. Fires lifetime.abort();
   // raceWithAbort then unblocks the engine.
   // NOTE: this is a setInterval timer, so it cannot fire if the event loop
   // itself is starved. The vm sync timeout only bounds the script's FIRST
@@ -277,8 +302,7 @@ export async function runWorkflowEngine(
       // A run blocked ONLY on a pending user approval isn't hung — it's correctly
       // waiting for input. Don't abort it (reset the clock instead), or a
       // background run whose agent needs an approval the absent user hasn't
-      // answered would lose all its completed work to this backstop. An individual
-      // stuck agent is still bounded by the per-subagent timeout.
+      // answered would lose all its completed work to this backstop.
       if (options.isAwaitingApproval?.()) {
         lastActivityAt = Date.now()
         return
@@ -1413,15 +1437,34 @@ export function toJsonSafe(value: unknown): unknown {
   }
 }
 
-/** toJsonSafe, but oversized values collapse to a truncated string so persisted files stay bounded. */
-function boundJsonSafe(value: unknown, maxChars: number): unknown {
+/**
+ * Bound the result for run.json AND, when the bound truncates it, return the compact
+ * full JSON for the `<runId>.result` sidecar if it fits the sidecar cap. Very large
+ * results remain bounded in run.json but get no advertised complete output file.
+ */
+function boundResultWithSidecar(
+  value: unknown,
+  maxChars: number,
+  sidecarMaxBytes: number
+): { bounded: unknown; sidecarJson: string | null; truncated: boolean } {
   const safe = toJsonSafe(value)
-  if (safe === undefined) return undefined
+  if (safe === undefined) return { bounded: undefined, sidecarJson: null, truncated: false }
   try {
     const serialized = JSON.stringify(safe)
-    if (serialized.length <= maxChars) return safe
-    return truncateText(serialized, maxChars)
+    // JSON.stringify returns undefined for values like a bare function/symbol that
+    // slipped through toJsonSafe — mirror boundJsonSafe's String() fallback.
+    if (serialized === undefined) {
+      return { bounded: String(safe), sidecarJson: null, truncated: false }
+    }
+    if (serialized.length <= maxChars) {
+      return { bounded: safe, sidecarJson: null, truncated: false }
+    }
+    return {
+      bounded: truncateText(serialized, maxChars),
+      sidecarJson: Buffer.byteLength(serialized, "utf8") <= sidecarMaxBytes ? serialized : null,
+      truncated: true
+    }
   } catch {
-    return String(safe)
+    return { bounded: String(safe), sidecarJson: null, truncated: false }
   }
 }

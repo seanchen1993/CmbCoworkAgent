@@ -5,6 +5,7 @@ import {
 } from "../src/main/agent/workflow/json-schema.ts"
 import { extractOutputTokens } from "../src/main/agent/workflow/subagent.ts"
 import {
+  getWorkflowAgentTimeoutMs,
   getWorkflowGlobMax,
   getWorkflowRunWallClockMs,
   isWorkflowSubagentThreadOf,
@@ -580,13 +581,26 @@ function testInactivityWindowFlooredAboveAgentTimeout(): void {
   const origRun = process.env.CMB_WORKFLOW_RUN_TIMEOUT_MS
   const origAgent = process.env.CMB_WORKFLOW_AGENT_TIMEOUT_MS
   try {
+    delete process.env.CMB_WORKFLOW_AGENT_TIMEOUT_MS
+    delete process.env.CMB_WORKFLOW_RUN_TIMEOUT_MS
+    assert(getWorkflowAgentTimeoutMs() === undefined, "per-subagent timeout is disabled by default")
+    assert(getWorkflowRunWallClockMs() === 7_200_000, "default inactivity window is 2h")
+
+    process.env.CMB_WORKFLOW_AGENT_TIMEOUT_MS = "1000"
+    assert(
+      getWorkflowAgentTimeoutMs() === undefined,
+      "too-small per-subagent timeout is ignored instead of enabled"
+    )
+
     // A window configured BELOW the per-subagent timeout would kill slow-but-
-    // healthy agents; the cross-check must floor it above the agent timeout.
+    // healthy agents; when the optional timeout is enabled, the cross-check must
+    // floor the run-level window above it.
     process.env.CMB_WORKFLOW_AGENT_TIMEOUT_MS = "600000" // 10 min
     process.env.CMB_WORKFLOW_RUN_TIMEOUT_MS = "60000" // 60s — misconfigured
+    const flooredWindow = getWorkflowRunWallClockMs()
     assert(
-      getWorkflowRunWallClockMs() >= 660_000,
-      `window must be floored above the agent timeout, got ${getWorkflowRunWallClockMs()}`
+      flooredWindow >= 660_000,
+      `window must be floored above the agent timeout, got ${flooredWindow}`
     )
     // A window comfortably above the agent timeout is honored as configured.
     process.env.CMB_WORKFLOW_RUN_TIMEOUT_MS = "1800000" // 30 min
