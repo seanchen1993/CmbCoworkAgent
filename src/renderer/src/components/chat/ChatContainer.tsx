@@ -1556,7 +1556,6 @@ export function ChatContainer({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
-  const lastAutoScrolledThreadIdRef = useRef<string | null>(null)
   const isComposingRef = useRef(false)
   const submitInFlightRef = useRef<Set<string>>(new Set())
   const [skills, setSkills] = useState<SkillMetadata[]>([])
@@ -2897,7 +2896,6 @@ export function ChatContainer({
     ) as HTMLDivElement | null
   }, [])
 
-  // Force scroll to bottom when an approval request arrives — the user must see and act on it
   useEffect(() => {
     if (!pendingApproval) return
     const viewport = getViewport()
@@ -2938,21 +2936,16 @@ export function ChatContainer({
     userInputDialogLayout?.top
   ])
 
-  // Scroll once when switching threads or when a thread finishes restoring history.
+  //  滚动到底部
+  // 1.初始化
+  // 2.切换thread
   useEffect(() => {
     if (historyLoading) return
-    if (lastAutoScrolledThreadIdRef.current === threadId) return
     const viewport = getViewport()
     if (viewport) {
-      if (displayMessages.length === 0) {
-        viewport.scrollTop = 0
-        lastAutoScrolledThreadIdRef.current = threadId
-        return
-      }
       viewport.scrollTop = viewport.scrollHeight
-      lastAutoScrolledThreadIdRef.current = threadId
     }
-  }, [displayMessages.length, getViewport, historyLoading, threadId])
+  }, [getViewport, historyLoading, threadId])
 
   // Focus input on mount
   useEffect(() => {
@@ -3138,11 +3131,6 @@ export function ChatContainer({
         end_at: userStartAt
       }
       appendMessage(userMessage)
-      window.requestAnimationFrame(() => {
-        const viewport = getViewport()
-        if (!viewport) return
-        viewport.scrollTop = viewport.scrollHeight
-      })
       if (options.persistTiming === false) return userMessage
 
       const userMessageTime: MessageTimeMap = {
@@ -3629,6 +3617,12 @@ export function ChatContainer({
             generateTitleForFirstMessage(threadId, titleSource)
           }
         }
+      }
+
+      // 发送消息，滚动到底部
+      const viewport = getViewport()
+      if (viewport) {
+        viewport.scrollTop = viewport.scrollHeight
       }
 
       const startTime = Date.now()
