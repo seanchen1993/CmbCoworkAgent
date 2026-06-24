@@ -7473,7 +7473,9 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     projectPage,
     projects,
     // Mock filters the in-memory project list directly, so it is never id-cap truncated.
-    leanTruncated: false
+    leanTruncated: false,
+    // 让 dev 模式下「生产效能代码指标」的 source 下拉有候选可选，便于联调 UI。
+    availableSources: ["tag-platform", "data-platform"]
   }
 }
 
@@ -8533,6 +8535,11 @@ interface DashboardProjectModeData {
    * 遥测汇总（对话/代码等）可能不完整。开关关闭时恒为 false。
    */
   leanTruncated: boolean
+  /**
+   * 当前范围内出现过的外部上报来源（`properties.source` 去重值，字典序）。供「生产
+   * 效能代码指标」的 source 下拉填充候选；原生事件不带 source、不入此列表。
+   */
+  availableSources?: string[]
 }
 
 interface DashboardProjectModeTracesData {
@@ -9801,6 +9808,44 @@ type ProjectModeCodeStatsResult = {
   byProject: Map<string, DashboardCodeStats>
   byAdapter: Map<string, DashboardCodeStats>
   bySkill: DashboardSkillCodeAdoptionStats[]
+  /**
+   * 当前项目模式范围内（org/时间过滤后）出现过的外部上报来源列表（`properties.source`
+   * 的去重值，按字典序）。原生事件不带 source、不入此列表。供「生产效能代码指标」的
+   * source 下拉填充候选。仅在未按 source 收窄（初始拉取）时有意义。
+   */
+  availableSources: string[]
+}
+
+/**
+ * source 下拉的「原生（DevClaw）」哨兵：选它表示只看不带 `properties.source` 的事件
+ * （我方原生 code_gen/code_adopt）。必须与渲染层常量一致；真实外部来源不会取此字面量。
+ */
+const NATIVE_CODE_SOURCE = "__native__"
+
+/**
+ * 把 source 选择映射成 ES 过滤子句。空/未选 → 不过滤（全部来源）；原生哨兵 →
+ * `must_not exists properties.source`；其余按字面量 term 匹配 `properties.source`。
+ */
+function buildCodeSourceFilterClause(
+  source: string | null | undefined
+): Record<string, unknown> | null {
+  if (!source) return null
+  if (source === NATIVE_CODE_SOURCE) {
+    return { bool: { must_not: { exists: { field: "properties.source" } } } }
+  }
+  return { term: { "properties.source": source } }
+}
+
+/** 解析 overall 查询里的 `by_source` terms 聚合 → 去重、非空、字典序的来源列表。 */
+function parseAvailableCodeSources(overallRaw: unknown): string[] {
+  const buckets = asRecord(asRecord(asRecord(overallRaw).aggregations).by_source).buckets
+  if (!Array.isArray(buckets)) return []
+  const out = new Set<string>()
+  for (const bucket of buckets) {
+    const key = asString(asRecord(bucket).key).trim()
+    if (key) out.add(key)
+  }
+  return [...out].sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }))
 }
 
 async function fetchProjectModeCodeAggs(
@@ -9837,24 +9882,42 @@ async function fetchProjectModeAggregateCodeStats(
   opts: OrgFilterOptions | undefined,
   access: DashboardAccessContext,
   // 「仅精益项目」时传入精益项目 id 集，按 properties.harnessProjectId 圈定 code 事件。
-  leanProjectIds?: string[]
+  leanProjectIds?: string[],
+  // 「生产效能代码指标」的 source 选择：空 → 全部；NATIVE_CODE_SOURCE → 仅原生；
+  // 其余 → 仅该外部来源。仅收窄代码指标，不影响项目列表/对话数等其它面板维度。
+  source?: string | null
 ): Promise<ProjectModeCodeStatsResult> {
   // code 事件自带顶层 upperOrgLv1，直接按室过滤即可，无需先枚举项目 id 再用 terms 圈定。
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
   // 仅统计项目模式：code 事件需带 properties.harnessProjectId（与 trace 侧 exists harnessProjectId 对齐），
   // 否则会把平台全量代码事件也算进来，导致与「平台运营概览」数值一致。
+  // 注意：source 枚举（by_source）必须用「不含 source 过滤」的 extraFilters，否则选定 source 后
+  // 候选会塌缩成单值。统计口径才叠加 sourceClause（statExtraFilters / statSkillOnlyFilters）。
   const extraFilters = [
     ...(orgFilterClause ? [orgFilterClause] : []),
     { exists: { field: "properties.harnessProjectId" } },
     ...(leanProjectIds ? [{ terms: { "properties.harnessProjectId": leanProjectIds } }] : [])
   ]
+  const sourceClause = buildCodeSourceFilterClause(source)
+  const statExtraFilters = sourceClause ? [...extraFilters, sourceClause] : extraFilters
+  // source 枚举只在「未按 source 收窄」时做：此时 statExtraFilters 不含 sourceClause，
+  // overall 下挂的 by_source 才能看到全部来源；已选 source 时跳过（候选已由初始拉取填好）。
+  const enumerateSources = sourceClause === null
 
   // 「由 Skill 生成的代码」口径：在整体过滤上再叠加 usedSkills 非空（与 by_skill 不同，
   // 这里用 filter 而非 terms，避免一段代码关联多个 skill 时被重复计数）。
-  const skillOnlyFilters = [...extraFilters, { exists: { field: "properties.usedSkills" } }]
+  const skillOnlyFilters = [...statExtraFilters, { exists: { field: "properties.usedSkills" } }]
 
   const [overallRaw, skillOverallRaw, adapterRaw, skillRaw] = await Promise.all([
-    fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, extraFilters),
+    fetchProjectModeCodeAggs(
+      null,
+      range,
+      (perBucketAggs) =>
+        enumerateSources
+          ? { ...perBucketAggs, by_source: { terms: { field: "properties.source", size: 50 } } }
+          : perBucketAggs,
+      statExtraFilters
+    ),
     fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, skillOnlyFilters),
     fetchProjectModeCodeAggs(
       null,
@@ -9871,7 +9934,7 @@ async function fetchProjectModeAggregateCodeStats(
           }
         }
       }),
-      extraFilters
+      statExtraFilters
     ),
     fetchProjectModeCodeAggs(
       null,
@@ -9882,7 +9945,7 @@ async function fetchProjectModeAggregateCodeStats(
           aggs: perBucketAggs
         }
       }),
-      extraFilters
+      statExtraFilters
     )
   ])
 
@@ -9893,7 +9956,8 @@ async function fetchProjectModeAggregateCodeStats(
     skillOverall: normalizeCodeStatsFromAggs(skillOverallRaw),
     byProject: new Map<string, DashboardCodeStats>(),
     byAdapter: parseAdapterCodeStatsBuckets(asRecord(adapterAggs.by_adapter).buckets),
-    bySkill: normalizeSkillCodeAdoptionBuckets({ aggregations: skillAggs }, "by_skill")
+    bySkill: normalizeSkillCodeAdoptionBuckets({ aggregations: skillAggs }, "by_skill"),
+    availableSources: enumerateSources ? parseAvailableCodeSources(overallRaw) : []
   }
 }
 
@@ -10273,8 +10337,31 @@ async function fetchProjectMode(
     projectCounts: snap.counts,
     projectPage,
     projects: projectPage.projects,
-    leanTruncated
+    leanTruncated,
+    availableSources: code.availableSources
   }
+}
+
+/**
+ * 「生产效能代码指标」按 source 局部换数：只重算两个子模块的整体 / Skill 代码采纳，
+ * 不碰项目列表、对话数等其它维度。沿用 fetchProjectMode 的 org / 精益口径，叠加 source。
+ */
+async function fetchProjectModeCodeStatsBySource(
+  range: TimeRange,
+  opts: OrgFilterOptions | undefined,
+  source: string | null | undefined
+): Promise<{ codeStats: DashboardCodeStats; skillCodeStats: DashboardCodeStats }> {
+  const access = requireDashboardProjectModeAccess()
+  // 与 fetchProjectMode 一致：仅精益项目时先解析精益项目 id 集，用于圈定 code 事件。
+  let leanProjectIds: string[] | undefined
+  if (opts?.fromLeanOnly === true) {
+    const resolved = await fetchProjectModeFilteredProjectIds(
+      projectModeSnapshotFilters(buildProjectModeOrgFilter(opts, access), true)
+    )
+    leanProjectIds = resolved.ids
+  }
+  const code = await fetchProjectModeAggregateCodeStats(range, opts, access, leanProjectIds, source)
+  return { codeStats: code.overall, skillCodeStats: code.skillOverall }
 }
 
 interface ProjectModeTracesOptions {
@@ -10447,6 +10534,26 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchProjectMode(range, opts) }
       } catch (e) {
         console.error("[Dashboard] projectMode error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:projectModeCodeStats",
+    async (_, range: TimeRange, opts: OrgFilterOptions | undefined, source: string | null) => {
+      if (import.meta.env.DEV) {
+        const mock = makeMockProjectMode(range, opts)
+        return {
+          success: true,
+          data: { codeStats: mock.summary.codeStats, skillCodeStats: mock.summary.skillCodeStats }
+        }
+      }
+      try {
+        requireDashboardProjectModeAccess()
+        return { success: true, data: await fetchProjectModeCodeStatsBySource(range, opts, source) }
+      } catch (e) {
+        console.error("[Dashboard] projectModeCodeStats error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

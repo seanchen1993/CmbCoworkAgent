@@ -2398,6 +2398,10 @@ export function DashboardView(): React.JSX.Element {
     projectMode,
     projectModeLoading,
     projectModeError,
+    projectModeCodeSource,
+    projectModeCodeStatsOverride,
+    projectModeCodeStatsLoading,
+    selectProjectModeCodeSource,
     projectModeProjectPages,
     projectModeProjectPageLoading,
     projectModeProjectPageError,
@@ -4348,6 +4352,10 @@ export function DashboardView(): React.JSX.Element {
                 data={projectMode}
                 loading={projectModeLoading}
                 error={projectModeError}
+                codeSource={projectModeCodeSource}
+                codeStatsOverride={projectModeCodeStatsOverride}
+                codeStatsLoading={projectModeCodeStatsLoading}
+                onCodeSourceChange={selectProjectModeCodeSource}
                 headerAction={
                   <div className="flex items-center gap-2">
                     <Button

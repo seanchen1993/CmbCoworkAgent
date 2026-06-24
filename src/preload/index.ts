@@ -2517,6 +2517,12 @@ const api = {
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMode", range, granularity, opts),
+    projectModeCodeStats: (
+      range: { from: string; to: string },
+      opts: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null } | undefined,
+      source: string | null
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeCodeStats", range, opts, source),
     projectModeProjects: (
       range: { from: string; to: string },
       options?: {

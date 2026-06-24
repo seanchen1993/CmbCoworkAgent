@@ -606,6 +606,8 @@ interface DashboardProjectModeData {
    * 「仅精益项目」开关下精益项目 id 集被截断、遥测汇总可能不完整。开关关闭时恒为 false。
    */
   leanTruncated: boolean
+  /** 当前范围内出现过的外部上报来源（properties.source 去重值）；供生产效能代码指标 source 下拉。 */
+  availableSources?: string[]
 }
 
 interface DashboardProjectModeTracesOptions {
@@ -1785,6 +1787,15 @@ interface CustomAPI {
       granularity: "day" | "week" | "month" | "custom",
       opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
     ) => Promise<{ success: boolean; data?: DashboardProjectModeData; error?: string }>
+    projectModeCodeStats: (
+      range: { from: string; to: string },
+      opts: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null } | undefined,
+      source: string | null
+    ) => Promise<{
+      success: boolean
+      data?: { codeStats: DashboardCodeStats | null; skillCodeStats: DashboardCodeStats | null }
+      error?: string
+    }>
     projectModeProjects: (
       range: { from: string; to: string },
       options?: DashboardProjectModeProjectPageOptions

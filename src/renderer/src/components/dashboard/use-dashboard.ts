@@ -476,6 +476,8 @@ export interface DashboardProjectModeData {
   projects: DashboardProjectModeProject[]
   /** 「仅精益项目」开关下精益项目 id 集被截断、遥测汇总可能不完整；开关关闭时恒为 false。 */
   leanTruncated: boolean
+  /** 当前范围内出现过的外部上报来源（properties.source 去重值，字典序）；供生产效能代码指标 source 下拉。 */
+  availableSources?: string[]
 }
 
 export interface DashboardProjectModeTracesOptions {
@@ -1848,6 +1850,14 @@ export function useDashboard() {
   >({})
   const [projectModeLoading, setProjectModeLoading] = useState(false)
   const [projectModeError, setProjectModeError] = useState<string | null>(null)
+  // 「生产效能代码指标」source 局部筛选：当前选中的来源（null = 全部，用 projectMode 自带口径），
+  // 以及按 source 换数得到的代码采纳覆盖值（仅替换该区两个子模块，不动其它面板维度）。
+  const [projectModeCodeSource, setProjectModeCodeSource] = useState<string | null>(null)
+  const [projectModeCodeStatsOverride, setProjectModeCodeStatsOverride] = useState<{
+    codeStats: DashboardCodeStats | null
+    skillCodeStats: DashboardCodeStats | null
+  } | null>(null)
+  const [projectModeCodeStatsLoading, setProjectModeCodeStatsLoading] = useState(false)
   // 顶部全量组织（LV1）筛选可选项，随时间范围刷新。
   const [orgOptions, setOrgOptions] = useState<string[]>([])
 
@@ -1856,6 +1866,7 @@ export function useDashboard() {
   const skillEvalFetchIdRef = useRef(0)
   const orgOptionsFetchIdRef = useRef(0)
   const projectModeFetchIdRef = useRef(0)
+  const projectModeCodeStatsFetchIdRef = useRef(0)
   const projectModeProjectPageFetchIdRef = useRef<
     Record<DashboardProjectModeProjectStatus, number>
   >({ active: 0, archived: 0 })
@@ -1924,6 +1935,11 @@ export function useDashboard() {
       const id = ++projectModeFetchIdRef.current
       setProjectModeLoading(true)
       setProjectModeError(null)
+      // 时间/组织/精益口径变了：source 候选会变，回到「全部来源」并作废在途的换数请求。
+      projectModeCodeStatsFetchIdRef.current += 1
+      setProjectModeCodeSource(null)
+      setProjectModeCodeStatsOverride(null)
+      setProjectModeCodeStatsLoading(false)
 
       try {
         const result = await window.api.dashboard.projectMode(r, g, {
@@ -1951,6 +1967,39 @@ export function useDashboard() {
       }
     },
     []
+  )
+
+  // 「生产效能代码指标」source 下拉切换：null（全部）→ 清 override 回退 projectMode 自带口径；
+  // 具体来源/原生哨兵 → 走专用轻量接口换数，仅替换该区两个子模块。带版本号防竞态。
+  const selectProjectModeCodeSource = useCallback(
+    async (source: string | null) => {
+      setProjectModeCodeSource(source)
+      if (!source) {
+        projectModeCodeStatsFetchIdRef.current += 1
+        setProjectModeCodeStatsOverride(null)
+        setProjectModeCodeStatsLoading(false)
+        return
+      }
+      const id = ++projectModeCodeStatsFetchIdRef.current
+      setProjectModeCodeStatsLoading(true)
+      try {
+        const result = await window.api.dashboard.projectModeCodeStats(
+          range,
+          { upperOrgLv1: selectedOrgLv1List, fromLeanOnly: fromLeanProjectsOnly },
+          source
+        )
+        if (id !== projectModeCodeStatsFetchIdRef.current) return
+        if (!result.success) throw new Error(result.error ?? "获取代码指标失败")
+        setProjectModeCodeStatsOverride(result.data ?? null)
+      } catch {
+        // 换数失败不阻断面板：清掉 override 回退全部口径（错误已在主进程日志记录）。
+        if (id !== projectModeCodeStatsFetchIdRef.current) return
+        setProjectModeCodeStatsOverride(null)
+      } finally {
+        if (id === projectModeCodeStatsFetchIdRef.current) setProjectModeCodeStatsLoading(false)
+      }
+    },
+    [range, selectedOrgLv1List, fromLeanProjectsOnly]
   )
 
   const fetchProjectModeProjectPage = useCallback(
@@ -2244,6 +2293,10 @@ export function useDashboard() {
     projectMode,
     projectModeLoading,
     projectModeError,
+    projectModeCodeSource,
+    projectModeCodeStatsOverride,
+    projectModeCodeStatsLoading,
+    selectProjectModeCodeSource,
     projectModeProjectPages,
     projectModeProjectPageLoading,
     projectModeProjectPageError,

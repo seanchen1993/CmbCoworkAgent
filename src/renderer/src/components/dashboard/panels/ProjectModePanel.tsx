@@ -88,6 +88,11 @@ const EMPTY_TOOL_USAGE: DashboardProjectModeToolUsage = {
   totalToolCalls: 0
 }
 
+// 「生产效能代码指标」source 下拉哨兵。CODE_SOURCE_NATIVE 必须与主进程
+// src/main/ipc/dashboard.ts 的 NATIVE_CODE_SOURCE 字面量保持一致。
+const CODE_SOURCE_ALL = "__all__"
+const CODE_SOURCE_NATIVE = "__native__"
+
 const PROJECT_CHART_COLORS = [
   "#3b82f6",
   "#8b5cf6",
@@ -1645,6 +1650,10 @@ export function ProjectModePanel({
   data,
   loading,
   error,
+  codeSource,
+  codeStatsOverride,
+  codeStatsLoading,
+  onCodeSourceChange,
   headerAction,
   projectPages,
   projectPageLoading,
@@ -1663,6 +1672,17 @@ export function ProjectModePanel({
   data: DashboardProjectModeData | null
   loading: boolean
   error: string | null
+  /** 「生产效能代码指标」当前选中的 source（null = 全部来源，用 data 自带口径）。 */
+  codeSource: string | null
+  /** 选了具体来源/原生时按 source 换数得到的代码采纳覆盖值；null 表示用 data 自带口径。 */
+  codeStatsOverride: {
+    codeStats: DashboardCodeStats | null
+    skillCodeStats: DashboardCodeStats | null
+  } | null
+  /** source 换数请求在途。 */
+  codeStatsLoading: boolean
+  /** 切换 source 下拉（null = 全部来源）。 */
+  onCodeSourceChange: (source: string | null) => void
   headerAction?: ReactNode
   projectPages: Partial<
     Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>
@@ -1723,8 +1743,14 @@ export function ProjectModePanel({
   }
 
   const summary = data?.summary
-  const skillCodeStats = summary?.skillCodeStats
-  const funnelData: CodeAdoptionFunnelData = summary?.codeStats ?? EMPTY_FUNNEL_DATA
+  // 「生产效能代码指标」按 source 局部换数：选了具体来源/原生（codeStatsOverride 非空）时
+  // 用 override，否则用 data 自带的整体口径。只影响该区两个子模块与漏斗。
+  const codeStats = codeStatsOverride ? codeStatsOverride.codeStats : (summary?.codeStats ?? null)
+  const skillCodeStats = codeStatsOverride
+    ? codeStatsOverride.skillCodeStats
+    : (summary?.skillCodeStats ?? null)
+  const availableSources = data?.availableSources ?? []
+  const funnelData: CodeAdoptionFunnelData = codeStats ?? EMPTY_FUNNEL_DATA
   const skillFunnelData: CodeAdoptionFunnelData = skillCodeStats ?? EMPTY_FUNNEL_DATA
   const topSkills = data?.topSkills ?? []
   const bySkillAdoption = data?.bySkillAdoption ?? []
@@ -1802,9 +1828,37 @@ export function ProjectModePanel({
 
       {/* 生成效能代码指标：项目模式总量 + AutoBizDevOps 约束生成，两个子模块各含卡片与独立漏斗 */}
       <section className="space-y-5">
-        <div className="flex items-center gap-1.5">
-          <h2 className="text-sm font-semibold text-foreground">生产效能代码指标</h2>
-          <CodeEfficiencyModelInfo />
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-1.5">
+            <h2 className="text-sm font-semibold text-foreground">生产效能代码指标</h2>
+            <CodeEfficiencyModelInfo />
+          </div>
+          {/* source 筛选：仅当范围内存在外部上报来源时出现，仅收窄本区两个子模块。 */}
+          {availableSources.length > 0 && (
+            <div className="flex items-center gap-2">
+              {codeStatsLoading && (
+                <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+              )}
+              <span className="text-[11px] text-muted-foreground">来源</span>
+              <Select
+                value={codeSource ?? CODE_SOURCE_ALL}
+                onValueChange={(v) => onCodeSourceChange(v === CODE_SOURCE_ALL ? null : v)}
+              >
+                <SelectTrigger className="h-7 w-[160px] text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={CODE_SOURCE_ALL}>全部来源</SelectItem>
+                  <SelectItem value={CODE_SOURCE_NATIVE}>原生（DevClaw）</SelectItem>
+                  {availableSources.map((s) => (
+                    <SelectItem key={s} value={s}>
+                      {s}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
         </div>
 
         {/* 子模块一（项目模式总量）：含 Vibecoding 在内的整体口径 */}
@@ -1819,7 +1873,7 @@ export function ProjectModePanel({
                 icon={Code2}
                 label="代码生成行数"
                 tag="计数"
-                value={formatLineCount(summary?.codeStats?.generatedLines ?? 0)}
+                value={formatLineCount(codeStats?.generatedLines ?? 0)}
                 color="bg-sky-500"
                 hint={<GeneratedLinesTooltip />}
               />
@@ -1827,69 +1881,53 @@ export function ProjectModePanel({
                 icon={Gauge}
                 label="总量入库采纳率"
                 tag="总量口径 · 入库"
-                value={formatPercent(summary?.codeStats?.inclusivePushedAdoptionRate)}
+                value={formatPercent(codeStats?.inclusivePushedAdoptionRate)}
                 sub={
-                  summary?.codeStats
-                    ? `${formatLineCount(summary.codeStats.pushedAdoptedLines)} / ${formatLineCount(summary.codeStats.inclusiveEffectiveGeneratedLines)} 行`
+                  codeStats
+                    ? `${formatLineCount(codeStats.pushedAdoptedLines)} / ${formatLineCount(codeStats.inclusiveEffectiveGeneratedLines)} 行`
                     : "暂无已 Push 数据"
                 }
                 color="bg-emerald-500"
-                hint={
-                  summary?.codeStats ? (
-                    <InclusivePushedAdoptionTooltip data={summary.codeStats} />
-                  ) : undefined
-                }
+                hint={codeStats ? <InclusivePushedAdoptionTooltip data={codeStats} /> : undefined}
               />
               <StatCard
                 icon={Gauge}
                 label="总量提交采纳率"
                 tag="总量口径 · 提交"
-                value={formatPercent(summary?.codeStats?.inclusiveAdoptionRate)}
+                value={formatPercent(codeStats?.inclusiveAdoptionRate)}
                 sub={
-                  summary?.codeStats
-                    ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.inclusiveEffectiveGeneratedLines)} 行`
+                  codeStats
+                    ? `${formatLineCount(codeStats.adoptedLines)} / ${formatLineCount(codeStats.inclusiveEffectiveGeneratedLines)} 行`
                     : "暂无代码生成数据"
                 }
                 color="bg-cyan-500"
-                hint={
-                  summary?.codeStats ? (
-                    <InclusiveAdoptionTooltip data={summary.codeStats} />
-                  ) : undefined
-                }
+                hint={codeStats ? <InclusiveAdoptionTooltip data={codeStats} /> : undefined}
               />
               <StatCard
                 icon={Gauge}
                 label="入库采纳率"
                 tag="提交口径 · 已push"
-                value={formatPercent(summary?.codeStats?.pushedAdoptionRate)}
+                value={formatPercent(codeStats?.pushedAdoptionRate)}
                 sub={
-                  summary?.codeStats
-                    ? `${formatLineCount(summary.codeStats.pushedAdoptedLines)} / ${formatLineCount(summary.codeStats.pushedEffectiveGeneratedLines)} 行`
+                  codeStats
+                    ? `${formatLineCount(codeStats.pushedAdoptedLines)} / ${formatLineCount(codeStats.pushedEffectiveGeneratedLines)} 行`
                     : "暂无已 Push 数据"
                 }
                 color="bg-teal-500"
-                hint={
-                  summary?.codeStats ? (
-                    <PushedAdoptionTooltip data={summary.codeStats} />
-                  ) : undefined
-                }
+                hint={codeStats ? <PushedAdoptionTooltip data={codeStats} /> : undefined}
               />
               <StatCard
                 icon={Gauge}
                 label="提交采纳率"
                 tag="提交口径 · 对标组织级"
-                value={formatPercent(summary?.codeStats?.measuredAdoptionRate)}
+                value={formatPercent(codeStats?.measuredAdoptionRate)}
                 sub={
-                  summary?.codeStats
-                    ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.effectiveGeneratedLines)} 行`
+                  codeStats
+                    ? `${formatLineCount(codeStats.adoptedLines)} / ${formatLineCount(codeStats.effectiveGeneratedLines)} 行`
                     : "暂无代码生成数据"
                 }
                 color="bg-indigo-500"
-                hint={
-                  summary?.codeStats ? (
-                    <MeasuredAdoptionTooltip data={summary.codeStats} />
-                  ) : undefined
-                }
+                hint={codeStats ? <MeasuredAdoptionTooltip data={codeStats} /> : undefined}
               />
             </div>
             <CodeAdoptionFunnel data={funnelData} onFirstStageClick={onFunnelFirstStageClick} />

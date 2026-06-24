@@ -91,6 +91,25 @@ export interface HookContext {
   pluginWorkspace?: string
   /** Harness feature identifier exposed to hooks as FEATURE_ID. */
   featureId?: string
+  /**
+   * Harness project stable id (= `properties.harnessProjectId` on code-adoption
+   * events) for the project this conversation is bound to. Exposed to hooks as
+   * `HARNESS_PROJECT_ID` env and `harness_project_id` in stdin JSON. Lets an
+   * external code-adoption reporter (running as a DevClaw hook) tag its
+   * self-reported events with the same project id the dashboard aggregates on,
+   * so they surface in 项目运营概览. Empty for non-project-mode conversations.
+   */
+  harnessProjectId?: string
+  /**
+   * Bound adapter name / version (= `properties.harnessAdapterName` /
+   * `properties.harnessAdapterVersion` on code-adoption events). Exposed to hooks
+   * as `HARNESS_ADAPTER_NAME` / `HARNESS_ADAPTER_VERSION` env and
+   * `harness_adapter_name` / `harness_adapter_version` in stdin JSON. Lets an
+   * external reporter tag self-reported events so they show in the dashboard's
+   * per-adapter adoption breakdown. Empty for non-project-mode conversations.
+   */
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
   /** Harness project code exposed to hooks as PROJECT_CODE. */
   projectCode?: string
   /** Harness project directory exposed to hooks as PROJECT_DIR. */
@@ -355,6 +374,9 @@ function buildHookEnv(
   if (context.pluginOutputDir) env.PLUGIN_OUTPUT_DIR = context.pluginOutputDir
   if (context.pluginWorkspace) env.PLUGIN_WORKSPACE = context.pluginWorkspace
   if (context.featureId) env.FEATURE_ID = context.featureId
+  if (context.harnessProjectId) env.HARNESS_PROJECT_ID = context.harnessProjectId
+  if (context.harnessAdapterName) env.HARNESS_ADAPTER_NAME = context.harnessAdapterName
+  if (context.harnessAdapterVersion) env.HARNESS_ADAPTER_VERSION = context.harnessAdapterVersion
   if (context.projectCode) env.PROJECT_CODE = context.projectCode
   if (context.projectDir) env.PROJECT_DIR = context.projectDir
   if (context.sessionId) env.SESSION_ID = context.sessionId
@@ -391,6 +413,9 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   if (context.pluginRoot) payload.plugin_root = context.pluginRoot
   if (context.pluginWorkspace) payload.plugin_workspace = context.pluginWorkspace
   if (context.featureId) payload.feature_id = context.featureId
+  if (context.harnessProjectId) payload.harness_project_id = context.harnessProjectId
+  if (context.harnessAdapterName) payload.harness_adapter_name = context.harnessAdapterName
+  if (context.harnessAdapterVersion) payload.harness_adapter_version = context.harnessAdapterVersion
   if (context.projectCode) payload.project_code = context.projectCode
   if (context.projectDir) payload.project_dir = context.projectDir
   if (context.toolResult !== undefined) {

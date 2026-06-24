@@ -360,16 +360,31 @@ interface HarnessAgentContext {
   pluginName?: string
   pluginWorkspace?: string
   featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
   projectCode?: string
   projectDir?: string
 }
 
 function getHarnessHookContext(
   context: HarnessAgentContext
-): Pick<HookContext, "pluginWorkspace" | "featureId" | "projectCode" | "projectDir"> {
+): Pick<
+  HookContext,
+  | "pluginWorkspace"
+  | "featureId"
+  | "harnessProjectId"
+  | "harnessAdapterName"
+  | "harnessAdapterVersion"
+  | "projectCode"
+  | "projectDir"
+> {
   return {
     pluginWorkspace: context.pluginWorkspace,
     featureId: context.featureId,
+    harnessProjectId: context.harnessProjectId,
+    harnessAdapterName: context.harnessAdapterName,
+    harnessAdapterVersion: context.harnessAdapterVersion,
     projectCode: context.projectCode,
     projectDir: context.projectDir
   }
@@ -389,6 +404,9 @@ function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgent
       pluginName: featureContext.pluginName,
       pluginWorkspace: featureContext.pluginWorkspace,
       featureId: featureContext.featureId,
+      harnessProjectId: featureContext.harnessProjectId,
+      harnessAdapterName: featureContext.harnessAdapterName,
+      harnessAdapterVersion: featureContext.harnessAdapterVersion,
       projectCode: featureContext.projectCode,
       projectDir: featureContext.projectDir
     }
@@ -915,6 +933,9 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   systemId?: string
   pluginWorkspace?: string
   featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
   projectCode?: string
   projectDir?: string
   threadId: string
@@ -948,6 +969,9 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     systemId: params.systemId,
     pluginWorkspace: params.pluginWorkspace,
     featureId: params.featureId,
+    harnessProjectId: params.harnessProjectId,
+    harnessAdapterName: params.harnessAdapterName,
+    harnessAdapterVersion: params.harnessAdapterVersion,
     projectCode: params.projectCode,
     projectDir: params.projectDir,
     sessionId: params.threadId,
@@ -1135,6 +1159,9 @@ async function activateExplicitSkillFromMessage({
   systemId,
   pluginWorkspace,
   featureId,
+  harnessProjectId,
+  harnessAdapterName,
+  harnessAdapterVersion,
   projectCode,
   projectDir,
   sessionId,
@@ -1151,6 +1178,9 @@ async function activateExplicitSkillFromMessage({
   systemId?: string
   pluginWorkspace?: string
   featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
   projectCode?: string
   projectDir?: string
   sessionId: string
@@ -1202,6 +1232,9 @@ async function activateExplicitSkillFromMessage({
     systemId,
     pluginWorkspace,
     featureId,
+    harnessProjectId,
+    harnessAdapterName,
+    harnessAdapterVersion,
     projectCode,
     projectDir,
     sessionId,
