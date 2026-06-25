@@ -287,6 +287,13 @@ const SHARED_TOOL_NAMES = new Set([
 ])
 
 const MAX_PARALLEL_TASK_SUBAGENTS = 3
+const PROJECT_MODE_SUBAGENTS_ENV = "PROJECT_MODE_SUBAGENTS_ENABLED"
+const PROJECT_MODE_SUBAGENTS_DISABLED_VALUES = new Set(["0", "false", "off", "no", "disabled"])
+
+function isProjectModeSubagentsEnabled(): boolean {
+  const raw = process.env[PROJECT_MODE_SUBAGENTS_ENV]?.trim().toLowerCase()
+  return raw ? !PROJECT_MODE_SUBAGENTS_DISABLED_VALUES.has(raw) : true
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -2449,6 +2456,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const approvalThreadId = requestedApprovalThreadId ?? threadId
   const isCoordinatorMode = agentMode === "coordinator"
   const memoryEnabledForRuntime = isMemoryEnabled() && !featureId
+  const projectModeSubagentsEnabled = !featureId || isProjectModeSubagentsEnabled()
 
   if (!threadId) {
     throw new Error("Thread ID is required for checkpointing.")
@@ -2464,6 +2472,12 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Thread ID:", threadId)
   console.log("[Runtime] Workspace path:", workspacePath)
   console.log("[Runtime] Agent mode:", agentMode)
+  if (featureId) {
+    const envValue = process.env[PROJECT_MODE_SUBAGENTS_ENV] ?? "<unset>"
+    console.log(
+      `[Runtime] Project mode subagents enabled: ${projectModeSubagentsEnabled} (${PROJECT_MODE_SUBAGENTS_ENV}=${envValue})`
+    )
+  }
   const hookScope = providedHookScope ?? createHookScope()
   // Coordinator mode: the coordinator never "uses" a skill itself (it has no
   // filesystem/tools and only delegates to workers), so a user's explicit
@@ -2705,7 +2719,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   backend.setOrchestrator(orchestrator)
 
   let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, workingDirPromptAppendix, {
-    includeSubagents: !featureId,
+    includeSubagents: projectModeSubagentsEnabled,
     includeMemory: memoryEnabledForRuntime
   })
   let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
@@ -3754,7 +3768,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     subagentExtraSystemPrompt: agentsPrompt.prompt ?? undefined,
     mainTodosEnabled: !isCoordinatorMode,
     mainFilesystemEnabled: !isCoordinatorMode,
-    mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && !featureId,
+    mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && projectModeSubagentsEnabled,
     filesystemAccess: options.filesystemAccess,
     taskSystemPrompt: isCoordinatorMode
       ? buildCoordinatorTaskPrompt(threadId)
