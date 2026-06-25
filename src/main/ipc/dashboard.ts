@@ -588,6 +588,8 @@ interface UncommittedScopeOptions {
   featureSlug?: string | null
   /** 仅统计由 Skill 生成的代码（properties.usedSkills 非空），对应「插件约束生成」漏斗。 */
   usedSkillsOnly?: boolean
+  /** 上报来源（properties.source）收窄：null/空=全部来源；原生哨兵=仅无 source 事件；其余=该 source。 */
+  source?: string | null
   /** 榜单内按用户姓名 / sapId / ystId 查询。 */
   userKeyword?: string | null
 }
@@ -2669,6 +2671,10 @@ function uncommittedScopeFilters(
   if (featureSlug) filters.push({ term: { "properties.harnessFeatureSlug": featureSlug } })
   // 「由 Skill 生成」口径：usedSkills 非空，与项目概览 skillCodeStats 一致。
   if (options?.usedSkillsOnly) filters.push({ exists: { field: "properties.usedSkills" } })
+  // 上报来源收窄：与「生产效能代码指标」下拉同口径（原生=must_not exists source；其余=term）。
+  // 顶层 filter 同时作用于 code_gen 与 code_adopt，二者均按令牌盖戳同一 properties.source。
+  const sourceClause = buildCodeSourceFilterClause(options?.source)
+  if (sourceClause) filters.push(sourceClause)
   const userKeyword = normalizeCommitUserKeyword(options?.userKeyword)
   if (userKeyword !== null) filters.push(buildCommitUserMatchFilter(userKeyword))
   return filters

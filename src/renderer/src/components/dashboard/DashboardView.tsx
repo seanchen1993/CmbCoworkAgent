@@ -4627,7 +4627,9 @@ export function DashboardView(): React.JSX.Element {
         scope={{
           upperOrgLv1: selectedOrgLv1List,
           projectMode: uncommittedProjectMode,
-          usedSkillsOnly: uncommittedUsedSkillsOnly
+          usedSkillsOnly: uncommittedUsedSkillsOnly,
+          // 与「生产效能代码指标」来源下拉同口径，从漏斗下钻时一并带入未提交分析。
+          source: projectModeCodeSource
         }}
       />
       <CommitDetailsDialog

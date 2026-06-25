@@ -2647,6 +2647,7 @@ const api = {
         projectId?: string | null
         featureSlug?: string | null
         usedSkillsOnly?: boolean
+        source?: string | null
         userKeyword?: string | null
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -2660,6 +2661,7 @@ const api = {
         projectId?: string | null
         featureSlug?: string | null
         usedSkillsOnly?: boolean
+        source?: string | null
         userKeyword?: string | null
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>

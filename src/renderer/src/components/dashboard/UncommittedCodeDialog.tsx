@@ -74,6 +74,8 @@ export interface UncommittedScope {
   projectId?: string
   featureSlug?: string
   usedSkillsOnly?: boolean
+  /** 上报来源收窄（null/缺省=全部来源；原生哨兵=仅无 source 事件）。 */
+  source?: string | null
   label?: string
 }
 
@@ -447,6 +449,7 @@ export function UncommittedCodeAnalysisPanel({
       projectId: scope?.projectId ?? null,
       featureSlug: scope?.featureSlug ?? null,
       usedSkillsOnly: scope?.usedSkillsOnly,
+      source: scope?.source ?? null,
       userKeyword: userKeyword || null
     }),
     [
@@ -455,6 +458,7 @@ export function UncommittedCodeAnalysisPanel({
       scope?.projectId,
       scope?.featureSlug,
       scope?.usedSkillsOnly,
+      scope?.source,
       userKeyword
     ]
   )
