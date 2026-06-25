@@ -5063,7 +5063,7 @@ export function ChatContainer({
           <>
             <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
               <div
-                className={cn("p-4", reserveRightSpace && "md:pr-20")}
+                className={cn("p-4", reserveRightSpace && "md:pr-[20px]")}
                 style={
                   userInputScrollPadding
                     ? { paddingBottom: `${userInputScrollPadding}px` }
@@ -5521,7 +5521,7 @@ export function ChatContainer({
               className={cn(
                 "px-4 pb-4",
                 goalUi.goal ? "pt-1" : "pt-4",
-                reserveRightSpace && "md:pr-20"
+                reserveRightSpace && "md:pr-[20px]"
               )}
             >
               {showGitChangeNotice && (
