@@ -671,45 +671,6 @@ export function buildOrgSkillSubscribeUrl(item: Pick<MarketItem, "name" | "orgSk
   return `${ORG_SKILL_CLAWPARTNER_URL}/skill-detail/${encodeURIComponent(slug)}/${encodeURIComponent(String(skillId))}`
 }
 
-function getOrgSkillErrorMessageFromBody(body: unknown): string | null {
-  if (!body || typeof body !== "object") return null
-
-  const payload = body as Record<string, unknown>
-  const candidates = [payload.errorMsg, payload.detail, payload.message, payload.error]
-  for (const candidate of candidates) {
-    if (typeof candidate === "string" && candidate.trim()) {
-      return candidate.trim()
-    }
-  }
-
-  return null
-}
-
-async function readOrgSkillErrorMessage(response: Response): Promise<string> {
-  const fallback = `HTTP error! status: ${response.status}`
-
-  try {
-    const contentType = response.headers.get("content-type") || ""
-    if (contentType.includes("application/json")) {
-      const data = await response.json()
-      return getOrgSkillErrorMessageFromBody(data) || fallback
-    }
-
-    const text = await response.text()
-    if (!text.trim()) return fallback
-
-    try {
-      const data = JSON.parse(text)
-      return getOrgSkillErrorMessageFromBody(data) || text
-    } catch {
-      return text
-    }
-  } catch (error) {
-    console.warn("[orgSkillMarketApi] Failed to parse error response:", error)
-    return fallback
-  }
-}
-
 async function throwOrgSkillError(response: Response): Promise<never> {
   const error = await readOrgSkillResponseError(response)
   if (error.loginExpired) {
