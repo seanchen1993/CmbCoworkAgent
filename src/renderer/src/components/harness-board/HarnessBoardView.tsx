@@ -477,6 +477,7 @@ function makeDeletedProjectSidebarItem(projectId: string, name: string): Project
     boardCompatibility: deletedProjectCompatibility,
     supportsServiceUnits: false,
     supportedServiceUnits: [],
+    supportsSessionContextInjection: false,
     lifecycle: {
       status: "deleted"
     }
@@ -2507,6 +2508,7 @@ function FeatureCreateDialog({
   const selectedTemplateNodeIds = new Set(selectedTemplate?.nodes ?? [])
   const supportedServiceUnitIds = new Set(project?.supportedServiceUnits ?? [])
   const supportsServiceUnits = project?.supportsServiceUnits === true
+  const supportsSessionContextInjection = project?.supportsSessionContextInjection === true
   const selectableServiceUnitMappings = serviceUnitMappings.filter((mapping) =>
     mapping.serviceUnitIdMapping.trim()
   )
@@ -2645,33 +2647,35 @@ function FeatureCreateDialog({
           })}
         </div>
       )}
-      <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium text-foreground">
-            {pluginServiceUnitContextEnabled
-              ? "由插件注入 AGENTS.md 以及知识库"
-              : "由 CMBDevClaw 注入 AGENTS.md"}
+      {supportsSessionContextInjection && (
+        <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-foreground">
+              {pluginServiceUnitContextEnabled
+                ? "由插件注入 AGENTS.md 以及知识库"
+                : "由 CMBDevClaw 注入 AGENTS.md"}
+            </div>
           </div>
-        </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={pluginServiceUnitContextEnabled}
-          aria-label="切换 AGENTS.md 和知识库注入方式"
-          className={cn(
-            "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-            pluginServiceUnitContextEnabled ? "bg-primary" : "bg-muted-foreground/30"
-          )}
-          onClick={() => onPluginServiceUnitContextChange(!pluginServiceUnitContextEnabled)}
-        >
-          <span
+          <button
+            type="button"
+            role="switch"
+            aria-checked={pluginServiceUnitContextEnabled}
+            aria-label="切换 AGENTS.md 和知识库注入方式"
             className={cn(
-              "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
-              pluginServiceUnitContextEnabled ? "translate-x-4" : "translate-x-0"
+              "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              pluginServiceUnitContextEnabled ? "bg-primary" : "bg-muted-foreground/30"
             )}
-          />
-        </button>
-      </div>
+            onClick={() => onPluginServiceUnitContextChange(!pluginServiceUnitContextEnabled)}
+          >
+            <span
+              className={cn(
+                "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                pluginServiceUnitContextEnabled ? "translate-x-4" : "translate-x-0"
+              )}
+            />
+          </button>
+        </div>
+      )}
     </section>
   )
 
@@ -5980,6 +5984,10 @@ export function HarnessBoardView({
       return
     }
     const supportsServiceUnits = featureDialogProject.supportsServiceUnits
+    const sessionContextInjectionSource =
+      featureDialogProject.supportsSessionContextInjection && pluginServiceUnitContextEnabled
+        ? "plugin"
+        : "cmbdevclaw"
     const selectedServiceUnits = supportsServiceUnits
       ? serviceUnitMappings.filter((mapping) =>
           selectedServiceUnitIds.has(mapping.serviceUnitIdMapping)
@@ -6019,7 +6027,7 @@ export function HarnessBoardView({
       const result = await window.api.harnessBoard.createFeature({
         projectId: featureDialogProject.projectId,
         feature,
-        sessionContextInjectionSource: pluginServiceUnitContextEnabled ? "plugin" : "cmbdevclaw",
+        sessionContextInjectionSource,
         ...(hasSelectedServiceUnits ? { selectedServiceUnits } : {}),
         ...workflowInput
       })

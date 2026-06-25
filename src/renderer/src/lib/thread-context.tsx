@@ -2431,6 +2431,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             toast.info(data.message)
           }
           break
+        case "harness_session_context_inject_warning":
+          if (typeof data.message === "string" && data.message.trim()) {
+            toast.warning(data.message)
+          }
+          break
         case "goal_notice":
           if (typeof data.message === "string" && data.message.trim()) {
             const message = formatGoalEventMessage(data.message)

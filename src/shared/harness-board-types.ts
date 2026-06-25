@@ -236,6 +236,7 @@ export interface HarnessProjectListItem {
   boardCompatibility: HarnessBoardCompatibility
   supportsServiceUnits: boolean
   supportedServiceUnits: string[]
+  supportsSessionContextInjection: boolean
   lifecycle: {
     status: "active" | "archived"
     /** Last lifecycle/metadata change (set on metadata edit and on archive). */

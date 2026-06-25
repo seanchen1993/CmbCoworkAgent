@@ -82,7 +82,7 @@ type HarnessInspectCommandConfigKey =
   | "create_feature"
   | "dynamic_workflow"
   | "skip_node"
-  | "session_context"
+  | "session_context_inject"
   | "pull_knowledge"
 type HarnessPlatformConfigKey =
   | HarnessInspectCommandConfigKey
@@ -100,7 +100,7 @@ const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
   createFeature: "create_feature",
   dynamicWorkflow: "dynamic_workflow",
   skipNode: "skip_node",
-  sessionContext: "session_context",
+  sessionContext: "session_context_inject",
   pullKnowledge: "pull_knowledge"
 }
 
@@ -866,6 +866,10 @@ function boardConfigSupportedServiceUnits(cwd: string): string[] {
 function boardConfigSupportsServiceUnitSelection(cwd: string): boolean {
   const parsed = readBoardConfig(cwd)
   return Array.isArray(parsed?.supported_service_units)
+}
+
+function boardConfigSupportsSessionContextInjection(cwd: string): boolean {
+  return readBoardConfigInspectCommand(cwd, "sessionContext") !== null
 }
 
 function projectDirectoryName(project: Pick<HarnessProjectMetadata, "projectDir" | "projectCode">): string {
@@ -1974,6 +1978,10 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     boardCompatibility.compatible && plugin ? boardConfigSupportedServiceUnits(plugin.path) : []
   const supportsServiceUnits =
     boardCompatibility.compatible && plugin ? boardConfigSupportsServiceUnitSelection(plugin.path) : false
+  const supportsSessionContextInjection =
+    boardCompatibility.compatible && plugin
+      ? boardConfigSupportsSessionContextInjection(plugin.path)
+      : false
   return {
     projectId: project.projectId,
     name: project.name,
@@ -1994,6 +2002,7 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     boardCompatibility,
     supportsServiceUnits,
     supportedServiceUnits,
+    supportsSessionContextInjection,
     lifecycle: {
       status: project.lifecycle.status,
       updateAt: project.lifecycle.updateAt
@@ -2300,6 +2309,8 @@ export function readHarnessFeatureMetadata(
 
 export interface HarnessFeatureAgentContext {
   systemPromptInject?: string
+  harnessAgentsPrompt?: string
+  sessionContextInjectWarning?: string
   pluginOutputDir?: string
   systemId?: string
   pluginRoot?: string
@@ -2315,11 +2326,31 @@ function isHarnessSessionContextOk(value: unknown): boolean {
   return value === true
 }
 
-function readHarnessFeatureSessionContextPrompt(
+interface HarnessSessionContextInjectResult {
+  prompt?: string
+  warning?: string
+}
+
+function formatSessionContextInjectWarning(detail: string): string {
+  return detail
+    ? `插件 AGENTS.md 注入失败：${detail}，已回退到 CMBDevClaw AGENTS.md`
+    : "插件 AGENTS.md 注入失败，已回退到 CMBDevClaw AGENTS.md"
+}
+
+function readHarnessFeatureSessionContextAgentPrompt(
   project: HarnessProjectMetadata,
   featureId: string
-): string | undefined {
-  if (!hasConfiguredHarnessInvocation(project, "sessionContext")) return undefined
+): HarnessSessionContextInjectResult {
+  if (!hasConfiguredHarnessInvocation(project, "sessionContext")) {
+    const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS.sessionContext
+    const detail = `插件未配置 inspectCommands.${process.platform}.${configKey}`
+    console.warn("[HarnessBoard] session_context_inject missing, fallback to CMBDevClaw AGENTS.md:", {
+      projectId: project.projectId,
+      featureId,
+      configKey
+    })
+    return { warning: formatSessionContextInjectWarning(detail) }
+  }
 
   try {
     const configured = buildConfiguredHarnessInvocation(project, "sessionContext", {
@@ -2329,23 +2360,39 @@ function readHarnessFeatureSessionContextPrompt(
     const result = runHarnessJsonInvocation(configured, "sessionContext")
     const message = normalizeText(result.message).trim()
     if (!isHarnessSessionContextOk(result.ok)) {
-      if (message) {
-        console.warn("[HarnessBoard] session_context returned not ok:", message)
-      }
-      return undefined
+      console.warn("[HarnessBoard] session_context_inject returned not ok, fallback to CMBDevClaw AGENTS.md:", {
+        projectId: project.projectId,
+        featureId,
+        message
+      })
+      return { warning: formatSessionContextInjectWarning(message) }
     }
-    const inlineSystemPrompt = normalizeText(result.inlineSystemPrompt).trim()
-    if (inlineSystemPrompt.length > HARNESS_SESSION_CONTEXT_MAX_CHARS) {
-      console.warn("[HarnessBoard] session_context inlineSystemPrompt truncated:", {
-        chars: inlineSystemPrompt.length,
+    const agentmdPrompt = normalizeText(result.agentmdPrompt).trim()
+    if (!agentmdPrompt) {
+      const detail = message || "agentmdPrompt 为空"
+      console.warn("[HarnessBoard] session_context_inject returned empty agentmdPrompt, fallback to CMBDevClaw AGENTS.md:", {
+        projectId: project.projectId,
+        featureId,
+        message
+      })
+      return { warning: formatSessionContextInjectWarning(detail) }
+    }
+    if (agentmdPrompt.length > HARNESS_SESSION_CONTEXT_MAX_CHARS) {
+      console.warn("[HarnessBoard] session_context_inject agentmdPrompt truncated:", {
+        chars: agentmdPrompt.length,
         maxChars: HARNESS_SESSION_CONTEXT_MAX_CHARS
       })
-      return inlineSystemPrompt.slice(0, HARNESS_SESSION_CONTEXT_MAX_CHARS)
+      return { prompt: agentmdPrompt.slice(0, HARNESS_SESSION_CONTEXT_MAX_CHARS) }
     }
-    return inlineSystemPrompt || undefined
+    return { prompt: agentmdPrompt }
   } catch (error) {
-    console.warn("[HarnessBoard] session_context failed:", error)
-    return undefined
+    const detail = error instanceof Error ? error.message : String(error)
+    console.error("[HarnessBoard] session_context_inject failed, fallback to CMBDevClaw AGENTS.md:", {
+      projectId: project.projectId,
+      featureId,
+      error
+    })
+    return { warning: formatSessionContextInjectWarning(detail) }
   }
 }
 
@@ -2362,6 +2409,10 @@ export function buildHarnessFeatureAgentContext(
   const staticSystemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
   const systemId = normalizeText(project.systemId).trim()
+  const featureBinding = findFeatureServiceUnitBinding(project.projectId, feature.slug)
+  const sessionContextInjectionSource =
+    featureBinding?.sessionContextInjectionSource ?? "cmbdevclaw"
+  const usePluginAgentsPrompt = sessionContextInjectionSource === "plugin"
   const render = (
     template: string | null,
     command: HarnessInspectCommandName
@@ -2371,11 +2422,18 @@ export function buildHarnessFeatureAgentContext(
         undefined
       : undefined
   const renderedStaticPrompt = render(staticSystemPromptInject, "run")
-  const sessionContextPrompt = readHarnessFeatureSessionContextPrompt(project, feature.slug)
-  const systemPromptInject = [renderedStaticPrompt, sessionContextPrompt].filter(Boolean).join("\n\n")
+  const sessionContextInjectResult = usePluginAgentsPrompt
+    ? readHarnessFeatureSessionContextAgentPrompt(project, feature.slug)
+    : undefined
+  const harnessAgentsPrompt = sessionContextInjectResult?.prompt
+  const systemPromptInject = renderedStaticPrompt?.trim() || undefined
 
   return {
-    systemPromptInject: systemPromptInject || undefined,
+    systemPromptInject,
+    ...(harnessAgentsPrompt ? { harnessAgentsPrompt } : {}),
+    ...(sessionContextInjectResult?.warning
+      ? { sessionContextInjectWarning: sessionContextInjectResult.warning }
+      : {}),
     pluginOutputDir: render(pluginOutputDir, "run"),
     systemId: systemId || undefined,
     pluginRoot: cwd,

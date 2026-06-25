@@ -352,6 +352,8 @@ async function withActiveRunReplacementLock<T>(threadId: string, fn: () => Promi
 
 interface HarnessAgentContext {
   workingDirPromptAppendix?: string
+  harnessAgentsPrompt?: string
+  sessionContextInjectWarning?: string
   pluginOutputDir?: string
   systemId?: string
   pluginRoot?: string
@@ -381,6 +383,8 @@ function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgent
 
     return {
       workingDirPromptAppendix: featureContext.systemPromptInject,
+      harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
+      sessionContextInjectWarning: featureContext.sessionContextInjectWarning,
       pluginOutputDir: featureContext.pluginOutputDir,
       systemId: featureContext.systemId,
       pluginRoot: featureContext.pluginRoot,
@@ -1309,6 +1313,19 @@ function sendHookNotice(window: BrowserWindow, channel: string, message: string)
   safeSendToWindow(window, channel, {
     type: "custom",
     data: { type: "hook_notice", message }
+  })
+}
+
+function sendHarnessSessionContextInjectWarning(
+  window: BrowserWindow,
+  channel: string,
+  context: HarnessAgentContext
+): void {
+  const message = context.sessionContextInjectWarning?.trim()
+  if (!message) return
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: { type: "harness_session_context_inject_warning", message }
   })
 }
 
@@ -4023,6 +4040,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const workspacePath = metadata.workspacePath as string | undefined
         sessionWorkspacePath = workspacePath ?? undefined
         const harnessAgentContext = getHarnessAgentContext(metadata)
+        sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
         const memoryEnabledForThread = isMemoryEnabled() && !harnessAgentContext.featureId
 
         if (!workspacePath) {
@@ -5990,6 +6008,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
       const workspacePath = metadata.workspacePath as string | undefined
       const harnessAgentContext = getHarnessAgentContext(metadata)
+      sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
       const resumeCoordinatorRequest = resolveCoordinatorModeRequest("", metadata)
       const resumeForcedByEnvironment = resumeCoordinatorRequest.source === "environment"
       const resumeAgentMode: AgentMode = resumeForcedByEnvironment
@@ -6744,6 +6763,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const workspacePath = metadata.workspacePath as string | undefined
     const modelId = metadata.model as string | undefined
     const harnessAgentContext = getHarnessAgentContext(metadata)
+    sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
     const interruptCoordinatorRequest = resolveCoordinatorModeRequest("", metadata)
     const interruptAgentMode: AgentMode =
       interruptCoordinatorRequest.source === "environment"

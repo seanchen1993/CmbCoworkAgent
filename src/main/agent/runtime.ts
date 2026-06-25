@@ -2344,6 +2344,8 @@ export interface CreateAgentRuntimeOptions {
   enableRequestUserInput?: boolean
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
+  /** Optional Harness project AGENTS.md prompt appended without changing workspace AGENTS.md loading. */
+  harnessAgentsPrompt?: string
   /** Turn-scoped internal coordinator context injected only into the main coordinator prompt. */
   coordinatorTurnPrompt?: string
   /** Explicit /skill selection parsed from the current coordinator turn, if any. */
@@ -2430,6 +2432,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     maxRetryAttempts,
     coordinatorWorkerTurnPlanning,
     enableAgentsPrompt = true,
+    harnessAgentsPrompt,
     agentMode = "normal",
     disableSubagents = false,
     onHookResult,
@@ -2730,6 +2733,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     }
   } else {
     console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
+  }
+  const normalizedHarnessAgentsPrompt = harnessAgentsPrompt?.trim()
+  if (normalizedHarnessAgentsPrompt) {
+    systemPrompt += "\n\n" + normalizedHarnessAgentsPrompt
+    console.log("[Runtime] Loaded Harness AGENTS.md prompt")
   }
   if (extraSystemPrompt) {
     systemPrompt += "\n\n" + extraSystemPrompt
