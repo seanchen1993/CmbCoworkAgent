@@ -1,14 +1,11 @@
 import { BrowserWindow } from "electron"
 import { execFile } from "child_process"
 import { createHash } from "crypto"
-import { existsSync } from "fs"
+import { existsSync, realpathSync } from "fs"
 import * as fs from "fs/promises"
 import * as path from "path"
 import { promisify } from "util"
-import type {
-  AgentAutoCommitResult,
-  AgentAutoCommitSettings
-} from "../types"
+import type { AgentAutoCommitResult, AgentAutoCommitSettings } from "../types"
 import {
   getAgentAutoCommitCardNumberForWorkspace,
   getAgentAutoCommitSettings,
@@ -132,11 +129,29 @@ function normalizeGitRelativePath(input: string): string {
     .replace(/\/$/, "")
 }
 
-function toWorktreeRelativePath(worktreePath: string, rawPath: string, gitRoot?: string | null): string | null {
+// Resolve symlinks so a workspace under a symlinked root (e.g. macOS /var ->
+// /private/var) compares equal to the realpath that `git rev-parse --show-toplevel`
+// returns — otherwise the repo-root → workspace mapping below silently fails and a
+// subdirectory workspace's staged renames get misread as foreign-staged changes.
+function canonicalizePath(p: string): string {
+  const resolved = path.resolve(p)
+  try {
+    return realpathSync.native(resolved)
+  } catch {
+    return resolved // may not exist yet (a not-yet-created file); resolve is best
+  }
+}
+
+// worktreeAbs / gitRootAbs must be pre-canonicalized by the caller (one
+// canonicalizePath per remap, not per file — they are identical for every entry,
+// so canonicalizing here would cost 2 realpath syscalls × N dirty files).
+function toWorktreeRelativePath(
+  worktreeAbs: string,
+  rawPath: string,
+  gitRootAbs?: string | null
+): string | null {
   const trimmed = normalizeGitRelativePath(rawPath)
   if (!trimmed) return null
-  const worktreeAbs = path.resolve(worktreePath)
-  const gitRootAbs = gitRoot ? path.resolve(gitRoot) : null
 
   // Porcelain status paths are repo-root-relative even when `git -C` points at a
   // subdirectory. Map those back to workspace-relative paths before they become
@@ -155,8 +170,8 @@ function toWorktreeRelativePath(worktreePath: string, rawPath: string, gitRoot?:
   }
 
   const rawResolved = path.isAbsolute(rawPath)
-    ? path.resolve(rawPath)
-    : path.resolve(worktreePath, rawPath)
+    ? canonicalizePath(rawPath)
+    : path.resolve(worktreeAbs, rawPath)
   const rel = path.relative(worktreeAbs, rawResolved)
   if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
     return normalizeGitRelativePath(rel)
@@ -212,10 +227,13 @@ function remapStatusEntries(
   worktreePath: string,
   gitRoot?: string | null
 ): GitStatusEntry[] {
+  // Canonicalize once per remap, not per entry.
+  const worktreeAbs = canonicalizePath(worktreePath)
+  const gitRootAbs = gitRoot ? canonicalizePath(gitRoot) : null
   return entries
     .map((entry) => ({
       ...entry,
-      path: toWorktreeRelativePath(worktreePath, entry.path, gitRoot) ?? ""
+      path: toWorktreeRelativePath(worktreeAbs, entry.path, gitRootAbs) ?? ""
     }))
     .filter((entry) => entry.path)
 }
@@ -240,15 +258,7 @@ async function runStatus(worktreePath: string, gitRoot?: string | null): Promise
   } catch {
     const out = await runGit(
       worktreePath,
-      [
-        "-c",
-        "core.quotepath=false",
-        "status",
-        "--porcelain",
-        "--untracked-files=all",
-        "--",
-        "."
-      ],
+      ["-c", "core.quotepath=false", "status", "--porcelain", "--untracked-files=all", "--", "."],
       { silent: true, timeoutMs: 15_000 }
     )
     return remapStatusEntries(parseStatusEntries(out), worktreePath, gitRoot)
@@ -316,10 +326,12 @@ async function getHead(worktreePath: string): Promise<string | null> {
 
 async function getGitRoot(workspacePath: string): Promise<string | null> {
   try {
-    const root = (await runGit(workspacePath, ["rev-parse", "--show-toplevel"], {
-      silent: true,
-      timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
-    })).trim()
+    const root = (
+      await runGit(workspacePath, ["rev-parse", "--show-toplevel"], {
+        silent: true,
+        timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
+      })
+    ).trim()
     return root || null
   } catch {
     return null
@@ -375,7 +387,7 @@ export function recordAgentTouchedFile(
   workspacePath: string,
   filePath: string
 ): void {
-  const rel = toWorktreeRelativePath(workspacePath, filePath)
+  const rel = toWorktreeRelativePath(canonicalizePath(workspacePath), filePath)
   if (!rel) return
   let set = touchedFilesByThread.get(threadId)
   if (!set) {
@@ -524,9 +536,11 @@ async function getThreadLlmModifiedFiles(
     const raw = metadata.llmModifiedFiles
     if (!Array.isArray(raw)) return []
     const files = new Set<string>()
+    const worktreeAbs = canonicalizePath(workspacePath)
+    const gitRootAbs = gitRoot ? canonicalizePath(gitRoot) : null
     for (const item of raw) {
       if (typeof item !== "string") continue
-      const rel = toWorktreeRelativePath(workspacePath, item, gitRoot)
+      const rel = toWorktreeRelativePath(worktreeAbs, item, gitRootAbs)
       if (rel) files.add(rel)
     }
     return Array.from(files)
@@ -644,7 +658,9 @@ export async function maybeAutoCommitAfterAgentRun({
     const endDirty = new Set(entries.map((entry) => entry.path))
     const startDirty = new Set(snapshot.dirtyFiles)
     const touched = touchedFilesByThread.get(threadId) ?? new Set<string>()
-    const trackedByGitPanel = new Set(await getThreadLlmModifiedFiles(threadId, workspacePath, gitRoot))
+    const trackedByGitPanel = new Set(
+      await getThreadLlmModifiedFiles(threadId, workspacePath, gitRoot)
+    )
     const agentReported = new Set([...touched, ...trackedByGitPanel])
 
     // Any pre-existing dirty file whose content changed during the run is a candidate.
@@ -660,18 +676,28 @@ export async function maybeAutoCommitAfterAgentRun({
       })
     )
 
-    const newDirtyFiles = Array.from(endDirty).filter((file) => !startDirty.has(file))
+    // `.cmbdevclaw/` is CmbCoworkAgent's own internal dir inside the user's
+    // workspace (workflow run state, hooks, etc.). It must NEVER be auto-committed
+    // into the user's repo: if they haven't gitignored it, its run JSON / script
+    // files surface as untracked/dirty and would otherwise be swept in. Exclude it
+    // from BOTH candidates and the skipped report (it's internal, not the user's
+    // work); a manual `git add` by the user is still their own choice.
+    const isWorkspaceInternalPath = (file: string): boolean =>
+      file === ".cmbdevclaw" || file.startsWith(".cmbdevclaw/") || file.includes("/.cmbdevclaw/")
+    const newDirtyFiles = Array.from(endDirty).filter(
+      (file) => !startDirty.has(file) && !isWorkspaceInternalPath(file)
+    )
     const candidate = new Set<string>()
     for (const file of newDirtyFiles) {
       candidate.add(file)
     }
     for (const file of changedStartDirty) {
-      candidate.add(file)
+      if (!isWorkspaceInternalPath(file)) candidate.add(file)
     }
 
     const candidateFiles = Array.from(candidate).sort()
     const skippedFiles = Array.from(endDirty)
-      .filter((file) => !candidate.has(file))
+      .filter((file) => !candidate.has(file) && !isWorkspaceInternalPath(file))
       .sort()
 
     const preexistingIncluded = candidateFiles.filter((file) => startDirty.has(file))
@@ -766,9 +792,9 @@ export async function maybeAutoCommitAfterAgentRun({
       // for this same commit — previously every auto-commit produced a duplicate
       // commit event (one here, one from the backstop that measured adoption).
       const adoptionCaptureTimeMs = Date.now()
-      let adoptionSnapshots: ReturnType<typeof captureStagedSnapshotsForCommit> = []
+      let adoptionSnapshots: Awaited<ReturnType<typeof captureStagedSnapshotsForCommit>> = []
       try {
-        adoptionSnapshots = captureStagedSnapshotsForCommit(workspacePath)
+        adoptionSnapshots = await captureStagedSnapshotsForCommit(workspacePath)
       } catch {
         // capture is best-effort; never block the auto-commit
       }

@@ -7,6 +7,7 @@ import * as path from "path"
 import { execFile } from "child_process"
 import { promisify } from "util"
 import { getWindowsSandboxMode } from "../storage"
+import { workflowRunManager } from "../agent/workflow/run-manager"
 import type {
   ModelConfig,
   Provider,
@@ -15,7 +16,12 @@ import type {
   WorkspaceFileParams
 } from "../types"
 import { LocalSandbox } from "../agent/local-sandbox"
-import { startWatching, stopWatching } from "../services/workspace-watcher"
+import {
+  buildGitignoreMatcher,
+  setActiveWatchedThread,
+  startWatching,
+  stopWatching
+} from "../services/workspace-watcher"
 import { trackEvent } from "../services/event-reporter"
 import { captureStagedSnapshotsForCommit, measureForCommit } from "../services/adoption-tracker"
 import { scheduleMarkCodeAdoptionCommitsPushed } from "../services/code-adoption-push-updater"
@@ -266,8 +272,40 @@ async function assertWorkspaceSwitchAllowed(
     typeof nextPath === "string" ? normalizeTrackedPath(nextPath) : ""
   if (normalizedCurrentPath && normalizedCurrentPath === normalizedNextPath) return
   if (currentPath === nextPath) return
+  // Block a workspace switch while a dynamic workflow is running or its result is
+  // still pending: run files live under the OLD workspace, but hydrate / completion
+  // notification / history look them up by the thread's CURRENT workspacePath, so
+  // switching orphans the run. This is the REAL workspace-picker entry (workspace:set
+  // / workspace:select, incl. the "创建 Worktree 并切换" path which calls workspace:set);
+  // threads:update has its own guard reusing the same check. (#2)
+  const pendingRun =
+    typeof currentPath === "string"
+      ? workflowRunManager.findPendingNotification(currentPath, threadId)
+      : null
+  if (
+    workflowRunManager.isBusyForThread(
+      threadId,
+      typeof currentPath === "string" ? currentPath : undefined
+    )
+  ) {
+    throw new Error("仍有动态工作流在运行或结果待汇报，请先等待其完成或取消后再切换工作区。")
+  }
   if (hasActiveAgentRun(threadId)) {
     throw new Error("当前线程仍有前台请求在执行，请等待该轮完成后再切换工作区。")
+  }
+  // Escape hatch (#5): once the pending run's auto-re-report is exhausted this process
+  // (wedged report turn / API outage) isBusyForThread returns false, so the switch is
+  // ALLOWED here rather than locking the user out. HONEST CAVEAT: switching the
+  // workspace strands that pending result under the ORIGINAL workspace — hydrate /
+  // list / completion notification all look runs up by the thread's CURRENT (new)
+  // workspacePath, so the result is NOT lost (still on disk under the old workspace,
+  // visible in its history panel) but won't auto-report until the user switches back
+  // to the original workspace in workflow mode. Mirrors the leave-mode caveat in
+  // threads.ts / agent.ts.
+  if (pendingRun) {
+    console.warn(
+      `[Workflow] Switching workspace with a renotify-exhausted pending run ${pendingRun.runId}: its result stays under the original workspace and won't auto-report until you switch back there in workflow mode. (#5)`
+    )
   }
   if (typeof currentPath === "string" && currentPath.trim()) {
     await coordinatorWorkerManager.restoreWorkersForThread({
@@ -299,13 +337,17 @@ async function assertWorkspaceSwitchAllowed(
 }
 
 function normalizeTrackedPath(input: string): string {
-  return String(input || "").trim().replace(/^"(.*)"$/, "$1").replace(/\\/g, "/")
+  const value = String(input ?? "")
+  if (!value.trim()) return ""
+  const quoted = value.trim().match(/^"(.*)"$/)
+  return (quoted ? quoted[1] : value).replace(/\\/g, "/")
 }
 
 function normalizeGitRelativePath(input: string): string {
-  return String(input || "")
-    .trim()
-    .replace(/^"(.*)"$/, "$1")
+  const value = String(input ?? "")
+  if (!value.trim()) return ""
+  const quoted = value.trim().match(/^"(.*)"$/)
+  return (quoted ? quoted[1] : value)
     .replace(/\\/g, "/")
     .replace(/^\.\/+/, "")
     .replace(/^\/+/, "")
@@ -541,7 +583,7 @@ function parsePorcelainPathEntries(output: string): GitPanelChangedFile[] {
   for (const line of lines) {
     if (line.length < 4) continue
     const status = line.slice(0, 2)
-    let rawPath = line.slice(3).trim()
+    let rawPath = line.slice(3).replace(/\r$/, "")
     if (!rawPath) continue
     let previousPath: string | undefined
     if (isRenameOrCopyStatus(status) && rawPath.includes(" -> ")) {
@@ -562,10 +604,25 @@ function parsePorcelainPathEntries(output: string): GitPanelChangedFile[] {
 async function runStatusPorcelain(
   worktreePath: string,
   pathspecs: string[],
-  options?: { silent?: boolean; untrackedMode?: GitStatusUntrackedMode; maxBufferBytes?: number }
+  options?: {
+    silent?: boolean
+    untrackedMode?: GitStatusUntrackedMode
+    maxBufferBytes?: number
+    excludeDirs?: readonly string[]
+  }
 ): Promise<string> {
   const silent = Boolean(options?.silent)
   const untrackedMode = options?.untrackedMode ?? "all"
+  const excludeDirs = options?.excludeDirs ?? []
+
+  // 需要排除噪音目录时不能直接给 status 加 :(exclude)：那样会把这些目录下“已跟踪”的真实
+  // 改动也一并隐藏（如项目刻意提交 dist/）。改为两段式扫描，只对未跟踪文件做噪音目录过滤。
+  if (excludeDirs.length > 0) {
+    return runStatusPorcelainExcludingNoiseDirs(worktreePath, pathspecs, excludeDirs, {
+      silent,
+      maxBufferBytes: options?.maxBufferBytes
+    })
+  }
 
   try {
     // Git 的 pathspec 默认支持 glob 语法，文件名中包含 []、*、? 等字符时会被当作模式匹配。
@@ -603,6 +660,76 @@ async function runStatusPorcelain(
       { silent, timeoutMs: 15_000, maxBufferBytes: options?.maxBufferBytes }
     )
   }
+}
+
+/**
+ * 两段式 porcelain 扫描，用于在排除 node_modules/dist 等噪音目录的同时，不误伤这些目录下
+ * 已跟踪文件的真实改动：
+ *   1) `status --untracked-files=no`：拿到全部已跟踪改动（含噪音目录里的 tracked 修改、
+ *      删除、重命名），不加任何排除；
+ *   2) `ls-files --others --exclude-standard` + 排除 pathspec：只对未跟踪文件应用噪音目录过滤，
+ *      并天然展开到文件级、尊重 .gitignore。
+ * 最后把未跟踪结果按 porcelain 口径合成 `?? <path>` 拼到已跟踪输出之后，交由现有解析器统一处理。
+ */
+async function runStatusPorcelainExcludingNoiseDirs(
+  worktreePath: string,
+  pathspecs: string[],
+  excludeDirs: readonly string[],
+  options: { silent?: boolean; maxBufferBytes?: number }
+): Promise<string> {
+  const silent = Boolean(options.silent)
+  const maxBufferBytes = options.maxBufferBytes
+  const excludePathspecs = buildExcludedDirPathspecs(excludeDirs)
+
+  const trackedArgs = (useZ: boolean): string[] => [
+    "-c",
+    "core.quotepath=false",
+    "--literal-pathspecs",
+    "status",
+    "--porcelain",
+    "--untracked-files=no",
+    ...(useZ ? ["-z"] : []),
+    "--",
+    ...pathspecs
+  ]
+  // ls-files 需要 pathspec magic 来排除目录，因此这里不能用 --literal-pathspecs。
+  const untrackedArgs = (useZ: boolean): string[] => [
+    "-c",
+    "core.quotepath=false",
+    "ls-files",
+    "--others",
+    "--exclude-standard",
+    ...(useZ ? ["-z"] : []),
+    "--",
+    ...pathspecs,
+    ...excludePathspecs
+  ]
+
+  const run = (args: string[]): Promise<string> =>
+    runGit(worktreePath, args, { silent, timeoutMs: 15_000, maxBufferBytes })
+
+  let useZ = true
+  let trackedOut: string
+  let untrackedOut: string
+  try {
+    ;[trackedOut, untrackedOut] = await Promise.all([run(trackedArgs(true)), run(untrackedArgs(true))])
+  } catch {
+    // 旧版 Git 不支持某些 -z 组合时回退到换行分隔。
+    useZ = false
+    ;[trackedOut, untrackedOut] = await Promise.all([run(trackedArgs(false)), run(untrackedArgs(false))])
+  }
+
+  const sep = useZ ? "\0" : "\n"
+  const untrackedEntries = untrackedOut
+    .split(sep)
+    .map((p) => (useZ ? p : p.replace(/\r$/, "")))
+    .filter((p) => p.length > 0)
+    .map((p) => `?? ${p}`)
+  if (untrackedEntries.length === 0) {
+    return trackedOut
+  }
+  const trackedNormalized = trackedOut && !trackedOut.endsWith(sep) ? `${trackedOut}${sep}` : trackedOut
+  return `${trackedNormalized}${untrackedEntries.join(sep)}${sep}`
 }
 
 interface TimedPromiseCacheEntry<T> {
@@ -665,7 +792,6 @@ const THREAD_GIT_CONTEXT_CACHE_TTL_MS = 30_000
 const GIT_EXEC_MAX_BUFFER_BYTES = 20 * 1024 * 1024
 const GIT_PANEL_DIFF_EXEC_MAX_BUFFER_BYTES = 768 * 1024
 const GIT_PANEL_NUMSTAT_MAX_BUFFER_BYTES = 2 * 1024 * 1024
-const GIT_PANEL_STATUS_LIST_MAX_BUFFER_BYTES = 768 * 1024
 const GIT_PANEL_STATUS_SUMMARY_MAX_BUFFER_BYTES = 2 * 1024 * 1024
 // 合成新文件 diff 时的内存保护阈值，避免一次性读取超大文件导致主进程内存抖动。
 const MAX_SYNTHETIC_DIFF_BYTES = 256 * 1024
@@ -677,6 +803,33 @@ const GIT_PANEL_MAX_VISIBLE_FILES = 200
 const GIT_PANEL_MAX_DIFF_CHARS = 200_000
 const GIT_PANEL_MAX_PENDING_COMMITS = 50
 const GIT_PANEL_MOVE_DETECTION_MAX_CANDIDATES = 80
+// Git 面板是“评审改动”的界面：依赖目录与构建产物属于噪音，且体量巨大（node_modules
+// 动辄上万文件）。即使工作区漏配 .gitignore，也不应把它们灌进评审列表——否则既是噪音，
+// 又会把面板和后续 commit 拖垮。这里在 status 扫描阶段按 pathspec 直接排除掉这些目录
+// （任意层级），同时其它未跟踪目录仍以 --untracked-files=all 展开到文件级。
+const GIT_PANEL_EXCLUDED_UNTRACKED_DIRS = [
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  ".next",
+  ".nuxt",
+  "target",
+  "__pycache__",
+  ".venv",
+  "venv",
+  ".gradle",
+  ".turbo",
+  ".parcel-cache",
+  "coverage"
+] as const
+
+// 把排除目录名转成 git pathspec：`:(exclude)<dir>` 命中顶层目录及其内容，
+// `:(glob,exclude)**/<dir>/**` 再补齐任意嵌套层级。
+// 注意：这些 magic pathspec 与 --literal-pathspecs 互斥，仅可用于“按 . 列目录”的场景。
+function buildExcludedDirPathspecs(dirs: readonly string[]): string[] {
+  return dirs.flatMap((dir) => [`:(exclude)${dir}`, `:(glob,exclude)**/${dir}/**`])
+}
 const gitRootCache = new Map<string, TimedPromiseCacheEntry<string | null>>()
 const worktreeCache = new Map<string, TimedPromiseCacheEntry<boolean>>()
 const summaryCache = new Map<string, TimedPromiseCacheEntry<GitPanelSummaryStats>>()
@@ -994,6 +1147,20 @@ function parseNumstatTotals(output: string): { additions: number; deletions: num
   return { additions, deletions }
 }
 
+// numstat 对重命名/移动会把路径渲染成 `old => new` 或带公共前后缀的
+// `pre{old => new}post` 形式。这里取重命名后的新路径，使其与 status 解析出的
+// `entry.path` 口径一致，能在折叠态正确命中行数。
+function extractNumstatRenameTarget(pathField: string): string {
+  if (!pathField.includes("=>")) return pathField
+  const braceMatch = pathField.match(/^(.*)\{.* => (.*)\}(.*)$/)
+  if (braceMatch) {
+    const [, prefix, newMid, suffix] = braceMatch
+    return `${prefix}${newMid}${suffix}`.replace(/\/{2,}/g, "/")
+  }
+  const arrowParts = pathField.split(" => ")
+  return arrowParts[arrowParts.length - 1] || pathField
+}
+
 function parseNumstatByPath(output: string): Map<string, { additions: number; deletions: number }> {
   const map = new Map<string, { additions: number; deletions: number }>()
   const lines = output
@@ -1007,8 +1174,12 @@ function parseNumstatByPath(output: string): Map<string, { additions: number; de
     const pathRaw = parts.slice(2).join("\t").trim()
     if (!pathRaw) continue
 
+    // numstat 默认会对非 ASCII 路径做 C 风格八进制转义并加引号（core.quotepath=true）。
+    // 必须先按 status 同款逻辑解码，否则 normalizeGitRelativePath 的 `\\ -> /` 规则会把
+    // `"docs/\346..."` 破坏成 `docs/346/...`，导致折叠态 numstat 命中不到对应文件、
+    // 行数回退成全文件估算（展开后才用 parseNumstatTotals 修正回来）。
     const normalizedPath = normalizeGitRelativePath(
-      pathRaw.includes(" -> ") ? pathRaw.split(" -> ").pop() || pathRaw : pathRaw
+      extractNumstatRenameTarget(decodeGitQuotedPath(pathRaw))
     )
     if (!normalizedPath) continue
 
@@ -1899,7 +2070,9 @@ export async function buildGitPanelState(
   const visibleFileLimit = Math.max(1, options?.visibleFileLimit ?? GIT_PANEL_MAX_VISIBLE_FILES)
   const statusUntrackedMode = options?.statusUntrackedMode ?? (includeDiffs ? "all" : "normal")
   const statusMaxBufferBytes =
-    options?.statusMaxBufferBytes ?? (includeDiffs ? GIT_EXEC_MAX_BUFFER_BYTES : GIT_PANEL_STATUS_LIST_MAX_BUFFER_BYTES)
+    // 懒加载列表如今用 --untracked-files=all 展开未跟踪目录（已排除 node_modules 等噪音），
+    // 路径文本量比 normal 模式更大，放宽到 summary 档，避免正常仓库触顶报错。
+    options?.statusMaxBufferBytes ?? (includeDiffs ? GIT_EXEC_MAX_BUFFER_BYTES : GIT_PANEL_STATUS_SUMMARY_MAX_BUFFER_BYTES)
   const trackedSet = new Set<string>()
   for (const tracked of trackedFiles) {
     for (const rel of toWorktreeRelativePath(worktreePath, tracked)) {
@@ -1920,10 +2093,16 @@ export async function buildGitPanelState(
   }
 
   const statusPathspecs = filterByTracked ? normalizedTrackedFiles : ["."]
+  // 列目录场景（未按具体 tracked 文件过滤）：排除依赖/构建噪音目录，并强制用 --untracked-files=all
+  // 把其它未跟踪目录展开到文件级，避免面板里出现 `node_modules` 这种光秃秃的文件夹条目。
+  // 按真实文件名过滤时保持原有口径（excludeDirs 与 magic pathspec 互斥）。
+  const excludeUntrackedDirs = filterByTracked ? undefined : GIT_PANEL_EXCLUDED_UNTRACKED_DIRS
+  const effectiveUntrackedMode: GitStatusUntrackedMode = filterByTracked ? statusUntrackedMode : "all"
   const statusOut = await runStatusPorcelain(worktreePath, statusPathspecs, {
     silent,
-    untrackedMode: statusUntrackedMode,
-    maxBufferBytes: statusMaxBufferBytes
+    untrackedMode: effectiveUntrackedMode,
+    maxBufferBytes: statusMaxBufferBytes,
+    excludeDirs: excludeUntrackedDirs
   })
   const rawChangedFileEntries = collectChangedFileEntriesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
     filterByTracked
@@ -2114,7 +2293,11 @@ async function getChangedFileEntriesForGitOps(
   }
 
   const statusPathspecs = filterByTracked ? normalizedTrackedFiles : ["."]
-  const statusOut = await runStatusPorcelain(worktreePath, statusPathspecs, { silent })
+  // 列目录场景排除 node_modules 等噪音目录，避免“提交全部”把依赖/构建产物一并暂存。
+  const statusOut = await runStatusPorcelain(worktreePath, statusPathspecs, {
+    silent,
+    excludeDirs: filterByTracked ? undefined : GIT_PANEL_EXCLUDED_UNTRACKED_DIRS
+  })
   const rawEntries = collectChangedFileEntriesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
     filterByTracked
   })
@@ -2208,10 +2391,13 @@ async function getGitPanelSummaryQuick(worktreePath: string): Promise<{
   hasPendingDiff: boolean
   changedFiles: number
 }> {
+  // 与 buildGitPanelState 保持同口径：排除依赖/构建噪音目录并展开到文件级，
+  // 否则 header 的“N files”会把 node_modules 算进去，与下方文件列表对不上。
   const statusOut = await runStatusPorcelain(worktreePath, ["."], {
     silent: true,
-    untrackedMode: "normal",
-    maxBufferBytes: GIT_PANEL_STATUS_SUMMARY_MAX_BUFFER_BYTES
+    untrackedMode: "all",
+    maxBufferBytes: GIT_PANEL_STATUS_SUMMARY_MAX_BUFFER_BYTES,
+    excludeDirs: GIT_PANEL_EXCLUDED_UNTRACKED_DIRS
   })
   const changedFiles = collectChangedFilesFromStatus(worktreePath, statusOut, [])
   return {
@@ -2860,7 +3046,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
         if (!ready) return null
 
-        const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
         metadata.workspacePath = newPath
         clearThreadGitContextCache(metadata)
         updateThread(threadId, { metadata: JSON.stringify(metadata) })
@@ -2869,7 +3054,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         // 同步刷新“最近工作区”，供新建线程默认复用。
         store.set("workspacePath", newPath)
       } else {
-        const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
         metadata.workspacePath = newPath
         clearThreadGitContextCache(metadata)
         updateThread(threadId, { metadata: JSON.stringify(metadata) })
@@ -2955,6 +3139,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   // Load files from disk into the workspace view
   ipcMain.handle("workspace:loadFromDisk", async (_event, { threadId }: WorkspaceLoadParams) => {
     const { getThread } = await import("../db")
+    // Always skip node_modules, the dominant machine-generated directory.
+    // `dist`/`out`/`build` are intentionally NOT hardcoded here: in many
+    // projects they hold artifacts the user may want to browse. Instead we
+    // defer to the workspace's own .gitignore (below) to skip large generated
+    // dirs per the user's intent. The same applies to directories named
+    // coverage/tmp/temp, which can contain legitimate project fixtures.
+    const ignoredWorkspaceDirs = new Set(["node_modules"])
 
     // Get workspace path from thread metadata
     const thread = getThread(threadId)
@@ -2965,6 +3156,17 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       return { success: false, error: "No workspace folder linked", files: [] }
     }
 
+    // Respect the workspace's own .gitignore — but for directories only, so
+    // individual gitignored files (e.g. logs, .env) stay visible in the tree
+    // while large gitignored dirs (dist/out/build/.next/target/…) are skipped.
+    const isGitIgnoredDir = buildGitignoreMatcher(workspacePath)
+
+    function shouldSkipWorkspaceDir(name: string, relPath: string): boolean {
+      if (name.startsWith(".") || ignoredWorkspaceDirs.has(name)) return true
+      if (relPath.replace(/\\/g, "/") === "resources/bin") return true
+      return isGitIgnoredDir(relPath)
+    }
+
     try {
       const files: Array<{
         path: string
@@ -2973,41 +3175,74 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         modified_at?: string
       }> = []
 
-      // Recursively read directory
+      // Cap concurrent fs.stat calls so a directory with very many files can't
+      // exhaust the file-descriptor table (EMFILE). Subdirectory recursion is
+      // sequential, so total in-flight stats stay around this bound.
+      const FILE_STAT_CONCURRENCY = 48
+
+      // Recursively read directory. Files within a directory are stat'd in
+      // bounded-parallel batches (the previous sequential `await fs.stat` per
+      // file was the main cost on large repos / network drives).
       async function readDir(dirPath: string, relativePath: string = ""): Promise<void> {
         const entries = await fs.readdir(dirPath, { withFileTypes: true })
 
+        const subDirs: Array<{ fullPath: string; relPath: string }> = []
+        const fileEntries: Array<{ fullPath: string; relPath: string }> = []
+
         for (const entry of entries) {
-          // Skip hidden files and common non-project files
-          if (entry.name.startsWith(".") || entry.name === "node_modules") {
+          const relPath = relativePath ? `${relativePath}/${entry.name}` : entry.name
+
+          // Skip hidden files and heavy generated directories.
+          if (
+            entry.name.startsWith(".") ||
+            (entry.isDirectory() && shouldSkipWorkspaceDir(entry.name, relPath))
+          ) {
             continue
           }
 
           const fullPath = path.join(dirPath, entry.name)
-          const relPath = relativePath ? `${relativePath}/${entry.name}` : entry.name
 
           if (entry.isDirectory()) {
             files.push({
               path: "/" + relPath,
               is_dir: true
             })
-            await readDir(fullPath, relPath)
+            subDirs.push({ fullPath, relPath })
           } else {
-            const stat = await fs.stat(fullPath)
-            files.push({
-              path: "/" + relPath,
-              is_dir: false,
-              size: stat.size,
-              modified_at: stat.mtime.toISOString()
-            })
+            fileEntries.push({ fullPath, relPath })
           }
+        }
+
+        for (let i = 0; i < fileEntries.length; i += FILE_STAT_CONCURRENCY) {
+          const batch = fileEntries.slice(i, i + FILE_STAT_CONCURRENCY)
+          await Promise.all(
+            batch.map(async ({ fullPath, relPath }) => {
+              const stat = await fs.stat(fullPath)
+              files.push({
+                path: "/" + relPath,
+                is_dir: false,
+                size: stat.size,
+                modified_at: stat.mtime.toISOString()
+              })
+            })
+          )
+        }
+
+        for (const dir of subDirs) {
+          await readDir(dir.fullPath, dir.relPath)
         }
       }
 
       await readDir(workspacePath)
 
-      // Start watching for file changes
-      startWatching(threadId, workspacePath)
+      // The scan can take a while; if the thread's workspace switched in the
+      // meantime, don't point the watcher back at the now-stale path. The
+      // renderer also discards stale results via result.workspacePath.
+      const latestThread = getThread(threadId)
+      const latestMetadata = latestThread?.metadata ? JSON.parse(latestThread.metadata) : {}
+      if ((latestMetadata.workspacePath as string | null) === workspacePath) {
+        startWatching(threadId, workspacePath)
+      }
 
       return {
         success: true,
@@ -3022,6 +3257,47 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       }
     }
   })
+
+  // Ensure the workspace watcher is active for a thread without re-scanning the
+  // tree. The renderer caches the file tree per thread and skips loadFromDisk on
+  // revisit, but the watcher may have been evicted by the LRU cap meanwhile —
+  // call this on thread activation to re-arm it. startWatching is idempotent
+  // (same-path calls are a no-op).
+  ipcMain.handle("workspace:ensureWatching", async (_event, { threadId }: WorkspaceLoadParams) => {
+    const { getThread } = await import("../db")
+    const thread = getThread(threadId)
+    const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
+    const workspacePath = metadata.workspacePath as string | null
+    if (!workspacePath) return { success: false }
+    const watcherState = startWatching(threadId, workspacePath)
+    return {
+      success: watcherState !== "failed",
+      restarted: watcherState === "started"
+    }
+  })
+
+  // Mark the foreground thread so the watcher LRU never evicts it, and (re)arm
+  // its watcher from the persisted workspace path. Called by the renderer on
+  // every active-thread switch, independent of whether the file panel is open,
+  // so file-change / Git diff notifications never silently stop for the thread
+  // the user is viewing.
+  ipcMain.handle(
+    "workspace:setActiveThread",
+    async (_event, { threadId }: { threadId: string | null }) => {
+      setActiveWatchedThread(threadId)
+      if (!threadId) return { success: true, restarted: false }
+      const { getThread } = await import("../db")
+      const thread = getThread(threadId)
+      const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
+      const workspacePath = metadata.workspacePath as string | null
+      if (!workspacePath) return { success: true, restarted: false }
+      const watcherState = startWatching(threadId, workspacePath)
+      return {
+        success: watcherState !== "failed",
+        restarted: watcherState === "started"
+      }
+    }
+  )
 
   // Read a single file's contents from disk
   ipcMain.handle(
@@ -3527,7 +3803,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         // bound on which generations can belong to this commit — passed to
         // adoption measurement so later (post-capture) gens are not attributed here.
         const adoptionCaptureTimeMs = Date.now()
-        const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
+        const adoptionSnapshots = await captureStagedSnapshotsForCommit(worktreePath)
         logGitStep(threadId, "commit", `commit message: ${message}`)
         if (Array.isArray(filePaths) && filePaths.length > 0) {
           await runGitWithLiteralPathspecs(worktreePath, ["commit", "-m", message], filesToCommit)

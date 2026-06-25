@@ -556,7 +556,7 @@ interface MessageBubbleProps {
   userSendTimeLabel?: string | null
 }
 
-export function MessageBubble({
+function MessageBubbleImpl({
   message,
   previousMessage,
   isStreaming = true,
@@ -1201,3 +1201,9 @@ export function MessageBubble({
     </div>
   )
 }
+
+// Memoized so off-screen/unchanged bubbles skip React reconciliation when the
+// parent re-renders (which happens on every streaming token). The container
+// passes stable, memoized props (message, toolResults, toolCallStates and
+// useCallback handlers), so the default shallow comparison is effective.
+export const MessageBubble = React.memo(MessageBubbleImpl)

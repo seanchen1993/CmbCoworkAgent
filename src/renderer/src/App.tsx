@@ -98,12 +98,31 @@ function WorkerSplitHandle({ onDrag }: WorkerSplitHandleProps): React.JSX.Elemen
     (event: React.MouseEvent<HTMLDivElement>) => {
       event.preventDefault()
       startXRef.current = event.clientX
+      let frame: number | null = null
+      let latestDelta = 0
+
+      const flushDrag = (): void => {
+        frame = null
+        onDrag(latestDelta)
+      }
+
+      const scheduleDrag = (delta: number): void => {
+        latestDelta = delta
+        if (frame === null) {
+          frame = window.requestAnimationFrame(flushDrag)
+        }
+      }
 
       const handleMouseMove = (moveEvent: MouseEvent): void => {
-        onDrag(moveEvent.clientX - startXRef.current)
+        scheduleDrag(moveEvent.clientX - startXRef.current)
       }
 
       const handleMouseUp = (): void => {
+        if (frame !== null) {
+          window.cancelAnimationFrame(frame)
+          frame = null
+          onDrag(latestDelta)
+        }
         document.removeEventListener("mousemove", handleMouseMove)
         document.removeEventListener("mouseup", handleMouseUp)
         document.body.style.cursor = ""
@@ -470,6 +489,11 @@ function App(): React.JSX.Element {
     setRightModule("git")
     handlePreviewExpand()
   }, [activeRightPanelThreadId, handlePreviewExpand, setThreadPendingGitDiff])
+
+  const dismissGitChangeNotice = useCallback(() => {
+    if (!activeRightPanelThreadId) return
+    setThreadPendingGitDiff(activeRightPanelThreadId, false)
+  }, [activeRightPanelThreadId, setThreadPendingGitDiff])
 
   useEffect(() => {
     // Keep right panel behavior predictable: when switching thread or entering thread view,
@@ -905,6 +929,7 @@ function App(): React.JSX.Element {
                           showTabBar={false}
                           hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
                           onRequestOpenGitPanel={selectGitModule}
+                          onDismissGitChangeNotice={dismissGitChangeNotice}
                           onThreadGitStatusChange={handleThreadGitStatusChange}
                         />
                       ) : (
@@ -926,6 +951,7 @@ function App(): React.JSX.Element {
                         showTabBar={false}
                         hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
                         onRequestOpenGitPanel={selectGitModule}
+                        onDismissGitChangeNotice={dismissGitChangeNotice}
                         onThreadGitStatusChange={handleThreadGitStatusChange}
                       />
                     ) : (
@@ -1006,6 +1032,7 @@ function App(): React.JSX.Element {
                 <HarnessBoardView
                   hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
                   onRequestOpenGitPanel={selectGitModule}
+                  onDismissGitChangeNotice={dismissGitChangeNotice}
                   onThreadGitStatusChange={handleThreadGitStatusChange}
                   onActiveSessionThreadChange={handleHarnessActiveSessionThreadChange}
                 />

@@ -14,18 +14,42 @@ function truncateSnippet(text: string, maxChars: number): string {
   return text.slice(0, end) + "\n…(truncated)"
 }
 
-export function createMemorySearchTool(store: MemoryStore) {
+function asStores(stores: MemoryStore | MemoryStore[]): MemoryStore[] {
+  return Array.isArray(stores) ? stores : [stores]
+}
+
+export function createMemorySearchTool(storesInput: MemoryStore | MemoryStore[]) {
+  const stores = asStores(storesInput)
   return tool(
     async (input) => {
-      const results = store.search(input.query, input.max_results ?? 5)
+      const limit = input.max_results ?? 5
+      const seen = new Set<string>()
+      const results = stores
+        .flatMap((store) =>
+          store.search(input.query, Math.max(limit, 5), { trackRecall: false }).map((result) => ({
+            result,
+            store
+          }))
+        )
+        .filter(({ result }) => {
+          const key = `${result.path}:${result.startLine}`
+          if (seen.has(key)) return false
+          seen.add(key)
+          return true
+        })
+        .sort((a, b) => (b.result.score ?? 0) - (a.result.score ?? 0))
+        .slice(0, limit)
+      for (const { store, result } of results) {
+        store.recordRecall([{ path: result.path, startLine: result.startLine }])
+      }
       if (results.length === 0) {
         return "No matching memories found."
       }
       const now = Date.now()
       const staleMs = MEMORY_FRESHNESS_DAYS * 24 * 60 * 60 * 1000
       return results
-        .map((r, i) => {
-          const source = `${r.path}#L${r.startLine}-${r.endLine}`
+        .map(({ result: r }, i) => {
+          const source = r.citation ?? `${r.path}#L${r.startLine}-${r.endLine}`
           const snippet = truncateSnippet(r.text, SNIPPET_MAX_CHARS)
           // Tag stale snippets so the agent knows to verify before asserting
           // — most agents call memory_search and use the snippet directly
@@ -65,9 +89,17 @@ export function createMemorySearchTool(store: MemoryStore) {
   )
 }
 
-export function createMemoryGetTool(store: MemoryStore) {
+export function createMemoryGetTool(storesInput: MemoryStore | MemoryStore[]) {
+  const stores = asStores(storesInput)
   return tool(
     async (input) => {
+      const store =
+        stores.find((candidate) => {
+          const fullPath = isAbsolute(input.path)
+            ? input.path
+            : join(candidate.getMemoryDir(), input.path)
+          return existsSync(fullPath)
+        }) ?? stores[0]
       const content = store.readMemoryFile(input.path, input.from, input.lines)
 
       // Prepend freshness caveat for memories older than the threshold so the

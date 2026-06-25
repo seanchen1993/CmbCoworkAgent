@@ -1,3 +1,4 @@
+import { memo } from "react"
 import { CircleGauge, Zap, ArrowDown, ArrowUp, Database } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
@@ -25,7 +26,9 @@ interface ContextUsageIndicatorProps {
   className?: string
 }
 
-export function ContextUsageIndicator({
+export const ContextUsageIndicator = memo(ContextUsageIndicatorImpl)
+
+function ContextUsageIndicatorImpl({
   tokenUsage,
   modelId,
   contextLimit: contextLimitProp,

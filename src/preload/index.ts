@@ -79,6 +79,11 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
+import {
+  APP_ATTENTION_CHANNEL,
+  getAgentStreamAttentionKind,
+  type AppAttentionKind
+} from "../shared/app-attention"
 
 interface LspDownloadProgress {
   percent: number
@@ -127,6 +132,26 @@ type PetState =
   | "interaction"
   | "hover"
 
+function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
+  ipcRenderer.send(APP_ATTENTION_CHANNEL, { kind, threadId })
+}
+
+const CANCELLED_AGENT_ATTENTION_TTL_MS = 30_000
+const cancelledAgentAttentionThreads = new Map<string, number>()
+
+function notifyForAgentStreamEvent(event: unknown, threadId?: string): void {
+  const kind = getAgentStreamAttentionKind(event)
+  if (!kind) return
+  if (threadId) {
+    const cancelledAt = cancelledAgentAttentionThreads.get(threadId)
+    if (cancelledAt !== undefined) {
+      cancelledAgentAttentionThreads.delete(threadId)
+      if (Date.now() - cancelledAt <= CANCELLED_AGENT_ATTENTION_TTL_MS) return
+    }
+  }
+  notifyAppAttention(kind, threadId)
+}
+
 // Simple electron API - replaces @electron-toolkit/preload
 const electronAPI = {
   openExternal: (url: string) => shell.openExternal(url),
@@ -166,7 +191,7 @@ const api = {
       message: string,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator",
+      agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ): (() => void) => {
@@ -176,6 +201,9 @@ const api = {
 
       const handler = (_: unknown, data: StreamEvent): void => {
         onEvent(data)
+        if (!coordinatorInternalNotification) {
+          notifyForAgentStreamEvent(data, threadId)
+        }
         if (data.type === "done" || data.type === "error") {
           ipcRenderer.removeListener(channel, handler)
         }
@@ -201,7 +229,7 @@ const api = {
       command: unknown,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator",
+      agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ): (() => void) => {
@@ -211,6 +239,9 @@ const api = {
 
       const handler = (_: unknown, data: StreamEvent): void => {
         onEvent(data)
+        if (!coordinatorInternalNotification) {
+          notifyForAgentStreamEvent(data, threadId)
+        }
         if (data.type === "done" || data.type === "error") {
           ipcRenderer.removeListener(channel, handler)
         }
@@ -244,6 +275,7 @@ const api = {
 
       const handler = (_: unknown, data: StreamEvent): void => {
         onEvent?.(data)
+        notifyForAgentStreamEvent(data, threadId)
         if (data.type === "done" || data.type === "error") {
           ipcRenderer.removeListener(channel, handler)
         }
@@ -284,7 +316,25 @@ const api = {
       }>
     },
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }): Promise<void> => {
-      return ipcRenderer.invoke("agent:cancel", { threadId, ...options })
+      if (options?.cancelWorkers) {
+        return ipcRenderer.invoke("agent:cancel", { threadId, ...options }).then(() => undefined)
+      }
+      const cancelledAt = Date.now()
+      cancelledAgentAttentionThreads.set(threadId, cancelledAt)
+      setTimeout(() => {
+        if (cancelledAgentAttentionThreads.get(threadId) === cancelledAt) {
+          cancelledAgentAttentionThreads.delete(threadId)
+        }
+      }, CANCELLED_AGENT_ATTENTION_TTL_MS)
+      return ipcRenderer
+        .invoke("agent:cancel", { threadId, ...options })
+        .then((cancelled: unknown) => {
+          if (cancelled !== true) cancelledAgentAttentionThreads.delete(threadId)
+        })
+        .catch((error) => {
+          cancelledAgentAttentionThreads.delete(threadId)
+          throw error
+        })
     },
     getCoordinatorWorkers: (
       threadId: string,
@@ -365,6 +415,33 @@ const api = {
     },
     isCoordinatorModeForced: (): Promise<boolean> => {
       return ipcRenderer.invoke("agent:coordinator-mode-forced") as Promise<boolean>
+    }
+  },
+  workflows: {
+    listRuns: (threadId: string): Promise<unknown[]> => {
+      return ipcRenderer.invoke("workflow:list-runs", { threadId }) as Promise<unknown[]>
+    },
+    getRun: (threadId: string, runId: string): Promise<unknown | null> => {
+      return ipcRenderer.invoke("workflow:get-run", { threadId, runId }) as Promise<unknown | null>
+    },
+    cancelRun: (threadId: string, runId?: string): Promise<boolean> => {
+      return ipcRenderer.invoke("workflow:cancel-run", { threadId, runId }) as Promise<boolean>
+    },
+    hydrate: (threadId: string): Promise<unknown> => {
+      return ipcRenderer.invoke("workflow:hydrate", { threadId }) as Promise<unknown>
+    },
+    onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void): (() => void) => {
+      // Durable per-thread channel for background workflow runs. Unlike the
+      // run stream, this survives past the launching turn so progress and the
+      // completion notification still reach the renderer.
+      const channel = `agent:workflow-events:${threadId}`
+      const handler = (_: unknown, data: unknown): void => {
+        callback(data)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
     }
   },
   threads: {
@@ -734,6 +811,16 @@ const api = {
       error?: string
     }> => {
       return ipcRenderer.invoke("workspace:loadFromDisk", { threadId })
+    },
+    ensureWatching: (
+      threadId: string
+    ): Promise<{ success: boolean; restarted?: boolean }> => {
+      return ipcRenderer.invoke("workspace:ensureWatching", { threadId })
+    },
+    setActiveThread: (
+      threadId: string | null
+    ): Promise<{ success: boolean; restarted?: boolean }> => {
+      return ipcRenderer.invoke("workspace:setActiveThread", { threadId })
     },
     readFile: (
       threadId: string,
@@ -1567,7 +1654,25 @@ const api = {
     }
   },
   memory: {
-    listFiles: (): Promise<
+    listProjects: (request?: {
+      workspacePath?: string | null
+    }): Promise<
+      Array<{
+        projectId: string
+        displayName: string
+        memoryDir: string
+        gitRoot?: string
+        fileCount: number
+        totalSize: number
+        indexSize: number
+        isCurrent: boolean
+      }>
+    > => ipcRenderer.invoke("memory:listProjects", request),
+    listFiles: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }): Promise<
       Array<{
         name: string
         size: number
@@ -1577,29 +1682,55 @@ const api = {
         description: string | null
         recallCount: number
       }>
-    > => ipcRenderer.invoke("memory:listFiles"),
-    readFile: (name: string): Promise<string> => ipcRenderer.invoke("memory:readFile", name),
-    deleteFile: (name: string): Promise<void> => ipcRenderer.invoke("memory:deleteFile", name),
+    > => ipcRenderer.invoke("memory:listFiles", request),
+    readFile: (
+      name: string,
+      request?: {
+        scope?: "global" | "project"
+        workspacePath?: string | null
+        projectId?: string | null
+      }
+    ): Promise<string> => ipcRenderer.invoke("memory:readFile", name, request),
+    deleteFile: (
+      name: string,
+      request?: {
+        scope?: "global" | "project"
+        workspacePath?: string | null
+        projectId?: string | null
+      }
+    ): Promise<void> => ipcRenderer.invoke("memory:deleteFile", name, request),
     getEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getEnabled"),
     setEnabled: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("memory:setEnabled", enabled),
     getDreamEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getDreamEnabled"),
     setDreamEnabled: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("memory:setDreamEnabled", enabled),
-    getStats: (): Promise<{
+    getStats: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }): Promise<{
       fileCount: number
       totalSize: number
       indexSize: number
       enabled: boolean
       dreamEnabled: boolean
       dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
-    }> => ipcRenderer.invoke("memory:getStats"),
-    consolidate: (): Promise<{
+      scope: "global" | "project"
+      memoryDir: string
+      projectId?: string
+      gitRoot?: string
+    }> => ipcRenderer.invoke("memory:getStats", request),
+    consolidate: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }): Promise<{
       archived: number
       merged: number
       created: number
       skipped: number
-    }> => ipcRenderer.invoke("memory:consolidate"),
+    }> => ipcRenderer.invoke("memory:consolidate", request),
     onChanged: (callback: () => void): (() => void) => {
       const handler = (): void => {
         callback()

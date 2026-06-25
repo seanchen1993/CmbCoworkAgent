@@ -10,6 +10,7 @@
  */
 
 import { GoalRuntimeHarness, type FakeGoalEvaluator } from "./support/goal-runtime-harness.ts"
+import { formatGoalEvaluatorRuntimeFailureReason } from "../src/main/agent/goals/evaluator-runtime.ts"
 import type { GoalJudgeDecision } from "../src/main/agent/goals/types.ts"
 
 function assert(condition: unknown, message: string): void {
@@ -25,6 +26,12 @@ function assertEqual<T>(actual: T, expected: T, message: string): void {
 function assertIncludes(haystack: string | undefined, needle: string, message: string): void {
   if (!haystack?.includes(needle)) {
     throw new Error(`${message}: missing ${JSON.stringify(needle)} in ${JSON.stringify(haystack)}`)
+  }
+}
+
+function assertNotIncludes(haystack: string | undefined, needle: string, message: string): void {
+  if (haystack?.includes(needle)) {
+    throw new Error(`${message}: unexpected ${JSON.stringify(needle)} in ${JSON.stringify(haystack)}`)
   }
 }
 
@@ -55,11 +62,27 @@ function testContinueThenCompleteLoop(): void {
   const evaluator: FakeGoalEvaluator = (input, prompt, turnIndex) => {
     evaluatorCalls += 1
     assertEqual(input.goal.goalId, started.goalId, "fake evaluator should receive current goal")
-    assertIncludes(prompt, "附件：spec.md；显式技能：audit", "judge prompt should include launch context summary")
-    assertIncludes(prompt, "Tool calls observed this turn:", "judge prompt should include tool call section")
-    assertIncludes(prompt, "Current-turn conversation evidence", "judge prompt should include evidence section")
+    assertIncludes(
+      prompt,
+      "附件：spec.md；显式技能：audit",
+      "judge prompt should include launch context summary"
+    )
+    assertIncludes(
+      prompt,
+      "Tool calls observed this turn:",
+      "judge prompt should include tool call section"
+    )
+    assertIncludes(
+      prompt,
+      "Current-turn conversation evidence",
+      "judge prompt should include evidence section"
+    )
     if (turnIndex === 0) {
-      assertIncludes(prompt, "read_file AuthController.java", "first turn should expose tool call evidence")
+      assertIncludes(
+        prompt,
+        "read_file AuthController.java",
+        "first turn should expose tool call evidence"
+      )
       return continueDecision()
     }
     assertIncludes(prompt, "rg log.info src/main", "second turn should expose verification command")
@@ -109,9 +132,18 @@ function testContinueThenCompleteLoop(): void {
   const finalGoal = harness.goal(threadId)
   assertEqual(finalGoal?.status, "complete", "goal should complete after complete verdict")
   assertEqual(finalGoal?.turnsUsed, 2, "completed goal should count both evaluated turns")
-  assert(finalGoal?.ledger.progress.includes("已定位 controller 目录"), "ledger should keep first turn progress")
-  assert(finalGoal?.ledger.progress.includes("已完成日志残留检查"), "ledger should merge final progress")
-  assert(finalGoal?.ledger.evidence.includes("rg log.info src/main -- no matches"), "ledger should keep verification evidence")
+  assert(
+    finalGoal?.ledger.progress.includes("已定位 controller 目录"),
+    "ledger should keep first turn progress"
+  )
+  assert(
+    finalGoal?.ledger.progress.includes("已完成日志残留检查"),
+    "ledger should merge final progress"
+  )
+  assert(
+    finalGoal?.ledger.evidence.includes("rg log.info src/main -- no matches"),
+    "ledger should keep verification evidence"
+  )
 }
 
 function testBlockedNeedsUserInputStopsLoop(): void {
@@ -145,7 +177,11 @@ function testBlockedNeedsUserInputStopsLoop(): void {
   assertEqual(results[0].outcome?.shouldContinue, false, "blocked decision should not continue")
   const goal = harness.goal(threadId)
   assertEqual(goal?.status, "paused", "needs_user_input should pause goal")
-  assertIncludes(goal?.pausedReason ?? "", "needs_user_input:", "pause reason should mark user-input blocker")
+  assertIncludes(
+    goal?.pausedReason ?? "",
+    "needs_user_input:",
+    "pause reason should mark user-input blocker"
+  )
   assert(goal?.ledger.blockers.includes("目标 cl 不明确"), "blocker ledger should be preserved")
 }
 
@@ -200,7 +236,11 @@ function testTurnBudgetStopsContinuation(): void {
   assertEqual(results[1].outcome?.shouldContinue, false, "second turn should hit budget")
   const goal = harness.goal(threadId)
   assertEqual(goal?.status, "paused", "budget exhaustion should pause goal")
-  assertEqual(goal?.pausedReason, "Turn budget exhausted (2/2).", "budget pause reason should include count")
+  assertEqual(
+    goal?.pausedReason,
+    "Turn budget exhausted (2/2).",
+    "budget pause reason should include count"
+  )
 }
 
 function testEvaluatorRuntimeFailurePausesWithoutContinuation(): void {
@@ -223,12 +263,16 @@ function testEvaluatorRuntimeFailurePausesWithoutContinuation(): void {
     ],
     () => ({
       verdict: "blocked",
-      reason: "评估器暂时不可用。Goal 已暂停，请稍后使用 /goal resume 重试。"
+      reason: "评估器暂时不可用。请稍后使用 /goal resume 重试。"
     })
   )
 
   assertEqual(results.length, 1, "evaluator runtime failure should stop auto continuation")
-  assertEqual(results[0].outcome?.shouldContinue, false, "blocked evaluator failure must not continue")
+  assertEqual(
+    results[0].outcome?.shouldContinue,
+    false,
+    "blocked evaluator failure must not continue"
+  )
   assert(
     !results[0].outcome?.continuationPrompt,
     "blocked evaluator failure must not produce a continuation prompt"
@@ -238,9 +282,59 @@ function testEvaluatorRuntimeFailurePausesWithoutContinuation(): void {
   assertEqual(goal?.turnsUsed, 1, "failed evaluator turn should still be accounted")
   assertEqual(
     goal?.pausedReason,
-    "评估器暂时不可用。Goal 已暂停，请稍后使用 /goal resume 重试。",
+    "评估器暂时不可用。请稍后使用 /goal resume 重试。",
     "paused reason should explain evaluator runtime failure"
   )
+}
+
+function testEvaluatorRuntimeFailureNoticeKeepsSanitizedSummary(): void {
+  const threadId = "thread-goal-runtime-evaluator-failure-summary"
+  const harness = new GoalRuntimeHarness({ maxTurns: 5 })
+  harness.start(threadId, "检查 controller 日志并确认无残留")
+
+  const secret = "sk-abcdefghijklmnopqrstuvwxyz"
+  const reason = formatGoalEvaluatorRuntimeFailureReason(
+    new Error(`Request timed out with token=${secret} after 30000ms`)
+  )
+  const results = harness.runUntilSettled(
+    threadId,
+    [
+      {
+        assistantResponse: "已读取 AuthController，还需要 evaluator 判断下一步。",
+        toolCalls: ["read_file AuthController.java"],
+        toolEvidence: ["AuthController.java read ok"]
+      },
+      {
+        assistantResponse: "不应该在 evaluator runtime failure 后继续第二轮。",
+        toolCalls: ["execute rg log src/main"]
+      }
+    ],
+    () => ({
+      verdict: "blocked",
+      reason
+    })
+  )
+
+  assertEqual(results.length, 1, "evaluator runtime failure summary should stop auto loop")
+  assertEqual(
+    results[0].outcome?.shouldContinue,
+    false,
+    "blocked evaluator failure summary must not continue"
+  )
+  const goal = harness.goal(threadId)
+  assertEqual(goal?.status, "paused", "evaluator runtime failure summary should pause goal")
+  assertIncludes(
+    goal?.pausedReason,
+    "Request timed out",
+    "paused reason should include sanitized evaluator failure summary"
+  )
+  assertIncludes(
+    results[0].outcome?.notice,
+    "Goal 已暂停：评估器暂时不可用：Request timed out",
+    "notice should include sanitized evaluator failure summary"
+  )
+  assertNotIncludes(goal?.pausedReason, secret, "paused reason should redact evaluator secrets")
+  assertNotIncludes(results[0].outcome?.notice, secret, "notice should redact evaluator secrets")
 }
 
 function testStaleWindowDecisionCannotMutateResumedGoal(): void {
@@ -282,6 +376,7 @@ function run(): void {
   testParseFailureBackstopPausesAfterThreeTurns()
   testTurnBudgetStopsContinuation()
   testEvaluatorRuntimeFailurePausesWithoutContinuation()
+  testEvaluatorRuntimeFailureNoticeKeepsSanitizedSummary()
   testStaleWindowDecisionCannotMutateResumedGoal()
   console.log("goals-runtime-harness.spec.ts passed")
 }

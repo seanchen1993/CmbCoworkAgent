@@ -628,7 +628,7 @@ interface CustomAPI {
       message: string,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator",
+      agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ) => () => void
@@ -638,7 +638,7 @@ interface CustomAPI {
       command: unknown,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator",
+      agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ) => () => void
@@ -688,6 +688,14 @@ interface CustomAPI {
       }
     ) => Promise<void>
     isCoordinatorModeForced: () => Promise<boolean>
+  }
+  workflows: {
+    listRuns: (threadId: string) => Promise<unknown[]>
+    getRun: (threadId: string, runId: string) => Promise<unknown | null>
+    cancelRun: (threadId: string, runId?: string) => Promise<boolean>
+    hydrate: (threadId: string) => Promise<unknown>
+    /** Durable per-thread channel; survives past the launching turn. Returns unsubscribe. */
+    onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void) => () => void
   }
   threads: {
     list: () => Promise<Thread[]>
@@ -877,6 +885,12 @@ interface CustomAPI {
       workspacePath?: string
       error?: string
     }>
+    ensureWatching: (
+      threadId: string
+    ) => Promise<{ success: boolean; restarted?: boolean }>
+    setActiveThread: (
+      threadId: string | null
+    ) => Promise<{ success: boolean; restarted?: boolean }>
     readFile: (
       threadId: string,
       filePath: string
@@ -1208,7 +1222,23 @@ interface CustomAPI {
     }) => Promise<{ success: boolean; tools?: string[]; error?: string }>
   }
   memory: {
-    listFiles: () => Promise<
+    listProjects: (request?: { workspacePath?: string | null }) => Promise<
+      Array<{
+        projectId: string
+        displayName: string
+        memoryDir: string
+        gitRoot?: string
+        fileCount: number
+        totalSize: number
+        indexSize: number
+        isCurrent: boolean
+      }>
+    >
+    listFiles: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }) => Promise<
       Array<{
         name: string
         size: number
@@ -1219,21 +1249,47 @@ interface CustomAPI {
         recallCount: number
       }>
     >
-    readFile: (name: string) => Promise<string>
-    deleteFile: (name: string) => Promise<void>
+    readFile: (
+      name: string,
+      request?: {
+        scope?: "global" | "project"
+        workspacePath?: string | null
+        projectId?: string | null
+      }
+    ) => Promise<string>
+    deleteFile: (
+      name: string,
+      request?: {
+        scope?: "global" | "project"
+        workspacePath?: string | null
+        projectId?: string | null
+      }
+    ) => Promise<void>
     getEnabled: () => Promise<boolean>
     setEnabled: (enabled: boolean) => Promise<void>
     getDreamEnabled: () => Promise<boolean>
     setDreamEnabled: (enabled: boolean) => Promise<void>
-    getStats: () => Promise<{
+    getStats: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }) => Promise<{
       fileCount: number
       totalSize: number
       indexSize: number
       enabled: boolean
       dreamEnabled: boolean
       dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
+      scope: "global" | "project"
+      memoryDir: string
+      projectId?: string
+      gitRoot?: string
     }>
-    consolidate: () => Promise<{
+    consolidate: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }) => Promise<{
       archived: number
       merged: number
       created: number

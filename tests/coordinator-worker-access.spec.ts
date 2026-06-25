@@ -62,10 +62,9 @@ function assertNoTool(tools: Array<{ name?: string }>, name: string, label: stri
 }
 
 async function invokeTool(tool: unknown, input: unknown, config?: unknown): Promise<string> {
-  const result = await (tool as { invoke: (args: unknown, config?: unknown) => Promise<unknown> }).invoke(
-    input,
-    config
-  )
+  const result = await (
+    tool as { invoke: (args: unknown, config?: unknown) => Promise<unknown> }
+  ).invoke(input, config)
   return typeof result === "string" ? result : JSON.stringify(result)
 }
 
@@ -95,17 +94,20 @@ async function testReadOnlyWorkerToolSurface(): Promise<void> {
     ownedFiles: []
   })
 
+  // Direct writes, ad-hoc/deferred execution, and browser stay cut.
   for (const name of [
     "write_file",
     "edit_file",
-    "execute",
-    "task_output",
     "code_exec",
     "save_code_exec_tool",
     "invoke_deferred_tool"
   ]) {
     assertNoTool(tools, name, "read_only worker")
   }
+  // read-only workers now KEEP execute + task_output (each command is gated to
+  // provably read-only by the runtime's isReadOnlyShellCommand check elsewhere).
+  assertHasTool(tools, "execute", "read_only worker")
+  assertHasTool(tools, "task_output", "read_only worker")
   assertHasTool(tools, "read_file", "read_only worker")
   assertHasTool(tools, "grep", "read_only worker")
 }
@@ -193,7 +195,11 @@ async function testScopedWriteWorkerToolSurfaceAndGuard(): Promise<void> {
     )
 
     if (usesCaseInsensitiveCoordinatorPathMatching()) {
-      const caseVariantAllowed = await invokeTool(writeTool, { file_path: "SRC/ALLOWED.TS" }, config)
+      const caseVariantAllowed = await invokeTool(
+        writeTool,
+        { file_path: "SRC/ALLOWED.TS" },
+        config
+      )
       assert(
         caseVariantAllowed === "write:ok",
         "scoped write worker should allow owned file case variants on case-insensitive filesystems"
@@ -209,14 +215,11 @@ async function testScopedWriteWorkerRejectsSymlinkEscape(): Promise<void> {
       await mkdir(join(workspace, "src"), { recursive: true })
       await symlink(outsideDir, join(workspace, "src", "link"), "dir")
 
-      const tools = applyCoordinatorWorkerFilesystemAccess(
-        [fakeTool("write_file")],
-        {
-          workload: "write",
-          workspacePath: workspace,
-          ownedFiles: ["src"]
-        }
-      )
+      const tools = applyCoordinatorWorkerFilesystemAccess([fakeTool("write_file")], {
+        workload: "write",
+        workspacePath: workspace,
+        ownedFiles: ["src"]
+      })
 
       const writeTool = tools.find((tool) => tool.name === "write_file")
       assert(writeTool, "symlink escape test should keep write_file")
@@ -233,14 +236,11 @@ async function testScopedWriteWorkerRejectsSymlinkEscape(): Promise<void> {
 }
 
 async function testScopedSingleFileOwnershipDoesNotGrantDescendants(): Promise<void> {
-  const tools = applyCoordinatorWorkerFilesystemAccess(
-    [fakeTool("write_file")],
-    {
-      workload: "write",
-      workspacePath: "/tmp/workspace",
-      ownedFiles: ["src/new-file.ts"]
-    }
-  )
+  const tools = applyCoordinatorWorkerFilesystemAccess([fakeTool("write_file")], {
+    workload: "write",
+    workspacePath: "/tmp/workspace",
+    ownedFiles: ["src/new-file.ts"]
+  })
 
   const writeTool = tools.find((tool) => tool.name === "write_file")
   assert(writeTool, "single-file owned writer should keep write_file")
@@ -256,20 +256,20 @@ async function testScopedSingleFileOwnershipDoesNotGrantDescendants(): Promise<v
 }
 
 async function testScopedExtensionlessSingleFileOwnershipDoesNotGrantDescendants(): Promise<void> {
-  const tools = applyCoordinatorWorkerFilesystemAccess(
-    [fakeTool("write_file")],
-    {
-      workload: "write",
-      workspacePath: "/tmp/workspace",
-      ownedFiles: ["README"]
-    }
-  )
+  const tools = applyCoordinatorWorkerFilesystemAccess([fakeTool("write_file")], {
+    workload: "write",
+    workspacePath: "/tmp/workspace",
+    ownedFiles: ["README"]
+  })
 
   const writeTool = tools.find((tool) => tool.name === "write_file")
   assert(writeTool, "extensionless single-file owned writer should keep write_file")
 
   const exact = await invokeTool(writeTool, { file_path: "README" })
-  assert(exact === "write_file:ok", "extensionless single-file owned writer should allow the exact file path")
+  assert(
+    exact === "write_file:ok",
+    "extensionless single-file owned writer should allow the exact file path"
+  )
 
   const denied = await invokeTool(writeTool, { file_path: "README/child.txt" })
   assert(
@@ -279,14 +279,11 @@ async function testScopedExtensionlessSingleFileOwnershipDoesNotGrantDescendants
 }
 
 async function testScopedMissingDirectoryOwnershipAllowsDescendantsWithTrailingSlash(): Promise<void> {
-  const tools = applyCoordinatorWorkerFilesystemAccess(
-    [fakeTool("write_file")],
-    {
-      workload: "write",
-      workspacePath: "/tmp/workspace",
-      ownedFiles: ["newdir/"]
-    }
-  )
+  const tools = applyCoordinatorWorkerFilesystemAccess([fakeTool("write_file")], {
+    workload: "write",
+    workspacePath: "/tmp/workspace",
+    ownedFiles: ["newdir/"]
+  })
 
   const writeTool = tools.find((tool) => tool.name === "write_file")
   assert(writeTool, "missing-directory owned writer should keep write_file")
@@ -336,7 +333,7 @@ async function testScopedWriteGuardWrapsRealStructuredToolCallPath(): Promise<vo
 
     const allowed = await callTool(guardedWriteTool, { file_path: "src/allowed.ts" })
     assert(
-      allowed.includes("\"status\":\"ok\"") && allowed.includes("\"file_path\":\"src/allowed.ts\""),
+      allowed.includes('"status":"ok"') && allowed.includes('"file_path":"src/allowed.ts"'),
       "guarded real structured tool should allow owned file writes through call()"
     )
     assert(
@@ -380,7 +377,8 @@ async function testConstrainedWorkerFinalToolSurface(): Promise<void> {
   assertNoTool(readOnlyTools, "invoke_deferred_tool", "read_only final tools")
   assertNoTool(readOnlyTools, "code_exec", "read_only final tools")
   assertNoTool(readOnlyTools, "browser_playwright", "read_only final tools")
-  assertNoTool(readOnlyTools, "execute", "read_only final tools")
+  // execute is KEPT for read-only final tools (gated read-only per command).
+  assertHasTool(readOnlyTools, "execute", "read_only final tools")
   assertHasTool(readOnlyTools, "read_file", "read_only final tools")
 
   const verifyTools = filterCoordinatorWorkerFinalTools(finalTools, {

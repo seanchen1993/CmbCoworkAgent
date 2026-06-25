@@ -8,7 +8,12 @@
 
 import path from "node:path"
 import type { ExecSafetyLevel } from "../types"
-import { isKnownSafeWindowsCommand, type WindowsShellKind } from "./windows-safe-commands"
+import {
+  isKnownSafeWindowsCommand,
+  isReadOnlyWindowsCommand,
+  type WindowsShellKind
+} from "./windows-safe-commands"
+import { BUILD_TOOL_EXECUTABLES, isReadOnlyBuildToolInvocation, hasUnsafeWriteFlag } from "./read-only-build-tool"
 
 export interface SafetyAssessment {
   level: ExecSafetyLevel
@@ -20,44 +25,164 @@ export type CommandConcurrencyClassification = "parallel_safe" | "exclusive"
 const APPROVAL_PREFIX_RULE_PREFIX = "prefix:"
 
 const SAFE_EXECUTABLES = new Set([
-  "base64", "cat", "cd", "cut", "dir", "echo", "expr", "false", "file", "grep",
-  "head", "hostname", "id", "ls", "nl", "paste", "pwd", "printf",
-  "rev", "seq", "sort", "stat", "tail", "tr", "tree", "true", "uname",
-  "uniq", "wc", "where", "which", "whoami", "type", "awk", "comm",
-  "date", "diff", "env", "printenv",
+  "base64",
+  "cat",
+  "cd",
+  "cut",
+  "dir",
+  "echo",
+  "expr",
+  "false",
+  "file",
+  "grep",
+  "head",
+  "hostname",
+  "id",
+  "ls",
+  "nl",
+  "paste",
+  "pwd",
+  "printf",
+  "rev",
+  "seq",
+  "sort",
+  "stat",
+  "tail",
+  "tr",
+  "tree",
+  "true",
+  "uname",
+  "uniq",
+  "wc",
+  "where",
+  "which",
+  "whoami",
+  "type",
+  "comm",
+  "date",
+  "diff",
+  "printenv",
   // Windows diagnostic commands (read-only)
-  "ipconfig", "netstat", "netsh", "systeminfo", "tasklist", "findstr", "nslookup",
-  "ping", "tracert", "pathping", "route", "arp", "getmac", "ver"
+  "ipconfig",
+  "netstat",
+  "netsh",
+  "systeminfo",
+  "tasklist",
+  "findstr",
+  "nslookup",
+  "ping",
+  "tracert",
+  "pathping",
+  "route",
+  "arp",
+  "getmac",
+  "ver"
 ])
 
 const PARALLEL_SAFE_EXECUTABLES = new Set([
-  "cat", "comm", "cut", "df", "diff", "dir", "du", "echo", "expr",
-  "false", "file", "findstr", "getmac", "grep", "head", "id", "ls",
-  "netstat", "nl", "paste", "pathping", "ping", "printenv", "printf",
-  "pwd", "rev", "seq", "stat", "systeminfo", "tail", "tasklist", "tr",
-  "tracert", "tree", "true", "type", "uname", "uniq", "ver", "wc",
-  "where", "which", "whoami",
+  "cat",
+  "comm",
+  "cut",
+  "df",
+  "diff",
+  "dir",
+  "du",
+  "echo",
+  "expr",
+  "false",
+  "file",
+  "findstr",
+  "getmac",
+  "grep",
+  "head",
+  "id",
+  "ls",
+  "netstat",
+  "nl",
+  "paste",
+  "pathping",
+  "ping",
+  "printenv",
+  "printf",
+  "pwd",
+  "rev",
+  "seq",
+  "stat",
+  "systeminfo",
+  "tail",
+  "tasklist",
+  "tr",
+  "tracert",
+  "tree",
+  "true",
+  "type",
+  "uname",
+  "uniq",
+  "ver",
+  "wc",
+  "where",
+  "which",
+  "whoami",
   // Common read-only PowerShell cmdlets and aliases.
-  "compare-object", "fl", "format-list", "format-table", "ft", "gc", "gci",
-  "get-childitem", "get-command", "get-content", "get-date", "get-item",
-  "get-location", "get-process", "get-service", "gl", "gps", "measure-object",
-  "select-string", "sort-object", "where-object"
+  "compare-object",
+  "fl",
+  "format-list",
+  "format-table",
+  "ft",
+  "gc",
+  "gci",
+  "get-childitem",
+  "get-command",
+  "get-content",
+  "get-date",
+  "get-item",
+  "get-location",
+  "get-process",
+  "get-service",
+  "gl",
+  "gps",
+  "measure-object",
+  "select-string",
+  "sort-object",
+  "where-object"
 ])
 
 const UNSAFE_FIND_OPTIONS = new Set([
-  "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fls", "-fprint", "-fprint0", "-fprintf"
+  "-exec",
+  "-execdir",
+  "-ok",
+  "-okdir",
+  "-delete",
+  "-fls",
+  "-fprint",
+  "-fprint0",
+  "-fprintf"
 ])
 
 const UNSAFE_RIPGREP_FLAGS = new Set(["--search-zip", "-z"])
 const UNSAFE_RIPGREP_FLAGS_WITH_VALUES = ["--pre", "--hostname-bin"]
 const UNSAFE_GIT_FLAGS = new Set(["--output", "--ext-diff", "--textconv", "--exec", "--paginate"])
 const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
-  "-c", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree"
+  "-c",
+  "--config-env",
+  "--exec-path",
+  "--git-dir",
+  "--namespace",
+  "--super-prefix",
+  "--work-tree"
 ])
 
 const SIDE_EFFECTING_POWERSHELL_CMDLETS = new Set([
-  "set-content", "add-content", "out-file", "new-item", "remove-item", "move-item",
-  "copy-item", "rename-item", "start-process", "stop-process"
+  "set-content",
+  "add-content",
+  "out-file",
+  "new-item",
+  "remove-item",
+  "move-item",
+  "copy-item",
+  "rename-item",
+  "start-process",
+  "stop-process"
 ])
 
 const BANNED_PERSISTENT_PREFIXES: string[][] = [
@@ -106,22 +231,84 @@ const BANNED_PERSISTENT_PREFIXES: string[][] = [
 
 const PERSISTABLE_EXECUTABLES = new Set([
   // Build tools & package managers
-  "bun", "cargo", "cmake", "go", "gradle", "gradlew", "java", "javac", "make",
-  "mvn", "npm", "npx", "pnpm", "poetry", "pip", "pip3", "pytest", "uv", "yarn",
-  "dotnet", "msbuild", "ant",
+  "bun",
+  "cargo",
+  "cmake",
+  "go",
+  "gradle",
+  "gradlew",
+  "java",
+  "javac",
+  "make",
+  "mvn",
+  "npm",
+  "npx",
+  "pnpm",
+  "poetry",
+  "pip",
+  "pip3",
+  "pytest",
+  "uv",
+  "yarn",
+  "dotnet",
+  "msbuild",
+  "ant",
   // Version control
-  "git", "svn",
+  "git",
+  "svn",
   // Common dev tools
-  "node", "python", "python3", "ruby", "perl", "php",
-  "rustc", "gcc", "g++", "clang", "clang++",
-  "docker", "docker-compose", "kubectl",
-  "curl", "wget",
+  "node",
+  "python",
+  "python3",
+  "ruby",
+  "perl",
+  "php",
+  "rustc",
+  "gcc",
+  "g++",
+  "clang",
+  "clang++",
+  "docker",
+  "docker-compose",
+  "kubectl",
+  "curl",
+  "wget",
   // Shell utilities (read-only / safe)
-  "ls", "dir", "cat", "head", "tail", "find", "grep", "rg", "awk", "sed",
-  "wc", "sort", "uniq", "diff", "tree", "file", "which", "where", "echo",
-  "pwd", "env", "printenv", "whoami", "hostname", "date", "df", "du",
+  "ls",
+  "dir",
+  "cat",
+  "head",
+  "tail",
+  "find",
+  "grep",
+  "rg",
+  "awk",
+  "sed",
+  "wc",
+  "sort",
+  "uniq",
+  "diff",
+  "tree",
+  "file",
+  "which",
+  "where",
+  "echo",
+  "pwd",
+  "env",
+  "printenv",
+  "whoami",
+  "hostname",
+  "date",
+  "df",
+  "du",
   // Windows-specific
-  "type", "findstr", "icacls", "net", "sc", "tasklist", "systeminfo"
+  "type",
+  "findstr",
+  "icacls",
+  "net",
+  "sc",
+  "tasklist",
+  "systeminfo"
 ])
 
 // ── Forbidden patterns ───────────────────────────────────────────────────────
@@ -149,18 +336,42 @@ const FORBIDDEN_PATTERNS: ForbiddenPattern[] = [
   { pattern: /\bwget\s+.*\|\s*(ba)?sh\b/, reason: "piping remote script to shell" },
   { pattern: /\b:(){ :\|:& };:/, reason: "fork bomb" },
   // PowerShell — drive root destruction
-  { pattern: /\bRemove-Item\s+.*-Recurse\b.*[a-zA-Z]:\\\*?/i, reason: "PowerShell recursive delete on drive root" },
-  { pattern: /\bRemove-Item\s+.*[a-zA-Z]:\\\*?.*-Recurse\b/i, reason: "PowerShell recursive delete on drive root" },
-  { pattern: /\bri\s+.*-Recurse\b.*[a-zA-Z]:\\\*?/i, reason: "PowerShell recursive delete on drive root (alias)" },
-  { pattern: /\bdel\s+.*-Recurse\b.*[a-zA-Z]:\\\*?/i, reason: "PowerShell recursive delete on drive root (alias)" },
+  {
+    pattern: /\bRemove-Item\s+.*-Recurse\b.*[a-zA-Z]:\\\*?/i,
+    reason: "PowerShell recursive delete on drive root"
+  },
+  {
+    pattern: /\bRemove-Item\s+.*[a-zA-Z]:\\\*?.*-Recurse\b/i,
+    reason: "PowerShell recursive delete on drive root"
+  },
+  {
+    pattern: /\bri\s+.*-Recurse\b.*[a-zA-Z]:\\\*?/i,
+    reason: "PowerShell recursive delete on drive root (alias)"
+  },
+  {
+    pattern: /\bdel\s+.*-Recurse\b.*[a-zA-Z]:\\\*?/i,
+    reason: "PowerShell recursive delete on drive root (alias)"
+  },
   // PowerShell — disk format
   { pattern: /\bFormat-Volume\b/i, reason: "PowerShell formats disk volume" },
   { pattern: /\bClear-Disk\b/i, reason: "PowerShell clears disk" },
   // PowerShell — remote script execution
-  { pattern: /\bInvoke-Expression\b.*\bInvoke-WebRequest\b/i, reason: "PowerShell downloads and executes remote script" },
-  { pattern: /\biex\b.*\biwr\b/i, reason: "PowerShell downloads and executes remote script (alias)" },
-  { pattern: /\bInvoke-Expression\b.*\bInvoke-RestMethod\b/i, reason: "PowerShell downloads and executes remote script" },
-  { pattern: /\biex\b.*\birm\b/i, reason: "PowerShell downloads and executes remote script (alias)" },
+  {
+    pattern: /\bInvoke-Expression\b.*\bInvoke-WebRequest\b/i,
+    reason: "PowerShell downloads and executes remote script"
+  },
+  {
+    pattern: /\biex\b.*\biwr\b/i,
+    reason: "PowerShell downloads and executes remote script (alias)"
+  },
+  {
+    pattern: /\bInvoke-Expression\b.*\bInvoke-RestMethod\b/i,
+    reason: "PowerShell downloads and executes remote script"
+  },
+  {
+    pattern: /\biex\b.*\birm\b/i,
+    reason: "PowerShell downloads and executes remote script (alias)"
+  },
   // PowerShell — system control
   { pattern: /\bStop-Computer\b/i, reason: "PowerShell shuts down computer" },
   { pattern: /\bRestart-Computer\b/i, reason: "PowerShell restarts computer" }
@@ -207,8 +418,14 @@ const DANGEROUS_INDICATORS: DangerousIndicator[] = [
   { pattern: /\bRemove-LocalUser\b/i, reason: "PowerShell removes local user" },
   { pattern: /\bSet-Acl\b/i, reason: "PowerShell modifies file ACLs" },
   // PowerShell — network/remote
-  { pattern: /\bInvoke-WebRequest\b.*-Method\s+(Post|Put|Delete)\b/i, reason: "PowerShell mutating HTTP request" },
-  { pattern: /\bInvoke-RestMethod\b.*-Method\s+(Post|Put|Delete)\b/i, reason: "PowerShell mutating HTTP request" },
+  {
+    pattern: /\bInvoke-WebRequest\b.*-Method\s+(Post|Put|Delete)\b/i,
+    reason: "PowerShell mutating HTTP request"
+  },
+  {
+    pattern: /\bInvoke-RestMethod\b.*-Method\s+(Post|Put|Delete)\b/i,
+    reason: "PowerShell mutating HTTP request"
+  },
   { pattern: /\bInvoke-Expression\b/i, reason: "PowerShell dynamic code execution" },
   { pattern: /\biex\b/i, reason: "PowerShell dynamic code execution (alias)" },
   // Script execution — can contain arbitrary dangerous code
@@ -241,7 +458,8 @@ export function assessCommandSafety(
   if (options?.enforceGitWorkflowCommitOnly && containsDirectGitSubmitCommand(trimmed)) {
     return {
       level: "forbidden",
-      reason: "git_workflow tool is available — use git_workflow instead of direct git add/commit/push"
+      reason:
+        "git_workflow tool is available — use git_workflow instead of direct git add/commit/push"
     }
   }
 
@@ -268,8 +486,9 @@ export function assessCommandSafety(
     }
   }
 
-  const windowsSafe = process.platform === "win32"
-    && isKnownSafeWindowsCommand(trimmed, options?.windowsShell ?? "unknown")
+  const windowsSafe =
+    process.platform === "win32" &&
+    isKnownSafeWindowsCommand(trimmed, options?.windowsShell ?? "unknown")
   if (windowsSafe) {
     return { level: "safe" }
   }
@@ -284,7 +503,9 @@ export function assessCommandSafety(
   // 4. Default: needs approval (unknown commands are not auto-approved)
   return {
     level: "needs_approval",
-    reason: hasShellMetacharacters ? "complex shell expression — requires review" : "unknown command — requires review"
+    reason: hasShellMetacharacters
+      ? "complex shell expression — requires review"
+      : "unknown command — requires review"
   }
 }
 
@@ -312,7 +533,9 @@ export function classifyCommandConcurrency(command: string): CommandConcurrencyC
     return "exclusive"
   }
 
-  if (tokens.some((token) => token.includes("$(") || token.includes("${") || token.includes("@("))) {
+  if (
+    tokens.some((token) => token.includes("$(") || token.includes("${") || token.includes("@("))
+  ) {
     return "exclusive"
   }
 
@@ -331,6 +554,13 @@ export function classifyCommandConcurrency(command: string): CommandConcurrencyC
   if (!executable) {
     return "exclusive"
   }
+
+  // A write/system-change flag (tree -o, diff --output, sort -o, date -s, route
+  // add, arp -d, netsh … set, ipconfig /flushdns …) mutates state, so the command
+  // must run EXCLUSIVELY — it can't overlap other shared ops even though its
+  // executable is otherwise in PARALLEL_SAFE_EXECUTABLES. Mirrors the same check in
+  // the auto-approve gate (isKnownSafeCommand) so concurrency and approval agree.
+  if (hasUnsafeWriteFlag(executable, tokens)) return "exclusive"
 
   if (PARALLEL_SAFE_EXECUTABLES.has(executable)) return "parallel_safe"
   if (isSafeBase64(tokens)) return "parallel_safe"
@@ -915,7 +1145,9 @@ export function derivePermanentApprovalPattern(command: string): string | null {
 
   const tokens = tokenizeCommand(trimmed)
   if (!tokens || tokens.length === 0) return null
-  if (tokens.some((token) => token.includes("$(") || token.includes("${") || token.includes("@("))) {
+  if (
+    tokens.some((token) => token.includes("$(") || token.includes("${") || token.includes("@("))
+  ) {
     return null
   }
   if (!PERSISTABLE_EXECUTABLES.has(normalizeExecutable(tokens[0]))) return null
@@ -929,15 +1161,15 @@ export function matchesApprovalPattern(pattern: string, command: string): boolea
   if (pattern.startsWith("file:")) {
     if (!command.startsWith("file:")) return false
     // pattern = "file:write_file:/some/dir/*", command = "file:write_file:/some/dir/foo.ts"
-    const patternParts = pattern.split(":")  // ["file", "write_file", "/some/dir/*"]
-    const commandParts = command.split(":")  // ["file", "write_file", "/some/dir/foo.ts"]
+    const patternParts = pattern.split(":") // ["file", "write_file", "/some/dir/*"]
+    const commandParts = command.split(":") // ["file", "write_file", "/some/dir/foo.ts"]
     if (patternParts.length < 3 || commandParts.length < 3) return false
-    if (patternParts[1] !== commandParts[1]) return false  // operation must match
+    if (patternParts[1] !== commandParts[1]) return false // operation must match
     const patternPath = patternParts.slice(2).join(":").replace(/\\/g, "/")
     const commandPath = commandParts.slice(2).join(":").replace(/\\/g, "/")
     // "dir/*" → check if commandPath starts with "dir/"
     if (patternPath.endsWith("/*")) {
-      const dirPrefix = patternPath.slice(0, -1)  // "dir/"
+      const dirPrefix = patternPath.slice(0, -1) // "dir/"
       return commandPath.startsWith(dirPrefix) || commandPath === dirPrefix.slice(0, -1)
     }
     return patternPath === commandPath
@@ -959,7 +1191,9 @@ function isKnownSafeCommand(command: string): boolean {
   const tokens = tokenizeCommand(command)
   if (!tokens || tokens.length === 0) return false
 
-  if (tokens.some((token) => token.includes("$(") || token.includes("${") || token.includes("@("))) {
+  if (
+    tokens.some((token) => token.includes("$(") || token.includes("${") || token.includes("@("))
+  ) {
     return false
   }
 
@@ -977,6 +1211,20 @@ function isKnownSafeCommand(command: string): boolean {
   const executable = normalizeExecutable(tokens[0])
   if (!executable) return false
 
+  // `env` and `awk` are NOT unconditionally safe: `env CMD` runs CMD, and awk can
+  // shell out / write files. Evaluate them specially (see helpers) instead of
+  // treating the executable name alone as read-only.
+  if (executable === "env") return isSafeEnvPrefix(tokens)
+  if (executable === "awk") return isSafeAwk(tokens)
+
+  // Several otherwise-safe executables have a WRITE / system-change flag the plain
+  // SAFE_EXECUTABLES membership check would wave through: `sort -o`/`tree -o`/
+  // `base64 -o` write a file, `date -s` sets the clock, and the network tools
+  // arp/route/netsh/ipconfig have mutate verbs (arp -d, route add, netsh … set,
+  // ipconfig /flushdns). Reject the offending flag/verb PER COMMAND (shared with
+  // the Windows gate); read-only forms (no such flag) stay safe.
+  if (hasUnsafeWriteFlag(executable, tokens)) return false
+
   if (isSafeBase64(tokens)) return true
   if (SAFE_EXECUTABLES.has(executable)) return true
   if (isSafeFind(tokens)) return true
@@ -988,16 +1236,83 @@ function isKnownSafeCommand(command: string): boolean {
   return false
 }
 
+/**
+ * `env` is a transparent prefix: `env [NAME=val...] CMD ...` runs CMD. It is safe
+ * only if the wrapped command is itself safe AND no env-var assignments are
+ * applied to it. Plain `env` or `env VAR=val` (no command) just set/list the
+ * environment → safe. But `env VAR=val CMD` runs CMD with VAR set, and an
+ * assignment can redirect/inject code (PATH=/tmp/evil, LD_PRELOAD=…, NODE_OPTIONS=…,
+ * PYTHONPATH=…) into an otherwise-safe binary — `env LD_PRELOAD=x.so cat f` then
+ * runs attacker code. "safe" means "no user approval needed", so an
+ * assignment-carrying command must NOT be auto-approved (require review). Flags
+ * before the command (-i/-u/-S/-C…) can change behaviour too → review.
+ */
+function isSafeEnvPrefix(tokens: string[]): boolean {
+  const rest = tokens.slice(1)
+  let i = 0
+  while (i < rest.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(rest[i])) i++
+  if (i >= rest.length) return true // `env` / `env VAR=val` only — no command run
+  if (i > 0) return false // assignment(s) + a command → could inject (PATH/LD_PRELOAD/…) → review
+  if (rest[i].startsWith("-")) return false // env flags wrapping a command → review
+  return isKnownSafeCommand(rest.slice(i).join(" ")) // wrapped command (no assignments) must be safe
+}
+
+/**
+ * awk can execute commands (`system()`, `getline cmd`, `| "cmd"`) and write files
+ * (`print > "file"`), so it is not unconditionally read-only. Plain
+ * field-processing awk stays safe; reject the dangerous constructs and external
+ * program files (`-f script.awk`, whose contents can't be inspected here).
+ */
+function isSafeAwk(tokens: string[]): boolean {
+  // Reject flags that load EXTERNAL/uninspectable code or WRITE files — these
+  // defeat the inline-program scan below:
+  //   -f/--file, -E/--exec       load a program file (can system()/write)
+  //   -i/--include               gawk include lib (`-i inplace` edits in place)
+  //   -l/--load                  gawk shared-lib load (arbitrary native code)
+  //   -o/--pretty-print, -p/--profile   write files
+  //   -d/--dump-variables, -D/--debug   write a variables dump file / debugger
+  // Short forms may attach a value (-fscript, -iinplace, -dvars.out). Safe flags
+  // like -F (field sep), -v (assign), -b/-n stay allowed (program still scanned).
+  for (const t of tokens.slice(1)) {
+    if (/^-[fEilopdD]/.test(t)) return false
+    if (/^--(file|exec|include|load|pretty-print|profile|debug|dump-variables)(=|$)/.test(t))
+      return false
+  }
+  const joined = tokens.join(" ")
+  return !/system\s*\(|getline|>\s*"|>>\s*"|\|\s*"|"\s*\|/.test(joined)
+}
+
 // ── Safe build tool checks (mirrors windows-safe-commands.ts) ───────────────
 
 const UNSAFE_MVN_GOALS = new Set(["deploy", "site-deploy"])
 const UNSAFE_MVN_GOAL_PREFIXES = ["exec:", "release:", "deploy:", "wagon:", "scm:"]
 const UNSAFE_GRADLE_TASKS = new Set(["publish", "publishtomavenlocal", "uploadarchives"])
-const UNSAFE_NPM_SUBCOMMANDS = new Set(["publish", "unpublish", "deprecate", "dist-tag", "access", "exec", "x"])
+const UNSAFE_NPM_SUBCOMMANDS = new Set([
+  "publish",
+  "unpublish",
+  "deprecate",
+  "dist-tag",
+  "access",
+  "exec",
+  "x"
+])
 const UNSAFE_CARGO_SUBCOMMANDS = new Set(["publish", "yank", "login", "logout"])
 const SAFE_GO_SUBCOMMANDS = new Set([
-  "build", "clean", "doc", "env", "fmt", "generate", "get",
-  "install", "list", "mod", "run", "test", "tool", "version", "vet"
+  "build",
+  "clean",
+  "doc",
+  "env",
+  "fmt",
+  "generate",
+  "get",
+  "install",
+  "list",
+  "mod",
+  "run",
+  "test",
+  "tool",
+  "version",
+  "vet"
 ])
 const UNSAFE_DOTNET_SUBCOMMANDS = new Set(["nuget", "publish"])
 
@@ -1050,6 +1365,148 @@ function isSafeGradle(tokens: string[]): boolean {
   return true
 }
 
+// ── Read-only shell gate (stricter than "safe") ─────────────────────────────
+//
+// assessCommandSafety's "safe" tier means "auto-approve" (no user prompt) — NOT
+// "no side effects". It deliberately auto-approves build/package/codegen tools
+// (npm install, cargo build, make, go run, javac …) because for a normal
+// write-capable agent those are routine. A READ-ONLY agent/worker must NOT run
+// them: they write node_modules/target/build artifacts/lockfiles or execute
+// arbitrary project code (test suites, run scripts, go run, java). isReadOnly-
+// ShellCommand below keeps every genuinely read-only "safe" command (ls / cat /
+// grep / find / rg / git log|diff|status / sed-read / base64-decode … — none of
+// which is a build tool) and additionally blocks build-tool invocations that
+// aren't pure inspection. The tools' READ-ONLY subcommands (npm ls, go list,
+// cargo tree, mvn dependency:tree, gradle dependencies …) stay allowed so
+// inspection isn't false-killed. The build-tool read/write classification lives
+// in read-only-build-tool.ts so this gate and the Windows/PowerShell gate
+// (windows-safe-commands.ts) agree.
+
+// Nested shell interpreters OTHER than PowerShell: these run an ARBITRARY inner
+// command this per-command gate can't introspect (e.g. `bash -c "npm install"`,
+// `cmd /c …`, `powershell -Command "npm install"`). They are blocked in the strict
+// path below. NOTE: a Windows-PowerShell command (a bare cmdlet OR a
+// `powershell -Command "<x>"` wrapper) is validated FIRST by isReadOnlyWindowsCommand
+// (which re-checks every parsed sub-command is read-only); only if that rejects it
+// does it reach here and get blocked. So `powershell -Command "Get-Content x"` /
+// "npm ls" stay allowed while "npm install" / a non-read inner are blocked.
+const SHELL_INTERPRETER_EXECUTABLES = new Set([
+  "cmd",
+  "sh",
+  "bash",
+  "zsh",
+  "dash",
+  "ksh",
+  "csh",
+  "tcsh",
+  "fish",
+  "wsl",
+  "powershell",
+  "pwsh"
+])
+
+/**
+ * Stricter than assessCommandSafety's "safe": a command is read-only-shell-safe
+ * iff it is auto-approve "safe" AND, when it invokes a build/package/codegen
+ * tool, that invocation is pure inspection. Used to gate the execute tool for
+ * read-only agents/workers.
+ *
+ * `windowsShell` tells the gate which shell the command runs in. On Windows
+ * PowerShell, bare read-only cmdlets (Get-Content, Select-String …) aren't in the
+ * cross-platform "safe" set, so they'd be false-blocked unless we know the shell.
+ * Callers that know the runtime shell pass it (the runtime derives it from the
+ * sandbox); it defaults to "unknown" (the strict cross-platform behavior).
+ *
+ * NOTE: the strict path's "safe" requires a SINGLE command with no shell
+ * metacharacters (&&, ||, |, …), so compound/redirected commands are rejected
+ * there. The Windows path uses isReadOnlyWindowsCommand, which validates EVERY
+ * parsed sub-command is read-only — so a compound only passes if both halves are
+ * read-only (it can't be used to tunnel a build/write).
+ */
+export function isReadOnlyShellCommand(
+  command: string,
+  cwd: string,
+  windowsShell: WindowsShellKind = "unknown"
+): boolean {
+  // Windows-PowerShell path FIRST: recognizes bare read-only cmdlets AND a
+  // `powershell -Command "<x>"` wrapper, re-validating every parsed sub-command is
+  // read-only. Returns false off win32 (process.platform guard), so the strict
+  // cross-platform path below is unchanged on macOS/Linux. We do NOT pass
+  // windowsShell to assessCommandSafety: its PowerShell parser would treat some
+  // compound forms as "safe", which the single-command refinement can't vet.
+  if (isReadOnlyWindowsCommand(command, windowsShell)) return true
+  // Cross-platform strict path.
+  if (assessCommandSafety(command, cwd).level !== "safe") return false
+  const tokens = tokenizeCommand(command.trim())
+  if (!tokens || tokens.length === 0) return true
+  // A PATH-QUALIFIED executable (./ls, /usr/bin/cat, /tmp/x/ls, ./gradlew) is NOT
+  // the known system command — assessCommandSafety identifies commands by
+  // path.basename(), so a repo-local `./ls` (or any binary whose basename matches
+  // a safe name) would be auto-"safe" yet run arbitrary code. A read-only agent
+  // can't assume its content is read-only, so require a BARE name resolved via
+  // PATH to the known binary. (Also blocks project scripts like ./gradlew.)
+  if (isPathQualifiedExecutable(tokens[0])) return false
+  // powershell/pwsh that reached here weren't accepted as read-only by
+  // isReadOnlyWindowsCommand above (non-read inner, or off-win32) → block them
+  // (they're in SHELL_INTERPRETER_EXECUTABLES, handled by isReadOnlyTokenizedCommand).
+  return isReadOnlyTokenizedCommand(tokens)
+}
+
+/** True when the executable token is path-qualified (contains a `/` or `\`),
+ * e.g. `./ls`, `/usr/bin/cat`, `/tmp/x/ls`, `./gradlew`. Such a binary's identity
+ * is not the known system command, so it must not pass the read-only gate. */
+function isPathQualifiedExecutable(token: string): boolean {
+  return /[\\/]/.test(token)
+}
+
+/** Read-only dispatch over an already-tokenized SINGLE command (no shell
+ * metacharacters — guaranteed by the "safe" check upstream). Split out so the
+ * `env` transparent prefix can recurse on the wrapped command. */
+function isReadOnlyTokenizedCommand(tokens: string[]): boolean {
+  // Re-apply the path-qualified guard on each (possibly env-unwrapped) command so
+  // `env /tmp/x/ls` / `/usr/bin/env …` can't tunnel a path-qualified binary.
+  if (isPathQualifiedExecutable(tokens[0])) return false
+  const executable = normalizeExecutable(tokens[0])
+  // `printenv [KEY]` prints environment variables (secrets) to stdout — never
+  // read-only-safe for an untrusted read-only agent, with or without an arg.
+  // (`env` is handled as a transparent prefix just below.)
+  if (executable === "printenv") return false
+  // echo / printf write their arguments straight to stdout, so a `$VAR` argument
+  // prints the EXPANDED value — `echo $OPENAI_API_KEY` / `printf %s $TOKEN` leak a
+  // secret this gate can't vet: there is no resolved file PATH to check (unlike
+  // `cat $VAR`, which the sensitive-path gate handles). Refuse `$` in their tokens.
+  // Over-blocks a literal single-quoted `echo '$x'` too — a safe trade for an agent
+  // that virtually never needs it. cat/grep/ls keep `$` expansion (path-vetted).
+  if ((executable === "echo" || executable === "printf") && tokens.some((t) => t.includes("$"))) {
+    return false
+  }
+  // `env [VAR=val...] CMD …` is a TRANSPARENT PREFIX that runs CMD —
+  // assessCommandSafety already verified the wrapped command is safe and that
+  // there are no env flags (which would make it non-safe). Without unwrapping,
+  // `env npm install` slips through here because `env` isn't a build tool.
+  if (executable === "env") {
+    const rest = tokens.slice(1)
+    // REJECT any env-var ASSIGNMENT: `env PATH=/tmp/evil ls` redirects a bare name
+    // to another binary, and `env LD_PRELOAD=… / NODE_OPTIONS=… / PYTHONPATH=… cmd`
+    // injects code into an otherwise-safe binary. A read-only agent can't vet
+    // these, so allow only bare `env` (lists the environment) or `env CMD` with no
+    // assignments; the inner CMD is still checked by the recursion.
+    if (rest.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(rest[0])) return false
+    // bare `env` dumps ALL environment variables (incl. secrets) to stdout — refuse
+    // it for a read-only agent (env-secret exfil). `env CMD …` is still a transparent
+    // prefix and recurses below; the inner CMD is what gets vetted.
+    if (rest.length === 0) return false
+    return isReadOnlyTokenizedCommand(rest)
+  }
+  // Other nested shells (bash -c, cmd /c, …) can't be introspected here and are
+  // not auto-"safe" anyway — block as belt-and-suspenders.
+  if (SHELL_INTERPRETER_EXECUTABLES.has(executable)) return false
+  // Every "safe" command that isn't a build tool is genuinely read-only (ls /
+  // cat / grep / find / rg / git log|diff|status / sed-read / base64-decode …).
+  if (!BUILD_TOOL_EXECUTABLES.has(executable)) return true
+  return isReadOnlyBuildToolInvocation(executable, tokens)
+}
+
 function tokenizeCommand(command: string): string[] | null {
   const tokens: string[] = []
   let current = ""
@@ -1079,7 +1536,7 @@ function tokenizeCommand(command: string): string[] | null {
       continue
     }
 
-    if (ch === "'" || ch === "\"") {
+    if (ch === "'" || ch === '"') {
       quote = ch
       continue
     }
@@ -1293,7 +1750,11 @@ function parseApprovalPattern(pattern: string): string[] | null {
   if (!pattern.startsWith(APPROVAL_PREFIX_RULE_PREFIX)) return null
   try {
     const parsed = JSON.parse(pattern.slice(APPROVAL_PREFIX_RULE_PREFIX.length)) as unknown
-    if (!Array.isArray(parsed) || parsed.length === 0 || parsed.some((item) => typeof item !== "string")) {
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length === 0 ||
+      parsed.some((item) => typeof item !== "string")
+    ) {
       return null
     }
     return parsed as string[]
@@ -1308,10 +1769,11 @@ function isBannedPersistentPrefix(tokens: string[]): boolean {
     return token.toLowerCase()
   })
 
-  return BANNED_PERSISTENT_PREFIXES.some((banned) => (
-    banned.length <= normalized.length &&
-    banned.every((token, index) => normalized[index] === token)
-  ))
+  return BANNED_PERSISTENT_PREFIXES.some(
+    (banned) =>
+      banned.length <= normalized.length &&
+      banned.every((token, index) => normalized[index] === token)
+  )
 }
 
 function normalizeExecutable(raw: string): string {
@@ -1330,7 +1792,9 @@ function isSafeRipgrep(tokens: string[]): boolean {
     const lower = token.toLowerCase()
     return (
       UNSAFE_RIPGREP_FLAGS.has(lower) ||
-      UNSAFE_RIPGREP_FLAGS_WITH_VALUES.some((flag) => lower === flag || lower.startsWith(flag + "="))
+      UNSAFE_RIPGREP_FLAGS_WITH_VALUES.some(
+        (flag) => lower === flag || lower.startsWith(flag + "=")
+      )
     )
   })
 }
@@ -1363,7 +1827,12 @@ function isSafeGit(tokens: string[]): boolean {
 function hasGitConfigOverride(tokens: string[]): boolean {
   return tokens.some((token) => {
     const lower = token.toLowerCase()
-    return lower === "-c" || lower === "--config-env" || lower.startsWith("-c") || lower.startsWith("--config-env=")
+    return (
+      lower === "-c" ||
+      lower === "--config-env" ||
+      lower.startsWith("-c") ||
+      lower.startsWith("--config-env=")
+    )
   })
 }
 
@@ -1378,9 +1847,7 @@ function findGitSubcommand(tokens: string[]): { index: number; subcommand: strin
       continue
     }
 
-    if (
-      GIT_GLOBAL_OPTIONS_WITH_VALUE.has(lower)
-    ) {
+    if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(lower)) {
       skipNext = true
       continue
     }
@@ -1408,7 +1875,9 @@ function findGitSubcommand(tokens: string[]): { index: number; subcommand: strin
 function gitArgsAreReadOnly(args: string[]): boolean {
   return !args.some((arg) => {
     const lower = arg.toLowerCase()
-    return UNSAFE_GIT_FLAGS.has(lower) || lower.startsWith("--output=") || lower.startsWith("--exec=")
+    return (
+      UNSAFE_GIT_FLAGS.has(lower) || lower.startsWith("--output=") || lower.startsWith("--exec=")
+    )
   })
 }
 
@@ -1454,6 +1923,11 @@ function isSafeBase64(tokens: string[]): boolean {
   if (normalizeExecutable(tokens[0]) !== "base64") return false
   return !tokens.slice(1).some((token) => {
     const lower = token.toLowerCase()
-    return lower === "-o" || lower === "--output" || lower.startsWith("--output=") || (lower.startsWith("-o") && lower !== "-o")
+    return (
+      lower === "-o" ||
+      lower === "--output" ||
+      lower.startsWith("--output=") ||
+      (lower.startsWith("-o") && lower !== "-o")
+    )
   })
 }
