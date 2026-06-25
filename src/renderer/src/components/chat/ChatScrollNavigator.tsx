@@ -252,12 +252,12 @@ export function ChatScrollNavigator({
     <>
       {children({ hasQuestions, reserveRightSpace, setMessageRef })}
       {hasQuestions && (
-        <div className="pointer-events-none absolute right-2 top-[46%] z-20 hidden -translate-y-1/2 md:block">
+        <div className="pointer-events-none absolute right-0 top-[46%] z-20 hidden -translate-y-1/2 md:block">
           <TooltipProvider delayDuration={120}>
             <div
               onMouseLeave={() => setHoveredIndex(null)}
               className={cn(
-                "pointer-events-auto relative flex max-h-[62vh] w-12 flex-col items-end gap-1 overflow-y-auto p-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                "pointer-events-auto relative flex max-h-[62vh] w-10 flex-col items-end gap-1 overflow-y-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
               )}
             >
               {questions.map((question, index) => {
