@@ -43,7 +43,9 @@ import {
   isSkillAutoProposeEnabled,
   setSkillAutoProposeEnabled,
   getSkillEvolutionThreshold,
-  setSkillEvolutionThreshold
+  setSkillEvolutionThreshold,
+  getSkillEvolutionTurnThreshold,
+  setSkillEvolutionTurnThreshold
 } from "../storage"
 import { trackEvent } from "../services/event-reporter"
 
@@ -506,5 +508,13 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle("optimizer:setThreshold", async (_event, value: number): Promise<void> => {
     setSkillEvolutionThreshold(value)
+  })
+
+  ipcMain.handle("optimizer:getTurnThreshold", async (): Promise<number> => {
+    return getSkillEvolutionTurnThreshold()
+  })
+
+  ipcMain.handle("optimizer:setTurnThreshold", async (_event, value: number): Promise<void> => {
+    setSkillEvolutionTurnThreshold(value)
   })
 }

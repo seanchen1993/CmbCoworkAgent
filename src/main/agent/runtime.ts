@@ -18,6 +18,7 @@ import {
   getUserInfo,
   isMemoryEnabled,
   getSkillEvolutionThreshold as getStoredSkillEvolutionThreshold,
+  getSkillEvolutionTurnThreshold as getStoredSkillEvolutionTurnThreshold,
   DEFAULT_MAX_TOKENS,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_TEMPERATURE,
@@ -1754,6 +1755,11 @@ const checkpointers = new Map<string, SqlJsSaver>()
 /** Returns the current skill-evolution threshold from persistent storage. */
 export function getSkillEvolutionThreshold(): number {
   return getStoredSkillEvolutionThreshold()
+}
+
+/** Returns the current skill-evolution conversation-turn threshold from persistent storage. */
+export function getSkillEvolutionTurnThreshold(): number {
+  return getStoredSkillEvolutionTurnThreshold()
 }
 
 /** Per-thread tool-call counters (in-memory, reset on app restart) */

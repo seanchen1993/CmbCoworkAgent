@@ -1406,6 +1406,8 @@ export function EvolutionPanel(): React.JSX.Element {
   const [autoPropose, setAutoPropose] = useState(false)
   const [threshold, setThreshold] = useState(10)
   const [thresholdInput, setThresholdInput] = useState("10")
+  const [turnThreshold, setTurnThreshold] = useState(2)
+  const [turnThresholdInput, setTurnThresholdInput] = useState("2")
   const [thresholdSaved, setThresholdSaved] = useState(false)
   const [cloudUpdateLoading, setCloudUpdateLoading] = useState(false)
   const [installingCloudCandidateId, setInstallingCloudCandidateId] = useState<string | null>(null)
@@ -1547,6 +1549,10 @@ export function EvolutionPanel(): React.JSX.Element {
       setThreshold(v)
       setThresholdInput(String(v))
     }).catch(console.warn)
+    window.api.optimizer.getTurnThreshold().then((v) => {
+      setTurnThreshold(v)
+      setTurnThresholdInput(String(v))
+    }).catch(console.warn)
     refreshCloudEvolutionUpdates().catch(console.warn)
   }, [refreshCloudEvolutionUpdates])
 
@@ -1634,12 +1640,21 @@ export function EvolutionPanel(): React.JSX.Element {
   const commitThreshold = useCallback(async () => {
     const parsed = parseInt(thresholdInput, 10)
     const clamped = Number.isNaN(parsed) ? 10 : Math.max(1, Math.min(99, parsed))
+    const parsedTurnThreshold = parseInt(turnThresholdInput, 10)
+    const clampedTurnThreshold = Number.isNaN(parsedTurnThreshold)
+      ? 2
+      : Math.max(1, Math.min(99, parsedTurnThreshold))
     setThreshold(clamped)
     setThresholdInput(String(clamped))
-    await window.api.optimizer.setThreshold(clamped).catch(console.warn)
+    setTurnThreshold(clampedTurnThreshold)
+    setTurnThresholdInput(String(clampedTurnThreshold))
+    await Promise.all([
+      window.api.optimizer.setThreshold(clamped),
+      window.api.optimizer.setTurnThreshold(clampedTurnThreshold)
+    ]).catch(console.warn)
     setThresholdSaved(true)
     setTimeout(() => setThresholdSaved(false), 1500)
-  }, [thresholdInput])
+  }, [thresholdInput, turnThresholdInput])
 
   const handleExpandTrace = useCallback(async (traceId: string) => {
     setDetailLoading(true)
@@ -2014,6 +2029,9 @@ export function EvolutionPanel(): React.JSX.Element {
     return <TraceDetailView detail={selectedTrace} onClose={() => setSelectedTrace(null)} />
   }
 
+  const thresholdsChanged =
+    thresholdInput !== String(threshold) || turnThresholdInput !== String(turnThreshold)
+
   return (
     <div className="flex flex-1 min-w-0 flex-col h-full overflow-hidden">
       <div className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-2">
@@ -2090,8 +2108,8 @@ export function EvolutionPanel(): React.JSX.Element {
             <div className="group relative shrink-0">
               <Info className="size-3.5 text-muted-foreground/40 hover:text-muted-foreground/70 cursor-default transition-colors" />
               <div className="pointer-events-none absolute top-full left-0 mt-2 w-80 rounded-md border border-border bg-popover px-3 py-2 text-[11px] leading-5 text-muted-foreground shadow-md opacity-0 group-hover:opacity-100 transition-opacity z-50">
-                <p><span className="font-medium text-foreground">直接触发：</span> 达到工具调用阈值后，直接进入技能沉淀流程。</p>
-                <p className="mt-1"><span className="font-medium text-foreground">模型判断：</span> 达到工具调用阈值后，先由大模型判断是否值得沉淀，再决定是否进入技能沉淀流程。</p>
+                <p><span className="font-medium text-foreground">直接触发：</span> 达到工具调用和对话轮次阈值后，直接进入技能沉淀流程。</p>
+                <p className="mt-1"><span className="font-medium text-foreground">模型判断：</span> 达到两个阈值后，先由大模型判断是否值得沉淀，再决定是否进入技能沉淀流程。</p>
               </div>
             </div>
 
@@ -2119,11 +2137,35 @@ export function EvolutionPanel(): React.JSX.Element {
                 !onlineSkillEvolutionEnabled && "cursor-not-allowed bg-muted/30"
               )}
             />
+            <span className="ml-2 text-xs text-muted-foreground">对话轮次阈值</span>
+            <input
+              type="number"
+              min={1}
+              max={99}
+              disabled={!onlineSkillEvolutionEnabled}
+              value={turnThresholdInput}
+              onChange={(e) => {
+                setTurnThresholdInput(e.target.value)
+                setThresholdSaved(false)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitThreshold()
+              }}
+              className={cn(
+                "w-12 h-6 rounded border bg-background text-center text-xs transition-colors",
+                "focus:outline-none focus:ring-1 focus:ring-violet-500/50",
+                "[appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none",
+                turnThresholdInput !== String(turnThreshold)
+                  ? "border-violet-400 text-foreground"
+                  : "border-border text-muted-foreground",
+                !onlineSkillEvolutionEnabled && "cursor-not-allowed bg-muted/30"
+              )}
+            />
             {thresholdSaved ? (
               <span className="text-[11px] text-emerald-500 flex items-center gap-0.5">
                 <CheckCircle2 className="size-3" />已保存
               </span>
-            ) : thresholdInput !== String(threshold) ? (
+            ) : thresholdsChanged ? (
               <button
                 disabled={!onlineSkillEvolutionEnabled}
                 onClick={commitThreshold}

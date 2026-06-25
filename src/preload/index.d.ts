@@ -1562,6 +1562,7 @@ interface CustomAPI {
         requestId: string
         summary: string
         toolCallCount: number
+        turnCount: number
         mode: "mode_a_rule" | "mode_b_llm"
         recommendationReason?: string
         /** Opaque context payload — cache in renderer and pass back on retry */
@@ -1753,6 +1754,8 @@ interface CustomAPI {
     setAutoPropose: (enabled: boolean) => Promise<void>
     getThreshold: () => Promise<number>
     setThreshold: (value: number) => Promise<void>
+    getTurnThreshold: () => Promise<number>
+    setTurnThreshold: (value: number) => Promise<void>
   }
   hooks: {
     list: () => Promise<HookConfig[]>

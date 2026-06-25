@@ -1719,6 +1719,7 @@ const api = {
         requestId: string
         summary: string
         toolCallCount: number
+        turnCount: number
         mode: "mode_a_rule" | "mode_b_llm"
         recommendationReason?: string
         context: unknown
@@ -1731,6 +1732,7 @@ const api = {
           requestId: string
           summary: string
           toolCallCount: number
+          turnCount: number
           mode: "mode_a_rule" | "mode_b_llm"
           recommendationReason?: string
           context: unknown
@@ -2376,7 +2378,11 @@ const api = {
     getThreshold: (): Promise<number> =>
       ipcRenderer.invoke("optimizer:getThreshold") as Promise<number>,
     setThreshold: (value: number): Promise<void> =>
-      ipcRenderer.invoke("optimizer:setThreshold", value) as Promise<void>
+      ipcRenderer.invoke("optimizer:setThreshold", value) as Promise<void>,
+    getTurnThreshold: (): Promise<number> =>
+      ipcRenderer.invoke("optimizer:getTurnThreshold") as Promise<number>,
+    setTurnThreshold: (value: number): Promise<void> =>
+      ipcRenderer.invoke("optimizer:setTurnThreshold", value) as Promise<void>
   },
   hooks: {
     list: (): Promise<HookConfig[]> => ipcRenderer.invoke("hooks:list"),

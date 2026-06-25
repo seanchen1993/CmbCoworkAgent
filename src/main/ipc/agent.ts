@@ -6,6 +6,7 @@ import { Command } from "@langchain/langgraph"
 import {
   createAgentRuntime,
   getSkillEvolutionThreshold,
+  getSkillEvolutionTurnThreshold,
   type ModelRetryHooks,
   type FetchErrorInfo
 } from "../agent/runtime"
@@ -2984,6 +2985,7 @@ async function runSkillProposalFlow(
     requestId: intentId,
     summary: latestUserMessage.slice(0, 120),
     toolCallCount: context.toolCallCount,
+    turnCount: context.turnCount,
     mode: intentMode,
     recommendationReason,
     context
@@ -5733,18 +5735,28 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
             // Check if this turn crossed the skill-evolution threshold.
             const sessionToolCallCount = proposalContext.toolCallCount
+            const sessionTurnCount = proposalContext.turnCount
             const threshold = getSkillEvolutionThreshold()
-            if (shouldEvaluateSkillProposalWindow(sessionToolCallCount, threshold)) {
+            const turnThreshold = getSkillEvolutionTurnThreshold()
+            if (
+              shouldEvaluateSkillProposalWindow(
+                sessionToolCallCount,
+                threshold,
+                sessionTurnCount,
+                turnThreshold
+              )
+            ) {
               const mode = getSkillProposalMode(isSkillAutoProposeEnabled())
               console.log(
                 `[SkillEvolution][${threadId}] Threshold reached ${JSON.stringify({
                   toolCallCount: sessionToolCallCount,
                   windowToolCallCount: proposalContext.toolCallCount,
                   threshold,
+                  turnThreshold,
                   mode,
                   usedSkills: proposalContext.usedSkills,
                   recentUsedSkills,
-                  turnCount: proposalContext.turnCount,
+                  turnCount: sessionTurnCount,
                   errorCount: proposalContext.errorCount,
                   toolCallSummary: proposalContext.toolCallSummary
                 })}`
@@ -5762,6 +5774,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   console.warn("[Agent] autoProposeSKill failed:", e)
                 )
               }
+            } else if (sessionToolCallCount >= threshold) {
+              console.log(
+                `[SkillEvolution][${threadId}] Tool threshold reached, waiting for turn threshold ${JSON.stringify({
+                  toolCallCount: sessionToolCallCount,
+                  threshold,
+                  turnCount: sessionTurnCount,
+                  turnThreshold
+                })}`
+              )
             }
           } else if (invokeFinalOutcome === "success" && !isCoordinatorNotificationTurn) {
             resetSkillEvolutionSession(threadId)

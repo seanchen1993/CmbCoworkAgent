@@ -129,6 +129,8 @@ export interface SkillIntentRequest {
   summary: string
   /** Number of tool calls made */
   toolCallCount: number
+  /** Number of conversation turns in the proposal window */
+  turnCount: number
   /** Trigger source for this suggestion */
   mode: "mode_a_rule" | "mode_b_llm"
   /** Optional model recommendation reason for Mode B */
@@ -145,7 +147,7 @@ export async function requestSkillIntent(req: SkillIntentRequest): Promise<boole
   const promise = waitForResponse(req.requestId)
   notifyRenderer("skill:intentRequest", req)
   console.log(
-    `[SkillEvolution] Sent intent request: ${req.requestId} mode=${req.mode} toolCallCount=${req.toolCallCount}`
+    `[SkillEvolution] Sent intent request: ${req.requestId} mode=${req.mode} turnCount=${req.turnCount} toolCallCount=${req.toolCallCount}`
   )
   return promise
 }
