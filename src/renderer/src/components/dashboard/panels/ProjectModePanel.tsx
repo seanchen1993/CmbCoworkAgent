@@ -1833,32 +1833,30 @@ export function ProjectModePanel({
             <h2 className="text-sm font-semibold text-foreground">生产效能代码指标</h2>
             <CodeEfficiencyModelInfo />
           </div>
-          {/* source 筛选：仅当范围内存在外部上报来源时出现，仅收窄本区两个子模块。 */}
-          {availableSources.length > 0 && (
-            <div className="flex items-center gap-2">
-              {codeStatsLoading && (
-                <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
-              )}
-              <span className="text-[11px] text-muted-foreground">来源</span>
-              <Select
-                value={codeSource ?? CODE_SOURCE_ALL}
-                onValueChange={(v) => onCodeSourceChange(v === CODE_SOURCE_ALL ? null : v)}
-              >
-                <SelectTrigger className="h-7 w-[160px] text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={CODE_SOURCE_ALL}>全部来源</SelectItem>
-                  <SelectItem value={CODE_SOURCE_NATIVE}>Git仓库采纳</SelectItem>
-                  {availableSources.map((s) => (
-                    <SelectItem key={s} value={s}>
-                      {s}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
+          {/* source 筛选：始终展示，仅收窄本区两个子模块。 */}
+          <div className="flex items-center gap-2">
+            {codeStatsLoading && (
+              <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+            )}
+            <span className="text-[11px] text-muted-foreground">来源</span>
+            <Select
+              value={codeSource ?? CODE_SOURCE_ALL}
+              onValueChange={(v) => onCodeSourceChange(v === CODE_SOURCE_ALL ? null : v)}
+            >
+              <SelectTrigger className="h-7 w-[160px] text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={CODE_SOURCE_ALL}>全部来源</SelectItem>
+                <SelectItem value={CODE_SOURCE_NATIVE}>Git仓库采纳</SelectItem>
+                {availableSources.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {s}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         </div>
 
         {/* 子模块一（项目模式总量）：含 Vibecoding 在内的整体口径 */}
