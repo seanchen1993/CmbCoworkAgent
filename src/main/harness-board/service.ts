@@ -623,7 +623,9 @@ function harnessCommandLogOptions(
 ): HarnessInvocationLogOptions {
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
   const successResult: HarnessInvocationSuccessLogMode =
-    mode === "createProject" || mode === "createFeature" ? "full" : "summary"
+    mode === "createProject" || mode === "createFeature" || mode === "sessionContext"
+      ? "full"
+      : "summary"
   return {
     configKey,
     ...(detail ? { detail } : {}),
@@ -956,6 +958,36 @@ function getHarnessSelectedServiceUnitsCommandOptions(
   return {
     selectedServiceUnitsJson: JSON.stringify(resolvedServiceUnits)
   }
+}
+
+function formatMarkdownInlineCode(value: string): string {
+  return value.replace(/`/g, "\\`")
+}
+
+function buildHarnessAdditionalWorkspaceRootsPrompt(
+  projectId: string,
+  featureId: string,
+  workspacePath: string
+): string | undefined {
+  const normalizedWorkspacePath = resolve(workspacePath)
+  const seen = new Set<string>([normalizedWorkspacePath])
+  const roots: string[] = []
+  for (const path of resolveFeatureServiceUnitMappings(projectId, featureId)
+    .map((mapping) => normalizeText(mapping.localRepoPath).trim())
+    .filter((path) => path && isAbsolute(path))) {
+    const normalizedPath = resolve(path)
+    if (seen.has(normalizedPath)) continue
+    seen.add(normalizedPath)
+    roots.push(path)
+  }
+  if (roots.length === 0) return undefined
+
+  return [
+    "### File System and Paths",
+    "",
+    "Additional workspace roots:",
+    ...roots.map((root) => `- \`${formatMarkdownInlineCode(root)}\``)
+  ].join("\n")
 }
 
 function isProjectMissingError(message: string): boolean {
@@ -2426,7 +2458,12 @@ export function buildHarnessFeatureAgentContext(
     ? readHarnessFeatureSessionContextAgentPrompt(project, feature.slug)
     : undefined
   const harnessAgentsPrompt = sessionContextInjectResult?.prompt
-  const systemPromptInject = renderedStaticPrompt?.trim() || undefined
+  const additionalWorkspaceRootsPrompt = usePluginAgentsPrompt
+    ? undefined
+    : buildHarnessAdditionalWorkspaceRootsPrompt(project.projectId, feature.slug, project.workspacePath)
+  const systemPromptInject =
+    [renderedStaticPrompt, additionalWorkspaceRootsPrompt].filter(Boolean).join("\n\n") ||
+    undefined
 
   return {
     systemPromptInject,
