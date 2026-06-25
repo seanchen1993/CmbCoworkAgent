@@ -3,6 +3,7 @@ import * as path from "path"
 import { BrowserWindow } from "electron"
 import micromatch from "micromatch"
 import { scheduleGitHookEventSync } from "./git-hook-service"
+import { isGitCommitSignalPath } from "./git-refs"
 
 // Store active watchers by thread ID
 const activeWatchers = new Map<string, fs.FSWatcher>()
@@ -224,7 +225,9 @@ export function startWatching(threadId: string, workspacePath: string): void {
         const hasHiddenPart = parts.some((p) => p.startsWith("."))
         const isGitInternalPath = parts[0] === ".git"
         if (isGitInternalPath) {
-          scheduleGitHookEventSync(workspacePath)
+          if (isGitCommitSignalPath(relativePath)) {
+            scheduleGitHookEventSync(workspacePath)
+          }
           return
         }
         const isGitIgnore = leaf === ".gitignore"
