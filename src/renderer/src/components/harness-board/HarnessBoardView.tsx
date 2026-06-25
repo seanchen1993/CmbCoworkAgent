@@ -3144,9 +3144,9 @@ function FeatureConversationPanel({
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
 }): React.JSX.Element {
   return (
-    <section className="flex min-h-0 flex-1 overflow-hidden rounded-md border border-border bg-background">
+    <section className="flex min-h-0 flex-1 overflow-hidden rounded-md border border-border bg-background w-full">
       {threadId ? (
-        <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 flex-1 w-full">
           <TabbedPanel
             threadId={threadId}
             showTabBar={false}

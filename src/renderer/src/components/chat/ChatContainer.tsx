@@ -1696,7 +1696,6 @@ export function ChatContainer({
   const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
-  const isAtBottomRef = useRef(true)
   const isComposingRef = useRef(false)
   const submitInFlightRef = useRef<Set<string>>(new Set())
   const [skills, setSkills] = useState<SkillMetadata[]>([])
@@ -3046,46 +3045,11 @@ export function ChatContainer({
     ) as HTMLDivElement | null
   }, [])
 
-  // Track scroll position to determine if user is at bottom
-  const handleScroll = useCallback((): void => {
-    const viewport = getViewport()
-    if (!viewport) return
-
-    const { scrollTop, scrollHeight, clientHeight } = viewport
-    // Consider "at bottom" if within 50px of the bottom
-    const threshold = 50
-    isAtBottomRef.current = scrollHeight - scrollTop - clientHeight < threshold
-  }, [getViewport])
-
-  // Attach scroll listener to viewport
-  useEffect(() => {
-    const viewport = getViewport()
-    if (!viewport) return
-
-    viewport.addEventListener("scroll", handleScroll)
-    return () => viewport.removeEventListener("scroll", handleScroll)
-  }, [getViewport, handleScroll])
-
-  // Auto-scroll on new messages only if already at bottom
-  useEffect(() => {
-    const viewport = getViewport()
-    if (viewport && displayMessages.length === 0) {
-      viewport.scrollTop = 0
-      isAtBottomRef.current = true
-      return
-    }
-    if (viewport && isAtBottomRef.current) {
-      viewport.scrollTop = viewport.scrollHeight
-    }
-  }, [displayMessages, isLoading, getViewport])
-
-  // Force scroll to bottom when an approval request arrives — the user must see and act on it
   useEffect(() => {
     if (!pendingApproval) return
     const viewport = getViewport()
     if (viewport) {
       viewport.scrollTop = viewport.scrollHeight
-      isAtBottomRef.current = true
     }
   }, [pendingApproval, getViewport])
 
@@ -3110,7 +3074,6 @@ export function ChatContainer({
       } else {
         viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
       }
-      isAtBottomRef.current = false
     })
 
     return () => cancelAnimationFrame(frame)
@@ -3122,19 +3085,31 @@ export function ChatContainer({
     userInputDialogLayout?.top
   ])
 
-  // Always scroll to bottom when switching threads
+
+  //  滚动到底部
+  // 1.初始化
+  // 2.切换thread
   useEffect(() => {
     const viewport = getViewport()
     if (viewport) {
-      if (displayMessages.length === 0) {
-        viewport.scrollTop = 0
-        isAtBottomRef.current = true
+      viewport.scrollTop = viewport.scrollHeight
+    }
+  }, [getViewport, historyLoading, threadId])
+
+
+  // stream 输出的过程中，如果用户正处于底部，那么继续保持底部
+  useEffect(() => {
+      const viewport = getViewport()
+      if (!viewport) return
+      const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+      if (bottomDistance <= 200) {
+        const scrollToBottom = (): void => {
+          viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+        }
+        scrollToBottom()
         return
       }
-      viewport.scrollTop = viewport.scrollHeight
-      isAtBottomRef.current = true
-    }
-  }, [displayMessages.length, threadId, getViewport])
+  }, [streamData, isLoading])
 
   // Focus input on mount
   useEffect(() => {
@@ -3338,7 +3313,7 @@ export function ChatContainer({
       }
       return userMessage
     },
-    [appendMessage, threadId]
+    [appendMessage, getViewport, threadId]
   )
 
   const showGoalControlNotice = useCallback((rawMessage?: string): void => {
@@ -3806,6 +3781,12 @@ export function ChatContainer({
             generateTitleForFirstMessage(threadId, titleSource)
           }
         }
+      }
+
+      // 发送消息，滚动到底部
+      const viewport = getViewport()
+      if (viewport) {
+        viewport.scrollTop = viewport.scrollHeight
       }
 
       const startTime = Date.now()
@@ -5077,7 +5058,6 @@ export function ChatContainer({
         messages={displayMessages}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
-        onScrollToQuestion={handleScrollToQuestion}
       >
         {({ reserveRightSpace, setMessageRef }) => (
           <>
@@ -5690,8 +5670,8 @@ export function ChatContainer({
                         style={{ minHeight: "44px", maxHeight: "200px" }}
                       />
                       {/* Bottom bar: + button left, send button right */}
-                      <div className="flex items-center justify-between px-3 pb-2">
-                        <div className="flex items-center gap-1">
+                      <div className="flex items-center justify-between px-3 pb-2 w-full">
+                        <div className="flex items-center gap-1 flex-1 overflow-auto">
                           <button
                             type="button"
                             disabled={
