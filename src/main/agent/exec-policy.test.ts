@@ -276,7 +276,7 @@ describe("resolveGitCommandCwd", () => {
         : path.resolve(CWD, "/c/ai/CmbCoworkAgent")
     )
     expect(resolveGitCommandCwd('git -C "repo\\\\with spaces" commit -m x', CWD)).toBe(
-      path.resolve(CWD, "repo\\\\with spaces")
+      path.resolve(CWD, "repo\\with spaces")
     )
     expect(resolveGitCommandCwd("git -C src -C nested commit -m x -- a.ts", CWD)).toBe(
       path.resolve(CWD, "src", "nested")

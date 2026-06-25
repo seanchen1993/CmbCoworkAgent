@@ -47,6 +47,10 @@ import type {
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
 import type {
+  HarnessEnterpriseProjectDetailInput,
+  HarnessEnterpriseProjectDetailResult,
+  HarnessEnterpriseProjectSearchInput,
+  HarnessEnterpriseProjectSearchResult,
   HarnessProjectCreateInput,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
@@ -55,7 +59,10 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessSkipNodeInput,
+  HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
+  HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent
 } from "../shared/harness-board-types"
 import type {
@@ -70,6 +77,11 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
+import {
+  APP_ATTENTION_CHANNEL,
+  getAgentStreamAttentionKind,
+  type AppAttentionKind
+} from "../shared/app-attention"
 
 interface LspDownloadProgress {
   percent: number
@@ -118,6 +130,26 @@ type PetState =
   | "interaction"
   | "hover"
 
+function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
+  ipcRenderer.send(APP_ATTENTION_CHANNEL, { kind, threadId })
+}
+
+const CANCELLED_AGENT_ATTENTION_TTL_MS = 30_000
+const cancelledAgentAttentionThreads = new Map<string, number>()
+
+function notifyForAgentStreamEvent(event: unknown, threadId?: string): void {
+  const kind = getAgentStreamAttentionKind(event)
+  if (!kind) return
+  if (threadId) {
+    const cancelledAt = cancelledAgentAttentionThreads.get(threadId)
+    if (cancelledAt !== undefined) {
+      cancelledAgentAttentionThreads.delete(threadId)
+      if (Date.now() - cancelledAt <= CANCELLED_AGENT_ATTENTION_TTL_MS) return
+    }
+  }
+  notifyAppAttention(kind, threadId)
+}
+
 // Simple electron API - replaces @electron-toolkit/preload
 const electronAPI = {
   openExternal: (url: string) => shell.openExternal(url),
@@ -157,7 +189,7 @@ const api = {
       message: string,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator",
+      agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ): (() => void) => {
@@ -167,6 +199,9 @@ const api = {
 
       const handler = (_: unknown, data: StreamEvent): void => {
         onEvent(data)
+        if (!coordinatorInternalNotification) {
+          notifyForAgentStreamEvent(data, threadId)
+        }
         if (data.type === "done" || data.type === "error") {
           ipcRenderer.removeListener(channel, handler)
         }
@@ -192,7 +227,7 @@ const api = {
       command: unknown,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator",
+      agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ): (() => void) => {
@@ -202,6 +237,9 @@ const api = {
 
       const handler = (_: unknown, data: StreamEvent): void => {
         onEvent(data)
+        if (!coordinatorInternalNotification) {
+          notifyForAgentStreamEvent(data, threadId)
+        }
         if (data.type === "done" || data.type === "error") {
           ipcRenderer.removeListener(channel, handler)
         }
@@ -235,6 +273,7 @@ const api = {
 
       const handler = (_: unknown, data: StreamEvent): void => {
         onEvent?.(data)
+        notifyForAgentStreamEvent(data, threadId)
         if (data.type === "done" || data.type === "error") {
           ipcRenderer.removeListener(channel, handler)
         }
@@ -275,7 +314,25 @@ const api = {
       }>
     },
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }): Promise<void> => {
-      return ipcRenderer.invoke("agent:cancel", { threadId, ...options })
+      if (options?.cancelWorkers) {
+        return ipcRenderer.invoke("agent:cancel", { threadId, ...options }).then(() => undefined)
+      }
+      const cancelledAt = Date.now()
+      cancelledAgentAttentionThreads.set(threadId, cancelledAt)
+      setTimeout(() => {
+        if (cancelledAgentAttentionThreads.get(threadId) === cancelledAt) {
+          cancelledAgentAttentionThreads.delete(threadId)
+        }
+      }, CANCELLED_AGENT_ATTENTION_TTL_MS)
+      return ipcRenderer
+        .invoke("agent:cancel", { threadId, ...options })
+        .then((cancelled: unknown) => {
+          if (cancelled !== true) cancelledAgentAttentionThreads.delete(threadId)
+        })
+        .catch((error) => {
+          cancelledAgentAttentionThreads.delete(threadId)
+          throw error
+        })
     },
     getCoordinatorWorkers: (
       threadId: string,
@@ -356,6 +413,33 @@ const api = {
     },
     isCoordinatorModeForced: (): Promise<boolean> => {
       return ipcRenderer.invoke("agent:coordinator-mode-forced") as Promise<boolean>
+    }
+  },
+  workflows: {
+    listRuns: (threadId: string): Promise<unknown[]> => {
+      return ipcRenderer.invoke("workflow:list-runs", { threadId }) as Promise<unknown[]>
+    },
+    getRun: (threadId: string, runId: string): Promise<unknown | null> => {
+      return ipcRenderer.invoke("workflow:get-run", { threadId, runId }) as Promise<unknown | null>
+    },
+    cancelRun: (threadId: string, runId?: string): Promise<boolean> => {
+      return ipcRenderer.invoke("workflow:cancel-run", { threadId, runId }) as Promise<boolean>
+    },
+    hydrate: (threadId: string): Promise<unknown> => {
+      return ipcRenderer.invoke("workflow:hydrate", { threadId }) as Promise<unknown>
+    },
+    onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void): (() => void) => {
+      // Durable per-thread channel for background workflow runs. Unlike the
+      // run stream, this survives past the launching turn so progress and the
+      // completion notification still reach the renderer.
+      const channel = `agent:workflow-events:${threadId}`
+      const handler = (_: unknown, data: unknown): void => {
+        callback(data)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
     }
   },
   threads: {
@@ -726,6 +810,16 @@ const api = {
     }> => {
       return ipcRenderer.invoke("workspace:loadFromDisk", { threadId })
     },
+    ensureWatching: (
+      threadId: string
+    ): Promise<{ success: boolean; restarted?: boolean }> => {
+      return ipcRenderer.invoke("workspace:ensureWatching", { threadId })
+    },
+    setActiveThread: (
+      threadId: string | null
+    ): Promise<{ success: boolean; restarted?: boolean }> => {
+      return ipcRenderer.invoke("workspace:setActiveThread", { threadId })
+    },
     readFile: (
       threadId: string,
       filePath: string
@@ -815,6 +909,7 @@ const api = {
         previousPath?: string
         status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
         diff: string
+        diffLoaded?: boolean
         additions: number
         deletions: number
       }>
@@ -840,6 +935,7 @@ const api = {
           previousPath?: string
           status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
           diff: string
+          diffLoaded?: boolean
           additions: number
           deletions: number
         }>
@@ -886,7 +982,12 @@ const api = {
       }>
     },
     getGitPanelDiffs: (
-      threadId: string
+      threadId: string,
+      options?: {
+        includeDiffs?: boolean
+        includeChangedFiles?: boolean
+        statusUntrackedMode?: "all" | "normal" | "no"
+      }
     ): Promise<{
       success: boolean
       isWorktree: boolean
@@ -897,6 +998,7 @@ const api = {
         previousPath?: string
         status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
         diff: string
+        diffLoaded?: boolean
         additions: number
         deletions: number
       }>
@@ -908,7 +1010,7 @@ const api = {
       suggestedCommitMessage?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:getGitPanelDiffs", { threadId }) as Promise<{
+      return ipcRenderer.invoke("workspace:getGitPanelDiffs", { threadId, options }) as Promise<{
         success: boolean
         isWorktree: boolean
         isGitRepo?: boolean
@@ -918,6 +1020,7 @@ const api = {
           previousPath?: string
           status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
           diff: string
+          diffLoaded?: boolean
           additions: number
           deletions: number
         }>
@@ -927,6 +1030,75 @@ const api = {
         totals: { additions: number; deletions: number; fileCount: number }
         hasPendingDiff: boolean
         suggestedCommitMessage?: string
+        error?: string
+      }>
+    },
+    getGitPanelFileDiff: (
+      threadId: string,
+      filePath: string
+    ): Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      file?: {
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+        diff: string
+        diffLoaded?: boolean
+        additions: number
+        deletions: number
+      }
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:getGitPanelFileDiff", { threadId, filePath }) as Promise<{
+        success: boolean
+        isWorktree: boolean
+        isGitRepo?: boolean
+        taskId: string
+        file?: {
+          path: string
+          previousPath?: string
+          status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+          diff: string
+          diffLoaded?: boolean
+          additions: number
+          deletions: number
+        }
+        error?: string
+      }>
+    },
+    getGitChangedFilesSummary: (
+      threadId: string
+    ): Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      files: Array<{
+        path: string
+        previousPath?: string
+        status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+      }>
+      changedFilesTotal: number
+      omittedFileCount: number
+      hasPendingDiff: boolean
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:getGitChangedFilesSummary", { threadId }) as Promise<{
+        success: boolean
+        isWorktree: boolean
+        isGitRepo?: boolean
+        taskId: string
+        files: Array<{
+          path: string
+          previousPath?: string
+          status?: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+        }>
+        changedFilesTotal: number
+        omittedFileCount: number
+        hasPendingDiff: boolean
         error?: string
       }>
     },
@@ -1480,7 +1652,25 @@ const api = {
     }
   },
   memory: {
-    listFiles: (): Promise<
+    listProjects: (request?: {
+      workspacePath?: string | null
+    }): Promise<
+      Array<{
+        projectId: string
+        displayName: string
+        memoryDir: string
+        gitRoot?: string
+        fileCount: number
+        totalSize: number
+        indexSize: number
+        isCurrent: boolean
+      }>
+    > => ipcRenderer.invoke("memory:listProjects", request),
+    listFiles: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }): Promise<
       Array<{
         name: string
         size: number
@@ -1490,29 +1680,55 @@ const api = {
         description: string | null
         recallCount: number
       }>
-    > => ipcRenderer.invoke("memory:listFiles"),
-    readFile: (name: string): Promise<string> => ipcRenderer.invoke("memory:readFile", name),
-    deleteFile: (name: string): Promise<void> => ipcRenderer.invoke("memory:deleteFile", name),
+    > => ipcRenderer.invoke("memory:listFiles", request),
+    readFile: (
+      name: string,
+      request?: {
+        scope?: "global" | "project"
+        workspacePath?: string | null
+        projectId?: string | null
+      }
+    ): Promise<string> => ipcRenderer.invoke("memory:readFile", name, request),
+    deleteFile: (
+      name: string,
+      request?: {
+        scope?: "global" | "project"
+        workspacePath?: string | null
+        projectId?: string | null
+      }
+    ): Promise<void> => ipcRenderer.invoke("memory:deleteFile", name, request),
     getEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getEnabled"),
     setEnabled: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("memory:setEnabled", enabled),
     getDreamEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getDreamEnabled"),
     setDreamEnabled: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("memory:setDreamEnabled", enabled),
-    getStats: (): Promise<{
+    getStats: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }): Promise<{
       fileCount: number
       totalSize: number
       indexSize: number
       enabled: boolean
       dreamEnabled: boolean
       dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
-    }> => ipcRenderer.invoke("memory:getStats"),
-    consolidate: (): Promise<{
+      scope: "global" | "project"
+      memoryDir: string
+      projectId?: string
+      gitRoot?: string
+    }> => ipcRenderer.invoke("memory:getStats", request),
+    consolidate: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }): Promise<{
       archived: number
       merged: number
       created: number
       skipped: number
-    }> => ipcRenderer.invoke("memory:consolidate"),
+    }> => ipcRenderer.invoke("memory:consolidate", request),
     onChanged: (callback: () => void): (() => void) => {
       const handler = (): void => {
         callback()
@@ -1847,11 +2063,12 @@ const api = {
     // Approval decision from renderer → main
     sendApprovalDecision: (decision: {
       requestId: string
-      type: string
+      type: "approve" | "approve_session" | "approve_permanent" | "reject" | "error"
       tool_call_id: string
       savedToolName?: string
       savedToolDescription?: string
       commitResult?: { success: boolean; commitMessage?: string; error?: string }
+      pushResult?: { success: boolean; error?: string }
     }): void => {
       ipcRenderer.send("sandbox:approvalDecision", decision)
     },
@@ -2382,6 +2599,8 @@ const api = {
       ipcRenderer.invoke("dashboard:isProjectModeAllowed"),
     isAnalysisAgentAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isAnalysisAgentAllowed"),
+    isUncommittedAnalysisAllowed: (): Promise<boolean> =>
+      ipcRenderer.invoke("dashboard:isUncommittedAnalysisAllowed"),
     esQuery: (input: {
       indexAlias: "event" | "trace"
       operation: "search" | "msearch" | "count" | "mapping" | "field_caps"
@@ -2452,6 +2671,7 @@ const api = {
         pageSize?: number
         pushedOnly?: boolean
         upperOrgLv1?: string | null
+        userKeyword?: string | null
         orgLv1List?: string[]
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -2470,6 +2690,7 @@ const api = {
         pageSize?: number
         pushedOnly?: boolean
         upperOrgLv1?: string | null
+        userKeyword?: string | null
         orgLv1List?: string[]
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -2526,7 +2747,10 @@ const api = {
       options?: {
         upperOrgLv1?: string | string[] | null
         projectMode?: boolean
+        projectId?: string | null
+        featureSlug?: string | null
         usedSkillsOnly?: boolean
+        userKeyword?: string | null
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:uncommittedRanking", range, options),
@@ -2536,7 +2760,10 @@ const api = {
       options?: {
         upperOrgLv1?: string | string[] | null
         projectMode?: boolean
+        projectId?: string | null
+        featureSlug?: string | null
         usedSkillsOnly?: boolean
+        userKeyword?: string | null
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:uncommittedDetail", sapId, range, options),
@@ -2641,6 +2868,7 @@ const api = {
         pageSize?: number
         pushedOnly?: boolean
         upperOrgLv1?: string | null
+        userKeyword?: string | null
         orgLv1List?: string[]
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -2678,11 +2906,30 @@ const api = {
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
     createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>
       ipcRenderer.invoke("harnessBoard:createProject", input) as Promise<HarnessProjectMetadata>,
+    searchEnterpriseProjects: (
+      input: HarnessEnterpriseProjectSearchInput
+    ): Promise<HarnessEnterpriseProjectSearchResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:searchEnterpriseProjects",
+        input
+      ) as Promise<HarnessEnterpriseProjectSearchResult>,
+    getEnterpriseProjectDetails: (
+      input: HarnessEnterpriseProjectDetailInput
+    ): Promise<HarnessEnterpriseProjectDetailResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:getEnterpriseProjectDetails",
+        input
+      ) as Promise<HarnessEnterpriseProjectDetailResult>,
     createFeature: (input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> =>
       ipcRenderer.invoke(
         "harnessBoard:createFeature",
         input
       ) as Promise<HarnessFeatureCreateResult>,
+    getDynamicWorkflowConfig: (projectId: string): Promise<HarnessDynamicWorkflowConfig | null> =>
+      ipcRenderer.invoke(
+        "harnessBoard:getDynamicWorkflowConfig",
+        projectId
+      ) as Promise<HarnessDynamicWorkflowConfig | null>,
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput
@@ -2694,6 +2941,11 @@ const api = {
     archiveProject: (projectId: string): Promise<HarnessProjectMetadata> =>
       ipcRenderer.invoke(
         "harnessBoard:archiveProject",
+        projectId
+      ) as Promise<HarnessProjectMetadata>,
+    deleteProject: (projectId: string): Promise<HarnessProjectMetadata> =>
+      ipcRenderer.invoke(
+        "harnessBoard:deleteProject",
         projectId
       ) as Promise<HarnessProjectMetadata>,
     getProjectDetail: (projectId: string): Promise<HarnessProjectDetailViewModel> =>
@@ -2714,6 +2966,8 @@ const api = {
         projectId,
         slug
       }) as Promise<HarnessRunDetailViewModel>,
+    skipNode: (input: HarnessSkipNodeInput): Promise<HarnessSkipNodeResult> =>
+      ipcRenderer.invoke("harnessBoard:skipNode", input) as Promise<HarnessSkipNodeResult>,
     getDialogTips: (projectId: string, slug: string): Promise<string | null> =>
       ipcRenderer.invoke("harnessBoard:getDialogTips", { projectId, slug }) as Promise<
         string | null
@@ -2855,11 +3109,17 @@ const api = {
   git: {
     currentBranch: (
       cwd?: string
-    ): Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }> =>
+    ): Promise<{
+      isGitRepo: boolean
+      branch: string | null
+      isWorktree: boolean
+      error?: string
+    }> =>
       ipcRenderer.invoke("git:currentBranch", cwd) as Promise<{
         isGitRepo: boolean
         branch: string | null
         isWorktree: boolean
+        error?: string
       }>,
     listBranches: (
       cwd?: string,

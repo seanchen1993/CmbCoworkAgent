@@ -56,7 +56,9 @@ async function getGitRoot(workspacePath: string): Promise<string | null> {
       {
         encoding: "utf-8",
         timeout: 10_000,
-        maxBuffer: 1024 * 1024
+        maxBuffer: 1024 * 1024,
+        windowsHide: true,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
       }
     )
     return String(stdout || "").trim() || null
@@ -70,7 +72,9 @@ async function getOptionalGitOutput(workspacePath: string, args: string[]): Prom
     const { stdout } = await execFileAsync("git", ["-C", workspacePath, ...args], {
       encoding: "utf-8",
       timeout: 10_000,
-      maxBuffer: 1024 * 1024
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
     })
     return String(stdout || "").trim() || null
   } catch {

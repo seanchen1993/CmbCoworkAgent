@@ -191,6 +191,7 @@ function summarizeCodeStatsForAnalysis(stats: DashboardProjectModeData["summary"
     pushedEffectiveGeneratedLines: stats.pushedEffectiveGeneratedLines,
     pushedAdoptedLines: stats.pushedAdoptedLines,
     pushedAdoptionRate: stats.pushedAdoptionRate,
+    inclusivePushedAdoptionRate: stats.inclusivePushedAdoptionRate,
     pushedCommitCount: stats.pushedCommitCount
   }
 }
@@ -255,6 +256,7 @@ function buildDashboardAnalysisPanelSnapshot({
           codePushedEffectiveGeneratedLines: overview.codePushedEffectiveGeneratedLines,
           codePushedAdoptedLines: overview.codePushedAdoptedLines,
           codePushedAdoptionRate: overview.codePushedAdoptionRate,
+          codeInclusivePushedAdoptionRate: overview.codeInclusivePushedAdoptionRate,
           codePushedCommitCount: overview.codePushedCommitCount
         }
       : null,
@@ -895,6 +897,7 @@ const EMPTY_SKILL_DETAIL: DashboardSkillDetail = {
     measuredAdoptionRate: null,
     inclusiveAdoptionRate: null,
     pushedAdoptionRate: null,
+    inclusivePushedAdoptionRate: null,
     adoptionRate: null
   },
   traces: [],
@@ -1001,13 +1004,14 @@ function buildProjectModeCodeRows(
     ["代码未提交生成行数", stats.unmeasuredGeneratedLines],
     ["代码含未提交分母行数", stats.inclusiveEffectiveGeneratedLines],
     ["代码采纳行数", stats.adoptedLines],
-    ["代码总量采纳率（含未提交）", formatPercent(stats.inclusiveAdoptionRate)],
-    ["提交率（已 Commit 采纳率）", formatPercent(stats.measuredAdoptionRate)],
+    ["总量提交采纳率（相对全部有效生成）", formatPercent(stats.inclusiveAdoptionRate)],
+    ["提交采纳率（已 Commit 采纳率）", formatPercent(stats.measuredAdoptionRate)],
     ["代码已 Push 原始生成行数", stats.pushedMeasuredGeneratedLines],
     ["代码已 Push 有效生成行数", stats.pushedEffectiveGeneratedLines],
     ["代码已 Push 采纳行数", stats.pushedAdoptedLines],
     ["代码已 Push Commit 数", stats.pushedCommitCount],
-    ["入库率（已 Push 采纳率）", formatPercent(stats.pushedAdoptionRate)]
+    ["入库采纳率（已 Push 采纳率）", formatPercent(stats.pushedAdoptionRate)],
+    ["总量入库采纳率（已 Push 真实入库率）", formatPercent(stats.inclusivePushedAdoptionRate)]
   ]
 }
 
@@ -1619,8 +1623,9 @@ function DashboardTabBar({
 }): React.JSX.Element {
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
     { id: "overview", label: "平台运营概览" },
-    ...(projectModeAllowed ? ([{ id: "project-mode", label: "项目运营概览" }] as const) : []),
-    { id: "skill-eval", label: "技能评估" }
+    ...(projectModeAllowed ? ([{ id: "project-mode", label: "项目运营概览" }] as const) : [])
+    // 技能评估 tab 暂时隐藏（仅移除入口，skill-eval 相关逻辑/内容/类型均保留，需要时取消注释即可恢复）
+    // { id: "skill-eval", label: "技能评估" }
   ]
 
   return (
@@ -2410,6 +2415,25 @@ export function DashboardView(): React.JSX.Element {
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [analysisAgentAllowed, setAnalysisAgentAllowed] = useState(false)
+  // 「生成但未提交分析」下钻权限：已登录可见；主进程按身份限制为全量 / 本室 / 本人数据。
+  const [uncommittedAnalysisAllowed, setUncommittedAnalysisAllowed] = useState(false)
+  // 「指标分析」入口默认隐藏：在标题栏右侧的隐藏热区连续点三下才显形（不完全移除功能）。
+  const [analysisEntryRevealed, setAnalysisEntryRevealed] = useState(false)
+  const analysisRevealClicksRef = useRef(0)
+  const analysisRevealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const handleAnalysisRevealHotspotClick = useCallback(() => {
+    if (analysisRevealTimerRef.current) clearTimeout(analysisRevealTimerRef.current)
+    analysisRevealClicksRef.current += 1
+    if (analysisRevealClicksRef.current >= 3) {
+      analysisRevealClicksRef.current = 0
+      setAnalysisEntryRevealed(true)
+      return
+    }
+    // 连续点击窗口：超过 600ms 未继续点击则重置计数。
+    analysisRevealTimerRef.current = setTimeout(() => {
+      analysisRevealClicksRef.current = 0
+    }, 600)
+  }, [])
   const [projectModeAllowed, setProjectModeAllowed] = useState(false)
   const [skillDialogOpen, setSkillDialogOpen] = useState(false)
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null)
@@ -2443,11 +2467,13 @@ export function DashboardView(): React.JSX.Element {
   const [commitDetailsLoading, setCommitDetailsLoading] = useState(false)
   const [commitDetailsError, setCommitDetailsError] = useState<string | null>(null)
   const [commitDepartmentValue, setCommitDepartmentValue] = useState("")
+  const [commitUserValue, setCommitUserValue] = useState("")
   // 「全部生成」漏斗首层下钻：生成但未提交分析弹窗。projectMode 区分平台概览 / 项目概览口径。
   const [uncommittedOpen, setUncommittedOpen] = useState(false)
   const [uncommittedProjectMode, setUncommittedProjectMode] = useState(false)
   // 仅 Skill 生成口径（对应「插件约束生成」漏斗下钻）。
   const [uncommittedUsedSkillsOnly, setUncommittedUsedSkillsOnly] = useState(false)
+  const [uncommittedDialogKey, setUncommittedDialogKey] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -2488,11 +2514,23 @@ export function DashboardView(): React.JSX.Element {
         setAnalysisOpen(false)
       })
 
+    window.api.dashboard
+      .isUncommittedAnalysisAllowed()
+      .then((allowed) => {
+        if (cancelled) return
+        setUncommittedAnalysisAllowed(allowed)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setUncommittedAnalysisAllowed(false)
+      })
+
     return () => {
       cancelled = true
     }
   }, [])
   const [commitDepartmentFilter, setCommitDepartmentFilter] = useState("")
+  const [commitUserFilter, setCommitUserFilter] = useState("")
   // 项目模式·特性级关联 Commit 弹窗（复用 CommitDetailsDialog，独立于平台级 Commit 明细）。
   const [featureCommitScope, setFeatureCommitScope] = useState<{
     projectId: string
@@ -2506,6 +2544,8 @@ export function DashboardView(): React.JSX.Element {
   const [featureCommitError, setFeatureCommitError] = useState<string | null>(null)
   const [featureCommitDeptValue, setFeatureCommitDeptValue] = useState("")
   const [featureCommitDeptFilter, setFeatureCommitDeptFilter] = useState("")
+  const [featureCommitUserValue, setFeatureCommitUserValue] = useState("")
+  const [featureCommitUserFilter, setFeatureCommitUserFilter] = useState("")
   const [subPage, setSubPage] = useState<DashboardSubPage>({ kind: "main" })
   const [userList, setUserList] = useState<DashboardUserListData | null>(null)
   const [userListLoading, setUserListLoading] = useState(false)
@@ -2889,6 +2929,8 @@ export function DashboardView(): React.JSX.Element {
       userMessage: skillEvalTraceRun.userMessage,
       outcome: skillEvalTraceRun.outcome,
       totalToolCalls: skillEvalTraceRun.totalToolCalls,
+      modelCallCount: skillEvalTraceRun.modelCallCount,
+      userInputRequestCount: 0,
       totalInputTokens: skillEvalTraceRun.totalInputTokens,
       totalOutputTokens: skillEvalTraceRun.totalOutputTokens,
       totalTokens: skillEvalTraceRun.totalTokens,
@@ -3389,7 +3431,8 @@ export function DashboardView(): React.JSX.Element {
       scopeLabel: string,
       page = 1,
       pushedOnly = false,
-      upperOrgLv1 = commitDepartmentFilter
+      upperOrgLv1 = commitDepartmentFilter,
+      userKeyword = commitUserFilter
     ) => {
       setCommitScopeLabel(scopeLabel)
       setCommitDetailsRange(targetRange)
@@ -3398,12 +3441,14 @@ export function DashboardView(): React.JSX.Element {
       setCommitDetailsError(null)
       setCommitDetailsLoading(true)
       const normalizedDepartment = upperOrgLv1.trim()
+      const normalizedUser = userKeyword.trim()
       try {
         const result = await window.api.dashboard.commitDetails(targetRange, {
           page,
           pageSize: 20,
           pushedOnly,
           upperOrgLv1: normalizedDepartment || null,
+          userKeyword: normalizedUser || null,
           // 带入顶部全局「室筛选」
           orgLv1List: selectedOrgLv1List
         })
@@ -3415,28 +3460,54 @@ export function DashboardView(): React.JSX.Element {
         setCommitDetailsLoading(false)
       }
     },
-    [commitDepartmentFilter, selectedOrgLv1List]
+    [commitDepartmentFilter, commitUserFilter, selectedOrgLv1List]
   )
 
   const reloadCommitDetails = useCallback(
-    (page: number, pushedOnly: boolean, upperOrgLv1 = commitDepartmentFilter) => {
+    (
+      page: number,
+      pushedOnly: boolean,
+      upperOrgLv1 = commitDepartmentFilter,
+      userKeyword = commitUserFilter
+    ) => {
       if (!commitDetailsRange) return
-      void loadCommitDetails(commitDetailsRange, commitScopeLabel, page, pushedOnly, upperOrgLv1)
+      void loadCommitDetails(
+        commitDetailsRange,
+        commitScopeLabel,
+        page,
+        pushedOnly,
+        upperOrgLv1,
+        userKeyword
+      )
     },
-    [commitDepartmentFilter, commitDetailsRange, commitScopeLabel, loadCommitDetails]
+    [
+      commitDepartmentFilter,
+      commitDetailsRange,
+      commitScopeLabel,
+      commitUserFilter,
+      loadCommitDetails
+    ]
   )
 
-  const handleCommitDepartmentSearch = useCallback(() => {
+  const handleCommitFilterSearch = useCallback(() => {
     const upperOrgLv1 = commitDepartmentValue.trim()
+    const userKeyword = commitUserValue.trim()
     setCommitDepartmentFilter(upperOrgLv1)
-    reloadCommitDetails(1, commitDetails?.pushedOnly ?? false, upperOrgLv1)
-  }, [commitDepartmentValue, commitDetails?.pushedOnly, reloadCommitDetails])
+    setCommitUserFilter(userKeyword)
+    reloadCommitDetails(1, commitDetails?.pushedOnly ?? false, upperOrgLv1, userKeyword)
+  }, [commitDepartmentValue, commitDetails?.pushedOnly, commitUserValue, reloadCommitDetails])
 
   const handleCommitDepartmentClear = useCallback(() => {
     setCommitDepartmentValue("")
     setCommitDepartmentFilter("")
-    reloadCommitDetails(1, commitDetails?.pushedOnly ?? false, "")
-  }, [commitDetails?.pushedOnly, reloadCommitDetails])
+    reloadCommitDetails(1, commitDetails?.pushedOnly ?? false, "", commitUserFilter)
+  }, [commitDetails?.pushedOnly, commitUserFilter, reloadCommitDetails])
+
+  const handleCommitUserClear = useCallback(() => {
+    setCommitUserValue("")
+    setCommitUserFilter("")
+    reloadCommitDetails(1, commitDetails?.pushedOnly ?? false, commitDepartmentFilter, "")
+  }, [commitDepartmentFilter, commitDetails?.pushedOnly, reloadCommitDetails])
 
   const handleCommitExternalOpen = useCallback((url: string) => {
     if (!url) return
@@ -3450,11 +3521,14 @@ export function DashboardView(): React.JSX.Element {
   const handleCommitTotalClick = useCallback(() => {
     setCommitDepartmentValue("")
     setCommitDepartmentFilter("")
+    setCommitUserValue("")
+    setCommitUserFilter("")
     void loadCommitDetails(
       range,
       `当前范围 · ${formatRangeLabel(range.from, range.to, granularity)}`,
       1,
       false,
+      "",
       ""
     )
   }, [loadCommitDetails, range, granularity])
@@ -3463,11 +3537,14 @@ export function DashboardView(): React.JSX.Element {
     (bucket: { from: string; to: string; label: string }) => {
       setCommitDepartmentValue("")
       setCommitDepartmentFilter("")
+      setCommitUserValue("")
+      setCommitUserFilter("")
       void loadCommitDetails(
         { from: bucket.from, to: bucket.to },
         `时间桶 · ${bucket.label}`,
         1,
         false,
+        "",
         ""
       )
     },
@@ -3479,12 +3556,14 @@ export function DashboardView(): React.JSX.Element {
       scope: { projectId: string; featureSlug: string; label: string },
       page = 1,
       pushedOnly = false,
-      upperOrgLv1 = featureCommitDeptFilter
+      upperOrgLv1 = featureCommitDeptFilter,
+      userKeyword = featureCommitUserFilter
     ) => {
       setFeatureCommitData(null)
       setFeatureCommitError(null)
       setFeatureCommitLoading(true)
       const normalizedDepartment = upperOrgLv1.trim()
+      const normalizedUser = userKeyword.trim()
       try {
         // featureSlug 为空 = 项目级（聚合该项目全部特性的 commit）；否则按单特性圈定。
         const commitOptions = {
@@ -3492,6 +3571,7 @@ export function DashboardView(): React.JSX.Element {
           pageSize: 20,
           pushedOnly,
           upperOrgLv1: normalizedDepartment || null,
+          userKeyword: normalizedUser || null,
           orgLv1List: selectedOrgLv1List
         }
         const result = scope.featureSlug
@@ -3514,7 +3594,7 @@ export function DashboardView(): React.JSX.Element {
         setFeatureCommitLoading(false)
       }
     },
-    [featureCommitDeptFilter, range, selectedOrgLv1List]
+    [featureCommitDeptFilter, featureCommitUserFilter, range, selectedOrgLv1List]
   )
 
   const handleProjectOpenFeatureCommits = useCallback(
@@ -3527,8 +3607,10 @@ export function DashboardView(): React.JSX.Element {
       }
       setFeatureCommitDeptValue("")
       setFeatureCommitDeptFilter("")
+      setFeatureCommitUserValue("")
+      setFeatureCommitUserFilter("")
       setFeatureCommitScope(scope)
-      void loadFeatureCommits(scope, 1, false, "")
+      void loadFeatureCommits(scope, 1, false, "", "")
     },
     [loadFeatureCommits]
   )
@@ -3542,31 +3624,51 @@ export function DashboardView(): React.JSX.Element {
       }
       setFeatureCommitDeptValue("")
       setFeatureCommitDeptFilter("")
+      setFeatureCommitUserValue("")
+      setFeatureCommitUserFilter("")
       setFeatureCommitScope(scope)
-      void loadFeatureCommits(scope, 1, pushedOnly, "")
+      void loadFeatureCommits(scope, 1, pushedOnly, "", "")
     },
     [loadFeatureCommits]
   )
 
   const reloadFeatureCommits = useCallback(
-    (page: number, pushedOnly: boolean, upperOrgLv1 = featureCommitDeptFilter) => {
+    (
+      page: number,
+      pushedOnly: boolean,
+      upperOrgLv1 = featureCommitDeptFilter,
+      userKeyword = featureCommitUserFilter
+    ) => {
       if (!featureCommitScope) return
-      void loadFeatureCommits(featureCommitScope, page, pushedOnly, upperOrgLv1)
+      void loadFeatureCommits(featureCommitScope, page, pushedOnly, upperOrgLv1, userKeyword)
     },
-    [featureCommitDeptFilter, featureCommitScope, loadFeatureCommits]
+    [featureCommitDeptFilter, featureCommitScope, featureCommitUserFilter, loadFeatureCommits]
   )
 
-  const handleFeatureCommitDepartmentSearch = useCallback(() => {
+  const handleFeatureCommitFilterSearch = useCallback(() => {
     const upperOrgLv1 = featureCommitDeptValue.trim()
+    const userKeyword = featureCommitUserValue.trim()
     setFeatureCommitDeptFilter(upperOrgLv1)
-    reloadFeatureCommits(1, featureCommitData?.pushedOnly ?? false, upperOrgLv1)
-  }, [featureCommitData?.pushedOnly, featureCommitDeptValue, reloadFeatureCommits])
+    setFeatureCommitUserFilter(userKeyword)
+    reloadFeatureCommits(1, featureCommitData?.pushedOnly ?? false, upperOrgLv1, userKeyword)
+  }, [
+    featureCommitData?.pushedOnly,
+    featureCommitDeptValue,
+    featureCommitUserValue,
+    reloadFeatureCommits
+  ])
 
   const handleFeatureCommitDepartmentClear = useCallback(() => {
     setFeatureCommitDeptValue("")
     setFeatureCommitDeptFilter("")
-    reloadFeatureCommits(1, featureCommitData?.pushedOnly ?? false, "")
-  }, [featureCommitData?.pushedOnly, reloadFeatureCommits])
+    reloadFeatureCommits(1, featureCommitData?.pushedOnly ?? false, "", featureCommitUserFilter)
+  }, [featureCommitData?.pushedOnly, featureCommitUserFilter, reloadFeatureCommits])
+
+  const handleFeatureCommitUserClear = useCallback(() => {
+    setFeatureCommitUserValue("")
+    setFeatureCommitUserFilter("")
+    reloadFeatureCommits(1, featureCommitData?.pushedOnly ?? false, featureCommitDeptFilter, "")
+  }, [featureCommitData?.pushedOnly, featureCommitDeptFilter, reloadFeatureCommits])
 
   const handleExport = useCallback(async () => {
     if (!overview && !modelStats && !userStats && !productivity) return
@@ -3592,13 +3694,20 @@ export function DashboardView(): React.JSX.Element {
             ["代码含未提交分母行数", overview.codeInclusiveEffectiveGeneratedLines],
             ["代码删除行数", overview.codeDeletedLines],
             ["代码采纳行数", overview.codeAdoptedLines],
-            ["代码总量采纳率（含未提交）", formatPercent(overview.codeInclusiveAdoptionRate)],
-            ["提交率（已 Commit 采纳率）", formatPercent(overview.codeMeasuredAdoptionRate)],
+            [
+              "总量提交采纳率（相对全部有效生成）",
+              formatPercent(overview.codeInclusiveAdoptionRate)
+            ],
+            ["提交采纳率（已 Commit 采纳率）", formatPercent(overview.codeMeasuredAdoptionRate)],
             ["代码已 Push 原始生成行数", overview.codePushedMeasuredGeneratedLines],
             ["代码已 Push 有效生成行数", overview.codePushedEffectiveGeneratedLines],
             ["代码已 Push 采纳行数", overview.codePushedAdoptedLines],
             ["代码已 Push Commit 数", overview.codePushedCommitCount],
-            ["入库率（已 Push 采纳率）", formatPercent(overview.codePushedAdoptionRate)],
+            ["入库采纳率（已 Push 采纳率）", formatPercent(overview.codePushedAdoptionRate)],
+            [
+              "总量入库采纳率（已 Push 真实入库率）",
+              formatPercent(overview.codeInclusivePushedAdoptionRate)
+            ],
             ["Skill 种类数", overview.totalSkills],
             ["Skill 调用次数", overview.totalSkillCalls],
             ["Tool 种类数", overview.totalTools],
@@ -3911,7 +4020,17 @@ export function DashboardView(): React.JSX.Element {
       if (projectMode.adapters.length > 0) {
         sheets.push({
           name: "项目插件统计",
-          header: ["插件", "版本", "项目数", "特性数", "对话数", "提交率", "入库率"],
+          header: [
+            "插件",
+            "版本",
+            "项目数",
+            "特性数",
+            "对话数",
+            "提交采纳率",
+            "入库采纳率",
+            "总量提交采纳率",
+            "总量入库采纳率"
+          ],
           rows: projectMode.adapters.map((adapter) => [
             adapter.name,
             adapter.version || "",
@@ -3919,7 +4038,9 @@ export function DashboardView(): React.JSX.Element {
             adapter.featureCount,
             adapter.conversationCount,
             formatPercent(adapter.codeStats?.measuredAdoptionRate ?? null),
-            formatPercent(adapter.codeStats?.pushedAdoptionRate ?? null)
+            formatPercent(adapter.codeStats?.pushedAdoptionRate ?? null),
+            formatPercent(adapter.codeStats?.inclusiveAdoptionRate ?? null),
+            formatPercent(adapter.codeStats?.inclusivePushedAdoptionRate ?? null)
           ])
         })
       }
@@ -3964,8 +4085,10 @@ export function DashboardView(): React.JSX.Element {
           name: "项目Skill采纳排行",
           header: [
             "Skill",
-            "提交率",
-            "入库率",
+            "提交采纳率",
+            "入库采纳率",
+            "总量提交采纳率",
+            "总量入库采纳率",
             "生成行数",
             "有效生成行数",
             "采纳行数",
@@ -3977,6 +4100,8 @@ export function DashboardView(): React.JSX.Element {
             skill.skill,
             formatPercent(skill.measuredAdoptionRate),
             formatPercent(skill.pushedAdoptionRate),
+            formatPercent(skill.inclusiveAdoptionRate),
+            formatPercent(skill.inclusivePushedAdoptionRate),
             skill.generatedLines,
             skill.effectiveGeneratedLines,
             skill.adoptedLines,
@@ -4109,17 +4234,27 @@ export function DashboardView(): React.JSX.Element {
               </Button>
             ) : analysisAgentAllowed &&
               (activeMainTab === "overview" || activeMainTab === "project-mode") ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="gap-1.5 text-xs"
-                onClick={() => setAnalysisOpen(true)}
-                disabled={activeMainTab === "project-mode" && !projectModeAllowed}
-              >
-                <Bot className="size-3.5" />
-                指标分析
-              </Button>
+              analysisEntryRevealed ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5 text-xs"
+                  onClick={() => setAnalysisOpen(true)}
+                  disabled={activeMainTab === "project-mode" && !projectModeAllowed}
+                >
+                  <Bot className="size-3.5" /> 指标分析
+                </Button>
+              ) : (
+                // 隐藏入口：在「指标分析」按钮原位置放一个不可见热区，连续点三下才显形。
+                <button
+                  type="button"
+                  aria-hidden
+                  tabIndex={-1}
+                  onClick={handleAnalysisRevealHotspotClick}
+                  className="h-7 w-16 cursor-default opacity-0"
+                />
+              )
             ) : null
           }
         />
@@ -4227,19 +4362,21 @@ export function DashboardView(): React.JSX.Element {
                 onSkillClick={handleSkillClick}
                 onUserClick={(sapId) => openUserDetail(sapId, "main", true)}
                 onFunnelFirstStageClick={
-                  analysisAgentAllowed
+                  uncommittedAnalysisAllowed
                     ? () => {
                         setUncommittedProjectMode(true)
                         setUncommittedUsedSkillsOnly(false)
+                        setUncommittedDialogKey((key) => key + 1)
                         setUncommittedOpen(true)
                       }
                     : undefined
                 }
                 onSkillFunnelFirstStageClick={
-                  analysisAgentAllowed
+                  uncommittedAnalysisAllowed
                     ? () => {
                         setUncommittedProjectMode(true)
                         setUncommittedUsedSkillsOnly(true)
+                        setUncommittedDialogKey((key) => key + 1)
                         setUncommittedOpen(true)
                       }
                     : undefined
@@ -4275,10 +4412,11 @@ export function DashboardView(): React.JSX.Element {
                   onSkillClick={handleSkillClick}
                   onActiveUsersClick={openUserList}
                   onFunnelFirstStageClick={
-                    analysisAgentAllowed
+                    uncommittedAnalysisAllowed
                       ? () => {
                           setUncommittedProjectMode(false)
                           setUncommittedUsedSkillsOnly(false)
+                          setUncommittedDialogKey((key) => key + 1)
                           setUncommittedOpen(true)
                         }
                       : undefined
@@ -4449,6 +4587,7 @@ export function DashboardView(): React.JSX.Element {
         </DialogContent>
       </Dialog>
       <UncommittedCodeDialog
+        key={uncommittedDialogKey}
         open={uncommittedOpen}
         onOpenChange={setUncommittedOpen}
         range={range}
@@ -4468,9 +4607,12 @@ export function DashboardView(): React.JSX.Element {
         onPageChange={(page) => reloadCommitDetails(page, commitDetails?.pushedOnly ?? false)}
         onPushedOnlyChange={(pushedOnly) => reloadCommitDetails(1, pushedOnly)}
         departmentValue={commitDepartmentValue}
+        userValue={commitUserValue}
         onDepartmentValueChange={setCommitDepartmentValue}
-        onDepartmentSearch={handleCommitDepartmentSearch}
+        onUserValueChange={setCommitUserValue}
+        onSearch={handleCommitFilterSearch}
         onClearDepartment={handleCommitDepartmentClear}
+        onClearUser={handleCommitUserClear}
         onOpenExternal={handleCommitExternalOpen}
       />
       <CommitDetailsDialog
@@ -4486,10 +4628,27 @@ export function DashboardView(): React.JSX.Element {
         onPageChange={(page) => reloadFeatureCommits(page, featureCommitData?.pushedOnly ?? false)}
         onPushedOnlyChange={(pushedOnly) => reloadFeatureCommits(1, pushedOnly)}
         departmentValue={featureCommitDeptValue}
+        userValue={featureCommitUserValue}
         onDepartmentValueChange={setFeatureCommitDeptValue}
-        onDepartmentSearch={handleFeatureCommitDepartmentSearch}
+        onUserValueChange={setFeatureCommitUserValue}
+        onSearch={handleFeatureCommitFilterSearch}
         onClearDepartment={handleFeatureCommitDepartmentClear}
+        onClearUser={handleFeatureCommitUserClear}
         onOpenExternal={handleCommitExternalOpen}
+        uncommittedAnalysis={
+          featureCommitScope && uncommittedAnalysisAllowed
+            ? {
+                range,
+                scope: {
+                  upperOrgLv1: selectedOrgLv1List,
+                  projectMode: true,
+                  projectId: featureCommitScope.projectId,
+                  featureSlug: featureCommitScope.featureSlug || undefined,
+                  label: featureCommitScope.label
+                }
+              }
+            : undefined
+        }
       />
       <DashboardAnalysisDrawer
         open={analysisAgentAllowed && analysisOpen}

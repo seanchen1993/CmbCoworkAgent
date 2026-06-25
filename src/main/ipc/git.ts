@@ -30,6 +30,7 @@ interface ExecCommandError extends Error {
   stdout?: unknown
   code?: string
   signal?: string
+  path?: string
 }
 
 const execFileAsync = promisify(execFile)
@@ -58,6 +59,7 @@ const ALLOWED_GIT_SUBCOMMANDS = new Set([
   "rev-parse",
   "ls-files"
 ])
+const GIT_UNAVAILABLE_MESSAGE = "未检测到 Git 命令，请检查 Git 是否已安装并配置到 PATH。"
 
 type WorkingDirectoryCacheEntry = {
   value: string
@@ -85,7 +87,11 @@ async function captureStagedSnapshotsForCommand(command: string): Promise<Staged
     const parsed = parseGitCommand(command)
     const workingDir = parsed.workingDirFromFlag || (await getCurrentWorkingDirectory())
     const captureTimeMs = Date.now()
-    return { workingDir, captureTimeMs, snapshots: captureAdoptionStagedSnapshots(workingDir) }
+    return {
+      workingDir,
+      captureTimeMs,
+      snapshots: await captureAdoptionStagedSnapshots(workingDir)
+    }
   } catch (e) {
     console.warn("[Git] adoption pre-commit capture skipped:", e)
     return null
@@ -106,6 +112,7 @@ function extractCommitSha(commitOutput: string, workingDir: string): string | nu
       encoding: "utf-8",
       cwd: workingDir,
       timeout: 5000,
+      windowsHide: true,
       shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
     }).trim()
     return sha || null
@@ -621,6 +628,15 @@ function isNotGitRepoErrorText(text: string): boolean {
   return (
     normalized.includes("not a git repository") ||
     normalized.includes("does not appear to be a git repository")
+  )
+}
+
+function isGitUnavailableError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const err = error as ExecCommandError
+  return (
+    err.code === "ENOENT" &&
+    (err.path === "git" || err.message.toLowerCase().includes("spawn git"))
   )
 }
 
@@ -1214,16 +1230,36 @@ export function registerGitHandlers(): void {
     async (
       _,
       cwd?: string
-    ): Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }> => {
+    ): Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean; error?: string }> => {
       try {
-        const repoCheck = await isGitRepo(cwd)
-        if (!repoCheck) return { isGitRepo: false, branch: null, isWorktree: false }
-        const branch = await getCurrentBranch(cwd)
-        const worktree = await isWorktree(cwd)
+        const workingDir = cwd || (await getCurrentWorkingDirectory())
+        try {
+          await runGitArgs(["rev-parse", "--git-dir"], {
+            cwd: workingDir,
+            timeout: 10000
+          })
+        } catch (error) {
+          if (isGitUnavailableError(error)) {
+            return {
+              isGitRepo: false,
+              branch: null,
+              isWorktree: false,
+              error: GIT_UNAVAILABLE_MESSAGE
+            }
+          }
+          return { isGitRepo: false, branch: null, isWorktree: false }
+        }
+        const branch = await getCurrentBranch(workingDir)
+        const worktree = await isWorktree(workingDir)
         return { isGitRepo: true, branch, isWorktree: worktree }
       } catch (error) {
         console.error("[IPC] git:currentBranch error:", error)
-        return { isGitRepo: false, branch: null, isWorktree: false }
+        return {
+          isGitRepo: false,
+          branch: null,
+          isWorktree: false,
+          ...(isGitUnavailableError(error) ? { error: GIT_UNAVAILABLE_MESSAGE } : {})
+        }
       }
     }
   )

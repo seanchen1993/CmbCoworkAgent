@@ -13,6 +13,8 @@ export interface DashboardCodeStats {
   measuredAdoptionRate: number | null
   inclusiveAdoptionRate: number | null
   pushedAdoptionRate: number | null
+  /** 已 Push 采纳行 ÷ 全部有效生成行（含未提交）。端到端「真实入库」口径，领导主看。 */
+  inclusivePushedAdoptionRate: number | null
   adoptionRate: number | null
 }
 
@@ -77,6 +79,10 @@ export function makeDashboardCodeStats(args: {
   const measuredAdoptionRate = computeAdoptionRate(adoptedLines, effectiveGeneratedLines)
   const inclusiveAdoptionRate = computeAdoptionRate(adoptedLines, inclusiveEffectiveGeneratedLines)
   const pushedAdoptionRate = computeAdoptionRate(pushedAdoptedLines, pushedEffectiveGeneratedLines)
+  const inclusivePushedAdoptionRate = computeAdoptionRate(
+    pushedAdoptedLines,
+    inclusiveEffectiveGeneratedLines
+  )
   return {
     generatedLines,
     deletedLines,
@@ -92,6 +98,7 @@ export function makeDashboardCodeStats(args: {
     measuredAdoptionRate,
     inclusiveAdoptionRate,
     pushedAdoptionRate,
+    inclusivePushedAdoptionRate,
     // Backward-compatible alias for older renderer code paths.
     adoptionRate: measuredAdoptionRate
   }

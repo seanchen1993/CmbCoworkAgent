@@ -718,7 +718,13 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
   // When the renderer makes a decision on an approval request, it sends it here.
   // We look up the pending promise and resolve it.
 
-  const VALID_DECISION_TYPES = new Set(["approve", "approve_session", "approve_permanent", "reject"])
+  const VALID_DECISION_TYPES = new Set([
+    "approve",
+    "approve_session",
+    "approve_permanent",
+    "reject",
+    "error"
+  ])
 
   ipcMain.on("sandbox:approvalDecision", (event, decision: ApprovalDecision & { requestId: string }) => {
     // P2 fix: validate sender is a known BrowserWindow
@@ -758,7 +764,6 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
           return
         }
       }
-      pendingApprovals.delete(decision.requestId)
       pending.resolve(decision)
     } else {
       console.warn("[Sandbox] Received approval decision for unknown request:", decision.requestId)

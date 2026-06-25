@@ -243,7 +243,7 @@ async function testGitPanelPathSkipsHookAndUsesDirectStagedCapture(): Promise<vo
     await writeFile(join(repo, "panel.ts"), "export const panelValue = 1\n")
     await git(repo, ["add", "panel.ts"])
 
-    const snapshots = captureStagedSnapshotsForCommit(repo)
+    const snapshots = await captureStagedSnapshotsForCommit(repo)
     assert(snapshots.length === 1, `Git Panel path should directly capture one staged file, got ${snapshots.length}`)
     assert(snapshots[0]?.absPath.endsWith("panel.ts"), `expected panel.ts snapshot, got ${snapshots[0]?.absPath}`)
     assert(

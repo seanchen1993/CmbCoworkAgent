@@ -21,7 +21,7 @@ export interface AgentInvokeParams {
   threadId: string
   message: string
   modelId?: string
-  agentMode?: "normal" | "coordinator"
+  agentMode?: "normal" | "coordinator" | "workflow"
   coordinatorInternalNotification?: boolean
   /** Renderer user message id for the turn, used to group hook log events. */
   userMessageId?: string
@@ -37,7 +37,7 @@ export interface AgentResumeParams {
     }
   }
   modelId?: string
-  agentMode?: "normal" | "coordinator"
+  agentMode?: "normal" | "coordinator" | "workflow"
 }
 
 export interface AgentInterruptParams {
@@ -125,11 +125,17 @@ export interface Subagent {
   id: string
   name: string
   description: string
-  status: "pending" | "running" | "completed" | "failed"
+  status: "pending" | "running" | "completed" | "failed" | "cancelled"
   startedAt?: Date
   completedAt?: Date
   toolCallId?: string
   subagentType?: string
+  /** Latest interior tool the subagent invoked — drives the collapsed status line. */
+  currentTool?: string
+  /** ISO timestamp of the subagent's most recent interior activity (heartbeat). */
+  lastActivityAt?: string
+  /** Registration order (0-based). Used to match LangGraph checkpoint_ns index (e.g. "tools:0"). */
+  spawnIndex?: number
 }
 
 // Stream events from agent
@@ -616,6 +622,7 @@ export interface ApprovalRequest extends HITLRequest {
     | "code_exec"
     | "save_code_exec_tool"
     | "git_commit"
+    | "git_push"
   command?: string // shell command (for execute operations)
   /** For git_commit: the message the agent passed via -m, used to pre-fill the dialog */
   suggestedCommitMessage?: string
@@ -638,7 +645,12 @@ export interface ApprovalRequest extends HITLRequest {
   allowed_approval_types: ApprovalDecisionType[]
 }
 
-export type ApprovalDecisionType = "approve" | "approve_session" | "approve_permanent" | "reject"
+export type ApprovalDecisionType =
+  | "approve"
+  | "approve_session"
+  | "approve_permanent"
+  | "reject"
+  | "error"
 
 /** Fine-grained approval decision from the renderer */
 export interface ApprovalDecision {
@@ -654,6 +666,15 @@ export interface ApprovalDecision {
   commitResult?: {
     success: boolean
     commitMessage?: string
+    error?: string
+  }
+  /**
+   * For git_push approvals: the outcome of the push the renderer performed (via
+   * workspace:pushWorktree, the same path as the Git Panel) after the user approved.
+   * Present only when operation === "git_push".
+   */
+  pushResult?: {
+    success: boolean
     error?: string
   }
 }

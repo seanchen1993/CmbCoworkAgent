@@ -65,6 +65,7 @@ type GitPanelDiffState = {
     previousPath?: string
     status?: GitPanelFileStatus
     diff: string
+    diffLoaded?: boolean
     additions: number
     deletions: number
   }>
@@ -77,6 +78,9 @@ type GitPanelDiffState = {
 }
 
 type GitPanelFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+
+// 同时按需拉取的文件 diff 上限，避免刷新后一次性为大量已展开文件并发拉取 diff 拖垮主进程。
+const MAX_CONCURRENT_FILE_DIFF_LOADS = 3
 
 function getPathParentDir(filePath?: string): string {
   const normalized = String(filePath || "").replace(/\\/g, "/")
@@ -169,6 +173,7 @@ export function GitPanelView({
 }): React.JSX.Element {
   const metaRequestIdRef = useRef(0)
   const diffRequestIdRef = useRef(0)
+  const activeThreadIdRef = useRef(threadId)
   const [metaLoading, setMetaLoading] = useState(true)
   const [diffLoading, setDiffLoading] = useState(true)
   const [running, setRunning] = useState<"commit" | "push" | "reject" | null>(null)
@@ -185,6 +190,8 @@ export function GitPanelView({
   const [commitHistory, setCommitHistory] = useState<GitCommitHistoryRecord[]>([])
   const [expandedFilePaths, setExpandedFilePaths] = useState<Set<string>>(new Set())
   const [selectedFilePaths, setSelectedFilePaths] = useState<Set<string>>(new Set())
+  const [fileDiffLoadingPaths, setFileDiffLoadingPaths] = useState<Set<string>>(new Set())
+  const [fileDiffErrors, setFileDiffErrors] = useState<Record<string, string>>({})
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
   const [pulling, setPulling] = useState(false)
   const initialMetaState = useMemo(
@@ -195,6 +202,7 @@ export function GitPanelView({
   const [diffState, setDiffState] = useState<GitPanelDiffState | null>(null)
 
   useEffect(() => {
+    activeThreadIdRef.current = threadId
     metaRequestIdRef.current += 1
     diffRequestIdRef.current += 1
     setMetaState(initialMetaState)
@@ -206,6 +214,8 @@ export function GitPanelView({
     setCommitHistory([])
     setExpandedFilePaths(new Set())
     setSelectedFilePaths(new Set())
+    setFileDiffLoadingPaths(new Set())
+    setFileDiffErrors({})
   }, [threadId, initialMetaState])
 
   const showToast = useCallback((text: string, variant: "success" | "error" = "success"): void => {
@@ -233,11 +243,6 @@ export function GitPanelView({
           showToast(message, "error")
         }
       }
-
-      console.log("[Git] Refreshing git panel state for threadId:", threadId, {
-        meta: shouldRefreshMeta,
-        diff: shouldRefreshDiff
-      })
 
       const tasks: Promise<void>[] = []
 
@@ -270,9 +275,15 @@ export function GitPanelView({
         tasks.push(
           (async () => {
             try {
-              const nextDiff = await window.api.workspace.getGitPanelDiffs(threadId)
+              const nextDiff = await window.api.workspace.getGitPanelDiffs(threadId, {
+                includeDiffs: false,
+                includeChangedFiles: false,
+                statusUntrackedMode: "normal"
+              })
               if (requestId !== diffRequestIdRef.current) return
               setDiffState(nextDiff)
+              setFileDiffLoadingPaths(new Set())
+              setFileDiffErrors({})
             } catch (e) {
               if (requestId !== diffRequestIdRef.current) return
               reportRefreshError(e instanceof Error ? e.message : "加载 Git 文件变更失败")
@@ -311,11 +322,7 @@ export function GitPanelView({
     const files = diffState?.files ?? []
     setExpandedFilePaths((prev) => {
       if (files.length === 0) return new Set()
-      const next = new Set([...prev].filter((path) => files.some((f) => f.path === path)))
-      if (next.size === 0) {
-        next.add(files[0].path)
-      }
-      return next
+      return new Set([...prev].filter((path) => files.some((f) => f.path === path)))
     })
   }, [diffState?.files])
 
@@ -367,7 +374,76 @@ export function GitPanelView({
     }
   }, [submitAction, threadId])
 
+  const loadFileDiff = useCallback(
+    async (filePath: string): Promise<void> => {
+      if (!threadId) return
+      const currentFile = diffState?.files.find((file) => file.path === filePath)
+      if (!currentFile || currentFile.diffLoaded || fileDiffLoadingPaths.has(filePath)) return
+      const requestDiffId = diffRequestIdRef.current
+      const requestThreadId = threadId
+
+      setFileDiffLoadingPaths((prev) => new Set(prev).add(filePath))
+      setFileDiffErrors((prev) => {
+        const next = { ...prev }
+        delete next[filePath]
+        return next
+      })
+
+      try {
+        const result = await window.api.workspace.getGitPanelFileDiff(threadId, filePath)
+        if (requestDiffId !== diffRequestIdRef.current || result.taskId !== activeThreadIdRef.current) return
+        if (!result.success || !result.file) {
+          throw new Error(result.error || "加载文件 diff 失败")
+        }
+
+        setDiffState((prev) => {
+          if (!prev) return prev
+          if (requestDiffId !== diffRequestIdRef.current || requestThreadId !== activeThreadIdRef.current) return prev
+          const files = prev.files.map((file) => {
+            if (file.path !== filePath) return file
+            return {
+              ...file,
+              diff: result.file?.diff ?? "",
+              diffLoaded: true,
+              additions: result.file?.additions ?? file.additions,
+              deletions: result.file?.deletions ?? file.deletions
+            }
+          })
+          // 懒加载下文件级行数可能在展开后才精确化（尤其是未跟踪新文件），
+          // 这里同步重算全局 totals，避免顶部汇总与逐文件 +/- 长期对不上。
+          const totals = files.reduce(
+            (acc, file) => {
+              acc.additions += file.additions
+              acc.deletions += file.deletions
+              return acc
+            },
+            { additions: 0, deletions: 0 }
+          )
+          return {
+            ...prev,
+            files,
+            totals: { ...prev.totals, additions: totals.additions, deletions: totals.deletions }
+          }
+        })
+      } catch (e) {
+        if (requestDiffId !== diffRequestIdRef.current || requestThreadId !== activeThreadIdRef.current) return
+        const message = e instanceof Error ? e.message : "加载文件 diff 失败"
+        setFileDiffErrors((prev) => ({ ...prev, [filePath]: message }))
+      } finally {
+        if (requestDiffId === diffRequestIdRef.current && requestThreadId === activeThreadIdRef.current) {
+          setFileDiffLoadingPaths((prev) => {
+            const next = new Set(prev)
+            next.delete(filePath)
+            return next
+          })
+        }
+      }
+    },
+    [threadId, diffState?.files, fileDiffLoadingPaths]
+  )
+
   const toggleFileExpanded = useCallback((filePath: string): void => {
+    const shouldExpand = !expandedFilePaths.has(filePath)
     setExpandedFilePaths((prev) => {
       const next = new Set(prev)
       if (next.has(filePath)) {
@@ -377,7 +453,28 @@ export function GitPanelView({
       }
       return next
     })
-  }, [])
+    if (shouldExpand) {
+      void loadFileDiff(filePath)
+    }
+  }, [expandedFilePaths, loadFileDiff])
+
+  useEffect(() => {
+    // 刷新会把已展开文件的 diffLoaded 重置，若一次性为所有展开文件并发拉取 diff，
+    // 每个文件会触发多个 git 子进程，展开数较多时主进程 CPU 会瞬时飙升。
+    // 这里用并发预算自时钟节流：单个 loadFileDiff 完成后会更新 loading 集合并重跑本 effect，
+    // 从而按 MAX_CONCURRENT_FILE_DIFF_LOADS 排队补齐剩余文件。
+    let budget = MAX_CONCURRENT_FILE_DIFF_LOADS - fileDiffLoadingPaths.size
+    if (budget <= 0) return
+    for (const filePath of expandedFilePaths) {
+      if (budget <= 0) break
+      const file = diffState?.files.find((item) => item.path === filePath)
+      if (!file || file.diffLoaded || fileDiffLoadingPaths.has(filePath) || fileDiffErrors[filePath]) {
+        continue
+      }
+      void loadFileDiff(filePath)
+      budget -= 1
+    }
+  }, [diffState?.files, expandedFilePaths, fileDiffErrors, fileDiffLoadingPaths, loadFileDiff])
 
   const toggleFileSelected = useCallback((filePath: string): void => {
     setSelectedFilePaths((prev) => {
@@ -490,7 +587,11 @@ export function GitPanelView({
         }
         setCommitMessage("")
         setSubmitAction(null)
-        await refresh({ meta: true, diff: true })
+        if (action === "push") {
+          void refresh({ meta: true, diff: true })
+        } else {
+          await refresh({ meta: true, diff: true })
+        }
       } catch (e) {
         const err = e instanceof Error ? e.message : "操作失败"
         setError(err)
@@ -905,6 +1006,8 @@ export function GitPanelView({
                   const diff = file.diff
                   const isExpanded = expandedFilePaths.has(file.path)
                   const isSelected = selectedFilePaths.has(file.path)
+                  const isFileDiffLoading = fileDiffLoadingPaths.has(file.path)
+                  const fileDiffError = fileDiffErrors[file.path]
                   const statusMeta = getFileStatusMeta(file.status, file.path, file.previousPath)
                   const showMovePath = file.status === "renamed" && Boolean(file.previousPath)
                   const revertHint =
@@ -1031,7 +1134,20 @@ export function GitPanelView({
                               </div>
                             </div>
                           )}
-                          {diff && diff.trim() !== "" ? (
+                          {isFileDiffLoading ? (
+                            <div className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                              <Loader2 className="size-3.5 animate-spin text-blue-600 dark:text-blue-400" />
+                              正在加载该文件 diff...
+                            </div>
+                          ) : fileDiffError ? (
+                            <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                              {fileDiffError}
+                            </div>
+                          ) : !file.diffLoaded ? (
+                            <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                              展开后将按需加载该文件 diff。
+                            </div>
+                          ) : diff && diff.trim() !== "" ? (
                             <DiffDisplay diff={diff} filePath={file.path} />
                           ) : (
                             <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">

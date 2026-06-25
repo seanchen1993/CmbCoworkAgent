@@ -25,7 +25,7 @@ interface TestableTransport {
   convertToSDKEvents: (
     event: unknown,
     threadId: string,
-    agentMode?: "normal" | "coordinator"
+    agentMode?: "normal" | "coordinator" | "workflow"
   ) => SdkEvent[]
 }
 
@@ -220,7 +220,7 @@ async function collectStreamEvents(
 function convert(
   transport: ElectronIPCTransport,
   event: unknown,
-  agentMode: "normal" | "coordinator" = "normal"
+  agentMode: "normal" | "coordinator" | "workflow" = "normal"
 ): SdkEvent[] {
   return (transport as unknown as TestableTransport).convertToSDKEvents(
     event,
@@ -290,6 +290,15 @@ async function testSubagentInternalsAreHiddenButObservable(): Promise<void> {
     String(toolCallEntry.content).includes("README.md"),
     "tool log entry should include compact input summary"
   )
+  const transcriptToolCall = customEvents(internalToolEvents, "subagent_transcript_message")[0]
+  assert(transcriptToolCall, "subagent internal tool call should emit a transcript message")
+  assert(transcriptToolCall.subagentId === "task-1", "transcript message should target subagent")
+  const transcriptAssistant = asRecord(transcriptToolCall.subagentMessage)
+  const transcriptToolCalls = transcriptAssistant.tool_calls as Array<Record<string, unknown>>
+  assert(
+    transcriptToolCalls?.[0]?.name === "read_file",
+    "transcript assistant message should include subagent tool call"
+  )
 
   const internalResultEvents = convert(
     transport,
@@ -319,6 +328,15 @@ async function testSubagentInternalsAreHiddenButObservable(): Promise<void> {
   assert(
     String(toolResultEntry.result).includes("README contents"),
     "tool result log should include compact result"
+  )
+  const transcriptToolResult = customEvents(internalResultEvents, "subagent_transcript_message")[0]
+  assert(transcriptToolResult, "subagent internal tool result should emit a transcript message")
+  const transcriptToolMessage = asRecord(transcriptToolResult.subagentMessage)
+  assert(
+    transcriptToolMessage.role === "tool" &&
+      transcriptToolMessage.tool_call_id === "inner-tool-1" &&
+      transcriptToolMessage.content === "README contents",
+    "transcript tool message should preserve tool result content"
   )
 
   const taskDoneEvents = convert(
@@ -361,6 +379,129 @@ async function testSubagentInternalsAreHiddenButObservable(): Promise<void> {
   assert(
     customEvents(lateResultEvents, "subagent_log_entry").length === 1,
     "known late subagent tool result should still update observability"
+  )
+}
+
+async function testPrefixedNamespaceRoutesConcurrentSubagentInternals(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-prefixed",
+        toolCalls: [
+          {
+            id: "task-1",
+            name: "task",
+            args: { subagent_type: "implementer", description: "Inspect first target" }
+          },
+          {
+            id: "task-2",
+            name: "task",
+            args: { subagent_type: "verifier", description: "Inspect second target" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const firstEvents = convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "subagent-ai-prefixed-1",
+        toolCalls: [{ id: "inner-tool-1", name: "read_file", args: { file_path: "one.md" } }]
+      }),
+      { langgraph_checkpoint_ns: "agent:tools:runtime-task-a|read_file:1" }
+    )
+  )
+  assert(
+    messageEvents(firstEvents).length === 0,
+    "prefixed subagent namespace should stay hidden from main chat"
+  )
+  const firstTranscript = customEvents(firstEvents, "subagent_transcript_message")[0]
+  assert(
+    firstTranscript?.subagentId === "task-1",
+    "first prefixed runtime task uuid should map to the first running subagent"
+  )
+
+  const secondEvents = convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "subagent-ai-prefixed-2",
+        toolCalls: [{ id: "inner-tool-2", name: "list_dir", args: { path: "src" } }]
+      }),
+      { langgraph_checkpoint_ns: "agent:tools:runtime-task-b|list_dir:1" }
+    )
+  )
+  const secondTranscript = customEvents(secondEvents, "subagent_transcript_message")[0]
+  assert(
+    secondTranscript?.subagentId === "task-2",
+    "second prefixed runtime task uuid should map to the next running subagent"
+  )
+}
+
+async function testSubagentToolCallChunksHydrateTranscriptArgs(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-subagent-chunk-args",
+        toolCalls: [
+          {
+            id: "task-1",
+            name: "task",
+            args: { subagent_type: "implementer", description: "Inspect streamed args" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const namespace = "agent:tools:task-1"
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "subagent-ai-chunk-args",
+        toolCalls: [{ id: "inner-tool-1", name: "read_file", args: {} }]
+      }),
+      { langgraph_checkpoint_ns: namespace }
+    )
+  )
+
+  const completedEvents = convert(
+    transport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "subagent-ai-chunk-args",
+        toolCallChunks: [
+          {
+            id: "inner-tool-1",
+            name: "read_file",
+            args: '{"file_path":"README.md"}'
+          }
+        ]
+      }),
+      { langgraph_checkpoint_ns: namespace }
+    )
+  )
+  const transcript = customEvents(completedEvents, "subagent_transcript_message")[0]
+  assert(transcript, "subagent tool-call chunks should emit a transcript update")
+  const assistant = asRecord(transcript.subagentMessage)
+  const toolCalls = assistant.tool_calls as Array<{
+    id?: string
+    name?: string
+    args?: Record<string, unknown>
+  }>
+  assert(toolCalls?.[0]?.name === "read_file", "transcript should preserve the tool name")
+  assert(
+    toolCalls[0]?.args?.file_path === "README.md",
+    "subagent transcript should hydrate streamed raw arguments after an early empty args object"
   )
 }
 
@@ -2916,9 +3057,319 @@ async function testValuesModeRegistersAndCompletesSubagents(): Promise<void> {
   )
 }
 
+async function testSubagentThinkingStreamingAccumulation(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  // Register the subagent via a main-flow task tool call.
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-1",
+        toolCalls: [
+          { id: "task-1", name: "task", args: { subagent_type: "implementer", description: "think" } }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const ns = "agent:tools:task-1"
+  const feed = (content: string): SdkEvent[] =>
+    convert(
+      transport,
+      streamMessageEvent(aiMessageChunk({ id: "subagent-ai-1", content }), {
+        langgraph_checkpoint_ns: ns
+      })
+    )
+
+  // Stream "hello" + " " + "world" as separate delta chunks; the whitespace chunk
+  // must not be dropped (otherwise the text glues into "helloworld").
+  feed("hello")
+  feed(" ")
+  const lastEvents = feed("world")
+
+  const assistantLogs = customEvents(lastEvents, "subagent_log_entry").filter(
+    (data) => asRecord(data.entry).kind === "assistant"
+  )
+  assert(assistantLogs.length > 0, "subagent thinking should emit an assistant log entry")
+  const entry = asRecord(assistantLogs[assistantLogs.length - 1].entry)
+  assert(
+    entry.content === "hello world",
+    `streamed thinking should accumulate with spaces, got ${JSON.stringify(entry.content)}`
+  )
+  assert(
+    entry.subagentToolCallId === "task-1",
+    "thinking entry should be attributed to the owning subagent"
+  )
+  assert(
+    messageEvents(lastEvents).length === 0,
+    "subagent thinking must not leak into the main chat stream"
+  )
+}
+
+async function testOwnerMetadataAttributesConcurrentSubagentsDeterministically(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const ownerKey = "cmb_subagent_owner_tool_call_id"
+
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-owner",
+        toolCalls: [
+          {
+            id: "task-1",
+            name: "task",
+            args: { subagent_type: "implementer", description: "First target" }
+          },
+          {
+            id: "task-2",
+            name: "task",
+            args: { subagent_type: "verifier", description: "Second target" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  // Second-spawned subagent (task-2) emits FIRST, and its checkpoint_ns shares
+  // the same task UUID a spawn-order heuristic would hand to task-1. The owner
+  // hint must override that and attribute the chunk to task-2.
+  const secondFirst = convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "subagent-ai-owner-b",
+        toolCalls: [{ id: "inner-b", name: "list_dir", args: { path: "src" } }]
+      }),
+      { langgraph_checkpoint_ns: "agent:tools:shared-uuid|list_dir:1", [ownerKey]: "task-2" }
+    )
+  )
+  const bTranscript = customEvents(secondFirst, "subagent_transcript_message")[0]
+  assert(
+    bTranscript?.subagentId === "task-2",
+    "owner metadata should attribute the chunk to task-2 even when it streams before task-1 and shares a task UUID"
+  )
+
+  const firstSecond = convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "subagent-ai-owner-a",
+        toolCalls: [{ id: "inner-a", name: "read_file", args: { file_path: "one.md" } }]
+      }),
+      { langgraph_checkpoint_ns: "agent:tools:shared-uuid|read_file:1", [ownerKey]: "task-1" }
+    )
+  )
+  const aTranscript = customEvents(firstSecond, "subagent_transcript_message")[0]
+  assert(
+    aTranscript?.subagentId === "task-1",
+    "owner metadata should attribute the later chunk to task-1 regardless of shared task UUID"
+  )
+  assert(
+    messageEvents(secondFirst).length === 0 && messageEvents(firstSecond).length === 0,
+    "owner-attributed subagent internals must not leak into the main chat stream"
+  )
+}
+
+async function testSubagentIdlessContinuationChunksStitchArgsByIndex(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const ownerKey = "cmb_subagent_owner_tool_call_id"
+  const ns = "tools:uuid-stream|model_request:1"
+
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-stream",
+        toolCalls: [
+          {
+            id: "task-1",
+            name: "task",
+            args: { subagent_type: "implementer", description: "Stream args" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const streamedMsgId = "subagent-streamed-1"
+  const chunk = (
+    chunks: Array<{ id?: string; name?: string; args?: string; index?: number }>
+  ): unknown => ({
+    id: ["langchain_core", "messages", "AIMessageChunk"],
+    kwargs: { id: streamedMsgId, content: "", tool_call_chunks: chunks }
+  })
+
+  // First chunk carries id+name+index; continuations carry only index + an args
+  // fragment (no id/name) — exactly the real provider shape.
+  convert(transport, streamMessageEvent(chunk([{ id: "inner-1", name: "ls", args: "", index: 0 }]), {
+    langgraph_checkpoint_ns: ns,
+    [ownerKey]: "task-1"
+  }))
+  convert(transport, streamMessageEvent(chunk([{ args: '{"path":', index: 0 }]), {
+    langgraph_checkpoint_ns: ns,
+    [ownerKey]: "task-1"
+  }))
+  const finalEvents = convert(
+    transport,
+    streamMessageEvent(chunk([{ args: '"src"}', index: 0 }]), {
+      langgraph_checkpoint_ns: ns,
+      [ownerKey]: "task-1"
+    })
+  )
+
+  const transcript = customEvents(finalEvents, "subagent_transcript_message")[0]
+  assert(transcript, "streamed id-less continuation chunks should emit a transcript update")
+  const assistant = asRecord(transcript.subagentMessage)
+  const toolCalls = assistant.tool_calls as Array<{
+    id?: string
+    name?: string
+    args?: Record<string, unknown>
+  }>
+  assert(toolCalls?.[0]?.name === "ls", "stitched tool call should keep its name from the first chunk")
+  assert(
+    toolCalls?.[0]?.args?.path === "src",
+    "id-less continuation chunks must stitch streamed args back by index (RAW ARGUMENTS must not stay {})"
+  )
+}
+
+async function testConcurrentSubagentsStreamingIndexZeroDoNotCrossContaminate(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const ownerKey = "cmb_subagent_owner_tool_call_id"
+
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-concurrent",
+        toolCalls: [
+          { id: "task-1", name: "task", args: { subagent_type: "implementer", description: "A" } },
+          { id: "task-2", name: "task", args: { subagent_type: "verifier", description: "B" } }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const chunkMsg = (
+    msgId: string,
+    chunks: Array<{ id?: string; name?: string; args?: string; index?: number }>
+  ): unknown => ({
+    id: ["langchain_core", "messages", "AIMessageChunk"],
+    kwargs: { id: msgId, content: "", tool_call_chunks: chunks }
+  })
+  const nsA = "tools:uuid-a|model_request:1"
+  const nsB = "tools:uuid-b|model_request:1"
+  const sendA = (chunks: Parameters<typeof chunkMsg>[1]): SdkEvent[] =>
+    convert(transport, streamMessageEvent(chunkMsg("msg-a", chunks), {
+      langgraph_checkpoint_ns: nsA,
+      [ownerKey]: "task-1"
+    }))
+  const sendB = (chunks: Parameters<typeof chunkMsg>[1]): SdkEvent[] =>
+    convert(transport, streamMessageEvent(chunkMsg("msg-b", chunks), {
+      langgraph_checkpoint_ns: nsB,
+      [ownerKey]: "task-2"
+    }))
+
+  // Both subagents stream their tool call with index 0, interleaved — exactly
+  // the real provider behaviour that previously corrupted both args.
+  sendA([{ id: "inner-a", name: "read_file", args: "", index: 0 }])
+  sendB([{ id: "inner-b", name: "glob", args: "", index: 0 }])
+  sendA([{ args: '{"file_path":', index: 0 }])
+  sendB([{ args: '{"pattern":', index: 0 }])
+  sendA([{ args: '"a.ts"}', index: 0 }])
+  const lastB = sendB([{ args: '"*.ts"}', index: 0 }])
+
+  const lastA = sendA([{ args: "", index: 0 }]) // trailing flush for A
+
+  const aMsg = asRecord(
+    customEvents(lastA, "subagent_transcript_message").find(
+      (e) => e.subagentId === "task-1"
+    )?.subagentMessage as Record<string, unknown>
+  )
+  const bMsg = asRecord(
+    customEvents(lastB, "subagent_transcript_message").find(
+      (e) => e.subagentId === "task-2"
+    )?.subagentMessage as Record<string, unknown>
+  )
+  const aCalls = aMsg.tool_calls as Array<{ name?: string; args?: Record<string, unknown> }>
+  const bCalls = bMsg.tool_calls as Array<{ name?: string; args?: Record<string, unknown> }>
+  assert(
+    aCalls?.[0]?.name === "read_file" && aCalls?.[0]?.args?.file_path === "a.ts",
+    "subagent A args must stitch independently of interleaved subagent B (index 0 collision)"
+  )
+  assert(
+    bCalls?.[0]?.name === "glob" && bCalls?.[0]?.args?.pattern === "*.ts",
+    "subagent B args must stitch independently of interleaved subagent A (index 0 collision)"
+  )
+}
+
+async function testSubagentDeltaArgsPreserveRepeatedFragments(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const ownerKey = "cmb_subagent_owner_tool_call_id"
+  const ns = "tools:uuid-empty|model_request:1"
+
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-empty",
+        toolCalls: [
+          { id: "task-1", name: "task", args: { subagent_type: "implementer", description: "X" } }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const msgId = "subagent-empty-arg"
+  const chunk = (
+    chunks: Array<{ id?: string; name?: string; args?: string; index?: number }>
+  ): unknown => ({
+    id: ["langchain_core", "messages", "AIMessageChunk"],
+    kwargs: { id: msgId, content: "", tool_call_chunks: chunks }
+  })
+  const send = (chunks: Parameters<typeof chunk>[0]): SdkEvent[] =>
+    convert(transport, streamMessageEvent(chunk(chunks), {
+      langgraph_checkpoint_ns: ns,
+      [ownerKey]: "task-1"
+    }))
+
+  // Stream args {"query":""} as deltas: the two quotes of the empty-string value
+  // arrive as identical consecutive fragments. They must NOT be deduped away.
+  send([{ id: "inner-1", name: "search", args: "", index: 0 }])
+  send([{ args: '{"query":', index: 0 }])
+  send([{ args: '"', index: 0 }])
+  send([{ args: '"', index: 0 }])
+  const last = send([{ args: "}", index: 0 }])
+
+  const transcript = customEvents(last, "subagent_transcript_message")[0]
+  const assistant = asRecord(transcript.subagentMessage)
+  const toolCalls = assistant.tool_calls as Array<{ name?: string; args?: Record<string, unknown> }>
+  assert(
+    toolCalls?.[0]?.name === "search" && toolCalls?.[0]?.args?.query === "",
+    "repeated identical delta fragments (empty-string value quotes) must be preserved, not deduped"
+  )
+}
+
 async function run(): Promise<void> {
   await testSubagentInternalsAreHiddenButObservable()
   console.log("PASS electron transport hides subagent internals")
+  await testConcurrentSubagentsStreamingIndexZeroDoNotCrossContaminate()
+  console.log("PASS electron transport keeps interleaved index-0 subagent args separate")
+  await testSubagentDeltaArgsPreserveRepeatedFragments()
+  console.log("PASS electron transport preserves repeated delta arg fragments")
+  await testOwnerMetadataAttributesConcurrentSubagentsDeterministically()
+  console.log("PASS electron transport attributes concurrent subagents via owner metadata")
+  await testSubagentIdlessContinuationChunksStitchArgsByIndex()
+  console.log("PASS electron transport stitches id-less subagent arg chunks by index")
+  await testPrefixedNamespaceRoutesConcurrentSubagentInternals()
+  console.log("PASS electron transport routes prefixed concurrent subagent namespaces")
+  await testSubagentToolCallChunksHydrateTranscriptArgs()
+  console.log("PASS electron transport hydrates subagent transcript chunk args")
   await testNamespacedToolsWithoutRunningSubagentRemainVisible()
   console.log("PASS electron transport avoids false subagent classification")
   await testAsyncWorkerInternalsStayOutOfMainThread()
@@ -2991,6 +3442,8 @@ async function run(): Promise<void> {
   console.log("PASS electron transport keeps post-tool assistant distinct after growth")
   await testValuesModeRegistersAndCompletesSubagents()
   console.log("PASS electron transport values-mode subagent lifecycle")
+  await testSubagentThinkingStreamingAccumulation()
+  console.log("PASS electron transport accumulates streamed subagent thinking")
 }
 
 run().catch((error: Error) => {

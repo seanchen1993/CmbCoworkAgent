@@ -3,12 +3,13 @@ import { BrowserWindow } from "electron"
 import WebSocket from "ws"
 import { HumanMessage } from "@langchain/core/messages"
 import { getChatXConfig } from "../storage"
-import { createAgentRuntime, closeCheckpointer } from "../agent/runtime"
+import { createAgentRuntime, closeCheckpointer, pinCheckpointer } from "../agent/runtime"
 import { createThread as dbCreateThread, deleteThread as dbDeleteThread, getAllThreads, getThread } from "../db/index"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
 import { showPetCompletedTaskNotice } from "../pet"
 import type { ChatXRobotConfig } from "../types"
+import { emitAppAttention } from "../app-attention-events"
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -222,6 +223,7 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
   threadIdToChatKey.set(threadId, chatKey)
   const channel = `scheduler:stream:${threadId}`
   let hasStreamedContent = false
+  const releaseCheckpointerPin = pinCheckpointer(threadId)
 
   try {
     const thread = getThread(threadId)
@@ -278,6 +280,11 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
       }
       notifyAlways(`🤖 ${msg.fromId} 回复完成`, lastAssistantText || "处理完成")
       showPetCompletedTaskNotice(threadId, `${msg.fromId} 回复`)
+      emitAppAttention({
+        kind: "task-complete",
+        threadId,
+        key: `chatx:${msg.msgId}`
+      })
       console.log(`[ChatX] Message processed: ${msg.msgId}`)
     } else {
       broadcastToChannel(channel, { type: "done" })
@@ -294,6 +301,11 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
     } else {
       broadcastToChannel(channel, { type: "error", error: errMsg })
       notifyAlways("🤖 机器人处理失败", errMsg)
+      emitAppAttention({
+        kind: "task-error",
+        threadId,
+        key: `chatx:${msg.msgId}`
+      })
       console.error(`[ChatX] Error processing message:`, errMsg)
     }
 
@@ -304,7 +316,8 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
     runningChats.delete(chatKey)
     activeAbortControllers.delete(chatKey)
     threadIdToChatKey.delete(threadId)
-    closeCheckpointer(threadId).catch(() => {})
+    releaseCheckpointerPin()
+    await closeCheckpointer(threadId).catch(() => {})
     notifyRenderer("threads:changed")
 
     // Process next queued message for this chat

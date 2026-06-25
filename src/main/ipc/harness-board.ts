@@ -4,22 +4,38 @@ import {
   createHarnessFeature,
   createHarnessProject,
   buildHarnessFeatureDialogTips,
+  getHarnessDynamicWorkflowConfig,
+  deleteHarnessProject,
   getHarnessProjectDetail,
   getHarnessProjectDetails,
   getHarnessRunDetail,
   listHarnessAdapters,
   listHarnessProjects,
+  skipHarnessRunNode,
   updateHarnessProjectMetadata
 } from "../harness-board/service"
+import {
+  getEnterpriseProjectDetails,
+  searchEnterpriseProjects
+} from "../harness-board/enterprise-projects"
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
+import { purgeProjectAnalytics } from "../services/project-analytics-purge"
+import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import type {
+  HarnessEnterpriseProjectDetailInput,
+  HarnessEnterpriseProjectDetailResult,
+  HarnessEnterpriseProjectSearchInput,
+  HarnessEnterpriseProjectSearchResult,
   HarnessProjectCreateInput,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
-  HarnessAdapterRegistryItem
+  HarnessSkipNodeInput,
+  HarnessSkipNodeResult,
+  HarnessAdapterRegistryItem,
+  HarnessDynamicWorkflowConfig
 } from "../../shared/harness-board-types"
 import type {
   HarnessFeatureCreateInput,
@@ -40,14 +56,48 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:createProject",
     async (_event, input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> => {
-      return createHarnessProject(input)
+      const created = createHarnessProject(input)
+      // 立即补一次快照上报，避免新建项目要等下一轮 20 分钟定时扫描才出现在运营面板。
+      // 尽力而为：内部已 try/catch，不抛错、不阻断创建结果返回。
+      void reportProjectSnapshotNow(created.projectId)
+      return created
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:searchEnterpriseProjects",
+    async (
+      _event,
+      input: HarnessEnterpriseProjectSearchInput
+    ): Promise<HarnessEnterpriseProjectSearchResult> => {
+      return searchEnterpriseProjects(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getEnterpriseProjectDetails",
+    async (
+      _event,
+      input: HarnessEnterpriseProjectDetailInput
+    ): Promise<HarnessEnterpriseProjectDetailResult> => {
+      return getEnterpriseProjectDetails(input)
     }
   )
 
   ipcMain.handle(
     "harnessBoard:createFeature",
     async (_event, input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> => {
-      return createHarnessFeature(input)
+      const result = createHarnessFeature(input)
+      // 新建 feature 后立即补一次该项目的快照上报，让面板尽快反映新特性，无需等定时扫描。
+      void reportProjectSnapshotNow(result.projectId)
+      return result
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getDynamicWorkflowConfig",
+    async (_event, projectId: string): Promise<HarnessDynamicWorkflowConfig | null> => {
+      return getHarnessDynamicWorkflowConfig(projectId)
     }
   )
 
@@ -69,10 +119,34 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle(
+    "harnessBoard:deleteProject",
+    async (_event, projectId: string): Promise<HarnessProjectMetadata> => {
+      const deleted = deleteHarnessProject(projectId)
+      // 项目本地删除后，后台清理其在 ES 中的 trace/event 文档，使其不再出现在运营面板统计中。
+      // 尽力而为（fire-and-forget）：内网部分机器无法直连 ES/后端，清理失败不应阻断或回滚删除。
+      void purgeProjectAnalytics(projectId)
+        .then((result) => {
+          console.log(`[HarnessBoard] purged analytics for deleted project ${projectId}:`, result)
+        })
+        .catch((e) => {
+          console.error(
+            `[HarnessBoard] purgeProjectAnalytics failed for deleted project ${projectId}:`,
+            e
+          )
+        })
+      return deleted
+    }
+  )
+
+  ipcMain.handle(
     "harnessBoard:getProjectDetail",
     async (_event, projectId: string): Promise<HarnessProjectDetailViewModel> => {
       const detail = getHarnessProjectDetail(projectId)
-      startHarnessWatchRefs(`project:${projectId}`, detail.project.projectRootPath, detail.watchRefs)
+      startHarnessWatchRefs(
+        `project:${projectId}`,
+        detail.project.projectRootPath,
+        detail.watchRefs
+      )
       return detail
     }
   )
@@ -88,7 +162,11 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       const details = getHarnessProjectDetails(projectIds)
       if (shouldWatchRefs) {
         for (const [projectId, detail] of Object.entries(details)) {
-          startHarnessWatchRefs(`project:${projectId}`, detail.project.projectRootPath, detail.watchRefs)
+          startHarnessWatchRefs(
+            `project:${projectId}`,
+            detail.project.projectRootPath,
+            detail.watchRefs
+          )
         }
       }
       return details
@@ -108,6 +186,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
         detail.run.watchRefs
       )
       return detail
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:skipNode",
+    async (_event, input: HarnessSkipNodeInput): Promise<HarnessSkipNodeResult> => {
+      return skipHarnessRunNode(input)
     }
   )
 

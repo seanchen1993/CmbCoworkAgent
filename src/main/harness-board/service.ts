@@ -1,10 +1,11 @@
 import { execFileSync } from "child_process"
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import { v4 as uuid } from "uuid"
 import { getOpenworkDir, getPlugins, getUserInfo } from "../storage"
+import { deriveUpperOrgLevelsFromPath } from "../org-levels"
 import type { PluginMetadata } from "../types"
 import type {
   HarnessAdapterRegistryItem,
@@ -14,6 +15,9 @@ import type {
   HarnessArtifactStatus,
   HarnessArtifactType,
   HarnessBoardCompatibility,
+  HarnessDynamicWorkflowConfig,
+  HarnessDynamicWorkflowNode,
+  HarnessDynamicWorkflowTemplate,
   HarnessEventStatus,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
@@ -27,6 +31,8 @@ import type {
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
   HarnessRunNode,
+  HarnessSkipNodeInput,
+  HarnessSkipNodeResult,
   HarnessFeatureSummary,
   HarnessStatus,
   HarnessWatchRef,
@@ -41,19 +47,36 @@ interface HarnessProjectStoreFile {
 }
 
 type HarnessHookLogRef = HarnessRunDetailViewModel["run"]["hookLogRefs"][number]
-type HarnessInspectCommandName = "project" | "run" | "createProject" | "createFeature"
-type HarnessInspectCommandConfigKey = "project_status" | "feature_status" | "create_project" | "create_feature"
+type HarnessInspectCommandName =
+  | "project"
+  | "run"
+  | "createProject"
+  | "createFeature"
+  | "dynamicWorkflow"
+  | "skipNode"
+type HarnessInspectCommandConfigKey =
+  | "project_status"
+  | "feature_status"
+  | "create_project"
+  | "create_feature"
+  | "dynamic_workflow"
+  | "skip_node"
 type HarnessPlatformConfigKey =
   | HarnessInspectCommandConfigKey
   | "system_prompt_inject"
   | "plugin_dir_hook"
   | "dialog_tips"
 
-const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<HarnessInspectCommandName, HarnessInspectCommandConfigKey> = {
+const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
+  HarnessInspectCommandName,
+  HarnessInspectCommandConfigKey
+> = {
   project: "project_status",
   run: "feature_status",
   createProject: "create_project",
-  createFeature: "create_feature"
+  createFeature: "create_feature",
+  dynamicWorkflow: "dynamic_workflow",
+  skipNode: "skip_node"
 }
 
 interface ConfiguredHarnessInvocation {
@@ -77,6 +100,14 @@ interface HarnessHookLogEntry {
   hook: HarnessRunNode["hooks"][number]
 }
 
+interface HarnessCommandParseOptions {
+  feature?: string
+  projectDirs?: string[]
+  workflowTemplate?: string
+  workflowNodes?: string
+  nodeId?: string
+}
+
 const HARNESS_BOARD_FILE = join(getOpenworkDir(), "harness-board-projects.json")
 
 const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
@@ -85,6 +116,7 @@ const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
 const HARNESS_NAME_PATTERN = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
 const HARNESS_NAME_RULE_MESSAGE = "仅支持中文、英文字母、数字、-、_，不允许空格"
+const CUSTOM_WORKFLOW_TEMPLATE_ID = "custom"
 
 const HARNESS_NODE_STATUSES = new Set<HarnessNodeStatus>([
   "not_started",
@@ -376,7 +408,10 @@ export function listHarnessAdapters(): HarnessAdapterRegistryItem[] {
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
-function resolveHarnessAdapter(adapterId: string, adapterType: HarnessAdapterType): HarnessAdapterSnapshot {
+function resolveHarnessAdapter(
+  adapterId: string,
+  adapterType: HarnessAdapterType
+): HarnessAdapterSnapshot {
   if (adapterType !== "plugin") {
     throw new Error(`Unsupported harness adapter type: ${adapterType}`)
   }
@@ -384,7 +419,9 @@ function resolveHarnessAdapter(adapterId: string, adapterType: HarnessAdapterTyp
     (item) => pluginHasBoardConfig(item) && pluginMatchesAdapterId(item, adapterId)
   )
   if (!plugin) {
-    throw new Error("Selected plugin is not installed or does not provide board_core/board_config.json")
+    throw new Error(
+      "Selected plugin is not installed or does not provide board_core/board_config.json"
+    )
   }
   const compatibility = evaluateBoardPluginCompatibility(plugin, plugin.name)
   if (!compatibility.compatible) {
@@ -396,7 +433,9 @@ function resolveHarnessAdapter(adapterId: string, adapterType: HarnessAdapterTyp
 function resolveHarnessAdapterSnapshot(adapter: HarnessAdapterSnapshot): HarnessAdapterSnapshot {
   const plugin = findPluginForAdapterSnapshot(adapter)
   if (!plugin) {
-    throw new Error("Selected plugin is not installed or does not provide board_core/board_config.json")
+    throw new Error(
+      "Selected plugin is not installed or does not provide board_core/board_config.json"
+    )
   }
   return pluginToHarnessAdapterSnapshot(plugin)
 }
@@ -410,7 +449,10 @@ function adapterPluginDir(project: HarnessProjectMetadata): string {
   const plugin = findAdapterPlugin(project)
   const compatibility = evaluateBoardPluginCompatibility(plugin, adapter.name || adapter.id)
   if (!compatibility.compatible) {
-    throw new Error(compatibility.message || `Harness adapter plugin not compatible: ${adapter.name || adapter.id}`)
+    throw new Error(
+      compatibility.message ||
+        `Harness adapter plugin not compatible: ${adapter.name || adapter.id}`
+    )
   }
   if (!plugin) {
     throw new Error(`Harness adapter plugin not found: ${adapter.name || adapter.id}`)
@@ -487,8 +529,8 @@ function formatAdapterError(error: unknown, label = "Harness adapter"): string {
 }
 
 function formatHarnessCommandToken(value: string): string {
-  if (!value) return "\"\""
-  return /^[A-Za-z0-9_/:=.,@%+-]+$/.test(value) ? value : (JSON.stringify(value) ?? "\"\"")
+  if (!value) return '""'
+  return /^[A-Za-z0-9_/:=.,@%+-]+$/.test(value) ? value : (JSON.stringify(value) ?? '""')
 }
 
 function formatHarnessCommand(invocation: ConfiguredHarnessInvocation["invocation"]): string {
@@ -519,7 +561,9 @@ function logHarnessInvocationStart(
   options: HarnessInvocationLogOptions
 ): void {
   const detail = options.detail ? ` ${options.detail}` : ""
-  console.log(`[HarnessBoard] [${options.configKey}] Running${detail}: ${formatHarnessCommand(configured.invocation)}`)
+  console.log(
+    `[HarnessBoard] [${options.configKey}] Running${detail}: ${formatHarnessCommand(configured.invocation)}`
+  )
   console.log(`[HarnessBoard] [${options.configKey}] CWD: ${configured.cwd}`)
 }
 
@@ -529,7 +573,9 @@ function logHarnessInvocationSuccess(
 ): void {
   if (options.successResult === "none") return
   if (options.successResult === "full") {
-    console.log(`[HarnessBoard] [${options.configKey}] Result:\n${formatHarnessLogOutput(stdoutBuffer)}`)
+    console.log(
+      `[HarnessBoard] [${options.configKey}] Result:\n${formatHarnessLogOutput(stdoutBuffer)}`
+    )
     return
   }
   console.log(`[HarnessBoard] [${options.configKey}] success`)
@@ -542,10 +588,16 @@ function logHarnessInvocationFailure(
 ): void {
   const maybeError = error as { stdout?: unknown; stderr?: unknown }
   console.error(`[HarnessBoard] [${options.configKey}] Failed: ${formatAdapterError(error)}`)
-  console.error(`[HarnessBoard] [${options.configKey}] Command: ${formatHarnessCommand(configured.invocation)}`)
+  console.error(
+    `[HarnessBoard] [${options.configKey}] Command: ${formatHarnessCommand(configured.invocation)}`
+  )
   console.error(`[HarnessBoard] [${options.configKey}] CWD: ${configured.cwd}`)
-  console.error(`[HarnessBoard] [${options.configKey}] stdout:\n${formatHarnessLogOutput(maybeError.stdout)}`)
-  console.error(`[HarnessBoard] [${options.configKey}] stderr:\n${formatHarnessLogOutput(maybeError.stderr)}`)
+  console.error(
+    `[HarnessBoard] [${options.configKey}] stdout:\n${formatHarnessLogOutput(maybeError.stdout)}`
+  )
+  console.error(
+    `[HarnessBoard] [${options.configKey}] stderr:\n${formatHarnessLogOutput(maybeError.stderr)}`
+  )
 }
 
 function logHarnessStatusResultFailure(
@@ -555,7 +607,9 @@ function logHarnessStatusResultFailure(
   errorMessage: string
 ): void {
   console.error(`[HarnessBoard] [${configKey}] Failed after command completed: ${errorMessage}`)
-  console.error(`[HarnessBoard] [${configKey}] Command: ${formatHarnessCommand(configured.invocation)}`)
+  console.error(
+    `[HarnessBoard] [${configKey}] Command: ${formatHarnessCommand(configured.invocation)}`
+  )
   console.error(`[HarnessBoard] [${configKey}] CWD: ${configured.cwd}`)
   console.error(`[HarnessBoard] [${configKey}] Result:\n${formatHarnessLogOutput(stdoutBuffer)}`)
 }
@@ -626,19 +680,25 @@ function replaceHarnessConfigPlaceholders(
   project: HarnessProjectMetadata,
   mode: HarnessInspectCommandName,
   cwd: string,
-  feature?: string
+  options: HarnessCommandParseOptions = {}
 ): string {
+  const projectDir = projectDirectoryName(project)
   const replacements: Record<string, string> = {
     pluginWorkspace: project.workspacePath,
-    project: project.projectCode,
+    project: projectDir,
+    projectDir,
     projectCode: project.projectCode,
-    feature: feature ?? "",
+    feature: options.feature ?? "",
     pluginPath: cwd,
-    mode
+    mode,
+    workflowTemplate: options.workflowTemplate ?? "",
+    workflowNodes: options.workflowNodes ?? "",
+    nodeId: options.nodeId ?? ""
   }
-  return value.replace(/\$\{(pluginWorkspace|project|projectCode|feature|pluginPath|mode)\}/g, (_, key: string) => {
-    return replacements[key] ?? ""
-  })
+  return value.replace(
+    /\$\{(pluginWorkspace|project|projectDir|projectCode|feature|pluginPath|mode|workflowTemplate|workflowNodes|nodeId)\}/g,
+    (_, key: string) => replacements[key] ?? ""
+  )
 }
 
 function parseInspectCommand(
@@ -646,19 +706,40 @@ function parseInspectCommand(
   project: HarnessProjectMetadata,
   mode: HarnessInspectCommandName,
   cwd: string,
-  feature?: string,
-  projectCodes?: string[]
+  options: HarnessCommandParseOptions = {}
 ): { executable: string; args: string[] } {
-  const tokens = tokenizeInspectCommand(command.trim()).flatMap((token) =>
-    token === "${projectCodes...}" && projectCodes
-      ? projectCodes
-      : [replaceHarnessConfigPlaceholders(token, project, mode, cwd, feature)]
-  )
-  const [executable, ...args] = tokens
+  const args: string[] = []
+  const optionalWorkflowArgs: Array<{
+    key: keyof Pick<HarnessCommandParseOptions, "workflowTemplate" | "workflowNodes">
+    placeholder: string
+    flag: string
+  }> = [
+    { key: "workflowTemplate", placeholder: "${workflowTemplate}", flag: "--workflow-template" },
+    { key: "workflowNodes", placeholder: "${workflowNodes}", flag: "--workflow-nodes" }
+  ]
+  const tokens = tokenizeInspectCommand(command.trim())
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if ((token === "${projectCodes...}" || token === "${projectDirs...}") && options.projectDirs) {
+      args.push(...options.projectDirs)
+      continue
+    }
+    const optionalArg = optionalWorkflowArgs.find((item) => !options[item.key] && (
+      token === item.placeholder ||
+      token === `${item.flag}=${item.placeholder}` ||
+      (token === item.flag && tokens[index + 1] === item.placeholder)
+    ))
+    if (optionalArg) {
+      if (token === optionalArg.flag) index += 1
+      continue
+    }
+    args.push(replaceHarnessConfigPlaceholders(token, project, mode, cwd, options))
+  }
+  const [executable, ...restArgs] = args
   if (!executable) {
     throw new Error("Inspect adapter command is empty")
   }
-  return { executable, args }
+  return { executable, args: restArgs }
 }
 
 function readBoardConfig(cwd: string): Record<string, unknown> | null {
@@ -686,22 +767,37 @@ function readBoardConfigPlatformText(cwd: string, key: HarnessPlatformConfigKey)
   return command || null
 }
 
-function readBoardConfigInspectCommand(cwd: string, mode: HarnessInspectCommandName): string | null {
+function readBoardConfigInspectCommand(
+  cwd: string,
+  mode: HarnessInspectCommandName
+): string | null {
   return readBoardConfigPlatformText(cwd, HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode])
+}
+
+function projectDirectoryName(project: Pick<HarnessProjectMetadata, "projectDir" | "projectCode">): string {
+  return normalizeText(project.projectDir).trim() || normalizeText(project.projectCode).trim()
 }
 
 function projectDirectoryPath(project: HarnessProjectMetadata): string {
   const workspacePath = resolve(project.workspacePath)
-  const projectPath = resolve(workspacePath, project.projectCode)
-  if (projectPath === workspacePath || !isInsideDirectory(workspacePath, projectPath)) {
-    throw new Error(`Project code resolves outside workspace: ${project.projectCode}`)
+  const projectDir = projectDirectoryName(project)
+  const projectPath = resolve(workspacePath, projectDir)
+  if (
+    projectPath === workspacePath ||
+    basename(projectPath) !== projectDir ||
+    !isInsideDirectory(workspacePath, projectPath)
+  ) {
+    throw new Error(`Project dir resolves outside workspace: ${projectDir}`)
   }
   return projectPath
 }
 
 function isInsideDirectory(basePath: string, targetPath: string): boolean {
   const relativePath = relative(resolve(basePath), resolve(targetPath))
-  return relativePath === "" || (!!relativePath && !relativePath.startsWith("..") && !isAbsolute(relativePath))
+  return (
+    relativePath === "" ||
+    (!!relativePath && !relativePath.startsWith("..") && !isAbsolute(relativePath))
+  )
 }
 
 function resolveAdapterFilePath(project: HarnessProjectMetadata, value: unknown): string | null {
@@ -730,7 +826,7 @@ function resolveProjectScopedPath(
 }
 
 function projectDirectoryMissingMessage(project: HarnessProjectMetadata): string {
-  return `请确认项目「${project.projectCode}」的工作区「${project.workspacePath}」下是否有对应特性。`
+  return `请确认项目「${project.projectCode}」的工作区「${project.workspacePath}」下存在项目文件夹「${projectDirectoryName(project)}」。`
 }
 
 function isProjectMissingError(message: string): boolean {
@@ -748,7 +844,7 @@ function formatProjectDetailError(project: HarnessProjectMetadata, error: unknow
 function buildOptionalConfiguredHarnessInvocation(
   project: HarnessProjectMetadata,
   mode: HarnessInspectCommandName,
-  feature?: string
+  options: HarnessCommandParseOptions = {}
 ): ConfiguredHarnessInvocation | null {
   const cwd = adapterPluginDir(project)
   const configuredCommand = readBoardConfigInspectCommand(cwd, mode)
@@ -756,21 +852,25 @@ function buildOptionalConfiguredHarnessInvocation(
 
   return {
     cwd,
-    invocation: parseInspectCommand(configuredCommand, project, mode, cwd, feature)
+    invocation: parseInspectCommand(configuredCommand, project, mode, cwd, options)
   }
 }
 
 function buildConfiguredHarnessInvocation(
   project: HarnessProjectMetadata,
   mode: HarnessInspectCommandName,
-  feature?: string
+  options: HarnessCommandParseOptions = {}
 ): ConfiguredHarnessInvocation {
-  const configured = buildOptionalConfiguredHarnessInvocation(project, mode, feature)
+  const configured = buildOptionalConfiguredHarnessInvocation(project, mode, options)
   if (!configured) {
     const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
     throw new Error(`插件未配置 inspectCommands.${process.platform}.${configKey}，请检查插件设置`)
   }
   return configured
+}
+
+function hasConfiguredHarnessInvocation(project: HarnessProjectMetadata, mode: HarnessInspectCommandName): boolean {
+  return readBoardConfigInspectCommand(adapterPluginDir(project), mode) !== null
 }
 
 function runHarnessInvocation(
@@ -799,30 +899,24 @@ function runHarnessInvocation(
   }
 }
 
-function runConfiguredHarnessCommand(
-  project: HarnessProjectMetadata,
-  mode: HarnessInspectCommandName,
-  feature?: string
-): Buffer {
-  return runHarnessInvocation(
-    buildConfiguredHarnessInvocation(project, mode, feature),
-    harnessCommandLogOptions(mode)
-  )
-}
-
 function runInspectAdapter(
   project: HarnessProjectMetadata,
   mode: "project" | "run",
   feature?: string
 ): Record<string, unknown> {
-  const invocation = buildConfiguredHarnessInvocation(project, mode, feature)
+  const invocation = buildConfiguredHarnessInvocation(project, mode, { feature })
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
   const stdoutBuffer = runHarnessInvocation(invocation, harnessCommandLogOptions(mode))
 
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
 
   if (!raw) {
-    logHarnessStatusResultFailure(invocation, configKey, stdoutBuffer, "Inspect adapter returned empty output")
+    logHarnessStatusResultFailure(
+      invocation,
+      configKey,
+      stdoutBuffer,
+      "Inspect adapter returned empty output"
+    )
     throw new Error("Inspect adapter returned empty output")
   }
 
@@ -841,6 +935,150 @@ function runInspectAdapter(
       `Inspect adapter returned invalid JSON: ${message}`
     )
     throw new Error(`Inspect adapter returned invalid JSON: ${message}`)
+  }
+}
+
+function runHarnessJsonInvocation(
+  configured: ConfiguredHarnessInvocation,
+  mode: HarnessInspectCommandName
+): Record<string, unknown> {
+  const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
+  const stdoutBuffer = runHarnessInvocation(configured, harnessCommandLogOptions(mode))
+  const raw = decodeAdapterBuffer(stdoutBuffer).trim()
+
+  if (!raw) {
+    logHarnessStatusResultFailure(configured, configKey, stdoutBuffer, "Inspect adapter returned empty output")
+    throw new Error("Inspect adapter returned empty output")
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!isObject(parsed)) {
+      throw new Error("top-level JSON is not an object")
+    }
+    return parsed
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    logHarnessStatusResultFailure(
+      configured,
+      configKey,
+      stdoutBuffer,
+      `Inspect adapter returned invalid JSON: ${message}`
+    )
+    throw new Error(`Inspect adapter returned invalid JSON: ${message}`)
+  }
+}
+
+function assertSkipNodeInvocationResult(
+  configured: ConfiguredHarnessInvocation,
+  stdoutBuffer: Buffer
+): void {
+  const raw = decodeAdapterBuffer(stdoutBuffer).trim()
+  if (!raw) return
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw) as unknown
+  } catch {
+    return
+  }
+
+  if (!isObject(parsed) || parsed.ok !== false) return
+
+  const message = normalizeText(parsed.message).trim() || "插件返回跳过节点失败"
+  logHarnessStatusResultFailure(configured, "skip_node", stdoutBuffer, message)
+  throw new Error(message)
+}
+
+function uniqueStringsInOrder(values: unknown): string[] {
+  if (!Array.isArray(values)) return []
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const value of values) {
+    const normalized = normalizeText(value).trim()
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    result.push(normalized)
+  }
+  return result
+}
+
+function normalizeDynamicWorkflowTemplate(value: unknown): HarnessDynamicWorkflowTemplate | null {
+  if (!isObject(value)) return null
+  const id = normalizeText(value.id).trim()
+  if (!id) return null
+  const templateType = normalizeText(value.templateType).trim()
+  const label = normalizeText(value.label).trim() || id
+  const description = normalizeText(value.description).trim()
+  return {
+    id,
+    templateType,
+    label,
+    description,
+    nodes: uniqueStringsInOrder(value.nodes),
+    requiredNodes: uniqueStringsInOrder(value.requiredNodes)
+  }
+}
+
+function normalizeDynamicWorkflowNode(value: unknown): HarnessDynamicWorkflowNode | null {
+  if (!isObject(value)) return null
+  const id = normalizeText(value.id).trim()
+  if (!id) return null
+  const group = normalizeText(value.group).trim()
+  return {
+    id,
+    label: normalizeText(value.label).trim() || id,
+    ...(group ? { group } : {}),
+    description: normalizeText(value.description).trim()
+  }
+}
+
+function normalizeDynamicWorkflowTemplateList(value: unknown): HarnessDynamicWorkflowTemplate[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const templates: HarnessDynamicWorkflowTemplate[] = []
+  for (const item of value) {
+    const template = normalizeDynamicWorkflowTemplate(item)
+    if (!template || seen.has(template.id)) continue
+    seen.add(template.id)
+    templates.push(template)
+  }
+  return templates
+}
+
+function normalizeDynamicWorkflowNodeList(value: unknown): HarnessDynamicWorkflowNode[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const nodes: HarnessDynamicWorkflowNode[] = []
+  for (const item of value) {
+    const node = normalizeDynamicWorkflowNode(item)
+    if (!node || seen.has(node.id)) continue
+    seen.add(node.id)
+    nodes.push(node)
+  }
+  return nodes
+}
+
+function normalizeDynamicWorkflowConfigSnapshot(value: unknown): HarnessDynamicWorkflowConfig | null {
+  if (!isObject(value)) return null
+  const templates = normalizeDynamicWorkflowTemplateList(value.templates)
+  const nodes = normalizeDynamicWorkflowNodeList(value.nodes)
+  return templates.length > 0 ? { templates, nodes } : null
+}
+
+function getHarnessDynamicWorkflowConfigForProject(
+  project: HarnessProjectMetadata
+): HarnessDynamicWorkflowConfig | null {
+  try {
+    const invocation = buildOptionalConfiguredHarnessInvocation(project, "dynamicWorkflow")
+    if (!invocation) return null
+
+    const response = runHarnessJsonInvocation(invocation, "dynamicWorkflow")
+    if (response.ok !== true) return null
+    return normalizeDynamicWorkflowConfigSnapshot(response)
+  } catch (error) {
+    console.warn("[HarnessBoard] Dynamic workflow config unavailable:", formatAdapterError(error))
+    return null
   }
 }
 
@@ -869,7 +1107,10 @@ function statusFromNodeStatus(nodeStatus: HarnessNodeStatus, label?: string): Ha
   }
 }
 
-function statusFromFeatureStatus(featureStatus: HarnessFeatureStatus, label?: string): HarnessStatus {
+function statusFromFeatureStatus(
+  featureStatus: HarnessFeatureStatus,
+  label?: string
+): HarnessStatus {
   return {
     label: label?.trim() || DEFAULT_FEATURE_STATUS_LABELS[featureStatus],
     uiKind: FEATURE_STATUS_UI_KIND[featureStatus]
@@ -941,29 +1182,37 @@ function normalizeWatchRefs(
   return normalized.length > 0 ? normalized : fallback
 }
 
+function workflowFromNodeIds(workflow: HarnessWorkflow, nodeIds: string[]): HarnessWorkflow {
+  if (nodeIds.length === 0) return workflow
+  const nodesById = new Map(workflow.nodes.map((node) => [node.id, node]))
+  const nodes = nodeIds
+    .map((nodeId) => nodesById.get(nodeId))
+    .filter((node): node is HarnessWorkflow["nodes"][number] => Boolean(node))
+  return { ...workflow, nodes }
+}
+
 function normalizeProjectRun(
   value: unknown,
-  defaultWorkflow: HarnessWorkflow,
-  dynamicWorkflows: Record<string, HarnessWorkflow>
+  defaultWorkflow: HarnessWorkflow
 ): HarnessFeatureSummary | null {
   if (!isObject(value)) return null
   const slug = normalizeText(value.featureId) || normalizeText(value.featureName)
   if (!slug) return null
 
-  const workflowId = normalizeText(value.workflowId).trim()
-  const workflow = workflowId ? dynamicWorkflows[workflowId] ?? defaultWorkflow : defaultWorkflow
+  const nodeIds = uniqueStringsInOrder(value.nodeIds)
+  const workflow = workflowFromNodeIds(defaultWorkflow, nodeIds)
   const currentNodeId = normalizeText(value.currentNodeId) || "unknown"
   const currentNodeStatus = normalizeNodeStatus(value.currentNodeStatus)
   const currentNodeStatusLabel = normalizeText(value.currentNodeStatusLabel).trim()
   const currentNodeIndex = workflow.nodes.findIndex((node) => node.id === currentNodeId)
   const currentNodeDefinition = currentNodeIndex >= 0 ? workflow.nodes[currentNodeIndex] : undefined
   const explicitFeatureStatus = normalizeFeatureStatus(value.featureStatus)
-  const featureStatus = explicitFeatureStatus ?? deriveFeatureStatusFromCurrentNode(
-    currentNodeStatus,
-    currentNodeIndex,
-    workflow.nodes.length
-  )
-  const featureStatusLabel = explicitFeatureStatus ? normalizeText(value.featureStatusLabel).trim() : ""
+  const featureStatus =
+    explicitFeatureStatus ??
+    deriveFeatureStatusFromCurrentNode(currentNodeStatus, currentNodeIndex, workflow.nodes.length)
+  const featureStatusLabel = explicitFeatureStatus
+    ? normalizeText(value.featureStatusLabel).trim()
+    : ""
   const status = statusFromFeatureStatus(featureStatus, featureStatusLabel)
   const currentNodeLabel = currentNodeDefinition?.label ?? currentNodeId
   const summaryText = currentNodeLabel ? `${currentNodeLabel} · ${status.label}` : status.label
@@ -977,7 +1226,7 @@ function normalizeProjectRun(
     featureStatus,
     ...(featureStatusLabel ? { featureStatusLabel } : {}),
     overallStatus: status,
-    ...(workflowId ? { workflowId } : {}),
+    nodeIds,
     currentNodeId,
     currentNodeStatus,
     ...(currentNodeStatusLabel ? { currentNodeStatusLabel } : {}),
@@ -990,12 +1239,11 @@ function normalizeProjectRun(
 
 function normalizeProjectRuns(
   snapshot: Record<string, unknown>,
-  workflow: HarnessWorkflow,
-  dynamicWorkflows: Record<string, HarnessWorkflow>
+  workflow: HarnessWorkflow
 ): HarnessFeatureSummary[] {
   if (!Array.isArray(snapshot.runs)) return []
   return snapshot.runs
-    .map((run) => normalizeProjectRun(run, workflow, dynamicWorkflows))
+    .map((run) => normalizeProjectRun(run, workflow))
     .filter((run): run is HarnessFeatureSummary => run !== null)
 }
 
@@ -1026,7 +1274,9 @@ function normalizeWorkflowNextAction(value: unknown): HarnessWorkflowNextAction 
   return Object.keys(nextAction).length > 0 ? nextAction : undefined
 }
 
-function normalizeWorkflowArtifactDefinition(value: unknown): HarnessWorkflowArtifactDefinition | null {
+function normalizeWorkflowArtifactDefinition(
+  value: unknown
+): HarnessWorkflowArtifactDefinition | null {
   if (!isObject(value)) return null
   const artifactId = normalizeText(value.id)
   if (!artifactId) return null
@@ -1101,18 +1351,9 @@ function normalizeWorkflow(value: unknown): HarnessWorkflow {
   }
 }
 
-function normalizeDynamicWorkflows(value: unknown): Record<string, HarnessWorkflow> {
-  if (!isObject(value)) return {}
-  const dynamicWorkflows: Record<string, HarnessWorkflow> = {}
-  for (const [key, workflow] of Object.entries(value)) {
-    const workflowId = normalizeText(key).trim()
-    if (!workflowId) continue
-    dynamicWorkflows[workflowId] = normalizeWorkflow(workflow)
-  }
-  return dynamicWorkflows
-}
-
-function workflowArtifactDefinitions(workflow: HarnessWorkflow): Map<string, Map<string, HarnessWorkflowArtifactDefinition>> {
+function workflowArtifactDefinitions(
+  workflow: HarnessWorkflow
+): Map<string, Map<string, HarnessWorkflowArtifactDefinition>> {
   const byNode = new Map<string, Map<string, HarnessWorkflowArtifactDefinition>>()
   for (const node of workflow.nodes) {
     const artifacts = new Map<string, HarnessWorkflowArtifactDefinition>()
@@ -1275,33 +1516,37 @@ function normalizeRunNodes(
   }
   const artifactDefinitions = workflowArtifactDefinitions(workflow)
   return workflow.nodes.map((nodeDefinition): HarnessRunNode => {
-      const node = runNodesById.get(nodeDefinition.id)
-      const id = nodeDefinition.id
-      const definitions = artifactDefinitions.get(id)
-      const nodeStatus = normalizeNodeStatus(node?.nodeStatus)
-      const nodeStatusLabel = normalizeText(node?.nodeStatusLabel).trim()
-      return {
-        id,
-        label: nodeDefinition.label,
-        ...(nodeDefinition.group ? { group: nodeDefinition.group } : {}),
-        nodeStatus,
-        ...(nodeStatusLabel ? { nodeStatusLabel } : {}),
-        status: statusFromNodeStatus(nodeStatus, nodeStatusLabel),
-        artifacts: Array.isArray(node?.artifacts)
-          ? node.artifacts
-              .map((artifact) => {
-                const artifactId = isObject(artifact) ? normalizeText(artifact.id) : ""
-                return normalizeArtifact(project, artifact, artifactId ? definitions?.get(artifactId) : undefined)
-              })
-              .filter((artifact): artifact is HarnessArtifact => artifact !== null)
-          : [],
-        hooks: Array.isArray(node?.hooks)
-          ? node.hooks
-              .map((hook) => normalizeHook(hook))
-              .filter((hook): hook is HarnessRunNode["hooks"][number] => hook !== null)
-          : []
-      }
-    })
+    const node = runNodesById.get(nodeDefinition.id)
+    const id = nodeDefinition.id
+    const definitions = artifactDefinitions.get(id)
+    const nodeStatus = normalizeNodeStatus(node?.nodeStatus)
+    const nodeStatusLabel = normalizeText(node?.nodeStatusLabel).trim()
+    return {
+      id,
+      label: nodeDefinition.label,
+      ...(nodeDefinition.group ? { group: nodeDefinition.group } : {}),
+      nodeStatus,
+      ...(nodeStatusLabel ? { nodeStatusLabel } : {}),
+      status: statusFromNodeStatus(nodeStatus, nodeStatusLabel),
+      artifacts: Array.isArray(node?.artifacts)
+        ? node.artifacts
+            .map((artifact) => {
+              const artifactId = isObject(artifact) ? normalizeText(artifact.id) : ""
+              return normalizeArtifact(
+                project,
+                artifact,
+                artifactId ? definitions?.get(artifactId) : undefined
+              )
+            })
+            .filter((artifact): artifact is HarnessArtifact => artifact !== null)
+        : [],
+      hooks: Array.isArray(node?.hooks)
+        ? node.hooks
+            .map((hook) => normalizeHook(hook))
+            .filter((hook): hook is HarnessRunNode["hooks"][number] => hook !== null)
+        : []
+    }
+  })
 }
 
 function normalizeProject(value: unknown): HarnessProjectMetadata | null {
@@ -1314,6 +1559,8 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
   const creator = normalizeProjectCreator(value.creator)
   const adapterId = normalizeText(harnessAdapter.id)
   const adapterName = normalizeText(harnessAdapter.name)
+  const projectCode = normalizeText(value.projectCode)
+  const projectDir = normalizeText(value.projectDir) || projectCode
   if (!adapterId || !adapterName || harnessAdapter.type !== "plugin") return null
   const now = new Date().toISOString()
 
@@ -1321,10 +1568,13 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
     projectId: value.projectId,
     name: value.name,
     description: normalizeText(value.description),
-    projectCode: normalizeText(value.projectCode),
+    projectCode,
+    projectFromLean: value.projectFromLean === true,
+    projectDir,
     systemId: normalizeText(value.systemId),
     systemName: normalizeText(value.systemName),
     workspacePath: normalizeText(value.workspacePath) || normalizeText(oldWorkspace.path),
+    sessionWorkspacePath: normalizeText(value.sessionWorkspacePath) || undefined,
     "harness-adapter": {
       id: adapterId,
       name: adapterName,
@@ -1338,26 +1588,6 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
       updateAt: typeof lifecycle.updateAt === "string" ? lifecycle.updateAt : undefined
     }
   }
-}
-
-function deriveCreatorOrgLevels(
-  pathName?: string
-): Pick<HarnessProjectCreatorMetadata, "upperOrgLv0" | "upperOrgLv1"> {
-  const parts =
-    typeof pathName === "string"
-      ? pathName
-          .split("/")
-          .map((part) => part.trim())
-          .filter(Boolean)
-      : []
-  const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
-  if (itDeptIndex < 0) return {}
-
-  const lowerParts = parts.slice(itDeptIndex + 1)
-  const startsWithTeam = lowerParts[0]?.includes("团队") ?? false
-  return startsWithTeam
-    ? { upperOrgLv0: lowerParts[2] ?? "", upperOrgLv1: lowerParts[1] ?? "" }
-    : { upperOrgLv0: lowerParts[3] ?? "", upperOrgLv1: lowerParts[2] ?? "" }
 }
 
 function normalizeProjectCreator(value: unknown): HarnessProjectCreatorMetadata | null {
@@ -1376,13 +1606,15 @@ function normalizeProjectCreator(value: unknown): HarnessProjectCreatorMetadata 
 
 function getCurrentProjectCreator(): HarnessProjectCreatorMetadata | undefined {
   const userInfo = getUserInfo()
+  const orgLevels = deriveUpperOrgLevelsFromPath(userInfo?.pathName)
   const creator = normalizeProjectCreator({
     sapId: userInfo?.sapId,
     ystId: userInfo?.ystId,
     userName: userInfo?.userName,
     orgName: userInfo?.orgName,
     pathName: userInfo?.pathName,
-    ...deriveCreatorOrgLevels(userInfo?.pathName)
+    upperOrgLv0: orgLevels.upperOrgLv0,
+    upperOrgLv1: orgLevels.upperOrgLv1
   })
   return creator ?? undefined
 }
@@ -1419,18 +1651,25 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     name: project.name,
     description: project.description,
     projectCode: project.projectCode,
+    projectFromLean: project.projectFromLean,
+    projectDir: projectDirectoryName(project),
     systemId: project.systemId,
     systemName: project.systemName,
     workspacePath: project.workspacePath,
+    sessionWorkspacePath: project.sessionWorkspacePath,
     harnessAdapter: {
       id: harnessAdapter.id,
       name: harnessAdapter.name,
       type: harnessAdapter.type
     },
     creator: project.creator,
-    boardCompatibility: evaluateBoardPluginCompatibility(plugin, harnessAdapter.name || harnessAdapter.id),
+    boardCompatibility: evaluateBoardPluginCompatibility(
+      plugin,
+      harnessAdapter.name || harnessAdapter.id
+    ),
     lifecycle: {
-      status: project.lifecycle.status
+      status: project.lifecycle.status,
+      updateAt: project.lifecycle.updateAt
     }
   }
 }
@@ -1449,6 +1688,7 @@ function validateCreateInput(input: HarnessProjectCreateInput): void {
     input.adapterType,
     input.name,
     input.projectCode,
+    input.projectDir,
     input.description,
     input.systemId,
     input.systemName,
@@ -1457,8 +1697,8 @@ function validateCreateInput(input: HarnessProjectCreateInput): void {
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
     throw new Error("Project name, code, description, system and workspace are required")
   }
-  validateHarnessName(input.name, "项目名称")
   validateHarnessName(input.projectCode, "项目编号")
+  validateHarnessName(input.projectDir, "项目文件夹")
 }
 
 function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput): void {
@@ -1467,6 +1707,7 @@ function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput):
     input.adapterType,
     input.name,
     input.projectCode,
+    input.projectDir,
     input.description,
     input.systemId,
     input.systemName,
@@ -1475,8 +1716,8 @@ function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput):
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
     throw new Error("Project name, code, description, system and workspace are required")
   }
-  validateHarnessName(input.name, "项目名称")
   validateHarnessName(input.projectCode, "项目编号")
+  validateHarnessName(input.projectDir, "项目文件夹")
 }
 
 function validateHarnessName(value: unknown, label: string): void {
@@ -1485,13 +1726,39 @@ function validateHarnessName(value: unknown, label: string): void {
   }
 }
 
-function validateProjectCodeUnique(code: string, store: HarnessProjectStoreFile, excludeProjectId?: string): void {
+function validateProjectCodeUnique(
+  code: string,
+  store: HarnessProjectStoreFile,
+  excludeProjectId?: string
+): void {
   const trimmed = code.trim()
   const duplicate = store.projects.find(
-    (item) => item.projectCode === trimmed && item.projectId !== excludeProjectId
+    (item) =>
+      item.lifecycle.status !== "archived" &&
+      item.projectCode === trimmed &&
+      item.projectId !== excludeProjectId
   )
   if (duplicate) {
-    throw new Error(`项目编号：${trimmed} 已被使用，请更换`)
+    throw new Error(`已有项目使用项目编号：${trimmed} ，请更换`)
+  }
+}
+
+function validateProjectDirUnique(
+  projectDir: string,
+  workspacePath: string,
+  store: HarnessProjectStoreFile,
+  excludeProjectId?: string
+): void {
+  const trimmedProjectDir = projectDir.trim()
+  const resolvedWorkspacePath = resolve(workspacePath)
+  const duplicate = store.projects.find(
+    (item) =>
+      resolve(item.workspacePath) === resolvedWorkspacePath &&
+      projectDirectoryName(item) === trimmedProjectDir &&
+      item.projectId !== excludeProjectId
+  )
+  if (duplicate) {
+    throw new Error(`项目根路径下已有文件夹：${trimmedProjectDir}`)
   }
 }
 
@@ -1506,6 +1773,84 @@ function validateFeatureCreateInput(input: HarnessFeatureCreateInput): void {
   validateHarnessName(input.feature, "特性名称")
 }
 
+function normalizeFeatureWorkflowTemplate(value: unknown): string {
+  const workflowTemplate = normalizeText(value).trim()
+  if (workflowTemplate.includes("\0")) {
+    throw new Error("Workflow template contains invalid characters")
+  }
+  return workflowTemplate
+}
+
+function normalizeFeatureWorkflowNodeIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const nodes: string[] = []
+  for (const item of value) {
+    const nodeId = normalizeText(item).trim()
+    if (!nodeId) continue
+    if (nodeId.includes("\0")) {
+      throw new Error("Workflow node contains invalid characters")
+    }
+    if (seen.has(nodeId)) continue
+    seen.add(nodeId)
+    nodes.push(nodeId)
+  }
+  return nodes
+}
+
+function validateSkipNodeInput(input: HarnessSkipNodeInput): { projectId: string; slug: string; nodeId: string } {
+  const projectId = normalizeText(input.projectId).trim()
+  const slug = normalizeText(input.slug).trim()
+  const nodeId = normalizeText(input.nodeId).trim()
+  if (!projectId || !slug || !nodeId) {
+    throw new Error("Project, feature and node are required")
+  }
+  if (slug.includes("\0") || nodeId.includes("\0")) {
+    throw new Error("Skip node input contains invalid characters")
+  }
+  return { projectId, slug, nodeId }
+}
+
+function buildFeatureWorkflowCommandOptions(
+  input: HarnessFeatureCreateInput
+): Pick<HarnessCommandParseOptions, "workflowTemplate" | "workflowNodes"> {
+  const workflowTemplate = normalizeFeatureWorkflowTemplate(input.workflowTemplate)
+  if (!workflowTemplate) return {}
+
+  const config = normalizeDynamicWorkflowConfigSnapshot(input.workflowConfig)
+  if (!config) {
+    throw new Error("动态工作流配置已失效，请重新打开创建特性弹窗")
+  }
+
+  const customTemplate = config.templates.find((template) => template.id === workflowTemplate)
+  if (!customTemplate) {
+    throw new Error("所选工作流模板不存在，请重新选择")
+  }
+
+  if (customTemplate.templateType !== CUSTOM_WORKFLOW_TEMPLATE_ID) {
+    return { workflowTemplate }
+  }
+
+  const selectedNodeIds = new Set(normalizeFeatureWorkflowNodeIds(input.workflowNodes))
+  const requiredNodeIds = customTemplate.requiredNodes
+  const missingRequiredNode = requiredNodeIds.find((nodeId) => !selectedNodeIds.has(nodeId))
+  if (missingRequiredNode) {
+    throw new Error(`自定义流程缺少必选节点：${missingRequiredNode}`)
+  }
+
+  const orderedNodeIds = config.nodes
+    .filter((node) => selectedNodeIds.has(node.id))
+    .map((node) => node.id)
+  if (orderedNodeIds.length !== selectedNodeIds.size) {
+    throw new Error("自定义流程包含未知节点")
+  }
+
+  return {
+    workflowTemplate,
+    workflowNodes: JSON.stringify(orderedNodeIds)
+  }
+}
+
 function okStatus(_id: string, label: string): HarnessStatus {
   return { label, uiKind: "ok" }
 }
@@ -1518,16 +1863,13 @@ function makeWatchRefs(slug?: string): HarnessWatchRef[] {
         { path: `${base}/features/${slug}`, purpose: "artifacts" },
         { path: `${base}/features/${slug}/hooks.ndjson`, purpose: "hook-log" }
       ]
-    : [
-        { path: `${base}/STATE.md`, purpose: "run-list" }
-      ]
+    : [{ path: `${base}/STATE.md`, purpose: "run-list" }]
 }
 
 function makeProjectDetailViewModel(
   project: HarnessProjectMetadata,
   data: {
     workflow: HarnessWorkflow
-    dynamicWorkflows?: Record<string, HarnessWorkflow>
     runs: HarnessFeatureSummary[]
     watchRefs: HarnessWatchRef[]
     projectState: HarnessStatus
@@ -1539,9 +1881,11 @@ function makeProjectDetailViewModel(
       projectId: project.projectId,
       name: project.name,
       projectCode: project.projectCode,
+      projectDir: projectDirectoryName(project),
       systemId: project.systemId,
       systemName: project.systemName,
       workspacePath: project.workspacePath,
+      sessionWorkspacePath: project.sessionWorkspacePath,
       projectRootPath: projectDirectoryPath(project)
     },
     adapterSnapshot: {
@@ -1550,7 +1894,6 @@ function makeProjectDetailViewModel(
     },
     projectState: data.projectState,
     workflow: data.workflow,
-    dynamicWorkflows: data.dynamicWorkflows ?? {},
     runs: data.runs,
     watchRefs: data.watchRefs,
     loading: false,
@@ -1572,13 +1915,15 @@ function initializeHarnessProject(project: HarnessProjectMetadata): void {
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
     if (raw.includes("已存在")) {
-      throw new Error("该项目编号已在所选工作区存在")
+      throw new Error("该项目文件夹已在所选工作区存在")
     }
     throw new Error(`创建项目失败：${raw}`)
   }
 }
 
-export function readHarnessFeatureMetadata(metadata: unknown): { projectId: string; slug: string } | null {
+export function readHarnessFeatureMetadata(
+  metadata: unknown
+): { projectId: string; slug: string } | null {
   if (!isObject(metadata) || !isObject(metadata.harnessFeature)) return null
   const projectId = normalizeText(metadata.harnessFeature.projectId).trim()
   const slug = normalizeText(metadata.harnessFeature.slug).trim()
@@ -1595,6 +1940,7 @@ export interface HarnessFeatureAgentContext {
   pluginWorkspace?: string
   featureId?: string
   projectCode?: string
+  projectDir?: string
 }
 
 export function buildHarnessFeatureAgentContext(
@@ -1615,7 +1961,7 @@ export function buildHarnessFeatureAgentContext(
     command: HarnessInspectCommandName
   ): string | undefined =>
     template
-      ? replaceHarnessConfigPlaceholders(template, project, command, cwd, feature.slug).trim() ||
+      ? replaceHarnessConfigPlaceholders(template, project, command, cwd, { feature: feature.slug }).trim() ||
         undefined
       : undefined
 
@@ -1628,7 +1974,8 @@ export function buildHarnessFeatureAgentContext(
     pluginName: normalizeText(plugin?.name) || adapter.name,
     pluginWorkspace: project.workspacePath,
     featureId: feature.slug,
-    projectCode: project.projectCode
+    projectCode: project.projectCode,
+    projectDir: projectDirectoryName(project)
   }
 }
 
@@ -1642,7 +1989,7 @@ export function buildHarnessFeatureDialogTips(projectId: string, slug: string): 
   const template = readBoardConfigPlatformText(cwd, "dialog_tips")
   if (!template) return null
 
-  return replaceHarnessConfigPlaceholders(template, project, "run", cwd, feature).trim() || null
+  return replaceHarnessConfigPlaceholders(template, project, "run", cwd, { feature }).trim() || null
 }
 
 export function listHarnessProjects(): HarnessProjectListItem[] {
@@ -1677,15 +2024,19 @@ export function createHarnessProject(input: HarnessProjectCreateInput): HarnessP
   validateCreateInput(input)
   const store = readProjectStore()
   validateProjectCodeUnique(input.projectCode, store)
+  validateProjectDirUnique(input.projectDir, input.workspacePath, store)
   const harnessAdapter = resolveHarnessAdapter(input.adapterId, input.adapterType)
   const project: HarnessProjectMetadata = {
     projectId: uuid(),
     name: input.name.trim(),
     description: input.description.trim(),
     projectCode: input.projectCode.trim(),
+    projectFromLean: input.projectFromLean === true,
+    projectDir: input.projectDir.trim(),
     systemId: input.systemId.trim(),
     systemName: input.systemName.trim(),
     workspacePath: input.workspacePath.trim(),
+    sessionWorkspacePath: input.sessionWorkspacePath?.trim() || undefined,
     "harness-adapter": harnessAdapter,
     creator: getCurrentProjectCreator(),
     lifecycle: {
@@ -1705,13 +2056,18 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
   const project = requireProject(input.projectId)
   const feature = input.feature.trim()
   const workspacePath = projectDirectoryPath(project)
+  const workflowOptions = buildFeatureWorkflowCommandOptions(input)
 
   if (!existsSync(workspacePath)) {
     throw new Error(projectDirectoryMissingMessage(project))
   }
 
   try {
-    runConfiguredHarnessCommand(project, "createFeature", feature)
+    const configured = buildConfiguredHarnessInvocation(project, "createFeature", {
+      feature,
+      ...workflowOptions
+    })
+    runHarnessInvocation(configured, harnessCommandLogOptions("createFeature"))
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
     if (raw.includes("已存在")) {
@@ -1726,6 +2082,43 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
     title: feature,
     workspacePath
   }
+}
+
+export function skipHarnessRunNode(input: HarnessSkipNodeInput): HarnessSkipNodeResult {
+  const { projectId, slug, nodeId } = validateSkipNodeInput(input)
+  const project = requireProject(projectId)
+  const workspacePath = projectDirectoryPath(project)
+
+  if (!existsSync(workspacePath)) {
+    throw new Error(projectDirectoryMissingMessage(project))
+  }
+
+  try {
+    const configured = buildConfiguredHarnessInvocation(project, "skipNode", {
+      feature: slug,
+      nodeId
+    })
+    const logOptions = { ...harnessCommandLogOptions("skipNode"), successResult: "none" as const }
+    const stdoutBuffer = runHarnessInvocation(configured, logOptions)
+    assertSkipNodeInvocationResult(configured, stdoutBuffer)
+    logHarnessInvocationSuccess(stdoutBuffer, harnessCommandLogOptions("skipNode"))
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error)
+    throw new Error(`跳过节点失败：${raw}`)
+  }
+
+  return {
+    projectId,
+    slug,
+    nodeId
+  }
+}
+
+export function getHarnessDynamicWorkflowConfig(
+  projectId: string
+): HarnessDynamicWorkflowConfig | null {
+  const project = requireProject(projectId)
+  return getHarnessDynamicWorkflowConfigForProject(project)
 }
 
 export function updateHarnessProjectMetadata(
@@ -1751,30 +2144,22 @@ export function updateHarnessProjectMetadata(
   if (requestedWorkspacePath !== existingWorkspacePath) {
     throw new Error("项目工作区路径不允许修改")
   }
-  const newCode = input.projectCode.trim()
-  const codeChanged = existing.projectCode !== newCode
-  if (codeChanged) {
-    const oldPath = resolve(existing.workspacePath, existing.projectCode)
-    const newPath = resolve(existing.workspacePath, newCode)
-    if (existsSync(oldPath)) {
-      if (existsSync(newPath)) {
-        throw new Error(`重命名失败：目标目录已存在 ${newPath}`)
-      }
-      try {
-        renameSync(oldPath, newPath)
-      } catch (e) {
-        throw new Error(`重命名项目目录失败：${e instanceof Error ? e.message : String(e)}`)
-      }
-    }
+  const existingProjectDir = projectDirectoryName(existing)
+  const requestedProjectDir = input.projectDir.trim()
+  if (requestedProjectDir !== existingProjectDir) {
+    throw new Error("项目文件夹不允许修改")
   }
   const updated: HarnessProjectMetadata = {
     ...existing,
     name: input.name.trim(),
     description: input.description.trim(),
     projectCode: input.projectCode.trim(),
+    projectFromLean: input.projectFromLean === true,
+    projectDir: existingProjectDir,
     systemId: input.systemId.trim(),
     systemName: input.systemName.trim(),
     workspacePath: existing.workspacePath,
+    sessionWorkspacePath: input.sessionWorkspacePath?.trim() || undefined,
     "harness-adapter": harnessAdapter,
     lifecycle: {
       ...existing.lifecycle,
@@ -1809,6 +2194,18 @@ export function archiveHarnessProject(projectId: string): HarnessProjectMetadata
   return archived
 }
 
+export function deleteHarnessProject(projectId: string): HarnessProjectMetadata {
+  const store = readProjectStore()
+  const index = store.projects.findIndex((item) => item.projectId === projectId)
+  if (index === -1) {
+    throw new Error("Project not found")
+  }
+
+  const [deleted] = store.projects.splice(index, 1)
+  writeProjectStore(store)
+  return deleted
+}
+
 export function getHarnessProjectDetail(projectId: string): HarnessProjectDetailViewModel {
   return getHarnessProjectDetails([projectId])[projectId]
 }
@@ -1825,9 +2222,13 @@ function runInspectAdapterBatch(
     throw new Error(`插件未配置 inspectCommands.${process.platform}.${configKey}，请检查插件设置`)
   }
 
-  const projectCodes = projects.map((p) => p.projectCode)
+  const projectDirs = projects.map((project) => projectDirectoryName(project))
   const { executable, args } = parseInspectCommand(
-    configuredCommand, firstProject, mode, cwd, undefined, projectCodes
+    configuredCommand,
+    firstProject,
+    mode,
+    cwd,
+    { projectDirs }
   )
 
   const configured: ConfiguredHarnessInvocation = {
@@ -1845,7 +2246,12 @@ function runInspectAdapterBatch(
 
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
   if (!raw) {
-    logHarnessStatusResultFailure(configured, configKey, stdoutBuffer, "Inspect adapter returned empty output")
+    logHarnessStatusResultFailure(
+      configured,
+      configKey,
+      stdoutBuffer,
+      "Inspect adapter returned empty output"
+    )
     throw new Error("Inspect adapter returned empty output")
   }
 
@@ -1881,6 +2287,16 @@ function makeProjectErrorDetail(
   })
 }
 
+function makeArchivedProjectDetail(project: HarnessProjectMetadata): HarnessProjectDetailViewModel {
+  return makeProjectDetailViewModel(project, {
+    workflow: normalizeWorkflow(null),
+    runs: [],
+    watchRefs: [],
+    projectState: { label: "已归档", uiKind: "archived" },
+    error: null
+  })
+}
+
 function projectAdapterLoadedStatus(project: HarnessProjectMetadata): HarnessStatus {
   const adapterName = normalizeText(project["harness-adapter"].name) || "插件"
   return okStatus("inspected", `${adapterName} 已加载`)
@@ -1893,12 +2309,20 @@ export function getHarnessProjectDetails(
 
   const projects = projectIds.map((id) => requireProject(id))
   const result: Record<string, HarnessProjectDetailViewModel> = {}
-  const groups = new Map<string, {
-    cwd: string
-    projects: HarnessProjectMetadata[]
-  }>()
+  const groups = new Map<
+    string,
+    {
+      cwd: string
+      projects: HarnessProjectMetadata[]
+    }
+  >()
 
   for (const project of projects) {
+    if (project.lifecycle.status === "archived") {
+      result[project.projectId] = makeArchivedProjectDetail(project)
+      continue
+    }
+
     const plugin = findAdapterPlugin(project)
     const adapter = project["harness-adapter"]
     const compatibility = evaluateBoardPluginCompatibility(plugin, adapter.name || adapter.id)
@@ -1937,28 +2361,27 @@ export function getHarnessProjectDetails(
     try {
       const snapshot = runInspectAdapterBatch(group.projects, "project", group.cwd)
       const workflow = normalizeWorkflow(snapshot.workflow)
-      const dynamicWorkflows = normalizeDynamicWorkflows(snapshot.dynamicWorkflows)
       if (!isObject(snapshot.projects)) {
         throw new Error("Inspect adapter returned invalid batch JSON: projects is not an object")
       }
       const projectsDict = snapshot.projects as Record<string, unknown>
 
       for (const project of group.projects) {
-        const projectData = projectsDict[project.projectCode]
+        const projectDir = projectDirectoryName(project)
+        const projectData = projectsDict[projectDir]
         if (!isObject(projectData)) {
           result[project.projectId] = makeProjectErrorDetail(
             project,
             "Inspect 读取失败",
-            `读取项目状态失败：Inspect adapter 未返回项目 ${project.projectCode} 的状态`
+            `读取项目状态失败：Inspect adapter 未返回项目文件夹 ${projectDir} 的状态`
           )
           continue
         }
 
         const fallbackWatchRefs = makeWatchRefs()
-        const runs = normalizeProjectRuns(projectData, workflow, dynamicWorkflows)
+        const runs = normalizeProjectRuns(projectData, workflow)
         result[project.projectId] = makeProjectDetailViewModel(project, {
           workflow,
-          dynamicWorkflows,
           runs,
           watchRefs: normalizeWatchRefs(project, projectData.watchRefs, fallbackWatchRefs),
           projectState: projectAdapterLoadedStatus(project),
@@ -1989,25 +2412,29 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
   const currentNodeId = normalizeText(run.currentNodeId)
   const nodes = normalizeRunNodes(project, run.nodes, workflow)
   const currentNodeIndex = workflow.nodes.findIndex((node) => node.id === currentNodeId)
-  const currentNodeStatus = nodes.find((node) => node.id === currentNodeId)?.nodeStatus ?? UNKNOWN_NODE_STATUS
+  const currentNodeStatus =
+    nodes.find((node) => node.id === currentNodeId)?.nodeStatus ?? UNKNOWN_NODE_STATUS
   const explicitFeatureStatus = normalizeFeatureStatus(run.featureStatus)
-  const featureStatus = explicitFeatureStatus ?? deriveFeatureStatusFromCurrentNode(
-    currentNodeStatus,
-    currentNodeIndex,
-    workflow.nodes.length
-  )
-  const featureStatusLabel = explicitFeatureStatus ? normalizeText(run.featureStatusLabel).trim() : ""
+  const featureStatus =
+    explicitFeatureStatus ??
+    deriveFeatureStatusFromCurrentNode(currentNodeStatus, currentNodeIndex, workflow.nodes.length)
+  const featureStatusLabel = explicitFeatureStatus
+    ? normalizeText(run.featureStatusLabel).trim()
+    : ""
   const overallStatus = statusFromFeatureStatus(featureStatus, featureStatusLabel)
   const hookLogRefs = normalizeHookLogRefs(project, run.hookLogRefs)
   const hookLogEntries = readHookLogRefs(project, hookLogRefs)
   const { nodes: nodesWithHookLogs, unmatchedHooks } = applyHookLogEntries(nodes, hookLogEntries)
+  const skipNodeAvailable = hasConfiguredHarnessInvocation(project, "skipNode")
   return {
     project: {
       projectId: project.projectId,
       name: project.name,
       projectCode: project.projectCode,
+      projectDir: projectDirectoryName(project),
       systemId: project.systemId,
       workspacePath: project.workspacePath,
+      sessionWorkspacePath: project.sessionWorkspacePath,
       projectRootPath: projectDirectoryPath(project)
     },
     adapterSnapshot: {
@@ -2026,6 +2453,7 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
       featureStatus,
       ...(featureStatusLabel ? { featureStatusLabel } : {}),
       overallStatus,
+      skipNodeAvailable,
       hookLogRefs,
       watchRefs: normalizeWatchRefs(project, run.watchRefs, makeWatchRefs(featureSlug)),
       currentNodeId,

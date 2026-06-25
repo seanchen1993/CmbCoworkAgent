@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react"
+import { useState, useCallback, useEffect, useMemo, useRef, memo } from "react"
 import {
   Plus,
   Trash2,
@@ -192,11 +192,12 @@ function ThreadStatusIcon({
   return null
 }
 
-export function ThreadListItem({
+function ThreadListItemImpl({
   thread,
   isLoading,
   hasPendingApproval,
   hasPendingUserInput,
+  hasContextReminder,
   scheduledTaskLoading,
   isSelected,
   isEditing,
@@ -217,6 +218,7 @@ export function ThreadListItem({
   isLoading: boolean
   hasPendingApproval: boolean
   hasPendingUserInput: boolean
+  hasContextReminder: boolean
   scheduledTaskLoading: boolean
   isExporting: boolean
   isSelected: boolean
@@ -313,7 +315,11 @@ export function ThreadListItem({
               </div>
             )}
           </div>
-          {isUnread && !isRunning && <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />}
+          {hasContextReminder && !isRunning ? (
+            <span className="size-2 rounded-full bg-status-warning shrink-0" />
+          ) : (
+            isUnread && !isRunning && <span className="size-2 rounded-full bg-blue-500 shrink-0" />
+          )}
           <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
             <span className="absolute right-0 text-[10px] text-muted-foreground transition-opacity group-hover:opacity-0">
               {formatCompactTime(thread.updated_at)}
@@ -365,6 +371,39 @@ export function ThreadListItem({
     </ContextMenu>
   )
 }
+
+type ThreadListItemProps = Parameters<typeof ThreadListItemImpl>[0]
+
+// Re-render a row only when its own rendered data changes. Callback props are
+// intentionally excluded from the comparison: the parent recreates them on every
+// render, but each row's closures always act on its own thread, so their identity
+// is irrelevant. Without this, a single thread's state tick (loading / approval /
+// unread / …) in allThreadStates re-rendered EVERY row in the list.
+function areThreadListItemPropsEqual(
+  prev: ThreadListItemProps,
+  next: ThreadListItemProps
+): boolean {
+  if (
+    prev.thread !== next.thread ||
+    prev.isLoading !== next.isLoading ||
+    prev.hasPendingApproval !== next.hasPendingApproval ||
+    prev.hasPendingUserInput !== next.hasPendingUserInput ||
+    prev.hasContextReminder !== next.hasContextReminder ||
+    prev.scheduledTaskLoading !== next.scheduledTaskLoading ||
+    prev.isExporting !== next.isExporting ||
+    prev.isSelected !== next.isSelected ||
+    prev.isEditing !== next.isEditing ||
+    prev.isUnread !== next.isUnread ||
+    prev.hoverTitle !== next.hoverTitle
+  ) {
+    return false
+  }
+  // editingTitle only affects the row currently being edited.
+  if (next.isEditing && prev.editingTitle !== next.editingTitle) return false
+  return true
+}
+
+export const ThreadListItem = memo(ThreadListItemImpl, areThreadListItemPropsEqual)
 
 export function ThreadSidebar(): React.JSX.Element {
   const {
@@ -426,6 +465,7 @@ export function ThreadSidebar(): React.JSX.Element {
   const [exportingThreadId, setExportingThreadId] = useState<string | null>(null)
   const [projectToDelete, setProjectToDelete] = useState<ThreadProject | null>(null)
   const [projectToRename, setProjectToRename] = useState<ThreadProject | null>(null)
+  const exportingThreadIdRef = useRef<string | null>(null)
   const activeSidebarTab: SidebarTab =
     showHarnessBoardView || mainView === "harness" ? "project" : "chat"
   const {
@@ -769,7 +809,8 @@ export function ThreadSidebar(): React.JSX.Element {
 
   const handleExportThread = useCallback(
     async (thread: Thread): Promise<void> => {
-      if (exportingThreadId) return
+      if (exportingThreadIdRef.current) return
+      exportingThreadIdRef.current = thread.thread_id
       setExportingThreadId(thread.thread_id)
       try {
         const result = await window.api.threads.exportSession(thread.thread_id)
@@ -782,10 +823,13 @@ export function ThreadSidebar(): React.JSX.Element {
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "导出会话失败")
       } finally {
-        setExportingThreadId(null)
+        if (exportingThreadIdRef.current === thread.thread_id) {
+          exportingThreadIdRef.current = null
+          setExportingThreadId(null)
+        }
       }
     },
-    [exportingThreadId]
+    []
   )
 
   const confirmDeleteProject = useCallback(async () => {
@@ -1061,6 +1105,9 @@ export function ThreadSidebar(): React.JSX.Element {
             const unreadCount = project.threads.filter((thread) =>
               unreadIds.has(thread.thread_id)
             ).length
+            const hasContextReminderThread = project.threads.some((thread) =>
+              Boolean(allThreadStates[thread.thread_id]?.contextReminder?.pending)
+            )
             const hasRunningThread = project.threads.some((thread) => {
               const threadState = allThreadStates[thread.thread_id]
               return (
@@ -1068,7 +1115,8 @@ export function ThreadSidebar(): React.JSX.Element {
                 Boolean(
                   threadState?.coordinatorWorkers.some((worker) => worker.status === "running")
                 ) ||
-                Boolean(threadState?.scheduledTaskLoading)
+                Boolean(threadState?.scheduledTaskLoading) ||
+                threadState?.workflowRun?.status === "running"
               )
             })
 
@@ -1113,8 +1161,12 @@ export function ThreadSidebar(): React.JSX.Element {
                               {project.name}
                             </span>
                           </button>
-                          {unreadCount > 0 && (
-                            <span className="size-2 rounded-full bg-blue-500 shrink-0" />
+                          {hasContextReminderThread ? (
+                            <span className="size-2 rounded-full bg-status-warning shrink-0" />
+                          ) : (
+                            unreadCount > 0 && (
+                              <span className="size-2 rounded-full bg-blue-500 shrink-0" />
+                            )
                           )}
                           <span className="relative flex h-6 w-4 shrink-0 items-center justify-end overflow-hidden transition-[width] duration-150 group-hover:w-28 group-focus-within:w-28">
                             <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
@@ -1239,10 +1291,12 @@ export function ThreadSidebar(): React.JSX.Element {
                       )
                       const isLoading =
                         (allStreamLoadingStates[thread.thread_id] ?? false) ||
-                        hasRunningCoordinatorWorker
+                        hasRunningCoordinatorWorker ||
+                        threadState?.workflowRun?.status === "running"
                       const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
                       const hasPendingApproval = Boolean(threadState?.pendingApproval)
                       const hasPendingUserInput = Boolean(threadState?.pendingUserInput)
+                      const hasContextReminder = Boolean(threadState?.contextReminder?.pending)
 
                       return (
                         <ThreadListItem
@@ -1251,6 +1305,7 @@ export function ThreadSidebar(): React.JSX.Element {
                           isLoading={isLoading}
                           hasPendingApproval={hasPendingApproval}
                           hasPendingUserInput={hasPendingUserInput}
+                          hasContextReminder={hasContextReminder}
                           scheduledTaskLoading={scheduledTaskLoading}
                           isExporting={exportingThreadId === thread.thread_id}
                           isSelected={currentThreadId === thread.thread_id}

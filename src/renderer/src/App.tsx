@@ -14,6 +14,7 @@ import { ThreadSidebar } from "@/components/sidebar/ThreadSidebar"
 import { TabbedPanel } from "@/components/tabs"
 import { RightPanel } from "@/components/panels/RightPanel"
 import { WorkerStreamPanel } from "@/components/chat/WorkerStreamPanel"
+import { SubagentStreamPanel } from "@/components/chat/SubagentStreamPanel"
 const KanbanView = lazy(() =>
   import("@/components/kanban").then((m) => ({ default: m.KanbanView }))
 )
@@ -97,12 +98,31 @@ function WorkerSplitHandle({ onDrag }: WorkerSplitHandleProps): React.JSX.Elemen
     (event: React.MouseEvent<HTMLDivElement>) => {
       event.preventDefault()
       startXRef.current = event.clientX
+      let frame: number | null = null
+      let latestDelta = 0
+
+      const flushDrag = (): void => {
+        frame = null
+        onDrag(latestDelta)
+      }
+
+      const scheduleDrag = (delta: number): void => {
+        latestDelta = delta
+        if (frame === null) {
+          frame = window.requestAnimationFrame(flushDrag)
+        }
+      }
 
       const handleMouseMove = (moveEvent: MouseEvent): void => {
-        onDrag(moveEvent.clientX - startXRef.current)
+        scheduleDrag(moveEvent.clientX - startXRef.current)
       }
 
       const handleMouseUp = (): void => {
+        if (frame !== null) {
+          window.cancelAnimationFrame(frame)
+          frame = null
+          onDrag(latestDelta)
+        }
         document.removeEventListener("mousemove", handleMouseMove)
         document.removeEventListener("mouseup", handleMouseUp)
         document.body.style.cursor = ""
@@ -121,7 +141,7 @@ function WorkerSplitHandle({ onDrag }: WorkerSplitHandleProps): React.JSX.Elemen
     <div
       role="separator"
       aria-orientation="vertical"
-      title="拖动调整主对话和 Worker 工具流宽度"
+      title="拖动调整主对话和代理记录宽度"
       onMouseDown={handleMouseDown}
       className="group relative z-20 flex h-full w-5 shrink-0 cursor-col-resize select-none items-center justify-center border-x border-stone-300/70 bg-stone-100/55 shadow-[0_0_18px_rgba(120,113,108,0.12)] backdrop-blur transition-colors hover:border-stone-400/80 hover:bg-stone-200/45 dark:border-stone-700/70 dark:bg-stone-900/35 dark:hover:border-stone-500/80 dark:hover:bg-stone-800/45"
     >
@@ -147,6 +167,7 @@ function App(): React.JSX.Element {
     toggleRightPanel,
     setPendingEvolution,
     workerFocusView,
+    subagentFocusView,
     setShowCustomizeView,
     setEvolutionTab,
     setCloudEvolutionUpdates
@@ -164,6 +185,7 @@ function App(): React.JSX.Element {
       toggleRightPanel: state.toggleRightPanel,
       setPendingEvolution: state.setPendingEvolution,
       workerFocusView: state.workerFocusView,
+      subagentFocusView: state.subagentFocusView,
       setShowCustomizeView: state.setShowCustomizeView,
       setEvolutionTab: state.setEvolutionTab,
       setCloudEvolutionUpdates: state.setCloudEvolutionUpdates
@@ -199,6 +221,15 @@ function App(): React.JSX.Element {
     mainView === "harness" &&
     Boolean(harnessSessionThreadId && workerFocusView?.threadId === harnessSessionThreadId)
   const isWorkerFocusActive = isThreadWorkerFocusActive || isHarnessWorkerFocusActive
+  const isThreadSubagentFocusActive =
+    mainView === "thread" &&
+    Boolean(currentThreadId && subagentFocusView?.threadId === currentThreadId)
+  const isHarnessSubagentFocusActive =
+    mainView === "harness" &&
+    Boolean(harnessSessionThreadId && subagentFocusView?.threadId === harnessSessionThreadId)
+  const isSubagentFocusActive = isThreadSubagentFocusActive || isHarnessSubagentFocusActive
+  const isAgentFocusActive = isWorkerFocusActive || isSubagentFocusActive
+  const isHarnessAgentFocusActive = isHarnessWorkerFocusActive || isHarnessSubagentFocusActive
 
   useEffect(() => {
     if (!workerFocusView?.threadId || !workerFocusView.workerThreadId) return
@@ -459,6 +490,11 @@ function App(): React.JSX.Element {
     handlePreviewExpand()
   }, [activeRightPanelThreadId, handlePreviewExpand, setThreadPendingGitDiff])
 
+  const dismissGitChangeNotice = useCallback(() => {
+    if (!activeRightPanelThreadId) return
+    setThreadPendingGitDiff(activeRightPanelThreadId, false)
+  }, [activeRightPanelThreadId, setThreadPendingGitDiff])
+
   useEffect(() => {
     // Keep right panel behavior predictable: when switching thread or entering thread view,
     // always fall back to workspace mode.
@@ -486,6 +522,13 @@ function App(): React.JSX.Element {
       useAppStore.getState().closeWorkerFocusView()
     }
   }, [harnessSessionThreadId, mainView, workerFocusView?.threadId])
+
+  useEffect(() => {
+    if (mainView !== "harness" || !subagentFocusView?.threadId) return
+    if (!harnessSessionThreadId || subagentFocusView.threadId !== harnessSessionThreadId) {
+      useAppStore.getState().closeSubagentFocusView()
+    }
+  }, [harnessSessionThreadId, mainView, subagentFocusView?.threadId])
 
   useEffect(() => {
     if (mainView === "claudecode") {
@@ -693,7 +736,7 @@ function App(): React.JSX.Element {
             className="flex flex-1 h-9 min-w-0 items-center"
             style={{ marginLeft: "var(--titlebar-inset-left, 0px)" }}
           >
-            {mainView !== "customize" && !isWorkerFocusActive && (
+            {mainView !== "customize" && !isAgentFocusActive && (
               <button
                 type="button"
                 className={`${panelToggleBaseClass} ${
@@ -759,7 +802,7 @@ function App(): React.JSX.Element {
           <div
             className="flex flex-1 h-full items-center justify-end pl-1 gap-1"
           >
-            {showRightPanelModuleControls && !isWorkerFocusActive && (
+            {showRightPanelModuleControls && !isAgentFocusActive && (
               <>
                 <button
                   type="button"
@@ -810,7 +853,7 @@ function App(): React.JSX.Element {
                 </button>
               </>
             )}
-            {mainView !== "customize" && !isWorkerFocusActive && (
+            {mainView !== "customize" && !isAgentFocusActive && (
               <button
                 type="button"
                 className={`${panelToggleBaseClass} ${
@@ -853,7 +896,7 @@ function App(): React.JSX.Element {
         ) : mainView !== "claudecode" && mainView !== "dashboard" && mainView !== "harness" ? (
           <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
             {/* Left Sidebar */}
-            {!sidebarCollapsed && !isWorkerFocusActive && (
+            {!sidebarCollapsed && !isAgentFocusActive && (
               <>
                 <div style={{ width: leftWidth }} className="shrink-0">
                   <ThreadSidebar />
@@ -871,7 +914,7 @@ function App(): React.JSX.Element {
             ) : (
               <>
                 {/* Center - Content Panel */}
-                {isWorkerFocusActive ? (
+                {isAgentFocusActive ? (
                   <main
                     ref={workerSplitRef}
                     className="relative flex flex-1 min-w-0 overflow-hidden bg-grid-subtle"
@@ -886,6 +929,7 @@ function App(): React.JSX.Element {
                           showTabBar={false}
                           hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
                           onRequestOpenGitPanel={selectGitModule}
+                          onDismissGitChangeNotice={dismissGitChangeNotice}
                           onThreadGitStatusChange={handleThreadGitStatusChange}
                         />
                       ) : (
@@ -896,7 +940,7 @@ function App(): React.JSX.Element {
                     </section>
                     <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
                     <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                      <WorkerStreamPanel />
+                      {isWorkerFocusActive ? <WorkerStreamPanel /> : <SubagentStreamPanel />}
                     </section>
                   </main>
                 ) : !previewFullscreen && (
@@ -907,6 +951,7 @@ function App(): React.JSX.Element {
                         showTabBar={false}
                         hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
                         onRequestOpenGitPanel={selectGitModule}
+                        onDismissGitChangeNotice={dismissGitChangeNotice}
                         onThreadGitStatusChange={handleThreadGitStatusChange}
                       />
                     ) : (
@@ -919,7 +964,7 @@ function App(): React.JSX.Element {
               </>
             )}
 
-            {mainView === "thread" && !rightPanelCollapsed && !isWorkerFocusActive && (
+            {mainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && (
               <>
                 {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
                 {/* Right Panel - floating style */}
@@ -961,10 +1006,10 @@ function App(): React.JSX.Element {
         {/* Harness Board 面板 */}
         {mainView === "harness" && (
           <div
-            ref={isHarnessWorkerFocusActive ? workerSplitRef : undefined}
+            ref={isHarnessAgentFocusActive ? workerSplitRef : undefined}
             className="relative flex flex-1 overflow-hidden bg-grid-subtle"
           >
-            {!sidebarCollapsed && !isHarnessWorkerFocusActive && (
+            {!sidebarCollapsed && !isHarnessAgentFocusActive && (
               <>
                 <div style={{ width: leftWidth }} className="shrink-0">
                   <ThreadSidebar />
@@ -974,11 +1019,11 @@ function App(): React.JSX.Element {
             )}
             <main
               key="harness-main"
-              style={isHarnessWorkerFocusActive ? { width: `${workerSplitLeftPercent}%` } : undefined}
+              style={isHarnessAgentFocusActive ? { width: `${workerSplitLeftPercent}%` } : undefined}
               className={
-                previewFullscreen && harnessSessionThreadId && !rightPanelCollapsed && !isHarnessWorkerFocusActive
+                previewFullscreen && harnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive
                   ? "hidden"
-                  : isHarnessWorkerFocusActive
+                  : isHarnessAgentFocusActive
                     ? "relative flex min-w-0 flex-col overflow-hidden"
                     : "relative flex flex-1 flex-col min-w-0 overflow-hidden"
               }
@@ -987,20 +1032,21 @@ function App(): React.JSX.Element {
                 <HarnessBoardView
                   hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
                   onRequestOpenGitPanel={selectGitModule}
+                  onDismissGitChangeNotice={dismissGitChangeNotice}
                   onThreadGitStatusChange={handleThreadGitStatusChange}
                   onActiveSessionThreadChange={handleHarnessActiveSessionThreadChange}
                 />
               </Suspense>
             </main>
-            {isHarnessWorkerFocusActive && (
+            {isHarnessAgentFocusActive && (
               <>
                 <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
                 <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                  <WorkerStreamPanel />
+                  {isHarnessWorkerFocusActive ? <WorkerStreamPanel /> : <SubagentStreamPanel />}
                 </section>
               </>
             )}
-            {harnessSessionThreadId && !rightPanelCollapsed && !isHarnessWorkerFocusActive && (
+            {harnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive && (
               <>
                 {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
                 <div

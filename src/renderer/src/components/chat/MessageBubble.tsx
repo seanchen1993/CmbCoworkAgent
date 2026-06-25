@@ -33,6 +33,7 @@ import {
 import { getWorkerToolResultKey, getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import { DurationShow } from "./DurationShow"
 import { isGoalClearAlias } from "../../../../shared/goal-slash"
+import { isResultlessCompletedToolCall } from "@/lib/tool-call-display-state"
 
 /**
  * Strip the trailing `<CMBDEVCLAW-SKILL-USE-V1>…</…>` block when present.
@@ -542,6 +543,7 @@ interface MessageBubbleProps {
   toolResults?: Map<string, ToolResultInfo>
   toolCallStates?: Map<string, ToolCallState>
   pendingApproval?: HITLRequest | null
+  autoApproveGitPush?: boolean
   onApprovalDecision?: (
     decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
   ) => void
@@ -554,7 +556,7 @@ interface MessageBubbleProps {
   userSendTimeLabel?: string | null
 }
 
-export function MessageBubble({
+function MessageBubbleImpl({
   message,
   previousMessage,
   isStreaming = true,
@@ -562,6 +564,7 @@ export function MessageBubble({
   toolResults,
   toolCallStates,
   pendingApproval,
+  autoApproveGitPush = false,
   onApprovalDecision,
   onEditUserMessage,
   onSetGoalFromMessage,
@@ -1026,6 +1029,8 @@ export function MessageBubble({
                     ? result.is_error
                       ? "failed"
                       : "completed"
+                    : isResultlessCompletedToolCall(resolvedToolCall)
+                      ? "completed"
                     : isStreaming
                       ? "running"
                       : "interrupted")
@@ -1043,9 +1048,12 @@ export function MessageBubble({
                 const isBatch = (pendingApproval?.pendingCount ?? 1) > 1
                 // git commit is approved through the dedicated task-card dialog, so the
                 // inline approve/reject buttons are hidden to avoid a second (card-less) path.
-                const isGitCommitApproval =
-                  (pendingApproval as unknown as { operation?: string } | null)?.operation ===
-                  "git_commit"
+                const pendingOperation = (pendingApproval as unknown as {
+                  operation?: string
+                } | null)?.operation
+                const isGitCommitApproval = pendingOperation === "git_commit"
+                const isAutoGitPushApproval =
+                  autoApproveGitPush && pendingOperation === "git_push"
                 return (
                   <ToolCallRenderer
                     key={`${toolId}-${needsApproval ? "pending" : "done"}`}
@@ -1054,7 +1062,7 @@ export function MessageBubble({
                     isError={result?.is_error}
                     status={inferredStatus}
                     needsApproval={needsApproval}
-                    showApprovalButtons={!isBatch && !isGitCommitApproval}
+                    showApprovalButtons={!isBatch && !isGitCommitApproval && !isAutoGitPushApproval}
                     onApprovalDecision={onApprovalDecision}
                     approvalTypes={
                       (
@@ -1193,3 +1201,9 @@ export function MessageBubble({
     </div>
   )
 }
+
+// Memoized so off-screen/unchanged bubbles skip React reconciliation when the
+// parent re-renders (which happens on every streaming token). The container
+// passes stable, memoized props (message, toolResults, toolCallStates and
+// useCallback handlers), so the default shallow comparison is effective.
+export const MessageBubble = React.memo(MessageBubbleImpl)
