@@ -2584,6 +2584,7 @@ Steps should describe the METHOD (how to approach the problem class), not the SO
 If the conversation is narrow, lift it one level: "how we fixed X" → "systematic approach to X-type problems".
 
 Other rules:
+- Prefer Chinese for generated skill name, description, rationale, headings, and SKILL.md prose when practical; keep code identifiers, commands, file paths, package names, and API names in their original language.
 - description is the MOST important field — it controls when the skill is injected in future sessions
 - Output ONLY valid JSON, no other text`
 

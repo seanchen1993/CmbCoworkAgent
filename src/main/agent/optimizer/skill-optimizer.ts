@@ -139,6 +139,7 @@ Rules:
 - If no skill is worth creating, output an empty array: []
 - Maximum 3 proposals per analysis.
 - Skills should be specific and actionable, not generic advice.
+- Prefer Chinese for generated skill name, description, rationale, headings, and SKILL.md prose when practical; keep code identifiers, commands, file paths, package names, and API names in their original language.
 - The description field (trigger) is the MOST important — make it precise.
 - If the analyzed traces already used an existing skill and the improvement belongs in that skill, return action="patch" for that exact skillId. Nested skills use slash-separated relative ids such as "office/pdf".
 - Only return action="create" when a new skill is genuinely needed and no used skill should be updated.`
