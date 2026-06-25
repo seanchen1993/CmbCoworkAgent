@@ -7,6 +7,7 @@ import { v4 as uuid } from "uuid"
 import { getOpenworkDir, getPlugins, getUserInfo } from "../storage"
 import { deriveUpperOrgLevelsFromPath } from "../org-levels"
 import type { PluginMetadata } from "../types"
+import { normalizeHarnessAgentmdLoadStatus } from "../../shared/harness-board-types"
 import type {
   HarnessAdapterRegistryItem,
   HarnessAdapterSnapshot,
@@ -23,6 +24,7 @@ import type {
   HarnessFeatureCreateResult,
   HarnessFeatureServiceUnitBinding,
   HarnessFeatureStatus,
+  HarnessAgentmdLoadStatusItem,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
   HarnessProjectConstraintSyncResult,
@@ -2343,6 +2345,7 @@ export interface HarnessFeatureAgentContext {
   systemPromptInject?: string
   harnessAgentsPrompt?: string
   sessionContextInjectWarning?: string
+  agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
   pluginOutputDir?: string
   systemId?: string
   pluginRoot?: string
@@ -2361,6 +2364,7 @@ function isHarnessSessionContextOk(value: unknown): boolean {
 interface HarnessSessionContextInjectResult {
   prompt?: string
   warning?: string
+  agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
 }
 
 function formatSessionContextInjectWarning(detail: string): string {
@@ -2399,6 +2403,7 @@ function readHarnessFeatureSessionContextAgentPrompt(
       })
       return { warning: formatSessionContextInjectWarning(message) }
     }
+    const agentmdLoadStatus = normalizeHarnessAgentmdLoadStatus(result.agentmdLoadStatus)
     const agentmdPrompt = normalizeText(result.agentmdPrompt).trim()
     if (!agentmdPrompt) {
       const detail = message || "agentmdPrompt 为空"
@@ -2414,9 +2419,12 @@ function readHarnessFeatureSessionContextAgentPrompt(
         chars: agentmdPrompt.length,
         maxChars: HARNESS_SESSION_CONTEXT_MAX_CHARS
       })
-      return { prompt: agentmdPrompt.slice(0, HARNESS_SESSION_CONTEXT_MAX_CHARS) }
+      return {
+        prompt: agentmdPrompt.slice(0, HARNESS_SESSION_CONTEXT_MAX_CHARS),
+        agentmdLoadStatus
+      }
     }
-    return { prompt: agentmdPrompt }
+    return { prompt: agentmdPrompt, agentmdLoadStatus }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     console.error("[HarnessBoard] session_context_inject failed, fallback to CMBDevClaw AGENTS.md:", {
@@ -2470,6 +2478,9 @@ export function buildHarnessFeatureAgentContext(
     ...(harnessAgentsPrompt ? { harnessAgentsPrompt } : {}),
     ...(sessionContextInjectResult?.warning
       ? { sessionContextInjectWarning: sessionContextInjectResult.warning }
+      : {}),
+    ...(sessionContextInjectResult?.agentmdLoadStatus
+      ? { agentmdLoadStatus: sessionContextInjectResult.agentmdLoadStatus }
       : {}),
     pluginOutputDir: render(pluginOutputDir, "run"),
     systemId: systemId || undefined,

@@ -23,6 +23,7 @@ import {
 } from "./thread-state-helpers"
 
 export type { CoordinatorWorkerView, SubagentInternalLogEntry } from "./thread-state-helpers"
+export type { HarnessAgentmdLoadStatusItem } from "../../../shared/harness-board-types"
 import type {
   Message,
   Todo,
@@ -40,6 +41,10 @@ import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
 import { formatAutoCommitText } from "../../../shared/auto-commit-format"
+import {
+  normalizeHarnessAgentmdLoadStatus,
+  type HarnessAgentmdLoadStatusItem
+} from "../../../shared/harness-board-types"
 import {
   isInternalGoalPromptMessage,
   shouldSuppressCheckpointApprovalRestore,
@@ -434,6 +439,7 @@ export interface ThreadState {
   fileContents: Record<string, string>
   tokenUsage: TokenUsage | null
   contextReminder: ContextReminderState
+  harnessAgentmdLoadStatus: HarnessAgentmdLoadStatusState | null
   draftInput: string
   harnessNextActionDialogTips: string | null
   /**
@@ -447,6 +453,11 @@ export interface ThreadState {
   scheduledTaskId: string | null
   routingResult: RoutingResultState | null
   modelRetry: ModelRetryState | null
+}
+
+export interface HarnessAgentmdLoadStatusState {
+  items: HarnessAgentmdLoadStatusItem[]
+  createdAt: number
 }
 
 function debugMessageContentLength(content: Message["content"] | undefined): number {
@@ -576,6 +587,7 @@ const createDefaultThreadState = (): ThreadState => ({
   fileContents: {},
   tokenUsage: null,
   contextReminder: createDefaultContextReminderState(),
+  harnessAgentmdLoadStatus: null,
   draftInput: "",
   harnessNextActionDialogTips: null,
   draftSkill: null,
@@ -983,6 +995,7 @@ interface CustomEventData {
   messages?: LiveStreamMessage[]
   assistantMessage?: LiveStreamMessage
   result?: AgentAutoCommitResult
+  agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
 }
 
 // Component that holds a stream and notifies subscribers
@@ -2435,7 +2448,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           if (typeof data.message === "string" && data.message.trim()) {
             toast.warning(data.message)
           }
+          updateThreadState(threadId, () => ({ harnessAgentmdLoadStatus: null }))
           break
+        case "harness_agentmd_load_status": {
+          const items = normalizeHarnessAgentmdLoadStatus(data.agentmdLoadStatus)
+          const createdAt =
+            typeof data.createdAt === "number" && Number.isFinite(data.createdAt)
+              ? data.createdAt
+              : Date.now()
+          updateThreadState(threadId, () => ({
+            harnessAgentmdLoadStatus: items.length > 0 ? { items, createdAt } : null
+          }))
+          break
+        }
         case "goal_notice":
           if (typeof data.message === "string" && data.message.trim()) {
             const message = formatGoalEventMessage(data.message)

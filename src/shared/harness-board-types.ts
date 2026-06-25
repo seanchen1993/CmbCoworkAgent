@@ -89,11 +89,48 @@ export interface HarnessServiceUnitMapping {
 
 export type HarnessSessionContextInjectionSource = "cmbdevclaw" | "plugin"
 
+export interface HarnessAgentmdLoadStatusItem {
+  serviceUnitId: string
+  path: string
+  loaded: boolean
+  source: string
+  message: string
+}
+
 export interface HarnessFeatureServiceUnitBinding {
   projectId: string
   featureId: string
   selectedServiceUnitMappings: HarnessServiceUnitMapping[]
   sessionContextInjectionSource: HarnessSessionContextInjectionSource
+}
+
+function normalizeHarnessText(value: unknown): string {
+  return typeof value === "string" ? value : ""
+}
+
+function isHarnessPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
+}
+
+export function normalizeHarnessAgentmdLoadStatus(
+  value: unknown
+): HarnessAgentmdLoadStatusItem[] {
+  if (!Array.isArray(value)) return []
+  const status: HarnessAgentmdLoadStatusItem[] = []
+  for (const item of value) {
+    if (!isHarnessPlainObject(item)) continue
+    const serviceUnitId = normalizeHarnessText(item.serviceUnitId).trim()
+    const path = normalizeHarnessText(item.path).trim()
+    if (!serviceUnitId && !path) continue
+    status.push({
+      serviceUnitId: serviceUnitId || "(unknown)",
+      path,
+      loaded: item.loaded === true,
+      source: normalizeHarnessText(item.source).trim(),
+      message: normalizeHarnessText(item.message).trim()
+    })
+  }
+  return status
 }
 
 export interface HarnessProjectCreatorMetadata {
