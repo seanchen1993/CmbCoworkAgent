@@ -6383,8 +6383,11 @@ export function HarnessBoardView({
     (projectId: string): void => {
       setSelectedFeature(null)
       setSelectedProjectId(projectId)
-      if (!detailsByProjectId[projectId] && !loadingDetailIds.has(projectId)) {
-        void loadProjectDetail(projectId)
+      if (!loadingDetailIds.has(projectId)) {
+        void loadProjectDetail(
+          projectId,
+          detailsByProjectId[projectId] ? { showLoading: false, reportError: false } : {}
+        )
       }
     },
     [detailsByProjectId, loadProjectDetail, loadingDetailIds]
@@ -6436,9 +6439,13 @@ export function HarnessBoardView({
   }, [])
 
   const handleBackToProject = useCallback((): void => {
+    const projectId = selectedFeatureRef.current?.projectId ?? selectedProjectIdRef.current
     setSelectedFeature(null)
     setIsViewingSession(false)
-  }, [])
+    if (projectId) {
+      void loadProjectDetail(projectId, { showLoading: false, reportError: false })
+    }
+  }, [loadProjectDetail])
 
   const projectSidebarGroups = useMemo<ProjectFeatureSessionGroup[]>(() => {
     const groups: ProjectFeatureSessionGroup[] = []
