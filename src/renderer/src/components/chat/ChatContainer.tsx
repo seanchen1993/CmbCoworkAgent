@@ -2936,16 +2936,31 @@ export function ChatContainer({
     userInputDialogLayout?.top
   ])
 
+
   //  滚动到底部
   // 1.初始化
   // 2.切换thread
   useEffect(() => {
-    if (historyLoading) return
     const viewport = getViewport()
     if (viewport) {
       viewport.scrollTop = viewport.scrollHeight
     }
   }, [getViewport, historyLoading, threadId])
+
+
+  // stream 输出的过程中，如果用户正处于底部，那么继续保持底部
+  useEffect(() => {
+      const viewport = getViewport()
+      if (!viewport) return
+      const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+      if (bottomDistance <= 200) {
+        const scrollToBottom = (): void => {
+          viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+        }
+        scrollToBottom()
+        return
+      }
+  }, [streamData, isLoading])
 
   // Focus input on mount
   useEffect(() => {
