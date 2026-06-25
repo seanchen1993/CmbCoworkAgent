@@ -2633,7 +2633,7 @@ function FeatureCreateDialog({
                           </span>
                         </TooltipTrigger>
                         <TooltipContent side="top" className="z-[70] max-w-72">
-                          当前插件支持自动同步该发布单元的 AGENTS.md 文件
+                          插件支持加载该发布单元的系统约束
                         </TooltipContent>
                       </Tooltip>
                     )}
@@ -2652,8 +2652,8 @@ function FeatureCreateDialog({
           <div className="min-w-0">
             <div className="truncate text-sm font-medium text-foreground">
               {pluginServiceUnitContextEnabled
-                ? "由插件注入 AGENTS.md 以及知识库"
-                : "由 CMBDevClaw 注入 AGENTS.md"}
+                ? "由插件注入系统约束"
+                : "由 CMBDevClaw 注入系统约束"}
             </div>
           </div>
           <button
@@ -2714,7 +2714,7 @@ function FeatureCreateDialog({
             <div className="flex min-w-0 items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs leading-5 text-status-warning">
               <AlertCircle className="mt-0.5 size-4 shrink-0" />
               <span className="min-w-0 [overflow-wrap:anywhere]">
-                未选择发布单元，插件无法下载对应的 AGENTS.md/将发布单元代码库路径作为会话工作区
+                选择要开发的发布单元 以实现在会话中开发对应代码库，并加载对应的系统约束
               </span>
             </div>
           )}
