@@ -415,7 +415,7 @@
   color: #333333;
   font-family: "SF Mono", ui-monospace, "Cascadia Code", "Fira Code", monospace;
   font-size: 0.86em;
-  white-space: break-spaces;
+  white-space: normal !important;
 }
 
 .streaming-markdown-code-block {
