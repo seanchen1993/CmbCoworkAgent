@@ -92,6 +92,7 @@ import type {
 } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator } from "./ChatScrollNavigator"
+import { ChatSearchOverlay } from "./ChatSearchOverlay"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
@@ -1695,6 +1696,8 @@ export function ChatContainer({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const chatRootRef = useRef<HTMLDivElement>(null)
+  const [searchOpen, setSearchOpen] = useState(false)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isComposingRef = useRef(false)
   const submitInFlightRef = useRef<Set<string>>(new Set())
@@ -2149,9 +2152,6 @@ export function ChatContainer({
     : null
   const handleOpenHookLogBucket = useCallback((turnId: string): void => {
     setOpenHookLogBucketId(turnId)
-  }, [])
-  const handleScrollToQuestion = useCallback((): void => {
-    isAtBottomRef.current = false
   }, [])
   const handleOpenSandboxSettings = useCallback((): void => {
     setShowCustomizeView(true, "sandbox")
@@ -2915,6 +2915,16 @@ export function ChatContainer({
     return filterCoordinatorNoiseMessages(cleanedMessages)
   }, [threadMessages, streamData.liveMessages])
 
+  // Key that drives in-session search re-matching. Message count and isLoading
+  // stay constant while tokens append to the SAME streaming message, so fold in
+  // the last message's text length — otherwise search misses text that is still
+  // being streamed until the run ends.
+  const searchRecomputeKey = useMemo(() => {
+    const last = displayMessages[displayMessages.length - 1]
+    const lastTextLength = last ? getMessageText(last.content).length : 0
+    return `${displayMessages.length}:${isLoading}:${lastTextLength}`
+  }, [displayMessages, isLoading])
+
   const detachedHookLogBuckets = useMemo(() => {
     const userMessageIds = new Set(
       displayMessages.filter((message) => message.role === "user").map((message) => message.id)
@@ -3043,6 +3053,23 @@ export function ChatContainer({
     return scrollRef.current?.querySelector(
       "[data-radix-scroll-area-viewport]"
     ) as HTMLDivElement | null
+  }, [])
+
+  // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
+  // fires regardless of where focus is — a root-scoped listener missed the common
+  // case where focus sits on <body> after clicking the transcript. The visibility
+  // guard (offsetParent) means a backgrounded panel in a split view stays inert;
+  // only one ChatContainer is mounted per panel (keyed + conditionally rendered).
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (!((event.ctrlKey || event.metaKey) && (event.key === "f" || event.key === "F"))) return
+      const root = chatRootRef.current
+      if (!root || root.offsetParent === null) return
+      event.preventDefault()
+      setSearchOpen(true)
+    }
+    window.addEventListener("keydown", handleKeyDown, true)
+    return () => window.removeEventListener("keydown", handleKeyDown, true)
   }, [])
 
   useEffect(() => {
@@ -5043,7 +5070,15 @@ export function ChatContainer({
   )
 
   return (
-    <div className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
+    <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
+      {/* In-session keyword search (Ctrl/Cmd+F) */}
+      <ChatSearchOverlay
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        getViewport={getViewport}
+        recomputeKey={searchRecomputeKey}
+      />
+
       {/* Skill creation confirmation dialog */}
       <SkillCreateConfirmDialog
         request={skillConfirmRequest}
@@ -5063,7 +5098,7 @@ export function ChatContainer({
           <>
             <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
               <div
-                className={cn("p-4", reserveRightSpace && "md:pr-20")}
+                className={cn("p-4", reserveRightSpace && "md:pr-[20px]")}
                 style={
                   userInputScrollPadding
                     ? { paddingBottom: `${userInputScrollPadding}px` }
@@ -5521,7 +5556,7 @@ export function ChatContainer({
               className={cn(
                 "px-4 pb-4",
                 goalUi.goal ? "pt-1" : "pt-4",
-                reserveRightSpace && "md:pr-20"
+                reserveRightSpace && "md:pr-[20px]"
               )}
             >
               {showGitChangeNotice && (
