@@ -446,8 +446,6 @@ function testStripBlockedToolDocs(): void {
 - edit_file: edit a file in the filesystem
 - glob: find files matching a pattern
 - grep: search for literal text
-- Browser strategy: for browser tasks, first follow any matching enabled skill; only if no relevant skill is available, use browser_playwright.
-- browser_playwright: built-in browser automation tool
 
 ## Execute Tool \`execute\`
 
@@ -460,24 +458,6 @@ You have access to an execute tool.
   assert(!ro.includes("- edit_file:"), "read_only strips the edit_file doc line")
   assert(ro.includes("- read_file:") && ro.includes("- grep:"), "read_only keeps read tools")
   assert(ro.includes("## Execute Tool"), "read_only keeps the execute section (read-only shell)")
-  // browser NOT blocked here → its doc + the "Browser strategy" guidance stay.
-  assert(
-    ro.includes("- browser_playwright:") && ro.includes("Browser strategy"),
-    "read_only (browser not blocked) keeps browser docs"
-  )
-  // When browser_playwright IS blocked, BOTH its `- tool:` line AND the
-  // "Browser strategy" guidance line (which names browser_playwright but isn't a
-  // tool entry) must be removed.
-  const noBrowser = stripBlockedToolDocs(
-    prompt,
-    new Set(["write_file", "edit_file", "browser_playwright"])
-  ) as string
-  assert(!noBrowser.includes("- browser_playwright:"), "blocking browser strips its doc line")
-  assert(
-    !noBrowser.includes("Browser strategy"),
-    "blocking browser strips the Browser strategy line"
-  )
-  assert(noBrowser.includes("- read_file:"), "blocking browser keeps unrelated read tools")
   // no shell: blocked includes execute → also remove the execute section + line.
   const none = stripBlockedToolDocs(
     prompt,
@@ -497,13 +477,12 @@ You have access to an execute tool.
 
 function testCoordinatorReadOnlyKeepsExecute(): void {
   // Coordinator read_only worker now KEEPS execute (gated read-only per command at
-  // runtime) + task_output for results; only writes/deferred/browser are blocked.
+  // runtime) + task_output for results; only writes/deferred execution are blocked.
   // verify keeps execute (full); explicit registry mode is unaffected.
   const ro = blockedToolNamesForAccess({ workload: "read_only" })
   assert(!ro.has("execute"), "read_only worker keeps execute (gated read-only)")
   assert(!ro.has("task_output"), "read_only worker keeps task_output for command results")
   assert(ro.has("write_file") && ro.has("edit_file"), "read_only still blocks direct writes")
-  assert(ro.has("browser_playwright"), "read_only still blocks browser automation")
   const vf = blockedToolNamesForAccess({ workload: "verify" })
   assert(!vf.has("execute"), "verify worker keeps execute (full shell)")
   assert(vf.has("write_file"), "verify worker still blocks writes")
@@ -691,9 +670,9 @@ function testLevel2MemoryInjection(): void {
 
 function testRegistryAgentBlockedTools(): void {
   // Registry agents are subagents, not orchestrators: NONE of them get ad-hoc
-  // code-exec or orchestration meta tools. read_only/none ALSO drop browser + the
+  // code-exec or orchestration meta tools. read_only/none ALSO drop the
   // deferred-execution bridge (invoke_deferred_tool can run saved code / deferred
-  // MCP tools); verify/write keep browser + bridge. Eager MCP is kept for all.
+  // MCP tools); verify/write keep the bridge. Eager MCP is kept for all.
   const ro = registryAgentBlockedTools(["write_file", "edit_file"], "read_only")
   for (const t of [
     "write_file",
@@ -702,7 +681,6 @@ function testRegistryAgentBlockedTools(): void {
     "save_code_exec_tool",
     "manage_scheduler",
     "manage_skill",
-    "browser_playwright",
     "invoke_deferred_tool",
     "search_tool",
     "inspect_tool"
@@ -711,14 +689,13 @@ function testRegistryAgentBlockedTools(): void {
   }
   assert(!ro.has("execute"), "read_only keeps execute (command-gated read-only)")
 
-  // none: no shell at all, plus no deferred-execution bridge AND no browser.
+  // none: no shell at all, plus no deferred-execution bridge.
   const none = registryAgentBlockedTools([], "none")
   assert(
     none.has("execute") &&
       none.has("task_output") &&
-      none.has("invoke_deferred_tool") &&
-      none.has("browser_playwright"),
-    "none blocks execute/task_output + deferred bridge + browser"
+      none.has("invoke_deferred_tool"),
+    "none blocks execute/task_output + deferred bridge"
   )
 
   const vf = registryAgentBlockedTools(["write_file", "edit_file"], "full") // verify-like
@@ -726,7 +703,6 @@ function testRegistryAgentBlockedTools(): void {
     vf.has("code_exec") && vf.has("manage_scheduler") && vf.has("manage_skill"),
     "verify blocks code-exec + orchestration meta tools"
   )
-  assert(!vf.has("browser_playwright"), "verify keeps browser (UI checks)")
   assert(!vf.has("execute"), "verify keeps execute (full shell)")
   assert(
     !vf.has("invoke_deferred_tool") && !vf.has("search_tool") && !vf.has("inspect_tool"),
@@ -739,8 +715,8 @@ function testRegistryAgentBlockedTools(): void {
     "even a write subagent blocks code-exec + orchestration meta tools"
   )
   assert(
-    !wr.has("write_file") && !wr.has("browser_playwright") && !wr.has("invoke_deferred_tool"),
-    "write subagent keeps write_file + browser + deferred bridge"
+    !wr.has("write_file") && !wr.has("invoke_deferred_tool"),
+    "write subagent keeps write_file + deferred bridge"
   )
 }
 
@@ -1733,14 +1709,11 @@ function testStripBlockedToolDocsHandlesObject(): void {
   // only stripped string content → silent no-op on arrays (same leak, other shape).
   const arr = new SystemMessage({
     content: [
-      { type: "text", text: "Base.\n- browser_playwright: open\n- Browser strategy: prefer it" },
+      { type: "text", text: "Base.\n- write_file: write\n- edit_file: edit" },
       { type: "text", text: `${content}` }
     ]
   } as never)
-  const arrOut = stripBlockedToolDocs(
-    arr,
-    new Set(["write_file", "edit_file", "execute", "browser_playwright"])
-  )
+  const arrOut = stripBlockedToolDocs(arr, new Set(["write_file", "edit_file", "execute"]))
   assert(
     arrOut instanceof SystemMessage,
     "array content: returns a SystemMessage (prototype preserved)"
@@ -1751,10 +1724,6 @@ function testStripBlockedToolDocsHandlesObject(): void {
       !arrText.includes("- write_file:") &&
       !arrText.includes("- edit_file:"),
     "array content: blocked docs + execute section removed across blocks"
-  )
-  assert(
-    !arrText.includes("browser_playwright") && !arrText.includes("Browser strategy:"),
-    "array content: browser tool doc + strategy line removed"
   )
   assert(arrText.includes("- read_file:"), "array content: allowed tool doc kept")
 
@@ -1828,14 +1797,10 @@ function testYamlCommentsDoNotWidenPolicy(): void {
 }
 
 function testDisallowedToolsCoversNonFsTools(): void {
-  // disallowedTools must be able to name NON-fs tools (browser_playwright, MCP
-  // bridge, memory, code_exec) — previously they normalized to null and were
+  // disallowedTools must be able to name NON-fs tools (MCP bridge, memory,
+  // code_exec) — previously they normalized to null and were
   // silently dropped, so a user "denylist" was a no-op. Genuinely unknown names
   // still drop to null (caller warns).
-  assert(
-    normalizeToolName("browser_playwright") === "browser_playwright",
-    "browser_playwright is recognized (so a denylist can name it)"
-  )
   assert(normalizeToolName("memory_search") === "memory_search", "memory_search recognized")
   assert(normalizeToolName("code_exec") === "code_exec", "code_exec recognized")
   assert(
@@ -1845,17 +1810,17 @@ function testDisallowedToolsCoversNonFsTools(): void {
   assert(normalizeToolName("NotebookEdit") === null, "genuinely unknown name still null (warns)")
 
   const ws = makeWorkspace({
-    // a write agent that explicitly denies browser + a deferred/exec tool
-    "noweb.md": `---\nname: noweb\ndescription: x\ndisallowedTools: browser_playwright, code_exec\n---\nbody`
+    // a write agent that explicitly denies a deferred/exec tool
+    "noweb.md": `---\nname: noweb\ndescription: x\ndisallowedTools: memory_search, code_exec\n---\nbody`
   })
   try {
     const noweb = loadAgentProfiles(ws).find((p) => p.name === "noweb")!
     assert(
-      noweb.disallowedTools.includes("browser_playwright") &&
+      noweb.disallowedTools.includes("memory_search") &&
         noweb.disallowedTools.includes("code_exec"),
       "disallowedTools now actually carries the non-fs tool names (not silently dropped)"
     )
-    assert(noweb.shellAccess === "full", "denying browser/code_exec doesn't touch shellAccess")
+    assert(noweb.shellAccess === "full", "denying memory/code_exec doesn't touch shellAccess")
   } finally {
     rmSync(ws, { recursive: true, force: true })
   }
@@ -1863,8 +1828,8 @@ function testDisallowedToolsCoversNonFsTools(): void {
 
 function testAllowlistBlocksNonFsSideEffectTools(): void {
   // A `tools:` allowlist now also excludes fixed non-fs SIDE-EFFECT tools
-  // (browser/code_exec/deferred bridge/orchestration) not listed — so a
-  // `tools: Read, Bash` no longer silently retains browser + the deferred bridge.
+  // (code_exec/deferred bridge/orchestration) not listed — so a `tools: Read,
+  // Bash` no longer silently retains the deferred bridge.
   // Read-only memory + eager MCP are intentionally NOT force-blocked by allowlist.
   const ws = makeWorkspace({
     "rb.md": `---\nname: rb\ntools: Read, Bash\n---\nbody`
@@ -1873,7 +1838,6 @@ function testAllowlistBlocksNonFsSideEffectTools(): void {
     const rb = loadAgentProfiles(ws).find((p) => p.name === "rb")!
     assert(rb.shellAccess === "full", "Bash in allowlist → full shell")
     for (const t of [
-      "browser_playwright",
       "invoke_deferred_tool",
       "search_tool",
       "inspect_tool",

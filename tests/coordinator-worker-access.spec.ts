@@ -375,7 +375,6 @@ async function testConstrainedWorkerFinalToolSurface(): Promise<void> {
   assertNoTool(readOnlyTools, "inspect_tool", "read_only final tools")
   assertNoTool(readOnlyTools, "invoke_deferred_tool", "read_only final tools")
   assertNoTool(readOnlyTools, "code_exec", "read_only final tools")
-  assertNoTool(readOnlyTools, "browser_playwright", "read_only final tools")
   // execute is KEPT for read-only final tools (gated read-only per command).
   assertHasTool(readOnlyTools, "execute", "read_only final tools")
   assertHasTool(readOnlyTools, "read_file", "read_only final tools")
