@@ -30,7 +30,7 @@ import {
   SkipForward,
   Trash2,
   Workflow,
-  Zap
+  Zap, MoveRight
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -115,7 +115,7 @@ const harnessPageHeaderContentClassName =
   "flex h-full items-start justify-between gap-4"
 const harnessPageHeaderActionsClassName = "flex shrink-0 items-center gap-2"
 const harnessSurfaceClassName =
-  "rounded-2xl border border-border/80 bg-background-elevated/80 shadow backdrop-blur"
+  "rounded-xl border border-border/80 bg-background-elevated/80 shadow-xs backdrop-blur"
 const harnessKickerClassName =
   "text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground"
 
@@ -257,6 +257,15 @@ interface HarnessProjectPhaseStep {
   tone: HarnessProjectPhaseTone
 }
 
+interface HarnessProjectStageStatusItem {
+  id: string
+  title: string
+  description: string
+  icon: ReactNode
+  status: HarnessStatus
+  tone: HarnessProjectPhaseTone
+}
+
 interface SelectedFeature {
   projectId: string
   slug: string
@@ -335,53 +344,6 @@ interface WorkspaceChangeState {
   changedFilesTotal: number
   omittedFileCount: number
   error?: string
-}
-
-const HARNESS_PROJECT_PHASES_MOCK: readonly HarnessProjectPhaseStep[] = [
-  {
-    id: "requirements",
-    order: 1,
-    title: "需求分析",
-    statusLabel: "已完成",
-    tone: "done"
-  },
-  {
-    id: "design",
-    order: 2,
-    title: "分析设计",
-    statusLabel: "已完成",
-    tone: "done"
-  },
-  {
-    id: "development",
-    order: 3,
-    title: "开发",
-    statusLabel: "进行中",
-    tone: "current"
-  },
-  {
-    id: "testing",
-    order: 4,
-    title: "测试",
-    statusLabel: "待开始",
-    tone: "upcoming"
-  },
-  {
-    id: "release",
-    order: 5,
-    title: "上线",
-    statusLabel: "未开始",
-    tone: "upcoming"
-  }
-] as const
-
-function buildMockProjectPhaseSteps(archived: boolean): HarnessProjectPhaseStep[] {
-  if (!archived) return HARNESS_PROJECT_PHASES_MOCK.map((step) => ({ ...step }))
-  return HARNESS_PROJECT_PHASES_MOCK.map((step) => ({
-    ...step,
-    tone: "done",
-    statusLabel: "已完成"
-  }))
 }
 
 type ThreadWorkspaceStateMap = Record<
@@ -1390,7 +1352,7 @@ function HarnessProjectPhaseFlow({
   steps: HarnessProjectPhaseStep[]
 }): React.JSX.Element {
   return (
-    <section className="w-full shrink-0 rounded-2xl border border-border/80 bg-background/90 p-4 shadow-sm">
+    <section className="w-full shrink-0 rounded-2xl border border-border/80  p-4 shadow-sx bg-background-elevated/80 ">
       <div className="flex flex-col gap-3">
         <div className="grid gap-5 md:grid-cols-[repeat(5,minmax(0,1fr))]">
           {steps.map((step, index) => {
@@ -1462,6 +1424,59 @@ function HarnessProjectPhaseFlow({
             )
           })}
         </div>
+      </div>
+    </section>
+  )
+}
+
+function HarnessProjectStageStatusPanel({
+  items,
+  onStageAction
+}: {
+  items: HarnessProjectStageStatusItem[]
+  onStageAction: (item: HarnessProjectStageStatusItem) => void
+}): React.JSX.Element {
+  return (
+    <section className={"flex h-full min-h-0 flex-col overflow-hidden p-3 bg-background-elevated/80 shadow-sm ml-2 rounded-xl"}>
+      <div className="flex items-center justify-between gap-3 px-1 py-1">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold">阶段状态</div>
+        </div>
+      </div>
+
+      <div className="mt-2 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+        {items.map((item) => (
+          // <div className={'flex border-border bg-background  p-4 rounded-lg items-center gap-3 cursor-pointer hover:border-[#d1cfc5] transition-colors'}>
+          <div  className="flex w-full cursor-pointer  gap-2 rounded-md border border-border bg-background
+          px-3 py-3 text-left transition-all hover:border-primary/50 hover:shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+          <div
+              className={cn(
+                "relative flex size-11 shrink-0 items-center justify-center rounded-2xl  transition-colors",
+              )}
+            >
+              {item.icon}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[15px] font-medium tracking-tight text-foreground">{item.title}</div>
+              <div className="mt-1 truncate text-xs leading-5 text-muted-foreground">
+                {item.description}
+              </div>
+            </div>
+            <span
+              aria-hidden="true"
+              className="flex  shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors group-hover:bg-muted group-hover:text-foreground"
+            >
+            {item.tone === "done" ? <span className={"text-green-600 font-bold flex space-x-2"}>
+              <span className={"text-xs"}>已完成</span>
+              <Check className="size-4 " />
+            </span> : <span className={"text-gray-600 font-bold flex space-x-2"}>
+              <span className={"text-xs"}>去处理</span>
+              <MoveRight className="size-4 " />
+            </span>}
+
+            </span>
+          </div>
+        ))}
       </div>
     </section>
   )
@@ -3893,41 +3908,6 @@ function FeatureWorkspaceChangesPanel({
   )
 }
 
-function EnterpriseProjectDetailSummary({
-  entry
-}: {
-  entry?: EnterpriseProjectDetailCacheEntry
-}): React.JSX.Element | null {
-  if (!entry) return null
-
-  if (entry.kind === "miss") {
-    return (
-      <div>
-        <p className="text-xs leading-5 text-status-warning">请选择有效的项目编号</p>
-      </div>
-    )
-  }
-
-  const fields = [
-    ["项目状态", entry.project.status],
-    ["阶段状态", entry.project.phaseStatus],
-    ["结项日期", entry.project.baselineEndDate]
-  ]
-
-  return (
-    <>
-      {fields.map(([label, value]) => (
-        <div key={label}>
-          <dt className="text-xs text-muted-foreground">{label}</dt>
-          <dd className="mt-1 truncate font-medium" title={value || "-"}>
-            {value || "-"}
-          </dd>
-        </div>
-      ))}
-    </>
-  )
-}
-
 function ProjectDetailPage({
   project,
   detail,
@@ -3953,7 +3933,161 @@ function ProjectDetailPage({
 }): React.JSX.Element {
   const runs = detail?.runs ?? []
   const archived = project.lifecycle.status === "archived"
-  const phaseSteps = useMemo(() => buildMockProjectPhaseSteps(archived), [archived])
+  const phaseSteps: HarnessProjectPhaseStep[] = archived
+    ? [
+        { id: "requirements", order: 1, title: "需求分析", statusLabel: "已完成", tone: "done" },
+        { id: "design", order: 2, title: "分析设计", statusLabel: "已完成", tone: "done" },
+        { id: "development", order: 3, title: "开发", statusLabel: "已完成", tone: "done" },
+        { id: "testing", order: 4, title: "测试", statusLabel: "已完成", tone: "done" },
+        { id: "release", order: 5, title: "上线", statusLabel: "已完成", tone: "done" }
+      ]
+    : [
+        { id: "requirements", order: 1, title: "需求分析", statusLabel: "已完成", tone: "done" },
+        { id: "design", order: 2, title: "分析设计", statusLabel: "已完成", tone: "done" },
+        { id: "development", order: 3, title: "开发", statusLabel: "进行中", tone: "current" },
+        { id: "testing", order: 4, title: "测试", statusLabel: "待开始", tone: "upcoming" },
+        { id: "release", order: 5, title: "上线", statusLabel: "未开始", tone: "upcoming" }
+      ]
+  const stageStatusItems: HarnessProjectStageStatusItem[] = archived
+    ? [
+        {
+          id: "design-review",
+          title: "总体/详细设计流程",
+          description: "文档+评审",
+          icon: <Workflow className="size-4" />,
+          status: { label: "已评审", uiKind: "done" },
+          tone: "done"
+        },
+        {
+          id: "code-review",
+          title: "代码检视",
+          description: "代码检视率",
+          icon: <Search className="size-4" />,
+          status: { label: "100%", uiKind: "done" },
+          tone: "done"
+        },
+        {
+          id: "st-report",
+          title: "ST测试流程",
+          description: "ST测试报告是否已上传",
+          icon: <FileText className="size-4" />,
+          status: { label: "已上传", uiKind: "done" },
+          tone: "done"
+        },
+        {
+          id: "uat-report",
+          title: "UAT测试流程",
+          description: "UAT测试报告是否已上传",
+          icon: <FileText className="size-4" />,
+          status: { label: "已上传", uiKind: "done" },
+          tone: "done"
+        },
+        {
+          id: "release",
+          title: "上线流程",
+          description: "是否已上线",
+          icon: <RefreshCw className="size-4" />,
+          status: { label: "已上线", uiKind: "done" },
+          tone: "done"
+        },
+        {
+          id: "close",
+          title: "结项流程",
+          description: "是否已结项",
+          icon: <Archive className="size-4" />,
+          status: { label: "已结项", uiKind: "done" },
+          tone: "done"
+        }
+      ]
+    : [
+        {
+          id: "design-review",
+          title: "总体/详细设计流程",
+          description: "文档 + 评审",
+          icon: <Workflow className="size-4" />,
+          status: { label: "待评审", uiKind: "warning" },
+          tone: "done"
+        },
+        {
+          id: "code-review",
+          title: "代码检视",
+          description: "代码检视率 88%",
+          icon: <Search className="size-4" />,
+          status: { label: "78%", uiKind: "active" },
+          tone: "done"
+        },
+        {
+          id: "st-report",
+          title: "ST测试流程",
+          description: "ST测试报告是否已上传",
+          icon: <FileText className="size-4" />,
+          status: { label: "未上传", uiKind: "warning" },
+          tone: "upcoming"
+        },
+        {
+          id: "uat-report",
+          title: "UAT测试流程",
+          description: "UAT测试报告是否已上传",
+          icon: <FileText className="size-4" />,
+          status: { label: "未上传", uiKind: "warning" },
+          tone: "upcoming"
+        },
+        {
+          id: "release",
+          title: "上线流程",
+          description: "是否已上线",
+          icon: <RefreshCw className="size-4" />,
+          status: { label: "未上线", uiKind: "pending" },
+          tone: "upcoming"
+        },
+        {
+          id: "close",
+          title: "结项流程",
+          description: "是否已结项",
+          icon: <Archive className="size-4" />,
+          status: { label: "未结项", uiKind: "pending" },
+          tone: "upcoming"
+        }
+      ]
+
+  const handleStageAction = useCallback(
+    (item: HarnessProjectStageStatusItem): void => {
+      const normalizedStageTitle = `${item.title} ${item.description}`.toLowerCase()
+      const targetRun =
+        runs.find((run) => {
+          const normalizedRunText = `${run.title} ${run.slug}`.toLowerCase()
+          switch (item.id) {
+            case "design-review":
+              return /design|review|设计/.test(normalizedRunText)
+            case "code-review":
+              return /review|检视|code/.test(normalizedRunText)
+            case "st-report":
+              return /st|test|测试|report/.test(normalizedRunText)
+            case "uat-report":
+              return /uat|test|测试|report/.test(normalizedRunText)
+            case "release":
+              return /release|publish|deploy|上线/.test(normalizedRunText)
+            case "close":
+              return /close|archive|结项|归档/.test(normalizedRunText)
+            default:
+              return normalizedRunText.includes(normalizedStageTitle)
+          }
+        }) ?? runs.find((run) => run.overallStatus.uiKind === "active") ?? runs[0] ?? null
+
+      if (targetRun) {
+        onOpenFeature(project.projectId, targetRun.slug)
+        return
+      }
+
+      if (!archived) {
+        onCreateFeature(project)
+        return
+      }
+
+      toast.info("当前项目暂无可跳转处理的特性")
+    },
+    [archived, onCreateFeature, onOpenFeature, project, runs]
+  )
   const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
   const projectRootPath = resolveProjectRootPath(project)
   const openProjectWorkspaceInFileManager = useCallback((): void => {
@@ -4014,165 +4148,170 @@ function ProjectDetailPage({
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        <main className="flex h-full min-h-0 w-full flex-col gap-6 p-4">
+        <main className="flex h-full min-h-0 w-full flex-col gap-4 p-4">
           {pluginCompatibilityMessage && (
             <div className="flex items-start gap-2 rounded-xl border border-status-warning/30 bg-status-warning/10 px-4 py-3 text-sm text-status-warning shadow-sm">
               <ShieldAlert className="mt-0.5 size-4 shrink-0" />
               <div>{pluginCompatibilityMessage}</div>
             </div>
           )}
-          <section className={cn(harnessSurfaceClassName, "min-h-0 flex-1 overflow-hidden")}>
-            <div className="grid gap-0 lg:h-full lg:min-h-0 lg:grid-cols-[minmax(280px,0.34fr)_minmax(0,1fr)]">
-              <aside className="border-b border-border/80 bg-background/60 p-5 lg:min-h-0 lg:overflow-y-auto lg:border-b-0 lg:border-r">
-                <div className="flex items-start gap-3">
-                  <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-status-info/20 bg-status-info/10 text-status-info">
-                    <Workflow className="size-5" />
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <div className="flex h-full min-h-0 flex-col gap-3">
+              <section className={cn(harnessSurfaceClassName, "overflow-hidden px-3 py-2")}>
+                <div className="flex min-w-0 items-start gap-3">
+                  <div
+                    className="flex size-9 shrink-0 items-center justify-center rounded-2xl border border-status-info/20 bg-status-info/10 text-status-info">
+                    <Workflow className="size-4" />
                   </div>
-                  <div className="min-w-0">
-                    <div className={harnessKickerClassName}>Project profile</div>
-                    <h2 className="mt-1 truncate text-lg font-semibold">{project.name}</h2>
-                    <p className="mt-2 line-clamp-3 text-sm leading-6 text-muted-foreground">
-                      {project.description}
-                    </p>
-                  </div>
-                </div>
-
-                <dl className="mt-5 grid gap-3 text-sm">
-                  <EnterpriseProjectDetailSummary entry={enterpriseProjectDetail} />
-                  <div className="rounded-xl border border-border/70 bg-background/70 px-3 py-2.5">
-                    <dt className="text-[11px] font-medium text-muted-foreground">系统编号</dt>
-                    <dd className="mt-1 truncate font-medium" title={project.systemId}>
-                      {project.systemId}
-                    </dd>
-                  </div>
-                  <div className="rounded-xl border border-border/70 bg-background/70 px-3 py-2.5">
-                    <dt className="text-[11px] font-medium text-muted-foreground">系统名称</dt>
-                    <dd className="mt-1 truncate font-medium" title={project.systemName}>
-                      {project.systemName}
-                    </dd>
-                  </div>
-                  <div className="rounded-xl border border-border/70 bg-background/70 px-3 py-2.5">
-                    <dt className="text-[11px] font-medium text-muted-foreground">工作区</dt>
-                    <dd className="mt-1 flex min-w-0 items-center gap-2">
-                      <span className="min-w-0 flex-1 truncate font-medium" title={projectRootPath}>
-                        {getWorkspaceName(projectRootPath)}
+                  <div className="flex min-w-0 items-center gap-2 flex-1 pt-1">
+                    <h2 className="truncate text-sm font-semibold">{project.name}</h2>
+                    {pluginCompatibilityMessage ? (
+                      <StatusPill
+                        status={boardCompatibilityStatus(project.boardCompatibility)}
+                        tooltip={pluginCompatibilityMessage}
+                      />
+                    ) : detail?.projectState ? (
+                      <StatusPill status={detail.projectState} tooltip={detail.error} />
+                    ) : (
+                      <span
+                        className="rounded-full border border-border/70 bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground">
+                          {loading ? "同步中" : "暂无状态"}
+                        </span>
+                    )}
+                    <div
+                      className="-mx-0.5 mt-1 flex min-w-0 items-center gap-2 overflow-x-auto pb-0.5 pr-1 text-[11px] text-muted-foreground [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                      <span className="shrink-0 rounded-full border border-border/70 bg-background/70 px-2 py-0.5">
+                        系统编号 {project.systemId || "-"}
                       </span>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        className="size-7 shrink-0"
-                        title="打开项目工作区"
-                        aria-label="打开项目工作区"
-                        onClick={openProjectWorkspaceInFileManager}
+                      <span
+                        className="shrink-0 max-w-48 truncate rounded-full border border-border/70 bg-background/70 px-2 py-0.5"
+                        title={project.systemName}>
+                        系统名称 {project.systemName || "-"}
+                      </span>
+                      <span
+                        className="shrink-0 max-w-56 truncate rounded-full border border-border/70 bg-background/70 px-2 py-0.5"
+                        title={projectRootPath}
                       >
-                        <FolderOpen className="size-3.5" />
-                      </Button>
-                    </dd>
-                  </div>
-                </dl>
-
-                <div className="mt-5 rounded-xl border border-border/70 bg-muted/25 p-3">
-                  <div className="mb-2 text-xs font-medium text-muted-foreground">项目状态</div>
-                  {pluginCompatibilityMessage ? (
-                    <StatusPill
-                      status={boardCompatibilityStatus(project.boardCompatibility)}
-                      tooltip={pluginCompatibilityMessage}
-                    />
-                  ) : detail?.projectState ? (
-                    <StatusPill status={detail.projectState} tooltip={detail.error} />
-                  ) : (
-                    <span className="text-sm text-muted-foreground">
-                      {loading ? "正在同步项目状态" : "暂无状态"}
-                    </span>
-                  )}
-                </div>
-              </aside>
-
-              <div className="flex min-h-0 min-w-0 flex-col p-5">
-                <HarnessProjectPhaseFlow steps={phaseSteps} />
-
-                <div className="mt-5 flex min-h-0 flex-1 flex-col rounded-2xl border border-border/80 bg-background/80 p-4 shadow-sm">
-                  <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <div className={harnessKickerClassName}>Feature workspace</div>
-                      <div className="mt-1 text-base font-semibold">特性列表</div>
-                    </div>
-                    <div className="rounded-full border border-border/70 bg-muted/40 px-3 py-1 text-xs text-muted-foreground">
-                      {loading || !detail ? "读取中" : `${runs.length} 个特性`}
+                        工作区 {getWorkspaceName(projectRootPath)}
+                      </span>
+                      {enterpriseProjectDetail?.kind === "hit" && (
+                        <>
+                          <span className="shrink-0 rounded-full border border-border/70 bg-background/70 px-2 py-0.5">
+                            阶段 {enterpriseProjectDetail.project.phaseStatus || "-"}
+                          </span>
+                          <span
+                            className="shrink-0 rounded-full border border-border/70 bg-background/70 px-2 py-0.5">
+                            结项 {enterpriseProjectDetail.project.baselineEndDate || "-"}
+                          </span>
+                        </>
+                      )}
                     </div>
                   </div>
-
-                  {loading || !detail ? (
-                    <div className="flex min-h-0 flex-1 items-center justify-center rounded-xl border border-dashed border-border/80 text-sm text-muted-foreground">
-                      <Loader2 className="mr-2 size-4 animate-spin text-status-info" />
-                      读取项目详情
-                    </div>
-                  ) : detail.error ? (
-                    <div className="flex items-start gap-2 rounded-xl border border-status-warning/30 bg-status-warning/10 px-3 py-3 text-sm text-status-warning">
-                      <AlertCircle className="mt-0.5 size-4 shrink-0" />
-                      <div>{detail.error}</div>
-                    </div>
-                  ) : runs.length === 0 ? (
-                    <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-2xl border border-dashed border-border/80 bg-gradient-to-br from-background via-background/95 to-muted/35 px-6 py-12 text-center shadow-sm">
-                      <div
-                        aria-hidden="true"
-                        className="pointer-events-none absolute -right-8 -top-10 size-28 rounded-full bg-status-info/10 blur-2xl"
-                      />
-                      <div
-                        aria-hidden="true"
-                        className="pointer-events-none absolute -bottom-12 left-8 size-32 rounded-full bg-primary/10 blur-3xl"
-                      />
-                      <div className="relative flex max-w-md flex-col items-center">
-                        <div className="flex size-14 items-center justify-center rounded-2xl border border-status-info/20 bg-status-info/10 text-status-info shadow-sm">
-                          <Workflow className="size-6" />
-                        </div>
-                        <div className="mt-4 text-base font-semibold text-foreground">
-                          当前项目还没有特性
-                        </div>
-                        <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                          从一个清晰的 feature 开始拆解工作，创建后就可以在这里持续跟踪阶段、产物和协作会话。
-                        </p>
-                        {!archived && (
-                          <Button
-                            type="button"
-                            size="sm"
-                            className={cn("mt-5 gap-2", harnessActionButtonClassName)}
-                            onClick={() => onCreateFeature(project)}
-                            disabled={creatingFeature || !!pluginCompatibilityMessage}
-                            title={pluginCompatibilityMessage || undefined}
-                          >
-                            <span aria-hidden="true" className={harnessActionOverlayClassName} />
-                            <span className={harnessActionIconClassName}>
-                              {creatingFeature ? (
-                                <Loader2 className="size-2.5 animate-spin" />
-                              ) : (
-                                <Plus className="size-2.5" />
-                              )}
-                            </span>
-                            <span className="relative">新建特性</span>
-                          </Button>
-                        )}
-                      </div>
-                    </div>
-                  ) : (
-                    <ScrollArea className="min-h-0 flex-1">
-                      <div className="mt-1 grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3 pr-3">
-                        {runs.map((run) => (
-                          <FeatureCard
-                            key={run.slug}
-                            run={run}
-                            workflowNodes={workflowForProjectRun(detail, run).nodes}
-                            onOpen={() => onOpenFeature(project.projectId, run.slug)}
-                          />
-                        ))}
-                      </div>
-                    </ScrollArea>
-                  )}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="size-7 shrink-0 self-center"
+                    title="打开项目工作区"
+                    aria-label="打开项目工作区"
+                    onClick={openProjectWorkspaceInFileManager}
+                  >
+                    <FolderOpen className="size-3.5" />
+                  </Button>
                 </div>
+              </section>
+              <div className="flex min-h-0 min-w-0 flex-1 flex-col xl:flex-row  mb-1">
+                <div className="flex min-h-0 min-w-0 flex-1 flex-col ">
+                  <HarnessProjectPhaseFlow steps={phaseSteps} />
+                  <div
+                    className="mt-2 flex min-h-0 flex-1 flex-col rounded-2xl border border-border/80  p-4 shadow-sm bg-background-elevated/80 ">
+                    <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <div className={harnessKickerClassName}>Feature workspace</div>
+                        <div className="mt-1 text-base font-semibold">特性列表</div>
+                      </div>
+                      <div
+                        className="rounded-full border border-border/70 bg-muted/40 px-3 py-1 text-xs text-muted-foreground">
+                        {loading || !detail ? "读取中" : `${runs.length} 个特性`}
+                      </div>
+                    </div>
+                    {loading || !detail ? (
+                      <div
+                        className="flex min-h-0 flex-1 items-center justify-center rounded-xl border border-dashed border-border/80 text-sm text-muted-foreground">
+                        <Loader2 className="mr-2 size-4 animate-spin text-status-info" />
+                        读取项目详情
+                      </div>
+                    ) : detail.error ? (
+                      <div
+                        className="flex items-start gap-2 rounded-xl border border-status-warning/30 bg-status-warning/10 px-3 py-3 text-sm text-status-warning">
+                        <AlertCircle className="mt-0.5 size-4 shrink-0" />
+                        <div>{detail.error}</div>
+                      </div>
+                    ) : runs.length === 0 ? (
+                      <div
+                        className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-2xl border border-dashed border-border/80 bg-gradient-to-br from-background via-background/95 to-muted/35 px-6 py-12 text-center shadow-sm">
+                        <div
+                          aria-hidden="true"
+                          className="pointer-events-none absolute -right-8 -top-10 size-28 rounded-full bg-status-info/10 blur-2xl"
+                        />
+                        <div
+                          aria-hidden="true"
+                          className="pointer-events-none absolute -bottom-12 left-8 size-32 rounded-full bg-primary/10 blur-3xl"
+                        />
+                        <div className="relative flex max-w-md flex-col items-center">
+                          <div className="flex size-14 items-center justify-center rounded-2xl border border-status-info/20 bg-status-info/10 text-status-info shadow-sm">
+                            <Workflow className="size-6" />
+                          </div>
+                          <div className="mt-4 text-base font-semibold text-foreground">
+                            当前项目还没有特性
+                          </div>
+                          <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                            从一个清晰的 feature 开始拆解工作，创建后就可以在这里持续跟踪阶段、产物和协作会话。
+                          </p>
+                          {!archived && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              className={cn("mt-5 gap-2", harnessActionButtonClassName)}
+                              onClick={() => onCreateFeature(project)}
+                              disabled={creatingFeature || !!pluginCompatibilityMessage}
+                              title={pluginCompatibilityMessage || undefined}
+                            >
+                              <span aria-hidden="true" className={harnessActionOverlayClassName} />
+                              <span className={harnessActionIconClassName}>
+                                {creatingFeature ? (
+                                  <Loader2 className="size-2.5 animate-spin" />
+                                ) : (
+                                  <Plus className="size-2.5" />
+                                )}
+                              </span>
+                              <span className="relative">新建特性</span>
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <ScrollArea className="min-h-0 flex-1">
+                        <div className="mt-1 grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3 pr-3">
+                          {runs.map((run) => (
+                            <FeatureCard
+                              key={run.slug}
+                              run={run}
+                              workflowNodes={workflowForProjectRun(detail, run).nodes}
+                              onOpen={() => onOpenFeature(project.projectId, run.slug)}
+                            />
+                          ))}
+                        </div>
+                      </ScrollArea>
+                    )}
+                  </div>
+                </div>
+                <aside className="w-full shrink-0 xl:w-[360px]">
+                  <HarnessProjectStageStatusPanel items={stageStatusItems} onStageAction={handleStageAction} />
+                </aside>
               </div>
             </div>
-          </section>
+          </div>
         </main>
       </div>
     </div>
