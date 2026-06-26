@@ -2293,9 +2293,9 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "closeCheckpointer(workerInput.workerThreadId)",
     "runtime releases worker checkpointer resources when a worker turn finishes"
   )
-  assertIncludes(
+  assertMatches(
     runtime,
-    "checkpointers.delete(threadId)\n    await checkpointer.close()",
+    /checkpointers\.delete\(threadId\)\s+await checkpointer\.close\(\)/,
     "runtime removes checkpointer from cache before awaiting close"
   )
   assertIncludes(

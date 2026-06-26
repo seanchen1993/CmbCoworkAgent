@@ -504,6 +504,8 @@ export function isWorkflowAbortError(error: unknown): boolean {
  * `instanceof` the host realm's Error, so check the shape instead.
  */
 export function describeWorkflowError(error: unknown): string {
+  const interruptMessage = describeGraphInterruptMessage(error)
+  if (interruptMessage !== undefined) return interruptMessage
   if (error instanceof Error) return error.message
   if (
     typeof error === "object" &&
@@ -513,6 +515,22 @@ export function describeWorkflowError(error: unknown): string {
     return (error as { message: string }).message
   }
   return String(error)
+}
+
+function describeGraphInterruptMessage(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined
+  const interrupts = (error as { interrupts?: unknown }).interrupts
+  if (!Array.isArray(interrupts) || interrupts.length === 0) return undefined
+  const first = interrupts[0]
+  if (
+    typeof first === "object" &&
+    first !== null &&
+    typeof (first as { value?: unknown }).value === "string"
+  ) {
+    return (first as { value: string }).value
+  }
+  if (typeof first === "string") return first
+  return undefined
 }
 
 export function truncateText(value: string, maxChars: number): string {
