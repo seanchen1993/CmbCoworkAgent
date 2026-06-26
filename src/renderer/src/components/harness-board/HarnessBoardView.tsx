@@ -2885,6 +2885,7 @@ function FeatureCreateDialog({
           className="grid min-w-0 gap-4 py-1"
           onSubmit={(event) => {
             event.preventDefault()
+            if (syncingPublicConstraints) return
             onSubmit()
           }}
         >
@@ -2923,7 +2924,7 @@ function FeatureCreateDialog({
                         </span>
                       </TooltipTrigger>
                       <TooltipContent side="top" className="z-[70] max-w-72 text-xs leading-5">
-                        注入选中的发布单元约束，并将对应代码库路径提供给大模型
+                        选择后将会在上下文注入选中的发布单元约束，并将对应代码库路径提供给大模型
                       </TooltipContent>
                     </Tooltip>
                   </span>
@@ -2957,6 +2958,7 @@ function FeatureCreateDialog({
               type="submit"
               disabled={
                 creating ||
+                syncingPublicConstraints ||
                 workflowLoading ||
                 !featureName.trim() ||
                 featureNameError !== null
@@ -3002,7 +3004,7 @@ function ProjectModeSettingsPanel({
         <div className="min-w-0">
           <h2 className="text-sm font-semibold text-foreground">本地工程配置</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            配置本地工程路径以及对应的发布单元。该配置用于拉取公共系统约束以及便捷选择代码工作路径
+            配置本地工程路径以及对应的发布单元。该配置用于 1.注入公共系统约束 2.便捷选择代码工作路径
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
