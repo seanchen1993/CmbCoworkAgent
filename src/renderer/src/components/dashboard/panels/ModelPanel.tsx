@@ -84,7 +84,7 @@ export function ModelPanel({
 
         {/* Premium vs Economy */}
         <div className="rounded-xl border border-border bg-card p-4">
-          <h3 className="text-xs font-medium text-muted-foreground mb-3">Premium / Economy 分流</h3>
+          <h3 className="text-xs font-medium text-muted-foreground mb-3">强力/经济模型使用占比</h3>
           {data.byTier.length > 0 ? (
             <ResponsiveContainer width="100%" height={200}>
               <PieChart>
