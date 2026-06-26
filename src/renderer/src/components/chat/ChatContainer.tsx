@@ -3343,9 +3343,9 @@ export function ChatContainer({
     ]
   )
 
-  const handleSubmit = async (e: React.FormEvent): Promise<void> => {
+  const handleSubmit = async (e: React.FormEvent, defaultText=''): Promise<void> => {
     e.preventDefault()
-    const trimmedInput = input.trim()
+    const trimmedInput = defaultText ||  input.trim()
     const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
     const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
@@ -5622,6 +5622,34 @@ export function ChatContainer({
                                   </Tooltip>
                                 </TooltipProvider>
                               )}
+                              <TooltipProvider delayDuration={180}>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (effectiveInputDisabled) return
+                                        // 创建伪造的表单提交事件
+                                        const fakeEvent = {
+                                          preventDefault: () => {}
+                                        } as React.FormEvent
+                                        // 发送继续消息
+                                        handleSubmit(fakeEvent, '继续')
+                                      }}
+                                      disabled={effectiveInputDisabled}
+                                      className="flex items-center justify-center gap-1 px-2.5 h-7 rounded-md border border-primary/20 bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                      aria-label="继续对话"
+                                    >
+                                      <Send className="size-3.5" />
+                                      <span className="text-xs font-medium">继续</span>
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top" sideOffset={6}>
+                                    点击自动发送"继续"2字
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+
                               <button
                                 type="submit"
                                 disabled={
