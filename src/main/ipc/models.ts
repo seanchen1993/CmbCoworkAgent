@@ -821,7 +821,18 @@ const GIT_PANEL_EXCLUDED_UNTRACKED_DIRS = [
   ".gradle",
   ".turbo",
   ".parcel-cache",
-  "coverage"
+  "coverage",
+  '.playwright-cli',
+  '.playwright',
+  '.agent-browser',
+  '.idea',
+  '.cmbdevclaw',
+  '.devagent',
+  '.devagentrules',
+  '.github',
+  '.vscode',
+  '.codex',
+  '.claude'
 ] as const
 
 // 把排除目录名转成 git pathspec：`:(exclude)<dir>` 命中顶层目录及其内容，

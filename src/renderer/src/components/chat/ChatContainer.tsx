@@ -1372,6 +1372,41 @@ const getMessageText = (content: Message["content"]): string => {
     .join("\n")
 }
 
+const getMessageBubbleText = (content: Message["content"]): string => {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+
+  return content
+    .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
+    .filter(Boolean)
+    .join("\n")
+}
+
+// MessageBubble renders `null` for messages with no visible content: tool-result
+// messages, empty system notices, and assistant/user messages whose text is empty
+// and that carry no tool calls. Such empty wrappers must NOT get content-visibility
+// containment — when scrolled off-screen the intrinsic-size fallback would reserve
+// phantom height (stacking across many empty tool results into a large blank gap
+// between tools and text). Detection is intentionally generous: a false positive
+// only skips a cheap optimization on an already-short message (harmless), while a
+// false negative reintroduces the gap.
+//
+// Match each role to its actual render path: assistant/user bubbles render only
+// `text` blocks (getMessageBubbleText), while the system branch renders via
+// extractMessagePlainText, which also reads string `block.content` — so system
+// must use getMessageText (same text+content logic) or a notice carried in a
+// content block would be misclassified as empty.
+const messageRendersNothing = (message: Message): boolean => {
+  if (message.role === "tool") return true
+  const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0
+  if (hasToolCalls) return false
+  const visibleText =
+    message.role === "system"
+      ? getMessageText(message.content)
+      : getMessageBubbleText(message.content)
+  return visibleText.trim().length === 0
+}
+
 function RotatingHeadline() {
   const [wordIndex, setWordIndex] = useState(0)
   const [displayed, setDisplayed] = useState("")
@@ -1740,6 +1775,10 @@ const ChatMessageList = React.memo(function ChatMessageList({
           hookLoggingEnabled && message.role === "user"
             ? hookLogBucketByTurnId.get(message.id)
             : undefined
+        const rendersNothing = messageRendersNothing(message)
+        const hasHookLogChip = Boolean(hookLogBucketForTurn?.entries.length)
+        if (rendersNothing && !hasHookLogChip) return null
+
         const navigatorRef = setMessageRef(message.id, message.role)
         const combinedRef = (node: HTMLDivElement | null): void => {
           navigatorRef(node)
@@ -1756,9 +1795,14 @@ const ChatMessageList = React.memo(function ChatMessageList({
             ref={combinedRef}
             data-message-role={message.role}
             style={
-              isLastMessage
+              // 渲染为空的消息（tool 结果、空 system/assistant/user）不参与
+              // content-visibility 占位：否则跳过渲染时会用兜底高度撑出幽灵空白，
+              // 多条空 tool 结果叠加即表现为工具与文字间突然空出很多行。
+              // 兜底值取较小的 96px：真实高度会在首次进入视口后由 `auto` 关键字记住，
+              // 96px 只用于尚未测量的离屏消息，足够避免过度预留导致的空隙/滚动跳动。
+              isLastMessage || rendersNothing
                 ? undefined
-                : { contentVisibility: "auto", containIntrinsicSize: "auto 240px" }
+                : { contentVisibility: "auto", containIntrinsicSize: "auto 96px" }
             }
           >
             <MessageBubble
@@ -3065,9 +3109,13 @@ export function ChatContainer({
   }, [displayMessages, hookLogBuckets])
 
   const lastContentMessageId = useMemo(() => {
+    // Match what actually renders: empty messages are skipped from the DOM
+    // (see messageRendersNothing), so they own no contentMessageRefs entry and
+    // must not be returned here, or precise scroll alignment would silently fall
+    // back to scroll-to-bottom.
     for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
       const message = displayMessages[index]
-      if (message.role !== "tool") return message.id
+      if (!messageRendersNothing(message)) return message.id
     }
     return null
   }, [displayMessages])

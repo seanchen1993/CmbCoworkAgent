@@ -155,7 +155,6 @@ async function testPromptContracts(): Promise<void> {
     projectModeAdapterInstructions: "ADAPTER_RULE",
     projectInstructions: "PROJECT_RULE",
     turnContext: "TURN_CONTEXT_RULE",
-    hasBrowserTool: true,
     hasCodeExecTool: true,
     deferredToolIds: ["github.search"]
   })
@@ -256,7 +255,6 @@ async function testPromptContracts(): Promise<void> {
     prompt.indexOf("ADAPTER_RULE") < prompt.indexOf("Verifier standard:"),
     "coordinator prompt should place adapter instructions before verifier/project sections"
   )
-  assertIncludes(prompt, "browser_playwright", "coordinator prompt")
   assertIncludes(prompt, "github.search", "coordinator prompt")
   assertIncludes(prompt, "PROJECT_RULE", "coordinator prompt")
   assertIncludes(prompt, "## Current Turn Internal Context", "coordinator prompt")
@@ -321,15 +319,9 @@ async function testPromptContracts(): Promise<void> {
     platform: "Linux",
     shell: "bash",
     ...timeContext,
-    hasBrowserTool: false,
     hasCodeExecTool: false,
     deferredToolIds: []
   })
-  assertIncludes(
-    fallbackPrompt,
-    "Browser/runtime verification may not be available",
-    "coordinator prompt fallback"
-  )
   assertIncludes(fallbackPrompt, "code_exec is not available", "coordinator prompt fallback")
   assertIncludes(
     fallbackPrompt,

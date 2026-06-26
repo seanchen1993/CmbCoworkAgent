@@ -744,6 +744,11 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
     const bucket = context.availableByHash.get(callHash)
     const cached = bucket && bucket.length > 0 ? bucket.shift() : undefined
     if (cached) {
+      const resultPreview = workflowAgentResultPreview(
+        cached.result,
+        cached.structured,
+        Boolean(cached.hasStructured)
+      )
       // Replays spend nothing against the token BUDGET (the original run's token
       // count is surfaced for UI/stats only) — but a replay STILL counts against
       // the 1000-agent cap (agentCount was incremented above), since the cap
@@ -765,10 +770,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         status: "cached",
         outputTokens: replayedTokens,
         promptPreview,
-        resultPreview:
-          typeof cached.result === "string"
-            ? truncateText(cached.result, WORKFLOW_RESULT_PREVIEW_MAX_CHARS)
-            : undefined
+        resultPreview
       })
       // A replay is instantaneous — one agent_end event keeps a large resume
       // from flooding the renderer with start/end pairs.
@@ -781,10 +783,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         status: "cached",
         outputTokens: replayedTokens,
         durationMs: 0,
-        resultPreview:
-          typeof cached.result === "string"
-            ? truncateText(cached.result, WORKFLOW_RESULT_PREVIEW_MAX_CHARS)
-            : undefined
+        resultPreview
       })
       // Copy on the way out: the journal entry is live persisted state, and a
       // script mutating a replayed object in place must not corrupt it.
@@ -827,10 +826,19 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         // an oversized one is simply not journaled so the run file stays bounded.
         // With content-based matching, only THIS call re-runs on resume (its hash
         // has no journal entry); other calls are unaffected — no tail is dropped.
-        const structuredSafe = request.options.schema ? toJsonSafe(result.structured) : undefined
+        const structuredSerialization = request.options.schema
+          ? toJsonSafeWithJson(result.structured)
+          : undefined
+        const structuredSafe = structuredSerialization?.safe
+        const resultPreview = workflowAgentResultPreview(
+          result.text,
+          structuredSafe,
+          Boolean(request.options.schema),
+          structuredSerialization?.json
+        )
         const structuredOversized =
           structuredSafe !== undefined &&
-          JSON.stringify(structuredSafe).length > WORKFLOW_RESULT_MAX_CHARS
+          (structuredSerialization?.json?.length ?? 0) > WORKFLOW_RESULT_MAX_CHARS
         if (structuredOversized) {
           log(
             `${label}: structured result too large to journal — only this call re-runs on resume (content-based matching; other agents still replay from cache)`
@@ -859,7 +867,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
           phase: assignedPhase,
           status: "completed",
           outputTokens: result.outputTokens,
-          resultPreview: truncateText(result.text, WORKFLOW_RESULT_PREVIEW_MAX_CHARS)
+          resultPreview
         })
         emit({
           kind: "agent_end",
@@ -870,7 +878,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
           status: "completed",
           outputTokens: result.outputTokens,
           durationMs: Date.now() - startedAt,
-          resultPreview: truncateText(result.text, WORKFLOW_RESULT_PREVIEW_MAX_CHARS)
+          resultPreview
         })
         // Return the JSON-safe copy (not the raw runner object) so the live
         // path matches the cached-replay path (which returns toJsonSafe too) and
@@ -1429,12 +1437,43 @@ function createLimiter(limit: number): <T>(fn: () => Promise<T>) => Promise<T> {
 
 /** Converts vm-realm values into plain JSON-safe host values (drops functions/cycles). */
 export function toJsonSafe(value: unknown): unknown {
-  if (value === undefined) return undefined
+  return toJsonSafeWithJson(value).safe
+}
+
+function toJsonSafeWithJson(value: unknown): { safe: unknown; json?: string } {
+  if (value === undefined) return { safe: undefined }
   try {
-    return JSON.parse(JSON.stringify(value)) as unknown
+    const json = JSON.stringify(value)
+    if (json === undefined) {
+      const safe = String(value)
+      return { safe, json: JSON.stringify(safe) }
+    }
+    return { safe: JSON.parse(json) as unknown, json }
   } catch {
-    return String(value)
+    const safe = String(value)
+    return { safe, json: JSON.stringify(safe) }
   }
+}
+
+function workflowAgentResultPreview(
+  text: unknown,
+  structured: unknown,
+  hasStructured: boolean,
+  structuredJson?: string
+): string | undefined {
+  if (hasStructured && structured !== undefined) {
+    try {
+      const json = structuredJson ?? JSON.stringify(structured)
+      return truncateText(
+        json === undefined ? String(structured) : json,
+        WORKFLOW_RESULT_PREVIEW_MAX_CHARS
+      )
+    } catch {
+      return truncateText(String(structured), WORKFLOW_RESULT_PREVIEW_MAX_CHARS)
+    }
+  }
+  if (typeof text === "string") return truncateText(text, WORKFLOW_RESULT_PREVIEW_MAX_CHARS)
+  return undefined
 }
 
 /**

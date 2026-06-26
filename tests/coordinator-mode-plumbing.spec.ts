@@ -1925,8 +1925,8 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "run validation commands, and use browser_playwright",
-    "runtime tells verifier workers browser verification is available when the tool exists"
+    "run validation commands, and use available browser automation skills/tools",
+    "runtime tells verifier workers to use session-available browser verification capabilities"
   )
   assertIncludes(
     runtime,
@@ -2147,8 +2147,8 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     workerAccess,
-    'new Set(["execute", "task_output", ...deferredToolNames, ...externalSideEffectToolNames])',
-    "worker access policy removes shell/browser execution from owned_files-scoped write workers"
+    'new Set(["execute", "task_output", ...deferredToolNames])',
+    "worker access policy removes shell execution and deferred execution from owned_files-scoped write workers"
   )
   assertIncludes(
     runtime,
@@ -2293,9 +2293,9 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "closeCheckpointer(workerInput.workerThreadId)",
     "runtime releases worker checkpointer resources when a worker turn finishes"
   )
-  assertIncludes(
+  assertMatches(
     runtime,
-    "checkpointers.delete(threadId)\n    await checkpointer.close()",
+    /checkpointers\.delete\(threadId\)\s+await checkpointer\.close\(\)/,
     "runtime removes checkpointer from cache before awaiting close"
   )
   assertIncludes(

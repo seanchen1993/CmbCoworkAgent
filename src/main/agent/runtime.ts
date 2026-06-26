@@ -86,7 +86,6 @@ import { resolveWorkspaceMemoryDirs } from "../memory/paths"
 import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import { getThread } from "../db/index"
-import { createPlaywrightTool } from "./tools/playwright-tool"
 import { createRequestUserInputTool } from "./tools/user-input-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
@@ -198,7 +197,10 @@ import { patchRuntimeReadFileTool } from "./read-file-tool"
 import { createWorkflowTool } from "./workflow/tool"
 import { workflowRunManager } from "./workflow/run-manager"
 import { WORKFLOW_MODE_SYSTEM_PROMPT } from "./workflow/prompts"
-import type { WorkflowSubagentRuntime } from "./workflow/subagent"
+import {
+  isWorkflowStructuredOutputFatalError,
+  type WorkflowSubagentRuntime
+} from "./workflow/subagent"
 import { isWorkflowSubagentThreadOf } from "./workflow/types"
 
 function isAbortError(error: unknown): boolean {
@@ -306,7 +308,6 @@ type ToolConcurrencyTier = "exclusive" | "shared" | "bypass"
 const EXCLUSIVE_TOOL_NAMES = new Set([
   "code_exec",
   "save_code_exec_tool",
-  "browser_playwright",
   "manage_scheduler",
   "manage_skill",
   "workflow",
@@ -572,7 +573,8 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
         const runSharedTool = () =>
           lock.read(async () => {
             const waited = Date.now() - waitStart
-            if (waited > 50) console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
+            if (waited > 50)
+              console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
             return handler(request)
           })
 
@@ -1223,9 +1225,7 @@ function wrapTaskToolWithOwnerMetadata(taskTool: DynamicStructuredTool): Dynamic
 function stampSubagentOwnerMetadata<T>(middleware: T): T {
   const mw = middleware as { tools?: DynamicStructuredTool[] }
   if (Array.isArray(mw.tools) && mw.tools.length > 0) {
-    mw.tools = mw.tools.map((t) =>
-      t?.name === "task" ? wrapTaskToolWithOwnerMetadata(t) : t
-    )
+    mw.tools = mw.tools.map((t) => (t?.name === "task" ? wrapTaskToolWithOwnerMetadata(t) : t))
   }
   return middleware
 }
@@ -1616,6 +1616,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     error: unknown,
     toolName: string | undefined
   ): { kind: "schema" | "runtime"; message: string } | null => {
+    if (isWorkflowStructuredOutputFatalError(error)) return null
     if (isGraphBubbleUp(error) || isAbortError(error)) return null
     if (isHookHaltError(error)) return null
     if (isProgrammerError(error)) return null
@@ -3393,8 +3394,6 @@ ${subagentShellGuidance}
 - edit_file: edit a file in the filesystem
 - glob: find files matching a pattern (e.g., "**/*.py")
 - grep: search for literal text within files (NOT regex). Do NOT use "|", ".*" or other regex syntax — call grep once per term instead.
-- Browser strategy: for browser tasks, first follow any matching enabled skill; only if no relevant skill is available, use browser_playwright.
-- browser_playwright: built-in browser automation and page interaction tool powered by project-local Playwright (fallback when no matching browser skill exists).
 - request_user_input: Only use in Plan mode, or when explicitly requested by the user or an active Skill/Plugin. Otherwise do not call this tool.
 The workspace root is: ${workspacePath}`
 
@@ -3578,8 +3577,6 @@ The workspace root is: ${workspacePath}`
     extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
   }
 
-  extraTools.push(createPlaywrightTool(workspacePath))
-
   // Conditionally inject Java LSP tool
   try {
     const lspConfig = getLspConfig()
@@ -3600,6 +3597,7 @@ The workspace root is: ${workspacePath}`
           try {
             return await Reflect.apply(originalFunc, t, args)
           } catch (e: unknown) {
+            if (isWorkflowStructuredOutputFatalError(e)) throw e
             const msg = e instanceof Error ? e.message : String(e)
             const level = e instanceof TypeError || e instanceof ReferenceError ? "error" : "warn"
             console[level](`[Runtime] Tool "${t.name}" error (non-fatal):`, msg)
@@ -3613,7 +3611,7 @@ The workspace root is: ${workspacePath}`
           try {
             return await Reflect.apply(originalInvoke, t, args)
           } catch (e: unknown) {
-            if (isHookHaltError(e)) throw e
+            if (isHookHaltError(e) || isWorkflowStructuredOutputFatalError(e)) throw e
             const msg = e instanceof Error ? e.message : String(e)
             const level = e instanceof TypeError || e instanceof ReferenceError ? "error" : "warn"
             console[level](`[Runtime] Tool "${t.name}" error (non-fatal):`, msg)
@@ -3893,13 +3891,13 @@ The workspace root is: ${workspacePath}`
     const scratchpadDir = getCoordinatorScratchpadDir(workerInput.parentThreadId)
     const workerAccessPrompt = (() => {
       if (workerInput.workload === "read_only") {
-        return "Access limits: read-only worker. You can inspect files, search, and run read-only shell commands via execute (e.g. ls, git log, git diff, find, cat, head, tail). The execute tool has a safety gate that blocks clearly-dangerous and unrecognized commands, but do NOT rely on it to catch everything — restrict yourself to read-only inspection: never use the shell for writes — no mkdir/touch/rm/cp/mv, no git add/commit/push, no package installs (npm/pip/etc.), no builds, and no redirect operators (>, >>, |) or heredocs. write_file, edit_file, browser_playwright, and the deferred-tool bridge (search/inspect/invoke_deferred) are unavailable. Eager MCP tools (if any are connected) ARE available for direct single-tool calls."
+        return "Access limits: read-only worker. You can inspect files, search, and run read-only shell commands via execute (e.g. ls, git log, git diff, find, cat, head, tail). The execute tool has a safety gate that blocks clearly-dangerous and unrecognized commands, but do NOT rely on it to catch everything — restrict yourself to read-only inspection: never use the shell for writes — no mkdir/touch/rm/cp/mv, no git add/commit/push, no package installs (npm/pip/etc.), no builds, and no redirect operators (>, >>, |) or heredocs. write_file, edit_file, and the deferred-tool bridge (search/inspect/invoke_deferred) are unavailable. Eager MCP tools (if any are connected) ARE available for direct single-tool calls."
       }
       if (workerInput.workload === "verify") {
-        return "Access limits: verifier worker. You can inspect files, run validation commands, and use browser_playwright for UI/runtime verification when available, but write_file, edit_file, and the deferred-tool bridge (search/inspect/invoke_deferred) are unavailable. Eager MCP tools (if any are connected) ARE available for direct single-tool calls. Do not create, modify, or delete files in the project workspace. If a temporary script or harness is necessary, write it only under /tmp or $TMPDIR and clean it up."
+        return "Access limits: verifier worker. You can inspect files, run validation commands, and use available browser automation skills/tools for UI/runtime verification when present, but write_file, edit_file, and the deferred-tool bridge (search/inspect/invoke_deferred) are unavailable. Eager MCP tools (if any are connected) ARE available for direct single-tool calls. Do not create, modify, or delete files in the project workspace. If a temporary script or harness is necessary, write it only under /tmp or $TMPDIR and clean it up."
       }
       if (workerInput.ownedFiles.length > 0) {
-        return `Access limits: scoped write worker. write_file and edit_file are limited to owned_files (${workerInput.ownedFiles.join(", ")}). execute, task_output, browser_playwright, and the deferred-tool bridge (search/inspect/invoke_deferred) are unavailable, so do not claim to have run shell/browser checks. Eager MCP tools (if any are connected) ARE available for direct single-tool calls. File edits may still require explicit user approval; if write_file or edit_file is denied/blocked, do not loop the same call and instead report the blocking file/action back to the coordinator.`
+        return `Access limits: scoped write worker. write_file and edit_file are limited to owned_files (${workerInput.ownedFiles.join(", ")}). execute, task_output, and the deferred-tool bridge (search/inspect/invoke_deferred) are unavailable, so do not claim to have run shell or deferred-tool checks. Eager MCP tools (if any are connected) ARE available for direct single-tool calls. File edits may still require explicit user approval; if write_file or edit_file is denied/blocked, do not loop the same call and instead report the blocking file/action back to the coordinator.`
       }
       return "Access limits: write worker. You may edit workspace files as needed for the assigned implementation. File edits may still require explicit user approval; if write_file or edit_file is denied/blocked, do not loop the same call and instead report the blocking file/action back to the coordinator."
     })()
@@ -4440,7 +4438,6 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       projectModeAdapterInstructions: coordinatorWorkingDirAppendix,
       projectInstructions: coordinatorProjectInstructions,
       turnContext: coordinatorTurnPrompt,
-      hasBrowserTool: hasNamedTool("browser_playwright"),
       hasCodeExecTool,
       deferredToolIds
     })
@@ -4557,9 +4554,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     // assessCommandSafety). Off Windows / no sandbox → "unknown" (strict).
     windowsShellKind:
       process.platform === "win32" && windowsSandbox !== "none" ? "powershell" : "unknown",
-    taskSystemPrompt: isCoordinatorMode
-      ? buildCoordinatorTaskPrompt(threadId)
-      : TASK_TOOL_PROMPT,
+    taskSystemPrompt: isCoordinatorMode ? buildCoordinatorTaskPrompt(threadId) : TASK_TOOL_PROMPT,
     includeGeneralPurposeSubagent: !isCoordinatorMode,
     skills: mainSkillSources,
     memory: mainMemorySources,

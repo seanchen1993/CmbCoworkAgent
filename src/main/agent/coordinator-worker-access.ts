@@ -38,7 +38,6 @@ const deferredExecutionToolNames = new Set([
   "invoke_deferred_tool"
 ])
 const deferredDiscoveryToolNames = new Set(["search_tool", "inspect_tool"])
-const externalSideEffectToolNames = new Set(["browser_playwright"])
 const ownedFileGuardToolNames = new Set(["write_file", "edit_file"])
 // Ad-hoc code execution + orchestration/meta tools. A registry agent
 // (Explore/Plan/verification/custom) is a SUBAGENT, not an orchestrator, so it
@@ -60,10 +59,10 @@ const deferredBridgeToolNames = new Set(["invoke_deferred_tool", "search_tool", 
 /**
  * Blocked tools for a registry agent: its own disallowedTools, plus ad-hoc code
  * execution + orchestration meta tools (always), plus execute/task_output when
- * the shell is off, plus — for read-only/no-shell — browser automation and the
- * deferred-execution bridge (invoke_deferred_tool + discovery). verify/write keep
- * browser + bridge; eager MCP is kept for all. Used by BOTH the workflow Level-1
- * path (filesystemAccess) and the Solo Level-2 guard so they cut the same set.
+ * the shell is off, plus — for read-only/no-shell — the deferred-execution
+ * bridge (invoke_deferred_tool + discovery). verify/write keep the bridge; eager
+ * MCP is kept for all. Used by BOTH the workflow Level-1 path
+ * (filesystemAccess) and the Solo Level-2 guard so they cut the same set.
  */
 export function registryAgentBlockedTools(
   disallowedTools: string[],
@@ -79,11 +78,9 @@ export function registryAgentBlockedTools(
     blocked.add("task_output")
   }
   if (shellAccess === "read_only" || shellAccess === "none") {
-    // No shell / read-only → no browser automation and no deferred-execution
-    // bridge (both are side-effecting). A `tools:` allowlist that omits Bash
-    // (→ none) clearly didn't ask for browser either; verify/write (full) keep
-    // both. (Previously `none` kept browser, contradicting this comment.)
-    for (const t of externalSideEffectToolNames) blocked.add(t)
+    // No shell / read-only → no deferred-execution bridge (side-effecting). A
+    // `tools:` allowlist that omits Bash (→ none) still keeps eager MCP, but
+    // not the bridge; verify/write (full) keep the bridge.
     for (const t of deferredBridgeToolNames) blocked.add(t)
   }
   return blocked
@@ -115,14 +112,14 @@ export function blockedToolNamesForAccess(
     // git log, git diff, find, cat …) run; unsafe/unverified shell composition
     // such as pipes/chaining/redirection is rejected;
     // mutating/unrecognized commands are rejected. Direct writes, deferred
-    // execution surfaces, and browser automation remain unavailable.
-    return new Set([...directWriteToolNames, ...deferredToolNames, ...externalSideEffectToolNames])
+    // execution surfaces remain unavailable.
+    return new Set([...directWriteToolNames, ...deferredToolNames])
   }
   if (access.workload === "verify") {
     return new Set([...directWriteToolNames, ...deferredToolNames])
   }
   if ((access.ownedFiles ?? []).length > 0) {
-    return new Set(["execute", "task_output", ...deferredToolNames, ...externalSideEffectToolNames])
+    return new Set(["execute", "task_output", ...deferredToolNames])
   }
   return new Set()
 }

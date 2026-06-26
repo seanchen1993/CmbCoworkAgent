@@ -38,7 +38,6 @@ interface CoordinatorPromptOptions {
   projectModeAdapterInstructions?: string | null
   projectInstructions?: string | null
   turnContext?: string | null
-  hasBrowserTool: boolean
   hasCodeExecTool: boolean
   deferredToolIds: string[]
 }
@@ -444,9 +443,6 @@ export function buildCoordinatorSystemPrompt(options: CoordinatorPromptOptions):
   const projectModeAdapterInstructions = options.projectModeAdapterInstructions?.trim()
   const projectInstructions = options.projectInstructions?.trim()
   const turnContext = options.turnContext?.trim()
-  const browserLine = options.hasBrowserTool
-    ? "- Browser/runtime verification is available to workers through browser_playwright."
-    : "- Browser/runtime verification may not be available; workers should use the strongest available runtime checks."
   const codeExecLine = options.hasCodeExecTool
     ? "- code_exec may be available to unrestricted workers for reusable scripted checks when useful; constrained workers may not receive it."
     : "- code_exec is not available; workers should rely on shell, tests, and browser tools."
@@ -607,7 +603,6 @@ Coordinator constraints:
 - Be practical: for small requests, keep acceptance criteria small; for app changes, insist on a real build/test/runtime check from an implementer or verifier.
 
 Worker capability summary:
-${browserLine}
 ${codeExecLine}
 ${deferredLine}
 

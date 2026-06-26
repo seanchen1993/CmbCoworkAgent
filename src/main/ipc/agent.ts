@@ -122,13 +122,13 @@ import {
 } from "../agent/failover"
 import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
 import {
-  createHookScope,
   normalizePathKey,
   normalizePluginId,
   normalizeSkillName,
   resolveEnabledHooksForRun,
   type HookScopeController
 } from "../hooks/scope"
+import { createPersistentThreadHookScope } from "../hooks/thread-scope-persistence"
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
@@ -781,7 +781,7 @@ function sendHookHalt(window: BrowserWindow, channel: string, error: HookHaltErr
 
 /**
  * Thread-scoped hook state shared across IPC handler boundaries. A new
- * `agent:invoke` starts a fresh turn, but keeps the session-level persistent
+ * `agent:invoke` starts a fresh turn, but keeps the thread-level persistent
  * hook keys that were activated by earlier skill / plugin use in this thread.
  * `agent:resume` / `agent:interrupt` reuse the current turn state. Without
  * this Map, every IPC handler entry would reset hookScope etc. and scoped
@@ -799,9 +799,13 @@ interface TurnState {
 
 const turnStates = new Map<string, TurnState>()
 
-function createTurnState(initialUserMessage?: string, turnId?: string): TurnState {
+function createTurnState(
+  threadId: string,
+  initialUserMessage?: string,
+  turnId?: string
+): TurnState {
   return {
-    hookScope: createHookScope(),
+    hookScope: createPersistentThreadHookScope(threadId),
     skillUseTracker: createSkillUseTracker(),
     skillHookKeys: new Set<string>(),
     stopContextCollector: new StopHookContextCollector(initialUserMessage),
@@ -817,7 +821,7 @@ function resetTurnStateForNewInvoke(
   turnId?: string
 ): void {
   const snapshot = state.hookScope.snapshot()
-  state.hookScope = createHookScope()
+  state.hookScope = createPersistentThreadHookScope(threadId)
   state.hookScope.activatePersistentHookKeys(snapshot.persistentHookKeys ?? [])
   state.skillUseTracker = createSkillUseTracker()
   state.skillHookKeys = new Set<string>()
@@ -834,7 +838,7 @@ function getOrCreateTurnState(
 ): TurnState {
   const existing = turnStates.get(threadId)
   if (existing) return existing
-  const fresh = createTurnState(initialUserMessage, turnId)
+  const fresh = createTurnState(threadId, initialUserMessage, turnId)
   turnStates.set(threadId, fresh)
   return fresh
 }

@@ -90,12 +90,11 @@ export function stripCustomModelPrefix(model: string): string {
 
 /** Project-native NON-filesystem tool names a denylist must be able to name.
  * KNOWN_TOOLS (used by the allowlist math) only covers fs/exec tools, so without
- * this a `disallowedTools: browser_playwright` would normalize to null, get
- * filtered out, and silently no-op. These names are blocked by exact match in the
- * guard (registryAgentBlockedTools spreads disallowedTools into its blocked set),
- * so naming one here makes the denylist actually take effect. */
+ * this a project-native tool denylist entry would normalize to null, get
+ * filtered out, and silently no-op. These names are blocked by exact match in
+ * the guard (registryAgentBlockedTools spreads disallowedTools into its blocked
+ * set), so naming one here makes the denylist actually take effect. */
 const NON_FS_TOOL_NAMES = new Set([
-  "browser_playwright",
   "memory_search",
   "memory_get",
   "code_exec",
@@ -109,11 +108,10 @@ const NON_FS_TOOL_NAMES = new Set([
 
 /** The SIDE-EFFECTING subset of NON_FS_TOOL_NAMES. An allowlist (`tools:`) blocks
  * these unless explicitly listed, so e.g. `tools: Read, Bash` no longer silently
- * retains browser automation or the deferred-execution bridge. Read-only memory
- * tools (memory_search/memory_get) and eager MCP are intentionally NOT force-
- * blocked by an allowlist (consistent with the eager-MCP-retained policy). */
+ * retains the deferred-execution bridge. Read-only memory tools
+ * (memory_search/memory_get) and eager MCP are intentionally NOT force-blocked
+ * by an allowlist (consistent with the eager-MCP-retained policy). */
 const NON_FS_SIDE_EFFECT_TOOLS = [
-  "browser_playwright",
   "code_exec",
   "save_code_exec_tool",
   "invoke_deferred_tool",
@@ -126,9 +124,9 @@ const NON_FS_SIDE_EFFECT_TOOLS = [
 /**
  * Normalize one tool token to a project tool name, or null if it has no
  * equivalent here. Accepts native fs names (read_file), CC names (Read/Bash),
- * project-native non-fs names (browser_playwright, memory_search, …), and CC
- * permission syntax with a parenthesised qualifier (e.g. `Bash(git:*)` →
- * execute). Case-insensitive. Returns null for genuinely unknown names (e.g.
+ * project-native non-fs names (memory_search, code_exec, …), and CC permission
+ * syntax with a parenthesised qualifier (e.g. `Bash(git:*)` → execute).
+ * Case-insensitive. Returns null for genuinely unknown names (e.g.
  * NotebookEdit) so callers can warn.
  */
 export function normalizeToolName(raw: string): string | null {
@@ -214,10 +212,10 @@ function deriveToolPolicy(fm: Record<string, string>): ToolPolicy {
     // allowlist grants execute, grant task_output too. An EXPLICIT
     // `disallowedTools: task_output` still wins (denyExplicit is applied below).
     if (allow.has("execute")) allow.add("task_output")
-    // Block every known fs tool AND every fixed non-fs side-effect tool (browser /
-    // code_exec / deferred bridge / orchestration) not in the allowlist, then add
-    // explicit denies. Including the side-effect set is what makes a `tools: Read,
-    // Bash` allowlist not silently keep browser_playwright + the deferred bridge.
+    // Block every known fs tool AND every fixed non-fs side-effect tool
+    // (code_exec / deferred bridge / orchestration) not in the allowlist, then
+    // add explicit denies. Including the side-effect set is what makes a
+    // `tools: Read, Bash` allowlist not silently keep the deferred bridge.
     const blocked = [...KNOWN_TOOLS, ...NON_FS_SIDE_EFFECT_TOOLS].filter((t) => !allow.has(t))
     const policy = policyFromDisallowed([...new Set([...blocked, ...denyExplicit])])
     // CC's `Bash(cmd:*)` qualifies the shell to a command prefix. We can't enforce
@@ -344,7 +342,7 @@ You are STRICTLY PROHIBITED from:
 
 You MAY write ephemeral test scripts to a temp directory (/tmp or $TMPDIR) via execute when inline commands aren't sufficient — e.g., a multi-step race harness or a Playwright test. Clean up after yourself.
 
-Check your ACTUAL available tools rather than assuming from this prompt. You may have browser automation (browser_playwright), web fetch, or other MCP tools depending on the session — do not skip capabilities you didn't think to check for.
+Check your ACTUAL available tools rather than assuming from this prompt. You may have browser automation through skills or MCP tools, web fetch, or other capabilities depending on the session — do not skip capabilities you didn't think to check for.
 
 === WHAT YOU RECEIVE ===
 You will receive: the original task description, files changed, approach taken, and optionally a plan file path.
@@ -352,7 +350,7 @@ You will receive: the original task description, files changed, approach taken, 
 === VERIFICATION STRATEGY ===
 Adapt your strategy based on what was changed:
 
-**Frontend changes**: Start dev server → check your tools for browser automation (browser_playwright) and USE it to navigate, screenshot, click, and read console — do NOT say "needs a real browser" without attempting → curl a sample of page subresources (image-optimizer URLs like /_next/image, same-origin API routes, static assets) since HTML can serve 200 while everything it references fails → run frontend tests
+**Frontend changes**: Start dev server → check your available skills/tools for browser automation and USE them to navigate, screenshot, click, and read console — do NOT say "needs a real browser" without attempting → curl a sample of page subresources (image-optimizer URLs like /_next/image, same-origin API routes, static assets) since HTML can serve 200 while everything it references fails → run frontend tests
 **Backend/API changes**: Start server → curl/fetch endpoints → verify response shapes against expected values (not just status codes) → test error handling → check edge cases
 **CLI/script changes**: Run with representative inputs → verify stdout/stderr/exit codes → test edge inputs (empty, malformed, boundary) → verify --help / usage output is accurate
 **Infrastructure/config changes**: Validate syntax → dry-run where possible (terraform plan, kubectl apply --dry-run=server, docker build, nginx -t) → check env vars / secrets are actually referenced, not just defined
@@ -381,7 +379,7 @@ You will feel the urge to skip checks. These are the exact excuses you reach for
 - "The implementer's tests already pass" — the implementer is an LLM. Verify independently.
 - "This is probably fine" — probably is not verified. Run it.
 - "Let me start the server and check the code" — no. Start the server and hit the endpoint.
-- "I don't have a browser" — did you actually check for browser_playwright? If present, use it. If a tool fails, troubleshoot (server running? selector right?). The fallback exists so you don't invent your own "can't do this" story.
+- "I don't have a browser" — did you actually check for browser automation skills/tools in this session? If present, use them. If one fails, troubleshoot (server running? selector right?). The fallback exists so you don't invent your own "can't do this" story.
 - "This would take too long" — not your call.
 If you catch yourself writing an explanation instead of a command, stop. Run the command.
 
@@ -660,14 +658,6 @@ export function stripBlockedToolDocs(systemMessage: unknown, blocked: Iterable<s
     // section), since it can still run provably read-only commands.
     if (blockedSet.has("execute")) {
       out = out.replace(/\n## Execute Tool[\s\S]*?(?=\n## |\n### |$)/g, "")
-    }
-    // The "Browser strategy" guidance line steers the model toward
-    // browser_playwright but isn't a `- browser_playwright:` entry, so the
-    // per-tool strip above misses it. Drop it when the browser tool is blocked,
-    // otherwise a read-only/no-shell agent's prompt still advertises a tool it
-    // doesn't have.
-    if (blockedSet.has("browser_playwright")) {
-      out = out.replace(/\n- Browser strategy:[^\n]*/g, "")
     }
     return out
   }
