@@ -2946,6 +2946,18 @@ const api = {
         "harnessBoard:getDynamicWorkflowConfig",
         projectId
       ) as Promise<HarnessDynamicWorkflowConfig | null>,
+    getPublicAgentmdServiceUnits: (projectId: string): Promise<string[]> =>
+      ipcRenderer.invoke(
+        "harnessBoard:getPublicAgentmdServiceUnits",
+        projectId
+      ) as Promise<string[]>,
+    getLocalAgentmdServiceUnitMappings: (
+      mappings: HarnessServiceUnitMapping[]
+    ): Promise<string[]> =>
+      ipcRenderer.invoke(
+        "harnessBoard:getLocalAgentmdServiceUnitMappings",
+        mappings
+      ) as Promise<string[]>,
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput

@@ -272,7 +272,6 @@ export interface HarnessProjectListItem {
   creator?: HarnessProjectCreatorMetadata
   boardCompatibility: HarnessBoardCompatibility
   supportsServiceUnits: boolean
-  supportedServiceUnits: string[]
   supportsSessionContextInjection: boolean
   lifecycle: {
     status: "active" | "archived"

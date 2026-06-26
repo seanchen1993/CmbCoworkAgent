@@ -8,6 +8,8 @@ import {
   deleteHarnessProject,
   getHarnessProjectDetail,
   getHarnessProjectDetails,
+  getHarnessLocalAgentmdServiceUnitMappings,
+  getHarnessProjectPublicAgentmdServiceUnits,
   getHarnessRunDetail,
   listHarnessAdapters,
   listHarnessProjects,
@@ -121,6 +123,20 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     "harnessBoard:getDynamicWorkflowConfig",
     async (_event, projectId: string): Promise<HarnessDynamicWorkflowConfig | null> => {
       return getHarnessDynamicWorkflowConfig(projectId)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getPublicAgentmdServiceUnits",
+    async (_event, projectId: string): Promise<string[]> => {
+      return getHarnessProjectPublicAgentmdServiceUnits(projectId)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getLocalAgentmdServiceUnitMappings",
+    async (_event, mappings: HarnessServiceUnitMapping[]): Promise<string[]> => {
+      return getHarnessLocalAgentmdServiceUnitMappings(mappings)
     }
   )
 

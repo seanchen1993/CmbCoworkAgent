@@ -2029,6 +2029,10 @@ interface CustomAPI {
     ) => Promise<HarnessEnterpriseProjectDetailResult>
     createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
+    getPublicAgentmdServiceUnits: (projectId: string) => Promise<string[]>
+    getLocalAgentmdServiceUnitMappings: (
+      mappings: HarnessServiceUnitMapping[]
+    ) => Promise<string[]>
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput

@@ -862,14 +862,9 @@ function readBoardConfigInspectCommand(
   return readBoardConfigPlatformText(cwd, HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode])
 }
 
-function boardConfigSupportedServiceUnits(cwd: string): string[] {
+function boardConfigPublicAgentmdServiceUnits(cwd: string): string[] {
   const parsed = readBoardConfig(cwd)
   return parsed ? uniqueStringsInOrder(parsed.supported_service_units) : []
-}
-
-function boardConfigSupportsServiceUnitSelection(cwd: string): boolean {
-  const parsed = readBoardConfig(cwd)
-  return Array.isArray(parsed?.supported_service_units)
 }
 
 function boardConfigSupportsSessionContextInjection(cwd: string): boolean {
@@ -2008,10 +2003,7 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     plugin,
     harnessAdapter.name || harnessAdapter.id
   )
-  const supportedServiceUnits =
-    boardCompatibility.compatible && plugin ? boardConfigSupportedServiceUnits(plugin.path) : []
-  const supportsServiceUnits =
-    boardCompatibility.compatible && plugin ? boardConfigSupportsServiceUnitSelection(plugin.path) : false
+  const supportsServiceUnits = boardCompatibility.compatible
   const supportsSessionContextInjection =
     boardCompatibility.compatible && plugin
       ? boardConfigSupportsSessionContextInjection(plugin.path)
@@ -2035,7 +2027,6 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     creator: project.creator,
     boardCompatibility,
     supportsServiceUnits,
-    supportedServiceUnits,
     supportsSessionContextInjection,
     lifecycle: {
       status: project.lifecycle.status,
@@ -2152,9 +2143,6 @@ function resolveFeatureSelectedServiceUnits(
   const selected = normalizeServiceUnitMappings(input.selectedServiceUnits)
   if (selected.length === 0) {
     throw new Error("请至少选择一个服务单元")
-  }
-  if (!boardConfigSupportsServiceUnitSelection(adapterPluginDir(project))) {
-    throw new Error("插件暂不支持服务单元选择")
   }
 
   const configuredMappings = readServiceUnitMappingStore().mappings
@@ -2404,27 +2392,27 @@ function readHarnessFeatureSessionContextAgentPrompt(
       return { warning: formatSessionContextInjectWarning(message) }
     }
     const agentmdLoadStatus = normalizeHarnessAgentmdLoadStatus(result.agentmdLoadStatus)
-    const agentmdPrompt = normalizeText(result.agentmdPrompt).trim()
-    if (!agentmdPrompt) {
-      const detail = message || "agentmdPrompt 为空"
-      console.warn("[HarnessBoard] session_context_inject returned empty agentmdPrompt, fallback to CMBDevClaw AGENTS.md:", {
+    const sessionContext = normalizeText(result.sessionContext).trim()
+    if (!sessionContext) {
+      const detail = message || "sessionContext 为空"
+      console.warn("[HarnessBoard] session_context_inject returned empty sessionContext, fallback to CMBDevClaw AGENTS.md:", {
         projectId: project.projectId,
         featureId,
         message
       })
       return { warning: formatSessionContextInjectWarning(detail) }
     }
-    if (agentmdPrompt.length > HARNESS_SESSION_CONTEXT_MAX_CHARS) {
-      console.warn("[HarnessBoard] session_context_inject agentmdPrompt truncated:", {
-        chars: agentmdPrompt.length,
+    if (sessionContext.length > HARNESS_SESSION_CONTEXT_MAX_CHARS) {
+      console.warn("[HarnessBoard] session_context_inject sessionContext truncated:", {
+        chars: sessionContext.length,
         maxChars: HARNESS_SESSION_CONTEXT_MAX_CHARS
       })
       return {
-        prompt: agentmdPrompt.slice(0, HARNESS_SESSION_CONTEXT_MAX_CHARS),
+        prompt: sessionContext.slice(0, HARNESS_SESSION_CONTEXT_MAX_CHARS),
         agentmdLoadStatus
       }
     }
-    return { prompt: agentmdPrompt, agentmdLoadStatus }
+    return { prompt: sessionContext, agentmdLoadStatus }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     console.error("[HarnessBoard] session_context_inject failed, fallback to CMBDevClaw AGENTS.md:", {
@@ -2509,6 +2497,29 @@ export function buildHarnessFeatureDialogTips(projectId: string, slug: string): 
 
 export function listHarnessProjects(): HarnessProjectListItem[] {
   return readProjectStore().projects.map(toListItem)
+}
+
+export function getHarnessProjectPublicAgentmdServiceUnits(projectId: string): string[] {
+  const project = requireProject(projectId)
+  const plugin = findAdapterPlugin(project)
+  if (!plugin) return []
+  const boardCompatibility = evaluateBoardPluginCompatibility(
+    plugin,
+    project["harness-adapter"].name || project["harness-adapter"].id
+  )
+  if (!boardCompatibility.compatible) return []
+  return boardConfigPublicAgentmdServiceUnits(plugin.path)
+}
+
+export function getHarnessLocalAgentmdServiceUnitMappings(
+  mappings: HarnessServiceUnitMapping[]
+): string[] {
+  return normalizeServiceUnitMappings(mappings)
+    .filter((mapping) => {
+      const localRepoPath = mapping.localRepoPath.trim()
+      return isAbsolute(localRepoPath) && existsSync(join(localRepoPath, "AGENTS.md"))
+    })
+    .map((mapping) => mapping.serviceUnitIdMapping)
 }
 
 /**
