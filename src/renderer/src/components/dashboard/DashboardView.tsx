@@ -113,7 +113,8 @@ const GRANULARITY_OPTIONS: { value: Granularity; label: string }[] = [
   { value: "month", label: "月" },
   { value: "custom", label: "自定义" }
 ]
-const CUSTOM_RANGE_MAX_DAYS = 31
+const DEFAULT_CUSTOM_RANGE_MAX_DAYS = 31
+const ADMIN_CUSTOM_RANGE_MAX_DAYS = 366
 const MS_PER_DAY = 24 * 60 * 60 * 1000
 
 type SkillUploaderExportInfo = {
@@ -579,6 +580,7 @@ function TimeControlBar({
   onCustomRange,
   onRefresh,
   loading,
+  customRangeMaxDays,
   orgFilter
 }: {
   granularity: Granularity
@@ -588,13 +590,17 @@ function TimeControlBar({
   onCustomRange: (from: string, to: string) => void
   onRefresh: () => void
   loading: boolean
+  customRangeMaxDays: number
   orgFilter?: ReactNode
 }) {
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [customFrom, setCustomFrom] = useState("")
   const [customTo, setCustomTo] = useState("")
   const [customRangeError, setCustomRangeError] = useState("")
-  const customToMax = customFrom ? addDaysToDateInput(customFrom, CUSTOM_RANGE_MAX_DAYS - 1) : ""
+  const normalizedCustomRangeMaxDays = Math.max(1, Math.floor(customRangeMaxDays))
+  const customToMax = customFrom
+    ? addDaysToDateInput(customFrom, normalizedCustomRangeMaxDays - 1)
+    : ""
 
   const handleCustomConfirm = (): void => {
     if (!customFrom || !customTo) return
@@ -607,8 +613,8 @@ function TimeControlBar({
     }
 
     const selectedDays = Math.floor((toDate.getTime() - fromDate.getTime()) / MS_PER_DAY) + 1
-    if (selectedDays > CUSTOM_RANGE_MAX_DAYS) {
-      setCustomRangeError(`自定义范围最多选择 ${CUSTOM_RANGE_MAX_DAYS} 天`)
+    if (selectedDays > normalizedCustomRangeMaxDays) {
+      setCustomRangeError(`自定义范围最多选择 ${normalizedCustomRangeMaxDays} 天`)
       return
     }
 
@@ -2422,6 +2428,7 @@ export function DashboardView(): React.JSX.Element {
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [analysisAgentAllowed, setAnalysisAgentAllowed] = useState(false)
+  const [traceEvolverReviewAdmin, setTraceEvolverReviewAdmin] = useState(false)
   // 「生成但未提交分析」下钻权限：已登录可见；主进程按身份限制为全量 / 本室 / 本人数据。
   const [uncommittedAnalysisAllowed, setUncommittedAnalysisAllowed] = useState(false)
   // 「指标分析」入口默认隐藏：在标题栏右侧的隐藏热区连续点三下才显形（不完全移除功能）。
@@ -2519,6 +2526,17 @@ export function DashboardView(): React.JSX.Element {
         if (cancelled) return
         setAnalysisAgentAllowed(false)
         setAnalysisOpen(false)
+      })
+
+    window.api.dashboard
+      .isTraceEvolverReviewAdmin()
+      .then((allowed) => {
+        if (cancelled) return
+        setTraceEvolverReviewAdmin(allowed)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setTraceEvolverReviewAdmin(false)
       })
 
     window.api.dashboard
@@ -4219,6 +4237,9 @@ export function DashboardView(): React.JSX.Element {
         onCustomRange={setCustomRange}
         onRefresh={handleRefresh}
         loading={loading}
+        customRangeMaxDays={
+          traceEvolverReviewAdmin ? ADMIN_CUSTOM_RANGE_MAX_DAYS : DEFAULT_CUSTOM_RANGE_MAX_DAYS
+        }
         orgFilter={
           subPage.kind === "main" ? (
             <OrgFilterBar

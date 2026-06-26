@@ -1815,6 +1815,7 @@ interface CustomAPI {
     isAllowed: () => Promise<boolean>
     isProjectModeAllowed: () => Promise<boolean>
     isAnalysisAgentAllowed: () => Promise<boolean>
+    isTraceEvolverReviewAdmin: () => Promise<boolean>
     isUncommittedAnalysisAllowed: () => Promise<boolean>
     esQuery: (input: {
       indexAlias: "event" | "trace"

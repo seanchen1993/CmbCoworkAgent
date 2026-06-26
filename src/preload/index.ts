@@ -2490,6 +2490,8 @@ const api = {
       ipcRenderer.invoke("dashboard:isProjectModeAllowed"),
     isAnalysisAgentAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isAnalysisAgentAllowed"),
+    isTraceEvolverReviewAdmin: (): Promise<boolean> =>
+      ipcRenderer.invoke("dashboard:isTraceEvolverReviewAdmin"),
     isUncommittedAnalysisAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isUncommittedAnalysisAllowed"),
     esQuery: (input: {

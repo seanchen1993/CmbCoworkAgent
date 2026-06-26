@@ -809,8 +809,13 @@ function requireDashboardProjectModeAccess(): DashboardAccessContext {
 }
 
 function isDashboardAnalysisAgentAllowed(): boolean {
+  return isTraceEvolverReviewAdmin()
+}
+
+function isTraceEvolverReviewAdmin(
+  access: DashboardAccessContext = getDashboardAccessContext()
+): boolean {
   if (import.meta.env.DEV) return true
-  const access = getDashboardAccessContext()
   if (!access.loggedIn || !access.ystId) return false
   return getTraceEvolverReviewAdminIds().has(access.ystId)
 }
@@ -10872,6 +10877,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle("dashboard:isAnalysisAgentAllowed", async () => {
     return isDashboardAnalysisAgentAllowed()
+  })
+
+  _ipcMain.handle("dashboard:isTraceEvolverReviewAdmin", async () => {
+    return isTraceEvolverReviewAdmin()
   })
 
   _ipcMain.handle("dashboard:isUncommittedAnalysisAllowed", async () => {
