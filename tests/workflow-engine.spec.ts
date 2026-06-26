@@ -44,7 +44,8 @@ import {
 import {
   WORKFLOW_TOOL_RESULT_MAX_CHARS,
   WORKFLOW_RESULT_MAX_CHARS,
-  WORKFLOW_RESULT_SIDECAR_MAX_BYTES
+  WORKFLOW_RESULT_SIDECAR_MAX_BYTES,
+  WorkflowScriptError
 } from "../src/main/agent/workflow/types.ts"
 import type {
   PersistedWorkflowRun,
@@ -65,6 +66,20 @@ import {
 
 function assert(cond: unknown, msg: string): void {
   if (!cond) throw new Error(msg)
+}
+
+function assertWorkflowScriptError(source: string, includes: string, label: string): void {
+  let thrown: unknown
+  try {
+    validateWorkflowScript(source)
+  } catch (error) {
+    thrown = error
+  }
+  assert(thrown instanceof WorkflowScriptError, `${label} should fail during script validation`)
+  assert(
+    String((thrown as Error).message).includes(includes),
+    `${label} error should include ${includes}, got: ${String((thrown as Error).message)}`
+  )
 }
 
 function testRendererNotificationFullMatch(): void {
@@ -1319,14 +1334,10 @@ return probes`,
 async function testDeterminismGuards(workspace: string): Promise<void> {
   const harness = createHarness(workspace)
   for (const expr of ["Date.now()", "Math.random()", "new Date()", "Date()"]) {
-    const result = await harness.run(
+    assertWorkflowScriptError(
       `export const meta = { name: "t", description: "d" }\nreturn ${expr}`,
-      echoRunner
-    )
-    assert(result.status === "error", `${expr} should fail`)
-    assert(
-      result.error?.includes("unavailable in workflow scripts"),
-      `${expr} error message hints determinism, got: ${result.error}`
+      "unavailable in workflow scripts",
+      expr
     )
   }
   const ok = await harness.run(
@@ -1731,14 +1742,11 @@ return { year: d.getUTCFullYear(), local: typeof d.getFullYear(), diff: new Date
   const value = ok.result as { year: number; local: string; diff: number; json: string }
   assert(value.year === 1970 && value.local === "number" && value.diff === 1000, "date math works")
 
-  const bypass = await harness.run(
+  assertWorkflowScriptError(
     `export const meta = { name: "t", description: "d" }
 return new Date(1).constructor.now()`,
-    echoRunner
-  )
-  assert(
-    bypass.status === "error" && bypass.error?.includes("Date.now()"),
-    `constructor bypass still hits the guard, got: ${bypass.error}`
+    "Date.now()",
+    "Date constructor bypass"
   )
 }
 

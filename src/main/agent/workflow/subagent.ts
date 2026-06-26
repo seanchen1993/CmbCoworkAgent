@@ -663,13 +663,15 @@ function rootSchemaCoversProperty(schema: Record<string, unknown>, key: string):
   ) {
     return true
   }
-  return schema.additionalProperties === true || isPlainRecord(schema.additionalProperties)
+  if (schema.additionalProperties === true || isPlainRecord(schema.additionalProperties)) return true
+  return rootSchemaVariants(schema).some((variant) => rootSchemaCoversProperty(variant, key))
 }
 
 function rootSchemaDeclaresProperty(schema: Record<string, unknown>, key: string): boolean {
-  return (
-    isPlainRecord(schema.properties) && Object.prototype.hasOwnProperty.call(schema.properties, key)
-  )
+  if (isPlainRecord(schema.properties) && Object.prototype.hasOwnProperty.call(schema.properties, key)) {
+    return true
+  }
+  return rootSchemaVariants(schema).some((variant) => rootSchemaDeclaresProperty(variant, key))
 }
 
 function rootSchemaHasObjectShape(schema: Record<string, unknown>): boolean {
@@ -1279,6 +1281,10 @@ function collectStringifiedJsonHints(
 function schemaVariants(value: unknown): Record<string, unknown>[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is Record<string, unknown> => isPlainRecord(item))
+}
+
+function rootSchemaVariants(schema: Record<string, unknown>): Record<string, unknown>[] {
+  return [...schemaVariants(schema.anyOf), ...schemaVariants(schema.oneOf)]
 }
 
 function schemaVariantValues(value: unknown): unknown[] {
