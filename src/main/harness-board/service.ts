@@ -2796,15 +2796,15 @@ export function syncHarnessProjectConstraints(adapterId: string): HarnessProject
   try {
     parsed = JSON.parse(raw) as unknown
   } catch {
-    throw new Error("项目约束同步返回格式异常")
+    throw new Error("公共系统约束同步返回格式异常")
   }
   if (!isObject(parsed) || typeof parsed.ok !== "boolean") {
-    throw new Error("项目约束同步返回格式异常")
+    throw new Error("公共系统约束同步返回格式异常")
   }
   message = normalizeText(parsed.message).trim()
   const outputPath = normalizeText(parsed.path).trim()
   if (!parsed.ok) {
-    throw new Error(message || "项目约束同步失败")
+    throw new Error(message || "公共系统约束同步失败")
   }
   return {
     adapterId: adapter.id,

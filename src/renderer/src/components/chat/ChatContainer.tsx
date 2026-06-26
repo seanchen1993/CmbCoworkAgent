@@ -2303,7 +2303,7 @@ export function ChatContainer({
   const isHarnessContextReminderEnabled =
     surface === "harness-project" && Boolean(harnessFeatureBinding) && !readOnly
   const agentModeSwitchDisabledReason = disableCoordinatorModeOption
-    ? "项目模式暂不支持子代理协同模式，只能使用 Solo Agent。"
+    ? "项目模式暂时仅支持 Solo Agent"
     : !canChangeAgentMode
       ? historyLoading
         ? "会话历史加载中，暂时不能切换执行模式。"

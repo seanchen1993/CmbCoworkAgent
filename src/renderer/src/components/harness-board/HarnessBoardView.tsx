@@ -2838,8 +2838,8 @@ function FeatureCreateDialog({
         <div className="min-w-0">
           <div className="truncate text-sm font-medium text-foreground">
             {pluginServiceUnitContextEnabled
-              ? "由插件注入系统约束"
-              : "由 CMBDevClaw 注入系统约束"}
+              ? "优先注入公共系统约束"
+              : "仅注入本地系统约束"}
           </div>
         </div>
         <button
@@ -3002,7 +3002,7 @@ function ProjectModeSettingsPanel({
         <div className="min-w-0">
           <h2 className="text-sm font-semibold text-foreground">本地工程配置</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            配置要使用的本地工程路径以及对应的发布单元。插件将利用该配置拉取远端的发布单元系统约束
+            配置本地工程路径以及对应的发布单元。该配置用于拉取公共系统约束以及便捷选择代码工作路径
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -4144,10 +4144,7 @@ function ProjectConstraintSyncPanel({
   return (
     <section className="rounded-md border border-border bg-background shadow-sm">
       <div className="border-b border-border px-4 py-3">
-        <h2 className="text-sm font-semibold text-foreground">项目约束同步</h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          下载或更新已安装项目模式插件的项目约束。
-        </p>
+        <h2 className="text-sm font-semibold text-foreground">拉取公共系统约束</h2>
       </div>
       <div className="space-y-3 p-4">
         {adapters.length === 0 ? (
@@ -4190,9 +4187,7 @@ function ProjectConstraintSyncPanel({
                       variant="ghost"
                       size="icon-sm"
                       title={syncedPath}
-                      onClick={() =>
-                        void openPathInFileManager(syncedPath, "无法打开项目约束目录")
-                      }
+                      onClick={() => void openPathInFileManager(syncedPath, "无法打开项目约束目录")}
                     >
                       <FolderOpen className="size-3.5" />
                     </Button>
@@ -4204,13 +4199,17 @@ function ProjectConstraintSyncPanel({
                     disabled={disabled}
                     title={
                       adapter.pullKnowledgeAvailable
-                        ? "下载/更新项目约束"
+                        ? "拉取最新公共系统约束"
                         : "插件未配置 pull_knowledge"
                     }
                     onClick={() => void onSync(adapter)}
                   >
-                    {syncing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
-                    下载/更新项目约束
+                    {syncing ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <RefreshCw className="size-4" />
+                    )}
+                    拉取最新约束
                   </Button>
                 </div>
               </div>
@@ -7077,7 +7076,7 @@ export function HarnessBoardView({
                 </TabsTrigger>
                 <TabsTrigger value="constraint-sync" className="gap-2">
                   <RefreshCw className="size-4" />
-                  项目约束同步
+                  拉取公共系统约束
                 </TabsTrigger>
               </TabsList>
               {projectModeTab === "projects" && (
