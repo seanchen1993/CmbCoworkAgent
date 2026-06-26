@@ -25,6 +25,7 @@ trace_evolver_service/
 # Codex local files
 .codex/
 tests/screenshots/
+.hook-scope-log/
 
 # OMC local runtime/cache state
 .omc/project-memory.json
