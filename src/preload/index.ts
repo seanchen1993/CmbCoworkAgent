@@ -1786,8 +1786,8 @@ const api = {
         ipcRenderer.removeListener("skill:confirmRequest", handler)
       }
     },
-    confirmResponse: (requestId: string, approved: boolean): Promise<void> =>
-      ipcRenderer.invoke("skill:confirmResponse", { requestId, approved }) as Promise<void>,
+    confirmResponse: (requestId: string, approved: boolean, content?: string): Promise<void> =>
+      ipcRenderer.invoke("skill:confirmResponse", { requestId, approved, content }) as Promise<void>,
 
     // ── Streaming generation progress ──────────────────────────
     onGenerating: (

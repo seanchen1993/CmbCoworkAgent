@@ -1589,7 +1589,7 @@ interface CustomAPI {
         content: string
       }) => void
     ) => () => void
-    confirmResponse: (requestId: string, approved: boolean) => Promise<void>
+    confirmResponse: (requestId: string, approved: boolean, content?: string) => Promise<void>
     /** Listen to streaming generation progress from the main process */
     onGenerating: (
       callback: (event: {

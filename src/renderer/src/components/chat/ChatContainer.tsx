@@ -3751,9 +3751,9 @@ export function ChatContainer({
     return cleanup
   }, [setSkillGenerationPhase])
 
-  const handleSkillApprove = useCallback((requestId: string): void => {
+  const handleSkillApprove = useCallback((requestId: string, content: string): void => {
     console.log("[ChatContainer] Approving skill confirm request:", requestId)
-    void window.api.skillEvolution.confirmResponse(requestId, true)
+    void window.api.skillEvolution.confirmResponse(requestId, true, content)
     setSkillConfirmRequest(null)
   }, [])
 

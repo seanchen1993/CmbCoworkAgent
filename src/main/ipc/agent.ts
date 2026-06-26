@@ -2936,7 +2936,7 @@ async function confirmAndWriteSkillProposal(
   if (!skillId) return
 
   const confirmId = uuid()
-  const adopted = await requestSkillConfirmation({
+  const decision = await requestSkillConfirmation({
     threadId,
     requestId: confirmId,
     skillId,
@@ -2945,7 +2945,7 @@ async function confirmAndWriteSkillProposal(
     content: proposal.content
   })
 
-  if (!adopted) {
+  if (!decision.approved) {
     console.log(`[Agent][${threadId}] User rejected skill detail for "${proposal.name}"`)
     return
   }
@@ -2959,7 +2959,7 @@ async function confirmAndWriteSkillProposal(
   } catch (e) {
     console.warn("[event] failed to emit skill.proposal.accepted:", e)
   }
-  await writeSkillToDisk(skillId, proposal.content, proposal.name)
+  await writeSkillToDisk(skillId, decision.content ?? proposal.content, proposal.name)
 }
 
 /**
