@@ -2256,6 +2256,16 @@ async function fetchModelStats(
       },
       by_layer: {
         terms: { field: "routing.decidedByLayer", size: 10 }
+      },
+      smart_by_tier: {
+        filter: {
+          terms: { "routing.decidedByLayer": ["thread", "layer1", "layer2", "layer3"] }
+        },
+        aggs: {
+          by_tier: {
+            terms: { field: "routing.resolvedTier", size: 5 }
+          }
+        }
       }
     }
   }
@@ -6503,17 +6513,27 @@ function makeMockModelStats(opts?: OrgFilterOptions): unknown {
         },
         by_tier: {
           buckets: [
-            { key: "high", doc_count: 280 },
-            { key: "medium", doc_count: 620 },
-            { key: "low", doc_count: 347 }
+            { key: "premium", doc_count: 1_178 },
+            { key: "economy", doc_count: 69 }
           ]
         },
         by_layer: {
           buckets: [
-            { key: "user_explicit", doc_count: 210 },
-            { key: "skill_override", doc_count: 390 },
-            { key: "auto_routing", doc_count: 647 }
+            { key: "pinned", doc_count: 1_110 },
+            { key: "thread", doc_count: 42 },
+            { key: "layer2", doc_count: 35 },
+            { key: "layer3", doc_count: 31 },
+            { key: "layer1", doc_count: 29 }
           ]
+        },
+        smart_by_tier: {
+          doc_count: 137,
+          by_tier: {
+            buckets: [
+              { key: "premium", doc_count: 68 },
+              { key: "economy", doc_count: 69 }
+            ]
+          }
         }
       }
     },

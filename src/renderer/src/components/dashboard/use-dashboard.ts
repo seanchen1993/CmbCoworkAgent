@@ -63,6 +63,7 @@ export interface ModelStatsData {
   }>
   byTier: Array<{ tier: string; count: number }>
   byLayer: Array<{ layer: string; count: number }>
+  smartByTier: Array<{ tier: string; count: number }>
 }
 
 export interface UserStatsData {
@@ -1220,7 +1221,19 @@ function parseModelStats(raw: any): ModelStatsData {
     count: b.doc_count
   }))
 
-  return { byModel, byTier, byLayer }
+  const smartByTier: ModelStatsData["smartByTier"] = (
+    aggs.smart_by_tier?.by_tier?.buckets ?? []
+  ).map((b: any) => ({
+    tier: b.key,
+    count: b.doc_count
+  }))
+
+  return {
+    byModel,
+    byTier,
+    byLayer,
+    smartByTier
+  }
 }
 
 function normalizeMetricValue(value: unknown): string {

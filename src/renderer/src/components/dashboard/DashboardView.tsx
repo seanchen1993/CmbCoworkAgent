@@ -3840,6 +3840,13 @@ export function DashboardView(): React.JSX.Element {
             rows: modelStats.byTier.map((t) => [t.tier, t.count])
           })
         }
+        if (modelStats.smartByTier.length > 0) {
+          sheets.push({
+            name: "智能路由分流",
+            header: ["Tier", "调用次数"],
+            rows: modelStats.smartByTier.map((t) => [t.tier, t.count])
+          })
+        }
         if (modelStats.byLayer.length > 0) {
           sheets.push({
             name: "路由决策层",
@@ -4482,16 +4489,16 @@ export function DashboardView(): React.JSX.Element {
                 />
               </section>
 
-              {/* Model Analysis */}
-              <section>
-                <h2 className="mb-3 text-sm font-semibold text-foreground">模型分析</h2>
-                <ModelPanel data={modelStats} loading={loading} />
-              </section>
-
               {/* Advanced Features */}
               <section>
                 <h2 className="mb-3 text-sm font-semibold text-foreground">高级特性运营</h2>
                 <AdvancedFeaturesPanel data={advancedFeatures} loading={loading} />
+              </section>
+
+              {/* Model Analysis */}
+              <section>
+                <h2 className="mb-3 text-sm font-semibold text-foreground">模型分析</h2>
+                <ModelPanel data={modelStats} loading={loading} />
               </section>
             </div>
           )}
