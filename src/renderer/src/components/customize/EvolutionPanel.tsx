@@ -27,17 +27,21 @@ import {
   XCircle,
   Ban,
   RotateCcw,
+  Rocket,
   ShieldCheck
 } from "lucide-react"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
 import { evolutionApi, evolutionSkillKey, type EvolutionCandidate } from "@/api/evolution"
+import { marketApi, type MarketItem } from "@/api/market"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
+import { DEFAULT_SCENE_CATEGORY } from "@/lib/skill-data-service"
 import { TraceConversation } from "@/components/trace/TraceConversation"
+import { normalizeMarketSkillKey } from "@/components/dashboard/skill-market"
 import { hasUnreadCloudEvolutionUpdates, markCloudEvolutionUpdatesSeen } from "@/lib/evolution-notices"
 import {
   buildBundleUnifiedDiff,
@@ -1045,20 +1049,26 @@ function CandidateCard({
 
 function CloudEvolutionUpdateCard({
   candidate,
+  marketInfo,
   onInstall,
+  onUpdateMarket,
   onRollback,
   onExportBackup,
   onIgnore,
   onDelete,
-  installing
+  installing,
+  updatingMarket
 }: {
   candidate: EvolutionCandidate
+  marketInfo?: MarketItem
   onInstall: (candidate: EvolutionCandidate, editedFiles?: TextBundleFile[], originalZipBuffer?: ArrayBuffer) => Promise<void>
+  onUpdateMarket: (candidate: EvolutionCandidate, marketInfo: MarketItem) => Promise<void>
   onRollback: (candidate: EvolutionCandidate) => Promise<void>
   onExportBackup: (candidate: EvolutionCandidate) => Promise<void>
   onIgnore: (candidateId: string) => void
   onDelete: (candidateId: string) => void
   installing: boolean
+  updatingMarket: boolean
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
   const [diff, setDiff] = useState("")
@@ -1123,6 +1133,7 @@ function CloudEvolutionUpdateCard({
   }, [candidate.candidate_id, candidate.skill_name, diffSource, expanded])
   const toggleExpanded = (): void => setExpanded((v) => !v)
   const adopted = candidate.local_adoption_status === "adopted"
+  const canUpdateMarket = adopted && !!marketInfo && !candidate.plugin_name
 
   const openEditor = async (): Promise<void> => {
     setEditorLoading(true)
@@ -1254,6 +1265,34 @@ function CloudEvolutionUpdateCard({
               <CheckCircle2 className="size-3 mr-1" />
               已采纳
             </Button>
+          )}
+          {canUpdateMarket && (
+            <TooltipProvider delayDuration={150}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={installing || updatingMarket}
+                    className="h-7 px-2.5 text-xs border-blue-500/40 text-blue-600 hover:bg-blue-500/10 hover:text-blue-600"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      if (marketInfo) void onUpdateMarket(candidate, marketInfo)
+                    }}
+                  >
+                    {updatingMarket ? (
+                      <Loader2 className="size-3 mr-1 animate-spin" />
+                    ) : (
+                      <Rocket className="size-3 mr-1" />
+                    )}
+                    更新市场
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top" sideOffset={6} className="max-w-56">
+                  将本地已采纳的新版本打包，并更新到你上传的应用市场 Skill。
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           )}
           {!adopted && (
             <Button
@@ -1411,6 +1450,7 @@ export function EvolutionPanel(): React.JSX.Element {
   const [thresholdSaved, setThresholdSaved] = useState(false)
   const [cloudUpdateLoading, setCloudUpdateLoading] = useState(false)
   const [installingCloudCandidateId, setInstallingCloudCandidateId] = useState<string | null>(null)
+  const [updatingMarketCandidateId, setUpdatingMarketCandidateId] = useState<string | null>(null)
   const [reviewUserInfo, setReviewUserInfo] = useState<UserInfoLite | null>(null)
   const {
     threads,
@@ -1440,7 +1480,7 @@ export function EvolutionPanel(): React.JSX.Element {
     setPendingEvolution
   } = useAppStore()
 
-  const { ownedSkillKeys } = useMyUploadedSkills()
+  const { ownedSkillKeys, ownedSkillItemsByKey } = useMyUploadedSkills()
   const localPendingCandidateCount = candidates.filter((c) => c.status === "pending").length
   const cloudPendingUpdateCount = cloudEvolutionUpdates.filter((candidate) => candidate.local_adoption_status !== "adopted").length
   const cloudAdoptedUpdateCount = cloudEvolutionUpdates.length - cloudPendingUpdateCount
@@ -1809,6 +1849,68 @@ export function EvolutionPanel(): React.JSX.Element {
       setInstallingCloudCandidateId(null)
     }
   }, [cloudEvolutionUpdates, setCloudEvolutionUpdates, setPendingEvolution])
+
+  const handleUpdateMarketFromCloudUpdate = useCallback(async (
+    candidate: EvolutionCandidate,
+    marketInfo: MarketItem
+  ) => {
+    if (candidate.plugin_name) {
+      toast.error("插件内 Skill 需要通过 Plugin 更新市场，不能按独立 Skill 发布")
+      return
+    }
+
+    setUpdatingMarketCandidateId(candidate.candidate_id)
+    try {
+      const candidateKeys = new Set(
+        [candidate.skill_name, marketInfo.name, marketInfo.filename]
+          .map((value) => normalizeMarketSkillKey(value))
+          .filter(Boolean)
+      )
+      const customSkills = await window.api.skills.list()
+      const existing = customSkills.find((skill: SkillMetadata) => {
+        const skillKeys = [skill.name, skill.relativePath]
+          .map((value) => normalizeMarketSkillKey(value))
+          .filter(Boolean)
+        return skillKeys.some((key) => candidateKeys.has(key))
+      })
+      if (!existing) {
+        throw new Error(`本地未找到已采纳的 Skill：${candidate.skill_name}`)
+      }
+
+      const exported = await window.api.skills.exportForMarket(existing.path, {
+        includeNestedSkills: true
+      })
+      if (!exported.success || !exported.buffer) {
+        throw new Error(exported.error || "导出市场 Skill 包失败")
+      }
+
+      const file = new File(
+        [exported.buffer],
+        exported.fileName || `${existing.name}.zip`,
+        { type: "application/zip" }
+      )
+      const result = await marketApi.updateItem(
+        file,
+        "skill",
+        marketInfo.name || existing.name || candidate.skill_name,
+        existing.description || marketInfo.description || "",
+        marketInfo.category || existing.metadata?.category || DEFAULT_SCENE_CATEGORY,
+        candidate.target_version || existing.version || marketInfo.version || "1.0.0",
+        existing.metadata?.guidance || marketInfo.guidance || undefined,
+        marketInfo.chinese_name || existing.metadata?.chinese_name || undefined,
+        marketInfo.user_id || undefined
+      )
+      if (!result.success) {
+        throw new Error(result.error || "更新应用市场失败")
+      }
+
+      toast.success(`已将「${candidate.skill_name}」更新到应用市场 ${candidate.target_version || ""}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "更新应用市场失败")
+    } finally {
+      setUpdatingMarketCandidateId(null)
+    }
+  }, [])
 
   const handleRollbackCloudUpdate = useCallback(async (candidate: EvolutionCandidate) => {
     if (!candidate.local_backup_id) {
@@ -2368,18 +2470,26 @@ export function EvolutionPanel(): React.JSX.Element {
               ) : (
                 <>
                   <CloudEvolutionIntro />
-                  {cloudEvolutionUpdates.map((candidate) => (
-                    <CloudEvolutionUpdateCard
-                      key={candidate.candidate_id}
-                      candidate={candidate}
-	                      installing={installingCloudCandidateId === candidate.candidate_id}
-	                      onInstall={handleInstallCloudUpdate}
-	                      onRollback={handleRollbackCloudUpdate}
-	                      onExportBackup={handleExportCloudBackup}
-	                      onIgnore={handleIgnoreCloudUpdate}
-	                      onDelete={handleDeleteCloudUpdate}
-                    />
-                  ))}
+                  {cloudEvolutionUpdates.map((candidate) => {
+                    const marketInfo = candidate.plugin_name
+                      ? undefined
+                      : ownedSkillItemsByKey.get(normalizeMarketSkillKey(candidate.skill_name))
+                    return (
+                      <CloudEvolutionUpdateCard
+                        key={candidate.candidate_id}
+                        candidate={candidate}
+                        marketInfo={marketInfo}
+                        installing={installingCloudCandidateId === candidate.candidate_id}
+                        updatingMarket={updatingMarketCandidateId === candidate.candidate_id}
+                        onInstall={handleInstallCloudUpdate}
+                        onUpdateMarket={handleUpdateMarketFromCloudUpdate}
+                        onRollback={handleRollbackCloudUpdate}
+                        onExportBackup={handleExportCloudBackup}
+                        onIgnore={handleIgnoreCloudUpdate}
+                        onDelete={handleDeleteCloudUpdate}
+                      />
+                    )
+                  })}
                   {[...candidates]
                     .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
                     .map((candidate) => (
