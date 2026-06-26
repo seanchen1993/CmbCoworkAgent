@@ -1542,14 +1542,24 @@ return r`,
 
 async function testStructuredSchemaPath(workspace: string): Promise<void> {
   const harness = createHarness(workspace)
+  const structuredOnlyRunner: WorkflowSubagentRunner = async (request) => ({
+    text: "Done",
+    structured: request.schema ? { answer: request.prompt } : undefined,
+    outputTokens: 10
+  })
   const result = await harness.run(
     `export const meta = { name: "t", description: "d" }
 const r = await agent("classify", { schema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] } })
 return r.answer`,
-    echoRunner
+    structuredOnlyRunner
   )
   assert(result.status === "completed", `completed, got ${result.error}`)
   assert(result.result === "classify", "schema mode returns structured object")
+  const detailed = loadWorkflowRunForResume(workspace, THREAD_ID, harness.runId)!
+  assert(
+    detailed.agents[0]?.resultPreview?.includes('"answer":"classify"'),
+    `schema-mode agent preview prefers structured JSON over generic final text: ${JSON.stringify(detailed.agents[0])}`
+  )
 }
 
 async function testAgentCapAndBudget(workspace: string): Promise<void> {

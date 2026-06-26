@@ -197,7 +197,10 @@ import { patchRuntimeReadFileTool } from "./read-file-tool"
 import { createWorkflowTool } from "./workflow/tool"
 import { workflowRunManager } from "./workflow/run-manager"
 import { WORKFLOW_MODE_SYSTEM_PROMPT } from "./workflow/prompts"
-import type { WorkflowSubagentRuntime } from "./workflow/subagent"
+import {
+  isWorkflowStructuredOutputFatalError,
+  type WorkflowSubagentRuntime
+} from "./workflow/subagent"
 import { isWorkflowSubagentThreadOf } from "./workflow/types"
 
 function isAbortError(error: unknown): boolean {
@@ -563,7 +566,8 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
         const runSharedTool = () =>
           lock.read(async () => {
             const waited = Date.now() - waitStart
-            if (waited > 50) console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
+            if (waited > 50)
+              console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
             return handler(request)
           })
 
@@ -1214,9 +1218,7 @@ function wrapTaskToolWithOwnerMetadata(taskTool: DynamicStructuredTool): Dynamic
 function stampSubagentOwnerMetadata<T>(middleware: T): T {
   const mw = middleware as { tools?: DynamicStructuredTool[] }
   if (Array.isArray(mw.tools) && mw.tools.length > 0) {
-    mw.tools = mw.tools.map((t) =>
-      t?.name === "task" ? wrapTaskToolWithOwnerMetadata(t) : t
-    )
+    mw.tools = mw.tools.map((t) => (t?.name === "task" ? wrapTaskToolWithOwnerMetadata(t) : t))
   }
   return middleware
 }
@@ -1607,6 +1609,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     error: unknown,
     toolName: string | undefined
   ): { kind: "schema" | "runtime"; message: string } | null => {
+    if (isWorkflowStructuredOutputFatalError(error)) return null
     if (isGraphBubbleUp(error) || isAbortError(error)) return null
     if (isHookHaltError(error)) return null
     if (isProgrammerError(error)) return null
@@ -3291,15 +3294,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const isReadOnlyRuntime =
     options.filesystemAccess?.shellAccess === "read_only" ||
     options.filesystemAccess?.workload === "read_only"
-  let systemPrompt = getSystemPrompt(
-    workspacePath,
-    windowsSandbox,
-    workingDirPromptAppendix,
-    {
-      includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
-      includeSubagents: !featureId
-    }
-  )
+  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, workingDirPromptAppendix, {
+    includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
+    includeSubagents: !featureId
+  })
   let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
     prompt: null,
     projectRoot: workspacePath,
@@ -3567,6 +3565,7 @@ The workspace root is: ${workspacePath}`
           try {
             return await Reflect.apply(originalFunc, t, args)
           } catch (e: unknown) {
+            if (isWorkflowStructuredOutputFatalError(e)) throw e
             const msg = e instanceof Error ? e.message : String(e)
             const level = e instanceof TypeError || e instanceof ReferenceError ? "error" : "warn"
             console[level](`[Runtime] Tool "${t.name}" error (non-fatal):`, msg)
@@ -3580,7 +3579,7 @@ The workspace root is: ${workspacePath}`
           try {
             return await Reflect.apply(originalInvoke, t, args)
           } catch (e: unknown) {
-            if (isHookHaltError(e)) throw e
+            if (isHookHaltError(e) || isWorkflowStructuredOutputFatalError(e)) throw e
             const msg = e instanceof Error ? e.message : String(e)
             const level = e instanceof TypeError || e instanceof ReferenceError ? "error" : "warn"
             console[level](`[Runtime] Tool "${t.name}" error (non-fatal):`, msg)
@@ -4523,9 +4522,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     // assessCommandSafety). Off Windows / no sandbox → "unknown" (strict).
     windowsShellKind:
       process.platform === "win32" && windowsSandbox !== "none" ? "powershell" : "unknown",
-    taskSystemPrompt: isCoordinatorMode
-      ? buildCoordinatorTaskPrompt(threadId)
-      : TASK_TOOL_PROMPT,
+    taskSystemPrompt: isCoordinatorMode ? buildCoordinatorTaskPrompt(threadId) : TASK_TOOL_PROMPT,
     includeGeneralPurposeSubagent: !isCoordinatorMode,
     skills: mainSkillSources,
     memory: mainMemorySources,

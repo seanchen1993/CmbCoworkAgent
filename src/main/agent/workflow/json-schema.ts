@@ -16,6 +16,9 @@
 
 const MAX_ERRORS = 10
 const MAX_DEPTH = 32
+const MAX_SCHEMA_NODES = 4096
+type JsonSchemaNode = Record<string, unknown> | boolean
+type SchemaPreflightContext = { nodes: number }
 
 /**
  * Upper bound on the input length we run a schema `pattern` regex against.
@@ -81,7 +84,7 @@ function hasNestedQuantifier(pattern: string): boolean {
   return false
 }
 
-export function validateJsonSchemaValue(schema: Record<string, unknown>, value: unknown): string[] {
+export function validateJsonSchemaValue(schema: JsonSchemaNode, value: unknown): string[] {
   const errors: string[] = []
   validateNode(schema, value, "$", errors, 0)
   return errors
@@ -147,18 +150,33 @@ const IGNORED_ANNOTATION_KEYWORDS = new Set([
  * Fail-closed pre-check for the schema itself, run when the SCRIPT declares it
  * (agent() call time) — not during subagent retries, where the schema author
  * isn't present to fix it. Without this, an unsupported construct ($ref,
- * tuple items, boolean subschema) validates vacuously and garbage output
+ * tuple items, unsupported keywords) validates vacuously and garbage output
  * passes as "valid".
+ *
+ * This intentionally does not try to prove whether a schema has at least one
+ * satisfying value. That kind of analysis is easy to get wrong for JSON Schema
+ * combinators; runtime validation plus structured_output retry/hard-stop is
+ * the source of truth for satisfiability.
  */
-export function assertSupportedJsonSchema(schema: unknown, path = "$", depth = 0): void {
+export function assertSupportedJsonSchema(
+  schema: unknown,
+  path = "$",
+  depth = 0,
+  context: SchemaPreflightContext = { nodes: 0 }
+): void {
   if (depth > MAX_DEPTH) {
     throw new TypeError(`${path}: schema nesting exceeds the supported depth of ${MAX_DEPTH}`)
   }
-  if (schema === true) return
-  if (schema === false) {
+  context.nodes += 1
+  if (context.nodes > MAX_SCHEMA_NODES) {
     throw new TypeError(
-      `${path}: boolean JSON schemas are not supported — use { type, properties, required, items, enum, const, anyOf }`
+      `${path}: schema is too large or complex (exceeds ${MAX_SCHEMA_NODES} schema nodes)`
     )
+  }
+  if (schema === true) return
+  if (schema === false) return
+  if (Array.isArray(schema)) {
+    throw new TypeError(`${path}: schema must be an object, not an array`)
   }
   if (typeof schema !== "object" || schema === null) {
     throw new TypeError(`${path}: schema must be an object`)
@@ -214,6 +232,13 @@ export function assertSupportedJsonSchema(schema: unknown, path = "$", depth = 0
   if (record.pattern !== undefined && typeof record.pattern !== "string") {
     throw new TypeError(`${path}.pattern: must be a string (a regular expression)`)
   }
+  if (typeof record.pattern === "string") {
+    try {
+      new RegExp(record.pattern)
+    } catch {
+      throw new TypeError(`${path}.pattern: must be a valid regular expression`)
+    }
+  }
   if (typeof record.pattern === "string" && hasNestedQuantifier(record.pattern)) {
     throw new TypeError(
       `${path}.pattern: rejected as ReDoS-prone — a quantifier is applied to a group that already contains one (e.g. (a+)+). Rewrite without nested quantifiers.`
@@ -236,7 +261,6 @@ export function assertSupportedJsonSchema(schema: unknown, path = "$", depth = 0
       throw new TypeError(`${path}.${countKeyword}: must be a non-negative integer`)
     }
   }
-
   if (record.items !== undefined) {
     if (Array.isArray(record.items)) {
       throw new TypeError(
@@ -245,7 +269,7 @@ export function assertSupportedJsonSchema(schema: unknown, path = "$", depth = 0
     }
     // A present `items` must be a schema object — null/primitives are malformed
     // (they would otherwise become a silent "no item constraint").
-    assertSupportedJsonSchema(record.items, `${path}.items`, depth + 1)
+    assertSupportedJsonSchema(record.items, `${path}.items`, depth + 1, context)
   }
   if (
     record.additionalProperties !== undefined &&
@@ -255,7 +279,8 @@ export function assertSupportedJsonSchema(schema: unknown, path = "$", depth = 0
     assertSupportedJsonSchema(
       record.additionalProperties,
       `${path}.additionalProperties`,
-      depth + 1
+      depth + 1,
+      context
     )
   }
   if (record.properties !== undefined) {
@@ -265,7 +290,7 @@ export function assertSupportedJsonSchema(schema: unknown, path = "$", depth = 0
       throw new TypeError(`${path}.properties: must be an object mapping names to schemas`)
     }
     for (const [key, child] of Object.entries(record.properties)) {
-      assertSupportedJsonSchema(child, `${path}.${key}`, depth + 1)
+      assertSupportedJsonSchema(child, `${path}.${key}`, depth + 1, context)
     }
   }
   // anyOf and oneOf are independent applicators — when BOTH are present, both are
@@ -278,13 +303,13 @@ export function assertSupportedJsonSchema(schema: unknown, path = "$", depth = 0
       throw new TypeError(`${path}.${variantKeyword}: must be a non-empty array of schemas`)
     }
     variants.forEach((child, index) =>
-      assertSupportedJsonSchema(child, `${path}.${variantKeyword}[${index}]`, depth + 1)
+      assertSupportedJsonSchema(child, `${path}.${variantKeyword}[${index}]`, depth + 1, context)
     )
   }
 }
 
 function validateNode(
-  schema: Record<string, unknown>,
+  schema: JsonSchemaNode,
   value: unknown,
   path: string,
   errors: string[],
@@ -296,21 +321,65 @@ function validateNode(
     errors.push(`${path}: schema nesting exceeds depth ${MAX_DEPTH}; value not fully validated`)
     return
   }
+  if (schema === true) return
+  if (schema === false) {
+    errors.push(`${path}: value is not allowed by false schema`)
+    return
+  }
   if (typeof schema !== "object" || schema === null) return
 
   // anyOf = "match AT LEAST one"; oneOf = "match EXACTLY one" (JSON Schema
   // semantics differ — earlier this conflated them, letting a value that matches
   // multiple oneOf branches pass). anyOf wins if both are present.
-  // A single variant's match test. Boolean sub-schemas: `true` matches
-  // everything, `false` nothing (consistent with a `true` items/property schema
-  // meaning "no constraint"); preflight already rejects a top-level `false`.
-  const matchesVariant = (candidate: unknown): boolean => {
-    if (candidate === true) return true
-    if (candidate === false) return false
-    if (typeof candidate !== "object" || candidate === null) return false
+  // Boolean sub-schemas: `true` matches everything, `false` nothing (consistent
+  // with a `true` items/property schema meaning "no constraint"); preflight
+  // already rejects a top-level `false`.
+  const evaluateVariant = (
+    candidate: unknown
+  ): { matched: boolean; errors: string[]; actionable: boolean } => {
+    if (candidate === true) return { matched: true, errors: [], actionable: false }
+    if (candidate === false)
+      return {
+        matched: false,
+        errors: [`${path}: value is not allowed by false schema`],
+        actionable: false
+      }
+    if (typeof candidate !== "object" || candidate === null)
+      return { matched: false, errors: [`${path}: invalid schema variant`], actionable: false }
     const candidateErrors: string[] = []
     validateNode(candidate as Record<string, unknown>, value, path, candidateErrors, depth + 1)
-    return candidateErrors.length === 0
+    return {
+      matched: candidateErrors.length === 0,
+      errors: candidateErrors,
+      actionable: true
+    }
+  }
+  const appendClosestVariantErrors = (
+    evaluations: Array<{ matched: boolean; errors: string[]; actionable: boolean }>
+  ): void => {
+    const closest = evaluations
+      .filter(
+        (evaluation) => evaluation.actionable && !evaluation.matched && evaluation.errors.length > 0
+      )
+      .sort(
+        (a, b) =>
+          a.errors.length - b.errors.length ||
+          variantErrorSpecificity(b.errors) - variantErrorSpecificity(a.errors)
+      )[0]
+    if (!closest) return
+    for (const error of closest.errors.slice(0, 3)) {
+      if (errors.length >= MAX_ERRORS) return
+      errors.push(error)
+    }
+  }
+  const variantErrorSpecificity = (candidateErrors: string[]): number => {
+    let best = 0
+    for (const error of candidateErrors) {
+      const path = error.split(":", 1)[0] ?? ""
+      const depth = (path.match(/(?:\.|\[)/g) ?? []).length
+      if (depth > best) best = depth
+    }
+    return best
   }
   const anyOfVariants = Array.isArray(schema.anyOf) ? schema.anyOf : null
   const oneOfVariants = Array.isArray(schema.oneOf) ? schema.oneOf : null
@@ -318,18 +387,22 @@ function validateNode(
     // anyOf and oneOf are independent applicators: when both are present BOTH are
     // enforced (AND), so check each rather than letting one shadow the other.
     if (anyOfVariants && anyOfVariants.length > 0) {
-      if (anyOfVariants.filter(matchesVariant).length === 0) {
+      const evaluations = anyOfVariants.map(evaluateVariant)
+      if (evaluations.filter((evaluation) => evaluation.matched).length === 0) {
         errors.push(
           `${path}: value does not match any of the ${anyOfVariants.length} anyOf variants`
         )
+        appendClosestVariantErrors(evaluations)
       }
     }
     if (oneOfVariants && oneOfVariants.length > 0) {
-      const matchCount = oneOfVariants.filter(matchesVariant).length
+      const evaluations = oneOfVariants.map(evaluateVariant)
+      const matchCount = evaluations.filter((evaluation) => evaluation.matched).length
       if (matchCount !== 1) {
         errors.push(
           `${path}: value must match EXACTLY ONE of the ${oneOfVariants.length} oneOf variants (matched ${matchCount})`
         )
+        if (matchCount === 0) appendClosestVariantErrors(evaluations)
       }
     }
     // No early return: anyOf/oneOf are applicators ANDed with sibling assertions
@@ -427,17 +500,12 @@ function validateNode(
     }
     if (maxItems !== null && value.length > maxItems) {
       errors.push(`${path}: array has more than maxItems ${maxItems}`)
+      return
     }
     const items = schema.items
-    if (typeof items === "object" && items !== null && !Array.isArray(items)) {
+    if (isSchemaNode(items) && !Array.isArray(items)) {
       for (let index = 0; index < value.length; index += 1) {
-        validateNode(
-          items as Record<string, unknown>,
-          value[index],
-          `${path}[${index}]`,
-          errors,
-          depth + 1
-        )
+        validateNode(items, value[index], `${path}[${index}]`, errors, depth + 1)
         if (errors.length >= MAX_ERRORS) return
       }
     }
@@ -454,9 +522,9 @@ function validateNode(
     if (isPlainObject(properties)) {
       for (const [key, propertySchema] of Object.entries(properties)) {
         if (!hasOwn(value, key)) continue
-        if (typeof propertySchema !== "object" || propertySchema === null) continue
+        if (!isSchemaNode(propertySchema)) continue
         validateNode(
-          propertySchema as Record<string, unknown>,
+          propertySchema,
           (value as Record<string, unknown>)[key],
           `${path}.${key}`,
           errors,
@@ -470,7 +538,8 @@ function validateNode(
       // otherwise `{ type:"object", additionalProperties:false }` would vacuously
       // accept extra keys.
       const declaredKeys = isPlainObject(properties) ? properties : {}
-      for (const key of Object.keys(value)) {
+      for (const key in value) {
+        if (!hasOwn(value, key)) continue
         if (!hasOwn(declaredKeys, key)) {
           errors.push(`${path}: unexpected property "${key}" (additionalProperties is false)`)
           if (errors.length >= MAX_ERRORS) return
@@ -480,8 +549,10 @@ function validateNode(
       // Schema-form additionalProperties: validate keys not covered by
       // `properties` against it instead of silently accepting them.
       const declared = isPlainObject(properties) ? properties : {}
-      for (const [key, child] of Object.entries(value)) {
+      for (const key in value) {
+        if (!hasOwn(value, key)) continue
         if (hasOwn(declared, key)) continue
+        const child = (value as Record<string, unknown>)[key]
         validateNode(
           schema.additionalProperties as Record<string, unknown>,
           child,
@@ -493,6 +564,10 @@ function validateNode(
       }
     }
   }
+}
+
+function isSchemaNode(value: unknown): value is JsonSchemaNode {
+  return typeof value === "boolean" || isPlainObject(value)
 }
 
 function normalizeTypes(type: unknown): string[] {

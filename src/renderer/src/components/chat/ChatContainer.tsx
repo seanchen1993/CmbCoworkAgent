@@ -1665,16 +1665,6 @@ const ChatMessageList = React.memo(function ChatMessageList({
             key={message.id}
             ref={combinedRef}
             data-message-role={message.role}
-            style={
-              // 渲染为空的消息（tool 结果、空 system/assistant/user）不参与
-              // content-visibility 占位：否则跳过渲染时会用兜底高度撑出幽灵空白，
-              // 多条空 tool 结果叠加即表现为工具与文字间突然空出很多行。
-              // 兜底值取较小的 96px：真实高度会在首次进入视口后由 `auto` 关键字记住，
-              // 96px 只用于尚未测量的离屏消息，足够避免过度预留导致的空隙/滚动跳动。
-              isLastMessage || rendersNothing
-                ? undefined
-                : { contentVisibility: "auto", containIntrinsicSize: "auto 96px" }
-            }
           >
             <MessageBubble
               message={message}
@@ -3174,16 +3164,12 @@ export function ChatContainer({
 
   // stream 输出的过程中，如果用户正处于底部，那么继续保持底部
   useEffect(() => {
-      const viewport = getViewport()
-      if (!viewport) return
-      const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-      if (bottomDistance <= 200) {
-        const scrollToBottom = (): void => {
-          viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
-        }
-        scrollToBottom()
-        return
-      }
+    const viewport = getViewport()
+    if (!viewport) return
+    const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+    if (bottomDistance <= 200) {
+      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+    }
   }, [streamData, isLoading])
 
   // Focus input on mount
