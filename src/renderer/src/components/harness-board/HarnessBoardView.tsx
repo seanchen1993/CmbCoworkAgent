@@ -3040,25 +3040,28 @@ function ProjectBadgeRow({
   children?: ReactNode
 }): React.JSX.Element {
   return (
-    <div className="flex min-w-0 items-center gap-2">
+    <div className="flex min-w-0 items-center">
       {children}
-      <span className="shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-        {project.projectCode}
+      <span className="text-xs mx-1 text-gray-500">
+        / {project.projectCode}
       </span>
+      <span
+        className=" shrink-0 rounded border border-border bg-blue-200/50 px-1.5 py-0.5 text-[10px] text-blue-600">
+                  精益之星</span>
     </div>
   )
 }
 
 function ProjectCard({
-  project,
-  detail,
-  loading,
-  archiving,
-  deleting,
-  pluginUpdateInfo,
-  updatingPlugin,
-  onEditProject,
-  onArchiveProject,
+                       project,
+                       detail,
+                       loading,
+                       archiving,
+                       deleting,
+                       pluginUpdateInfo,
+                       updatingPlugin,
+                       onEditProject,
+                       onArchiveProject,
   onDeleteProject,
   onUpdatePlugin,
   onProjectVisible,
@@ -3165,20 +3168,14 @@ function ProjectCard({
       <div className="relative p-4">
         <div className="flex min-w-0 items-start justify-between gap-3">
           <div className="flex">
-            <div className="flex min-w-0 gap-3">
-              <div className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-xl border border-status-info/20 bg-status-info/10 text-status-info">
-                <Workflow className="size-4" />
+            <div className="min-w-0">
+              <ProjectBadgeRow project={project}>
+                <h2 className="truncate text-base font-semibold">{project.name}</h2>
+              </ProjectBadgeRow>
+              <div className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                {project.description}
               </div>
-              <div className="min-w-0">
-                <ProjectBadgeRow project={project}>
-                  <h2 className="truncate text-base font-semibold">{project.name}</h2>
-                </ProjectBadgeRow>
-                <div className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                  {project.description}
-                </div>
-              </div>
-            </div>
-          </div>
+            </div></div>
           <div className="flex shrink-0 flex-col items-end gap-1.5">
             <div className="flex items-center gap-1">
               <ProjectActionMenu
