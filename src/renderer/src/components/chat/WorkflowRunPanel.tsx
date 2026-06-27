@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleSlash,
+  Code2,
   Copy,
   History,
   Loader2,
@@ -13,6 +14,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
+import { useAppStore } from "@/lib/store"
 import {
   groupWorkflowAgentsByPhase,
   type WorkflowAgentView,
@@ -85,44 +87,75 @@ function formatDuration(ms: number): string {
   return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`
 }
 
-function AgentRow({ agent }: { agent: WorkflowAgentView }): JSX.Element {
+function AgentRow({
+  agent,
+  threadId,
+  runId
+}: {
+  agent: WorkflowAgentView
+  threadId: string
+  runId: string
+}): JSX.Element {
   const [expanded, setExpanded] = useState(false)
+  const openWorkflowAgentFocusView = useAppStore((state) => state.openWorkflowAgentFocusView)
   const hasDetail = Boolean(agent.promptPreview || agent.resultPreview || agent.error)
+  const openToolStream = (): void =>
+    openWorkflowAgentFocusView({
+      threadId,
+      runId,
+      agentIndex: agent.agentIndex,
+      label: agent.label,
+      status: agent.status
+    })
   return (
     <div className="rounded-md transition-colors hover:bg-violet-50/60 dark:hover:bg-violet-500/10">
-      <button
-        type="button"
-        onClick={() => hasDetail && setExpanded((value) => !value)}
-        className={cn(
-          "flex w-full items-center gap-1.5 px-1 py-0.5 text-left text-[11px] leading-5",
-          hasDetail ? "cursor-pointer" : "cursor-default"
-        )}
-        title={hasDetail ? "点击查看该子代理的指令与结果" : undefined}
-      >
-        <AgentStatusIcon agent={agent} />
-        <span className="min-w-0 flex-1 truncate text-foreground/80">{agent.label}</span>
-        {agent.status === "cached" && (
-          <span className="shrink-0 text-[10px] text-sky-500">缓存</span>
-        )}
-        {agent.durationMs > 0 && (
-          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
-            {formatDuration(agent.durationMs)}
-          </span>
-        )}
-        {agent.outputTokens > 0 && (
-          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
-            {agent.outputTokens}tk
-          </span>
-        )}
-        {hasDetail && (
-          <ChevronRight
-            className={cn(
-              "size-3 shrink-0 text-muted-foreground transition-transform",
-              expanded && "rotate-90"
-            )}
-          />
-        )}
-      </button>
+      <div className="flex items-center">
+        <button
+          type="button"
+          onClick={() => hasDetail && setExpanded((value) => !value)}
+          className={cn(
+            "flex min-w-0 flex-1 items-center gap-1.5 px-1 py-0.5 text-left text-[11px] leading-5",
+            hasDetail ? "cursor-pointer" : "cursor-default"
+          )}
+          title={hasDetail ? "点击查看该子代理的指令与结果" : undefined}
+        >
+          <AgentStatusIcon agent={agent} />
+          <span className="min-w-0 flex-1 truncate text-foreground/80">{agent.label}</span>
+          {agent.status === "cached" && (
+            <span className="shrink-0 text-[10px] text-sky-500">缓存</span>
+          )}
+          {agent.durationMs > 0 && (
+            <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+              {formatDuration(agent.durationMs)}
+            </span>
+          )}
+          {agent.outputTokens > 0 && (
+            <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+              {agent.outputTokens}tk
+            </span>
+          )}
+          {hasDetail && (
+            <ChevronRight
+              className={cn(
+                "size-3 shrink-0 text-muted-foreground transition-transform",
+                expanded && "rotate-90"
+              )}
+            />
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation()
+            openToolStream()
+          }}
+          className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-violet-100/70 hover:text-violet-600 dark:hover:bg-violet-500/20 dark:hover:text-violet-300"
+          title="查看该子代理的实时工具流"
+          aria-label="查看该子代理的实时工具流"
+        >
+          <Code2 className="size-3" />
+        </button>
+      </div>
       {expanded && (
         <div className="space-y-1 px-2 pb-1.5 pt-0.5">
           {agent.promptPreview && (
@@ -158,11 +191,15 @@ function AgentRow({ agent }: { agent: WorkflowAgentView }): JSX.Element {
 function PhaseGroup({
   phase,
   agents,
-  isCurrent
+  isCurrent,
+  threadId,
+  runId
 }: {
   phase: string | null
   agents: WorkflowAgentView[]
   isCurrent: boolean
+  threadId: string
+  runId: string
 }): JSX.Element {
   const [collapsed, setCollapsed] = useState(false)
   const done = agents.filter((agent) => agent.status !== "running").length
@@ -209,7 +246,7 @@ function PhaseGroup({
             </div>
           )}
           {visibleAgents.map((agent) => (
-            <AgentRow key={agent.agentIndex} agent={agent} />
+            <AgentRow key={agent.agentIndex} agent={agent} threadId={threadId} runId={runId} />
           ))}
         </div>
       )}
@@ -243,6 +280,32 @@ function WorkflowRunPanelImpl({ threadId, run }: WorkflowRunPanelProps): JSX.Ele
   const visibleLogs = run.logs.slice(-MAX_VISIBLE_LOGS)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [cancelling, setCancelling] = useState(false)
+
+  // Display-only subagent tool-stream capture, gated by THIS panel's lifecycle so it
+  // costs nothing when no run is on screen. On mount: tell main a viewer is present
+  // (it only serializes/broadcasts the tap when interested) and buffer every agent's
+  // live "values" snapshot. On unmount (run cleared / thread switch): deregister and
+  // drop this run's buffered snapshots → memory ≈ the run you are currently viewing.
+  const runId = run.runId
+  useEffect(() => {
+    void window.api.workflows.setAgentStreamInterest(threadId, true)
+    const unsubscribe = window.api.workflows.onWorkflowAgentStream(threadId, (payload) => {
+      const data = payload as {
+        runId?: string
+        agentIndex?: number
+        snapshotMessages?: unknown
+      }
+      if (data.runId !== runId || typeof data.agentIndex !== "number") return
+      useAppStore
+        .getState()
+        .setWorkflowAgentRawSnapshot(runId, data.agentIndex, data.snapshotMessages)
+    })
+    return () => {
+      void window.api.workflows.setAgentStreamInterest(threadId, false)
+      unsubscribe()
+      useAppStore.getState().clearWorkflowAgentSnapshotsForRun(runId)
+    }
+  }, [threadId, runId])
 
   const handleCancel = async (): Promise<void> => {
     setCancelling(true)
@@ -355,6 +418,8 @@ function WorkflowRunPanelImpl({ threadId, run }: WorkflowRunPanelProps): JSX.Ele
               phase={group.phase}
               agents={group.agents}
               isCurrent={run.status === "running" && group.phase === run.currentPhase}
+              threadId={threadId}
+              runId={run.runId}
             />
           ))}
         </div>

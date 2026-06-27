@@ -1,5 +1,8 @@
 import { ipcMain, type IpcMain } from "electron"
-import { workflowRunManager } from "../agent/workflow/run-manager"
+import {
+  setWorkflowAgentStreamInterest,
+  workflowRunManager
+} from "../agent/workflow/run-manager"
 import {
   byNewestRun,
   listWorkflowRuns,
@@ -120,6 +123,20 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
     (_event, { threadId, runId }: { threadId: string; runId?: string }): boolean => {
       console.log("[Workflow] Cancel requested:", { threadId, runId })
       return workflowRunManager.cancel(threadId, runId)
+    }
+  )
+
+  // Display-only: the renderer registers/deregisters "viewing interest" while a run's
+  // live panel is mounted, so the subagent tool-stream tap only does work (serialize +
+  // broadcast) when someone is actually looking. No-op for the run itself.
+  ipc.handle(
+    "workflow:set-agent-stream-interest",
+    (event, { threadId, interested }: { threadId: string; interested: boolean }): boolean => {
+      // Pass the calling webContents so interest is keyed per-window and self-purges on
+      // that window's reload / crash / close (robust to a hard reload that skips the
+      // renderer's unmount cleanup).
+      setWorkflowAgentStreamInterest(threadId, interested, event.sender)
+      return true
     }
   )
 

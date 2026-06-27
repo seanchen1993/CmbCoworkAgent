@@ -96,6 +96,14 @@ export interface RunWorkflowSubagentRequest {
   disallowedTools?: string[]
   /** agentType-resolved shell policy. Undefined = full. */
   shellAccess?: AgentShellAccess
+  /**
+   * Best-effort display tap: invoked with each "values" snapshot (the graph state
+   * `{ messages: [...] }`) so the renderer can show this subagent's live tool stream.
+   * PURELY additive — it never affects the returned result, the structured-stop
+   * logic, or the journal. The callee guards it with try/catch, but callers MUST
+   * keep it non-throwing and cheap. Undefined for all non-display callers.
+   */
+  onValues?: (snapshot: unknown) => void
 }
 
 interface StructuredOutputLogContext {
@@ -281,7 +289,8 @@ async function runOnce(
         consumeValuesStream(
           await runtime.stream({ messages: [new HumanMessage(request.prompt)] }, streamConfig),
           controller.signal,
-          stopAfterStructuredAccepted
+          stopAfterStructuredAccepted,
+          request.onValues
         ))(),
       controller.signal
     )
@@ -312,7 +321,8 @@ async function runOnce(
               streamConfig
             ),
             controller.signal,
-            stopAfterStructuredAccepted
+            stopAfterStructuredAccepted,
+            request.onValues
           ))(),
         controller.signal
       )
@@ -1503,10 +1513,13 @@ function structuredOutputInterruptMessage(snapshot: unknown): string | null {
 }
 
 /** Consumes a [mode, data] stream and returns the last "values" snapshot. */
-async function consumeValuesStream(
+/** Exported for the tap-isolation regression test (display-only onValues must not
+ * change the return value or stop semantics; a throwing tap must be swallowed). */
+export async function consumeValuesStream(
   stream: AsyncIterable<unknown>,
   signal: AbortSignal,
-  shouldStop?: (snapshot: unknown) => boolean
+  shouldStop?: (snapshot: unknown) => boolean,
+  onValues?: (snapshot: unknown) => void
 ): Promise<unknown> {
   let lastValues: unknown
   for await (const chunk of stream) {
@@ -1515,6 +1528,16 @@ async function consumeValuesStream(
     const [mode, data] = chunk as [string, unknown]
     if (mode === "values") {
       lastValues = data
+      // Best-effort display tap (BEFORE the stop check so the final accepted
+      // snapshot is also surfaced). Fully isolated: a throwing tap must never
+      // perturb the run's result or stop semantics.
+      if (onValues) {
+        try {
+          onValues(data)
+        } catch {
+          /* display tap is best-effort */
+        }
+      }
       // Structured subagents can stop as soon as a schema-valid structured_output
       // call has been captured; invalid tool calls keep streaming so the model can
       // read the repair feedback and call the tool again.

@@ -691,9 +691,18 @@ interface CustomAPI {
     listRuns: (threadId: string) => Promise<unknown[]>
     getRun: (threadId: string, runId: string) => Promise<unknown | null>
     cancelRun: (threadId: string, runId?: string) => Promise<boolean>
+    /** Register/deregister "a live workflow panel is mounted" so the display-only
+     * subagent tool-stream tap only serializes/broadcasts when someone is viewing. */
+    setAgentStreamInterest: (threadId: string, interested: boolean) => Promise<boolean>
     hydrate: (threadId: string) => Promise<unknown>
     /** Durable per-thread channel; survives past the launching turn. Returns unsubscribe. */
     onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void) => () => void
+    /** Display-only live subagent tool-stream (keyed by parent threadId; payload carries
+     * runId+agentIndex). Best-effort, not persisted. Returns unsubscribe. */
+    onWorkflowAgentStream: (
+      threadId: string,
+      callback: (payload: unknown) => void
+    ) => () => void
   }
   threads: {
     list: () => Promise<Thread[]>

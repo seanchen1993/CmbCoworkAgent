@@ -59,6 +59,7 @@ import {
   type WorkflowRunView
 } from "../src/renderer/src/lib/workflow-run-view.ts"
 import {
+  consumeValuesStream,
   createRuntimeWithModelFallback,
   isModelUnavailableError,
   type WorkflowSubagentDeps
@@ -556,6 +557,41 @@ return "tiny"`,
       resultSidecarStatus: "unavailable"
     }) === undefined,
     "status unavailable must resolve to no output-file"
+  )
+}
+
+async function testConsumeValuesStreamTapIsolation(): Promise<void> {
+  // Display-only feature: the `onValues` tap (live workflow subagent tool-stream)
+  // must NOT change consumeValuesStream's return value or stop behavior, and a
+  // throwing tap must be swallowed (the run must never be perturbed by display code).
+  const frames: Array<[string, unknown]> = [
+    ["values", { messages: [{ id: ["AIMessage"], kwargs: { content: "a" } }] }],
+    ["messages", { ignored: true }],
+    ["values", { messages: [{ id: ["AIMessage"], kwargs: { content: "ab" } }] }]
+  ]
+  const makeStream = async function* (): AsyncGenerator<[string, unknown]> {
+    for (const frame of frames) yield frame
+  }
+  const signal = new AbortController().signal
+
+  const seen: unknown[] = []
+  const withTap = await consumeValuesStream(makeStream(), signal, undefined, (data) =>
+    seen.push(data)
+  )
+  assert(seen.length === 2, `onValues fires once per "values" frame, got ${seen.length}`)
+
+  const withoutTap = await consumeValuesStream(makeStream(), signal)
+  assert(
+    JSON.stringify(withTap) === JSON.stringify(withoutTap),
+    "return value must be identical with and without the onValues tap"
+  )
+
+  const withThrowingTap = await consumeValuesStream(makeStream(), signal, undefined, () => {
+    throw new Error("boom — a tap failure must not reach the run")
+  })
+  assert(
+    JSON.stringify(withThrowingTap) === JSON.stringify(withoutTap),
+    "a throwing onValues tap must be swallowed and not change the returned snapshot"
   )
 }
 
@@ -3329,6 +3365,7 @@ async function main(): Promise<void> {
     await testFireAndForgetFatalFailsRun(workspace)
     await testModelFallbackNotJournaled(workspace)
     await testFullResultSidecarForOversizedReturn(workspace)
+    await testConsumeValuesStreamTapIsolation()
     await testResumeRerunsWhenSessionDefaultModelChanges(workspace)
     await testScriptWriteFileRoutesThroughRunLock(workspace)
     await testResumeRefusesWhenJournalLost(workspace)
@@ -3363,7 +3400,7 @@ async function main(): Promise<void> {
     await testChildWorkflowPhaseModelInherited(workspace)
     await testLogArgBoxedInVm(workspace)
     await testAgentOptsBoxedAfterAwait(workspace)
-    console.log("PASS workflow-engine (66 tests)")
+    console.log("PASS workflow-engine (69 tests)")
   } finally {
     if (origHome === undefined) delete process.env.HOME
     else process.env.HOME = origHome

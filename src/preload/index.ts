@@ -425,6 +425,14 @@ const api = {
     cancelRun: (threadId: string, runId?: string): Promise<boolean> => {
       return ipcRenderer.invoke("workflow:cancel-run", { threadId, runId }) as Promise<boolean>
     },
+    setAgentStreamInterest: (threadId: string, interested: boolean): Promise<boolean> => {
+      // Tell main whether a live workflow panel is mounted for this thread, so the
+      // display-only subagent tool-stream tap only does work when someone is viewing.
+      return ipcRenderer.invoke("workflow:set-agent-stream-interest", {
+        threadId,
+        interested
+      }) as Promise<boolean>
+    },
     hydrate: (threadId: string): Promise<unknown> => {
       return ipcRenderer.invoke("workflow:hydrate", { threadId }) as Promise<unknown>
     },
@@ -433,6 +441,21 @@ const api = {
       // run stream, this survives past the launching turn so progress and the
       // completion notification still reach the renderer.
       const channel = `agent:workflow-events:${threadId}`
+      const handler = (_: unknown, data: unknown): void => {
+        callback(data)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
+    onWorkflowAgentStream: (
+      threadId: string,
+      callback: (payload: unknown) => void
+    ): (() => void) => {
+      // Display-only live tool-stream of a workflow run's subagents (keyed by the
+      // PARENT threadId; payload carries runId+agentIndex so the renderer filters).
+      const channel = `agent:workflow-agent-stream:${threadId}`
       const handler = (_: unknown, data: unknown): void => {
         callback(data)
       }
