@@ -706,24 +706,3 @@ export async function loadAgentsPromptForWorkspace(
     truncated: globalResult.truncated || projectResult.truncated || totalBudgetResult.truncated
   }
 }
-
-/**
- * Lightweight wrapper around `loadAgentsPromptForWorkspace` for harnessboard template rendering.
- *
- * Returns the raw merged AGENTS.md prompt (without section titles) so it can be injected
- * into a system prompt template via the `${AGENTS_MD}` variable.
- */
-export async function loadAgentsMdForTemplate(
-  workspacePath: string,
-  budget: AgentsPromptBudget = {
-    globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
-    projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
-  }
-): Promise<{ prompt: string | null; loadedPaths: string[]; truncated: boolean }> {
-  const result = await loadAgentsPromptForWorkspace(workspacePath, budget)
-  return {
-    prompt: result.prompt,
-    loadedPaths: result.loadedPaths,
-    truncated: result.truncated
-  }
-}

@@ -278,7 +278,6 @@ async function executeHeartbeat(): Promise<void> {
       workspacePath: config.workDir,
       modelId: effectiveModelId,
       extraSystemPrompt: heartbeatContext,
-      enableAgentsPrompt: false,
       noSchedulerTool: true,
       abortSignal: abortController.signal
     })

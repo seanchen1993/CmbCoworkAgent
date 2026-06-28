@@ -2307,8 +2307,8 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    'enableAgentsPrompt: false,\n            agentMode: "normal",\n            disableSubagents: true,\n            filesystemAccess: {',
-    "async worker disables prompt/subagent inheritance before applying worker access limits"
+    'extraSystemPrompt: `${workerRolePrompt}\\n\\n${workerMetadataPrompt}`,\n            noSchedulerTool: true,\n            noSkillEvolutionTool: true,\n            agentMode: "normal",',
+    "async worker uses its internal role prompt before applying worker access limits"
   )
   assertIncludes(
     runtime,

@@ -185,7 +185,6 @@ async function executeTask(taskId: string): Promise<void> {
       threadId,
       workspacePath,
       modelId: effectiveModelId,
-      enableAgentsPrompt: false,
       noSchedulerTool: true,
       abortSignal: abortController.signal
     })

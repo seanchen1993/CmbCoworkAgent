@@ -769,31 +769,6 @@ function readBoardConfigPlatformText(cwd: string, key: HarnessPlatformConfigKey)
   return command || null
 }
 
-function readBoardConfigSystemPrompt(cwd: string): HarnessSystemPromptConfig | undefined {
-  const parsed = readBoardConfig(cwd)
-  if (!parsed) return undefined
-
-  const raw = parsed.systemPrompt
-  if (!isObject(raw)) return undefined
-
-  const config = raw as Record<string, unknown>
-  const template = typeof config.template === "string" ? config.template.trim() : undefined
-  const rawArgs = config.args
-
-  let args: Record<string, string> | undefined
-  if (isObject(rawArgs)) {
-    const entries = Object.entries(rawArgs as Record<string, unknown>).filter(
-      ([, value]) => typeof value === "string"
-    ) as [string, string][]
-    if (entries.length > 0) {
-      args = Object.fromEntries(entries)
-    }
-  }
-
-  if (!template && !args) return undefined
-  return { template, args }
-}
-
 function readBoardConfigInspectCommand(
   cwd: string,
   mode: HarnessInspectCommandName
@@ -1973,13 +1948,7 @@ export function readHarnessFeatureMetadata(
   return projectId && slug ? { projectId, slug } : null
 }
 
-export interface HarnessSystemPromptConfig {
-  template?: string
-  args?: Record<string, string>
-}
-
 export interface HarnessFeatureAgentContext {
-  systemPromptInject?: string
   pluginOutputDir?: string
   systemId?: string
   pluginRoot?: string
@@ -1989,7 +1958,6 @@ export interface HarnessFeatureAgentContext {
   featureId?: string
   projectCode?: string
   projectDir?: string
-  systemPromptConfig?: HarnessSystemPromptConfig
 }
 
 export function buildHarnessFeatureAgentContext(
@@ -2002,9 +1970,7 @@ export function buildHarnessFeatureAgentContext(
   const cwd = adapterPluginDir(project)
   const adapter = project["harness-adapter"]
   const plugin = findAdapterPlugin(project)
-  const systemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
-  const systemPromptConfig = readBoardConfigSystemPrompt(cwd)
   const systemId = normalizeText(project.systemId).trim()
   const render = (
     template: string | null,
@@ -2017,7 +1983,6 @@ export function buildHarnessFeatureAgentContext(
       : undefined
 
   return {
-    systemPromptInject: render(systemPromptInject, "run"),
     pluginOutputDir: render(pluginOutputDir, "run"),
     systemId: systemId || undefined,
     pluginRoot: cwd,
@@ -2026,8 +1991,7 @@ export function buildHarnessFeatureAgentContext(
     pluginWorkspace: project.workspacePath,
     featureId: feature.slug,
     projectCode: project.projectCode,
-    projectDir: projectDirectoryName(project),
-    systemPromptConfig
+    projectDir: projectDirectoryName(project)
   }
 }
 

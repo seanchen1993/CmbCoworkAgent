@@ -234,7 +234,6 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
       threadId,
       workspacePath,
       modelId: robot.modelId || undefined,
-      enableAgentsPrompt: false,
       abortSignal: abortController.signal
     })
 
