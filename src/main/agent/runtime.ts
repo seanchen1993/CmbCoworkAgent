@@ -3354,6 +3354,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     systemPrompt += "\n\n" + normalizedHarnessAgentsPrompt
     console.log("[Runtime] Loaded Harness AGENTS.md prompt")
   }
+  const combinedAgentsPrompt =
+    [agentsPrompt.prompt, normalizedHarnessAgentsPrompt].filter(Boolean).join("\n\n") || undefined
   if (extraSystemPrompt) {
     systemPrompt += "\n\n" + extraSystemPrompt
   }
@@ -3829,11 +3831,11 @@ The workspace root is: ${workspacePath}`
   }
 
   const coordinatorWorkingDirAppendix = workingDirPromptAppendix?.trim()
-  const coordinatorProjectInstructions = [agentsPrompt.prompt, extraSystemPrompt]
+  const coordinatorProjectInstructions = [combinedAgentsPrompt, extraSystemPrompt]
     .filter(Boolean)
     .join("\n\n")
   const coordinatorWorkerProjectInstructions = [
-    agentsPrompt.prompt,
+    combinedAgentsPrompt,
     coordinatorWorkingDirAppendix
       ? `### Project Mode Adapter Instructions\n\n${coordinatorWorkingDirAppendix}`
       : "",
@@ -4542,7 +4544,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     backend,
     systemPrompt,
     filesystemSystemPrompt,
-    subagentExtraSystemPrompt: agentsPrompt.prompt ?? undefined,
+    subagentExtraSystemPrompt: combinedAgentsPrompt,
     mainTodosEnabled: !isCoordinatorMode,
     mainFilesystemEnabled: !isCoordinatorMode,
     mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && projectModeSubagentsEnabled,

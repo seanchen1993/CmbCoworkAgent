@@ -2331,6 +2331,7 @@ export function readHarnessFeatureMetadata(
 
 export interface HarnessFeatureAgentContext {
   systemPromptInject?: string
+  enableAgentsPrompt?: boolean
   harnessAgentsPrompt?: string
   sessionContextInjectWarning?: string
   agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
@@ -2463,6 +2464,7 @@ export function buildHarnessFeatureAgentContext(
 
   return {
     systemPromptInject,
+    enableAgentsPrompt: !harnessAgentsPrompt,
     ...(harnessAgentsPrompt ? { harnessAgentsPrompt } : {}),
     ...(sessionContextInjectResult?.warning
       ? { sessionContextInjectWarning: sessionContextInjectResult.warning }

@@ -367,6 +367,7 @@ async function withActiveRunReplacementLock<T>(threadId: string, fn: () => Promi
 
 interface HarnessAgentContext {
   workingDirPromptAppendix?: string
+  enableAgentsPrompt?: boolean
   harnessAgentsPrompt?: string
   sessionContextInjectWarning?: string
   agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
@@ -399,6 +400,7 @@ function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgent
 
     return {
       workingDirPromptAppendix: featureContext.systemPromptInject,
+      enableAgentsPrompt: featureContext.enableAgentsPrompt,
       harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
       sessionContextInjectWarning: featureContext.sessionContextInjectWarning,
       agentmdLoadStatus: featureContext.agentmdLoadStatus,
