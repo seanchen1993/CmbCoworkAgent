@@ -2136,7 +2136,7 @@ function validateFeatureCreateInput(input: HarnessFeatureCreateInput): void {
 
 function resolveFeatureSelectedServiceUnits(
   input: HarnessFeatureCreateInput,
-  project: HarnessProjectMetadata
+  _project: HarnessProjectMetadata
 ): HarnessServiceUnitMapping[] {
   if (!Array.isArray(input.selectedServiceUnits)) return []
 
@@ -2464,7 +2464,7 @@ export function buildHarnessFeatureAgentContext(
 
   return {
     systemPromptInject,
-    enableAgentsPrompt: !harnessAgentsPrompt,
+    enableAgentsPrompt: !harnessAgentsPrompt?.trim(),
     ...(harnessAgentsPrompt ? { harnessAgentsPrompt } : {}),
     ...(sessionContextInjectResult?.warning
       ? { sessionContextInjectWarning: sessionContextInjectResult.warning }

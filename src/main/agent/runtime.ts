@@ -1241,7 +1241,7 @@ function stampSubagentOwnerMetadata<T>(middleware: T): T {
  *     don't trim old edit/write tool args after a fixed 20 messages.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
+export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
   const {
     model = "claude-sonnet-4-5-20250929",
     tools = [],
@@ -1285,8 +1285,10 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     // when a tool throws. Closed-over context (threadId / workspace /
     // hookScope / onHookResult) lives at the createAgentRuntime layer; this
     // adapter keeps createDeepAgent oblivious to that wiring.
-    onToolFailureSignal
+    onToolFailureSignal,
+    onFinalSystemPrompt
   }: {
+    onFinalSystemPrompt?: (prompt: string) => void
     onToolFailureSignal?: (input: {
       toolName: string | undefined
       toolCallId: string | undefined
@@ -1310,6 +1312,9 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
           ]
         })
     : BASE_PROMPT
+  if (typeof finalSystemPrompt === "string") {
+    onFinalSystemPrompt?.(finalSystemPrompt)
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const filesystemBackend = backend ? backend : (config: any) => new StateBackend(config)
@@ -1961,7 +1966,7 @@ function getRuntimeTimeContext(date: Date = new Date()): {
   }
 }
 
-function getSystemPrompt(
+export function getSystemPrompt(
   workspacePath: string,
   windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated",
   workingDirPromptAppendix?: string,
@@ -2828,6 +2833,8 @@ export interface CreateAgentRuntimeOptions {
   enableAgentsPrompt?: boolean
   /** Optional Harness project AGENTS.md prompt appended without changing workspace AGENTS.md loading. */
   harnessAgentsPrompt?: string
+  /** Test/debug hook: captures the final system prompt passed to LangChain. */
+  onFinalSystemPrompt?: (prompt: string) => void
   /** Skip injecting MEMORY.md into the system prompt (the memory_search/memory_get
    * tools stay available). Used by read-only agentType leaves (Explore/Plan) —
    * mirrors Claude Code, whose Explore/Plan omitClaudeMd and whose built-in agents
@@ -2935,6 +2942,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     coordinatorWorkerTurnPlanning,
     enableAgentsPrompt = true,
     harnessAgentsPrompt,
+    onFinalSystemPrompt,
     disableMemoryInjection = false,
     agentMode = "normal",
     disableSubagents = false,
@@ -3329,7 +3337,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     loadedPaths: [],
     truncated: false
   }
-  if (enableAgentsPrompt) {
+  const normalizedHarnessAgentsPrompt = harnessAgentsPrompt?.trim()
+  const shouldLoadWorkspaceAgentsPrompt = enableAgentsPrompt && !normalizedHarnessAgentsPrompt
+  if (shouldLoadWorkspaceAgentsPrompt) {
     agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, {
       globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
       projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
@@ -3346,10 +3356,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     } else {
       console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
     }
+  } else if (enableAgentsPrompt && normalizedHarnessAgentsPrompt) {
+    console.log("[Runtime] Workspace AGENTS.md prompt injection suppressed by Harness AGENTS.md prompt")
   } else {
     console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
   }
-  const normalizedHarnessAgentsPrompt = harnessAgentsPrompt?.trim()
   if (normalizedHarnessAgentsPrompt) {
     systemPrompt += "\n\n" + normalizedHarnessAgentsPrompt
     console.log("[Runtime] Loaded Harness AGENTS.md prompt")
@@ -4543,6 +4554,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     checkpointer,
     backend,
     systemPrompt,
+    onFinalSystemPrompt,
     filesystemSystemPrompt,
     subagentExtraSystemPrompt: combinedAgentsPrompt,
     mainTodosEnabled: !isCoordinatorMode,
