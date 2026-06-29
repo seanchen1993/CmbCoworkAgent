@@ -213,6 +213,28 @@ function journalFilePath(workspacePath: string, threadId: string, runId: string)
   )
 }
 
+/** Filename suffix of a per-agent tool-stream sidecar, e.g. `.a3.toolstream`. */
+function agentToolStreamSuffix(agentIndex: number): string {
+  return `.a${Math.max(0, Math.trunc(agentIndex))}.toolstream`
+}
+
+/** Per-agent tool-stream sidecar (`<runId>.a<index>.toolstream`, no `.json` so the
+ * run-file scans skip it): the DISPLAY-ONLY complete tool flow of ONE subagent, written
+ * once when that agent finishes so its flow can be opened on demand afterwards (a still
+ * running agent streams live instead). Bounded/truncated; never read by resume/the
+ * engine; deleted with the run (prune + thread delete). */
+export function agentToolStreamPath(
+  workspacePath: string,
+  threadId: string,
+  runId: string,
+  agentIndex: number
+): string {
+  return join(
+    getWorkflowRunsDir(workspacePath, threadId),
+    `${assertSafeSegment(runId, "runId")}${agentToolStreamSuffix(agentIndex)}`
+  )
+}
+
 export function toRunSummary(run: PersistedWorkflowRun): WorkflowRunSummary {
   return {
     runId: run.runId,
@@ -541,6 +563,23 @@ export function pruneWorkflowRuns(
           /* best-effort cleanup */
         }
       }
+      // Per-agent tool-stream sidecars (`<runId>.aN.toolstream`) are variable in count,
+      // so glob by the runId prefix instead of a fixed suffix. The leading "." before
+      // "a" keeps the prefix from matching a different run whose id extends this one.
+      try {
+        const toolStreamPrefix = `${stale.runId}.a`
+        for (const file of readdirSync(dir)) {
+          if (file.startsWith(toolStreamPrefix) && file.endsWith(".toolstream")) {
+            try {
+              unlinkSync(join(dir, file))
+            } catch {
+              /* best-effort cleanup */
+            }
+          }
+        }
+      } catch {
+        /* best-effort cleanup */
+      }
     }
   } catch (error) {
     console.warn("[Workflow] Run prune failed:", error)
@@ -658,6 +697,14 @@ const storeGenerations = new Map<string, number>()
  * never reused, so entries can stay for the process lifetime (tiny, bounded).
  */
 const disposedRunDirs = new Set<string>()
+
+/** True once a thread's run directory has been disposed (thread deleted): a late,
+ * fire-and-forget write (e.g. a subagent tool-stream sidecar still settling) must check
+ * this and skip, so it can't recreate the removed `.cmbdevclaw/workflows/<threadId>/`
+ * as an orphan after the thread is gone. */
+export function isWorkflowRunDirDisposed(workspacePath: string, threadId: string): boolean {
+  return disposedRunDirs.has(getWorkflowRunsDir(workspacePath, threadId))
+}
 
 export function createWorkflowRunStore(options: {
   workspacePath: string

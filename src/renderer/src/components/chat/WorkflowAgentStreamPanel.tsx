@@ -12,13 +12,19 @@ import type { Message } from "@/types"
 import { cn } from "@/lib/utils"
 
 /**
- * Live tool-stream of ONE dynamic-workflow subagent (display-only). Fed by the
- * best-effort main-process "values" tap → `agent:workflow-agent-stream` → the store's
- * per-agent raw-snapshot buffer (`workflowAgentRawSnapshots`), converted here lazily
- * for the focused agent. Renders identically to the coordinator/solo tool streams
- * (MessageBubble + rainbow-spinner). NOT persisted: after a reload, or for a
- * cached/replayed agent, there is no buffer and we show a note instead.
+ * Tool-stream of ONE dynamic-workflow subagent (display-only), loaded ON DEMAND for the
+ * focused agent and released on switch/close — so only the agent you're viewing costs
+ * memory. A RUNNING agent streams live (per-agent interest → `agent:workflow-agent-stream`
+ * → `workflowAgentFocusSnapshot`); a FINISHED agent's complete flow is read lazily from
+ * its persisted sidecar via `workflows.getAgentToolStream`. Renders identically to the
+ * coordinator/solo tool streams (MessageBubble + rainbow-spinner). A cached/instant agent
+ * (no captured flow) shows a neutral note.
  */
+
+// Short retries when a finished agent's sidecar read returns null, to cover the window
+// before its fire-and-forget write has flushed (see the fallback effect below).
+const WORKFLOW_AGENT_TOOLSTREAM_RETRY_MS = 300
+const WORKFLOW_AGENT_TOOLSTREAM_MAX_RETRIES = 3
 
 function messageContentLength(content: Message["content"] | undefined): number {
   if (typeof content === "string") return content.length
@@ -79,13 +85,11 @@ function statusBadge(status: string | undefined): { label: string; className: st
 
 export function WorkflowAgentStreamPanel(): React.JSX.Element {
   const workflowAgentFocusView = useAppStore((state) => state.workflowAgentFocusView)
-  // Read the focused agent's latest RAW snapshot atomically from state (buffered by
-  // the run-level subscription for every agent), then convert lazily below.
-  const rawSnapshot = useAppStore((state) => {
-    const view = state.workflowAgentFocusView
-    if (!view) return undefined
-    return state.workflowAgentRawSnapshots.get(`${view.runId}:${view.agentIndex}`)
-  })
+  // The CURRENTLY-focused agent's raw snapshot (a single agent), loaded on demand by the
+  // effects below — live frames while it runs, or its persisted sidecar when finished —
+  // and released on switch/close. THREE states: `undefined` = loading / not yet loaded,
+  // `null` = loaded but empty (no flow), an array = the flow. Converted lazily further down.
+  const focusSnapshot = useAppStore((state) => state.workflowAgentFocusSnapshot)
   const closeWorkflowAgentFocusView = useAppStore((state) => state.closeWorkflowAgentFocusView)
   const transport = useMemo(() => new ElectronIPCTransport(), [])
   const threadState = useThreadState(workflowAgentFocusView?.threadId ?? null)
@@ -112,15 +116,104 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
   const isRunning = status === "running" && isFocusedRunLive && liveRun?.status === "running"
   const isCached = status === "cached"
 
+  // Load THIS agent's tool stream on demand and release it on switch/close — only the
+  // agent you're viewing ever streams or holds memory. Two effects keyed on identity +
+  // isRunning, so a running→finished transition is handled WITHOUT a flash:
+  //  (1) Live: subscribe ONLY while the agent is the current, running one; on teardown we
+  //      KEEP the last live frame (cumulative = the complete flow).
+  //  (2) Fallback: when NOT running and no live frame arrived (finished/historical agent,
+  //      OR you clicked right at completion), read the persisted sidecar once.
+  // Destructured to primitives so the effect deps don't depend on the view object identity.
+  const focusThreadId = workflowAgentFocusView?.threadId
+  const focusRunId = workflowAgentFocusView?.runId
+  const focusAgentIndex = workflowAgentFocusView?.agentIndex
+  useEffect(() => {
+    if (focusThreadId == null || focusRunId == null || focusAgentIndex == null) return
+    if (!isRunning) return
+    void window.api.workflows.setAgentStreamInterest(
+      focusThreadId,
+      focusRunId,
+      focusAgentIndex,
+      true
+    )
+    const unsubscribe = window.api.workflows.onWorkflowAgentStream(focusThreadId, (payload) => {
+      const data = payload as { runId?: string; agentIndex?: number; snapshotMessages?: unknown }
+      if (data.runId !== focusRunId || data.agentIndex !== focusAgentIndex) return
+      useAppStore.getState().setWorkflowAgentFocusSnapshot(data.snapshotMessages)
+    })
+    return () => {
+      void window.api.workflows.setAgentStreamInterest(
+        focusThreadId,
+        focusRunId,
+        focusAgentIndex,
+        false
+      )
+      unsubscribe()
+      // Keep the last live frame; effect (2) decides whether a sidecar reload is needed.
+    }
+  }, [focusThreadId, focusRunId, focusAgentIndex, isRunning])
+
+  useEffect(() => {
+    if (focusThreadId == null || focusRunId == null || focusAgentIndex == null) return
+    if (isRunning) return
+    // The agent is finished → load its AUTHORITATIVE sidecar (the complete flow). This runs
+    // on focus-switch and on the running→finished transition, replacing any (possibly
+    // incomplete) last live frame. Deps are identity+isRunning only, so it never loops; a
+    // re-click of the same agent is a store no-op, so we don't need to react to that here.
+    let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+    let attempts = 0
+    const load = (): void => {
+      void window.api.workflows
+        .getAgentToolStream(focusThreadId, focusRunId, focusAgentIndex)
+        .then((loaded) => {
+          if (cancelled) return
+          if (loaded != null) {
+            // Authoritative complete flow — overwrite whatever (live frame / loading) we had.
+            useAppStore.getState().setWorkflowAgentFocusSnapshot(loaded)
+            return
+          }
+          // null: the sidecar is written fire-and-forget; retry a few times before
+          // concluding there is no flow (and never clobber a live frame with an empty).
+          if (attempts < WORKFLOW_AGENT_TOOLSTREAM_MAX_RETRIES) {
+            attempts += 1
+            retryTimer = setTimeout(load, WORKFLOW_AGENT_TOOLSTREAM_RETRY_MS)
+            return
+          }
+          if (useAppStore.getState().workflowAgentFocusSnapshot === undefined) {
+            useAppStore.getState().setWorkflowAgentFocusSnapshot(null)
+          }
+        })
+        .catch(() => {
+          if (!cancelled && useAppStore.getState().workflowAgentFocusSnapshot === undefined) {
+            useAppStore.getState().setWorkflowAgentFocusSnapshot(null)
+          }
+        })
+    }
+    load()
+    return () => {
+      cancelled = true
+      if (retryTimer !== undefined) clearTimeout(retryTimer)
+    }
+  }, [focusThreadId, focusRunId, focusAgentIndex, isRunning])
+
+  // Release the focused snapshot on unmount (thread/view switch). Switching agents within
+  // the panel already clears it via openWorkflowAgentFocusView; this covers the unmount.
+  useEffect(() => {
+    return () => {
+      useAppStore.getState().setWorkflowAgentFocusSnapshot(undefined)
+    }
+  }, [])
+
   const messages = useMemo(
     () =>
-      workflowAgentFocusView && rawSnapshot
+      workflowAgentFocusView && focusSnapshot
         ? transport.convertWorkflowAgentValuesSnapshot(
-            rawSnapshot,
+            focusSnapshot,
             `wfagent:${workflowAgentFocusView.runId}:${workflowAgentFocusView.agentIndex}`
           )
         : [],
-    [transport, rawSnapshot, workflowAgentFocusView]
+    [transport, focusSnapshot, workflowAgentFocusView]
   )
   const toolResults = useMemo(() => buildToolResults(messages), [messages])
   const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
@@ -289,7 +382,9 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
                   ? "正在等待子代理的工具调用……"
                   : isCached
                     ? "该子代理为缓存复用结果，没有实时工具流记录。"
-                    : "该子代理本次运行没有可显示的实时工具流（可能已结束、未在运行时查看，或已重新加载）。可在「运行历史」中查看结果。"}
+                    : focusSnapshot === undefined
+                      ? "正在加载该子代理的工具流……"
+                      : "该子代理本次运行没有捕获到工具流（缓存复用、未产生工具调用，或运行记录已被清理）。"}
               </div>
             )}
             {messages.map((message, index) => {

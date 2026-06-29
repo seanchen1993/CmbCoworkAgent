@@ -691,18 +691,27 @@ interface CustomAPI {
     listRuns: (threadId: string) => Promise<unknown[]>
     getRun: (threadId: string, runId: string) => Promise<unknown | null>
     cancelRun: (threadId: string, runId?: string) => Promise<boolean>
-    /** Register/deregister "a live workflow panel is mounted" so the display-only
-     * subagent tool-stream tap only serializes/broadcasts when someone is viewing. */
-    setAgentStreamInterest: (threadId: string, interested: boolean) => Promise<boolean>
+    /** Register/deregister per-agent "viewing interest" (the focus panel is showing this
+     * running agent) so the display-only live tap only serializes/broadcasts that agent. */
+    setAgentStreamInterest: (
+      threadId: string,
+      runId: string,
+      agentIndex: number,
+      interested: boolean
+    ) => Promise<boolean>
+    /** Lazily read one FINISHED subagent's persisted complete tool flow on demand; null
+     * when there is no sidecar (cached/instant agent, pruned run, or pre-feature run). */
+    getAgentToolStream: (
+      threadId: string,
+      runId: string,
+      agentIndex: number
+    ) => Promise<unknown[] | null>
     hydrate: (threadId: string) => Promise<unknown>
     /** Durable per-thread channel; survives past the launching turn. Returns unsubscribe. */
     onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void) => () => void
     /** Display-only live subagent tool-stream (keyed by parent threadId; payload carries
      * runId+agentIndex). Best-effort, not persisted. Returns unsubscribe. */
-    onWorkflowAgentStream: (
-      threadId: string,
-      callback: (payload: unknown) => void
-    ) => () => void
+    onWorkflowAgentStream: (threadId: string, callback: (payload: unknown) => void) => () => void
   }
   threads: {
     list: () => Promise<Thread[]>
@@ -892,12 +901,8 @@ interface CustomAPI {
       workspacePath?: string
       error?: string
     }>
-    ensureWatching: (
-      threadId: string
-    ) => Promise<{ success: boolean; restarted?: boolean }>
-    setActiveThread: (
-      threadId: string | null
-    ) => Promise<{ success: boolean; restarted?: boolean }>
+    ensureWatching: (threadId: string) => Promise<{ success: boolean; restarted?: boolean }>
+    setActiveThread: (threadId: string | null) => Promise<{ success: boolean; restarted?: boolean }>
     readFile: (
       threadId: string,
       filePath: string
@@ -1016,7 +1021,10 @@ interface CustomAPI {
       suggestedCommitMessage?: string
       error?: string
     }>
-    getGitPanelFileDiff: (threadId: string, filePath: string) => Promise<{
+    getGitPanelFileDiff: (
+      threadId: string,
+      filePath: string
+    ) => Promise<{
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean

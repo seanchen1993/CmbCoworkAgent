@@ -64,6 +64,11 @@ import {
   isModelUnavailableError,
   type WorkflowSubagentDeps
 } from "../src/main/agent/workflow/subagent.ts"
+import {
+  serializeWorkflowAgentSnapshotMessages,
+  WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP,
+  WORKFLOW_AGENT_SNAPSHOT_TOTAL_CAP
+} from "../src/main/agent/workflow/agent-snapshot.ts"
 
 function assert(cond: unknown, msg: string): void {
   if (!cond) throw new Error(msg)
@@ -592,6 +597,75 @@ async function testConsumeValuesStreamTapIsolation(): Promise<void> {
   assert(
     JSON.stringify(withThrowingTap) === JSON.stringify(withoutTap),
     "a throwing onValues tap must be swallowed and not change the returned snapshot"
+  )
+}
+
+async function testWorkflowAgentSnapshotBounding(): Promise<void> {
+  // Display-only bounding: a huge tool output must be truncated EVERYWHERE (not just
+  // `content`) and must not be fully stringified — so the sidecar/IPC payload stays
+  // bounded and the main process can't spike on a multi-MB arg.
+  const cap = WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP
+  const big = "X".repeat(1_000_000) // 1MB in several fields at once
+  const isTruncated = (value: unknown): boolean =>
+    typeof value === "string" && value.length <= cap + 64 && value.includes("[truncated")
+
+  type BoundedKwargs = {
+    content: unknown
+    tool_calls: Array<{ args: { content: unknown } }>
+    tool_call_chunks: Array<{ args: unknown }>
+    additional_kwargs: { reasoning: unknown }
+  }
+  const out = serializeWorkflowAgentSnapshotMessages({
+    messages: [
+      {
+        id: ["AIMessage"],
+        kwargs: {
+          content: big,
+          tool_calls: [{ name: "write_file", id: "tc1", args: { path: "a.txt", content: big } }],
+          tool_call_chunks: [{ args: big }],
+          additional_kwargs: { reasoning: big }
+        }
+      }
+    ]
+  }) as Array<{ kwargs: BoundedKwargs }> | undefined
+  assert(!!out && out.length === 1, "serialize returns the single message")
+  const kwargs = out![0].kwargs
+  // The whole point of #2: every over-long string is truncated, not only `content`.
+  assert(isTruncated(kwargs.content), "message content truncated")
+  assert(isTruncated(kwargs.tool_calls[0].args.content), "tool-call arg content truncated")
+  assert(isTruncated(kwargs.tool_call_chunks[0].args), "tool_call_chunks args truncated")
+  assert(isTruncated(kwargs.additional_kwargs.reasoning), "additional_kwargs truncated")
+  // #1: 4×1MB fields collapse to a tiny bounded payload (no field bypasses the cap).
+  assert(
+    JSON.stringify(out).length < 200_000,
+    `bounded payload, got ${JSON.stringify(out).length} bytes`
+  )
+
+  // toJSON (LangChain serializables) is honored and truncated.
+  const viaToJson = serializeWorkflowAgentSnapshotMessages({
+    messages: [{ toJSON: () => ({ id: ["AIMessage"], kwargs: { content: big } }) }]
+  }) as Array<{ kwargs: { content: unknown } }>
+  assert(isTruncated(viaToJson[0].kwargs.content), "toJSON form is walked and truncated")
+
+  // Message-count cap tail-slices to the last N.
+  const many = serializeWorkflowAgentSnapshotMessages({
+    messages: Array.from({ length: 500 }, (_unused, index) => ({
+      id: ["AIMessage"],
+      kwargs: { content: `m${index}` }
+    }))
+  }) as unknown[]
+  assert(many.length === 400, `message-count cap tail-slices to 400, got ${many.length}`)
+
+  // Hard TOTAL cap: an object with a huge number of tiny fields (no single string is
+  // over-long, so per-field truncation alone wouldn't bound it) is still capped.
+  const wideArgs: Record<string, number> = {}
+  for (let index = 0; index < 500_000; index += 1) wideArgs[`k${index}`] = index
+  const wide = serializeWorkflowAgentSnapshotMessages({
+    messages: [{ id: ["AIMessage"], kwargs: { tool_calls: [{ id: "tc", args: wideArgs }] } }]
+  })
+  assert(
+    JSON.stringify(wide).length < WORKFLOW_AGENT_SNAPSHOT_TOTAL_CAP * 3,
+    `total-cap bounds a wide payload, got ${JSON.stringify(wide).length} bytes`
   )
 }
 
@@ -3366,6 +3440,7 @@ async function main(): Promise<void> {
     await testModelFallbackNotJournaled(workspace)
     await testFullResultSidecarForOversizedReturn(workspace)
     await testConsumeValuesStreamTapIsolation()
+    await testWorkflowAgentSnapshotBounding()
     await testResumeRerunsWhenSessionDefaultModelChanges(workspace)
     await testScriptWriteFileRoutesThroughRunLock(workspace)
     await testResumeRefusesWhenJournalLost(workspace)
@@ -3400,7 +3475,7 @@ async function main(): Promise<void> {
     await testChildWorkflowPhaseModelInherited(workspace)
     await testLogArgBoxedInVm(workspace)
     await testAgentOptsBoxedAfterAwait(workspace)
-    console.log("PASS workflow-engine (69 tests)")
+    console.log("PASS workflow-engine (70 tests)")
   } finally {
     if (origHome === undefined) delete process.env.HOME
     else process.env.HOME = origHome

@@ -237,15 +237,6 @@ export interface WorkflowAgentFocusView {
   status?: "running" | "completed" | "error" | "cached"
 }
 
-/** Keep the latest RAW "values" snapshot for up to this many recently-active workflow
- * agents (across runs), so clicking ANY this-session agent — running or completed,
- * whether or not it was watched live — shows its tool stream. The renderer subscribes
- * at the THREAD/run level (not per-focus) and buffers every agent; the panel converts
- * the focused agent's raw snapshot lazily. Pure in-memory; not persisted (Option A).
- * Bounded by an LRU cap AND cleared per-run when the run's panel unmounts, so memory
- * is ≈ the agents of the run you are currently viewing (near-zero when not viewing). */
-const WORKFLOW_AGENT_SNAPSHOT_CACHE_MAX = 32
-
 interface AppState {
   // Main content view routing
   mainView: MainView
@@ -285,18 +276,15 @@ interface AppState {
   // Split view for inspecting one dynamic-workflow subagent's live tool stream
   // (display-only; fed by the best-effort main-process values tap).
   workflowAgentFocusView: WorkflowAgentFocusView | null
-  /** Latest RAW `snapshotMessages` per `${runId}:${agentIndex}` (bounded LRU). Buffered
-   * for EVERY agent of a run (run-level subscription), converted lazily by the panel. */
-  workflowAgentRawSnapshots: Map<string, unknown>
+  /** The CURRENTLY-FOCUSED agent's raw `snapshotMessages` (a single agent, on demand).
+   * Loaded by the panel — live frames while the agent runs, or its persisted sidecar
+   * when finished — and released (null) on switch/close, so only the agent you are
+   * actually viewing costs any memory. */
+  workflowAgentFocusSnapshot: unknown
   openWorkflowAgentFocusView: (view: WorkflowAgentFocusView) => void
   closeWorkflowAgentFocusView: () => void
-  setWorkflowAgentRawSnapshot: (
-    runId: string,
-    agentIndex: number,
-    snapshotMessages: unknown
-  ) => void
-  /** Drop all buffered snapshots for a run (called when its live panel unmounts). */
-  clearWorkflowAgentSnapshotsForRun: (runId: string) => void
+  /** Set/replace the focused agent's raw snapshot (latest-wins), or null to release. */
+  setWorkflowAgentFocusSnapshot: (snapshot: unknown) => void
 
   // Kanban view state
   showKanbanView: boolean
@@ -448,7 +436,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   workerFocusMessages: [],
   subagentFocusView: null,
   workflowAgentFocusView: null,
-  workflowAgentRawSnapshots: new Map<string, unknown>(),
+  workflowAgentFocusSnapshot: null,
   mainView: "thread",
   showKanbanView: false,
   showSubagentsInKanban: true,
@@ -674,51 +662,36 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   openWorkflowAgentFocusView: (view) => {
     // Mutually exclusive with the worker/subagent foci so only one stream panel shows.
-    // The panel reads the buffered raw snapshot for this agent (populated by the
-    // run-level subscription), so no per-focus message state is needed here.
-    set({
-      workflowAgentFocusView: view,
-      workerFocusView: null,
-      workerFocusMessagesThreadId: null,
-      workerFocusMessages: [],
-      subagentFocusView: null
+    // The panel loads THIS agent on demand (live frames if running, the persisted sidecar
+    // if finished) and releases it on switch/close, so only the agent you're viewing holds
+    // memory.
+    set((state) => {
+      const prev = state.workflowAgentFocusView
+      const sameAgent =
+        !!prev &&
+        prev.threadId === view.threadId &&
+        prev.runId === view.runId &&
+        prev.agentIndex === view.agentIndex
+      return {
+        workflowAgentFocusView: view,
+        // Reset to the loading state (`undefined`) only when switching to a DIFFERENT
+        // agent. Re-clicking the SAME open agent keeps its loaded snapshot so it can't get
+        // stuck on a stale "loading" note (the effect won't re-run for an unchanged key).
+        ...(sameAgent ? {} : { workflowAgentFocusSnapshot: undefined }),
+        workerFocusView: null,
+        workerFocusMessagesThreadId: null,
+        workerFocusMessages: [],
+        subagentFocusView: null
+      }
     })
   },
 
   closeWorkflowAgentFocusView: () => {
-    set({ workflowAgentFocusView: null })
+    set({ workflowAgentFocusView: null, workflowAgentFocusSnapshot: null })
   },
 
-  setWorkflowAgentRawSnapshot: (runId, agentIndex, snapshotMessages) => {
-    set((state) => {
-      const key = `${runId}:${agentIndex}`
-      // Bounded LRU of the latest raw snapshot per agent. "values" snapshots are
-      // full-state, so latest-wins replace. New Map for zustand change detection.
-      const cache = new Map(state.workflowAgentRawSnapshots)
-      cache.delete(key)
-      cache.set(key, snapshotMessages)
-      while (cache.size > WORKFLOW_AGENT_SNAPSHOT_CACHE_MAX) {
-        const oldest = cache.keys().next().value
-        if (oldest === undefined) break
-        cache.delete(oldest)
-      }
-      return { workflowAgentRawSnapshots: cache }
-    })
-  },
-
-  clearWorkflowAgentSnapshotsForRun: (runId) => {
-    set((state) => {
-      const prefix = `${runId}:`
-      let removed = false
-      const cache = new Map(state.workflowAgentRawSnapshots)
-      for (const key of Array.from(cache.keys())) {
-        if (key.startsWith(prefix)) {
-          cache.delete(key)
-          removed = true
-        }
-      }
-      return removed ? { workflowAgentRawSnapshots: cache } : {}
-    })
+  setWorkflowAgentFocusSnapshot: (snapshot) => {
+    set({ workflowAgentFocusSnapshot: snapshot })
   },
 
   appendWorkerFocusMessage: (workerThreadId, message) => {

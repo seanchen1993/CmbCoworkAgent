@@ -425,13 +425,32 @@ const api = {
     cancelRun: (threadId: string, runId?: string): Promise<boolean> => {
       return ipcRenderer.invoke("workflow:cancel-run", { threadId, runId }) as Promise<boolean>
     },
-    setAgentStreamInterest: (threadId: string, interested: boolean): Promise<boolean> => {
-      // Tell main whether a live workflow panel is mounted for this thread, so the
-      // display-only subagent tool-stream tap only does work when someone is viewing.
+    setAgentStreamInterest: (
+      threadId: string,
+      runId: string,
+      agentIndex: number,
+      interested: boolean
+    ): Promise<boolean> => {
+      // Tell main whether the focus panel is viewing THIS running agent, so the
+      // display-only live tap only serializes/broadcasts the one agent you're watching.
       return ipcRenderer.invoke("workflow:set-agent-stream-interest", {
         threadId,
+        runId,
+        agentIndex,
         interested
       }) as Promise<boolean>
+    },
+    getAgentToolStream: (
+      threadId: string,
+      runId: string,
+      agentIndex: number
+    ): Promise<unknown[] | null> => {
+      // Lazily read ONE finished subagent's persisted complete tool flow on click.
+      return ipcRenderer.invoke("workflow:get-agent-toolstream", {
+        threadId,
+        runId,
+        agentIndex
+      }) as Promise<unknown[] | null>
     },
     hydrate: (threadId: string): Promise<unknown> => {
       return ipcRenderer.invoke("workflow:hydrate", { threadId }) as Promise<unknown>
@@ -833,9 +852,7 @@ const api = {
     }> => {
       return ipcRenderer.invoke("workspace:loadFromDisk", { threadId })
     },
-    ensureWatching: (
-      threadId: string
-    ): Promise<{ success: boolean; restarted?: boolean }> => {
+    ensureWatching: (threadId: string): Promise<{ success: boolean; restarted?: boolean }> => {
       return ipcRenderer.invoke("workspace:ensureWatching", { threadId })
     },
     setActiveThread: (
@@ -1075,7 +1092,10 @@ const api = {
       }
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:getGitPanelFileDiff", { threadId, filePath }) as Promise<{
+      return ipcRenderer.invoke("workspace:getGitPanelFileDiff", {
+        threadId,
+        filePath
+      }) as Promise<{
         success: boolean
         isWorktree: boolean
         isGitRepo?: boolean

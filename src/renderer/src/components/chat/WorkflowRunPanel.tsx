@@ -281,31 +281,9 @@ function WorkflowRunPanelImpl({ threadId, run }: WorkflowRunPanelProps): JSX.Ele
   const [historyOpen, setHistoryOpen] = useState(false)
   const [cancelling, setCancelling] = useState(false)
 
-  // Display-only subagent tool-stream capture, gated by THIS panel's lifecycle so it
-  // costs nothing when no run is on screen. On mount: tell main a viewer is present
-  // (it only serializes/broadcasts the tap when interested) and buffer every agent's
-  // live "values" snapshot. On unmount (run cleared / thread switch): deregister and
-  // drop this run's buffered snapshots → memory ≈ the run you are currently viewing.
-  const runId = run.runId
-  useEffect(() => {
-    void window.api.workflows.setAgentStreamInterest(threadId, true)
-    const unsubscribe = window.api.workflows.onWorkflowAgentStream(threadId, (payload) => {
-      const data = payload as {
-        runId?: string
-        agentIndex?: number
-        snapshotMessages?: unknown
-      }
-      if (data.runId !== runId || typeof data.agentIndex !== "number") return
-      useAppStore
-        .getState()
-        .setWorkflowAgentRawSnapshot(runId, data.agentIndex, data.snapshotMessages)
-    })
-    return () => {
-      void window.api.workflows.setAgentStreamInterest(threadId, false)
-      unsubscribe()
-      useAppStore.getState().clearWorkflowAgentSnapshotsForRun(runId)
-    }
-  }, [threadId, runId])
+  // Tool-stream capture is no longer run-level: the focus panel loads ONE agent on
+  // demand (live frames if running, the persisted sidecar if finished) and releases it
+  // on switch/close, so nothing is buffered here. The "</>" button just opens the focus.
 
   const handleCancel = async (): Promise<void> => {
     setCancelling(true)
