@@ -143,10 +143,12 @@ import { InterleavedThinkingChatOpenAICompletions } from "./interleaved-thinking
 import { createLspTool } from "./tools/lsp-tool"
 import { detectJavaProject } from "../lsp"
 import {
+  buildAgentsPromptLoadStatusItems,
   DEFAULT_AGENTS_MAX_BYTES,
   DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
   loadAgentsPromptForWorkspaces,
-  loadAgentsPromptForWorkspace
+  loadAgentsPromptForWorkspace,
+  type AgentsPromptRuntimeResult
 } from "./agents-md"
 import {
   buildCoordinatorSystemPrompt,
@@ -2794,53 +2796,12 @@ function getModelInstance(
   } as never)
 }
 
-type AgentsPromptRuntimeResult =
-  | Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>>
-  | Awaited<ReturnType<typeof loadAgentsPromptForWorkspaces>>
-
 type AgentsPromptLoader = "plugin" | "cmbdevclaw"
 
 interface AgentsPromptLoadStatusPayload {
   items: HarnessAgentmdLoadStatusItem[]
   loader: AgentsPromptLoader
   promptPreview?: string
-}
-
-function buildFrameworkAgentsLoadStatus(
-  agentsPrompt: AgentsPromptRuntimeResult
-): HarnessAgentmdLoadStatusItem[] {
-  if ("workspaceSections" in agentsPrompt) {
-    const workspaceLoadedPaths = new Set(
-      agentsPrompt.workspaceSections.flatMap((section) => section.loadedPaths)
-    )
-    const globalItems = agentsPrompt.loadedPaths
-      .filter((path) => !workspaceLoadedPaths.has(path))
-      .map((path) => ({
-        serviceUnitId: "CMBDevClaw",
-        path,
-        loaded: true,
-        source: "local",
-        message: ""
-      }))
-    const workspaceItems = agentsPrompt.workspaceSections.flatMap((section) =>
-      section.loadedPaths.map((path) => ({
-        serviceUnitId: section.cwd,
-        path,
-        loaded: true,
-        source: "local",
-        message: ""
-      }))
-    )
-    return [...globalItems, ...workspaceItems]
-  }
-
-  return agentsPrompt.loadedPaths.map((path) => ({
-    serviceUnitId: agentsPrompt.projectRoot,
-    path,
-    loaded: true,
-    source: "local",
-    message: ""
-  }))
 }
 
 export interface CreateAgentRuntimeOptions {
@@ -3392,6 +3353,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     }
   )
   let agentsPrompt: AgentsPromptRuntimeResult = {
+    type: "workspace",
     prompt: null,
     projectRoot: workspacePath,
     loadedPaths: [],
@@ -3405,34 +3367,36 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   let agentsPromptLoader: AgentsPromptLoader | undefined
   let agentsPromptLoadStatusItems: HarnessAgentmdLoadStatusItem[] = []
   if (shouldLoadWorkspaceAgentsPrompt) {
-    const normalizedAdditionalAgentsWorkspacePaths =
-      additionalAgentsWorkspacePaths?.map((path) => path.trim()).filter(Boolean) ?? []
+    const frameworkAdditionalAgentsWorkspacePaths = additionalAgentsWorkspacePaths ?? []
     agentsPrompt =
-      normalizedAdditionalAgentsWorkspacePaths.length > 0 || onAgentsPromptLoadStatus
+      frameworkAdditionalAgentsWorkspacePaths.length > 0 || onAgentsPromptLoadStatus
         ? await loadAgentsPromptForWorkspaces(
             {
               primaryWorkspacePath: workspacePath,
-              additionalWorkspacePaths: normalizedAdditionalAgentsWorkspacePaths,
+              additionalWorkspacePaths: frameworkAdditionalAgentsWorkspacePaths,
               includeGlobal: true
             },
             {
               globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
-              projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+              projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES,
+              totalMaxBytes: DEFAULT_AGENTS_MAX_BYTES
             }
           )
         : await loadAgentsPromptForWorkspace(workspacePath, {
             globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
-            projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+            projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES,
+            totalMaxBytes: DEFAULT_AGENTS_MAX_BYTES
           })
     agentsPromptLoader = "cmbdevclaw"
-    agentsPromptLoadStatusItems = buildFrameworkAgentsLoadStatus(agentsPrompt)
+    agentsPromptLoadStatusItems = buildAgentsPromptLoadStatusItems(agentsPrompt)
     if (agentsPrompt.prompt) {
       systemPrompt += "\n\n" + agentsPrompt.prompt
       console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
       if (agentsPrompt.truncated) {
         console.warn("[Runtime] AGENTS.md content exceeded prompt budget and was truncated:", {
           globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
-          projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+          projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES,
+          totalMaxBytes: DEFAULT_AGENTS_MAX_BYTES
         })
       }
     } else {
