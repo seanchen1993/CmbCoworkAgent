@@ -135,6 +135,29 @@ describe("buildGitPanelState — lazy mode (includeDiffs:false)", () => {
     expect(tracked?.additions).toBeGreaterThan(0)
   })
 
+  it("reports zero additions for empty untracked files", async () => {
+    const localRepo = createRepo("gitpanel-empty-untracked-")
+    try {
+      writeFileSync(join(localRepo, "empty.txt"), "")
+
+      const lazy = await buildGitPanelState(localRepo, [], {
+        silent: true,
+        includeAllWhenNoTracked: true,
+        includeDiffs: false,
+        includeChangedFiles: true
+      })
+      const collapsed = lazy.files.find((f) => f.path === "empty.txt")
+      expect(collapsed?.additions).toBe(0)
+      expect(collapsed?.deletions).toBe(0)
+
+      const expanded = await buildGitPanelFileDiff(localRepo, "empty.txt", { silent: true })
+      expect(expanded?.additions).toBe(0)
+      expect(expanded?.deletions).toBe(0)
+    } finally {
+      rmSync(localRepo, { recursive: true, force: true })
+    }
+  })
+
   it("matches collapsed numstat for non-ASCII paths (quotepath regression)", async () => {
     // git 默认 core.quotepath=true，会把中文路径输出成 "docs/\346..." 的转义形式。
     // 折叠态走 parseNumstatByPath 按路径命中，必须与 status 一样解码，否则会匹配不到
