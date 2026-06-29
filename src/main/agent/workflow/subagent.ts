@@ -1,4 +1,4 @@
-import { HumanMessage } from "@langchain/core/messages"
+import { HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
 import { NodeInterrupt } from "@langchain/langgraph"
 import type { AgentShellAccess } from "../agent-registry"
@@ -15,6 +15,11 @@ import {
 import { WORKFLOW_SUBAGENT_BASE_PROMPT, buildWorkflowSubagentStructuredPrompt } from "./prompts"
 
 const STRUCTURED_OUTPUT_FATAL_ERROR = Symbol.for("cmb.workflow.structured_output.fatal")
+// Explicitly marks a structured-output failure as "retry on a fresh session" so the
+// retry decision does NOT depend on the error message incidentally containing the
+// substring "structured_output" (the nudge-block reason names the pending tool, which
+// may or may not be structured_output — see schemaRetry).
+const STRUCTURED_OUTPUT_RETRYABLE = Symbol.for("cmb.workflow.structured_output.retryable")
 const STRUCTURED_OUTPUT_RECORDED_MESSAGE =
   "Structured output recorded successfully. End your turn now — no further text is needed."
 const STRUCTURED_OUTPUT_SIGNATURE_MAX_CHARS = 8_192
@@ -120,6 +125,24 @@ function isStructuredOutputFailure(error: unknown): boolean {
   return error instanceof Error && error.message.includes("structured_output")
 }
 
+/** A structured-output failure explicitly tagged "retry on a fresh session" (e.g. the
+ * nudge-block when the transcript has a dangling tool call) — classified by an explicit
+ * marker rather than by message substring, so the retry decision is stable regardless of
+ * which tool was pending. */
+function structuredOutputRetryableError(message: string): Error {
+  const error = new Error(message)
+  Object.defineProperty(error, STRUCTURED_OUTPUT_RETRYABLE, { value: true })
+  return error
+}
+
+function isStructuredOutputRetryableError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { [STRUCTURED_OUTPUT_RETRYABLE]?: unknown })[STRUCTURED_OUTPUT_RETRYABLE] === true
+  )
+}
+
 export function isWorkflowStructuredOutputFatalError(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -157,7 +180,9 @@ export async function runWorkflowSubagent(
       // a FRESH session: a clean transcript often succeeds where a poisoned one
       // couldn't, especially for mid-tier models. Bounded by MAX_RUNS (2) — exactly
       // one extra attempt — so a genuinely impossible schema can't loop.
-      const schemaRetry = request.schema !== undefined && isStructuredOutputFailure(error)
+      const schemaRetry =
+        request.schema !== undefined &&
+        (isStructuredOutputRetryableError(error) || isStructuredOutputFailure(error))
       if ((!retryable && !schemaRetry) || attempt >= WORKFLOW_SUBAGENT_MAX_RUNS) break
       console.warn(
         `[Workflow] Subagent ${request.label} attempt ${attempt} failed (${
@@ -307,16 +332,37 @@ async function runOnce(
     // a fresh thread_id, you must accumulate tokens across both snapshots.)
     if (request.schema && !isStructuredAccepted(structured, request.schema)) {
       throwIfAborted(controller.signal, request.signal, timeoutMs)
-      const unsafeNudgeReason = unsafeStructuredOutputNudgeReason(snapshot)
-      if (unsafeNudgeReason) {
-        throw new Error(unsafeNudgeReason)
+      // A genuine (non-structured) interrupt can't be repaired — fail it, but tag it
+      // retryable so a fresh clean session gets one more shot.
+      const interruptText = nonStructuredInterruptText(snapshot)
+      if (interruptText) {
+        throw structuredOutputRetryableError(
+          `subagent paused before returning a structured result: ${interruptText}`
+        )
       }
+      // A dangling tool call (assistant tool_calls without results — common when mid-tier
+      // models do parallel calls and one comes back unpaired) would 400 if we just
+      // appended the nudge HumanMessage. Instead synthesize a tool result for each dangling
+      // id so the history is valid, then nudge on the SAME session — aligning with how
+      // claude-code (yieldMissingToolResultBlocks) and MiMo-Code repair unmatched tool
+      // calls. Keeps parallel_tool_calls AND gives the model a real recovery turn (with the
+      // session context + a clear instruction) instead of failing the whole attempt.
+      const repairMessages = danglingToolCallIds(snapshot).map(
+        (id) =>
+          new ToolMessage({
+            tool_call_id: id,
+            content:
+              "[This tool call did not complete. Call structured_output again, exactly once, " +
+              "by itself, with input matching the required JSON Schema.]"
+          })
+      )
       snapshot = await raceWithAbort(
         (async () =>
           consumeValuesStream(
             await runtime.stream(
               {
                 messages: [
+                  ...repairMessages,
                   new HumanMessage(
                     "You have not returned a valid structured result yet. Call the structured_output tool now, exactly once, with an input matching the required JSON Schema. Do not reply with plain text."
                   )
@@ -1613,14 +1659,6 @@ function toolCallId(toolCall: unknown): string | undefined {
   return typeof toolCall.id === "string" && toolCall.id.trim() ? toolCall.id : undefined
 }
 
-function toolCallName(toolCall: unknown): string | undefined {
-  if (!isPlainRecord(toolCall)) return undefined
-  if (typeof toolCall.name === "string" && toolCall.name.trim()) return toolCall.name
-  const fn = toolCall.function
-  if (isPlainRecord(fn) && typeof fn.name === "string" && fn.name.trim()) return fn.name
-  return undefined
-}
-
 function toolMessageToolCallId(message: MessageLike): string | undefined {
   const id = message.tool_call_id ?? message.kwargs?.tool_call_id
   return typeof id === "string" && id.trim() ? id : undefined
@@ -1639,13 +1677,12 @@ function nonStructuredInterruptText(snapshot: unknown): string | null {
   return null
 }
 
-function unsafeStructuredOutputNudgeReason(snapshot: unknown): string | null {
-  const interruptText = nonStructuredInterruptText(snapshot)
-  if (interruptText) {
-    return `subagent paused before returning a structured result: ${interruptText}`
-  }
-
-  const pending = new Map<string, string | undefined>()
+/** Tool-call ids from the snapshot that never got a matching tool result — "dangling".
+ * Walks the cumulative messages tracking the latest assistant turn's tool calls; any still
+ * unresolved when a non-tool message arrives (or the transcript ends) are returned, so the
+ * caller can synthesize a tool result for each before continuing (else the API 400s). */
+function danglingToolCallIds(snapshot: unknown): string[] {
+  const pending = new Set<string>()
   for (const message of snapshotMessages(snapshot)) {
     if (pending.size > 0) {
       if (isToolMessage(message)) {
@@ -1653,25 +1690,15 @@ function unsafeStructuredOutputNudgeReason(snapshot: unknown): string | null {
         if (id) pending.delete(id)
         continue
       }
-
-      const names = Array.from(pending.entries())
-        .map(([id, name]) => (name ? `${name} (${id})` : id))
-        .join(", ")
-      return `subagent cannot request a structured-result retry because the previous assistant message still has pending tool call results: ${names}`
+      return Array.from(pending)
     }
-
     if (!isAiMessage(message)) continue
     for (const call of messageToolCalls(message)) {
       const id = toolCallId(call)
-      if (id) pending.set(id, toolCallName(call))
+      if (id) pending.add(id)
     }
   }
-
-  if (pending.size === 0) return null
-  const names = Array.from(pending.entries())
-    .map(([id, name]) => (name ? `${name} (${id})` : id))
-    .join(", ")
-  return `subagent cannot request a structured-result retry because the previous assistant message still has pending tool call results: ${names}`
+  return Array.from(pending)
 }
 
 function extractFinalAssistantText(snapshot: unknown): string {
@@ -1774,8 +1801,10 @@ async function delay(ms: number, signal: AbortSignal): Promise<void> {
   let onAbort: (() => void) | undefined
   try {
     await new Promise<void>((resolveDelay) => {
+      // NOT unref'd: this is the run's critical retry path, so the timer MUST keep the
+      // process alive until it fires (an unref'd timer let a bare-node test exit early
+      // mid-retry — a false green). On app quit the run's abort signal resolves it at once.
       const timer = setTimeout(resolveDelay, ms)
-      timer.unref?.()
       onAbort = () => {
         clearTimeout(timer)
         resolveDelay()

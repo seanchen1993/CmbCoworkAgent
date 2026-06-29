@@ -1,7 +1,7 @@
 import { BrowserWindow, webContents, type WebContents } from "electron"
 import { mkdirSync, realpathSync, writeFileSync } from "fs"
-import { mkdir, writeFile } from "fs/promises"
-import { dirname, join, resolve } from "path"
+import { writeFile } from "fs/promises"
+import { join, resolve } from "path"
 import { serializeWorkflowAgentSnapshotMessages } from "./agent-snapshot"
 import { runWorkflowEngine, toJsonSafe } from "./engine"
 import { isPathInside } from "./paths"
@@ -257,24 +257,19 @@ function persistAgentToolStream(
 ): void {
   try {
     // Honor the thread-delete disposal guard: if the thread was deleted, a late sidecar
-    // write must NOT recreate its removed run directory as an orphan.
+    // write must NOT touch its removed run directory.
     if (isWorkflowRunDirDisposed(workspacePath, threadId)) return
     const snapshotMessages = serializeWorkflowAgentSnapshotMessages(snapshot)
     if (!snapshotMessages || snapshotMessages.length === 0) return
     const path = agentToolStreamPath(workspacePath, threadId, runId, agentIndex)
     const payload = JSON.stringify({ runId, agentIndex, snapshotMessages })
-    // Fire-and-forget async I/O: the disk write never blocks the main process event loop
-    // and never delays the run's settle (it's a display-only sidecar). Best-effort.
-    void mkdir(dirname(path), { recursive: true })
-      .then(() => {
-        // Re-check: the thread may have been deleted during the async mkdir — don't write
-        // an orphan into a now-disposed run directory.
-        if (isWorkflowRunDirDisposed(workspacePath, threadId)) return
-        return writeFile(path, payload)
-      })
-      .catch(() => {
-        /* sidecar persistence is best-effort and display-only */
-      })
+    // Fire-and-forget async write; never blocks the event loop or the run's settle. We do
+    // NOT mkdir the run directory: an active run already created it (run.json lives there),
+    // so a late write after the thread was deleted can't recreate an orphan directory —
+    // writeFile simply ENOENTs and is swallowed. Best-effort, display-only.
+    void writeFile(path, payload).catch(() => {
+      /* sidecar persistence is best-effort and display-only */
+    })
   } catch {
     /* serialization is best-effort and display-only */
   }

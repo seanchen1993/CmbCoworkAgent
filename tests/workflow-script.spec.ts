@@ -2377,8 +2377,9 @@ async function testWorkflowSubagentBubblesStructuredOutputInterruptSnapshot(): P
   )
 }
 
-async function testWorkflowSubagentDoesNotNudgeAcrossPendingToolCall(): Promise<void> {
+async function testWorkflowSubagentRepairsDanglingToolCallThenNudges(): Promise<void> {
   let streamCalls = 0
+  const streamInputs: unknown[][] = []
   const schema = {
     type: "object",
     properties: {
@@ -2387,6 +2388,10 @@ async function testWorkflowSubagentDoesNotNudgeAcrossPendingToolCall(): Promise<
     required: ["answer"]
   }
 
+  // The model leaves structured_output dangling (a tool_call with no result) on EVERY turn.
+  // The subagent must NOT 400 by appending the nudge after the dangling call; instead it
+  // synthesizes a tool result for the dangling id, then nudges — on EACH attempt (initial +
+  // one fresh retry). The mock never recovers, so it ultimately fails after both attempts.
   await expectRejects(
     () =>
       runWorkflowSubagent(
@@ -2396,8 +2401,10 @@ async function testWorkflowSubagentDoesNotNudgeAcrossPendingToolCall(): Promise<
           cleanupThread: async () => undefined,
           isRetryableApiError: () => false,
           createRuntime: async () => ({
-            stream: async () => {
+            stream: async (input: unknown) => {
               streamCalls += 1
+              const messages = (input as { messages?: unknown[] })?.messages
+              if (Array.isArray(messages)) streamInputs.push(messages)
               return (async function* () {
                 yield [
                   "values",
@@ -2435,10 +2442,24 @@ async function testWorkflowSubagentDoesNotNudgeAcrossPendingToolCall(): Promise<
           signal: new AbortController().signal
         }
       ),
-    "pending tool call results",
-    "structured subagent must not insert a nudge HumanMessage after dangling tool_calls"
+    "completed without calling the structured_output tool",
+    "dangling tool call must be repaired + nudged (not 400), then fail after retries"
   )
-  assert(streamCalls === 1, `pending tool call must block the nudge stream, got ${streamCalls}`)
+  // Each attempt = [initial stream, nudge stream]; 2 attempts (initial + 1 fresh retry) = 4.
+  // A 400-block (old behavior) would have been 1 stream/attempt = 2.
+  assert(
+    streamCalls === 4,
+    `repair must let the nudge proceed on each attempt (2 attempts × 2 streams); got ${streamCalls}`
+  )
+  // The nudge turn's input must carry a synthetic tool result for the dangling tool_call id
+  // (so the history is valid before the nudge HumanMessage — no 400).
+  const repaired = streamInputs.some((messages) =>
+    messages.some((m) => {
+      const id = (m as { tool_call_id?: unknown })?.tool_call_id
+      return id === "call-structured"
+    })
+  )
+  assert(repaired, "nudge stream input must include a synthetic tool result for the dangling id")
 }
 
 async function testWorkflowSubagentNudgesAfterClosedToolCall(): Promise<void> {
@@ -3189,7 +3210,7 @@ const tests = [
   testStructuredOutputHardStopsInvalidLoops,
   testStructuredOutputAcceptsWrappersAndNullableObjects,
   testWorkflowSubagentBubblesStructuredOutputInterruptSnapshot,
-  testWorkflowSubagentDoesNotNudgeAcrossPendingToolCall,
+  testWorkflowSubagentRepairsDanglingToolCallThenNudges,
   testWorkflowSubagentNudgesAfterClosedToolCall,
   testWorkflowSubagentStopsAfterStructuredOutputSuccess,
   testStructuredOutputPatternValidationStaysLocal,

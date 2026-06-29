@@ -2411,8 +2411,8 @@ test("workflow state gates switch-to-normal, and thread delete clears tool-concu
   // especially), bounded by MAX_RUNS so an impossible schema can't loop.
   assert.match(
     workflowSubagentSource,
-    /const schemaRetry = request\.schema !== undefined && isStructuredOutputFailure\(error\)/,
-    "subagent retries a structured-output failure once on a fresh session"
+    /const schemaRetry =\s+request\.schema !== undefined &&\s+\(isStructuredOutputRetryableError\(error\) \|\| isStructuredOutputFailure\(error\)\)/,
+    "subagent retries a structured-output failure (explicit retryable marker OR failure message) once on a fresh session"
   )
   assert.match(
     workflowSubagentSource,

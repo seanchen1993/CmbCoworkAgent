@@ -24,7 +24,7 @@ import { cn } from "@/lib/utils"
 // Short retries when a finished agent's sidecar read returns null, to cover the window
 // before its fire-and-forget write has flushed (see the fallback effect below).
 const WORKFLOW_AGENT_TOOLSTREAM_RETRY_MS = 300
-const WORKFLOW_AGENT_TOOLSTREAM_MAX_RETRIES = 3
+const WORKFLOW_AGENT_TOOLSTREAM_MAX_RETRIES = 5
 
 function messageContentLength(content: Message["content"] | undefined): number {
   if (typeof content === "string") return content.length
@@ -173,11 +173,14 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
             useAppStore.getState().setWorkflowAgentFocusSnapshot(loaded)
             return
           }
-          // null: the sidecar is written fire-and-forget; retry a few times before
+          // null: the sidecar is written fire-and-forget; retry with backoff before
           // concluding there is no flow (and never clobber a live frame with an empty).
+          // The backoff window (~7s) covers even a slow disk, so the user rarely needs to
+          // reopen; a write slower than that is disk-failure territory.
           if (attempts < WORKFLOW_AGENT_TOOLSTREAM_MAX_RETRIES) {
+            const delay = Math.min(WORKFLOW_AGENT_TOOLSTREAM_RETRY_MS * 2 ** attempts, 2400)
             attempts += 1
-            retryTimer = setTimeout(load, WORKFLOW_AGENT_TOOLSTREAM_RETRY_MS)
+            retryTimer = setTimeout(load, delay)
             return
           }
           if (useAppStore.getState().workflowAgentFocusSnapshot === undefined) {
