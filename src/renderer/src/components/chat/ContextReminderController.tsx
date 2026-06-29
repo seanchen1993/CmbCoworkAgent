@@ -79,7 +79,10 @@ export function ContextReminderController({
   const [creatingSession, setCreatingSession] = useState(false)
   const creatingRef = useRef(false)
   const wasLoadingRef = useRef(false)
-  const contextLimit = currentModel ? modelContextLimit ?? getContextLimit(currentModel) : undefined
+  const isCustomModel = currentModel.startsWith("custom:")
+  const contextLimit = currentModel
+    ? (modelContextLimit ?? (isCustomModel ? undefined : getContextLimit(currentModel)))
+    : undefined
   const usagePercent =
     tokenUsage && contextLimit ? Math.min((tokenUsage.inputTokens / contextLimit) * 100, 100) : 0
   const pending = isContextReminderPending(enabled, contextReminder)
@@ -127,6 +130,13 @@ export function ContextReminderController({
     setContextReminder,
     usagePercent
   ])
+
+  useEffect(() => {
+    if (!enabled) return
+    if (usagePercent > CONTEXT_REMINDER_THRESHOLD_PERCENT) return
+
+    setContextReminder((prev) => (prev.pending ? { ...prev, pending: false } : prev))
+  }, [enabled, setContextReminder, usagePercent])
 
   const handleDismiss = useCallback(() => {
     setContextReminder((prev) => ({ ...prev, pending: false }))
