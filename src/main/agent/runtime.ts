@@ -45,7 +45,10 @@ import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
-import type { HarnessAgentmdLoadStatusItem } from "../../shared/harness-board-types"
+import type {
+  HarnessAgentmdLoadStatusItem,
+  HarnessServiceUnitMapping
+} from "../../shared/harness-board-types"
 import {
   createAgent,
   createMiddleware,
@@ -2804,6 +2807,28 @@ interface AgentsPromptLoadStatusPayload {
   promptPreview?: string
 }
 
+function applyServiceUnitMappingsToAgentmdLoadStatus(
+  items: HarnessAgentmdLoadStatusItem[],
+  mappings: HarnessServiceUnitMapping[] | undefined
+): HarnessAgentmdLoadStatusItem[] {
+  if (!Array.isArray(mappings) || mappings.length === 0) return items
+
+  const serviceUnitByRepoPath = new Map<string, string>()
+  for (const mapping of mappings) {
+    const localRepoPath = mapping.localRepoPath.trim()
+    const serviceUnitId = mapping.serviceUnitId.trim()
+    if (!localRepoPath || !serviceUnitId) continue
+    serviceUnitByRepoPath.set(resolve(localRepoPath), serviceUnitId)
+  }
+  if (serviceUnitByRepoPath.size === 0) return items
+
+  return items.map((item) => {
+    if (!path.isAbsolute(item.serviceUnitId)) return item
+    const serviceUnitId = serviceUnitByRepoPath.get(resolve(item.serviceUnitId))
+    return serviceUnitId ? { ...item, serviceUnitId } : item
+  })
+}
+
 export interface CreateAgentRuntimeOptions {
   /** Thread ID - REQUIRED for per-thread checkpointing */
   threadId: string
@@ -2849,6 +2874,8 @@ export interface CreateAgentRuntimeOptions {
   agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
   /** Additional project-mode workspace roots whose AGENTS.md files should be loaded by framework fallback. */
   additionalAgentsWorkspacePaths?: string[]
+  /** Project-mode service unit metadata for additional workspace AGENTS.md load status display. */
+  additionalAgentsWorkspaceMappings?: HarnessServiceUnitMapping[]
   /** Project-mode callback for reporting final AGENTS.md load status and preview. */
   onAgentsPromptLoadStatus?: (payload: AgentsPromptLoadStatusPayload) => void
   /** Test/debug hook: captures the final system prompt passed to LangChain. */
@@ -2962,6 +2989,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     harnessAgentsPrompt,
     agentmdLoadStatus,
     additionalAgentsWorkspacePaths,
+    additionalAgentsWorkspaceMappings,
     onAgentsPromptLoadStatus,
     onFinalSystemPrompt,
     disableMemoryInjection = false,
@@ -3388,7 +3416,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
             totalMaxBytes: DEFAULT_AGENTS_MAX_BYTES
           })
     agentsPromptLoader = "cmbdevclaw"
-    agentsPromptLoadStatusItems = buildAgentsPromptLoadStatusItems(agentsPrompt)
+    agentsPromptLoadStatusItems = applyServiceUnitMappingsToAgentmdLoadStatus(
+      buildAgentsPromptLoadStatusItems(agentsPrompt),
+      additionalAgentsWorkspaceMappings
+    )
     if (agentsPrompt.prompt) {
       systemPrompt += "\n\n" + agentsPrompt.prompt
       console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
@@ -3415,11 +3446,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   }
   const combinedAgentsPrompt =
     [agentsPrompt.prompt, normalizedHarnessAgentsPrompt].filter(Boolean).join("\n\n") || undefined
+  const combinedAgentsPromptPreview =
+    [workingDirPromptAppendix?.trim(), combinedAgentsPrompt].filter(Boolean).join("\n\n") ||
+    undefined
   if (onAgentsPromptLoadStatus && agentsPromptLoader && agentsPromptLoadStatusItems.length > 0) {
     onAgentsPromptLoadStatus({
       items: agentsPromptLoadStatusItems,
       loader: agentsPromptLoader,
-      promptPreview: combinedAgentsPrompt
+      promptPreview: combinedAgentsPromptPreview
     })
   }
   if (extraSystemPrompt) {

@@ -48,7 +48,10 @@ import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
   RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
 } from "../../shared/goal-events"
-import type { HarnessAgentmdLoadStatusItem } from "../../shared/harness-board-types"
+import type {
+  HarnessAgentmdLoadStatusItem,
+  HarnessServiceUnitMapping
+} from "../../shared/harness-board-types"
 import { TraceCollector } from "../agent/trace/collector"
 import {
   requestSkillIntent,
@@ -370,6 +373,7 @@ interface HarnessAgentContext {
   enableAgentsPrompt?: boolean
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
+  additionalAgentsWorkspaceMappings?: HarnessServiceUnitMapping[]
   sessionContextInjectWarning?: string
   agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
   pluginOutputDir?: string
@@ -409,6 +413,7 @@ function getHarnessAgentContext(
       enableAgentsPrompt: featureContext.enableAgentsPrompt,
       harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
       additionalAgentsWorkspacePaths: featureContext.additionalAgentsWorkspacePaths,
+      additionalAgentsWorkspaceMappings: featureContext.additionalAgentsWorkspaceMappings,
       sessionContextInjectWarning: featureContext.sessionContextInjectWarning,
       agentmdLoadStatus: featureContext.agentmdLoadStatus,
       pluginOutputDir: featureContext.pluginOutputDir,

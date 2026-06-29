@@ -963,33 +963,56 @@ function formatMarkdownInlineCode(value: string): string {
   return value.replace(/`/g, "\\`")
 }
 
-function resolveHarnessAdditionalWorkspaceRoots(
+function formatMarkdownTableCell(value: string): string {
+  return value.replace(/\r?\n/g, " ").replace(/\|/g, "\\|").trim()
+}
+
+function resolveHarnessAdditionalWorkspaceRootMappings(
   projectId: string,
   featureId: string,
   workspacePath: string
-): string[] {
+): HarnessServiceUnitMapping[] {
   const normalizedWorkspacePath = resolve(workspacePath)
   const seen = new Set<string>([normalizedWorkspacePath])
-  const roots: string[] = []
-  for (const path of resolveFeatureServiceUnitMappings(projectId, featureId)
-    .map((mapping) => normalizeText(mapping.localRepoPath).trim())
-    .filter((path) => path && isAbsolute(path))) {
-    const normalizedPath = resolve(path)
+  const mappings: HarnessServiceUnitMapping[] = []
+  for (const mapping of resolveFeatureServiceUnitMappings(projectId, featureId)) {
+    const localRepoPath = normalizeText(mapping.localRepoPath).trim()
+    if (!localRepoPath || !isAbsolute(localRepoPath)) continue
+
+    const normalizedPath = resolve(localRepoPath)
     if (seen.has(normalizedPath)) continue
     seen.add(normalizedPath)
-    roots.push(path)
+    const description = normalizeText(mapping.description).trim()
+    mappings.push({
+      serviceUnitIdMapping: mapping.serviceUnitIdMapping,
+      serviceUnitId: normalizeText(mapping.serviceUnitId).trim(),
+      localRepoPath,
+      ...(description ? { description } : {})
+    })
   }
-  return roots
+  return mappings
 }
 
-function buildHarnessAdditionalWorkspaceRootsPrompt(roots: string[]): string | undefined {
-  if (roots.length === 0) return undefined
+function buildHarnessAdditionalWorkspaceRootsPrompt(
+  mappings: HarnessServiceUnitMapping[]
+): string | undefined {
+  if (mappings.length === 0) return undefined
 
   return [
     "### File System and Paths",
     "",
-    "Additional workspace roots:",
-    ...roots.map((root) => `- \`${formatMarkdownInlineCode(root)}\``)
+    "Project mode service unit mappings:",
+    "",
+    "| 规则区域 | 发布单元 | 实际工程地址 |",
+    "| --- | --- | --- |",
+    ...mappings.map((mapping) => {
+      const description = formatMarkdownTableCell(normalizeText(mapping.description).trim())
+      const serviceUnitId = formatMarkdownTableCell(normalizeText(mapping.serviceUnitId).trim())
+      const localRepoPath = formatMarkdownTableCell(
+        `\`${formatMarkdownInlineCode(normalizeText(mapping.localRepoPath).trim())}\``
+      )
+      return `| ${description} | ${serviceUnitId} | ${localRepoPath} |`
+    })
   ].join("\n")
 }
 
@@ -2348,6 +2371,7 @@ export interface HarnessFeatureAgentContext {
   enableAgentsPrompt?: boolean
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
+  additionalAgentsWorkspaceMappings?: HarnessServiceUnitMapping[]
   sessionContextInjectWarning?: string
   agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
   pluginOutputDir?: string
@@ -2481,14 +2505,17 @@ export function buildHarnessFeatureAgentContext(
     : undefined
   const harnessAgentsPrompt = sessionContextInjectResult?.prompt
   const pluginPromptLoaded = Boolean(harnessAgentsPrompt?.trim())
-  const additionalWorkspaceRoots = resolveHarnessAdditionalWorkspaceRoots(
+  const additionalWorkspaceRootMappings = resolveHarnessAdditionalWorkspaceRootMappings(
     project.projectId,
     feature.slug,
     sessionWorkspacePath
   )
+  const additionalWorkspaceRoots = additionalWorkspaceRootMappings.map(
+    (mapping) => mapping.localRepoPath
+  )
   const additionalWorkspaceRootsPrompt = pluginPromptLoaded
     ? undefined
-    : buildHarnessAdditionalWorkspaceRootsPrompt(additionalWorkspaceRoots)
+    : buildHarnessAdditionalWorkspaceRootsPrompt(additionalWorkspaceRootMappings)
   const systemPromptInject =
     [renderedStaticPrompt, additionalWorkspaceRootsPrompt].filter(Boolean).join("\n\n") ||
     undefined
@@ -2498,7 +2525,10 @@ export function buildHarnessFeatureAgentContext(
     enableAgentsPrompt: !pluginPromptLoaded,
     ...(harnessAgentsPrompt ? { harnessAgentsPrompt } : {}),
     ...(!pluginPromptLoaded && additionalWorkspaceRoots.length > 0
-      ? { additionalAgentsWorkspacePaths: additionalWorkspaceRoots }
+      ? {
+          additionalAgentsWorkspacePaths: additionalWorkspaceRoots,
+          additionalAgentsWorkspaceMappings: additionalWorkspaceRootMappings
+        }
       : {}),
     ...(sessionContextInjectResult?.warning
       ? { sessionContextInjectWarning: sessionContextInjectResult.warning }

@@ -2637,7 +2637,6 @@ function FeatureCreateDialog({
   serviceUnitMappings,
   serviceUnitMappingsLoading,
   selectedServiceUnitIds,
-  pluginServiceUnitContextEnabled,
   creating,
   error,
   onOpenChange,
@@ -2645,7 +2644,6 @@ function FeatureCreateDialog({
   onWorkflowTemplateChange,
   onWorkflowNodeToggle,
   onServiceUnitToggle,
-  onPluginServiceUnitContextChange,
   onOpenServiceUnitSettings,
   onSyncPublicConstraints,
   onSubmit
@@ -2663,7 +2661,6 @@ function FeatureCreateDialog({
   serviceUnitMappings: HarnessServiceUnitMapping[]
   serviceUnitMappingsLoading: boolean
   selectedServiceUnitIds: Set<string>
-  pluginServiceUnitContextEnabled: boolean
   creating: boolean
   error: string | null
   onOpenChange: (open: boolean) => void
@@ -2671,7 +2668,6 @@ function FeatureCreateDialog({
   onWorkflowTemplateChange: (templateId: string) => void
   onWorkflowNodeToggle: (nodeId: string, checked: boolean) => void
   onServiceUnitToggle: (serviceUnitIdMapping: string, checked: boolean) => void
-  onPluginServiceUnitContextChange: (enabled: boolean) => void
   onOpenServiceUnitSettings: () => void
   onSyncPublicConstraints: () => void
   onSubmit: () => void
@@ -2690,7 +2686,11 @@ function FeatureCreateDialog({
   const selectedServiceUnitCount = selectableServiceUnitMappings.filter((mapping) =>
     selectedServiceUnitIds.has(mapping.serviceUnitIdMapping)
   ).length
-  const pluginContextSwitchEnabled = supportsSessionContextInjection && selectedServiceUnitCount > 0
+  const sessionContextProviderName =
+    project?.harnessAdapter.name.trim() || project?.harnessAdapter.id.trim() || "插件"
+  const sessionContextStatusText = supportsSessionContextInjection
+    ? `由 ${sessionContextProviderName} 加载会话工作区及所选发布单元的系统约束`
+    : "由 CMBDevClaw 加载会话工作区及所选发布单元的系统约束"
   const workflowTabDisabled = !workflowLoading && !workflowConfig
   const defaultTab = "service-units"
   const workflowPanel = workflowLoading ? (
@@ -2780,9 +2780,9 @@ function FeatureCreateDialog({
             const checked = selectedServiceUnitIds.has(mapping.serviceUnitIdMapping)
             const publicAgentmdSupported = agentsReadyServiceUnitIds.has(mapping.serviceUnitId.trim())
             const localAgentmdSupported = localAgentmdServiceUnitMappingIds.has(mapping.serviceUnitIdMapping)
-            const showPublicAgentmdTag = pluginServiceUnitContextEnabled && publicAgentmdSupported
+            const showPublicAgentmdTag = supportsSessionContextInjection && publicAgentmdSupported
             const showLocalAgentmdTag =
-              localAgentmdSupported && (!pluginServiceUnitContextEnabled || !publicAgentmdSupported)
+              localAgentmdSupported && (!supportsSessionContextInjection || !publicAgentmdSupported)
             return (
               <label
                 key={mapping.serviceUnitIdMapping}
@@ -2804,7 +2804,7 @@ function FeatureCreateDialog({
                         <TooltipTrigger asChild>
                           <span className="inline-flex shrink-0 items-center gap-1 rounded border border-status-nominal/30 bg-status-nominal/10 px-1.5 py-0.5 text-[11px] font-medium text-status-nominal">
                             <CheckCircle2 className="size-3" />
-                            支持加载公共系统约束
+                            公共系统约束
                           </span>
                         </TooltipTrigger>
                         <TooltipContent side="top" className="z-[70] max-w-72">
@@ -2817,13 +2817,13 @@ function FeatureCreateDialog({
                         <TooltipTrigger asChild>
                           <span className="inline-flex shrink-0 items-center gap-1 rounded border border-blue-500/30 bg-blue-500/10 px-1.5 py-0.5 text-[11px] font-medium text-blue-600 dark:text-blue-300">
                             <CheckCircle2 className="size-3" />
-                            支持加载本地系统约束
+                            本地系统约束
                           </span>
                         </TooltipTrigger>
                         <TooltipContent side="top" className="z-[70] max-w-72">
-                          {pluginServiceUnitContextEnabled
-                            ? "由插件加载本地代码库路径下的 AGENTS.md"
-                            : "由 CMBDevClaw 加载本地代码库路径下的 AGENTS.md"}
+                          {supportsSessionContextInjection
+                            ? "由插件加载该路径下的 AGENTS.md"
+                            : "由 CMBDevClaw 加载该路径下的 AGENTS.md"}
                         </TooltipContent>
                       </Tooltip>
                     )}
@@ -2837,37 +2837,8 @@ function FeatureCreateDialog({
           })}
         </div>
       )}
-      <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium text-foreground">
-            {pluginServiceUnitContextEnabled
-              ? "优先注入公共系统约束"
-              : "仅注入本地系统约束"}
-          </div>
-        </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={pluginServiceUnitContextEnabled}
-          aria-label="切换 AGENTS.md 和知识库注入方式"
-          disabled={!pluginContextSwitchEnabled}
-          className={cn(
-            "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-            pluginServiceUnitContextEnabled ? "bg-primary" : "bg-muted-foreground/30",
-            !pluginContextSwitchEnabled && "cursor-not-allowed opacity-60"
-          )}
-          onClick={() => {
-            if (!pluginContextSwitchEnabled) return
-            onPluginServiceUnitContextChange(!pluginServiceUnitContextEnabled)
-          }}
-        >
-          <span
-            className={cn(
-              "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
-              pluginServiceUnitContextEnabled ? "translate-x-4" : "translate-x-0"
-            )}
-          />
-        </button>
+      <div className="text-xs text-muted-foreground">
+        {sessionContextStatusText}
       </div>
     </section>
   )
@@ -2913,6 +2884,7 @@ function FeatureCreateDialog({
               <TabsList className="grid w-full grid-cols-2">
                 <FeatureCreateTabTrigger
                   value="service-units"
+                  disabled={false}
                   tooltip="插件暂不支持"
                 >
                   <span className="inline-flex min-w-0 items-center gap-1.5">
@@ -3047,19 +3019,19 @@ function ProjectModeSettingsPanel({
           </div>
         ) : (
           <div className="space-y-3">
-            <div className="grid grid-cols-[minmax(150px,0.8fr)_minmax(220px,1.2fr)_minmax(180px,1fr)_132px_40px] gap-2 px-1 text-xs font-medium text-muted-foreground">
+            <div className="grid grid-cols-[minmax(150px,0.8fr)_minmax(180px,1fr)_minmax(220px,1.2fr)_132px_40px] gap-2 px-1 text-xs font-medium text-muted-foreground">
               <div className="flex min-w-0 items-center gap-1">
                 <span>发布单元</span>
                 <ReleaseUnitIdTip />
               </div>
-              <div>本机代码库路径</div>
               <div>描述</div>
+              <div>本机代码库路径</div>
               <div />
             </div>
             {mappings.map((mapping, index) => (
               <div
                 key={index}
-                className="grid grid-cols-[minmax(150px,0.8fr)_minmax(220px,1.2fr)_minmax(180px,1fr)_132px_40px] items-center gap-2"
+                className="grid grid-cols-[minmax(150px,0.8fr)_minmax(180px,1fr)_minmax(220px,1.2fr)_132px_40px] items-center gap-2"
               >
                 <Input
                   value={mapping.serviceUnitId}
@@ -3070,19 +3042,19 @@ function ProjectModeSettingsPanel({
                   className={harnessProjectCreateInputClassName}
                 />
                 <Input
-                  value={mapping.localRepoPath}
-                  readOnly
-                  placeholder="请选择本机代码库路径"
-                  className={harnessProjectCreateInputClassName}
-                  title={mapping.localRepoPath}
-                />
-                <Input
                   value={mapping.description || ""}
                   onChange={(event) =>
                     onChange(index, { ...mapping, description: event.target.value })
                   }
                   placeholder="请输入描述（选填）"
                   className={harnessProjectCreateInputClassName}
+                />
+                <Input
+                  value={mapping.localRepoPath}
+                  readOnly
+                  placeholder="请选择本机代码库路径"
+                  className={harnessProjectCreateInputClassName}
+                  title={mapping.localRepoPath}
                 />
                 <Button
                   type="button"
@@ -5265,7 +5237,6 @@ export function HarnessBoardView({
   const [featureLocalAgentmdServiceUnitMappings, setFeatureLocalAgentmdServiceUnitMappings] =
     useState<string[]>([])
   const [selectedServiceUnitIds, setSelectedServiceUnitIds] = useState<Set<string>>(new Set())
-  const [pluginServiceUnitContextEnabled, setPluginServiceUnitContextEnabled] = useState(false)
   const [projectModeTab, setProjectModeTab] = useState("projects")
   const [syncingProjectConstraintAdapterIds, setSyncingProjectConstraintAdapterIds] = useState<Set<string>>(new Set())
   const [syncedProjectConstraintPaths, setSyncedProjectConstraintPaths] = useState<Record<string, string>>({})
@@ -6190,7 +6161,6 @@ export function HarnessBoardView({
     setFeatureAgentsReadyServiceUnits([])
     setFeatureLocalAgentmdServiceUnitMappings([])
     setSelectedServiceUnitIds(new Set())
-    setPluginServiceUnitContextEnabled(false)
     setFeatureWorkflowLoading(true)
 
     void window.api.harnessBoard
@@ -6240,7 +6210,6 @@ export function HarnessBoardView({
         setFeatureAgentsReadyServiceUnits([])
         setFeatureLocalAgentmdServiceUnitMappings([])
         setSelectedServiceUnitIds(new Set())
-        setPluginServiceUnitContextEnabled(false)
       }
     },
     [creatingFeatureProjectId]
@@ -6280,14 +6249,6 @@ export function HarnessBoardView({
   }, [featureWorkflowConfig, featureWorkflowTemplate])
 
   const handleServiceUnitToggle = useCallback((serviceUnitIdMapping: string, checked: boolean): void => {
-    const nextSelectedSize = checked
-      ? selectedServiceUnitIds.has(serviceUnitIdMapping)
-        ? selectedServiceUnitIds.size
-        : selectedServiceUnitIds.size + 1
-      : selectedServiceUnitIds.has(serviceUnitIdMapping)
-        ? selectedServiceUnitIds.size - 1
-        : selectedServiceUnitIds.size
-
     setSelectedServiceUnitIds((current) => {
       const next = new Set(current)
       if (checked) {
@@ -6297,12 +6258,7 @@ export function HarnessBoardView({
       }
       return next
     })
-    if (nextSelectedSize === 0) {
-      setPluginServiceUnitContextEnabled(false)
-    } else if (checked && featureDialogProject?.supportsSessionContextInjection) {
-      setPluginServiceUnitContextEnabled(true)
-    }
-  }, [featureDialogProject?.supportsSessionContextInjection, selectedServiceUnitIds])
+  }, [])
 
   const handleSubmitFeature = useCallback(async (): Promise<void> => {
     if (!featureDialogProject || creatingFeatureRef.current) return
@@ -6318,14 +6274,10 @@ export function HarnessBoardView({
     }
     const supportsSessionContextInjection = featureDialogProject.supportsSessionContextInjection
     const sessionContextInjectionSource =
-      supportsSessionContextInjection && pluginServiceUnitContextEnabled
-        ? "plugin"
-        : "cmbdevclaw"
-    const selectedServiceUnits = supportsSessionContextInjection
-      ? serviceUnitMappings.filter((mapping) =>
-          selectedServiceUnitIds.has(mapping.serviceUnitIdMapping)
-        )
-      : []
+      supportsSessionContextInjection ? "plugin" : "cmbdevclaw"
+    const selectedServiceUnits = serviceUnitMappings.filter((mapping) =>
+      selectedServiceUnitIds.has(mapping.serviceUnitIdMapping)
+    )
     const hasSelectedServiceUnits = selectedServiceUnits.length > 0
     if (hasSelectedServiceUnits && serviceUnitMappingsDirty) {
       setFeatureError("发布单元路径配置尚未保存，请先保存后再创建特性")
@@ -6388,7 +6340,6 @@ export function HarnessBoardView({
     featureWorkflowTemplate,
     selectedWorkflowNodeIds,
     selectedServiceUnitIds,
-    pluginServiceUnitContextEnabled,
     serviceUnitMappings,
     serviceUnitMappingsDirty,
     loadProjectDetail
@@ -6991,7 +6942,6 @@ export function HarnessBoardView({
           serviceUnitMappings={serviceUnitMappings}
           serviceUnitMappingsLoading={serviceUnitMappingsLoading}
           selectedServiceUnitIds={selectedServiceUnitIds}
-          pluginServiceUnitContextEnabled={pluginServiceUnitContextEnabled}
           creating={creatingFeatureProjectId !== null}
           error={featureError}
           onOpenChange={handleFeatureDialogOpenChange}
@@ -6999,7 +6949,6 @@ export function HarnessBoardView({
           onWorkflowTemplateChange={handleWorkflowTemplateChange}
           onWorkflowNodeToggle={handleWorkflowNodeToggle}
           onServiceUnitToggle={handleServiceUnitToggle}
-          onPluginServiceUnitContextChange={setPluginServiceUnitContextEnabled}
           onOpenServiceUnitSettings={handleOpenServiceUnitSettings}
           onSyncPublicConstraints={() => void handleSyncFeaturePublicConstraints()}
           onSubmit={() => void handleSubmitFeature()}
@@ -7242,7 +7191,6 @@ export function HarnessBoardView({
         serviceUnitMappings={serviceUnitMappings}
         serviceUnitMappingsLoading={serviceUnitMappingsLoading}
         selectedServiceUnitIds={selectedServiceUnitIds}
-        pluginServiceUnitContextEnabled={pluginServiceUnitContextEnabled}
         creating={creatingFeatureProjectId !== null}
         error={featureError}
         onOpenChange={handleFeatureDialogOpenChange}
@@ -7250,7 +7198,6 @@ export function HarnessBoardView({
         onWorkflowTemplateChange={handleWorkflowTemplateChange}
         onWorkflowNodeToggle={handleWorkflowNodeToggle}
         onServiceUnitToggle={handleServiceUnitToggle}
-        onPluginServiceUnitContextChange={setPluginServiceUnitContextEnabled}
         onOpenServiceUnitSettings={handleOpenServiceUnitSettings}
         onSyncPublicConstraints={() => void handleSyncFeaturePublicConstraints()}
         onSubmit={() => void handleSubmitFeature()}

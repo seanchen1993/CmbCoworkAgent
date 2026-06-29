@@ -8,7 +8,6 @@ import React, {
 } from "react"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkBreaks from "remark-breaks"
-import remarkGfm from "remark-gfm"
 import {
   Send,
   Square,
@@ -385,8 +384,6 @@ async function openAgentmdLoadStatusPath(targetPath: string): Promise<void> {
   }
 }
 
-const AGENTMD_PREVIEW_REMARK_PLUGINS = [remarkGfm, remarkBreaks]
-
 function AgentmdLoadStatusNotice({
   state
 }: {
@@ -480,11 +477,9 @@ function AgentmdLoadStatusNotice({
                 <FileText className="size-3.5" />
                 <span>系统约束预览</span>
               </div>
-              <div className="streaming-markdown max-w-none text-xs leading-relaxed">
-                <ReactMarkdown remarkPlugins={AGENTMD_PREVIEW_REMARK_PLUGINS}>
-                  {promptPreview}
-                </ReactMarkdown>
-              </div>
+              <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-foreground">
+                {promptPreview}
+              </pre>
             </PopoverContent>
           </Popover>
         ) : (
