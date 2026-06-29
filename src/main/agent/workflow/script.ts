@@ -259,9 +259,456 @@ export function validateWorkflowScript(source: string): ParsedWorkflowScript {
       )
     }
   })
+  assertDeterministicAst(program)
 
   const body = script.slice(metaStatement.end as number).replace(/^[;\s]*/, "")
   return { meta: parsedMeta.data as WorkflowMeta, body }
+}
+
+type ScopeStack = Array<ReadonlySet<string>>
+
+function assertDeterministicAst(program: AcornNode): void {
+  visitScopedAst(program, [collectProgramScope(program)])
+}
+
+function visitScopedAst(node: AcornNode, scopes: ScopeStack): void {
+  const blockedApi = blockedNondeterministicApi(node, scopes)
+  if (blockedApi) {
+    throw new WorkflowScriptError(
+      `${blockedApi} is unavailable in workflow scripts (breaks resume). ` +
+        "Pass timestamps/randomness in via args, or vary agent prompts/labels by index."
+    )
+  }
+
+  if (isFunctionNode(node)) {
+    visitFunctionAst(node, scopes)
+    return
+  }
+  if (node.type === "ClassExpression" && node.id && (node.id as AcornNode).type === "Identifier") {
+    visitAstChildren(node, [...scopes, new Set([(node.id as { name: string }).name])])
+    return
+  }
+  if (node.type === "BlockStatement") {
+    visitAstChildren(node, [...scopes, collectBlockScope(node)])
+    return
+  }
+  if (node.type === "StaticBlock") {
+    visitAstChildren(node, [...scopes, collectStaticBlockScope(node)])
+    return
+  }
+  if (node.type === "CatchClause") {
+    const catchScope = new Set<string>()
+    if (node.param) addPatternNames(node.param as AcornNode, catchScope)
+    visitAstChildren(node, [...scopes, catchScope])
+    return
+  }
+  if (node.type === "ForStatement") {
+    visitForStatementAst(node, scopes)
+    return
+  }
+  if (node.type === "ForInStatement" || node.type === "ForOfStatement") {
+    visitForInOfStatementAst(node, scopes)
+    return
+  }
+  if (node.type === "SwitchStatement") {
+    visitSwitchStatementAst(node, scopes)
+    return
+  }
+
+  visitAstChildren(node, scopes)
+}
+
+function visitAstChildren(node: AcornNode, scopes: ScopeStack): void {
+  const stack = astChildrenOf(node)
+  while (stack.length > 0) {
+    const child = stack.pop()!
+    if (needsScopedVisit(child)) {
+      visitScopedAst(child, scopes)
+      continue
+    }
+    const blockedApi = blockedNondeterministicApi(child, scopes)
+    if (blockedApi) {
+      throw new WorkflowScriptError(
+        `${blockedApi} is unavailable in workflow scripts (breaks resume). ` +
+          "Pass timestamps/randomness in via args, or vary agent prompts/labels by index."
+      )
+    }
+    pushAstChildren(stack, child)
+  }
+}
+
+function needsScopedVisit(node: AcornNode): boolean {
+  return (
+    isFunctionNode(node) ||
+    (node.type === "ClassExpression" && Boolean(node.id)) ||
+    node.type === "BlockStatement" ||
+    node.type === "StaticBlock" ||
+    node.type === "CatchClause" ||
+    node.type === "ForStatement" ||
+    node.type === "ForInStatement" ||
+    node.type === "ForOfStatement" ||
+    node.type === "SwitchStatement"
+  )
+}
+
+function astChildrenOf(node: AcornNode): AcornNode[] {
+  const children: AcornNode[] = []
+  pushAstChildren(children, node)
+  return children
+}
+
+function pushAstChildren(stack: AcornNode[], node: AcornNode): void {
+  const values = Object.values(node)
+  for (let i = values.length - 1; i >= 0; i--) {
+    const value = values[i]
+    if (Array.isArray(value)) {
+      for (let j = value.length - 1; j >= 0; j--) {
+        const item = value[j]
+        if (item && typeof item === "object" && typeof (item as AcornNode).type === "string") {
+          stack.push(item as AcornNode)
+        }
+      }
+    } else if (
+      value &&
+      typeof value === "object" &&
+      typeof (value as AcornNode).type === "string"
+    ) {
+      stack.push(value as AcornNode)
+    }
+  }
+}
+
+function visitFunctionAst(node: AcornNode, scopes: ScopeStack): void {
+  const functionNameScope = collectFunctionNameScope(node)
+  const paramScope = new Set(functionNameScope)
+  for (const param of (node.params ?? []) as AcornNode[]) addPatternNames(param, paramScope)
+  const paramScopes = [...scopes, paramScope]
+  for (const param of (node.params ?? []) as AcornNode[]) visitScopedAst(param, paramScopes)
+
+  const body = node.body as AcornNode | undefined
+  if (!body) return
+  const bodyScope = new Set(paramScope)
+  collectFunctionScopedVarNames(body, bodyScope)
+  if (body.type === "BlockStatement") {
+    collectDirectLexicalNames((body.body ?? []) as AcornNode[], bodyScope)
+  }
+  visitScopedAst(body, [...scopes, bodyScope])
+}
+
+function visitForStatementAst(node: AcornNode, scopes: ScopeStack): void {
+  const forScope = collectForHeadScope(node.init as AcornNode | null | undefined)
+  const loopScopes = forScope.size > 0 ? [...scopes, forScope] : scopes
+  if (node.init) visitScopedAst(node.init as AcornNode, loopScopes)
+  if (node.test) visitScopedAst(node.test as AcornNode, loopScopes)
+  if (node.update) visitScopedAst(node.update as AcornNode, loopScopes)
+  if (node.body) visitScopedAst(node.body as AcornNode, loopScopes)
+}
+
+function visitForInOfStatementAst(node: AcornNode, scopes: ScopeStack): void {
+  if (node.right) visitScopedAst(node.right as AcornNode, scopes)
+  const forScope = collectForHeadScope(node.left as AcornNode | null | undefined)
+  const loopScopes = forScope.size > 0 ? [...scopes, forScope] : scopes
+  if (node.left) visitScopedAst(node.left as AcornNode, loopScopes)
+  if (node.body) visitScopedAst(node.body as AcornNode, loopScopes)
+}
+
+function visitSwitchStatementAst(node: AcornNode, scopes: ScopeStack): void {
+  if (node.discriminant) visitScopedAst(node.discriminant as AcornNode, scopes)
+  const switchScope = collectSwitchScope(node)
+  const caseScopes = switchScope.size > 0 ? [...scopes, switchScope] : scopes
+  for (const switchCase of (node.cases ?? []) as AcornNode[]) {
+    if (switchCase.test) visitScopedAst(switchCase.test as AcornNode, caseScopes)
+    for (const statement of (switchCase.consequent ?? []) as AcornNode[]) {
+      visitScopedAst(statement, caseScopes)
+    }
+  }
+}
+
+function blockedNondeterministicApi(node: AcornNode, scopes: ScopeStack): string | null {
+  if (node.type === "CallExpression") {
+    const callee = node.callee as AcornNode
+    if (isGlobalDateReference(callee, scopes)) return "Date()"
+    if (isMemberCall(callee, "Date", "now", scopes)) return "Date.now()"
+    if (isMemberCall(callee, "Math", "random", scopes)) return "Math.random()"
+    if (isDateConstructorNowCall(callee, scopes)) return "Date.now()"
+    if (isDatePrototypeConstructorNowCall(callee, scopes)) return "Date.now()"
+    const indirectCall = nondeterministicCallApplyTarget(callee, scopes)
+    if (indirectCall) return indirectCall
+    const boundCall = nondeterministicBindCallTarget(callee, scopes)
+    if (boundCall) return boundCall
+    const bareReferenceCall = nondeterministicCallableReference(callee, scopes)
+    if (bareReferenceCall) return bareReferenceCall
+  }
+  if (node.type === "NewExpression") {
+    const callee = node.callee as AcornNode
+    const args = Array.isArray(node.arguments) ? node.arguments : []
+    if (isGlobalDateReference(callee, scopes) && args.length === 0) {
+      return "new Date()"
+    }
+  }
+  return null
+}
+
+function nondeterministicCallApplyTarget(node: AcornNode, scopes: ScopeStack): string | null {
+  if (node.type === "SequenceExpression") {
+    const expressions = node.expressions as AcornNode[] | undefined
+    const last = expressions?.[expressions.length - 1]
+    return last ? nondeterministicCallApplyTarget(last, scopes) : null
+  }
+  if (node.type !== "MemberExpression") return null
+  const method = propertyNameOf(node)
+  if (method !== "call" && method !== "apply") return null
+  return nondeterministicCallableReference(node.object as AcornNode, scopes)
+}
+
+function nondeterministicBindCallTarget(node: AcornNode, scopes: ScopeStack): string | null {
+  if (node.type === "SequenceExpression") {
+    const expressions = node.expressions as AcornNode[] | undefined
+    const last = expressions?.[expressions.length - 1]
+    return last ? nondeterministicBindCallTarget(last, scopes) : null
+  }
+  if (node.type !== "CallExpression") return null
+  const callee = node.callee as AcornNode
+  if (callee.type !== "MemberExpression" || propertyNameOf(callee) !== "bind") return null
+  return nondeterministicCallableReference(callee.object as AcornNode, scopes)
+}
+
+function nondeterministicCallableReference(node: AcornNode, scopes: ScopeStack): string | null {
+  if (node.type === "SequenceExpression") {
+    const expressions = node.expressions as AcornNode[] | undefined
+    const last = expressions?.[expressions.length - 1]
+    return last ? nondeterministicCallableReference(last, scopes) : null
+  }
+  if (isGlobalDateReference(node, scopes)) return "Date()"
+  if (isMemberCall(node, "Date", "now", scopes)) return "Date.now()"
+  if (isMemberCall(node, "Math", "random", scopes)) return "Math.random()"
+  if (isDateConstructorNowCall(node, scopes)) return "Date.now()"
+  if (isDatePrototypeConstructorNowCall(node, scopes)) return "Date.now()"
+  return null
+}
+
+function isMemberCall(
+  node: AcornNode,
+  objectName: "Date" | "Math",
+  propertyName: string,
+  scopes: ScopeStack
+): boolean {
+  if (node.type !== "MemberExpression") return false
+  const object = node.object as AcornNode
+  return (
+    propertyNameOf(node) === propertyName &&
+    (objectName === "Date"
+      ? isGlobalDateReference(object, scopes)
+      : isGlobalMathReference(object, scopes))
+  )
+}
+
+function isDateConstructorNowCall(node: AcornNode, scopes: ScopeStack): boolean {
+  if (node.type !== "MemberExpression" || propertyNameOf(node) !== "now") return false
+  const constructorMember = node.object as AcornNode
+  if (constructorMember.type !== "MemberExpression" || propertyNameOf(constructorMember) !== "constructor") {
+    return false
+  }
+  const constructed = constructorMember.object as AcornNode
+  return (
+    constructed.type === "NewExpression" &&
+    isGlobalDateReference(constructed.callee as AcornNode, scopes)
+  )
+}
+
+function isDatePrototypeConstructorNowCall(node: AcornNode, scopes: ScopeStack): boolean {
+  if (node.type !== "MemberExpression" || propertyNameOf(node) !== "now") return false
+  const constructorMember = node.object as AcornNode
+  if (constructorMember.type !== "MemberExpression" || propertyNameOf(constructorMember) !== "constructor") {
+    return false
+  }
+  const prototypeMember = constructorMember.object as AcornNode
+  return (
+    prototypeMember.type === "MemberExpression" &&
+    propertyNameOf(prototypeMember) === "prototype" &&
+    isGlobalDateReference(prototypeMember.object as AcornNode, scopes)
+  )
+}
+
+function isGlobalDateReference(node: AcornNode, scopes: ScopeStack): boolean {
+  if (node.type === "Identifier") return node.name === "Date" && !isBound("Date", scopes)
+  return isGlobalThisMember(node, "Date", scopes)
+}
+
+function isGlobalMathReference(node: AcornNode, scopes: ScopeStack): boolean {
+  if (node.type === "Identifier") return node.name === "Math" && !isBound("Math", scopes)
+  return isGlobalThisMember(node, "Math", scopes)
+}
+
+function isGlobalThisMember(node: AcornNode, propertyName: string, scopes: ScopeStack): boolean {
+  if (node.type !== "MemberExpression") return false
+  const object = node.object as AcornNode
+  return (
+    object.type === "Identifier" &&
+    object.name === "globalThis" &&
+    !isBound("globalThis", scopes) &&
+    propertyNameOf(node) === propertyName
+  )
+}
+
+function propertyNameOf(node: AcornNode): string | undefined {
+  if (node.type !== "MemberExpression") return undefined
+  const property = node.property as AcornNode
+  if (!node.computed && property.type === "Identifier") return property.name as string
+  return staticStringOf(property)
+}
+
+function staticStringOf(node: AcornNode | undefined): string | undefined {
+  if (node?.type === "Literal" && typeof node.value === "string") return node.value
+  if (node?.type === "TemplateLiteral" && Array.isArray(node.expressions) && node.expressions.length === 0) {
+    const quasis = node.quasis as Array<{ value: { cooked?: string; raw: string } }>
+    return quasis.map((quasi) => quasi.value.cooked ?? quasi.value.raw).join("")
+  }
+  if (node?.type === "BinaryExpression" && node.operator === "+") {
+    const left = staticStringOf(node.left as AcornNode)
+    const right = staticStringOf(node.right as AcornNode)
+    if (left !== undefined && right !== undefined) return left + right
+  }
+  return undefined
+}
+
+function isBound(name: string, scopes: ScopeStack): boolean {
+  for (let i = scopes.length - 1; i >= 0; i--) {
+    if (scopes[i].has(name)) return true
+  }
+  return false
+}
+
+function collectProgramScope(program: AcornNode): Set<string> {
+  const names = new Set<string>()
+  collectFunctionScopedVarNames(program, names)
+  collectDirectLexicalNames((program.body ?? []) as AcornNode[], names)
+  return names
+}
+
+function collectFunctionNameScope(node: AcornNode): Set<string> {
+  const names = new Set<string>()
+  if (
+    (node.type === "FunctionExpression" || node.type === "FunctionDeclaration") &&
+    node.id &&
+    (node.id as AcornNode).type === "Identifier"
+  ) {
+    names.add((node.id as { name: string }).name)
+  }
+  return names
+}
+
+function collectBlockScope(block: AcornNode): Set<string> {
+  const names = new Set<string>()
+  collectDirectLexicalNames((block.body ?? []) as AcornNode[], names)
+  return names
+}
+
+function collectForHeadScope(head: AcornNode | null | undefined): Set<string> {
+  const names = new Set<string>()
+  if (head?.type === "VariableDeclaration" && head.kind !== "var") {
+    for (const declarator of (head.declarations ?? []) as AcornNode[]) {
+      addPatternNames(declarator.id as AcornNode, names)
+    }
+  }
+  return names
+}
+
+function collectSwitchScope(node: AcornNode): Set<string> {
+  const names = new Set<string>()
+  for (const switchCase of (node.cases ?? []) as AcornNode[]) {
+    collectDirectLexicalNames((switchCase.consequent ?? []) as AcornNode[], names)
+  }
+  return names
+}
+
+function collectStaticBlockScope(block: AcornNode): Set<string> {
+  const names = collectBlockScope(block)
+  collectFunctionScopedVarNames(block, names)
+  return names
+}
+
+function collectDirectLexicalNames(statements: AcornNode[], names: Set<string>): void {
+  for (const statement of statements) {
+    const declaration =
+      statement.type === "ExportNamedDeclaration" ? (statement.declaration as AcornNode | null) : statement
+    if (!declaration) continue
+    if (declaration.type === "VariableDeclaration" && declaration.kind !== "var") {
+      for (const declarator of (declaration.declarations ?? []) as AcornNode[]) {
+        addPatternNames(declarator.id as AcornNode, names)
+      }
+    } else if (
+      (declaration.type === "FunctionDeclaration" || declaration.type === "ClassDeclaration") &&
+      declaration.id &&
+      (declaration.id as AcornNode).type === "Identifier"
+    ) {
+      names.add((declaration.id as { name: string }).name)
+    }
+  }
+}
+
+function collectFunctionScopedVarNames(root: AcornNode, names: Set<string>): void {
+  const stack: Array<{ node: AcornNode; isRoot: boolean }> = [{ node: root, isRoot: true }]
+  while (stack.length > 0) {
+    const { node, isRoot } = stack.pop()!
+    if (!isRoot && (isFunctionNode(node) || node.type === "StaticBlock")) continue
+    if (node.type === "VariableDeclaration" && node.kind === "var") {
+      for (const declarator of (node.declarations ?? []) as AcornNode[]) {
+        addPatternNames(declarator.id as AcornNode, names)
+      }
+    }
+    const values = Object.values(node)
+    for (let i = values.length - 1; i >= 0; i--) {
+      const value = values[i]
+      if (Array.isArray(value)) {
+        for (let j = value.length - 1; j >= 0; j--) {
+          const item = value[j]
+          if (item && typeof item === "object" && typeof (item as AcornNode).type === "string") {
+            stack.push({ node: item as AcornNode, isRoot: false })
+          }
+        }
+      } else if (
+        value &&
+        typeof value === "object" &&
+        typeof (value as AcornNode).type === "string"
+      ) {
+        stack.push({ node: value as AcornNode, isRoot: false })
+      }
+    }
+  }
+}
+
+function isFunctionNode(node: AcornNode): boolean {
+  return (
+    node.type === "FunctionDeclaration" ||
+    node.type === "FunctionExpression" ||
+    node.type === "ArrowFunctionExpression"
+  )
+}
+
+function addPatternNames(node: AcornNode, names: Set<string>): void {
+  switch (node.type) {
+    case "Identifier":
+      names.add(node.name as string)
+      break
+    case "ObjectPattern":
+      for (const property of (node.properties ?? []) as AcornNode[]) {
+        if (property.type === "RestElement") addPatternNames(property.argument as AcornNode, names)
+        else if (property.type === "Property") addPatternNames(property.value as AcornNode, names)
+      }
+      break
+    case "ArrayPattern":
+      for (const element of (node.elements ?? []) as Array<AcornNode | null>) {
+        if (element) addPatternNames(element, names)
+      }
+      break
+    case "RestElement":
+      addPatternNames(node.argument as AcornNode, names)
+      break
+    case "AssignmentPattern":
+      addPatternNames(node.left as AcornNode, names)
+      break
+  }
 }
 
 /** Depth-first visit of every AST node (plain-object walk, no acorn-walk dependency). */

@@ -165,6 +165,114 @@ function testImportExportRejectedInBody(): void {
   )
 }
 
+function testNondeterministicApisRejectedBeforeRun(): void {
+  const head = `export const meta = { name: "a", description: "b" }\n`
+  const rejected: Array<[string, string, string]> = [
+    [`return new Date().toISOString()`, "new Date() is unavailable", "argless new Date rejected before launch"],
+    [`return Date()`, "Date() is unavailable", "Date() rejected before launch"],
+    [`return Date.now()`, "Date.now() is unavailable", "Date.now rejected before launch"],
+    [`return Date["now"]()`, "Date.now() is unavailable", "computed Date.now rejected before launch"],
+    [`return Date.now.call(null)`, "Date.now() is unavailable", "Date.now.call rejected before launch"],
+    [`return Date.now.apply(null)`, "Date.now() is unavailable", "Date.now.apply rejected before launch"],
+    [`return (0, Date.now)()`, "Date.now() is unavailable", "sequence Date.now call rejected before launch"],
+    [`return (0, Date.now.call)(null)`, "Date.now() is unavailable", "sequence Date.now.call rejected before launch"],
+    [`return Date.now.bind(null)()`, "Date.now() is unavailable", "Date.now.bind rejected before launch"],
+    [`return (0, Date.now.bind(null))()`, "Date.now() is unavailable", "sequence Date.now.bind rejected before launch"],
+    [`return Date.call(null)`, "Date() is unavailable", "Date.call rejected before launch"],
+    [`return Date.bind(null)()`, "Date() is unavailable", "Date.bind rejected before launch"],
+    [`return Math.random()`, "Math.random() is unavailable", "Math.random rejected before launch"],
+    [`return Math["random"]()`, "Math.random() is unavailable", "computed Math.random rejected before launch"],
+    [`return Math.random.call(null)`, "Math.random() is unavailable", "Math.random.call rejected before launch"],
+    [`return Math.random.bind(null)()`, "Math.random() is unavailable", "Math.random.bind rejected before launch"],
+    [`return (0, Math.random)()`, "Math.random() is unavailable", "sequence Math.random rejected before launch"],
+    [`return globalThis.Date.now()`, "Date.now() is unavailable", "globalThis Date.now rejected before launch"],
+    [`return globalThis.Math.random()`, "Math.random() is unavailable", "globalThis Math.random rejected before launch"],
+    [`return globalThis.Date.now.call(null)`, "Date.now() is unavailable", "globalThis Date.now.call rejected before launch"],
+    [`return globalThis.Date.now.bind(null)()`, "Date.now() is unavailable", "globalThis Date.now.bind rejected before launch"],
+    [`return globalThis.Math.random.apply(null)`, "Math.random() is unavailable", "globalThis Math.random.apply rejected before launch"],
+    [`return new globalThis.Date()`, "new Date() is unavailable", "globalThis new Date rejected before launch"],
+    [`return new Date(1).constructor.now()`, "Date.now() is unavailable", "Date constructor bypass rejected before launch"],
+    [`return Date.prototype.constructor.now()`, "Date.now() is unavailable", "Date prototype constructor bypass rejected"],
+    [
+      `return globalThis.Date.prototype.constructor.now()`,
+      "Date.now() is unavailable",
+      "globalThis Date prototype constructor bypass rejected"
+    ],
+    [`function f(Date){}; return Date.now()`, "Date.now() is unavailable", "function param does not shadow outer Date"],
+    [
+      `function f(x = Date.now()) { const Date = { now: () => 1 }; return x } return f()`,
+      "Date.now() is unavailable",
+      "function body Date does not shadow parameter default Date"
+    ],
+    [`if (true) { const Date = () => 1 } return Date()`, "Date() is unavailable", "block Date does not shadow outer Date"],
+    [`const f = function Date(){}; return Date.now()`, "Date.now() is unavailable", "function expression name is local only"],
+    [
+      `try {} catch (globalThis) {} return globalThis.Math.random()`,
+      "Math.random() is unavailable",
+      "catch param does not shadow outer globalThis"
+    ],
+    [
+      `class C { static { var Date = { now: () => 1 } } } return Date.now()`,
+      "Date.now() is unavailable",
+      "static block var Date does not shadow outer Date"
+    ],
+    [
+      `class C { static { var globalThis = { Math: { random: () => 1 } } } } return globalThis.Math.random()`,
+      "Math.random() is unavailable",
+      "static block var globalThis does not shadow outer globalThis"
+    ],
+    [
+      `for (const Date of [Date.now()]) { Date() } return 1`,
+      "Date.now() is unavailable",
+      "for-of right side is evaluated outside loop binding"
+    ],
+    [
+      `switch (Date.now()) { case 1: const Date = () => 1; Date(); break } return 1`,
+      "Date.now() is unavailable",
+      "switch discriminant is evaluated outside switch lexical scope"
+    ]
+  ]
+  for (const [body, message, label] of rejected) {
+    expectThrows(() => validateWorkflowScript(`${head}${body}`), message, label)
+  }
+
+  const { body } = validateWorkflowScript(`${head}return new Date("2026-06-26T00:00:00Z").toISOString()`)
+  assert(body.includes("new Date("), "new Date(value) remains allowed")
+  validateWorkflowScript(`${head}const x = {}; return x${".x".repeat(5000)}`)
+
+  validateWorkflowScript(`${head}const Date = () => "shadowed"; return Date()`)
+  validateWorkflowScript(`${head}const Math = { random: () => 0.1 }; return Math.random()`)
+  validateWorkflowScript(`${head}const Date = { now: { call: () => 1 } }; return Date.now.call(null)`)
+  validateWorkflowScript(`${head}const Math = { random: { apply: () => 0.1 } }; return Math.random.apply(null)`)
+  validateWorkflowScript(`${head}const Date = { now: { bind: () => () => 1 } }; return Date.now.bind(null)()`)
+  validateWorkflowScript(`${head}const Math = { random: { bind: () => () => 0.1 } }; return Math.random.bind(null)()`)
+  validateWorkflowScript(
+    `${head}const globalThis = { Date: { now: () => 1 }, Math: { random: () => 0.1 } }; return globalThis.Date.now()`
+  )
+  validateWorkflowScript(`${head}function f(Date) { return Date.now() }; return f({ now: () => 1 })`)
+  validateWorkflowScript(`${head}if (true) { const Date = () => "shadowed"; Date() } return 1`)
+  validateWorkflowScript(
+    `${head}try { throw { Math: { random: () => 0.1 } } } catch (globalThis) { globalThis.Math.random() } return 1`
+  )
+  validateWorkflowScript(`${head}function f(Date = { now: () => 1 }) { return Date.now() }; return f()`)
+  validateWorkflowScript(`${head}const C = class Math { static v(){ return Math.random() } }; return 1`)
+  validateWorkflowScript(`${head}class C { static { const Date = { now: () => 1 }; Date.now() } } return 1`)
+  validateWorkflowScript(`${head}class C { static { var Date = { now: () => 1 }; Date.now() } } return 1`)
+  validateWorkflowScript(`${head}class C { static { var Math = { random: () => 1 }; Math.random() } } return 1`)
+  validateWorkflowScript(
+    `${head}class C { static { var globalThis = { Math: { random: () => 1 } }; globalThis.Math.random() } } return 1`
+  )
+  validateWorkflowScript(`${head}for (const Date of [() => 1]) { Date() } return 1`)
+  validateWorkflowScript(`${head}for (let Math of [{ random: () => 0.1 }]) { Math.random() } return 1`)
+  validateWorkflowScript(`${head}for (let globalThis of [{ Math: { random: () => 0.1 } }]) { globalThis.Math.random() } return 1`)
+  validateWorkflowScript(`${head}for (let Date = () => 1; false; ) { Date() } return 1`)
+  validateWorkflowScript(`${head}switch (1) { case 1: const Date = () => 1; Date(); break } return 1`)
+  validateWorkflowScript(`${head}switch (1) { case Date.now(): const Date = () => 1; break } return 1`)
+  validateWorkflowScript(
+    `${head}switch (1) { case 1: class Math { static random(){ return 1 } } Math.random(); break } return 1`
+  )
+}
+
 function testSyntaxErrorReported(): void {
   expectThrows(
     () => validateWorkflowScript(`export const meta = { name: "a", description: "b" }\nconst {`),
@@ -244,6 +352,16 @@ function testJsonSchemaValidator(): void {
       { x: null }
     ).length === 0,
     "type array with null accepts null"
+  )
+  assert(
+    validateJsonSchemaValue({ type: "string", maxLength: 1 }, "😀").length === 0,
+    "string maxLength counts Unicode code points, not UTF-16 code units"
+  )
+  assert(
+    validateJsonSchemaValue({ type: "string", minLength: 2 }, "😀").some((e) =>
+      e.includes("minLength")
+    ),
+    "string minLength counts Unicode code points"
   )
 
   const falsePropertyErrors = validateJsonSchemaValue(
@@ -1302,6 +1420,25 @@ async function testStructuredOutputAcceptsWrappersAndNullableObjects(): Promise<
   assert(
     additionalValueMismatch.includes("$.value: expected type string, got number"),
     "additionalProperties schemas treat value/input/result/data as real object-root fields for repair errors"
+  )
+  const combinatorValueFieldTool = createStructuredOutputTool(
+    {
+      anyOf: [
+        {
+          type: "object",
+          properties: { value: { type: "string", minLength: 5 } },
+          required: ["value"]
+        }
+      ]
+    },
+    { value: undefined as unknown, called: false }
+  ) as unknown as {
+    invoke: (input: unknown) => Promise<unknown>
+  }
+  const combinatorValueMismatch = String(await combinatorValueFieldTool.invoke({ value: "x" }))
+  assert(
+    combinatorValueMismatch.includes("$.value: string is shorter than minLength 5"),
+    "anyOf/oneOf object-root fields named value/input/result/data are not mistaken for wrapper errors"
   )
 
   const nodeWrappedCapture = { value: undefined as unknown, called: false }
@@ -2898,6 +3035,7 @@ const tests = [
   testMetaSchemaValidation,
   testReservedKeysRejected,
   testImportExportRejectedInBody,
+  testNondeterministicApisRejectedBeforeRun,
   testSyntaxErrorReported,
   testJsonSchemaValidator,
   testOutputTokenSummation,

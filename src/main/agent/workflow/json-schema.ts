@@ -456,10 +456,11 @@ function validateNode(
   if (typeof value === "string") {
     const minLength = asNumber(schema.minLength)
     const maxLength = asNumber(schema.maxLength)
-    if (minLength !== null && value.length < minLength) {
+    const valueLength = jsonStringLength(value)
+    if (minLength !== null && valueLength < minLength) {
       errors.push(`${path}: string is shorter than minLength ${minLength}`)
     }
-    if (maxLength !== null && value.length > maxLength) {
+    if (maxLength !== null && valueLength > maxLength) {
       errors.push(`${path}: string is longer than maxLength ${maxLength}`)
     }
     if (typeof schema.pattern === "string") {
@@ -580,6 +581,10 @@ function typeMatches(expected: string, value: unknown, actual: string): boolean 
   if (expected === "integer") return typeof value === "number" && Number.isInteger(value)
   if (expected === "number") return typeof value === "number" && Number.isFinite(value)
   return expected === actual
+}
+
+function jsonStringLength(value: string): number {
+  return Array.from(value).length
 }
 
 function jsonTypeOf(value: unknown): string {
