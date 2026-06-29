@@ -54,17 +54,21 @@ describe("agent debug dump", () => {
       threadId: "thread-b",
       input: { messages: [{ role: "user", content: "hi" }] }
     })
+    const toolCalls = [{ id: "call-a", name: "read_file", args: { path: "README.md" } }]
     dumpModelCallDebug({
       workspacePath: workspace,
       threadId: "thread-b",
       inputMessages: [{ role: "system", content: "SYSTEM PROMPT" }],
-      outputMessage: { role: "assistant", content: "ok" }
+      outputMessage: { role: "assistant", content: "ok", toolCalls },
+      toolCalls
     })
 
     const dir = join(output, "thread-b")
     expect(readJson(join(dir, "latest-system-prompt.json")).systemPrompt).toBe("SYSTEM PROMPT")
     expect(readJson(join(dir, "latest-agent-input.json")).kind).toBe("agent_stream_input")
-    expect(readJson(join(dir, "latest-model-call.json")).kind).toBe("model_call")
+    const modelCall = readJson(join(dir, "latest-model-call.json"))
+    expect(modelCall.kind).toBe("model_call")
+    expect(modelCall.toolCalls).toEqual(toolCalls)
     rmSync(workspace, { recursive: true, force: true })
     rmSync(output, { recursive: true, force: true })
   })

@@ -1758,11 +1758,11 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
           ]
         : []),
       createSummarizationMiddleware(summarizationOptions),
-      debugModelCallMiddleware,
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       createPatchToolCallsMiddleware(),
       ...skillsMiddlewareArray,
       ...memoryMiddlewareArray,
+      debugModelCallMiddleware,
       ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
       ...customMiddleware
     ],
@@ -3750,7 +3750,14 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       hasExtraSystemPrompt: Boolean(extraSystemPrompt),
       deferredToolIds,
       coordinatorMode: isCoordinatorMode,
-      approvalThreadId
+      approvalThreadId,
+      skillSources: {
+        standalone: skillsSources,
+        plugin: pluginSkillsSources,
+        combined: allSkillsSources,
+        lifecycle: skillLifecycleSources,
+        main: !isCoordinatorMode && allSkillsSources.length > 0 ? allSkillsSources : []
+      }
     }
   })
 

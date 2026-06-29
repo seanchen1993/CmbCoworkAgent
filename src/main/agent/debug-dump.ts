@@ -26,6 +26,27 @@ function resolveDebugDir(workspacePath: string, threadId?: string): string {
   return join(root, safePathSegment(threadId, "unknown-thread"))
 }
 
+function toDebugJsonValue(value: unknown, stack = new WeakSet<object>()): unknown {
+  if (typeof value === "function") return `[Function ${value.name || "anonymous"}]`
+  if (typeof value === "bigint") return value.toString()
+  if (!value || typeof value !== "object") return value
+  if (stack.has(value)) return "[Circular]"
+
+  stack.add(value)
+  try {
+    if (Array.isArray(value)) return value.map((item) => toDebugJsonValue(item, stack))
+
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, nested]) => [
+        key,
+        toDebugJsonValue(nested, stack)
+      ])
+    )
+  } finally {
+    stack.delete(value)
+  }
+}
+
 function writeDebugJson(
   workspacePath: string,
   threadId: string | undefined,
@@ -37,20 +58,7 @@ function writeDebugJson(
   try {
     const dir = resolveDebugDir(workspacePath, threadId)
     mkdirSync(dir, { recursive: true })
-    const seen = new WeakSet<object>()
-    const text = JSON.stringify(
-      payload,
-      (_key, value) => {
-        if (typeof value === "function") return `[Function ${value.name || "anonymous"}]`
-        if (typeof value === "bigint") return value.toString()
-        if (value && typeof value === "object") {
-          if (seen.has(value)) return "[Circular]"
-          seen.add(value)
-        }
-        return value
-      },
-      2
-    )
+    const text = JSON.stringify(toDebugJsonValue(payload), null, 2)
     writeFileSync(join(dir, fileName), text, "utf-8")
     writeFileSync(join(dir, latestName), text, "utf-8")
   } catch (error) {
