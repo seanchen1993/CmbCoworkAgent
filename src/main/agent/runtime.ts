@@ -144,6 +144,7 @@ import { detectJavaProject } from "../lsp"
 import {
   DEFAULT_AGENTS_MAX_BYTES,
   DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+  loadAgentsPromptForWorkspaces,
   loadAgentsPromptForWorkspace
 } from "./agents-md"
 import {
@@ -2833,6 +2834,8 @@ export interface CreateAgentRuntimeOptions {
   enableAgentsPrompt?: boolean
   /** Optional Harness project AGENTS.md prompt appended without changing workspace AGENTS.md loading. */
   harnessAgentsPrompt?: string
+  /** Additional project-mode workspace roots whose AGENTS.md files should be loaded by framework fallback. */
+  additionalAgentsWorkspacePaths?: string[]
   /** Test/debug hook: captures the final system prompt passed to LangChain. */
   onFinalSystemPrompt?: (prompt: string) => void
   /** Skip injecting MEMORY.md into the system prompt (the memory_search/memory_get
@@ -2942,6 +2945,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     coordinatorWorkerTurnPlanning,
     enableAgentsPrompt = true,
     harnessAgentsPrompt,
+    additionalAgentsWorkspacePaths,
     onFinalSystemPrompt,
     disableMemoryInjection = false,
     agentMode = "normal",
@@ -3340,10 +3344,25 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const normalizedHarnessAgentsPrompt = harnessAgentsPrompt?.trim()
   const shouldLoadWorkspaceAgentsPrompt = enableAgentsPrompt && !normalizedHarnessAgentsPrompt
   if (shouldLoadWorkspaceAgentsPrompt) {
-    agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, {
-      globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
-      projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
-    })
+    const normalizedAdditionalAgentsWorkspacePaths =
+      additionalAgentsWorkspacePaths?.map((path) => path.trim()).filter(Boolean) ?? []
+    agentsPrompt =
+      normalizedAdditionalAgentsWorkspacePaths.length > 0
+        ? await loadAgentsPromptForWorkspaces(
+            {
+              primaryWorkspacePath: workspacePath,
+              additionalWorkspacePaths: normalizedAdditionalAgentsWorkspacePaths,
+              includeGlobal: true
+            },
+            {
+              globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+              projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+            }
+          )
+        : await loadAgentsPromptForWorkspace(workspacePath, {
+            globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+            projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+          })
     if (agentsPrompt.prompt) {
       systemPrompt += "\n\n" + agentsPrompt.prompt
       console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)

@@ -130,6 +130,7 @@ interface HarnessHookLogEntry {
 interface HarnessCommandParseOptions {
   feature?: string
   selectedServiceUnitsJson?: string
+  sessionWorkspacePath?: string
   projectDirs?: string[]
   workflowTemplate?: string
   workflowNodes?: string
@@ -769,6 +770,7 @@ function replaceHarnessConfigPlaceholders(
     projectCode: project.projectCode,
     feature: options.feature ?? "",
     selectedServiceUnits: options.selectedServiceUnitsJson ?? "",
+    sessionWorkspacePath: options.sessionWorkspacePath ?? "",
     pluginPath: cwd,
     mode,
     workflowTemplate: options.workflowTemplate ?? "",
@@ -776,7 +778,7 @@ function replaceHarnessConfigPlaceholders(
     nodeId: options.nodeId ?? ""
   }
   return value.replace(
-    /\$\{(pluginWorkspace|project|projectDir|projectCode|feature|selectedServiceUnits|pluginPath|mode|workflowTemplate|workflowNodes|nodeId)\}/g,
+    /\$\{(pluginWorkspace|project|projectDir|projectCode|feature|selectedServiceUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId)\}/g,
     (_, key: string) => replacements[key] ?? ""
   )
 }
@@ -961,11 +963,11 @@ function formatMarkdownInlineCode(value: string): string {
   return value.replace(/`/g, "\\`")
 }
 
-function buildHarnessAdditionalWorkspaceRootsPrompt(
+function resolveHarnessAdditionalWorkspaceRoots(
   projectId: string,
   featureId: string,
   workspacePath: string
-): string | undefined {
+): string[] {
   const normalizedWorkspacePath = resolve(workspacePath)
   const seen = new Set<string>([normalizedWorkspacePath])
   const roots: string[] = []
@@ -977,6 +979,10 @@ function buildHarnessAdditionalWorkspaceRootsPrompt(
     seen.add(normalizedPath)
     roots.push(path)
   }
+  return roots
+}
+
+function buildHarnessAdditionalWorkspaceRootsPrompt(roots: string[]): string | undefined {
   if (roots.length === 0) return undefined
 
   return [
@@ -2333,6 +2339,7 @@ export interface HarnessFeatureAgentContext {
   systemPromptInject?: string
   enableAgentsPrompt?: boolean
   harnessAgentsPrompt?: string
+  additionalAgentsWorkspacePaths?: string[]
   sessionContextInjectWarning?: string
   agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
   pluginOutputDir?: string
@@ -2344,6 +2351,10 @@ export interface HarnessFeatureAgentContext {
   featureId?: string
   projectCode?: string
   projectDir?: string
+}
+
+export interface HarnessFeatureAgentContextOptions {
+  workspacePath?: string
 }
 
 function isHarnessSessionContextOk(value: unknown): boolean {
@@ -2364,7 +2375,8 @@ function formatSessionContextInjectWarning(detail: string): string {
 
 function readHarnessFeatureSessionContextAgentPrompt(
   project: HarnessProjectMetadata,
-  featureId: string
+  featureId: string,
+  options: { sessionWorkspacePath?: string } = {}
 ): HarnessSessionContextInjectResult {
   if (!hasConfiguredHarnessInvocation(project, "sessionContext")) {
     const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS.sessionContext
@@ -2380,7 +2392,8 @@ function readHarnessFeatureSessionContextAgentPrompt(
   try {
     const configured = buildConfiguredHarnessInvocation(project, "sessionContext", {
       feature: featureId,
-      ...getHarnessSelectedServiceUnitsCommandOptions(project, featureId)
+      ...getHarnessSelectedServiceUnitsCommandOptions(project, featureId),
+      sessionWorkspacePath: options.sessionWorkspacePath
     })
     const result = runHarnessJsonInvocation(configured, "sessionContext")
     const message = normalizeText(result.message).trim()
@@ -2426,7 +2439,8 @@ function readHarnessFeatureSessionContextAgentPrompt(
 }
 
 export function buildHarnessFeatureAgentContext(
-  metadata: unknown
+  metadata: unknown,
+  options: HarnessFeatureAgentContextOptions = {}
 ): HarnessFeatureAgentContext | null {
   const feature = readHarnessFeatureMetadata(metadata)
   if (!feature) return null
@@ -2442,30 +2456,42 @@ export function buildHarnessFeatureAgentContext(
   const sessionContextInjectionSource =
     featureBinding?.sessionContextInjectionSource ?? "cmbdevclaw"
   const usePluginAgentsPrompt = sessionContextInjectionSource === "plugin"
+  const sessionWorkspacePath = normalizeText(options.workspacePath).trim() || project.workspacePath
   const render = (
     template: string | null,
     command: HarnessInspectCommandName
   ): string | undefined =>
     template
-      ? replaceHarnessConfigPlaceholders(template, project, command, cwd, { feature: feature.slug }).trim() ||
-        undefined
+      ? replaceHarnessConfigPlaceholders(template, project, command, cwd, {
+          feature: feature.slug,
+          sessionWorkspacePath
+        }).trim() || undefined
       : undefined
   const renderedStaticPrompt = render(staticSystemPromptInject, "run")
   const sessionContextInjectResult = usePluginAgentsPrompt
-    ? readHarnessFeatureSessionContextAgentPrompt(project, feature.slug)
+    ? readHarnessFeatureSessionContextAgentPrompt(project, feature.slug, { sessionWorkspacePath })
     : undefined
   const harnessAgentsPrompt = sessionContextInjectResult?.prompt
-  const additionalWorkspaceRootsPrompt = usePluginAgentsPrompt
+  const pluginPromptLoaded = Boolean(harnessAgentsPrompt?.trim())
+  const additionalWorkspaceRoots = resolveHarnessAdditionalWorkspaceRoots(
+    project.projectId,
+    feature.slug,
+    sessionWorkspacePath
+  )
+  const additionalWorkspaceRootsPrompt = pluginPromptLoaded
     ? undefined
-    : buildHarnessAdditionalWorkspaceRootsPrompt(project.projectId, feature.slug, project.workspacePath)
+    : buildHarnessAdditionalWorkspaceRootsPrompt(additionalWorkspaceRoots)
   const systemPromptInject =
     [renderedStaticPrompt, additionalWorkspaceRootsPrompt].filter(Boolean).join("\n\n") ||
     undefined
 
   return {
     systemPromptInject,
-    enableAgentsPrompt: !harnessAgentsPrompt?.trim(),
+    enableAgentsPrompt: !pluginPromptLoaded,
     ...(harnessAgentsPrompt ? { harnessAgentsPrompt } : {}),
+    ...(!pluginPromptLoaded && additionalWorkspaceRoots.length > 0
+      ? { additionalAgentsWorkspacePaths: additionalWorkspaceRoots }
+      : {}),
     ...(sessionContextInjectResult?.warning
       ? { sessionContextInjectWarning: sessionContextInjectResult.warning }
       : {}),
