@@ -13,7 +13,7 @@
  */
 
 import { execFileSync } from "child_process"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { basename, dirname, join } from "path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
@@ -29,6 +29,7 @@ import {
   buildGitPanelDiffState,
   buildGitPanelFileDiff,
   buildGitPanelFileDiffState,
+  buildGitPanelMetaState,
   buildGitPanelState,
   shouldUseDefaultGitPush
 } from "./models"
@@ -132,6 +133,29 @@ describe("buildGitPanelState — lazy mode (includeDiffs:false)", () => {
     expect(fresh?.additions).toBeGreaterThan(0)
     // Modified tracked file keeps real numstat values.
     expect(tracked?.additions).toBeGreaterThan(0)
+  })
+
+  it("reports zero additions for empty untracked files", async () => {
+    const localRepo = createRepo("gitpanel-empty-untracked-")
+    try {
+      writeFileSync(join(localRepo, "empty.txt"), "")
+
+      const lazy = await buildGitPanelState(localRepo, [], {
+        silent: true,
+        includeAllWhenNoTracked: true,
+        includeDiffs: false,
+        includeChangedFiles: true
+      })
+      const collapsed = lazy.files.find((f) => f.path === "empty.txt")
+      expect(collapsed?.additions).toBe(0)
+      expect(collapsed?.deletions).toBe(0)
+
+      const expanded = await buildGitPanelFileDiff(localRepo, "empty.txt", { silent: true })
+      expect(expanded?.additions).toBe(0)
+      expect(expanded?.deletions).toBe(0)
+    } finally {
+      rmSync(localRepo, { recursive: true, force: true })
+    }
   })
 
   it("matches collapsed numstat for non-ASCII paths (quotepath regression)", async () => {
@@ -254,6 +278,68 @@ describe("buildGitPanelState — lazy mode (includeDiffs:false)", () => {
       expect(paths).toContain(" leading.ts")
       expect(paths).not.toContain("leading.ts")
       expect(paths.some((p) => p.includes("node_modules"))).toBe(false)
+    } finally {
+      rmSync(localRepo, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps collapsed numstat accurate for tracked paths with leading spaces", async () => {
+    const localRepo = createRepo("gitpanel-leading-space-numstat-")
+    try {
+      const name = " leading.ts"
+      writeFileSync(join(localRepo, name), "one\ntwo\nthree\n")
+      gitIn(localRepo, ["add", "."])
+      gitIn(localRepo, ["commit", "-q", "-m", "init"])
+      // Only touch part of the tracked file. If numstat path matching trims the
+      // leading space, lazy mode falls back to whole-file new-file estimation.
+      writeFileSync(join(localRepo, name), "one changed\ntwo\nthree\nfour\n")
+
+      const lazy = await buildGitPanelState(localRepo, [], {
+        silent: true,
+        includeAllWhenNoTracked: true,
+        includeDiffs: false,
+        includeChangedFiles: true
+      })
+      const collapsed = lazy.files.find((f) => f.path === name)
+      expect(collapsed).toBeDefined()
+      expect(collapsed?.additions).toBe(2)
+      expect(collapsed?.deletions).toBe(1)
+
+      const expanded = await buildGitPanelFileDiff(localRepo, name, { silent: true })
+      expect(collapsed?.additions).toBe(expanded?.additions)
+      expect(collapsed?.deletions).toBe(expanded?.deletions)
+    } finally {
+      rmSync(localRepo, { recursive: true, force: true })
+    }
+  })
+
+  it("counts a filesystem move as ONE renamed entry (header/list count parity)", async () => {
+    const localRepo = createRepo("gitpanel-move-count-")
+    try {
+      writeFileSync(join(localRepo, "fileA.txt"), "shared content line\n")
+      gitIn(localRepo, ["add", "."])
+      gitIn(localRepo, ["commit", "-q", "-m", "init"])
+      // 未暂存的文件系统重命名：status 里是“删除 fileA + 新增 fileB”两条。
+      renameSync(join(localRepo, "fileA.txt"), join(localRepo, "fileB.txt"))
+
+      const state = await buildGitPanelState(localRepo, [], {
+        silent: true,
+        includeAllWhenNoTracked: true,
+        includeDiffs: false,
+        includeChangedFiles: true
+      })
+
+      // 移动合并后必须是 1 条重命名，且 changedFilesTotal 与实际列表长度一致。
+      expect(state.changedFilesTotal).toBe(1)
+      expect(state.files).toHaveLength(1)
+      expect(state.files[0]?.path).toBe("fileB.txt")
+      expect(state.files[0]?.status).toBe("renamed")
+      expect(state.files[0]?.previousPath).toBe("fileA.txt")
+
+      // 核心回归点：header 的快速摘要（buildGitPanelMetaState）必须同样合并移动，
+      // 算成 1 而不是“删除 + 新增”的 2，否则点开详情前后数量对不上。
+      const meta = await buildGitPanelMetaState("thread-test", createGitPanelTestContext(localRepo))
+      expect(meta.changedFilesTotal).toBe(1)
     } finally {
       rmSync(localRepo, { recursive: true, force: true })
     }

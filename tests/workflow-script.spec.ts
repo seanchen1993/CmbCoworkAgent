@@ -2377,6 +2377,174 @@ async function testWorkflowSubagentBubblesStructuredOutputInterruptSnapshot(): P
   )
 }
 
+async function testWorkflowSubagentRepairsDanglingToolCallThenNudges(): Promise<void> {
+  let streamCalls = 0
+  const streamInputs: unknown[][] = []
+  const schema = {
+    type: "object",
+    properties: {
+      answer: { type: "string" }
+    },
+    required: ["answer"]
+  }
+
+  // The model leaves structured_output dangling (a tool_call with no result) on EVERY turn.
+  // The subagent must NOT 400 by appending the nudge after the dangling call; instead it
+  // synthesizes a tool result for the dangling id, then nudges — on EACH attempt (initial +
+  // one fresh retry). The mock never recovers, so it ultimately fails after both attempts.
+  await expectRejects(
+    () =>
+      runWorkflowSubagent(
+        {
+          parentThreadId: "thread-structured-pending-tool-call",
+          defaultModelId: "default",
+          cleanupThread: async () => undefined,
+          isRetryableApiError: () => false,
+          createRuntime: async () => ({
+            stream: async (input: unknown) => {
+              streamCalls += 1
+              const messages = (input as { messages?: unknown[] })?.messages
+              if (Array.isArray(messages)) streamInputs.push(messages)
+              return (async function* () {
+                yield [
+                  "values",
+                  {
+                    messages: [
+                      {
+                        _getType: () => "ai",
+                        content: "",
+                        kwargs: {
+                          additional_kwargs: {
+                            tool_calls: [
+                              {
+                                id: "call-structured",
+                                function: { name: "structured_output" },
+                                type: "function"
+                              }
+                            ]
+                          }
+                        },
+                        usage_metadata: { output_tokens: 5 }
+                      }
+                    ]
+                  }
+                ]
+              })()
+            }
+          })
+        },
+        {
+          prompt: "return a structured answer",
+          schema,
+          agentIndex: 0,
+          label: "structured-pending-tool-call",
+          runId: "wf_structured_pending_tool_call",
+          signal: new AbortController().signal
+        }
+      ),
+    "completed without calling the structured_output tool",
+    "dangling tool call must be repaired + nudged (not 400), then fail after retries"
+  )
+  // Each attempt = [initial stream, nudge stream]; 2 attempts (initial + 1 fresh retry) = 4.
+  // A 400-block (old behavior) would have been 1 stream/attempt = 2.
+  assert(
+    streamCalls === 4,
+    `repair must let the nudge proceed on each attempt (2 attempts × 2 streams); got ${streamCalls}`
+  )
+  // The nudge turn's input must carry a synthetic tool result for the dangling tool_call id
+  // (so the history is valid before the nudge HumanMessage — no 400).
+  const repaired = streamInputs.some((messages) =>
+    messages.some((m) => {
+      const id = (m as { tool_call_id?: unknown })?.tool_call_id
+      return id === "call-structured"
+    })
+  )
+  assert(repaired, "nudge stream input must include a synthetic tool result for the dangling id")
+}
+
+async function testWorkflowSubagentNudgesAfterClosedToolCall(): Promise<void> {
+  let streamCalls = 0
+  const schema = {
+    type: "object",
+    properties: {
+      answer: { type: "string" }
+    },
+    required: ["answer"]
+  }
+
+  const result = await runWorkflowSubagent(
+    {
+      parentThreadId: "thread-structured-closed-tool-call",
+      defaultModelId: "default",
+      cleanupThread: async () => undefined,
+      isRetryableApiError: () => false,
+      createRuntime: async (options) => ({
+        stream: async () => {
+          streamCalls += 1
+          return (async function* () {
+            if (streamCalls === 1) {
+              yield [
+                "values",
+                {
+                  messages: [
+                    {
+                      _getType: () => "ai",
+                      content: "",
+                      tool_calls: [
+                        {
+                          id: "call-read",
+                          name: "read_file",
+                          args: { path: "README.md" }
+                        }
+                      ],
+                      usage_metadata: { output_tokens: 5 }
+                    },
+                    {
+                      _getType: () => "tool",
+                      tool_call_id: "call-read",
+                      content: "readme"
+                    }
+                  ]
+                }
+              ]
+              return
+            }
+
+            const structuredTool = options.additionalTools?.find(
+              (tool) => tool.name === "structured_output"
+            ) as { invoke: (input: unknown) => Promise<unknown> } | undefined
+            assert(structuredTool, "structured subagent receives structured_output tool")
+            await structuredTool.invoke({ answer: "ok" })
+            yield [
+              "values",
+              {
+                messages: [
+                  {
+                    _getType: () => "ai",
+                    content: "",
+                    usage_metadata: { output_tokens: 7 }
+                  }
+                ]
+              }
+            ]
+          })()
+        }
+      })
+    },
+    {
+      prompt: "return a structured answer",
+      schema,
+      agentIndex: 0,
+      label: "structured-closed-tool-call",
+      runId: "wf_structured_closed_tool_call",
+      signal: new AbortController().signal
+    }
+  )
+
+  assert(JSON.stringify(result.structured) === '{"answer":"ok"}', "captures nudge result")
+  assert(streamCalls === 2, `closed tool calls should still allow the nudge, got ${streamCalls}`)
+}
+
 async function testWorkflowSubagentStopsAfterStructuredOutputSuccess(): Promise<void> {
   let continuedAfterSuccess = false
   let streamClosedEarly = false
@@ -3042,6 +3210,8 @@ const tests = [
   testStructuredOutputHardStopsInvalidLoops,
   testStructuredOutputAcceptsWrappersAndNullableObjects,
   testWorkflowSubagentBubblesStructuredOutputInterruptSnapshot,
+  testWorkflowSubagentRepairsDanglingToolCallThenNudges,
+  testWorkflowSubagentNudgesAfterClosedToolCall,
   testWorkflowSubagentStopsAfterStructuredOutputSuccess,
   testStructuredOutputPatternValidationStaysLocal,
   testStructuredOutputExamplePromptOmitsInvalidExamples,

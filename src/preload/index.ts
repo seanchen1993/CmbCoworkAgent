@@ -425,6 +425,33 @@ const api = {
     cancelRun: (threadId: string, runId?: string): Promise<boolean> => {
       return ipcRenderer.invoke("workflow:cancel-run", { threadId, runId }) as Promise<boolean>
     },
+    setAgentStreamInterest: (
+      threadId: string,
+      runId: string,
+      agentIndex: number,
+      interested: boolean
+    ): Promise<boolean> => {
+      // Tell main whether the focus panel is viewing THIS running agent, so the
+      // display-only live tap only serializes/broadcasts the one agent you're watching.
+      return ipcRenderer.invoke("workflow:set-agent-stream-interest", {
+        threadId,
+        runId,
+        agentIndex,
+        interested
+      }) as Promise<boolean>
+    },
+    getAgentToolStream: (
+      threadId: string,
+      runId: string,
+      agentIndex: number
+    ): Promise<unknown[] | null> => {
+      // Lazily read ONE finished subagent's persisted complete tool flow on click.
+      return ipcRenderer.invoke("workflow:get-agent-toolstream", {
+        threadId,
+        runId,
+        agentIndex
+      }) as Promise<unknown[] | null>
+    },
     hydrate: (threadId: string): Promise<unknown> => {
       return ipcRenderer.invoke("workflow:hydrate", { threadId }) as Promise<unknown>
     },
@@ -433,6 +460,21 @@ const api = {
       // run stream, this survives past the launching turn so progress and the
       // completion notification still reach the renderer.
       const channel = `agent:workflow-events:${threadId}`
+      const handler = (_: unknown, data: unknown): void => {
+        callback(data)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
+    onWorkflowAgentStream: (
+      threadId: string,
+      callback: (payload: unknown) => void
+    ): (() => void) => {
+      // Display-only live tool-stream of a workflow run's subagents (keyed by the
+      // PARENT threadId; payload carries runId+agentIndex so the renderer filters).
+      const channel = `agent:workflow-agent-stream:${threadId}`
       const handler = (_: unknown, data: unknown): void => {
         callback(data)
       }
@@ -810,9 +852,7 @@ const api = {
     }> => {
       return ipcRenderer.invoke("workspace:loadFromDisk", { threadId })
     },
-    ensureWatching: (
-      threadId: string
-    ): Promise<{ success: boolean; restarted?: boolean }> => {
+    ensureWatching: (threadId: string): Promise<{ success: boolean; restarted?: boolean }> => {
       return ipcRenderer.invoke("workspace:ensureWatching", { threadId })
     },
     setActiveThread: (
@@ -987,6 +1027,7 @@ const api = {
         includeDiffs?: boolean
         includeChangedFiles?: boolean
         statusUntrackedMode?: "all" | "normal" | "no"
+        visibleFileLimit?: number
       }
     ): Promise<{
       success: boolean
@@ -1052,7 +1093,10 @@ const api = {
       }
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:getGitPanelFileDiff", { threadId, filePath }) as Promise<{
+      return ipcRenderer.invoke("workspace:getGitPanelFileDiff", {
+        threadId,
+        filePath
+      }) as Promise<{
         success: boolean
         isWorktree: boolean
         isGitRepo?: boolean
@@ -1221,9 +1265,13 @@ const api = {
         error?: string
       }>
     },
-    rejectWorktreeChanges: (threadId: string): Promise<{ success: boolean; error?: string }> => {
-      return ipcRenderer.invoke("workspace:rejectWorktreeChanges", { threadId }) as Promise<{
+    rejectWorktreeChanges: (
+      threadId: string,
+      filePaths?: string[]
+    ): Promise<{ success: boolean; revertedFileCount?: number; error?: string }> => {
+      return ipcRenderer.invoke("workspace:rejectWorktreeChanges", { threadId, filePaths }) as Promise<{
         success: boolean
+        revertedFileCount?: number
         error?: string
       }>
     },
