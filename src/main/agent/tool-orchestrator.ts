@@ -27,7 +27,8 @@ import {
   isGitPushCommand,
   normalizeCdPrefixedGitCommitCommand,
   normalizeGitAddPrefixedGitCommitCommand,
-  resolveGitCommandCwd
+  resolveGitCommandCwd,
+  resolveGitPushCommandCwd
 } from "./exec-policy"
 import { LocalSandbox } from "./local-sandbox"
 import type {
@@ -36,6 +37,10 @@ import type {
   ReviewDecision,
   ApprovalDecisionType
 } from "../types"
+import {
+  discoverWorkspaceGitRepositories,
+  getGitRootForPath
+} from "../services/git-repository-discovery"
 import type { ExecuteResponse } from "deepagents"
 
 const execFileAsync = promisify(execFile)
@@ -100,19 +105,72 @@ async function resolveExistingDirForBoundary(dir: string): Promise<{ path: strin
   }
 }
 
-async function validateGitCommitCwd(cwd: string, gitCommandCwd: string): Promise<string | null> {
+type GitOperationKind = "commit" | "push"
+
+const GIT_OPERATION_COPY: Record<
+  GitOperationKind,
+  {
+    commandName: string
+    actionName: string
+    outsideWorkspaceMessage: string
+    operationLabel: string
+  }
+> = {
+  commit: {
+    commandName: "git commit",
+    actionName: "提交",
+    outsideWorkspaceMessage:
+      "`git commit` 的 -C 目标不在当前线程工作区内，任务卡片对话框无法安全展示或提交该仓库。" +
+      "请在当前工作区内执行提交，或切换到对应工作区后再提交。",
+    operationLabel: "Git 提交"
+  },
+  push: {
+    commandName: "git push",
+    actionName: "推送",
+    outsideWorkspaceMessage:
+      "`git push` 的 -C 目标不在当前线程工作区内，无法安全推送该仓库。" +
+      "请在当前工作区内执行推送，或切换到对应工作区后再推送。",
+    operationLabel: "Git 推送"
+  }
+}
+
+async function validateGitCommandCwd(
+  cwd: string,
+  gitCommandCwd: string,
+  operation: GitOperationKind
+): Promise<string | null> {
+  const copy = GIT_OPERATION_COPY[operation]
   const [realCwd, realGitCommandCwd] = await Promise.all([
     resolveExistingDirForBoundary(cwd),
     resolveExistingDirForBoundary(gitCommandCwd)
   ])
   if (!realGitCommandCwd.exists) {
-    return "`git commit` 的工作目录不存在，请确认 cd/-C 目标后再提交。"
+    return `\`${copy.commandName}\` 的工作目录不存在，请确认 cd/-C 目标后再${copy.actionName}。`
   }
   if (isPathInsideOrSame(realGitCommandCwd.path, realCwd.path)) return null
-  return (
-    "`git commit` 的 -C 目标不在当前线程工作区内，任务卡片对话框无法安全展示或提交该仓库。" +
-    "请在当前工作区内执行提交，或切换到对应工作区后再提交。"
-  )
+  return copy.outsideWorkspaceMessage
+}
+
+async function validateGitOperationCwd(
+  workspaceCwd: string,
+  gitCommandCwd: string,
+  operation: GitOperationKind
+): Promise<string | null> {
+  const existingError = await validateGitCommandCwd(workspaceCwd, gitCommandCwd, operation)
+  if (existingError) return existingError
+  const gitRoot = await getGitRootForPath(gitCommandCwd)
+  if (gitRoot) return null
+
+  const repositories = await discoverWorkspaceGitRepositories(workspaceCwd)
+  const copy = GIT_OPERATION_COPY[operation]
+  if (repositories.length > 0) {
+    const repoList = repositories.map((repo) => repo.displayPath).join("，")
+    return (
+      `当前目录不是 Git 仓库，但工作区内发现 ${repositories.length} 个子仓库：${repoList}。` +
+      `请进入具体子仓库后再执行 ${copy.operationLabel}，例如 \`cd <子仓库> && ${copy.commandName}\`。`
+    )
+  }
+  return `当前目录不是 Git 仓库，无法执行 ${copy.operationLabel}。`
 }
 
 export class ToolOrchestrator {
@@ -226,10 +284,12 @@ export class ToolOrchestrator {
       if (
         isGitPushCommand(command) &&
         !isForcePushCommand(command) &&
-        !isChainedShellCommand(command) &&
-        isPathInsideOrSame(resolveGitCommandCwd(command, cwd), cwd)
+        !isChainedShellCommand(command)
       ) {
-        return this.requestWorktreePush(command, cwd)
+        const gitCommandCwd = resolveGitPushCommandCwd(command, cwd)
+        if (isPathInsideOrSame(gitCommandCwd, cwd)) {
+          return this.requestWorktreePush(command, cwd, gitCommandCwd)
+        }
       }
 
       // 3. YOLO mode: skip the initial command approval for safe + needs_approval
@@ -323,7 +383,7 @@ export class ToolOrchestrator {
   ): Promise<ExecuteResponse> {
     const suggestedCommitMessage = extractGitCommitMessage(command)
     const gitCommandCwd = resolveGitCommandCwd(command, cwd)
-    const gitCommandCwdError = await validateGitCommitCwd(cwd, gitCommandCwd)
+    const gitCommandCwdError = await validateGitOperationCwd(cwd, gitCommandCwd, "commit")
     if (gitCommandCwdError) {
       return {
         output: gitCommandCwdError,
@@ -357,6 +417,7 @@ export class ToolOrchestrator {
       suggestedCommitMessage,
       suggestedCommitFilePaths,
       suggestedCommitFileBasePath,
+      suggestedGitWorktreePath: gitCommandCwd,
       suggestedCommitFileSelectionSource,
       reason: "Git 提交需要选择任务卡片并确认",
       allowed_decisions: ["approve", "reject"],
@@ -390,8 +451,20 @@ export class ToolOrchestrator {
    * credential-prompt hang/timeout. We never run the raw `git push` ourselves; the renderer
    * performs the push and reports the outcome back via decision.pushResult.
    */
-  private async requestWorktreePush(command: string, cwd: string): Promise<ExecuteResponse> {
-    console.log(`[Orchestrator] git push → workspace:pushWorktree (cwd=${cwd})`)
+  private async requestWorktreePush(
+    command: string,
+    cwd: string,
+    gitCommandCwd: string
+  ): Promise<ExecuteResponse> {
+    const gitCommandCwdError = await validateGitOperationCwd(cwd, gitCommandCwd, "push")
+    if (gitCommandCwdError) {
+      return {
+        output: gitCommandCwdError,
+        exitCode: 1,
+        truncated: false
+      }
+    }
+    console.log(`[Orchestrator] git push → workspace:pushWorktree (cwd=${cwd}, gitCwd=${gitCommandCwd})`)
     const decision = await this.requestApproval({
       id: randomUUID(),
       tool_call: { id: randomUUID(), name: "execute", args: { command } },
@@ -399,6 +472,7 @@ export class ToolOrchestrator {
       operation: "git_push",
       command,
       cwd,
+      suggestedGitWorktreePath: gitCommandCwd,
       reason: "Git 推送将通过 Git 面板的推送机制执行（push -u origin <当前分支>）",
       allowed_decisions: ["approve", "reject"],
       allowed_approval_types: ["approve", "reject"]

@@ -7,7 +7,6 @@ import {
   Clock,
   Code2,
   GitBranch,
-  GitCommit,
   HeartPulse,
   Loader2,
   Network,
@@ -52,9 +51,6 @@ const LspPanel = lazy(() => import("./LspPanel").then((m) => ({ default: m.LspPa
 const CodeExecToolsPanel = lazy(() =>
   import("./CodeExecToolsPanel").then((m) => ({ default: m.CodeExecToolsPanel }))
 )
-const CommitPolicyPanel = lazy(() =>
-  import("./CommitPolicyPanel").then((m) => ({ default: m.CommitPolicyPanel }))
-)
 const PetPanel = lazy(() => import("./PetPanel").then((m) => ({ default: m.PetPanel })))
 
 type CustomizeTab =
@@ -74,7 +70,6 @@ type CustomizeTab =
   | "hooks"
   | "lsp"
   | "codeExecTools"
-  | "commitPolicy"
 
 type MenuGroupId = "basic" | "advanced" | "profile"
 
@@ -116,8 +111,7 @@ const MENU_GROUPS: MenuGroup[] = [
       { tab: "evolution", label: "自优化", icon: GitBranch, beta: true },
       { tab: "chatx", label: "机器人管理", icon: Cpu },
       { tab: "hooks", label: "钩子", icon: Webhook },
-      { tab: "codeExecTools", label: "编程式工具调用", icon: Wrench, truncate: true },
-      { tab: "commitPolicy", label: "提交策略", icon: GitCommit }
+      { tab: "codeExecTools", label: "编程式工具调用", icon: Wrench, truncate: true }
     ]
   },
   {
@@ -157,7 +151,7 @@ export function CustomizeView(): React.JSX.Element {
   const { setShowCustomizeView, customizeInitialTab, pendingEvolution, currentThreadId, threads } =
     useAppStore()
   const [activeTab, setActiveTab] = useState<CustomizeTab>(
-    (customizeInitialTab as CustomizeTab) || "skills"
+    customizeInitialTab === "commitPolicy" ? "skills" : (customizeInitialTab as CustomizeTab) || "skills"
   )
   const [expandedGroups, setExpandedGroups] = useState<Record<MenuGroupId, boolean>>({
     basic: true,
@@ -176,7 +170,9 @@ export function CustomizeView(): React.JSX.Element {
     if (!customizeInitialTab) return
     let cancelled = false
     queueMicrotask(() => {
-      if (!cancelled) setActiveTab(customizeInitialTab as CustomizeTab)
+      if (!cancelled) {
+        setActiveTab(customizeInitialTab === "commitPolicy" ? "skills" : customizeInitialTab as CustomizeTab)
+      }
     })
     return () => {
       cancelled = true
@@ -303,8 +299,6 @@ export function CustomizeView(): React.JSX.Element {
           <div className="flex flex-1 overflow-hidden">
             <CodeExecToolsPanel />
           </div>
-        ) : activeTab === "commitPolicy" ? (
-          <CommitPolicyPanel />
         ) : activeTab === "pet" ? (
           <PetPanel />
         ) : null}

@@ -165,7 +165,6 @@ import {
 } from "@/lib/submit-in-flight-lock"
 import { groupWelcomeSkills } from "./skill-grouping"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
-import { WorkspaceTaskCardControl } from "@/components/git/WorkspaceTaskCardControl"
 import { ProcessingDuration } from "./ProcessingDuration"
 import { HookLogChip, HookLogModal } from "./HookLogViews"
 
@@ -2702,7 +2701,12 @@ export function ChatContainer({
           setToolCallState(toolCallId, { status: "running" })
           removePendingApproval(pendingApproval.id)
           try {
-            const res = await window.api.workspace.pushWorktree(threadId)
+            const res = await window.api.workspace.pushWorktree(threadId, {
+              worktreePath:
+                typeof approvalAny.suggestedGitWorktreePath === "string"
+                  ? approvalAny.suggestedGitWorktreePath
+                  : undefined
+            })
             if (!res.success) {
               setToolCallState(toolCallId, {
                 status: "failed",
@@ -2818,6 +2822,7 @@ export function ChatContainer({
           suggestedCommitMessage?: string
           suggestedCommitFilePaths?: string[]
           suggestedCommitFileBasePath?: string
+          suggestedGitWorktreePath?: string
           suggestedCommitFileSelectionSource?: "pathspec" | "staged"
         })
       | null
@@ -6058,6 +6063,7 @@ export function ChatContainer({
                         suggestedMessage={agentCommitApproval?.suggestedCommitMessage}
                         suggestedFilePaths={agentCommitApproval?.suggestedCommitFilePaths}
                         suggestedFileBasePath={agentCommitApproval?.suggestedCommitFileBasePath}
+                        suggestedGitWorktreePath={agentCommitApproval?.suggestedGitWorktreePath}
                         suggestedFileSelectionSource={
                           agentCommitApproval?.suggestedCommitFileSelectionSource
                         }
@@ -6091,7 +6097,6 @@ export function ChatContainer({
                     </div>
                     <div className="flex min-w-0 items-center gap-2">
                       <GitBranchSwitcher workspacePath={workspacePath} />
-                      <WorkspaceTaskCardControl workspacePath={workspacePath} />
                     </div>
                   </div>
                 </div>

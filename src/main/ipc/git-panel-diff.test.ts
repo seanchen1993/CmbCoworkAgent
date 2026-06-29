@@ -33,6 +33,7 @@ import {
   buildGitPanelState,
   shouldUseDefaultGitPush
 } from "./models"
+import { discoverWorkspaceGitRepositories } from "../services/git-repository-discovery"
 
 type GitPanelTestContext = Parameters<typeof buildGitPanelDiffState>[1]
 
@@ -385,6 +386,117 @@ describe("buildGitPanelDiffState — workspace review scope", () => {
       expect(state.changedFilesTotal).toBe(2)
     } finally {
       rmSync(localRepo, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps a repository subdirectory workspace scoped to that subdirectory", async () => {
+    const localRepo = createRepo("gitpanel-subdir-workspace-")
+    try {
+      mkdirSync(join(localRepo, "packages", "a"), { recursive: true })
+      mkdirSync(join(localRepo, "packages", "b"), { recursive: true })
+      writeFileSync(join(localRepo, "packages", "a", "a.txt"), "a1\n")
+      writeFileSync(join(localRepo, "packages", "b", "b.txt"), "b1\n")
+      gitIn(localRepo, ["add", "."])
+      gitIn(localRepo, ["commit", "-q", "-m", "init packages"])
+
+      writeFileSync(join(localRepo, "packages", "a", "a.txt"), "a1\na2\n")
+      writeFileSync(join(localRepo, "packages", "b", "b.txt"), "b1\nb2\n")
+
+      const workspacePath = join(localRepo, "packages", "a")
+      const state = await buildGitPanelDiffState(
+        "thread-subdir",
+        createGitPanelTestContext(workspacePath),
+        { includeDiffs: false, includeChangedFiles: true }
+      )
+
+      expect(state.success).toBe(true)
+      expect(state.files.map((file) => file.path)).toEqual(["a.txt"])
+      expect(state.changedFiles).toEqual(["a.txt"])
+      expect(state.changedFilesTotal).toBe(1)
+    } finally {
+      rmSync(localRepo, { recursive: true, force: true })
+    }
+  })
+
+  it("aggregates child repositories below a non-Git workspace", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "gitpanel-multi-repo-"))
+    try {
+      const repoB = createRepo("gitpanel-child-b-")
+      const repoC = createRepo("gitpanel-child-c-")
+      const targetB = join(workspace, "B")
+      const targetC = join(workspace, "C")
+      renameSync(repoB, targetB)
+      renameSync(repoC, targetC)
+
+      writeFileSync(join(targetB, "b.txt"), "b1\n")
+      gitIn(targetB, ["add", "."])
+      gitIn(targetB, ["commit", "-q", "-m", "init b"])
+      writeFileSync(join(targetB, "b.txt"), "b1\nb2\n")
+
+      writeFileSync(join(targetC, "c.txt"), "c1\n")
+      gitIn(targetC, ["add", "."])
+      gitIn(targetC, ["commit", "-q", "-m", "init c"])
+      writeFileSync(join(targetC, "c.txt"), "c1\nc2\n")
+
+      const repositories = await discoverWorkspaceGitRepositories(workspace)
+      const state = await buildGitPanelDiffState("thread-multi", {
+        workspacePath: workspace,
+        isGitRepo: true,
+        isWorktree: false,
+        metadata: {},
+        repositories
+      } as GitPanelTestContext, { includeDiffs: false })
+
+      expect(state.success).toBe(true)
+      expect(state.changedFilesTotal).toBe(2)
+      expect(state.files.map((file) => file.path).sort()).toEqual(["B/b.txt", "C/c.txt"])
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps later repositories visible when each repo applies its own file limit", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "gitpanel-multi-repo-limit-"))
+    try {
+      const repoB = createRepo("gitpanel-child-limit-b-")
+      const repoC = createRepo("gitpanel-child-limit-c-")
+      const targetB = join(workspace, "B")
+      const targetC = join(workspace, "C")
+      renameSync(repoB, targetB)
+      renameSync(repoC, targetC)
+
+      writeFileSync(join(targetB, "b1.txt"), "b1\n")
+      writeFileSync(join(targetB, "b2.txt"), "b2\n")
+      gitIn(targetB, ["add", "."])
+      gitIn(targetB, ["commit", "-q", "-m", "init b"])
+      writeFileSync(join(targetB, "b1.txt"), "b1\nchanged\n")
+      writeFileSync(join(targetB, "b2.txt"), "b2\nchanged\n")
+
+      writeFileSync(join(targetC, "c.txt"), "c1\n")
+      gitIn(targetC, ["add", "."])
+      gitIn(targetC, ["commit", "-q", "-m", "init c"])
+      writeFileSync(join(targetC, "c.txt"), "c1\nchanged\n")
+
+      const repositories = await discoverWorkspaceGitRepositories(workspace)
+      const state = await buildGitPanelDiffState("thread-multi-limit", {
+        workspacePath: workspace,
+        isGitRepo: true,
+        isWorktree: false,
+        metadata: {},
+        repositories
+      } as GitPanelTestContext, {
+        includeDiffs: false,
+        visibleFileLimit: 2
+      })
+
+      expect(state.success).toBe(true)
+      expect(state.changedFilesTotal).toBe(3)
+      expect(state.files).toHaveLength(2)
+      expect(state.files.some((file) => file.path.startsWith("B/"))).toBe(true)
+      expect(state.files.some((file) => file.path.startsWith("C/"))).toBe(true)
+      expect(state.omittedFileCount).toBe(1)
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
     }
   })
 })

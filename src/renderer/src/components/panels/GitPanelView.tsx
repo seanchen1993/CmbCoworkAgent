@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react"
 import {
+  Check,
   ChevronRight,
   ChevronDown,
   AlertCircle,
@@ -21,6 +22,7 @@ import { DiffDisplay } from "@/components/chat/DiffDisplay"
 import { Badge } from "@/components/ui/badge"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { OpenInIdeButton } from "@/components/ui/open-in-ide-button"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { toast } from "sonner"
 import { GitCommitDialog } from "./GitCommitDialog"
 import type { CommitType } from "./GitCommitDialog"
@@ -56,11 +58,18 @@ type GitPanelMetaState = {
   error?: string
 }
 
+type GitRepositoryInfo = {
+  path: string
+  displayPath: string
+  gitRoot: string
+}
+
 type GitPanelDiffState = {
   success: boolean
   isWorktree: boolean
   isGitRepo?: boolean
   taskId: string
+  repositories?: GitRepositoryInfo[]
   files: Array<{
     path: string
     previousPath?: string
@@ -83,6 +92,43 @@ type GitPanelFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied
 // 同时按需拉取的文件 diff 上限，避免刷新后一次性为大量已展开文件并发拉取 diff 拖垮主进程。
 const MAX_CONCURRENT_FILE_DIFF_LOADS = 3
 const GIT_REJECT_DIALOG_FILE_LIMIT = 10_000
+const ALL_REPOSITORIES_VALUE = "__all__"
+
+function normalizePanelPath(filePath: string): string {
+  return String(filePath || "").replace(/\\/g, "/").replace(/^\/+/, "")
+}
+
+function getRepositoryPrefix(repo: GitRepositoryInfo): string {
+  return normalizePanelPath(repo.displayPath)
+}
+
+function isFileInRepository(filePath: string, repo: GitRepositoryInfo): boolean {
+  const normalizedFile = normalizePanelPath(filePath)
+  const prefix = getRepositoryPrefix(repo)
+  return normalizedFile === prefix || normalizedFile.startsWith(`${prefix}/`)
+}
+
+function getFileRepository(
+  filePath: string,
+  repositories: GitRepositoryInfo[]
+): GitRepositoryInfo | null {
+  const sorted = [...repositories].sort((a, b) => getRepositoryPrefix(b).length - getRepositoryPrefix(a).length)
+  return sorted.find((repo) => isFileInRepository(filePath, repo)) ?? null
+}
+
+function stripRepositoryPrefix(filePath: string, repo: GitRepositoryInfo): string {
+  const normalizedFile = normalizePanelPath(filePath)
+  const prefix = getRepositoryPrefix(repo)
+  if (normalizedFile === prefix) return ""
+  if (normalizedFile.startsWith(`${prefix}/`)) {
+    return normalizedFile.slice(prefix.length + 1)
+  }
+  return normalizedFile
+}
+
+function getRepositoryFileDisplayPath(filePath: string, repo?: GitRepositoryInfo | null): string {
+  return repo ? stripRepositoryPrefix(filePath, repo) : filePath
+}
 
 function getPathParentDir(filePath?: string): string {
   const normalized = String(filePath || "").replace(/\\/g, "/")
@@ -179,6 +225,7 @@ export function GitPanelView({
   const rejectInFlightRef = useRef(false)
   const suppressFileChangeRefreshUntilRef = useRef(0)
   const rejectDialogRequestIdRef = useRef(0)
+  const pushMetaRequestIdRef = useRef(0)
   const [metaLoading, setMetaLoading] = useState(true)
   const [diffLoading, setDiffLoading] = useState(true)
   const [running, setRunning] = useState<"commit" | "push" | "reject" | null>(null)
@@ -200,16 +247,22 @@ export function GitPanelView({
   const [commitHistory, setCommitHistory] = useState<GitCommitHistoryRecord[]>([])
   const [expandedFilePaths, setExpandedFilePaths] = useState<Set<string>>(new Set())
   const [selectedFilePaths, setSelectedFilePaths] = useState<Set<string>>(new Set())
+  const [collapsedRepositoryPaths, setCollapsedRepositoryPaths] = useState<Set<string>>(new Set())
+  const [activeRepositoryPath, setActiveRepositoryPath] = useState(ALL_REPOSITORIES_VALUE)
+  const [repositoryPickerOpen, setRepositoryPickerOpen] = useState(false)
   const [fileDiffLoadingPaths, setFileDiffLoadingPaths] = useState<Set<string>>(new Set())
   const [fileDiffErrors, setFileDiffErrors] = useState<Record<string, string>>({})
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
   const [pulling, setPulling] = useState(false)
+  const selectionScopeRef = useRef(ALL_REPOSITORIES_VALUE)
   const initialMetaState = useMemo(
     () => createInitialMetaState(threadId, initialGitContext),
     [threadId, initialGitContext]
   )
   const [metaState, setMetaState] = useState<GitPanelMetaState | null>(initialMetaState)
   const [diffState, setDiffState] = useState<GitPanelDiffState | null>(null)
+  const [pushMetaState, setPushMetaState] = useState<GitPanelMetaState | null>(null)
+  const [pushMetaLoading, setPushMetaLoading] = useState(false)
 
   useEffect(() => {
     activeThreadIdRef.current = threadId
@@ -227,13 +280,20 @@ export function GitPanelView({
     setRejectDialogLoading(false)
     setRejectDialogSelectionSeed(0)
     rejectDialogRequestIdRef.current += 1
+    pushMetaRequestIdRef.current += 1
     rejectInFlightRef.current = false
     suppressFileChangeRefreshUntilRef.current = 0
     setCommitHistory([])
     setExpandedFilePaths(new Set())
     setSelectedFilePaths(new Set())
+    setCollapsedRepositoryPaths(new Set())
+    setActiveRepositoryPath(ALL_REPOSITORIES_VALUE)
+    setRepositoryPickerOpen(false)
+    selectionScopeRef.current = ALL_REPOSITORIES_VALUE
     setFileDiffLoadingPaths(new Set())
     setFileDiffErrors({})
+    setPushMetaState(null)
+    setPushMetaLoading(false)
   }, [threadId, initialMetaState])
 
   const showToast = useCallback((text: string, variant: "success" | "error" = "success"): void => {
@@ -336,26 +396,152 @@ export function GitPanelView({
     }
   }, [refresh, workspacePath])
 
-  useEffect(() => {
+  const repositories = useMemo(
+    () => diffState?.repositories ?? [],
+    [diffState?.repositories]
+  )
+  const hasMultipleRepositories = repositories.length > 1
+  const activeRepository = useMemo(() => {
+    if (!hasMultipleRepositories || activeRepositoryPath === ALL_REPOSITORIES_VALUE) return null
+    return repositories.find((repo) => repo.path === activeRepositoryPath) ?? null
+  }, [activeRepositoryPath, hasMultipleRepositories, repositories])
+  const activeRepositoryLabel = activeRepository?.displayPath ?? "全部仓库"
+  const visibleDiffFiles = useMemo(() => {
     const files = diffState?.files ?? []
+    if (!activeRepository) return files
+    return files.filter((file) => isFileInRepository(file.path, activeRepository))
+  }, [activeRepository, diffState?.files])
+
+  const selectActiveRepository = useCallback((repositoryPath: string): void => {
+    setActiveRepositoryPath(repositoryPath)
+    setRepositoryPickerOpen(false)
+    pushMetaRequestIdRef.current += 1
+    setPushMetaState(null)
+    setPushMetaLoading(false)
+    setSubmitAction(null)
+  }, [])
+
+  const toRepositoryRelativePaths = useCallback(
+    (filePaths: string[], repo: GitRepositoryInfo | null): string[] => {
+      if (!repo) return filePaths
+      return filePaths
+        .map((filePath) => stripRepositoryPrefix(filePath, repo))
+        .filter((filePath) => filePath.length > 0)
+    },
+    []
+  )
+
+  const resolveActionRepository = useCallback(
+    (filePaths: string[] = []): GitRepositoryInfo | null => {
+      if (!hasMultipleRepositories) return null
+      if (activeRepository) return activeRepository
+      const matchedRepositories = new Map<string, GitRepositoryInfo>()
+      for (const filePath of filePaths) {
+        const repo = getFileRepository(filePath, repositories)
+        if (repo) matchedRepositories.set(repo.path, repo)
+      }
+      if (matchedRepositories.size === 1) {
+        return Array.from(matchedRepositories.values())[0]
+      }
+      return null
+    },
+    [activeRepository, hasMultipleRepositories, repositories]
+  )
+
+  const formatFilesForRejectDialog = useCallback(
+    (files: GitRejectFile[]): GitRejectFile[] => {
+      if (!activeRepository) return files
+      return files.map((file) => ({
+        ...file,
+        path: stripRepositoryPrefix(file.path, activeRepository),
+        previousPath: file.previousPath
+          ? stripRepositoryPrefix(file.previousPath, activeRepository)
+          : undefined
+      }))
+    },
+    [activeRepository]
+  )
+
+  const openPushDialog = useCallback(() => {
+    if (hasMultipleRepositories && !activeRepository) {
+      showToast("请先在“操作仓库”中选择要推送的子仓库", "error")
+      return
+    }
+    setSubmitAction("push")
+  }, [activeRepository, hasMultipleRepositories, showToast])
+
+  useEffect(() => {
+    if (submitAction !== "push" || !threadId) return
+    const requestId = ++pushMetaRequestIdRef.current
+    setPushMetaLoading(true)
+    setPushMetaState(null)
+    const targetOptions = activeRepository ? { worktreePath: activeRepository.path } : undefined
+
+    void window.api.workspace
+      .getGitPanelMeta(threadId, targetOptions)
+      .then((result) => {
+        if (requestId !== pushMetaRequestIdRef.current || activeThreadIdRef.current !== threadId) return
+        setPushMetaState(result)
+        if (!result.success && result.error) {
+          setError(result.error)
+          showToast(result.error, "error")
+        }
+      })
+      .catch((error) => {
+        if (requestId !== pushMetaRequestIdRef.current || activeThreadIdRef.current !== threadId) return
+        const message = error instanceof Error ? error.message : "读取待推送提交失败"
+        setPushMetaState(null)
+        setError(message)
+        showToast(message, "error")
+      })
+      .finally(() => {
+        if (requestId === pushMetaRequestIdRef.current && activeThreadIdRef.current === threadId) {
+          setPushMetaLoading(false)
+        }
+      })
+
+    return () => {
+      pushMetaRequestIdRef.current += 1
+    }
+  }, [activeRepository, showToast, submitAction, threadId])
+
+  useEffect(() => {
+    if (!hasMultipleRepositories) {
+      if (activeRepositoryPath !== ALL_REPOSITORIES_VALUE) {
+        setActiveRepositoryPath(ALL_REPOSITORIES_VALUE)
+      }
+      return
+    }
+    if (
+      activeRepositoryPath !== ALL_REPOSITORIES_VALUE &&
+      !repositories.some((repo) => repo.path === activeRepositoryPath)
+    ) {
+      setActiveRepositoryPath(ALL_REPOSITORIES_VALUE)
+    }
+  }, [activeRepositoryPath, hasMultipleRepositories, repositories])
+
+  useEffect(() => {
+    const files = visibleDiffFiles
     setExpandedFilePaths((prev) => {
       if (files.length === 0) return new Set()
       return new Set([...prev].filter((path) => files.some((f) => f.path === path)))
     })
-  }, [diffState?.files])
+  }, [visibleDiffFiles])
 
   useEffect(() => {
-    const files = diffState?.files ?? []
+    const files = visibleDiffFiles
+    const scopeChanged = selectionScopeRef.current !== activeRepositoryPath
+    selectionScopeRef.current = activeRepositoryPath
     setSelectedFilePaths((prev) => {
       if (files.length === 0) return new Set()
       const filePaths = files.map((file) => file.path)
       const next = new Set([...prev].filter((path) => filePaths.includes(path)))
-      if (prev.size === 0 || next.size === 0) {
+      if (scopeChanged || prev.size === 0 || next.size === 0) {
         return new Set(filePaths)
       }
       return next
     })
-  }, [diffState?.files])
+  }, [activeRepositoryPath, visibleDiffFiles])
 
   const applyCommitHistoryRecord = useCallback(
     (record: GitCommitHistoryRecord): void => {
@@ -408,7 +594,13 @@ export function GitPanelView({
       })
 
       try {
-        const result = await window.api.workspace.getGitPanelFileDiff(threadId, filePath)
+        const repo = getFileRepository(filePath, repositories)
+        const requestFilePath = repo ? stripRepositoryPrefix(filePath, repo) : filePath
+        const result = await window.api.workspace.getGitPanelFileDiff(
+          threadId,
+          requestFilePath,
+          repo ? { worktreePath: repo.path } : undefined
+        )
         if (requestDiffId !== diffRequestIdRef.current || result.taskId !== activeThreadIdRef.current) return
         if (!result.success || !result.file) {
           throw new Error(result.error || "加载文件 diff 失败")
@@ -457,7 +649,7 @@ export function GitPanelView({
         }
       }
     },
-    [threadId, diffState?.files, fileDiffLoadingPaths]
+    [threadId, diffState?.files, fileDiffLoadingPaths, repositories]
   )
 
   const toggleFileExpanded = useCallback((filePath: string): void => {
@@ -485,14 +677,14 @@ export function GitPanelView({
     if (budget <= 0) return
     for (const filePath of expandedFilePaths) {
       if (budget <= 0) break
-      const file = diffState?.files.find((item) => item.path === filePath)
+      const file = visibleDiffFiles.find((item) => item.path === filePath)
       if (!file || file.diffLoaded || fileDiffLoadingPaths.has(filePath) || fileDiffErrors[filePath]) {
         continue
       }
       void loadFileDiff(filePath)
       budget -= 1
     }
-  }, [diffState?.files, expandedFilePaths, fileDiffErrors, fileDiffLoadingPaths, loadFileDiff])
+  }, [expandedFilePaths, fileDiffErrors, fileDiffLoadingPaths, loadFileDiff, visibleDiffFiles])
 
   const toggleFileSelected = useCallback((filePath: string): void => {
     setSelectedFilePaths((prev) => {
@@ -501,6 +693,18 @@ export function GitPanelView({
         next.delete(filePath)
       } else {
         next.add(filePath)
+      }
+      return next
+    })
+  }, [])
+
+  const toggleRepositoryCollapsed = useCallback((repositoryPath: string): void => {
+    setCollapsedRepositoryPaths((prev) => {
+      const next = new Set(prev)
+      if (next.has(repositoryPath)) {
+        next.delete(repositoryPath)
+      } else {
+        next.add(repositoryPath)
       }
       return next
     })
@@ -531,12 +735,22 @@ export function GitPanelView({
       showToast("请至少选择 1 个文件", "error")
       return
     }
+    const actionRepository = resolveActionRepository(filePaths)
+    if (hasMultipleRepositories && !actionRepository) {
+      showToast("请先在“操作仓库”中选择一个子仓库再回退", "error")
+      return
+    }
+    const requestFilePaths = toRepositoryRelativePaths(filePaths, actionRepository)
     setRunning("reject")
     setError(null)
     rejectInFlightRef.current = true
     suppressFileChangeRefreshUntilRef.current = Number.POSITIVE_INFINITY
     try {
-      const result = await window.api.workspace.rejectWorktreeChanges(threadId, filePaths)
+      const result = await window.api.workspace.rejectWorktreeChanges(
+        threadId,
+        requestFilePaths,
+        actionRepository ? { worktreePath: actionRepository.path } : undefined
+      )
       if (!result.success) throw new Error(result.error || "回滚失败")
       setRejectDialogOpen(false)
       const count = result.revertedFileCount ?? filePaths.length
@@ -551,14 +765,21 @@ export function GitPanelView({
       suppressFileChangeRefreshUntilRef.current = Date.now() + 1200
       setRunning(null)
     }
-  }, [threadId, refresh, showToast])
+  }, [
+    threadId,
+    hasMultipleRepositories,
+    refresh,
+    resolveActionRepository,
+    showToast,
+    toRepositoryRelativePaths
+  ])
 
   const openRejectDialog = useCallback(() => {
     if (!threadId) return
     const requestId = ++rejectDialogRequestIdRef.current
-    const initialFiles = diffState?.files ?? []
+    const initialFiles = formatFilesForRejectDialog(visibleDiffFiles)
     setRejectDialogFiles(initialFiles)
-    setRejectDialogOmittedFileCount(diffState?.omittedFileCount ?? 0)
+    setRejectDialogOmittedFileCount(activeRepository ? 0 : (diffState?.omittedFileCount ?? 0))
     setRejectDialogLoading(true)
     setRejectDialogSelectionSeed((seed) => seed + 1)
     setRejectDialogOpen(true)
@@ -568,7 +789,8 @@ export function GitPanelView({
         includeDiffs: false,
         includeChangedFiles: false,
         statusUntrackedMode: "all",
-        visibleFileLimit: GIT_REJECT_DIALOG_FILE_LIMIT
+        visibleFileLimit: GIT_REJECT_DIALOG_FILE_LIMIT,
+        worktreePath: activeRepository?.path
       })
       .then((result) => {
         if (requestId !== rejectDialogRequestIdRef.current || result.taskId !== activeThreadIdRef.current) return
@@ -577,8 +799,9 @@ export function GitPanelView({
           setRejectDialogLoading(false)
           return
         }
-        setRejectDialogFiles(result.files ?? [])
+        const nextFiles = formatFilesForRejectDialog(result.files ?? [])
         setRejectDialogOmittedFileCount(result.omittedFileCount ?? 0)
+        setRejectDialogFiles(nextFiles)
         setRejectDialogSelectionSeed((seed) => seed + 1)
         setRejectDialogLoading(false)
       })
@@ -587,7 +810,14 @@ export function GitPanelView({
         setRejectDialogLoading(false)
         showToast(error instanceof Error ? error.message : "加载回退文件列表失败", "error")
       })
-  }, [threadId, diffState?.files, diffState?.omittedFileCount, showToast])
+  }, [
+    threadId,
+    activeRepository,
+    diffState?.omittedFileCount,
+    formatFilesForRejectDialog,
+    showToast,
+    visibleDiffFiles
+  ])
 
   const runSubmit = useCallback(
     async (action: "commit" | "push") => {
@@ -622,6 +852,20 @@ export function GitPanelView({
         return
       }
 
+      const actionRepository = action === "commit"
+        ? resolveActionRepository(selectedPaths)
+        : activeRepository
+      if (hasMultipleRepositories && !actionRepository) {
+        showToast(
+          action === "commit"
+            ? "请先在“操作仓库”中选择一个子仓库，或只勾选同一仓库的文件"
+            : "请先在“操作仓库”中选择要推送的子仓库",
+          "error"
+        )
+        return
+      }
+      const requestSelectedPaths = toRepositoryRelativePaths(selectedPaths, actionRepository)
+
       const finalMessage =
         action === "commit"
           ? `${cardNumber.trim()} #comment ${commitType}:${commitMessage.trim()} #CMBDevClaw`
@@ -634,7 +878,8 @@ export function GitPanelView({
           const result = await window.api.workspace.commitWorktree(
             threadId,
             finalMessage ?? "",
-            selectedPaths
+            requestSelectedPaths,
+            actionRepository ? { worktreePath: actionRepository.path } : undefined
           )
           if (!result.success) throw new Error(result.error || "提交失败")
           void window.api.gitPanel
@@ -647,7 +892,10 @@ export function GitPanelView({
           // Remember the card actually committed with for this workspace.
           persistWorkspaceCard(cardNumber.trim())
         } else {
-          const result = await window.api.workspace.pushWorktree(threadId)
+          const result = await window.api.workspace.pushWorktree(
+            threadId,
+            actionRepository ? { worktreePath: actionRepository.path } : undefined
+          )
           if (!result.success) throw new Error(result.error || "推送失败")
           showToast("推送成功", "success")
           insertLog("push成功")
@@ -674,9 +922,13 @@ export function GitPanelView({
       commitMessage,
       diffState?.hasPendingDiff,
       diffState?.files,
+      activeRepository,
+      hasMultipleRepositories,
+      resolveActionRepository,
       selectedFilePaths,
       refresh,
       showToast,
+      toRepositoryRelativePaths,
       persistWorkspaceCard
     ]
   )
@@ -687,7 +939,15 @@ export function GitPanelView({
       setRevertingFilePath(filePath)
       setError(null)
       try {
-        const result = await window.api.workspace.rejectWorktreeFile(threadId, filePath)
+        const actionRepository = getFileRepository(filePath, repositories)
+        const requestFilePath = actionRepository
+          ? stripRepositoryPrefix(filePath, actionRepository)
+          : filePath
+        const result = await window.api.workspace.rejectWorktreeFile(
+          threadId,
+          requestFilePath,
+          actionRepository ? { worktreePath: actionRepository.path } : undefined
+        )
         if (!result.success) throw new Error(result.error || "文件回退失败")
         showToast(`已回退文件：${filePath}`, "success")
         await refresh({ meta: false, diff: true })
@@ -699,7 +959,7 @@ export function GitPanelView({
         setRevertingFilePath(null)
       }
     },
-    [threadId, refresh, showToast]
+    [threadId, refresh, repositories, showToast]
   )
 
   const runPull = useCallback(async () => {
@@ -707,7 +967,10 @@ export function GitPanelView({
     setPulling(true)
     setError(null)
     try {
-      const result = await window.api.workspace.pullWorktree(threadId)
+      const result = await window.api.workspace.pullWorktree(
+        threadId,
+        activeRepository ? { worktreePath: activeRepository.path } : undefined
+      )
       if (!result.success) throw new Error(result.error || "拉取失败")
       showToast(result.detail || "拉取成功", "success")
       await refresh({ meta: true, diff: true })
@@ -718,7 +981,7 @@ export function GitPanelView({
     } finally {
       setPulling(false)
     }
-  }, [threadId, refresh, showToast])
+  }, [threadId, activeRepository, refresh, showToast])
 
   const loading = metaLoading || diffLoading
   const combinedError = error || metaState?.error || diffState?.error || null
@@ -741,8 +1004,8 @@ export function GitPanelView({
   const omittedFileCount = diffState?.omittedFileCount ?? 0
   const visibleFilesCount = diffState?.totals.fileCount ?? 0
   const selectedFiles = useMemo(
-    () => (diffState?.files ?? []).filter((file) => selectedFilePaths.has(file.path)),
-    [diffState?.files, selectedFilePaths]
+    () => visibleDiffFiles.filter((file) => selectedFilePaths.has(file.path)),
+    [selectedFilePaths, visibleDiffFiles]
   )
   const selectedTotals = useMemo(
     () =>
@@ -756,9 +1019,188 @@ export function GitPanelView({
       ),
     [selectedFiles]
   )
-  const allVisibleFilesSelected = diffState?.files.length
-    ? selectedFiles.length === diffState.files.length
+  const allVisibleFilesSelected = visibleDiffFiles.length
+    ? selectedFiles.length === visibleDiffFiles.length
     : false
+  const repositoryGroups = useMemo(() => {
+    if (!hasMultipleRepositories) {
+      return [{ repo: null as GitRepositoryInfo | null, files: visibleDiffFiles }]
+    }
+    const groups = repositories
+      .map((repo) => ({
+        repo,
+        files: visibleDiffFiles.filter((file) => isFileInRepository(file.path, repo))
+      }))
+      .filter((group) => group.files.length > 0)
+    if (activeRepository || groups.length > 0) return groups
+    return [{ repo: null as GitRepositoryInfo | null, files: visibleDiffFiles }]
+  }, [activeRepository, hasMultipleRepositories, repositories, visibleDiffFiles])
+
+  const renderDiffFileCard = (
+    file: GitPanelDiffState["files"][number],
+    repo?: GitRepositoryInfo | null
+  ): React.JSX.Element => {
+    const diff = file.diff
+    const isExpanded = expandedFilePaths.has(file.path)
+    const isSelected = selectedFilePaths.has(file.path)
+    const isFileDiffLoading = fileDiffLoadingPaths.has(file.path)
+    const fileDiffError = fileDiffErrors[file.path]
+    const statusMeta = getFileStatusMeta(file.status, file.path, file.previousPath)
+    const showMovePath = file.status === "renamed" && Boolean(file.previousPath)
+    const revertHint =
+      revertingFilePath === file.path ? "回退中..." : "回退（大模型改动的上一个版本）"
+    const displayPath = getRepositoryFileDisplayPath(file.path, repo)
+    const previousDisplayPath = file.previousPath
+      ? getRepositoryFileDisplayPath(file.previousPath, repo)
+      : undefined
+
+    return (
+      <div key={file.path} className="rounded-md border border-border/70 bg-white">
+        <div className="flex items-center justify-between gap-2 p-2 text-xs">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            <input
+              type="checkbox"
+              checked={isSelected}
+              aria-label={`选择文件 ${file.path}`}
+              onChange={(e) => {
+                e.stopPropagation()
+                toggleFileSelected(file.path)
+              }}
+              onClick={(e) => e.stopPropagation()}
+              className="size-3.5 shrink-0 accent-blue-600"
+            />
+            <button
+              type="button"
+              aria-expanded={isExpanded}
+              onClick={() => toggleFileExpanded(file.path)}
+              className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+            >
+              {isExpanded ? (
+                <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+              ) : (
+                <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+              )}
+              <span
+                className={cn(
+                  "inline-flex h-4 shrink-0 items-center rounded border px-1 text-[9px] font-medium leading-none",
+                  statusMeta.className
+                )}
+                title={`文件状态：${statusMeta.label}`}
+              >
+                {statusMeta.label}
+              </span>
+              <span
+                className="font-mono font-semibold truncate text-left"
+                title={file.path}
+              >
+                {displayPath}
+              </span>
+              <span className="shrink-0 flex items-center gap-1.5 text-[11px] font-semibold">
+                <span className="text-emerald-600 dark:text-emerald-400">
+                  +{file.additions}
+                </span>
+                <span className="text-muted-foreground">/</span>
+                <span className="text-rose-600 dark:text-rose-400">
+                  -{file.deletions}
+                </span>
+              </span>
+            </button>
+          </div>
+          <span className="flex items-center gap-2 shrink-0">
+            <OpenInIdeButton
+              filePath={file.path}
+              workspacePath={workspacePath}
+              fileMissing={file.status === "deleted"}
+              align="end"
+              stopPropagation
+              onOpenError={(message) => {
+                showToast(message, "error")
+              }}
+            />
+            <IconPopoverButton
+              icon={<FolderOpen className="size-3" />}
+              popoverContent="打开文件夹"
+              aria-label="打开文件夹"
+              align="end"
+              stopPropagation
+              onClick={() => onOpenFileFolder?.(file.path)}
+            />
+            <IconPopoverButton
+              icon={
+                <Undo2
+                  className={cn(
+                    "size-3",
+                    revertingFilePath === file.path && "animate-spin"
+                  )}
+                />
+              }
+              popoverContent={revertHint}
+              disabled={Boolean(revertingFilePath && revertingFilePath !== file.path)}
+              aria-label={revertHint}
+              align="end"
+              stopPropagation
+              className={cn(revertingFilePath === file.path && "opacity-80")}
+              onClick={() => {
+                if (!revertingFilePath) void handleRevertFile(file.path)
+              }}
+            />
+          </span>
+        </div>
+        {isExpanded && (
+          <div className="px-2 pb-2">
+            {showMovePath && (
+              <div className="mb-2 rounded-md border border-blue-500/20 bg-blue-500/5 px-3 py-2 text-xs">
+                <div className="mb-1 flex items-center gap-1.5 font-medium text-blue-700 dark:text-blue-300">
+                  <GitCompareArrows className="size-3.5" />
+                  {statusMeta.label}信息
+                </div>
+                <div className="grid gap-1.5 font-mono">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="shrink-0 text-muted-foreground">原路径</span>
+                    <span
+                      className="truncate text-muted-foreground line-through decoration-muted-foreground/50"
+                      title={file.previousPath}
+                    >
+                      {previousDisplayPath}
+                    </span>
+                  </div>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="shrink-0 text-muted-foreground">现路径</span>
+                    <span
+                      className="truncate font-semibold text-foreground"
+                      title={file.path}
+                    >
+                      {displayPath}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+            {isFileDiffLoading ? (
+              <div className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                <Loader2 className="size-3.5 animate-spin text-blue-600 dark:text-blue-400" />
+                正在加载该文件 diff...
+              </div>
+            ) : fileDiffError ? (
+              <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                {fileDiffError}
+              </div>
+            ) : !file.diffLoaded ? (
+              <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                展开后将按需加载该文件 diff。
+              </div>
+            ) : diff && diff.trim() !== "" ? (
+              <DiffDisplay diff={diff} filePath={displayPath} />
+            ) : (
+              <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                当前文件暂无可展示 diff（可能已恢复、删除或为二进制文件）。
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className="rounded-xl border border-border/70 overflow-hidden bg-background flex flex-col min-h-0 h-full">
@@ -835,20 +1277,107 @@ export function GitPanelView({
                     ) : (
                       <TriangleAlert className="size-2.5" />
                     )}
-                    {isWorktreePath ? "Worktree" : "主仓库目录"}
+                    {hasMultipleRepositories ? "多仓库工作区" : isWorktreePath ? "Worktree" : "主仓库目录"}
                   </Badge>
                 )}
               </div>
               {hasGitRepo && (
                 <p className="mt-1.5 text-xs text-muted-foreground leading-5">
-                  {isWorktreePath
-                    ? "当前目录是独立 worktree，可直接执行提交与推送。建议保持一个任务一个 worktree。"
-                    : "当前目录是 Git 仓库主目录。建议切换到独立 worktree 后再执行任务，更安全。"}
+                  {hasMultipleRepositories
+                    ? "当前工作区包含多个 Git 仓库。请在下方“操作仓库”选择具体子仓库后提交、推送或回退；Pull 在“全部仓库”下会逐仓库执行。"
+                    : isWorktreePath
+                      ? "当前目录是独立 worktree，可直接执行提交与推送。建议保持一个任务一个 worktree。"
+                      : "当前目录是 Git 仓库主目录。建议切换到独立 worktree 后再执行任务，更安全。"}
                 </p>
               )}
               {hasGitRepo && (
                 <div className="mt-2 pt-2 border-t border-border/60 flex flex-wrap items-center gap-2 justify-between">
-                  <div className={"flex space-x-2"}>
+                  <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                    {hasMultipleRepositories && (
+                      <Popover open={repositoryPickerOpen} onOpenChange={setRepositoryPickerOpen}>
+                        <PopoverTrigger asChild>
+                          <button
+                            type="button"
+                            className={cn(
+                              "inline-flex h-7 min-w-0 max-w-[280px] items-center gap-1.5 rounded-md border border-blue-500/30 bg-blue-500/5 px-2",
+                              "text-[11px] font-medium text-blue-800 transition-colors hover:bg-blue-500/10 dark:text-blue-200"
+                            )}
+                            title={activeRepository?.path ?? "全部仓库（仅查看和 Pull）"}
+                          >
+                            <GitBranch className="size-3.5 shrink-0" />
+                            <span className="shrink-0 text-blue-700 dark:text-blue-300">操作仓库</span>
+                            <span className="min-w-0 truncate font-semibold text-foreground">
+                              {activeRepositoryLabel}
+                            </span>
+                            <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent
+                          align="start"
+                          sideOffset={6}
+                          className="w-[min(420px,calc(100vw_-_2rem))] p-1"
+                        >
+                          <div className="px-2 py-1.5 text-[11px] font-medium text-muted-foreground">
+                            选择 Git 操作要作用的子仓库
+                          </div>
+                          <div className="max-h-[280px] overflow-y-auto py-1">
+                            <button
+                              type="button"
+                              className={cn(
+                                "flex w-full min-w-0 items-start gap-2 rounded-md px-2 py-2 text-left text-xs transition-colors",
+                                activeRepositoryPath === ALL_REPOSITORIES_VALUE
+                                  ? "bg-blue-500/10 text-foreground"
+                                  : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                              )}
+                              onClick={() => selectActiveRepository(ALL_REPOSITORIES_VALUE)}
+                            >
+                              <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center">
+                                {activeRepositoryPath === ALL_REPOSITORIES_VALUE && (
+                                  <Check className="size-3.5 text-blue-600 dark:text-blue-400" />
+                                )}
+                              </span>
+                              <span className="min-w-0 flex-1">
+                                <span className="block font-semibold text-foreground">全部仓库</span>
+                                <span className="block truncate text-[11px] text-muted-foreground">
+                                  用于查看汇总变更和逐仓库 Pull；提交、推送、回退需选择具体仓库
+                                </span>
+                              </span>
+                            </button>
+                            {repositories.map((repo) => {
+                              const selected = activeRepositoryPath === repo.path
+                              return (
+                                <button
+                                  key={repo.path}
+                                  type="button"
+                                  className={cn(
+                                    "flex w-full min-w-0 items-start gap-2 rounded-md px-2 py-2 text-left text-xs transition-colors",
+                                    selected
+                                      ? "bg-blue-500/10 text-foreground"
+                                      : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                                  )}
+                                  title={repo.path}
+                                  onClick={() => selectActiveRepository(repo.path)}
+                                >
+                                  <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center">
+                                    {selected && (
+                                      <Check className="size-3.5 text-blue-600 dark:text-blue-400" />
+                                    )}
+                                  </span>
+                                  <span className="min-w-0 flex-1">
+                                    <span className="block truncate font-mono font-semibold text-foreground">
+                                      {repo.displayPath}
+                                    </span>
+                                    <span className="block truncate font-mono text-[11px] text-muted-foreground">
+                                      {repo.path}
+                                    </span>
+                                  </span>
+                                </button>
+                              )
+                            })}
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                    )}
                     {canShowSubmit && (
                       <div className="flex items-center gap-1">
                         <button
@@ -866,7 +1395,7 @@ export function GitPanelView({
                           <span>Commit</span>
                         </button>
                         <button
-                          onClick={() => setSubmitAction("push")}
+                          onClick={openPushDialog}
                           disabled={running !== null || !isDiffReady}
                           title={isInitialDiffLoading ? "准备中..." : "Push 推送"}
                           aria-label={isInitialDiffLoading ? "准备中" : "Push 推送"}
@@ -1001,7 +1530,7 @@ export function GitPanelView({
                 个文件。请先提交或回退部分改动后再查看全部详情。
               </div>
             )}
-            {diffState.files.length === 0 ? (
+            {visibleDiffFiles.length === 0 ? (
               <div className="rounded-xl border border-border/70 bg-muted/20 px-4 py-8">
                 <div className="mx-auto max-w-[420px]">
                   <div className="mx-auto mb-3 flex size-9 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10">
@@ -1047,7 +1576,7 @@ export function GitPanelView({
                     <span className="font-semibold text-foreground">
                       {selectedTotals.fileCount}
                     </span>{" "}
-                    / {diffState.files.length} 个文件
+                    / {visibleDiffFiles.length} 个文件
                     <span className="ml-2 text-emerald-600 dark:text-emerald-400">
                       +{selectedTotals.additions}
                     </span>
@@ -1062,170 +1591,102 @@ export function GitPanelView({
                       setSelectedFilePaths(
                         allVisibleFilesSelected
                           ? new Set()
-                          : new Set(diffState.files.map((file) => file.path))
+                          : new Set(visibleDiffFiles.map((file) => file.path))
                       )
                     }}
                   >
                     {allVisibleFilesSelected ? "取消全选" : "全选文件"}
                   </button>
                 </div>
-                {diffState.files.map((file) => {
-                  const diff = file.diff
-                  const isExpanded = expandedFilePaths.has(file.path)
-                  const isSelected = selectedFilePaths.has(file.path)
-                  const isFileDiffLoading = fileDiffLoadingPaths.has(file.path)
-                  const fileDiffError = fileDiffErrors[file.path]
-                  const statusMeta = getFileStatusMeta(file.status, file.path, file.previousPath)
-                  const showMovePath = file.status === "renamed" && Boolean(file.previousPath)
-                  const revertHint =
-                    revertingFilePath === file.path ? "回退中..." : "回退（大模型改动的上一个版本）"
-                  return (
-                    <div key={file.path} className="rounded-md border border-border/70 bg-white">
-                      <div className="flex items-center justify-between gap-2 p-2 text-xs">
-                        <div className="flex min-w-0 flex-1 items-center gap-1.5">
-                          <input
-                            type="checkbox"
-                            checked={isSelected}
-                            aria-label={`选择文件 ${file.path}`}
-                            onChange={(e) => {
-                              e.stopPropagation()
-                              toggleFileSelected(file.path)
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            className="size-3.5 shrink-0 accent-blue-600"
-                          />
-                          <button
-                            type="button"
-                            aria-expanded={isExpanded}
-                            onClick={() => toggleFileExpanded(file.path)}
-                            className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
-                          >
-                            {isExpanded ? (
-                              <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-                            ) : (
-                              <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-                            )}
-                            <span
-                              className={cn(
-                                "inline-flex h-4 shrink-0 items-center rounded border px-1 text-[9px] font-medium leading-none",
-                                statusMeta.className
-                              )}
-                              title={`文件状态：${statusMeta.label}`}
-                            >
-                              {statusMeta.label}
-                            </span>
-                            <span
-                              className="font-mono font-semibold truncate text-left"
-                              title={file.path}
-                            >
-                              {file.path}
-                            </span>
-                            <span className="shrink-0 flex items-center gap-1.5 text-[11px] font-semibold">
-                              <span className="text-emerald-600 dark:text-emerald-400">
-                                +{file.additions}
-                              </span>
-                              <span className="text-muted-foreground">/</span>
-                              <span className="text-rose-600 dark:text-rose-400">
-                                -{file.deletions}
-                              </span>
-                            </span>
-                          </button>
-                        </div>
-                        <span className="flex items-center gap-2 shrink-0">
-                          <OpenInIdeButton
-                            filePath={file.path}
-                            workspacePath={workspacePath}
-                            fileMissing={file.status === "deleted"}
-                            align="end"
-                            stopPropagation
-                            onOpenError={(message) => {
-                              showToast(message, "error")
-                            }}
-                          />
-                          <IconPopoverButton
-                            icon={<FolderOpen className="size-3" />}
-                            popoverContent="打开文件夹"
-                            aria-label="打开文件夹"
-                            align="end"
-                            stopPropagation
-                            onClick={() => onOpenFileFolder?.(file.path)}
-                          />
-                          <IconPopoverButton
-                            icon={
-                              <Undo2
-                                className={cn(
-                                  "size-3",
-                                  revertingFilePath === file.path && "animate-spin"
-                                )}
+                <div className="space-y-3">
+                  {repositoryGroups.map((group) => {
+                    const repositoryKey = group.repo?.path ?? "__workspace__"
+                    const isCollapsed = collapsedRepositoryPaths.has(repositoryKey)
+                    const selectedInGroup = group.files.filter((file) => selectedFilePaths.has(file.path))
+                    const groupTotals = group.files.reduce(
+                      (acc, file) => {
+                        acc.additions += file.additions
+                        acc.deletions += file.deletions
+                        return acc
+                      },
+                      { additions: 0, deletions: 0 }
+                    )
+                    const allGroupFilesSelected =
+                      group.files.length > 0 && selectedInGroup.length === group.files.length
+                    return (
+                      <section
+                        key={repositoryKey}
+                        className="overflow-hidden rounded-md border border-border/80 bg-background"
+                      >
+                        {hasMultipleRepositories && group.repo && (
+                          <div className="flex items-center justify-between gap-3 border-b border-border/70 bg-blue-500/5 px-3 py-2">
+                            <label className="inline-flex min-w-0 flex-1 items-center gap-2 text-xs font-semibold">
+                              <input
+                                type="checkbox"
+                                checked={allGroupFilesSelected}
+                                onChange={() => {
+                                  setSelectedFilePaths((prev) => {
+                                    const next = new Set(prev)
+                                    if (allGroupFilesSelected) {
+                                      for (const file of group.files) next.delete(file.path)
+                                    } else {
+                                      for (const file of group.files) next.add(file.path)
+                                    }
+                                    return next
+                                  })
+                                }}
+                                className="size-3.5 shrink-0 accent-blue-600"
                               />
-                            }
-                            popoverContent={revertHint}
-                            disabled={Boolean(revertingFilePath && revertingFilePath !== file.path)}
-                            aria-label={revertHint}
-                            align="end"
-                            stopPropagation
-                            className={cn(revertingFilePath === file.path && "opacity-80")}
-                            onClick={() => {
-                              if (!revertingFilePath) void handleRevertFile(file.path)
-                            }}
-                          />
-                        </span>
-                      </div>
-                      {isExpanded && (
-                        <div className="px-2 pb-2">
-                          {showMovePath && (
-                            <div className="mb-2 rounded-md border border-blue-500/20 bg-blue-500/5 px-3 py-2 text-xs">
-                              <div className="mb-1 flex items-center gap-1.5 font-medium text-blue-700 dark:text-blue-300">
-                                <GitCompareArrows className="size-3.5" />
-                                {statusMeta.label}信息
-                              </div>
-                              <div className="grid gap-1.5 font-mono">
-                                <div className="flex min-w-0 items-center gap-2">
-                                  <span className="shrink-0 text-muted-foreground">原路径</span>
-                                  <span
-                                    className="truncate text-muted-foreground line-through decoration-muted-foreground/50"
-                                    title={file.previousPath}
-                                  >
-                                    {file.previousPath}
-                                  </span>
-                                </div>
-                                <div className="flex min-w-0 items-center gap-2">
-                                  <span className="shrink-0 text-muted-foreground">现路径</span>
-                                  <span
-                                    className="truncate font-semibold text-foreground"
-                                    title={file.path}
-                                  >
-                                    {file.path}
-                                  </span>
-                                </div>
-                              </div>
+                              <button
+                                type="button"
+                                className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-background/80 hover:text-foreground"
+                                aria-label={isCollapsed ? "展开仓库" : "折叠仓库"}
+                                aria-expanded={!isCollapsed}
+                                onClick={(event) => {
+                                  event.preventDefault()
+                                  event.stopPropagation()
+                                  toggleRepositoryCollapsed(repositoryKey)
+                                }}
+                              >
+                                {isCollapsed ? (
+                                  <ChevronRight className="size-3.5" />
+                                ) : (
+                                  <ChevronDown className="size-3.5" />
+                                )}
+                              </button>
+                              <span className="flex size-6 shrink-0 items-center justify-center rounded-md border border-blue-500/25 bg-blue-500/10">
+                                <GitBranch className="size-3.5 text-blue-700 dark:text-blue-300" />
+                              </span>
+                              <span className="shrink-0 rounded border border-blue-500/25 bg-background/80 px-1.5 py-0.5 text-[10px] font-medium leading-none text-blue-700 dark:text-blue-300">
+                                仓库
+                              </span>
+                              <span
+                                className="truncate font-mono text-foreground"
+                                title={group.repo.path}
+                              >
+                                {group.repo.displayPath}
+                              </span>
+                            </label>
+                            <div className="flex shrink-0 items-center gap-2 text-[11px] font-medium text-muted-foreground">
+                              <span className="rounded-full border border-border/70 bg-background/80 px-2 py-0.5">
+                                {selectedInGroup.length}/{group.files.length}
+                              </span>
+                              <span className="text-emerald-600 dark:text-emerald-400">
+                                +{groupTotals.additions}
+                              </span>
+                              <span className="text-rose-600 dark:text-rose-400">
+                                -{groupTotals.deletions}
+                              </span>
                             </div>
-                          )}
-                          {isFileDiffLoading ? (
-                            <div className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                              <Loader2 className="size-3.5 animate-spin text-blue-600 dark:text-blue-400" />
-                              正在加载该文件 diff...
-                            </div>
-                          ) : fileDiffError ? (
-                            <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-                              {fileDiffError}
-                            </div>
-                          ) : !file.diffLoaded ? (
-                            <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                              展开后将按需加载该文件 diff。
-                            </div>
-                          ) : diff && diff.trim() !== "" ? (
-                            <DiffDisplay diff={diff} filePath={file.path} />
-                          ) : (
-                            <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                              当前文件暂无可展示 diff（可能已恢复、删除或为二进制文件）。
-                            </div>
-                          )}
+                          </div>
+                        )}
+                        <div className={cn("space-y-2 p-2", isCollapsed && "hidden")}>
+                          {group.files.map((file) => renderDiffFileCard(file, group.repo))}
                         </div>
-                      )}
-                    </div>
-                  )
-                })}
+                      </section>
+                    )
+                  })}
+                </div>
               </>
             )}
           </>
@@ -1276,10 +1737,16 @@ export function GitPanelView({
       <GitPushDialog
         open={submitAction === "push"}
         running={running === "push"}
-        branch={metaState?.worktreeBranch || "-"}
-        pendingCommits={metaState?.pendingCommits}
+        loading={pushMetaLoading}
+        branch={pushMetaState?.worktreeBranch || activeRepository?.displayPath || metaState?.worktreeBranch || "-"}
+        pendingCommits={pushMetaLoading ? undefined : (pushMetaState?.pendingCommits ?? metaState?.pendingCommits)}
         onOpenChange={(open) => {
-          if (!open) setSubmitAction(null)
+          if (!open) {
+            pushMetaRequestIdRef.current += 1
+            setPushMetaLoading(false)
+            setPushMetaState(null)
+            setSubmitAction(null)
+          }
         }}
         onSubmit={() => {
           void runSubmit("push")
