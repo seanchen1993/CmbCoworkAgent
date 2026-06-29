@@ -998,6 +998,7 @@ interface CustomAPI {
         includeDiffs?: boolean
         includeChangedFiles?: boolean
         statusUntrackedMode?: "all" | "normal" | "no"
+        visibleFileLimit?: number
       }
     ) => Promise<{
       success: boolean
@@ -1115,8 +1116,12 @@ interface CustomAPI {
       detail?: string
       error?: string
     }>
-    rejectWorktreeChanges: (threadId: string) => Promise<{
+    rejectWorktreeChanges: (
+      threadId: string,
+      filePaths?: string[]
+    ) => Promise<{
       success: boolean
+      revertedFileCount?: number
       error?: string
     }>
     rejectWorktreeFile: (

@@ -1027,6 +1027,7 @@ const api = {
         includeDiffs?: boolean
         includeChangedFiles?: boolean
         statusUntrackedMode?: "all" | "normal" | "no"
+        visibleFileLimit?: number
       }
     ): Promise<{
       success: boolean
@@ -1264,9 +1265,13 @@ const api = {
         error?: string
       }>
     },
-    rejectWorktreeChanges: (threadId: string): Promise<{ success: boolean; error?: string }> => {
-      return ipcRenderer.invoke("workspace:rejectWorktreeChanges", { threadId }) as Promise<{
+    rejectWorktreeChanges: (
+      threadId: string,
+      filePaths?: string[]
+    ): Promise<{ success: boolean; revertedFileCount?: number; error?: string }> => {
+      return ipcRenderer.invoke("workspace:rejectWorktreeChanges", { threadId, filePaths }) as Promise<{
         success: boolean
+        revertedFileCount?: number
         error?: string
       }>
     },

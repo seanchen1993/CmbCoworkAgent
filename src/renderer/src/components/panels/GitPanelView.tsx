@@ -25,6 +25,7 @@ import { toast } from "sonner"
 import { GitCommitDialog } from "./GitCommitDialog"
 import type { CommitType } from "./GitCommitDialog"
 import { GitPushDialog } from "./GitPushDialog"
+import { GitRejectDialog, type GitRejectFile } from "./GitRejectDialog"
 import { insertLog } from "../../../js/mmjUtils"
 import type { ThreadGitContext } from "@/lib/thread-context"
 import type { GitCommitHistoryRecord } from "../../../../shared/git-commit-history"
@@ -81,6 +82,7 @@ type GitPanelFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied
 
 // 同时按需拉取的文件 diff 上限，避免刷新后一次性为大量已展开文件并发拉取 diff 拖垮主进程。
 const MAX_CONCURRENT_FILE_DIFF_LOADS = 3
+const GIT_REJECT_DIALOG_FILE_LIMIT = 10_000
 
 function getPathParentDir(filePath?: string): string {
   const normalized = String(filePath || "").replace(/\\/g, "/")
@@ -174,11 +176,19 @@ export function GitPanelView({
   const metaRequestIdRef = useRef(0)
   const diffRequestIdRef = useRef(0)
   const activeThreadIdRef = useRef(threadId)
+  const rejectInFlightRef = useRef(false)
+  const suppressFileChangeRefreshUntilRef = useRef(0)
+  const rejectDialogRequestIdRef = useRef(0)
   const [metaLoading, setMetaLoading] = useState(true)
   const [diffLoading, setDiffLoading] = useState(true)
   const [running, setRunning] = useState<"commit" | "push" | "reject" | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [submitAction, setSubmitAction] = useState<"commit" | "push" | null>(null)
+  const [rejectDialogOpen, setRejectDialogOpen] = useState(false)
+  const [rejectDialogFiles, setRejectDialogFiles] = useState<GitRejectFile[]>([])
+  const [rejectDialogOmittedFileCount, setRejectDialogOmittedFileCount] = useState(0)
+  const [rejectDialogLoading, setRejectDialogLoading] = useState(false)
+  const [rejectDialogSelectionSeed, setRejectDialogSelectionSeed] = useState(0)
   const {
     cardNumber,
     handleCardNumberChange,
@@ -211,6 +221,14 @@ export function GitPanelView({
     setDiffLoading(true)
     setError(null)
     setSubmitAction(null)
+    setRejectDialogOpen(false)
+    setRejectDialogFiles([])
+    setRejectDialogOmittedFileCount(0)
+    setRejectDialogLoading(false)
+    setRejectDialogSelectionSeed(0)
+    rejectDialogRequestIdRef.current += 1
+    rejectInFlightRef.current = false
+    suppressFileChangeRefreshUntilRef.current = 0
     setCommitHistory([])
     setExpandedFilePaths(new Set())
     setSelectedFilePaths(new Set())
@@ -493,6 +511,9 @@ export function GitPanelView({
     let refreshTimer: ReturnType<typeof setTimeout> | null = null
     const cleanup = window.api.workspace.onFilesChanged((data) => {
       if (data.threadId !== threadId) return
+      if (rejectInFlightRef.current || Date.now() < suppressFileChangeRefreshUntilRef.current) {
+        return
+      }
       if (refreshTimer) clearTimeout(refreshTimer)
       refreshTimer = setTimeout(() => {
         void refresh({ meta: false, diff: true })
@@ -504,23 +525,69 @@ export function GitPanelView({
     }
   }, [threadId, refresh])
 
-  const runReject = useCallback(async () => {
+  const runReject = useCallback(async (filePaths: string[]) => {
     if (!threadId) return
+    if (filePaths.length === 0) {
+      showToast("请至少选择 1 个文件", "error")
+      return
+    }
     setRunning("reject")
     setError(null)
+    rejectInFlightRef.current = true
+    suppressFileChangeRefreshUntilRef.current = Number.POSITIVE_INFINITY
     try {
-      const result = await window.api.workspace.rejectWorktreeChanges(threadId)
+      const result = await window.api.workspace.rejectWorktreeChanges(threadId, filePaths)
       if (!result.success) throw new Error(result.error || "回滚失败")
-      showToast("已全部回退到上一版编辑内容", "success")
+      setRejectDialogOpen(false)
+      const count = result.revertedFileCount ?? filePaths.length
+      showToast(`已回退 ${count} 个文件`, "success")
       await refresh({ meta: false, diff: true })
     } catch (e) {
       const err = e instanceof Error ? e.message : "操作失败"
       setError(err)
       showToast(err, "error")
     } finally {
+      rejectInFlightRef.current = false
+      suppressFileChangeRefreshUntilRef.current = Date.now() + 1200
       setRunning(null)
     }
   }, [threadId, refresh, showToast])
+
+  const openRejectDialog = useCallback(() => {
+    if (!threadId) return
+    const requestId = ++rejectDialogRequestIdRef.current
+    const initialFiles = diffState?.files ?? []
+    setRejectDialogFiles(initialFiles)
+    setRejectDialogOmittedFileCount(diffState?.omittedFileCount ?? 0)
+    setRejectDialogLoading(true)
+    setRejectDialogSelectionSeed((seed) => seed + 1)
+    setRejectDialogOpen(true)
+
+    void window.api.workspace
+      .getGitPanelDiffs(threadId, {
+        includeDiffs: false,
+        includeChangedFiles: false,
+        statusUntrackedMode: "all",
+        visibleFileLimit: GIT_REJECT_DIALOG_FILE_LIMIT
+      })
+      .then((result) => {
+        if (requestId !== rejectDialogRequestIdRef.current || result.taskId !== activeThreadIdRef.current) return
+        if (!result.success) {
+          showToast(result.error || "加载回退文件列表失败", "error")
+          setRejectDialogLoading(false)
+          return
+        }
+        setRejectDialogFiles(result.files ?? [])
+        setRejectDialogOmittedFileCount(result.omittedFileCount ?? 0)
+        setRejectDialogSelectionSeed((seed) => seed + 1)
+        setRejectDialogLoading(false)
+      })
+      .catch((error) => {
+        if (requestId !== rejectDialogRequestIdRef.current) return
+        setRejectDialogLoading(false)
+        showToast(error instanceof Error ? error.message : "加载回退文件列表失败", "error")
+      })
+  }, [threadId, diffState?.files, diffState?.omittedFileCount, showToast])
 
   const runSubmit = useCallback(
     async (action: "commit" | "push") => {
@@ -819,7 +886,7 @@ export function GitPanelView({
                       <button
                         id={"git-reject-all-button"}
                         onClick={() => {
-                          void runReject()
+                          openRejectDialog()
                         }}
                         disabled={running !== null}
                         className="inline-flex items-center gap-1 rounded-md border border-destructive/50 text-destructive px-2 py-1 text-[11px] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-destructive/10 transition-colors"
@@ -1186,6 +1253,24 @@ export function GitPanelView({
         onHistorySelect={applyCommitHistoryRecord}
         onSubmit={() => {
           void runSubmit("commit")
+        }}
+      />
+      <GitRejectDialog
+        open={rejectDialogOpen}
+        running={running === "reject"}
+        loading={rejectDialogLoading}
+        selectionSeed={rejectDialogSelectionSeed}
+        files={rejectDialogFiles}
+        omittedFileCount={rejectDialogOmittedFileCount}
+        onOpenChange={(open) => {
+          setRejectDialogOpen(open)
+          if (!open) {
+            rejectDialogRequestIdRef.current += 1
+            setRejectDialogLoading(false)
+          }
+        }}
+        onSubmit={(filePaths) => {
+          void runReject(filePaths)
         }}
       />
       <GitPushDialog
