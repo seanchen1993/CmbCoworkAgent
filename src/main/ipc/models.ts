@@ -1045,16 +1045,6 @@ function collectChangedFileEntriesFromStatus(
   return Array.from(changedMap.values())
 }
 
-function collectChangedFilesFromStatus(
-  worktreePath: string,
-  statusOutput: string,
-  trackedFiles: string[],
-  options?: { filterByTracked?: boolean }
-): string[] {
-  return collectChangedFileEntriesFromStatus(worktreePath, statusOutput, trackedFiles, options).map(
-    (entry) => entry.path
-  )
-}
 
 async function getHeadBlobHash(worktreePath: string, relPath: string, options?: { silent?: boolean }): Promise<string | null> {
   try {
@@ -1176,19 +1166,20 @@ function parseNumstatByPath(output: string): Map<string, { additions: number; de
   const map = new Map<string, { additions: number; deletions: number }>()
   const lines = output
     .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
+    .map((line) => line.replace(/\r$/, ""))
+    .filter((line) => line.length > 0)
 
   for (const line of lines) {
     const parts = line.split("\t")
     if (parts.length < 3) continue
-    const pathRaw = parts.slice(2).join("\t").trim()
-    if (!pathRaw) continue
+    const pathRaw = parts.slice(2).join("\t")
+    if (pathRaw.length === 0) continue
 
     // numstat 默认会对非 ASCII 路径做 C 风格八进制转义并加引号（core.quotepath=true）。
     // 必须先按 status 同款逻辑解码，否则 normalizeGitRelativePath 的 `\\ -> /` 规则会把
     // `"docs/\346..."` 破坏成 `docs/346/...`，导致折叠态 numstat 命中不到对应文件、
     // 行数回退成全文件估算（展开后才用 parseNumstatTotals 修正回来）。
+    // 这里不能 trim path 字段：文件名可以合法地以空格开头/结尾，剥掉后同样会命中失败。
     const normalizedPath = normalizeGitRelativePath(
       extractNumstatRenameTarget(decodeGitQuotedPath(pathRaw))
     )
@@ -2402,18 +2393,17 @@ async function getGitPanelSummaryQuick(worktreePath: string): Promise<{
   hasPendingDiff: boolean
   changedFiles: number
 }> {
-  // 与 buildGitPanelState 保持同口径：排除依赖/构建噪音目录并展开到文件级，
-  // 否则 header 的“N files”会把 node_modules 算进去，与下方文件列表对不上。
-  const statusOut = await runStatusPorcelain(worktreePath, ["."], {
+  // header 的“N files”必须与下方文件列表（buildGitPanelState）完全同口径：
+  // 除了排除噪音目录、展开到文件级，还要做文件系统“移动”合并——
+  // 一次未暂存的重命名在 status 里是“删除旧路径 + 新增新路径”两条，列表会合并成 1 条
+  // 重命名；若 header 仍按 2 条计数，就会出现“数量对不上”。直接复用同一套实体收集逻辑。
+  const entries = await getChangedFileEntriesForGitOps(worktreePath, [], {
     silent: true,
-    untrackedMode: "all",
-    maxBufferBytes: GIT_PANEL_STATUS_SUMMARY_MAX_BUFFER_BYTES,
-    excludeDirs: GIT_PANEL_EXCLUDED_UNTRACKED_DIRS
+    includeAllWhenNoTracked: true
   })
-  const changedFiles = collectChangedFilesFromStatus(worktreePath, statusOut, [])
   return {
-    hasPendingDiff: changedFiles.length > 0,
-    changedFiles: changedFiles.length
+    hasPendingDiff: entries.length > 0,
+    changedFiles: entries.length
   }
 }
 
@@ -2486,7 +2476,7 @@ function createEmptyGitChangedFilesSummary(
   }
 }
 
-async function buildGitPanelMetaState(
+export async function buildGitPanelMetaState(
   threadId: string,
   context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>>
 ): Promise<GitPanelMetaStatePayload> {
