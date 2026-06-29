@@ -228,7 +228,8 @@ function createEmptyServiceUnitMapping(): HarnessServiceUnitMapping {
   return {
     serviceUnitIdMapping: "",
     serviceUnitId: "",
-    localRepoPath: ""
+    localRepoPath: "",
+    description: ""
   }
 }
 
@@ -243,7 +244,8 @@ function buildServiceUnitMappingSavePayload(
     const row = mappings[index]
     const serviceUnitId = row.serviceUnitId.trim()
     const localRepoPath = row.localRepoPath.trim()
-    if (!serviceUnitId && !localRepoPath) continue
+    const description = row.description?.trim() || ""
+    if (!serviceUnitId && !localRepoPath && !description) continue
     if (!serviceUnitId) {
       return { mappings: [], error: `第 ${index + 1} 行发布单元 ID 不能为空` }
     }
@@ -257,7 +259,8 @@ function buildServiceUnitMappingSavePayload(
     payload.push({
       serviceUnitIdMapping: row.serviceUnitIdMapping,
       serviceUnitId,
-      localRepoPath
+      localRepoPath,
+      ...(description ? { description } : {})
     })
   }
 
@@ -3044,18 +3047,19 @@ function ProjectModeSettingsPanel({
           </div>
         ) : (
           <div className="space-y-3">
-            <div className="grid grid-cols-[minmax(160px,0.8fr)_minmax(220px,1.4fr)_132px_40px] gap-2 px-1 text-xs font-medium text-muted-foreground">
+            <div className="grid grid-cols-[minmax(150px,0.8fr)_minmax(220px,1.2fr)_minmax(180px,1fr)_132px_40px] gap-2 px-1 text-xs font-medium text-muted-foreground">
               <div className="flex min-w-0 items-center gap-1">
                 <span>发布单元</span>
                 <ReleaseUnitIdTip />
               </div>
               <div>本机代码库路径</div>
+              <div>描述</div>
               <div />
             </div>
             {mappings.map((mapping, index) => (
               <div
                 key={index}
-                className="grid grid-cols-[minmax(160px,0.8fr)_minmax(220px,1.4fr)_132px_40px] items-center gap-2"
+                className="grid grid-cols-[minmax(150px,0.8fr)_minmax(220px,1.2fr)_minmax(180px,1fr)_132px_40px] items-center gap-2"
               >
                 <Input
                   value={mapping.serviceUnitId}
@@ -3071,6 +3075,14 @@ function ProjectModeSettingsPanel({
                   placeholder="请选择本机代码库路径"
                   className={harnessProjectCreateInputClassName}
                   title={mapping.localRepoPath}
+                />
+                <Input
+                  value={mapping.description || ""}
+                  onChange={(event) =>
+                    onChange(index, { ...mapping, description: event.target.value })
+                  }
+                  placeholder="请输入描述（选填）"
+                  className={harnessProjectCreateInputClassName}
                 />
                 <Button
                   type="button"

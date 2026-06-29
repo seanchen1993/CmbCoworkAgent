@@ -85,6 +85,7 @@ export interface HarnessServiceUnitMapping {
   serviceUnitIdMapping: string
   serviceUnitId: string
   localRepoPath: string
+  description?: string
 }
 
 export type HarnessSessionContextInjectionSource = "cmbdevclaw" | "plugin"

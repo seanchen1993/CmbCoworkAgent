@@ -1788,6 +1788,7 @@ function normalizeServiceUnitMappings(
     if (!isObject(item)) continue
     const serviceUnitId = normalizeText(item.serviceUnitId).trim()
     const localRepoPath = normalizeText(item.localRepoPath).trim()
+    const description = normalizeText(item.description).trim()
     if (!serviceUnitId || !localRepoPath || seen.has(serviceUnitId)) continue
 
     let serviceUnitIdMapping = normalizeText(item.serviceUnitIdMapping).trim()
@@ -1798,7 +1799,12 @@ function normalizeServiceUnitMappings(
 
     seen.add(serviceUnitId)
     seenIds.add(serviceUnitIdMapping)
-    mappings.push({ serviceUnitIdMapping, serviceUnitId, localRepoPath })
+    mappings.push({
+      serviceUnitIdMapping,
+      serviceUnitId,
+      localRepoPath,
+      ...(description ? { description } : {})
+    })
   }
   return mappings
 }
@@ -2168,10 +2174,12 @@ function resolveFeatureSelectedServiceUnits(
     if (!existsSync(localRepoPath)) {
       throw new Error(`服务单元 ${serviceUnitId} 的代码库路径不存在：${localRepoPath}`)
     }
+    const description = resolvedMapping.description?.trim() || ""
     resolved.push({
       serviceUnitIdMapping: resolvedMapping.serviceUnitIdMapping,
       serviceUnitId,
-      localRepoPath
+      localRepoPath,
+      ...(description ? { description } : {})
     })
   }
 
