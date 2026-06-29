@@ -8,6 +8,7 @@ import React, {
 } from "react"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkBreaks from "remark-breaks"
+import remarkGfm from "remark-gfm"
 import {
   Send,
   Square,
@@ -52,6 +53,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { useAppStore } from "@/lib/store"
 import {
   consumePendingHarnessNextAction,
@@ -383,12 +385,16 @@ async function openAgentmdLoadStatusPath(targetPath: string): Promise<void> {
   }
 }
 
+const AGENTMD_PREVIEW_REMARK_PLUGINS = [remarkGfm, remarkBreaks]
+
 function AgentmdLoadStatusNotice({
   state
 }: {
   state: HarnessAgentmdLoadStatusState
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const previewHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const groupedItems = useMemo(() => {
     const groups = new Map<string, HarnessAgentmdLoadStatusItem[]>()
     for (const item of state.items) {
@@ -399,9 +405,42 @@ function AgentmdLoadStatusNotice({
     return Array.from(groups.entries())
   }, [state.items])
   const loadedCount = state.items.filter((item) => item.loaded).length
+  const title =
+    state.loader === "cmbdevclaw" ? "CMBDevClaw 已加载系统约束" : "插件已加载系统约束"
+  const promptPreview = state.promptPreview?.trim()
   const handleOpenPath = useCallback((path: string): void => {
     void openAgentmdLoadStatusPath(path)
   }, [])
+  const showPreview = useCallback(() => {
+    if (previewHideTimerRef.current) {
+      clearTimeout(previewHideTimerRef.current)
+      previewHideTimerRef.current = null
+    }
+    if (promptPreview) setPreviewOpen(true)
+  }, [promptPreview])
+  const hidePreview = useCallback(() => {
+    if (previewHideTimerRef.current) clearTimeout(previewHideTimerRef.current)
+    previewHideTimerRef.current = setTimeout(() => {
+      previewHideTimerRef.current = null
+      setPreviewOpen(false)
+    }, 120)
+  }, [])
+  useEffect(
+    () => () => {
+      if (previewHideTimerRef.current) clearTimeout(previewHideTimerRef.current)
+    },
+    []
+  )
+  const titleContent = (
+    <span
+      className={cn(
+        "shrink-0 font-mono text-[11px] text-foreground/80",
+        promptPreview && "cursor-help decoration-dotted underline-offset-2 hover:underline"
+      )}
+    >
+      {title}： {loadedCount}/{state.items.length}
+    </span>
+  )
 
   return (
     <div className="rounded-md border border-border/70 bg-muted/30 text-xs text-muted-foreground">
@@ -417,9 +456,40 @@ function AgentmdLoadStatusNotice({
           <ChevronRight className="size-3.5 shrink-0" />
         )}
         <FileText className="size-3.5 shrink-0 text-muted-foreground/80" />
-        <span className="shrink-0 font-mono text-[11px] text-foreground/80">
-          插件已加载系统约束： {loadedCount}/{state.items.length}
-        </span>
+        {promptPreview ? (
+          <Popover open={previewOpen} onOpenChange={setPreviewOpen}>
+            <PopoverAnchor asChild>
+              <span
+                onPointerEnter={showPreview}
+                onPointerLeave={hidePreview}
+                onFocus={showPreview}
+                onBlur={hidePreview}
+              >
+                {titleContent}
+              </span>
+            </PopoverAnchor>
+            <PopoverContent
+              align="start"
+              side="bottom"
+              sideOffset={8}
+              className="max-h-[60vh] w-[min(720px,calc(100vw-2rem))] overflow-auto p-3 text-left"
+              onPointerEnter={showPreview}
+              onPointerLeave={hidePreview}
+            >
+              <div className="mb-2 flex items-center gap-1.5 border-b border-border/60 pb-2 text-[11px] font-medium text-foreground/80">
+                <FileText className="size-3.5" />
+                <span>系统约束预览</span>
+              </div>
+              <div className="streaming-markdown max-w-none text-xs leading-relaxed">
+                <ReactMarkdown remarkPlugins={AGENTMD_PREVIEW_REMARK_PLUGINS}>
+                  {promptPreview}
+                </ReactMarkdown>
+              </div>
+            </PopoverContent>
+          </Popover>
+        ) : (
+          titleContent
+        )}
       </button>
       {expanded && (
         <div className="border-t border-border/60 px-3 py-2">

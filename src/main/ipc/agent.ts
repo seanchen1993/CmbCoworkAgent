@@ -1362,7 +1362,9 @@ function sendHarnessSessionContextInjectWarning(
 function sendHarnessAgentmdLoadStatus(
   window: BrowserWindow,
   channel: string,
-  context: HarnessAgentContext
+  context: HarnessAgentContext,
+  agentmdLoader: "plugin" | "cmbdevclaw" = "plugin",
+  agentmdPromptPreview?: string
 ): void {
   if (!Array.isArray(context.agentmdLoadStatus)) return
   safeSendToWindow(window, channel, {
@@ -1370,9 +1372,37 @@ function sendHarnessAgentmdLoadStatus(
     data: {
       type: "harness_agentmd_load_status",
       agentmdLoadStatus: context.agentmdLoadStatus,
+      agentmdLoader,
+      agentmdPromptPreview,
       createdAt: Date.now()
     }
   })
+}
+
+function createHarnessAgentmdLoadStatusHandler(
+  window: BrowserWindow,
+  channel: string,
+  context: HarnessAgentContext
+):
+  | ((payload: {
+      items: HarnessAgentmdLoadStatusItem[]
+      loader: "plugin" | "cmbdevclaw"
+      promptPreview?: string
+    }) => void)
+  | undefined {
+  if (!context.featureId) return undefined
+  return ({ items, loader, promptPreview }) => {
+    sendHarnessAgentmdLoadStatus(
+      window,
+      channel,
+      {
+        ...context,
+        agentmdLoadStatus: items
+      },
+      loader,
+      promptPreview
+    )
+  }
 }
 
 function sendActiveHookNotice(
@@ -4189,7 +4219,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         sessionWorkspacePath = workspacePath ?? undefined
         const harnessAgentContext = getHarnessAgentContext(metadata, { workspacePath })
         sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
-        sendHarnessAgentmdLoadStatus(window, channel, harnessAgentContext)
+        const onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
+          window,
+          channel,
+          harnessAgentContext
+        )
         const memoryEnabledForThread = isMemoryEnabled() && !harnessAgentContext.featureId
 
         if (!workspacePath) {
@@ -4859,6 +4893,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillHookKeys,
               skillUseTracker,
               ...harnessAgentContext,
+              onAgentsPromptLoadStatus,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
@@ -5607,6 +5642,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             skillHookKeys,
             skillUseTracker,
             ...harnessAgentContext,
+            onAgentsPromptLoadStatus,
             onFileMutation: autoCommit.onFileMutation,
             onCoordinatorWorkerHookResult,
             onCoordinatorWorkerEvent,
@@ -5713,6 +5749,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillHookKeys,
               skillUseTracker,
               ...harnessAgentContext,
+              onAgentsPromptLoadStatus,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
@@ -6380,7 +6417,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const workspacePath = metadata.workspacePath as string | undefined
       const harnessAgentContext = getHarnessAgentContext(metadata, { workspacePath })
       sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
-      sendHarnessAgentmdLoadStatus(window, channel, harnessAgentContext)
+      const onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
+        window,
+        channel,
+        harnessAgentContext
+      )
       const resumeCoordinatorRequest = resolveCoordinatorModeRequest("", metadata)
       const resumeForcedByEnvironment = resumeCoordinatorRequest.source === "environment"
       const resumeAgentMode: AgentMode = resumeForcedByEnvironment
@@ -6774,6 +6815,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillHookKeys,
               skillUseTracker,
               ...harnessAgentContext,
+              onAgentsPromptLoadStatus,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
@@ -6932,6 +6974,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillHookKeys,
               skillUseTracker,
               ...harnessAgentContext,
+              onAgentsPromptLoadStatus,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
@@ -7154,7 +7197,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const modelId = metadata.model as string | undefined
     const harnessAgentContext = getHarnessAgentContext(metadata, { workspacePath })
     sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
-    sendHarnessAgentmdLoadStatus(window, channel, harnessAgentContext)
+    const onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
+      window,
+      channel,
+      harnessAgentContext
+    )
     const interruptCoordinatorRequest = resolveCoordinatorModeRequest("", metadata)
     const interruptAgentMode: AgentMode =
       interruptCoordinatorRequest.source === "environment"
@@ -7491,6 +7538,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillHookKeys,
               skillUseTracker,
               ...harnessAgentContext,
+              onAgentsPromptLoadStatus,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
@@ -7646,6 +7694,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillHookKeys,
               skillUseTracker,
               ...harnessAgentContext,
+              onAgentsPromptLoadStatus,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,

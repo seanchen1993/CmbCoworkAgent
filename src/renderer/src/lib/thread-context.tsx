@@ -479,6 +479,8 @@ export interface ThreadState {
 export interface HarnessAgentmdLoadStatusState {
   items: HarnessAgentmdLoadStatusItem[]
   createdAt: number
+  loader: "plugin" | "cmbdevclaw"
+  promptPreview?: string
 }
 
 function debugMessageContentLength(content: Message["content"] | undefined): number {
@@ -1022,6 +1024,8 @@ interface CustomEventData {
   assistantMessage?: LiveStreamMessage
   result?: AgentAutoCommitResult
   agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
+  agentmdLoader?: "plugin" | "cmbdevclaw"
+  agentmdPromptPreview?: string
 }
 
 // Component that holds a stream and notifies subscribers
@@ -2601,12 +2605,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           break
         case "harness_agentmd_load_status": {
           const items = normalizeHarnessAgentmdLoadStatus(data.agentmdLoadStatus)
+          const loader = data.agentmdLoader === "cmbdevclaw" ? "cmbdevclaw" : "plugin"
+          const promptPreview =
+            typeof data.agentmdPromptPreview === "string" && data.agentmdPromptPreview.trim()
+              ? data.agentmdPromptPreview
+              : undefined
           const createdAt =
             typeof data.createdAt === "number" && Number.isFinite(data.createdAt)
               ? data.createdAt
               : Date.now()
           updateThreadState(threadId, () => ({
-            harnessAgentmdLoadStatus: items.length > 0 ? { items, createdAt } : null
+            harnessAgentmdLoadStatus:
+              items.length > 0 ? { items, createdAt, loader, promptPreview } : null
           }))
           break
         }

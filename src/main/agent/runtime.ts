@@ -45,6 +45,7 @@ import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
+import type { HarnessAgentmdLoadStatusItem } from "../../shared/harness-board-types"
 import {
   createAgent,
   createMiddleware,
@@ -2793,6 +2794,55 @@ function getModelInstance(
   } as never)
 }
 
+type AgentsPromptRuntimeResult =
+  | Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>>
+  | Awaited<ReturnType<typeof loadAgentsPromptForWorkspaces>>
+
+type AgentsPromptLoader = "plugin" | "cmbdevclaw"
+
+interface AgentsPromptLoadStatusPayload {
+  items: HarnessAgentmdLoadStatusItem[]
+  loader: AgentsPromptLoader
+  promptPreview?: string
+}
+
+function buildFrameworkAgentsLoadStatus(
+  agentsPrompt: AgentsPromptRuntimeResult
+): HarnessAgentmdLoadStatusItem[] {
+  if ("workspaceSections" in agentsPrompt) {
+    const workspaceLoadedPaths = new Set(
+      agentsPrompt.workspaceSections.flatMap((section) => section.loadedPaths)
+    )
+    const globalItems = agentsPrompt.loadedPaths
+      .filter((path) => !workspaceLoadedPaths.has(path))
+      .map((path) => ({
+        serviceUnitId: "CMBDevClaw",
+        path,
+        loaded: true,
+        source: "local",
+        message: ""
+      }))
+    const workspaceItems = agentsPrompt.workspaceSections.flatMap((section) =>
+      section.loadedPaths.map((path) => ({
+        serviceUnitId: section.cwd,
+        path,
+        loaded: true,
+        source: "local",
+        message: ""
+      }))
+    )
+    return [...globalItems, ...workspaceItems]
+  }
+
+  return agentsPrompt.loadedPaths.map((path) => ({
+    serviceUnitId: agentsPrompt.projectRoot,
+    path,
+    loaded: true,
+    source: "local",
+    message: ""
+  }))
+}
+
 export interface CreateAgentRuntimeOptions {
   /** Thread ID - REQUIRED for per-thread checkpointing */
   threadId: string
@@ -2834,8 +2884,12 @@ export interface CreateAgentRuntimeOptions {
   enableAgentsPrompt?: boolean
   /** Optional Harness project AGENTS.md prompt appended without changing workspace AGENTS.md loading. */
   harnessAgentsPrompt?: string
+  /** Optional Harness project AGENTS.md load status returned by the plugin. */
+  agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
   /** Additional project-mode workspace roots whose AGENTS.md files should be loaded by framework fallback. */
   additionalAgentsWorkspacePaths?: string[]
+  /** Project-mode callback for reporting final AGENTS.md load status and preview. */
+  onAgentsPromptLoadStatus?: (payload: AgentsPromptLoadStatusPayload) => void
   /** Test/debug hook: captures the final system prompt passed to LangChain. */
   onFinalSystemPrompt?: (prompt: string) => void
   /** Skip injecting MEMORY.md into the system prompt (the memory_search/memory_get
@@ -2945,7 +2999,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     coordinatorWorkerTurnPlanning,
     enableAgentsPrompt = true,
     harnessAgentsPrompt,
+    agentmdLoadStatus,
     additionalAgentsWorkspacePaths,
+    onAgentsPromptLoadStatus,
     onFinalSystemPrompt,
     disableMemoryInjection = false,
     agentMode = "normal",
@@ -3335,19 +3391,24 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       includeMemory: memoryEnabledForRuntime
     }
   )
-  let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
+  let agentsPrompt: AgentsPromptRuntimeResult = {
     prompt: null,
     projectRoot: workspacePath,
     loadedPaths: [],
     truncated: false
   }
   const normalizedHarnessAgentsPrompt = harnessAgentsPrompt?.trim()
+  const normalizedHarnessAgentmdLoadStatus = Array.isArray(agentmdLoadStatus)
+    ? agentmdLoadStatus
+    : []
   const shouldLoadWorkspaceAgentsPrompt = enableAgentsPrompt && !normalizedHarnessAgentsPrompt
+  let agentsPromptLoader: AgentsPromptLoader | undefined
+  let agentsPromptLoadStatusItems: HarnessAgentmdLoadStatusItem[] = []
   if (shouldLoadWorkspaceAgentsPrompt) {
     const normalizedAdditionalAgentsWorkspacePaths =
       additionalAgentsWorkspacePaths?.map((path) => path.trim()).filter(Boolean) ?? []
     agentsPrompt =
-      normalizedAdditionalAgentsWorkspacePaths.length > 0
+      normalizedAdditionalAgentsWorkspacePaths.length > 0 || onAgentsPromptLoadStatus
         ? await loadAgentsPromptForWorkspaces(
             {
               primaryWorkspacePath: workspacePath,
@@ -3363,6 +3424,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
             globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
             projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
           })
+    agentsPromptLoader = "cmbdevclaw"
+    agentsPromptLoadStatusItems = buildFrameworkAgentsLoadStatus(agentsPrompt)
     if (agentsPrompt.prompt) {
       systemPrompt += "\n\n" + agentsPrompt.prompt
       console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
@@ -3381,11 +3444,20 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
   }
   if (normalizedHarnessAgentsPrompt) {
+    agentsPromptLoader = "plugin"
+    agentsPromptLoadStatusItems = normalizedHarnessAgentmdLoadStatus
     systemPrompt += "\n\n" + normalizedHarnessAgentsPrompt
     console.log("[Runtime] Loaded Harness AGENTS.md prompt")
   }
   const combinedAgentsPrompt =
     [agentsPrompt.prompt, normalizedHarnessAgentsPrompt].filter(Boolean).join("\n\n") || undefined
+  if (onAgentsPromptLoadStatus && agentsPromptLoader && agentsPromptLoadStatusItems.length > 0) {
+    onAgentsPromptLoadStatus({
+      items: agentsPromptLoadStatusItems,
+      loader: agentsPromptLoader,
+      promptPreview: combinedAgentsPrompt
+    })
+  }
   if (extraSystemPrompt) {
     systemPrompt += "\n\n" + extraSystemPrompt
   }
