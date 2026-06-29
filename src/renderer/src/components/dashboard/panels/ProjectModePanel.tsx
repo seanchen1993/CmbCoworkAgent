@@ -1774,13 +1774,18 @@ function AdapterListSection({
   const versionCount = adapters.length
   const aggregatedByName = aggregateAdaptersByName(adapters)
   const baseList = mode === "byName" ? aggregatedByName : adapters
-  const sortedAdapters = [...baseList].sort(
-    (a, b) =>
+  // 优先展示能在插件市场匹配上的插件（marketInfo 命中），其次再按项目数降序。
+  const sortedAdapters = [...baseList].sort((a, b) => {
+    const aMatched = marketInfo.has(a.name) ? 1 : 0
+    const bMatched = marketInfo.has(b.name) ? 1 : 0
+    return (
+      bMatched - aMatched ||
       b.projectCount - a.projectCount ||
       b.conversationCount - a.conversationCount ||
       a.name.localeCompare(b.name) ||
       (a.version ?? "").localeCompare(b.version ?? "")
-  )
+    )
+  })
   const totalPages = Math.max(1, Math.ceil(sortedAdapters.length / ADAPTER_PAGE_SIZE))
   const currentPage = Math.min(page, totalPages)
   const pageItems = sortedAdapters.slice(
@@ -1798,8 +1803,8 @@ function AdapterListSection({
       <h2 className="mb-1 text-sm font-semibold text-foreground">插件列表</h2>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
         {mode === "byName"
-          ? "按插件名聚合同名插件的多个版本；按项目数降序排列，项目数为当前状态，对话数、提交、总量两口径采纳率按所选时间范围统计。"
-          : "按插件版本展开；按项目数降序排列，项目数为当前状态，对话数、提交、总量两口径采纳率按所选时间范围统计。"}
+          ? "按插件名聚合同名插件的多个版本；优先展示能在插件市场匹配的插件，再按项目数降序排列，项目数为当前状态，对话数、提交、总量两口径采纳率按所选时间范围统计。"
+          : "按插件版本展开；优先展示能在插件市场匹配的插件，再按项目数降序排列，项目数为当前状态，对话数、提交、总量两口径采纳率按所选时间范围统计。"}
       </p>
       <div className="mb-3 flex items-center overflow-hidden rounded-md border border-border w-fit">
         {modeTabs.map((t) => (
