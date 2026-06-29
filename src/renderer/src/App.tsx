@@ -490,6 +490,11 @@ function App(): React.JSX.Element {
     handlePreviewExpand()
   }, [activeRightPanelThreadId, handlePreviewExpand, setThreadPendingGitDiff])
 
+  const dismissGitChangeNotice = useCallback(() => {
+    if (!activeRightPanelThreadId) return
+    setThreadPendingGitDiff(activeRightPanelThreadId, false)
+  }, [activeRightPanelThreadId, setThreadPendingGitDiff])
+
   useEffect(() => {
     // Keep right panel behavior predictable: when switching thread or entering thread view,
     // always fall back to workspace mode.
@@ -924,6 +929,7 @@ function App(): React.JSX.Element {
                           showTabBar={false}
                           hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
                           onRequestOpenGitPanel={selectGitModule}
+                          onDismissGitChangeNotice={dismissGitChangeNotice}
                           onThreadGitStatusChange={handleThreadGitStatusChange}
                         />
                       ) : (
@@ -945,6 +951,7 @@ function App(): React.JSX.Element {
                         showTabBar={false}
                         hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
                         onRequestOpenGitPanel={selectGitModule}
+                        onDismissGitChangeNotice={dismissGitChangeNotice}
                         onThreadGitStatusChange={handleThreadGitStatusChange}
                       />
                     ) : (
@@ -1025,6 +1032,7 @@ function App(): React.JSX.Element {
                 <HarnessBoardView
                   hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
                   onRequestOpenGitPanel={selectGitModule}
+                  onDismissGitChangeNotice={dismissGitChangeNotice}
                   onThreadGitStatusChange={handleThreadGitStatusChange}
                   onActiveSessionThreadChange={handleHarnessActiveSessionThreadChange}
                 />

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { memo, useEffect, useRef, useState } from "react"
 import { TaskCardPicker } from "@/components/git/TaskCardPicker"
 import { useWorkspaceTaskCard } from "@/components/git/use-workspace-task-card"
 import type { AgentAutoCommitSettings } from "@/types"
@@ -20,7 +20,9 @@ function normalizeSettings(settings: AgentAutoCommitSettings | null): AgentAutoC
   return { ...DEFAULT_AUTO_COMMIT_SETTINGS, ...(settings ?? {}) }
 }
 
-export function WorkspaceTaskCardControl({
+export const WorkspaceTaskCardControl = memo(WorkspaceTaskCardControlImpl)
+
+function WorkspaceTaskCardControlImpl({
   workspacePath
 }: WorkspaceTaskCardControlProps): React.JSX.Element | null {
   const [settings, setSettings] = useState<AgentAutoCommitSettings>(DEFAULT_AUTO_COMMIT_SETTINGS)

@@ -16,6 +16,7 @@ import {
   WORKFLOW_PROMPT_PREVIEW_MAX_CHARS,
   WORKFLOW_RESULT_MAX_CHARS,
   WORKFLOW_RESULT_PREVIEW_MAX_CHARS,
+  WORKFLOW_RESULT_SIDECAR_MAX_BYTES,
   WorkflowAbortError,
   WorkflowFatalError,
   WorkflowScriptError,
@@ -210,11 +211,34 @@ export async function runWorkflowEngine(
         : promiseWarning
     }
     const runStats = stats()
+    const { bounded, sidecarJson, truncated } = boundResultWithSidecar(
+      result,
+      WORKFLOW_RESULT_MAX_CHARS,
+      WORKFLOW_RESULT_SIDECAR_MAX_BYTES
+    )
+    // When the bound truncated the result and the compact full JSON is within the
+    // sidecar cap, persist it to `<runId>.result` so <output-file> is honest. Pass
+    // null when it fits OR when it is too large for the sidecar, clearing stale
+    // leftovers. Do this BEFORE the run.json flush so "available" always points to
+    // an already-written file. Write failure or over-cap → "unavailable".
+    let resultSidecarStatus: "available" | "unavailable" | "none"
+    if (!truncated) {
+      await options.runStore.persistFullResult(null)
+      resultSidecarStatus = "none"
+    } else if (sidecarJson === null) {
+      await options.runStore.persistFullResult(null)
+      resultSidecarStatus = "unavailable"
+    } else {
+      resultSidecarStatus = (await options.runStore.persistFullResult(sidecarJson))
+        ? "available"
+        : "unavailable"
+    }
     options.runStore.update((run) => {
       run.status = status
       run.error = error
       run.warning = effectiveWarning
-      run.result = boundJsonSafe(result, WORKFLOW_RESULT_MAX_CHARS)
+      run.result = bounded
+      run.resultSidecarStatus = resultSidecarStatus
       run.stats = runStats
       run.completedAt = new Date().toISOString()
       // No agent stays "running" in a settled run file.
@@ -251,8 +275,9 @@ export async function runWorkflowEngine(
   // INACTIVITY backstop (not a total-runtime cap — legitimate runs span hours):
   // every progress event resets the clock; a run with NO events for the whole
   // window is treated as hung (e.g. a stuck await loop) and aborted. The window
-  // exceeds the per-subagent timeout, so a slow-but-alive agent always produces
-  // an agent_end (or timeout error) before it expires. Fires lifetime.abort();
+  // is raised above the optional per-subagent timeout when that timeout is
+  // configured, so a slow-but-alive agent can produce an agent_end (or timeout
+  // error) before it expires. Fires lifetime.abort();
   // raceWithAbort then unblocks the engine.
   // NOTE: this is a setInterval timer, so it cannot fire if the event loop
   // itself is starved. The vm sync timeout only bounds the script's FIRST
@@ -277,8 +302,7 @@ export async function runWorkflowEngine(
       // A run blocked ONLY on a pending user approval isn't hung — it's correctly
       // waiting for input. Don't abort it (reset the clock instead), or a
       // background run whose agent needs an approval the absent user hasn't
-      // answered would lose all its completed work to this backstop. An individual
-      // stuck agent is still bounded by the per-subagent timeout.
+      // answered would lose all its completed work to this backstop.
       if (options.isAwaitingApproval?.()) {
         lastActivityAt = Date.now()
         return
@@ -720,6 +744,11 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
     const bucket = context.availableByHash.get(callHash)
     const cached = bucket && bucket.length > 0 ? bucket.shift() : undefined
     if (cached) {
+      const resultPreview = workflowAgentResultPreview(
+        cached.result,
+        cached.structured,
+        Boolean(cached.hasStructured)
+      )
       // Replays spend nothing against the token BUDGET (the original run's token
       // count is surfaced for UI/stats only) — but a replay STILL counts against
       // the 1000-agent cap (agentCount was incremented above), since the cap
@@ -741,10 +770,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         status: "cached",
         outputTokens: replayedTokens,
         promptPreview,
-        resultPreview:
-          typeof cached.result === "string"
-            ? truncateText(cached.result, WORKFLOW_RESULT_PREVIEW_MAX_CHARS)
-            : undefined
+        resultPreview
       })
       // A replay is instantaneous — one agent_end event keeps a large resume
       // from flooding the renderer with start/end pairs.
@@ -757,10 +783,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         status: "cached",
         outputTokens: replayedTokens,
         durationMs: 0,
-        resultPreview:
-          typeof cached.result === "string"
-            ? truncateText(cached.result, WORKFLOW_RESULT_PREVIEW_MAX_CHARS)
-            : undefined
+        resultPreview
       })
       // Copy on the way out: the journal entry is live persisted state, and a
       // script mutating a replayed object in place must not corrupt it.
@@ -803,10 +826,19 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         // an oversized one is simply not journaled so the run file stays bounded.
         // With content-based matching, only THIS call re-runs on resume (its hash
         // has no journal entry); other calls are unaffected — no tail is dropped.
-        const structuredSafe = request.options.schema ? toJsonSafe(result.structured) : undefined
+        const structuredSerialization = request.options.schema
+          ? toJsonSafeWithJson(result.structured)
+          : undefined
+        const structuredSafe = structuredSerialization?.safe
+        const resultPreview = workflowAgentResultPreview(
+          result.text,
+          structuredSafe,
+          Boolean(request.options.schema),
+          structuredSerialization?.json
+        )
         const structuredOversized =
           structuredSafe !== undefined &&
-          JSON.stringify(structuredSafe).length > WORKFLOW_RESULT_MAX_CHARS
+          (structuredSerialization?.json?.length ?? 0) > WORKFLOW_RESULT_MAX_CHARS
         if (structuredOversized) {
           log(
             `${label}: structured result too large to journal — only this call re-runs on resume (content-based matching; other agents still replay from cache)`
@@ -835,7 +867,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
           phase: assignedPhase,
           status: "completed",
           outputTokens: result.outputTokens,
-          resultPreview: truncateText(result.text, WORKFLOW_RESULT_PREVIEW_MAX_CHARS)
+          resultPreview
         })
         emit({
           kind: "agent_end",
@@ -846,7 +878,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
           status: "completed",
           outputTokens: result.outputTokens,
           durationMs: Date.now() - startedAt,
-          resultPreview: truncateText(result.text, WORKFLOW_RESULT_PREVIEW_MAX_CHARS)
+          resultPreview
         })
         // Return the JSON-safe copy (not the raw runner object) so the live
         // path matches the cached-replay path (which returns toJsonSafe too) and
@@ -1405,23 +1437,73 @@ function createLimiter(limit: number): <T>(fn: () => Promise<T>) => Promise<T> {
 
 /** Converts vm-realm values into plain JSON-safe host values (drops functions/cycles). */
 export function toJsonSafe(value: unknown): unknown {
-  if (value === undefined) return undefined
+  return toJsonSafeWithJson(value).safe
+}
+
+function toJsonSafeWithJson(value: unknown): { safe: unknown; json?: string } {
+  if (value === undefined) return { safe: undefined }
   try {
-    return JSON.parse(JSON.stringify(value)) as unknown
+    const json = JSON.stringify(value)
+    if (json === undefined) {
+      const safe = String(value)
+      return { safe, json: JSON.stringify(safe) }
+    }
+    return { safe: JSON.parse(json) as unknown, json }
   } catch {
-    return String(value)
+    const safe = String(value)
+    return { safe, json: JSON.stringify(safe) }
   }
 }
 
-/** toJsonSafe, but oversized values collapse to a truncated string so persisted files stay bounded. */
-function boundJsonSafe(value: unknown, maxChars: number): unknown {
+function workflowAgentResultPreview(
+  text: unknown,
+  structured: unknown,
+  hasStructured: boolean,
+  structuredJson?: string
+): string | undefined {
+  if (hasStructured && structured !== undefined) {
+    try {
+      const json = structuredJson ?? JSON.stringify(structured)
+      return truncateText(
+        json === undefined ? String(structured) : json,
+        WORKFLOW_RESULT_PREVIEW_MAX_CHARS
+      )
+    } catch {
+      return truncateText(String(structured), WORKFLOW_RESULT_PREVIEW_MAX_CHARS)
+    }
+  }
+  if (typeof text === "string") return truncateText(text, WORKFLOW_RESULT_PREVIEW_MAX_CHARS)
+  return undefined
+}
+
+/**
+ * Bound the result for run.json AND, when the bound truncates it, return the compact
+ * full JSON for the `<runId>.result` sidecar if it fits the sidecar cap. Very large
+ * results remain bounded in run.json but get no advertised complete output file.
+ */
+function boundResultWithSidecar(
+  value: unknown,
+  maxChars: number,
+  sidecarMaxBytes: number
+): { bounded: unknown; sidecarJson: string | null; truncated: boolean } {
   const safe = toJsonSafe(value)
-  if (safe === undefined) return undefined
+  if (safe === undefined) return { bounded: undefined, sidecarJson: null, truncated: false }
   try {
     const serialized = JSON.stringify(safe)
-    if (serialized.length <= maxChars) return safe
-    return truncateText(serialized, maxChars)
+    // JSON.stringify returns undefined for values like a bare function/symbol that
+    // slipped through toJsonSafe — mirror boundJsonSafe's String() fallback.
+    if (serialized === undefined) {
+      return { bounded: String(safe), sidecarJson: null, truncated: false }
+    }
+    if (serialized.length <= maxChars) {
+      return { bounded: safe, sidecarJson: null, truncated: false }
+    }
+    return {
+      bounded: truncateText(serialized, maxChars),
+      sidecarJson: Buffer.byteLength(serialized, "utf8") <= sidecarMaxBytes ? serialized : null,
+      truncated: true
+    }
   } catch {
-    return String(safe)
+    return { bounded: String(safe), sidecarJson: null, truncated: false }
   }
 }

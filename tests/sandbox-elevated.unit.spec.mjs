@@ -1082,6 +1082,16 @@ test("approval requests do not auto-timeout and are cleaned up on run abort", ()
     /pendingApprovals\.delete\(req\.id\)[\s\S]*resolve\(decision\)/,
     "resolving an approval should remove the pending entry before resolving the decision"
   )
+  assert.match(
+    runtimeApprovalSection,
+    /const resolveOnce[\s\S]*if \(attentionRaised\)[\s\S]*action: "resolve"[\s\S]*key: `approval:\$\{req\.id\}`/,
+    "approval attention should resolve from the shared resolveOnce lifecycle"
+  )
+  assert.doesNotMatch(
+    sandboxSource,
+    /pendingApprovals\.delete\(decision\.requestId\)/,
+    "approval decision IPC should delegate cleanup to the shared approval resolver"
+  )
 })
 
 test("pending command approvals can be restored after renderer reload", () => {

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, memo } from "react"
 import { ChevronDown, Check, Key, Zap, Info } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
@@ -19,7 +19,9 @@ interface ModelSwitcherProps {
   threadId: string
 }
 
-export function ModelSwitcher({ threadId }: ModelSwitcherProps): React.JSX.Element {
+export const ModelSwitcher = memo(ModelSwitcherImpl)
+
+function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [customDialogOpen, setCustomDialogOpen] = useState(false)
   const [dialogModelId, setDialogModelId] = useState<string | undefined>(undefined)

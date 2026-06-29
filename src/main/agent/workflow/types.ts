@@ -32,6 +32,15 @@ export const WORKFLOW_MAX_COLLECTION_ITEMS = 4096
  */
 export const WORKFLOW_RESULT_MAX_CHARS = 64_000
 
+/**
+ * Byte cap for the full-result sidecar. Keep this in the same ballpark as Claude
+ * Code's default task-output read/memory window (8 MiB), while still preventing a
+ * pathological workflow return from turning the Electron main process into an
+ * unbounded JSON/disk sink. Results above this cap still get the bounded run.json
+ * marker, but no <output-file> is advertised as complete.
+ */
+export const WORKFLOW_RESULT_SIDECAR_MAX_BYTES = 8 * 1024 * 1024
+
 /** Truncation cap for one `log()` message. */
 export const WORKFLOW_LOG_MAX_CHARS = 2_000
 
@@ -42,8 +51,8 @@ export const WORKFLOW_MAX_LOG_LINES = 500
  * completion notification. ~8K to match Claude Code's <result> preview cap — CC's
  * marker reports the unit explicitly as "truncated N chars" and its preview measures
  * ~8K chars (≈2K tokens), not 32K. When a result exceeds this it is truncated inline
- * with a marker, and the FULL result is always linked via <output-file> for the model
- * to read with its file tools. */
+ * with a marker, and a complete output file is linked when the full result is within
+ * the sidecar cap and persisted successfully. */
 export const WORKFLOW_TOOL_RESULT_MAX_CHARS = 8_000
 
 /** Schema-validation retries granted to a subagent's structured_output tool. */
@@ -87,12 +96,17 @@ export const WORKFLOW_MAX_AGENT_INVOCATIONS = 10_000
 
 export const WORKFLOW_RUN_ID_PATTERN = /^wf_[a-z0-9]{6,32}$/
 
-/** Per-subagent wall-clock timeout. Mid-tier gateways can hang; never wait forever. */
-export function getWorkflowAgentTimeoutMs(): number {
+/**
+ * Optional per-subagent wall-clock timeout. Unset by default to match the base
+ * workflow contract; operators can enable it with CMB_WORKFLOW_AGENT_TIMEOUT_MS
+ * when their gateway needs a per-agent hang backstop. Values below 30s are ignored
+ * so a typo cannot make every subagent fail almost immediately.
+ */
+export function getWorkflowAgentTimeoutMs(): number | undefined {
   const raw = process.env.CMB_WORKFLOW_AGENT_TIMEOUT_MS
   const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN
   if (Number.isFinite(parsed) && parsed >= 30_000) return parsed
-  return 20 * 60 * 1000
+  return undefined
 }
 
 /**
@@ -113,37 +127,41 @@ export function getWorkflowGlobMax(): number {
 
 /**
  * Run INACTIVITY backstop — not a total-runtime cap (legitimate runs span
- * hours). Every progress event (agent start/end, phase, log) resets the
- * clock; only a run with no events for the whole window is treated as hung
- * (stuck await loop, starved microtask queue) and aborted. The window is always
- * kept above the per-subagent timeout (floored by the cross-check below, not
- * just by the default), so a slow-but-alive agent always emits before it
- * expires. Override with CMB_WORKFLOW_RUN_TIMEOUT_MS.
+ * hours). Every progress event (agent start/end, phase, log) resets the clock;
+ * only a run with no events for the whole window is treated as hung (stuck await
+ * loop, starved microtask queue) and aborted. When the optional per-subagent
+ * timeout is enabled, this window is kept above it so a slow-but-alive agent
+ * times out cleanly before the run-level inactivity backstop. Defaults to 2h: long
+ * enough for slow gateway/model calls, but short enough that a hung Electron-side
+ * workflow does not stay active all day. Override with CMB_WORKFLOW_RUN_TIMEOUT_MS.
  */
 export function getWorkflowRunWallClockMs(): number {
   const raw = process.env.CMB_WORKFLOW_RUN_TIMEOUT_MS
   const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN
-  const configured = Number.isFinite(parsed) && parsed >= 60_000 ? parsed : 30 * 60 * 1000
-  // Cross-check the two independent env knobs (no silent foot-gun): the
-  // inactivity window MUST exceed the per-subagent timeout, or a slow-but-healthy
-  // agent — one that emits no progress event between its start and end — would
-  // trip the "hung" backstop and be aborted mid-flight. If CMB_WORKFLOW_RUN_TIMEOUT_MS
-  // was set below CMB_WORKFLOW_AGENT_TIMEOUT_MS, floor the window one minute above
-  // the agent timeout rather than honoring the inconsistent value.
-  const minWindow = getWorkflowAgentTimeoutMs() + 60_000
-  if (configured < minWindow) {
-    console.warn(
-      `[Workflow] CMB_WORKFLOW_RUN_TIMEOUT_MS (${configured}ms) is below the per-subagent ` +
-        `timeout; raising the inactivity window to ${minWindow}ms so a slow-but-healthy agent ` +
-        `is not killed mid-flight.`
-    )
-    return minWindow
+  const configured = Number.isFinite(parsed) && parsed >= 60_000 ? parsed : 2 * 60 * 60 * 1000
+  // Cross-check the two independent env knobs when per-subagent timeout is
+  // enabled (no silent foot-gun): the inactivity window MUST exceed that timeout,
+  // or a slow-but-healthy agent — one that emits no progress event between its
+  // start and end — would trip the "hung" backstop and be aborted mid-flight.
+  // If CMB_WORKFLOW_RUN_TIMEOUT_MS was set too low, floor the window one minute
+  // above the agent timeout rather than honoring the inconsistent value.
+  const agentTimeoutMs = getWorkflowAgentTimeoutMs()
+  if (agentTimeoutMs !== undefined) {
+    const minWindow = agentTimeoutMs + 60_000
+    if (configured < minWindow) {
+      console.warn(
+        `[Workflow] CMB_WORKFLOW_RUN_TIMEOUT_MS (${configured}ms) is below the per-subagent ` +
+          `timeout; raising the inactivity window to ${minWindow}ms so a slow-but-healthy agent ` +
+          `is not killed mid-flight.`
+      )
+      return minWindow
+    }
   }
   return configured
 }
 
-/** Hard TOTAL-runtime ceiling — a backstop ABOVE the inactivity window for a run
- * that stays active (keeps emitting) but never converges. Default 12h; env
+/** Hard TOTAL-runtime ceiling — a final backstop for a run that stays active
+ * (keeps emitting) but never converges. Default 12h; env
  * CMB_WORKFLOW_MAX_RUNTIME_MS (min 5min). Like the inactivity timer this is a
  * macrotask timer: it CANNOT fire if the event loop is starved by a post-await sync
  * loop (that needs off-thread execution). It bounds long-but-ALIVE runs, not frozen ones. */
@@ -357,6 +375,17 @@ export interface PersistedWorkflowRun {
   logs: string[]
   journal: WorkflowJournalEntry[]
   result?: unknown
+  /**
+   * Where the COMPLETE result lives for the completion notification's <output-file>:
+   * - "none": result fit under WORKFLOW_RESULT_MAX_CHARS, so run.json holds it whole.
+   * - "available": result was truncated in run.json; the full copy is in the
+   *   `<runId>.result` sidecar (never truncated).
+   * - "unavailable": result was truncated but the sidecar is missing, too large, or
+   *   failed to write — NO file has the complete result, so the notification must not
+   *   promise one.
+   * Absent on legacy runs persisted before this field existed.
+   */
+  resultSidecarStatus?: "available" | "unavailable" | "none"
   error?: string
   /** Non-fatal advisory surfaced to the model (e.g. completed but ran 0 agents). */
   warning?: string
@@ -475,6 +504,8 @@ export function isWorkflowAbortError(error: unknown): boolean {
  * `instanceof` the host realm's Error, so check the shape instead.
  */
 export function describeWorkflowError(error: unknown): string {
+  const interruptMessage = describeGraphInterruptMessage(error)
+  if (interruptMessage !== undefined) return interruptMessage
   if (error instanceof Error) return error.message
   if (
     typeof error === "object" &&
@@ -484,6 +515,22 @@ export function describeWorkflowError(error: unknown): string {
     return (error as { message: string }).message
   }
   return String(error)
+}
+
+function describeGraphInterruptMessage(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined
+  const interrupts = (error as { interrupts?: unknown }).interrupts
+  if (!Array.isArray(interrupts) || interrupts.length === 0) return undefined
+  const first = interrupts[0]
+  if (
+    typeof first === "object" &&
+    first !== null &&
+    typeof (first as { value?: unknown }).value === "string"
+  ) {
+    return (first as { value: string }).value
+  }
+  if (typeof first === "string") return first
+  return undefined
 }
 
 export function truncateText(value: string, maxChars: number): string {

@@ -15,6 +15,7 @@ import {
 } from "../db"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyIfBackground } from "./notify"
+import { emitAppAttention } from "../app-attention-events"
 
 /** Fixed thread ID for heartbeat (aligns with Nanobot session_key="heartbeat"). Resets won't orphan it. */
 const HEARTBEAT_THREAD_ID = "heartbeat"
@@ -348,6 +349,10 @@ async function executeHeartbeat(): Promise<void> {
         lastRunError: null
       })
       notifyIfBackground("💓 Heartbeat", stripped.text.trim() || "检查完成，有需要关注的内容")
+      emitAppAttention({
+        kind: "interaction",
+        threadId
+      })
       console.log("[Heartbeat] Completed with actionable output")
     }
   } catch (error) {
@@ -359,7 +364,13 @@ async function executeHeartbeat(): Promise<void> {
       lastRunStatus: "error",
       lastRunError: message
     })
-    if (!isAbort) notifyIfBackground("❌ Heartbeat", message)
+    if (!isAbort) {
+      notifyIfBackground("❌ Heartbeat", message)
+      emitAppAttention({
+        kind: "task-error",
+        threadId
+      })
+    }
     console.error("[Heartbeat] Error:", message)
   } finally {
     running = false

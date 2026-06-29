@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react"
+import React, { useState, useEffect, useCallback, useRef, memo } from "react"
 import { GitBranch, Check, Loader2, RefreshCw, AlertCircle, ChevronDown } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -24,7 +24,9 @@ function isRemoteBranch(branch: string): boolean {
   return branch.startsWith("origin/")
 }
 
-export function GitBranchSwitcher({
+export const GitBranchSwitcher = memo(GitBranchSwitcherImpl)
+
+function GitBranchSwitcherImpl({
   workspacePath
 }: GitBranchSwitcherProps): React.JSX.Element | null {
   const [open, setOpen] = useState(false)

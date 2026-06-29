@@ -419,7 +419,31 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   if (context.skillTriggerToolName) payload.skill_trigger_tool_name = context.skillTriggerToolName
   if (context.subagent) payload.subagent = context.subagent
   if (context.stopContext) payload.stop_context = context.stopContext
-  return JSON.stringify(payload)
+  return stringifyAsciiJson(payload)
+}
+
+/**
+ * Serialize the hook stdin payload as ASCII-only JSON (non-ASCII → \uXXXX).
+ *
+ * stdin bytes are written UTF-8 (Node's string default in `child.stdin.end`),
+ * but on Chinese Windows the interpreters that read them — Python's
+ * `sys.stdin.read()` (cp936/GBK via locale), PowerShell's `[Console]::In`
+ * (OEM codepage), cmd — default to the system ANSI/OEM codepage, not UTF-8.
+ * Any non-ASCII field (Chinese prompts, tool args, block reasons) therefore
+ * comes back as mojibake or throws UnicodeDecodeError. Escaping every code unit
+ * >= U+0080 to \uXXXX keeps the payload pure ASCII — a common subset of UTF-8
+ * and every legacy codepage — so the bytes are identical regardless of the
+ * encoding the script assumes, and every JSON parser restores the real code
+ * points. Surrogate pairs are emitted as two \uXXXX escapes, which is valid JSON.
+ */
+function stringifyAsciiJson(payload: unknown): string {
+  const json = JSON.stringify(payload)
+  let out = ""
+  for (let i = 0; i < json.length; i++) {
+    const code = json.charCodeAt(i)
+    out += code > 0x7f ? "\\u" + code.toString(16).padStart(4, "0") : json[i]
+  }
+  return out
 }
 
 function isBlockingResult(result: HookResult): boolean {

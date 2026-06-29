@@ -100,7 +100,7 @@ import {
   type CoordinatorSelectedSkill
 } from "../agent/coordinator-mode"
 import { workflowRunManager } from "../agent/workflow/run-manager"
-import { runFilePath } from "../agent/workflow/run-store"
+import { resolveWorkflowOutputFile } from "../agent/workflow/run-store"
 import {
   WORKFLOW_NOTIFICATION_MARKER_PREFIX,
   WORKFLOW_NOTIFICATION_TURN_PROMPT,
@@ -121,13 +121,13 @@ import {
 } from "../agent/failover"
 import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
 import {
-  createHookScope,
   normalizePathKey,
   normalizePluginId,
   normalizeSkillName,
   resolveEnabledHooksForRun,
   type HookScopeController
 } from "../hooks/scope"
+import { createPersistentThreadHookScope } from "../hooks/thread-scope-persistence"
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
@@ -178,7 +178,10 @@ import {
   resolveEvaluatorConfig,
   shouldPauseGoalForEmptyTurn
 } from "../agent/goals/evaluator"
-import { evaluateGoalWithRuntimeRetry } from "../agent/goals/evaluator-runtime"
+import {
+  evaluateGoalWithRuntimeRetry,
+  formatGoalEvaluatorRuntimeFailureReason
+} from "../agent/goals/evaluator-runtime"
 import { GoalEvidenceBuffer } from "../agent/goals/evidence"
 import {
   RUNTIME_RESTORED_ACTIVE_GOAL_REASON,
@@ -206,6 +209,7 @@ import type {
   AgentInterruptParams,
   AgentCancelParams
 } from "../types"
+import { emitAppAttention } from "../app-attention-events"
 
 const MIN_CHARS_FOR_MEMORY = 200
 const MAX_STOP_HOOK_REVISIONS = 2
@@ -770,7 +774,7 @@ function sendHookHalt(window: BrowserWindow, channel: string, error: HookHaltErr
 
 /**
  * Thread-scoped hook state shared across IPC handler boundaries. A new
- * `agent:invoke` starts a fresh turn, but keeps the session-level persistent
+ * `agent:invoke` starts a fresh turn, but keeps the thread-level persistent
  * hook keys that were activated by earlier skill / plugin use in this thread.
  * `agent:resume` / `agent:interrupt` reuse the current turn state. Without
  * this Map, every IPC handler entry would reset hookScope etc. and scoped
@@ -788,9 +792,13 @@ interface TurnState {
 
 const turnStates = new Map<string, TurnState>()
 
-function createTurnState(initialUserMessage?: string, turnId?: string): TurnState {
+function createTurnState(
+  threadId: string,
+  initialUserMessage?: string,
+  turnId?: string
+): TurnState {
   return {
-    hookScope: createHookScope(),
+    hookScope: createPersistentThreadHookScope(threadId),
     skillUseTracker: createSkillUseTracker(),
     skillHookKeys: new Set<string>(),
     stopContextCollector: new StopHookContextCollector(initialUserMessage),
@@ -806,7 +814,7 @@ function resetTurnStateForNewInvoke(
   turnId?: string
 ): void {
   const snapshot = state.hookScope.snapshot()
-  state.hookScope = createHookScope()
+  state.hookScope = createPersistentThreadHookScope(threadId)
   state.hookScope.activatePersistentHookKeys(snapshot.persistentHookKeys ?? [])
   state.skillUseTracker = createSkillUseTracker()
   state.skillHookKeys = new Set<string>()
@@ -823,7 +831,7 @@ function getOrCreateTurnState(
 ): TurnState {
   const existing = turnStates.get(threadId)
   if (existing) return existing
-  const fresh = createTurnState(initialUserMessage, turnId)
+  const fresh = createTurnState(threadId, initialUserMessage, turnId)
   turnStates.set(threadId, fresh)
   return fresh
 }
@@ -4192,10 +4200,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             await tracer.finish("success", "WORKFLOW_NOTIFICATION_STALE")
             return
           }
-          const workflowOutputFile = runFilePath(
+          const workflowOutputFile = resolveWorkflowOutputFile(
             workspacePath,
             pendingWorkflowRun.threadId,
-            pendingWorkflowRun.runId
+            pendingWorkflowRun
           )
           effectiveMessage = buildWorkflowNotificationMessage(
             pendingWorkflowRun,
@@ -5410,11 +5418,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
             }
 
-            const finalMsgs = state.messages.filter((m) => {
+            const finalMsgs = state.messages.slice(valuesStartIndex).filter((m) => {
               const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
               const kw = m.kwargs || {}
+              const isAiMessage = cn.includes("AI") || kw.type === "ai"
               return (
-                cn.includes("AI") &&
+                isAiMessage &&
                 (!kw.tool_calls || !Array.isArray(kw.tool_calls) || kw.tool_calls.length === 0)
               )
             })
@@ -5773,7 +5782,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     console.warn("[Goal] evaluator failed after retry:", error)
                     return {
                       verdict: "blocked",
-                      reason: "评估器暂时不可用。Goal 已暂停，请稍后使用 /goal resume 重试。"
+                      reason: formatGoalEvaluatorRuntimeFailureReason(error)
                     }
                   }
                 })
@@ -5918,6 +5927,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
           turnStateShouldDispose = true
           safeSendToWindow(window, channel, { type: "done" })
+          if (invokeFinalOutcome === "success" && !isInternalNotificationTurn) {
+            emitAppAttention({
+              kind: "task-complete",
+              threadId,
+              key: `agent:${threadId}:${turnState.turnId}`
+            })
+          }
           const postRunAssistantText = trimPostRunAssistantText(assistantText)
           if (invokeFinalOutcome === "success") {
             notifyIfBackground("✅ 任务完成", lastFinalText || postRunAssistantText || "对话已完成")
@@ -6958,6 +6974,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           turnStateShouldDispose = true
           safeSendToWindow(window, channel, { type: "done" })
+          if (!boundaryGoalId) {
+            emitAppAttention({
+              kind: "task-complete",
+              threadId,
+              key: `agent:${threadId}:${turnState.turnId}`
+            })
+          }
         }
       } catch (error) {
         if (isHookHaltError(error)) {
@@ -7660,6 +7683,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           turnStateShouldDispose = true
           safeSendToWindow(window, channel, { type: "done" })
+          if (!boundaryGoalId) {
+            emitAppAttention({
+              kind: "task-complete",
+              threadId,
+              key: `agent:${threadId}:${turnState.turnId}`
+            })
+          }
         }
       } else if (decision.type === "reject") {
         // For reject, we need to send a Command with reject decision
@@ -7833,6 +7863,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       } else if (!controller && !cancelWorkers) {
         console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
       }
+      return Boolean(controller && !cancelWorkers)
     }
   )
 }

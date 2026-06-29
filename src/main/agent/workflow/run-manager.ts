@@ -17,6 +17,7 @@ import {
   type PersistedWorkflowRun,
   type WorkflowProgressEvent
 } from "./types"
+import { emitAppAttention } from "../../app-attention-events"
 
 /**
  * Background workflow run manager — the Claude Code execution model: the
@@ -349,6 +350,11 @@ class WorkflowRunManager {
               if (!evicted) break
             }
           }
+          emitAppAttention({
+            kind: runStore.state.status === "completed" ? "task-complete" : "task-error",
+            threadId: request.threadId,
+            key: `workflow:${request.runId}`
+          })
           broadcast(request.threadId, { type: "workflow_notification", runId: request.runId })
         } else {
           // Mark the cancelled run delivered too: otherwise a later hydrate's

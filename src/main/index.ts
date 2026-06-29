@@ -11,6 +11,22 @@ import { existsSync, rmSync } from "fs"
 import { writeMainLog, writeRendererLog, flushLogs, flushLogsSync } from "./logging"
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
 import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
+import {
+  clearAppAttention,
+  disposeAppTray,
+  initializeAppTray,
+  isAppQuitting,
+  isAppTrayAvailable,
+  requestAppAttention,
+  setAppQuitting,
+  showPendingAppAttention,
+  shouldHideMainWindowOnClose
+} from "./app-tray"
+import { setAppAttentionHandler } from "./app-attention-events"
+import {
+  APP_ATTENTION_CHANNEL,
+  isRendererAppAttentionPayload
+} from "../shared/app-attention"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
@@ -330,6 +346,9 @@ function createWindow(): void {
     applyMacDockIcon()
   })
 
+  mainWindow.on("focus", clearAppAttention)
+  mainWindow.on("blur", showPendingAppAttention)
+
   mainWindow.on("unresponsive", () => {
     console.warn("[Main] BrowserWindow became unresponsive")
   })
@@ -384,10 +403,18 @@ function createWindow(): void {
     }
   }
 
-  mainWindow.on("close", () => {
+  mainWindow.on("close", (event) => {
     console.warn("[Main] Main window close requested", {
       pet: getPetWindowDebugInfo()
     })
+    if (shouldHideMainWindowOnClose(isAppQuitting(), isAppTrayAvailable())) {
+      event.preventDefault()
+      mainWindow?.hide()
+      showPendingAppAttention()
+      if (process.platform === "darwin" && app.dock) {
+        app.dock.hide()
+      }
+    }
   })
 
   mainWindow.on("closed", () => {
@@ -408,6 +435,7 @@ function createWindow(): void {
  * 供单实例唤起、宠物窗口交互等入口复用，覆盖主窗口被销毁、最小化和隐藏三种情况。
  */
 function ensureMainWindowVisible(): BrowserWindow | null {
+  clearAppAttention()
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow()
     return mainWindow
@@ -550,6 +578,18 @@ if (!gotTheLock) {
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
 
+    ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      if (
+        event.sender.id !== mainWindow.webContents.id ||
+        !isRendererAppAttentionPayload(payload)
+      )
+        return
+      // Main-process sources own persistent state and keys. Strip renderer keys so
+      // a compromised renderer cannot overwrite or resolve an approval/input entry.
+      requestAppAttention({ kind: payload.kind, threadId: payload.threadId })
+    })
+
     ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
       mainLogForwardingEnabled = Boolean(enabled)
     })
@@ -632,6 +672,14 @@ if (!gotTheLock) {
     ipcMain.handle("update:get-startup-result", () => selfCheckResult)
 
     createWindow()
+    setAppAttentionHandler(requestAppAttention)
+    await initializeAppTray({
+      getMainWindow: () => mainWindow,
+      showMainWindow: () => {
+        ensureMainWindowVisible()
+        applyMacDockIcon()
+      }
+    })
     createPetWindow()
 
     // Start scheduled task scheduler and heartbeat service
@@ -653,9 +701,8 @@ if (!gotTheLock) {
     })
 
     app.on("activate", () => {
-      if (!mainWindow || mainWindow.isDestroyed()) {
-        createWindow()
-      }
+      ensureMainWindowVisible()
+      applyMacDockIcon()
       createPetWindow()
     })
   })
@@ -675,6 +722,7 @@ if (!gotTheLock) {
   // queued there have no guarantee of completing before the process exits.
   let sessionEndDone = false
   app.on("before-quit", (event) => {
+    setAppQuitting(true)
     console.warn("[Main] before-quit", {
       sessionEndDone,
       hasActiveSessions: hasActiveSessions(),
@@ -708,6 +756,8 @@ if (!gotTheLock) {
     }
     quitting = true
     e.preventDefault()
+    setAppAttentionHandler(null)
+    disposeAppTray()
     applyKeepAwake(false)
     disposeAllTerminals()
     LocalSandbox.killAll()

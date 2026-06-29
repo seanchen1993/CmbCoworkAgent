@@ -29,7 +29,9 @@ import {
   findUndeliveredTerminalRun,
   pruneWorkflowRuns,
   sha256Hex,
-  getWorkflowRunsDir
+  getWorkflowRunsDir,
+  workflowResultFilePath,
+  resolveWorkflowOutputFile
 } from "../src/main/agent/workflow/run-store.ts"
 import {
   buildWorkflowNotificationMessage,
@@ -39,7 +41,12 @@ import {
   WORKFLOW_NOTIFICATION_TURN_PROMPT as RENDERER_WORKFLOW_NOTIFICATION_TURN_PROMPT,
   isWorkflowNotificationPrompt
 } from "../src/renderer/src/lib/message-display-helpers.ts"
-import { WORKFLOW_TOOL_RESULT_MAX_CHARS } from "../src/main/agent/workflow/types.ts"
+import {
+  WORKFLOW_TOOL_RESULT_MAX_CHARS,
+  WORKFLOW_RESULT_MAX_CHARS,
+  WORKFLOW_RESULT_SIDECAR_MAX_BYTES,
+  WorkflowScriptError
+} from "../src/main/agent/workflow/types.ts"
 import type {
   PersistedWorkflowRun,
   WorkflowProgressEvent,
@@ -59,6 +66,20 @@ import {
 
 function assert(cond: unknown, msg: string): void {
   if (!cond) throw new Error(msg)
+}
+
+function assertWorkflowScriptError(source: string, includes: string, label: string): void {
+  let thrown: unknown
+  try {
+    validateWorkflowScript(source)
+  } catch (error) {
+    thrown = error
+  }
+  assert(thrown instanceof WorkflowScriptError, `${label} should fail during script validation`)
+  assert(
+    String((thrown as Error).message).includes(includes),
+    `${label} error should include ${includes}, got: ${String((thrown as Error).message)}`
+  )
 }
 
 function testRendererNotificationFullMatch(): void {
@@ -300,6 +321,242 @@ return "ok"`,
     `fire-and-forget fatal must fail the run, got ${result.status}: ${JSON.stringify(result.result)}`
   )
   assert(/budget/.test(result.error ?? ""), `error names the budget fatal, got: ${result.error}`)
+}
+
+async function testFullResultSidecarForOversizedReturn(workspace: string): Promise<void> {
+  // AE-18 regression: a return value larger than WORKFLOW_RESULT_MAX_CHARS is truncated
+  // in run.json (kept small for the runs panel), but the COMPLETE result must be
+  // persisted to the <runId>.result sidecar so the notification's <output-file> is
+  // honest. resultSidecarStatus on the record — NOT existsSync — is the resolver's
+  // source of truth, so a stale sidecar can't be mistaken for the current result.
+
+  // --- Oversized result → sidecar holds the complete value, run.json keeps a marker.
+  const bigLen = WORKFLOW_RESULT_MAX_CHARS + 6000
+  const big = createHarness(workspace)
+  const bigResult = await big.run(
+    `export const meta = { name: "big", description: "d" }
+return "x".repeat(${bigLen})`,
+    echoRunner
+  )
+  assert(bigResult.status === "completed", `completed, got ${bigResult.error}`)
+  const bigRun = loadWorkflowRun(workspace, THREAD_ID, big.runId)!
+  assert(
+    bigRun.resultSidecarStatus === "available",
+    `oversized result → resultSidecarStatus "available", got ${bigRun.resultSidecarStatus}`
+  )
+  const sidecar = workflowResultFilePath(workspace, THREAD_ID, big.runId)
+  assert(existsSync(sidecar), "oversized result must write a .result sidecar")
+  const full = JSON.parse(readFileSync(sidecar, "utf-8"))
+  assert(
+    typeof full === "string" && full.length === bigLen,
+    `sidecar holds the COMPLETE result, got ${typeof full === "string" ? full.length : "non-string"}`
+  )
+  assert(
+    typeof bigRun.result === "string" && bigRun.result.length < bigLen,
+    "run.json keeps only the bounded (truncated) copy"
+  )
+  assert(
+    resolveWorkflowOutputFile(workspace, THREAD_ID, bigRun) === sidecar,
+    "output-file must resolve to the .result sidecar when status is available"
+  )
+  const message = buildWorkflowNotificationMessage(
+    bigRun,
+    resolveWorkflowOutputFile(workspace, THREAD_ID, bigRun)
+  )
+  assert(
+    message.includes("(truncated") && message.includes(sidecar),
+    "notification must point the model to the full-result sidecar"
+  )
+
+  const corruptAvailableRunId = generateWorkflowRunId()
+  writeFileSync(workflowResultFilePath(workspace, THREAD_ID, corruptAvailableRunId), "{bad json")
+  assert(
+    resolveWorkflowOutputFile(workspace, THREAD_ID, {
+      ...bigRun,
+      runId: corruptAvailableRunId,
+      resultSidecarStatus: "available"
+    }) === undefined,
+    "available sidecar must not resolve when the sidecar is corrupt"
+  )
+
+  const directorySidecarRunId = generateWorkflowRunId()
+  mkdirSync(workflowResultFilePath(workspace, THREAD_ID, directorySidecarRunId))
+  assert(
+    resolveWorkflowOutputFile(workspace, THREAD_ID, {
+      ...bigRun,
+      runId: directorySidecarRunId,
+      resultSidecarStatus: "available"
+    }) === undefined,
+    "available sidecar must not resolve when the sidecar path is not a regular file"
+  )
+
+  const oversizedSidecarRunId = generateWorkflowRunId()
+  writeFileSync(
+    workflowResultFilePath(workspace, THREAD_ID, oversizedSidecarRunId),
+    JSON.stringify("x".repeat(WORKFLOW_RESULT_SIDECAR_MAX_BYTES))
+  )
+  assert(
+    resolveWorkflowOutputFile(workspace, THREAD_ID, {
+      ...bigRun,
+      runId: oversizedSidecarRunId,
+      resultSidecarStatus: "available"
+    }) === undefined,
+    "available sidecar must not resolve when the sidecar exceeds the byte cap"
+  )
+
+  // --- Over the sidecar cap → bounded run.json only, no false complete output-file.
+  const overSidecarLen = WORKFLOW_RESULT_SIDECAR_MAX_BYTES + 1000
+  const overSidecar = createHarness(workspace)
+  await overSidecar.run(
+    `export const meta = { name: "too-big", description: "d" }
+return "z".repeat(${overSidecarLen})`,
+    echoRunner
+  )
+  const overSidecarRun = loadWorkflowRun(workspace, THREAD_ID, overSidecar.runId)!
+  assert(
+    overSidecarRun.resultSidecarStatus === "unavailable",
+    `over-cap result → resultSidecarStatus "unavailable", got ${overSidecarRun.resultSidecarStatus}`
+  )
+  assert(
+    !existsSync(workflowResultFilePath(workspace, THREAD_ID, overSidecar.runId)),
+    "over-cap result must not write an unbounded .result sidecar"
+  )
+  assert(
+    resolveWorkflowOutputFile(workspace, THREAD_ID, overSidecarRun) === undefined,
+    "over-cap result must not advertise a complete output-file"
+  )
+  const overSidecarMessage = buildWorkflowNotificationMessage(
+    overSidecarRun,
+    resolveWorkflowOutputFile(workspace, THREAD_ID, overSidecarRun)
+  )
+  assert(
+    !overSidecarMessage.includes("full result in"),
+    "notification must not claim a full-result path for an over-cap sidecar"
+  )
+
+  // --- Multi-byte result over the BYTE cap → no sidecar even when char count is smaller.
+  const cjkOverSidecarLen = Math.ceil(WORKFLOW_RESULT_SIDECAR_MAX_BYTES / 3) + 1000
+  assert(
+    cjkOverSidecarLen < WORKFLOW_RESULT_SIDECAR_MAX_BYTES,
+    "test fixture should exceed byte cap without exceeding char cap"
+  )
+  const cjkOverSidecar = createHarness(workspace)
+  await cjkOverSidecar.run(
+    `export const meta = { name: "too-big-cjk", description: "d" }
+return "汉".repeat(${cjkOverSidecarLen})`,
+    echoRunner
+  )
+  const cjkOverSidecarRun = loadWorkflowRun(workspace, THREAD_ID, cjkOverSidecar.runId)!
+  assert(
+    cjkOverSidecarRun.resultSidecarStatus === "unavailable",
+    `multi-byte over-cap result → resultSidecarStatus "unavailable", got ${cjkOverSidecarRun.resultSidecarStatus}`
+  )
+  assert(
+    !existsSync(workflowResultFilePath(workspace, THREAD_ID, cjkOverSidecar.runId)),
+    "multi-byte over-cap result must not write a .result sidecar"
+  )
+
+  // --- Result under the bound → no sidecar, status "none", output-file = run.json.
+  const small = createHarness(workspace)
+  await small.run(
+    `export const meta = { name: "small", description: "d" }
+return "tiny"`,
+    echoRunner
+  )
+  const smallRun = loadWorkflowRun(workspace, THREAD_ID, small.runId)!
+  assert(
+    smallRun.resultSidecarStatus === "none",
+    `result under the bound → status "none", got ${smallRun.resultSidecarStatus}`
+  )
+  assert(
+    !existsSync(workflowResultFilePath(workspace, THREAD_ID, small.runId)),
+    "a result under the bound must NOT write a .result sidecar"
+  )
+  assert(
+    resolveWorkflowOutputFile(workspace, THREAD_ID, smallRun)?.endsWith(`${small.runId}.json`),
+    "output-file falls back to run.json when status is none"
+  )
+
+  // --- Boundary: a flush-failed in-memory snapshot with status="none" must not point
+  // to a missing or stale on-disk run.json. The in-memory snapshot is terminal, but
+  // resolveWorkflowOutputFile only advertises a disk path if that same terminal run
+  // actually reached disk.
+  const memoryOnlyRunId = generateWorkflowRunId()
+  const now = new Date().toISOString()
+  const memoryOnlyRun: PersistedWorkflowRun = {
+    version: 1,
+    runId: memoryOnlyRunId,
+    threadId: THREAD_ID,
+    workflowName: "memory-only",
+    description: "d",
+    script: "x",
+    scriptSha256: "sha",
+    status: "completed",
+    phases: [],
+    currentPhase: null,
+    agents: [],
+    logs: [],
+    journal: [],
+    result: "m".repeat(WORKFLOW_TOOL_RESULT_MAX_CHARS + 100),
+    resultSidecarStatus: "none",
+    stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
+    startedAt: now,
+    updatedAt: now,
+    completedAt: now
+  }
+  const memoryOnlyPath = join(getWorkflowRunsDir(workspace, THREAD_ID), `${memoryOnlyRunId}.json`)
+  assert(
+    resolveWorkflowOutputFile(workspace, THREAD_ID, memoryOnlyRun) === undefined,
+    "memory-only flush-failed snapshot must not advertise a missing run.json"
+  )
+  mkdirSync(getWorkflowRunsDir(workspace, THREAD_ID), { recursive: true })
+  writeFileSync(memoryOnlyPath, JSON.stringify({ ...memoryOnlyRun, status: "running" }))
+  assert(
+    resolveWorkflowOutputFile(workspace, THREAD_ID, memoryOnlyRun) === undefined,
+    "memory-only snapshot must not advertise a stale non-terminal run.json"
+  )
+  writeFileSync(memoryOnlyPath, JSON.stringify({ ...memoryOnlyRun, journal: [] }))
+  assert(
+    resolveWorkflowOutputFile(workspace, THREAD_ID, memoryOnlyRun) === memoryOnlyPath,
+    "once the current terminal run reaches disk, run.json is a valid output-file"
+  )
+  const staleCompletedRun = {
+    ...memoryOnlyRun,
+    scriptSha256: "old-sha",
+    startedAt: new Date(Date.parse(now) - 4_000).toISOString(),
+    updatedAt: new Date(Date.parse(now) - 3_000).toISOString(),
+    completedAt: new Date(Date.parse(now) - 2_000).toISOString(),
+    journal: []
+  }
+  writeFileSync(memoryOnlyPath, JSON.stringify(staleCompletedRun))
+  assert(
+    resolveWorkflowOutputFile(workspace, THREAD_ID, memoryOnlyRun) === undefined,
+    "memory-only snapshot must not advertise a stale completed run.json with the same runId"
+  )
+  writeFileSync(memoryOnlyPath, JSON.stringify({ ...memoryOnlyRun, journal: [] }))
+  assert(
+    resolveWorkflowOutputFile(workspace, THREAD_ID, memoryOnlyRun) === memoryOnlyPath,
+    "identity-matched terminal run.json remains a valid output-file"
+  )
+
+  // --- Boundary: a STALE .result file for a status="none" run must be IGNORED — the
+  // recorded status, not the file's presence, decides (the bug codex flagged).
+  writeFileSync(workflowResultFilePath(workspace, THREAD_ID, small.runId), '"stale-leftover"')
+  assert(
+    resolveWorkflowOutputFile(workspace, THREAD_ID, smallRun)?.endsWith(`${small.runId}.json`),
+    "a stale .result must not be trusted when resultSidecarStatus is none"
+  )
+
+  // --- Boundary: status "unavailable" (truncated but sidecar write failed) → there is
+  // NO file with the complete result, so advertise nothing (no false "full result in").
+  assert(
+    resolveWorkflowOutputFile(workspace, THREAD_ID, {
+      runId: small.runId,
+      result: smallRun.result,
+      resultSidecarStatus: "unavailable"
+    }) === undefined,
+    "status unavailable must resolve to no output-file"
+  )
 }
 
 async function testModelFallbackNotJournaled(workspace: string): Promise<void> {
@@ -728,6 +985,58 @@ async function testPersistRecoveredRunKeepsJournal(workspace: string): Promise<v
   )
 }
 
+async function testPersistRecoveredRunVerifiesAvailableSidecar(workspace: string): Promise<void> {
+  const runId = generateWorkflowRunId()
+  const now = new Date().toISOString()
+  const run: PersistedWorkflowRun = {
+    version: 1,
+    runId,
+    threadId: THREAD_ID,
+    workflowName: "recover-sidecar",
+    script: "x",
+    scriptSha256: "sha",
+    status: "completed",
+    phases: [],
+    currentPhase: null,
+    agents: [],
+    logs: [],
+    journal: [],
+    result: "partial\n…[truncated 10 chars]",
+    resultSidecarStatus: "available",
+    stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
+    startedAt: now,
+    updatedAt: now,
+    completedAt: now
+  }
+
+  assert(
+    (await persistRecoveredRun(workspace, THREAD_ID, run)) === true,
+    "persistRecoveredRun writes the sidecar-status recovery run back"
+  )
+  const recovered = loadWorkflowRun(workspace, THREAD_ID, runId)!
+  assert(
+    recovered.resultSidecarStatus === "unavailable",
+    `missing recovered sidecar should downgrade status to unavailable, got ${recovered.resultSidecarStatus}`
+  )
+  assert(
+    resolveWorkflowOutputFile(workspace, THREAD_ID, recovered) === undefined,
+    "missing recovered sidecar must not advertise a complete output file"
+  )
+
+  const badSidecarRunId = generateWorkflowRunId()
+  const badSidecarRun: PersistedWorkflowRun = { ...run, runId: badSidecarRunId }
+  writeFileSync(workflowResultFilePath(workspace, THREAD_ID, badSidecarRunId), "{bad json")
+  assert(
+    (await persistRecoveredRun(workspace, THREAD_ID, badSidecarRun)) === true,
+    "persistRecoveredRun writes the corrupt-sidecar recovery run back"
+  )
+  const recoveredBadSidecar = loadWorkflowRun(workspace, THREAD_ID, badSidecarRunId)!
+  assert(
+    recoveredBadSidecar.resultSidecarStatus === "unavailable",
+    `corrupt recovered sidecar should downgrade status to unavailable, got ${recoveredBadSidecar.resultSidecarStatus}`
+  )
+}
+
 async function testFlushReportsPersistFailure(): Promise<void> {
   // #4: flush() must report whether the FINAL write reached disk, so settle can
   // warn/retry instead of broadcasting a notification over a stale run. Force a
@@ -1025,14 +1334,10 @@ return probes`,
 async function testDeterminismGuards(workspace: string): Promise<void> {
   const harness = createHarness(workspace)
   for (const expr of ["Date.now()", "Math.random()", "new Date()", "Date()"]) {
-    const result = await harness.run(
+    assertWorkflowScriptError(
       `export const meta = { name: "t", description: "d" }\nreturn ${expr}`,
-      echoRunner
-    )
-    assert(result.status === "error", `${expr} should fail`)
-    assert(
-      result.error?.includes("unavailable in workflow scripts"),
-      `${expr} error message hints determinism, got: ${result.error}`
+      "unavailable in workflow scripts",
+      expr
     )
   }
   const ok = await harness.run(
@@ -1248,14 +1553,24 @@ return r`,
 
 async function testStructuredSchemaPath(workspace: string): Promise<void> {
   const harness = createHarness(workspace)
+  const structuredOnlyRunner: WorkflowSubagentRunner = async (request) => ({
+    text: "Done",
+    structured: request.schema ? { answer: request.prompt } : undefined,
+    outputTokens: 10
+  })
   const result = await harness.run(
     `export const meta = { name: "t", description: "d" }
 const r = await agent("classify", { schema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] } })
 return r.answer`,
-    echoRunner
+    structuredOnlyRunner
   )
   assert(result.status === "completed", `completed, got ${result.error}`)
   assert(result.result === "classify", "schema mode returns structured object")
+  const detailed = loadWorkflowRunForResume(workspace, THREAD_ID, harness.runId)!
+  assert(
+    detailed.agents[0]?.resultPreview?.includes('"answer":"classify"'),
+    `schema-mode agent preview prefers structured JSON over generic final text: ${JSON.stringify(detailed.agents[0])}`
+  )
 }
 
 async function testAgentCapAndBudget(workspace: string): Promise<void> {
@@ -1427,14 +1742,11 @@ return { year: d.getUTCFullYear(), local: typeof d.getFullYear(), diff: new Date
   const value = ok.result as { year: number; local: string; diff: number; json: string }
   assert(value.year === 1970 && value.local === "number" && value.diff === 1000, "date math works")
 
-  const bypass = await harness.run(
+  assertWorkflowScriptError(
     `export const meta = { name: "t", description: "d" }
 return new Date(1).constructor.now()`,
-    echoRunner
-  )
-  assert(
-    bypass.status === "error" && bypass.error?.includes("Date.now()"),
-    `constructor bypass still hits the guard, got: ${bypass.error}`
+    "Date.now()",
+    "Date constructor bypass"
   )
 }
 
@@ -3016,6 +3328,7 @@ async function main(): Promise<void> {
     await testUnawaitedPromiseWarned(workspace)
     await testFireAndForgetFatalFailsRun(workspace)
     await testModelFallbackNotJournaled(workspace)
+    await testFullResultSidecarForOversizedReturn(workspace)
     await testResumeRerunsWhenSessionDefaultModelChanges(workspace)
     await testScriptWriteFileRoutesThroughRunLock(workspace)
     await testResumeRefusesWhenJournalLost(workspace)
@@ -3039,6 +3352,7 @@ async function main(): Promise<void> {
     await testJournalSidecarSplit(workspace)
     await testFlushReportsPersistFailure()
     await testPersistRecoveredRunKeepsJournal(workspace)
+    await testPersistRecoveredRunVerifiesAvailableSidecar(workspace)
     testResumedFlagPersisted()
     testReconcileHydratedRun()
     await testGlobCapStreamEarlyStop()
@@ -3049,7 +3363,7 @@ async function main(): Promise<void> {
     await testChildWorkflowPhaseModelInherited(workspace)
     await testLogArgBoxedInVm(workspace)
     await testAgentOptsBoxedAfterAwait(workspace)
-    console.log("PASS workflow-engine (64 tests)")
+    console.log("PASS workflow-engine (66 tests)")
   } finally {
     if (origHome === undefined) delete process.env.HOME
     else process.env.HOME = origHome

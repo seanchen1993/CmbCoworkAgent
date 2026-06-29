@@ -64,9 +64,13 @@ export function buildWorkflowNotificationMessage(
   outputFilePath?: string
 ): string {
   const stats: WorkflowRunStats = run.stats
-  // The COMPLETE result is always persisted to disk; surface its path so the model can
-  // read the full result with its file tools when the inline <result> below is
-  // truncated (mirrors Claude Code's <output-file>).
+  // outputFilePath (from resolveWorkflowOutputFile) is the file that faithfully holds
+  // the COMPLETE result — the `<runId>.result` sidecar for a truncated result that
+  // fit the sidecar cap, or run.json when it fit the run record. Surface it so the
+  // model can read the full result with its file tools when the inline <result> below
+  // is truncated (mirrors Claude Code's <output-file>). undefined when no file holds
+  // the complete result (e.g. sidecar write failed or the result exceeded the sidecar
+  // cap): we then omit the path and never make a false "full result in <path>".
   const escapedOutputFile = outputFilePath ? escapeXml(outputFilePath) : ""
   const lines: string[] = [
     `${WORKFLOW_NOTIFICATION_MARKER_PREFIX}${run.runId}]]`,

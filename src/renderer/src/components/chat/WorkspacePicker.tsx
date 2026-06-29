@@ -10,7 +10,7 @@ import {
   RefreshCw,
   Trash2
 } from "lucide-react"
-import { useState, useEffect } from "react"
+import { useState, useEffect, memo } from "react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -86,7 +86,12 @@ function PathRow({ label, path, highlight = false }: { label: string; path: stri
   )
 }
 
-export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePickerProps): React.JSX.Element {
+export const WorkspacePicker = memo(WorkspacePickerImpl)
+
+function WorkspacePickerImpl({
+  threadId,
+  onGitStatusChange
+}: WorkspacePickerProps): React.JSX.Element {
   const { workspacePath, setWorkspacePath, setWorkspaceFiles, messages } = useCurrentThread(threadId)
   const canChangeWorkspace = messages.length === 0
   const [open, setOpen] = useState(false)

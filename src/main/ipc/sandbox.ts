@@ -764,7 +764,6 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
           return
         }
       }
-      pendingApprovals.delete(decision.requestId)
       pending.resolve(decision)
     } else {
       console.warn("[Sandbox] Received approval decision for unknown request:", decision.requestId)

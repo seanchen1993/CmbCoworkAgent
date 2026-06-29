@@ -241,7 +241,7 @@ const HOOK_CONFIG_EXTENSION_FIELDS: Array<{ key: string; description: string }> 
   {
     key: "persistAfterInterrupt",
     description:
-      "CMB 扩展字段。仅对插件 / 技能 Hook 的作用域有意义；设为 true 后，只要本会话里触发过该 Hook 所属的插件或技能，这条 Hook 后续轮次也会继续命中。持久化按 Hook 身份计算，不会让同技能下未开启的兄弟 Hook 一起生效。"
+      "CMB 扩展字段。仅对插件 / 技能 Hook 的作用域有意义；设为 true 后，只要当前线程里触发过该 Hook 所属的插件或技能，这条 Hook 后续轮次和应用重启恢复后也会继续命中。持久化按 Hook 身份计算，不会让同技能下未开启的兄弟 Hook 一起生效。"
   },
   {
     key: "injectUserContext",
@@ -951,17 +951,14 @@ function HookLoggingControls(): React.JSX.Element {
     }
   }, [])
 
-  const save = useCallback(
-    async (next: Partial<{ enabled: boolean; diagnostic: boolean }>) => {
-      try {
-        const updated = await window.api.hooks.logging.save(next)
-        setConfig(updated)
-      } catch (e) {
-        toast.error(e instanceof Error ? e.message : "保存失败")
-      }
-    },
-    []
-  )
+  const save = useCallback(async (next: Partial<{ enabled: boolean; diagnostic: boolean }>) => {
+    try {
+      const updated = await window.api.hooks.logging.save(next)
+      setConfig(updated)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "保存失败")
+    }
+  }, [])
 
   const openLogDir = useCallback(async () => {
     try {
@@ -973,7 +970,11 @@ function HookLoggingControls(): React.JSX.Element {
   }, [])
 
   if (loading) {
-    return <div className="border-t border-border/60 px-3 py-2 text-[11px] text-muted-foreground/60">加载中…</div>
+    return (
+      <div className="border-t border-border/60 px-3 py-2 text-[11px] text-muted-foreground/60">
+        加载中…
+      </div>
+    )
   }
 
   return (
@@ -1089,12 +1090,7 @@ function HookDetail(props: {
             ) : (
               <Terminal className="size-4 text-muted-foreground shrink-0" />
             )}
-            <h3
-              className={cn(
-                "text-base font-bold truncate",
-                isPrompt ? "italic" : "font-mono"
-              )}
-            >
+            <h3 className={cn("text-base font-bold truncate", isPrompt ? "italic" : "font-mono")}>
               {hookTitle(hook)}
             </h3>
           </div>
@@ -1204,7 +1200,7 @@ function HookDetail(props: {
                 ? "自然语言策略不启动本地命令；此目录仅用于说明来源"
                 : isHttp
                   ? "HTTP Hook 不启动本地命令；此目录仅用于说明来源"
-                : "相对路径命令会基于这里解析"
+                  : "相对路径命令会基于这里解析"
             }
           />
           <DetailCard label="配置文件" value={configPath} mono />
@@ -1219,11 +1215,11 @@ function HookDetail(props: {
             subtext={hook.once ? "同一会话内按事件、来源和 Hook ID 记忆" : undefined}
           />
           <DetailCard
-            label="会话持久"
+            label="线程持久"
             value={hook.persistAfterInterrupt ? "触发后持续" : "仅当前作用域"}
             subtext={
               hook.persistAfterInterrupt
-                ? "所属插件 / 技能触发一次后本会话继续命中"
+                ? "所属插件 / 技能触发一次后，当前线程后续轮次和重启恢复后继续命中"
                 : "未触发所属插件 / 技能时不会命中"
             }
           />
@@ -1296,7 +1292,9 @@ function HookDetail(props: {
                     >
                       <p className="font-mono text-[11px] text-foreground/85">{field.key}</p>
                       <p className="text-sm text-muted-foreground">{field.description}</p>
-                      {field.note && <p className="mt-1 text-xs text-foreground/75">{field.note}</p>}
+                      {field.note && (
+                        <p className="mt-1 text-xs text-foreground/75">{field.note}</p>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1626,7 +1624,9 @@ function GuideSubSection(props: {
     >
       <summary className="flex cursor-pointer list-none items-start justify-between gap-3 px-3 py-2.5 [&::-webkit-details-marker]:hidden">
         <div className="space-y-1">
-          <p className={cn("text-sm font-medium", nested ? "text-foreground/90" : "text-foreground")}>
+          <p
+            className={cn("text-sm font-medium", nested ? "text-foreground/90" : "text-foreground")}
+          >
             {title}
           </p>
           <p className="text-sm text-muted-foreground">{summary}</p>
@@ -1712,7 +1712,10 @@ function HooksGuide(): React.JSX.Element {
             <div className="space-y-2 text-sm text-muted-foreground">
               <div className="rounded-md border border-border/40 bg-background px-3 py-2 space-y-2">
                 <p className="text-foreground/90">
-                  一句话：<strong className="text-foreground">command = 本地脚本判，HTTP = 甩给一个接口判</strong>
+                  一句话：
+                  <strong className="text-foreground">
+                    command = 本地脚本判，HTTP = 甩给一个接口判
+                  </strong>
                   。两者触发时机、决策能力完全一样，只是判决逻辑从本机脚本换成了远端服务。
                 </p>
                 <p>典型用途：</p>
@@ -1743,7 +1746,9 @@ function HooksGuide(): React.JSX.Element {
                 与 command Hook 共用同一份输入：runner 把 stdin JSON 作为请求体 POST 到
                 <code className="mx-1 font-mono text-foreground/85">url</code>
                 （固定带
-                <code className="mx-1 font-mono text-foreground/85">Content-Type: application/json</code>
+                <code className="mx-1 font-mono text-foreground/85">
+                  Content-Type: application/json
+                </code>
                 ）。注意 HTTP Hook **不会**收到环境变量，所有上下文都在 JSON 请求体里。
               </p>
               <p>
@@ -1764,8 +1769,8 @@ function HooksGuide(): React.JSX.Element {
                 <code className="mx-1 font-mono text-foreground/85">{`\${VAR}`}</code>
                 引用环境变量，但**仅限**列入
                 <code className="mx-1 font-mono text-foreground/85">allowedEnvVars</code>
-                白名单的变量，未授权的引用会被替换成空串。默认超时 30s（异步上限 5 分钟），响应体上限
-                1MB。
+                白名单的变量，未授权的引用会被替换成空串。默认超时 30s（异步上限 5
+                分钟），响应体上限 1MB。
               </p>
               <p className="text-xs text-foreground/75">
                 ⚠️ HTTP Hook 不做 SSRF 防护，URL 与出网风险由配置者自负；不要把它指向不可信地址。
@@ -1781,9 +1786,11 @@ function HooksGuide(): React.JSX.Element {
               <p>全局 Hook 由你在当前应用里创建、编辑、删除。</p>
               <p>
                 插件 Hook 来自插件目录下的
-                hooks/hooks.json，随插件启停，这里可以统一控制，但不直接编辑脚本内容。
-                需要在插件 / 技能触发后让某条 Hook 本会话持续生效时，可以在对应 Hook 上加
-                <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt: true</code>
+                hooks/hooks.json，随插件启停，这里可以统一控制，但不直接编辑脚本内容。 需要在插件 /
+                技能触发后让某条 Hook 当前线程持续生效时，可以在对应 Hook 上加
+                <code className="mx-1 font-mono text-foreground/85">
+                  persistAfterInterrupt: true
+                </code>
                 。
               </p>
               <p>
@@ -2157,17 +2164,20 @@ function HooksGuide(): React.JSX.Element {
             <div className="space-y-2 text-sm text-muted-foreground">
               <p>
                 runner 用 POST 把事件 stdin JSON 作为请求体发送，固定附带
-                <code className="mx-1 font-mono text-foreground/85">Content-Type: application/json</code>
+                <code className="mx-1 font-mono text-foreground/85">
+                  Content-Type: application/json
+                </code>
                 。<strong className="text-foreground/85">HTTP Hook 不接收任何环境变量</strong>
-                ，需要的上下文（tool_name、tool_input、user_context 等）都在请求体里，字段与对应事件的
-                command Hook 完全一致。
+                ，需要的上下文（tool_name、tool_input、user_context
+                等）都在请求体里，字段与对应事件的 command Hook 完全一致。
               </p>
               <p>
-                2xx 响应：返回纯文本则当普通输出，返回 JSON 则按 Hook 返回协议解析
-                （decision / reason / continue / updatedInput 等）。非 2xx、网络错误或超时：按
+                2xx 响应：返回纯文本则当普通输出，返回 JSON 则按 Hook 返回协议解析 （decision /
+                reason / continue / updatedInput 等）。非 2xx、网络错误或超时：按
                 <code className="mx-1 font-mono text-foreground/85">fallback</code>
                 处理（<code className="font-mono text-foreground/85">"allow"</code> 放行，
-                <code className="font-mono text-foreground/85">"block"</code> 阻断）。响应体上限 1MB。
+                <code className="font-mono text-foreground/85">"block"</code> 阻断）。响应体上限
+                1MB。
               </p>
               <p>
                 <code className="mx-1 font-mono text-foreground/85">headers</code>
