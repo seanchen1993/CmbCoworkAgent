@@ -958,6 +958,7 @@ interface CustomAPI {
       isWorktree: boolean
       isGitRepo?: boolean
       taskId: string
+      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
       files: Array<{
         path: string
         previousPath?: string
@@ -979,7 +980,7 @@ interface CustomAPI {
       suggestedCommitMessage?: string
       error?: string
     }>
-    getGitPanelMeta: (threadId: string) => Promise<{
+    getGitPanelMeta: (threadId: string, options?: { worktreePath?: string }) => Promise<{
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
@@ -999,6 +1000,7 @@ interface CustomAPI {
         includeChangedFiles?: boolean
         statusUntrackedMode?: "all" | "normal" | "no"
         visibleFileLimit?: number
+        worktreePath?: string
       }
     ) => Promise<{
       success: boolean
@@ -1024,7 +1026,8 @@ interface CustomAPI {
     }>
     getGitPanelFileDiff: (
       threadId: string,
-      filePath: string
+      filePath: string,
+      options?: { worktreePath?: string }
     ) => Promise<{
       success: boolean
       isWorktree: boolean
@@ -1071,6 +1074,7 @@ interface CustomAPI {
       gitRoot: string | null
       worktrees: Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>
       isWorktreePath: boolean
+      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
     }>
     listWorktrees: (
       gitRoot: string
@@ -1096,12 +1100,13 @@ interface CustomAPI {
     commitWorktree: (
       threadId: string,
       message: string,
-      filePaths?: string[]
+      filePaths?: string[],
+      options?: { worktreePath?: string }
     ) => Promise<{
       success: boolean
       error?: string
     }>
-    pushWorktree: (threadId: string) => Promise<{
+    pushWorktree: (threadId: string, options?: { worktreePath?: string }) => Promise<{
       success: boolean
       autoCommitted?: boolean
       error?: string
@@ -1111,14 +1116,15 @@ interface CustomAPI {
         detail: string
       }>
     }>
-    pullWorktree: (threadId: string) => Promise<{
+    pullWorktree: (threadId: string, options?: { worktreePath?: string }) => Promise<{
       success: boolean
       detail?: string
       error?: string
     }>
     rejectWorktreeChanges: (
       threadId: string,
-      filePaths?: string[]
+      filePaths?: string[],
+      options?: { worktreePath?: string }
     ) => Promise<{
       success: boolean
       revertedFileCount?: number
@@ -1126,7 +1132,8 @@ interface CustomAPI {
     }>
     rejectWorktreeFile: (
       threadId: string,
-      filePath: string
+      filePath: string,
+      options?: { worktreePath?: string }
     ) => Promise<{
       success: boolean
       error?: string
@@ -2141,7 +2148,14 @@ interface CustomAPI {
   git: {
     currentBranch: (
       cwd?: string
-    ) => Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean; error?: string }>
+    ) => Promise<{
+      isGitRepo: boolean
+      branch: string | null
+      isWorktree: boolean
+      isMultiRepo?: boolean
+      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
+      error?: string
+    }>
     listBranches: (
       cwd?: string,
       options?: { refreshRemote?: boolean }

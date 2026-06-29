@@ -944,6 +944,7 @@ const api = {
       isWorktree: boolean
       isGitRepo?: boolean
       taskId: string
+      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
       files: Array<{
         path: string
         previousPath?: string
@@ -970,6 +971,7 @@ const api = {
         isWorktree: boolean
         isGitRepo?: boolean
         taskId: string
+        repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
         files: Array<{
           path: string
           previousPath?: string
@@ -993,7 +995,8 @@ const api = {
       }>
     },
     getGitPanelMeta: (
-      threadId: string
+      threadId: string,
+      options?: { worktreePath?: string }
     ): Promise<{
       success: boolean
       isWorktree: boolean
@@ -1007,7 +1010,7 @@ const api = {
       worktreeBranch?: string | null
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:getGitPanelMeta", { threadId }) as Promise<{
+      return ipcRenderer.invoke("workspace:getGitPanelMeta", { threadId, options }) as Promise<{
         success: boolean
         isWorktree: boolean
         isGitRepo?: boolean
@@ -1028,6 +1031,7 @@ const api = {
         includeChangedFiles?: boolean
         statusUntrackedMode?: "all" | "normal" | "no"
         visibleFileLimit?: number
+        worktreePath?: string
       }
     ): Promise<{
       success: boolean
@@ -1076,7 +1080,8 @@ const api = {
     },
     getGitPanelFileDiff: (
       threadId: string,
-      filePath: string
+      filePath: string,
+      options?: { worktreePath?: string }
     ): Promise<{
       success: boolean
       isWorktree: boolean
@@ -1095,7 +1100,8 @@ const api = {
     }> => {
       return ipcRenderer.invoke("workspace:getGitPanelFileDiff", {
         threadId,
-        filePath
+        filePath,
+        options
       }) as Promise<{
         success: boolean
         isWorktree: boolean
@@ -1171,6 +1177,7 @@ const api = {
       gitRoot: string | null
       worktrees: Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>
       isWorktreePath: boolean
+      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
     }> => {
       return ipcRenderer.invoke("workspace:isGit", {
         folderPath,
@@ -1181,6 +1188,7 @@ const api = {
         gitRoot: string | null
         worktrees: Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>
         isWorktreePath: boolean
+        repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
       }>
     },
     listWorktrees: (
@@ -1222,19 +1230,22 @@ const api = {
     commitWorktree: (
       threadId: string,
       message: string,
-      filePaths?: string[]
+      filePaths?: string[],
+      options?: { worktreePath?: string }
     ): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("workspace:commitWorktree", {
         threadId,
         message,
-        filePaths
+        filePaths,
+        options
       }) as Promise<{
         success: boolean
         error?: string
       }>
     },
     pushWorktree: (
-      threadId: string
+      threadId: string,
+      options?: { worktreePath?: string }
     ): Promise<{
       success: boolean
       autoCommitted?: boolean
@@ -1245,7 +1256,7 @@ const api = {
         detail: string
       }>
     }> => {
-      return ipcRenderer.invoke("workspace:pushWorktree", { threadId }) as Promise<{
+      return ipcRenderer.invoke("workspace:pushWorktree", { threadId, options }) as Promise<{
         success: boolean
         autoCommitted?: boolean
         error?: string
@@ -1257,9 +1268,10 @@ const api = {
       }>
     },
     pullWorktree: (
-      threadId: string
+      threadId: string,
+      options?: { worktreePath?: string }
     ): Promise<{ success: boolean; detail?: string; error?: string }> => {
-      return ipcRenderer.invoke("workspace:pullWorktree", { threadId }) as Promise<{
+      return ipcRenderer.invoke("workspace:pullWorktree", { threadId, options }) as Promise<{
         success: boolean
         detail?: string
         error?: string
@@ -1267,9 +1279,10 @@ const api = {
     },
     rejectWorktreeChanges: (
       threadId: string,
-      filePaths?: string[]
+      filePaths?: string[],
+      options?: { worktreePath?: string }
     ): Promise<{ success: boolean; revertedFileCount?: number; error?: string }> => {
-      return ipcRenderer.invoke("workspace:rejectWorktreeChanges", { threadId, filePaths }) as Promise<{
+      return ipcRenderer.invoke("workspace:rejectWorktreeChanges", { threadId, filePaths, options }) as Promise<{
         success: boolean
         revertedFileCount?: number
         error?: string
@@ -1277,9 +1290,10 @@ const api = {
     },
     rejectWorktreeFile: (
       threadId: string,
-      filePath: string
+      filePath: string,
+      options?: { worktreePath?: string }
     ): Promise<{ success: boolean; error?: string }> => {
-      return ipcRenderer.invoke("workspace:rejectWorktreeFile", { threadId, filePath }) as Promise<{
+      return ipcRenderer.invoke("workspace:rejectWorktreeFile", { threadId, filePath, options }) as Promise<{
         success: boolean
         error?: string
       }>
@@ -3161,12 +3175,16 @@ const api = {
       isGitRepo: boolean
       branch: string | null
       isWorktree: boolean
+      isMultiRepo?: boolean
+      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
       error?: string
     }> =>
       ipcRenderer.invoke("git:currentBranch", cwd) as Promise<{
         isGitRepo: boolean
         branch: string | null
         isWorktree: boolean
+        isMultiRepo?: boolean
+        repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
         error?: string
       }>,
     listBranches: (

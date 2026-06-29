@@ -10,6 +10,7 @@ import {
   type StagedSnapshot
 } from "../services/adoption-tracker"
 import { CMBDEVCLAW_INTERNAL_GIT_ENV } from "../services/git-hook-service"
+import { discoverWorkspaceGitRepositories } from "../services/git-repository-discovery"
 import { promisify } from "util"
 
 /**
@@ -1230,7 +1231,14 @@ export function registerGitHandlers(): void {
     async (
       _,
       cwd?: string
-    ): Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean; error?: string }> => {
+    ): Promise<{
+      isGitRepo: boolean
+      branch: string | null
+      isWorktree: boolean
+      isMultiRepo?: boolean
+      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
+      error?: string
+    }> => {
       try {
         const workingDir = cwd || (await getCurrentWorkingDirectory())
         try {
@@ -1245,6 +1253,20 @@ export function registerGitHandlers(): void {
               branch: null,
               isWorktree: false,
               error: GIT_UNAVAILABLE_MESSAGE
+            }
+          }
+          const repositories = await discoverWorkspaceGitRepositories(workingDir)
+          if (repositories.length > 0) {
+            return {
+              isGitRepo: true,
+              branch: repositories.length > 1 ? `${repositories.length} 个仓库` : repositories[0].displayPath,
+              isWorktree: false,
+              isMultiRepo: true,
+              repositories: repositories.map((repo) => ({
+                path: repo.repoPath,
+                displayPath: repo.displayPath,
+                gitRoot: repo.gitRoot
+              }))
             }
           }
           return { isGitRepo: false, branch: null, isWorktree: false }
