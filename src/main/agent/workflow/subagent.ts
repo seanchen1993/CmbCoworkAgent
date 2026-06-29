@@ -307,6 +307,10 @@ async function runOnce(
     // a fresh thread_id, you must accumulate tokens across both snapshots.)
     if (request.schema && !isStructuredAccepted(structured, request.schema)) {
       throwIfAborted(controller.signal, request.signal, timeoutMs)
+      const unsafeNudgeReason = unsafeStructuredOutputNudgeReason(snapshot)
+      if (unsafeNudgeReason) {
+        throw new Error(unsafeNudgeReason)
+      }
       snapshot = await raceWithAbort(
         (async () =>
           consumeValuesStream(
@@ -1548,10 +1552,18 @@ export async function consumeValuesStream(
 }
 
 interface MessageLike {
+  additional_kwargs?: { tool_calls?: unknown[] }
   content?: unknown
-  kwargs?: { content?: unknown; usage_metadata?: { output_tokens?: number } }
+  kwargs?: {
+    additional_kwargs?: { tool_calls?: unknown[] }
+    content?: unknown
+    tool_calls?: unknown[]
+    tool_call_id?: unknown
+    usage_metadata?: { output_tokens?: number }
+  }
   usage_metadata?: { output_tokens?: number }
   tool_calls?: unknown[]
+  tool_call_id?: unknown
   id?: unknown
   _getType?: () => string
 }
@@ -1580,12 +1592,94 @@ function isAiMessage(message: MessageLike): boolean {
   return className === "ai" || className.includes("aimessage")
 }
 
+function isToolMessage(message: MessageLike): boolean {
+  const className = messageClassName(message).toLowerCase()
+  return className === "tool" || className.includes("toolmessage")
+}
+
+function messageToolCalls(message: MessageLike): unknown[] {
+  if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return message.tool_calls
+  if (Array.isArray(message.kwargs?.tool_calls)) return message.kwargs.tool_calls
+  if (Array.isArray(message.additional_kwargs?.tool_calls)) return message.additional_kwargs.tool_calls
+  if (Array.isArray(message.kwargs?.additional_kwargs?.tool_calls)) {
+    return message.kwargs.additional_kwargs.tool_calls
+  }
+  if (Array.isArray(message.tool_calls)) return message.tool_calls
+  return []
+}
+
+function toolCallId(toolCall: unknown): string | undefined {
+  if (!isPlainRecord(toolCall)) return undefined
+  return typeof toolCall.id === "string" && toolCall.id.trim() ? toolCall.id : undefined
+}
+
+function toolCallName(toolCall: unknown): string | undefined {
+  if (!isPlainRecord(toolCall)) return undefined
+  if (typeof toolCall.name === "string" && toolCall.name.trim()) return toolCall.name
+  const fn = toolCall.function
+  if (isPlainRecord(fn) && typeof fn.name === "string" && fn.name.trim()) return fn.name
+  return undefined
+}
+
+function toolMessageToolCallId(message: MessageLike): string | undefined {
+  const id = message.tool_call_id ?? message.kwargs?.tool_call_id
+  return typeof id === "string" && id.trim() ? id : undefined
+}
+
+function nonStructuredInterruptText(snapshot: unknown): string | null {
+  if (!isPlainRecord(snapshot)) return null
+  const interrupts = snapshot.__interrupt__
+  if (!Array.isArray(interrupts)) return null
+  for (const interrupt of interrupts) {
+    const value = isPlainRecord(interrupt) ? interrupt.value : interrupt
+    const text = typeof value === "string" ? value : extractTextFromUnknownContent(value).trim()
+    if (!text) continue
+    if (!text.includes("structured_output schema validation failed")) return text
+  }
+  return null
+}
+
+function unsafeStructuredOutputNudgeReason(snapshot: unknown): string | null {
+  const interruptText = nonStructuredInterruptText(snapshot)
+  if (interruptText) {
+    return `subagent paused before returning a structured result: ${interruptText}`
+  }
+
+  const pending = new Map<string, string | undefined>()
+  for (const message of snapshotMessages(snapshot)) {
+    if (pending.size > 0) {
+      if (isToolMessage(message)) {
+        const id = toolMessageToolCallId(message)
+        if (id) pending.delete(id)
+        continue
+      }
+
+      const names = Array.from(pending.entries())
+        .map(([id, name]) => (name ? `${name} (${id})` : id))
+        .join(", ")
+      return `subagent cannot request a structured-result retry because the previous assistant message still has pending tool call results: ${names}`
+    }
+
+    if (!isAiMessage(message)) continue
+    for (const call of messageToolCalls(message)) {
+      const id = toolCallId(call)
+      if (id) pending.set(id, toolCallName(call))
+    }
+  }
+
+  if (pending.size === 0) return null
+  const names = Array.from(pending.entries())
+    .map(([id, name]) => (name ? `${name} (${id})` : id))
+    .join(", ")
+  return `subagent cannot request a structured-result retry because the previous assistant message still has pending tool call results: ${names}`
+}
+
 function extractFinalAssistantText(snapshot: unknown): string {
   const messages = snapshotMessages(snapshot)
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
     if (!isAiMessage(message)) continue
-    const toolCalls = message.tool_calls
+    const toolCalls = messageToolCalls(message)
     if (Array.isArray(toolCalls) && toolCalls.length > 0) continue
     const text = extractTextFromUnknownContent(message.content ?? message.kwargs?.content)
     if (text.trim()) return text.trim()
@@ -1615,7 +1709,7 @@ export function extractOutputTokens(snapshot: unknown, text: string): number {
       total += estimateTokenCount(
         extractTextFromUnknownContent(message.content ?? message.kwargs?.content)
       )
-      const toolCalls = message.tool_calls
+      const toolCalls = messageToolCalls(message)
       if (Array.isArray(toolCalls) && toolCalls.length > 0) {
         total += estimateTokenCount(stringifyToolCalls(toolCalls))
       }
