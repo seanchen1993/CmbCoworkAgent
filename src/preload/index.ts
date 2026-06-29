@@ -965,7 +965,10 @@ const api = {
       }
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:getGitPanelFileDiff", { threadId, filePath }) as Promise<{
+      return ipcRenderer.invoke("workspace:getGitPanelFileDiff", {
+        threadId,
+        filePath
+      }) as Promise<{
         success: boolean
         isWorktree: boolean
         isGitRepo?: boolean
@@ -1787,7 +1790,11 @@ const api = {
       }
     },
     confirmResponse: (requestId: string, approved: boolean, content?: string): Promise<void> =>
-      ipcRenderer.invoke("skill:confirmResponse", { requestId, approved, content }) as Promise<void>,
+      ipcRenderer.invoke("skill:confirmResponse", {
+        requestId,
+        approved,
+        content
+      }) as Promise<void>,
 
     // ── Streaming generation progress ──────────────────────────
     onGenerating: (
@@ -2558,9 +2565,22 @@ const api = {
         viewMode?: "thread" | "trace"
         triggerScope?: "active" | "all"
         featureSlug?: string
+        nodeName?: string
+        nodeStatus?: string
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeTraces", projectId, range, options),
+    projectModeFeatureNodes: (
+      projectId: string,
+      featureSlug: string,
+      range: { from: string; to: string }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeFeatureNodes", projectId, featureSlug, range),
+    pluginAggregate: (
+      adapterName: string,
+      range: { from: string; to: string }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:pluginAggregate", adapterName, range),
     projectModeFeatureCommits: (
       projectId: string,
       featureSlug: string,

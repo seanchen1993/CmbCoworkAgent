@@ -674,6 +674,8 @@ interface DashboardProjectModeTracesOptions {
   viewMode?: DashboardTraceViewMode
   triggerScope?: DashboardTraceTriggerScope
   featureSlug?: string
+  nodeName?: string
+  nodeStatus?: string
 }
 
 interface DashboardProjectModeTracesData {
@@ -684,6 +686,27 @@ interface DashboardProjectModeTracesData {
   total: number
   traceViewMode: DashboardTraceViewMode
   traceTriggerScope: DashboardTraceTriggerScope
+}
+
+interface DashboardProjectModeNodeStatus {
+  status: string
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+}
+
+interface DashboardProjectModeFeatureNode {
+  nodeName: string
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+  byStatus: DashboardProjectModeNodeStatus[]
+}
+
+interface DashboardPluginAggregate {
+  adapterName: string
+  conversationCount: number
+  projectCount: number
+  codeStats: DashboardCodeStats | null
+  byNode: DashboardProjectModeFeatureNode[]
 }
 
 interface CustomAPI {
@@ -1060,7 +1083,10 @@ interface CustomAPI {
       suggestedCommitMessage?: string
       error?: string
     }>
-    getGitPanelFileDiff: (threadId: string, filePath: string) => Promise<{
+    getGitPanelFileDiff: (
+      threadId: string,
+      filePath: string
+    ) => Promise<{
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
@@ -1863,6 +1889,15 @@ interface CustomAPI {
       range: { from: string; to: string },
       options?: DashboardProjectModeTracesOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeTracesData; error?: string }>
+    projectModeFeatureNodes: (
+      projectId: string,
+      featureSlug: string,
+      range: { from: string; to: string }
+    ) => Promise<{ success: boolean; data?: DashboardProjectModeFeatureNode[]; error?: string }>
+    pluginAggregate: (
+      adapterName: string,
+      range: { from: string; to: string }
+    ) => Promise<{ success: boolean; data?: DashboardPluginAggregate; error?: string }>
     projectModeFeatureCommits: (
       projectId: string,
       featureSlug: string,

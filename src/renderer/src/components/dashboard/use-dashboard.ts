@@ -367,6 +367,32 @@ export interface DashboardProjectModeFeature {
   codeStats?: DashboardCodeStats | null
 }
 
+/** Sub-row of a stage: conversations + code adoption for one node status (进行中/已完成/...). */
+export interface DashboardProjectModeNodeStatus {
+  status: string
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+}
+
+/** Per-stage (workflow node) breakdown of a feature: conversations + code adoption. */
+export interface DashboardProjectModeFeatureNode {
+  /** Human-readable stage name (group-label, e.g. "Dev-代码实现"); no raw node id. */
+  nodeName: string
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+  /** Status-at-turn-time sub-breakdown within this stage (进行中/已完成/...). */
+  byStatus: DashboardProjectModeNodeStatus[]
+}
+
+/** Cross-user aggregate for a single plugin (adapter), surfaced in the plugin list. */
+export interface DashboardPluginAggregate {
+  adapterName: string
+  conversationCount: number
+  projectCount: number
+  codeStats: DashboardCodeStats | null
+  byNode: DashboardProjectModeFeatureNode[]
+}
+
 export interface DashboardProjectModeSkillCount {
   skill: string
   count: number
@@ -533,6 +559,10 @@ export interface DashboardProjectModeTracesOptions {
   viewMode?: DashboardTraceViewMode
   triggerScope?: DashboardTraceTriggerScope
   featureSlug?: string
+  /** Scope traces to a single workflow stage (group-label), e.g. "Dev-代码实现". */
+  nodeName?: string
+  /** Further scope traces within a stage by node status (进行中/已完成/...). */
+  nodeStatus?: string
 }
 
 export interface DashboardProjectModeTracesData {

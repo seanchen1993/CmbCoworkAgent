@@ -54,6 +54,8 @@ import type {
   DashboardProjectModeAdapter,
   DashboardProjectModeAnalytics,
   DashboardProjectModeFeature,
+  DashboardProjectModeFeatureNode,
+  DashboardProjectModeNodeStatus,
   DashboardProjectModeOrgDistributionItem,
   DashboardProjectModeProject,
   DashboardProjectModeProjectCounts,
@@ -463,9 +465,12 @@ function CodeEfficiencyModelInfo(): React.JSX.Element {
 
 /** Per-feature code-adoption line: 原始生成行数 / 有效生成行数 / 已Commit·已Push 采纳率（含行数明细）。 */
 function FeatureCodeStatsLine({
-  codeStats
+  codeStats,
+  compact = false
 }: {
   codeStats?: DashboardCodeStats | null
+  /** 紧凑模式：隐藏「原始/有效生成行数」首行，提交口径 + 总量口径合并为一行。 */
+  compact?: boolean
 }): React.JSX.Element {
   if (!codeStats) {
     return <div className="text-[11px] text-muted-foreground/80">暂无代码生成数据</div>
@@ -475,6 +480,61 @@ function FeatureCodeStatsLine({
   const totalDenom = formatLineCount(codeStats.inclusiveEffectiveGeneratedLines)
   const adopted = formatLineCount(codeStats.adoptedLines)
   const pushedAdopted = formatLineCount(codeStats.pushedAdoptedLines)
+  const commitGroup = (
+    <>
+      <span className="text-muted-foreground/70">提交口径</span>
+      <span>
+        提交{" "}
+        <span className="font-medium text-foreground">
+          {formatPercent(codeStats.measuredAdoptionRate)}
+        </span>
+        <span className="ml-1 text-muted-foreground/80">
+          ({adopted} / {commitDenom} 行)
+        </span>
+      </span>
+      <span>
+        入库{" "}
+        <span className="font-medium text-foreground">
+          {formatPercent(codeStats.pushedAdoptionRate)}
+        </span>
+        <span className="ml-1 text-muted-foreground/80">
+          ({pushedAdopted} / {pushDenom} 行)
+        </span>
+      </span>
+    </>
+  )
+  const totalGroup = (
+    <>
+      <span className="text-muted-foreground/70">总量口径</span>
+      <span>
+        提交{" "}
+        <span className="font-medium text-foreground">
+          {formatPercent(codeStats.inclusiveAdoptionRate)}
+        </span>
+        <span className="ml-1 text-muted-foreground/80">
+          ({adopted} / {totalDenom} 行)
+        </span>
+      </span>
+      <span>
+        入库{" "}
+        <span className="font-medium text-foreground">
+          {formatPercent(codeStats.inclusivePushedAdoptionRate)}
+        </span>
+        <span className="ml-1 text-muted-foreground/80">
+          ({pushedAdopted} / {totalDenom} 行)
+        </span>
+      </span>
+    </>
+  )
+  if (compact) {
+    // 紧凑：两口径合并到一行（flex-wrap，窄屏才换行）。
+    return (
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground">
+        {commitGroup}
+        {totalGroup}
+      </div>
+    )
+  }
   return (
     <div className="space-y-1 text-[11px] text-muted-foreground">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -492,48 +552,8 @@ function FeatureCodeStatsLine({
           <InfoHint hint="Agent 原始生成行数扣除被Agent后续修改覆盖、回退或删除的行后，真正纳入采纳率分母的有效产出。" />
         </span>
       </div>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-        <span className="text-muted-foreground/70">提交口径</span>
-        <span>
-          提交{" "}
-          <span className="font-medium text-foreground">
-            {formatPercent(codeStats.measuredAdoptionRate)}
-          </span>
-          <span className="ml-1 text-muted-foreground/80">
-            ({adopted} / {commitDenom} 行)
-          </span>
-        </span>
-        <span>
-          入库{" "}
-          <span className="font-medium text-foreground">
-            {formatPercent(codeStats.pushedAdoptionRate)}
-          </span>
-          <span className="ml-1 text-muted-foreground/80">
-            ({pushedAdopted} / {pushDenom} 行)
-          </span>
-        </span>
-      </div>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-        <span className="text-muted-foreground/70">总量口径</span>
-        <span>
-          提交{" "}
-          <span className="font-medium text-foreground">
-            {formatPercent(codeStats.inclusiveAdoptionRate)}
-          </span>
-          <span className="ml-1 text-muted-foreground/80">
-            ({adopted} / {totalDenom} 行)
-          </span>
-        </span>
-        <span>
-          入库{" "}
-          <span className="font-medium text-foreground">
-            {formatPercent(codeStats.inclusivePushedAdoptionRate)}
-          </span>
-          <span className="ml-1 text-muted-foreground/80">
-            ({pushedAdopted} / {totalDenom} 行)
-          </span>
-        </span>
-      </div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">{commitGroup}</div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">{totalGroup}</div>
     </div>
   )
 }
@@ -581,20 +601,176 @@ function AdoptionRateLine({
   return <div className="text-right">{body}</div>
 }
 
+/** Status-at-turn-time sub-breakdown within a stage（进行中/已完成 等）。空则不渲染。 */
+function StageStatusRows({
+  byStatus,
+  onOpenStatusTraces
+}: {
+  byStatus: DashboardProjectModeNodeStatus[]
+  /** 可选：查看该「阶段+状态」的对话；不传则不显示按钮（如插件聚合无单项目 trace）。 */
+  onOpenStatusTraces?: (status: string) => void
+}): React.JSX.Element | null {
+  if (byStatus.length === 0) return null
+  return (
+    <div className="space-y-2 border-t border-border/40 pt-1.5">
+      <div className="flex items-center gap-1 text-[10px] text-muted-foreground/70">
+        <span>状态细分</span>
+        <InfoHint hint="按每轮对话开始时该节点的状态（进行中/已完成等）细分；多数对话发生在当前进行中的节点，故「进行中」通常占多数。" />
+      </div>
+      {byStatus.map((s) => (
+        <div key={s.status} className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
+              <span className="rounded bg-muted/60 px-1.5 py-0.5 text-foreground/80">
+                {s.status}
+              </span>
+              <span>{formatNumber(s.conversationCount)} 对话</span>
+            </span>
+            {onOpenStatusTraces ? (
+              <button
+                type="button"
+                className="inline-flex shrink-0 items-center gap-1 text-[10px] text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+                disabled={s.conversationCount === 0}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onOpenStatusTraces(s.status)
+                }}
+              >
+                <MessagesSquare className="size-3" />
+                查看对话
+              </button>
+            ) : null}
+          </div>
+          {/* 紧凑：提交口径 + 总量口径合并为一行，含 (采纳/分母 行)。 */}
+          <FeatureCodeStatsLine codeStats={s.codeStats} compact />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function FeatureStageBreakdown({
+  feature,
+  loadNodes,
+  onOpenNodeTraces
+}: {
+  feature: DashboardProjectModeFeature
+  loadNodes: (feature: DashboardProjectModeFeature) => Promise<DashboardProjectModeFeatureNode[]>
+  onOpenNodeTraces: (
+    feature: DashboardProjectModeFeature,
+    node: DashboardProjectModeFeatureNode,
+    status?: string
+  ) => void
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [nodes, setNodes] = useState<DashboardProjectModeFeatureNode[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleToggle = (): void => {
+    const next = !open
+    setOpen(next)
+    if (next && nodes === null && !loading) {
+      setLoading(true)
+      setError(null)
+      loadNodes(feature)
+        .then((result) => setNodes(result))
+        .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+        .finally(() => setLoading(false))
+    }
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <button
+        type="button"
+        className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+        onClick={(event) => {
+          event.stopPropagation()
+          handleToggle()
+        }}
+      >
+        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        阶段细分
+        <InfoHint hint="按工作流节点（阶段）拆分该特性的对话与代码采纳。" />
+      </button>
+      {open && (
+        <div className="space-y-1.5 rounded-md border border-border/60 bg-background/60 p-2">
+          {loading && (
+            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+              <Loader2 className="size-3 animate-spin" />
+              加载阶段数据…
+            </div>
+          )}
+          {error && <div className="text-[11px] text-destructive">{error}</div>}
+          {!loading && !error && nodes && nodes.length === 0 && (
+            <div className="text-[11px] text-muted-foreground">暂无阶段数据</div>
+          )}
+          {!loading &&
+            !error &&
+            nodes?.map((node) => (
+              <div
+                key={node.nodeName}
+                className="space-y-1 rounded border border-border/50 px-2 py-1.5"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-foreground">
+                    <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                      阶段
+                    </span>
+                    <span className="font-medium">{node.nodeName}</span>
+                    <span className="text-muted-foreground">
+                      · {formatNumber(node.conversationCount)} 对话
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className="inline-flex shrink-0 items-center gap-1 text-[11px] text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+                    disabled={node.conversationCount === 0}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onOpenNodeTraces(feature, node)
+                    }}
+                  >
+                    <MessagesSquare className="size-3.5" />
+                    查看对话
+                  </button>
+                </div>
+                <FeatureCodeStatsLine codeStats={node.codeStats} />
+                <StageStatusRows
+                  byStatus={node.byStatus}
+                  onOpenStatusTraces={(status) => onOpenNodeTraces(feature, node, status)}
+                />
+              </div>
+            ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ProjectRow({
   project,
   expanded,
   onToggle,
   onOpenTraces,
   onOpenFeatureCommits,
-  onOpenProjectCommits
+  onOpenProjectCommits,
+  loadFeatureNodes
 }: {
   project: DashboardProjectModeProject
   expanded: boolean
   onToggle: () => void
-  onOpenTraces: (feature?: DashboardProjectModeFeature) => void
+  onOpenTraces: (
+    feature?: DashboardProjectModeFeature,
+    node?: DashboardProjectModeFeatureNode,
+    status?: string
+  ) => void
   onOpenFeatureCommits: (feature: DashboardProjectModeFeature) => void
   onOpenProjectCommits: (pushedOnly?: boolean) => void
+  loadFeatureNodes: (
+    feature: DashboardProjectModeFeature
+  ) => Promise<DashboardProjectModeFeatureNode[]>
 }): React.JSX.Element {
   const codeStats = project.codeStats
   const hasCommitAdoption = Boolean(codeStats && codeStats.effectiveGeneratedLines > 0)
@@ -805,6 +981,13 @@ function ProjectRow({
                         </div>
                       </div>
                       <FeatureCodeStatsLine codeStats={feature.codeStats} />
+                      {feature.slug && (
+                        <FeatureStageBreakdown
+                          feature={feature}
+                          loadNodes={loadFeatureNodes}
+                          onOpenNodeTraces={(f, node, status) => onOpenTraces(f, node, status)}
+                        />
+                      )}
                     </div>
                   ))}
                 </div>
@@ -928,7 +1111,8 @@ function ProjectListSection({
   onPageChange,
   onOpenTraces,
   onOpenFeatureCommits,
-  onOpenProjectCommits
+  onOpenProjectCommits,
+  loadFeatureNodes
 }: {
   projectCounts?: DashboardProjectModeProjectCounts
   projectPages: Partial<
@@ -951,13 +1135,19 @@ function ProjectListSection({
   ) => void
   onOpenTraces: (
     project: DashboardProjectModeProject,
-    feature?: DashboardProjectModeFeature
+    feature?: DashboardProjectModeFeature,
+    node?: DashboardProjectModeFeatureNode,
+    status?: string
   ) => void
   onOpenFeatureCommits: (
     project: DashboardProjectModeProject,
     feature: DashboardProjectModeFeature
   ) => void
   onOpenProjectCommits: (project: DashboardProjectModeProject, pushedOnly?: boolean) => void
+  loadFeatureNodes: (
+    project: DashboardProjectModeProject,
+    feature: DashboardProjectModeFeature
+  ) => Promise<DashboardProjectModeFeatureNode[]>
 }): React.JSX.Element {
   const [tab, setTab] = useState<ProjectListTab>("active")
   const [query, setQuery] = useState("")
@@ -1239,9 +1429,12 @@ function ProjectListSection({
                 onToggle={() =>
                   setExpandedId((prev) => (prev === project.projectId ? null : project.projectId))
                 }
-                onOpenTraces={(feature) => onOpenTraces(project, feature)}
+                onOpenTraces={(feature, node, status) =>
+                  onOpenTraces(project, feature, node, status)
+                }
                 onOpenFeatureCommits={(feature) => onOpenFeatureCommits(project, feature)}
                 onOpenProjectCommits={(pushedOnly) => onOpenProjectCommits(project, pushedOnly)}
+                loadFeatureNodes={(feature) => loadFeatureNodes(project, feature)}
               />
             ))}
             {effectiveLoading && pageItems.length === 0 && (
@@ -1478,10 +1671,102 @@ function usePluginMarketInfo(): Map<string, PluginMarketInfo> {
   return infoMap
 }
 
+/**
+ * 插件行内「阶段细分」：懒加载该插件跨用户的按阶段（工作流节点）对话数 + 代码采纳，
+ * 跟随面板所选时间范围（range 改变 → loadAggregate 标识变化，展开中会自动重拉）。
+ * 已在项目运营概览内（已具备项目模式权限），无需再做权限门禁。阶段归因前向生效，
+ * 更早会话不带 nodeId。
+ */
+function AdapterStageBreakdown({
+  adapterName,
+  loadAggregate
+}: {
+  adapterName: string
+  loadAggregate: (adapterName: string) => Promise<DashboardProjectModeFeatureNode[]>
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [nodes, setNodes] = useState<DashboardProjectModeFeatureNode[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  // 展开时按当前面板时间范围拉取；range（→ loadAggregate）变化且仍展开时自动重拉。
+  // 不在首个 await 前 setState（满足 react-hooks/set-state-in-effect）；loading 由状态派生。
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const result = await loadAggregate(adapterName)
+        if (!cancelled) {
+          setError(null)
+          setNodes(result)
+        }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [open, adapterName, loadAggregate])
+
+  // 首次展开（无缓存、无错误）显示加载态；range 变化重拉时沿用旧数据直到新数据到达。
+  const loading = open && nodes === null && error === null
+
+  return (
+    <div className="space-y-1.5 pl-5">
+      <button
+        type="button"
+        className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        阶段细分
+        <InfoHint hint="按工作流节点（阶段）拆分该插件的对话与代码采纳，跨用户，跟随面板所选时间范围。" />
+      </button>
+      {open && (
+        <div className="space-y-1.5 rounded-md border border-border/60 bg-background/60 p-2">
+          {loading && (
+            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+              <Loader2 className="size-3 animate-spin" />
+              加载阶段数据…
+            </div>
+          )}
+          {error && <div className="text-[11px] text-destructive">{error}</div>}
+          {!loading && !error && nodes && nodes.length === 0 && (
+            <div className="text-[11px] text-muted-foreground">暂无阶段数据</div>
+          )}
+          {!loading &&
+            !error &&
+            nodes?.map((node) => (
+              <div
+                key={node.nodeName}
+                className="space-y-1 rounded border border-border/50 px-2 py-1.5"
+              >
+                <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-foreground">
+                  <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    阶段
+                  </span>
+                  <span className="font-medium">{node.nodeName}</span>
+                  <span className="text-muted-foreground">
+                    · {formatNumber(node.conversationCount)} 对话
+                  </span>
+                </span>
+                <FeatureCodeStatsLine codeStats={node.codeStats} />
+                <StageStatusRows byStatus={node.byStatus} />
+              </div>
+            ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AdapterListSection({
-  adapters
+  adapters,
+  loadPluginAggregate
 }: {
   adapters: DashboardProjectModeAdapter[]
+  loadPluginAggregate: (adapterName: string) => Promise<DashboardProjectModeFeatureNode[]>
 }): React.JSX.Element {
   const [page, setPage] = useState(1)
   const [mode, setMode] = useState<AdapterListMode>("byName")
@@ -1546,71 +1831,79 @@ function AdapterListSection({
                 return (
                   <div
                     key={`${adapter.name}@${adapter.version ?? ""}`}
-                    className="flex items-center justify-between gap-3 px-4 py-3 text-sm"
+                    className="space-y-2 px-4 py-3 text-sm"
                   >
-                    <div className="flex min-w-0 flex-col gap-1">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <Plug className="size-3.5 shrink-0 text-muted-foreground" />
-                        <span className="truncate font-medium text-foreground">{adapter.name}</span>
-                        {adapter.version && (
-                          <Badge variant="outline" className="normal-case tracking-normal">
-                            {adapter.version}
-                          </Badge>
-                        )}
-                        {info?.useScenario && (
-                          <Badge
-                            variant="secondary"
-                            className="shrink-0 normal-case tracking-normal"
-                          >
-                            {info.useScenario}
-                          </Badge>
-                        )}
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex min-w-0 flex-col gap-1">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <Plug className="size-3.5 shrink-0 text-muted-foreground" />
+                          <span className="truncate font-medium text-foreground">
+                            {adapter.name}
+                          </span>
+                          {adapter.version && (
+                            <Badge variant="outline" className="normal-case tracking-normal">
+                              {adapter.version}
+                            </Badge>
+                          )}
+                          {info?.useScenario && (
+                            <Badge
+                              variant="secondary"
+                              className="shrink-0 normal-case tracking-normal"
+                            >
+                              {info.useScenario}
+                            </Badge>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 pl-5 text-[11px] text-muted-foreground">
+                          <span>负责人：{info?.managerName || "—"}</span>
+                          <span>部门：{info?.managerDepartment || "—"}</span>
+                        </div>
                       </div>
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 pl-5 text-[11px] text-muted-foreground">
-                        <span>负责人：{info?.managerName || "—"}</span>
-                        <span>部门：{info?.managerDepartment || "—"}</span>
+                      <div className="flex shrink-0 items-center gap-4 text-xs text-muted-foreground">
+                        <span>
+                          项目{" "}
+                          <span className="font-medium text-foreground">
+                            {formatNumber(adapter.projectCount)}
+                          </span>
+                        </span>
+                        <span>
+                          特性{" "}
+                          <span className="font-medium text-foreground">
+                            {formatNumber(adapter.featureCount)}
+                          </span>
+                        </span>
+                        <span>
+                          对话{" "}
+                          <span className="font-medium text-foreground">
+                            {formatNumber(adapter.conversationCount)}
+                          </span>
+                        </span>
+                        <span>
+                          <span className="text-muted-foreground/70">提交口径</span> 提交{" "}
+                          <span className="font-medium text-foreground">
+                            {formatPercent(adapter.codeStats?.measuredAdoptionRate)}
+                          </span>{" "}
+                          · 入库{" "}
+                          <span className="font-medium text-foreground">
+                            {formatPercent(adapter.codeStats?.pushedAdoptionRate)}
+                          </span>
+                        </span>
+                        <span>
+                          <span className="text-muted-foreground/70">总量口径</span> 提交{" "}
+                          <span className="font-medium text-foreground">
+                            {formatPercent(adapter.codeStats?.inclusiveAdoptionRate)}
+                          </span>{" "}
+                          · 入库{" "}
+                          <span className="font-medium text-foreground">
+                            {formatPercent(adapter.codeStats?.inclusivePushedAdoptionRate)}
+                          </span>
+                        </span>
                       </div>
                     </div>
-                    <div className="flex shrink-0 items-center gap-4 text-xs text-muted-foreground">
-                      <span>
-                        项目{" "}
-                        <span className="font-medium text-foreground">
-                          {formatNumber(adapter.projectCount)}
-                        </span>
-                      </span>
-                      <span>
-                        特性{" "}
-                        <span className="font-medium text-foreground">
-                          {formatNumber(adapter.featureCount)}
-                        </span>
-                      </span>
-                      <span>
-                        对话{" "}
-                        <span className="font-medium text-foreground">
-                          {formatNumber(adapter.conversationCount)}
-                        </span>
-                      </span>
-                      <span>
-                        <span className="text-muted-foreground/70">提交口径</span> 提交{" "}
-                        <span className="font-medium text-foreground">
-                          {formatPercent(adapter.codeStats?.measuredAdoptionRate)}
-                        </span>{" "}
-                        · 入库{" "}
-                        <span className="font-medium text-foreground">
-                          {formatPercent(adapter.codeStats?.pushedAdoptionRate)}
-                        </span>
-                      </span>
-                      <span>
-                        <span className="text-muted-foreground/70">总量口径</span> 提交{" "}
-                        <span className="font-medium text-foreground">
-                          {formatPercent(adapter.codeStats?.inclusiveAdoptionRate)}
-                        </span>{" "}
-                        · 入库{" "}
-                        <span className="font-medium text-foreground">
-                          {formatPercent(adapter.codeStats?.inclusivePushedAdoptionRate)}
-                        </span>
-                      </span>
-                    </div>
+                    <AdapterStageBreakdown
+                      adapterName={adapter.name}
+                      loadAggregate={loadPluginAggregate}
+                    />
                   </div>
                 )
               })}
@@ -1662,6 +1955,8 @@ export function ProjectModePanel({
   onOpenTraces,
   onOpenFeatureCommits,
   onOpenProjectCommits,
+  loadFeatureNodes,
+  loadPluginAggregate,
   onSkillClick,
   onUserClick,
   onFunnelFirstStageClick,
@@ -1702,13 +1997,20 @@ export function ProjectModePanel({
   ) => void
   onOpenTraces: (
     project: DashboardProjectModeProject,
-    feature?: DashboardProjectModeFeature
+    feature?: DashboardProjectModeFeature,
+    node?: DashboardProjectModeFeatureNode,
+    status?: string
   ) => void
   onOpenFeatureCommits: (
     project: DashboardProjectModeProject,
     feature: DashboardProjectModeFeature
   ) => void
   onOpenProjectCommits: (project: DashboardProjectModeProject, pushedOnly?: boolean) => void
+  loadFeatureNodes: (
+    project: DashboardProjectModeProject,
+    feature: DashboardProjectModeFeature
+  ) => Promise<DashboardProjectModeFeatureNode[]>
+  loadPluginAggregate: (adapterName: string) => Promise<DashboardProjectModeFeatureNode[]>
   onSkillClick?: (skill: string) => void
   onUserClick?: (sapId: string) => void
   onFunnelFirstStageClick?: () => void
@@ -2030,6 +2332,7 @@ export function ProjectModePanel({
         onOpenTraces={onOpenTraces}
         onOpenFeatureCommits={onOpenFeatureCommits}
         onOpenProjectCommits={onOpenProjectCommits}
+        loadFeatureNodes={loadFeatureNodes}
       />
 
       <ProjectModeAnalyticsSection analytics={data?.analytics} onUserClick={onUserClick} />
@@ -2060,7 +2363,7 @@ export function ProjectModePanel({
       </section>
 
       {/* Adapter distribution */}
-      <AdapterListSection adapters={adapters} />
+      <AdapterListSection adapters={adapters} loadPluginAggregate={loadPluginAggregate} />
     </div>
   )
 }

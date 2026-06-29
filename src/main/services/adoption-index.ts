@@ -81,6 +81,10 @@ export interface GenIndexRow {
   /** Harness Board project this generation belongs to (project-mode only), or null. */
   harness_project_id: string | null
   harness_feature_slug: string | null
+  /** Harness Board stage name (group-label) current at gen time (project-mode only), or null. */
+  harness_node_name: string | null
+  /** Stage status (the group-label node's status) current at gen time, or null. */
+  harness_node_status: string | null
   /** Adapter plugin bound to the project at gen time, so adoption can be sliced by plugin version. */
   harness_adapter_name: string | null
   harness_adapter_version: string | null
@@ -125,6 +129,8 @@ export async function initializeAdoptionIndex(): Promise<void> {
         model_name TEXT,
         harness_project_id TEXT,
         harness_feature_slug TEXT,
+        harness_node_name TEXT,
+        harness_node_status TEXT,
         harness_adapter_name TEXT,
         harness_adapter_version TEXT
       )
@@ -143,6 +149,8 @@ export async function initializeAdoptionIndex(): Promise<void> {
       "old_line_hashes BLOB",
       "harness_project_id TEXT",
       "harness_feature_slug TEXT",
+      "harness_node_name TEXT",
+      "harness_node_status TEXT",
       "harness_adapter_name TEXT",
       "harness_adapter_version TEXT"
     ]) {
@@ -201,8 +209,8 @@ export function insertGenEvent(row: GenIndexRow): void {
       `INSERT OR REPLACE INTO gen_events
        (event_id, file_path, tool, content_fingerprint, shard_file, shard_offset, line_hashes, old_line_hashes, created_at, measured,
         used_skills, thread_id, trace_id, model_id, model_name,
-        harness_project_id, harness_feature_slug, harness_adapter_name, harness_adapter_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.event_id,
         row.file_path,
@@ -221,6 +229,8 @@ export function insertGenEvent(row: GenIndexRow): void {
         row.model_name,
         row.harness_project_id,
         row.harness_feature_slug,
+        row.harness_node_name,
+        row.harness_node_status,
         row.harness_adapter_name,
         row.harness_adapter_version
       ]
@@ -255,7 +265,7 @@ export function findPendingGensForFile(
     `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
             line_hashes, old_line_hashes, created_at, measured,
             used_skills, thread_id, trace_id, model_id, model_name,
-            harness_project_id, harness_feature_slug, harness_adapter_name, harness_adapter_version,
+            harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
             tool
        FROM gen_events
       WHERE file_path = ? AND measured = 0 AND created_at >= ?${hasMax ? " AND created_at <= ?" : ""}
@@ -286,7 +296,7 @@ export function getGenRowByEventId(eventId: string): GenIndexRow | null {
     `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
             line_hashes, old_line_hashes, created_at, measured,
             used_skills, thread_id, trace_id, model_id, model_name,
-            harness_project_id, harness_feature_slug, harness_adapter_name, harness_adapter_version,
+            harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
             tool
        FROM gen_events
       WHERE event_id = ?`

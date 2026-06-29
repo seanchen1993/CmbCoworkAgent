@@ -1496,7 +1496,9 @@ function dashboardTraceSourceIncludes(): string[] {
     "totalTokens",
     "usedSkills",
     "evolvedSkills",
-    "triggerSource"
+    "triggerSource",
+    "harnessNodeName",
+    "harnessNodeStatus"
   ]
 }
 
@@ -2649,7 +2651,9 @@ function uncommittedSettledRange(range: TimeRange): TimeRange {
   return { from: range.from, to: range.to < settle ? range.to : settle }
 }
 
-function buildUncommittedSelfUserFilter(access: UncommittedAnalysisAccess): Record<string, unknown> {
+function buildUncommittedSelfUserFilter(
+  access: UncommittedAnalysisAccess
+): Record<string, unknown> {
   const should: Record<string, unknown>[] = []
   const sapId = access.sapId.trim()
   const ystId = access.ystId.trim()
@@ -10778,6 +10782,10 @@ interface ProjectModeTracesOptions {
   viewMode?: TraceViewMode
   triggerScope?: TraceTriggerScope
   featureSlug?: string
+  /** Optional workflow stage name (group-label) to scope traces to a single stage. */
+  nodeName?: string
+  /** Optional node status (进行中/已完成/...) to further scope traces within a stage. */
+  nodeStatus?: string
 }
 
 /** Project-mode traces for a single project (thread/trace pagination). */
@@ -10790,6 +10798,8 @@ async function fetchProjectModeTraces(
   const normalizedProjectId = projectId.trim()
   if (!normalizedProjectId) throw new Error("projectId is required")
   const normalizedFeatureSlug = options?.featureSlug?.trim()
+  const normalizedNodeName = options?.nodeName?.trim()
+  const normalizedNodeStatus = options?.nodeStatus?.trim()
   const traceViewMode = normalizeTraceViewMode(options?.viewMode ?? options?.mode)
   const tracePageSize = clampLimit(
     options?.tracePageSize ?? options?.pageSize ?? options?.limit,
@@ -10806,6 +10816,8 @@ async function fetchProjectModeTraces(
     timeRangeFilter("startedAt", range),
     { term: { harnessProjectId: normalizedProjectId } },
     ...(normalizedFeatureSlug ? [{ term: { harnessFeatureSlug: normalizedFeatureSlug } }] : []),
+    ...(normalizedNodeName ? [{ term: { harnessNodeName: normalizedNodeName } }] : []),
+    ...(normalizedNodeStatus ? [{ term: { harnessNodeStatus: normalizedNodeStatus } }] : []),
     ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
   ]
 
@@ -10860,6 +10872,335 @@ async function fetchProjectModeTraces(
     traceViewMode,
     traceTriggerScope: triggerScope
   }
+}
+
+/** Sub-row of a stage: conversations + code adoption for one node status (进行中/已完成/...). */
+interface ProjectModeNodeStatus {
+  status: string
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+}
+
+/** One workflow node (stage) breakdown row for a feature: conversations + code adoption. */
+interface ProjectModeFeatureNode {
+  nodeName: string
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+  /** Status-at-turn-time sub-breakdown within this stage (进行中/已完成/...). */
+  byStatus: ProjectModeNodeStatus[]
+}
+
+/** Merge per-status conversation counts + code stats into a sorted status sub-breakdown. */
+function buildNodeStatusBreakdown(
+  convByStatus: Map<string, number> | undefined,
+  codeByStatus: Map<string, DashboardCodeStats> | undefined
+): ProjectModeNodeStatus[] {
+  const statuses = new Set<string>([
+    ...(convByStatus?.keys() ?? []),
+    ...(codeByStatus?.keys() ?? [])
+  ])
+  return [...statuses]
+    .map((status) => ({
+      status,
+      conversationCount: convByStatus?.get(status) ?? 0,
+      codeStats: codeByStatus?.get(status) ?? null
+    }))
+    .sort((a, b) => b.conversationCount - a.conversationCount)
+}
+
+/** terms-agg size for the status sub-bucket (only ~9 node statuses exist). */
+const NODE_STATUS_TERMS_SIZE = 16
+
+/** Trace-side `by_node` agg (conversations per stage) with a nested status sub-agg. */
+function traceNodeStatusAgg(): Record<string, unknown> {
+  return {
+    by_node: {
+      terms: { field: "harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT },
+      aggs: {
+        by_status: { terms: { field: "harnessNodeStatus", size: NODE_STATUS_TERMS_SIZE } }
+      }
+    }
+  }
+}
+
+/** Event-side `by_node` agg (code stats per stage) with a nested status sub-agg carrying the same code stats. */
+function codeNodeStatusAgg(perBucketAggs: Record<string, unknown>): Record<string, unknown> {
+  return {
+    by_node: {
+      terms: { field: "properties.harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT },
+      aggs: {
+        ...perBucketAggs,
+        by_status: {
+          terms: { field: "properties.harnessNodeStatus", size: NODE_STATUS_TERMS_SIZE },
+          aggs: perBucketAggs
+        }
+      }
+    }
+  }
+}
+
+/** Parse a trace `by_node` agg container → per-node conversation totals + per-status sub-maps. */
+function parseTraceNodeBuckets(aggregations: unknown): {
+  conversationByNode: Map<string, number>
+  convStatusByNode: Map<string, Map<string, number>>
+} {
+  const conversationByNode = new Map<string, number>()
+  const convStatusByNode = new Map<string, Map<string, number>>()
+  const buckets = asRecord(asRecord(aggregations).by_node).buckets
+  if (Array.isArray(buckets)) {
+    for (const bucket of buckets) {
+      const b = asRecord(bucket)
+      const nodeName = asString(b.key)
+      if (!nodeName) continue
+      conversationByNode.set(nodeName, asNumber(b.doc_count))
+      const statusMap = new Map<string, number>()
+      const statusBuckets = asRecord(b.by_status).buckets
+      if (Array.isArray(statusBuckets)) {
+        for (const sb of statusBuckets) {
+          const s = asRecord(sb)
+          const status = asString(s.key)
+          if (status) statusMap.set(status, asNumber(s.doc_count))
+        }
+      }
+      if (statusMap.size > 0) convStatusByNode.set(nodeName, statusMap)
+    }
+  }
+  return { conversationByNode, convStatusByNode }
+}
+
+/** Parse an event `by_node` agg container → per-node code stats + per-status sub-maps. */
+function parseCodeNodeBuckets(aggregations: unknown): {
+  codeByNode: Map<string, DashboardCodeStats>
+  codeStatusByNode: Map<string, Map<string, DashboardCodeStats>>
+} {
+  const codeByNode = new Map<string, DashboardCodeStats>()
+  const codeStatusByNode = new Map<string, Map<string, DashboardCodeStats>>()
+  const buckets = asRecord(asRecord(aggregations).by_node).buckets
+  if (Array.isArray(buckets)) {
+    for (const bucket of buckets) {
+      const b = asRecord(bucket)
+      const nodeName = asString(b.key)
+      if (!nodeName) continue
+      codeByNode.set(nodeName, normalizeCodeStatsFromContainer(b))
+      const statusMap = new Map<string, DashboardCodeStats>()
+      const statusBuckets = asRecord(b.by_status).buckets
+      if (Array.isArray(statusBuckets)) {
+        for (const sb of statusBuckets) {
+          const s = asRecord(sb)
+          const status = asString(s.key)
+          if (status) statusMap.set(status, normalizeCodeStatsFromContainer(s))
+        }
+      }
+      if (statusMap.size > 0) codeStatusByNode.set(nodeName, statusMap)
+    }
+  }
+  return { codeByNode, codeStatusByNode }
+}
+
+/** Merge parsed trace + event node maps into the sorted stage breakdown (with status sub-rows). */
+function buildFeatureNodeBreakdown(
+  trace: ReturnType<typeof parseTraceNodeBuckets>,
+  code: ReturnType<typeof parseCodeNodeBuckets>
+): ProjectModeFeatureNode[] {
+  const nodeNames = new Set<string>([...trace.conversationByNode.keys(), ...code.codeByNode.keys()])
+  return [...nodeNames]
+    .map((nodeName) => ({
+      nodeName,
+      conversationCount: trace.conversationByNode.get(nodeName) ?? 0,
+      codeStats: code.codeByNode.get(nodeName) ?? null,
+      byStatus: buildNodeStatusBreakdown(
+        trace.convStatusByNode.get(nodeName),
+        code.codeStatusByNode.get(nodeName)
+      )
+    }))
+    .sort((a, b) => b.conversationCount - a.conversationCount)
+}
+
+/**
+ * Per-stage (workflow node) breakdown for one feature: conversation count (trace
+ * index, grouped by harnessNodeName) + code adoption (event index, grouped by
+ * properties.harnessNodeName, scoped to the feature). Forward-only — only turns that
+ * ran after node attribution shipped carry a harnessNodeName, so older conversations
+ * do not appear here.
+ */
+async function fetchProjectModeFeatureNodes(
+  projectId: string,
+  featureSlug: string,
+  range: TimeRange
+): Promise<ProjectModeFeatureNode[]> {
+  const access = requireDashboardProjectModeAccess()
+  const normalizedProjectId = projectId.trim()
+  const normalizedFeatureSlug = featureSlug.trim()
+  if (!normalizedProjectId || !normalizedFeatureSlug) return []
+
+  // 1) conversations per stage (+ status sub-breakdown) — trace index.
+  const traceAccessFilter = buildProjectModeAccessFilter(access)
+  const traceBody = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("startedAt", range),
+          { term: { harnessProjectId: normalizedProjectId } },
+          { term: { harnessFeatureSlug: normalizedFeatureSlug } },
+          ...(traceAccessFilter ? [traceAccessFilter] : [])
+        ]
+      }
+    },
+    aggs: traceNodeStatusAgg()
+  }
+  const traceRaw = (await esQuery(getEsIndex("trace"), traceBody)) as EsSearchResponse
+  const traceParsed = parseTraceNodeBuckets(
+    (traceRaw as unknown as Record<string, unknown>).aggregations
+  )
+
+  // 2) code adoption per stage (+ status sub-breakdown) — event index, scoped to feature.
+  // Mirror fetchProjectModeProjectCodeStats: carry the same org/access filter so
+  // a non-admin never sees other orgs' code events for this project+feature.
+  const orgFilterClause = buildProjectModeOrgFilter(undefined, access)
+  const codeRaw = await fetchProjectModeCodeAggs([normalizedProjectId], range, codeNodeStatusAgg, [
+    ...(orgFilterClause ? [orgFilterClause] : []),
+    { term: { "properties.harnessFeatureSlug": normalizedFeatureSlug } }
+  ])
+  const codeParsed = parseCodeNodeBuckets(asRecord(codeRaw).aggregations)
+
+  // 3) union of stages seen in either index; keep conversation-busiest first.
+  return buildFeatureNodeBreakdown(traceParsed, codeParsed)
+}
+
+/** DEV mock: a deterministic per-node breakdown derived from project/feature seed. */
+function makeMockProjectModeFeatureNodes(
+  projectId: string,
+  featureSlug: string
+): ProjectModeFeatureNode[] {
+  const seed = `${projectId}/${featureSlug}`
+  let h = 0
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0
+  const nodeNames = ["Dev-行为规格", "Dev-技术设计", "Dev-代码实现", "Dev-单元测试"]
+  const baseGenerated = 120 + (h % 240)
+  const base = makeDashboardCodeStats({
+    generatedLines: baseGenerated,
+    deletedLines: 0,
+    measuredGeneratedLines: baseGenerated,
+    effectiveGeneratedLines: baseGenerated,
+    adoptedLines: Math.round(baseGenerated * 0.62),
+    pushedMeasuredGeneratedLines: baseGenerated,
+    pushedEffectiveGeneratedLines: baseGenerated,
+    pushedAdoptedLines: Math.round(baseGenerated * 0.5),
+    pushedCommitCount: 3
+  })
+  const split = splitMockCodeStatsAcrossFeatures(base, nodeNames.length)
+  return nodeNames.map((nodeName, i) => {
+    // Unsigned shift (>>>) so a high-bit seed never yields a negative count; +1 so
+    // every mock stage shows a non-empty status sub-breakdown.
+    const conversationCount = 1 + ((h >>> (i * 4)) % 8)
+    const codeStats = split[i] ?? null
+    const inProgress = Math.ceil(conversationCount / 2)
+    // Split the stage's code stats across its two statuses so the mock shows the
+    // full four-rate breakdown (with numerator/denominator) under each status.
+    const statusSplit = codeStats ? splitMockCodeStatsAcrossFeatures(codeStats, 2) : []
+    return {
+      nodeName,
+      conversationCount,
+      codeStats,
+      byStatus: [
+        { status: "进行中", conversationCount: inProgress, codeStats: statusSplit[0] ?? null },
+        {
+          status: "已完成",
+          conversationCount: conversationCount - inProgress,
+          codeStats: statusSplit[1] ?? null
+        }
+      ].filter((s) => s.conversationCount > 0)
+    }
+  })
+}
+
+/** Cross-user aggregate for a single plugin (adapter), surfaced in the plugin list. */
+interface DashboardPluginAggregate {
+  adapterName: string
+  conversationCount: number
+  projectCount: number
+  codeStats: DashboardCodeStats | null
+  byNode: ProjectModeFeatureNode[]
+}
+
+/**
+ * Aggregate one plugin's project-mode usage across users: conversations + distinct
+ * projects (trace index) and code adoption (event index), both overall and per
+ * workflow node (stage). Keyed on harnessAdapterName so it merges plugin versions.
+ */
+async function fetchPluginAggregate(
+  adapterName: string,
+  range: TimeRange
+): Promise<DashboardPluginAggregate> {
+  const access = requireDashboardProjectModeAccess()
+  const normalizedAdapterName = adapterName.trim()
+  const empty: DashboardPluginAggregate = {
+    adapterName: normalizedAdapterName,
+    conversationCount: 0,
+    projectCount: 0,
+    codeStats: null,
+    byNode: []
+  }
+  if (!normalizedAdapterName) return empty
+
+  const orgFilterClause = buildProjectModeOrgFilter(undefined, access)
+  // Event side mirrors fetchProjectModeAggregateCodeStats: only project-mode code
+  // events (those carrying properties.harnessProjectId), scoped to this adapter.
+  const adapterEventFilters = [
+    ...(orgFilterClause ? [orgFilterClause] : []),
+    { exists: { field: "properties.harnessProjectId" } },
+    { term: { "properties.harnessAdapterName": normalizedAdapterName } }
+  ]
+
+  const [traceRaw, overallCodeRaw, nodeCodeRaw] = await Promise.all([
+    esQuery(getEsIndex("trace"), {
+      size: 0,
+      query: {
+        bool: {
+          filter: [
+            ...projectModeTraceFilters(range, orgFilterClause),
+            { term: { harnessAdapterName: normalizedAdapterName } }
+          ]
+        }
+      },
+      aggs: {
+        conversation_count: { value_count: { field: "traceId" } },
+        project_count: { cardinality: { field: "harnessProjectId" } },
+        ...traceNodeStatusAgg()
+      }
+    }) as Promise<EsSearchResponse>,
+    fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, adapterEventFilters),
+    fetchProjectModeCodeAggs(null, range, codeNodeStatusAgg, adapterEventFilters)
+  ])
+
+  const traceAggs = asRecord(traceRaw.aggregations)
+  const conversationCount = asNumber(asRecord(traceAggs.conversation_count).value)
+  const projectCount = asNumber(asRecord(traceAggs.project_count).value)
+  const traceParsed = parseTraceNodeBuckets(traceAggs)
+  const codeStats = overallCodeRaw ? normalizeCodeStatsFromAggs(overallCodeRaw) : null
+  const codeParsed = parseCodeNodeBuckets(asRecord(nodeCodeRaw).aggregations)
+  const byNode = buildFeatureNodeBreakdown(traceParsed, codeParsed)
+
+  return { adapterName: normalizedAdapterName, conversationCount, projectCount, codeStats, byNode }
+}
+
+/** DEV mock: a deterministic plugin aggregate derived from the adapter name seed. */
+function makeMockPluginAggregate(adapterName: string): DashboardPluginAggregate {
+  const byNode = makeMockProjectModeFeatureNodes(adapterName, "plugin-aggregate")
+  const conversationCount = byNode.reduce((sum, n) => sum + n.conversationCount, 0)
+  const codeStats = makeDashboardCodeStats({
+    generatedLines: 800,
+    deletedLines: 0,
+    measuredGeneratedLines: 800,
+    effectiveGeneratedLines: 800,
+    adoptedLines: 520,
+    pushedMeasuredGeneratedLines: 800,
+    pushedEffectiveGeneratedLines: 800,
+    pushedAdoptedLines: 410,
+    pushedCommitCount: 12
+  })
+  return { adapterName, conversationCount, projectCount: 3, codeStats, byNode }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -10996,6 +11337,35 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       }
     }
   )
+
+  _ipcMain.handle(
+    "dashboard:projectModeFeatureNodes",
+    async (_, projectId: string, featureSlug: string, range: TimeRange) => {
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockProjectModeFeatureNodes(projectId, featureSlug) }
+      try {
+        requireDashboardProjectModeAccess()
+        return {
+          success: true,
+          data: await fetchProjectModeFeatureNodes(projectId, featureSlug, range)
+        }
+      } catch (e) {
+        console.error("[Dashboard] projectModeFeatureNodes error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle("dashboard:pluginAggregate", async (_, adapterName: string, range: TimeRange) => {
+    if (import.meta.env.DEV) return { success: true, data: makeMockPluginAggregate(adapterName) }
+    try {
+      requireDashboardProjectModeAccess()
+      return { success: true, data: await fetchPluginAggregate(adapterName, range) }
+    } catch (e) {
+      console.error("[Dashboard] pluginAggregate error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
 
   _ipcMain.handle(
     "dashboard:projectModeFeatureCommits",

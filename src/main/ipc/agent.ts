@@ -181,7 +181,8 @@ import {
 import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
 import {
   buildHarnessFeatureAgentContext,
-  readHarnessFeatureMetadata
+  readHarnessFeatureMetadata,
+  resolveHarnessFeatureCurrentStage
 } from "../harness-board/service"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
@@ -3776,8 +3777,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       window.once("closed", onWindowClosed)
 
       // Resolve the Harness Board feature binding (if any) so traces can be
-      // linked back to the feature/project that owns this conversation.
-      let harnessFeatureBinding: { projectId: string; slug: string } | undefined
+      // linked back to the feature/project that owns this conversation. We also
+      // resolve the feature's *current stage* once per turn here and attach its
+      // human-readable name (group-label, e.g. "Dev-代码实现") plus the node's status
+      // at this turn (进行中/已完成/...) to the binding, so this turn's trace + code
+      // events are sliceable by stage and by status-within-stage. Best-effort: any
+      // failure leaves nodeName/nodeStatus absent (we never report the raw node id).
+      let harnessFeatureBinding:
+        | { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
+        | undefined
       try {
         const bindingThread = getThread(threadId)
         if (bindingThread?.metadata) {
@@ -3786,6 +3794,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       } catch {
         // Non-project threads or unparsable metadata: leave the trace untagged.
+      }
+      if (harnessFeatureBinding) {
+        const currentStage = resolveHarnessFeatureCurrentStage(
+          harnessFeatureBinding.projectId,
+          harnessFeatureBinding.slug
+        )
+        if (currentStage?.name)
+          harnessFeatureBinding = {
+            ...harnessFeatureBinding,
+            nodeName: currentStage.name,
+            ...(currentStage.status ? { nodeStatus: currentStage.status } : {})
+          }
       }
 
       // Start trace collection for this invocation (modelId resolved later)
@@ -5777,12 +5797,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
             } else if (sessionToolCallCount >= threshold) {
               console.log(
-                `[SkillEvolution][${threadId}] Tool threshold reached, waiting for turn threshold ${JSON.stringify({
-                  toolCallCount: sessionToolCallCount,
-                  threshold,
-                  turnCount: sessionTurnCount,
-                  turnThreshold
-                })}`
+                `[SkillEvolution][${threadId}] Tool threshold reached, waiting for turn threshold ${JSON.stringify(
+                  {
+                    toolCallCount: sessionToolCallCount,
+                    threshold,
+                    turnCount: sessionTurnCount,
+                    turnThreshold
+                  }
+                )}`
               )
             }
           } else if (invokeFinalOutcome === "success" && !isCoordinatorNotificationTurn) {

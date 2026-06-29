@@ -64,6 +64,8 @@ import {
   type DashboardUserListData,
   type DashboardUserListItem,
   type DashboardProjectModeFeature,
+  type DashboardProjectModeFeatureNode,
+  type DashboardPluginAggregate,
   type DashboardProjectModeData,
   type DashboardProjectModeProject,
   type DashboardProjectModeTracesData,
@@ -2467,6 +2469,10 @@ export function DashboardView(): React.JSX.Element {
     useState<DashboardProjectModeProject | null>(null)
   const [projectTraceFeature, setProjectTraceFeature] =
     useState<DashboardProjectModeFeature | null>(null)
+  const [projectTraceNode, setProjectTraceNode] = useState<DashboardProjectModeFeatureNode | null>(
+    null
+  )
+  const [projectTraceStatus, setProjectTraceStatus] = useState<string | null>(null)
   const [projectTraceData, setProjectTraceData] = useState<DashboardProjectModeTracesData | null>(
     null
   )
@@ -3052,9 +3058,16 @@ export function DashboardView(): React.JSX.Element {
   ])
 
   const handleProjectOpenTraces = useCallback(
-    (project: DashboardProjectModeProject, feature?: DashboardProjectModeFeature) => {
+    (
+      project: DashboardProjectModeProject,
+      feature?: DashboardProjectModeFeature,
+      node?: DashboardProjectModeFeatureNode,
+      status?: string
+    ) => {
       setProjectTraceProject(project)
       setProjectTraceFeature(feature ?? null)
+      setProjectTraceNode(node ?? null)
+      setProjectTraceStatus(status ?? null)
       setProjectTraceData(null)
       setProjectTracesError(null)
       setProjectTracePage(1)
@@ -3063,11 +3076,40 @@ export function DashboardView(): React.JSX.Element {
     []
   )
 
+  const loadProjectFeatureNodes = useCallback(
+    async (
+      project: DashboardProjectModeProject,
+      feature: DashboardProjectModeFeature
+    ): Promise<DashboardProjectModeFeatureNode[]> => {
+      const res = await window.api.dashboard.projectModeFeatureNodes(
+        project.projectId,
+        feature.slug,
+        range
+      )
+      if (!res.success) throw new Error(res.error ?? "获取阶段数据失败")
+      return Array.isArray(res.data) ? (res.data as DashboardProjectModeFeatureNode[]) : []
+    },
+    [range]
+  )
+
+  // 插件聚合的按阶段细分，跟随面板当前时间范围（range 变化即得到新回调，展开中的细分会重拉）。
+  const loadPluginAggregateNodes = useCallback(
+    async (adapterName: string): Promise<DashboardProjectModeFeatureNode[]> => {
+      const res = await window.api.dashboard.pluginAggregate(adapterName, range)
+      if (!res.success) throw new Error(res.error ?? "获取阶段数据失败")
+      const data = res.data as DashboardPluginAggregate | undefined
+      return Array.isArray(data?.byNode) ? data.byNode : []
+    },
+    [range]
+  )
+
   useEffect(() => {
     if (!projectTraceProject) return
     let cancelled = false
     const currentProject = projectTraceProject
     const currentFeature = projectTraceFeature
+    const currentNode = projectTraceNode
+    const currentStatus = projectTraceStatus
 
     async function loadProjectTraces(): Promise<void> {
       setProjectTracesLoading(true)
@@ -3078,7 +3120,9 @@ export function DashboardView(): React.JSX.Element {
           tracePageSize: PROJECT_TRACE_PAGE_SIZE,
           mode: projectTraceViewMode,
           triggerScope: PROJECT_TRACE_TRIGGER_SCOPE,
-          ...(currentFeature?.slug ? { featureSlug: currentFeature.slug } : {})
+          ...(currentFeature?.slug ? { featureSlug: currentFeature.slug } : {}),
+          ...(currentNode?.nodeName ? { nodeName: currentNode.nodeName } : {}),
+          ...(currentStatus ? { nodeStatus: currentStatus } : {})
         })
         if (!res.success) throw new Error(res.error ?? "获取项目对话失败")
         const rawData = res.data
@@ -3111,7 +3155,15 @@ export function DashboardView(): React.JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [projectTraceFeature, projectTracePage, projectTraceProject, projectTraceViewMode, range])
+  }, [
+    projectTraceFeature,
+    projectTraceNode,
+    projectTraceStatus,
+    projectTracePage,
+    projectTraceProject,
+    projectTraceViewMode,
+    range
+  ])
 
   useEffect(() => {
     let cancelled = false
@@ -4200,7 +4252,7 @@ export function DashboardView(): React.JSX.Element {
     Boolean(projectTraceData) &&
     projectTracePage * projectTracePageSize < projectTraceTotal &&
     !projectTracesLoading
-  const projectTraceScopeLabel = projectTraceFeature ? "特性" : "项目"
+  const projectTraceScopeLabel = projectTraceNode ? "阶段" : projectTraceFeature ? "特性" : "项目"
   const projectTraceTitle =
     projectTraceViewMode === "thread"
       ? `${projectTraceScopeLabel}会话（第 ${projectTracePage} 页）`
@@ -4209,12 +4261,17 @@ export function DashboardView(): React.JSX.Element {
     projectTraceViewMode === "thread"
       ? `共 ${formatNumber(projectTraceTotal)} 个会话，选择记录定位到对话`
       : `共 ${formatNumber(projectTraceTotal)} 条，选择记录定位到对话`
+  const projectTraceStageSuffix = projectTraceNode
+    ? ` · 阶段 ${projectTraceNode.nodeName}${projectTraceStatus ? ` · ${projectTraceStatus}` : ""}`
+    : ""
   const projectTraceDialogTitle = projectTraceFeature
-    ? `特性对话 · ${projectTraceProject?.name ?? "-"} · ${projectTraceFeature.title}`
+    ? `特性对话 · ${projectTraceProject?.name ?? "-"} · ${projectTraceFeature.title}${projectTraceStageSuffix}`
     : `项目对话 · ${projectTraceProject?.name ?? "-"}`
-  const projectTraceDialogSubtitle = projectTraceFeature
-    ? "该特性在项目模式下的对话记录，选择记录定位到会话"
-    : "该项目模式下的对话记录，选择记录定位到会话"
+  const projectTraceDialogSubtitle = projectTraceNode
+    ? "该特性某阶段（工作流节点）下的对话记录，选择记录定位到会话"
+    : projectTraceFeature
+      ? "该特性在项目模式下的对话记录，选择记录定位到会话"
+      : "该项目模式下的对话记录，选择记录定位到会话"
   const analysisScope: DashboardAnalysisScope =
     activeMainTab === "project-mode" && projectModeAllowed ? "project" : "platform"
   const analysisPanelSnapshot = useMemo(
@@ -4420,6 +4477,8 @@ export function DashboardView(): React.JSX.Element {
                 onOpenTraces={handleProjectOpenTraces}
                 onOpenFeatureCommits={handleProjectOpenFeatureCommits}
                 onOpenProjectCommits={handleProjectOpenProjectCommits}
+                loadFeatureNodes={loadProjectFeatureNodes}
+                loadPluginAggregate={loadPluginAggregateNodes}
                 onSkillClick={handleSkillClick}
                 onUserClick={(sapId) => openUserDetail(sapId, "main", true)}
                 onFunnelFirstStageClick={
@@ -4593,6 +4652,8 @@ export function DashboardView(): React.JSX.Element {
           if (!open) {
             setProjectTraceProject(null)
             setProjectTraceFeature(null)
+            setProjectTraceNode(null)
+            setProjectTraceStatus(null)
             setProjectTraceData(null)
             setProjectTracePage(1)
             setProjectTraceViewMode("thread")

@@ -187,6 +187,14 @@ export interface AdoptionContext {
    */
   harnessProjectId?: string
   harnessFeatureSlug?: string
+  /**
+   * Harness Board workflow stage name (group-label, e.g. "Dev-代码实现") current at
+   * gen time, so emitted code_gen/code_adopt events can be sliced by stage.
+   * Forward-only; no raw node id.
+   */
+  harnessNodeName?: string
+  /** Stage status at gen time (group-label's node status, e.g. 进行中/已完成). Forward-only. */
+  harnessNodeStatus?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
 }
@@ -403,7 +411,6 @@ export function countNonBlankLines(content: string): number {
   return count
 }
 
-
 function computeLineHashes(content: string): Uint32Array {
   const lines = content.split(/\r?\n/)
   const hashes: number[] = []
@@ -451,10 +458,9 @@ function subtractLineHashMultiset(source: Uint32Array, subtract: Uint32Array): U
   return new Uint32Array(kept)
 }
 
-export function buildAdoptionLineBaseline(input: Pick<
-  RecordGenInput,
-  "tool" | "generatedContent" | "oldString" | "occurrences"
->): AdoptionLineBaseline {
+export function buildAdoptionLineBaseline(
+  input: Pick<RecordGenInput, "tool" | "generatedContent" | "oldString" | "occurrences">
+): AdoptionLineBaseline {
   const generationOccurrences = getGenerationOccurrenceCount(input)
   const rawGeneratedLineHashes = repeatLineHashes(
     computeLineHashes(input.generatedContent),
@@ -545,8 +551,7 @@ function deriveDeletedLineCount(input: RecordGenInput): number {
   if (occurrences === 0) return 0
 
   const oldNonBlank = countNonBlankLines(input.oldString)
-  const newNonBlank =
-    typeof input.newString === "string" ? countNonBlankLines(input.newString) : 0
+  const newNonBlank = typeof input.newString === "string" ? countNonBlankLines(input.newString) : 0
   return Math.max(0, oldNonBlank - newNonBlank) * occurrences
 }
 
@@ -812,9 +817,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     const hashes = baseline.generatedLineHashes
     const oldLineHashes = baseline.supersededLineHashes
     if (hashes.length === 0 && oldLineHashes.length === 0) {
-      console.log(
-        `[AdoptionTracker] recordGen skip — empty after normalization: ${input.filePath}`
-      )
+      console.log(`[AdoptionTracker] recordGen skip — empty after normalization: ${input.filePath}`)
       return
     }
     const fingerprint = generationFingerprint(input.generatedContent, generationOccurrences)
@@ -871,6 +874,8 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       model_name: ctx.modelName ?? null,
       harness_project_id: ctx.harnessProjectId ?? null,
       harness_feature_slug: ctx.harnessFeatureSlug ?? null,
+      harness_node_name: ctx.harnessNodeName ?? null,
+      harness_node_status: ctx.harnessNodeStatus ?? null,
       harness_adapter_name: ctx.harnessAdapterName ?? null,
       harness_adapter_version: ctx.harnessAdapterVersion ?? null
     })
@@ -891,6 +896,8 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       modelName: ctx.modelName ?? null,
       harnessProjectId: ctx.harnessProjectId ?? null,
       harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
+      harnessNodeName: ctx.harnessNodeName ?? null,
+      harnessNodeStatus: ctx.harnessNodeStatus ?? null,
       harnessAdapterName: ctx.harnessAdapterName ?? null,
       harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
       // note: filePath / content / fingerprint intentionally withheld
@@ -941,6 +948,8 @@ function emitSkippedLargeAtGen(args: {
     modelName: ctx.modelName ?? null,
     harnessProjectId: ctx.harnessProjectId ?? null,
     harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
+    harnessNodeName: ctx.harnessNodeName ?? null,
+    harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
     harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
     createdAt: new Date(createdAt).toISOString(),
@@ -971,6 +980,8 @@ function emitSkippedLargeAtGen(args: {
     modelName: ctx.modelName ?? null,
     harnessProjectId: ctx.harnessProjectId ?? null,
     harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
+    harnessNodeName: ctx.harnessNodeName ?? null,
+    harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
     harnessAdapterVersion: ctx.harnessAdapterVersion ?? null
   })
@@ -1080,6 +1091,8 @@ async function emitSupersededAdopt(
     modelName: pending.model_name ?? null,
     harnessProjectId: pending.harness_project_id ?? null,
     harnessFeatureSlug: pending.harness_feature_slug ?? null,
+    harnessNodeName: pending.harness_node_name ?? null,
+    harnessNodeStatus: pending.harness_node_status ?? null,
     harnessAdapterName: pending.harness_adapter_name ?? null,
     harnessAdapterVersion: pending.harness_adapter_version ?? null
   })
@@ -1261,6 +1274,8 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         modelName: pending.model_name ?? null,
         harnessProjectId: pending.harness_project_id ?? null,
         harnessFeatureSlug: pending.harness_feature_slug ?? null,
+        harnessNodeName: pending.harness_node_name ?? null,
+        harnessNodeStatus: pending.harness_node_status ?? null,
         harnessAdapterName: pending.harness_adapter_name ?? null,
         harnessAdapterVersion: pending.harness_adapter_version ?? null
       })
