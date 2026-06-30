@@ -1,4 +1,5 @@
 import { tmpdir } from "os"
+import path from "path"
 import { describe, expect, it, vi } from "vitest"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator, type RawExecuteFn, type RequestApprovalFn } from "./tool-orchestrator"
@@ -89,5 +90,31 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(result.output).toContain("Command rejected")
     expect(rawExecute).not.toHaveBeenCalled()
     expect(requestApproval).toHaveBeenCalledTimes(1)
+  })
+
+  it("reports push-specific cwd validation errors for routed git push commands", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
+      output: "should not run",
+      exitCode: 0,
+      truncated: false
+    })
+    const requestApproval = vi.fn<RequestApprovalFn>()
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      false
+    )
+    const cwd = process.cwd()
+    const missingGitCwd = path.join(cwd, ".missing-git-push-cwd-for-test")
+
+    const result = await orchestrator.execute(`git -C "${missingGitCwd}" push`, cwd, "none")
+
+    expect(result.exitCode).toBe(1)
+    expect(result.output).toContain("`git push` 的工作目录不存在")
+    expect(result.output).not.toContain("git commit")
+    expect(result.output).not.toContain("任务卡片")
+    expect(rawExecute).not.toHaveBeenCalled()
+    expect(requestApproval).not.toHaveBeenCalled()
   })
 })

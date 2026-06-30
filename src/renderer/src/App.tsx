@@ -15,6 +15,7 @@ import { TabbedPanel } from "@/components/tabs"
 import { RightPanel } from "@/components/panels/RightPanel"
 import { WorkerStreamPanel } from "@/components/chat/WorkerStreamPanel"
 import { SubagentStreamPanel } from "@/components/chat/SubagentStreamPanel"
+import { WorkflowAgentStreamPanel } from "@/components/chat/WorkflowAgentStreamPanel"
 const KanbanView = lazy(() =>
   import("@/components/kanban").then((m) => ({ default: m.KanbanView }))
 )
@@ -169,6 +170,7 @@ function App(): React.JSX.Element {
     setPendingEvolution,
     workerFocusView,
     subagentFocusView,
+    workflowAgentFocusView,
     setShowCustomizeView,
     setEvolutionTab,
     setCloudEvolutionUpdates
@@ -188,6 +190,7 @@ function App(): React.JSX.Element {
       setPendingEvolution: state.setPendingEvolution,
       workerFocusView: state.workerFocusView,
       subagentFocusView: state.subagentFocusView,
+      workflowAgentFocusView: state.workflowAgentFocusView,
       setShowCustomizeView: state.setShowCustomizeView,
       setEvolutionTab: state.setEvolutionTab,
       setCloudEvolutionUpdates: state.setCloudEvolutionUpdates
@@ -230,8 +233,18 @@ function App(): React.JSX.Element {
     mainView === "harness" &&
     Boolean(harnessSessionThreadId && subagentFocusView?.threadId === harnessSessionThreadId)
   const isSubagentFocusActive = isThreadSubagentFocusActive || isHarnessSubagentFocusActive
-  const isAgentFocusActive = isWorkerFocusActive || isSubagentFocusActive
-  const isHarnessAgentFocusActive = isHarnessWorkerFocusActive || isHarnessSubagentFocusActive
+  const isThreadWorkflowAgentFocusActive =
+    mainView === "thread" &&
+    Boolean(currentThreadId && workflowAgentFocusView?.threadId === currentThreadId)
+  const isHarnessWorkflowAgentFocusActive =
+    mainView === "harness" &&
+    Boolean(harnessSessionThreadId && workflowAgentFocusView?.threadId === harnessSessionThreadId)
+  const isWorkflowAgentFocusActive =
+    isThreadWorkflowAgentFocusActive || isHarnessWorkflowAgentFocusActive
+  const isAgentFocusActive =
+    isWorkerFocusActive || isSubagentFocusActive || isWorkflowAgentFocusActive
+  const isHarnessAgentFocusActive =
+    isHarnessWorkerFocusActive || isHarnessSubagentFocusActive || isHarnessWorkflowAgentFocusActive
 
   useEffect(() => {
     if (!workerFocusView?.threadId || !workerFocusView.workerThreadId) return
@@ -284,6 +297,10 @@ function App(): React.JSX.Element {
       })
     }
   }, [workerFocusView?.threadId, workerFocusView?.workerThreadId])
+
+  // NOTE: the workflow subagent tool-stream capture (subscribe + buffer + main-side
+  // "viewing interest" registration) lives in WorkflowRunPanel, gated by that panel's
+  // mount lifecycle — so the tap does work ONLY while a run is actually on screen.
 
   const initUser = () => {
     window.api.models.getUserInfo().then(user => {
@@ -948,7 +965,13 @@ function App(): React.JSX.Element {
                     </section>
                     <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
                     <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                      {isWorkerFocusActive ? <WorkerStreamPanel /> : <SubagentStreamPanel />}
+                      {isWorkflowAgentFocusActive ? (
+                        <WorkflowAgentStreamPanel />
+                      ) : isWorkerFocusActive ? (
+                        <WorkerStreamPanel />
+                      ) : (
+                        <SubagentStreamPanel />
+                      )}
                     </section>
                   </main>
                 ) : !previewFullscreen && (
@@ -1050,7 +1073,13 @@ function App(): React.JSX.Element {
               <>
                 <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
                 <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                  {isHarnessWorkerFocusActive ? <WorkerStreamPanel /> : <SubagentStreamPanel />}
+                  {isHarnessWorkflowAgentFocusActive ? (
+                    <WorkflowAgentStreamPanel />
+                  ) : isHarnessWorkerFocusActive ? (
+                    <WorkerStreamPanel />
+                  ) : (
+                    <SubagentStreamPanel />
+                  )}
                 </section>
               </>
             )}

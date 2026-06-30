@@ -5,7 +5,7 @@ import { existsSync, realpathSync } from "fs"
 import * as fs from "fs/promises"
 import * as path from "path"
 import { promisify } from "util"
-import type { AgentAutoCommitResult, AgentAutoCommitSettings } from "../types"
+import type { AgentAutoCommitRepoResult, AgentAutoCommitResult, AgentAutoCommitSettings } from "../types"
 import {
   getAgentAutoCommitCardNumberForWorkspace,
   getAgentAutoCommitSettings,
@@ -15,10 +15,15 @@ import { trackEvent } from "./event-reporter"
 import { captureStagedSnapshotsForCommit, measureForCommit } from "./adoption-tracker"
 import { getTracesDir } from "../agent/trace/collector"
 import type { AgentTrace } from "../agent/trace/types"
+import {
+  discoverWorkspaceGitRepositories,
+  type DiscoveredGitRepository
+} from "./git-repository-discovery"
 
 const execFileAsync = promisify(execFile)
 const GIT_EXEC_MAX_BUFFER_BYTES = 20 * 1024 * 1024
 const GIT_CONTEXT_QUERY_TIMEOUT_MS = 10_000
+const AUTO_COMMIT_FEATURE_ENABLED = false
 
 const GIT_BASE_ENV: NodeJS.ProcessEnv = {
   ...process.env,
@@ -46,6 +51,19 @@ export interface AgentGitSnapshot {
   workspacePath: string
   isGitRepo: boolean
   gitRoot: string | null
+  head: string | null
+  branch: string | null
+  dirtyFiles: string[]
+  stagedFiles: string[]
+  dirtyFingerprints: Record<string, string>
+  repositories?: AgentGitRepositorySnapshot[]
+}
+
+export interface AgentGitRepositorySnapshot {
+  repoPath: string
+  gitRoot: string
+  workspaceRelativePath: string
+  displayPath: string
   head: string | null
   branch: string | null
   dirtyFiles: string[]
@@ -324,17 +342,23 @@ async function getHead(worktreePath: string): Promise<string | null> {
   }
 }
 
-async function getGitRoot(workspacePath: string): Promise<string | null> {
-  try {
-    const root = (
-      await runGit(workspacePath, ["rev-parse", "--show-toplevel"], {
-        silent: true,
-        timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
-      })
-    ).trim()
-    return root || null
-  } catch {
-    return null
+async function snapshotRepository(repo: DiscoveredGitRepository): Promise<AgentGitRepositorySnapshot> {
+  const [head, branch, entries] = await Promise.all([
+    getHead(repo.repoPath),
+    getCurrentBranch(repo.repoPath),
+    runStatus(repo.repoPath, repo.gitRoot)
+  ])
+  const dirtyFiles = Array.from(new Set(entries.map((entry) => entry.path)))
+  return {
+    repoPath: repo.repoPath,
+    gitRoot: repo.gitRoot,
+    workspaceRelativePath: repo.workspaceRelativePath,
+    displayPath: repo.displayPath,
+    head,
+    branch,
+    dirtyFiles,
+    stagedFiles: getStagedFiles(entries),
+    dirtyFingerprints: await getFingerprints(repo.repoPath, dirtyFiles)
   }
 }
 
@@ -343,13 +367,14 @@ export async function startAgentGitSnapshot(
   workspacePath: string | undefined
 ): Promise<AgentGitSnapshot | null> {
   touchedFilesByThread.set(threadId, new Set())
+  if (!AUTO_COMMIT_FEATURE_ENABLED) return null
   if (!workspacePath) return null
 
   const settings = getAgentAutoCommitSettings()
   if (settings.mode === "off") return null
 
-  const gitRoot = await getGitRoot(workspacePath)
-  if (!gitRoot) {
+  const repositories = await discoverWorkspaceGitRepositories(workspacePath)
+  if (repositories.length === 0) {
     return {
       threadId,
       workspacePath,
@@ -362,6 +387,32 @@ export async function startAgentGitSnapshot(
       dirtyFingerprints: {}
     }
   }
+
+  if (repositories.length > 1 || !repositories[0].isWorkspaceRoot) {
+    const repoSnapshots = await Promise.all(repositories.map((repo) => snapshotRepository(repo)))
+    return {
+      threadId,
+      workspacePath,
+      isGitRepo: true,
+      gitRoot: null,
+      head: null,
+      branch: null,
+      dirtyFiles: repoSnapshots.flatMap((repo) =>
+        repo.dirtyFiles.map((file) =>
+          repo.workspaceRelativePath === "." ? file : `${repo.workspaceRelativePath}/${file}`
+        )
+      ),
+      stagedFiles: repoSnapshots.flatMap((repo) =>
+        repo.stagedFiles.map((file) =>
+          repo.workspaceRelativePath === "." ? file : `${repo.workspaceRelativePath}/${file}`
+        )
+      ),
+      dirtyFingerprints: {},
+      repositories: repoSnapshots
+    }
+  }
+
+  const gitRoot = repositories[0].gitRoot
 
   const [head, branch, entries] = await Promise.all([
     getHead(workspacePath),
@@ -378,7 +429,8 @@ export async function startAgentGitSnapshot(
     branch,
     dirtyFiles,
     stagedFiles: getStagedFiles(entries),
-    dirtyFingerprints: await getFingerprints(workspacePath, dirtyFiles)
+    dirtyFingerprints: await getFingerprints(workspacePath, dirtyFiles),
+    repositories: [await snapshotRepository(repositories[0])]
   }
 }
 
@@ -387,6 +439,7 @@ export function recordAgentTouchedFile(
   workspacePath: string,
   filePath: string
 ): void {
+  if (!AUTO_COMMIT_FEATURE_ENABLED) return
   const rel = toWorktreeRelativePath(canonicalizePath(workspacePath), filePath)
   if (!rel) return
   let set = touchedFilesByThread.get(threadId)
@@ -518,11 +571,7 @@ async function clearLlmModifiedMetadata(threadId: string): Promise<void> {
   }
 }
 
-async function getThreadLlmModifiedFiles(
-  threadId: string,
-  workspacePath: string,
-  gitRoot?: string | null
-): Promise<string[]> {
+async function readThreadLlmModifiedFileItems(threadId: string): Promise<string[]> {
   try {
     const { getThread } = await import("../db")
     const thread = getThread(threadId)
@@ -535,6 +584,19 @@ async function getThreadLlmModifiedFiles(
     }
     const raw = metadata.llmModifiedFiles
     if (!Array.isArray(raw)) return []
+    return raw.filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+  } catch {
+    return []
+  }
+}
+
+async function getThreadLlmModifiedFiles(
+  threadId: string,
+  workspacePath: string,
+  gitRoot?: string | null
+): Promise<string[]> {
+  try {
+    const raw = await readThreadLlmModifiedFileItems(threadId)
     const files = new Set<string>()
     const worktreeAbs = canonicalizePath(workspacePath)
     const gitRootAbs = gitRoot ? canonicalizePath(gitRoot) : null
@@ -547,6 +609,46 @@ async function getThreadLlmModifiedFiles(
   } catch {
     return []
   }
+}
+
+async function getThreadLlmModifiedFilesForRepo(
+  threadId: string,
+  workspacePath: string,
+  repo: AgentGitRepositorySnapshot
+): Promise<string[]> {
+  const raw = await readThreadLlmModifiedFileItems(threadId)
+  const files = new Set<string>()
+  const repoAbs = canonicalizePath(repo.repoPath)
+  const gitRootAbs = canonicalizePath(repo.gitRoot)
+  const workspaceAbs = canonicalizePath(workspacePath)
+  for (const item of raw) {
+    const candidate = path.isAbsolute(item) ? item : path.resolve(workspaceAbs, item)
+    const rel = toWorktreeRelativePath(repoAbs, candidate, gitRootAbs)
+    if (rel) files.add(rel)
+  }
+  return Array.from(files)
+}
+
+function mapWorkspaceRelativeFilesToRepo(
+  workspacePath: string,
+  repo: AgentGitRepositorySnapshot,
+  files: Iterable<string>
+): Set<string> {
+  const mapped = new Set<string>()
+  const repoAbs = canonicalizePath(repo.repoPath)
+  const gitRootAbs = canonicalizePath(repo.gitRoot)
+  const workspaceAbs = canonicalizePath(workspacePath)
+  for (const file of files) {
+    if (!file) continue
+    const candidate = path.isAbsolute(file) ? file : path.resolve(workspaceAbs, file)
+    const rel = toWorktreeRelativePath(repoAbs, candidate, gitRootAbs)
+    if (rel) mapped.add(rel)
+  }
+  return mapped
+}
+
+function prefixRepoFile(repo: AgentGitRepositorySnapshot, file: string): string {
+  return repo.workspaceRelativePath === "." ? file : `${repo.workspaceRelativePath}/${file}`
 }
 
 async function collectThreadSkillStatsAsync(threadId: string): Promise<string[]> {
@@ -602,6 +704,375 @@ function trackAutoCommit(threadId: string, workspacePath: string, changedFiles: 
     .catch((error) => console.warn("[AutoCommit] telemetry failed:", error))
 }
 
+interface RepositoryAutoCommitPlan {
+  repo: AgentGitRepositorySnapshot
+  candidateFiles: string[]
+  skippedFiles: string[]
+  warnings: string[]
+  commitMessage: string
+}
+
+async function prepareRepositoryAutoCommitPlan(params: {
+  threadId: string
+  workspacePath: string
+  userPrompt?: string
+  settings: AgentAutoCommitSettings
+  workspaceCardNumber: string | undefined
+  repo: AgentGitRepositorySnapshot
+  touchedFiles: Set<string>
+}): Promise<RepositoryAutoCommitPlan | AgentAutoCommitRepoResult> {
+  const { threadId, workspacePath, userPrompt, settings, workspaceCardNumber, repo, touchedFiles } = params
+  const warnings: string[] = []
+
+  const currentHead = await getHead(repo.repoPath)
+  if (repo.head && currentHead && currentHead !== repo.head) {
+    return {
+      repoPath: repo.repoPath,
+      displayPath: repo.displayPath,
+      status: "skipped",
+      reasons: ["Agent 执行期间 HEAD 发生变化，为避免误提交，已跳过自动提交"]
+    }
+  }
+
+  const unmerged = await getUnmergedFiles(repo.repoPath)
+  if (unmerged.length > 0) {
+    return {
+      repoPath: repo.repoPath,
+      displayPath: repo.displayPath,
+      status: "skipped",
+      reasons: ["检测到冲突文件，自动提交已跳过"],
+      skippedFiles: unmerged
+    }
+  }
+
+  const entries = await runStatus(repo.repoPath, repo.gitRoot)
+  const endDirty = new Set(entries.map((entry) => entry.path))
+  const startDirty = new Set(repo.dirtyFiles)
+  const touched = mapWorkspaceRelativeFilesToRepo(workspacePath, repo, touchedFiles)
+  const trackedByGitPanel = new Set(
+    await getThreadLlmModifiedFilesForRepo(threadId, workspacePath, repo)
+  )
+  const agentReported = new Set([...touched, ...trackedByGitPanel])
+
+  const changedStartDirty = new Set<string>()
+  await Promise.all(
+    repo.dirtyFiles.map(async (file) => {
+      if (!endDirty.has(file)) return
+      const current = await getFileFingerprint(repo.repoPath, file)
+      if (current !== repo.dirtyFingerprints[file]) changedStartDirty.add(file)
+    })
+  )
+
+  const isWorkspaceInternalPath = (file: string): boolean =>
+    file === ".cmbdevclaw" || file.startsWith(".cmbdevclaw/") || file.includes("/.cmbdevclaw/")
+  const newDirtyFiles = Array.from(endDirty).filter(
+    (file) => !startDirty.has(file) && !isWorkspaceInternalPath(file)
+  )
+  const candidate = new Set<string>()
+  for (const file of newDirtyFiles) candidate.add(file)
+  for (const file of changedStartDirty) {
+    if (!isWorkspaceInternalPath(file)) candidate.add(file)
+  }
+
+  const candidateFiles = Array.from(candidate).sort()
+  const skippedFiles = Array.from(endDirty)
+    .filter((file) => !candidate.has(file) && !isWorkspaceInternalPath(file))
+    .sort()
+
+  const preexistingIncluded = candidateFiles.filter((file) => startDirty.has(file))
+  if (preexistingIncluded.length > 0) {
+    warnings.push(
+      `本次自动提交包含 ${preexistingIncluded.length} 个 Agent 开始前已有未提交改动、且本轮被修改的文件`
+    )
+  }
+  if (newDirtyFiles.length > 0) {
+    warnings.push(`本次自动提交包含 ${newDirtyFiles.length} 个本轮新增的脏文件`)
+  }
+  const unreportedCandidates = candidateFiles.filter((file) => !agentReported.has(file))
+  if (unreportedCandidates.length > 0) {
+    warnings.push(
+      `其中 ${unreportedCandidates.length} 个文件未被 Agent 工具主动报告（可能来自 shell 命令或外部修改），如非预期请人工核对`
+    )
+  }
+
+  const stagedEnd = new Set(getStagedFiles(entries))
+  const foreignStaged = Array.from(stagedEnd).filter((file) => !agentReported.has(file))
+  if (foreignStaged.length > 0) {
+    return {
+      repoPath: repo.repoPath,
+      displayPath: repo.displayPath,
+      status: "skipped",
+      reasons: ["检测到非本轮 Agent 改动已暂存，为避免误提交，已跳过自动提交"],
+      skippedFiles: foreignStaged,
+      warnings
+    }
+  }
+
+  if (candidateFiles.length === 0) {
+    const reasons = ["未发现本轮 Agent 产生的可提交改动，已跳过自动提交"]
+    if (skippedFiles.length > 0) {
+      reasons.push("仓库仍有未提交改动，但这些文件不符合自动提交规则")
+    }
+    return {
+      repoPath: repo.repoPath,
+      displayPath: repo.displayPath,
+      status: "skipped",
+      reasons,
+      skippedFiles,
+      warnings
+    }
+  }
+
+  const commitMessageResult = buildCommitMessage(
+    settings,
+    workspaceCardNumber,
+    threadId,
+    userPrompt,
+    candidateFiles
+  )
+  if (!commitMessageResult.message) {
+    return {
+      repoPath: repo.repoPath,
+      displayPath: repo.displayPath,
+      status: "skipped",
+      reasons: [commitMessageResult.reason || "未能生成提交信息，已跳过自动提交"],
+      committedFiles: candidateFiles,
+      skippedFiles,
+      warnings
+    }
+  }
+
+  return {
+    repo,
+    candidateFiles,
+    skippedFiles,
+    warnings,
+    commitMessage: commitMessageResult.message
+  }
+}
+
+function isRepositoryPlan(
+  value: RepositoryAutoCommitPlan | AgentAutoCommitRepoResult
+): value is RepositoryAutoCommitPlan {
+  return "candidateFiles" in value && "commitMessage" in value && "repo" in value
+}
+
+async function executeRepositoryAutoCommitPlan(params: {
+  threadId: string
+  workspacePath: string
+  settings: AgentAutoCommitSettings
+  plan: RepositoryAutoCommitPlan
+}): Promise<AgentAutoCommitRepoResult> {
+  const { threadId, workspacePath, settings, plan } = params
+  const { repo, candidateFiles, skippedFiles, warnings, commitMessage } = plan
+  try {
+    await runGit(repo.repoPath, ["add", "--", ...candidateFiles])
+    const adoptionCaptureTimeMs = Date.now()
+    let adoptionSnapshots: Awaited<ReturnType<typeof captureStagedSnapshotsForCommit>> = []
+    try {
+      adoptionSnapshots = await captureStagedSnapshotsForCommit(repo.repoPath)
+    } catch {
+      // best-effort
+    }
+    await runGit(repo.repoPath, ["commit", "-m", commitMessage])
+    const commitHash = await getHead(repo.repoPath)
+    if (adoptionSnapshots.length > 0) {
+      try {
+        measureForCommit(adoptionSnapshots, commitHash ?? undefined, adoptionCaptureTimeMs)
+      } catch {
+        // best-effort
+      }
+    }
+
+    notifyWorkspaceFilesChanged(threadId, repo.repoPath)
+    if (path.resolve(repo.repoPath) !== path.resolve(workspacePath)) {
+      notifyWorkspaceFilesChanged(threadId, workspacePath)
+    }
+    trackAutoCommit(threadId, repo.repoPath, candidateFiles)
+
+    let pushed: boolean | undefined
+    let pushError: string | undefined
+    if (settings.push) {
+      try {
+        await runGit(repo.repoPath, ["push"])
+        pushed = true
+      } catch (error) {
+        pushed = false
+        pushError = getExecErrorText(error) || "推送失败"
+      }
+    }
+
+    return {
+      repoPath: repo.repoPath,
+      displayPath: repo.displayPath,
+      status: "committed",
+      commitMessage,
+      commitHash: commitHash ?? undefined,
+      committedFiles: candidateFiles,
+      skippedFiles,
+      warnings,
+      ...(pushed !== undefined ? { pushed } : {}),
+      ...(pushError ? { pushError } : {})
+    }
+  } catch (error) {
+    return {
+      repoPath: repo.repoPath,
+      displayPath: repo.displayPath,
+      status: "failed",
+      message: "自动提交失败",
+      commitMessage,
+      committedFiles: candidateFiles,
+      skippedFiles,
+      warnings,
+      reasons: [getExecErrorText(error) || "提交失败"]
+    }
+  }
+}
+
+async function maybeAutoCommitMultipleRepositories(params: {
+  threadId: string
+  workspacePath: string
+  userPrompt?: string
+  snapshot: AgentGitSnapshot
+  confirm?: (result: AgentAutoCommitResult) => Promise<boolean>
+  settings: AgentAutoCommitSettings
+}): Promise<AgentAutoCommitResult> {
+  const { threadId, workspacePath, userPrompt, snapshot, confirm, settings } = params
+  const repositories = snapshot.repositories ?? []
+  if (repositories.length === 0) {
+    return { status: "skipped", reasons: ["当前工作区未发现 Git 仓库，已跳过自动提交"] }
+  }
+
+  const workspaceCardNumber = getAgentAutoCommitCardNumberForWorkspace(workspacePath)
+  const touched = touchedFilesByThread.get(threadId) ?? new Set<string>()
+  const prepared = await Promise.all(
+    repositories.map((repo) =>
+      prepareRepositoryAutoCommitPlan({
+        threadId,
+        workspacePath,
+        userPrompt,
+        settings,
+        workspaceCardNumber,
+        repo,
+        touchedFiles: touched
+      })
+    )
+  )
+  const plans = prepared.filter(isRepositoryPlan)
+  const skippedRepoResults = prepared.filter(
+    (item): item is AgentAutoCommitRepoResult => !isRepositoryPlan(item)
+  )
+
+  if (plans.length === 0) {
+    return {
+      status: "skipped",
+      reasons: ["未发现本轮 Agent 产生的可提交改动，已跳过自动提交"],
+      skippedFiles: skippedRepoResults.flatMap((repo) =>
+        (repo.skippedFiles ?? []).map((file) => `${repo.displayPath}/${file}`)
+      ),
+      warnings: skippedRepoResults.flatMap((repo) => repo.warnings ?? []),
+      repoResults: skippedRepoResults
+    }
+  }
+
+  const totalFiles = plans.reduce((sum, plan) => sum + plan.candidateFiles.length, 0)
+  const preview: AgentAutoCommitResult = {
+    status: "needs_confirmation",
+    message: settings.push
+      ? `准备在 ${plans.length} 个仓库自动提交并推送 ${totalFiles} 个文件`
+      : `准备在 ${plans.length} 个仓库自动提交 ${totalFiles} 个文件`,
+    committedFiles: plans.flatMap((plan) =>
+      plan.candidateFiles.map((file) => prefixRepoFile(plan.repo, file))
+    ),
+    skippedFiles: skippedRepoResults.flatMap((repo) =>
+      (repo.skippedFiles ?? []).map((file) => `${repo.displayPath}/${file}`)
+    ),
+    warnings: [
+      ...plans.flatMap((plan) => plan.warnings.map((warning) => `[${plan.repo.displayPath}] ${warning}`)),
+      ...skippedRepoResults.flatMap((repo) =>
+        (repo.warnings ?? []).map((warning) => `[${repo.displayPath}] ${warning}`)
+      )
+    ],
+    repoResults: [
+      ...plans.map((plan): AgentAutoCommitRepoResult => ({
+        repoPath: plan.repo.repoPath,
+        displayPath: plan.repo.displayPath,
+        status: "skipped",
+        message: "等待确认",
+        commitMessage: plan.commitMessage,
+        committedFiles: plan.candidateFiles,
+        skippedFiles: plan.skippedFiles,
+        warnings: plan.warnings
+      })),
+      ...skippedRepoResults
+    ]
+  }
+
+  if (settings.mode === "ask") {
+    const approved = await confirm?.(preview)
+    if (!approved) {
+      return {
+        ...preview,
+        status: "skipped",
+        reasons: ["用户取消了本次自动提交"]
+      }
+    }
+  }
+
+  const committedRepoResults: AgentAutoCommitRepoResult[] = []
+  for (const plan of plans) {
+    committedRepoResults.push(
+      await executeRepositoryAutoCommitPlan({ threadId, workspacePath, settings, plan })
+    )
+  }
+
+  if (committedRepoResults.some((repo) => repo.status === "committed") && workspaceCardNumber?.trim()) {
+    saveAgentAutoCommitWorkspaceCard(workspacePath, workspaceCardNumber.trim())
+  }
+  if (committedRepoResults.some((repo) => repo.status === "committed")) {
+    await clearLlmModifiedMetadata(threadId)
+  }
+
+  const repoResults = [...committedRepoResults, ...skippedRepoResults]
+  const committedRepos = committedRepoResults.filter((repo) => repo.status === "committed")
+  const failedRepos = committedRepoResults.filter((repo) => repo.status === "failed")
+  const committedFiles = committedRepoResults.flatMap((repo) =>
+    (repo.committedFiles ?? []).map((file) => `${repo.displayPath}/${file}`)
+  )
+  const skippedFiles = repoResults.flatMap((repo) =>
+    (repo.skippedFiles ?? []).map((file) => `${repo.displayPath}/${file}`)
+  )
+
+  if (committedRepos.length === 0 && failedRepos.length > 0) {
+    return {
+      status: "failed",
+      message: "多仓库自动提交失败",
+      committedFiles,
+      skippedFiles,
+      warnings: repoResults.flatMap((repo) => repo.warnings ?? []),
+      reasons: repoResults.flatMap((repo) => repo.reasons ?? []),
+      repoResults
+    }
+  }
+
+  return {
+    status: committedRepos.length > 0 ? "committed" : "skipped",
+    message:
+      committedRepos.length > 0
+        ? `自动提交完成：${committedRepos.length} 个仓库，${committedFiles.length} 个文件`
+        : "未发现本轮 Agent 产生的可提交改动，已跳过自动提交",
+    committedFiles,
+    skippedFiles,
+    warnings: repoResults.flatMap((repo) => repo.warnings ?? []),
+    reasons: repoResults.flatMap((repo) => repo.reasons ?? []),
+    pushed: settings.push && committedRepos.length > 0
+      ? committedRepos.every((repo) => repo.pushed === true)
+      : undefined,
+    pushError: repoResults.find((repo) => repo.pushError)?.pushError,
+    repoResults
+  }
+}
+
 export async function maybeAutoCommitAfterAgentRun({
   threadId,
   workspacePath,
@@ -616,6 +1087,9 @@ export async function maybeAutoCommitAfterAgentRun({
   confirm?: (result: AgentAutoCommitResult) => Promise<boolean>
 }): Promise<AgentAutoCommitResult> {
   try {
+    if (!AUTO_COMMIT_FEATURE_ENABLED) {
+      return { status: "disabled" }
+    }
     const settings = getAgentAutoCommitSettings()
     if (settings.mode === "off") {
       return { status: "disabled" }
@@ -630,6 +1104,22 @@ export async function maybeAutoCommitAfterAgentRun({
     if (!existsSync(workspacePath)) {
       return { status: "skipped", reasons: ["工作区路径不存在，已跳过自动提交"] }
     }
+    const repositorySnapshots = snapshot.repositories ?? []
+    const shouldUseMultiRepoFlow =
+      repositorySnapshots.length > 0 &&
+      (repositorySnapshots.length > 1 ||
+        path.resolve(repositorySnapshots[0].repoPath) !== path.resolve(workspacePath))
+    if (shouldUseMultiRepoFlow) {
+      return await maybeAutoCommitMultipleRepositories({
+        threadId,
+        workspacePath,
+        userPrompt,
+        snapshot,
+        confirm,
+        settings
+      })
+    }
+
     const gitRoot = snapshot.gitRoot
     if (!gitRoot) {
       return { status: "skipped", reasons: ["当前工作区不是 Git 仓库，已跳过自动提交"] }

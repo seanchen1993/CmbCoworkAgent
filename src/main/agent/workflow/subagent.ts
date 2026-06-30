@@ -1,4 +1,4 @@
-import { HumanMessage } from "@langchain/core/messages"
+import { HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
 import { NodeInterrupt } from "@langchain/langgraph"
 import type { AgentShellAccess } from "../agent-registry"
@@ -15,6 +15,11 @@ import {
 import { WORKFLOW_SUBAGENT_BASE_PROMPT, buildWorkflowSubagentStructuredPrompt } from "./prompts"
 
 const STRUCTURED_OUTPUT_FATAL_ERROR = Symbol.for("cmb.workflow.structured_output.fatal")
+// Explicitly marks a structured-output failure as "retry on a fresh session" so the
+// retry decision does NOT depend on the error message incidentally containing the
+// substring "structured_output" (the nudge-block reason names the pending tool, which
+// may or may not be structured_output — see schemaRetry).
+const STRUCTURED_OUTPUT_RETRYABLE = Symbol.for("cmb.workflow.structured_output.retryable")
 const STRUCTURED_OUTPUT_RECORDED_MESSAGE =
   "Structured output recorded successfully. End your turn now — no further text is needed."
 const STRUCTURED_OUTPUT_SIGNATURE_MAX_CHARS = 8_192
@@ -96,6 +101,14 @@ export interface RunWorkflowSubagentRequest {
   disallowedTools?: string[]
   /** agentType-resolved shell policy. Undefined = full. */
   shellAccess?: AgentShellAccess
+  /**
+   * Best-effort display tap: invoked with each "values" snapshot (the graph state
+   * `{ messages: [...] }`) so the renderer can show this subagent's live tool stream.
+   * PURELY additive — it never affects the returned result, the structured-stop
+   * logic, or the journal. The callee guards it with try/catch, but callers MUST
+   * keep it non-throwing and cheap. Undefined for all non-display callers.
+   */
+  onValues?: (snapshot: unknown) => void
 }
 
 interface StructuredOutputLogContext {
@@ -110,6 +123,24 @@ interface StructuredOutputLogContext {
  * the in-session tool-retries + nudge). Both messages mention `structured_output`. */
 function isStructuredOutputFailure(error: unknown): boolean {
   return error instanceof Error && error.message.includes("structured_output")
+}
+
+/** A structured-output failure explicitly tagged "retry on a fresh session" (e.g. the
+ * nudge-block when the transcript has a dangling tool call) — classified by an explicit
+ * marker rather than by message substring, so the retry decision is stable regardless of
+ * which tool was pending. */
+function structuredOutputRetryableError(message: string): Error {
+  const error = new Error(message)
+  Object.defineProperty(error, STRUCTURED_OUTPUT_RETRYABLE, { value: true })
+  return error
+}
+
+function isStructuredOutputRetryableError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { [STRUCTURED_OUTPUT_RETRYABLE]?: unknown })[STRUCTURED_OUTPUT_RETRYABLE] === true
+  )
 }
 
 export function isWorkflowStructuredOutputFatalError(error: unknown): boolean {
@@ -149,7 +180,9 @@ export async function runWorkflowSubagent(
       // a FRESH session: a clean transcript often succeeds where a poisoned one
       // couldn't, especially for mid-tier models. Bounded by MAX_RUNS (2) — exactly
       // one extra attempt — so a genuinely impossible schema can't loop.
-      const schemaRetry = request.schema !== undefined && isStructuredOutputFailure(error)
+      const schemaRetry =
+        request.schema !== undefined &&
+        (isStructuredOutputRetryableError(error) || isStructuredOutputFailure(error))
       if ((!retryable && !schemaRetry) || attempt >= WORKFLOW_SUBAGENT_MAX_RUNS) break
       console.warn(
         `[Workflow] Subagent ${request.label} attempt ${attempt} failed (${
@@ -281,7 +314,8 @@ async function runOnce(
         consumeValuesStream(
           await runtime.stream({ messages: [new HumanMessage(request.prompt)] }, streamConfig),
           controller.signal,
-          stopAfterStructuredAccepted
+          stopAfterStructuredAccepted,
+          request.onValues
         ))(),
       controller.signal
     )
@@ -298,12 +332,37 @@ async function runOnce(
     // a fresh thread_id, you must accumulate tokens across both snapshots.)
     if (request.schema && !isStructuredAccepted(structured, request.schema)) {
       throwIfAborted(controller.signal, request.signal, timeoutMs)
+      // A genuine (non-structured) interrupt can't be repaired — fail it, but tag it
+      // retryable so a fresh clean session gets one more shot.
+      const interruptText = nonStructuredInterruptText(snapshot)
+      if (interruptText) {
+        throw structuredOutputRetryableError(
+          `subagent paused before returning a structured result: ${interruptText}`
+        )
+      }
+      // A dangling tool call (assistant tool_calls without results — common when mid-tier
+      // models do parallel calls and one comes back unpaired) would 400 if we just
+      // appended the nudge HumanMessage. Instead synthesize a tool result for each dangling
+      // id so the history is valid, then nudge on the SAME session — aligning with how
+      // claude-code (yieldMissingToolResultBlocks) and MiMo-Code repair unmatched tool
+      // calls. Keeps parallel_tool_calls AND gives the model a real recovery turn (with the
+      // session context + a clear instruction) instead of failing the whole attempt.
+      const repairMessages = danglingToolCallIds(snapshot).map(
+        (id) =>
+          new ToolMessage({
+            tool_call_id: id,
+            content:
+              "[This tool call did not complete. Call structured_output again, exactly once, " +
+              "by itself, with input matching the required JSON Schema.]"
+          })
+      )
       snapshot = await raceWithAbort(
         (async () =>
           consumeValuesStream(
             await runtime.stream(
               {
                 messages: [
+                  ...repairMessages,
                   new HumanMessage(
                     "You have not returned a valid structured result yet. Call the structured_output tool now, exactly once, with an input matching the required JSON Schema. Do not reply with plain text."
                   )
@@ -312,7 +371,8 @@ async function runOnce(
               streamConfig
             ),
             controller.signal,
-            stopAfterStructuredAccepted
+            stopAfterStructuredAccepted,
+            request.onValues
           ))(),
         controller.signal
       )
@@ -663,13 +723,15 @@ function rootSchemaCoversProperty(schema: Record<string, unknown>, key: string):
   ) {
     return true
   }
-  return schema.additionalProperties === true || isPlainRecord(schema.additionalProperties)
+  if (schema.additionalProperties === true || isPlainRecord(schema.additionalProperties)) return true
+  return rootSchemaVariants(schema).some((variant) => rootSchemaCoversProperty(variant, key))
 }
 
 function rootSchemaDeclaresProperty(schema: Record<string, unknown>, key: string): boolean {
-  return (
-    isPlainRecord(schema.properties) && Object.prototype.hasOwnProperty.call(schema.properties, key)
-  )
+  if (isPlainRecord(schema.properties) && Object.prototype.hasOwnProperty.call(schema.properties, key)) {
+    return true
+  }
+  return rootSchemaVariants(schema).some((variant) => rootSchemaDeclaresProperty(variant, key))
 }
 
 function rootSchemaHasObjectShape(schema: Record<string, unknown>): boolean {
@@ -1281,6 +1343,10 @@ function schemaVariants(value: unknown): Record<string, unknown>[] {
   return value.filter((item): item is Record<string, unknown> => isPlainRecord(item))
 }
 
+function rootSchemaVariants(schema: Record<string, unknown>): Record<string, unknown>[] {
+  return [...schemaVariants(schema.anyOf), ...schemaVariants(schema.oneOf)]
+}
+
 function schemaVariantValues(value: unknown): unknown[] {
   return Array.isArray(value) ? value : []
 }
@@ -1497,10 +1563,13 @@ function structuredOutputInterruptMessage(snapshot: unknown): string | null {
 }
 
 /** Consumes a [mode, data] stream and returns the last "values" snapshot. */
-async function consumeValuesStream(
+/** Exported for the tap-isolation regression test (display-only onValues must not
+ * change the return value or stop semantics; a throwing tap must be swallowed). */
+export async function consumeValuesStream(
   stream: AsyncIterable<unknown>,
   signal: AbortSignal,
-  shouldStop?: (snapshot: unknown) => boolean
+  shouldStop?: (snapshot: unknown) => boolean,
+  onValues?: (snapshot: unknown) => void
 ): Promise<unknown> {
   let lastValues: unknown
   for await (const chunk of stream) {
@@ -1509,6 +1578,16 @@ async function consumeValuesStream(
     const [mode, data] = chunk as [string, unknown]
     if (mode === "values") {
       lastValues = data
+      // Best-effort display tap (BEFORE the stop check so the final accepted
+      // snapshot is also surfaced). Fully isolated: a throwing tap must never
+      // perturb the run's result or stop semantics.
+      if (onValues) {
+        try {
+          onValues(data)
+        } catch {
+          /* display tap is best-effort */
+        }
+      }
       // Structured subagents can stop as soon as a schema-valid structured_output
       // call has been captured; invalid tool calls keep streaming so the model can
       // read the repair feedback and call the tool again.
@@ -1519,10 +1598,18 @@ async function consumeValuesStream(
 }
 
 interface MessageLike {
+  additional_kwargs?: { tool_calls?: unknown[] }
   content?: unknown
-  kwargs?: { content?: unknown; usage_metadata?: { output_tokens?: number } }
+  kwargs?: {
+    additional_kwargs?: { tool_calls?: unknown[] }
+    content?: unknown
+    tool_calls?: unknown[]
+    tool_call_id?: unknown
+    usage_metadata?: { output_tokens?: number }
+  }
   usage_metadata?: { output_tokens?: number }
   tool_calls?: unknown[]
+  tool_call_id?: unknown
   id?: unknown
   _getType?: () => string
 }
@@ -1551,12 +1638,75 @@ function isAiMessage(message: MessageLike): boolean {
   return className === "ai" || className.includes("aimessage")
 }
 
+function isToolMessage(message: MessageLike): boolean {
+  const className = messageClassName(message).toLowerCase()
+  return className === "tool" || className.includes("toolmessage")
+}
+
+function messageToolCalls(message: MessageLike): unknown[] {
+  if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return message.tool_calls
+  if (Array.isArray(message.kwargs?.tool_calls)) return message.kwargs.tool_calls
+  if (Array.isArray(message.additional_kwargs?.tool_calls)) return message.additional_kwargs.tool_calls
+  if (Array.isArray(message.kwargs?.additional_kwargs?.tool_calls)) {
+    return message.kwargs.additional_kwargs.tool_calls
+  }
+  if (Array.isArray(message.tool_calls)) return message.tool_calls
+  return []
+}
+
+function toolCallId(toolCall: unknown): string | undefined {
+  if (!isPlainRecord(toolCall)) return undefined
+  return typeof toolCall.id === "string" && toolCall.id.trim() ? toolCall.id : undefined
+}
+
+function toolMessageToolCallId(message: MessageLike): string | undefined {
+  const id = message.tool_call_id ?? message.kwargs?.tool_call_id
+  return typeof id === "string" && id.trim() ? id : undefined
+}
+
+function nonStructuredInterruptText(snapshot: unknown): string | null {
+  if (!isPlainRecord(snapshot)) return null
+  const interrupts = snapshot.__interrupt__
+  if (!Array.isArray(interrupts)) return null
+  for (const interrupt of interrupts) {
+    const value = isPlainRecord(interrupt) ? interrupt.value : interrupt
+    const text = typeof value === "string" ? value : extractTextFromUnknownContent(value).trim()
+    if (!text) continue
+    if (!text.includes("structured_output schema validation failed")) return text
+  }
+  return null
+}
+
+/** Tool-call ids from the snapshot that never got a matching tool result — "dangling".
+ * Walks the cumulative messages tracking the latest assistant turn's tool calls; any still
+ * unresolved when a non-tool message arrives (or the transcript ends) are returned, so the
+ * caller can synthesize a tool result for each before continuing (else the API 400s). */
+function danglingToolCallIds(snapshot: unknown): string[] {
+  const pending = new Set<string>()
+  for (const message of snapshotMessages(snapshot)) {
+    if (pending.size > 0) {
+      if (isToolMessage(message)) {
+        const id = toolMessageToolCallId(message)
+        if (id) pending.delete(id)
+        continue
+      }
+      return Array.from(pending)
+    }
+    if (!isAiMessage(message)) continue
+    for (const call of messageToolCalls(message)) {
+      const id = toolCallId(call)
+      if (id) pending.add(id)
+    }
+  }
+  return Array.from(pending)
+}
+
 function extractFinalAssistantText(snapshot: unknown): string {
   const messages = snapshotMessages(snapshot)
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
     if (!isAiMessage(message)) continue
-    const toolCalls = message.tool_calls
+    const toolCalls = messageToolCalls(message)
     if (Array.isArray(toolCalls) && toolCalls.length > 0) continue
     const text = extractTextFromUnknownContent(message.content ?? message.kwargs?.content)
     if (text.trim()) return text.trim()
@@ -1586,7 +1736,7 @@ export function extractOutputTokens(snapshot: unknown, text: string): number {
       total += estimateTokenCount(
         extractTextFromUnknownContent(message.content ?? message.kwargs?.content)
       )
-      const toolCalls = message.tool_calls
+      const toolCalls = messageToolCalls(message)
       if (Array.isArray(toolCalls) && toolCalls.length > 0) {
         total += estimateTokenCount(stringifyToolCalls(toolCalls))
       }
@@ -1651,8 +1801,10 @@ async function delay(ms: number, signal: AbortSignal): Promise<void> {
   let onAbort: (() => void) | undefined
   try {
     await new Promise<void>((resolveDelay) => {
+      // NOT unref'd: this is the run's critical retry path, so the timer MUST keep the
+      // process alive until it fires (an unref'd timer let a bare-node test exit early
+      // mid-retry — a false green). On app quit the run's abort signal resolves it at once.
       const timer = setTimeout(resolveDelay, ms)
-      timer.unref?.()
       onAbort = () => {
         clearTimeout(timer)
         resolveDelay()

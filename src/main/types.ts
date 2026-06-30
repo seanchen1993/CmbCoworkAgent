@@ -4,6 +4,7 @@ export type {
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitMode,
   AgentAutoCommitResult,
+  AgentAutoCommitRepoResult,
   AgentAutoCommitSettings,
   AgentAutoCommitWorkspaceCard,
   AgentAutoCommitStatus
@@ -630,6 +631,8 @@ export interface ApprovalRequest extends HITLRequest {
   suggestedCommitFilePaths?: string[]
   /** For git_commit: cwd that explicit pathspecs are relative to (after git -C) */
   suggestedCommitFileBasePath?: string
+  /** For git_commit/git_push: Git working directory resolved from cd / git -C. */
+  suggestedGitWorktreePath?: string
   /** For git_commit: where suggestedCommitFilePaths came from */
   suggestedCommitFileSelectionSource?: "pathspec" | "staged"
   filePath?: string // target file path (for write_file/edit_file operations)

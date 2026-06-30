@@ -508,6 +508,26 @@ export class ElectronIPCTransport implements UseStreamTransport {
       .filter((message): message is Message => Boolean(message && typeof message === "object"))
   }
 
+  /**
+   * Convert a workflow subagent's "values" snapshot (the broadcast `snapshotMessages`
+   * array) into renderer `Message[]` for the live workflow tool-stream panel. Reuses
+   * the proven coordinator values-mapper, but WITHOUT its `workerFocusView` coupling
+   * (the workflow tap is keyed by runId+agentIndex, filtered by runId in
+   * WorkflowRunPanel's subscription). `values`
+   * snapshots are full-state latest-wins, so the caller REPLACES the agent's buffer
+   * — no append/dedup needed.
+   */
+  convertWorkflowAgentValuesSnapshot(
+    snapshotMessages: unknown,
+    syntheticThreadId: string
+  ): Message[] {
+    if (!Array.isArray(snapshotMessages) || snapshotMessages.length === 0) return []
+    return this.createFocusedCoordinatorWorkerEventsFromValues(
+      snapshotMessages as SerializedMessageChunk[],
+      syntheticThreadId
+    )
+  }
+
   private async *createErrorGenerator(code: string, message: string): AsyncGenerator<StreamEvent> {
     yield {
       event: "error",

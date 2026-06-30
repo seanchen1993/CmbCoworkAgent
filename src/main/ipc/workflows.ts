@@ -1,6 +1,8 @@
 import { ipcMain, type IpcMain } from "electron"
-import { workflowRunManager } from "../agent/workflow/run-manager"
+import { readFile, stat } from "fs/promises"
+import { setWorkflowAgentStreamInterest, workflowRunManager } from "../agent/workflow/run-manager"
 import {
+  agentToolStreamPath,
   byNewestRun,
   listWorkflowRuns,
   loadWorkflowRun,
@@ -17,6 +19,10 @@ import { getThread } from "../db"
  * stripJournalForRenderer), cancel the active run, and hydrate the live panel
  * after a renderer reload / app restart.
  */
+
+// Upper bound on a per-agent tool-stream sidecar we'll read: well above the ~1MB content
+// write budget (plus JSON overhead), but caps a corrupted/externally-grown file.
+const WORKFLOW_AGENT_TOOLSTREAM_MAX_BYTES = 8 * 1024 * 1024
 
 function resolveWorkspacePath(threadId: string): string | null {
   const thread = getThread(threadId)
@@ -120,6 +126,54 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
     (_event, { threadId, runId }: { threadId: string; runId?: string }): boolean => {
       console.log("[Workflow] Cancel requested:", { threadId, runId })
       return workflowRunManager.cancel(threadId, runId)
+    }
+  )
+
+  // Display-only: the focus panel registers/deregisters per-AGENT "viewing interest"
+  // while it shows a RUNNING agent, so the live tool-stream tap only serializes +
+  // broadcasts the one agent you're looking at. No-op for the run itself.
+  ipc.handle(
+    "workflow:set-agent-stream-interest",
+    (
+      event,
+      {
+        threadId,
+        runId,
+        agentIndex,
+        interested
+      }: { threadId: string; runId: string; agentIndex: number; interested: boolean }
+    ): boolean => {
+      // Pass the calling webContents so interest is keyed per-window and self-purges on
+      // that window's reload / crash / close (robust to a hard reload that skips the
+      // renderer's unmount cleanup).
+      setWorkflowAgentStreamInterest(threadId, runId, agentIndex, interested, event.sender)
+      return true
+    }
+  )
+
+  // Display-only: read a FINISHED subagent's persisted complete tool flow on demand
+  // (lazy — only the clicked agent). Returns the serialized "values" messages array, or
+  // null when there is no sidecar (cached/instant agent, pruned run, or pre-feature run).
+  ipc.handle(
+    "workflow:get-agent-toolstream",
+    async (
+      _event,
+      { threadId, runId, agentIndex }: { threadId: string; runId: string; agentIndex: number }
+    ): Promise<unknown[] | null> => {
+      const workspacePath = resolveWorkspacePath(threadId)
+      if (!workspacePath) return null
+      try {
+        const path = agentToolStreamPath(workspacePath, threadId, runId, agentIndex)
+        // Defensive size cap: a normal sidecar is bounded (~1MB content write budget plus
+        // JSON overhead); refuse to read+parse a corrupted or externally-grown file
+        // unbounded into the main process.
+        if ((await stat(path)).size > WORKFLOW_AGENT_TOOLSTREAM_MAX_BYTES) return null
+        const parsed = JSON.parse(await readFile(path, "utf8")) as { snapshotMessages?: unknown }
+        return Array.isArray(parsed.snapshotMessages) ? parsed.snapshotMessages : null
+      } catch {
+        // Missing sidecar (ENOENT) or unreadable/parse error → no displayable flow.
+        return null
+      }
     }
   )
 
