@@ -904,6 +904,9 @@ function FeatureStageBreakdown({
                       阶段
                     </span>
                     <span className="font-medium">{node.nodeName}</span>
+                    {node.nodeName === STAGE_BUCKET_LABELS.unattributed && (
+                      <InfoHint hint={STAGE_BUCKET_HINTS.unattributed} />
+                    )}
                     <span className="text-muted-foreground">
                       · {formatNumber(node.conversationCount)} 对话
                     </span>

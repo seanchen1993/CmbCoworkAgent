@@ -43,6 +43,7 @@ import {
   type DashboardAnalysisAgentInput
 } from "../services/dashboard-analysis-agent"
 import {
+  STAGE_BUCKET_LABELS,
   STAGE_DONE_LABEL,
   STAGE_IN_PROGRESS_LABEL,
   type StageBucket
@@ -11117,7 +11118,7 @@ async function fetchProjectModeTraces(
     timeRangeFilter("startedAt", range),
     { term: { harnessProjectId: normalizedProjectId } },
     ...(normalizedFeatureSlug ? [{ term: { harnessFeatureSlug: normalizedFeatureSlug } }] : []),
-    ...(normalizedNodeName ? [{ term: { harnessNodeName: normalizedNodeName } }] : []),
+    ...(normalizedNodeName ? [harnessNodeNameTraceFilterClause(normalizedNodeName)] : []),
     ...(normalizedNodeStatus ? [{ term: { harnessNodeStatus: normalizedNodeStatus } }] : []),
     ...(stageBucket ? [stageBucketTraceFilterClause(stageBucket)] : []),
     ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
@@ -11215,11 +11216,35 @@ function buildNodeStatusBreakdown(
 /** terms-agg size for the status sub-bucket (only ~9 node statuses exist). */
 const NODE_STATUS_TERMS_SIZE = 16
 
+/**
+ * Stage row name for turns/code events that carry no workflow-node attribution —
+ * historical data from before node attribution shipped, or abnormal data missing
+ * the field. Surfaced as a dedicated「未归因」stage via the terms-agg `missing`
+ * bucket (reusing the shared stage×skill 未归因 label for口径一致性).
+ */
+const UNATTRIBUTED_NODE_NAME = STAGE_BUCKET_LABELS.unattributed
+
+/**
+ * Trace filter clause scoping to one stage by name. The 未归因 stage is the
+ * terms-agg `missing` bucket, so it matches docs *without* a harnessNodeName
+ * rather than a literal value — mirror that here with `must_not exists`.
+ */
+function harnessNodeNameTraceFilterClause(nodeName: string): Record<string, unknown> {
+  if (nodeName === UNATTRIBUTED_NODE_NAME) {
+    return { bool: { must_not: { exists: { field: "harnessNodeName" } } } }
+  }
+  return { term: { harnessNodeName: nodeName } }
+}
+
 /** Trace-side `by_node` agg (conversations per stage) with nested status + stage-bucket sub-aggs. */
 function traceNodeStatusAgg(): Record<string, unknown> {
   return {
     by_node: {
-      terms: { field: "harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT },
+      terms: {
+        field: "harnessNodeName",
+        size: PROJECT_MODE_FEATURE_SLUG_LIMIT,
+        missing: UNATTRIBUTED_NODE_NAME
+      },
       aggs: {
         by_status: { terms: { field: "harnessNodeStatus", size: NODE_STATUS_TERMS_SIZE } },
         ...stageBucketTraceAggs()
@@ -11232,7 +11257,11 @@ function traceNodeStatusAgg(): Record<string, unknown> {
 function codeNodeStatusAgg(perBucketAggs: Record<string, unknown>): Record<string, unknown> {
   return {
     by_node: {
-      terms: { field: "properties.harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT },
+      terms: {
+        field: "properties.harnessNodeName",
+        size: PROJECT_MODE_FEATURE_SLUG_LIMIT,
+        missing: UNATTRIBUTED_NODE_NAME
+      },
       aggs: {
         ...perBucketAggs,
         by_status: {
@@ -11315,21 +11344,29 @@ function buildFeatureNodeBreakdown(
   code: ReturnType<typeof parseCodeNodeBuckets>
 ): ProjectModeFeatureNode[] {
   const nodeNames = new Set<string>([...trace.conversationByNode.keys(), ...code.codeByNode.keys()])
-  return [...nodeNames]
-    .map((nodeName) => ({
-      nodeName,
-      conversationCount: trace.conversationByNode.get(nodeName) ?? 0,
-      codeStats: code.codeByNode.get(nodeName) ?? null,
-      byStatus: buildNodeStatusBreakdown(
-        trace.convStatusByNode.get(nodeName),
-        code.codeStatusByNode.get(nodeName)
-      ),
-      stageBuckets: buildStageBuckets(
-        trace.convStageByNode.get(nodeName),
-        code.codeStageByNode.get(nodeName)
-      )
-    }))
-    .sort((a, b) => b.conversationCount - a.conversationCount)
+  return (
+    [...nodeNames]
+      .map((nodeName) => ({
+        nodeName,
+        conversationCount: trace.conversationByNode.get(nodeName) ?? 0,
+        codeStats: code.codeByNode.get(nodeName) ?? null,
+        byStatus: buildNodeStatusBreakdown(
+          trace.convStatusByNode.get(nodeName),
+          code.codeStatusByNode.get(nodeName)
+        ),
+        stageBuckets: buildStageBuckets(
+          trace.convStageByNode.get(nodeName),
+          code.codeStageByNode.get(nodeName)
+        )
+      }))
+      // Conversation-busiest stage first; 未归因（历史/异常数据）always pinned last.
+      .sort((a, b) => {
+        const aUn = a.nodeName === UNATTRIBUTED_NODE_NAME ? 1 : 0
+        const bUn = b.nodeName === UNATTRIBUTED_NODE_NAME ? 1 : 0
+        if (aUn !== bUn) return aUn - bUn
+        return b.conversationCount - a.conversationCount
+      })
+  )
 }
 
 /**
@@ -11406,7 +11443,7 @@ function makeMockProjectModeFeatureNodes(
     pushedCommitCount: 3
   })
   const split = splitMockCodeStatsAcrossFeatures(base, nodeNames.length)
-  return nodeNames.map((nodeName, i) => {
+  const nodes = nodeNames.map((nodeName, i) => {
     // Unsigned shift (>>>) so a high-bit seed never yields a negative count; +1 so
     // every mock stage shows a non-empty status sub-breakdown.
     const conversationCount = 1 + ((h >>> (i * 4)) % 8)
@@ -11430,6 +11467,23 @@ function makeMockProjectModeFeatureNodes(
       stageBuckets: makeMockStageBuckets(codeStats, conversationCount)
     }
   })
+  // A 未归因 stage for historical/abnormal data with no node attribution: no status
+  // sub-rows, and (per classifyHarnessStageBucket) all of it falls into the
+  // unattributed stage×skill bucket since these turns carry no stage status.
+  const unattributedConversations = 1 + (h % 4)
+  const unattributedCode = split[0] ?? null
+  nodes.push({
+    nodeName: UNATTRIBUTED_NODE_NAME,
+    conversationCount: unattributedConversations,
+    codeStats: unattributedCode,
+    byStatus: [],
+    stageBuckets: {
+      pluginConstrained: { conversationCount: 0, codeStats: null },
+      vibecoding: { conversationCount: 0, codeStats: null },
+      unattributed: { conversationCount: unattributedConversations, codeStats: unattributedCode }
+    }
+  })
+  return nodes
 }
 
 /** Cross-user aggregate for a single plugin (adapter), surfaced in the plugin list. */
