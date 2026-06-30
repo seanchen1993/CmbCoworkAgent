@@ -1,5 +1,6 @@
 import { execFileSync } from "child_process"
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "fs"
+import type { Dirent } from "fs"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
@@ -2837,7 +2838,10 @@ function findCompatibleKnowledgePlugin(adapterId: string): {
   return { plugin, adapter }
 }
 
-function createKnowledgeCommandProject(adapter: HarnessAdapterRegistryItem): HarnessProjectMetadata {
+function createKnowledgeCommandProject(
+  plugin: PluginMetadata,
+  adapter: HarnessAdapterRegistryItem
+): HarnessProjectMetadata {
   return {
     projectId: "__project_constraints__",
     name: adapter.name,
@@ -2848,12 +2852,7 @@ function createKnowledgeCommandProject(adapter: HarnessAdapterRegistryItem): Har
     systemId: "",
     systemName: "",
     workspacePath: getOpenworkDir(),
-    "harness-adapter": {
-      id: adapter.id,
-      name: adapter.name,
-      version: adapter.version,
-      type: adapter.type
-    },
+    "harness-adapter": pluginToHarnessAdapterSnapshot(plugin),
     lifecycle: {
       status: "active",
       createAt: ""
@@ -2867,7 +2866,7 @@ function resolveHarnessKnowledgePath(plugin: PluginMetadata, adapter: HarnessAda
 
   const replaced = replaceHarnessConfigPlaceholders(
     rawPath,
-    createKnowledgeCommandProject(adapter),
+    createKnowledgeCommandProject(plugin, adapter),
     "pullKnowledge",
     plugin.path
   ).trim()
@@ -2876,25 +2875,48 @@ function resolveHarnessKnowledgePath(plugin: PluginMetadata, adapter: HarnessAda
   return isAbsolute(replaced) ? resolve(replaced) : resolve(plugin.path, replaced)
 }
 
-function scanKnowledgeFiles(rootPath: string): HarnessKnowledgePreviewResult["files"] {
+interface KnowledgeFileScanResult {
+  files: HarnessKnowledgePreviewResult["files"]
+  error?: string
+}
+
+function formatKnowledgeFileError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function scanKnowledgeFiles(rootPath: string): KnowledgeFileScanResult {
   const files: HarnessKnowledgePreviewResult["files"] = []
+  const errors: string[] = []
   const maxEntries = 2000
-  const ignoredDirs = new Set([".git", "node_modules"])
+  const ignoredDirs = new Set(["node_modules"])
+
+  function shouldSkipEntry(entry: Dirent): boolean {
+    return entry.name.startsWith(".") || (entry.isDirectory() && ignoredDirs.has(entry.name))
+  }
+
+  function recordError(path: string, error: unknown): void {
+    errors.push(`${path}: ${formatKnowledgeFileError(error)}`)
+  }
 
   function readDir(dirPath: string, relativePath = ""): void {
     if (files.length >= maxEntries) return
 
-    const entries = readdirSync(dirPath, { withFileTypes: true })
-      .filter((entry) => !entry.name.startsWith("."))
-      .sort((left, right) => {
-        if (left.isDirectory() && !right.isDirectory()) return -1
-        if (!left.isDirectory() && right.isDirectory()) return 1
-        return left.name.localeCompare(right.name)
-      })
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(dirPath, { withFileTypes: true })
+        .filter((entry) => !shouldSkipEntry(entry))
+        .sort((left, right) => {
+          if (left.isDirectory() && !right.isDirectory()) return -1
+          if (!left.isDirectory() && right.isDirectory()) return 1
+          return left.name.localeCompare(right.name)
+        })
+    } catch (error) {
+      recordError(dirPath, error)
+      return
+    }
 
     for (const entry of entries) {
       if (files.length >= maxEntries) return
-      if (entry.isDirectory() && ignoredDirs.has(entry.name)) continue
 
       const entryRelativePath = relativePath ? `${relativePath}/${entry.name}` : entry.name
       const fullPath = join(dirPath, entry.name)
@@ -2908,7 +2930,13 @@ function scanKnowledgeFiles(rootPath: string): HarnessKnowledgePreviewResult["fi
         continue
       }
 
-      const stat = statSync(fullPath)
+      let stat: ReturnType<typeof statSync>
+      try {
+        stat = statSync(fullPath)
+      } catch (error) {
+        recordError(fullPath, error)
+        continue
+      }
       if (!stat.isFile()) continue
       files.push({
         path: `/${entryRelativePath}`,
@@ -2920,7 +2948,10 @@ function scanKnowledgeFiles(rootPath: string): HarnessKnowledgePreviewResult["fi
   }
 
   readDir(rootPath)
-  return files
+  const error = errors.length > 0
+    ? `部分知识库文件读取失败：${errors.slice(0, 3).join("；")}${errors.length > 3 ? ` 等 ${errors.length} 个错误` : ""}`
+    : undefined
+  return { files, ...(error ? { error } : {}) }
 }
 
 export function getHarnessKnowledgePreview(adapterId: string): HarnessKnowledgePreviewResult {
@@ -2948,7 +2979,20 @@ export function getHarnessKnowledgePreview(adapterId: string): HarnessKnowledgeP
     }
   }
 
-  const stat = statSync(knowledgePath)
+  let stat: ReturnType<typeof statSync>
+  try {
+    stat = statSync(knowledgePath)
+  } catch (error) {
+    return {
+      adapterId: adapter.id,
+      adapterName: adapter.name,
+      configured: true,
+      exists: false,
+      path: knowledgePath,
+      files: [],
+      error: `无法读取 knowledge_path：${formatKnowledgeFileError(error)}`
+    }
+  }
   if (!stat.isDirectory()) {
     return {
       adapterId: adapter.id,
@@ -2961,13 +3005,15 @@ export function getHarnessKnowledgePreview(adapterId: string): HarnessKnowledgeP
     }
   }
 
+  const scanResult = scanKnowledgeFiles(knowledgePath)
   return {
     adapterId: adapter.id,
     adapterName: adapter.name,
     configured: true,
     exists: true,
     path: knowledgePath,
-    files: scanKnowledgeFiles(knowledgePath)
+    files: scanResult.files,
+    ...(scanResult.error ? { error: scanResult.error } : {})
   }
 }
 
@@ -2978,7 +3024,7 @@ export function syncHarnessProjectConstraints(adapterId: string): HarnessProject
     throw new Error(`插件未配置 inspectCommands.${process.platform}.pull_knowledge，请检查插件设置`)
   }
 
-  const commandProject = createKnowledgeCommandProject(adapter)
+  const commandProject = createKnowledgeCommandProject(plugin, adapter)
   const configured: ConfiguredHarnessInvocation = {
     cwd: plugin.path,
     invocation: parseInspectCommand(configuredCommand, commandProject, "pullKnowledge", plugin.path)

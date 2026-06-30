@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   AlertCircle,
   ChevronDown,
@@ -51,10 +51,17 @@ function buildTree(files: HarnessKnowledgePreviewFile[]): Map<string, HarnessKno
 
     const parentPath = getParentPath(normalized)
     if (!tree.has(parentPath)) tree.set(parentPath, [])
-    tree.get(parentPath)!.push({
-      ...file,
-      path: normalized
-    })
+    tree.get(parentPath)!.push(file.is_dir
+      ? {
+          path: normalized,
+          is_dir: true
+        }
+      : {
+          path: normalized,
+          is_dir: false,
+          size: file.size,
+          modified_at: file.modified_at
+        })
   }
 
   for (const dir of allDirs) {
@@ -98,6 +105,7 @@ export function KnowledgePreviewPanel({
   onRefresh
 }: KnowledgePreviewPanelProps): React.JSX.Element {
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set(["/"]))
+  const skipNextAutoSelectRef = useRef(false)
   const files = preview?.files ?? []
   const tree = useMemo(() => buildTree(files), [files])
   const firstFilePath = useMemo(
@@ -109,14 +117,26 @@ export function KnowledgePreviewPanel({
     : null
   const selectedFullPath =
     preview?.path && selectedFile ? joinKnowledgePath(preview.path, selectedFile.path) : null
+  const blockingError = preview?.error && files.length === 0
 
   useEffect(() => {
     if (!firstFilePath) {
       if (selectedPath) onSelectPath(null)
       return
     }
+    if (!selectedPath) {
+      if (skipNextAutoSelectRef.current) {
+        skipNextAutoSelectRef.current = false
+        return
+      }
+      onSelectPath(firstFilePath)
+      return
+    }
     const selectedStillValid = files.some((file) => file.path === selectedPath && !file.is_dir)
-    if (!selectedStillValid) onSelectPath(firstFilePath)
+    if (!selectedStillValid) {
+      skipNextAutoSelectRef.current = true
+      onSelectPath(null)
+    }
   }, [files, firstFilePath, onSelectPath, selectedPath])
 
   const toggleDir = (path: string): void => {
@@ -219,16 +239,21 @@ export function KnowledgePreviewPanel({
         <KnowledgePreviewEmpty icon={<FolderOpen className="size-5" />} text="展开后加载系统约束预览。" />
       ) : !preview.configured ? (
         <KnowledgePreviewEmpty icon={<AlertCircle className="size-5" />} text="暂无知识库" />
-      ) : preview.error ? (
-        <KnowledgePreviewEmpty icon={<AlertCircle className="size-5" />} text={preview.error} />
+      ) : blockingError ? (
+        <KnowledgePreviewEmpty icon={<AlertCircle className="size-5" />} text={preview.error ?? "知识库预览失败"} />
       ) : !preview.exists ? (
         <KnowledgePreviewEmpty icon={<FolderOpen className="size-5" />} text="尚未拉取知识库。" />
       ) : files.length === 0 ? (
         <KnowledgePreviewEmpty icon={<FolderOpen className="size-5" />} text="知识库目录为空。" />
       ) : (
         <div className="grid h-[360px] min-h-0 grid-cols-[280px_minmax(0,1fr)]">
-          <div className="min-w-0 border-r border-border">
-            <ScrollArea className="h-full">
+          <div className="flex min-h-0 min-w-0 flex-col border-r border-border">
+            {preview.error && (
+              <div className="border-b border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
+                {preview.error}
+              </div>
+            )}
+            <ScrollArea className="min-h-0 flex-1">
               <div className="py-2">
                 {rootItems.map((file) => renderNode(file, 0))}
               </div>

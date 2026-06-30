@@ -43,13 +43,13 @@ import type {
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
-  HarnessDynamicWorkflowConfig
+  HarnessDynamicWorkflowConfig,
+  HarnessKnowledgePreviewResult
 } from "../../shared/harness-board-types"
 import type {
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult
 } from "../../shared/harness-board-types"
-import type { HarnessKnowledgePreviewResult } from "../../shared/harness-board-types"
 
 export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   console.log("[HarnessBoard] Registering harness board handlers...")

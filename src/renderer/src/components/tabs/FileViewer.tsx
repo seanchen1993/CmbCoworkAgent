@@ -126,13 +126,14 @@ export function FileViewer({
           setError("Missing thread id for workspace file preview")
           return
         }
-        const workspaceThreadId = threadId ?? ""
 
         if (isBinary) {
           // Read as binary file (base64)
           const result = externalFullPath
             ? await window.api.workspace.readExternalBinaryFile(externalFullPath)
-            : await window.api.workspace.readBinaryFile(workspaceThreadId, filePath)
+            : threadId
+              ? await window.api.workspace.readBinaryFile(threadId, filePath)
+              : { success: false, error: "Missing thread id for workspace file preview" }
           if (result.success && result.content !== undefined) {
             setBinaryContent(result.content)
             setFileSize(result.size)
@@ -144,7 +145,9 @@ export function FileViewer({
           // Read as text file
           const result = externalFullPath
             ? await window.api.workspace.readExternalFile(externalFullPath)
-            : await window.api.workspace.readFile(workspaceThreadId, filePath)
+            : threadId
+              ? await window.api.workspace.readFile(threadId, filePath)
+              : { success: false, error: "Missing thread id for workspace file preview" }
           if (result.success && result.content !== undefined) {
             if (externalFullPath) {
               setExternalTextContent(result.content)
