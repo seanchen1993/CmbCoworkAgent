@@ -2021,10 +2021,58 @@ function renderRuntimeTimeContextLines(
   ].join("\n")
 }
 
+function normalizeInjectedMarkdownHeadings(content: string, minLevel = 3): string {
+  let inFence = false
+  let fenceChar: "`" | "~" | null = null
+  let fenceLength = 0
+
+  return content
+    .split("\n")
+    .map((line) => {
+      const fenceMatch = line.match(/^( {0,3})(`{3,}|~{3,})/)
+      if (fenceMatch) {
+        const marker = fenceMatch[2]
+        const markerChar = marker[0] as "`" | "~"
+        if (!inFence) {
+          inFence = true
+          fenceChar = markerChar
+          fenceLength = marker.length
+        } else if (markerChar === fenceChar && marker.length >= fenceLength) {
+          inFence = false
+          fenceChar = null
+          fenceLength = 0
+        }
+        return line
+      }
+
+      if (inFence) return line
+
+      return line.replace(
+        /^( {0,3})(#{1,6})([ \t]+.+)$/,
+        (_match: string, indent: string, hashes: string, rest: string) => {
+          const normalizedLevel = Math.max(hashes.length, minLevel)
+          return `${indent}${"#".repeat(normalizedLevel)}${rest}`
+        }
+      )
+    })
+    .join("\n")
+}
+
+function renderAgentsInstructionsPrompt(content: string): string {
+  const normalizedContent = normalizeInjectedMarkdownHeadings(content).trim()
+  if (!normalizedContent) return ""
+  return `## AGENTS.md instructions\n\n<AGENTS_INSTRUCTIONS>\n${normalizedContent}\n</AGENTS_INSTRUCTIONS>`
+}
+
+function renderPluginPromptInject(content?: string): string | undefined {
+  const normalizedContent = content?.trim()
+  if (!normalizedContent) return undefined
+  return `## Skills Runtime Context\n\n${normalizedContent}`
+}
+
 export function getSystemPrompt(
   workspacePath: string,
   windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated",
-  workingDirPromptAppendix?: string,
   options: {
     includeBackgroundExec?: boolean
     includeSubagents?: boolean
@@ -2128,12 +2176,8 @@ ${shellGuidance}
 
   const memorySection =
     options.includeMemory !== false && isMemoryEnabled() ? MEMORY_SYSTEM_PROMPT : ""
-  const workingDirAppendix = workingDirPromptAppendix?.trim()
-    ? `${workingDirPromptAppendix.trim()}\n`
-    : ""
   return (
     workingDirSection +
-    workingDirAppendix +
     backgroundExecSection +
     sandboxSection +
     renderBaseSystemPrompt({ includeSubagents: options.includeSubagents }) +
@@ -2895,8 +2939,8 @@ export interface CreateAgentRuntimeOptions {
   workspacePath: string
   /** Extra content appended to the system prompt (e.g. HEARTBEAT.md context) */
   extraSystemPrompt?: string
-  /** Extra content appended immediately after the working directory section. */
-  workingDirPromptAppendix?: string
+  /** Plugin-provided runtime context for skill artifact paths and feature bindings. */
+  pluginPromptInject?: string
   /** Optional plugin output directory exposed to hook commands as PLUGIN_OUTPUT_DIR. */
   pluginOutputDir?: string
   /** Optional system identifier exposed to child processes and hooks as SYSTEM_ID. */
@@ -3027,7 +3071,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     modelId,
     extraSystemPrompt,
     coordinatorTurnPrompt,
-    workingDirPromptAppendix,
+    pluginPromptInject,
     pluginOutputDir,
     systemId,
     pluginRoot,
@@ -3431,7 +3475,6 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   let systemPrompt = getSystemPrompt(
     workspacePath,
     windowsSandbox,
-    workingDirPromptAppendix,
     {
       includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
       includeSubagents: runtimePolicy.includeSubagents,
@@ -3480,7 +3523,6 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       additionalAgentsWorkspaceMappings
     )
     if (agentsPrompt.prompt) {
-      systemPrompt += "\n\n" + agentsPrompt.prompt
       console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
       if (agentsPrompt.truncated) {
         console.warn("[Runtime] AGENTS.md content exceeded prompt budget and was truncated:", {
@@ -3500,13 +3542,22 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   if (normalizedHarnessAgentsPrompt) {
     agentsPromptLoader = "plugin"
     agentsPromptLoadStatusItems = normalizedHarnessAgentmdLoadStatus
-    systemPrompt += "\n\n" + normalizedHarnessAgentsPrompt
     console.log("[Runtime] Loaded Harness AGENTS.md prompt")
   }
-  const combinedAgentsPrompt =
+  const rawCombinedAgentsPrompt =
     [agentsPrompt.prompt, normalizedHarnessAgentsPrompt].filter(Boolean).join("\n\n") || undefined
+  const renderedPluginPromptInject = renderPluginPromptInject(pluginPromptInject)
+  const combinedAgentsPrompt = rawCombinedAgentsPrompt
+    ? renderAgentsInstructionsPrompt(rawCombinedAgentsPrompt)
+    : undefined
+  if (renderedPluginPromptInject) {
+    systemPrompt += "\n\n" + renderedPluginPromptInject
+  }
+  if (combinedAgentsPrompt) {
+    systemPrompt += "\n\n" + combinedAgentsPrompt
+  }
   const combinedAgentsPromptPreview =
-    [workingDirPromptAppendix?.trim(), combinedAgentsPrompt].filter(Boolean).join("\n\n") ||
+    [renderedPluginPromptInject, combinedAgentsPrompt].filter(Boolean).join("\n\n") ||
     undefined
   if (onAgentsPromptLoadStatus && agentsPromptLoader && agentsPromptLoadStatusItems.length > 0) {
     onAgentsPromptLoadStatus({
@@ -3993,14 +4044,14 @@ The workspace root is: ${workspacePath}`
     console.log("[Runtime] Added code_exec prompt")
   }
 
-  const coordinatorWorkingDirAppendix = workingDirPromptAppendix?.trim()
+  const coordinatorPluginPromptInject = pluginPromptInject?.trim()
   const coordinatorProjectInstructions = [combinedAgentsPrompt, extraSystemPrompt]
     .filter(Boolean)
     .join("\n\n")
   const coordinatorWorkerProjectInstructions = [
     combinedAgentsPrompt,
-    coordinatorWorkingDirAppendix
-      ? `### Project Mode Adapter Instructions\n\n${coordinatorWorkingDirAppendix}`
+    coordinatorPluginPromptInject
+      ? `### Project Mode Adapter Instructions\n\n${coordinatorPluginPromptInject}`
       : "",
     extraSystemPrompt
   ]
@@ -4602,7 +4653,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       currentTime: timeContext.currentTime,
       includeCurrentTime: runtimePolicy.includeCurrentTime,
       includeTimestampRule: runtimePolicy.includeTimestampRule,
-      projectModeAdapterInstructions: coordinatorWorkingDirAppendix,
+      projectModeAdapterInstructions: coordinatorPluginPromptInject,
       projectInstructions: coordinatorProjectInstructions,
       turnContext: coordinatorTurnPrompt,
       hasCodeExecTool,

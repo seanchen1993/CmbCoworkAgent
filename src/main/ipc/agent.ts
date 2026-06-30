@@ -369,7 +369,7 @@ async function withActiveRunReplacementLock<T>(threadId: string, fn: () => Promi
 }
 
 interface HarnessAgentContext {
-  workingDirPromptAppendix?: string
+  pluginPromptInject?: string
   enableAgentsPrompt?: boolean
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
@@ -409,7 +409,7 @@ function getHarnessAgentContext(
     if (!featureContext) return {}
 
     return {
-      workingDirPromptAppendix: featureContext.systemPromptInject,
+      pluginPromptInject: featureContext.systemPromptInject,
       enableAgentsPrompt: featureContext.enableAgentsPrompt,
       harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
       additionalAgentsWorkspacePaths: featureContext.additionalAgentsWorkspacePaths,

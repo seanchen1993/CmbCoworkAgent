@@ -187,10 +187,11 @@ async function withTempWorkspace<T>(fn: (workspace: TempWorkspace) => Promise<T>
 
 function buildBaseRuntimePrompt(
   workspacePath: string,
-  workingDirPromptAppendix?: string,
+  pluginPromptInject?: string,
   options: { includeBackgroundExec?: boolean; includeSubagents?: boolean } = {}
 ): string {
-  return getSystemPrompt(workspacePath, undefined, workingDirPromptAppendix, {
+  void pluginPromptInject
+  return getSystemPrompt(workspacePath, undefined, {
     includeBackgroundExec: options.includeBackgroundExec ?? false,
     includeSubagents: options.includeSubagents ?? false,
     includeMemory: false

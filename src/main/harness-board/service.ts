@@ -1002,11 +1002,9 @@ function buildHarnessAdditionalWorkspaceRootsPrompt(
   if (mappings.length === 0) return undefined
 
   return [
-    "### File System and Paths",
+    "## Multi-Repository Path Guide",
     "",
-    "Project mode service unit mappings:",
-    "",
-    "| 规则区域 | 发布单元 | 实际工程地址 |",
+    "| 描述 | 发布单元 | 对应代码路径 |",
     "| --- | --- | --- |",
     ...mappings.map((mapping) => {
       const description = formatMarkdownTableCell(normalizeText(mapping.description).trim())
