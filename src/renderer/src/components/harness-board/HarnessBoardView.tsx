@@ -4689,7 +4689,7 @@ function FeatureDetailPage({
     detail.run.skipNodeAvailable &&
     !projectInteractionDisabled &&
     node.id === detail.run.currentNodeId &&
-    node.status.kind !== "done"
+    node.status.uiKind !== "done"
   ), [detail, projectInteractionDisabled])
 
   const handleSkipNode = useCallback(async (node: HarnessRunNode): Promise<void> => {

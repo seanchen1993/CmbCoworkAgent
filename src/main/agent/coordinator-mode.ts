@@ -35,6 +35,8 @@ interface CoordinatorPromptOptions {
   shell: string
   timezone: string
   currentTime: string
+  includeCurrentTime?: boolean
+  includeTimestampRule?: boolean
   projectModeAdapterInstructions?: string | null
   projectInstructions?: string | null
   turnContext?: string | null
@@ -45,6 +47,8 @@ interface CoordinatorPromptOptions {
 interface CoordinatorTimeContext {
   timezone: string
   currentTime: string
+  includeCurrentTime?: boolean
+  includeTimestampRule?: boolean
 }
 
 interface CoordinatorWorkerToolOptions {
@@ -160,9 +164,17 @@ function toCoordinatorWorkerToolSnapshots(
 }
 
 function renderTimeContext(options: CoordinatorTimeContext): string {
-  return `- Timezone: ${options.timezone}
-- Current time: ${options.currentTime}
-- Timestamp rule: Do not invent dates or timestamps. If a timestamp is useful, use the current time above; otherwise omit it.`
+  const includeCurrentTime = options.includeCurrentTime ?? true
+  const includeTimestampRule = includeCurrentTime && options.includeTimestampRule !== false
+  return [
+    `- Timezone: ${options.timezone}`,
+    ...(includeCurrentTime ? [`- Current time: ${options.currentTime}`] : []),
+    ...(includeTimestampRule
+      ? [
+          "- Timestamp rule: Do not invent dates or timestamps. If a timestamp is useful, use the current time above; otherwise omit it."
+        ]
+      : [])
+  ].join("\n")
 }
 
 function unescapeSkillXml(value: string): string {

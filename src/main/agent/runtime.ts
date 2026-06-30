@@ -353,6 +353,37 @@ function isProjectModeSubagentsEnabled(): boolean {
   return raw ? !PROJECT_MODE_SUBAGENTS_DISABLED_VALUES.has(raw) : true
 }
 
+type RuntimePromptToolPolicy = {
+  isProjectMode: boolean
+  includeCurrentTime: boolean
+  includeTimestampRule: boolean
+  includeMemory: boolean
+  includeSubagents: boolean
+  includeCodeExecRoute: boolean
+  includeSavedCodeExecTools: boolean
+  includeInjectedToolUsagePrompt: boolean
+  includeDeferredToolInventoryPrompt: boolean
+}
+
+function createRuntimePromptToolPolicy(input: {
+  featureId?: string
+  agentMode: AgentMode
+  memoryEnabled: boolean
+}): RuntimePromptToolPolicy {
+  const isProjectMode = Boolean(input.featureId)
+  return {
+    isProjectMode,
+    includeCurrentTime: !isProjectMode,
+    includeTimestampRule: !isProjectMode,
+    includeMemory: input.memoryEnabled && !isProjectMode,
+    includeSubagents: !isProjectMode || isProjectModeSubagentsEnabled(),
+    includeCodeExecRoute: !isProjectMode && input.agentMode !== "coordinator",
+    includeSavedCodeExecTools: true,
+    includeInjectedToolUsagePrompt: true,
+    includeDeferredToolInventoryPrompt: true
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
 }
@@ -1973,11 +2004,33 @@ function getRuntimeTimeContext(date: Date = new Date()): {
   }
 }
 
+function renderRuntimeTimeContextLines(
+  timeContext: ReturnType<typeof getRuntimeTimeContext>,
+  options: { includeCurrentTime?: boolean; includeTimestampRule?: boolean } = {}
+): string {
+  const includeCurrentTime = options.includeCurrentTime ?? true
+  const includeTimestampRule = includeCurrentTime && options.includeTimestampRule === true
+  return [
+    `- Timezone: ${timeContext.timezone}`,
+    ...(includeCurrentTime ? [`- Current time: ${timeContext.currentTime}`] : []),
+    ...(includeTimestampRule
+      ? [
+          "- Timestamp rule: Do not invent dates or timestamps. If a timestamp is useful, use the current time above; otherwise omit it."
+        ]
+      : [])
+  ].join("\n")
+}
+
 export function getSystemPrompt(
   workspacePath: string,
   windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated",
   workingDirPromptAppendix?: string,
-  options: { includeBackgroundExec?: boolean; includeSubagents?: boolean; includeMemory?: boolean } = {}
+  options: {
+    includeBackgroundExec?: boolean
+    includeSubagents?: boolean
+    includeMemory?: boolean
+    includeCurrentTime?: boolean
+  } = {}
 ): string {
   const includeBackgroundExec = options.includeBackgroundExec ?? true
   const isWindows = process.platform === "win32"
@@ -2003,12 +2056,14 @@ export function getSystemPrompt(
       : "- Use cmd.exe syntax for shell commands (e.g., dir instead of ls, type instead of cat)\n- Use && to chain commands, use ^ for line continuation, use %VAR% for environment variables"
 
   const timeContext = getRuntimeTimeContext()
+  const timeContextLines = renderRuntimeTimeContextLines(timeContext, {
+    includeCurrentTime: options.includeCurrentTime
+  })
   const workingDirSection = `
 ### System Environment
 - Operating system: ${platform} (${process.arch})
 - Default shell: ${shell}
-- Timezone: ${timeContext.timezone}
-- Current time: ${timeContext.currentTime}
+${timeContextLines}
 ${shellGuidance}
 
 ### File System and Paths
@@ -3009,8 +3064,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const approvalThreadId = requestedApprovalThreadId ?? threadId
   const isCoordinatorMode = agentMode === "coordinator"
   const isWorkflowMode = agentMode === "workflow"
-  const memoryEnabledForRuntime = isMemoryEnabled() && !featureId
-  const projectModeSubagentsEnabled = !featureId || isProjectModeSubagentsEnabled()
+  const runtimePolicy = createRuntimePromptToolPolicy({
+    featureId,
+    agentMode,
+    memoryEnabled: isMemoryEnabled()
+  })
 
   if (!threadId) {
     throw new Error("Thread ID is required for checkpointing.")
@@ -3026,10 +3084,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Thread ID:", threadId)
   console.log("[Runtime] Workspace path:", workspacePath)
   console.log("[Runtime] Agent mode:", agentMode)
-  if (featureId) {
+  if (runtimePolicy.isProjectMode) {
     const envValue = process.env[PROJECT_MODE_SUBAGENTS_ENV] ?? "<unset>"
     console.log(
-      `[Runtime] Project mode subagents enabled: ${projectModeSubagentsEnabled} (${PROJECT_MODE_SUBAGENTS_ENV}=${envValue})`
+      `[Runtime] Project mode subagents enabled: ${runtimePolicy.includeSubagents} (${PROJECT_MODE_SUBAGENTS_ENV}=${envValue})`
     )
   }
   const hookScope = providedHookScope ?? createHookScope()
@@ -3376,8 +3434,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     workingDirPromptAppendix,
     {
       includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
-      includeSubagents: projectModeSubagentsEnabled,
-      includeMemory: memoryEnabledForRuntime
+      includeSubagents: runtimePolicy.includeSubagents,
+      includeMemory: runtimePolicy.includeMemory,
+      includeCurrentTime: runtimePolicy.includeCurrentTime
     }
   )
   let agentsPrompt: AgentsPromptRuntimeResult = {
@@ -3465,6 +3524,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const { name: shell, isBashLike, isPowerShell } = getShellInfo(windowsSandbox)
   const timeContext = getRuntimeTimeContext()
   const userInfo = getUserInfo()
+  const filesystemTimeContextLines = renderRuntimeTimeContextLines(timeContext, {
+    includeCurrentTime: runtimePolicy.includeCurrentTime,
+    includeTimestampRule: runtimePolicy.includeTimestampRule
+  })
   const subagentShellGuidance = isBashLike
     ? "- Use Unix/bash commands for shell operations (ls, cat, grep, etc.)"
     : isPowerShell
@@ -3484,9 +3547,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
 ### System Environment
 - Operating system: ${platform} (${process.arch})
 - Default shell: ${shell}
-- Timezone: ${timeContext.timezone}
-- Current time: ${timeContext.currentTime}
-- Timestamp rule: Do not invent dates or timestamps. If a timestamp is useful, use the current time above; otherwise omit it.
+${filesystemTimeContextLines}
 ${subagentShellGuidance}
 
 ### Available Tools
@@ -3531,7 +3592,7 @@ The workspace root is: ${workspacePath}`
   // Initialize memory system (gated by user setting)
   let memoryTools: ReturnType<typeof createMemorySearchTool | typeof createMemoryGetTool>[] = []
   let memorySources: string[] | undefined
-  if (memoryEnabledForRuntime) {
+  if (runtimePolicy.includeMemory) {
     const memoryDirs = resolveWorkspaceMemoryDirs(workspacePath)
     const globalStore = await getMemoryStore(memoryDirs.global.dir)
     const projectStore = memoryDirs.project ? await getMemoryStore(memoryDirs.project.dir) : null
@@ -3546,7 +3607,7 @@ The workspace root is: ${workspacePath}`
       projectDir: memoryDirs.project?.dir ?? null,
       projectId: memoryDirs.project?.projectId ?? null
     })
-  } else if (featureId) {
+  } else if (runtimePolicy.isProjectMode) {
     console.log("[Runtime] Memory disabled for project mode feature:", featureId)
   } else {
     console.log("[Runtime] Memory disabled by user setting")
@@ -3589,7 +3650,9 @@ The workspace root is: ${workspacePath}`
   let eagerMcpMetadata: McpCapabilityTool[] = []
   let lazyMcpMetadata: McpCapabilityTool[] = []
   const deferredSavedTools =
-    !isConstrainedCoordinatorWorker && codeExecEnabled ? listSavedCodeExecTools() : []
+    !isConstrainedCoordinatorWorker && codeExecEnabled && runtimePolicy.includeSavedCodeExecTools
+      ? listSavedCodeExecTools()
+      : []
   let mcpTools: ReturnType<typeof createEagerMcpTools> = []
   let toolSearchTools: unknown[] = []
 
@@ -3614,7 +3677,7 @@ The workspace root is: ${workspacePath}`
     // Disable ad hoc code_exec authoring in Agent Team and project mode. Saved tools remain
     // available through the deferred-tool bridge when code exec is enabled.
     codeExecRouteEnabled =
-      codeExecEnabled && allMcpTools.length > 0 && !isCoordinatorMode && !Boolean(featureId)
+      codeExecEnabled && allMcpTools.length > 0 && runtimePolicy.includeCodeExecRoute
     eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
     lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
     mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata)
@@ -4537,6 +4600,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       shell,
       timezone: timeContext.timezone,
       currentTime: timeContext.currentTime,
+      includeCurrentTime: runtimePolicy.includeCurrentTime,
+      includeTimestampRule: runtimePolicy.includeTimestampRule,
       projectModeAdapterInstructions: coordinatorWorkingDirAppendix,
       projectInstructions: coordinatorProjectInstructions,
       turnContext: coordinatorTurnPrompt,
@@ -4544,19 +4609,21 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       deferredToolIds
     })
   } else {
-    systemPrompt += renderInjectedToolUsagePrompt({
-      hasSearchTool,
-      hasInspectTool,
-      hasInvokeDeferredTool,
-      hasCodeExecTool
-    })
+    if (runtimePolicy.includeInjectedToolUsagePrompt) {
+      systemPrompt += renderInjectedToolUsagePrompt({
+        hasSearchTool,
+        hasInspectTool,
+        hasInvokeDeferredTool,
+        hasCodeExecTool
+      })
+    }
     // Only advertise the deferred-tool inventory when the invoke bridge is
     // actually present. A restricted leaf (read_only/none registry agent — e.g. a
     // workflow Explore/Plan) has search/inspect/invoke_deferred removed, yet it is
     // NOT an isConstrainedCoordinatorWorker, so lazy MCP / saved tools still fill
     // deferredToolIds. Listing IDs it can't invoke is misleading noise, so gate on
     // the invoke capability (the bridge tools are cut as a set for read_only/none).
-    if (hasInvokeDeferredTool) {
+    if (runtimePolicy.includeDeferredToolInventoryPrompt && hasInvokeDeferredTool) {
       systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)
     }
     if (isWorkflowMode) {
@@ -4648,7 +4715,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     subagentExtraSystemPrompt: combinedAgentsPrompt,
     mainTodosEnabled: !isCoordinatorMode,
     mainFilesystemEnabled: !isCoordinatorMode,
-    mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && projectModeSubagentsEnabled,
+    mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && runtimePolicy.includeSubagents,
     filesystemAccess: options.filesystemAccess,
     registrySubagentSpecs,
     // The runtime's commands execute via the sandbox; on Windows with a sandbox
