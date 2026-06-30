@@ -177,7 +177,7 @@ interface UserInfoLite {
   pathName?: string | null
 }
 
-function buildMarketUserId(userInfo: UserInfoLite | null): string | undefined {
+function buildMarketUserId(userInfo: UserInfoLite | null | undefined): string | undefined {
   if (!userInfo) return undefined
   const rawId = (userInfo.sapId || userInfo.ystId || "").trim()
   const rawName = (userInfo.userName || "").trim()
@@ -1808,7 +1808,7 @@ export function EvolutionPanel(): React.JSX.Element {
         { type: "application/zip" }
       )
       const userInfo = await window.api.models.getUserInfo().catch(() => null)
-      const userId = marketInfo?.user_id || buildMarketUserId(userInfo as UserInfoLite | null)
+      const userId = marketInfo?.user_id || buildMarketUserId(userInfo)
       const name = marketInfo?.name || existing.name || candidate.name || candidate.skillId
       const description = existing.description || candidate.description || marketInfo?.description || ""
       const category = marketInfo?.category || existing.metadata?.category || DEFAULT_SCENE_CATEGORY
