@@ -398,7 +398,11 @@ export interface DashboardAwardTeamBenchmarkRow {
   group?: string
   usageCount: number
   userCount: number
+  /** 本行（室/组）人均使用次数。 */
   perCapitaUsage: number
+  /** 总量人均使用次数（全员基线），每行相同。 */
+  totalPerCapitaUsage: number
+  /** 本行内使用次数超过「总量人均」的用户数。 */
   aboveAvgUserCount: number
   skillUsageCount: number
   distinctSkillsUsed: number

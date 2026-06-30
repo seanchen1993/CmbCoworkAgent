@@ -565,9 +565,11 @@ interface DashboardAwardTeamBenchmarkRow {
   usageCount: number
   /** 去重用户数。 */
   userCount: number
-  /** 人均使用次数 = usageCount / userCount。 */
+  /** 本行（室/组）人均使用次数 = usageCount / userCount。 */
   perCapitaUsage: number
-  /** 使用次数超过本行人均的用户数。 */
+  /** 总量人均使用次数（全员基线 = 总使用次数 / 总去重用户），每行相同。 */
+  totalPerCapitaUsage: number
+  /** 本行内使用次数超过「总量人均」的用户数。 */
   aboveAvgUserCount: number
   /** 技能使用次数（value_count usedSkills，含重复）。 */
   skillUsageCount: number
@@ -6107,8 +6109,14 @@ function teamBenchmarkTraceMetricAggs(): Record<string, unknown> {
   }
 }
 
-/** 把一个组织桶（含 teamBenchmarkTraceMetricAggs）解析为标杆奖行的 trace 侧部分。 */
-function parseTeamBenchmarkTraceBucket(bucket: Record<string, unknown>): {
+/**
+ * 把一个组织桶（含 teamBenchmarkTraceMetricAggs）解析为标杆奖行的 trace 侧部分。
+ * `aboveAvgThreshold` 为「总量人均」基线：本行内使用次数超过该基线的用户计入 aboveAvgUserCount。
+ */
+function parseTeamBenchmarkTraceBucket(
+  bucket: Record<string, unknown>,
+  aboveAvgThreshold: number
+): {
   usageCount: number
   userCount: number
   perCapitaUsage: number
@@ -6121,7 +6129,7 @@ function parseTeamBenchmarkTraceBucket(bucket: Record<string, unknown>): {
   const perCapitaUsage = userCount > 0 ? usageCount / userCount : 0
   const userBuckets = asRecord(bucket.users).buckets
   const aboveAvgUserCount = Array.isArray(userBuckets)
-    ? userBuckets.filter((u) => asNumber(asRecord(u).doc_count) > perCapitaUsage).length
+    ? userBuckets.filter((u) => asNumber(asRecord(u).doc_count) > aboveAvgThreshold).length
     : 0
   return {
     usageCount,
@@ -6162,6 +6170,9 @@ async function fetchAwardTeamBenchmark(
       }
     },
     aggs: {
+      // 全员基线：总使用次数 / 总去重用户 → 总量人均使用次数。
+      total_usage: { value_count: { field: "traceId" } },
+      total_users: { cardinality: { field: "ystId" } },
       by_shi: {
         terms: { field: "upperOrgLv1", size: TEAM_BENCHMARK_SHI_LIMIT },
         aggs: {
@@ -6224,7 +6235,13 @@ async function fetchAwardTeamBenchmark(
     }
   }
 
-  const shiBuckets = asRecord(asRecord(asRecord(traceRaw).aggregations).by_shi).buckets
+  const traceAggs = asRecord(asRecord(traceRaw).aggregations)
+  const totalUsage = asNumber(asRecord(traceAggs.total_usage).value)
+  const totalUsers = asNumber(asRecord(traceAggs.total_users).value)
+  // 总量人均使用次数 = 全员总使用次数 / 全员去重用户数；同时作为「超过人均人数」的判定基线。
+  const totalPerCapitaUsage = totalUsers > 0 ? totalUsage / totalUsers : 0
+
+  const shiBuckets = asRecord(traceAggs.by_shi).buckets
   return (Array.isArray(shiBuckets) ? shiBuckets : [])
     .map((sb): DashboardAwardTeamBenchmarkRow | null => {
       const shiBucket = asRecord(sb)
@@ -6239,14 +6256,16 @@ async function fetchAwardTeamBenchmark(
           return {
             shi,
             group,
-            ...parseTeamBenchmarkTraceBucket(groupBucket),
+            ...parseTeamBenchmarkTraceBucket(groupBucket, totalPerCapitaUsage),
+            totalPerCapitaUsage,
             codeStats: codeByOrg.get(teamOrgKey(shi, group)) ?? null
           }
         })
         .filter((x): x is DashboardAwardTeamBenchmarkRow => x !== null)
       return {
         shi,
-        ...parseTeamBenchmarkTraceBucket(shiBucket),
+        ...parseTeamBenchmarkTraceBucket(shiBucket, totalPerCapitaUsage),
+        totalPerCapitaUsage,
         codeStats: codeByOrg.get(teamOrgKey(shi)) ?? null,
         children
       }
@@ -8904,6 +8923,7 @@ function makeMockAwardTeamBenchmark(): DashboardAwardTeamBenchmarkRow[] {
         usageCount,
         userCount,
         perCapitaUsage,
+        totalPerCapitaUsage: 26.5,
         aboveAvgUserCount: Math.max(1, Math.round(userCount * 0.38)),
         skillUsageCount: Math.round((780 - i * 80) * scale),
         distinctSkillsUsed: Math.max(1, Math.round((12 - i) * scale)),

@@ -3050,12 +3050,16 @@ export function DashboardView(): React.JSX.Element {
             isGroup ? `    ${formatTopUserOrgName("", row.shi, row.group ?? "")}` : row.shi,
             row.usageCount,
             Number(row.perCapitaUsage.toFixed(1)),
+            Number(row.totalPerCapitaUsage.toFixed(1)),
             row.aboveAvgUserCount,
             row.contributedSkillCount === null ? "" : row.contributedSkillCount,
             row.skillCoverageShiCount === null ? "" : row.skillCoverageShiCount,
             row.skillUsageCount,
             row.codeStats?.adoptedLines ?? 0,
-            formatPercent(row.codeStats?.measuredAdoptionRate ?? null)
+            formatPercent(row.codeStats?.measuredAdoptionRate ?? null),
+            formatPercent(row.codeStats?.pushedAdoptionRate ?? null),
+            formatPercent(row.codeStats?.inclusiveAdoptionRate ?? null),
+            formatPercent(row.codeStats?.inclusivePushedAdoptionRate ?? null)
           ])
         }
         emit(shiRow, false)
@@ -3067,12 +3071,16 @@ export function DashboardView(): React.JSX.Element {
           "室/组",
           "使用次数",
           "人均使用次数",
+          "总量人均使用次数",
           "超过人均人数",
           "贡献技能数",
-          "覆盖室数",
+          "技能覆盖室数",
           "技能使用次数",
-          "代码提交量",
-          "提交率"
+          "代码提交行数",
+          "提交口径·提交",
+          "提交口径·入库",
+          "总量口径·提交",
+          "总量口径·入库"
         ],
         rows: teamSheetRows
       })
