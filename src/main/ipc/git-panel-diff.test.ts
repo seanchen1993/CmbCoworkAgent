@@ -67,6 +67,12 @@ function createRepo(prefix: string): string {
   return repoPath
 }
 
+function createBareRepo(prefix: string): string {
+  const repoPath = mkdtempSync(join(tmpdir(), prefix))
+  gitIn(repoPath, ["init", "--bare", "-q"])
+  return repoPath
+}
+
 function createGitPanelTestContext(
   workspacePath: string,
   metadata: Record<string, unknown> = {}
@@ -585,5 +591,42 @@ describe("shouldUseDefaultGitPush", () => {
     expect(shouldUseDefaultGitPush("fork/feature/a", "feature/a")).toBe(false)
     expect(shouldUseDefaultGitPush(null, "feature/a")).toBe(false)
     expect(shouldUseDefaultGitPush("origin/HEAD", "HEAD")).toBe(false)
+  })
+})
+
+describe("buildGitPanelMetaState — pushability", () => {
+  it("lists all unpublished commits on a first-push branch, including external IDE commits", async () => {
+    const localRepo = createRepo("gitpanel-pushability-local-")
+    const remoteRepo = createBareRepo("gitpanel-pushability-remote-")
+    try {
+      writeFileSync(join(localRepo, "README.md"), "# test\n")
+      gitIn(localRepo, ["add", "."])
+      gitIn(localRepo, ["commit", "-q", "-m", "init"])
+      const baseBranch = gitIn(localRepo, ["rev-parse", "--abbrev-ref", "HEAD"]).trim()
+      gitIn(localRepo, ["remote", "add", "origin", remoteRepo])
+      gitIn(localRepo, ["push", "-u", "origin", baseBranch])
+
+      gitIn(localRepo, ["checkout", "-q", "-b", "feature/no-upstream"])
+      writeFileSync(join(localRepo, "idea.txt"), "idea\n")
+      gitIn(localRepo, ["add", "."])
+      gitIn(localRepo, ["commit", "-q", "-m", "IDEA commit"])
+      writeFileSync(join(localRepo, "app.txt"), "app\n")
+      gitIn(localRepo, ["add", "."])
+      gitIn(localRepo, ["commit", "-q", "-m", "App commit"])
+
+      const meta = await buildGitPanelMetaState(
+        "thread-test",
+        createGitPanelTestContext(localRepo)
+      )
+
+      expect(meta.hasPushableCommit).toBe(true)
+      expect(meta.pendingCommits?.map((commit) => commit.message)).toEqual([
+        "App commit",
+        "IDEA commit"
+      ])
+    } finally {
+      rmSync(localRepo, { recursive: true, force: true })
+      rmSync(remoteRepo, { recursive: true, force: true })
+    }
   })
 })

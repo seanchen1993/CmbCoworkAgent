@@ -1540,6 +1540,24 @@ function parseCommitLog(raw: string): Array<{ hash: string; message: string; dat
     .filter((c) => c.hash)
 }
 
+async function getPushabilityForRevisions(
+  worktreePath: string,
+  revisionArgs: string[],
+  options?: { silent?: boolean }
+): Promise<{ hasPushableCommit: boolean; pendingCommits: Array<{ hash: string; message: string; date: string }> }> {
+  const silent = Boolean(options?.silent)
+  const logFormat = "%H\x1f%s\x1f%ci"
+  const [countRaw, logRaw] = await Promise.all([
+    runGit(worktreePath, ["rev-list", "--count", ...revisionArgs], { silent }),
+    runGit(worktreePath, ["log", `-${GIT_PANEL_MAX_PENDING_COMMITS}`, ...revisionArgs, `--format=${logFormat}`], { silent })
+  ])
+  const count = Number.parseInt(countRaw.trim(), 10)
+  return {
+    hasPushableCommit: Number.isFinite(count) && count > 0,
+    pendingCommits: parseCommitLog(logRaw.trim())
+  }
+}
+
 async function getPushabilitySnapshot(
   worktreePath: string,
   branch: string,
@@ -1547,41 +1565,41 @@ async function getPushabilitySnapshot(
   options?: { silent?: boolean }
 ): Promise<{ hasPushableCommit: boolean; pendingCommits: Array<{ hash: string; message: string; date: string }> }> {
   const silent = Boolean(options?.silent)
-  const logFormat = "%H\x1f%s\x1f%ci"
   const pushBaseRef = await resolvePushBaseRef(worktreePath, branch, { silent })
 
   if (pushBaseRef) {
     try {
-      // 关键优化：可并行的两个 Git 查询（ahead count + log）并发执行，
-      // 统一产出 hasPushableCommit + pendingCommits，避免不同调用方重复计算。
-      const [aheadRaw, logRaw] = await Promise.all([
-        runGit(worktreePath, ["rev-list", "--count", `${pushBaseRef}..HEAD`], { silent }),
-        runGit(worktreePath, ["log", `-${GIT_PANEL_MAX_PENDING_COMMITS}`, `${pushBaseRef}..HEAD`, `--format=${logFormat}`], { silent })
-      ])
-      const ahead = Number.parseInt(aheadRaw.trim(), 10)
-      return {
-        hasPushableCommit: Number.isFinite(ahead) && ahead > 0,
-        pendingCommits: parseCommitLog(logRaw.trim())
-      }
+      return await getPushabilityForRevisions(worktreePath, [`${pushBaseRef}..HEAD`], { silent })
     } catch {
       // fall through to baseCommit fallback
     }
   }
 
+  try {
+    // 首次推送分支时既没有 @{upstream}，也没有 refs/remotes/origin/<branch>。
+    // 这时不能只展示最后一次提交，否则 IDEA/终端里先提交、应用里再提交时，
+    // Push 弹窗会看起来“只识别应用 commit”。这个范围表示：HEAD 可达但 origin
+    // 任意远端跟踪分支都还没有的提交，基本等价于本次 push 会发布的新提交集合。
+    const unpublished = await getPushabilityForRevisions(
+      worktreePath,
+      ["HEAD", "--not", "--remotes=origin"],
+      { silent }
+    )
+    if (unpublished.hasPushableCommit || unpublished.pendingCommits.length > 0) {
+      return unpublished
+    }
+  } catch {
+    // fall through to baseCommit fallback
+  }
+
   if (baseCommit) {
     try {
       // upstream 缺失时退化到 baseCommit，同样采用并发读取 count + log。
-      const [sinceBaseRaw, logRaw] = await Promise.all([
-        runGit(worktreePath, ["rev-list", "--count", `${baseCommit}..HEAD`], { silent }),
-        runGit(worktreePath, ["log", `-${GIT_PANEL_MAX_PENDING_COMMITS}`, `${baseCommit}..HEAD`, `--format=${logFormat}`], { silent })
-      ])
-      const sinceBase = Number.parseInt(sinceBaseRaw.trim(), 10)
-      const commits = parseCommitLog(logRaw.trim())
-      if (commits.length > 0) {
-        return {
-          hasPushableCommit: Number.isFinite(sinceBase) && sinceBase > 0,
-          pendingCommits: commits
-        }
+      const sinceBase = await getPushabilityForRevisions(worktreePath, [`${baseCommit}..HEAD`], {
+        silent
+      })
+      if (sinceBase.pendingCommits.length > 0) {
+        return sinceBase
       }
     } catch {
       // fall through
@@ -1595,6 +1613,7 @@ async function getPushabilitySnapshot(
   }
 
   try {
+    const logFormat = "%H\x1f%s\x1f%ci"
     const raw = (await runGit(worktreePath, ["log", "-1", `--format=${logFormat}`], { silent })).trim()
     return { hasPushableCommit: true, pendingCommits: parseCommitLog(raw) }
   } catch {
