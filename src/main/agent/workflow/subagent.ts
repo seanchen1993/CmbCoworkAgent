@@ -340,14 +340,28 @@ async function runOnce(
           `subagent paused before returning a structured result: ${interruptText}`
         )
       }
-      // A dangling tool call (assistant tool_calls without results — common when mid-tier
-      // models do parallel calls and one comes back unpaired) would 400 if we just
-      // appended the nudge HumanMessage. Instead synthesize a tool result for each dangling
-      // id so the history is valid, then nudge on the SAME session — aligning with how
-      // claude-code (yieldMissingToolResultBlocks) and MiMo-Code repair unmatched tool
-      // calls. Keeps parallel_tool_calls AND gives the model a real recovery turn (with the
-      // session context + a clear instruction) instead of failing the whole attempt.
-      const repairMessages = danglingToolCallIds(snapshot).map(
+      // Split dangling tool calls by SOURCE — this decides repair-in-place vs fresh session.
+      // deepagents' patchToolCalls (runs in beforeAgent right before the nudge's model call)
+      // builds its keep-set from NORMALIZED tool_calls only, so a synthesized result for a call
+      // that lives solely in additional_kwargs / invalid_tool_calls (deepseek emitted malformed
+      // or token-truncated JSON) is dropped as an orphan — the dangling call then re-serializes
+      // and 400s anyway. Those are UNREPAIRABLE in place: fail fast as retryable so a FRESH
+      // session (clean transcript, no poisoned assistant turn) gets the next shot. Calls present
+      // in the normalized array ARE repairable (patchToolCalls keeps the result) — e.g. mid-tier
+      // models doing parallel calls where one came back unpaired — so synthesize a result for
+      // each and nudge on the SAME session (claude-code yieldMissingToolResultBlocks / MiMo-Code
+      // parity), preserving the round-1 context.
+      const danglingIds = danglingToolCallIds(snapshot)
+      const normalizedDanglingIds = normalizedToolCallIds(snapshot)
+      const unrepairableDangling = danglingIds.filter((id) => !normalizedDanglingIds.has(id))
+      if (unrepairableDangling.length > 0) {
+        throw structuredOutputRetryableError(
+          `structured_output left ${unrepairableDangling.length} unparseable tool call(s) dangling ` +
+            `(malformed/truncated JSON in additional_kwargs/invalid_tool_calls); patchToolCalls drops ` +
+            `in-place repairs for these, so retrying on a fresh session`
+        )
+      }
+      const repairMessages = danglingIds.map(
         (id) =>
           new ToolMessage({
             tool_call_id: id,
@@ -1604,11 +1618,13 @@ interface MessageLike {
     additional_kwargs?: { tool_calls?: unknown[] }
     content?: unknown
     tool_calls?: unknown[]
+    invalid_tool_calls?: unknown[]
     tool_call_id?: unknown
     usage_metadata?: { output_tokens?: number }
   }
   usage_metadata?: { output_tokens?: number }
   tool_calls?: unknown[]
+  invalid_tool_calls?: unknown[]
   tool_call_id?: unknown
   id?: unknown
   _getType?: () => string
@@ -1644,14 +1660,39 @@ function isToolMessage(message: MessageLike): boolean {
 }
 
 function messageToolCalls(message: MessageLike): unknown[] {
-  if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return message.tool_calls
-  if (Array.isArray(message.kwargs?.tool_calls)) return message.kwargs.tool_calls
-  if (Array.isArray(message.additional_kwargs?.tool_calls)) return message.additional_kwargs.tool_calls
-  if (Array.isArray(message.kwargs?.additional_kwargs?.tool_calls)) {
-    return message.kwargs.additional_kwargs.tool_calls
+  // Collect ALL tool calls a message carries — deduped by id — across every shape it can take: live
+  // vs serialized, normalized `tool_calls`, raw `additional_kwargs.tool_calls`, and the canonical
+  // malformed bucket `invalid_tool_calls`. A "first non-empty" scan would MISS a malformed call when
+  // the SAME turn also has a valid one (valid → tool_calls, malformed → invalid_tool_calls), and the
+  // dangling/fail-fast logic must see BOTH: deepseek can leave normalized EMPTY while the real call
+  // lives in additional_kwargs/invalid_tool_calls (truncated/unparseable args), or emit valid +
+  // invalid side by side. Returning the UNION feeds every id to danglingToolCallIds, which then
+  // cross-checks normalizedToolCallIds: a dangling id NOT in the normalized set is unrepairable
+  // (patchToolCalls would drop any synthesized result) → fail-fast retry instead of a 400. Dedup
+  // keeps the first (normalized) form when a call appears in several shapes; id-less calls are kept
+  // as-is (danglingToolCallIds ignores them; token estimation may double-count, which errs high).
+  const out: unknown[] = []
+  const seen = new Set<string>()
+  const candidates = [
+    message.tool_calls,
+    message.kwargs?.tool_calls,
+    message.additional_kwargs?.tool_calls,
+    message.kwargs?.additional_kwargs?.tool_calls,
+    message.invalid_tool_calls,
+    message.kwargs?.invalid_tool_calls
+  ]
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue
+    for (const call of candidate) {
+      const id = toolCallId(call)
+      if (id !== undefined) {
+        if (seen.has(id)) continue
+        seen.add(id)
+      }
+      out.push(call)
+    }
   }
-  if (Array.isArray(message.tool_calls)) return message.tool_calls
-  return []
+  return out
 }
 
 function toolCallId(toolCall: unknown): string | undefined {
@@ -1701,12 +1742,47 @@ function danglingToolCallIds(snapshot: unknown): string[] {
   return Array.from(pending)
 }
 
+/** Tool-call ids that appear in some assistant turn's NORMALIZED `tool_calls` (live `tool_calls`
+ * or serialized `kwargs.tool_calls`) — NEVER additional_kwargs / invalid_tool_calls. deepagents'
+ * patchToolCalls builds its keep-set from exactly these, so a synthesized repair ToolMessage
+ * survives the pre-model patch ONLY if its id is here; a result for a call that lives solely in
+ * additional_kwargs is dropped as an orphan (re-dangles → 400). Lets the nudge tell repairable
+ * (normalized) dangling calls from unrepairable (raw, malformed-JSON) ones apart. */
+function normalizedToolCallIds(snapshot: unknown): Set<string> {
+  const ids = new Set<string>()
+  for (const message of snapshotMessages(snapshot)) {
+    if (!isAiMessage(message)) continue
+    for (const candidate of [message.tool_calls, message.kwargs?.tool_calls]) {
+      if (!Array.isArray(candidate)) continue
+      for (const call of candidate) {
+        const id = toolCallId(call)
+        if (id) ids.add(id)
+      }
+    }
+  }
+  return ids
+}
+
+/** ONLY the normalized/actionable tool_calls (live `tool_calls` or serialized `kwargs.tool_calls`) —
+ * NOT additional_kwargs / invalid_tool_calls, which can hold a RAW or MALFORMED artifact the runtime
+ * never executes. messageToolCalls() unions those for dangling DETECTION; but "is this turn awaiting
+ * a real tool result (so it is NOT the final text)?" must look at normalized only — otherwise a
+ * mid-tier gateway tacking a malformed tool-call artifact onto its final TEXT would make a
+ * non-schema subagent look like it produced no output and falsely throw "no assistant output". */
+function messageNormalizedToolCalls(message: MessageLike): unknown[] {
+  for (const candidate of [message.tool_calls, message.kwargs?.tool_calls]) {
+    if (Array.isArray(candidate) && candidate.length > 0) return candidate
+  }
+  return []
+}
+
 function extractFinalAssistantText(snapshot: unknown): string {
   const messages = snapshotMessages(snapshot)
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
     if (!isAiMessage(message)) continue
-    const toolCalls = messageToolCalls(message)
+    // Normalized-only: a malformed/raw artifact must NOT hide this message's final text (see helper).
+    const toolCalls = messageNormalizedToolCalls(message)
     if (Array.isArray(toolCalls) && toolCalls.length > 0) continue
     const text = extractTextFromUnknownContent(message.content ?? message.kwargs?.content)
     if (text.trim()) return text.trim()

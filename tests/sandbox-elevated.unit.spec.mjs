@@ -57,6 +57,10 @@ const workflowsIpcSource = readFileSync(
   new URL("../src/main/ipc/workflows.ts", import.meta.url),
   "utf8"
 )
+const workflowRunsDialogSource = readFileSync(
+  new URL("../src/renderer/src/components/chat/WorkflowRunsDialog.tsx", import.meta.url),
+  "utf8"
+)
 
 function sectionBetween(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker)
@@ -1804,6 +1808,40 @@ test("workflow file reads/writes guard non-regular files (FIFO/device) before to
   )
 })
 
+test("edit-and-resume sidecar sweep runs AFTER approval-reject and BEFORE launch", () => {
+  // P2: clearAllAgentToolStreams deletes the prior run's tool-stream sidecars on a journal-dropping
+  // resume (reused runId, new callHashes). It MUST sit AFTER the approval-reject return — a rejected
+  // edit-and-resume must NOT destroy the prior run's still-in-history tool stream — and BEFORE launch
+  // (no new sidecar exists yet to race). tool.func imports electron and can't be unit-run, so the
+  // call ORDER is locked here by source position. (The sweep's glob scope is behavior-tested in
+  // workflow-engine: testClearAllAgentToolStreamsSweepsRunIdSidecars.)
+  const rejectReturnAt = workflowToolSource.indexOf('status: "rejected"')
+  const sweepAt = workflowToolSource.indexOf("clearAllAgentToolStreams(workspacePath")
+  const launchAt = workflowToolSource.indexOf("workflowRunManager.launch(")
+  assert(
+    rejectReturnAt > 0 && sweepAt > 0 && launchAt > 0,
+    "approval-reject, sweep, and launch anchors are all present in tool.ts"
+  )
+  assert(
+    rejectReturnAt < sweepAt,
+    "sweep must run AFTER the approval-reject return — a rejected edit-and-resume must not delete history"
+  )
+  assert(sweepAt < launchAt, "sweep must run BEFORE launch (no new sidecar exists yet to race)")
+  // ...and the sweep itself must NOT block the launch on display I/O (run-store:253 — hung writes
+  // stall only the sidecar chain, never the run). It is SYNC (void), and in-flight writes get an
+  // ORDERED delete on the op chain (enqueueAgentSidecarOp) — never an awaited Promise.allSettled.
+  assert.match(
+    workflowRunStoreSource,
+    /export function clearAllAgentToolStreams\([\s\S]*?\): void \{/,
+    "clearAllAgentToolStreams is sync (void) — it can't await/block the launch on display I/O"
+  )
+  assert.match(
+    workflowRunStoreSource,
+    /clearAllAgentToolStreams[\s\S]*?enqueueAgentSidecarOp\(opPath/,
+    "in-flight writes get an ordered op-chain delete (handles revival without blocking the launch)"
+  )
+})
+
 test("workflow approval fingerprint distinguishes undefined args from explicit null", () => {
   // P2: "no args" (undefined) and explicit `args: null` are DIFFERENT approvals —
   // a script reads `args === undefined` vs `=== null` differently, so a prior
@@ -2033,6 +2071,121 @@ test("flush-failed-run snapshot handles the cancel + zombie-reconcile boundaries
     workflowRunManagerSource,
     /size > MAX_FLUSH_FAILED_RUNS[\s\S]*?snap\.notificationDelivered && !this\.inFlightNotifications\.has\(id\)[\s\S]*?this\.flushFailedRuns\.delete\(id\)/,
     "cap evicts ONLY an already-delivered, not-in-flight snapshot (never drops an unreported result)"
+  )
+})
+
+test("agent tool-stream sidecar: a re-run clears the stale sidecar, OFF the run's critical path", () => {
+  // resume REUSES the runId; the runner clears any prior sidecar at re-run start — but
+  // FIRE-AND-FORGET (void, never awaited), so display I/O can't block the agent even if a prior
+  // write hangs (the cardinal rule: display-only must never affect the run). clear internally
+  // awaits any in-flight write so a late rename can't resurrect the file; on a normal disk it
+  // finishes in ms, before this agent's finish-write, so it still wins the ordering.
+  // Behavior-tested end-to-end in workflow-engine.spec (testAgentToolStreamStaleSidecarKilled).
+  assert.match(
+    workflowRunManagerSource,
+    /void clearAgentToolStream\(/,
+    "the subagent runner fires clearAgentToolStream fire-and-forget (never blocks the run)"
+  )
+  assert.doesNotMatch(
+    workflowRunManagerSource,
+    /await clearAgentToolStream\(/,
+    "clear is NOT awaited on the run's critical path (display-only must never block the run)"
+  )
+})
+
+test("agent tool-stream sidecar is written atomically (tmp+rename), like run.json/journal", () => {
+  // A direct writeFile leaves a half-written .toolstream on a crash mid-write (reader chokes /
+  // file permanently unopenable) and a torn read under concurrency. tmp+rename makes a reader
+  // see old-or-new, never partial; a crash leaves only a stray .tmp (swept by prune).
+  assert.match(
+    workflowRunStoreSource,
+    /writeFile\(`\$\{path\}\.tmp`, payload\)[\s\S]*?rename\(`\$\{path\}\.tmp`, path\)/,
+    "persistAgentToolStream writes <path>.tmp then renames it into place (atomic)"
+  )
+  assert.match(
+    workflowRunStoreSource,
+    /file\.endsWith\("\.toolstream"\) \|\| file\.endsWith\("\.toolstream\.tmp"\)/,
+    "prune sweeps a crash-left .toolstream.tmp alongside the sidecar"
+  )
+})
+
+test("agent tool-stream sidecar ops are serialized on a per-path chain (deterministic ordering)", () => {
+  // Determinism without blocking the run: clear and write are enqueued on ONE per-path chain, so
+  // the order is always write(old) → clear → write(new). clear can't delete this run's write, and
+  // a prior write's late rename can't resurrect a cleared file — by ordering, with no awaited I/O
+  // on the run's path. Behavior-tested in workflow-engine.spec (testAgentToolStreamStaleSidecarKilled).
+  assert.match(
+    workflowRunStoreSource,
+    /function enqueueAgentSidecarOp\(/,
+    "run-store has a per-path sidecar op chain"
+  )
+  assert.match(
+    workflowRunStoreSource,
+    /clearAgentToolStream[\s\S]*?return enqueueAgentSidecarOp\(/,
+    "clear is enqueued on the chain (ordered after any in-flight write, before the next write)"
+  )
+})
+
+test("agent tool-stream sidecar is keyed by the COMPOSITE callHash+callIndex, resolved from agentIndex", () => {
+  // P1: agentIndex shifts across resume; callHash alone collides for same-prompt agents; callIndex
+  // alone collides across a cache-hit/live-miss resume (a new live agent reuses an index a cached
+  // agent also carries). So the sidecar key is the COMPOSITE <callHash>_c<callIndex>: callHash
+  // separates different agents on the same index, callIndex separates same-prompt instances, and a
+  // cached agent uses its ORIGINAL callIndex. The reader maps agentIndex → toolStreamKey via the
+  // persisted run. Behavior-tested in workflow-engine.spec (Case F: same callIndex, diff callHash).
+  assert.match(
+    workflowEngineSource,
+    /liveToolStreamKey = `\$\{callHash\}_c\$\{callIndex\}`/,
+    "the engine builds the sidecar key from callHash + callIndex (so a same-index collision differs by callHash)"
+  )
+  assert.match(
+    workflowEngineSource,
+    /toolStreamKey: `\$\{callHash\}_c\$\{cached\.index\}`/,
+    "a cached agent keys by callHash + its ORIGINAL callIndex (reads its own flow, never a live agent's)"
+  )
+  assert.match(
+    workflowRunStoreSource,
+    /function agentToolStreamSuffix\(toolStreamKey: string\)/,
+    "the sidecar filename is the composite key string, not a bare index"
+  )
+  assert.match(
+    workflowsIpcSource,
+    /run\?\.agents\.find\(\(agent\) => agent\.index === agentIndex\)\?\.toolStreamKey/,
+    "get-agent-toolstream resolves the requested agentIndex → the agent's composite toolStreamKey"
+  )
+})
+
+test("opening a running agent gets an immediate catch-up snapshot (no blank wait)", () => {
+  // values frames arrive only per super-step, so a viewer who opens an agent mid-(long)-tool
+  // call would otherwise see "waiting" until the next frame. main remembers the latest frame
+  // per agent (even when unwatched) and replays it to a newly-interested webContents on
+  // interest registration; the entry is dropped when the agent finishes (sidecar authoritative).
+  assert.match(
+    workflowRunManagerSource,
+    /agentLatestSnapshot\.set\(interestKey, \{ snapshot, label \}\)/,
+    "every frame remembers the latest snapshot for catch-up (even when nobody is watching yet)"
+  )
+  assert.match(
+    workflowRunManagerSource,
+    /const latest = agentLatestSnapshot\.get\(key\)[\s\S]*?sendAgentSnapshotTo\(/,
+    "registering interest replays the latest remembered frame to the newly-interested webContents"
+  )
+  assert.match(
+    workflowRunManagerSource,
+    /agentLatestSnapshot\.delete\(/,
+    "the catch-up snapshot is dropped when the agent finishes (no per-finished-agent retention)"
+  )
+})
+
+test("workflow runs-history dialog can open a finished agent's tool stream", () => {
+  // The sidecar + IPC existed but the history dialog had no entry, so once the live panel was
+  // cleared a finished agent's tool stream was unreachable. AgentDetail now opens the focused
+  // view (which loads the sidecar) keyed by the run's threadId/runId/agentIndex, and closes
+  // the dialog so the panel behind it is visible.
+  assert.match(
+    workflowRunsDialogSource,
+    /openWorkflowAgentFocusView\(\{[\s\S]*?agentIndex: agent\.index[\s\S]*?\}\)[\s\S]*?onClose\(\)/,
+    "AgentDetail opens the focused tool-stream view for the historical agent, then closes the dialog"
   )
 })
 

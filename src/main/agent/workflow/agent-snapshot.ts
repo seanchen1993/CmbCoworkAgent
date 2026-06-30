@@ -10,9 +10,10 @@
  *    never materialized.
  *  - Truncation applies to strings ANYWHERE — message content, tool-call args,
  *    tool_call_chunks, additional_kwargs, … — so the biggest fields can't bypass the cap.
- *  - A hard TOTAL char budget caps the whole payload regardless of shape (e.g. an object
- *    with millions of tiny fields). The walk keeps the NEWEST messages and stops once the
- *    budget is spent, so the recent activity the user is looking at always survives.
+ *  - A hard TOTAL char budget caps the whole payload regardless of shape (e.g. an object with
+ *    millions of tiny fields, or a tree of empty arrays/objects — every container also costs
+ *    budget, not just leaf chars). The walk keeps the NEWEST messages and stops once the budget
+ *    is spent, so the recent activity the user is looking at always survives.
  */
 
 export const WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP = 24_000
@@ -59,6 +60,11 @@ export function boundedCloneSnapshotValue(
     return boundedCloneSnapshotValue((serializable.toJSON as () => unknown)(), depth + 1, budget)
   }
   if (Array.isArray(value)) {
+    // The container itself costs budget: a tree of empty arrays has no leaf chars and would
+    // otherwise bypass the total cap, so without this the budget bounds leaf CONTENT but not node
+    // COUNT (a tool can return a huge nested-empty structure). Charging per container makes the
+    // "caps the whole payload regardless of shape" invariant actually hold.
+    budget.left -= 2
     const capped =
       value.length > WORKFLOW_AGENT_SNAPSHOT_MAX_ARRAY
         ? value.slice(value.length - WORKFLOW_AGENT_SNAPSHOT_MAX_ARRAY)
@@ -71,6 +77,7 @@ export function boundedCloneSnapshotValue(
     return out
   }
   const out: Record<string, unknown> = {}
+  budget.left -= 2 // the container itself costs budget too (empty objects deduct nothing per-key) — see the array branch
   // for...in iterates keys lazily — unlike Object.keys() it does NOT materialize the full
   // key array up front, so a pathologically wide object can't spike before the per-key
   // budget loop stops it.

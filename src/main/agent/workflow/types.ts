@@ -236,6 +236,11 @@ export type WorkflowSubagentRunner = (request: {
   schema?: Record<string, unknown>
   model?: string
   agentIndex: number
+  /** Composite per-agent tool-stream sidecar key = `<callHash>_c<callIndex>`. callHash (content
+   * identity) distinguishes DIFFERENT agents that land on the same callIndex across a resume
+   * (cache-hit + live-miss); callIndex distinguishes same-prompt (same-callHash) instances. A
+   * cached agent uses its ORIGINAL callIndex (from the journal) so it still reads its OWN stream. */
+  toolStreamKey: string
   label: string
   phase: string | null
   signal: AbortSignal
@@ -351,6 +356,12 @@ export interface WorkflowAgentStateRecord {
   promptPreview?: string
   /** Truncated final text — drill-down observability (full result lives in the journal). */
   resultPreview?: string
+  /** Composite key for THIS agent's tool-stream sidecar = `<callHash>_c<callIndex>` (a cached
+   * agent stores its ORIGINAL callIndex). Lets get-agent-toolstream resolve agentIndex → the
+   * sidecar, so a resumed/cached agent reads its OWN stream, two same-prompt agents never collide
+   * (callIndex), and a cache-hit/live-miss never collide on the same index (callHash). Optional
+   * for back-compat with pre-feature run.json. */
+  toolStreamKey?: string
 }
 
 /** Truncation caps for the drill-down previews persisted per agent. */

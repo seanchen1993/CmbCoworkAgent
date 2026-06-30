@@ -31,7 +31,12 @@ import {
   sha256Hex,
   getWorkflowRunsDir,
   workflowResultFilePath,
-  resolveWorkflowOutputFile
+  resolveWorkflowOutputFile,
+  agentToolStreamPath,
+  clearAgentToolStream,
+  clearAllAgentToolStreams,
+  persistAgentToolStream,
+  readAgentToolStream
 } from "../src/main/agent/workflow/run-store.ts"
 import {
   buildWorkflowNotificationMessage,
@@ -65,6 +70,7 @@ import {
   type WorkflowSubagentDeps
 } from "../src/main/agent/workflow/subagent.ts"
 import {
+  boundedCloneSnapshotValue,
   serializeWorkflowAgentSnapshotMessages,
   WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP,
   WORKFLOW_AGENT_SNAPSHOT_TOTAL_CAP
@@ -667,6 +673,200 @@ async function testWorkflowAgentSnapshotBounding(): Promise<void> {
     JSON.stringify(wide).length < WORKFLOW_AGENT_SNAPSHOT_TOTAL_CAP * 3,
     `total-cap bounds a wide payload, got ${JSON.stringify(wide).length} bytes`
   )
+
+  // Empty containers must cost budget too: a tree of empty arrays/objects has no leaf chars, so
+  // without a per-container charge the budget would bound leaf CONTENT but not node COUNT (a tool
+  // can return a huge nested-empty structure). With a tiny budget, not all 5 empty objects survive.
+  const tinyBudget = { left: 7 }
+  const clonedEmpties = boundedCloneSnapshotValue([{}, {}, {}, {}, {}], 0, tinyBudget) as unknown[]
+  assert(
+    Array.isArray(clonedEmpties) && clonedEmpties.length < 5,
+    `empty containers consume budget so not all survive a tiny budget, got ${JSON.stringify(clonedEmpties)}`
+  )
+}
+
+async function testAgentToolStreamStaleSidecarKilled(): Promise<void> {
+  // P1: the sidecar is keyed by the per-call toolStreamKey (engine callSeq) — UNIQUE per agent()
+  // call (two same-prompt/same-callHash agents never collide) AND recovered from the journal for a
+  // cached agent (so a resumed/cached agent reads its OWN flow even when its execution-order
+  // agentIndex shifts). This real-sequence behavior test exercises clear/persist/read against the
+  // filesystem: per-path op-chain ordering (Cases A-D), the read-side wait (Case E), and key
+  // isolation so two agents never cross-contaminate even sharing a runId (Case F).
+  const ws = mkdtempSync(join(tmpdir(), "cmb-toolstream-stale-"))
+  try {
+    const threadId = "thread-stale"
+    const runId = "wf_stale_reuse"
+    const toolStreamKey = "aabbccdd_c0" // composite key: <callHash>_c<callIndex>
+    mkdirSync(getWorkflowRunsDir(ws, threadId), { recursive: true })
+    const seedOldSidecar = (): void =>
+      writeFileSync(
+        agentToolStreamPath(ws, threadId, runId, toolStreamKey),
+        JSON.stringify({
+          runId,
+          toolStreamKey,
+          snapshotMessages: [{ id: ["AIMessage"], kwargs: { content: "OLD-FLOW" } }]
+        })
+      )
+
+    // Case A — re-run produces NO snapshot. clear-at-start removes the stale file; the
+    // empty-snapshot finish skips. UI must read null, NOT the prior run's "OLD-FLOW".
+    seedOldSidecar()
+    await clearAgentToolStream(ws, threadId, runId, toolStreamKey)
+    assert(
+      (await readAgentToolStream(ws, threadId, runId, toolStreamKey)) === null,
+      "clear-at-start removes the stale sidecar before the agent can finish"
+    )
+    persistAgentToolStream(ws, threadId, runId, toolStreamKey, { messages: [] })
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    assert(
+      (await readAgentToolStream(ws, threadId, runId, toolStreamKey)) === null,
+      "a no-snapshot re-run leaves no flow to read (not the prior run's)"
+    )
+
+    // Case B — re-run DOES produce a snapshot. clear-at-start removes the stale file; the
+    // finish write replaces it with THIS run's flow. UI must read "NEW-FLOW", never "OLD-FLOW".
+    seedOldSidecar()
+    await clearAgentToolStream(ws, threadId, runId, toolStreamKey)
+    persistAgentToolStream(ws, threadId, runId, toolStreamKey, {
+      messages: [{ id: ["AIMessage"], kwargs: { content: "NEW-FLOW" } }]
+    })
+    let serialized = ""
+    for (let attempt = 0; attempt < 100 && !serialized.includes("NEW-FLOW"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      serialized = JSON.stringify(
+        (await readAgentToolStream(ws, threadId, runId, toolStreamKey)) ?? []
+      )
+    }
+    assert(serialized.includes("NEW-FLOW"), "a re-run with a snapshot surfaces this run's flow")
+    assert(!serialized.includes("OLD-FLOW"), "the prior run's flow is never surfaced")
+
+    // Case C — codex's race: a PRIOR run's write is still IN FLIGHT when the re-run clears.
+    // clear awaits that write (so its rename lands FIRST) then deletes — the late write cannot
+    // resurrect the file. Without the in-flight guard, the pending rename would land after the
+    // unlink and read would return "OLD-FLOW".
+    persistAgentToolStream(ws, threadId, runId, toolStreamKey, {
+      messages: [{ id: ["AIMessage"], kwargs: { content: "OLD-FLOW" } }]
+    })
+    await clearAgentToolStream(ws, threadId, runId, toolStreamKey) // chained after the in-flight write, then unlinks
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    assert(
+      (await readAgentToolStream(ws, threadId, runId, toolStreamKey)) === null,
+      "an in-flight prior write cannot resurrect the sidecar after clear"
+    )
+
+    // Case D — the REAL runner sequence: a prior write is in flight, the re-run fires clear
+    // WITHOUT awaiting (void, exactly like run-manager), then this run writes. The per-path op
+    // chain orders write(old) → clear → write(new), so it ends on the NEW flow and NEVER surfaces
+    // OLD — even though nothing awaited the clear. This is the timing codex said wasn't covered.
+    persistAgentToolStream(ws, threadId, runId, toolStreamKey, {
+      messages: [{ id: ["AIMessage"], kwargs: { content: "OLD-FLOW" } }]
+    })
+    void clearAgentToolStream(ws, threadId, runId, toolStreamKey) // fire-and-forget, like the runner
+    persistAgentToolStream(ws, threadId, runId, toolStreamKey, {
+      messages: [{ id: ["AIMessage"], kwargs: { content: "NEW-FLOW" } }]
+    })
+    let dContent = ""
+    for (let attempt = 0; attempt < 100 && !dContent.includes("NEW-FLOW"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      dContent = JSON.stringify(
+        (await readAgentToolStream(ws, threadId, runId, toolStreamKey)) ?? []
+      )
+    }
+    assert(dContent.includes("NEW-FLOW"), "fire-and-forget re-run sequence ends on this run's flow")
+    assert(!dContent.includes("OLD-FLOW"), "ordered chain never surfaces the prior run's flow")
+
+    // Case E — codex's read-side race (the most dangerous one): read happens WHILE a clear is
+    // still QUEUED (not yet executed). readAgentToolStream awaits the pending chain op, so it
+    // returns null (post-clear), never the stale OLD — even reading immediately after a
+    // fire-and-forget clear, before the op runs. (Without the read-side wait this could read OLD,
+    // and the panel treats a non-null read as authoritative and stops retrying.)
+    seedOldSidecar()
+    void clearAgentToolStream(ws, threadId, runId, toolStreamKey) // op QUEUED, not yet executed
+    assert(
+      (await readAgentToolStream(ws, threadId, runId, toolStreamKey)) === null,
+      "read awaits a pending clear op, so it never returns the stale OLD flow mid-clear"
+    )
+
+    // Case F — THE P1 FIX, incl. codex's cache-hit/live-miss collision: two agents that land on the
+    // SAME callIndex but have DIFFERENT callHash must NOT cross-contaminate. On a resume a new live
+    // agent A can take this run's callIndex 0 while a cached agent B carries its ORIGINAL callIndex
+    // 0 — same index — but the composite key folds in callHash, so their sidecars differ. (The
+    // other failure mode, same-prompt duplicates, instead differs by callIndex.)
+    const toolStreamKeyA = "aaaaaaaa_c0" // live A: callHash A + callIndex 0
+    const toolStreamKeyB = "bbbbbbbb_c0" // cached B: callHash B + the SAME callIndex 0
+    persistAgentToolStream(ws, threadId, runId, toolStreamKeyA, {
+      messages: [{ id: ["AIMessage"], kwargs: { content: "FLOW-A" } }]
+    })
+    persistAgentToolStream(ws, threadId, runId, toolStreamKeyB, {
+      messages: [{ id: ["AIMessage"], kwargs: { content: "FLOW-B" } }]
+    })
+    let aContent = ""
+    let bContent = ""
+    for (
+      let attempt = 0;
+      attempt < 100 && (!aContent.includes("FLOW-A") || !bContent.includes("FLOW-B"));
+      attempt += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      aContent = JSON.stringify(
+        (await readAgentToolStream(ws, threadId, runId, toolStreamKeyA)) ?? []
+      )
+      bContent = JSON.stringify(
+        (await readAgentToolStream(ws, threadId, runId, toolStreamKeyB)) ?? []
+      )
+    }
+    assert(
+      aContent.includes("FLOW-A") && !aContent.includes("FLOW-B"),
+      "live A reads its OWN flow — callHash keeps it apart from cached B at the SAME callIndex"
+    )
+    assert(
+      bContent.includes("FLOW-B") && !bContent.includes("FLOW-A"),
+      "cached B reads its OWN flow — not whatever live A wrote at the same callIndex"
+    )
+  } finally {
+    rmSync(ws, { recursive: true, force: true })
+  }
+}
+
+async function testClearAllAgentToolStreamsSweepsRunIdSidecars(): Promise<void> {
+  // When a resume DROPS the journal (script/args changed), the runId is reused but agents may have
+  // new callHashes, orphaning the prior run's sidecars. clearAllAgentToolStreams sweeps every
+  // <runId>.*.toolstream (incl. a .tmp) so repeated edit-and-resume doesn't pile up garbage — and it
+  // must NOT touch another run's sidecars or this run's non-toolstream files (run.json/.journal).
+  const ws = mkdtempSync(join(tmpdir(), "cmb-toolstream-sweep-"))
+  try {
+    const threadId = "thread-sweep"
+    const runId = "wf_sweepaabbccdd"
+    const otherRunId = "wf_otheraabbccdd"
+    const dir = getWorkflowRunsDir(ws, threadId)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(agentToolStreamPath(ws, threadId, runId, "oldhash_c0"), "{}")
+    writeFileSync(agentToolStreamPath(ws, threadId, runId, "oldhash_c1"), "{}")
+    writeFileSync(`${agentToolStreamPath(ws, threadId, runId, "oldhash_c2")}.tmp`, "{}")
+    writeFileSync(agentToolStreamPath(ws, threadId, otherRunId, "x_c0"), "{}") // different run
+    writeFileSync(join(dir, `${runId}.json`), "{}") // non-toolstream
+    writeFileSync(join(dir, `${runId}.journal`), "[]") // non-toolstream
+
+    clearAllAgentToolStreams(ws, threadId, runId)
+
+    assert(!existsSync(agentToolStreamPath(ws, threadId, runId, "oldhash_c0")), "swept c0")
+    assert(!existsSync(agentToolStreamPath(ws, threadId, runId, "oldhash_c1")), "swept c1")
+    assert(
+      !existsSync(`${agentToolStreamPath(ws, threadId, runId, "oldhash_c2")}.tmp`),
+      "swept the .tmp too"
+    )
+    assert(
+      existsSync(agentToolStreamPath(ws, threadId, otherRunId, "x_c0")),
+      "another run's sidecar must survive (runId-prefix scoped)"
+    )
+    assert(
+      existsSync(join(dir, `${runId}.json`)),
+      "run.json must survive (.toolstream suffix only)"
+    )
+    assert(existsSync(join(dir, `${runId}.journal`)), "journal must survive")
+  } finally {
+    rmSync(ws, { recursive: true, force: true })
+  }
 }
 
 async function testModelFallbackNotJournaled(workspace: string): Promise<void> {
@@ -734,6 +934,81 @@ return "no-agents"`,
     loadWorkflowRunForResume(workspace, THREAD_ID, h0.runId) !== null,
     "a 0-agent run still resumes without a sidecar (nothing to replay) (#3)"
   )
+}
+
+async function testClearAllAgentToolStreamsHandlesPendingWriteNoRevival(): Promise<void> {
+  // P3: a still-in-flight sidecar write must not resurrect an orphan AFTER the sweep, AND the sweep
+  // must NEVER block the launch on that write. clearAllAgentToolStreams enqueues an ordered delete on
+  // the pending path's op chain (runs after the write, no await). Persist (enqueues a write) then
+  // sweep; once the chain settles (readAgentToolStream awaits it), the sidecar is GONE — not revived.
+  const ws = mkdtempSync(join(tmpdir(), "cmb-toolstream-pending-"))
+  try {
+    const threadId = "thread-pending"
+    const runId = "wf_pendingaabbcc"
+    const key = "h_c0"
+    mkdirSync(getWorkflowRunsDir(ws, threadId), { recursive: true })
+    persistAgentToolStream(ws, threadId, runId, key, {
+      messages: [{ id: ["AIMessage"], kwargs: { content: "FLOW" } }]
+    })
+    clearAllAgentToolStreams(ws, threadId, runId)
+    assert(
+      (await readAgentToolStream(ws, threadId, runId, key)) === null,
+      "an in-flight write does not survive the sweep — the ordered delete runs after it (no orphan revival)"
+    )
+  } finally {
+    rmSync(ws, { recursive: true, force: true })
+  }
+}
+
+async function testAppendJournalPreservesDifferentHashAtSameIndex(): Promise<void> {
+  // P1: appendJournal must NOT overwrite a cached entry when a DIFFERENT hash lands on an existing
+  // index (a concurrent pipeline() reorder, or some agents left un-journaled, shifts the live
+  // callSeq onto a cached index). Replay is BY HASH, so overwriting would drop the other call's
+  // result from availableByHash → it re-runs on the next resume + re-applies edits. Replace ONLY for
+  // the SAME (index, hash) — idempotent; a different hash at the same index is APPENDED.
+  const ws = mkdtempSync(join(tmpdir(), "cmb-journal-collide-"))
+  try {
+    const threadId = "thread-journal-collide"
+    const runId = "wf_journalcollide0"
+    const now = new Date().toISOString()
+    const store = createWorkflowRunStore({
+      workspacePath: ws,
+      threadId,
+      initial: {
+        version: 1,
+        runId,
+        threadId,
+        workflowName: "t",
+        script: "x",
+        scriptSha256: sha256Hex("x"),
+        status: "running",
+        phases: [],
+        currentPhase: null,
+        agents: [],
+        logs: [],
+        journal: [{ index: 0, hash: "hashA", result: "A" }], // a completed/cached call
+        stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
+        startedAt: now,
+        updatedAt: now
+      }
+    })
+    await store.whenInitialPersisted
+    store.appendJournal({ index: 0, hash: "hashB", result: "B" }) // DIFFERENT hash, same index
+    store.appendJournal({ index: 0, hash: "hashA", result: "A2" }) // SAME (index, hash) re-run
+    await store.flush()
+    const journal = loadWorkflowRunForResume(ws, threadId, runId)?.journal ?? []
+    const aEntries = journal.filter((e) => e.hash === "hashA")
+    assert(
+      aEntries.length === 1 && journal.some((e) => e.hash === "hashB"),
+      `collision APPENDS (cached hashA preserved + hashB added); same-(index,hash) REPLACES (no dup hashA), got ${JSON.stringify(journal.map((e) => e.hash))}`
+    )
+    assert(
+      aEntries[0]?.result === "A2",
+      "the same-(index,hash) re-run replaced the entry in place (idempotent rewrite)"
+    )
+  } finally {
+    rmSync(ws, { recursive: true, force: true })
+  }
 }
 
 async function testResumeRerunsWhenSessionDefaultModelChanges(workspace: string): Promise<void> {
@@ -2172,14 +2447,17 @@ return [a, b]`
   )
   assert(run4.stats.agentsCached === 1, "unchanged prefix replayed")
 
-  // The live result must REPLACE the stale journal entry: resuming the edited
-  // script from run4's journal replays everything with zero live calls.
+  // The live result is APPENDED, not overwriting the different-hash stale entry: appendJournal only
+  // replaces a SAME (index, hash) re-run — overwriting a different hash would drop a concurrent
+  // call's cached result (P1). The stale "second" entry lingers harmlessly (its hash is never looked
+  // up by the edited script); resuming the edited script still replays everything via hash below,
+  // zero live calls. (In the REAL tool a script edit drops the whole journal upstream, so this
+  // append-vs-replace only surfaces in this engine-direct test.)
   const run4Persisted = loadWorkflowRunForResume(workspace, THREAD_ID, fourth.runId)
   assert(run4Persisted !== null, "tail-edited run persisted")
   assert(
-    run4Persisted!.journal.length === 2 &&
-      run4Persisted!.journal[1].result === "live:second-EDITED",
-    `stale entry replaced by the live result, got ${JSON.stringify(run4Persisted!.journal[1])}`
+    run4Persisted!.journal.some((e) => e.result === "live:second-EDITED"),
+    `the live edited result is journaled (appended), got ${JSON.stringify(run4Persisted!.journal.map((e) => e.result))}`
   )
   calls = []
   const fifth = createHarness(workspace)
@@ -3441,6 +3719,10 @@ async function main(): Promise<void> {
     await testFullResultSidecarForOversizedReturn(workspace)
     await testConsumeValuesStreamTapIsolation()
     await testWorkflowAgentSnapshotBounding()
+    await testAgentToolStreamStaleSidecarKilled()
+    await testClearAllAgentToolStreamsSweepsRunIdSidecars()
+    await testClearAllAgentToolStreamsHandlesPendingWriteNoRevival()
+    await testAppendJournalPreservesDifferentHashAtSameIndex()
     await testResumeRerunsWhenSessionDefaultModelChanges(workspace)
     await testScriptWriteFileRoutesThroughRunLock(workspace)
     await testResumeRefusesWhenJournalLost(workspace)
@@ -3475,7 +3757,7 @@ async function main(): Promise<void> {
     await testChildWorkflowPhaseModelInherited(workspace)
     await testLogArgBoxedInVm(workspace)
     await testAgentOptsBoxedAfterAwait(workspace)
-    console.log("PASS workflow-engine (70 tests)")
+    console.log("PASS workflow-engine (71 tests)")
   } finally {
     if (origHome === undefined) delete process.env.HOME
     else process.env.HOME = origHome

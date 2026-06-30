@@ -10,6 +10,7 @@ import { WORKFLOW_TOOL_DESCRIPTION } from "./prompts"
 import { loadAgentProfiles } from "../agent-registry"
 import { workflowRunManager } from "./run-manager"
 import {
+  clearAllAgentToolStreams,
   generateWorkflowRunId,
   isValidWorkflowRunId,
   loadWorkflowRunForResume,
@@ -185,6 +186,14 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
           2
         )
       }
+
+      // Journal dropped (script/args changed) but the runId is REUSED: the fresh re-run's agents may
+      // have different callHashes, orphaning the prior run's tool-stream sidecars (the per-agent
+      // runner only clears the CURRENT key). Sweep them — AFTER approval (a rejected edit-and-resume
+      // must NOT destroy the prior run's history) and BEFORE launch (no new sidecar exists yet to
+      // race). Non-blocking by design: in-flight writes get an ordered delete on their op chain, not
+      // an await, so display I/O can never stall the launch.
+      if (invalidatedReason) clearAllAgentToolStreams(workspacePath, threadId, runId)
 
       const launch = workflowRunManager.launch({
         threadId,
