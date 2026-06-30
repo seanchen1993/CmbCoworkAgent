@@ -1,14 +1,10 @@
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
+import { renameSync, unlinkSync } from "fs"
 import {
-  readFileSync,
-  existsSync,
-  mkdirSync,
-  statSync,
-  renameSync,
-  unlinkSync
-} from "fs"
-import { writeFile, rename } from "fs/promises"
-import { dirname } from "path"
+  openRecoveredSqliteDatabase,
+  persistSqliteSnapshot,
+  sqliteFileSize
+} from "../utils/sqlite-durable-file"
 
 // Debounce window for background checkpoint saves. Checkpoints are written very
 // frequently during a streaming agent run; coalescing keeps the synchronous
@@ -81,15 +77,17 @@ export class SqlJsSaver extends BaseCheckpointSaver {
 
     const SQL = await initSqlJs()
 
-    // Load existing database if it exists
-    if (existsSync(this.dbPath)) {
-      // Check file size - sql.js works entirely in memory, so large files will fail
-      const stats = statSync(this.dbPath)
-      const MAX_DB_SIZE = 100 * 1024 * 1024 // 100MB limit
-
-      if (stats.size > MAX_DB_SIZE) {
+    const MAX_DB_SIZE = 100 * 1024 * 1024 // 100MB limit
+    const recovered = await openRecoveredSqliteDatabase(SQL, this.dbPath, "SqlJsSaver", {
+      maxBytes: MAX_DB_SIZE
+    })
+    if (recovered.database) {
+      this.db = recovered.database
+    } else {
+      const liveSize = sqliteFileSize(this.dbPath)
+      if (liveSize && liveSize > MAX_DB_SIZE) {
         console.warn(
-          `[SqlJsSaver] Database file is too large (${Math.round(stats.size / 1024 / 1024)}MB). ` +
+          `[SqlJsSaver] Database file is too large (${Math.round(liveSize / 1024 / 1024)}MB). ` +
             `Creating fresh database to prevent memory issues.`
         )
         // Rename the old file for backup
@@ -106,16 +104,6 @@ export class SqlJsSaver extends BaseCheckpointSaver {
             console.error("[SqlJsSaver] Could not delete old database:", e2)
           }
         }
-        this.db = new SQL.Database()
-      } else {
-        const buffer = readFileSync(this.dbPath)
-        this.db = new SQL.Database(buffer)
-      }
-    } else {
-      // Ensure directory exists
-      const dir = dirname(this.dbPath)
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true })
       }
       this.db = new SQL.Database()
     }
@@ -214,15 +202,13 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       this.dirty = false
       try {
         const data = Buffer.from(this.db.export())
-        const tmp = `${this.dbPath}.tmp`
-        await writeFile(tmp, data)
-        // flush() took over: this snapshot isn't persisted yet, so re-mark dirty
-        // and let flush write it authoritatively rather than racing its write.
+        await persistSqliteSnapshot(this.dbPath, data, "SqlJsSaver")
+        // flush() took over while this save was in flight; re-mark dirty and let
+        // flush write the authoritative final snapshot after this save settles.
         if (this.blockAsyncWrite) {
           this.dirty = true
           return
         }
-        await rename(tmp, this.dbPath)
       } catch (e) {
         this.dirty = true
         console.warn("[SqlJsSaver] async save failed, will retry on next change:", e)
@@ -273,9 +259,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       while (this.db && this.dirty) {
         this.dirty = false
         const data = Buffer.from(this.db.export())
-        const tmp = `${this.dbPath}.flush.tmp`
-        await writeFile(tmp, data)
-        await rename(tmp, this.dbPath)
+        await persistSqliteSnapshot(this.dbPath, data, "SqlJsSaver")
       }
     } catch (e) {
       this.dirty = true
