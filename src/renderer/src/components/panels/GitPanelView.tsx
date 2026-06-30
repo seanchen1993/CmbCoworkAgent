@@ -1215,15 +1215,6 @@ export function GitPanelView({
               >
                 {displayPath}
               </span>
-              <span className="shrink-0 flex items-center gap-1.5 text-[11px] font-semibold">
-                <span className="text-emerald-600 dark:text-emerald-400">
-                  +{file.additions}
-                </span>
-                <span className="text-muted-foreground">/</span>
-                <span className="text-rose-600 dark:text-rose-400">
-                  -{file.deletions}
-                </span>
-              </span>
             </button>
           </div>
           <span className="flex items-center gap-2 shrink-0">
@@ -1268,6 +1259,24 @@ export function GitPanelView({
         </div>
         {isExpanded && (
           <div className="pb-2 pr-2" style={{ paddingLeft: diffIndent }}>
+            <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs">
+              <span className="text-muted-foreground">变更统计</span>
+              <span
+                className={cn(
+                  "inline-flex h-4 items-center rounded border px-1 text-[9px] font-medium leading-none",
+                  statusMeta.className
+                )}
+              >
+                {statusMeta.label}
+              </span>
+              <span className="font-semibold text-emerald-600 dark:text-emerald-400">
+                +{file.additions}
+              </span>
+              <span className="text-muted-foreground">/</span>
+              <span className="font-semibold text-rose-600 dark:text-rose-400">
+                -{file.deletions}
+              </span>
+            </div>
             {showMovePath && (
               <div className="mb-2 rounded-md border border-blue-500/20 bg-blue-500/5 px-3 py-2 text-xs">
                 <div className="mb-1 flex items-center gap-1.5 font-medium text-blue-700 dark:text-blue-300">
@@ -1376,11 +1385,6 @@ export function GitPanelView({
               </span>
             </button>
           </div>
-          <span className="flex shrink-0 items-center gap-1.5 text-[11px] font-semibold">
-            <span className="text-emerald-600 dark:text-emerald-400">+{row.additions}</span>
-            <span className="text-muted-foreground">/</span>
-            <span className="text-rose-600 dark:text-rose-400">-{row.deletions}</span>
-          </span>
         </div>
       </div>
     )
@@ -1425,14 +1429,6 @@ export function GitPanelView({
                         <span>(仅展示 {visibleFilesCount})</span>
                       </>
                     )}
-                    <span>,</span>
-                    <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
-                      +{diffState?.totals.additions ?? 0}
-                    </span>
-                    <span>/</span>
-                    <span className="text-rose-600 dark:text-rose-400 font-semibold">
-                      -{diffState?.totals.deletions ?? 0}
-                    </span>
                   </>
                 )}
               </div>
@@ -1761,12 +1757,6 @@ export function GitPanelView({
                       {selectedTotals.fileCount}
                     </span>{" "}
                     / {visibleDiffFiles.length} 个文件
-                    <span className="ml-2 text-emerald-600 dark:text-emerald-400">
-                      +{selectedTotals.additions}
-                    </span>
-                    <span className="ml-1 text-rose-600 dark:text-rose-400">
-                      -{selectedTotals.deletions}
-                    </span>
                   </div>
                   <button
                     type="button"
@@ -1787,14 +1777,6 @@ export function GitPanelView({
                     const repositoryKey = group.repositoryKey
                     const isCollapsed = collapsedRepositoryPaths.has(repositoryKey)
                     const selectedInGroup = group.files.filter((file) => selectedFilePaths.has(file.path))
-                    const groupTotals = group.files.reduce(
-                      (acc, file) => {
-                        acc.additions += file.additions
-                        acc.deletions += file.deletions
-                        return acc
-                      },
-                      { additions: 0, deletions: 0 }
-                    )
                     const allGroupFilesSelected =
                       group.files.length > 0 && selectedInGroup.length === group.files.length
                     const someGroupFilesSelected =
@@ -1856,12 +1838,6 @@ export function GitPanelView({
                             <div className="flex shrink-0 items-center gap-2 text-[11px] font-medium text-muted-foreground">
                               <span className="rounded-full border border-border/70 bg-background/80 px-2 py-0.5">
                                 {selectedInGroup.length}/{group.files.length}
-                              </span>
-                              <span className="text-emerald-600 dark:text-emerald-400">
-                                +{groupTotals.additions}
-                              </span>
-                              <span className="text-rose-600 dark:text-rose-400">
-                                -{groupTotals.deletions}
                               </span>
                             </div>
                           </div>
