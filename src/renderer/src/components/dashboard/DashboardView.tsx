@@ -547,17 +547,7 @@ function resolveSkillUploaderExportInfo(
   item: MarketItem | null,
   uploaderProfiles: Record<string, SkillUploaderProfile>
 ): SkillUploaderExportInfo {
-  if (!item) return { sapId: "", userName: "", orgName: "" }
-
-  // 组织级 / 精品技能的创建人信息落在 managerName / managerDepartment，
-  // 与技能市场 getOrgSkillUploaderProfile 同口径。这里统一作为回退，
-  // 兼容两种情况：① user_id 为空；② user_id 是裸 SAP 号但 profile/解析取不到姓名。
-  const managerName = item.managerName?.trim() ?? ""
-  const managerDepartment = item.managerDepartment?.trim() ?? ""
-
-  if (!item.user_id?.trim()) {
-    return { sapId: "", userName: managerName, orgName: managerDepartment }
-  }
+  if (!item?.user_id) return { sapId: "", userName: "", orgName: "" }
 
   const parsed = parseUploaderIdentity(item.user_id)
   const profileCandidates = getUploaderIdCandidates(item.user_id)
@@ -570,16 +560,13 @@ function resolveSkillUploaderExportInfo(
       item.user_id.trim(),
     userName:
       normalizeUploaderProfileField(profile?.userName) ||
-      normalizeUploaderProfileField(parsed?.userName) ||
-      managerName,
+      normalizeUploaderProfileField(parsed?.userName),
     orgName:
       formatTopUserOrgName(
         normalizeUploaderProfileField(profile?.orgName),
         normalizeUploaderProfileField(profile?.upperOrgLv1),
         normalizeUploaderProfileField(profile?.upperOrgLv0)
-      ) ||
-      normalizeUploaderProfileField(parsed?.orgName) ||
-      managerDepartment
+      ) || normalizeUploaderProfileField(parsed?.orgName)
   }
 }
 
@@ -3169,102 +3156,67 @@ export function DashboardView(): React.JSX.Element {
     let cancelled = false
 
     async function loadUploaderProfiles(items: MarketItem[]): Promise<void> {
-      const uploaderIds = Array.from(
-        new Set(
-          items
-            .map((item) => {
-              const parsed = parseUploaderIdentity(item.user_id)
-              return parsed?.sapId || item.user_id?.trim() || ""
-            })
-            .filter(Boolean)
-            .flatMap((id) => buildUploaderIdCandidates(id))
-        )
-      )
+      // 与技能市场（MarketPanel）一致：用全量用户目录 queryAllUser 反查创建人，
+      // 而不是按使用埋点聚合的 userProfiles —— 否则像精品技能这种作者本人无使用记录的，
+      // 聚合里查不到对应 SAP 桶，创建人就会显示 “—”。
+      // 每个 user_id 对应一组候选 SAP，作为 resolveSkillUploaderExportInfo 的查表 key。
+      const candidatesByUserId = new Map<string, string[]>()
+      for (const item of items) {
+        const rawUserId = item.user_id?.trim()
+        if (!rawUserId || candidatesByUserId.has(rawUserId)) continue
+        candidatesByUserId.set(rawUserId, getUploaderIdCandidates(rawUserId))
+      }
 
-      if (uploaderIds.length === 0) {
+      if (candidatesByUserId.size === 0) {
         if (!cancelled) setSkillUploaderProfiles({})
         return
       }
 
-      if (typeof window.api?.dashboard?.userProfiles !== "function") {
-        if (!cancelled) {
-          setSkillUploaderProfiles(
-            Object.fromEntries(
-              uploaderIds.map((sapId) => [sapId, { sapId, userName: "", orgName: "" }])
-            )
-          )
+      const buildFallbackMap = (): Record<string, SkillUploaderProfile> => {
+        const map: Record<string, SkillUploaderProfile> = {}
+        for (const candidates of candidatesByUserId.values()) {
+          for (const candidate of candidates) {
+            if (!map[candidate]) map[candidate] = { sapId: candidate, userName: "", orgName: "" }
+          }
         }
+        return map
+      }
+
+      if (typeof window.api?.dashboard?.queryAllUser !== "function") {
+        if (!cancelled) setSkillUploaderProfiles(buildFallbackMap())
         return
       }
 
       try {
-        const response = await window.api.dashboard.userProfiles(uploaderIds)
+        const response = await window.api.dashboard.queryAllUser()
         if (!response.success || !response.data) {
-          throw new Error(response.error || "获取上传用户信息失败")
+          throw new Error(response.error || "获取全量用户信息失败")
         }
 
-        const buckets =
-          (
-            response.data as {
-              aggregations?: {
-                by_sap?: {
-                  buckets?: Array<{
-                    key?: string
-                    user_name?: { buckets?: Array<{ key?: string }> }
-                    org_name?: { buckets?: Array<{ key?: string }> }
-                    latest_user_info?: {
-                      hits?: {
-                        hits?: Array<{
-                          _source?: {
-                            userName?: string
-                            orgName?: string
-                            upperOrgLv0?: string
-                            upperOrgLv1?: string
-                          }
-                        }>
-                      }
-                    }
-                  }>
-                }
-              }
-            }
-          ).aggregations?.by_sap?.buckets ?? []
-
-        const profileBySapId: Record<string, SkillUploaderProfile> = {}
-        for (const bucket of buckets) {
-          const sapId = bucket.key?.trim()
-          if (!sapId) continue
-          const latestUserInfo = bucket.latest_user_info?.hits?.hits?.[0]?._source
-          profileBySapId[sapId] = {
-            sapId,
-            userName: latestUserInfo?.userName ?? bucket.user_name?.buckets?.[0]?.key ?? "",
-            orgName: latestUserInfo?.orgName ?? bucket.org_name?.buckets?.[0]?.key ?? "",
-            upperOrgLv0: latestUserInfo?.upperOrgLv0 ?? "",
-            upperOrgLv1: latestUserInfo?.upperOrgLv1 ?? ""
-          }
-        }
-
-        const profileEntries = Object.entries(profileBySapId)
+        const allUsers = response.data.filter((user) => user.sapId?.trim())
         const nextMap: Record<string, SkillUploaderProfile> = {}
-        for (const rawId of uploaderIds) {
-          nextMap[rawId] = profileBySapId[rawId] ||
-            profileEntries.find(([sapId]) => sapId.includes(rawId))?.[1] || {
-              sapId: rawId,
-              userName: "",
-              orgName: ""
-            }
+        for (const candidates of candidatesByUserId.values()) {
+          const target = allUsers.find((user) =>
+            candidates.some((candidate) => user.sapId.includes(candidate))
+          )
+          const profile: SkillUploaderProfile = target
+            ? {
+                sapId: target.sapId,
+                userName: target.userName,
+                orgName: target.orgName ?? "",
+                upperOrgLv0: target.upperOrgLv0 ?? "",
+                upperOrgLv1: target.upperOrgLv1 ?? ""
+              }
+            : { sapId: candidates[0] ?? "", userName: "", orgName: "" }
+          for (const candidate of candidates) {
+            if (!nextMap[candidate]) nextMap[candidate] = profile
+          }
         }
 
         if (!cancelled) setSkillUploaderProfiles(nextMap)
       } catch (error) {
         console.warn("[Dashboard] Failed to load marketplace skill uploader profiles:", error)
-        if (!cancelled) {
-          setSkillUploaderProfiles(
-            Object.fromEntries(
-              uploaderIds.map((sapId) => [sapId, { sapId, userName: "", orgName: "" }])
-            )
-          )
-        }
+        if (!cancelled) setSkillUploaderProfiles(buildFallbackMap())
       }
     }
 
