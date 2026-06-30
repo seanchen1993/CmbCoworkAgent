@@ -3992,7 +3992,10 @@ export function ChatContainer({
     }
   }, [adjustTextareaHeight, input])
 
-  const handleCancel = async (): Promise<void> => {
+  const handleCancel = async (e): Promise<void> => {
+    e.preventDefault()
+    e.stopPropagation()
+
     if (scheduledTaskLoading && scheduledTaskId) {
       try {
         await window.api.scheduledTasks.cancel(scheduledTaskId)
