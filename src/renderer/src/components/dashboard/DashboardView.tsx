@@ -3049,8 +3049,8 @@ export function DashboardView(): React.JSX.Element {
           teamSheetRows.push([
             isGroup ? `    ${formatTopUserOrgName("", row.shi, row.group ?? "")}` : row.shi,
             row.usageCount,
+            row.userCount,
             Number(row.perCapitaUsage.toFixed(1)),
-            Number(row.totalPerCapitaUsage.toFixed(1)),
             row.aboveAvgUserCount,
             row.contributedSkillCount === null ? "" : row.contributedSkillCount,
             row.skillCoverageShiCount === null ? "" : row.skillCoverageShiCount,
@@ -3070,8 +3070,8 @@ export function DashboardView(): React.JSX.Element {
         header: [
           "室/组",
           "使用次数",
+          "使用人数",
           "人均使用次数",
-          "总量人均使用次数",
           "超过人均人数",
           "贡献技能数",
           "技能覆盖室数",

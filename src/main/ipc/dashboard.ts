@@ -569,7 +569,7 @@ interface DashboardAwardTeamBenchmarkRow {
   perCapitaUsage: number
   /** 总量人均使用次数（全员基线 = 总使用次数 / 总去重用户），每行相同。 */
   totalPerCapitaUsage: number
-  /** 本行内使用次数超过「总量人均」的用户数。 */
+  /** 本行内使用次数超过「本行人均」的用户数。 */
   aboveAvgUserCount: number
   /** 技能使用次数（value_count usedSkills，含重复）。 */
   skillUsageCount: number
@@ -6111,12 +6111,9 @@ function teamBenchmarkTraceMetricAggs(): Record<string, unknown> {
 
 /**
  * 把一个组织桶（含 teamBenchmarkTraceMetricAggs）解析为标杆奖行的 trace 侧部分。
- * `aboveAvgThreshold` 为「总量人均」基线：本行内使用次数超过该基线的用户计入 aboveAvgUserCount。
+ * 本行内使用次数超过本行人均的用户计入 aboveAvgUserCount。
  */
-function parseTeamBenchmarkTraceBucket(
-  bucket: Record<string, unknown>,
-  aboveAvgThreshold: number
-): {
+function parseTeamBenchmarkTraceBucket(bucket: Record<string, unknown>): {
   usageCount: number
   userCount: number
   perCapitaUsage: number
@@ -6129,7 +6126,7 @@ function parseTeamBenchmarkTraceBucket(
   const perCapitaUsage = userCount > 0 ? usageCount / userCount : 0
   const userBuckets = asRecord(bucket.users).buckets
   const aboveAvgUserCount = Array.isArray(userBuckets)
-    ? userBuckets.filter((u) => asNumber(asRecord(u).doc_count) > aboveAvgThreshold).length
+    ? userBuckets.filter((u) => asNumber(asRecord(u).doc_count) > perCapitaUsage).length
     : 0
   return {
     usageCount,
@@ -6238,7 +6235,7 @@ async function fetchAwardTeamBenchmark(
   const traceAggs = asRecord(asRecord(traceRaw).aggregations)
   const totalUsage = asNumber(asRecord(traceAggs.total_usage).value)
   const totalUsers = asNumber(asRecord(traceAggs.total_users).value)
-  // 总量人均使用次数 = 全员总使用次数 / 全员去重用户数；同时作为「超过人均人数」的判定基线。
+  // 总量人均使用次数 = 全员总使用次数 / 全员去重用户数，仅作全局参考。
   const totalPerCapitaUsage = totalUsers > 0 ? totalUsage / totalUsers : 0
 
   const shiBuckets = asRecord(traceAggs.by_shi).buckets
@@ -6256,7 +6253,7 @@ async function fetchAwardTeamBenchmark(
           return {
             shi,
             group,
-            ...parseTeamBenchmarkTraceBucket(groupBucket, totalPerCapitaUsage),
+            ...parseTeamBenchmarkTraceBucket(groupBucket),
             totalPerCapitaUsage,
             codeStats: codeByOrg.get(teamOrgKey(shi, group)) ?? null
           }
@@ -6264,7 +6261,7 @@ async function fetchAwardTeamBenchmark(
         .filter((x): x is DashboardAwardTeamBenchmarkRow => x !== null)
       return {
         shi,
-        ...parseTeamBenchmarkTraceBucket(shiBucket, totalPerCapitaUsage),
+        ...parseTeamBenchmarkTraceBucket(shiBucket),
         totalPerCapitaUsage,
         codeStats: codeByOrg.get(teamOrgKey(shi)) ?? null,
         children

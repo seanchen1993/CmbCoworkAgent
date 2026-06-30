@@ -541,7 +541,7 @@ function ApplicationTable({
 
   return (
     <div className="space-y-3">
-      <p className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+      <p className="flex flex-wrap items-center gap-x-1 gap-y-1 text-xs text-muted-foreground">
         展示前 {APPLICATION_TOP_N} 名（按当前排序列取，默认按调用数）。点击列头切换排序。{" "}
         <InfoHint hint={APPLICATION_HINT} />
       </p>
@@ -647,12 +647,12 @@ function ApplicationTable({
 }
 
 const TEAM_HINT =
-  "按 室(upperOrgLv1) → 组(upperOrgLv0) 两级统计。人均使用次数=本行使用次数/本行去重用户；总量人均使用次数=全员总使用次数/全员去重用户（基线，每行相同）；超过人均人数=该室/组内使用次数高于「总量人均」的用户数。代码提交行数取已采纳行数；AI 代码入库率四口径同其它榜单。贡献技能数 / 技能覆盖室数按应用市场作者归属（发布者所属室）统计，仅在室级展示。"
+  "按 室(upperOrgLv1) → 组(upperOrgLv0) 两级统计。室/组人均使用次数=本行使用次数/本行去重用户；总量人均使用次数=全员总使用次数/全员去重用户，仅作全局参考；超过人均人数=该室/组内使用次数高于本行室/组人均使用次数的用户数。代码提交行数取已采纳行数；AI 代码入库率四口径同其它榜单。贡献技能数 / 技能覆盖室数按应用市场作者归属（发布者所属室）统计，仅在室级展示。"
 
 type TeamSortKey =
   | "usageCount"
+  | "userCount"
   | "perCapitaUsage"
-  | "totalPerCapitaUsage"
   | "aboveAvgUserCount"
   | "contributedSkillCount"
   | "skillCoverageShiCount"
@@ -664,10 +664,10 @@ function teamSortValue(row: TeamBenchmarkRow, key: TeamSortKey): number {
   switch (key) {
     case "usageCount":
       return row.usageCount
+    case "userCount":
+      return row.userCount
     case "perCapitaUsage":
       return row.perCapitaUsage
-    case "totalPerCapitaUsage":
-      return row.totalPerCapitaUsage
     case "aboveAvgUserCount":
       return row.aboveAvgUserCount
     case "contributedSkillCount":
@@ -746,8 +746,8 @@ function TeamBenchmarkTable({
 
   const columns: Array<{ key: TeamSortKey; label: string }> = [
     { key: "usageCount", label: "使用次数" },
+    { key: "userCount", label: "使用人数" },
     { key: "perCapitaUsage", label: "室/组人均使用次数" },
-    { key: "totalPerCapitaUsage", label: "总量人均使用次数" },
     { key: "aboveAvgUserCount", label: "超过人均人数" },
     { key: "contributedSkillCount", label: "贡献技能数" },
     { key: "skillCoverageShiCount", label: "技能覆盖室数" },
@@ -758,8 +758,8 @@ function TeamBenchmarkTable({
   const renderCells = (row: TeamBenchmarkRow): React.JSX.Element => (
     <>
       <td className="px-3 py-2 text-right tabular-nums">{formatNumber(row.usageCount)}</td>
+      <td className="px-3 py-2 text-right tabular-nums">{formatNumber(row.userCount)}</td>
       <td className="px-3 py-2 text-right tabular-nums">{row.perCapitaUsage.toFixed(1)}</td>
-      <td className="px-3 py-2 text-right tabular-nums">{row.totalPerCapitaUsage.toFixed(1)}</td>
       <td className="px-3 py-2 text-right tabular-nums">{formatNumber(row.aboveAvgUserCount)}</td>
       <td className="px-3 py-2 text-right tabular-nums">
         {row.contributedSkillCount === null ? "—" : formatNumber(row.contributedSkillCount)}
@@ -786,10 +786,13 @@ function TeamBenchmarkTable({
     </>
   )
 
+  const totalPerCapitaUsage = rows[0]?.totalPerCapitaUsage ?? 0
+
   return (
     <div className="space-y-3">
-      <p className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-        按室汇总，点击室名展开下属组。点击列头切换排序。 <InfoHint hint={TEAM_HINT} />
+      <p className="flex flex-wrap items-center gap-x-1 gap-y-1 text-xs text-muted-foreground">
+        按室汇总，点击室名展开下属组。点击列头切换排序。总量人均使用次数：
+        {totalPerCapitaUsage.toFixed(1)}。 <InfoHint hint={TEAM_HINT} />
       </p>
       <div className="overflow-x-auto rounded-md border border-border">
         <table className="w-full border-collapse text-sm">
