@@ -4164,7 +4164,18 @@ function ProjectConstraintSyncPanel({
                 key={adapter.id}
                 className="min-w-0 rounded-md border border-border bg-muted/20 px-4 py-3"
               >
-                <div className="flex min-w-0 items-center justify-between gap-4">
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={expanded}
+                  className="flex min-w-0 cursor-pointer items-center justify-between gap-4 rounded-sm outline-none transition-colors hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={() => onToggleKnowledgePreview(adapter)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return
+                    event.preventDefault()
+                    onToggleKnowledgePreview(adapter)
+                  }}
+                >
                   <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 items-center gap-2">
                       <AdapterOptionHeader adapter={adapter} />
@@ -4191,7 +4202,10 @@ function ProjectConstraintSyncPanel({
                         variant="ghost"
                         size="icon-sm"
                         title={syncedPath}
-                        onClick={() => void openPathInFileManager(syncedPath, "无法打开项目约束目录")}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          void openPathInFileManager(syncedPath, "无法打开项目约束目录")
+                        }}
                       >
                         <FolderOpen className="size-3.5" />
                       </Button>
@@ -4201,7 +4215,10 @@ function ProjectConstraintSyncPanel({
                       variant="ghost"
                       size="icon-sm"
                       title={expanded ? "收起知识库预览" : "展开知识库预览"}
-                      onClick={() => onToggleKnowledgePreview(adapter)}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onToggleKnowledgePreview(adapter)
+                      }}
                     >
                       {expanded ? (
                         <ChevronDown className="size-3.5" />
@@ -4219,7 +4236,10 @@ function ProjectConstraintSyncPanel({
                           ? "拉取最新公共系统约束"
                           : "插件未配置 pull_knowledge"
                       }
-                      onClick={() => void onSync(adapter)}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void onSync(adapter)
+                      }}
                     >
                       {syncing ? (
                         <Loader2 className="size-4 animate-spin" />
@@ -4668,7 +4688,8 @@ function FeatureDetailPage({
     node &&
     detail.run.skipNodeAvailable &&
     !projectInteractionDisabled &&
-    node.id === detail.run.currentNodeId
+    node.id === detail.run.currentNodeId &&
+    node.status.kind !== "done"
   ), [detail, projectInteractionDisabled])
 
   const handleSkipNode = useCallback(async (node: HarnessRunNode): Promise<void> => {
