@@ -52,6 +52,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { useAppStore } from "@/lib/store"
 import {
   consumePendingHarnessNextAction,
@@ -1156,6 +1157,13 @@ const THINKING_MESSAGES = [
 ]
 
 const SUPPORTED_EXTS = new Set([".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"])
+const ATTACH_FILE_POPOVER_CONTENT = (
+  <div className="space-y-1">
+    <div>1. 添加文件 (txt, md, csv, docx, xlsx)</div>
+    <div>2. doc文件：不要直接改后缀，在文件系统“另存为”docx之后，再选择上传。</div>
+  </div>
+)
+const DOC_SAVE_AS_DOCX_HINT = "doc文件不要直接改后缀，在文件系统“另存为”docx之后上传。"
 const MAX_ATTACHMENTS = 3
 const MAX_TOTAL_CHARS = 24_000
 const GOOD_SKILLS_PREVIEW_LIMIT = 4
@@ -2349,7 +2357,11 @@ export function ChatContainer({
           const ext = lastDot >= 0 ? filePath.substring(lastDot).toLowerCase() : ""
           if (!ext || !SUPPORTED_EXTS.has(ext)) {
             const fileName = filePath.replace(/^.*[/\\]/, "") || filePath
-            setError(`不支持的文件类型"${fileName}"，仅支持 txt、md、csv、docx、xlsx、xls`)
+            if (ext === ".doc") {
+              setError(`不支持的文件类型"${fileName}"；${DOC_SAVE_AS_DOCX_HINT}`)
+            } else {
+              setError(`不支持的文件类型"${fileName}"，仅支持 txt、md、csv、docx、xlsx、xls`)
+            }
             continue
           }
 
@@ -2367,9 +2379,9 @@ export function ChatContainer({
           if (result.success && result.attachment) {
             // #12: skip empty files
             if (!result.attachment.content.trim()) {
-              if (result.attachment.filename.includes(".doc")) {
+              if (result.attachment.filename.toLowerCase().endsWith(".docx")) {
                 setError(
-                  `文件 "${result.attachment.filename}" 内容为空，可尝试将文件用 WPS 另存为 docx 后添加`
+                  `文件 "${result.attachment.filename}" 内容为空；若原始文件为 doc，请${DOC_SAVE_AS_DOCX_HINT}`
                 )
               } else {
                 setError(`文件 "${result.attachment.filename}" 内容为空`)
@@ -5749,20 +5761,20 @@ export function ChatContainer({
                       {/* Bottom bar: + button left, send button right */}
                       <div className="flex items-center justify-between px-3 pb-2 w-full">
                         <div className="flex items-center gap-1 flex-1 overflow-auto">
-                          <button
-                            type="button"
+                          <IconPopoverButton
+                            icon={<Plus className="size-4" />}
+                            popoverContent={ATTACH_FILE_POPOVER_CONTENT}
+                            popoverClassName="max-w-64 leading-relaxed"
                             disabled={
                               effectiveComposerControlsDisabled ||
                               attachmentLoading ||
                               attachments.length >= MAX_ATTACHMENTS ||
                               totalAttachmentChars >= MAX_TOTAL_CHARS
                             }
+                            aria-label="添加文件"
+                            className="size-7 rounded-md p-0 text-muted-foreground hover:bg-muted/50 disabled:opacity-40 disabled:cursor-not-allowed"
                             onClick={handleAttachClick}
-                            title="添加文件 (txt, md, csv, docx, xlsx)"
-                            className="flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            <Plus className="size-4" />
-                          </button>
+                          />
                           <div className="w-px h-4 bg-border mx-1" />
                           <ModelSwitcher threadId={threadId} />
                           <div className="w-px h-4 bg-border mx-1" />
