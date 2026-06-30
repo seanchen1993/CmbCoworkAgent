@@ -849,21 +849,31 @@ function FeatureStageBreakdown({
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [nodes, setNodes] = useState<DashboardProjectModeFeatureNode[] | null>(null)
-  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const handleToggle = (): void => {
-    const next = !open
-    setOpen(next)
-    if (next && nodes === null && !loading) {
-      setLoading(true)
-      setError(null)
-      loadNodes(feature)
-        .then((result) => setNodes(result))
-        .catch((e) => setError(e instanceof Error ? e.message : String(e)))
-        .finally(() => setLoading(false))
+  // 展开时按当前面板时间范围拉取；range（→ loadNodes）变化且仍展开时自动重拉，
+  // 与插件聚合的 AdapterStageBreakdown 同款，保证刷新/改日期后阶段细分同步更新。
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const result = await loadNodes(feature)
+        if (!cancelled) {
+          setError(null)
+          setNodes(result)
+        }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+      }
+    })()
+    return () => {
+      cancelled = true
     }
-  }
+  }, [open, feature, loadNodes])
+
+  // 首次展开（无缓存、无错误）显示加载态；range 变化重拉时沿用旧数据直到新数据到达。
+  const loading = open && nodes === null && error === null
 
   return (
     <div className="space-y-1.5">
@@ -872,7 +882,7 @@ function FeatureStageBreakdown({
         className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
         onClick={(event) => {
           event.stopPropagation()
-          handleToggle()
+          setOpen((v) => !v)
         }}
       >
         {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
