@@ -173,6 +173,17 @@ interface UserInfoLite {
   ystId?: string | null
   sapId?: string | null
   userName?: string | null
+  orgName?: string | null
+  pathName?: string | null
+}
+
+function buildMarketUserId(userInfo: UserInfoLite | null): string | undefined {
+  if (!userInfo) return undefined
+  const rawId = (userInfo.sapId || userInfo.ystId || "").trim()
+  const rawName = (userInfo.userName || "").trim()
+  const rawOrg = (userInfo.pathName || userInfo.orgName || "").trim()
+  const segments = [rawId, rawName, rawOrg].filter(Boolean)
+  return segments.length > 0 ? segments.join(" / ") : undefined
 }
 
 function getEvolutionReviewAdminYstIds(): Set<string> {
@@ -768,14 +779,22 @@ function OptimizeStreamCard({
 
 function CandidateCard({
   candidate,
+  marketInfo,
   onApprove,
   onReject,
-  onDelete
+  onDelete,
+  onPublishMarket,
+  publishingMarket,
+  marketSynced
 }: {
   candidate: SkillCandidate
+  marketInfo?: MarketItem
   onApprove: (id: string, proposedContent?: string) => Promise<void>
   onReject: (id: string) => Promise<void>
   onDelete: (id: string) => void
+  onPublishMarket: (candidate: SkillCandidate, marketInfo?: MarketItem) => Promise<void>
+  publishingMarket: boolean
+  marketSynced: boolean
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -967,6 +986,25 @@ function CandidateCard({
                 <XCircle className="size-3 mr-1" />拒绝
               </Button>
             </>
+          )}
+          {candidate.status === "approved" && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={loading || publishingMarket || marketSynced}
+              className="h-7 px-2.5 text-xs border-blue-500/40 text-blue-600 hover:bg-blue-500/10 hover:text-blue-600"
+              onClick={(event) => {
+                event.stopPropagation()
+                void onPublishMarket(candidate, marketInfo)
+              }}
+            >
+              {publishingMarket ? (
+                <Loader2 className="size-3 mr-1 animate-spin" />
+              ) : (
+                <Rocket className="size-3 mr-1" />
+              )}
+              {marketSynced ? "已提交市场" : marketInfo ? "更新市场" : "发布市场"}
+            </Button>
           )}
           <Button
             size="sm"
@@ -1451,6 +1489,10 @@ export function EvolutionPanel(): React.JSX.Element {
   const [cloudUpdateLoading, setCloudUpdateLoading] = useState(false)
   const [installingCloudCandidateId, setInstallingCloudCandidateId] = useState<string | null>(null)
   const [updatingMarketCandidateId, setUpdatingMarketCandidateId] = useState<string | null>(null)
+  const [publishingMarketCandidateId, setPublishingMarketCandidateId] = useState<string | null>(null)
+  const [marketSyncedCandidateIds, setMarketSyncedCandidateIds] = useState<Set<string>>(
+    () => new Set()
+  )
   const [reviewUserInfo, setReviewUserInfo] = useState<UserInfoLite | null>(null)
   const {
     threads,
@@ -1726,8 +1768,101 @@ export function EvolutionPanel(): React.JSX.Element {
     )))
   }, [])
 
+  const handlePublishLocalCandidateToMarket = useCallback(async (
+    candidate: SkillCandidate,
+    marketInfo?: MarketItem
+  ) => {
+    if (candidate.status !== "approved") {
+      toast.error("请先采纳候选，再发布到应用市场")
+      return
+    }
+
+    setPublishingMarketCandidateId(candidate.candidateId)
+    try {
+      const candidateKeys = new Set(
+        [candidate.skillId, candidate.name, marketInfo?.name, marketInfo?.filename]
+          .map((value) => normalizeMarketSkillKey(value))
+          .filter(Boolean)
+      )
+      const customSkills = await window.api.skills.list()
+      const existing = customSkills.find((skill: SkillMetadata) => {
+        const skillKeys = [skill.name, skill.relativePath, skill.id]
+          .map((value) => normalizeMarketSkillKey(value))
+          .filter(Boolean)
+        return skillKeys.some((key) => candidateKeys.has(key))
+      })
+      if (!existing) {
+        throw new Error(`本地未找到已采纳的 Skill：${candidate.name || candidate.skillId}`)
+      }
+
+      const exported = await window.api.skills.exportForMarket(existing.path, {
+        includeNestedSkills: true
+      })
+      if (!exported.success || !exported.buffer) {
+        throw new Error(exported.error || "导出市场 Skill 包失败")
+      }
+
+      const file = new File(
+        [exported.buffer],
+        exported.fileName || `${existing.name}.zip`,
+        { type: "application/zip" }
+      )
+      const userInfo = await window.api.models.getUserInfo().catch(() => null)
+      const userId = marketInfo?.user_id || buildMarketUserId(userInfo as UserInfoLite | null)
+      const name = marketInfo?.name || existing.name || candidate.name || candidate.skillId
+      const description = existing.description || candidate.description || marketInfo?.description || ""
+      const category = marketInfo?.category || existing.metadata?.category || DEFAULT_SCENE_CATEGORY
+      const version = existing.version || marketInfo?.version || "1.0.0"
+      const guidance = existing.metadata?.guidance || marketInfo?.guidance || undefined
+      const chineseName = marketInfo?.chinese_name || existing.metadata?.chinese_name || undefined
+
+      const result = marketInfo
+        ? await marketApi.updateItem(
+            file,
+            "skill",
+            name,
+            description,
+            category,
+            version,
+            guidance,
+            chineseName,
+            userId
+          )
+        : await marketApi.uploadFile(
+            file,
+            "skill",
+            name,
+            description,
+            category,
+            version,
+            guidance,
+            chineseName,
+            userId
+          )
+      if (!result.success) {
+        throw new Error(result.error || (marketInfo ? "更新应用市场失败" : "发布应用市场失败"))
+      }
+
+      setMarketSyncedCandidateIds((prev) => new Set(prev).add(candidate.candidateId))
+      toast.success(
+        marketInfo
+          ? `已将「${existing.name}」更新到应用市场`
+          : `已将「${existing.name}」发布到应用市场`
+      )
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "发布应用市场失败")
+    } finally {
+      setPublishingMarketCandidateId(null)
+    }
+  }, [])
+
   const handleDeleteCandidate = useCallback((candidateId: string) => {
     setCandidates((prev) => prev.filter((candidate) => candidate.candidateId !== candidateId))
+    setMarketSyncedCandidateIds((prev) => {
+      const next = new Set(prev)
+      next.delete(candidateId)
+      return next
+    })
   }, [])
 
   const removeCloudUpdate = useCallback((candidateId: string) => {
@@ -2492,15 +2627,24 @@ export function EvolutionPanel(): React.JSX.Element {
                   })}
                   {[...candidates]
                     .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
-                    .map((candidate) => (
-                      <CandidateCard
-                        key={candidate.candidateId}
-                        candidate={candidate}
-                        onApprove={handleApprove}
-                        onReject={handleReject}
-                        onDelete={handleDeleteCandidate}
-                      />
-                    ))}
+                    .map((candidate) => {
+                      const marketInfo =
+                        ownedSkillItemsByKey.get(normalizeMarketSkillKey(candidate.skillId)) ??
+                        ownedSkillItemsByKey.get(normalizeMarketSkillKey(candidate.name))
+                      return (
+                        <CandidateCard
+                          key={candidate.candidateId}
+                          candidate={candidate}
+                          marketInfo={marketInfo}
+                          publishingMarket={publishingMarketCandidateId === candidate.candidateId}
+                          marketSynced={marketSyncedCandidateIds.has(candidate.candidateId)}
+                          onApprove={handleApprove}
+                          onReject={handleReject}
+                          onDelete={handleDeleteCandidate}
+                          onPublishMarket={handlePublishLocalCandidateToMarket}
+                        />
+                      )
+                    })}
                 </>
               )
             ) : tracesLoading ? (
