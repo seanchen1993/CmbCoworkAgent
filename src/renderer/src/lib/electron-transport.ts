@@ -2413,9 +2413,19 @@ export class ElectronIPCTransport implements UseStreamTransport {
   }
 
   private hydrateToolCallsWithAccumulatedArgs(
-    toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>
+    toolCalls: unknown
   ): Array<{ id?: string; name?: string; args?: Record<string, unknown> }> {
-    return toolCalls.map((toolCall) => {
+    // A corrupted / half-broken sidecar can deserialize `tool_calls` as a NON-array (string/object) OR
+    // as an array with bad ELEMENTS (null / string / array). `?? []` at call sites only catches
+    // null/undefined. Guard the container AND each element at this shared chokepoint: a `null` element
+    // would throw on `.args`, and a non-object element would reach MessageBubble as a bogus tool call.
+    // Bad input degrades to "no tool calls" / drops the bad entries instead of breaking the panel.
+    if (!Array.isArray(toolCalls)) return []
+    const calls = toolCalls.filter(
+      (toolCall): toolCall is { id?: string; name?: string; args?: Record<string, unknown> } =>
+        toolCall !== null && typeof toolCall === "object" && !Array.isArray(toolCall)
+    )
+    return calls.map((toolCall) => {
       if (this.hasToolArgs(toolCall.args)) {
         return {
           ...toolCall,

@@ -61,6 +61,10 @@ const workflowRunsDialogSource = readFileSync(
   new URL("../src/renderer/src/components/chat/WorkflowRunsDialog.tsx", import.meta.url),
   "utf8"
 )
+const workflowAgentStreamPanelSource = readFileSync(
+  new URL("../src/renderer/src/components/chat/WorkflowAgentStreamPanel.tsx", import.meta.url),
+  "utf8"
+)
 
 function sectionBetween(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker)
@@ -1595,6 +1599,81 @@ test("workflow notification turn auto-commits via a fresh snapshot, never a laun
     agentIpcSource,
     /const autoCommit = await beginAutoCommitTracking\(threadId, workspacePath\)/,
     "notification turn takes a fresh auto-commit snapshot"
+  )
+})
+
+test("workspace-switch/resume state-consistency: leave-while-switch orphan + resume stale flush-failed", () => {
+  // #2: leaving workflow mode while ALSO switching workspacePath in one update must look the pending
+  // run up in the CURRENT (old) workspace — that's where its files live. Using nextMetadata's NEW
+  // path finds nothing → the leave is allowed → the pending run is orphaned. The leave guard's `wsp`
+  // must prefer currentMetadata.workspacePath (mirrors the workspace-switch guard, which does too).
+  assert.match(
+    threadsSource,
+    /const wsp =\s*typeof currentMetadata\.workspacePath === "string"/,
+    "the leave-workflow-mode guard looks up the pending run in the CURRENT (old) workspace"
+  )
+  // #3: a fresh launch REUSES the runId on resume, so it must drop any stale flush-failed terminal
+  // snapshot for that id — otherwise get-run/hydrate (which prefer getFlushFailedRun) keep showing the
+  // OLD terminal run instead of the NEW active one (the disk re-persist may still be failing).
+  assert.match(
+    workflowRunManagerSource,
+    /this\.flushFailedRuns\.delete\(request\.runId\)/,
+    "launch() clears any stale flush-failed snapshot for the reused runId"
+  )
+})
+
+test("workflow agent live stream guards a stale frame after a focus switch", () => {
+  // P1: the live onWorkflowAgentStream callback writes the GLOBAL workflowAgentFocusSnapshot. A frame
+  // can land after a fast focus switch but before unsubscribe, so it must re-check the FULL current
+  // focus identity (threadId + runId + agentIndex — a cross-thread switch can collide on
+  // runId/agentIndex) and skip the write if it changed. The guard MUST run BEFORE the write — else the
+  // previous agent's frame pollutes the new panel (effect 2 only fills an `undefined` snapshot, so a
+  // finished/no-sidecar agent would keep showing it). Source-asserted: the panel can't render in tsx.
+  const cb = sectionBetween(
+    workflowAgentStreamPanelSource,
+    "onWorkflowAgentStream(focusThreadId",
+    "})"
+  )
+  assert.match(
+    cb,
+    /const cur = useAppStore\.getState\(\)\.workflowAgentFocusView/,
+    "the live callback reads the CURRENT focus"
+  )
+  const tIdx = cb.indexOf("cur?.threadId !== focusThreadId")
+  const rIdx = cb.indexOf("cur?.runId !== focusRunId")
+  const aIdx = cb.indexOf("cur?.agentIndex !== focusAgentIndex")
+  const writeIdx = cb.indexOf("setWorkflowAgentFocusSnapshot")
+  assert(
+    tIdx > 0 && rIdx > 0 && aIdx > 0,
+    "the guard re-checks the FULL focus identity: threadId + runId + agentIndex"
+  )
+  assert(
+    Math.max(tIdx, rIdx, aIdx) < writeIdx,
+    "the guard runs BEFORE setWorkflowAgentFocusSnapshot (a stale frame skips the write)"
+  )
+})
+
+test("workflow agent finished-sidecar load re-checks live focus (passive-cleanup gap)", () => {
+  // item1 follow-up: `cancelled` only catches frames that resolve AFTER React runs the effect's
+  // PASSIVE cleanup. A focus switch updates the store synchronously but DEFERS that cleanup, so the
+  // finished-agent getAgentToolStream() promise (or a fired retry) can resolve in the gap with
+  // cancelled=false. It must re-check the LIVE focus before writing the GLOBAL snapshot — else agent
+  // A's flow lands on agent B's panel and sticks. Source-asserted: the panel can't render in tsx.
+  const src = workflowAgentStreamPanelSource
+  assert.match(
+    src,
+    /const isStillFocused = \(\): boolean => \{/,
+    "the finished-sidecar effect defines a live-focus re-check"
+  )
+  // The re-check must guard the AUTHORITATIVE write (...setWorkflowAgentFocusSnapshot(loaded)).
+  const loadToWrite = sectionBetween(
+    src,
+    "getAgentToolStream(focusThreadId",
+    "setWorkflowAgentFocusSnapshot(loaded)"
+  )
+  assert(
+    loadToWrite.includes("cancelled || !isStillFocused()"),
+    "the load .then re-checks focus BEFORE the authoritative snapshot write"
   )
 })
 

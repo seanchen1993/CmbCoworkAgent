@@ -422,7 +422,11 @@ export async function readAgentToolStream(
     // refuse to read+parse a corrupted/externally-grown file unbounded into memory.
     if ((await stat(path)).size > WORKFLOW_AGENT_TOOLSTREAM_MAX_BYTES) return null
     const parsed = JSON.parse(await readFile(path, "utf8")) as { snapshotMessages?: unknown }
-    return Array.isArray(parsed.snapshotMessages) ? parsed.snapshotMessages : null
+    if (!Array.isArray(parsed.snapshotMessages)) return null
+    // Drop non-object elements (null / string / primitive / old-format / half-corrupt): the renderer
+    // reads `message.kwargs` on each, so a bad element would throw and break the panel. A corrupted or
+    // externally-edited sidecar then degrades to the valid messages (or empty), never a crash.
+    return parsed.snapshotMessages.filter((m): m is object => m !== null && typeof m === "object")
   } catch {
     return null
   }

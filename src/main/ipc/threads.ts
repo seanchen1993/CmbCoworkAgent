@@ -170,11 +170,15 @@ async function assertCanPersistExplicitNormalMode(
   // targets are covered too. (Despite the function name, this also guards exits
   // from workflow mode.)
   if (currentMetadata.agentMode === "workflow" && nextMetadata.agentMode !== "workflow") {
+    // Look the pending run up in the CURRENT (old) workspace — that's where its files live (it was
+    // launched there). A combined update that ALSO switches workspacePath must NOT use the NEW path:
+    // the run isn't there → findPendingNotification returns null → the leave would be allowed and
+    // orphan the run. Mirrors the workspace-switch guard above, which also checks currentMetadata.
     const wsp =
-      typeof nextMetadata.workspacePath === "string"
-        ? nextMetadata.workspacePath
-        : typeof currentMetadata.workspacePath === "string"
-          ? currentMetadata.workspacePath
+      typeof currentMetadata.workspacePath === "string"
+        ? currentMetadata.workspacePath
+        : typeof nextMetadata.workspacePath === "string"
+          ? nextMetadata.workspacePath
           : undefined
     const active = workflowRunManager.isActive(threadId)
     const pendingRun = wsp ? workflowRunManager.findPendingNotification(wsp, threadId) : null

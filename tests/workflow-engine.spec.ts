@@ -662,6 +662,31 @@ async function testWorkflowAgentSnapshotBounding(): Promise<void> {
   }) as unknown[]
   assert(many.length === 400, `message-count cap tail-slices to 400, got ${many.length}`)
 
+  // item4: each kept message is stamped with its ABSOLUTE pre-tail-slice index, so the renderer's
+  // stable fallback key (for messages with no provider id) does NOT drift as the window slides.
+  const snapIdxOf = (m: unknown): unknown =>
+    (m as { kwargs?: { additional_kwargs?: Record<string, unknown> } }).kwargs?.additional_kwargs
+      ?.cmb_worker_snapshot_index
+  // `many` is m0..m499 tail-sliced to m100..m499 → oldest kept is absolute 100, newest absolute 499.
+  assert(snapIdxOf(many[0]) === 100, `oldest kept (m100) stamped absolute 100, got ${snapIdxOf(many[0])}`)
+  assert(
+    snapIdxOf(many[399]) === 499,
+    `newest kept (m499) stamped absolute 499, got ${snapIdxOf(many[399])}`
+  )
+  // Stability: a LONGER stream slides the window (m499 moves from array slot 399 → 389), but its
+  // ABSOLUTE stamp stays 499 — the whole point (array position would have drifted).
+  const many2 = serializeWorkflowAgentSnapshotMessages({
+    messages: Array.from({ length: 510 }, (_unused, index) => ({
+      id: ["AIMessage"],
+      kwargs: { content: `m${index}` }
+    }))
+  }) as unknown[]
+  const m499In2 = many2.find((m) => (m as { kwargs?: { content?: string } }).kwargs?.content === "m499")
+  assert(
+    snapIdxOf(m499In2) === 499,
+    `m499 keeps absolute index 499 across a slid window, got ${snapIdxOf(m499In2)}`
+  )
+
   // Hard TOTAL cap: an object with a huge number of tiny fields (no single string is
   // over-long, so per-field truncation alone wouldn't bound it) is still capped.
   const wideArgs: Record<string, number> = {}
@@ -1009,6 +1034,77 @@ async function testAppendJournalPreservesDifferentHashAtSameIndex(): Promise<voi
   } finally {
     rmSync(ws, { recursive: true, force: true })
   }
+}
+
+async function testReadAgentToolStreamDropsCorruptElements(): Promise<void> {
+  // item3: the renderer reads `message.kwargs` on each toolstream element, so a corrupt / externally
+  // edited sidecar with null / string / primitive elements would crash the panel. readAgentToolStream
+  // must filter to object-shaped elements — degrading to the valid messages (or empty), never a throw.
+  const ws = mkdtempSync(join(tmpdir(), "cmb-toolstream-corrupt-"))
+  try {
+    const threadId = "thread-corrupt"
+    const runId = "wf_corruptaabbcc"
+    const key = "h_c0"
+    mkdirSync(getWorkflowRunsDir(ws, threadId), { recursive: true })
+    writeFileSync(
+      agentToolStreamPath(ws, threadId, runId, key),
+      JSON.stringify({
+        runId,
+        toolStreamKey: key,
+        snapshotMessages: [
+          { id: ["AIMessage"], kwargs: { content: "good" } },
+          null,
+          "a string",
+          42,
+          { id: ["ToolMessage"], kwargs: { content: "ok" } }
+        ]
+      })
+    )
+    const loaded = (await readAgentToolStream(ws, threadId, runId, key)) as unknown[]
+    assert(
+      Array.isArray(loaded) && loaded.length === 2,
+      `only the 2 object elements survive (null/string/number dropped), got ${JSON.stringify(loaded)}`
+    )
+    assert(
+      loaded.every((m) => m !== null && typeof m === "object"),
+      "every returned element is an object → the renderer reads message.kwargs without crashing"
+    )
+  } finally {
+    rmSync(ws, { recursive: true, force: true })
+  }
+}
+
+function testNotificationFlagsTruncationOnEscapedLength(): void {
+  // A result UNDER the char cap raw but OVER it once XML-escaped (lots of `<`) is silently cut by
+  // escapeAndCap (escape-then-cap). The notification must STILL mark it "(truncated" — else the model
+  // thinks it got the FULL result and works off half-cut JSON. A pre-escape length check misses this.
+  const baseRun = {
+    version: 1 as const,
+    runId: "wf_notiftrunc00",
+    threadId: THREAD_ID,
+    workflowName: "t",
+    script: "x",
+    scriptSha256: sha256Hex("x"),
+    status: "completed" as const,
+    phases: [],
+    currentPhase: null,
+    agents: [],
+    logs: [],
+    journal: [],
+    stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
+    startedAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    completedAt: "2026-01-01T00:00:00.000Z"
+  }
+  // raw JSON ≈ cap-98 (under the cap), escaped ≈ 4×(cap-100) (well over) → escapeAndCap silently cuts.
+  const escapeHeavy = "<".repeat(WORKFLOW_TOOL_RESULT_MAX_CHARS - 100)
+  const escMsg = buildWorkflowNotificationMessage({ ...baseRun, result: escapeHeavy })
+  assert(
+    escMsg.includes("(truncated"),
+    "an escape-expanded result over the cap must be flagged truncated (post-escape length)"
+  )
+  const shortMsg = buildWorkflowNotificationMessage({ ...baseRun, result: "ok" })
+  assert(!shortMsg.includes("(truncated"), "a small result must NOT be flagged truncated")
 }
 
 async function testResumeRerunsWhenSessionDefaultModelChanges(workspace: string): Promise<void> {
@@ -3723,6 +3819,8 @@ async function main(): Promise<void> {
     await testClearAllAgentToolStreamsSweepsRunIdSidecars()
     await testClearAllAgentToolStreamsHandlesPendingWriteNoRevival()
     await testAppendJournalPreservesDifferentHashAtSameIndex()
+    await testReadAgentToolStreamDropsCorruptElements()
+    testNotificationFlagsTruncationOnEscapedLength()
     await testResumeRerunsWhenSessionDefaultModelChanges(workspace)
     await testScriptWriteFileRoutesThroughRunLock(workspace)
     await testResumeRefusesWhenJournalLost(workspace)

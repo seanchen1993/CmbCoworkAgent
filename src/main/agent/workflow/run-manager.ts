@@ -401,6 +401,11 @@ class WorkflowRunManager {
     // Fresh launch (incl. a resume reusing this runId) → reset its re-notify
     // budget, so a prior run's exhausted attempts don't pre-throttle this one.
     this.renotifyAttempts.delete(request.runId)
+    // Drop any stale flush-failed terminal snapshot for this runId: a fresh run REUSES the id, so the
+    // old in-memory terminal state is superseded. Without this, get-run/hydrate (which prefer
+    // getFlushFailedRun) would keep showing the OLD terminal run instead of the NEW active one — the
+    // disk re-persist may still be failing, so it isn't cleared on the success/ack paths.
+    this.flushFailedRuns.delete(request.runId)
 
     const now = new Date().toISOString()
     const initial: PersistedWorkflowRun = {

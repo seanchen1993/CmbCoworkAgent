@@ -104,15 +104,55 @@ export function serializeWorkflowAgentSnapshotMessages(snapshot: unknown): unkno
     raw.length > WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES
       ? raw.slice(raw.length - WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES)
       : raw
+  // Absolute index of trimmed[0] in the FULL (pre-tail-slice) list. Stamp each kept message with its
+  // absolute position so the renderer's stable fallback key (for messages with NO provider id) does
+  // not drift as the tail window slides — otherwise React reuses the wrong bubble and tool results /
+  // scroll positions misalign. Mirrors the main chat's annotateWorkerSnapshotIndexForRenderer.
+  const sliceOffset = raw.length - trimmed.length
   const budget: SnapshotBudget = { left: WORKFLOW_AGENT_SNAPSHOT_TOTAL_CAP }
   try {
     const keptNewestFirst: unknown[] = []
     for (let index = trimmed.length - 1; index >= 0; index -= 1) {
       if (budget.left <= 0) break
-      keptNewestFirst.push(boundedCloneSnapshotValue(trimmed[index], 0, budget))
+      const cloned = boundedCloneSnapshotValue(trimmed[index], 0, budget)
+      keptNewestFirst.push(annotateSnapshotIndexForRenderer(cloned, sliceOffset + index))
     }
     return keptNewestFirst.reverse()
   } catch {
     return undefined
+  }
+}
+
+/** Renderer's stable fallback message-id key — MUST match electron-transport.ts's
+ * WORKER_SNAPSHOT_INDEX_MESSAGE_KEY and the main chat's key in agent.ts, or the fallback id won't
+ * line up and the renderer falls back to the (drifting) array index. */
+const WORKER_SNAPSHOT_INDEX_MESSAGE_KEY = "cmb_worker_snapshot_index"
+
+/** Stamp a CLONED snapshot message with its absolute pre-tail-slice index in
+ * additional_kwargs.cmb_worker_snapshot_index. The arg is a fresh bounded-clone, so we build new
+ * wrappers (no source mutation) and spend only a few extra chars per message (negligible vs the
+ * display cap). Non-object clones (shouldn't happen for messages) pass through untouched. */
+function annotateSnapshotIndexForRenderer(cloned: unknown, absoluteIndex: number): unknown {
+  if (!cloned || typeof cloned !== "object" || Array.isArray(cloned)) return cloned
+  const record = cloned as Record<string, unknown>
+  const kwargs =
+    record.kwargs && typeof record.kwargs === "object" && !Array.isArray(record.kwargs)
+      ? (record.kwargs as Record<string, unknown>)
+      : {}
+  const additionalKwargs =
+    kwargs.additional_kwargs &&
+    typeof kwargs.additional_kwargs === "object" &&
+    !Array.isArray(kwargs.additional_kwargs)
+      ? (kwargs.additional_kwargs as Record<string, unknown>)
+      : {}
+  return {
+    ...record,
+    kwargs: {
+      ...kwargs,
+      additional_kwargs: {
+        ...additionalKwargs,
+        [WORKER_SNAPSHOT_INDEX_MESSAGE_KEY]: absoluteIndex
+      }
+    }
   }
 }
