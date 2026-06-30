@@ -53,6 +53,7 @@ import type {
   HarnessEnterpriseProjectSearchResult,
   HarnessProjectCreateInput,
   HarnessProjectConstraintSyncResult,
+  HarnessKnowledgePreviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
   HarnessProjectDetailViewModel,
@@ -2020,6 +2021,7 @@ interface CustomAPI {
       mappings: HarnessServiceUnitMapping[]
     ) => Promise<HarnessServiceUnitMapping[]>
     syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
+    getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
     searchEnterpriseProjects: (
       input: HarnessEnterpriseProjectSearchInput

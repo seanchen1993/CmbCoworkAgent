@@ -2129,7 +2129,7 @@ export function ChatContainer({
       : "系统约束，点击查看详情"
   const systemConstraintsLabel =
     systemConstraintsLoadFailed
-      ? "系统约束未加载"
+      ? "系统约束未全部加载"
       : systemConstraintCounts.loaded > 0
         ? "系统约束已加载"
         : "系统约束"

@@ -30,8 +30,8 @@ export function getSystemConstraintsOverviewTitle(
 ): string {
   if (hasNoLoadedSystemConstraints(state)) {
     return state?.loader === "cmbdevclaw"
-      ? "CMBDevClaw 系统约束未能加载"
-      : "插件系统约束未能加载"
+      ? "CMBDevClaw 未加载全部系统约束"
+      : "插件未加载全部系统约束"
   }
   return state?.loader === "cmbdevclaw" ? "CMBDevClaw 已加载系统约束" : "插件已加载系统约束"
 }

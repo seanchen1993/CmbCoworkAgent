@@ -53,6 +53,7 @@ import type {
   HarnessEnterpriseProjectSearchResult,
   HarnessProjectCreateInput,
   HarnessProjectConstraintSyncResult,
+  HarnessKnowledgePreviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
   HarnessProjectDetailViewModel,
@@ -2920,6 +2921,11 @@ const api = {
         "harnessBoard:syncProjectConstraints",
         adapterId
       ) as Promise<HarnessProjectConstraintSyncResult>,
+    getKnowledgePreview: (adapterId: string): Promise<HarnessKnowledgePreviewResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:getKnowledgePreview",
+        adapterId
+      ) as Promise<HarnessKnowledgePreviewResult>,
     createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>
       ipcRenderer.invoke("harnessBoard:createProject", input) as Promise<HarnessProjectMetadata>,
     searchEnterpriseProjects: (

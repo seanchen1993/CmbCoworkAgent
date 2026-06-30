@@ -8,6 +8,7 @@ import {
   deleteHarnessProject,
   getHarnessProjectDetail,
   getHarnessProjectDetails,
+  getHarnessKnowledgePreview,
   getHarnessLocalAgentmdServiceUnitMappings,
   getHarnessProjectPublicAgentmdServiceUnits,
   getHarnessRunDetail,
@@ -48,6 +49,7 @@ import type {
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult
 } from "../../shared/harness-board-types"
+import type { HarnessKnowledgePreviewResult } from "../../shared/harness-board-types"
 
 export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   console.log("[HarnessBoard] Registering harness board handlers...")
@@ -75,6 +77,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     "harnessBoard:syncProjectConstraints",
     async (_event, adapterId: string): Promise<HarnessProjectConstraintSyncResult> => {
       return syncHarnessProjectConstraints(adapterId)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getKnowledgePreview",
+    async (_event, adapterId: string): Promise<HarnessKnowledgePreviewResult> => {
+      return getHarnessKnowledgePreview(adapterId)
     }
   )
 

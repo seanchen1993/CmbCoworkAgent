@@ -81,6 +81,23 @@ export interface HarnessProjectConstraintSyncResult {
   path?: string
 }
 
+export interface HarnessKnowledgePreviewFile {
+  path: string
+  is_dir: boolean
+  size?: number
+  modified_at?: string
+}
+
+export interface HarnessKnowledgePreviewResult {
+  adapterId: string
+  adapterName: string
+  configured: boolean
+  exists: boolean
+  path?: string
+  files: HarnessKnowledgePreviewFile[]
+  error?: string
+}
+
 export interface HarnessServiceUnitMapping {
   serviceUnitIdMapping: string
   serviceUnitId: string

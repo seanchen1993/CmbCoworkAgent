@@ -1,5 +1,5 @@
 import { execFileSync } from "child_process"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "fs"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
@@ -40,6 +40,7 @@ import type {
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessFeatureSummary,
+  HarnessKnowledgePreviewResult,
   HarnessStatus,
   HarnessWatchRef,
   HarnessWorkflow,
@@ -91,6 +92,7 @@ type HarnessPlatformConfigKey =
   | "system_prompt_inject"
   | "plugin_dir_hook"
   | "dialog_tips"
+  | "knowledge_path"
 
 const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
   HarnessInspectCommandName,
@@ -2815,7 +2817,10 @@ export function deleteHarnessProject(projectId: string): HarnessProjectMetadata 
   return deleted
 }
 
-export function syncHarnessProjectConstraints(adapterId: string): HarnessProjectConstraintSyncResult {
+function findCompatibleKnowledgePlugin(adapterId: string): {
+  plugin: PluginMetadata
+  adapter: HarnessAdapterRegistryItem
+} {
   const normalizedAdapterId = normalizeText(adapterId).trim()
   const plugin = getPlugins().find(
     (item) => pluginHasBoardConfig(item) && pluginMatchesAdapterId(item, normalizedAdapterId)
@@ -2829,12 +2834,11 @@ export function syncHarnessProjectConstraints(adapterId: string): HarnessProject
     throw new Error(adapter.boardCompatibility.message || adapter.boardCompatibility.label)
   }
 
-  const configuredCommand = readBoardConfigInspectCommand(plugin.path, "pullKnowledge")
-  if (!configuredCommand) {
-    throw new Error(`插件未配置 inspectCommands.${process.platform}.pull_knowledge，请检查插件设置`)
-  }
+  return { plugin, adapter }
+}
 
-  const commandProject: HarnessProjectMetadata = {
+function createKnowledgeCommandProject(adapter: HarnessAdapterRegistryItem): HarnessProjectMetadata {
+  return {
     projectId: "__project_constraints__",
     name: adapter.name,
     description: adapter.description,
@@ -2844,12 +2848,137 @@ export function syncHarnessProjectConstraints(adapterId: string): HarnessProject
     systemId: "",
     systemName: "",
     workspacePath: getOpenworkDir(),
-    "harness-adapter": pluginToHarnessAdapterSnapshot(plugin),
+    "harness-adapter": {
+      id: adapter.id,
+      name: adapter.name,
+      version: adapter.version,
+      type: adapter.type
+    },
     lifecycle: {
       status: "active",
       createAt: ""
     }
   }
+}
+
+function resolveHarnessKnowledgePath(plugin: PluginMetadata, adapter: HarnessAdapterRegistryItem): string | null {
+  const rawPath = readBoardConfigPlatformText(plugin.path, "knowledge_path")
+  if (!rawPath) return null
+
+  const replaced = replaceHarnessConfigPlaceholders(
+    rawPath,
+    createKnowledgeCommandProject(adapter),
+    "pullKnowledge",
+    plugin.path
+  ).trim()
+  if (!replaced) return null
+
+  return isAbsolute(replaced) ? resolve(replaced) : resolve(plugin.path, replaced)
+}
+
+function scanKnowledgeFiles(rootPath: string): HarnessKnowledgePreviewResult["files"] {
+  const files: HarnessKnowledgePreviewResult["files"] = []
+  const maxEntries = 2000
+  const ignoredDirs = new Set([".git", "node_modules"])
+
+  function readDir(dirPath: string, relativePath = ""): void {
+    if (files.length >= maxEntries) return
+
+    const entries = readdirSync(dirPath, { withFileTypes: true })
+      .filter((entry) => !entry.name.startsWith("."))
+      .sort((left, right) => {
+        if (left.isDirectory() && !right.isDirectory()) return -1
+        if (!left.isDirectory() && right.isDirectory()) return 1
+        return left.name.localeCompare(right.name)
+      })
+
+    for (const entry of entries) {
+      if (files.length >= maxEntries) return
+      if (entry.isDirectory() && ignoredDirs.has(entry.name)) continue
+
+      const entryRelativePath = relativePath ? `${relativePath}/${entry.name}` : entry.name
+      const fullPath = join(dirPath, entry.name)
+
+      if (entry.isDirectory()) {
+        files.push({
+          path: `/${entryRelativePath}`,
+          is_dir: true
+        })
+        readDir(fullPath, entryRelativePath)
+        continue
+      }
+
+      const stat = statSync(fullPath)
+      if (!stat.isFile()) continue
+      files.push({
+        path: `/${entryRelativePath}`,
+        is_dir: false,
+        size: stat.size,
+        modified_at: stat.mtime.toISOString()
+      })
+    }
+  }
+
+  readDir(rootPath)
+  return files
+}
+
+export function getHarnessKnowledgePreview(adapterId: string): HarnessKnowledgePreviewResult {
+  const { plugin, adapter } = findCompatibleKnowledgePlugin(adapterId)
+  const knowledgePath = resolveHarnessKnowledgePath(plugin, adapter)
+
+  if (!knowledgePath) {
+    return {
+      adapterId: adapter.id,
+      adapterName: adapter.name,
+      configured: false,
+      exists: false,
+      files: []
+    }
+  }
+
+  if (!existsSync(knowledgePath)) {
+    return {
+      adapterId: adapter.id,
+      adapterName: adapter.name,
+      configured: true,
+      exists: false,
+      path: knowledgePath,
+      files: []
+    }
+  }
+
+  const stat = statSync(knowledgePath)
+  if (!stat.isDirectory()) {
+    return {
+      adapterId: adapter.id,
+      adapterName: adapter.name,
+      configured: true,
+      exists: false,
+      path: knowledgePath,
+      files: [],
+      error: "knowledge_path 不是目录"
+    }
+  }
+
+  return {
+    adapterId: adapter.id,
+    adapterName: adapter.name,
+    configured: true,
+    exists: true,
+    path: knowledgePath,
+    files: scanKnowledgeFiles(knowledgePath)
+  }
+}
+
+export function syncHarnessProjectConstraints(adapterId: string): HarnessProjectConstraintSyncResult {
+  const { plugin, adapter } = findCompatibleKnowledgePlugin(adapterId)
+  const configuredCommand = readBoardConfigInspectCommand(plugin.path, "pullKnowledge")
+  if (!configuredCommand) {
+    throw new Error(`插件未配置 inspectCommands.${process.platform}.pull_knowledge，请检查插件设置`)
+  }
+
+  const commandProject = createKnowledgeCommandProject(adapter)
   const configured: ConfiguredHarnessInvocation = {
     cwd: plugin.path,
     invocation: parseInspectCommand(configuredCommand, commandProject, "pullKnowledge", plugin.path)
