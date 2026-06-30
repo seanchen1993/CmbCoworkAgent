@@ -20,7 +20,7 @@ import { ChatOpenAI } from "@langchain/openai"
 import {
   getCustomModelConfigs,
   isDreamEnabled,
-  isMemoryEnabled,
+  isThreadMemoryEnabled,
   getCustomSkillsDir,
   invalidateEnabledSkillsCache,
   isOnlineSkillEvolutionEnabled,
@@ -4143,6 +4143,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const workspacePath = metadata.workspacePath as string | undefined
         sessionWorkspacePath = workspacePath ?? undefined
         const harnessAgentContext = getHarnessAgentContext(metadata)
+        const memoryEnabledForThread = isThreadMemoryEnabled(metadata)
 
         if (!workspacePath) {
           pauseActiveGoalForRuntimeStop("WORKSPACE_REQUIRED")
@@ -4537,7 +4538,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
 
         // Sync FTS index with any memory files changed since last invocation
-        if (isMemoryEnabled()) {
+        if (memoryEnabledForThread) {
           try {
             const memoryDirs = resolveWorkspaceMemoryDirs(workspacePath)
             const dirs = [
@@ -6024,7 +6025,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               ? `User: ${rootUserPrompt}\n\nAssistant: ${postRunAssistantText}`
               : ""
 
-          if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
+          const memoryStillEnabledForThread = (() => {
+            if (!memoryEnabledForThread) return false
+            try {
+              const latestThread = getThread(threadId)
+              const latestMetadata = latestThread?.metadata
+                ? (JSON.parse(latestThread.metadata) as Record<string, unknown>)
+                : metadata
+              return isThreadMemoryEnabled(latestMetadata)
+            } catch {
+              return false
+            }
+          })()
+
+          if (memoryStillEnabledForThread && conversation.length >= MIN_CHARS_FOR_MEMORY) {
             const memoryDirs = resolveWorkspaceMemoryDirs(workspacePath)
             const namespaces: MemoryNamespace[] = [
               memoryDirs.global,
