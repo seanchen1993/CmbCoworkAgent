@@ -967,6 +967,10 @@ export function resolveGitCommandCwd(command: string, cwd: string): string {
   return resolveGitCommandCwdForSubcommand(command, cwd, "commit") ?? cwd
 }
 
+export function resolveGitPushCommandCwd(command: string, cwd: string): string {
+  return resolveGitCommandCwdForSubcommand(command, cwd, "push") ?? cwd
+}
+
 /**
  * Best-effort extraction of the commit message the agent passed via `-m`/`--message`.
  * Used to pre-fill the task-card commit dialog. Returns undefined when no message arg

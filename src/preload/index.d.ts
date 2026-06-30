@@ -691,9 +691,27 @@ interface CustomAPI {
     listRuns: (threadId: string) => Promise<unknown[]>
     getRun: (threadId: string, runId: string) => Promise<unknown | null>
     cancelRun: (threadId: string, runId?: string) => Promise<boolean>
+    /** Register/deregister per-agent "viewing interest" (the focus panel is showing this
+     * running agent) so the display-only live tap only serializes/broadcasts that agent. */
+    setAgentStreamInterest: (
+      threadId: string,
+      runId: string,
+      agentIndex: number,
+      interested: boolean
+    ) => Promise<boolean>
+    /** Lazily read one FINISHED subagent's persisted complete tool flow on demand; null
+     * when there is no sidecar (cached/instant agent, pruned run, or pre-feature run). */
+    getAgentToolStream: (
+      threadId: string,
+      runId: string,
+      agentIndex: number
+    ) => Promise<unknown[] | null>
     hydrate: (threadId: string) => Promise<unknown>
     /** Durable per-thread channel; survives past the launching turn. Returns unsubscribe. */
     onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void) => () => void
+    /** Display-only live subagent tool-stream (keyed by parent threadId; payload carries
+     * runId+agentIndex). Best-effort, not persisted. Returns unsubscribe. */
+    onWorkflowAgentStream: (threadId: string, callback: (payload: unknown) => void) => () => void
   }
   threads: {
     list: () => Promise<Thread[]>
@@ -883,12 +901,8 @@ interface CustomAPI {
       workspacePath?: string
       error?: string
     }>
-    ensureWatching: (
-      threadId: string
-    ) => Promise<{ success: boolean; restarted?: boolean }>
-    setActiveThread: (
-      threadId: string | null
-    ) => Promise<{ success: boolean; restarted?: boolean }>
+    ensureWatching: (threadId: string) => Promise<{ success: boolean; restarted?: boolean }>
+    setActiveThread: (threadId: string | null) => Promise<{ success: boolean; restarted?: boolean }>
     readFile: (
       threadId: string,
       filePath: string
@@ -944,6 +958,7 @@ interface CustomAPI {
       isWorktree: boolean
       isGitRepo?: boolean
       taskId: string
+      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
       files: Array<{
         path: string
         previousPath?: string
@@ -965,7 +980,7 @@ interface CustomAPI {
       suggestedCommitMessage?: string
       error?: string
     }>
-    getGitPanelMeta: (threadId: string) => Promise<{
+    getGitPanelMeta: (threadId: string, options?: { worktreePath?: string }) => Promise<{
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
@@ -984,6 +999,8 @@ interface CustomAPI {
         includeDiffs?: boolean
         includeChangedFiles?: boolean
         statusUntrackedMode?: "all" | "normal" | "no"
+        visibleFileLimit?: number
+        worktreePath?: string
       }
     ) => Promise<{
       success: boolean
@@ -1007,7 +1024,11 @@ interface CustomAPI {
       suggestedCommitMessage?: string
       error?: string
     }>
-    getGitPanelFileDiff: (threadId: string, filePath: string) => Promise<{
+    getGitPanelFileDiff: (
+      threadId: string,
+      filePath: string,
+      options?: { worktreePath?: string }
+    ) => Promise<{
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
@@ -1053,6 +1074,7 @@ interface CustomAPI {
       gitRoot: string | null
       worktrees: Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>
       isWorktreePath: boolean
+      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
     }>
     listWorktrees: (
       gitRoot: string
@@ -1078,12 +1100,13 @@ interface CustomAPI {
     commitWorktree: (
       threadId: string,
       message: string,
-      filePaths?: string[]
+      filePaths?: string[],
+      options?: { worktreePath?: string }
     ) => Promise<{
       success: boolean
       error?: string
     }>
-    pushWorktree: (threadId: string) => Promise<{
+    pushWorktree: (threadId: string, options?: { worktreePath?: string }) => Promise<{
       success: boolean
       autoCommitted?: boolean
       error?: string
@@ -1093,18 +1116,24 @@ interface CustomAPI {
         detail: string
       }>
     }>
-    pullWorktree: (threadId: string) => Promise<{
+    pullWorktree: (threadId: string, options?: { worktreePath?: string }) => Promise<{
       success: boolean
       detail?: string
       error?: string
     }>
-    rejectWorktreeChanges: (threadId: string) => Promise<{
+    rejectWorktreeChanges: (
+      threadId: string,
+      filePaths?: string[],
+      options?: { worktreePath?: string }
+    ) => Promise<{
       success: boolean
+      revertedFileCount?: number
       error?: string
     }>
     rejectWorktreeFile: (
       threadId: string,
-      filePath: string
+      filePath: string,
+      options?: { worktreePath?: string }
     ) => Promise<{
       success: boolean
       error?: string
@@ -2119,7 +2148,14 @@ interface CustomAPI {
   git: {
     currentBranch: (
       cwd?: string
-    ) => Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean; error?: string }>
+    ) => Promise<{
+      isGitRepo: boolean
+      branch: string | null
+      isWorktree: boolean
+      isMultiRepo?: boolean
+      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
+      error?: string
+    }>
     listBranches: (
       cwd?: string,
       options?: { refreshRemote?: boolean }

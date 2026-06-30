@@ -1,12 +1,16 @@
-import { BrowserWindow } from "electron"
+import { BrowserWindow, webContents, type WebContents } from "electron"
 import { mkdirSync, realpathSync, writeFileSync } from "fs"
+import { writeFile } from "fs/promises"
 import { join, resolve } from "path"
+import { serializeWorkflowAgentSnapshotMessages } from "./agent-snapshot"
 import { runWorkflowEngine, toJsonSafe } from "./engine"
 import { isPathInside } from "./paths"
 import {
+  agentToolStreamPath,
   createWorkflowRunStore,
   findUndeliveredTerminalRun,
   getWorkflowRunsDir,
+  isWorkflowRunDirDisposed,
   markWorkflowRunNotified,
   persistRecoveredRun,
   pruneWorkflowRuns
@@ -84,6 +88,190 @@ function broadcast(threadId: string, payload: WorkflowChannelPayload): void {
     } catch (error) {
       console.warn("[Workflow] Broadcast failed:", error)
     }
+  }
+}
+
+// ── Subagent tool-stream (DISPLAY-ONLY) ───────────────────────────────────────
+// Two best-effort, fully-guarded mechanisms let the renderer show ANY subagent's tool
+// flow on demand, WITHOUT ever perturbing the run (no run.json/journal/checkpoint/engine
+// change; fed by the subagent's onValues tap, deep-cloned before use):
+//   1. LIVE — while you view a still-running agent, its "values" snapshots are broadcast
+//      on a per-PARENT-thread channel (payload carries runId+agentIndex). Gated by
+//      per-AGENT "viewing interest", so ONLY the agent you're looking at is serialized/
+//      broadcast — a background run, or sibling agents you aren't viewing, cost nothing.
+//   2. PERSISTED — when an agent FINISHES, its final complete flow is written once to a
+//      small bounded per-agent sidecar (run-store agentToolStreamPath), so it can be
+//      opened on demand later (an agent you never watched, or after the run ended). Read
+//      lazily via IPC; deleted with the run.
+export const WORKFLOW_AGENT_STREAM_CHANNEL_PREFIX = "agent:workflow-agent-stream:"
+
+// Per-AGENT "viewing interest" gate (key = threadId+runId+agentIndex): the focus panel
+// registers while it shows a RUNNING agent and deregisters on close/switch. emit does
+// ZERO serialize/broadcast unless that exact agent is being viewed. Each key maps to the
+// Set of viewing webContents ids (NOT a counter) so it is robust to renderer hard-reload
+// / crash — re-registering is idempotent, and a webContents's interest is purged on its
+// main-frame navigation / render-process-gone / destroy so no phantom keeps the tap on.
+const agentStreamInterest = new Map<string, Set<number>>() // interestKey -> webContents ids
+const trackedAgentStreamWebContents = new Set<number>()
+
+function agentStreamInterestKey(threadId: string, runId: string, agentIndex: number): string {
+  return `${threadId}|${runId}|${agentIndex}`
+}
+
+function purgeAgentStreamInterestFor(webContentsId: number): void {
+  for (const [key, ids] of agentStreamInterest) {
+    if (ids.delete(webContentsId) && ids.size === 0) agentStreamInterest.delete(key)
+  }
+}
+
+export function setWorkflowAgentStreamInterest(
+  threadId: string,
+  runId: string,
+  agentIndex: number,
+  interested: boolean,
+  webContents: WebContents
+): void {
+  const id = webContents.id
+  const key = agentStreamInterestKey(threadId, runId, agentIndex)
+  if (interested) {
+    let ids = agentStreamInterest.get(key)
+    if (!ids) {
+      ids = new Set<number>()
+      agentStreamInterest.set(key, ids)
+    }
+    ids.add(id)
+    // Attach self-purge listeners ONCE per webContents so a reload (skips React
+    // cleanup), a crash, or a close can't leave a phantom interest behind.
+    if (!trackedAgentStreamWebContents.has(id)) {
+      trackedAgentStreamWebContents.add(id)
+      // A full main-frame navigation (reload / new page) voids the prior page's
+      // registrations; the reloaded page re-registers via its own effects if it
+      // still shows a focused running agent.
+      webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+        if (isMainFrame && !isInPlace) purgeAgentStreamInterestFor(id)
+      })
+      // A renderer CRASH does NOT destroy the webContents (it can reload), so KEEP it
+      // tracked — its listeners stay attached and re-registration must not re-add them
+      // (re-adding would leak one listener per crash). Just drop its interest.
+      webContents.on("render-process-gone", () => purgeAgentStreamInterestFor(id))
+      // Only a real destroy removes the webContents (Electron then drops its listeners);
+      // untrack so a fresh webContents that reuses this id attaches its own listeners.
+      webContents.once("destroyed", () => {
+        trackedAgentStreamWebContents.delete(id)
+        purgeAgentStreamInterestFor(id)
+      })
+    }
+  } else {
+    const ids = agentStreamInterest.get(key)
+    if (ids && ids.delete(id) && ids.size === 0) agentStreamInterest.delete(key)
+  }
+}
+
+const WORKFLOW_AGENT_SNAPSHOT_WINDOW_MS = 120
+
+/** Per-(runId:agentIndex) leading+trailing coalescer: emits the first frame at
+ * once, collapses a burst within the window, and flushes the LATEST frame at window
+ * close — so the terminal snapshot is never dropped. Snapshots are low-frequency
+ * (one per LangGraph super-step), so this only smooths the occasional fast burst. */
+const agentSnapshotCoalescers = new Map<
+  string,
+  { timer: NodeJS.Timeout | null; latest: (() => void) | null }
+>()
+
+function coalesceAgentSnapshotEmit(key: string, doEmit: () => void): void {
+  let state = agentSnapshotCoalescers.get(key)
+  if (!state) {
+    state = { timer: null, latest: null }
+    agentSnapshotCoalescers.set(key, state)
+  }
+  if (state.timer) {
+    state.latest = doEmit // a window is open — keep only the latest
+    return
+  }
+  doEmit() // leading edge
+  state.timer = setTimeout(() => {
+    const pending = state.latest
+    state.latest = null
+    state.timer = null
+    if (pending) pending()
+    // Always drop the entry once the window closes (idle) so the map can't accumulate
+    // one dead record per (runId:agentIndex) over a long session — the next frame for
+    // this key recreates it via the leading edge.
+    agentSnapshotCoalescers.delete(key)
+  }, WORKFLOW_AGENT_SNAPSHOT_WINDOW_MS)
+  state.timer.unref?.()
+}
+
+function emitWorkflowAgentSnapshot(
+  parentThreadId: string,
+  runId: string,
+  agentIndex: number,
+  label: string,
+  snapshot: unknown
+): void {
+  // Gate: do NOTHING (no serialize, no clone, no send) unless a renderer is actively
+  // viewing THIS agent. Just a Map.has — near-zero cost for everyone else.
+  const interestKey = agentStreamInterestKey(parentThreadId, runId, agentIndex)
+  if (!agentStreamInterest.has(interestKey)) return
+  try {
+    coalesceAgentSnapshotEmit(`${runId}:${agentIndex}`, () => {
+      try {
+        // Re-read at flush time (a window may have closed during the coalesce window) and
+        // send ONLY to the webContents that registered interest for THIS agent — never a
+        // getAllWindows() broadcast — so other windows (a different agent, pet/login
+        // windows) never receive this agent's tool data or pay any IPC.
+        const recipients = agentStreamInterest.get(interestKey)
+        if (!recipients || recipients.size === 0) return
+        const snapshotMessages = serializeWorkflowAgentSnapshotMessages(snapshot)
+        if (!snapshotMessages) return
+        const channel = `${WORKFLOW_AGENT_STREAM_CHANNEL_PREFIX}${parentThreadId}`
+        const payload = { runId, agentIndex, label, snapshotMessages }
+        for (const wcId of recipients) {
+          try {
+            const wc = webContents.fromId(wcId)
+            if (wc && !wc.isDestroyed()) wc.send(channel, payload)
+          } catch {
+            /* per-window best-effort */
+          }
+        }
+      } catch {
+        /* serialization/send is best-effort */
+      }
+    })
+  } catch {
+    /* the tap must never throw into the run */
+  }
+}
+
+/** Write a FINISHED subagent's complete tool flow to its bounded per-agent sidecar so it
+ * can be opened on demand afterwards (even an agent you never watched live, or after the
+ * run ended). Display-only + best-effort: it NEVER throws into the run and NEVER touches
+ * run.json/journal/checkpoint. Skips when the agent produced no snapshot (e.g. a cached
+ * or instant-error agent) — the panel then shows a neutral note. */
+function persistAgentToolStream(
+  workspacePath: string,
+  threadId: string,
+  runId: string,
+  agentIndex: number,
+  snapshot: unknown
+): void {
+  try {
+    // Honor the thread-delete disposal guard: if the thread was deleted, a late sidecar
+    // write must NOT touch its removed run directory.
+    if (isWorkflowRunDirDisposed(workspacePath, threadId)) return
+    const snapshotMessages = serializeWorkflowAgentSnapshotMessages(snapshot)
+    if (!snapshotMessages || snapshotMessages.length === 0) return
+    const path = agentToolStreamPath(workspacePath, threadId, runId, agentIndex)
+    const payload = JSON.stringify({ runId, agentIndex, snapshotMessages })
+    // Fire-and-forget async write; never blocks the event loop or the run's settle. We do
+    // NOT mkdir the run directory: an active run already created it (run.json lives there),
+    // so a late write after the thread was deleted can't recreate an orphan directory —
+    // writeFile simply ENOENTs and is swallowed. Best-effort, display-only.
+    void writeFile(path, payload).catch(() => {
+      /* sidecar persistence is best-effort and display-only */
+    })
+  } catch {
+    /* serialization is best-effort and display-only */
   }
 }
 
@@ -269,8 +457,13 @@ class WorkflowRunManager {
           // agents instead of replaying the old model's cached result. (#1)
           defaultModelId: request.subagentDeps.defaultModelId,
           runExclusiveFileWrite: request.runExclusiveFileWrite,
-          subagentRunner: (subRequest) =>
-            runWorkflowSubagent(request.subagentDeps, {
+          subagentRunner: (subRequest) => {
+            // Display-only tool stream (best-effort; never affects the run): keep this
+            // agent's latest "values" snapshot, broadcast it live while it's being
+            // viewed (gated per-agent), and persist the FINAL flow once it settles so it
+            // can be opened on demand later — even if you never watched it live.
+            let latestSnapshot: unknown
+            return runWorkflowSubagent(request.subagentDeps, {
               prompt: subRequest.prompt,
               schema: subRequest.schema,
               model: subRequest.model,
@@ -280,8 +473,27 @@ class WorkflowRunManager {
               signal: subRequest.signal,
               roleSystemPrompt: subRequest.roleSystemPrompt,
               disallowedTools: subRequest.disallowedTools,
-              shellAccess: subRequest.shellAccess
-            }),
+              shellAccess: subRequest.shellAccess,
+              onValues: (snapshot) => {
+                latestSnapshot = snapshot
+                emitWorkflowAgentSnapshot(
+                  request.threadId,
+                  request.runId,
+                  subRequest.agentIndex,
+                  subRequest.label,
+                  snapshot
+                )
+              }
+            }).finally(() =>
+              persistAgentToolStream(
+                request.workspacePath,
+                request.threadId,
+                request.runId,
+                subRequest.agentIndex,
+                latestSnapshot
+              )
+            )
+          },
           emit: (event) =>
             broadcast(request.threadId, { type: "workflow_progress", workflowEvent: event }),
           signal: controller.signal,

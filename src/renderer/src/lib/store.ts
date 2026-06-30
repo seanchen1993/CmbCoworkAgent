@@ -227,6 +227,16 @@ export interface SubagentFocusView {
   status?: "pending" | "running" | "completed" | "failed" | "cancelled"
 }
 
+/** Focus on one dynamic-workflow subagent's live tool stream. Keyed by the PARENT
+ * threadId (the live panel's thread) + the run's agentIndex. Display-only. */
+export interface WorkflowAgentFocusView {
+  threadId: string
+  runId: string
+  agentIndex: number
+  label: string
+  status?: "running" | "completed" | "error" | "cached"
+}
+
 interface AppState {
   // Main content view routing
   mainView: MainView
@@ -262,6 +272,19 @@ interface AppState {
   subagentFocusView: SubagentFocusView | null
   openSubagentFocusView: (view: SubagentFocusView) => void
   closeSubagentFocusView: () => void
+
+  // Split view for inspecting one dynamic-workflow subagent's live tool stream
+  // (display-only; fed by the best-effort main-process values tap).
+  workflowAgentFocusView: WorkflowAgentFocusView | null
+  /** The CURRENTLY-FOCUSED agent's raw `snapshotMessages` (a single agent, on demand).
+   * Loaded by the panel — live frames while the agent runs, or its persisted sidecar
+   * when finished — and released (null) on switch/close, so only the agent you are
+   * actually viewing costs any memory. */
+  workflowAgentFocusSnapshot: unknown
+  openWorkflowAgentFocusView: (view: WorkflowAgentFocusView) => void
+  closeWorkflowAgentFocusView: () => void
+  /** Set/replace the focused agent's raw snapshot (latest-wins), or null to release. */
+  setWorkflowAgentFocusSnapshot: (snapshot: unknown) => void
 
   // Kanban view state
   showKanbanView: boolean
@@ -412,6 +435,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   workerFocusMessagesThreadId: null,
   workerFocusMessages: [],
   subagentFocusView: null,
+  workflowAgentFocusView: null,
+  workflowAgentFocusSnapshot: null,
   mainView: "thread",
   showKanbanView: false,
   showSubagentsInKanban: true,
@@ -471,7 +496,8 @@ export const useAppStore = create<AppState>((set, get) => ({
             workerFocusView: null,
             workerFocusMessagesThreadId: null,
             workerFocusMessages: [],
-            subagentFocusView: null
+            subagentFocusView: null,
+            workflowAgentFocusView: null
           })
       // skillGenerationByThread is NOT reset here: new threads start with no entry
       // in the map, so the card is naturally absent without discarding other threads' state.
@@ -495,7 +521,8 @@ export const useAppStore = create<AppState>((set, get) => ({
             workerFocusView: null,
             workerFocusMessagesThreadId: null,
             workerFocusMessages: [],
-            subagentFocusView: null
+            subagentFocusView: null,
+            workflowAgentFocusView: null
           })
       // skillGenerationByThread is NOT cleared here: each thread retains its own card
       // state so switching back to a thread shows the card exactly as it was left.
@@ -532,6 +559,11 @@ export const useAppStore = create<AppState>((set, get) => ({
           ...(state.subagentFocusView?.threadId === threadId
             ? {
                 subagentFocusView: null
+              }
+            : {}),
+          ...(state.workflowAgentFocusView?.threadId === threadId
+            ? {
+                workflowAgentFocusView: null
               }
             : {})
         }
@@ -601,7 +633,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       workerFocusView: view,
       workerFocusMessagesThreadId: view.workerThreadId,
       workerFocusMessages: [],
-      subagentFocusView: null
+      subagentFocusView: null,
+      workflowAgentFocusView: null
     })
   },
 
@@ -618,12 +651,47 @@ export const useAppStore = create<AppState>((set, get) => ({
       subagentFocusView: view,
       workerFocusView: null,
       workerFocusMessagesThreadId: null,
-      workerFocusMessages: []
+      workerFocusMessages: [],
+      workflowAgentFocusView: null
     })
   },
 
   closeSubagentFocusView: () => {
     set({ subagentFocusView: null })
+  },
+
+  openWorkflowAgentFocusView: (view) => {
+    // Mutually exclusive with the worker/subagent foci so only one stream panel shows.
+    // The panel loads THIS agent on demand (live frames if running, the persisted sidecar
+    // if finished) and releases it on switch/close, so only the agent you're viewing holds
+    // memory.
+    set((state) => {
+      const prev = state.workflowAgentFocusView
+      const sameAgent =
+        !!prev &&
+        prev.threadId === view.threadId &&
+        prev.runId === view.runId &&
+        prev.agentIndex === view.agentIndex
+      return {
+        workflowAgentFocusView: view,
+        // Reset to the loading state (`undefined`) only when switching to a DIFFERENT
+        // agent. Re-clicking the SAME open agent keeps its loaded snapshot so it can't get
+        // stuck on a stale "loading" note (the effect won't re-run for an unchanged key).
+        ...(sameAgent ? {} : { workflowAgentFocusSnapshot: undefined }),
+        workerFocusView: null,
+        workerFocusMessagesThreadId: null,
+        workerFocusMessages: [],
+        subagentFocusView: null
+      }
+    })
+  },
+
+  closeWorkflowAgentFocusView: () => {
+    set({ workflowAgentFocusView: null, workflowAgentFocusSnapshot: null })
+  },
+
+  setWorkflowAgentFocusSnapshot: (snapshot) => {
+    set({ workflowAgentFocusSnapshot: snapshot })
   },
 
   appendWorkerFocusMessage: (workerThreadId, message) => {
@@ -743,7 +811,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
         workerFocusMessages: [],
-        subagentFocusView: null
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
     } else {
       const restored = get().previousThreadId
@@ -788,7 +857,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
         workerFocusMessages: [],
-        subagentFocusView: null
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
     } else {
       const restored = get().previousThreadId
@@ -819,7 +889,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
         workerFocusMessages: [],
-        subagentFocusView: null
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
     } else {
       const restored = get().previousThreadId
@@ -853,7 +924,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
         workerFocusMessages: [],
-        subagentFocusView: null
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
     } else {
       const restored = get().previousThreadId
@@ -880,7 +952,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
         workerFocusMessages: [],
-        subagentFocusView: null
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
     } else {
       const restored = get().previousThreadId
@@ -928,7 +1001,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
         workerFocusMessages: [],
-        subagentFocusView: null
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
       return
     }
@@ -944,7 +1018,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
         workerFocusMessages: [],
-        subagentFocusView: null
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
       return
     }
@@ -961,7 +1036,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
         workerFocusMessages: [],
-        subagentFocusView: null
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
       return
     }
@@ -981,7 +1057,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
         workerFocusMessages: [],
-        subagentFocusView: null
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
       return
     }
@@ -1000,7 +1077,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
         workerFocusMessages: [],
-        subagentFocusView: null
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
       return
     }
@@ -1019,7 +1097,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
         workerFocusMessages: [],
-        subagentFocusView: null
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
       return
     }
