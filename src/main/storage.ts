@@ -3,6 +3,7 @@ import { basename, isAbsolute, join, relative, resolve } from "path"
 import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
 import {
+  type Dirent,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -352,12 +353,16 @@ const MEMORY_SETTINGS_FILE = join(OPENWORK_DIR, "memory-settings.json")
 interface MemorySettings {
   enabled?: boolean
   dreamEnabled?: boolean
+  sessionOptInMigrated?: boolean
 }
 
 function readMemorySettings(): MemorySettings {
   if (!existsSync(MEMORY_SETTINGS_FILE)) return {}
   try {
-    return JSON.parse(readFileSync(MEMORY_SETTINGS_FILE, "utf-8")) as MemorySettings
+    const parsed = JSON.parse(readFileSync(MEMORY_SETTINGS_FILE, "utf-8"))
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as MemorySettings)
+      : {}
   } catch {
     return {}
   }
@@ -368,27 +373,90 @@ function writeMemorySettings(settings: MemorySettings): void {
   writeFileSync(MEMORY_SETTINGS_FILE, JSON.stringify(settings, null, 2))
 }
 
+function hasLegacyMemoryFiles(): boolean {
+  const memoryDir = join(OPENWORK_DIR, "memory")
+  if (!existsSync(memoryDir)) return false
+  const stack = [memoryDir]
+  while (stack.length > 0) {
+    const dir = stack.pop()!
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith(".md")) return true
+      if (entry.isDirectory()) stack.push(join(dir, entry.name))
+    }
+  }
+  return false
+}
+
+export function getMemorySessionOptInMigrationState(hasExistingThreads: boolean): {
+  migrated: boolean
+  legacyMemoryEnabled: boolean
+  legacyDreamEnabled: boolean
+} {
+  const settingsFileExists = existsSync(MEMORY_SETTINGS_FILE)
+  const current = readMemorySettings()
+  if (current.sessionOptInMigrated === true) {
+    const enabled = current.enabled === true
+    return {
+      migrated: true,
+      legacyMemoryEnabled: enabled,
+      legacyDreamEnabled: enabled && current.dreamEnabled === true
+    }
+  }
+  const legacyInstall = settingsFileExists || hasExistingThreads || hasLegacyMemoryFiles()
+  const legacyMemoryEnabled = legacyInstall && current.enabled !== false
+  return {
+    migrated: false,
+    legacyMemoryEnabled,
+    legacyDreamEnabled: legacyMemoryEnabled && current.dreamEnabled !== false
+  }
+}
+
+export function markMemorySessionOptInMigrated(options: {
+  enabled: boolean
+  dreamEnabled: boolean
+}): void {
+  const current = readMemorySettings()
+  writeMemorySettings({
+    ...current,
+    enabled: options.enabled,
+    dreamEnabled: options.enabled && options.dreamEnabled,
+    sessionOptInMigrated: true
+  })
+}
+
 export function isMemoryEnabled(): boolean {
-  return readMemorySettings().enabled !== false
+  return readMemorySettings().enabled === true
 }
 
 export function setMemoryEnabled(enabled: boolean): void {
   const current = readMemorySettings()
   writeMemorySettings({
+    ...current,
     enabled,
-    dreamEnabled: enabled ? current.dreamEnabled !== false : false
+    dreamEnabled: enabled ? current.dreamEnabled === true : false
   })
+}
+
+export function isThreadMemoryEnabled(metadata?: Record<string, unknown> | null): boolean {
+  return isMemoryEnabled() && metadata?.memoryEnabled === true
 }
 
 export function isDreamEnabled(): boolean {
   const current = readMemorySettings()
-  return current.enabled !== false && current.dreamEnabled !== false
+  return current.enabled === true && current.dreamEnabled === true
 }
 
 export function setDreamEnabled(enabled: boolean): void {
   const current = readMemorySettings()
-  const memoryEnabled = current.enabled !== false
+  const memoryEnabled = current.enabled === true
   writeMemorySettings({
+    ...current,
     enabled: memoryEnabled,
     dreamEnabled: memoryEnabled && enabled
   })
@@ -2581,8 +2649,9 @@ function parseHookInjectUserContext(raw: unknown): HookInjectUserContext | undef
 
   const record = raw as Record<string, unknown>
   const include = Array.isArray(record.include)
-    ? record.include.filter((item): item is HookUserContextField =>
-        typeof item === "string" && HOOK_USER_CONTEXT_FIELDS.has(item as HookUserContextField)
+    ? record.include.filter(
+        (item): item is HookUserContextField =>
+          typeof item === "string" && HOOK_USER_CONTEXT_FIELDS.has(item as HookUserContextField)
       )
     : undefined
   return {

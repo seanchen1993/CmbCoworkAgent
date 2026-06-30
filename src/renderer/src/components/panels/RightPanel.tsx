@@ -3262,6 +3262,111 @@ const TOOL_LABEL: Record<string, string> = {
   manage_skill: "技能管理"
 }
 
+type HookSourceGroup = {
+  key: string
+  sourceLabel: string
+  title: string
+  detail?: string
+  fullPath?: string
+  badgeClassName: string
+  priority: number
+  hooks: DisplayHook[]
+}
+
+function getHookSummary(hook: DisplayHook): string {
+  if (hook.type === "prompt") return hook.prompt ?? ""
+  if (hook.type === "http") return hook.url ?? ""
+  return hook.command ?? ""
+}
+
+function getCompactPath(pathValue?: string): string | undefined {
+  if (!pathValue) return undefined
+  const normalized = pathValue.replace(/\\/g, "/").replace(/\/+$/, "")
+  const parts = normalized.split("/").filter(Boolean)
+  if (parts.length <= 2) return normalized
+  return parts.slice(-2).join("/")
+}
+
+function getHookSourcePath(hook: DisplayHook): string | undefined {
+  return hook.hookPath ?? hook.hookSourcePath
+}
+
+function getHookSourceGroupInfo(hook: DisplayHook): Omit<HookSourceGroup, "hooks"> {
+  const sourcePath = getHookSourcePath(hook)
+  const compactPath = getCompactPath(sourcePath)
+
+  if (hook.source === "workspace") {
+    return {
+      key: `workspace:${sourcePath ?? "current"}`,
+      sourceLabel: "工作区",
+      title: compactPath ?? "当前工作区",
+      fullPath: sourcePath,
+      badgeClassName: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
+      priority: 0
+    }
+  }
+
+  if (hook.source === "global") {
+    return {
+      key: "global",
+      sourceLabel: "全局",
+      title: "全局 hooks.json",
+      detail: compactPath,
+      fullPath: sourcePath,
+      badgeClassName: "bg-sky-500/15 text-sky-600 dark:text-sky-400",
+      priority: 1
+    }
+  }
+
+  if (hook.source === "plugin") {
+    const title = hook.pluginName ?? hook.pluginId ?? compactPath ?? "未命名插件"
+    return {
+      key: `plugin:${hook.pluginId ?? hook.pluginName ?? sourcePath ?? "unknown"}`,
+      sourceLabel: "插件",
+      title,
+      detail: compactPath,
+      fullPath: sourcePath,
+      badgeClassName: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
+      priority: 2
+    }
+  }
+
+  const isPluginSkillHook = Boolean(hook.pluginName || hook.pluginId)
+  const skillTitle = hook.skillName ?? compactPath ?? "未命名技能"
+  const pluginLabel = hook.pluginName ?? hook.pluginId
+  return {
+    key: `${isPluginSkillHook ? "plugin-skill" : "skill"}:${
+      hook.pluginId ?? hook.pluginName ?? ""
+    }:${hook.skillPath ?? hook.skillName ?? sourcePath ?? "unknown"}`,
+    sourceLabel: isPluginSkillHook ? "插件技能" : "技能",
+    title: isPluginSkillHook && pluginLabel ? `${pluginLabel} · ${skillTitle}` : skillTitle,
+    detail: compactPath,
+    fullPath: sourcePath,
+    badgeClassName: isPluginSkillHook
+      ? "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400"
+      : "bg-teal-500/15 text-teal-600 dark:text-teal-400",
+    priority: isPluginSkillHook ? 3 : 4
+  }
+}
+
+function buildHookSourceGroups(hooks: DisplayHook[]): HookSourceGroup[] {
+  const groups = new Map<string, HookSourceGroup>()
+
+  for (const hook of hooks) {
+    const info = getHookSourceGroupInfo(hook)
+    const existing = groups.get(info.key)
+    if (existing) {
+      existing.hooks.push(hook)
+    } else {
+      groups.set(info.key, { ...info, hooks: [hook] })
+    }
+  }
+
+  return Array.from(groups.values()).sort(
+    (a, b) => a.priority - b.priority || a.title.localeCompare(b.title, "zh-Hans-CN")
+  )
+}
+
 function HooksContent({
   hooks,
   onChange
@@ -3279,8 +3384,10 @@ function HooksContent({
     )
   }
 
-  const enabled = hooks.filter((h) => h.enabled)
-  const disabled = hooks.filter((h) => !h.enabled)
+  const enabledHooks = hooks.filter((h) => h.enabled)
+  const disabledHooks = hooks.filter((h) => !h.enabled)
+  const enabledGroups = buildHookSourceGroups(enabledHooks)
+  const disabledGroups = buildHookSourceGroups(disabledHooks)
 
   const handleToggle = async (hook: DisplayHook): Promise<void> => {
     try {
@@ -3301,7 +3408,7 @@ function HooksContent({
     // A plugin-owned skill hook: source="skill" but with pluginName / pluginId set.
     // Show its origin (plugin → skill) so users can tell it apart from a stand-alone skill hook.
     const isPluginSkillHook = isSkillHook && Boolean(hook.pluginName || hook.pluginId)
-    const summary = isPrompt ? (hook.prompt ?? "") : (hook.command ?? "")
+    const summary = getHookSummary(hook)
     const ownerLabel = isPluginHook
       ? hook.pluginName
       : isPluginSkillHook && hook.skillName
@@ -3420,18 +3527,70 @@ function HooksContent({
     )
   }
 
+  const renderHookGroup = (group: HookSourceGroup): React.JSX.Element => {
+    return (
+      <details
+        key={group.key}
+        className="group/source space-y-2 border-t border-border/60 pt-2 first:border-t-0 first:pt-0"
+        open
+      >
+        <summary
+          className="flex cursor-pointer list-none items-center justify-between gap-2 px-1"
+          title={group.fullPath}
+        >
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            <ChevronRight className="size-3 shrink-0 text-muted-foreground transition-transform group-open/source:rotate-90" />
+            <span
+              className={cn(
+                "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+                group.badgeClassName
+              )}
+            >
+              {group.sourceLabel}
+            </span>
+            <span className="min-w-0 truncate text-xs font-medium text-foreground/90">
+              {group.title}
+            </span>
+          </div>
+          <Badge
+            variant="outline"
+            className="h-5 shrink-0 text-[10px]"
+            title={`${group.hooks.length} 个 Hook`}
+          >
+            {group.hooks.length}
+          </Badge>
+        </summary>
+        {group.detail && group.detail !== group.title && (
+          <div
+            className="min-w-0 truncate px-6 text-[10px] text-muted-foreground"
+            title={group.fullPath}
+          >
+            {group.detail}
+          </div>
+        )}
+        <div className="space-y-2">{group.hooks.map(renderHookCard)}</div>
+      </details>
+    )
+  }
+
   return (
     <div className="p-3 space-y-2">
-      {enabled.length > 0 && enabled.map(renderHookCard)}
-      {disabled.length > 0 && (
-        <details className="rounded-sm border border-border/70 bg-muted/20 px-2 py-2">
+      {enabledGroups.map(renderHookGroup)}
+      {disabledGroups.length > 0 && (
+        <details
+          className="group/disabled rounded-sm border border-border/70 bg-muted/20 px-2 py-2"
+          open={enabledGroups.length === 0}
+        >
           <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground">
-            <span>已禁用</span>
-            <Badge variant="outline" className="text-[10px] h-5">
-              {disabled.length}
+            <span className="flex min-w-0 items-center gap-1.5">
+              <ChevronRight className="size-3 shrink-0 transition-transform group-open/disabled:rotate-90" />
+              <span>已禁用</span>
+            </span>
+            <Badge variant="outline" className="h-5 shrink-0 text-[10px]">
+              {disabledHooks.length}
             </Badge>
           </summary>
-          <div className="space-y-2 pt-2">{disabled.map(renderHookCard)}</div>
+          <div className="space-y-2 pt-2">{disabledGroups.map(renderHookGroup)}</div>
         </details>
       )}
     </div>

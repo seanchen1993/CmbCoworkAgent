@@ -499,31 +499,17 @@ function testCoordinatorReadOnlyKeepsExecute(): void {
 // assertions (the full createAgentRuntime can't run under tsx — needs Electron +
 // a configured model), guarding coordinator isolation + correct plumbing.
 
-const RUNTIME_SRC = readFileSync(new URL("../src/main/agent/runtime.ts", import.meta.url), "utf-8")
-const LOCAL_SANDBOX_SRC = readFileSync(
-  new URL("../src/main/agent/local-sandbox.ts", import.meta.url),
-  "utf-8"
-)
-const ENGINE_SRC = readFileSync(
-  new URL("../src/main/agent/workflow/engine.ts", import.meta.url),
-  "utf-8"
-)
-const SUBAGENT_SRC = readFileSync(
-  new URL("../src/main/agent/workflow/subagent.ts", import.meta.url),
-  "utf-8"
-)
-const ACCESS_SRC = readFileSync(
-  new URL("../src/main/agent/coordinator-worker-access.ts", import.meta.url),
-  "utf-8"
-)
-const WORKFLOW_TOOL_SRC = readFileSync(
-  new URL("../src/main/agent/workflow/tool.ts", import.meta.url),
-  "utf-8"
-)
-const CHAT_CONTAINER_SRC = readFileSync(
-  new URL("../src/renderer/src/components/chat/ChatContainer.tsx", import.meta.url),
-  "utf-8"
-)
+function readSource(path: string): string {
+  return readFileSync(new URL(path, import.meta.url), "utf-8").replace(/\r\n?/g, "\n")
+}
+
+const RUNTIME_SRC = readSource("../src/main/agent/runtime.ts")
+const LOCAL_SANDBOX_SRC = readSource("../src/main/agent/local-sandbox.ts")
+const ENGINE_SRC = readSource("../src/main/agent/workflow/engine.ts")
+const SUBAGENT_SRC = readSource("../src/main/agent/workflow/subagent.ts")
+const ACCESS_SRC = readSource("../src/main/agent/coordinator-worker-access.ts")
+const WORKFLOW_TOOL_SRC = readSource("../src/main/agent/workflow/tool.ts")
+const CHAT_CONTAINER_SRC = readSource("../src/renderer/src/components/chat/ChatContainer.tsx")
 
 function testLevel2GatedToSoloMainAgent(): void {
   // Requirement 2: registry specs are built ONLY for the Solo main agent.
@@ -692,9 +678,7 @@ function testRegistryAgentBlockedTools(): void {
   // none: no shell at all, plus no deferred-execution bridge.
   const none = registryAgentBlockedTools([], "none")
   assert(
-    none.has("execute") &&
-      none.has("task_output") &&
-      none.has("invoke_deferred_tool"),
+    none.has("execute") && none.has("task_output") && none.has("invoke_deferred_tool"),
     "none blocks execute/task_output + deferred bridge"
   )
 

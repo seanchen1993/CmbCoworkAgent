@@ -17,7 +17,6 @@ import {
   getEnabledSkillMiddlewareSources,
   getCustomModelConfigs,
   getUserInfo,
-  isMemoryEnabled,
   getSkillEvolutionThreshold as getStoredSkillEvolutionThreshold,
   DEFAULT_MAX_TOKENS,
   DEFAULT_MAX_OUTPUT_TOKENS,
@@ -97,7 +96,8 @@ import {
   getYoloMode,
   getEnabledHooks,
   isCodeExecEnabled,
-  getLspConfig
+  getLspConfig,
+  isThreadMemoryEnabled
 } from "../storage"
 import { runHooks, type HookContext } from "../hooks/runner"
 import type { HookEvent } from "../hooks/types"
@@ -1958,7 +1958,11 @@ function getSystemPrompt(
   workspacePath: string,
   windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated",
   workingDirPromptAppendix?: string,
-  options: { includeBackgroundExec?: boolean; includeSubagents?: boolean } = {}
+  options: {
+    includeBackgroundExec?: boolean
+    includeSubagents?: boolean
+    memoryEnabled?: boolean
+  } = {}
 ): string {
   const includeBackgroundExec = options.includeBackgroundExec ?? true
   const isWindows = process.platform === "win32"
@@ -2052,7 +2056,7 @@ ${shellGuidance}
 `
         : ""
 
-  const memorySection = isMemoryEnabled() ? MEMORY_SYSTEM_PROMPT : ""
+  const memorySection = options.memoryEnabled ? MEMORY_SYSTEM_PROMPT : ""
   const workingDirAppendix = workingDirPromptAppendix?.trim()
     ? `${workingDirPromptAppendix.trim()}\n`
     : ""
@@ -2823,6 +2827,9 @@ export interface CreateAgentRuntimeOptions {
    * mirrors Claude Code, whose Explore/Plan omitClaudeMd and whose built-in agents
    * inject no memory (it's per-agent opt-in via frontmatter, which they don't set). */
   disableMemoryInjection?: boolean
+  /** Effective per-session memory switch. Child runtimes inherit this because
+   * worker thread ids may not have persisted thread metadata. */
+  memoryEnabled?: boolean
   /** Turn-scoped internal coordinator context injected only into the main coordinator prompt. */
   coordinatorTurnPrompt?: string
   /** Explicit /skill selection parsed from the current coordinator turn, if any. */
@@ -2925,6 +2932,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     coordinatorWorkerTurnPlanning,
     enableAgentsPrompt = true,
     disableMemoryInjection = false,
+    memoryEnabled: inheritedMemoryEnabled,
     agentMode = "normal",
     disableSubagents = false,
     onHookResult,
@@ -2951,6 +2959,20 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       "Workspace path is required. Please select a workspace folder before running the agent."
     )
   }
+
+  const runtimeThreadMetadata: Record<string, unknown> = (() => {
+    try {
+      const threadRow = getThread(threadId)
+      return threadRow?.metadata
+        ? (JSON.parse(threadRow.metadata) as Record<string, unknown>)
+        : {}
+    } catch {
+      console.warn("[Runtime] Failed to parse thread metadata for memory settings")
+      return {}
+    }
+  })()
+  const memoryEnabledForThread =
+    inheritedMemoryEnabled ?? isThreadMemoryEnabled(runtimeThreadMetadata)
 
   console.log("[Runtime] Creating agent runtime...")
   console.log("[Runtime] Thread ID:", threadId)
@@ -3296,7 +3318,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     options.filesystemAccess?.workload === "read_only"
   let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, workingDirPromptAppendix, {
     includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
-    includeSubagents: !featureId
+    includeSubagents: !featureId,
+    memoryEnabled: memoryEnabledForThread
   })
   let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
     prompt: null,
@@ -3396,10 +3419,10 @@ The workspace root is: ${workspacePath}`
   console.log("[Runtime] All skills sources count:", allSkillsSources.length)
   console.log("[Runtime] Skills sources:", skillsSources, "Plugin skills:", pluginSkillsSources)
 
-  // Initialize memory system (gated by user setting)
+  // Initialize memory system (gated by global setting + current thread opt-in)
   let memoryTools: ReturnType<typeof createMemorySearchTool | typeof createMemoryGetTool>[] = []
   let memorySources: string[] | undefined
-  if (isMemoryEnabled()) {
+  if (memoryEnabledForThread) {
     const memoryDirs = resolveWorkspaceMemoryDirs(workspacePath)
     const globalStore = await getMemoryStore(memoryDirs.global.dir)
     const projectStore = memoryDirs.project ? await getMemoryStore(memoryDirs.project.dir) : null
@@ -3415,7 +3438,7 @@ The workspace root is: ${workspacePath}`
       projectId: memoryDirs.project?.projectId ?? null
     })
   } else {
-    console.log("[Runtime] Memory disabled by user setting")
+    console.log("[Runtime] Memory disabled for this session")
   }
 
   const capabilityService = createScopedMcpCapabilityService(
@@ -3644,6 +3667,7 @@ The workspace root is: ${workspacePath}`
               // claudeMd in CC. memory_search/memory_get tools stay available either way.
               enableAgentsPrompt: !restrictedRole,
               disableMemoryInjection: restrictedRole,
+              memoryEnabled: memoryEnabledForThread,
               agentMode: "normal",
               disableSubagents: true,
               // agentType-resolved tool policy. Cuts the disallowed tools and
@@ -4083,6 +4107,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             retryHooks,
             maxRetryAttempts,
             hookScope: workerHookScope,
+            memoryEnabled: memoryEnabledForThread,
             ...workerHarnessContext,
             onHookResult: workerOnHookResult
           })
@@ -4152,6 +4177,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             retryHooks,
             maxRetryAttempts,
             hookScope: workerHookScope,
+            memoryEnabled: memoryEnabledForThread,
             ...workerHarnessContext,
             onHookResult: workerOnHookResult
           })
@@ -4202,6 +4228,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             retryHooks,
             maxRetryAttempts,
             hookScope: workerHookScope,
+            memoryEnabled: memoryEnabledForThread,
             ...workerHarnessContext,
             onHookResult: workerOnHookResult
           })

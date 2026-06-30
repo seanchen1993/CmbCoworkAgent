@@ -77,6 +77,7 @@ import { ModelSwitcher } from "./ModelSwitcher"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkflowRunPanel, WorkflowHistoryButton } from "./WorkflowRunPanel"
 import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
+import { MemorySessionSwitcher } from "./MemorySessionSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
@@ -2188,6 +2189,9 @@ export function ChatContainer({
   }, [])
   const handleOpenSandboxSettings = useCallback((): void => {
     setShowCustomizeView(true, "sandbox")
+  }, [setShowCustomizeView])
+  const handleOpenMemorySettings = useCallback((): void => {
+    setShowCustomizeView(true, "memory")
   }, [setShowCustomizeView])
 
   const canChangeAgentMode = !historyLoading && threadMessages.length === 0
@@ -5891,6 +5895,7 @@ export function ChatContainer({
                           YOLO
                         </button>
                       )}
+                      <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
                       <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                       {tokenUsage && (
                         <ContextUsageIndicator
