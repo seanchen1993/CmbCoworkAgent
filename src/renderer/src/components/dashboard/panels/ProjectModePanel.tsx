@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import { PieChart, Pie, Cell, Tooltip as RechartsTooltip, ResponsiveContainer } from "recharts"
 import {
   Boxes,
@@ -60,14 +60,22 @@ import type {
   DashboardProjectModeProject,
   DashboardProjectModeProjectCounts,
   DashboardProjectModeProjectPageData,
+  DashboardProjectModeProjectPageOptions,
   DashboardProjectModeProjectSortKey,
   DashboardProjectModeProjectSortOrder,
   DashboardProjectModeProjectStatus,
   DashboardProjectModeSkillCount,
   DashboardProjectModeToolUsage,
-  DashboardCodeStats
+  DashboardCodeStats,
+  DashboardStageBuckets,
+  DashboardStageBucketStat
 } from "../use-dashboard"
 import { formatTopUserOrgName } from "../use-dashboard"
+import {
+  STAGE_BUCKET_HINTS,
+  STAGE_BUCKET_LABELS,
+  type StageBucket
+} from "../../../../../shared/harness-stage-bucket"
 
 const EMPTY_FUNNEL_DATA: CodeAdoptionFunnelData = {
   inclusiveEffectiveGeneratedLines: 0,
@@ -601,7 +609,7 @@ function AdoptionRateLine({
   return <div className="text-right">{body}</div>
 }
 
-/** Status-at-turn-time sub-breakdown within a stage（进行中/已完成 等）。空则不渲染。 */
+/** Status-at-turn-time sub-breakdown rows（进行中/已完成 等）。空则不渲染。表头/边框由 NodeBreakdownTabs 提供。 */
 function StageStatusRows({
   byStatus,
   onOpenStatusTraces
@@ -612,11 +620,7 @@ function StageStatusRows({
 }): React.JSX.Element | null {
   if (byStatus.length === 0) return null
   return (
-    <div className="space-y-2 border-t border-border/40 pt-1.5">
-      <div className="flex items-center gap-1 text-[10px] text-muted-foreground/70">
-        <span>状态细分</span>
-        <InfoHint hint="按每轮对话开始时该节点的状态（进行中/已完成等）细分；多数对话发生在当前进行中的节点，故「进行中」通常占多数。" />
-      </div>
+    <div className="space-y-2">
       {byStatus.map((s) => (
         <div key={s.status} className="space-y-1">
           <div className="flex items-center justify-between gap-2">
@@ -649,6 +653,186 @@ function StageStatusRows({
   )
 }
 
+/** Ordered, color-coded descriptors for the stage×skill buckets. */
+const STAGE_BUCKET_VIEW: ReadonlyArray<{
+  key: keyof DashboardStageBuckets
+  bucket: StageBucket
+  dot: string
+}> = [
+  { key: "pluginConstrained", bucket: "plugin_constrained", dot: "bg-emerald-500" },
+  { key: "vibecoding", bucket: "vibecoding", dot: "bg-violet-500" },
+  { key: "unattributed", bucket: "unattributed", dot: "bg-muted-foreground/40" }
+]
+
+/** True when every bucket is empty (no conversations and no generated lines). */
+function isStageBucketsEmpty(buckets: DashboardStageBuckets): boolean {
+  return STAGE_BUCKET_VIEW.every(({ key }) => {
+    const stat = buckets[key]
+    return stat.conversationCount === 0 && (stat.codeStats?.generatedLines ?? 0) === 0
+  })
+}
+
+/**
+ * 流程阶段口径完整说明，复用 shared 的桶标签 / 含义常量，保证口径单一来源。
+ * 三桶定义 + 每格指标图例，作为列表内「流程阶段口径」小 i 的权威说明。
+ */
+function StageBucketCaliberHint(): React.JSX.Element {
+  return (
+    <div className="space-y-1.5">
+      <div>按每轮对话开始时的工作流阶段状态 × 是否调用插件 Skill 交叉拆分为三类：</div>
+      {STAGE_BUCKET_VIEW.map(({ bucket }) => (
+        <div key={bucket}>
+          <span className="font-medium">{STAGE_BUCKET_LABELS[bucket]}</span>：
+          {STAGE_BUCKET_HINTS[bucket]}
+        </div>
+      ))}
+      <div className="opacity-80">每格依次为「对话数 · 生成行数 · 总量口径提交采纳率」。</div>
+    </div>
+  )
+}
+
+/**
+ * Stage×skill 三桶拆分：插件约束（Harness）/ VibeCoding / 未归因。
+ * 列表行内紧凑一行展示；全空则不渲染。
+ */
+function StageBucketSplit({
+  buckets
+}: {
+  buckets: DashboardStageBuckets
+}): React.JSX.Element | null {
+  if (isStageBucketsEmpty(buckets)) return null
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+      {STAGE_BUCKET_VIEW.map(({ key, bucket, dot }) => {
+        const stat = buckets[key]
+        const lines = stat.codeStats?.generatedLines ?? 0
+        return (
+          <span key={bucket} className="flex items-center gap-1">
+            <span className={`size-1.5 rounded-full ${dot}`} />
+            <span className="text-foreground/80">{STAGE_BUCKET_LABELS[bucket]}</span>
+            <InfoHint hint={STAGE_BUCKET_HINTS[bucket]} />
+            <span>
+              {formatNumber(stat.conversationCount)} 对话 · {formatLineCount(lines)} 行 ·{" "}
+              {formatPercent(stat.codeStats?.inclusiveAdoptionRate)} 采纳
+            </span>
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+/** 流程阶段三桶分行展示（插件约束（Harness）/ VibeCoding / 未归因），与状态细分同款紧凑口径。空则不渲染。 */
+function StageBucketRows({
+  buckets,
+  onOpenBucketTraces
+}: {
+  buckets: DashboardStageBuckets
+  /** 可选：按桶查看对话；不传则不显示按钮（如插件聚合无单项目 trace）。 */
+  onOpenBucketTraces?: (bucket: StageBucket) => void
+}): React.JSX.Element | null {
+  if (isStageBucketsEmpty(buckets)) return null
+  return (
+    <div className="space-y-2">
+      {STAGE_BUCKET_VIEW.map(({ key, bucket, dot }) => {
+        const stat = buckets[key]
+        return (
+          <div key={bucket} className="space-y-1">
+            <div className="flex items-center justify-between gap-2">
+              <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
+                <span className="inline-flex items-center gap-1 rounded bg-muted/60 px-1.5 py-0.5 text-foreground/80">
+                  <span className={`size-1.5 rounded-full ${dot}`} />
+                  {STAGE_BUCKET_LABELS[bucket]}
+                </span>
+                <span>{formatNumber(stat.conversationCount)} 对话</span>
+              </span>
+              {onOpenBucketTraces ? (
+                <button
+                  type="button"
+                  className="inline-flex shrink-0 items-center gap-1 text-[10px] text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+                  disabled={stat.conversationCount === 0}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onOpenBucketTraces(bucket)
+                  }}
+                >
+                  <MessagesSquare className="size-3" />
+                  查看对话
+                </button>
+              ) : null}
+            </div>
+            {/* 紧凑：提交口径 + 总量口径合并为一行，含 (采纳/分母 行)。 */}
+            <FeatureCodeStatsLine codeStats={stat.codeStats} compact />
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+const NODE_STATUS_BREAKDOWN_HINT =
+  "按每轮对话开始时该节点的状态（进行中/已完成等）细分；多数对话发生在当前进行中的节点，故「进行中」通常占多数。"
+
+/**
+ * 节点（阶段）内的子拆分，两个 tab 切换：
+ *  - 状态细分：按节点状态（进行中/已完成…）；
+ *  - 插件约束（Harness） vs VibeCoding：按 stage×skill 三桶。
+ * 两侧都无数据则整体不渲染；仅一侧有数据时默认落在该 tab。
+ */
+function NodeBreakdownTabs({
+  byStatus,
+  stageBuckets,
+  onOpenStatusTraces,
+  onOpenBucketTraces
+}: {
+  byStatus: DashboardProjectModeNodeStatus[]
+  stageBuckets: DashboardStageBuckets
+  onOpenStatusTraces?: (status: string) => void
+  onOpenBucketTraces?: (bucket: StageBucket) => void
+}): React.JSX.Element | null {
+  const hasStatus = byStatus.length > 0
+  const hasBuckets = !isStageBucketsEmpty(stageBuckets)
+  const [tab, setTab] = useState<"status" | "buckets">(hasStatus ? "status" : "buckets")
+  if (!hasStatus && !hasBuckets) return null
+
+  const tabButton = (id: "status" | "buckets", label: string): React.JSX.Element => (
+    <button
+      type="button"
+      className={`rounded px-1.5 py-0.5 transition-colors ${
+        tab === id
+          ? "bg-muted font-medium text-foreground"
+          : "text-muted-foreground/70 hover:text-foreground"
+      }`}
+      onClick={(event) => {
+        event.stopPropagation()
+        setTab(id)
+      }}
+    >
+      {label}
+    </button>
+  )
+
+  // 仅一侧有数据时按那侧落 tab，避免点到空 tab 看到空白。
+  const activeTab: "status" | "buckets" = tab === "buckets" && hasBuckets ? "buckets" : "status"
+
+  return (
+    <div className="space-y-2 border-t border-border/40 pt-1.5">
+      <div className="flex flex-wrap items-center gap-1 text-[10px]">
+        {hasStatus && tabButton("status", "状态细分")}
+        {hasBuckets && tabButton("buckets", "插件约束（Harness） vs VibeCoding")}
+        <InfoHint
+          hint={activeTab === "status" ? NODE_STATUS_BREAKDOWN_HINT : <StageBucketCaliberHint />}
+        />
+      </div>
+      {activeTab === "status" ? (
+        <StageStatusRows byStatus={byStatus} onOpenStatusTraces={onOpenStatusTraces} />
+      ) : (
+        <StageBucketRows buckets={stageBuckets} onOpenBucketTraces={onOpenBucketTraces} />
+      )}
+    </div>
+  )
+}
+
 function FeatureStageBreakdown({
   feature,
   loadNodes,
@@ -659,7 +843,8 @@ function FeatureStageBreakdown({
   onOpenNodeTraces: (
     feature: DashboardProjectModeFeature,
     node: DashboardProjectModeFeatureNode,
-    status?: string
+    status?: string,
+    stageBucket?: StageBucket
   ) => void
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
@@ -737,9 +922,13 @@ function FeatureStageBreakdown({
                   </button>
                 </div>
                 <FeatureCodeStatsLine codeStats={node.codeStats} />
-                <StageStatusRows
+                <NodeBreakdownTabs
                   byStatus={node.byStatus}
+                  stageBuckets={node.stageBuckets}
                   onOpenStatusTraces={(status) => onOpenNodeTraces(feature, node, status)}
+                  onOpenBucketTraces={(bucket) =>
+                    onOpenNodeTraces(feature, node, undefined, bucket)
+                  }
                 />
               </div>
             ))}
@@ -764,7 +953,8 @@ function ProjectRow({
   onOpenTraces: (
     feature?: DashboardProjectModeFeature,
     node?: DashboardProjectModeFeatureNode,
-    status?: string
+    status?: string,
+    stageBucket?: StageBucket
   ) => void
   onOpenFeatureCommits: (feature: DashboardProjectModeFeature) => void
   onOpenProjectCommits: (pushedOnly?: boolean) => void
@@ -921,6 +1111,17 @@ function ProjectRow({
                 )}
               </div>
 
+              {/* 流程阶段口径：插件约束（Harness）/ VibeCoding / 未归因 */}
+              {!isStageBucketsEmpty(project.stageBuckets) && (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                    <span>流程阶段口径：插件约束（Harness） vs VibeCoding</span>
+                    <InfoHint hint={<StageBucketCaliberHint />} />
+                  </div>
+                  <StageBucketSplit buckets={project.stageBuckets} />
+                </div>
+              )}
+
               {/* 特性状态 + 各特性采纳明细 + 关联 commit */}
               {project.features.length === 0 ? (
                 <div className="text-xs text-muted-foreground">该项目暂无特性记录</div>
@@ -985,7 +1186,9 @@ function ProjectRow({
                         <FeatureStageBreakdown
                           feature={feature}
                           loadNodes={loadFeatureNodes}
-                          onOpenNodeTraces={(f, node, status) => onOpenTraces(f, node, status)}
+                          onOpenNodeTraces={(f, node, status, stageBucket) =>
+                            onOpenTraces(f, node, status, stageBucket)
+                          }
                         />
                       )}
                     </div>
@@ -1112,7 +1315,8 @@ function ProjectListSection({
   onOpenTraces,
   onOpenFeatureCommits,
   onOpenProjectCommits,
-  loadFeatureNodes
+  loadFeatureNodes,
+  lockedAdapterName
 }: {
   projectCounts?: DashboardProjectModeProjectCounts
   projectPages: Partial<
@@ -1137,7 +1341,8 @@ function ProjectListSection({
     project: DashboardProjectModeProject,
     feature?: DashboardProjectModeFeature,
     node?: DashboardProjectModeFeatureNode,
-    status?: string
+    status?: string,
+    stageBucket?: StageBucket
   ) => void
   onOpenFeatureCommits: (
     project: DashboardProjectModeProject,
@@ -1148,7 +1353,10 @@ function ProjectListSection({
     project: DashboardProjectModeProject,
     feature: DashboardProjectModeFeature
   ) => Promise<DashboardProjectModeFeatureNode[]>
+  /** 嵌入模式：锁定到该插件名（隐藏标题与插件下拉，强制按此插件过滤）。用于插件「项目数」弹窗。 */
+  lockedAdapterName?: string
 }): React.JSX.Element {
+  const embedded = lockedAdapterName != null
   const [tab, setTab] = useState<ProjectListTab>("active")
   const [query, setQuery] = useState("")
   const [creatorQuery, setCreatorQuery] = useState("")
@@ -1163,7 +1371,11 @@ function ProjectListSection({
   const creatorKeyword = creatorQuery.trim()
   const creatorOrgKeyword = departmentQuery.trim()
   const rawSelectedAdapter = adapterName.trim()
-  const selectedAdapter = adapterOptions.includes(rawSelectedAdapter) ? rawSelectedAdapter : ""
+  const selectedAdapter = embedded
+    ? (lockedAdapterName ?? "")
+    : adapterOptions.includes(rawSelectedAdapter)
+      ? rawSelectedAdapter
+      : ""
   // 对话数 / 原始生成行数 排序仅在「进行中」开放（归档项目量大，按指标全量排序代价高）。
   const metricSortAllowed = tab === "active"
   // 各 tab 默认排序：进行中→对话数降序；已归档→归档时间降序。
@@ -1308,11 +1520,15 @@ function ProjectListSection({
 
   return (
     <section>
-      <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
-      <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-        项目、插件、项目状态、特性数为当前状态；对话数、原始生成行数、提交、总量两口径采纳率，以及展开行的技能、各特性采纳明细与关联
-        Commit 按所选时间范围统计。
-      </p>
+      {!embedded && (
+        <>
+          <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
+          <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
+            项目、插件、项目状态、特性数为当前状态；对话数、原始生成行数、提交、总量两口径采纳率，以及展开行的技能、各特性采纳明细与关联
+            Commit 按所选时间范围统计。
+          </p>
+        </>
+      )}
 
       {pageData?.truncated && pageMatchesFilter && (
         <div className="mb-3 flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
@@ -1341,19 +1557,21 @@ function ProjectListSection({
             </button>
           ))}
         </div>
-        <Select value={selectedAdapter || ALL_ADAPTERS_VALUE} onValueChange={changeAdapterName}>
-          <SelectTrigger className="h-8 w-[180px] shrink-0 rounded-md border-border bg-background text-xs">
-            <SelectValue placeholder="按插件筛选" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={ALL_ADAPTERS_VALUE}>全部插件</SelectItem>
-            {adapterOptions.map((name) => (
-              <SelectItem key={name} value={name}>
-                {name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        {!embedded && (
+          <Select value={selectedAdapter || ALL_ADAPTERS_VALUE} onValueChange={changeAdapterName}>
+            <SelectTrigger className="h-8 w-[180px] shrink-0 rounded-md border-border bg-background text-xs">
+              <SelectValue placeholder="按插件筛选" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL_ADAPTERS_VALUE}>全部插件</SelectItem>
+              {adapterOptions.map((name) => (
+                <SelectItem key={name} value={name}>
+                  {name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
         <div className="ml-auto flex shrink-0 items-center gap-2">
           <ProjectListSearchInput
             value={query}
@@ -1429,8 +1647,8 @@ function ProjectListSection({
                 onToggle={() =>
                   setExpandedId((prev) => (prev === project.projectId ? null : project.projectId))
                 }
-                onOpenTraces={(feature, node, status) =>
-                  onOpenTraces(project, feature, node, status)
+                onOpenTraces={(feature, node, status, stageBucket) =>
+                  onOpenTraces(project, feature, node, status, stageBucket)
                 }
                 onOpenFeatureCommits={(feature) => onOpenFeatureCommits(project, feature)}
                 onOpenProjectCommits={(pushedOnly) => onOpenProjectCommits(project, pushedOnly)}
@@ -1546,7 +1764,22 @@ function mergeCodeStats(
   }
 }
 
-/** 按插件名聚合：累加项目/特性/对话数，合并代码采纳明细。 */
+/** 合并多份 stage×skill 三桶：逐桶累加对话数、合并代码采纳明细。 */
+function mergeStageBuckets(items: DashboardStageBuckets[]): DashboardStageBuckets {
+  const mergeOne = (
+    pick: (b: DashboardStageBuckets) => DashboardStageBucketStat
+  ): DashboardStageBucketStat => ({
+    conversationCount: items.reduce((acc, b) => acc + pick(b).conversationCount, 0),
+    codeStats: mergeCodeStats(items.map((b) => pick(b).codeStats))
+  })
+  return {
+    pluginConstrained: mergeOne((b) => b.pluginConstrained),
+    vibecoding: mergeOne((b) => b.vibecoding),
+    unattributed: mergeOne((b) => b.unattributed)
+  }
+}
+
+/** 按插件名聚合：累加项目/特性/对话数，合并代码采纳明细与流程阶段三桶。 */
 function aggregateAdaptersByName(
   adapters: DashboardProjectModeAdapter[]
 ): DashboardProjectModeAdapter[] {
@@ -1564,7 +1797,8 @@ function aggregateAdaptersByName(
       projectCount: group.reduce((acc, a) => acc + a.projectCount, 0),
       featureCount: group.reduce((acc, a) => acc + a.featureCount, 0),
       conversationCount: group.reduce((acc, a) => acc + a.conversationCount, 0),
-      codeStats: mergeCodeStats(group.map((a) => a.codeStats))
+      codeStats: mergeCodeStats(group.map((a) => a.codeStats)),
+      stageBuckets: mergeStageBuckets(group.map((a) => a.stageBuckets))
     })
   }
   return result
@@ -1752,7 +1986,7 @@ function AdapterStageBreakdown({
                   </span>
                 </span>
                 <FeatureCodeStatsLine codeStats={node.codeStats} />
-                <StageStatusRows byStatus={node.byStatus} />
+                <NodeBreakdownTabs byStatus={node.byStatus} stageBuckets={node.stageBuckets} />
               </div>
             ))}
         </div>
@@ -1763,17 +1997,47 @@ function AdapterStageBreakdown({
 
 function AdapterListSection({
   adapters,
-  loadPluginAggregate
+  loadPluginAggregate,
+  fetchAdapterProjectPage,
+  onOpenTraces,
+  onOpenFeatureCommits,
+  onOpenProjectCommits,
+  loadFeatureNodes
 }: {
   adapters: DashboardProjectModeAdapter[]
   loadPluginAggregate: (adapterName: string) => Promise<DashboardProjectModeFeatureNode[]>
+  fetchAdapterProjectPage: (
+    options: DashboardProjectModeProjectPageOptions
+  ) => Promise<DashboardProjectModeProjectPageData>
+  onOpenTraces: (
+    project: DashboardProjectModeProject,
+    feature?: DashboardProjectModeFeature,
+    node?: DashboardProjectModeFeatureNode,
+    status?: string,
+    stageBucket?: StageBucket
+  ) => void
+  onOpenFeatureCommits: (
+    project: DashboardProjectModeProject,
+    feature: DashboardProjectModeFeature
+  ) => void
+  onOpenProjectCommits: (project: DashboardProjectModeProject, pushedOnly?: boolean) => void
+  loadFeatureNodes: (
+    project: DashboardProjectModeProject,
+    feature: DashboardProjectModeFeature
+  ) => Promise<DashboardProjectModeFeatureNode[]>
 }): React.JSX.Element {
   const [page, setPage] = useState(1)
   const [mode, setMode] = useState<AdapterListMode>("byName")
+  // 点击插件「项目数」弹出的项目列表对应的插件（含版本，byName 模式 version 为空 = 全部版本）；null = 关闭。
+  const [projectsForAdapter, setProjectsForAdapter] = useState<AdapterProjectsTarget | null>(null)
   const marketInfo = usePluginMarketInfo()
-  const versionCount = adapters.length
-  const aggregatedByName = aggregateAdaptersByName(adapters)
-  const baseList = mode === "byName" ? aggregatedByName : adapters
+  // 过滤掉对话数与生成代码行数都为 0 的插件（无实际使用，不展示）。
+  const hasAdapterActivity = (a: DashboardProjectModeAdapter): boolean =>
+    a.conversationCount > 0 || (a.codeStats?.generatedLines ?? 0) > 0
+  const versionList = adapters.filter(hasAdapterActivity)
+  const aggregatedByName = aggregateAdaptersByName(adapters).filter(hasAdapterActivity)
+  const versionCount = versionList.length
+  const baseList = mode === "byName" ? aggregatedByName : versionList
   // 优先展示能在插件市场匹配上的插件（marketInfo 命中），其次再按项目数降序。
   const sortedAdapters = [...baseList].sort((a, b) => {
     const aMatched = marketInfo.has(a.name) ? 1 : 0
@@ -1865,12 +2129,34 @@ function AdapterListSection({
                         </div>
                       </div>
                       <div className="flex shrink-0 items-center gap-4 text-xs text-muted-foreground">
-                        <span>
-                          项目{" "}
-                          <span className="font-medium text-foreground">
-                            {formatNumber(adapter.projectCount)}
+                        {adapter.projectCount > 0 ? (
+                          <button
+                            type="button"
+                            className="group -mx-1 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 transition-colors hover:bg-primary/10"
+                            title="查看该插件下的项目列表"
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              setProjectsForAdapter({
+                                name: adapter.name,
+                                version: adapter.version,
+                                projectCount: adapter.projectCount
+                              })
+                            }}
+                          >
+                            <span className="text-muted-foreground">项目</span>
+                            <span className="font-semibold text-primary underline decoration-dotted underline-offset-2 group-hover:decoration-solid">
+                              {formatNumber(adapter.projectCount)}
+                            </span>
+                            <ChevronRight className="size-3 text-primary/70 transition-transform group-hover:translate-x-0.5" />
+                          </button>
+                        ) : (
+                          <span>
+                            项目{" "}
+                            <span className="font-medium text-foreground">
+                              {formatNumber(adapter.projectCount)}
+                            </span>
                           </span>
-                        </span>
+                        )}
                         <span>
                           特性{" "}
                           <span className="font-medium text-foreground">
@@ -1905,6 +2191,12 @@ function AdapterListSection({
                         </span>
                       </div>
                     </div>
+                    {/* 流程阶段口径：插件约束（Harness）/ VibeCoding / 未归因 */}
+                    {!isStageBucketsEmpty(adapter.stageBuckets) && (
+                      <div className="border-t border-border/40 pt-2">
+                        <StageBucketSplit buckets={adapter.stageBuckets} />
+                      </div>
+                    )}
                     <AdapterStageBreakdown
                       adapterName={adapter.name}
                       loadAggregate={loadPluginAggregate}
@@ -1940,7 +2232,171 @@ function AdapterListSection({
           </>
         )}
       </div>
+      <AdapterProjectsDialog
+        target={projectsForAdapter}
+        onClose={() => setProjectsForAdapter(null)}
+        fetchPage={fetchAdapterProjectPage}
+        onOpenTraces={onOpenTraces}
+        onOpenFeatureCommits={onOpenFeatureCommits}
+        onOpenProjectCommits={onOpenProjectCommits}
+        loadFeatureNodes={loadFeatureNodes}
+      />
     </section>
+  )
+}
+
+interface AdapterProjectsTarget {
+  name: string
+  version?: string
+  /** 该插件（或版本）当前项目总数，用于弹窗首屏加载态与 tab 计数兜底。 */
+  projectCount: number
+}
+
+interface AdapterProjectsDialogHandlers {
+  fetchPage: (
+    options: DashboardProjectModeProjectPageOptions
+  ) => Promise<DashboardProjectModeProjectPageData>
+  onOpenTraces: (
+    project: DashboardProjectModeProject,
+    feature?: DashboardProjectModeFeature,
+    node?: DashboardProjectModeFeatureNode,
+    status?: string,
+    stageBucket?: StageBucket
+  ) => void
+  onOpenFeatureCommits: (
+    project: DashboardProjectModeProject,
+    feature: DashboardProjectModeFeature
+  ) => void
+  onOpenProjectCommits: (project: DashboardProjectModeProject, pushedOnly?: boolean) => void
+  loadFeatureNodes: (
+    project: DashboardProjectModeProject,
+    feature: DashboardProjectModeFeature
+  ) => Promise<DashboardProjectModeFeatureNode[]>
+}
+
+/**
+ * 点击插件「项目数」弹出的弹窗：直接复用「项目列表」（ProjectListSection）锁定到该插件，
+ * 功能与上方主列表一致（双 tab / 搜索 / 排序 / 分页 / 展开行的特性·阶段·Commit·查看对话）。
+ */
+function AdapterProjectsDialog({
+  target,
+  onClose,
+  ...handlers
+}: {
+  /** 当前点击的插件（含版本）；null = 关闭。byName 模式 version 为空 = 全部版本。 */
+  target: AdapterProjectsTarget | null
+  onClose: () => void
+} & AdapterProjectsDialogHandlers): React.JSX.Element {
+  return (
+    <Dialog open={Boolean(target)} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="flex max-h-[88vh] w-[95vw] max-w-[1400px] flex-col">
+        <DialogHeader>
+          <DialogTitle>
+            插件「{target?.name}」
+            {target?.version ? (
+              <span className="text-muted-foreground">@{target.version}</span>
+            ) : null}{" "}
+            关联项目
+          </DialogTitle>
+        </DialogHeader>
+        {target ? (
+          // 按「插件名@版本」重挂，切换插件/版本时彻底重置内部 tab/搜索/分页与本地缓存。
+          <AdapterProjectsDialogBody
+            key={`${target.name}@${target.version ?? ""}`}
+            target={target}
+            {...handlers}
+          />
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** 弹窗内容：自管整页缓存 + 锁定插件的 onPageChange，渲染嵌入式 ProjectListSection。 */
+function AdapterProjectsDialogBody({
+  target,
+  fetchPage,
+  onOpenTraces,
+  onOpenFeatureCommits,
+  onOpenProjectCommits,
+  loadFeatureNodes
+}: { target: AdapterProjectsTarget } & AdapterProjectsDialogHandlers): React.JSX.Element {
+  const [pages, setPages] = useState<
+    Partial<Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>>
+  >({})
+  const [pageLoading, setPageLoading] = useState<
+    Record<DashboardProjectModeProjectStatus, boolean>
+  >({ active: false, archived: false })
+  const [pageError, setPageError] = useState<
+    Partial<Record<DashboardProjectModeProjectStatus, string>>
+  >({})
+
+  const handlePageChange = useCallback(
+    (
+      status: DashboardProjectModeProjectStatus,
+      page: number,
+      keyword: string,
+      pageSize: number,
+      _adapterName: string,
+      creatorKeyword: string,
+      creatorOrgKeyword: string,
+      sortBy?: DashboardProjectModeProjectSortKey | null,
+      sortOrder?: DashboardProjectModeProjectSortOrder
+    ) => {
+      setPageLoading((prev) => ({ ...prev, [status]: true }))
+      setPageError((prev) => ({ ...prev, [status]: undefined }))
+      // 锁定到该插件 + 版本（忽略组件传入的 _adapterName，恒用 target）。
+      fetchPage({
+        status,
+        page,
+        pageSize,
+        keyword,
+        adapterName: target.name,
+        adapterVersion: target.version,
+        creatorKeyword,
+        creatorOrgKeyword,
+        sortBy,
+        sortOrder
+      })
+        .then((data) => setPages((prev) => ({ ...prev, [status]: data })))
+        .catch((e) =>
+          setPageError((prev) => ({
+            ...prev,
+            [status]: e instanceof Error ? e.message : String(e)
+          }))
+        )
+        .finally(() => setPageLoading((prev) => ({ ...prev, [status]: false })))
+    },
+    [fetchPage, target.name, target.version]
+  )
+
+  // tab 计数：已加载用整页 total，未加载兜底用插件项目总数（保证首屏显示加载态而非空表）。
+  const projectCounts: DashboardProjectModeProjectCounts = {
+    total: target.projectCount,
+    active: pages.active?.total ?? target.projectCount,
+    archived: pages.archived?.total ?? 0,
+    totalFeatureCount: 0,
+    activeFeatureCount: 0,
+    archivedFeatureCount: 0
+  }
+
+  return (
+    <div className="-mx-1 min-h-0 flex-1 overflow-auto px-1">
+      <ProjectListSection
+        projectCounts={projectCounts}
+        projectPages={pages}
+        adapterOptions={[]}
+        pageLoading={pageLoading}
+        pageError={pageError}
+        loading={false}
+        onPageChange={handlePageChange}
+        onOpenTraces={onOpenTraces}
+        onOpenFeatureCommits={onOpenFeatureCommits}
+        onOpenProjectCommits={onOpenProjectCommits}
+        loadFeatureNodes={loadFeatureNodes}
+        lockedAdapterName={target.name}
+      />
+    </div>
   )
 }
 
@@ -1962,6 +2418,7 @@ export function ProjectModePanel({
   onOpenProjectCommits,
   loadFeatureNodes,
   loadPluginAggregate,
+  fetchAdapterProjectPage,
   onSkillClick,
   onUserClick,
   onFunnelFirstStageClick,
@@ -2004,7 +2461,8 @@ export function ProjectModePanel({
     project: DashboardProjectModeProject,
     feature?: DashboardProjectModeFeature,
     node?: DashboardProjectModeFeatureNode,
-    status?: string
+    status?: string,
+    stageBucket?: StageBucket
   ) => void
   onOpenFeatureCommits: (
     project: DashboardProjectModeProject,
@@ -2016,6 +2474,10 @@ export function ProjectModePanel({
     feature: DashboardProjectModeFeature
   ) => Promise<DashboardProjectModeFeatureNode[]>
   loadPluginAggregate: (adapterName: string) => Promise<DashboardProjectModeFeatureNode[]>
+  /** 插件「项目数」弹窗复用项目列表所需的分页拉取器（按当前时间范围，调用方注入插件名/版本）。 */
+  fetchAdapterProjectPage: (
+    options: DashboardProjectModeProjectPageOptions
+  ) => Promise<DashboardProjectModeProjectPageData>
   onSkillClick?: (skill: string) => void
   onUserClick?: (sapId: string) => void
   onFunnelFirstStageClick?: () => void
@@ -2166,11 +2628,11 @@ export function ProjectModePanel({
           </div>
         </div>
 
-        {/* 子模块一（项目模式总量）：含 Vibecoding 在内的整体口径 */}
+        {/* 子模块一（项目模式总量）：含 VibeCoding 在内的整体口径 */}
         <div>
           <div className="mb-3 flex items-center gap-1.5">
             <h3 className="text-xs font-semibold text-foreground">项目模式总量</h3>
-            <InfoHint hint="项目模式下产生的全部代码（含 Vibecoding 等未使用 Skill 的对话）。" />
+            <InfoHint hint="项目模式下产生的全部代码（含 VibeCoding 等未使用 Skill 的对话）。" />
           </div>
           <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3">
             <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-5">
@@ -2340,6 +2802,17 @@ export function ProjectModePanel({
         loadFeatureNodes={loadFeatureNodes}
       />
 
+      {/* Adapter (plugin) distribution — 紧随项目列表之后 */}
+      <AdapterListSection
+        adapters={adapters}
+        loadPluginAggregate={loadPluginAggregate}
+        fetchAdapterProjectPage={fetchAdapterProjectPage}
+        onOpenTraces={onOpenTraces}
+        onOpenFeatureCommits={onOpenFeatureCommits}
+        onOpenProjectCommits={onOpenProjectCommits}
+        loadFeatureNodes={loadFeatureNodes}
+      />
+
       <ProjectModeAnalyticsSection analytics={data?.analytics} onUserClick={onUserClick} />
 
       {/* Skill / Tool 使用排行，与平台运营概览同款 */}
@@ -2366,9 +2839,6 @@ export function ProjectModePanel({
           />
         </div>
       </section>
-
-      {/* Adapter distribution */}
-      <AdapterListSection adapters={adapters} loadPluginAggregate={loadPluginAggregate} />
     </div>
   )
 }

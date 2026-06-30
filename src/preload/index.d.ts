@@ -571,6 +571,7 @@ interface DashboardProjectModeProject {
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
+  stageBuckets: DashboardStageBuckets
 }
 
 type DashboardProjectModeProjectStatus = "active" | "archived"
@@ -619,10 +620,23 @@ interface DashboardProjectModeProjectPageOptions {
   pageSize?: number
   keyword?: string | null
   adapterName?: string | null
+  /** 配合 adapterName 精确到插件版本（「按版本」口径点击项目数）；空 = 不限版本。 */
+  adapterVersion?: string | null
   creatorKeyword?: string | null
   creatorOrgKeyword?: string | null
   sortBy?: DashboardProjectModeProjectSortKey | null
   sortOrder?: DashboardProjectModeProjectSortOrder | null
+}
+
+interface DashboardStageBucketStat {
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+}
+
+interface DashboardStageBuckets {
+  pluginConstrained: DashboardStageBucketStat
+  vibecoding: DashboardStageBucketStat
+  unattributed: DashboardStageBucketStat
 }
 
 interface DashboardProjectModeAdapter {
@@ -632,6 +646,7 @@ interface DashboardProjectModeAdapter {
   featureCount: number
   conversationCount: number
   codeStats: DashboardCodeStats | null
+  stageBuckets: DashboardStageBuckets
 }
 
 interface DashboardProjectModeData {
@@ -647,6 +662,7 @@ interface DashboardProjectModeData {
     skillCallCount: number
     distinctSkillCount: number
     codeStats: DashboardCodeStats | null
+    skillCodeStats?: DashboardCodeStats | null
   }
   adapters: DashboardProjectModeAdapter[]
   topSkills: DashboardProjectModeSkillCount[]
@@ -676,6 +692,8 @@ interface DashboardProjectModeTracesOptions {
   featureSlug?: string
   nodeName?: string
   nodeStatus?: string
+  /** stage×skill 桶过滤（插件约束（Harness）/ VibeCoding / 未归因），用于按桶查看对话。 */
+  stageBucket?: "plugin_constrained" | "vibecoding" | "unattributed"
 }
 
 interface DashboardProjectModeTracesData {
@@ -699,6 +717,8 @@ interface DashboardProjectModeFeatureNode {
   conversationCount: number
   codeStats: DashboardCodeStats | null
   byStatus: DashboardProjectModeNodeStatus[]
+  /** Stage×skill 三桶拆分（插件约束（Harness）/ VibeCoding / 未归因）。 */
+  stageBuckets: DashboardStageBuckets
 }
 
 interface DashboardPluginAggregate {

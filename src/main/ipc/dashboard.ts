@@ -42,6 +42,11 @@ import {
   runDashboardAnalysisAgent,
   type DashboardAnalysisAgentInput
 } from "../services/dashboard-analysis-agent"
+import {
+  STAGE_DONE_LABEL,
+  STAGE_IN_PROGRESS_LABEL,
+  type StageBucket
+} from "../../shared/harness-stage-bucket"
 
 // ─────────────────────────────────────────────────────────
 // ES Configuration (from .env)
@@ -7343,8 +7348,25 @@ function splitMockCodeStatsAcrossFeatures(
   })
 }
 
+/** DEV mock helper: derive a plausible stage×skill four-bucket split from a row's totals. */
+function makeMockStageBuckets(
+  codeStats: DashboardCodeStats | null,
+  conversationCount: number
+): DashboardStageBuckets {
+  // Deterministic fractions across [plugin_constrained, vibecoding, unattributed].
+  const fractions = [0.45, 0.45, 0.1]
+  const [code0, code1, code2] = splitMockCodeStatsAcrossFeatures(codeStats, 3)
+  const conv = fractions.map((f) => Math.round(conversationCount * f))
+  return {
+    pluginConstrained: { conversationCount: conv[0] ?? 0, codeStats: code0 ?? null },
+    vibecoding: { conversationCount: conv[1] ?? 0, codeStats: code1 ?? null },
+    unattributed: { conversationCount: conv[2] ?? 0, codeStats: code2 ?? null }
+  }
+}
+
 function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): DashboardProjectModeData {
-  const allProjects: ProjectModeProjectView[] = [
+  // stageBuckets is derived from each draft's totals after assembly (see below).
+  const projectDrafts: Array<Omit<ProjectModeProjectView, "stageBuckets">> = [
     {
       projectId: "proj-cmb-cowork",
       name: "CmbCowork Agent",
@@ -7511,7 +7533,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
   void range
   // 额外填充若干进行中项目，便于在 DEV 模式演示项目列表的分页/搜索交互。
   for (let i = 1; i <= 12; i++) {
-    allProjects.push({
+    projectDrafts.push({
       projectId: `proj-demo-${i}`,
       name: `示例项目 ${i}`,
       systemName: "示例平台",
@@ -7537,7 +7559,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     })
   }
   // DEV：把项目级采纳明细按递减权重拆到各特性，让「下沉到 feature 级别」的采纳率/生成行数有 mock 数据可看。
-  for (const project of allProjects) {
+  for (const project of projectDrafts) {
     const featureStats = splitMockCodeStatsAcrossFeatures(
       project.codeStats,
       project.features.length
@@ -7582,9 +7604,14 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       creatorUpperOrgLv0: "平台一组"
     }
   ]
-  allProjects.forEach((project, index) => {
+  projectDrafts.forEach((project, index) => {
     Object.assign(project, mockCreators[index % mockCreators.length])
   })
+  // 由各项目自身的代码/对话总量派生 stage×skill 三桶（DEV 演示用）。
+  const allProjects: ProjectModeProjectView[] = projectDrafts.map((project) => ({
+    ...project,
+    stageBuckets: makeMockStageBuckets(project.codeStats, project.conversationCount)
+  }))
   // 「室筛选」：按下标分配的室过滤项目列表，使 mock 下切换室也能真实改变数据。
   const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
   // DEV：把偶数下标的 mock 项目视为「精益项目」，让「仅精益项目」开关在无 ES 时也能可见地筛选。
@@ -7612,6 +7639,17 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     sortBy: "conversationCount",
     sortOrder: "desc"
   })
+  const summaryCodeStats = makeDashboardCodeStats({
+    generatedLines: scaleMockMetricNumber(7300, aggScale),
+    deletedLines: scaleMockMetricNumber(1100, aggScale),
+    measuredGeneratedLines: scaleMockMetricNumber(6700, aggScale),
+    effectiveGeneratedLines: scaleMockMetricNumber(5900, aggScale),
+    adoptedLines: scaleMockMetricNumber(4000, aggScale),
+    pushedMeasuredGeneratedLines: scaleMockMetricNumber(5500, aggScale),
+    pushedEffectiveGeneratedLines: scaleMockMetricNumber(4900, aggScale),
+    pushedAdoptedLines: scaleMockMetricNumber(3400, aggScale),
+    pushedCommitCount: scaleMockMetricNumber(53, aggScale)
+  })
   return {
     summary: {
       projectCount: projects.length,
@@ -7624,17 +7662,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       totalTokens: scaleMockMetricNumber(9_650_000, aggScale),
       skillCallCount: scaleMockMetricNumber(312, aggScale),
       distinctSkillCount: 14,
-      codeStats: makeDashboardCodeStats({
-        generatedLines: scaleMockMetricNumber(7300, aggScale),
-        deletedLines: scaleMockMetricNumber(1100, aggScale),
-        measuredGeneratedLines: scaleMockMetricNumber(6700, aggScale),
-        effectiveGeneratedLines: scaleMockMetricNumber(5900, aggScale),
-        adoptedLines: scaleMockMetricNumber(4000, aggScale),
-        pushedMeasuredGeneratedLines: scaleMockMetricNumber(5500, aggScale),
-        pushedEffectiveGeneratedLines: scaleMockMetricNumber(4900, aggScale),
-        pushedAdoptedLines: scaleMockMetricNumber(3400, aggScale),
-        pushedCommitCount: scaleMockMetricNumber(53, aggScale)
-      }),
+      codeStats: summaryCodeStats,
       // 由 Skill 生成的代码（整体的子集，约六成）。
       skillCodeStats: makeDashboardCodeStats({
         generatedLines: scaleMockMetricNumber(4600, aggScale),
@@ -7649,52 +7677,57 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       })
     },
     adapters: deepScaleMockMetrics(
-      [
-        {
-          name: "claude-code",
-          version: "1.4.2",
-          projectCount: 1,
-          featureCount: 3,
-          conversationCount: 128,
-          codeStats: makeDashboardCodeStats({
-            generatedLines: 5200,
-            deletedLines: 800,
-            measuredGeneratedLines: 4800,
-            effectiveGeneratedLines: 4200,
-            adoptedLines: 3100,
-            pushedMeasuredGeneratedLines: 4000,
-            pushedEffectiveGeneratedLines: 3600,
-            pushedAdoptedLines: 2700,
-            pushedCommitCount: 42
-          })
-        },
-        {
-          name: "claude-code",
-          version: "1.4.0",
-          projectCount: 1,
-          featureCount: 2,
-          conversationCount: 47,
-          codeStats: makeDashboardCodeStats({
-            generatedLines: 1800,
-            deletedLines: 200,
-            measuredGeneratedLines: 1600,
-            effectiveGeneratedLines: 1400,
-            adoptedLines: 900,
-            pushedMeasuredGeneratedLines: 1200,
-            pushedEffectiveGeneratedLines: 1000,
-            pushedAdoptedLines: 650,
-            pushedCommitCount: 14
-          })
-        },
-        {
-          name: "codex",
-          version: "0.9.1",
-          projectCount: 1,
-          featureCount: 1,
-          conversationCount: 0,
-          codeStats: null
-        }
-      ],
+      (
+        [
+          {
+            name: "claude-code",
+            version: "1.4.2",
+            projectCount: 1,
+            featureCount: 3,
+            conversationCount: 128,
+            codeStats: makeDashboardCodeStats({
+              generatedLines: 5200,
+              deletedLines: 800,
+              measuredGeneratedLines: 4800,
+              effectiveGeneratedLines: 4200,
+              adoptedLines: 3100,
+              pushedMeasuredGeneratedLines: 4000,
+              pushedEffectiveGeneratedLines: 3600,
+              pushedAdoptedLines: 2700,
+              pushedCommitCount: 42
+            })
+          },
+          {
+            name: "claude-code",
+            version: "1.4.0",
+            projectCount: 1,
+            featureCount: 2,
+            conversationCount: 47,
+            codeStats: makeDashboardCodeStats({
+              generatedLines: 1800,
+              deletedLines: 200,
+              measuredGeneratedLines: 1600,
+              effectiveGeneratedLines: 1400,
+              adoptedLines: 900,
+              pushedMeasuredGeneratedLines: 1200,
+              pushedEffectiveGeneratedLines: 1000,
+              pushedAdoptedLines: 650,
+              pushedCommitCount: 14
+            })
+          },
+          {
+            name: "codex",
+            version: "0.9.1",
+            projectCount: 1,
+            featureCount: 1,
+            conversationCount: 0,
+            codeStats: null
+          }
+        ] as Array<Omit<ProjectModeAdapterView, "stageBuckets">>
+      ).map((adapter) => ({
+        ...adapter,
+        stageBuckets: makeMockStageBuckets(adapter.codeStats, adapter.conversationCount)
+      })),
       aggScale
     ),
     topSkills: deepScaleMockMetrics(
@@ -8844,6 +8877,7 @@ interface ProjectModeProjectView {
   features: ProjectModeFeatureView[]
   topSkills: ProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
+  stageBuckets: DashboardStageBuckets
 }
 
 type ProjectModeProjectStatus = "active" | "archived"
@@ -8900,10 +8934,194 @@ interface ProjectModeProjectPageOptions extends OrgFilterOptions {
   pageSize?: number
   keyword?: string | null
   adapterName?: string | null
+  /** 配合 adapterName 精确到插件版本（如「按版本」口径点击项目数）；空 = 不限版本。 */
+  adapterVersion?: string | null
   creatorKeyword?: string | null
   creatorOrgKeyword?: string | null
   sortBy?: ProjectModeProjectSortKey | null
   sortOrder?: ProjectModeProjectSortOrder | null
+}
+
+/** One stage×skill bucket: its conversation count + code adoption stats. */
+interface StageBucketStat {
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+}
+
+/**
+ * Project-mode work split by the stage×skill attribution buckets
+ * (see src/shared/harness-stage-bucket.ts). Complements the existing
+ * Skill-usage口径 — here a turn/code event is bucketed by the workflow stage
+ * status at turn time crossed with whether it carried a plugin Skill.
+ */
+interface DashboardStageBuckets {
+  pluginConstrained: StageBucketStat
+  vibecoding: StageBucketStat
+  unattributed: StageBucketStat
+}
+
+function emptyStageBucketStat(): StageBucketStat {
+  return { conversationCount: 0, codeStats: null }
+}
+
+function emptyStageBuckets(): DashboardStageBuckets {
+  return {
+    pluginConstrained: emptyStageBucketStat(),
+    vibecoding: emptyStageBucketStat(),
+    unattributed: emptyStageBucketStat()
+  }
+}
+
+/** ES agg key for one bucket (shared between trace + code aggregations). */
+function stageBucketAggKey(bucket: StageBucket): string {
+  return `sb_${bucket}`
+}
+
+/**
+ * Four named filter sub-aggs splitting code events by stage×skill, each wrapping
+ * the same `perBucketAggs` (code_gen/code_adopt/pushed) so every bucket yields a
+ * clean DashboardCodeStats via normalizeCodeStatsFromContainer — no cross-status
+ * summing of adoption rates. `unattributed` is the complement of 进行中/已完成 and
+ * so also captures events missing harnessNodeStatus (historical / unresolved).
+ */
+function stageBucketCodeAggs(perBucketAggs: Record<string, unknown>): Record<string, unknown> {
+  const inProgress = { term: { "properties.harnessNodeStatus": STAGE_IN_PROGRESS_LABEL } }
+  const done = { term: { "properties.harnessNodeStatus": STAGE_DONE_LABEL } }
+  const hasSkill = { exists: { field: "properties.usedSkills" } }
+  return {
+    [stageBucketAggKey("plugin_constrained")]: {
+      filter: { bool: { filter: [inProgress, hasSkill] } },
+      aggs: perBucketAggs
+    },
+    // VibeCoding = 进行中但绕过插件（无 Skill）∪ 已完成后的自由产出。
+    [stageBucketAggKey("vibecoding")]: {
+      filter: {
+        bool: {
+          should: [{ bool: { filter: [inProgress], must_not: [hasSkill] } }, done],
+          minimum_should_match: 1
+        }
+      },
+      aggs: perBucketAggs
+    },
+    [stageBucketAggKey("unattributed")]: {
+      filter: {
+        bool: {
+          must_not: [
+            {
+              terms: { "properties.harnessNodeStatus": [STAGE_IN_PROGRESS_LABEL, STAGE_DONE_LABEL] }
+            }
+          ]
+        }
+      },
+      aggs: perBucketAggs
+    }
+  }
+}
+
+/**
+ * Trace-side ES filter clause for one stage bucket（字段无 `properties.` 前缀，用于 trace 索引）。
+ * 单一来源：既给 stageBucketTraceAggs 的分桶用，也给「查看对话」按桶过滤 trace 用。
+ *  - 插件约束（Harness）= 进行中 + 有 Skill
+ *  - VibeCoding        = 进行中但无 Skill ∪ 已完成（不论 Skill）
+ *  - 未归因            = 其余状态 / 无状态
+ */
+function stageBucketTraceFilterClause(bucket: StageBucket): Record<string, unknown> {
+  const inProgress = { term: { harnessNodeStatus: STAGE_IN_PROGRESS_LABEL } }
+  const done = { term: { harnessNodeStatus: STAGE_DONE_LABEL } }
+  const hasSkill = { exists: { field: "usedSkills" } }
+  switch (bucket) {
+    case "plugin_constrained":
+      return { bool: { filter: [inProgress, hasSkill] } }
+    case "vibecoding":
+      return {
+        bool: {
+          should: [{ bool: { filter: [inProgress], must_not: [hasSkill] } }, done],
+          minimum_should_match: 1
+        }
+      }
+    case "unattributed":
+      return {
+        bool: {
+          must_not: [{ terms: { harnessNodeStatus: [STAGE_IN_PROGRESS_LABEL, STAGE_DONE_LABEL] } }]
+        }
+      }
+  }
+}
+
+/** Trace-side mirror of stageBucketCodeAggs (conversation counts, no perBucketAggs). */
+function stageBucketTraceAggs(): Record<string, unknown> {
+  return {
+    [stageBucketAggKey("plugin_constrained")]: {
+      filter: stageBucketTraceFilterClause("plugin_constrained")
+    },
+    [stageBucketAggKey("vibecoding")]: {
+      filter: stageBucketTraceFilterClause("vibecoding")
+    },
+    [stageBucketAggKey("unattributed")]: {
+      filter: stageBucketTraceFilterClause("unattributed")
+    }
+  }
+}
+
+/** Parse a container holding `sb_*` filter buckets → per-bucket code stats. */
+function parseStageBucketCodeStats(container: unknown): Record<StageBucket, DashboardCodeStats> {
+  const c = asRecord(container)
+  const read = (bucket: StageBucket): DashboardCodeStats =>
+    normalizeCodeStatsFromContainer(asRecord(c[stageBucketAggKey(bucket)]))
+  return {
+    plugin_constrained: read("plugin_constrained"),
+    vibecoding: read("vibecoding"),
+    unattributed: read("unattributed")
+  }
+}
+
+/** Parse a container holding `sb_*` filter buckets → per-bucket conversation counts. */
+function parseStageBucketConversations(container: unknown): Record<StageBucket, number> {
+  const c = asRecord(container)
+  const read = (bucket: StageBucket): number =>
+    asNumber(asRecord(c[stageBucketAggKey(bucket)]).doc_count)
+  return {
+    plugin_constrained: read("plugin_constrained"),
+    vibecoding: read("vibecoding"),
+    unattributed: read("unattributed")
+  }
+}
+
+/** Merge per-bucket conversation counts + code stats into DashboardStageBuckets. */
+function buildStageBuckets(
+  conv: Record<StageBucket, number> | undefined,
+  code: Record<StageBucket, DashboardCodeStats> | undefined
+): DashboardStageBuckets {
+  const stat = (bucket: StageBucket): StageBucketStat => ({
+    conversationCount: conv?.[bucket] ?? 0,
+    codeStats: code?.[bucket] ?? null
+  })
+  return {
+    pluginConstrained: stat("plugin_constrained"),
+    vibecoding: stat("vibecoding"),
+    unattributed: stat("unattributed")
+  }
+}
+
+/** Fill the code-stats side of already-built (conversation-only) stage buckets. */
+function withStageBucketsCode(
+  conv: DashboardStageBuckets,
+  code: Record<StageBucket, DashboardCodeStats> | undefined
+): DashboardStageBuckets {
+  return {
+    pluginConstrained: {
+      conversationCount: conv.pluginConstrained.conversationCount,
+      codeStats: code?.plugin_constrained ?? null
+    },
+    vibecoding: {
+      conversationCount: conv.vibecoding.conversationCount,
+      codeStats: code?.vibecoding ?? null
+    },
+    unattributed: {
+      conversationCount: conv.unattributed.conversationCount,
+      codeStats: code?.unattributed ?? null
+    }
+  }
 }
 
 interface ProjectModeAdapterView {
@@ -8913,6 +9131,7 @@ interface ProjectModeAdapterView {
   featureCount: number
   conversationCount: number
   codeStats: DashboardCodeStats | null
+  stageBuckets: DashboardStageBuckets
 }
 
 interface DashboardProjectModeData {
@@ -9007,6 +9226,10 @@ function normalizeProjectModeAdapterName(value?: string | null): string {
   return String(value ?? "").trim()
 }
 
+function normalizeProjectModeAdapterVersion(value?: string | null): string {
+  return String(value ?? "").trim()
+}
+
 function normalizeProjectModeCreatorKeyword(value?: string | null): string {
   return String(value ?? "").trim()
 }
@@ -9040,6 +9263,14 @@ function projectMatchesKeyword(project: ProjectModeProjectView, keyword: string)
 function projectMatchesAdapterName(project: ProjectModeProjectView, adapterName: string): boolean {
   if (!adapterName) return true
   return project.adapterName === adapterName
+}
+
+function projectMatchesAdapterVersion(
+  project: ProjectModeProjectView,
+  adapterVersion: string
+): boolean {
+  if (!adapterVersion) return true
+  return project.adapterVersion === adapterVersion
 }
 
 function projectMatchesCreatorKeyword(
@@ -9195,6 +9426,7 @@ function sliceProjectModeProjects(
   const status = normalizeProjectModeProjectStatus(options?.status)
   const keyword = normalizeProjectModeKeyword(options?.keyword)
   const adapterName = normalizeProjectModeAdapterName(options?.adapterName)
+  const adapterVersion = normalizeProjectModeAdapterVersion(options?.adapterVersion)
   const creatorKeyword = normalizeProjectModeCreatorKeyword(options?.creatorKeyword)
   const creatorOrgKeyword = normalizeProjectModeCreatorOrgKeyword(options?.creatorOrgKeyword)
   const { sortBy, sortOrder } = normalizeProjectModeProjectSort(options, status)
@@ -9204,6 +9436,7 @@ function sliceProjectModeProjects(
     .filter((project) => projectMatchesStatus(project, status))
     .filter((project) => projectMatchesKeyword(project, keyword))
     .filter((project) => projectMatchesAdapterName(project, adapterName))
+    .filter((project) => projectMatchesAdapterVersion(project, adapterVersion))
     .filter((project) => projectMatchesCreatorKeyword(project, creatorKeyword))
     .filter((project) => projectMatchesCreatorOrgKeyword(project, creatorOrgKeyword))
   const sorted = sortBy
@@ -9277,7 +9510,10 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     hasError: typeof props.error === "string" && props.error.length > 0,
     features,
     topSkills: [],
-    codeStats: null
+    codeStats: null,
+    // Filled with real per-range buckets when the page enriches usage/code; the
+    // snapshot hit alone carries no per-turn attribution.
+    stageBuckets: emptyStageBuckets()
   }
 }
 
@@ -9570,6 +9806,7 @@ function buildProjectModeProjectListFilters(
   const status = normalizeProjectModeProjectStatus(options?.status)
   const keyword = normalizeProjectModeKeyword(options?.keyword)
   const adapterName = normalizeProjectModeAdapterName(options?.adapterName)
+  const adapterVersion = normalizeProjectModeAdapterVersion(options?.adapterVersion)
   const creatorKeyword = normalizeProjectModeCreatorKeyword(options?.creatorKeyword)
   const creatorOrgKeyword = normalizeProjectModeCreatorOrgKeyword(options?.creatorOrgKeyword)
   const orgFilterClause = buildProjectModeOrgFilter(options, access)
@@ -9596,6 +9833,9 @@ function buildProjectModeProjectListFilters(
   const adapterFilter: Record<string, unknown>[] = adapterName
     ? [{ term: { "properties.adapterName": adapterName } }]
     : []
+  const adapterVersionFilter: Record<string, unknown>[] = adapterVersion
+    ? [{ term: { "properties.adapterVersion": adapterVersion } }]
+    : []
   const creatorSearchFilter = buildProjectModeCreatorSearchFilter(creatorKeyword)
   const creatorOrgSearchFilter = buildProjectModeCreatorOrgSearchFilter(creatorOrgKeyword)
 
@@ -9604,6 +9844,7 @@ function buildProjectModeProjectListFilters(
     ...statusFilter,
     ...keywordFilter,
     ...adapterFilter,
+    ...adapterVersionFilter,
     ...(creatorSearchFilter ? [creatorSearchFilter] : []),
     ...(creatorOrgSearchFilter ? [creatorOrgSearchFilter] : [])
   ]
@@ -9991,7 +10232,13 @@ async function fetchProjectModeUsage(
       by_tool_all_full: { terms: { field: "toolNames", size: 1000 } },
       by_adapter: {
         terms: { field: "harnessAdapterName", size: 200 },
-        aggs: { by_version: { terms: { field: "harnessAdapterVersion", size: 50 } } }
+        aggs: {
+          by_version: {
+            terms: { field: "harnessAdapterVersion", size: 50 },
+            aggs: stageBucketTraceAggs()
+          },
+          ...stageBucketTraceAggs()
+        }
       }
     }
   }
@@ -10021,7 +10268,8 @@ async function fetchProjectModeUsage(
           projectCount: 0,
           featureCount: 0,
           conversationCount: asNumber(b.doc_count),
-          codeStats: null
+          codeStats: null,
+          stageBuckets: buildStageBuckets(parseStageBucketConversations(b), undefined)
         })
         continue
       }
@@ -10034,7 +10282,8 @@ async function fetchProjectModeUsage(
           projectCount: 0,
           featureCount: 0,
           conversationCount: asNumber(v.doc_count),
-          codeStats: null
+          codeStats: null,
+          stageBuckets: buildStageBuckets(parseStageBucketConversations(v), undefined)
         })
       }
     }
@@ -10071,10 +10320,12 @@ async function fetchProjectModePageUsage(
 ): Promise<{
   perProject: Map<string, number>
   perProjectSkills: Map<string, ProjectModeSkillCount[]>
+  perProjectStageConversations: Map<string, Record<StageBucket, number>>
 }> {
   const perProject = new Map<string, number>()
   const perProjectSkills = new Map<string, ProjectModeSkillCount[]>()
-  if (projectIds.length === 0) return { perProject, perProjectSkills }
+  const perProjectStageConversations = new Map<string, Record<StageBucket, number>>()
+  if (projectIds.length === 0) return { perProject, perProjectSkills, perProjectStageConversations }
 
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
   const body = {
@@ -10091,14 +10342,15 @@ async function fetchProjectModePageUsage(
       by_project: {
         terms: { field: "harnessProjectId", size: Math.max(1, projectIds.length) },
         aggs: {
-          skills: { terms: { field: "usedSkills", size: 10 } }
+          skills: { terms: { field: "usedSkills", size: 10 } },
+          ...stageBucketTraceAggs()
         }
       }
     }
   }
   const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
   const buckets = asRecord(asRecord(raw.aggregations).by_project).buckets
-  if (!Array.isArray(buckets)) return { perProject, perProjectSkills }
+  if (!Array.isArray(buckets)) return { perProject, perProjectSkills, perProjectStageConversations }
 
   for (const bucket of buckets) {
     const b = asRecord(bucket)
@@ -10106,9 +10358,10 @@ async function fetchProjectModePageUsage(
     if (!key) continue
     perProject.set(key, asNumber(b.doc_count))
     perProjectSkills.set(key, parseSkillCountBuckets(asRecord(b.skills).buckets))
+    perProjectStageConversations.set(key, parseStageBucketConversations(b))
   }
 
-  return { perProject, perProjectSkills }
+  return { perProject, perProjectSkills, perProjectStageConversations }
 }
 
 /**
@@ -10204,6 +10457,31 @@ function parseAdapterCodeStatsBuckets(buckets: unknown): Map<string, DashboardCo
   return map
 }
 
+/** Same adapter bucket tree as parseAdapterCodeStatsBuckets, but reads the stage×skill sub-aggs. */
+function parseAdapterStageBucketsBuckets(
+  buckets: unknown
+): Map<string, Record<StageBucket, DashboardCodeStats>> {
+  const map = new Map<string, Record<StageBucket, DashboardCodeStats>>()
+  if (!Array.isArray(buckets)) return map
+  for (const bucket of buckets) {
+    const b = asRecord(bucket)
+    const name = asString(b.key)
+    if (!name) continue
+    const rawVersions = asRecord(b.by_version).buckets
+    const versions = Array.isArray(rawVersions) ? rawVersions : []
+    if (versions.length === 0) {
+      map.set(adapterKey(name), parseStageBucketCodeStats(b))
+      continue
+    }
+    for (const vb of versions) {
+      const v = asRecord(vb)
+      const version = asOptionalString(v.key)
+      map.set(adapterKey(name, version), parseStageBucketCodeStats(v))
+    }
+  }
+  return map
+}
+
 /**
  * Code-adoption stats for project mode. Keep the page payload unchanged, but
  * split the ES DSL by aggregation dimension so one request no longer has to
@@ -10215,6 +10493,8 @@ type ProjectModeCodeStatsResult = {
   skillOverall: DashboardCodeStats
   byProject: Map<string, DashboardCodeStats>
   byAdapter: Map<string, DashboardCodeStats>
+  /** 每个 adapter 的 stage×skill 三桶代码拆分，键同 byAdapter。 */
+  byAdapterStage: Map<string, Record<StageBucket, DashboardCodeStats>>
   bySkill: DashboardSkillCodeAdoptionStats[]
   /**
    * 当前项目模式范围内（org/时间过滤后）出现过的外部上报来源列表（`properties.source`
@@ -10320,10 +10600,12 @@ async function fetchProjectModeAggregateCodeStats(
     fetchProjectModeCodeAggs(
       null,
       range,
-      (perBucketAggs) =>
-        enumerateSources
-          ? { ...perBucketAggs, by_source: { terms: { field: "properties.source", size: 50 } } }
-          : perBucketAggs,
+      (perBucketAggs) => ({
+        ...perBucketAggs,
+        ...(enumerateSources
+          ? { by_source: { terms: { field: "properties.source", size: 50 } } }
+          : {})
+      }),
       statExtraFilters
     ),
     fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, skillOnlyFilters),
@@ -10337,8 +10619,9 @@ async function fetchProjectModeAggregateCodeStats(
             ...perBucketAggs,
             by_version: {
               terms: { field: "properties.harnessAdapterVersion", size: 50 },
-              aggs: perBucketAggs
-            }
+              aggs: { ...perBucketAggs, ...stageBucketCodeAggs(perBucketAggs) }
+            },
+            ...stageBucketCodeAggs(perBucketAggs)
           }
         }
       }),
@@ -10364,6 +10647,7 @@ async function fetchProjectModeAggregateCodeStats(
     skillOverall: normalizeCodeStatsFromAggs(skillOverallRaw),
     byProject: new Map<string, DashboardCodeStats>(),
     byAdapter: parseAdapterCodeStatsBuckets(asRecord(adapterAggs.by_adapter).buckets),
+    byAdapterStage: parseAdapterStageBucketsBuckets(asRecord(adapterAggs.by_adapter).buckets),
     bySkill: normalizeSkillCodeAdoptionBuckets({ aggregations: skillAggs }, "by_skill"),
     availableSources: enumerateSources ? parseAvailableCodeSources(overallRaw) : []
   }
@@ -10377,9 +10661,14 @@ async function fetchProjectModeProjectCodeStats(
 ): Promise<{
   byProject: Map<string, DashboardCodeStats>
   byFeature: Map<string, DashboardCodeStats>
+  byProjectStage: Map<string, Record<StageBucket, DashboardCodeStats>>
 }> {
   if (projectIds.length === 0) {
-    return { byProject: new Map<string, DashboardCodeStats>(), byFeature: new Map() }
+    return {
+      byProject: new Map<string, DashboardCodeStats>(),
+      byFeature: new Map(),
+      byProjectStage: new Map()
+    }
   }
 
   // 同一个 perBucketAggs 既统计项目整体，又作为 by_feature 桶的子聚合按特性 slug 切片，
@@ -10399,7 +10688,8 @@ async function fetchProjectModeProjectCodeStats(
               size: PROJECT_MODE_FEATURE_SLUG_LIMIT
             },
             aggs: perBucketAggs
-          }
+          },
+          ...stageBucketCodeAggs(perBucketAggs)
         }
       }
     }),
@@ -10409,12 +10699,14 @@ async function fetchProjectModeProjectCodeStats(
   const projectBuckets = asRecord(projectAggs.by_project).buckets
   const byProject = new Map<string, DashboardCodeStats>()
   const byFeature = new Map<string, DashboardCodeStats>()
+  const byProjectStage = new Map<string, Record<StageBucket, DashboardCodeStats>>()
   if (Array.isArray(projectBuckets)) {
     for (const bucket of projectBuckets) {
       const b = asRecord(bucket)
       const projectId = asString(b.key)
       if (!projectId) continue
       byProject.set(projectId, normalizeCodeStatsFromContainer(b))
+      byProjectStage.set(projectId, parseStageBucketCodeStats(b))
       const featureBuckets = asRecord(b.by_feature).buckets
       if (!Array.isArray(featureBuckets)) continue
       for (const featureBucket of featureBuckets) {
@@ -10425,7 +10717,7 @@ async function fetchProjectModeProjectCodeStats(
       }
     }
   }
-  return { byProject, byFeature }
+  return { byProject, byFeature, byProjectStage }
 }
 
 /** One list page: ES-paginated snapshot projects enriched with this-range usage / code. */
@@ -10457,6 +10749,10 @@ async function fetchProjectModeProjectPage(
       conversationCount: usage.perProject.get(project.projectId) ?? 0,
       topSkills: usage.perProjectSkills.get(project.projectId) ?? [],
       codeStats: code.byProject.get(project.projectId) ?? null,
+      stageBuckets: buildStageBuckets(
+        usage.perProjectStageConversations.get(project.projectId),
+        code.byProjectStage.get(project.projectId)
+      ),
       features: project.features.map((feature) => ({
         ...feature,
         codeStats: code.byFeature.get(projectFeatureKey(project.projectId, feature.slug)) ?? null
@@ -10703,12 +10999,14 @@ async function fetchProjectMode(
         projectCount: snapAdapter.projectCount,
         featureCount: snapAdapter.featureCount,
         conversationCount: 0,
-        codeStats: null
+        codeStats: null,
+        stageBuckets: emptyStageBuckets()
       })
     }
   }
   for (const [key, adapter] of adapters) {
     adapter.codeStats = code.byAdapter.get(key) ?? null
+    adapter.stageBuckets = withStageBucketsCode(adapter.stageBuckets, code.byAdapterStage.get(key))
   }
   const adapterList = [...adapters.values()].sort(
     (a, b) =>
@@ -10786,6 +11084,8 @@ interface ProjectModeTracesOptions {
   nodeName?: string
   /** Optional node status (进行中/已完成/...) to further scope traces within a stage. */
   nodeStatus?: string
+  /** Optional stage×skill bucket (插件约束（Harness）/ VibeCoding / 未归因) to scope traces. */
+  stageBucket?: StageBucket
 }
 
 /** Project-mode traces for a single project (thread/trace pagination). */
@@ -10800,6 +11100,7 @@ async function fetchProjectModeTraces(
   const normalizedFeatureSlug = options?.featureSlug?.trim()
   const normalizedNodeName = options?.nodeName?.trim()
   const normalizedNodeStatus = options?.nodeStatus?.trim()
+  const stageBucket = options?.stageBucket
   const traceViewMode = normalizeTraceViewMode(options?.viewMode ?? options?.mode)
   const tracePageSize = clampLimit(
     options?.tracePageSize ?? options?.pageSize ?? options?.limit,
@@ -10818,6 +11119,7 @@ async function fetchProjectModeTraces(
     ...(normalizedFeatureSlug ? [{ term: { harnessFeatureSlug: normalizedFeatureSlug } }] : []),
     ...(normalizedNodeName ? [{ term: { harnessNodeName: normalizedNodeName } }] : []),
     ...(normalizedNodeStatus ? [{ term: { harnessNodeStatus: normalizedNodeStatus } }] : []),
+    ...(stageBucket ? [stageBucketTraceFilterClause(stageBucket)] : []),
     ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
   ]
 
@@ -10888,6 +11190,8 @@ interface ProjectModeFeatureNode {
   codeStats: DashboardCodeStats | null
   /** Status-at-turn-time sub-breakdown within this stage (进行中/已完成/...). */
   byStatus: ProjectModeNodeStatus[]
+  /** Stage×skill 三桶拆分（插件约束（Harness）/ VibeCoding / 未归因），口径同列表行。 */
+  stageBuckets: DashboardStageBuckets
 }
 
 /** Merge per-status conversation counts + code stats into a sorted status sub-breakdown. */
@@ -10911,19 +11215,20 @@ function buildNodeStatusBreakdown(
 /** terms-agg size for the status sub-bucket (only ~9 node statuses exist). */
 const NODE_STATUS_TERMS_SIZE = 16
 
-/** Trace-side `by_node` agg (conversations per stage) with a nested status sub-agg. */
+/** Trace-side `by_node` agg (conversations per stage) with nested status + stage-bucket sub-aggs. */
 function traceNodeStatusAgg(): Record<string, unknown> {
   return {
     by_node: {
       terms: { field: "harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT },
       aggs: {
-        by_status: { terms: { field: "harnessNodeStatus", size: NODE_STATUS_TERMS_SIZE } }
+        by_status: { terms: { field: "harnessNodeStatus", size: NODE_STATUS_TERMS_SIZE } },
+        ...stageBucketTraceAggs()
       }
     }
   }
 }
 
-/** Event-side `by_node` agg (code stats per stage) with a nested status sub-agg carrying the same code stats. */
+/** Event-side `by_node` agg (code stats per stage) with nested status + stage-bucket sub-aggs carrying the same code stats. */
 function codeNodeStatusAgg(perBucketAggs: Record<string, unknown>): Record<string, unknown> {
   return {
     by_node: {
@@ -10933,19 +11238,22 @@ function codeNodeStatusAgg(perBucketAggs: Record<string, unknown>): Record<strin
         by_status: {
           terms: { field: "properties.harnessNodeStatus", size: NODE_STATUS_TERMS_SIZE },
           aggs: perBucketAggs
-        }
+        },
+        ...stageBucketCodeAggs(perBucketAggs)
       }
     }
   }
 }
 
-/** Parse a trace `by_node` agg container → per-node conversation totals + per-status sub-maps. */
+/** Parse a trace `by_node` agg container → per-node conversation totals + per-status + per-stage-bucket sub-maps. */
 function parseTraceNodeBuckets(aggregations: unknown): {
   conversationByNode: Map<string, number>
   convStatusByNode: Map<string, Map<string, number>>
+  convStageByNode: Map<string, Record<StageBucket, number>>
 } {
   const conversationByNode = new Map<string, number>()
   const convStatusByNode = new Map<string, Map<string, number>>()
+  const convStageByNode = new Map<string, Record<StageBucket, number>>()
   const buckets = asRecord(asRecord(aggregations).by_node).buckets
   if (Array.isArray(buckets)) {
     for (const bucket of buckets) {
@@ -10953,6 +11261,7 @@ function parseTraceNodeBuckets(aggregations: unknown): {
       const nodeName = asString(b.key)
       if (!nodeName) continue
       conversationByNode.set(nodeName, asNumber(b.doc_count))
+      convStageByNode.set(nodeName, parseStageBucketConversations(b))
       const statusMap = new Map<string, number>()
       const statusBuckets = asRecord(b.by_status).buckets
       if (Array.isArray(statusBuckets)) {
@@ -10965,16 +11274,18 @@ function parseTraceNodeBuckets(aggregations: unknown): {
       if (statusMap.size > 0) convStatusByNode.set(nodeName, statusMap)
     }
   }
-  return { conversationByNode, convStatusByNode }
+  return { conversationByNode, convStatusByNode, convStageByNode }
 }
 
-/** Parse an event `by_node` agg container → per-node code stats + per-status sub-maps. */
+/** Parse an event `by_node` agg container → per-node code stats + per-status + per-stage-bucket sub-maps. */
 function parseCodeNodeBuckets(aggregations: unknown): {
   codeByNode: Map<string, DashboardCodeStats>
   codeStatusByNode: Map<string, Map<string, DashboardCodeStats>>
+  codeStageByNode: Map<string, Record<StageBucket, DashboardCodeStats>>
 } {
   const codeByNode = new Map<string, DashboardCodeStats>()
   const codeStatusByNode = new Map<string, Map<string, DashboardCodeStats>>()
+  const codeStageByNode = new Map<string, Record<StageBucket, DashboardCodeStats>>()
   const buckets = asRecord(asRecord(aggregations).by_node).buckets
   if (Array.isArray(buckets)) {
     for (const bucket of buckets) {
@@ -10982,6 +11293,7 @@ function parseCodeNodeBuckets(aggregations: unknown): {
       const nodeName = asString(b.key)
       if (!nodeName) continue
       codeByNode.set(nodeName, normalizeCodeStatsFromContainer(b))
+      codeStageByNode.set(nodeName, parseStageBucketCodeStats(b))
       const statusMap = new Map<string, DashboardCodeStats>()
       const statusBuckets = asRecord(b.by_status).buckets
       if (Array.isArray(statusBuckets)) {
@@ -10994,7 +11306,7 @@ function parseCodeNodeBuckets(aggregations: unknown): {
       if (statusMap.size > 0) codeStatusByNode.set(nodeName, statusMap)
     }
   }
-  return { codeByNode, codeStatusByNode }
+  return { codeByNode, codeStatusByNode, codeStageByNode }
 }
 
 /** Merge parsed trace + event node maps into the sorted stage breakdown (with status sub-rows). */
@@ -11011,6 +11323,10 @@ function buildFeatureNodeBreakdown(
       byStatus: buildNodeStatusBreakdown(
         trace.convStatusByNode.get(nodeName),
         code.codeStatusByNode.get(nodeName)
+      ),
+      stageBuckets: buildStageBuckets(
+        trace.convStageByNode.get(nodeName),
+        code.codeStageByNode.get(nodeName)
       )
     }))
     .sort((a, b) => b.conversationCount - a.conversationCount)
@@ -11110,7 +11426,8 @@ function makeMockProjectModeFeatureNodes(
           conversationCount: conversationCount - inProgress,
           codeStats: statusSplit[1] ?? null
         }
-      ].filter((s) => s.conversationCount > 0)
+      ].filter((s) => s.conversationCount > 0),
+      stageBuckets: makeMockStageBuckets(codeStats, conversationCount)
     }
   })
 }

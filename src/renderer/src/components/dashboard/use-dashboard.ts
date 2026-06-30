@@ -382,6 +382,8 @@ export interface DashboardProjectModeFeatureNode {
   codeStats: DashboardCodeStats | null
   /** Status-at-turn-time sub-breakdown within this stage (进行中/已完成/...). */
   byStatus: DashboardProjectModeNodeStatus[]
+  /** Stage×skill 三桶拆分（插件约束（Harness）/ VibeCoding / 未归因）。 */
+  stageBuckets: DashboardStageBuckets
 }
 
 /** Cross-user aggregate for a single plugin (adapter), surfaced in the plugin list. */
@@ -433,6 +435,25 @@ export interface DashboardProjectModeAnalytics {
   byAdapter: DashboardProjectModeAdapterShareItem[]
 }
 
+/** One stage×skill bucket: conversation count + code adoption stats. */
+export interface DashboardStageBucketStat {
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+}
+
+/**
+ * Project-mode work split by stage×skill attribution (流程内/插件约束 vs VibeCoding),
+ * complementing the Skill-usage口径. See src/shared/harness-stage-bucket.ts.
+ */
+export interface DashboardStageBuckets {
+  /** 进行中阶段 + 调用了插件 Skill —— 真正受插件流程约束。 */
+  pluginConstrained: DashboardStageBucketStat
+  /** 未受插件约束的自由产出：进行中但未用 Skill（绕过插件），或已完成阶段后的产出。 */
+  vibecoding: DashboardStageBucketStat
+  /** 其余阶段状态或无阶段状态的历史数据。 */
+  unattributed: DashboardStageBucketStat
+}
+
 export interface DashboardProjectModeProject {
   projectId: string
   name: string
@@ -456,6 +477,7 @@ export interface DashboardProjectModeProject {
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
+  stageBuckets: DashboardStageBuckets
 }
 
 export type DashboardProjectModeProjectStatus = "active" | "archived"
@@ -504,6 +526,8 @@ export interface DashboardProjectModeProjectPageOptions {
   pageSize?: number
   keyword?: string | null
   adapterName?: string | null
+  /** 配合 adapterName 精确到插件版本（「按版本」口径点击项目数）；空 = 不限版本。 */
+  adapterVersion?: string | null
   creatorKeyword?: string | null
   creatorOrgKeyword?: string | null
   sortBy?: DashboardProjectModeProjectSortKey | null
@@ -517,6 +541,7 @@ export interface DashboardProjectModeAdapter {
   featureCount: number
   conversationCount: number
   codeStats: DashboardCodeStats | null
+  stageBuckets: DashboardStageBuckets
 }
 
 export interface DashboardProjectModeData {
@@ -563,6 +588,8 @@ export interface DashboardProjectModeTracesOptions {
   nodeName?: string
   /** Further scope traces within a stage by node status (进行中/已完成/...). */
   nodeStatus?: string
+  /** stage×skill 桶过滤（插件约束（Harness）/ VibeCoding / 未归因），用于按桶查看对话。 */
+  stageBucket?: "plugin_constrained" | "vibecoding" | "unattributed"
 }
 
 export interface DashboardProjectModeTracesData {

@@ -68,6 +68,8 @@ import {
   type DashboardPluginAggregate,
   type DashboardProjectModeData,
   type DashboardProjectModeProject,
+  type DashboardProjectModeProjectPageData,
+  type DashboardProjectModeProjectPageOptions,
   type DashboardProjectModeTracesData,
   type DashboardTraceDetail,
   type Granularity,
@@ -76,6 +78,7 @@ import {
 } from "./use-dashboard"
 import { OverviewPanel } from "./panels/OverviewPanel"
 import { ProjectModePanel } from "./panels/ProjectModePanel"
+import { STAGE_BUCKET_LABELS, type StageBucket } from "../../../../shared/harness-stage-bucket"
 import { ModelPanel } from "./panels/ModelPanel"
 import { UserPanel } from "./panels/UserPanel"
 import { ProductivityPanel } from "./panels/ProductivityPanel"
@@ -2473,6 +2476,7 @@ export function DashboardView(): React.JSX.Element {
     null
   )
   const [projectTraceStatus, setProjectTraceStatus] = useState<string | null>(null)
+  const [projectTraceStageBucket, setProjectTraceStageBucket] = useState<StageBucket | null>(null)
   const [projectTraceData, setProjectTraceData] = useState<DashboardProjectModeTracesData | null>(
     null
   )
@@ -3062,12 +3066,14 @@ export function DashboardView(): React.JSX.Element {
       project: DashboardProjectModeProject,
       feature?: DashboardProjectModeFeature,
       node?: DashboardProjectModeFeatureNode,
-      status?: string
+      status?: string,
+      stageBucket?: StageBucket
     ) => {
       setProjectTraceProject(project)
       setProjectTraceFeature(feature ?? null)
       setProjectTraceNode(node ?? null)
       setProjectTraceStatus(status ?? null)
+      setProjectTraceStageBucket(stageBucket ?? null)
       setProjectTraceData(null)
       setProjectTracesError(null)
       setProjectTracePage(1)
@@ -3103,6 +3109,19 @@ export function DashboardView(): React.JSX.Element {
     [range]
   )
 
+  // 插件「项目数」点击弹窗复用「项目列表」组件，需一个按当前时间范围的分页拉取器（返回整页数据）。
+  // 调用方注入锁定的 adapterName/adapterVersion（「按版本」精确到版本，「按插件」聚合全部版本）。
+  const fetchAdapterProjectPage = useCallback(
+    async (
+      options: DashboardProjectModeProjectPageOptions
+    ): Promise<DashboardProjectModeProjectPageData> => {
+      const res = await window.api.dashboard.projectModeProjects(range, options)
+      if (!res.success || !res.data) throw new Error(res.error ?? "获取项目列表失败")
+      return res.data
+    },
+    [range]
+  )
+
   useEffect(() => {
     if (!projectTraceProject) return
     let cancelled = false
@@ -3110,6 +3129,7 @@ export function DashboardView(): React.JSX.Element {
     const currentFeature = projectTraceFeature
     const currentNode = projectTraceNode
     const currentStatus = projectTraceStatus
+    const currentStageBucket = projectTraceStageBucket
 
     async function loadProjectTraces(): Promise<void> {
       setProjectTracesLoading(true)
@@ -3122,7 +3142,8 @@ export function DashboardView(): React.JSX.Element {
           triggerScope: PROJECT_TRACE_TRIGGER_SCOPE,
           ...(currentFeature?.slug ? { featureSlug: currentFeature.slug } : {}),
           ...(currentNode?.nodeName ? { nodeName: currentNode.nodeName } : {}),
-          ...(currentStatus ? { nodeStatus: currentStatus } : {})
+          ...(currentStatus ? { nodeStatus: currentStatus } : {}),
+          ...(currentStageBucket ? { stageBucket: currentStageBucket } : {})
         })
         if (!res.success) throw new Error(res.error ?? "获取项目对话失败")
         const rawData = res.data
@@ -3159,6 +3180,7 @@ export function DashboardView(): React.JSX.Element {
     projectTraceFeature,
     projectTraceNode,
     projectTraceStatus,
+    projectTraceStageBucket,
     projectTracePage,
     projectTraceProject,
     projectTraceViewMode,
@@ -4262,7 +4284,9 @@ export function DashboardView(): React.JSX.Element {
       ? `共 ${formatNumber(projectTraceTotal)} 个会话，选择记录定位到对话`
       : `共 ${formatNumber(projectTraceTotal)} 条，选择记录定位到对话`
   const projectTraceStageSuffix = projectTraceNode
-    ? ` · 阶段 ${projectTraceNode.nodeName}${projectTraceStatus ? ` · ${projectTraceStatus}` : ""}`
+    ? ` · 阶段 ${projectTraceNode.nodeName}${projectTraceStatus ? ` · ${projectTraceStatus}` : ""}${
+        projectTraceStageBucket ? ` · ${STAGE_BUCKET_LABELS[projectTraceStageBucket]}` : ""
+      }`
     : ""
   const projectTraceDialogTitle = projectTraceFeature
     ? `特性对话 · ${projectTraceProject?.name ?? "-"} · ${projectTraceFeature.title}${projectTraceStageSuffix}`
@@ -4479,6 +4503,7 @@ export function DashboardView(): React.JSX.Element {
                 onOpenProjectCommits={handleProjectOpenProjectCommits}
                 loadFeatureNodes={loadProjectFeatureNodes}
                 loadPluginAggregate={loadPluginAggregateNodes}
+                fetchAdapterProjectPage={fetchAdapterProjectPage}
                 onSkillClick={handleSkillClick}
                 onUserClick={(sapId) => openUserDetail(sapId, "main", true)}
                 onFunnelFirstStageClick={
@@ -4654,6 +4679,7 @@ export function DashboardView(): React.JSX.Element {
             setProjectTraceFeature(null)
             setProjectTraceNode(null)
             setProjectTraceStatus(null)
+            setProjectTraceStageBucket(null)
             setProjectTraceData(null)
             setProjectTracePage(1)
             setProjectTraceViewMode("thread")
